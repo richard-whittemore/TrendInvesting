@@ -1,0 +1,28 @@
+# Go
+/bin/
+/dist/
+*.test
+*.out
+coverage.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime data
+/data/
+/logs/
