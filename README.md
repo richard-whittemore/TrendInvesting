@@ -27,12 +27,10 @@ This initial foundation contains the event contract, deterministic replay sequen
 Requirements: Go 1.24 or newer.
 
 ```sh
-go test ./...
-go vet ./...
-go run ./cmd/trend-investing
+make check
 ```
 
-See [docs/architecture.md](docs/architecture.md) and [docs/development.md](docs/development.md) before adding production behavior.
+This runs the same formatting, analysis, race-enabled tests, coverage, vulnerability, dependency, and build gates used by CI. See [docs/architecture.md](docs/architecture.md), [docs/development.md](docs/development.md), and [docs/dependency-policy.md](docs/dependency-policy.md) before adding production behavior.
 
 ## Safety
 
