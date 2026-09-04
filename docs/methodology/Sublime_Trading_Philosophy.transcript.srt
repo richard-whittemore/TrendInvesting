@@ -1,0 +1,3656 @@
+1
+00:00:00,000 --> 00:00:13,280
+but it's all down to one's approach. It isn't down to your ability, it's down to your approach.
+
+2
+00:00:13,660 --> 00:00:18,060
+If I can do it, anyone can do it. My background, very straightforward. I've got a degree in
+
+3
+00:00:18,060 --> 00:00:23,880
+software engineering. I then transitioned into photography because photography was always my
+
+4
+00:00:23,880 --> 00:00:29,340
+passion. I was an English language teacher for a while and through that journey, made money,
+
+5
+00:00:29,340 --> 00:00:35,000
+saved it and then learned to invest it. Now, like everyone else, I went down the route of day
+
+6
+00:00:35,000 --> 00:00:39,640
+trading, quickly learned the pitfalls of day trading. A lot of people don't learn the pitfalls
+
+7
+00:00:39,640 --> 00:00:44,560
+of day trading. I quickly learned the pitfalls of day trading. I came across a book called
+
+8
+00:00:44,560 --> 00:00:50,120
+Way of the Turtle by Curtis Faith. Now, if you guys have not read this book,
+
+9
+00:00:50,600 --> 00:00:56,820
+I recommend pushing it to the top of your reading list. Way of the Turtle. I'm just
+
+10
+00:00:56,820 --> 00:01:08,360
+typing it in for you by Curtis Faith. This book was a complete game changer for me. This is where
+
+11
+00:01:08,360 --> 00:01:14,660
+I discovered the turtle traders and I discovered trend following. I then found a couple of mentors
+
+12
+00:01:14,660 --> 00:01:21,040
+to teach me the approach. And then once I was confident with it, I then broke away and created
+
+13
+00:01:21,040 --> 00:01:28,300
+Sublime Trading in 2018. And then in 2023, I had my hedge fund incorporated in Luxembourg,
+
+14
+00:01:28,400 --> 00:01:33,200
+which is also a trend following fund. So in Sublime Trading, that's our education platform.
+
+15
+00:01:33,360 --> 00:01:39,380
+That's where we teach people how to do it. And then the fund is for investors who either want
+
+16
+00:01:39,380 --> 00:01:45,600
+to diversify with the education or have no desire to learn and just want a fund that can deliver
+
+17
+00:01:45,600 --> 00:01:53,000
+good returns. And so that is very short, my background and how I came across trend following.
+
+18
+00:01:53,820 --> 00:01:58,160
+Thanks, I read Turtle. Yeah, absolutely, Paco. It's a game-changing book. There's a lot of people
+
+19
+00:01:58,160 --> 00:02:02,660
+out there who haven't even heard of the Turtle Traders. And when you do read the Turtle Traders,
+
+20
+00:02:02,740 --> 00:02:08,520
+it will completely change your understanding of the markets. It's a timeless approach. The Turtle
+
+21
+00:02:08,520 --> 00:02:15,080
+Trader experiment happened in 1982, where, of course, in 2026, coming into 2027 soon, believe
+
+22
+00:02:15,080 --> 00:02:20,640
+it or not, the approach is still pretty much the same. The markets are slightly different,
+
+23
+00:02:20,640 --> 00:02:24,960
+but of course we now have technology. And because we now have technology, the markets are far more
+
+24
+00:02:24,960 --> 00:02:31,020
+accessible. And with that access comes new challenges, such as where are the assets to
+
+25
+00:02:31,020 --> 00:02:36,960
+be investing in? There's 11 sectors out there in the stock market, thousands of stocks. We've got
+
+26
+00:02:36,960 --> 00:02:41,140
+to be able to narrow down to the best performing stocks in the best performing sector. That's
+
+27
+00:02:41,140 --> 00:02:46,920
+really our job as investors. And so we have a two-step process. The first process is to use a
+
+28
+00:02:46,920 --> 00:02:51,800
+scanner. Now, I know there's a scanner in TradingView and I've played around with it and it's okay.
+
+29
+00:02:52,520 --> 00:02:56,720
+The strength of TradingView isn't really its scanning, it's its charting capability. It's
+
+30
+00:02:56,720 --> 00:03:01,500
+very, very good at charting. Its scanning is a little bit limited as you would expect for a
+
+31
+00:03:02,260 --> 00:03:07,860
+package that's quite cheap. We use a professional grade scanner, which costs far more money.
+
+32
+00:03:07,860 --> 00:03:16,440
+that's step one. We analyze 20,000 stocks, that's US stocks, commodities, currencies,
+
+33
+00:03:16,920 --> 00:03:22,600
+and commodities, around 20,000 assets in total. We get the scanner to go through the first round
+
+34
+00:03:22,600 --> 00:03:28,560
+of scanning to meet a particular criteria. We generally get a list of around 150 to 200
+
+35
+00:03:28,560 --> 00:03:35,520
+assets on a daily basis. We then import that list into TradingView, conduct our analysis across this
+
+36
+00:03:35,520 --> 00:03:40,740
+chart setup that I'm going to show you today, and then cherry pick the very best for the portfolio.
+
+37
+00:03:41,300 --> 00:03:47,760
+So this is effectively what we have perfected over the years. And for me personally, it started
+
+38
+00:03:47,760 --> 00:03:52,640
+with that book, Way of the Turtle. And that's really what allowed me to evolve to where I am
+
+39
+00:03:52,640 --> 00:03:58,660
+today. Okay. So with that said, let's dive in. As already mentioned, monthly in the top left,
+
+40
+00:03:58,940 --> 00:04:03,460
+weekly in the top right, and daily chart across the bottom. This is how I do my analysis. And
+
+41
+00:04:03,460 --> 00:04:08,680
+the daily chart is where we then eventually take our positions, entry points, stop losses,
+
+42
+00:04:10,120 --> 00:04:17,340
+trailing stop losses, and all of that is, that's another page that we've created. But for here,
+
+43
+00:04:17,380 --> 00:04:22,300
+we're just really going to focus on the analysis. Okay, so let's start with the S&P 500. Now,
+
+44
+00:04:22,740 --> 00:04:28,300
+as trend followers, as an investor, I'm not interested in investing in the S&P 500. It's
+
+45
+00:04:28,300 --> 00:04:32,360
+a really good place to start if you're putting money in a tracker fund on a monthly basis and
+
+46
+00:04:32,360 --> 00:04:40,460
+getting 8% a year on average over the next 10, 15, 20 years. It's a great place to actually start
+
+47
+00:04:40,460 --> 00:04:45,860
+in terms of, in comparison to just leaving money in the banking system where you're getting 1% or
+
+48
+00:04:45,860 --> 00:04:51,440
+less on an annual basis. But given that process that I've just talked about, which is using the
+
+49
+00:04:51,440 --> 00:04:56,940
+scanners and charts, we can break up the S&P 500, we can break up the indices, and we can find the
+
+50
+00:04:56,940 --> 00:05:01,760
+stocks that are outperforming the index. And by finding those stocks outperforming the index,
+
+51
+00:05:01,760 --> 00:05:08,260
+we can then push our average performance to well beyond 8% a year. We average over 30% a year.
+
+52
+00:05:09,040 --> 00:05:14,280
+But the indices are really good for identifying market conditions. If the indices are bullish,
+
+53
+00:05:14,580 --> 00:05:19,500
+we want to be buying. If the indices are flat, we want to be standing aside. If the indices do
+
+54
+00:05:19,500 --> 00:05:24,200
+a complete turnaround and confirm a bear market, then we can actually look to short the market.
+
+55
+00:05:24,380 --> 00:05:31,360
+Now, the last time I actually shorted the market was in 2008. So since 2008, I've only been bullish,
+
+56
+00:05:31,360 --> 00:05:33,980
+That's because we've been in this long-term bullish trend.
+
+57
+00:05:34,080 --> 00:05:35,800
+Yes, there have been corrections along the way.
+
+58
+00:05:36,320 --> 00:05:40,480
+COVID, for example, last April when we had the Trump tariffs,
+
+59
+00:05:40,960 --> 00:05:43,360
+earlier this year when we had the situation in Iran
+
+60
+00:05:43,360 --> 00:05:45,080
+and there was weakness and corrections,
+
+61
+00:05:45,160 --> 00:05:46,660
+we've had corrections along the way.
+
+62
+00:05:46,860 --> 00:05:50,520
+But all of those corrections have been absorbed into the bull trend
+
+63
+00:05:50,520 --> 00:05:54,480
+and the market just goes on to set record highs.
+
+64
+00:05:54,700 --> 00:05:58,400
+So we must stay aligned with the long-term bullish trend.
+
+65
+00:05:58,400 --> 00:06:07,280
+We just want to be able to understand that at times of the year or in certain periods, a period of rebalancing will be needed.
+
+66
+00:06:07,520 --> 00:06:11,360
+You know, you cut out of the weaker stocks, you hold on to the stronger stocks.
+
+67
+00:06:11,860 --> 00:06:14,780
+And then when the market confirms a bull trend, you start buying back in again.
+
+68
+00:06:14,880 --> 00:06:18,600
+What you do not want to do at any time is just go straight to cash.
+
+69
+00:06:19,080 --> 00:06:22,900
+And that's because the Internet is fear mongering. The world's coming to an end right now.
+
+70
+00:06:22,900 --> 00:06:28,040
+we know that the internet narrative, one of the favorite internet narratives or media narratives
+
+71
+00:06:28,040 --> 00:06:34,580
+is the AI bubble. The AI bubble is going to burst. It's 2000 all over again. It's the 1930s all over
+
+72
+00:06:34,580 --> 00:06:41,180
+again. Yet all we ever see is breakouts and record highs. And so we want to turn all of that noise
+
+73
+00:06:41,180 --> 00:06:46,860
+off and we want to let the indices guide us. So how do we do that? Well, I like to start with the
+
+74
+00:06:46,860 --> 00:06:51,120
+highest timeframe, which is the monthly. I then want to move to the weekly to make sure that's
+
+75
+00:06:51,120 --> 00:06:55,960
+aligned with the monthly. And then I come down to the daily to make sure that the daily is aligned
+
+76
+00:06:55,960 --> 00:07:01,580
+with the weekly. So we're looking for what is known as multi-time frame alignment, monthly moving up,
+
+77
+00:07:01,740 --> 00:07:08,700
+weekly moving up, daily moving up. If at any time the indices fall out of alignment, then we are
+
+78
+00:07:08,700 --> 00:07:14,400
+likely seeing a correction or a sideways market or potentially the start of a bear market.
+
+79
+00:07:15,220 --> 00:07:19,320
+So we've always got to be aware of what the indices are doing because that's the clearest picture.
+
+80
+00:07:19,320 --> 00:07:23,700
+So let's start with the monthly timeframe. If I just open up the monthly timeframe,
+
+81
+00:07:24,000 --> 00:07:32,740
+the first indicator I'm going to add are these two lines. Now, what do these two lines represent?
+
+82
+00:07:32,940 --> 00:07:38,100
+This represents the highest point of last year, and this represents the lowest point of last year.
+
+83
+00:07:38,160 --> 00:07:43,480
+So what you're looking at is the highest and lowest point of the previous calendar year,
+
+84
+00:07:43,480 --> 00:07:51,220
+not 12 months back from today, but the actual calendar year. So this is the high of 2025
+
+85
+00:07:51,220 --> 00:07:58,700
+and this is the low of 2025. Now, why is this important? Because it gives us an immediate
+
+86
+00:07:58,700 --> 00:08:05,720
+bias to the market. If the asset, any asset is trading above the highest points of last year,
+
+87
+00:08:05,720 --> 00:08:12,960
+which the S&P 500 has been doing since April, we are in a bull market. Simple and straightforward.
+
+88
+00:08:13,480 --> 00:08:18,960
+If at any point an asset breaks below the low of last year, we are in a bear market.
+
+89
+00:08:19,960 --> 00:08:26,540
+And if an asset is trading inside the annual level, so if it's anywhere between the high and the low of last year,
+
+90
+00:08:26,540 --> 00:08:29,700
+then we are in a sideways market.
+
+91
+00:08:30,220 --> 00:08:31,700
+Very, very clean.
+
+92
+00:08:31,880 --> 00:08:33,020
+Very, very straightforward.
+
+93
+00:08:33,320 --> 00:08:37,920
+You will have access to this tool as part of this toolkit.
+
+94
+00:08:37,920 --> 00:08:48,040
+So if we go back to this period here. So this period here, this is when the situation in Iran
+
+95
+00:08:48,040 --> 00:08:54,500
+really started kicking off in March. And if you can see that there was a correction taking place.
+
+96
+00:08:55,160 --> 00:08:59,220
+Now, the other way to look at this is that the stock market has a seasonal movement.
+
+97
+00:09:00,340 --> 00:09:06,260
+Typically, February is one of the weakest months of the year, as well as September. So next month,
+
+98
+00:09:06,260 --> 00:09:11,620
+September, if we see a correction, don't be surprised. How large that correction will be
+
+99
+00:09:11,620 --> 00:09:17,480
+remains to be seen. But typically, February and September are two of the weakest months of the
+
+100
+00:09:17,480 --> 00:09:23,180
+year. Now, if you actually look at what happened, January was bullish. February was an indecision
+
+101
+00:09:23,180 --> 00:09:29,140
+candle. Let me just expand that a little bit. February was an indecision candle and the
+
+102
+00:09:29,140 --> 00:09:36,060
+correction actually came in in March. Now, people would like to attribute that to what happened
+
+103
+00:09:36,060 --> 00:09:40,380
+in Iran and the situation in the Middle East, fine, no problem. People are always trying to
+
+104
+00:09:40,380 --> 00:09:44,040
+find meaning. The other way to look at it is that the correction didn't happen in February,
+
+105
+00:09:44,140 --> 00:09:51,020
+it happened in March. The market's organic. Just because historically, February is the weakest
+
+106
+00:09:51,020 --> 00:09:55,580
+month of the year doesn't mean that it will actually happen in February. It could happen
+
+107
+00:09:55,580 --> 00:10:01,160
+in January, it could happen in March as it did this year. Crucially, it was inside the annual
+
+108
+00:10:01,160 --> 00:10:05,440
+levels of last year. So because we didn't get a clean move above the high of last year,
+
+109
+00:10:05,600 --> 00:10:11,420
+we were actually in capital protection mode. What we were doing was holding the strongest stocks
+
+110
+00:10:11,420 --> 00:10:16,160
+that were actually leading the way. So even during this period here, where it's flat,
+
+111
+00:10:16,880 --> 00:10:22,680
+there's stocks that still continue to move up or stocks that actually hold very well inside tight
+
+112
+00:10:22,680 --> 00:10:27,440
+ranges, inside tight support and resistance levels. And then when March came in,
+
+113
+00:10:27,440 --> 00:10:34,980
+those stocks that had been moving up during this period experienced a little pullback.
+
+114
+00:10:34,980 --> 00:10:40,000
+Those that were trading inside tight ranges, many of them continued trading inside those tight
+
+115
+00:10:40,000 --> 00:10:46,940
+ranges. Some stocks obviously weakened. And remember the indices are weighted. So when tech
+
+116
+00:10:46,940 --> 00:10:54,100
+gets hit heavily, then the indices tend to get dragged down with that tech sector because of
+
+117
+00:10:54,100 --> 00:10:58,920
+the weighting that big tech has, but a lot of the lower weighting stocks, they can continue to move
+
+118
+00:10:58,920 --> 00:11:03,940
+up, which is why it's really, really important to have a holistic view of what is happening.
+
+119
+00:11:04,080 --> 00:11:07,760
+You don't want to just narrow down to big tech because just because big tech is correcting
+
+120
+00:11:07,760 --> 00:11:12,280
+doesn't mean that the whole stock market is correcting. In fact, a lot of the stock market
+
+121
+00:11:12,280 --> 00:11:16,960
+can keep moving up. And that's exactly what we have been seeing. When tech was correcting,
+
+122
+00:11:16,960 --> 00:11:25,160
+money was flowing into financials into health care into other sectors so you've got to be very very
+
+123
+00:11:25,160 --> 00:11:31,040
+aware of what is happening don't rely on just what that media narrative then what happened
+
+124
+00:11:31,040 --> 00:11:37,080
+because we know from experience that this period often just requires a little bit of patience and
+
+125
+00:11:37,080 --> 00:11:43,060
+standing aside and rebalancing we were then rewarded with a breakout in april continuation
+
+126
+00:11:43,060 --> 00:11:51,760
+in May, June, July, as we move into the summer months. Again, the summer months go quiet because
+
+127
+00:11:51,760 --> 00:11:57,760
+institutional money dries up. People move away from their desks. Traders go on holiday.
+
+128
+00:11:58,560 --> 00:12:04,580
+Naturally, the markets go flat. And that's all we've seen here is that summer sideways market.
+
+129
+00:12:04,680 --> 00:12:10,260
+A little bit of bullishness in August, but nothing of real interest, but a little bit of
+
+130
+00:12:10,260 --> 00:12:17,020
+foolishness. The candle has a wick above it, so the bears are also partly to play here. So it
+
+131
+00:12:17,020 --> 00:12:20,240
+really is a stalemate at the moment, given that we are going through the summer months.
+
+132
+00:12:20,640 --> 00:12:26,260
+Now we want to see that momentum kick in towards 8,000 and then a continuation. And that will
+
+133
+00:12:26,260 --> 00:12:34,240
+happen post-summer. And that can end with what we know as the Santa Claus rally. December can often
+
+134
+00:12:34,240 --> 00:12:39,400
+be a very profitable month. Many traders will switch off their computer and start getting
+
+135
+00:12:39,400 --> 00:12:44,340
+ready to tuck into their turkey, whereas good investors will have a portfolio that's still
+
+136
+00:12:44,340 --> 00:12:49,880
+open, that's still taking advantage of the trends and the Santa Claus rally. So you really want to
+
+137
+00:12:49,880 --> 00:12:55,440
+be aware of the seasonal movement. And then when we come to the end of the year and we've had that
+
+138
+00:12:55,440 --> 00:13:01,880
+strong December, maybe even a strong January, then that recycle repeats where February we could see
+
+139
+00:13:01,880 --> 00:13:10,900
+a correction and round and round and round we go. Guys, in the chat box, please write clear so that
+
+140
+00:13:10,900 --> 00:13:16,720
+all makes sense so far. Let me know that you are all aligned with what we are saying here. Ultimately,
+
+141
+00:13:17,260 --> 00:13:24,600
+the S&P 500 is trading above the highest point of last year and that is why we are in a bull market.
+
+142
+00:13:24,600 --> 00:13:30,520
+And if you look at it from the low of 2009, so in fact, let me just compress it. That's the
+
+143
+00:13:30,520 --> 00:13:41,300
+tech bubble, 2000 to 2002. We had that bear market. Then we had the revival. It came back
+
+144
+00:13:41,300 --> 00:13:48,240
+to that high. This is the financial meltdown when you had all of the, you know, you had people like
+
+145
+00:13:48,240 --> 00:13:55,940
+Michael Berry, who's made a name from calling this, they made the movie about him, The Big Short.
+
+146
+00:13:56,660 --> 00:14:01,960
+Since 2000, since the global financial crisis, since the recovery, we've only been in a bull
+
+147
+00:14:01,960 --> 00:14:08,220
+market. And that includes COVID, which was this period here, quickly absorbed. We had the 2022
+
+148
+00:14:08,220 --> 00:14:12,880
+correction, which was just a very natural correction in the markets. Why? Because we had
+
+149
+00:14:12,880 --> 00:14:18,940
+such a big move post-coronavirus when we had all of those tech stocks, everyone went into lockdown
+
+150
+00:14:18,940 --> 00:14:24,020
+and you had stocks like Zoom going through the roof. There was bound to be a correction. So there
+
+151
+00:14:24,020 --> 00:14:29,360
+was a very natural correction. Why did it end here? We'll have a look in a second. Since then,
+
+152
+00:14:29,680 --> 00:14:37,240
+since the low of 2022, we've been in another move up and the S&P 500 has climbed, I think it's over
+
+153
+00:14:37,240 --> 00:14:44,160
+100% since this low point. Let's just have a look. It's definitely 120%, roughly 120% since that low
+
+154
+00:14:44,160 --> 00:14:48,440
+point. So you can imagine you've got all these internet personalities, people like Michael
+
+155
+00:14:48,440 --> 00:14:53,680
+Berry, who's had a movie made about him, who's basically been wrong since 2008. He's been wrong
+
+156
+00:14:53,680 --> 00:14:59,120
+time and time and time and time again. Yet the internet keeps on talking about how Michael Berry
+
+157
+00:14:59,120 --> 00:15:05,440
+said that the top is coming in. How many times do you have to call a top before the internet goes,
+
+158
+00:15:05,860 --> 00:15:12,020
+Michael, I think you were just lucky in 2008. Yes, there was a bit of numbers involved and
+
+159
+00:15:12,020 --> 00:15:16,260
+he spotted some disconnect between what was happening in the housing markets and all of that.
+
+160
+00:15:16,340 --> 00:15:21,980
+But it took many, many months before the correction actually, the bear market actually
+
+161
+00:15:21,980 --> 00:15:27,340
+started coming in. And the other point to note is what is the purpose of risk and exit management?
+
+162
+00:15:27,340 --> 00:15:31,560
+The purpose of risk and exit management is to always make sure that your downside is protected.
+
+163
+00:15:31,560 --> 00:15:38,000
+This is key to a good investor. You have to focus on what is in your control. Everything up until
+
+164
+00:15:38,000 --> 00:15:43,160
+the moment of execution when you're live in the market is under your control. And so you must
+
+165
+00:15:43,160 --> 00:15:48,340
+always protect your downside. And what that means is that with your downside protected, you can take
+
+166
+00:15:48,340 --> 00:15:54,040
+advantage of the upside while your downside is protected. So you're profiting and you're protected
+
+167
+00:15:54,040 --> 00:16:00,480
+at the same time. This way, as the market keeps on pushing up, you keep on profiting, you keep on
+
+168
+00:16:00,480 --> 00:16:05,320
+making money, and that at any point the reversal does come in, if at all it does come in, that's
+
+169
+00:16:05,320 --> 00:16:10,220
+where your exits and stop losses come into play. So that is the smart way of doing it. Align with
+
+170
+00:16:10,220 --> 00:16:15,840
+the bull market, but use exit management and risk management to protect your downside. That is the
+
+171
+00:16:15,840 --> 00:16:22,420
+hallmark of a good investor. Okay, now the other indicator we want on here are key levels of support
+
+172
+00:16:22,420 --> 00:16:29,140
+and resistance. Something you will have noticed when you go online and you look on the internet
+
+173
+00:16:29,140 --> 00:16:33,200
+and you see images of screens of trading view charts and different packages,
+
+174
+00:16:33,640 --> 00:16:37,080
+the amount of lines that people have on their packages,
+
+175
+00:16:37,080 --> 00:16:40,820
+support and resistance on their charts, support and resistance lines,
+
+176
+00:16:41,200 --> 00:16:46,800
+trend lines, Fibonacci's, Elliott Wave, Count's, GAN.
+
+177
+00:16:48,180 --> 00:16:49,700
+I mean, the list goes on and on and on.
+
+178
+00:16:49,760 --> 00:16:54,300
+And it'll just end up being all of these indicators all piled up on top of each other.
+
+179
+00:16:54,520 --> 00:16:57,740
+And underneath there somewhere is price action.
+
+180
+00:16:58,740 --> 00:17:01,140
+Remember, price is your number one indicator.
+
+181
+00:17:01,300 --> 00:17:02,500
+It's your main indicator.
+
+182
+00:17:03,020 --> 00:17:05,520
+All other indicators are generally lagging.
+
+183
+00:17:05,600 --> 00:17:07,700
+So if all indicators are lagging indicators
+
+184
+00:17:07,700 --> 00:17:10,500
+based on price action, you don't need all of them.
+
+185
+00:17:10,860 --> 00:17:15,040
+You only need a handful that can help you determine an edge.
+
+186
+00:17:16,080 --> 00:17:19,340
+And that's really what this toolkit will give you.
+
+187
+00:17:19,380 --> 00:17:21,400
+It'll give you a clear edge in the market.
+
+188
+00:17:21,680 --> 00:17:22,420
+What is an edge?
+
+189
+00:17:22,420 --> 00:17:26,480
+An edge is identifying environments
+
+190
+00:17:26,480 --> 00:17:29,140
+where you have a higher chance of making profit than a loss.
+
+191
+00:17:29,520 --> 00:17:30,400
+Now, here's the thing, guys.
+
+192
+00:17:30,500 --> 00:17:33,200
+If you cannot define your edge, you don't have one.
+
+193
+00:17:33,540 --> 00:17:34,780
+And if you don't have an edge,
+
+194
+00:17:34,980 --> 00:17:36,920
+you will get eaten by someone who does.
+
+195
+00:17:37,240 --> 00:17:38,900
+So if you consistently find yourself
+
+196
+00:17:38,900 --> 00:17:40,200
+on the wrong side of the market,
+
+197
+00:17:40,300 --> 00:17:42,180
+the wrong side of the trend is because you lack an edge
+
+198
+00:17:42,180 --> 00:17:43,200
+and you can't define it.
+
+199
+00:17:43,460 --> 00:17:44,780
+So we wanna get away from that.
+
+200
+00:17:45,420 --> 00:17:46,620
+Part of having an edge
+
+201
+00:17:46,620 --> 00:17:48,720
+is understanding key levels of support and resistance.
+
+202
+00:17:49,200 --> 00:17:51,540
+So we have a tool here that will identify
+
+203
+00:17:51,540 --> 00:17:54,460
+these key support and resistance levels for you.
+
+204
+00:17:54,460 --> 00:17:57,800
+and it will plot them for you as well.
+
+205
+00:17:57,920 --> 00:17:59,440
+So the software is detecting them
+
+206
+00:17:59,440 --> 00:18:00,940
+and it will then plot them for you.
+
+207
+00:18:01,020 --> 00:18:03,620
+So no more wasting time drawing support
+
+208
+00:18:03,620 --> 00:18:05,220
+and resistance on the charts.
+
+209
+00:18:05,320 --> 00:18:07,640
+Complete waste of time, complete waste of energy.
+
+210
+00:18:07,760 --> 00:18:09,480
+You want to understand what makes a good support
+
+211
+00:18:09,480 --> 00:18:11,840
+or resistance level and then plot it on the charts.
+
+212
+00:18:12,520 --> 00:18:14,700
+What makes a key support or resistance level?
+
+213
+00:18:14,880 --> 00:18:16,200
+On the monthly timeframe,
+
+214
+00:18:16,420 --> 00:18:17,760
+remember this on the monthly timeframe,
+
+215
+00:18:18,700 --> 00:18:20,840
+through all the back testing that we have done
+
+216
+00:18:20,840 --> 00:18:22,440
+over the years in our early days,
+
+217
+00:18:22,440 --> 00:18:28,300
+we discovered that a key resistance or a key support level is a high point or a low point
+
+218
+00:18:28,300 --> 00:18:33,520
+with a minimum of nine bars on either side. So if you take this high point here, there'll be at
+
+219
+00:18:33,520 --> 00:18:40,260
+least nine bars to the left and at least nine bars to the right. Once the software detects that
+
+220
+00:18:40,260 --> 00:18:45,100
+there's at least nine bars to the left and nine bars to the right, minimum, so it could be 10 and
+
+221
+00:18:45,100 --> 00:18:52,300
+10, it could be 12 and 15, it will plot that level there for you and it will have it marked
+
+222
+00:18:52,300 --> 00:18:59,360
+for the rest of that software, for the rest of that pivot, what we call a pivot life. It's now
+
+223
+00:18:59,360 --> 00:19:04,540
+been earmarked as a strong level of support and resistance. Same with a support level.
+
+224
+00:19:05,180 --> 00:19:10,100
+It's a low with a minimum of nine bars to the left and a minimum of nine bars to the right.
+
+225
+00:19:10,100 --> 00:19:15,740
+If there's nine bars to the left and only six bars to the right, that is not a strong support
+
+226
+00:19:15,740 --> 00:19:20,400
+or resistance level on the monthly timeframe. Now we have a different count on the weekly and the
+
+227
+00:19:20,400 --> 00:19:24,980
+daily, which I'll look at in a second, but on the monthly, minimum of nine bars to the left,
+
+228
+00:19:25,120 --> 00:19:30,700
+minimum of nine bars to the right. So you can see that this pivot level from January 22 was the last
+
+229
+00:19:30,700 --> 00:19:38,820
+strong resistance level, which is now support. And this low point from October, 2022 was the last
+
+230
+00:19:38,820 --> 00:19:45,880
+major PIV9 support level. Since then, the market has just gone on and on and has created nice
+
+231
+00:19:45,880 --> 00:19:51,160
+mini flags in the trend and has continued to the upside. I say mini, this is of course the
+
+232
+00:19:51,160 --> 00:19:55,540
+monthly timeframe. So that will take many months to form. But in terms of just looking at it
+
+233
+00:19:55,540 --> 00:20:01,220
+visually, small flags, and then a continuation. We're not having these long periods of consolidation
+
+234
+00:20:01,220 --> 00:20:07,980
+like we did here. It's just a move up, flag, continuation, flag, continuation. And that's
+
+235
+00:20:07,980 --> 00:20:14,100
+what we want to see through the rest of the year. If you guys can just put a message in the chat box
+
+236
+00:20:14,100 --> 00:20:18,820
+and say, yep, clear, all is good. Guys, I can see some people typing in there. Alexandros, thank you,
+
+237
+00:20:18,880 --> 00:20:26,020
+Paco, thank you. There is another 15 of you on the chat, please. So if you guys can just interact
+
+238
+00:20:26,020 --> 00:20:31,480
+with me, let me know that everything is clear. And if there are any questions that you have,
+
+239
+00:20:31,740 --> 00:20:36,880
+put them in the chat box and I'll make sure that I go through them. Okay, monthly timeframe. What
+
+240
+00:20:36,880 --> 00:20:41,860
+do we want to see? The asset above the high of last year and above all of these key levels of
+
+241
+00:20:41,860 --> 00:20:46,740
+support and resistance level. If there is a strong resistance level directly above, then we need to
+
+242
+00:20:46,740 --> 00:20:52,480
+be aware of that. In the case of the S&P, apart from that 8,000 round number, everything is looking
+
+243
+00:20:52,480 --> 00:21:02,660
+rosy for a potential continuation to the upside. Okay, let's go now to the weekly timeframe.
+
+244
+00:21:02,660 --> 00:21:12,200
+now on the weekly time frame one of the first indicators that we want to put up is the 200
+
+245
+00:21:12,200 --> 00:21:18,200
+simple moving average now the 200 simple moving average is a timeless indicator
+
+246
+00:21:18,200 --> 00:21:25,760
+we are blessed in today's day and age in that we do not have to draw charts we've got software that
+
+247
+00:21:25,760 --> 00:21:30,240
+does all of that for us but old school traders who didn't have the luxury of software had to
+
+248
+00:21:30,240 --> 00:21:35,120
+draw charts by hand. And so they were very selective with the information that they put
+
+249
+00:21:35,120 --> 00:21:40,480
+on their charts because you can imagine having to update tens and hundreds of charts. It's a very
+
+250
+00:21:40,480 --> 00:21:46,480
+long process. So they were very selective. What they determined was that the 200 simple moving
+
+251
+00:21:46,480 --> 00:21:52,240
+average was a very good indicator of the long-term trend. Above the 200 simple moving average,
+
+252
+00:21:52,380 --> 00:21:56,720
+the buyers was bullish and they would look to buy. Below the 200 simple moving average,
+
+253
+00:21:56,720 --> 00:22:08,420
+they would sell. So with that logic, if we go back to 2001 and 2008, you can see why these were the
+
+254
+00:22:08,420 --> 00:22:15,360
+last two true great bear markets because they actually broke below the 200 SMA and then weakened
+
+255
+00:22:15,360 --> 00:22:23,180
+over many, many months. Same again in 2008, broke through and then weakened for many, many months.
+
+256
+00:22:23,180 --> 00:22:28,360
+That is why they are the last true bear markets. And that is how you determine a bear market.
+
+257
+00:22:28,620 --> 00:22:35,360
+Anything that doesn't break through the 200 SMA on the weekly is simply a correction. And what we
+
+258
+00:22:35,360 --> 00:22:44,800
+can see since 2010, when the market recovered and moved above the 200 simple moving average,
+
+259
+00:22:45,020 --> 00:22:49,900
+it has remained above the 200 simple moving average. Apart from that little blip during COVID
+
+260
+00:22:49,900 --> 00:22:55,640
+when everyone was panicking, everyone started shorting. Many, many people ended up on the
+
+261
+00:22:55,640 --> 00:23:00,200
+wrong side of the market. The bulls came in swiftly and reversed back to the upside.
+
+262
+00:23:00,960 --> 00:23:09,680
+So if you look at 2011, it bounced, strong trend, came back in 2016, bounced, strong trend,
+
+263
+00:23:10,100 --> 00:23:15,720
+came back in 2018, bounced. It was in a strong trend. And then of course, COVID hit.
+
+264
+00:23:15,720 --> 00:23:22,300
+COVID quickly got absorbed. Strong, strong trend. Natural correction to the 200 simple moving
+
+265
+00:23:22,300 --> 00:23:26,580
+average. Now, I don't know if there are anyone on here who follows me on LinkedIn, but if you go
+
+266
+00:23:26,580 --> 00:23:33,140
+back to my message around this period, which was September, October 2022, I said on LinkedIn was
+
+267
+00:23:33,140 --> 00:23:39,100
+we're at a crucial time. The S&P is at the 200 simple moving average. If it breaks through,
+
+268
+00:23:39,520 --> 00:23:44,480
+we could see weakness and the start of a bear market and when we will look to start shorting.
+
+269
+00:23:44,860 --> 00:23:48,800
+However, there is a very strong chance that we could see the market bounce from this level
+
+270
+00:23:48,800 --> 00:23:55,260
+and recover and continue up. And the only reason I said that is because the S&P had a history of
+
+271
+00:23:55,260 --> 00:24:00,900
+doing that going all the way back to 2011. It wasn't me looking at any crystal ball and going,
+
+272
+00:24:01,000 --> 00:24:05,000
+oh my God, listen, I'm a magician, I'm a wizard, I know exactly what's going to happen.
+
+273
+00:24:05,000 --> 00:24:11,880
+I was thinking in terms of probabilities. What is the likelihood of a bounce compared to a
+
+274
+00:24:11,880 --> 00:24:17,620
+likelihood of a breakthrough and a bear trend. And so a bounce is always stronger. And we've
+
+275
+00:24:17,620 --> 00:24:25,100
+seen that repeatedly happen. 23, then we had this correction, which was the Trump tariffs correction
+
+276
+00:24:25,100 --> 00:24:30,680
+that came to just above the 200 simple moving average. It was actually the 5,000 round number,
+
+277
+00:24:30,820 --> 00:24:36,920
+which was acting as a support zone. We had a bounce. So the 200 simple moving average is
+
+278
+00:24:36,920 --> 00:24:41,420
+timeless. As long as we remain above the 200 simple moving average, the overall bias of the
+
+279
+00:24:41,420 --> 00:24:48,360
+market is bullish. We then want to add in another filter, and that is the 50 simple moving average.
+
+280
+00:24:49,580 --> 00:24:55,020
+Typically, what tends to happen is that when the S&P moves above the 200, excuse me, above the 50
+
+281
+00:24:55,020 --> 00:25:00,460
+SMA, that's when it really starts to gather momentum. When it breaks below it, that is a time
+
+282
+00:25:00,460 --> 00:25:06,300
+to rebalance, cut out of the weaker ones, hold the strongest one. As long as it doesn't break
+
+283
+00:25:06,300 --> 00:25:12,120
+through the 200 simple moving average, this is really where patience comes in. Market recovered
+
+284
+00:25:12,120 --> 00:25:19,000
+and look at where it bounced during the March, April correction of this year, had a bounce at
+
+285
+00:25:19,000 --> 00:25:24,040
+the 50 simple moving average, the market has continued. So you can see how key these levels
+
+286
+00:25:24,040 --> 00:25:30,820
+are to understanding when trends are in play, when a correction is in play, or when the potential
+
+287
+00:25:30,820 --> 00:25:35,920
+start of a bear market is in play. The weekly timeframe gives you a lot of information.
+
+288
+00:25:36,300 --> 00:25:44,800
+So looking at just the monthly and the weekly for now, you can now start seeing how we can
+
+289
+00:25:44,800 --> 00:25:50,680
+develop a picture of the market. Overall, the market is bullish because it's above the high
+
+290
+00:25:50,680 --> 00:25:55,060
+of last year. It's above all those key support and resistance levels. It's clearly bullish.
+
+291
+00:25:55,500 --> 00:26:00,280
+On the weekly timeframe, it's above the 200 simple moving average and it's above the 50
+
+292
+00:26:00,280 --> 00:26:06,720
+simple moving average. The weekly timeframe is aligned with the monthly timeframe. And what we
+
+293
+00:26:06,720 --> 00:26:18,600
+want to see on the daily timeframe is that exact same logic. So we've got the 200, we've got the 50,
+
+294
+00:26:19,160 --> 00:26:24,200
+and we've got the 20 simple moving average. Now I like to use the 20 simple moving average because
+
+295
+00:26:24,200 --> 00:26:30,900
+the 20 simple moving average works really well as an immediate short-term support level like a
+
+296
+00:26:30,900 --> 00:26:35,420
+trampoline for when a bull flag is forming. So you can see right now a bull flag is forming.
+
+297
+00:26:35,680 --> 00:26:40,520
+It's walking along the 20 simple moving average. Ideally, I want to see a bounce at this level
+
+298
+00:26:40,520 --> 00:26:45,080
+and a breakout and a continuation to the upside. If it breaks through that, then the 50 simple
+
+299
+00:26:45,080 --> 00:26:49,680
+moving average is the next logical level. Now, remember, this is the S&P. So while this is
+
+300
+00:26:49,680 --> 00:26:56,100
+happening. Other stocks, for example, like Eaton, which is a stock I've mentioned in the community,
+
+301
+00:26:57,160 --> 00:27:01,160
+look at where it is in relation to its 20 and its 50 and its 200 simple moving averages.
+
+302
+00:27:01,520 --> 00:27:05,840
+It's well away, it's trending, it's moving up, it gapped up on earnings, and it's gathering
+
+303
+00:27:05,840 --> 00:27:10,840
+momentum. This is because the healthcare sector is actually performing very, very well at the
+
+304
+00:27:10,840 --> 00:27:17,380
+moment. So use the S&P 500 as a guide, but always narrow down to the stocks that are performing
+
+305
+00:27:17,380 --> 00:27:24,980
+exceptionally well. So again, applying that logic,
+
+306
+00:27:30,380 --> 00:27:35,460
+excuse me, applying that logic, monthly above the high of last year, so it's bullish.
+
+307
+00:27:36,020 --> 00:27:41,740
+Weekly is above all the 200 and the 50 simple moving averages, so the market is bullish.
+
+308
+00:27:41,740 --> 00:27:47,320
+on the daily. It's above all three moving averages. Overall, the market is bullish.
+
+309
+00:27:47,560 --> 00:27:51,920
+All we're experiencing right now currently is a pullback because of that seasonal time of the year
+
+310
+00:27:51,920 --> 00:27:56,820
+where pullbacks are pretty common. What we're waiting for now is a breakout and a continuation.
+
+311
+00:27:57,460 --> 00:28:01,060
+While we wait for that breakout and that continuation, we can buy strong stocks.
+
+312
+00:28:01,060 --> 00:28:07,860
+We may just want to reduce our risk. So if typically I risk 1% because the market is in
+
+313
+00:28:07,860 --> 00:28:13,340
+full bloom, 1% per position, right now I could be risking half a percent or a quarter of a percent
+
+314
+00:28:13,340 --> 00:28:17,800
+because we're going through the summer months. The indices aren't fully aligned. They're correcting,
+
+315
+00:28:18,000 --> 00:28:22,800
+pulling back, but there are strong stocks, what we call leaders leading the market that I want
+
+316
+00:28:22,800 --> 00:28:28,540
+to take advantage of. So I'll buy in at a smaller position size. My stop loss typically remains the
+
+317
+00:28:28,540 --> 00:28:34,940
+same, which is a very wide stop loss, but my position size or my risk allocation is typically
+
+318
+00:28:34,940 --> 00:28:42,680
+smaller. Okay. So just looking at this, these three timeframes as they are, looking at them
+
+319
+00:28:42,680 --> 00:28:49,220
+without any other indicators gives you all the information you really need. But we do have
+
+320
+00:28:49,220 --> 00:28:58,500
+some additional indicators that we use. So the first indicator that I want to load up is a key
+
+321
+00:28:58,500 --> 00:29:03,160
+support and resistance levels on the weekly timeframe. Now on the monthly timeframe,
+
+322
+00:29:03,160 --> 00:29:10,380
+the support and resistance the pivot levels they were based on nine bars to the left and nine bars
+
+323
+00:29:10,380 --> 00:29:16,460
+to the right on the weekly time frame through all the back testing we've determined that it's a
+
+324
+00:29:16,460 --> 00:29:25,180
+minimum of four bars on either side of the pivot so all of these markers all of these green
+
+325
+00:29:25,180 --> 00:29:31,060
+squares you can see these little green markers these are basically key levels of support and
+
+326
+00:29:31,060 --> 00:29:39,820
+resistance on the weekly timeframe. There's a coding involved where it will also market with
+
+327
+00:29:39,820 --> 00:29:48,360
+lines, but we will only do that up until the recent month. All the lines disappear
+
+328
+00:29:48,360 --> 00:29:54,700
+once the next month has started. And that's really, again, to keep the charts as clean and
+
+329
+00:29:54,700 --> 00:29:58,600
+as simple as possible. We don't want to be loathing the charts up with lines. It just becomes
+
+330
+00:29:58,600 --> 00:30:06,780
+extremely messy. So we've got support and resistance levels marked on the weekly timeframe
+
+331
+00:30:06,780 --> 00:30:12,760
+with each pivot level. So each of these squares is a minimum of four bars to the left and a minimum
+
+332
+00:30:12,760 --> 00:30:17,320
+of four bars to the right. That is what we have determined as strong support and resistance
+
+333
+00:30:17,320 --> 00:30:23,340
+levels on the weekly timeframe. And on the daily timeframe, the same logic.
+
+334
+00:30:28,600 --> 00:30:34,660
+Yeah, we'll pass on that for now.
+
+335
+00:30:34,800 --> 00:30:36,680
+Yeah, I don't think we have that on the daily.
+
+336
+00:30:36,780 --> 00:30:37,180
+That's fine.
+
+337
+00:30:37,500 --> 00:30:37,920
+Excuse me.
+
+338
+00:30:37,980 --> 00:30:38,900
+Let's park that for now.
+
+339
+00:30:38,980 --> 00:30:40,060
+We've got it marked on the weekly.
+
+340
+00:30:40,360 --> 00:30:43,840
+And the reason for that is because we want to keep the daily as clean as possible.
+
+341
+00:30:43,960 --> 00:30:48,180
+You've got enough support and resistance between the monthly and the weekly timeframe.
+
+342
+00:30:49,440 --> 00:30:55,140
+Okay, now sticking to the weekly timeframe, I'm going to remove these indicators and I'm
+
+343
+00:30:55,140 --> 00:31:08,600
+going to load up some additional indicators and these are called Bollinger Bands. So I'm going to
+
+344
+00:31:08,600 --> 00:31:15,660
+load up two Bollinger Bands and I'll show you precisely how we use them. So there's two Bollinger
+
+345
+00:31:15,660 --> 00:31:20,380
+Bands here. So I'm going to look at the first Bollinger Band. I'm just going to go into the
+
+346
+00:31:20,380 --> 00:31:26,780
+settings and i am going to remove the basis which is that mid that blue line in the middle
+
+347
+00:31:28,460 --> 00:31:34,460
+so i'm going to remove that so that we only have the excuse me where are we
+
+348
+00:31:37,260 --> 00:31:39,740
+style upper so basis
+
+349
+00:31:41,820 --> 00:31:46,780
+and should disappear why isn't it disappearing oh it's because we've got two on here excuse me
+
+350
+00:31:46,780 --> 00:31:50,840
+Sorry, let me hide the other one. There we go. That's better. I was wondering what was happening
+
+351
+00:31:50,840 --> 00:31:54,580
+there. It's because there's two Bollinger Bands on there with the same settings. And so I was
+
+352
+00:31:54,580 --> 00:32:01,240
+trying to hide the settings of one, but the other one was still showing. So let me just do that
+
+353
+00:32:01,240 --> 00:32:06,980
+again. Okay. So when you load up Bollinger Bands for the first time, this is what it will look like.
+
+354
+00:32:07,020 --> 00:32:11,480
+You've got the upper Bollinger Band, which is the red line. You've got the lower Bollinger Band,
+
+355
+00:32:11,580 --> 00:32:16,160
+which is the green line. And you've got the blue line in the middle, which is the basis. Now,
+
+356
+00:32:16,160 --> 00:32:21,180
+This Bollinger Bands were created by a gentleman called John Bollinger. I won't go into much detail.
+
+357
+00:32:21,560 --> 00:32:26,120
+You can do your research on John Bollinger. He's considered one of the pioneers or trend following,
+
+358
+00:32:26,120 --> 00:32:30,920
+if you like. This indicator is very straightforward. When the market is gathering momentum,
+
+359
+00:32:31,620 --> 00:32:38,160
+the Bollinger Bands expand and price will walk along the upper band in a bull market
+
+360
+00:32:38,160 --> 00:32:45,460
+and below the lower Bollinger Band in a bear market. When the Bollinger Bands start narrowing
+
+361
+00:32:45,460 --> 00:32:50,220
+out, as you can see here, that means momentum is thinning, the market may be going sideways,
+
+362
+00:32:50,580 --> 00:32:55,000
+and we're waiting for that Bollinger Bands to start expanding to suggest momentum again.
+
+363
+00:32:56,140 --> 00:33:02,120
+So let me just remove the background, remove the basis. Now, if you go into the inputs,
+
+364
+00:33:02,440 --> 00:33:07,420
+this has a standard deviation setting of two. Again, I won't go into too much detail on that.
+
+365
+00:33:07,480 --> 00:33:11,520
+You can do some research on what that means. The source is closed, and what that means,
+
+366
+00:33:11,520 --> 00:33:17,540
+it uses the closing price of each bar to calculate the information going into the Bollinger Bands.
+
+367
+00:33:17,920 --> 00:33:22,940
+So this is what we've got here. We've got standard deviation two for the first setting.
+
+368
+00:33:26,900 --> 00:33:30,480
+In fact, let me change this one because it'll make the other one easier to look at. So this
+
+369
+00:33:30,480 --> 00:33:36,420
+is standard deviation one. So by default, it's standard deviation two, but we've changed this
+
+370
+00:33:36,420 --> 00:33:38,240
+to standard deviation one.
+
+371
+00:33:38,660 --> 00:33:40,460
+Now what I'm going to do is upload
+
+372
+00:33:40,460 --> 00:33:42,580
+the second Bollinger Bands,
+
+373
+00:33:42,980 --> 00:33:45,460
+go into the settings,
+
+374
+00:33:50,260 --> 00:33:52,040
+do the same thing again,
+
+375
+00:33:52,160 --> 00:33:54,460
+which is just remove the background,
+
+376
+00:33:54,960 --> 00:33:55,940
+remove the basis.
+
+377
+00:33:56,640 --> 00:33:57,920
+Now this time, I'm going to keep
+
+378
+00:33:57,920 --> 00:33:59,260
+the standard deviation two.
+
+379
+00:34:01,720 --> 00:34:03,480
+So in the previous one,
+
+380
+00:34:03,540 --> 00:34:04,820
+we had standard deviation one.
+
+381
+00:34:04,920 --> 00:34:06,280
+We changed it from two to one.
+
+382
+00:34:06,420 --> 00:34:12,060
+And we're going to keep this at standard deviation too, which is the standard setting.
+
+383
+00:34:12,340 --> 00:34:12,760
+Press OK.
+
+384
+00:34:13,160 --> 00:34:15,380
+Now, what you have are three zones.
+
+385
+00:34:15,920 --> 00:34:18,920
+You've got a zone in the top area, which is your buy zone.
+
+386
+00:34:19,740 --> 00:34:22,960
+You've got the zone in the lower area, which is your sell zone.
+
+387
+00:34:22,960 --> 00:34:27,400
+And you've got the zone in the middle, which is your neutral zone, which is your stand
+
+388
+00:34:27,400 --> 00:34:33,040
+aside zone or your pullback zone or your apply patient zone, whatever you want to call it.
+
+389
+00:34:33,040 --> 00:34:48,180
+What we want to see in the bull market is if you look at the S&P 500 from November 23 through to February 25, see that strong bull market have remained predominantly in that buy zone.
+
+390
+00:34:50,840 --> 00:34:54,100
+Yes, there were pullbacks when it fell out, and that's okay.
+
+391
+00:34:54,600 --> 00:35:02,580
+And we know that that's part and parcel, but that's where you apply patience based on everything I've talked about, the seasonal movement to the stock market, et cetera, et cetera.
+
+392
+00:35:02,580 --> 00:35:08,960
+The recovery came in, it went straight back into that buy zone and remained in that buy zone
+
+393
+00:35:08,960 --> 00:35:16,400
+predominantly from where we look in November 23 all the way through to December 24. So you're
+
+394
+00:35:16,400 --> 00:35:22,500
+looking at over a year. So it shows you how long trends can stay in play for. Then we had that
+
+395
+00:35:22,500 --> 00:35:30,280
+correction in early 2025 based around Trump tariffs, the recovery, it went back into that
+
+396
+00:35:30,280 --> 00:35:36,300
+buy zone. Then we had that correction earlier this year based around the situation in Iran.
+
+397
+00:35:36,440 --> 00:35:41,780
+That's also been absorbed and it's now in that buy zone. Okay. Now here's the thing though,
+
+398
+00:35:41,780 --> 00:35:48,800
+guys, when you start loading up all the other indicators that I have talked about,
+
+399
+00:35:49,460 --> 00:35:56,800
+what tends to start happening? What tends to start happening is exactly what I preached about
+
+400
+00:35:56,800 --> 00:36:03,460
+earlier, which is the chart starts becoming very messy. You get all of these lines on there.
+
+401
+00:36:03,680 --> 00:36:08,780
+And then underneath there is price action. Underneath there are the candlesticks. So we
+
+402
+00:36:08,780 --> 00:36:13,120
+want to bring out the candlesticks a little bit more so that we can see them a lot more clearly
+
+403
+00:36:13,120 --> 00:36:20,780
+in relation to the moving averages. And the way we do that is we have created a trend filter,
+
+404
+00:36:20,900 --> 00:36:26,480
+what we call the trend strength filter. So let me just remove the moving averages and the PIB
+
+405
+00:36:26,480 --> 00:36:33,240
+levels for a second. And now what I'm going to do, keep an eye out on the color of the bars.
+
+406
+00:36:33,340 --> 00:36:39,540
+At the moment, what you're looking at are the standard red and green colors of the bar. Green
+
+407
+00:36:39,540 --> 00:36:45,200
+is a bullish week. Red is a bearish week. So the standard red and green candles. Now I'm going to
+
+408
+00:36:45,200 --> 00:36:50,140
+load up the trend filter that we have developed. And you'll see now, I'm going to do that again,
+
+409
+00:36:50,140 --> 00:36:58,980
+look how the colors change. There your standard red and green. Now you've got periods of green,
+
+410
+00:36:59,540 --> 00:37:05,720
+periods of gray, and you've got periods of red. And if you look at the green, you'll also notice
+
+411
+00:37:05,720 --> 00:37:11,180
+that you've got light green and you've got dark green. So what the trend filter is telling you
+
+412
+00:37:11,180 --> 00:37:17,440
+is when the asset, in this case, the S&P 500 is in the buy zone, the bars will be green.
+
+413
+00:37:17,440 --> 00:37:22,600
+when it goes into the neutral zone. So when it closes, remember this is based on closing price,
+
+414
+00:37:22,600 --> 00:37:27,980
+when it closes by the end of the week in the neutral zone, it will be gray.
+
+415
+00:37:28,440 --> 00:37:31,860
+And at any point it closes in the sell zone, it will be red.
+
+416
+00:37:34,600 --> 00:37:40,880
+If it's a light green, that means it's closed inside the zone. If it's a dark green,
+
+417
+00:37:40,980 --> 00:37:45,520
+that means it's closed outside of the zone. So it will also even tell you when potentially an
+
+418
+00:37:45,520 --> 00:37:50,680
+asset is becoming overextended. So if you get green bar, strong green bar, strong green bar,
+
+419
+00:37:50,680 --> 00:37:58,440
+and the assets all the way up here, that could mean that the asset is overextended and we could
+
+420
+00:37:58,440 --> 00:38:06,300
+expect a whipsaw back in the opposite direction. Same with red. If it's a light red, it's closed
+
+421
+00:38:06,300 --> 00:38:10,420
+inside the sell zone. If it's a dark red, let me just expand it. You'll see here.
+
+422
+00:38:10,420 --> 00:38:16,900
+this is a light red because it closed inside the cell zone or the dark reds have closed outside
+
+423
+00:38:16,900 --> 00:38:23,200
+of the cell zone so now what this is allow what this allows us to do is actually remove the
+
+424
+00:38:23,200 --> 00:38:30,000
+Bollinger Bands and what you're looking at now is a much cleaner looking chart and we can actually
+
+425
+00:38:30,000 --> 00:38:37,220
+load up the moving averages and the piv levels and we have a much clearer chart now if you want
+
+426
+00:38:37,220 --> 00:38:43,120
+to load up the Bollinger Bands, you can do, but I would fade them right down. So there's a fade
+
+427
+00:38:43,120 --> 00:38:48,840
+setting where you can, you know, a transparency opacity setting, however you want to look at it,
+
+428
+00:38:49,180 --> 00:38:53,260
+you can bring it right down to 10% or 20%. So you literally have it on in the background,
+
+429
+00:38:53,260 --> 00:38:57,640
+but you do not want to have it as we had originally. I have it really overpowering
+
+430
+00:38:57,640 --> 00:39:04,480
+because it then distracts you from the candlesticks. Okay. I'm just going to go to
+
+431
+00:39:04,480 --> 00:39:08,160
+the chat box just to make sure that I'm...
+
+432
+00:39:11,540 --> 00:39:15,480
+Okay, good, good, good. Hey, good to see some people on here. Iju,
+
+433
+00:39:16,480 --> 00:39:20,680
+Nake, Guy, welcome, welcome. Okay, fantastic. Right, if you guys can just give me
+
+434
+00:39:20,680 --> 00:39:27,660
+a message in the chat box, let me know that so far everything is clear and hunky-dory.
+
+435
+00:39:27,660 --> 00:39:36,540
+and what we're looking for now with the new setup is alignment, a much easier way of looking at
+
+436
+00:39:36,540 --> 00:39:41,360
+alignment with the monthly and the weekly timeframe. So monthly, we know if it's above
+
+437
+00:39:41,360 --> 00:39:47,620
+the high of last year, it's bullish on the weekly. If it's above the PIV level, the 50 and the 200
+
+438
+00:39:47,620 --> 00:39:53,460
+SMA, everything is bullish. And as long as the trend filter is predominantly green with little
+
+439
+00:39:53,460 --> 00:40:00,300
+bits of gray. We have nothing to worry about. Overall, the market is very, very bullish. All
+
+440
+00:40:00,300 --> 00:40:07,100
+we're looking for now is a continuation of the bull trend. Okay. Alexandros, fantastic. Iju,
+
+441
+00:40:07,220 --> 00:40:13,580
+fantastic. Paco, brilliant. Okay. Nate, there's a gap between price and 200 SMA. Yeah, absolutely.
+
+442
+00:40:13,580 --> 00:40:23,660
+absolutely there's a fair distance but given where we are in terms of the seasonal movement
+
+443
+00:40:23,660 --> 00:40:29,200
+and how everything is holding at support and we've got our our risk and exit management in play in
+
+444
+00:40:29,200 --> 00:40:34,060
+terms of the apl and the copy service we don't need to worry too much about that distance for now
+
+445
+00:40:34,060 --> 00:40:41,500
+all we need to focus on really is seeing how the markets will behave at this key support level which
+
+446
+00:40:41,500 --> 00:40:48,400
+is the 20 SMA on the daily timeframe for now. Okay. Same on the daily timeframe, guys.
+
+447
+00:40:49,580 --> 00:40:55,060
+Same logic. We've got the Bollinger Bands, two Bollinger Bands, standard deviation one,
+
+448
+00:40:55,200 --> 00:41:01,840
+standard deviation two. Instead of bringing up those Bollinger Bands, we have the trend filter.
+
+449
+00:41:02,720 --> 00:41:08,900
+And so now we have everything you need to conduct your analysis. And this, guys,
+
+450
+00:41:08,900 --> 00:41:16,620
+is what your toolkit will look like. You have the monthly, you have the annual levels of last year
+
+451
+00:41:16,620 --> 00:41:20,140
+on the monthly timeframe. You have the support and resistance levels on the monthly timeframe.
+
+452
+00:41:20,660 --> 00:41:26,000
+You have the trend filter based on the two moving averages, and you have the key support and
+
+453
+00:41:26,000 --> 00:41:32,220
+resistance levels. You also have the trend filter on the daily timeframe, the moving averages.
+
+454
+00:41:32,220 --> 00:41:38,000
+and now you can conduct proper analysis
+
+455
+00:41:38,000 --> 00:41:42,400
+based on what the market is actually doing
+
+456
+00:41:42,400 --> 00:41:44,560
+and not what the market,
+
+457
+00:41:44,940 --> 00:41:47,680
+not what the internet is telling you is happening.
+
+458
+00:41:49,860 --> 00:41:51,780
+No, good question.
+
+459
+00:41:51,780 --> 00:41:54,460
+I just answered your question.
+
+460
+00:41:54,940 --> 00:41:57,580
+Azuz asked, is the coloring on the weekly
+
+461
+00:41:57,580 --> 00:41:58,940
+and not on the daily?
+
+462
+00:41:58,940 --> 00:42:05,940
+as you can see, the coloring is on the daily timeframe as well. The way to look at this is
+
+463
+00:42:05,940 --> 00:42:10,960
+big sister and little sister. Whatever big sister is doing, which is the weekly timeframe,
+
+464
+00:42:11,760 --> 00:42:17,260
+the daily timeframe should be following. The monthly, of course, is the biggest picture of
+
+465
+00:42:17,260 --> 00:42:21,760
+all, but because it's such a slow moving timeframe, we only really need to know where it is in
+
+466
+00:42:21,760 --> 00:42:27,500
+relation to last year's high. The real trend direction is really established using the weekly
+
+467
+00:42:27,500 --> 00:42:29,460
+and the daily timeframes.
+
+468
+00:42:30,720 --> 00:42:34,640
+So now if you guys can chuck in some assets
+
+469
+00:42:34,640 --> 00:42:36,820
+that you want to look at,
+
+470
+00:42:36,900 --> 00:42:38,280
+we can do some analysis on.
+
+471
+00:42:38,500 --> 00:42:40,520
+Maybe they're in your portfolio already.
+
+472
+00:42:41,060 --> 00:42:43,180
+Maybe you're looking at and taking a position.
+
+473
+00:42:43,600 --> 00:42:46,380
+While you guys chuck some assets at me,
+
+474
+00:42:46,640 --> 00:42:49,060
+we know that there is earnings coming out
+
+475
+00:42:49,060 --> 00:42:50,060
+for Nvidia tomorrow.
+
+476
+00:42:51,940 --> 00:42:54,320
+And if you have got trading view,
+
+477
+00:42:54,400 --> 00:42:55,820
+you can add the earnings label.
+
+478
+00:42:55,820 --> 00:43:01,400
+So I will add the earnings label. So if you go to events and if you put earnings,
+
+479
+00:43:01,700 --> 00:43:08,020
+press OK, you can see now that we have earnings coming out tomorrow. It's usually after hours.
+
+480
+00:43:08,780 --> 00:43:14,740
+And look at what's happening, guys, a sell off. And this is very normal for earnings. People panic
+
+481
+00:43:14,740 --> 00:43:21,720
+thinking that earnings is going to crash their portfolio or create losses. And what tends to
+
+482
+00:43:21,720 --> 00:43:25,780
+happen is that people dump their positions. And that's a big mistake because what can happen in
+
+483
+00:43:25,780 --> 00:43:31,500
+earnings, and NVIDIA has a very good history of this, is that it can gap up on earnings and then
+
+484
+00:43:31,500 --> 00:43:36,380
+go on to start a new bull trend. We've already looked at Eton. Let me just look at Eton again.
+
+485
+00:43:37,040 --> 00:43:41,280
+It's a good example. This is earnings here. This was a sell-off, people panicking.
+
+486
+00:43:42,380 --> 00:43:47,200
+Those who sold off missed out on the gap up and the continuation. So this is a really,
+
+487
+00:43:47,200 --> 00:43:53,460
+really good example of why you never want to sell just out of panic. You want to have a structured
+
+488
+00:43:53,460 --> 00:43:59,180
+approach that has an understanding of when earnings is coming out. Typically for us,
+
+489
+00:43:59,580 --> 00:44:03,240
+two weeks before earnings, we don't take any positions. We don't close our positions.
+
+490
+00:44:03,640 --> 00:44:09,080
+We don't tighten stop losses. We don't panic. We are aware that earnings is coming out.
+
+491
+00:44:09,480 --> 00:44:13,640
+We apply patience. Once earnings has been factored, we then analyze the trends,
+
+492
+00:44:13,640 --> 00:44:21,440
+and then we start buying in again if we need to. So looking at Eton, above the high of last year,
+
+493
+00:44:21,660 --> 00:44:27,260
+that's when the trend kicked in, which was in March of this year. And since then,
+
+494
+00:44:27,760 --> 00:44:34,140
+it has climbed. I know it's over 100%. It's climbed 175%. So a strong trend.
+
+495
+00:44:35,420 --> 00:44:41,240
+On the weekly, above the 200, above the 50, above the PIV levels, the trend filter is green.
+
+496
+00:44:41,240 --> 00:44:46,440
+on the daily above all three moving averages and the trend filter is green. And if you look at the
+
+497
+00:44:46,440 --> 00:44:52,560
+way the trend has developed, when it broke out, look at how it's used the 20 and the 50 simple
+
+498
+00:44:52,560 --> 00:44:56,980
+moving average as a trampoline, a support zone. And this is really what you want to see in a trend.
+
+499
+00:44:56,980 --> 00:45:02,740
+Now, in a real strong trend, it will remain above the 20 SMA. In a slower moving trend,
+
+500
+00:45:03,300 --> 00:45:08,260
+it will push through to the 50 SMA and bounce. So this is a really good way of managing your
+
+501
+00:45:08,260 --> 00:45:14,520
+positions, you can use the 50 simple moving average as a trailing stop loss. If the 50 SMA is breached
+
+502
+00:45:14,520 --> 00:45:21,120
+by one, maybe even two bars, that is a reason to tighten your stop loss and to exit. You really
+
+503
+00:45:21,120 --> 00:45:28,300
+want to give the trend enough space to develop. So you want to understand the benefit of the 20
+
+504
+00:45:28,300 --> 00:45:31,940
+and the 50 simple moving average on the daily timeframe. These are natural levels where the
+
+505
+00:45:31,940 --> 00:45:38,080
+pullbacks will come in and then there's a bounce. You're looking for linearity. Bars don't just move
+
+506
+00:45:38,260 --> 00:45:42,260
+in a continuous green bar, green bar, green bar, green bar. There's a move, pullback,
+
+507
+00:45:42,380 --> 00:45:44,460
+breakout, move, pullback, breakout, these flags.
+
+508
+00:45:49,600 --> 00:45:55,520
+Eton, sorry, Guy is asking, when did you get into Eton? So with Eton, what you were looking at with
+
+509
+00:45:55,520 --> 00:46:00,040
+any asset, guys, is once it breaks through the high of last year, what you're looking for is a
+
+510
+00:46:00,040 --> 00:46:05,040
+really good question. What you're looking for is a consolidation phase between the high and the low
+
+511
+00:46:05,040 --> 00:46:09,960
+of last year. When it breaks out above the high of last year, because you know the expression,
+
+512
+00:46:10,060 --> 00:46:13,900
+the longer the consolidation, the bigger the breakout. When most people see consolidation,
+
+513
+00:46:14,500 --> 00:46:20,120
+they assume it's the start of the end, whereas actually it's the start of the beginning of the
+
+514
+00:46:20,120 --> 00:46:24,500
+next bull phase. So what you're looking for is a move above the high of last year. Once you get
+
+515
+00:46:24,500 --> 00:46:30,480
+the move above the high of last year, you're then looking for the weekly timeframe to align
+
+516
+00:46:30,480 --> 00:46:34,020
+by moving above the 200 and the 50 simple moving averages
+
+517
+00:46:34,020 --> 00:46:35,620
+and the trend filter to be green.
+
+518
+00:46:36,180 --> 00:46:37,640
+And then on the daily timeframe,
+
+519
+00:46:37,740 --> 00:46:38,980
+this is where the entry comes in.
+
+520
+00:46:39,260 --> 00:46:41,660
+You're looking for a bull flag formation.
+
+521
+00:46:43,160 --> 00:46:45,940
+You're looking for a bull flag formation.
+
+522
+00:46:45,940 --> 00:46:49,100
+So at the very earliest, this area here,
+
+523
+00:46:49,720 --> 00:46:51,340
+May is when you would have entered
+
+524
+00:46:51,340 --> 00:46:53,860
+because it moved through the high of last year,
+
+525
+00:46:53,940 --> 00:46:55,360
+which was around this area here.
+
+526
+00:46:55,460 --> 00:46:56,600
+So if you mark this level,
+
+527
+00:47:00,480 --> 00:47:08,580
+a breakthrough it, you want to see a pullback. Now, remember, you don't want to get in on the
+
+528
+00:47:08,580 --> 00:47:12,640
+first breakout because the first breakout can be a fake breakout. So it looks like it's trending.
+
+529
+00:47:12,820 --> 00:47:17,200
+Then when it starts pulling back, it can drop back into that consolidation. So you've bought in,
+
+530
+00:47:17,680 --> 00:47:22,520
+you've bought in and you're now stuck in consolidation and that could consolidate
+
+531
+00:47:22,520 --> 00:47:26,280
+for the next year. And you've got all of this money tied up for no growth. So what you want
+
+532
+00:47:26,280 --> 00:47:32,220
+to wait is for a confirmation. And for us, we like bull flags. So the next breakout is your entry
+
+533
+00:47:32,220 --> 00:47:38,520
+point. And so the end of May, beginning of April would have been the time to enter. And since then,
+
+534
+00:47:38,520 --> 00:47:47,460
+it has moved on to a very good profit. Yeah, absolutely. So if you've got a good scanner,
+
+535
+00:47:47,620 --> 00:47:53,200
+you can scan for assets that are breaking through the high of last year, for example.
+
+536
+00:47:53,200 --> 00:47:59,880
+you can set a Donchian channel. So you could set Donchian 20 for the month. So there's 20
+
+537
+00:47:59,880 --> 00:48:05,880
+trading days in a month. Set your scanner for Donchian 20. Look for assets that are breaking
+
+538
+00:48:05,880 --> 00:48:12,200
+and closing above Donchian 20. So use that as a filter. You don't want just a break of Donchian
+
+539
+00:48:12,200 --> 00:48:16,980
+20. You want a break and close of Donchian 20. You then want to look at that in relation to last
+
+540
+00:48:16,980 --> 00:48:22,060
+year's high and the all-time high. We like to go in on assets that are setting all-time highs as
+
+541
+00:48:22,060 --> 00:48:28,000
+well because there's no resistance above price and then it can shoot forward. So some really
+
+542
+00:48:28,000 --> 00:48:37,800
+good questions, guys. In terms of scanners, set it for a Donchen channel. I recommend Donchen 20
+
+543
+00:48:37,800 --> 00:48:43,100
+and then use the other analysis that comes in. This is why you do not want to rely on a purely
+
+544
+00:48:43,100 --> 00:48:50,160
+automated process. The sweet spot is using technology for the boring stuff and then using
+
+545
+00:48:50,160 --> 00:48:56,300
+your expert eye and analysis to cherry pick the very best from the list that the scanner gives
+
+546
+00:48:56,300 --> 00:49:03,520
+you. So the sweet spot is in the middle. Do not outsource all your intelligence to technology.
+
+547
+00:49:04,860 --> 00:49:09,960
+Technology is just there to speed up the process and do the mundane stuff. You have a very powerful
+
+548
+00:49:09,960 --> 00:49:16,240
+tool inside your head called the brain that a lot of people have given up on. And what you have to
+
+549
+00:49:16,240 --> 00:49:22,440
+do is sharpen that brain and train that brain and nurture that brain to be as powerful as it can be.
+
+550
+00:49:22,820 --> 00:49:27,760
+And that is ultimately to cherry pick the very best assets and then manage it. Override technology.
+
+551
+00:49:27,980 --> 00:49:32,680
+When technology is telling you to sell, when you want to be looking at support and resistance,
+
+552
+00:49:32,860 --> 00:49:37,060
+looking at structure and go, actually, I don't need to sell here. I'm just going to apply patience.
+
+553
+00:49:40,760 --> 00:49:45,620
+Okay. So that's Eton. I'll come back to your question, Paco. Can you just be clear on what
+
+554
+00:49:45,620 --> 00:49:53,180
+you mean by that. Just expand on that and I'll come back to that. Okay. Let's go on to another
+
+555
+00:49:53,180 --> 00:50:00,640
+asset that people are asking about. So what do we have? We have MATX. Wow. Lots of assets. Okay.
+
+556
+00:50:00,660 --> 00:50:05,040
+Interesting. MATX. Some of these guys, I won't even do a thorough analysis on because
+
+557
+00:50:05,040 --> 00:50:12,760
+the asset can talk for itself. MATX. I mean, look, it's doing very well.
+
+558
+00:50:12,760 --> 00:50:19,700
+The one downside is when you look at the history, we know that it's actually quite volatile.
+
+559
+00:50:20,800 --> 00:50:26,240
+What you want are smooth trends. So if a stock has a history of moving up and then sharp swings,
+
+560
+00:50:26,560 --> 00:50:33,040
+moving up sharp swings, do not be surprised if those sharp swings happen again. And so that's
+
+561
+00:50:33,040 --> 00:50:37,100
+really where your exit management and your trading stop loss, of course, the personality could change
+
+562
+00:50:37,100 --> 00:50:45,560
+this could shoot all the way to $500. But for me, if I had to choose between MATX and let's say a
+
+563
+00:50:45,560 --> 00:50:52,560
+stock like Visa. Now, I choose Visa for a very specific reason. Look at the history of Visa,
+
+564
+00:50:52,720 --> 00:50:58,620
+particularly from 2012 to 2000. That's eight years of very smooth trend. So that tells us
+
+565
+00:50:58,620 --> 00:51:03,400
+the potential of Visa. Look at what it's doing right now. It's moving above the high of last
+
+566
+00:51:03,400 --> 00:51:09,960
+year. So it is now starting its next phase. We want to, of course, see that confirmed based on
+
+567
+00:51:09,960 --> 00:51:14,660
+what I said, which is, okay, we're green on the weekly, above the 50, above the 200. It's only
+
+568
+00:51:14,660 --> 00:51:19,240
+now broken through the all-time high. We want to see that pullback to avoid the fake breakout.
+
+569
+00:51:19,680 --> 00:51:24,400
+If it moves back in, we've avoided it. We then want to see it bounce from support and then buy
+
+570
+00:51:24,400 --> 00:51:34,060
+in again. Okay. So based on MATX, let me just conduct our analysis. It's moving up quite nicely
+
+571
+00:51:34,060 --> 00:51:39,040
+now. It's moving up nicely on the weekly and it's moving up very nicely on the daily. So
+
+572
+00:51:39,040 --> 00:51:45,340
+to be fair, Paco, it's a good stock based on current price action. You only need to be aware
+
+573
+00:51:45,340 --> 00:51:50,000
+of the history based on the monthly and understand that it could swing around you at any moment in
+
+574
+00:51:50,000 --> 00:51:54,300
+time. So you want to be aware of that. And if you've got this, if you've got good profit and
+
+575
+00:51:54,300 --> 00:51:59,880
+you start seeing weakness, then you want to take cut out with a well-placed stop loss.
+
+576
+00:52:03,800 --> 00:52:14,480
+Okay. Next stock we will look at is TWST. Okay. For me, straight up, I would say no.
+
+577
+00:52:15,380 --> 00:52:18,960
+And the main reason I would say no is it's because it's below its all-time high.
+
+578
+00:52:19,840 --> 00:52:24,000
+Yes, you could be aggressive and you could go in and you could buy and ride it all the way up to
+
+579
+00:52:24,000 --> 00:52:27,920
+its all-time high. You could do. It would get to that all-time high and it could potentially fail.
+
+580
+00:52:28,300 --> 00:52:34,300
+Between here and here, you can make very, very good profit. On the weekly, it's above the 200
+
+581
+00:52:34,300 --> 00:52:39,060
+and the 50. The trend filter is green. On the daily, above all three moving averages, the trend
+
+582
+00:52:39,060 --> 00:52:44,160
+filter is green. So it is a profitable stock if you got in at the right time, which was a move above
+
+583
+00:52:44,160 --> 00:52:48,400
+the high of last year and this monthly PIM 9 level, which was around, what, $62, $63.
+
+584
+00:52:48,880 --> 00:52:53,500
+That would have been a good time to buy. And if you did buy, you'd be in good profit now. But
+
+585
+00:52:53,500 --> 00:52:59,880
+given the fact that there are thousands of stocks to choose from, I would prefer to choose stocks
+
+586
+00:52:59,880 --> 00:53:03,640
+that are already breaking through there or trading above their all-time high, simply because there's
+
+587
+00:53:03,640 --> 00:53:09,260
+nothing above price to force it down. So for me, this would be a no. But if you're in it,
+
+588
+00:53:09,260 --> 00:53:15,100
+by all means, based on your own analysis and logic, just be aware of the fact that the all-time high
+
+589
+00:53:15,100 --> 00:53:18,980
+is a level that could force the market back down again.
+
+590
+00:53:23,000 --> 00:53:29,500
+Okay. Thank you, Paco. Good stocks. Let's move on to Nintendo. Okay. Yeah. My God, memories,
+
+591
+00:53:29,500 --> 00:53:38,300
+right? Nintendo. I think this might be it because I know it's a Japanese stock, right? So beyond the
+
+592
+00:53:38,300 --> 00:53:44,840
+Taiwanese. Okay, let's look at the Nintendo, this one here. I mean, look, guys, it's below
+
+593
+00:53:44,840 --> 00:53:52,880
+the low of last year. It's above the 200, but below the 50 SMA on the weekly. The trend filter
+
+594
+00:53:52,880 --> 00:53:56,820
+is green, confirming the start of a trend, but there's resistance directly above. And look at
+
+595
+00:53:56,820 --> 00:54:02,980
+the daily, below the 200 SMA. So there's too much resistance above price. There's a lot of work for
+
+596
+00:54:02,980 --> 00:54:08,540
+Nintendo to do before it starts delivering. Now, of course, it could just start shooting up,
+
+597
+00:54:08,640 --> 00:54:13,680
+in which case you want to wait for the 200 SMA on the daily to be broken and the 50 SMA on the
+
+598
+00:54:13,680 --> 00:54:19,700
+weekly to be broken. And even that 10,000 yen round number, which is a key level. Once those
+
+599
+00:54:19,700 --> 00:54:23,340
+levels are broken, then you could potentially start buying in. But again, look at how much
+
+600
+00:54:23,340 --> 00:54:28,560
+work it has to do. And if you look at the monthly timeframe, there aren't really any clean trends.
+
+601
+00:54:28,560 --> 00:54:33,340
+There was a nice move up in 2005 to 2007 to show its potential.
+
+602
+00:54:33,720 --> 00:54:35,980
+But since then, very, very choppy.
+
+603
+00:54:37,340 --> 00:54:43,400
+So even though we may be Nintendo fans and we love Mario Kart and all those classic games
+
+604
+00:54:43,400 --> 00:54:47,500
+that we've grown up playing and that we still play, we don't want to bring that into our
+
+605
+00:54:47,500 --> 00:54:47,900
+attachment.
+
+606
+00:54:48,600 --> 00:54:52,840
+We want to be neutral to that and just look at this chart for what it is.
+
+607
+00:54:52,920 --> 00:54:54,200
+Put the brand name aside.
+
+608
+00:54:54,360 --> 00:54:55,240
+Forget that it's Nintendo.
+
+609
+00:54:55,360 --> 00:54:56,240
+In fact, hide the name.
+
+610
+00:54:57,120 --> 00:55:01,240
+Look at the structure of the stock on individual merit.
+
+611
+00:55:01,580 --> 00:55:02,940
+And based on what it's doing right now,
+
+612
+00:55:03,220 --> 00:55:05,400
+this isn't a stock that I would personally entertain
+
+613
+00:55:05,400 --> 00:55:08,140
+because there's so many other options that we could look at.
+
+614
+00:55:09,920 --> 00:55:11,080
+Okay, let's move on.
+
+615
+00:55:11,460 --> 00:55:13,940
+Integrated microelectronics.
+
+616
+00:55:14,300 --> 00:55:16,880
+Again, and this is why I like the monthly timeframe
+
+617
+00:55:16,880 --> 00:55:18,320
+because the monthly timeframe,
+
+618
+00:55:18,520 --> 00:55:20,720
+you can dismiss so many stocks
+
+619
+00:55:20,720 --> 00:55:23,380
+just based on what the monthly is telling you.
+
+620
+00:55:24,160 --> 00:55:25,640
+And based on what the monthly is telling you
+
+621
+00:55:25,640 --> 00:55:32,880
+is that every time it threatens to trend, it fails. So you're going to have your money tied
+
+622
+00:55:32,880 --> 00:55:37,260
+up in this stock that's not really going anywhere, even if it's 1%. Let's say you put 1% or 2%
+
+623
+00:55:37,260 --> 00:55:41,380
+and you hold that 1% or 2% in this stock for the next five years and it does nothing.
+
+624
+00:55:42,060 --> 00:55:49,060
+Imagine that 1% can be recycled again and again and again in so many other stocks. So that 1%
+
+625
+00:55:49,060 --> 00:55:54,440
+that you've got tied up here can make you infinitely more money in better stocks. So
+
+626
+00:55:54,440 --> 00:55:59,680
+don't think of it as just 1% tied up. Think of what that 1% is going to do for you. If it's not
+
+627
+00:55:59,680 --> 00:56:03,740
+going to do much for you because the odds are against you, stand aside and look for better
+
+628
+00:56:03,740 --> 00:56:08,380
+opportunity. So for me, IMI, just even looking at this, remember, this is not an opinion.
+
+629
+00:56:09,680 --> 00:56:13,640
+One of the first rules of investing is to ignore opinions, including your own. This is about
+
+630
+00:56:13,640 --> 00:56:18,440
+analysis and aligning with the market. And we've looked at stocks like Visa that are actually
+
+631
+00:56:18,440 --> 00:56:24,000
+performing that you could buy into, then you do not want to be buying into this. Okay, sorry. So
+
+632
+00:56:24,000 --> 00:56:29,280
+I may be looking at the wrong one. We want to be looking at IMI, PLC. This is the London stock.
+
+633
+00:56:29,840 --> 00:56:38,700
+Okay. Much better, right? But again, if you look at the monthly timeframe, very choppy.
+
+634
+00:56:39,240 --> 00:56:44,600
+Current trend is looking good. The weekly is looking fairly good. The daily, if you open up
+
+635
+00:56:44,600 --> 00:56:53,760
+the daily, it can trend and then it tends to go choppy. So given the fact that it's
+
+636
+00:56:53,760 --> 00:56:58,940
+trended quite well here. It's actually a stock that you may want to consider. It is a stock that
+
+637
+00:56:58,940 --> 00:57:03,260
+you may want to consider. Just be aware, again, just be aware of what the history suggests.
+
+638
+00:57:03,580 --> 00:57:11,600
+The history suggests that it can be quite choppy. But personalities change, right? Think of it like
+
+639
+00:57:11,600 --> 00:57:15,360
+a human. Sometimes you meet someone and they're a complete idiot. And then the next time you meet
+
+640
+00:57:15,360 --> 00:57:19,800
+them, they're just a lovely person and they regret their ways. It could be the same with the stock
+
+641
+00:57:19,800 --> 00:57:25,580
+market and certain stocks, they may not have the best history, but recent trend structure suggests
+
+642
+00:57:25,580 --> 00:57:29,680
+that the personality may have changed. So if you look at it from April 25, you actually had a
+
+643
+00:57:29,680 --> 00:57:34,300
+really nice move. It went through a sideways market and that move could now be continuing.
+
+644
+00:57:34,820 --> 00:57:40,500
+So based on that, this could be a stock worth considering. Nice move up, flat market. If it
+
+645
+00:57:40,500 --> 00:57:45,820
+starts breaking out and trending, then this could be one to consider. Above the 200, above the 50
+
+646
+00:57:45,820 --> 00:57:52,400
+on the weekly and on the daily as already looked at. Let me just open that up again. Excuse me.
+
+647
+00:57:53,780 --> 00:57:59,040
+Compress that a little bit. Really nice trend. And look, it never broke through the 50 SMA,
+
+648
+00:57:59,140 --> 00:58:04,680
+just breached it a little bit, but that's fine. Trended really, really well. It then went flat
+
+649
+00:58:04,680 --> 00:58:09,400
+because after every move, the market goes flat. And we're now starting to see potentially moves
+
+650
+00:58:09,400 --> 00:58:13,660
+and breakouts to the upside. So if you get that move, the bull flag formation. So at the very
+
+651
+00:58:13,660 --> 00:58:17,860
+early as the move out of this consolidation pullback breakout, then of course, this could
+
+652
+00:58:17,860 --> 00:58:24,260
+be one to absolutely consider. So IMI, yeah, keep it on the watch list. Who was that as Guy?
+
+653
+00:58:25,160 --> 00:58:28,960
+Absolutely. Keep it on the watch list as a potential.
+
+654
+00:58:32,540 --> 00:58:39,800
+Guy, when did you get into Eton? We went through that. So the Donchon channels. So for me,
+
+655
+00:58:39,800 --> 00:58:44,300
+the Donchon channels is really just about momentum. So you've got the Donchon channels,
+
+656
+00:58:44,380 --> 00:58:48,080
+which are for scanning and for breakouts, excuse me. And then you've got the Bollinger bands,
+
+657
+00:58:48,140 --> 00:58:53,540
+which are for momentum. So I would use them independently, but together. So use the Donchon
+
+658
+00:58:53,540 --> 00:58:59,580
+channels to identify breakouts and entry points, and then use the Bollinger bands to identify
+
+659
+00:58:59,580 --> 00:59:05,300
+momentum and weakness. Use them together, not one instead of the other.
+
+660
+00:59:05,300 --> 00:59:11,120
+Guy, I've used MACD on a monthly timeframe to get success on profitable stocks. Is there a reason
+
+661
+00:59:11,120 --> 00:59:15,700
+why you don't use the indicator? Yeah, you can use MACD. The problem with these indicators like
+
+662
+00:59:15,700 --> 00:59:22,880
+MACD and Stochastic and RSI is that they are again lagging. And the thing about overbought
+
+663
+00:59:22,880 --> 00:59:28,440
+and oversold indicators is that the market itself can remain overbought, oversold for
+
+664
+00:59:28,440 --> 00:59:33,700
+infinitely longer periods of time. So with the indicators that I've got here,
+
+665
+00:59:33,700 --> 00:59:39,540
+I have enough information to make my decisions. MACD, RSI, Stochastic, yes, they are useful
+
+666
+00:59:39,540 --> 00:59:45,520
+additional indicators, but they aren't necessary for me. One indicator that I should have on here,
+
+667
+00:59:45,580 --> 00:59:52,060
+which I don't have, let me just bring it up. Let me just see if I have it. Yeah. No, not this
+
+668
+00:59:52,060 --> 00:59:58,400
+indicator. One indicator that I have is volume. So volume, I want to see breakouts on volume,
+
+669
+00:59:58,400 --> 01:00:06,220
+on high volume. So typically with US stocks, we want volume over a million, 500,000 at the very
+
+670
+01:00:06,220 --> 01:00:13,560
+least. With UK stocks, you want stocks with volume of 100K. So you're getting into stocks with good
+
+671
+01:00:13,560 --> 01:00:19,840
+volume. So that is a sub chart indicator that I would use. But in terms of MACD, RSI, Stochastic,
+
+672
+01:00:20,720 --> 01:00:26,560
+I've moved away from them because the trends and the moving averages and support and resistance,
+
+673
+01:00:26,560 --> 01:00:34,820
+they give me everything that I need to know. Price is your number one indicator. Moving averages are
+
+674
+01:00:34,820 --> 01:00:39,820
+your lagging indicator. Support and resistance are your leading indicator. So moving averages
+
+675
+01:00:39,820 --> 01:00:45,280
+actually tell us, sorry, price actually tells us what is happening. Moving averages confirm that.
+
+676
+01:00:45,700 --> 01:00:51,000
+And then support and resistance tells us where price could move towards. So you've got a good
+
+677
+01:00:51,000 --> 01:00:57,540
+mixture of price as your main indicator, moving averages as your lagging indicator, support and
+
+678
+01:00:57,540 --> 01:01:02,320
+resistance as your leading indicators. Anything else is just more information. And ultimately,
+
+679
+01:01:02,500 --> 01:01:06,800
+as you start having more information, and sometimes it can conflict, it can override
+
+680
+01:01:06,800 --> 01:01:11,460
+what the market is telling you. So by all means, if you've had great success with the MACD guy,
+
+681
+01:01:11,460 --> 01:01:16,940
+keep using it. But that's the reason why I tend to not use these sub chart indicators.
+
+682
+01:01:16,940 --> 01:01:19,540
+Let's have a look at gold
+
+683
+01:01:19,540 --> 01:01:28,120
+It's because I'm in stocks
+
+684
+01:01:28,120 --> 01:01:29,820
+Let's use that one
+
+685
+01:01:29,820 --> 01:01:31,660
+Okay, gold
+
+686
+01:01:31,660 --> 01:01:34,360
+Now, gold is very, very interesting
+
+687
+01:01:34,360 --> 01:01:35,780
+Gold is a commodity, right?
+
+688
+01:01:35,880 --> 01:01:37,800
+So gold as a commodity
+
+689
+01:01:37,800 --> 01:01:40,800
+It behaves similar but different to stocks
+
+690
+01:01:40,800 --> 01:01:42,560
+Stocks move up, then correct
+
+691
+01:01:42,560 --> 01:01:43,620
+Then go up, then correct
+
+692
+01:01:43,620 --> 01:01:44,680
+Go up, then correct
+
+693
+01:01:44,680 --> 01:01:45,900
+And then crash
+
+694
+01:01:45,900 --> 01:01:52,600
+Commodities will trend for very, very long periods of time. So commodities, look at gold.
+
+695
+01:01:52,680 --> 01:01:59,740
+It trended from 2001 to 2011, long period of consolidation, 10 years, 11 years of consolidation.
+
+696
+01:02:00,520 --> 01:02:05,320
+The longer the consolidation, sorry, after every big move, it consolidates. If you look at the
+
+697
+01:02:05,320 --> 01:02:11,920
+consolidation, it lasted 13 years. We have this cup and handle formation that formed over 13 years
+
+698
+01:02:11,920 --> 01:02:14,120
+from 2011 to 2011.
+
+699
+01:02:15,900 --> 01:02:25,240
+through to the breakout in March of 2024. We started buying in March 2024 using that same
+
+700
+01:02:25,240 --> 01:02:30,180
+logic that we've just looked at above the high of last year, above the moving averages, trend filter
+
+701
+01:02:30,180 --> 01:02:35,740
+green on the weekly and daily. When it broke out, we waited for the bull flag on the daily.
+
+702
+01:02:35,740 --> 01:02:41,240
+Then we started buying in and we rode it all the way up through to the all-time high. We then
+
+703
+01:02:41,240 --> 01:02:47,820
+tightened stop losses in January, locked in all of that profit. And then we managed to escape this
+
+704
+01:02:47,820 --> 01:02:53,100
+correction. And the reason why we tightened stop losses is because simply 5,000 is a major round
+
+705
+01:02:53,100 --> 01:02:57,140
+number, a logical level for the asset to consolidate. Then what are we seeing?
+
+706
+01:03:00,000 --> 01:03:05,400
+Excuse me, what is happening? What we're seeing is simply that, a consolidation. If you look at
+
+707
+01:03:05,400 --> 01:03:10,780
+this month now, now the consolidation fell below the high of last year. We've just been standing
+
+708
+01:03:10,780 --> 01:03:16,080
+aside. We've got no exposure to gold. But now that it's above the high of last year, things are
+
+709
+01:03:16,080 --> 01:03:19,520
+starting to look interesting. That doesn't mean to say that we're going to just start buying in
+
+710
+01:03:19,520 --> 01:03:25,560
+because this is what I mean. If you buy in now and then the market goes flat for the next decade,
+
+711
+01:03:25,860 --> 01:03:28,780
+you're going to have money just tied up for a decade that's gone nowhere.
+
+712
+01:03:30,600 --> 01:03:36,220
+Personally, with all the momentum on stocks, I'm happy to keep buying stocks until gold sets up.
+
+713
+01:03:36,220 --> 01:03:39,600
+And for me, that will be ideally a move through the high of last year.
+
+714
+01:03:40,780 --> 01:03:49,480
+on the weekly, you can see now it never moved below the 200 SMA. So it's remained in consolidation.
+
+715
+01:03:49,480 --> 01:03:53,600
+You can see again how our support levels are creating support and resistance levels,
+
+716
+01:03:53,720 --> 01:03:58,200
+creating resistance above, support below. So we're clearly in a sideways market.
+
+717
+01:03:58,640 --> 01:04:02,440
+The trend filter is alternating between green, gray, and red. So when it starts looking a bit
+
+718
+01:04:02,440 --> 01:04:08,960
+like the Italian flag, you're in a flat market. And so this is what's going to happen for the
+
+719
+01:04:08,960 --> 01:04:12,380
+foreseeable future. I know there's a lot of hype and you go on the internet and people are like,
+
+720
+01:04:12,380 --> 01:04:16,660
+oh my God, I made all of this money on gold in recent days. Well, I'll be like, okay, that's
+
+721
+01:04:16,660 --> 01:04:20,900
+fine. Well, that's what you've made in recent days. But show me how those positions have
+
+722
+01:04:20,900 --> 01:04:26,660
+performed in recent days compared to your whole portfolio. And what you'll find is that there'll
+
+723
+01:04:26,660 --> 01:04:31,060
+be a lot more losses than wins. And so all people are doing is talking about their wins and hiding
+
+724
+01:04:31,060 --> 01:04:38,180
+their losses. And that is classic internet behavior. You'll only ever see a winning period.
+
+725
+01:04:38,180 --> 01:04:45,120
+Look at how much money I've made this week. So standing aside, it is starting to look interesting.
+
+726
+01:04:45,260 --> 01:04:49,280
+The trend filter is green, but it's very much a flat market for now. And we can see that a lot
+
+727
+01:04:49,280 --> 01:04:56,220
+more clearly on the daily timeframe. Look at the daily timeframe, guys. Flat. And the 200 and the
+
+728
+01:04:56,220 --> 01:05:01,140
+moving averages, when they start flattening out, when the trend was in play, look at the moving
+
+729
+01:05:01,140 --> 01:05:08,100
+averages, all moving up, confirming the trend. But then they flattened out, confirming a sideways.
+
+730
+01:05:08,180 --> 01:05:12,300
+market. And price is actually telling us that it's flat for now. So although gold is starting
+
+731
+01:05:12,300 --> 01:05:19,260
+to look interesting in that it's moving above the 250 moving average on the daily, it's moved above
+
+732
+01:05:19,260 --> 01:05:23,220
+the 50 simple moving average on the weekly, the trend filter is green, the trend filter is green,
+
+733
+01:05:23,520 --> 01:05:28,220
+it's moved above the high of last year. What this is telling us is that bullish momentum is kicking
+
+734
+01:05:28,220 --> 01:05:35,100
+in. Whether you want to buy in, that's dependent on your analysis and your strategy. For us as
+
+735
+01:05:35,100 --> 01:05:39,540
+trend followers. This is not enough information to buy in because we know that we could be stuck
+
+736
+01:05:39,540 --> 01:05:45,080
+in this sideways market for a very long period of time. So while gold is setting up, we're going
+
+737
+01:05:45,080 --> 01:05:50,860
+to just focus on all the strong stocks that are performing because they're already trending.
+
+738
+01:05:51,160 --> 01:05:56,040
+And that's really, guys, the hallmark of an investor. Know where the edge lies. Gold doesn't
+
+739
+01:05:56,040 --> 01:06:00,600
+have an edge. It's starting to show an edge, but that edge is in a sideways market. So it's up to
+
+740
+01:06:00,600 --> 01:06:09,640
+you to decide whether you want to act on that or not okay so paco i think i answered your question
+
+741
+01:06:09,640 --> 01:06:20,060
+there on bollinger bands guy also when filtering do you simply uh the technical answer or do you
+
+742
+01:06:20,060 --> 01:06:25,080
+consider probability revenue growth about it's all based on technical analysis guy a really good
+
+743
+01:06:25,080 --> 01:06:33,260
+question. People often ask us, how much of the fundamentals of this company do we take into
+
+744
+01:06:33,260 --> 01:06:37,740
+consideration? The way I look at this is very straightforward. If an asset is setting record
+
+745
+01:06:37,740 --> 01:06:43,340
+highs, as I mentioned earlier, I want to see a stock that's breaking out from a sideways market
+
+746
+01:06:43,340 --> 01:06:53,140
+like Visa. So if you go back to Visa, look at the sideways market between the high and the low of
+
+747
+01:06:53,140 --> 01:07:00,700
+last year. The sideways market is from June 25, April 26. That's the high of last year. Sorry,
+
+748
+01:07:00,840 --> 01:07:07,700
+June 25 is the high. April 25 is the low. But really and truly, it's been sideways since November
+
+749
+01:07:07,700 --> 01:07:14,240
+24. So we're coming up to two years of sideways market. The longer the consolidation, the bigger
+
+750
+01:07:14,240 --> 01:07:21,740
+the breakout. So now that the asset is breaking out and setting record highs, we can assume that
+
+751
+01:07:21,740 --> 01:07:26,080
+the company is healthy. Now, if you want to add in another layer of fundamentals, you can absolutely
+
+752
+01:07:26,080 --> 01:07:31,820
+do that. But if the asset is moving up and breaking through to record highs, that is an
+
+753
+01:07:31,820 --> 01:07:37,580
+assumption. You can assume that the company is doing well. Now, if it reverses and fails, well,
+
+754
+01:07:37,620 --> 01:07:41,460
+as already mentioned, that's where the stop losses and the risk management come in. Susan, great to
+
+755
+01:07:41,460 --> 01:07:45,340
+have you on here. Have a great day, guys. I know I'm going over, but this was meant to be an hour,
+
+756
+01:07:45,340 --> 01:07:50,720
+but some really good questions and we'll stay on air until everything has been answered.
+
+757
+01:07:51,740 --> 01:07:58,200
+But if you guys need to drop off, appreciate your time. Send me your username and I will get you licensed for these tools.
+
+758
+01:07:59,320 --> 01:08:03,140
+So, Guy, I hope that answers your questions. It's all very straightforward.
+
+759
+01:08:03,360 --> 01:08:09,860
+It's all based on technical analysis and volume and multiple timeframes and alignment and letting the trend dictate.
+
+760
+01:08:09,860 --> 01:08:23,080
+Francisco, I think I've answered that as well. What you want is a scanner. So I know Trading
+
+761
+01:08:23,080 --> 01:08:29,300
+View has a scanner. You can do that initial scan where you're scanning for a Donchon.
+
+762
+01:08:30,340 --> 01:08:36,440
+Use Donchon 20, for example. You then need to do your analysis using this setup to cherry pick
+
+763
+01:08:36,440 --> 01:08:42,140
+the best. Guys, listen, let me tell you something. Good investing is simple, but not easy.
+
+764
+01:08:43,920 --> 01:08:47,620
+Look at what we've done. And I'm sure you guys all understand it. And maybe some of you guys
+
+765
+01:08:47,620 --> 01:08:53,220
+have seen this for the first time. And you may understand most of it, but not all of it. But
+
+766
+01:08:53,220 --> 01:08:57,420
+it's all very straightforward. With a bit of familiarization, it's very, very straightforward.
+
+767
+01:08:57,720 --> 01:09:02,900
+Good investing is simple, but not easy. Where people fail is the consistency of doing the right
+
+768
+01:09:02,900 --> 01:09:09,640
+things. If you want to drop body fat, if you're 25% body fat and you want to get to 10% body fat,
+
+769
+01:09:09,820 --> 01:09:14,340
+you've got to stay in a calorie deficit and you've got to repeat that for the next 12, 18,
+
+770
+01:09:14,400 --> 01:09:19,400
+24 months. There's no getting away from it. If you want to bulk up, if you're quite lean and you
+
+771
+01:09:19,400 --> 01:09:24,160
+want to get big and a more muscular frame, you have to be in a surplus and you've got a calorie
+
+772
+01:09:24,160 --> 01:09:29,060
+surplus and you've got to eat more food and repeat that for the next 12, 18, 24 months. You can't get
+
+773
+01:09:29,060 --> 01:09:36,460
+away from it. It's the same thing with the market. It's all very simple in terms of analysis and
+
+774
+01:09:36,460 --> 01:09:43,700
+finding that edge, but it's repeating the process day in, day out, allowing the market to dictate
+
+775
+01:09:43,700 --> 01:09:49,140
+the entries, the conditions, playing out on the edge, allowing the profit to come to you,
+
+776
+01:09:49,500 --> 01:09:54,860
+repeating that process again. That is where the money is made. And to do that, you need to have
+
+777
+01:09:54,860 --> 01:10:00,820
+a good scanner that can scan the market initially based on the Donchon 20. You then want to import
+
+778
+01:10:00,820 --> 01:10:05,860
+it into this three screen setup and you then want to conduct your analysis and cherry pick the best.
+
+779
+01:10:07,120 --> 01:10:12,440
+Now, if you want to, if you want to set, this isn't meant to be, this analysis here is this
+
+780
+01:10:12,440 --> 01:10:17,480
+webinar isn't a sales pitch, but we do that process. We have the scanner and we've got
+
+781
+01:10:17,480 --> 01:10:22,760
+a process to do that for you. We've got a copy service where all of this is done for you. And
+
+782
+01:10:22,760 --> 01:10:28,500
+all you need to do is copy the portfolio. Because scanning the market and analyzing the market can
+
+783
+01:10:28,500 --> 01:10:34,800
+take anywhere from one to two hours on a daily basis. You wait for the market to close so that
+
+784
+01:10:34,800 --> 01:10:39,940
+you have the closing prices. You then scan the market and then you cherry pick the best. That
+
+785
+01:10:39,940 --> 01:10:44,220
+can take anywhere from one to two hours on a daily basis. At the very least, you want to do that once
+
+786
+01:10:44,220 --> 01:10:51,260
+a week and at the weekend. So we do that. People are busy. People have jobs, careers, families,
+
+787
+01:10:51,260 --> 01:10:55,320
+hobbies. People don't really have the time to do that. And that's why they then look to the internet
+
+788
+01:10:55,320 --> 01:11:03,360
+for information and look for an easy way to find good stocks. You want a process and you want to
+
+789
+01:11:03,360 --> 01:11:08,920
+learn and understand that process so that you can consistently execute and find the best stocks.
+
+790
+01:11:09,380 --> 01:11:14,100
+And there's no getting away from the sophistication of it. There is a level of sophistication that
+
+791
+01:11:14,100 --> 01:11:19,500
+people regularly overlook. Get it right and you'll be handsomely rewarded. Get it wrong and
+
+792
+01:11:19,500 --> 01:11:25,120
+you'll always be in this, you know, jumping in and out of positions and changing strategies and
+
+793
+01:11:25,120 --> 01:11:29,240
+making money, they're not making money, it becomes very frustrating. And then you just end up leaving
+
+794
+01:11:29,240 --> 01:11:33,080
+it in your bank or tracker fund or thinking, you know what, forget it, I'm just gonna buy Bitcoin.
+
+795
+01:11:33,740 --> 01:11:37,780
+Right? And then that's generally what tends to happen. You've got to change your mindset,
+
+796
+01:11:38,360 --> 01:11:40,700
+you've got to make this a part of your lifestyle.
+
+797
+01:11:40,700 --> 01:11:54,400
+um middle what does the gray candle represent so good question if i just go back the green
+
+798
+01:11:54,400 --> 01:11:58,040
+i don't know when you joined middle but there's two bollinger bands
+
+799
+01:11:58,040 --> 01:12:05,240
+let me just quickly upload those bollinger bands because they're still here we have two bollinger
+
+800
+01:12:05,240 --> 01:12:13,620
+bands, you'll see that. So the inner Bollinger bands, those are based on standard deviation one
+
+801
+01:12:13,620 --> 01:12:18,480
+and the outer Bollinger bands are based on standard deviation two. Bollinger bands are
+
+802
+01:12:18,480 --> 01:12:23,600
+very useful for momentum in the trend. So when the Bollinger bands expand like they do here,
+
+803
+01:12:23,740 --> 01:12:28,760
+that means momentum is kicking in. And when the Bollinger bands flatten, that means the market
+
+804
+01:12:28,760 --> 01:12:34,720
+is going flat. So we created a trend filter that tells us that when it's in the buy zone,
+
+805
+01:12:34,720 --> 01:12:40,160
+the trend filter is green. When it's in the sell zone, the trend filter is red. And when it's in
+
+806
+01:12:40,160 --> 01:12:45,960
+the middle zone, the neutral zone, the trend filter is gray. So now I can hide the Bollinger
+
+807
+01:12:45,960 --> 01:12:52,400
+Bands and have a much cleaner looking chart. And now you can see why we have green, red and gray
+
+808
+01:12:52,400 --> 01:12:56,480
+bars. And so right now the Bollinger Bands will be expanding. Momentum is kicking in.
+
+809
+01:12:57,540 --> 01:13:01,800
+Visa is looking to push through to record highs. This could be an opportunity.
+
+810
+01:13:01,800 --> 01:13:08,940
+you're welcome it all i hope that makes sense check out pay sign okay guy let's have a look
+
+811
+01:13:08,940 --> 01:13:15,660
+at that i'm assuming that is a a uk stock or is it a i think i think this i may have
+
+812
+01:13:15,660 --> 01:13:22,680
+i think we've already looked at this okay now the one so pay sign it's actually below its all-time
+
+813
+01:13:22,680 --> 01:13:27,860
+high i'm sorry it's all-time high is it's actually all the way back from its ipo in 98
+
+814
+01:13:28,620 --> 01:13:31,920
+So again, this is one of those stocks that's recovering at the very earliest.
+
+815
+01:13:32,300 --> 01:13:34,300
+We do not invest in stocks less than $20.
+
+816
+01:13:34,640 --> 01:13:35,960
+So we have a filter there as well.
+
+817
+01:13:36,420 --> 01:13:40,840
+So stocks below $20 tend to be very, very, very volatile, lots of swings.
+
+818
+01:13:41,460 --> 01:13:45,940
+So pay sign would look more interesting above $20 where we could potentially take a position.
+
+819
+01:13:46,080 --> 01:13:48,320
+It will then be a cheap stock with good upside potential.
+
+820
+01:13:48,920 --> 01:13:53,620
+So based on that, pay sign for now, if I am looking at the right chart,
+
+821
+01:13:53,800 --> 01:13:56,960
+Guy, if you want to confirm, probably stand aside on that for now.
+
+822
+01:13:57,860 --> 01:14:04,540
+Okay, let's have a look at MRK, Merck and Company. Okay, so let's look at the monthly.
+
+823
+01:14:06,200 --> 01:14:12,740
+So yes, meets our criteria and that it's setting record highs, but the monthly is a little bit
+
+824
+01:14:12,740 --> 01:14:18,060
+volatile. So we do want to be aware of that. It's not the cleanest of trends. Weekly is looking good.
+
+825
+01:14:18,520 --> 01:14:23,080
+Daily is looking good. If we look at what the daily is doing, it's actually trending quite nicely
+
+826
+01:14:23,080 --> 01:14:29,520
+since November. Breakout post earnings, post earnings, so nothing to do with earnings.
+
+827
+01:14:29,780 --> 01:14:37,140
+It's continuing to the upside. So again, it's one that has potential. It's one that has potential.
+
+828
+01:14:37,360 --> 01:14:41,740
+You may want to wait for a pullback in the next breakout. You just want to be aware. This is the
+
+829
+01:14:41,740 --> 01:14:47,240
+thing. What you want to do is do your analysis, build a watch list. What I do is I have tier A
+
+830
+01:14:47,240 --> 01:14:51,920
+and tier B. A stock like Merck would probably be a tier B stock just because of its history.
+
+831
+01:14:53,080 --> 01:15:00,240
+And then tier A would be all the really good stocks like Visa and MasterCard and Eton and all these stocks that are trending variable.
+
+832
+01:15:00,340 --> 01:15:07,140
+They'll be on tier A. Now, if I don't have any options on tier A, then I may look at tier B and go, OK, let's see what tier B is offering.
+
+833
+01:15:07,560 --> 01:15:12,060
+And if I like a stock on tier B, then I may take a position. So this is how you want to do it.
+
+834
+01:15:12,100 --> 01:15:20,660
+You want to have a two-tier system. And remember, when there's so much, when there's so many opportunities, you go back to our dads and our granddads.
+
+835
+01:15:20,660 --> 01:15:25,300
+they didn't have the opportunities that we had. Because we've got scanners and technologies,
+
+836
+01:15:25,640 --> 01:15:29,940
+we've got a different set of problems, which is we've got so many opportunities,
+
+837
+01:15:30,300 --> 01:15:34,460
+but we need to know exactly where those really good opportunities are. And that's what we want.
+
+838
+01:15:34,620 --> 01:15:41,920
+We don't want average opportunities. So MRK, yes, it meets our criteria in terms of its recent trend.
+
+839
+01:15:42,520 --> 01:15:49,660
+Its past trend structure and history is not too appealing for me. So for me, this would be a tier B.
+
+840
+01:15:50,660 --> 01:15:56,860
+middle to get access to the indicators, you need to send me your TradingView username.
+
+841
+01:15:57,400 --> 01:16:04,280
+Have a look at the posts that I put up in the community. You'll see the one that I put up earlier
+
+842
+01:16:04,280 --> 01:16:10,500
+today. If you don't have TradingView, there is our affiliate link. If you click on that affiliate
+
+843
+01:16:10,500 --> 01:16:17,420
+link, you will get a 30-day free trial. Sign up, send me your username. After the 30-day free trial,
+
+844
+01:16:17,420 --> 01:16:21,280
+if you want to keep access to the tools and trading view, you then have to move on to the
+
+845
+01:16:21,280 --> 01:16:27,020
+paid subscription, which works out to around 300, 350 pound for the year. So it's a very,
+
+846
+01:16:27,140 --> 01:16:33,180
+very, very good price for a package that's actually very good. Guys, remember, this is
+
+847
+01:16:33,180 --> 01:16:37,700
+investing. As investors, we have to invest in a little bit. Think of it as a business.
+
+848
+01:16:38,180 --> 01:16:42,600
+You've got to have the right tools for the trade. So you don't want to do this on the Uber cheap
+
+849
+01:16:42,600 --> 01:16:47,260
+and constantly look for free things. Invest a little bit of money in it. It will pay dividends.
+
+850
+01:16:47,260 --> 01:16:55,600
+over the long run. So, Mittal, email me your username at hello at sublimetrading.io. I'll
+
+851
+01:16:55,600 --> 01:17:05,120
+just put that in again. Hello at sublimetrading.io. If you guys have your username, email me your
+
+852
+01:17:05,120 --> 01:17:10,540
+username and I will have you licensed. I usually take 12 to 24 hours to do it and I'll let you know
+
+853
+01:17:10,540 --> 01:17:16,980
+once it's done. I will also send you the link to copy the page and all you need to then do is clone
+
+854
+01:17:16,980 --> 01:17:28,380
+the page and the page is yours to use. Guy, absolutely. I mean, what I tell people is that
+
+855
+01:17:28,380 --> 01:17:33,420
+you don't want to be one of those guys that goes into the gym. You spend lots of money on your gym
+
+856
+01:17:33,420 --> 01:17:40,460
+membership, 50 pound, 100 pound more a month. And you basically look the same 10 years later.
+
+857
+01:17:40,900 --> 01:17:45,860
+I know people in the gym who've just not changed. They look exactly the same from the moment they
+
+858
+01:17:45,860 --> 01:17:51,700
+join 10 years on, they look exactly the same. And the reason for that is because they do the easy
+
+859
+01:17:51,700 --> 01:17:56,300
+things, which is pay for the membership and turn up and do an hour of training because it feels good,
+
+860
+01:17:56,380 --> 01:18:00,760
+but they don't want to do the things that are actually necessary. And the way to look at this
+
+861
+01:18:00,760 --> 01:18:08,100
+is we've all got 24 hours in a day, one hour, one and a half hours, maybe two hours is spent in the
+
+862
+01:18:08,100 --> 01:18:15,840
+gym. It's really what happens in the other 22 hours that counts. You can't expect to make change
+
+863
+01:18:15,840 --> 01:18:24,440
+changes in two hours when the other 22 hours are out of sync. So when it comes to weight goals and
+
+864
+01:18:24,440 --> 01:18:30,180
+body goals and getting fit and getting lean and getting buff, sleep and nutrition are far more
+
+865
+01:18:30,180 --> 01:18:35,520
+important than what happens in the gym. The gym is only an aid to get to where you want to get to,
+
+866
+01:18:35,720 --> 01:18:42,220
+but it will never work if sleep and nutrition isn't on point. If you want to drive to Scotland
+
+867
+01:18:42,220 --> 01:18:47,180
+and you wash the car, but you put no petrol in it, you're not going to get to Scotland.
+
+868
+01:18:48,180 --> 01:18:52,500
+Right? So you've got to make sure the inside of the car is well looked after. You've got to make
+
+869
+01:18:52,500 --> 01:18:57,440
+sure it's serviced. You've got to make sure that it's full of petrol. You've got to make sure there's
+
+870
+01:18:57,440 --> 01:19:02,640
+oil or the parts are nicely looked after. And then if you want to make the car look good and
+
+871
+01:19:02,640 --> 01:19:07,580
+give it a clean, then by all means, give it a clean. But it's the inside that really counts.
+
+872
+01:19:07,580 --> 01:19:15,000
+so switch that mindset around guys do the right thing start with the right process the money will
+
+873
+01:19:15,000 --> 01:19:20,920
+come and once you start understanding the power of compounding the money comes with abundance
+
+874
+01:19:20,920 --> 01:19:27,320
+but it won't come if you don't do the right thing so really change that mindset and you know this
+
+875
+01:19:27,320 --> 01:19:31,520
+guys i learned this the hard way i'm telling you for my experience francisco you're welcome
+
+876
+01:19:31,520 --> 01:19:40,140
+Have a good day. BNY. Okay, let's make that the last one. And then we will call it a day for
+
+877
+01:19:40,140 --> 01:19:47,220
+today. I think BNY is the bank. Yeah. We actually have been tracking this for a long time. Positions
+
+878
+01:19:47,220 --> 01:19:52,420
+running. Community members have positions running. We've been sharing this in our coffee service for
+
+879
+01:19:52,420 --> 01:19:58,580
+a very, very long time. And you can see why. Strong history, long consolidation. So this is
+
+880
+01:19:58,580 --> 01:20:07,680
+a good example. Strong trend up, 95 to 2000, so five-year trend. Long consolidation. The longer
+
+881
+01:20:07,680 --> 01:20:16,600
+the consolidation, the bigger the breakout. Broke out in June 24, June, July 24, and it's just gone
+
+882
+01:20:16,600 --> 01:20:23,040
+on to just set record highs. And so, Guy, this is a good example of there's been no fundamentals
+
+883
+01:20:23,040 --> 01:20:30,020
+done it into the back end other than the finance sector was performing well. This was one of the
+
+884
+01:20:30,020 --> 01:20:34,480
+strongest stocks in the sector. This was set up. It met our checklist, monthly, weekly, daily,
+
+885
+01:20:34,840 --> 01:20:40,560
+alignment all there, detected by our scanner. We did the analysis. When we had the breakout,
+
+886
+01:20:40,760 --> 01:20:45,400
+we took a position. And as it unfolded, we just kept on buying more. So that's the beauty of
+
+887
+01:20:45,400 --> 01:20:51,760
+compounding. You put a 0.5% or 1% risk allocation. When it moves 180R, buy more.
+
+888
+01:20:51,760 --> 01:20:57,060
+so your first position is still open your second position is then triggered when your second
+
+889
+01:20:57,060 --> 01:21:04,860
+position moves one atr you add your third position so this is how you want to do it rather than
+
+890
+01:21:04,860 --> 01:21:10,140
+rather than talk yourself out of it use that checklist system when the checklist is met
+
+891
+01:21:10,140 --> 01:21:14,240
+take a small position if it fails small loss if it works out holding compound
+
+892
+01:21:14,240 --> 01:21:23,760
+okay guys i think this is a really really good place to leave we're coming up to half past five
+
+893
+01:21:23,760 --> 01:21:30,680
+i've gone over i can't see any more questions coming through summarize monthly weekly daily
+
+894
+01:21:30,680 --> 01:21:37,580
+alignments you want these tools to keep you aligned with the market send me over your username
+
+895
+01:21:37,580 --> 01:21:44,120
+so i can license you for these tools i'll have that done today latest tomorrow and what i would
+
+896
+01:21:44,120 --> 01:21:51,100
+love to see is more activity in the community. The community has 800 people. Most people
+
+897
+01:21:51,100 --> 01:21:56,160
+communicate to me through email. What I would love to see is you guys put up your analysis,
+
+898
+01:21:56,920 --> 01:22:03,220
+start sharing ideas, talking about the stocks you're looking at, using the tools. And then
+
+899
+01:22:03,220 --> 01:22:08,200
+I will feedback. I will feedback, guys, and tell you, yes, good, not good. Have you considered
+
+900
+01:22:08,200 --> 01:22:13,660
+this? Look at what's missing. A question to always ask yourself is, what do I not see?
+
+901
+01:22:14,120 --> 01:22:17,600
+And if that cannot be answered, you have a good stock.
+
+902
+01:22:19,800 --> 01:22:24,540
+Okay, guys, have a lovely rest of the day.
+
+903
+01:22:24,720 --> 01:22:27,060
+Let's see how the stock market closes today.
+
+904
+01:22:27,060 --> 01:22:30,780
+We want to see that 20 simple moving average hold on the S&P 500.
+
+905
+01:22:31,080 --> 01:22:35,060
+We've got NVIDIA earnings tomorrow, which will have an impact.
+
+906
+01:22:35,200 --> 01:22:38,840
+If we see bullish momentum, NVIDIA tends to take the market with it.
+
+907
+01:22:38,940 --> 01:22:40,120
+Big tech tends to follow.
+
+908
+01:22:40,620 --> 01:22:43,060
+So an interesting week ahead of us.
+
+909
+01:22:44,120 --> 01:22:49,780
+All right, guys, have a lovely rest of the day and we will stay in touch. Take care. Bye-bye.
+
+910
+01:23:14,120 --> 01:23:44,100
+Thank you.
+
+911
+01:23:44,120 --> 01:24:14,100
+Thank you.
+
+912
+01:24:14,120 --> 01:24:44,100
+Thank you.
+
+913
+01:24:44,120 --> 01:25:14,100
+Thank you.
+
+914
+01:25:14,120 --> 01:25:44,100
+Thank you.
+
