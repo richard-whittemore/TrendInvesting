@@ -1,0 +1,123 @@
+version: "2"
+
+# Linting policy for a system that will trade real money.
+#
+# Two categories of rule live here:
+#   1. Ordinary correctness and hygiene linters.
+#   2. Architectural and determinism rules that are stated in AGENTS.md and are
+#      otherwise enforced only by review. depguard and forbidigo make them fail
+#      the build instead.
+#
+# Run with `make lint` (included in `make check`).
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose # response bodies must be closed
+    - depguard # architectural boundaries (see settings below)
+    - errorlint # error comparison and wrapping correctness
+    - forbidigo # determinism (see settings below)
+    - gocritic # broad correctness and style diagnostics
+    - gosec # security issues
+    - misspell
+    - nilerr # returning nil when err is non-nil
+    - predeclared # shadowing predeclared identifiers
+    - revive # replacement for golint
+    - unconvert # redundant type conversions
+    - unparam # unused function parameters and results
+    - wastedassign
+
+  settings:
+    depguard:
+      rules:
+        # The Go domain is a pure, deterministic reducer over an ordered event
+        # stream. It must not reach the outside world: everything it needs
+        # arrives as an event, and everything it produces is returned as a
+        # decision. See docs/architecture.md and AGENTS.md.
+        domain-purity:
+          files:
+            - "**/internal/**"
+            - "!**/internal/**/*_test.go"
+          deny:
+            - pkg: net/http
+              desc: "Domain packages must not perform network I/O. Inputs arrive as events; outputs are returned as decisions."
+            - pkg: net
+              desc: "Domain packages must not perform network I/O."
+            - pkg: database/sql
+              desc: "Domain packages must not access persistence directly. Use a repository interface defined in the domain and implemented outside it."
+            - pkg: os/exec
+              desc: "Domain packages must not execute processes."
+            - pkg: google.golang.org/grpc
+              desc: "Transport belongs at the adapter boundary, not in the domain."
+
+        # cmd/ wires dependencies together and nothing more.
+        cmd-is-composition-only:
+          files:
+            - "**/cmd/**"
+          deny:
+            - pkg: database/sql
+              desc: "cmd/ is composition only; persistence belongs behind an interface."
+
+    forbidigo:
+      # Determinism: a decision must depend only on the ordered event stream and
+      # the configuration, never on ambient state. Replay must reproduce it
+      # exactly. See AGENTS.md and docs/architecture.md.
+      analyze-types: true
+      forbid:
+        - pattern: "^time\\.Now$"
+          msg: "Non-deterministic: the domain must take time from the event being processed, not the wall clock. Inject a clock at the boundary if a timestamp is genuinely required."
+        - pattern: "^time\\.Since$"
+          msg: "Non-deterministic: derive elapsed time from event timestamps."
+        # matches both math/rand and math/rand/v2, which both bind as `rand`
+        - pattern: "^rand\\..*$"
+          msg: "Non-deterministic: randomness must not influence a trading decision. If sampling is genuinely needed, take an explicitly seeded generator as a parameter."
+
+    revive:
+      rules:
+        - name: exported
+          disabled: true # doc comments are reviewed, not linted, for now
+        - name: unused-parameter
+          disabled: true # unparam covers this with fewer false positives
+
+    gosec:
+      excludes:
+        - G104 # duplicates errcheck
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - hugeParam # premature for daily-bar workloads
+        - rangeValCopy # events are immutable values by design; copying is intentional
+        - commentFormatting
+
+  exclusions:
+    generated: lax
+    rules:
+      # Tests may use the wall clock and construct fixtures freely; the
+      # determinism rules apply to production decision paths.
+      - path: _test\.go
+        linters:
+          - forbidigo
+          - gosec
+          - unparam
+      # The composition root and the adapter boundary legitimately touch the
+      # outside world; determinism is enforced in the domain.
+      - path: ^cmd/
+        linters:
+          - forbidigo
+      - path: ^adapter/
+        linters:
+          - forbidigo
+
+issues:
+  # Do not hide a second finding that lands on the same line as another linter's
+  # finding. Verified necessary: `unused` was masking a forbidigo determinism
+  # violation reported on the same line.
+  uniq-by-line: false
+
+formatters:
+  enable:
+    - gofmt

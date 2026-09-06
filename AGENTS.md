@@ -14,6 +14,8 @@ A research and trading platform that evaluates three declared strategies on US e
 6. **Preserve failed results.** Never rewrite or delete a recorded experiment configuration or its evidence.
 7. **Domain packages stay pure** — no LEAN, database, or transport imports in `internal/`; `cmd/` is composition only.
 
+Rules 4 and 7, and the determinism requirement, are enforced mechanically by `make lint` (`depguard` and `forbidigo` in `.golangci.yml`), not just by review. If a lint rule blocks you, the answer is almost never to add a `//nolint` — say why the rule is wrong instead.
+
 ## Working a ticket
 
 Tickets are self-sufficient and are **living records**. Update the Work log as you go (what you did, how, how you tested it), edit Findings in place, and record any concern you discover. Close only when the acceptance criteria are met, testing evidence is recorded, durable findings are committed, and every concern is filed as its own issue. Full standard: `docs/agents/issue-tracker.md`.
