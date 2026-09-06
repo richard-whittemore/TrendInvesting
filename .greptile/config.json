@@ -1,0 +1,87 @@
+{
+  "strictness": 2,
+  "commentTypes": ["logic", "syntax"],
+  "triggerOnUpdates": true,
+  "triggerOnDrafts": false,
+  "statusCheck": true,
+  "statusCommentsEnabled": true,
+  "includeIssuesTable": true,
+  "includeConfidenceScore": true,
+  "fixWithAI": true,
+  "excludeAuthors": ["dependabot[bot]"],
+  "ignorePatterns": "docs/methodology/*.transcript.*\ncoverage.out\ncoverage.txt\n**/*.generated.*",
+  "rules": [
+    {
+      "id": "no-look-ahead",
+      "rule": "Indicators, breakout channels, and signals must be computed from completed prior bars only. Flag any read of a channel or indicator that includes the bar being decided on.",
+      "scope": ["internal/**", "adapter/**"],
+      "severity": "critical"
+    },
+    {
+      "id": "fill-driven-state",
+      "rule": "Position, stop, and pyramid state may change only in response to a recorded fill or brokerage event — never at order-submission time and never from a quoted price.",
+      "scope": ["internal/**", "adapter/**"],
+      "severity": "critical"
+    },
+    {
+      "id": "aggregate-risk-before-add",
+      "rule": "Every position addition must compute aggregate open risk after the proposed action and reject it if a per-stock, sector, or portfolio limit would be exceeded. Each Unit must not receive a fresh full risk budget.",
+      "scope": ["internal/**"],
+      "severity": "critical"
+    },
+    {
+      "id": "deterministic-domain",
+      "rule": "Domain code must be deterministic: no time.Now() or wall-clock reads, no unseeded randomness, no output-affecting map iteration order, no network/filesystem/database access inside a strategy calculation. Time and all inputs arrive via events.",
+      "scope": ["internal/**"],
+      "severity": "high"
+    },
+    {
+      "id": "wilder-n",
+      "rule": "N must be the 20-day Wilder average of True Range, N = (19*PDN + TR)/20 seeded with a 20-day SMA of TR. Flag a simple moving average of True Range, or any average of price, used as N.",
+      "scope": ["internal/**"],
+      "severity": "high"
+    },
+    {
+      "id": "no-strategy-in-adapter",
+      "rule": "The LEAN adapter must contain no methodology: no position sizing, pyramid state, drawdown logic, or portfolio-risk decisions. It translates events and submits already-validated orders.",
+      "scope": ["adapter/**"],
+      "severity": "high"
+    },
+    {
+      "id": "domain-purity",
+      "rule": "internal/ domain packages must not import LEAN, database, transport, or HTTP packages. cmd/ is composition only.",
+      "scope": ["internal/**", "cmd/**"],
+      "severity": "high"
+    },
+    {
+      "id": "no-baseline-experiment-blending",
+      "rule": "Turtle baseline (1/2N adds, 2N stop) and Sublime/hybrid variants (1 ATR adds, ~3xATR stop, risk-free-before-add) are distinct named configurations. Flag code that blends them or hard-codes one where a versioned configuration parameter belongs.",
+      "scope": ["internal/**"],
+      "severity": "high"
+    },
+    {
+      "id": "fail-closed-volatility",
+      "rule": "A zero, negative, or insufficiently warmed-up volatility value must fail closed and prevent a trade proposal, never silently produce a position size.",
+      "scope": ["internal/**"],
+      "severity": "high"
+    },
+    {
+      "id": "cite-strategy-constants",
+      "rule": "Constants encoding a strategy rule (55, 20, 2N, 1/2N, 4 Units, 10%/20% drawdown) must carry a comment citing their source document and page or timestamp.",
+      "scope": ["internal/**"],
+      "severity": "medium"
+    },
+    {
+      "id": "tests-first",
+      "rule": "New or changed strategy behaviour must come with a test that would have failed before the change. Golden scenarios must be transcribed from primary sources with a citation, not invented.",
+      "scope": ["internal/**", "adapter/**"],
+      "severity": "medium"
+    },
+    {
+      "id": "money-numerics",
+      "rule": "Do not compare prices with ==. Be explicit about decimal versus float and about rounding direction for share quantities (the Turtle rule truncates).",
+      "scope": ["internal/**"],
+      "severity": "medium"
+    }
+  ]
+}

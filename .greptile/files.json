@@ -1,0 +1,31 @@
+{
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "description": "Standing instructions: non-negotiables, ticket discipline, orchestration"
+    },
+    {
+      "path": "CONTEXT.md",
+      "description": "Domain glossary. N, Unit, campaign, notional account, risk and ATR have precise, easily-confused meanings defined here"
+    },
+    {
+      "path": "docs/methodology/Methodology_Analysis.md",
+      "description": "Source-grounded Turtle and Sublime rules with citations, provenance tags, and the conflict ledger. The authority for any strategy rule",
+      "scope": ["internal/**", "adapter/**"]
+    },
+    {
+      "path": "docs/architecture.md",
+      "description": "LEAN to adapter to Go boundary, and the safety invariants",
+      "scope": ["internal/**", "adapter/**", "cmd/**"]
+    },
+    {
+      "path": "docs/development.md",
+      "description": "Engineering principles, package boundaries, PR expectations"
+    },
+    {
+      "path": "docs/dependency-policy.md",
+      "description": "When a runtime dependency is acceptable and how tools are pinned",
+      "scope": ["go.mod", "go.sum", ".github/**"]
+    }
+  ]
+}
