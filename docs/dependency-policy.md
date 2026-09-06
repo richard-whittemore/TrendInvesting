@@ -17,10 +17,13 @@ Commit `go.mod` and `go.sum`. Do not use an unreviewed `replace` or `exclude` di
 
 ## Development tools
 
-Go-based tools must be tracked with Go 1.24 `tool` directives and invoked with `go tool`. Pin released, Go-1.24-compatible versions; do not install `@latest` in CI. The initial tools are:
+Go-based tools must be tracked with Go 1.24 `tool` directives and invoked with `go tool`. Pin released, Go-1.24-compatible versions; do not install `@latest` in CI. The tools are:
 
-- Staticcheck for repeatable linting; and
-- `govulncheck` for reachable known-vulnerability analysis.
+- Staticcheck for repeatable linting;
+- `govulncheck` for reachable known-vulnerability analysis; and
+- golangci-lint (**pinned to v2.8.0**) for correctness linting and for mechanically enforcing the architectural and determinism rules in `AGENTS.md` — see `.golangci.yml`.
+
+> **Do not upgrade golangci-lint without checking its Go requirement.** Releases from v2.10.0 onward declare `go >= 1.25`, and v2.13 declares `go >= 1.26`. Adding one rewrites this module's `go` directive to match, which breaks `GOTOOLCHAIN=local` against the `1.24.4` pin in `.go-version` and silently reintroduces automatic toolchain downloads. v2.8.0 is the newest release compatible with Go 1.24. Moving past it is a deliberate toolchain upgrade: bump `.go-version`, `go.mod`, and the installed toolchain together, and record the decision.
 
 ## GitHub Actions
 

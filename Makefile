@@ -3,7 +3,7 @@ export GOTOOLCHAIN := local
 COVERAGE_MIN ?= 80.0
 COVERAGE_PROFILE ?= coverage.out
 
-.PHONY: build check coverage deps fmt fmt-check lint staticcheck test vet vuln
+.PHONY: build check coverage deps fmt fmt-check golangci lint staticcheck test vet vuln
 
 build:
 	go build ./...
@@ -27,7 +27,12 @@ vet:
 staticcheck:
 	go tool staticcheck ./...
 
-lint: fmt-check vet staticcheck
+# Enforces the architectural and determinism rules from AGENTS.md
+# (depguard, forbidigo) alongside the usual correctness linters.
+golangci:
+	go tool golangci-lint run ./...
+
+lint: fmt-check vet staticcheck golangci
 
 vuln:
 	go tool govulncheck ./...
