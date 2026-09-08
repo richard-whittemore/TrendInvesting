@@ -15,4 +15,5 @@ Faith's numbers are kept: **4 Units per instrument, 6 per industry, 10 per secto
 
 - An unknown name is assumed correlated with every other unknown name. That fails safe and keeps delisted stocks in the universe without pretending their sector is known.
 - Price-only correlation clusters (bias-free by construction) are a declared Variant.
+- Twelve total Units means at most three fully-Loaded names on a thousand-stock universe. Faith's twelve were spread across ~21 futures; the number is kept for fidelity because the Baseline is the control, and **a wider total-long cap (24 and 36) is the second early ablation**, immediately after "recompute N per Add" (ADR 0006). If concentration hurts, that ablation shows it directly.
 - A cap check is performed on every proposed entry and Add, against post-trade exposure, and a rejection is journaled with the cap that bound.
