@@ -58,6 +58,26 @@ The progression of Protective Stops as Units are added to a Campaign.
 **Loaded**:
 Holding the maximum permitted number of Units for a given risk level — in one instrument, in a correlated group, or in one direction.
 
+### Setups and the Watchlist
+
+**Setup**:
+An Eligible instrument that is not in a Campaign, together with its current Tier. Every Eligible instrument outside a Campaign is a Setup; most are far from any entry condition.
+
+**Tier**:
+The readiness stage of a Setup. **Tier B** means the Setup is approaching its entry condition; **Tier A** means the entry condition was met on the current completed bar. A Setup can enter Tier A directly without passing through Tier B.
+_Avoid_: grade, quality, rank (Tier says nothing about how good a Setup is, only how close).
+
+**Grade**:
+The quality band of a Setup, derived from a mechanical score over its trend history, all-time-high proximity, timeframe alignment, and sector strength. Used only by the Sublime Variant. This is what the Sublime webinar calls "Tier A / Tier B"; that usage is deliberately not adopted here.
+_Avoid_: tier.
+
+**Signal**:
+The event of a Setup reaching Tier A on a completed bar — the strategy recognising that its entry condition is met. In the Baseline a Signal is a Breakout; in the Sublime Variant it is the second breakout. A Signal belongs to one bar and expires with it.
+_Avoid_: breakout (a market event, not a strategy decision), trigger, alert.
+
+**Watchlist**:
+The ranked set of every Setup currently in Tier B or Tier A. It is the pre-image of tomorrow's Signals and the first thing reviewed each day, in every strategy configuration.
+
 ### Risk
 
 **Unit Volatility Fraction**:
