@@ -76,6 +76,26 @@ Which quantity position size is keyed to. *Volatility-normalised* sizes from **N
 The equity figure used for position sizing, which is reduced during a drawdown and is therefore not the same as actual account equity.
 _Avoid_: equity, balance, capital.
 
+**Drawdown Step**:
+A 20 % reduction of the Notional Account, triggered each time actual equity falls 10 % below the figure the Notional Account was last measured against.
+
+**Strength**:
+The mechanical ranking measure applied when several instruments signal at once: an instrument's price change over the preceding 63 completed bars, divided by its N.
+
+### Universe
+
+**Universe**:
+The set of instruments the strategy may open a Campaign in on a given day. Membership is decided point-in-time from declared criteria and never from knowledge of what happened afterwards.
+
+**Eligible**:
+An instrument that satisfies the Universe criteria on the day in question. Losing eligibility affects only new Campaigns, never open ones.
+
+**Unclassified Group**:
+The single correlation group that holds every instrument whose industry and sector are unknown. Its members are treated as correlated with one another.
+
+**Delisting Exit**:
+The forced closing of a Campaign because its instrument ceased to trade, distinct from an Exit-Channel exit or a stop-out.
+
 ### Research
 
 **Baseline**:
