@@ -102,6 +102,7 @@ func NewBarEnvelope(sequence uint64, universe int, now Clock) event.Envelope {
 	return event.Envelope{
 		ID:                "bar-" + strconv.FormatUint(sequence, 10),
 		Type:              "market.bar.completed",
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
 		SchemaVersion:     1,
 		EventTime:         observed,
 		RecordedAt:        observed,
@@ -153,6 +154,7 @@ func Decider(now Clock) transport.Decider {
 		return event.Envelope{
 			ID:                "decision-" + bar.ID,
 			Type:              "decision.proposed",
+			EnvelopeVersion:   event.CurrentEnvelopeVersion,
 			SchemaVersion:     1,
 			EventTime:         bar.EventTime,
 			RecordedAt:        decided,

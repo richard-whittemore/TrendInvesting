@@ -32,6 +32,14 @@ CODE_UNAVAILABLE = "unavailable"
 
 STRATEGY_VERSION = "transport-spike"
 
+# Must equal event.CurrentEnvelopeVersion in internal/event/envelope.go. It
+# versions the envelope struct itself, not the payload (ADR 0015), and the Go
+# side fails closed in both directions: a value of 0 — which is what an
+# envelope with the field missing decodes to — is rejected as
+# `invalid_envelope`, not silently upgraded. The JSON key is the struct tag,
+# `envelope_version`.
+ENVELOPE_VERSION = 1
+
 # json.dumps must use these separators everywhere. The payload hash attests the
 # payload bytes exactly as they are stored, so the bytes hashed on their own
 # must be byte-identical to the bytes embedded in the envelope. With the same
@@ -104,6 +112,7 @@ def envelope(event_type, sequence, payload, source="lean-adapter", event_id=None
     return {
         "id": event_id or "bar-{}".format(sequence),
         "type": event_type,
+        "envelope_version": ENVELOPE_VERSION,
         "schema_version": 1,
         "event_time": stamp,
         "recorded_at": stamp,

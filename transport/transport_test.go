@@ -39,6 +39,7 @@ func newBar(t *testing.T, id string, sequence uint64) event.Envelope {
 	return event.Envelope{
 		ID:                id,
 		Type:              "market.bar.completed",
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
 		SchemaVersion:     1,
 		EventTime:         time.Date(2026, 9, 9, 20, 0, 0, 0, time.UTC),
 		RecordedAt:        time.Date(2026, 9, 9, 20, 0, 1, 0, time.UTC),
@@ -58,6 +59,7 @@ func echoDecider(_ context.Context, bar event.Envelope) (event.Envelope, error) 
 	return event.Envelope{
 		ID:                "decision-" + bar.ID,
 		Type:              "decision.proposed",
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
 		SchemaVersion:     1,
 		EventTime:         bar.EventTime,
 		RecordedAt:        bar.RecordedAt,
