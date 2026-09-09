@@ -671,3 +671,252 @@ func TestReducerRejectsUndecodableCompletedBarPayload(t *testing.T) {
 		t.Fatalf("Run() error = %v, want it to name a decode failure", err)
 	}
 }
+
+// --- Greptile PR #60 findings ---
+
+// TestReducerRejectsConfigurationWithMismatchedHash is Greptile finding 1
+// (P1, applyConfiguration): a configuration envelope whose ConfigurationHash
+// differs from the hash passed to NewReducer must be rejected, naming both
+// hashes, rather than silently accepted while every later decision is
+// stamped with the constructor's hash (an audit-attribution defect).
+func TestReducerRejectsConfigurationWithMismatchedHash(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	const otherHash = "cfg-other"
+	mismatched := configEnvelope(t, 1, day(0))
+	mismatched.ConfigurationHash = otherHash // ConfigurationHash is envelope
+	// provenance, independent of the payload bytes/hash, so this alone makes
+	// the envelope carry a different configuration hash than the reducer's.
+
+	_, err = engine.Run(context.Background(), []event.Envelope{mismatched})
+	if err == nil {
+		t.Fatal("Run() error = nil, want error for a configuration hash mismatch")
+	}
+	if !strings.Contains(err.Error(), testConfigurationHash) || !strings.Contains(err.Error(), otherHash) {
+		t.Fatalf("Run() error = %v, want it to name both configuration hashes (%q and %q)", err, testConfigurationHash, otherHash)
+	}
+}
+
+// TestReducerAcceptsConfigurationWithMatchingHash confirms the mismatch
+// check above does not also reject a legitimately matching hash.
+func TestReducerAcceptsConfigurationWithMatchingHash(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	// configEnvelope stamps ConfigurationHash = testConfigurationHash, matching
+	// NewReducer's argument above.
+	if _, err := engine.Run(context.Background(), []event.Envelope{configEnvelope(t, 1, day(0))}); err != nil {
+		t.Fatalf("Run() error = %v, want a matching configuration hash to be accepted", err)
+	}
+}
+
+// TestReducerRejectsSecondConfigurationEvent is the other half of finding 1:
+// the reducer is configured once per run. ADR 0006 freezes a Campaign's
+// configuration at entry; a mid-stream reconfiguration is not something this
+// reducer supports, so a second configuration event — even one with a
+// matching hash — is rejected rather than silently re-applied.
+func TestReducerRejectsSecondConfigurationEvent(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	first := configEnvelope(t, 1, day(0))
+	second := configEnvelope(t, 2, day(1))
+
+	_, err = engine.Run(context.Background(), []event.Envelope{first, second})
+	if err == nil {
+		t.Fatal("Run() error = nil, want error for a second configuration event")
+	}
+	if !strings.Contains(err.Error(), "already configured") {
+		t.Fatalf("Run() error = %v, want it to say the reducer is already configured", err)
+	}
+}
+
+// TestReducerRejectsDuplicateBarPeriodEnd is Greptile finding 2 (P1,
+// applyCompletedBar): an exact duplicate bar (same instrument, same
+// PeriodEnd) must be rejected, naming the instrument, the last recorded
+// period end, and the offending one, rather than silently advancing the
+// accumulator and overwriting previousClose a second time for the same bar.
+func TestReducerRejectsDuplicateBarPeriodEnd(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	first := syntheticBar("AAPL", day(1), 1.0)
+	duplicate := syntheticBar("AAPL", day(1), 2.0) // same PeriodEnd as first
+
+	envelopes := []event.Envelope{
+		configEnvelope(t, 1, day(0)),
+		barEnvelope(t, 2, first, day(1)),
+		barEnvelope(t, 3, duplicate, day(1)),
+	}
+
+	_, err = engine.Run(context.Background(), envelopes)
+	if err == nil {
+		t.Fatal("Run() error = nil, want error for a duplicate bar period end")
+	}
+	for _, want := range []string{"AAPL", day(1).Format(time.RFC3339)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Run() error = %v, want substring %q", err, want)
+		}
+	}
+}
+
+// TestReducerRejectsOutOfOrderBarPeriodEnd is the other half of finding 2: a
+// bar whose PeriodEnd is earlier than the last one recorded for the same
+// instrument must be rejected the same way a duplicate is.
+func TestReducerRejectsOutOfOrderBarPeriodEnd(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	later := syntheticBar("AAPL", day(5), 1.0)
+	earlier := syntheticBar("AAPL", day(2), 1.0) // before day(5)
+
+	envelopes := []event.Envelope{
+		configEnvelope(t, 1, day(0)),
+		barEnvelope(t, 2, later, day(5)),
+		barEnvelope(t, 3, earlier, day(5)), // envelope's own RecordedAt is irrelevant here
+	}
+
+	_, err = engine.Run(context.Background(), envelopes)
+	if err == nil {
+		t.Fatal("Run() error = nil, want error for an out-of-order bar period end")
+	}
+	for _, want := range []string{"AAPL", day(5).Format(time.RFC3339), day(2).Format(time.RFC3339)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Run() error = %v, want substring %q", err, want)
+		}
+	}
+}
+
+// TestReducerAcceptsEarlierPeriodEndForDifferentInstrument confirms
+// chronology is tracked per instrument, not globally: the replay.Engine's
+// input Sequence — not PeriodEnd — is what orders the stream across
+// different instruments, so a second instrument's earlier-dated bar must
+// still be accepted.
+func TestReducerAcceptsEarlierPeriodEndForDifferentInstrument(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	aapl := syntheticBar("AAPL", day(5), 1.0)
+	msft := syntheticBar("MSFT", day(1), 1.0) // earlier than AAPL's, different instrument
+
+	envelopes := []event.Envelope{
+		configEnvelope(t, 1, day(0)),
+		barEnvelope(t, 2, aapl, day(5)),
+		barEnvelope(t, 3, msft, day(1)),
+	}
+
+	emitted, err := engine.Run(context.Background(), envelopes)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want a different instrument's earlier bar to be accepted", err)
+	}
+	if len(emitted) != 2 {
+		t.Fatalf("len(emitted) = %d, want 2", len(emitted))
+	}
+}
+
+// TestReducerFlatInstrumentStaysNotReadyUntilNonZeroTrueRange is Greptile
+// finding 3 (P2, event.SetupEvaluatedPayload.Validate): twenty flat bars
+// (high == low == close) legitimately warm up in bar count but produce
+// N == 0, which is not a usable volatility reading. The reducer must report
+// NReady = false for those (not error out), and readiness must return the
+// moment True Range is non-zero again.
+func TestReducerFlatInstrumentStaysNotReadyUntilNonZeroTrueRange(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	envelopes := []event.Envelope{configEnvelope(t, 1, day(0))}
+	seq := uint64(2)
+	for i := 0; i < 20; i++ {
+		bar := syntheticBar("AAPL", day(i+1), 0.0) // flat: True Range = 0
+		envelopes = append(envelopes, barEnvelope(t, seq, bar, day(i+1)))
+		seq++
+	}
+	rangedBar := syntheticBar("AAPL", day(21), 1.0) // True Range = 1
+	envelopes = append(envelopes, barEnvelope(t, seq, rangedBar, day(21)))
+
+	emitted, err := engine.Run(context.Background(), envelopes)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(emitted) != 21 {
+		t.Fatalf("len(emitted) = %d, want 21", len(emitted))
+	}
+
+	for i := 0; i < 20; i++ {
+		payload := decodeSetupEvaluated(t, emitted[i])
+		if payload.NReady {
+			t.Fatalf("bar %d: NReady = true for a flat instrument, want false (warm-up complete but N is not a usable reading)", i+1)
+		}
+		if payload.N != 0 {
+			t.Fatalf("bar %d: N = %v, want 0", i+1, payload.N)
+		}
+	}
+
+	last := decodeSetupEvaluated(t, emitted[20])
+	if !last.NReady {
+		t.Fatal("bar 21: NReady = false, want true: True Range is non-zero again")
+	}
+	// previousN is 0 (the 20-bar seed of an all-zero series); WilderNext(0, 1,
+	// 20) = (19*0+1)/20 = 1/20.
+	want := 1.0 / 20.0
+	if diff := math.Abs(last.N - want); diff > epsilon {
+		t.Fatalf("bar 21: N = %v, want %v (diff %v)", last.N, want, diff)
+	}
+}

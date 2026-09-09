@@ -51,6 +51,17 @@ func TestSetupEvaluatedPayloadValidate(t *testing.T) {
 			mutate:  func(p *event.SetupEvaluatedPayload) { p.N = -0.0001 },
 			wantErr: "n must not be negative",
 		},
+		{
+			// Greptile PR #60 finding 3: twenty flat bars (high==low==close)
+			// legitimately complete bar-count warm-up with N==0, which is not
+			// a usable volatility reading. NReady means "N is usable", not
+			// merely "warm-up complete", so this combination must be
+			// rejected rather than handed to a downstream sizing step that
+			// would divide by it.
+			name:    "ready with zero n is invalid",
+			mutate:  func(p *event.SetupEvaluatedPayload) { p.N = 0; p.NReady = true },
+			wantErr: "n must be positive when ready",
+		},
 	}
 
 	for _, tt := range tests {
