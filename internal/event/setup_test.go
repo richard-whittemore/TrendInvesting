@@ -12,13 +12,19 @@ import (
 )
 
 // validSetupEvaluated returns a payload that satisfies every validation rule
-// so each table test only needs to describe its one deviation.
+// so each table test only needs to describe its one deviation. Tier is
+// TierNone with a positive distance: a Setup that is ready to be evaluated
+// but not currently approaching or meeting its entry condition.
 func validSetupEvaluated() event.SetupEvaluatedPayload {
 	return event.SetupEvaluatedPayload{
-		InstrumentID: "AAPL",
-		PeriodEnd:    time.Date(2026, time.September, 8, 0, 0, 0, 0, time.UTC),
-		N:            0.0141,
-		NReady:       true,
+		InstrumentID:       "AAPL",
+		PeriodEnd:          time.Date(2026, time.September, 8, 0, 0, 0, 0, time.UTC),
+		N:                  0.0141,
+		NReady:             true,
+		EntryChannelHigh:   150.0,
+		EntryChannelReady:  true,
+		Tier:               event.TierNone,
+		DistanceToEntryInN: 5.0,
 	}
 }
 
@@ -32,8 +38,20 @@ func TestSetupEvaluatedPayloadValidate(t *testing.T) {
 	}{
 		{name: "valid, ready"},
 		{
-			name:    "valid, not ready, n is zero",
-			mutate:  func(p *event.SetupEvaluatedPayload) { p.N = 0; p.NReady = false },
+			name: "valid, not ready, n is zero",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.N = 0
+				p.NReady = false
+				// #9: when either input is not ready, the Entry Channel
+				// fields, Tier, and distance must all report their
+				// "not evaluable" zero values too (see the type's doc
+				// comment) — this case exercises the whole combination,
+				// not just N.
+				p.EntryChannelHigh = 0
+				p.EntryChannelReady = false
+				p.Tier = event.TierNone
+				p.DistanceToEntryInN = 0
+			},
 			wantErr: "",
 		},
 		{
@@ -62,6 +80,126 @@ func TestSetupEvaluatedPayloadValidate(t *testing.T) {
 			mutate:  func(p *event.SetupEvaluatedPayload) { p.N = 0; p.NReady = true },
 			wantErr: "n must be positive when ready",
 		},
+		{
+			name:    "negative entry channel high",
+			mutate:  func(p *event.SetupEvaluatedPayload) { p.EntryChannelHigh = -1 },
+			wantErr: "entry channel high must not be negative",
+		},
+		{
+			name: "entry channel high zero while ready is invalid",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.EntryChannelHigh = 0
+				p.EntryChannelReady = true
+			},
+			wantErr: "entry channel high must be positive when ready",
+		},
+		{
+			name: "entry channel high nonzero while not ready is invalid",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.EntryChannelReady = false
+				p.Tier = event.TierNone
+				p.DistanceToEntryInN = 0
+				// EntryChannelHigh deliberately left at its ready value
+				// (150) to trigger exactly this one violation.
+			},
+			wantErr: "entry channel high must be zero while not ready",
+		},
+		{
+			name: "distance nonzero while n not ready is invalid",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.N = 0
+				p.NReady = false
+				// DistanceToEntryInN deliberately left at its ready value
+				// (5.0), and Tier at its valid TierNone, to isolate this one
+				// violation from "tier set while not ready" below.
+			},
+			wantErr: "distance to entry in n must be zero while n or the entry channel is not ready",
+		},
+		{
+			name:    "invalid tier value",
+			mutate:  func(p *event.SetupEvaluatedPayload) { p.Tier = "C" },
+			wantErr: "not a recognised tier",
+		},
+		{
+			name: "tier set while n not ready is invalid",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.N = 0
+				p.NReady = false
+				p.DistanceToEntryInN = 0
+				p.Tier = event.TierA
+			},
+			wantErr: "tier must be empty while n or the entry channel is not ready",
+		},
+		{
+			name: "tier set while entry channel not ready is invalid",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.EntryChannelReady = false
+				p.DistanceToEntryInN = 0
+				p.Tier = event.TierB
+			},
+			wantErr: "tier must be empty while n or the entry channel is not ready",
+		},
+		{
+			name: "tier a requires a negative distance",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.Tier = event.TierA
+				p.DistanceToEntryInN = 5.0
+			},
+			wantErr: "tier a requires a negative distance",
+		},
+		{
+			name: "tier a with negative distance is valid",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.Tier = event.TierA
+				p.DistanceToEntryInN = -2.0
+			},
+			wantErr: "",
+		},
+		{
+			name: "tier b requires a non-negative distance",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.Tier = event.TierB
+				p.DistanceToEntryInN = -1.0
+			},
+			wantErr: "tier b requires a non-negative distance",
+		},
+		{
+			name: "tier b with positive distance is valid",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.Tier = event.TierB
+				p.DistanceToEntryInN = 0.5
+			},
+			wantErr: "",
+		},
+		{
+			// A tie (distance exactly 0) is the closest possible approach
+			// without a breakout, and TierBDistanceInN is always
+			// non-negative (ConfigurationPayload.Validate), so a tie is
+			// always at least Tier B — ADR 0011's Watchlist exists to
+			// surface exactly this.
+			name: "tier b with zero distance (a tie) is valid",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.Tier = event.TierB
+				p.DistanceToEntryInN = 0
+			},
+			wantErr: "",
+		},
+		{
+			name: "negative distance without tier a is invalid",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.Tier = event.TierNone
+				p.DistanceToEntryInN = -3.0
+			},
+			wantErr: "a negative distance to entry in n implies a breakout and must be tier a",
+		},
+		{
+			name: "zero distance (a tie) without tier b is invalid",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.Tier = event.TierNone
+				p.DistanceToEntryInN = 0
+			},
+			wantErr: "a zero distance to entry in n (a tie) implies at least tier b, not tier none",
+		},
 	}
 
 	for _, tt := range tests {
@@ -82,11 +220,34 @@ func TestSetupEvaluatedPayloadValidate(t *testing.T) {
 	}
 }
 
-// A NaN or infinite N must be rejected explicitly, the same way bar.go and
-// configuration.go reject non-finite fields: an unreadable N must not reach
-// a downstream sizing calculation silently.
-func TestSetupEvaluatedPayloadValidateRejectsNonFiniteN(t *testing.T) {
+// A NaN or infinite value must be rejected explicitly, the same way bar.go
+// and configuration.go reject non-finite fields: an unreadable value must
+// not reach a downstream sizing calculation silently.
+func TestSetupEvaluatedPayloadValidateRejectsNonFiniteFields(t *testing.T) {
 	t.Parallel()
+
+	type fieldCase struct {
+		name    string
+		apply   func(p *event.SetupEvaluatedPayload, f float64)
+		wantErr string
+	}
+	fields := []fieldCase{
+		{
+			name:    "n",
+			apply:   func(p *event.SetupEvaluatedPayload, f float64) { p.N = f },
+			wantErr: "n must be finite",
+		},
+		{
+			name:    "entry channel high",
+			apply:   func(p *event.SetupEvaluatedPayload, f float64) { p.EntryChannelHigh = f },
+			wantErr: "entry channel high must be finite",
+		},
+		{
+			name:    "distance to entry in n",
+			apply:   func(p *event.SetupEvaluatedPayload, f float64) { p.DistanceToEntryInN = f },
+			wantErr: "distance to entry in n must be finite",
+		},
+	}
 
 	nonFinite := []struct {
 		name  string
@@ -97,17 +258,19 @@ func TestSetupEvaluatedPayloadValidateRejectsNonFiniteN(t *testing.T) {
 		{"-Inf", math.Inf(-1)},
 	}
 
-	for _, nf := range nonFinite {
-		t.Run(nf.name, func(t *testing.T) {
-			t.Parallel()
-			payload := validSetupEvaluated()
-			payload.N = nf.value
+	for _, field := range fields {
+		for _, nf := range nonFinite {
+			t.Run(field.name+" "+nf.name, func(t *testing.T) {
+				t.Parallel()
+				payload := validSetupEvaluated()
+				field.apply(&payload, nf.value)
 
-			err := payload.Validate()
-			if err == nil || !strings.Contains(err.Error(), "n must be finite") {
-				t.Fatalf("Validate() error = %v, want substring %q", err, "n must be finite")
-			}
-		})
+				err := payload.Validate()
+				if err == nil || !strings.Contains(err.Error(), field.wantErr) {
+					t.Fatalf("Validate() error = %v, want substring %q", err, field.wantErr)
+				}
+			})
+		}
 	}
 }
 
@@ -137,10 +300,26 @@ func TestSetupEvaluatedEventConstants(t *testing.T) {
 	if event.SetupEvaluatedSchemaVersion == 0 {
 		t.Fatal("SetupEvaluatedSchemaVersion must be positive")
 	}
-	// This is deliberately not, and must never collide with, a future
-	// Signal event type: evaluating N is not a trade decision.
-	if event.SetupEvaluatedEventType == event.CompletedBarEventType || event.SetupEvaluatedEventType == event.ConfigurationEventType {
-		t.Fatalf("SetupEvaluatedEventType %q collides with an existing event type", event.SetupEvaluatedEventType)
+	// This must never collide with the Signal event type: evaluating a
+	// Setup is not the same as a decision to act on one (CONTEXT.md:
+	// "Signal").
+	for _, other := range []string{event.CompletedBarEventType, event.ConfigurationEventType, event.SignalEventType} {
+		if event.SetupEvaluatedEventType == other {
+			t.Fatalf("SetupEvaluatedEventType %q collides with an existing event type %q", event.SetupEvaluatedEventType, other)
+		}
+	}
+}
+
+// TestSetupEvaluatedSchemaVersionBumpedForEntryChannelFields pins #9's
+// explicit schema bump: EntryChannelHigh, EntryChannelReady, Tier, and
+// DistanceToEntryInN are new fields on an existing payload, so the schema
+// version must change (docs/development.md: a schema change is explicit in
+// this project, never a silent field addition).
+func TestSetupEvaluatedSchemaVersionBumpedForEntryChannelFields(t *testing.T) {
+	t.Parallel()
+
+	if event.SetupEvaluatedSchemaVersion != 2 {
+		t.Fatalf("SetupEvaluatedSchemaVersion = %d, want 2", event.SetupEvaluatedSchemaVersion)
 	}
 }
 
@@ -189,7 +368,16 @@ func TestSetupEvaluatedPayloadJSONTags(t *testing.T) {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
 
-	for _, key := range []string{"instrument_id", "period_end", "n", "n_ready"} {
+	for _, key := range []string{
+		"instrument_id",
+		"period_end",
+		"n",
+		"n_ready",
+		"entry_channel_high",
+		"entry_channel_ready",
+		"tier",
+		"distance_to_entry_in_n",
+	} {
 		if _, ok := asMap[key]; !ok {
 			t.Errorf("encoded payload missing expected key %q: %s", key, encoded)
 		}

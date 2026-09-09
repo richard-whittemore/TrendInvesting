@@ -12,7 +12,11 @@ const ConfigurationEventType = "strategy.configuration"
 
 // ConfigurationSchemaVersion is the current schema version of
 // ConfigurationPayload, for the Envelope's SchemaVersion field.
-const ConfigurationSchemaVersion uint32 = 1
+//
+// Bumped to 2 for #9: TierBDistanceInN was added. A schema change is
+// explicit in this project (docs/development.md), never a silent field
+// addition.
+const ConfigurationSchemaVersion uint32 = 2
 
 // SizingMode selects which quantity position size is keyed to (ADR 0003).
 type SizingMode string
@@ -45,15 +49,23 @@ type NotionalAccountConfig struct {
 // is ADR territory, out of scope for this contract. ConfigurationHash
 // derivation (#50) is also out of scope: this payload is its obvious input.
 type ConfigurationPayload struct {
-	StrategyID             string                `json:"strategy_id"`
-	SizingMode             SizingMode            `json:"sizing_mode"`
-	UnitVolatilityFraction float64               `json:"unit_volatility_fraction"`
-	StopMultiple           float64               `json:"stop_multiple"`
-	EntryChannelLength     int                   `json:"entry_channel_length"`
-	ExitChannelLength      int                   `json:"exit_channel_length"`
-	MaxUnits               int                   `json:"max_units"`
-	SlippageN              float64               `json:"slippage_n"`
-	NotionalAccount        NotionalAccountConfig `json:"notional_account"`
+	StrategyID             string     `json:"strategy_id"`
+	SizingMode             SizingMode `json:"sizing_mode"`
+	UnitVolatilityFraction float64    `json:"unit_volatility_fraction"`
+	StopMultiple           float64    `json:"stop_multiple"`
+	EntryChannelLength     int        `json:"entry_channel_length"`
+	ExitChannelLength      int        `json:"exit_channel_length"`
+	MaxUnits               int        `json:"max_units"`
+	SlippageN              float64    `json:"slippage_n"`
+	// TierBDistanceInN is how close (in N) a Setup's high may sit below the
+	// Entry Channel and still be reported as Tier B (CONTEXT.md: "Tier";
+	// #9). Unlike the channel lengths above, this is not a Faith number:
+	// System 2's own printed rules have no concept of an "approaching"
+	// state. It is a Baseline-declared adaptation (ADR 0012's provenance
+	// taxonomy) that whoever owns the Baseline configuration (#50) must
+	// choose deliberately, not a value transcribed from a source.
+	TierBDistanceInN float64               `json:"tier_b_distance_in_n"`
+	NotionalAccount  NotionalAccountConfig `json:"notional_account"`
 }
 
 // Validate checks that every Baseline parameter is present and in range. A
@@ -101,6 +113,12 @@ func (c ConfigurationPayload) Validate() error {
 		errs = append(errs, errors.New("slippage must be finite"))
 	case c.SlippageN <= 0:
 		errs = append(errs, errors.New("slippage must be positive; zero slippage is invalid by construction (ADR 0013)"))
+	}
+	switch {
+	case !isFinite(c.TierBDistanceInN):
+		errs = append(errs, errors.New("tier b distance in n must be finite"))
+	case c.TierBDistanceInN < 0:
+		errs = append(errs, errors.New("tier b distance in n must not be negative"))
 	}
 	switch {
 	case !isFinite(c.NotionalAccount.StartingEquity):
