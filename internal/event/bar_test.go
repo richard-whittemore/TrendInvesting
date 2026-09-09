@@ -1,6 +1,7 @@
 package event_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -211,7 +212,7 @@ func TestCompletedBarPayloadRoundTrip(t *testing.T) {
 		t.Fatalf("re-Marshal() error = %v", err)
 	}
 
-	if string(encoded) != string(reEncoded) {
+	if !bytes.Equal(encoded, reEncoded) {
 		t.Fatalf("round trip not stable:\n  first:  %s\n  second: %s", encoded, reEncoded)
 	}
 }
