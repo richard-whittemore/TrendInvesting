@@ -11,6 +11,14 @@ import (
 	"time"
 )
 
+// CurrentEnvelopeVersion is the envelope shape this build produces and
+// expects to replay. It is distinct from Envelope.SchemaVersion, which
+// versions a payload for a given event Type: CurrentEnvelopeVersion versions
+// the envelope struct itself (see ADR 0015). Validate rejects any envelope
+// whose EnvelopeVersion does not equal this constant, fail closed in both
+// directions, because no upcaster is implemented yet.
+const CurrentEnvelopeVersion uint32 = 1
+
 // Envelope contains the immutable metadata required to order, correlate, and
 // replay a domain input or output.
 //
@@ -21,14 +29,19 @@ import (
 // required: an event that cannot be traced to the code and configuration that
 // produced it is not auditable evidence.
 type Envelope struct {
-	ID            string    `json:"id"`
-	Type          string    `json:"type"`
-	SchemaVersion uint32    `json:"schema_version"`
-	EventTime     time.Time `json:"event_time"`
-	RecordedAt    time.Time `json:"recorded_at"`
-	Sequence      uint64    `json:"sequence"`
-	CorrelationID string    `json:"correlation_id,omitempty"`
-	CausationID   string    `json:"causation_id,omitempty"`
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	// EnvelopeVersion is the shape version of this envelope struct itself,
+	// distinct from SchemaVersion (which versions the payload for Type). It
+	// must equal CurrentEnvelopeVersion: this build has no upcaster, so any
+	// other value fails closed (ADR 0015).
+	EnvelopeVersion uint32    `json:"envelope_version"`
+	SchemaVersion   uint32    `json:"schema_version"`
+	EventTime       time.Time `json:"event_time"`
+	RecordedAt      time.Time `json:"recorded_at"`
+	Sequence        uint64    `json:"sequence"`
+	CorrelationID   string    `json:"correlation_id,omitempty"`
+	CausationID     string    `json:"causation_id,omitempty"`
 	// Source names the component that emitted the event, for example
 	// "lean-adapter", "fill-simulator", "reducer", or "fixture".
 	Source string `json:"source"`
@@ -67,6 +80,19 @@ func (e Envelope) Validate() error {
 	}
 	if e.Type == "" {
 		errs = append(errs, errors.New("event type is required"))
+	}
+	if e.EnvelopeVersion == 0 {
+		errs = append(errs, errors.New("envelope version is required"))
+	}
+	if e.EnvelopeVersion > CurrentEnvelopeVersion {
+		errs = append(errs, fmt.Errorf("envelope version %d is greater than the current version %d: produced by a newer build", e.EnvelopeVersion, CurrentEnvelopeVersion))
+	}
+	// This also fires for the zero value above, since 0 < CurrentEnvelopeVersion:
+	// an envelope recorded before this field existed decodes as EnvelopeVersion
+	// 0, which is exactly the "no upcaster for an older shape" case this check
+	// exists to catch, reported alongside the required-field complaint above.
+	if e.EnvelopeVersion < CurrentEnvelopeVersion {
+		errs = append(errs, fmt.Errorf("envelope version %d is less than the current version %d: no upcaster registered", e.EnvelopeVersion, CurrentEnvelopeVersion))
 	}
 	if e.SchemaVersion == 0 {
 		errs = append(errs, errors.New("schema version must be positive"))
