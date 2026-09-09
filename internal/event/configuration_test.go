@@ -23,6 +23,11 @@ func validConfiguration() event.ConfigurationPayload {
 		ExitChannelLength:      20,
 		MaxUnits:               4,
 		SlippageN:              0.05,
+		// #9: 1.0 is a Baseline-declared adaptation (ADR 0012's provenance
+		// taxonomy), not a Faith number — used here only as a test fixture
+		// default. Whoever owns the Baseline configuration (#50) must pick
+		// this deliberately.
+		TierBDistanceInN: 1.0,
 		NotionalAccount: event.NotionalAccountConfig{
 			StartingEquity: 1_000_000,
 			RebasingMonth:  1,
@@ -126,6 +131,16 @@ func TestConfigurationPayloadValidate(t *testing.T) {
 			wantErr: "slippage",
 		},
 		{
+			name:    "zero tier b distance in n is accepted",
+			mutate:  func(c *event.ConfigurationPayload) { c.TierBDistanceInN = 0 },
+			wantErr: "",
+		},
+		{
+			name:    "negative tier b distance in n rejected",
+			mutate:  func(c *event.ConfigurationPayload) { c.TierBDistanceInN = -1.0 },
+			wantErr: "tier b distance in n",
+		},
+		{
 			name:    "zero notional account starting equity",
 			mutate:  func(c *event.ConfigurationPayload) { c.NotionalAccount.StartingEquity = 0 },
 			wantErr: "notional account starting equity",
@@ -220,6 +235,11 @@ func TestConfigurationPayloadValidateRejectsNonFiniteFields(t *testing.T) {
 			apply:   func(c *event.ConfigurationPayload, f float64) { c.NotionalAccount.StartingEquity = f },
 			wantErr: "notional account starting equity must be finite",
 		},
+		{
+			name:    "tier b distance in n",
+			apply:   func(c *event.ConfigurationPayload, f float64) { c.TierBDistanceInN = f },
+			wantErr: "tier b distance in n must be finite",
+		},
 	}
 
 	nonFinite := []struct {
@@ -285,6 +305,18 @@ func TestConfigurationEventConstants(t *testing.T) {
 	}
 }
 
+// TestConfigurationSchemaVersionBumpedForTierBDistance pins #9's explicit
+// schema bump: TierBDistanceInN is a new field on an existing payload, so
+// the schema version must change (docs/development.md: a schema change is
+// explicit in this project, never a silent field addition).
+func TestConfigurationSchemaVersionBumpedForTierBDistance(t *testing.T) {
+	t.Parallel()
+
+	if event.ConfigurationSchemaVersion != 2 {
+		t.Fatalf("ConfigurationSchemaVersion = %d, want 2", event.ConfigurationSchemaVersion)
+	}
+}
+
 // Round-trip stability: encoding then decoding a valid payload must reproduce
 // the exact same bytes on re-encoding. Floats are compared only by way of
 // their encoded representation, never with ==, per the project's numeric
@@ -341,6 +373,7 @@ func TestConfigurationPayloadJSONTags(t *testing.T) {
 		"exit_channel_length",
 		"max_units",
 		"slippage_n",
+		"tier_b_distance_in_n",
 		"notional_account",
 	} {
 		if _, ok := asMap[key]; !ok {
