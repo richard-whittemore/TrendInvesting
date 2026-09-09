@@ -17,7 +17,8 @@ Issues and specs for this repo live as **GitHub issues in `richard-whittemore/Tr
 
 Notes and limits:
 
-- **The MCP cannot create labels, and it validates every label before writing.** Passing a label that does not already exist fails the whole call with `failed to resolve label "<name>"` — the issue is not created, so there is no partial state, but the write must be retried. `get_label` can check one label; there is no list-labels tool. If a required label is missing, ask the operator to create it in the GitHub UI, and carry the information in the issue body meanwhile. Labels confirmed present: `ready-for-agent`, `spec`.
+- **The MCP cannot create labels, and it validates every label before writing.** Passing a label that does not already exist fails the whole call with `failed to resolve label "<name>"` — the issue is not created, so there is no partial state, but the write must be retried. `get_label` checks one label; there is no list-labels tool.
+- **To create a label, use the REST API directly.** The environment carries `GITHUB_MCP_PAT`, the same credential the MCP uses. `POST /repos/{owner}/{repo}/labels` with `Authorization: Bearer $GITHUB_MCP_PAT` creates one (201), or returns 422 if it already exists. `POST /repos/{owner}/{repo}/issues/{n}/labels` adds labels to an existing issue without removing its current ones. Never echo the token; reference it only as an environment variable. Prefer the MCP for everything it supports — this is the documented exception, not a general licence to bypass it.
 - The MCP exposes no native issue-dependency endpoint. Represent blocking edges as described under **Blocking** below.
 - Paginate in batches of 5–10 and use `minimal_output` when the full body isn't needed.
 
