@@ -128,5 +128,8 @@ _Avoid_: version, tweak, config.
 **Golden Scenario**:
 A hand-checked worked example transcribed from a primary source and used as a test fixture. Golden Scenarios are transcribed, never invented.
 
+**Regime Window**:
+One of seven fixed, named spans of market history over which every result is evaluated separately, so that an improvement confined to one kind of market is recognised as such.
+
 **Provenance tag**:
 The classification of a strategy rule as *disclosed*, *reconstructed*, *proxy*, or *excluded*, according to how directly the source material supports it.
