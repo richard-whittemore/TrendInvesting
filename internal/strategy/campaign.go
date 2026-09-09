@@ -284,7 +284,7 @@ func (r *Reducer) applyFill(envelope event.Envelope) ([]event.Envelope, error) {
 //     failure.
 //
 // Idempotency means "the same fact delivered twice", not "any fact carrying an
-// identifier already seen. A producer that reuses a fill id for a different
+// identifier already seen". A producer that reuses a fill id for a different
 // execution is a defect, and treating it as a duplicate would silently discard
 // a real execution — so the contents are compared, not just the id.
 func applyFillToOpenCampaign(campaign *campaignState, fill event.FillPayload) ([]event.Envelope, error) {

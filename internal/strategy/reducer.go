@@ -331,11 +331,14 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	state.hasPreviousClose = true
 	state.lastPeriodEnd = bar.PeriodEnd
 
-	// --- #11: the previous bar's outstanding business, closed before this bar
-	// is evaluated (the ordering ADR 0010 applies within a day). A trade
-	// proposal that no fill arrived for expires with its bar, per ADR 0011;
-	// see Reducer.expireProposal for why the expiry is emitted rather than
-	// dropped.
+	// --- #11: the previous bar's outstanding business, resolved so that it is
+	// EMITTED before any decision this bar produces — the ordering ADR 0010
+	// applies within a day, exits before entries. It sits below the advance
+	// block rather than above the evaluate block only so that the
+	// evaluate/advance pair stays contiguous; it reads and writes none of that
+	// state. A trade proposal that no fill arrived for expires with its bar,
+	// per ADR 0011; see Reducer.expireProposal for why the expiry is emitted
+	// rather than dropped.
 	var emissions []event.Envelope
 	if state.pendingProposal != nil {
 		expired, err := r.expireProposal(state, bar, envelope)

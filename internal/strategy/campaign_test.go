@@ -684,6 +684,47 @@ func TestFillForAnUnknownProposalIsRejected(t *testing.T) {
 		wantRunError("AAPL", "1999-01-01")
 }
 
+// TestFillNamingADifferentProposalWhileACampaignIsOpenIsRejected is the same
+// rule again once the instrument is committed: a fill for some other order it
+// never had outstanding must not be quietly folded into the Campaign that does
+// exist.
+func TestFillNamingADifferentProposalWhileACampaignIsOpenIsRejected(t *testing.T) {
+	t.Parallel()
+
+	stray := openingFill("AAPL")
+	stray.ProposalID = "proposal:AAPL:1999-01-01T00:00:00.000000000Z"
+	stray.FillID = "sim-fill-0002"
+
+	newStream(t, validConfigurationPayload()).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		fill(stray).
+		wantRunError("AAPL", "1999-01-01", "already open from proposal")
+}
+
+// TestFillThatWouldLeaveThePositionUnprotectedIsRejected covers the one way a
+// fill can be individually valid and still produce a Campaign that must not
+// exist: a price low enough that the Protective Stop, measured from the actual
+// fill, lands at or below zero. A long equity cannot be stopped out there, so
+// the Unit would in fact risk the whole position while the journal recorded a
+// stop.
+//
+// It cannot arise from a producer honouring ADR 0005 — a long entry fills at
+// max(level, open), and the proposal's stop intent was already required to be
+// positive — so this is a misbehaving-producer check, and failing the run is
+// the only answer that does not leave an unprotected position behind.
+func TestFillThatWouldLeaveThePositionUnprotectedIsRejected(t *testing.T) {
+	t.Parallel()
+
+	underwater := openingFill("AAPL")
+	underwater.Price = 1
+
+	newStream(t, validConfigurationPayload()).
+		bars(breakoutBars("AAPL")).
+		fill(underwater).
+		wantRunError("would open an invalid campaign", "protective stop must be positive")
+}
+
 // TestFillForAnInstrumentWithNoProposalIsRejected is the same rule for an
 // instrument the reducer has never seen a bar for: there is nothing it could
 // possibly have proposed.
