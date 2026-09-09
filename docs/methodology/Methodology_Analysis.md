@@ -86,6 +86,7 @@ Faith organises a "Complete Trading System" into six components: markets, positi
 - Turtles traded *notional* accounts re-based yearly by Dennis [T p.17].
 - Reduce the notional account by **20 % each time equity falls 10 % of the original account**; continue trading at the reduced size until back at the yearly starting equity. Example: $1 M → $800 k after −$100 k → $640 k after a further −$80 k [T p.17].
 - Faith explicitly says other schemes may be better; these are just the rules used [T p.17].
+- **Clarification (#16):** "10 % of the original account" is loose wording against the worked example immediately above it — the further −$80 k is 10 % of the *reduced* $800 k account, not of the original $1 M. ADR 0007 and #16's implementation follow the worked example: each 10 % fall is measured against the *current* (already-reduced) notional account, compounding the ladder ($1 M → $800 k → $640 k → $512 k, …), not against the original starting figure.
 
 ### 2.6 Entries
 - Donchian channel breakouts. **System 1**: 20-day; **System 2**: 55-day. Traders allocated equity between the two at their discretion [T p.18].
