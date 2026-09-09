@@ -15,14 +15,15 @@ import (
 // table test only needs to describe its one deviation.
 func validSignal() event.SignalPayload {
 	return event.SignalPayload{
-		InstrumentID:     "AAPL",
-		PeriodEnd:        time.Date(2026, time.September, 8, 0, 0, 0, 0, time.UTC),
-		Rule:             event.RuleSystem2Entry55,
-		ADR:              event.ADRSystem2Baseline,
-		Direction:        event.DirectionLong,
-		EntryChannelHigh: 150.0,
-		BreakoutHigh:     151.0,
-		N:                2.5,
+		InstrumentID:       "AAPL",
+		PeriodEnd:          time.Date(2026, time.September, 8, 0, 0, 0, 0, time.UTC),
+		Rule:               event.RuleSystem2Entry,
+		ADR:                event.ADRSystem2Baseline,
+		Direction:          event.DirectionLong,
+		EntryChannelLength: 55,
+		EntryChannelHigh:   150.0,
+		BreakoutHigh:       151.0,
+		N:                  2.5,
 	}
 }
 
@@ -64,6 +65,16 @@ func TestSignalPayloadValidate(t *testing.T) {
 			name:    "empty direction",
 			mutate:  func(p *event.SignalPayload) { p.Direction = "" },
 			wantErr: "direction",
+		},
+		{
+			name:    "zero entry channel length",
+			mutate:  func(p *event.SignalPayload) { p.EntryChannelLength = 0 },
+			wantErr: "entry channel length must be a positive integer",
+		},
+		{
+			name:    "negative entry channel length",
+			mutate:  func(p *event.SignalPayload) { p.EntryChannelLength = -55 },
+			wantErr: "entry channel length must be a positive integer",
 		},
 		{
 			name:    "zero entry channel high",
@@ -200,6 +211,7 @@ func TestSignalPayloadValidateAggregatesEveryField(t *testing.T) {
 		"rule is required",
 		"adr is required",
 		"direction",
+		"entry channel length must be a positive integer",
 		"entry channel high must be positive",
 		"breakout high must be positive",
 		"n must be positive",
@@ -226,8 +238,8 @@ func TestSignalEventConstants(t *testing.T) {
 			t.Fatalf("SignalEventType %q collides with an existing event type %q", event.SignalEventType, other)
 		}
 	}
-	if event.RuleSystem2Entry55 == "" {
-		t.Fatal("RuleSystem2Entry55 must not be empty")
+	if event.RuleSystem2Entry == "" {
+		t.Fatal("RuleSystem2Entry must not be empty")
 	}
 	if event.ADRSystem2Baseline != "0002" {
 		t.Fatalf("ADRSystem2Baseline = %q, want %q (ADR 0002 selects System 2 as the Baseline)", event.ADRSystem2Baseline, "0002")
@@ -288,6 +300,7 @@ func TestSignalPayloadJSONTags(t *testing.T) {
 		"rule",
 		"adr",
 		"direction",
+		"entry_channel_length",
 		"entry_channel_high",
 		"breakout_high",
 		"n",

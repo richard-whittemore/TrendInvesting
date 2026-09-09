@@ -263,7 +263,10 @@ func referenceSetupSteps(highs []float64, period, channelLength int, tierBDistan
 			switch {
 			case breakout:
 				tier = event.TierA
-			case distance > 0 && distance <= tierBDistance:
+			case distance >= 0 && distance <= tierBDistance:
+				// A tie (distance exactly 0) is at least Tier B, never Tier
+				// none: it is the closest possible approach without a
+				// breakout, and TierBDistanceInN is always non-negative.
 				tier = event.TierB
 			default:
 				tier = event.TierNone
@@ -831,6 +834,80 @@ func TestReducerRejectsUndecodableCompletedBarPayload(t *testing.T) {
 	}
 }
 
+// TestReducerRejectsConfigurationWithWrongSchemaVersion is a Greptile PR #62
+// finding (P1): a configuration envelope's SchemaVersion must equal
+// event.ConfigurationSchemaVersion before the payload is even decoded. A
+// schema-1 configuration (recorded before #9 added TierBDistanceInN) would
+// otherwise decode cleanly with TierBDistanceInN defaulting to the float64
+// zero value, which ConfigurationPayload.Validate accepts as legitimately
+// "no Tier B window" — silently changing what Tier B means for that run
+// instead of the run being rejected as incompatible. This mirrors ADR
+// 0015's envelope-level rule at the payload level: an older or newer schema
+// is rejected, never silently upgraded, until an explicit upcaster exists.
+func TestReducerRejectsConfigurationWithWrongSchemaVersion(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	wrongVersion := configEnvelope(t, 1, day(0))
+	wrongVersion.SchemaVersion = 1 // event.ConfigurationSchemaVersion is 2
+
+	_, err = engine.Run(context.Background(), []event.Envelope{wrongVersion})
+	if err == nil {
+		t.Fatal("Run() error = nil, want error for a configuration payload at the wrong schema version")
+	}
+	for _, want := range []string{"schema version", "1", "2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Run() error = %v, want substring %q", err, want)
+		}
+	}
+}
+
+// TestReducerRejectsCompletedBarWithWrongSchemaVersion is the completed-bar
+// counterpart of TestReducerRejectsConfigurationWithWrongSchemaVersion: a
+// bar envelope's SchemaVersion must equal event.CompletedBarSchemaVersion
+// before the payload is decoded.
+func TestReducerRejectsCompletedBarWithWrongSchemaVersion(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	// event.CompletedBarSchemaVersion is 1; SchemaVersion 0 would also be
+	// rejected, but at Envelope.Validate() ("schema version must be
+	// positive") rather than by the check under test here, so a distinct
+	// positive-but-wrong value (2) is used to exercise the reducer's own
+	// schema check specifically.
+	bar := syntheticBar("AAPL", day(1), 1.0)
+	wrongVersion := barEnvelope(t, 2, bar, day(1))
+	wrongVersion.SchemaVersion = 2
+
+	envelopes := []event.Envelope{configEnvelope(t, 1, day(0)), wrongVersion}
+
+	_, err = engine.Run(context.Background(), envelopes)
+	if err == nil {
+		t.Fatal("Run() error = nil, want error for a completed bar payload at the wrong schema version")
+	}
+	for _, want := range []string{"schema version", "2", "1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Run() error = %v, want substring %q", err, want)
+		}
+	}
+}
+
 // --- Greptile PR #60 findings ---
 
 // TestReducerRejectsConfigurationWithMismatchedHash is Greptile finding 1
@@ -1150,14 +1227,17 @@ func TestReducerEmitsExactlyOneSignalOnBreakoutBar(t *testing.T) {
 	if !signal.PeriodEnd.Equal(wantEventTime) {
 		t.Errorf("Signal PeriodEnd = %v, want %v", signal.PeriodEnd, wantEventTime)
 	}
-	if signal.Rule != event.RuleSystem2Entry55 {
-		t.Errorf("Signal Rule = %q, want %q", signal.Rule, event.RuleSystem2Entry55)
+	if signal.Rule != event.RuleSystem2Entry {
+		t.Errorf("Signal Rule = %q, want %q", signal.Rule, event.RuleSystem2Entry)
 	}
 	if signal.ADR != event.ADRSystem2Baseline {
 		t.Errorf("Signal ADR = %q, want %q", signal.ADR, event.ADRSystem2Baseline)
 	}
 	if signal.Direction != event.DirectionLong {
 		t.Errorf("Signal Direction = %q, want %q", signal.Direction, event.DirectionLong)
+	}
+	if signal.EntryChannelLength != cfg.EntryChannelLength {
+		t.Errorf("Signal EntryChannelLength = %d, want %d (the length actually configured, not a hard-coded 55)", signal.EntryChannelLength, cfg.EntryChannelLength)
 	}
 	if signal.EntryChannelHigh != 155 {
 		t.Errorf("Signal EntryChannelHigh = %v, want 155 (the highest high of bars 1..55)", signal.EntryChannelHigh)
@@ -1266,12 +1346,15 @@ func TestLookAheadEntryChannelWouldMissTheBreakout(t *testing.T) {
 	}
 }
 
-// TestReducerTieAtChannelHighIsNotABreakoutOrTierB locks in Faith's word
+// TestReducerTieAtChannelHighIsTierBNotABreakout locks in Faith's word
 // choice (The Turtle Rules p.19: "exceeds"): a bar whose high exactly equals
-// the channel high is not a Breakout. It is also not Tier B, since Tier B
-// requires a strictly positive distance (0 < distance): a tie's distance is
-// exactly 0.
-func TestReducerTieAtChannelHighIsNotABreakoutOrTierB(t *testing.T) {
+// the channel high is not a Breakout (no Signal), and therefore not Tier A.
+// It IS Tier B: a tie's distance is exactly 0, the closest possible approach
+// without a breakout, and TierBDistanceInN is always non-negative
+// (ConfigurationPayload.Validate), so 0 always falls within [0,
+// TierBDistanceInN] — ADR 0011's Watchlist exists to surface exactly this
+// case.
+func TestReducerTieAtChannelHighIsTierBNotABreakout(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
@@ -1298,8 +1381,8 @@ func TestReducerTieAtChannelHighIsNotABreakoutOrTierB(t *testing.T) {
 	if last.DistanceToEntryInN != 0 {
 		t.Fatalf("DistanceToEntryInN = %v, want 0 (a tie)", last.DistanceToEntryInN)
 	}
-	if last.Tier != event.TierNone {
-		t.Fatalf("Tier = %q, want %q (a tie is neither a breakout nor within a positive distance)", last.Tier, event.TierNone)
+	if last.Tier != event.TierB {
+		t.Fatalf("Tier = %q, want %q (a tie is the closest possible approach without a breakout)", last.Tier, event.TierB)
 	}
 }
 
@@ -1409,6 +1492,49 @@ func TestReducerNoSignalWhileNNotReady(t *testing.T) {
 	}
 	if last.DistanceToEntryInN != 0 {
 		t.Fatalf("DistanceToEntryInN = %v, want 0 (not meaningful while N is not ready)", last.DistanceToEntryInN)
+	}
+}
+
+// TestReducerSignalCarriesTheConfiguredEntryChannelLength is a Greptile PR
+// #62 finding: a Signal's Rule must never hard-code a channel length that a
+// Variant could configure differently. A Variant configured with
+// EntryChannelLength: 5 (far from the Baseline's 55) must produce a Signal
+// whose EntryChannelLength is 5 and whose Rule is the length-independent
+// event.RuleSystem2Entry — never a rule name that (correctly or not) implies
+// 55.
+func TestReducerSignalCarriesTheConfiguredEntryChannelLength(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	cfg.EntryChannelLength = 5
+
+	// 25 warm-up bars, all high=101 (channel ready after 5, N ready after
+	// 20; a constant series never breaks out — each bar ties its own
+	// 5-bar channel), then one breakout well above it.
+	highs := make([]float64, 25)
+	for i := range highs {
+		highs[i] = 101
+	}
+	highs = append(highs, 200)
+
+	emitted := runReducerOverHighs(t, "AAPL", highs, cfg)
+
+	var signals []event.Envelope
+	for _, e := range emitted {
+		if e.Type == event.SignalEventType {
+			signals = append(signals, e)
+		}
+	}
+	if len(signals) != 1 {
+		t.Fatalf("got %d Signal(s), want exactly 1", len(signals))
+	}
+
+	signal := decodeSignal(t, signals[0])
+	if signal.EntryChannelLength != 5 {
+		t.Fatalf("Signal EntryChannelLength = %d, want 5 (the configured length, not the Baseline's 55)", signal.EntryChannelLength)
+	}
+	if signal.Rule != event.RuleSystem2Entry {
+		t.Fatalf("Signal Rule = %q, want %q (length-independent; the length lives in its own field)", signal.Rule, event.RuleSystem2Entry)
 	}
 }
 

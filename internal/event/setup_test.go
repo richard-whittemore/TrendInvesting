@@ -156,12 +156,12 @@ func TestSetupEvaluatedPayloadValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
-			name: "tier b requires a positive distance",
+			name: "tier b requires a non-negative distance",
 			mutate: func(p *event.SetupEvaluatedPayload) {
 				p.Tier = event.TierB
 				p.DistanceToEntryInN = -1.0
 			},
-			wantErr: "tier b requires a positive distance",
+			wantErr: "tier b requires a non-negative distance",
 		},
 		{
 			name: "tier b with positive distance is valid",
@@ -172,12 +172,33 @@ func TestSetupEvaluatedPayloadValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			// A tie (distance exactly 0) is the closest possible approach
+			// without a breakout, and TierBDistanceInN is always
+			// non-negative (ConfigurationPayload.Validate), so a tie is
+			// always at least Tier B — ADR 0011's Watchlist exists to
+			// surface exactly this.
+			name: "tier b with zero distance (a tie) is valid",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.Tier = event.TierB
+				p.DistanceToEntryInN = 0
+			},
+			wantErr: "",
+		},
+		{
 			name: "negative distance without tier a is invalid",
 			mutate: func(p *event.SetupEvaluatedPayload) {
 				p.Tier = event.TierNone
 				p.DistanceToEntryInN = -3.0
 			},
 			wantErr: "a negative distance to entry in n implies a breakout and must be tier a",
+		},
+		{
+			name: "zero distance (a tie) without tier b is invalid",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.Tier = event.TierNone
+				p.DistanceToEntryInN = 0
+			},
+			wantErr: "a zero distance to entry in n (a tie) implies at least tier b, not tier none",
 		},
 	}
 
