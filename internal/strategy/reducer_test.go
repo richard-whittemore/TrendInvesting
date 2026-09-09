@@ -1227,11 +1227,11 @@ func TestReducerEmitsExactlyOneSignalOnBreakoutBar(t *testing.T) {
 	if !signal.PeriodEnd.Equal(wantEventTime) {
 		t.Errorf("Signal PeriodEnd = %v, want %v", signal.PeriodEnd, wantEventTime)
 	}
-	if signal.Rule != event.RuleSystem2Entry {
-		t.Errorf("Signal Rule = %q, want %q", signal.Rule, event.RuleSystem2Entry)
+	if signal.Rule != event.RuleEntryChannelBreakout {
+		t.Errorf("Signal Rule = %q, want %q", signal.Rule, event.RuleEntryChannelBreakout)
 	}
-	if signal.ADR != event.ADRSystem2Baseline {
-		t.Errorf("Signal ADR = %q, want %q", signal.ADR, event.ADRSystem2Baseline)
+	if signal.ADR != event.ADREntryChannelBreakout {
+		t.Errorf("Signal ADR = %q, want %q", signal.ADR, event.ADREntryChannelBreakout)
 	}
 	if signal.Direction != event.DirectionLong {
 		t.Errorf("Signal Direction = %q, want %q", signal.Direction, event.DirectionLong)
@@ -1496,12 +1496,14 @@ func TestReducerNoSignalWhileNNotReady(t *testing.T) {
 }
 
 // TestReducerSignalCarriesTheConfiguredEntryChannelLength is a Greptile PR
-// #62 finding: a Signal's Rule must never hard-code a channel length that a
-// Variant could configure differently. A Variant configured with
-// EntryChannelLength: 5 (far from the Baseline's 55) must produce a Signal
-// whose EntryChannelLength is 5 and whose Rule is the length-independent
-// event.RuleSystem2Entry — never a rule name that (correctly or not) implies
-// 55.
+// #62 finding: a Signal's Rule must never hard-code a channel length, or a
+// Faith system label, that a Variant could configure differently — System 1
+// is a 20-day channel and System 2 a 55-day one (ADR 0002), so naming the
+// rule after either system would misdescribe a Variant configured with the
+// other's length. A Variant configured with EntryChannelLength: 5 (neither
+// Faith system) must produce a Signal whose EntryChannelLength is 5 and
+// whose Rule is the mechanism-named, length-independent
+// event.RuleEntryChannelBreakout.
 func TestReducerSignalCarriesTheConfiguredEntryChannelLength(t *testing.T) {
 	t.Parallel()
 
@@ -1533,8 +1535,8 @@ func TestReducerSignalCarriesTheConfiguredEntryChannelLength(t *testing.T) {
 	if signal.EntryChannelLength != 5 {
 		t.Fatalf("Signal EntryChannelLength = %d, want 5 (the configured length, not the Baseline's 55)", signal.EntryChannelLength)
 	}
-	if signal.Rule != event.RuleSystem2Entry {
-		t.Fatalf("Signal Rule = %q, want %q (length-independent; the length lives in its own field)", signal.Rule, event.RuleSystem2Entry)
+	if signal.Rule != event.RuleEntryChannelBreakout {
+		t.Fatalf("Signal Rule = %q, want %q (length-independent; the length lives in its own field)", signal.Rule, event.RuleEntryChannelBreakout)
 	}
 }
 

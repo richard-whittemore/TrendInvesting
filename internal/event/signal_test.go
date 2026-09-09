@@ -17,8 +17,8 @@ func validSignal() event.SignalPayload {
 	return event.SignalPayload{
 		InstrumentID:       "AAPL",
 		PeriodEnd:          time.Date(2026, time.September, 8, 0, 0, 0, 0, time.UTC),
-		Rule:               event.RuleSystem2Entry,
-		ADR:                event.ADRSystem2Baseline,
+		Rule:               event.RuleEntryChannelBreakout,
+		ADR:                event.ADREntryChannelBreakout,
 		Direction:          event.DirectionLong,
 		EntryChannelLength: 55,
 		EntryChannelHigh:   150.0,
@@ -238,11 +238,11 @@ func TestSignalEventConstants(t *testing.T) {
 			t.Fatalf("SignalEventType %q collides with an existing event type %q", event.SignalEventType, other)
 		}
 	}
-	if event.RuleSystem2Entry == "" {
-		t.Fatal("RuleSystem2Entry must not be empty")
+	if event.RuleEntryChannelBreakout == "" {
+		t.Fatal("RuleEntryChannelBreakout must not be empty")
 	}
-	if event.ADRSystem2Baseline != "0002" {
-		t.Fatalf("ADRSystem2Baseline = %q, want %q (ADR 0002 selects System 2 as the Baseline)", event.ADRSystem2Baseline, "0002")
+	if event.ADREntryChannelBreakout != "0002" {
+		t.Fatalf("ADREntryChannelBreakout = %q, want %q (ADR 0002 defines the entry-channel breakout rule itself, not just the Baseline)", event.ADREntryChannelBreakout, "0002")
 	}
 	if event.DirectionLong != "long" {
 		t.Fatalf("DirectionLong = %q, want %q", event.DirectionLong, "long")
