@@ -3,6 +3,7 @@ package replay_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -305,6 +306,40 @@ func TestEngineRunFailsClosedOnInvalidEmission(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "emission 1") {
 		t.Fatalf("Run() error = %v, want it to name the emission index (1)", err)
+	}
+}
+
+func TestEngineRunRejectsInvalidInputEnvelope(t *testing.T) {
+	t.Parallel()
+
+	engine, err := replay.New(replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) { return nil, nil }))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	invalid := envelope(1)
+	invalid.Source = "" // missing a required provenance field
+
+	_, err = engine.Run(context.Background(), []event.Envelope{invalid})
+	if err == nil {
+		t.Fatal("Run() error = nil, want error")
+	}
+}
+
+func TestEngineRunPropagatesHandlerError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("handler failed")
+	engine, err := replay.New(replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) {
+		return nil, wantErr
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = engine.Run(context.Background(), []event.Envelope{envelope(1)})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Run() error = %v, want it to wrap %v", err, wantErr)
 	}
 }
 
