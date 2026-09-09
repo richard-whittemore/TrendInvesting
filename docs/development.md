@@ -23,6 +23,8 @@ Go code must be formatted with `gofmt`. New behavior should include focused test
 - `cmd/` contains executable composition only.
 - `internal/event/` owns the shared event envelope and transport-level validation.
 - `internal/replay/` owns deterministic application of recorded events.
+- `internal/indicator/` owns pure, side-effect-free strategy arithmetic (True Range, N) with no knowledge of events or replay.
+- `internal/strategy/` owns the `replay.Handler` reducers that turn a validated event stream into decision events.
 - Future strategy packages must not import LEAN, database, or transport implementations.
 - `adapter/lean/` documents and will contain the deliberately thin Python boundary.
 
