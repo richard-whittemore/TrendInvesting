@@ -22,7 +22,7 @@
 |---|---|---|---|---|
 | **T** | *The Original Turtle Trading Rules*, Curtis Faith, OriginalTurtles.org, 2003 (37 pp) — iCloud `Investing/Trend Investing/The Turtle Rules.pdf` | Primary | **Authoritative for Turtle** | Written by an original Turtle; complete rule set. |
 | **N-T** | Notion *Turtle Trading Rules Distilled* (Richard's notes on Covel, *The Complete TurtleTrader*) | Secondary | Non-authoritative | Useful for the equity-sizing simplification and Covel's framing; contains two errors and one unresolved dual citation (§4.9). |
-| **V** | Webinar *Sublime Trading Philosophy* (85:30, presenter Zaheer Anwari, recorded ≈ Aug 2026) — `~/Desktop/Sublime_Trading_Philosophy.mov`; transcript `Sublime_Trading_Philosophy.transcript.md` (this folder) | Primary for Sublime | Authoritative for what Sublime *says*; not a rulebook | Analysis-only session; the presenter states that entries/stops/TSL live on "another page" [V 00:04:03]. |
+| **V** | Webinar *Sublime Trading Philosophy* (85:30, presenter Zaheer Anwari, recorded ≈ Aug 2026) — recording and transcript held **outside this repository**, see the note below | Primary for Sublime | Authoritative for what Sublime *says*; not a rulebook | Analysis-only session; the presenter states that entries/stops/TSL live on "another page" [V 00:04:03]. |
 | **M** | *The Complete Methodology* (Sublime Trading e-book, 59 pp) | Primary for Sublime | Authoritative for disclosed rules | Chapters 1–6 are motivational; Brain Workout 2 (pp.42–59) contains the rules. |
 | **R** | *The Sublime Trading Risk Management Rules* (community post, Zaheer Anwari, 2 pp) | Primary | Authoritative | Three risk ceilings scaled by S&P regime. |
 | **4PS** | *Don't Add CBOE…* (4PS Method) and *Phase 3 To Phase 4 … Explained* (community posts, Nov 2023) | Primary | Authoritative | The entry sequence (Phase 1–4; A/B/C). |
@@ -37,6 +37,18 @@
 | **GPT** | ChatGPT/Codex thread of 2026-08-28/29 | Analysis | Non-authoritative | Reviewed in §8. |
 
 Not used: *Riley's Favorite Trading Patterns* and Notion *Riley Coleman Future Trading Strategy* (unrelated discretionary/intraday material); *Wealth Calculator ST.xlsm* (compound-growth projection, no trading rules).
+
+### A note on the third-party sources
+
+**None of the source material is stored in this repository, and none should be added to it.** The Sublime recording, its transcript, and the Sublime PDFs are third-party commercial material; reproducing them here would republish someone else's product. The transcript in particular is a complete verbatim record of a paid webinar and is deliberately kept outside version control (see `.gitignore`).
+
+The sources live alongside one another in the operator's local library:
+
+- Recording: `~/Desktop/Sublime_Trading_Philosophy.mov`
+- Transcript (`.md` and `.srt`, machine-generated, timestamps as cited here): `~/Library/Mobile Documents/com~apple~CloudDocs/Investing/Trend Investing/`
+- Sublime PDFs and *The Turtle Rules*: the same directory
+
+Timestamp citations of the form `[V hh:mm:ss]` and page citations of the form `[T p.N]` therefore resolve against those files, not against anything in this repository. Faith's *Original Turtle Trading Rules* is an exception in kind — its authors released it free and invited redistribution — but it is still cited by page rather than reproduced.
 
 ---
 

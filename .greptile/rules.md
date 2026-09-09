@@ -59,4 +59,4 @@ Any constant that encodes a strategy rule (55, 20, 2N, ½N, 4 Units, 10 %/20 % d
 
 - Formatting, import order, and naming already enforced by `gofmt`, `go vet`, and `staticcheck` in `make check`.
 - Preferences with no correctness or auditability consequence.
-- The `docs/methodology/*.transcript.*` files — machine transcripts, reviewed separately.
+- Citation accuracy against third-party source documents, which are not in this repository and cannot be checked from the diff.

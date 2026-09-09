@@ -9,7 +9,7 @@
   "includeConfidenceScore": true,
   "fixWithAI": true,
   "excludeAuthors": ["dependabot[bot]"],
-  "ignorePatterns": "docs/methodology/*.transcript.*\ncoverage.out\ncoverage.txt\n**/*.generated.*",
+  "ignorePatterns": "coverage.out\ncoverage.txt\n**/*.generated.*",
   "rules": [
     {
       "id": "no-look-ahead",

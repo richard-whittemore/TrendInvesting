@@ -22,7 +22,7 @@ This is a **single-context** repo:
 │   ├── adr/
 │   │   └── 0001-modular-monolith.md
 │   ├── agents/                     ← this directory: skill configuration
-│   ├── methodology/                ← source analysis, transcript, plan review
+│   ├── methodology/                ← source analysis, plan review (no third-party material)
 │   ├── architecture.md
 │   ├── development.md
 │   └── dependency-policy.md

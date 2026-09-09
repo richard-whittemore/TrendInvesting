@@ -26,3 +26,10 @@ __pycache__/
 # Runtime data
 /data/
 /logs/
+
+# Third-party source material is never committed: the Sublime recording,
+# its transcript, and the vendor PDFs are someone else's commercial product.
+# See the source note in docs/methodology/Methodology_Analysis.md.
+*.transcript.md
+*.transcript.srt
+*.mov
