@@ -973,6 +973,101 @@ func TestFillPredatingTheBarTheOrderCouldHaveExecutedInIsRejected(t *testing.T) 
 	}
 }
 
+// TestFillAfterTheDecisionBarButBeforeTheNextIsAccepted is the live
+// resting-order case, and the reason the upper end of the window cannot be
+// checked when the fill arrives.
+//
+// Live, the order proposed on the decision bar's close rests into the
+// following session and fills there — after the proposal's `PeriodEnd`, and
+// before the next completed bar exists. At the moment the fill is applied the
+// reducer has no way to know when that bar will end: there is no bar-length
+// configuration, and the next bar has not arrived. So the fill is accepted on
+// its own terms, and the bar that follows confirms it.
+func TestFillAfterTheDecisionBarButBeforeTheNextIsAccepted(t *testing.T) {
+	t.Parallel()
+
+	// Twelve hours after the decision bar closed, twelve before the next bar
+	// does: inside the session the resting order was live in.
+	nextSession := day(56).Add(12 * time.Hour)
+	fill := openingFill("AAPL")
+	fill.FilledAt = nextSession
+
+	emitted := newStream(t, validConfigurationPayload()).
+		bars(breakoutBars("AAPL")).
+		fill(fill).
+		bar(nextBreakoutBar("AAPL")).
+		mustRun()
+
+	campaign := decodeCampaignOpened(t, onlyEnvelopeOfType(t, emitted, event.CampaignOpenedEventType))
+	if !campaign.OpenedAt.Equal(nextSession) {
+		t.Errorf("OpenedAt = %v, want the next session's fill time %v", campaign.OpenedAt, nextSession)
+	}
+	// The bar that follows is applied without error — it simply emits nothing,
+	// because the instrument is now in a Campaign.
+	if len(emitted) != 59 {
+		t.Errorf("len(emitted) = %d, want 59 (the bar after the fill is processed and emits nothing)", len(emitted))
+	}
+}
+
+// TestFillAtTheNextBarsPeriodEndIsAccepted pins the inclusive upper boundary: a
+// fill at the very close of the bar that confirms it is still a fill that
+// happened within that bar.
+func TestFillAtTheNextBarsPeriodEndIsAccepted(t *testing.T) {
+	t.Parallel()
+
+	fill := openingFill("AAPL")
+	fill.FilledAt = day(57)
+
+	emitted := newStream(t, validConfigurationPayload()).
+		bars(breakoutBars("AAPL")).
+		fill(fill).
+		bar(nextBreakoutBar("AAPL")).
+		mustRun()
+
+	if got := len(envelopesOfType(emitted, event.CampaignOpenedEventType)); got != 1 {
+		t.Fatalf("got %d Campaign(s), want 1", got)
+	}
+}
+
+// TestBarPredatingTheCampaignsOpeningFillFailsClosed is the upper bound of the
+// window, enforced at the earliest point the reducer can know it (a second PR
+// #69 review finding).
+//
+// A fill timestamped after a bar that has not yet completed cannot have
+// happened: the execution claims a moment the stream has not reached. But the
+// reducer cannot see that when the fill arrives — the next bar does not exist
+// yet and no bar length is configured — so the fill is accepted then, and the
+// contradiction is caught by the very next bar for that instrument, which
+// fails the run rather than continuing with a Campaign whose id, OpenedAt and
+// EventTime sit in the stream's future.
+//
+// Both halves are asserted, because the point is the split: the same fill is
+// accepted on its own and rejected once the bar that contradicts it arrives.
+func TestBarPredatingTheCampaignsOpeningFillFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	// A day beyond the next bar's period end: unknowable at fill time,
+	// contradicted the moment that bar arrives.
+	fill := openingFill("AAPL")
+	fill.FilledAt = day(58)
+
+	// Accepted on its own terms, because nothing yet contradicts it.
+	emitted := newStream(t, validConfigurationPayload()).
+		bars(breakoutBars("AAPL")).
+		fill(fill).
+		mustRun()
+	if got := len(envelopesOfType(emitted, event.CampaignOpenedEventType)); got != 1 {
+		t.Fatalf("got %d Campaign(s) before the contradicting bar, want 1: the fill is unknowable at the time it arrives", got)
+	}
+
+	// And rejected as soon as a bar shows the timestamp was impossible.
+	newStream(t, validConfigurationPayload()).
+		bars(breakoutBars("AAPL")).
+		fill(fill).
+		bar(nextBreakoutBar("AAPL")).
+		wantRunError("AAPL", "campaign:AAPL:2026-03-01T00:00:00.000000000Z", "predates")
+}
+
 // --- No new entry while a Campaign is open ------------------------------
 
 // TestNoSignalOrProposalWhileACampaignIsOpen covers the ticket's rule that an
