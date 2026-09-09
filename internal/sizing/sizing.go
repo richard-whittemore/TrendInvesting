@@ -206,6 +206,34 @@ func RealisedRiskAtStop(quantity int64, stopMultiple, n, dollarsPerPoint, notion
 	return float64(quantity) * (stopMultiple * n * dollarsPerPoint) / notionalAccount
 }
 
+// DrawdownStepRetainedFraction is the fraction of the Notional Account
+// retained (equivalently, the complement of the 20% reduction) at each
+// Drawdown Step: x0.8 (The Turtle Rules p.17, ADR 0007). Exported so
+// internal/strategy can derive the drawdown ladder's asymptote from the same
+// single constant DrawdownSteppedNotional uses, rather than a second,
+// independently-stated 0.8.
+const DrawdownStepRetainedFraction = 0.8
+
+// DrawdownSteppedNotional returns the Notional Account after one Drawdown
+// Step (CONTEXT.md: "Drawdown Step"; ADR 0007): before x
+// DrawdownStepRetainedFraction.
+//
+// It is exported, and defined here once — the same "one copy of each
+// derivation" discipline RealisedRiskAtStop above establishes — so that
+// internal/strategy.NotionalAccount.Observe (the producer) and
+// event.DrawdownStepAppliedPayload.Validate (the validator) compute the
+// identical float64 value and an exact-equality comparison between them is
+// meaningful rather than a source of false rejections. #65 tracks this
+// discipline generally, including the risk that two textually identical
+// expressions can be fused differently across architectures; that risk
+// applies to an expression combining a multiply with an add or subtract
+// (e.g. EntryLevel - StopMultiple*N), which a compiler may fuse as a single
+// operation, not to this function's single multiplication, which has
+// nothing to fuse with.
+func DrawdownSteppedNotional(before float64) float64 {
+	return DrawdownStepRetainedFraction * before
+}
+
 // UnitQuantity is Faith's Unit-sizing formula (The Turtle Rules p.14): one
 // Unit is the Unit Volatility Fraction of the Notional Account divided by the
 // market's dollar volatility, N times dollars per point.
