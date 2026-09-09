@@ -157,6 +157,30 @@ def case_oversized_message(binary):
         engine.stop()
 
 
+def case_stale_envelope_version(binary):
+    """An adapter built before ADR 0015 sends no envelope_version."""
+    engine = Engine(binary)
+    try:
+        conn = spike.Client(engine.socket_path, timeout=10)
+        stale = bar(1)
+        del stale["envelope_version"]
+        try:
+            conn.decide(stale)
+        except spike.Rejected as err:
+            survived = "yes"
+            try:
+                conn.decide(bar(2))
+            except Exception as follow_on:  # noqa: BLE001 - reporting, not handling
+                survived = "no ({})".format(type(follow_on).__name__)
+            record("stale envelope version", "Rejected(invalid_envelope), survives",
+                   "{}, survives={}".format(err.code, survived),
+                   err.code == spike.CODE_INVALID_ENVELOPE and survived == "yes")
+            return
+        record("stale envelope version", "Rejected(invalid_envelope)", "accepted anyway", False)
+    finally:
+        engine.stop()
+
+
 def case_slow_engine(binary):
     """The engine answers, but later than the adapter can wait."""
     engine = Engine(binary, ["--stall", "2s"])
@@ -234,6 +258,7 @@ CASES = [
     case_engine_killed_mid_run,
     case_engine_restarted,
     case_oversized_message,
+    case_stale_envelope_version,
     case_slow_engine,
     case_engine_decision_timeout,
 ]

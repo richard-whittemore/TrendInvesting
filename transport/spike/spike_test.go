@@ -18,6 +18,17 @@ import (
 
 var errNotReady = errors.New("risk controller is not ready")
 
+// testTimeout bounds every wait in this package, so a client call that never
+// completes fails the test instead of stalling the package.
+const testTimeout = 10 * time.Second
+
+func bounded(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 // fixedClock advances by a known step on every reading, so a measured duration
 // in a test is an arithmetic fact rather than a race with the machine.
 func fixedClock(step time.Duration) spike.Clock {
@@ -52,6 +63,34 @@ func TestBarEnvelopeIsValidAndCoversTheUniverse(t *testing.T) {
 	}
 }
 
+func TestThePayloadHashCoversOnlyThePayload(t *testing.T) {
+	t.Parallel()
+	bar := spike.NewBarEnvelope(1, 10, stoppedClock())
+	if bar.EnvelopeVersion != event.CurrentEnvelopeVersion {
+		t.Fatalf("envelope version = %d, want %d", bar.EnvelopeVersion, event.CurrentEnvelopeVersion)
+	}
+	if err := bar.Validate(); err != nil {
+		t.Fatalf("bar envelope is invalid: %v", err)
+	}
+
+	// Adding envelope_version changed the envelope, not the payload. The claim
+	// that hashing is unaffected is worth checking rather than assuming: if the
+	// hash ever covered envelope-level fields, every producer and verifier
+	// would have to agree on the whole struct's encoding.
+	downgraded := bar
+	downgraded.EnvelopeVersion = 0
+	if got := event.HashPayload(downgraded.Payload); got != bar.PayloadHash {
+		t.Errorf("payload hash changed with an envelope-level field: %s != %s", got, bar.PayloadHash)
+	}
+	err := downgraded.Validate()
+	if err == nil {
+		t.Fatal("expected an envelope with no version to fail validation")
+	}
+	if strings.Contains(err.Error(), "payload hash does not match") {
+		t.Errorf("a version rejection must not surface as a payload-hash mismatch: %v", err)
+	}
+}
+
 func TestBarEnvelopeIsReproducible(t *testing.T) {
 	t.Parallel()
 	first := spike.NewBarEnvelope(7, 50, stoppedClock())
@@ -68,7 +107,7 @@ func TestBarEnvelopeIsReproducible(t *testing.T) {
 func TestDeciderAnswersWithAValidDecisionCitingTheBar(t *testing.T) {
 	t.Parallel()
 	bar := spike.NewBarEnvelope(1, 200, stoppedClock())
-	decision, err := spike.Decider(stoppedClock())(t.Context(), bar)
+	decision, err := spike.Decider(stoppedClock())(bounded(t), bar)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -94,7 +133,7 @@ func TestDeciderRejectsAPayloadItCannotRead(t *testing.T) {
 	t.Parallel()
 	bar := spike.NewBarEnvelope(1, 1, stoppedClock())
 	bar.Payload = json.RawMessage(`{"bars":"not a list"}`)
-	if _, err := spike.Decider(stoppedClock())(t.Context(), bar); err == nil {
+	if _, err := spike.Decider(stoppedClock())(bounded(t), bar); err == nil {
 		t.Fatal("expected an error for an unreadable payload")
 	}
 }
@@ -189,7 +228,7 @@ func TestRunMeasuresEveryRoundTrip(t *testing.T) {
 
 	// The clock advances 1ms per reading and Run takes two readings per round
 	// trip, so every sample is exactly 1ms.
-	stats, err := spike.Run(t.Context(), client, 5, 20, 2, fixedClock(time.Millisecond))
+	stats, err := spike.Run(bounded(t), client, 5, 20, 2, fixedClock(time.Millisecond))
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -239,7 +278,7 @@ func TestRunReportsAnUnavailableEngine(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = client.Close() })
 
-	if _, err := spike.Run(t.Context(), client, 3, 5, 0, stoppedClock()); err == nil {
+	if _, err := spike.Run(bounded(t), client, 3, 5, 0, stoppedClock()); err == nil {
 		t.Fatal("expected Run to report the engine's refusal")
 	}
 }

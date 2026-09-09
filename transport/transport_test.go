@@ -19,6 +19,39 @@ import (
 
 const testStrategyVersion = "spike-0"
 
+// testTimeout bounds every wait in this package. No test here may block for
+// ever: the server can always answer a bar with a protocol error instead of a
+// decision, and a test that waits unconditionally for the decision path turns
+// that answer into a hung package rather than a failure.
+const testTimeout = 10 * time.Second
+
+// bounded returns a context that expires, so a client call that never
+// completes fails the test instead of stalling it.
+func bounded(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// awaitDecider blocks until the decider has been entered, and watches the
+// exchange while it does.
+//
+// A test that waits only on the decider's own signal deadlocks whenever the
+// server answers without calling the decider — which is exactly what happens
+// when an envelope fails validation. Watching the exchange turns that into an
+// immediate, self-explaining failure.
+func awaitDecider(t *testing.T, entered <-chan struct{}, exchange <-chan error) {
+	t.Helper()
+	select {
+	case <-entered:
+	case err := <-exchange:
+		t.Fatalf("the exchange completed before the decider ran (%v): the server answered without calling it", err)
+	case <-time.After(testTimeout):
+		t.Fatal("timed out waiting for the decider to be entered")
+	}
+}
+
 // socketPath returns a short socket path. The default TMPDIR on macOS is a
 // /var/folders/... path long enough to approach the 103-byte sun_path limit on
 // its own, which would make these tests fail for a reason unrelated to what
@@ -115,7 +148,7 @@ func TestBarProducesDecisionCitingIt(t *testing.T) {
 	client := dial(t, path, transport.ClientConfig{})
 
 	bar := newBar(t, "bar-1", 1)
-	decision, err := client.Decide(t.Context(), bar)
+	decision, err := client.Decide(bounded(t), bar)
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -137,7 +170,7 @@ func TestConnectionCarriesManyBarsInOrder(t *testing.T) {
 
 	for sequence := uint64(1); sequence <= 50; sequence++ {
 		bar := newBar(t, fmt.Sprintf("bar-%d", sequence), sequence)
-		decision, err := client.Decide(t.Context(), bar)
+		decision, err := client.Decide(bounded(t), bar)
 		if err != nil {
 			t.Fatalf("decide %d: %v", sequence, err)
 		}
@@ -157,11 +190,11 @@ func TestReplyForAnotherBarIsRejected(t *testing.T) {
 	_, path := startServer(t, misciting, transport.ServerConfig{})
 	client := dial(t, path, transport.ClientConfig{})
 
-	if _, err := client.Decide(t.Context(), newBar(t, "bar-1", 1)); !errors.Is(err, transport.ErrOutOfOrder) {
+	if _, err := client.Decide(bounded(t), newBar(t, "bar-1", 1)); !errors.Is(err, transport.ErrOutOfOrder) {
 		t.Fatalf("err = %v, want ErrOutOfOrder", err)
 	}
 	// A desynchronised connection must not be reused.
-	if _, err := client.Decide(t.Context(), newBar(t, "bar-2", 2)); !errors.Is(err, transport.ErrUnavailable) {
+	if _, err := client.Decide(bounded(t), newBar(t, "bar-2", 2)); !errors.Is(err, transport.ErrUnavailable) {
 		t.Fatalf("reuse after desync: err = %v, want ErrUnavailable", err)
 	}
 }
@@ -192,22 +225,26 @@ func TestDecideFailsWhenEngineDiesMidExchange(t *testing.T) {
 	server, path := startServer(t, blocking, transport.ServerConfig{})
 	client := dial(t, path, transport.ClientConfig{})
 
-	type outcome struct{ err error }
-	results := make(chan outcome, 1)
+	ctx := bounded(t)
+	results := make(chan error, 1)
 	go func() {
-		_, err := client.Decide(context.Background(), newBar(t, "bar-1", 1))
-		results <- outcome{err: err}
+		_, err := client.Decide(ctx, newBar(t, "bar-1", 1))
+		results <- err
 	}()
 
-	<-entered
+	awaitDecider(t, entered, results)
 	if err := server.Close(); err != nil {
 		t.Fatalf("close server: %v", err)
 	}
 	close(release)
 
-	got := <-results
-	if !errors.Is(got.err, transport.ErrUnavailable) {
-		t.Fatalf("err = %v, want ErrUnavailable", got.err)
+	select {
+	case err := <-results:
+		if !errors.Is(err, transport.ErrUnavailable) {
+			t.Fatalf("err = %v, want ErrUnavailable", err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("the exchange never finished after the engine went away")
 	}
 }
 
@@ -223,8 +260,13 @@ func TestShutdownIsNotBlockedByAStuckDecider(t *testing.T) {
 	}
 	server, path := startServer(t, stuck, transport.ServerConfig{})
 	client := dial(t, path, transport.ClientConfig{})
-	go func() { _, _ = client.Decide(context.Background(), newBar(t, "bar-1", 1)) }()
-	<-entered
+	ctx := bounded(t)
+	results := make(chan error, 1)
+	go func() {
+		_, err := client.Decide(ctx, newBar(t, "bar-1", 1))
+		results <- err
+	}()
+	awaitDecider(t, entered, results)
 
 	closed := make(chan error, 1)
 	go func() { closed <- server.Close() }()
@@ -233,7 +275,7 @@ func TestShutdownIsNotBlockedByAStuckDecider(t *testing.T) {
 		if err != nil {
 			t.Fatalf("close: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testTimeout):
 		t.Fatal("Close blocked behind a decider that ignores cancellation")
 	}
 }
@@ -243,16 +285,16 @@ func TestDecideFailsFastOnAnAbandonedConnection(t *testing.T) {
 	server, path := startServer(t, echoDecider, transport.ServerConfig{})
 	client := dial(t, path, transport.ClientConfig{})
 
-	if _, err := client.Decide(t.Context(), newBar(t, "bar-1", 1)); err != nil {
+	if _, err := client.Decide(bounded(t), newBar(t, "bar-1", 1)); err != nil {
 		t.Fatalf("first decide: %v", err)
 	}
 	if err := server.Close(); err != nil {
 		t.Fatalf("close server: %v", err)
 	}
-	if _, err := client.Decide(t.Context(), newBar(t, "bar-2", 2)); !errors.Is(err, transport.ErrUnavailable) {
+	if _, err := client.Decide(bounded(t), newBar(t, "bar-2", 2)); !errors.Is(err, transport.ErrUnavailable) {
 		t.Fatalf("after engine exit: err = %v, want ErrUnavailable", err)
 	}
-	if _, err := client.Decide(t.Context(), newBar(t, "bar-3", 3)); !errors.Is(err, transport.ErrUnavailable) {
+	if _, err := client.Decide(bounded(t), newBar(t, "bar-3", 3)); !errors.Is(err, transport.ErrUnavailable) {
 		t.Fatalf("third decide: err = %v, want ErrUnavailable", err)
 	}
 }
@@ -268,7 +310,7 @@ func TestSlowDeciderIsReportedAsTimeout(t *testing.T) {
 	_, path := startServer(t, slow, transport.ServerConfig{DecisionTimeout: 20 * time.Millisecond})
 	client := dial(t, path, transport.ClientConfig{})
 
-	_, err := client.Decide(t.Context(), newBar(t, "bar-1", 1))
+	_, err := client.Decide(bounded(t), newBar(t, "bar-1", 1))
 	var protocolErr *transport.ProtocolError
 	if !errors.As(err, &protocolErr) {
 		t.Fatalf("err = %v, want a ProtocolError", err)
@@ -277,7 +319,7 @@ func TestSlowDeciderIsReportedAsTimeout(t *testing.T) {
 		t.Errorf("code = %q, want %q", protocolErr.Code, transport.CodeTimeout)
 	}
 	// The engine is alive, so the session must survive its own timeout.
-	if _, err := client.Decide(t.Context(), newBar(t, "bar-2", 2)); err == nil {
+	if _, err := client.Decide(bounded(t), newBar(t, "bar-2", 2)); err == nil {
 		t.Error("expected the second bar to time out too, got success")
 	}
 }
@@ -301,7 +343,7 @@ func TestClientDeadlineAbandonsTheConnection(t *testing.T) {
 	if _, err := client.Decide(ctx, newBar(t, "bar-1", 1)); !errors.Is(err, transport.ErrUnavailable) {
 		t.Fatalf("err = %v, want ErrUnavailable", err)
 	}
-	if _, err := client.Decide(t.Context(), newBar(t, "bar-2", 2)); !errors.Is(err, transport.ErrUnavailable) {
+	if _, err := client.Decide(bounded(t), newBar(t, "bar-2", 2)); !errors.Is(err, transport.ErrUnavailable) {
 		t.Fatalf("reuse after deadline: err = %v, want ErrUnavailable", err)
 	}
 }
@@ -320,7 +362,7 @@ func TestOversizedRequestIsRejectedAndTheSessionSurvives(t *testing.T) {
 	huge.Payload = json.RawMessage(`{"symbols":"` + strings.Repeat("A", 20000) + `"}`)
 	huge.PayloadHash = event.HashPayload(huge.Payload)
 
-	_, err := client.Decide(t.Context(), huge)
+	_, err := client.Decide(bounded(t), huge)
 	var protocolErr *transport.ProtocolError
 	if !errors.As(err, &protocolErr) {
 		t.Fatalf("err = %v, want a ProtocolError", err)
@@ -328,7 +370,7 @@ func TestOversizedRequestIsRejectedAndTheSessionSurvives(t *testing.T) {
 	if protocolErr.Code != transport.CodeOversized {
 		t.Errorf("code = %q, want %q", protocolErr.Code, transport.CodeOversized)
 	}
-	if _, err := client.Decide(t.Context(), newBar(t, "bar-2", 2)); err != nil {
+	if _, err := client.Decide(bounded(t), newBar(t, "bar-2", 2)); err != nil {
 		t.Fatalf("session did not survive an oversized frame: %v", err)
 	}
 }
@@ -342,11 +384,11 @@ func TestClientRefusesToSendAnOversizedRequest(t *testing.T) {
 	huge.Payload = json.RawMessage(`{"symbols":"` + strings.Repeat("A", 8192) + `"}`)
 	huge.PayloadHash = event.HashPayload(huge.Payload)
 
-	if _, err := client.Decide(t.Context(), huge); !errors.Is(err, transport.ErrFrameTooLarge) {
+	if _, err := client.Decide(bounded(t), huge); !errors.Is(err, transport.ErrFrameTooLarge) {
 		t.Fatalf("err = %v, want ErrFrameTooLarge", err)
 	}
 	// Nothing was written, so the connection is still usable.
-	if _, err := client.Decide(t.Context(), newBar(t, "bar-2", 2)); err != nil {
+	if _, err := client.Decide(bounded(t), newBar(t, "bar-2", 2)); err != nil {
 		t.Fatalf("connection unusable after a refused send: %v", err)
 	}
 }
@@ -398,6 +440,35 @@ func TestInvalidEnvelopeIsRejectedWithItsIdentifier(t *testing.T) {
 	}
 }
 
+func TestEnvelopeOfAnOlderShapeIsRejected(t *testing.T) {
+	t.Parallel()
+	_, path := startServer(t, echoDecider, transport.ServerConfig{})
+	client := dial(t, path, transport.ClientConfig{})
+
+	// An adapter built before ADR 0015 sends no envelope_version, which
+	// decodes as zero. The engine must refuse it rather than guess, and must
+	// say so as a rejection of one bar, not as a lost connection.
+	stale := newBar(t, "bar-1", 1)
+	stale.EnvelopeVersion = 0
+
+	_, err := client.Decide(bounded(t), stale)
+	var protocolErr *transport.ProtocolError
+	if !errors.As(err, &protocolErr) {
+		t.Fatalf("err = %v, want a ProtocolError", err)
+	}
+	if protocolErr.Code != transport.CodeInvalidEnvelope {
+		t.Errorf("code = %q, want %q", protocolErr.Code, transport.CodeInvalidEnvelope)
+	}
+	if !strings.Contains(protocolErr.Message, "envelope version") {
+		t.Errorf("message %q does not name the envelope version", protocolErr.Message)
+	}
+	// The engine is alive and rejected one bar, so a correctly versioned bar
+	// must still be answered on the same connection.
+	if _, err := client.Decide(bounded(t), newBar(t, "bar-2", 2)); err != nil {
+		t.Fatalf("session lost after a version rejection: %v", err)
+	}
+}
+
 func TestDeciderFailureIsReportedWithoutDroppingTheSession(t *testing.T) {
 	t.Parallel()
 	failing := func(_ context.Context, _ event.Envelope) (event.Envelope, error) {
@@ -406,7 +477,7 @@ func TestDeciderFailureIsReportedWithoutDroppingTheSession(t *testing.T) {
 	_, path := startServer(t, failing, transport.ServerConfig{})
 	client := dial(t, path, transport.ClientConfig{})
 
-	_, err := client.Decide(t.Context(), newBar(t, "bar-1", 1))
+	_, err := client.Decide(bounded(t), newBar(t, "bar-1", 1))
 	var protocolErr *transport.ProtocolError
 	if !errors.As(err, &protocolErr) {
 		t.Fatalf("err = %v, want a ProtocolError", err)
@@ -417,14 +488,14 @@ func TestDeciderFailureIsReportedWithoutDroppingTheSession(t *testing.T) {
 	if protocolErr.CausationID != "bar-1" {
 		t.Errorf("causation id = %q, want %q", protocolErr.CausationID, "bar-1")
 	}
-	if _, err := client.Decide(t.Context(), newBar(t, "bar-2", 2)); !errors.As(err, &protocolErr) {
+	if _, err := client.Decide(bounded(t), newBar(t, "bar-2", 2)); !errors.As(err, &protocolErr) {
 		t.Fatalf("session lost after a decider failure: %v", err)
 	}
 }
 
 func readResponse(t *testing.T, conn net.Conn) transport.Response {
 	t.Helper()
-	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(testTimeout)); err != nil {
 		t.Fatalf("set deadline: %v", err)
 	}
 	buf := make([]byte, 0, 4096)
@@ -499,12 +570,12 @@ func TestServeContextStopsOnCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	stopped := make(chan error, 1)
 	go func() { stopped <- server.ServeContext(ctx) }()
 
 	client := dial(t, path, transport.ClientConfig{})
-	if _, err := client.Decide(t.Context(), newBar(t, "bar-1", 1)); err != nil {
+	if _, err := client.Decide(bounded(t), newBar(t, "bar-1", 1)); err != nil {
 		t.Fatalf("decide: %v", err)
 	}
 	cancel()
@@ -513,7 +584,7 @@ func TestServeContextStopsOnCancellation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ServeContext: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testTimeout):
 		t.Fatal("ServeContext did not return after cancellation")
 	}
 }
