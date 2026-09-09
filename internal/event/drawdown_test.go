@@ -154,30 +154,81 @@ func TestDrawdownStepAppliedPayloadValidate(t *testing.T) {
 	}
 }
 
-// TestDrawdownStepAppliedPayloadValidateAllowsFloatTolerance documents and
-// tests the justified float64 tolerance: a chained multiplication (several
-// Drawdown Steps applied from one account snapshot,
-// internal/strategy.NotionalAccount.Observe) can differ from a fresh
-// 0.8 x NotionalBefore in the last bit without being a defect.
-func TestDrawdownStepAppliedPayloadValidateAllowsFloatTolerance(t *testing.T) {
+// TestDrawdownStepAppliedPayloadValidateRequiresExactDerivation replaces an
+// earlier, mistaken tolerance: each Drawdown Step event carries its OWN
+// NotionalBefore/NotionalAfter pair, and both the reducer
+// (internal/strategy.NotionalAccount.Observe, via
+// sizing.DrawdownSteppedNotional) and this Validate call the identical
+// shared function on the identical NotionalBefore — nothing is chained
+// across the check, so there is nothing for a tolerance to excuse. Even a
+// last-bit difference (here, 1e-7 on an 800,000 figure) must be rejected,
+// the same exact-equality discipline #10 established for
+// TradeProposalPayload (see #65, which tracks this discipline generally).
+func TestDrawdownStepAppliedPayloadValidateRequiresExactDerivation(t *testing.T) {
 	t.Parallel()
 
 	payload := validDrawdownStepApplied()
-	payload.NotionalAfter = 800_000 + 1e-7 // far below the 1e-6 x 1,000,000 tolerance
-	if err := payload.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v, want nil (within the justified float tolerance)", err)
+	payload.NotionalAfter = 800_000 + 1e-7 // not bit-identical to sizing.DrawdownSteppedNotional(1_000_000)
+	if err := payload.Validate(); err == nil || !strings.Contains(err.Error(), "does not match the derivation") {
+		t.Fatalf("Validate() error = %v, want it to name a derivation mismatch (exact equality, no tolerance)", err)
 	}
 }
 
-// TestDrawdownStepAppliedPayloadValidateRejectsBeyondTolerance confirms the
-// tolerance is not so wide that it stops catching a real defect (here, a
-// wrong drawdown percentage: 0.9x instead of 0.8x).
-func TestDrawdownStepAppliedPayloadValidateRejectsBeyondTolerance(t *testing.T) {
+// TestDrawdownStepAppliedPayloadValidateRejectsWrongPercentage confirms a
+// real defect — a wrong drawdown percentage, 0.9x instead of ADR 0007's
+// 0.8x — is rejected.
+func TestDrawdownStepAppliedPayloadValidateRejectsWrongPercentage(t *testing.T) {
 	t.Parallel()
 
 	payload := validDrawdownStepApplied()
 	payload.NotionalAfter = 900_000 // 0.9 x 1,000,000, not 0.8x
 	if err := payload.Validate(); err == nil || !strings.Contains(err.Error(), "does not match the derivation") {
 		t.Fatalf("Validate() error = %v, want it to name a derivation mismatch", err)
+	}
+}
+
+// TestDrawdownStepAppliedPayloadValidateRejectsTransposedFigures confirms a
+// step whose NotionalBefore and NotionalAfter have been swapped (a plausible
+// transcription defect: the smaller figure recorded as "before") is
+// rejected.
+func TestDrawdownStepAppliedPayloadValidateRejectsTransposedFigures(t *testing.T) {
+	t.Parallel()
+
+	payload := validDrawdownStepApplied() // NotionalBefore 1,000,000, NotionalAfter 800,000
+	payload.NotionalBefore, payload.NotionalAfter = payload.NotionalAfter, payload.NotionalBefore
+	if err := payload.Validate(); err == nil || !strings.Contains(err.Error(), "must be strictly below notional before") {
+		t.Fatalf("Validate() error = %v, want it to reject notional after exceeding notional before", err)
+	}
+}
+
+// TestDrawdownStepAppliedPayloadValidateAcceptsAWholeMultiStepChain builds
+// the three payloads a single large-drop account snapshot would produce
+// (Faith's ladder plus its derived third step: The Turtle Rules p.17,
+// 1,000,000 -> 800,000 -> 640,000 -> 512,000) and confirms every one
+// validates exactly on its own, not only the first.
+func TestDrawdownStepAppliedPayloadValidateAcceptsAWholeMultiStepChain(t *testing.T) {
+	t.Parallel()
+
+	chain := []event.DrawdownStepAppliedPayload{
+		{
+			AsOf: validDrawdownStepApplied().AsOf, Equity: 750_000, Threshold: 900_000,
+			NotionalBefore: 1_000_000, NotionalAfter: 800_000, StepNumber: 1,
+			Rule: event.RuleNotionalAccountDrawdownStep, ADR: event.ADRNotionalAccountDrawdownStep,
+		},
+		{
+			AsOf: validDrawdownStepApplied().AsOf, Equity: 750_000, Threshold: 820_000,
+			NotionalBefore: 800_000, NotionalAfter: 640_000, StepNumber: 2,
+			Rule: event.RuleNotionalAccountDrawdownStep, ADR: event.ADRNotionalAccountDrawdownStep,
+		},
+		{
+			AsOf: validDrawdownStepApplied().AsOf, Equity: 750_000, Threshold: 756_000,
+			NotionalBefore: 640_000, NotionalAfter: 512_000, StepNumber: 3,
+			Rule: event.RuleNotionalAccountDrawdownStep, ADR: event.ADRNotionalAccountDrawdownStep,
+		},
+	}
+	for i, step := range chain {
+		if err := step.Validate(); err != nil {
+			t.Errorf("chain step %d (StepNumber %d) fails Validate(): %v", i, step.StepNumber, err)
+		}
 	}
 }
