@@ -89,7 +89,7 @@ func Listen(path string, decide Decider, cfg ServerConfig) (*Server, error) {
 	if err := clearStaleSocket(path); err != nil {
 		return nil, err
 	}
-	listener, err := net.Listen("unix", path)
+	listener, err := net.ListenUnix("unix", unixAddr(path))
 	if err != nil {
 		return nil, fmt.Errorf("transport: listen on %s: %w", path, err)
 	}
@@ -105,13 +105,23 @@ func Listen(path string, decide Decider, cfg ServerConfig) (*Server, error) {
 	}, nil
 }
 
+// unixAddr names a Unix-domain endpoint.
+//
+// The address-family-specific net.DialUnix and net.ListenUnix are used rather
+// than net.Dial and net.Listen: those parse an address string and reach
+// net.LookupPort, which is both meaningless for a socket path and the subject
+// of GO-2026-4971. Naming the family removes that path entirely.
+func unixAddr(path string) *net.UnixAddr {
+	return &net.UnixAddr{Name: path, Net: "unix"}
+}
+
 // clearStaleSocket removes a socket file that no process is listening on.
 //
 // It probes by connecting rather than by stat: the file's existence says
 // nothing about whether anyone is behind it, and a killed engine always leaves
 // its socket file on disk.
 func clearStaleSocket(path string) error {
-	conn, dialErr := net.Dial("unix", path)
+	conn, dialErr := net.DialUnix("unix", nil, unixAddr(path))
 	if dialErr == nil {
 		_ = conn.Close()
 		return fmt.Errorf("transport: a server is already listening on %s", path)

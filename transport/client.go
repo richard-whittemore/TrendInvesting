@@ -63,7 +63,7 @@ func Dial(path string) (*Client, error) {
 
 // DialConfig is Dial with an explicit configuration.
 func DialConfig(path string, cfg ClientConfig) (*Client, error) {
-	conn, err := net.Dial("unix", path)
+	conn, err := net.DialUnix("unix", nil, unixAddr(path))
 	if err != nil {
 		return nil, fmt.Errorf("%w: dial %s: %w", ErrUnavailable, path, err)
 	}
