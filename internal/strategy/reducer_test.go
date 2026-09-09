@@ -1567,29 +1567,30 @@ func TestReducerRejectsConfigurationWithNonPositiveEntryChannelLength(t *testing
 	}
 }
 
-// TestReducerRejectsConfigurationWithInvalidTierBDistanceInN confirms the
+// TestReducerRejectsConfigurationWithNegativeTierBDistanceInN confirms the
 // reducer surfaces ConfigurationPayload.Validate's rejection of a negative
-// or non-finite TierBDistanceInN, naming it.
-func TestReducerRejectsConfigurationWithInvalidTierBDistanceInN(t *testing.T) {
+// TierBDistanceInN, naming it. (A non-finite TierBDistanceInN cannot reach
+// the reducer through a JSON envelope at all — encoding.json.Marshal itself
+// refuses NaN/Inf — so that case is covered directly at the payload seam,
+// event.TestConfigurationPayloadValidateRejectsNonFiniteFields.)
+func TestReducerRejectsConfigurationWithNegativeTierBDistanceInN(t *testing.T) {
 	t.Parallel()
 
-	for _, distance := range []float64{-1.0, math.NaN(), math.Inf(1)} {
-		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
-		if err != nil {
-			t.Fatalf("NewReducer() error = %v", err)
-		}
-		engine, err := replay.New(reducer)
-		if err != nil {
-			t.Fatalf("replay.New() error = %v", err)
-		}
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
 
-		cfg := validConfigurationPayload()
-		cfg.TierBDistanceInN = distance
+	cfg := validConfigurationPayload()
+	cfg.TierBDistanceInN = -1.0
 
-		_, err = engine.Run(context.Background(), []event.Envelope{configEnvelopeWithConfig(t, 1, day(0), cfg)})
-		if err == nil || !strings.Contains(err.Error(), "tier b distance in n") {
-			t.Fatalf("Run() error = %v, want it to name an invalid tier b distance in n (%v)", err, distance)
-		}
+	_, err = engine.Run(context.Background(), []event.Envelope{configEnvelopeWithConfig(t, 1, day(0), cfg)})
+	if err == nil || !strings.Contains(err.Error(), "tier b distance in n") {
+		t.Fatalf("Run() error = %v, want it to name an invalid tier b distance in n", err)
 	}
 }
 

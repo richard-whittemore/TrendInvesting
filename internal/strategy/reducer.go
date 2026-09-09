@@ -21,18 +21,22 @@ import (
 // "the source that emitted the event").
 const sourceReducer = "reducer"
 
-// Reducer implements replay.Handler for #8: it tracks each instrument's
-// True Range and N (CONTEXT.md: "True Range", "N") from completed bars, and
-// emits one Setup-evaluated decision event per bar, reporting N and whether
-// it is a usable volatility reading. It requires a configuration event
-// before any bar and fails closed if a bar arrives first, accepts exactly
-// one configuration event per run (matching its constructor's configuration
-// hash — see applyConfiguration), and rejects a duplicate or out-of-order
-// bar for any one instrument (see applyCompletedBar).
+// Reducer implements replay.Handler for #8/#9: it tracks each instrument's
+// True Range, N (CONTEXT.md: "True Range", "N"), and Entry Channel
+// (CONTEXT.md: "Entry Channel"; ADR 0002) from completed bars. It emits one
+// Setup-evaluated decision event per bar, reporting N, the Entry Channel,
+// the Setup's Tier, and its distance to entry in N; when the bar's high
+// exceeds the Entry Channel (a Breakout, Tier A), it additionally emits a
+// Signal, Setup-evaluated first (#9's ordering). It requires a configuration
+// event before any bar and fails closed if a bar arrives first, accepts
+// exactly one configuration event per run (matching its constructor's
+// configuration hash — see applyConfiguration), and rejects a duplicate or
+// out-of-order bar for any one instrument (see applyCompletedBar).
 //
-// N is computed from the split-adjusted price view only (ADR 0004): signal
-// computation must never see raw prices, so a Campaign's entries and exits
-// stay consistent with the levels a live system would have seen on the day.
+// N and the Entry Channel are computed from the split-adjusted price view
+// only (ADR 0004): signal computation must never see raw prices, so a
+// Campaign's entries and exits stay consistent with the levels a live
+// system would have seen on the day.
 //
 // This reducer holds mutable per-instrument state (docs/architecture.md
 // notes a Handler applies events to "deterministic domain state"); it is not
@@ -41,14 +45,17 @@ type Reducer struct {
 	strategyVersion   string
 	configurationHash string
 
-	configured  bool
+	configured         bool
+	entryChannelLength int
+	tierBDistanceInN   float64
+
 	instruments map[string]*instrumentState
 }
 
-// instrumentState is one instrument's running True Range/N state.
-// previousClose and hasPreviousClose together let TrueRange compute the gap
-// terms once a prior bar exists, and are left at their zero values for the
-// first bar of a given instrument, per the choice documented on
+// instrumentState is one instrument's running True Range/N/Entry Channel
+// state. previousClose and hasPreviousClose together let TrueRange compute
+// the gap terms once a prior bar exists, and are left at their zero values
+// for the first bar of a given instrument, per the choice documented on
 // indicator.TrueRange. lastPeriodEnd is the PeriodEnd of the last bar
 // accepted for this instrument, and is the zero time.Time before any bar has
 // been seen (CompletedBarPayload.Validate already rejects a zero PeriodEnd,
@@ -58,6 +65,7 @@ type instrumentState struct {
 	hasPreviousClose bool
 	lastPeriodEnd    time.Time
 	n                *indicator.WilderAverage
+	entryChannel     *indicator.EntryChannel
 }
 
 // NewReducer returns a Reducer that stamps every decision it emits with
@@ -130,6 +138,8 @@ func (r *Reducer) applyConfiguration(envelope event.Envelope) ([]event.Envelope,
 	if err := payload.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: invalid configuration payload: %w", err)
 	}
+	r.entryChannelLength = payload.EntryChannelLength
+	r.tierBDistanceInN = payload.TierBDistanceInN
 	r.configured = true
 	return nil, nil
 }
@@ -166,8 +176,8 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 			bar.InstrumentID, bar.PeriodEnd.Format(time.RFC3339), state.lastPeriodEnd.Format(time.RFC3339))
 	}
 
-	// ADR 0004: signal computation, including N, runs on the split-adjusted
-	// view only.
+	// ADR 0004: signal computation, including N and the Entry Channel, runs
+	// on the split-adjusted view only.
 	view := bar.SplitAdjusted
 	tr := indicator.TrueRange(view.High, view.Low, state.previousClose, state.hasPreviousClose)
 	state.n.Add(tr)
@@ -184,11 +194,47 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	// comment).
 	nReady := state.n.Ready() && state.n.Value() > 0
 
+	// #9's ordering, the fix for the prototype's headline look-ahead bug
+	// (see indicator.EntryChannel's doc comment): Extreme is read BEFORE
+	// this bar's own high is Added, so the channel this bar is decided
+	// against never includes the bar itself.
+	entryChannelHigh, entryChannelReady := state.entryChannel.Extreme()
+	// The Turtle Rules p.19: a Breakout "exceeds" the channel, so the
+	// comparison is strict; a tie is not a breakout.
+	breakout := entryChannelReady && view.High > entryChannelHigh
+	state.entryChannel.Add(view.High)
+
+	ready := nReady && entryChannelReady
+	tier := event.TierNone
+	var distanceToEntryInN float64
+	if ready {
+		distanceToEntryInN = (entryChannelHigh - view.High) / state.n.Value()
+		switch {
+		case breakout:
+			tier = event.TierA
+		case distanceToEntryInN > 0 && distanceToEntryInN <= r.tierBDistanceInN:
+			tier = event.TierB
+		}
+	}
+
+	reportedEntryChannelHigh := entryChannelHigh
+	if !entryChannelReady {
+		// Matches N's convention (indicator.WilderAverage: zero while not
+		// ready): a channel high computed from fewer than
+		// EntryChannelLength bars is not a real Entry Channel level and
+		// must never be read as one.
+		reportedEntryChannelHigh = 0
+	}
+
 	decisionPayload := event.SetupEvaluatedPayload{
-		InstrumentID: bar.InstrumentID,
-		PeriodEnd:    bar.PeriodEnd,
-		N:            state.n.Value(),
-		NReady:       nReady,
+		InstrumentID:       bar.InstrumentID,
+		PeriodEnd:          bar.PeriodEnd,
+		N:                  state.n.Value(),
+		NReady:             nReady,
+		EntryChannelHigh:   reportedEntryChannelHigh,
+		EntryChannelReady:  entryChannelReady,
+		Tier:               tier,
+		DistanceToEntryInN: distanceToEntryInN,
 	}
 	if err := decisionPayload.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: built invalid setup evaluated payload: %w", err)
@@ -217,7 +263,49 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		PayloadHash:       event.HashPayload(payloadBytes),
 		Payload:           payloadBytes,
 	}
-	return []event.Envelope{decision}, nil
+	emissions := []event.Envelope{decision}
+
+	// #9: Tier A is a Signal. No Signal while N or the channel is not ready
+	// (tier is TierA only when ready is true, above), and never on a tie
+	// (breakout, and therefore tier==TierA, requires a strict >). Emitted
+	// after the Setup-evaluated event, per the ticket's ordering.
+	if tier == event.TierA {
+		signalPayload := event.SignalPayload{
+			InstrumentID:     bar.InstrumentID,
+			PeriodEnd:        bar.PeriodEnd,
+			Rule:             event.RuleSystem2Entry55,
+			ADR:              event.ADRSystem2Baseline,
+			Direction:        event.DirectionLong,
+			EntryChannelHigh: entryChannelHigh,
+			BreakoutHigh:     view.High,
+			N:                state.n.Value(),
+		}
+		if err := signalPayload.Validate(); err != nil {
+			return nil, fmt.Errorf("strategy: built invalid signal payload: %w", err)
+		}
+		signalBytes, err := json.Marshal(signalPayload)
+		if err != nil {
+			return nil, fmt.Errorf("strategy: marshal signal payload: %w", err)
+		}
+		signal := event.Envelope{
+			// Deterministic and reproducible on replay, same rationale as
+			// the Setup-evaluated event's ID above.
+			ID:                fmt.Sprintf("signal:%s:%s", bar.InstrumentID, bar.PeriodEnd.UTC().Format("2006-01-02T15:04:05.000000000Z")),
+			Type:              event.SignalEventType,
+			SchemaVersion:     event.SignalSchemaVersion,
+			EnvelopeVersion:   event.CurrentEnvelopeVersion,
+			EventTime:         bar.PeriodEnd,
+			RecordedAt:        envelope.RecordedAt,
+			Source:            sourceReducer,
+			StrategyVersion:   r.strategyVersion,
+			ConfigurationHash: r.configurationHash,
+			PayloadHash:       event.HashPayload(signalBytes),
+			Payload:           signalBytes,
+		}
+		emissions = append(emissions, signal)
+	}
+
+	return emissions, nil
 }
 
 func (r *Reducer) stateFor(instrumentID string) (*instrumentState, error) {
@@ -231,7 +319,15 @@ func (r *Reducer) stateFor(instrumentID string) (*instrumentState, error) {
 		// anyway rather than panicking, in case that ever changes.
 		return nil, fmt.Errorf("strategy: %w", err)
 	}
-	state := &instrumentState{n: n}
+	entryChannel, err := indicator.NewEntryChannel(r.entryChannelLength)
+	if err != nil {
+		// Unreachable in practice: applyConfiguration only sets
+		// entryChannelLength from a payload that ConfigurationPayload.Validate
+		// has already required to be positive. Failing closed anyway rather
+		// than panicking, in case that ever changes.
+		return nil, fmt.Errorf("strategy: %w", err)
+	}
+	state := &instrumentState{n: n, entryChannel: entryChannel}
 	r.instruments[instrumentID] = state
 	return state, nil
 }

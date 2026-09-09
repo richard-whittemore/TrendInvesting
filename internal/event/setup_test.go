@@ -105,6 +105,17 @@ func TestSetupEvaluatedPayloadValidate(t *testing.T) {
 			wantErr: "entry channel high must be zero while not ready",
 		},
 		{
+			name: "distance nonzero while n not ready is invalid",
+			mutate: func(p *event.SetupEvaluatedPayload) {
+				p.N = 0
+				p.NReady = false
+				// DistanceToEntryInN deliberately left at its ready value
+				// (5.0), and Tier at its valid TierNone, to isolate this one
+				// violation from "tier set while not ready" below.
+			},
+			wantErr: "distance to entry in n must be zero while n or the entry channel is not ready",
+		},
+		{
 			name:    "invalid tier value",
 			mutate:  func(p *event.SetupEvaluatedPayload) { p.Tier = "C" },
 			wantErr: "not a recognised tier",
