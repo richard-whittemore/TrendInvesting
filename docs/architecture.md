@@ -37,6 +37,12 @@ The provenance fields are required. Together they let a reviewer reading a journ
 
 Replay rejects invalid events, sequence gaps, and payloads that do not match their integrity hash. Payload schemas and upcasting rules will be introduced explicitly as the contract evolves.
 
+## Local transport
+
+Envelopes cross the Python-to-Go boundary over a Unix-domain socket carrying newline-delimited JSON, one request and one reply at a time per connection. Local gRPC was measured against it and rejected: at the universe size this system runs it was no faster, worse at p99, and cost 37 modules of transitive dependency. ADR 0014 records the measurements and the constraints the choice imposes — notably that a socket on a macOS bind mount cannot be reached from inside the container, that a reply must be checked against the bar it answers, and that a connection whose exchange did not complete must be abandoned rather than reused.
+
+The Go side of the boundary is the `transport` package. It lives outside `internal/` because the domain must not import networking, and `depguard`'s `domain-purity` rule enforces that.
+
 ## Safety invariants
 
 - If the Go decision engine is unavailable, the adapter submits no new orders.
@@ -51,7 +57,6 @@ Replay rejects invalid events, sequence gaps, and payloads that do not match the
 
 The following are intentionally not selected in the initial scaffold:
 
-- exact local transport (Unix-domain gRPC is preferred but not frozen);
 - PostgreSQL schema and migration tool;
 - observability vendor;
 - cloud provider and deployment topology;
