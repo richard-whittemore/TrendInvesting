@@ -218,11 +218,12 @@ func (r *Reducer) applyConfiguration(envelope event.Envelope) ([]event.Envelope,
 	// any account.snapshot arrives it equals StartingEquity exactly (#16's
 	// applyAccountSnapshot, in notional.go, is what steps it down). Yearly
 	// re-basing and recovery are #17.
-	notionalAccount, err := New(payload.NotionalAccount.StartingEquity)
+	notionalAccount, err := NewNotionalAccount(payload.NotionalAccount.StartingEquity)
 	if err != nil {
 		// Unreachable: ConfigurationPayload.Validate has already required
-		// StartingEquity to be finite and positive, which is everything New
-		// checks. Guarded anyway, matching this project's fail-closed style.
+		// StartingEquity to be finite and positive, which is everything
+		// NewNotionalAccount checks. Guarded anyway, matching this project's
+		// fail-closed style.
 		return nil, fmt.Errorf("strategy: %w", err)
 	}
 	r.notionalAccount = notionalAccount

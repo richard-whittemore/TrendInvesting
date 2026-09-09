@@ -22,7 +22,7 @@ import (
 func TestNotionalAccountFaithsLadder(t *testing.T) {
 	t.Parallel()
 
-	account, err := strategy.New(1_000_000)
+	account, err := strategy.NewNotionalAccount(1_000_000)
 	if err != nil {
 		t.Fatalf("New(1000000) error = %v", err)
 	}
@@ -98,7 +98,7 @@ func TestNotionalAccountFaithsLadder(t *testing.T) {
 func TestNotionalAccountExactBoundaryTriggersAndOneCentAboveDoesNot(t *testing.T) {
 	t.Parallel()
 
-	triggering, err := strategy.New(1_000_000)
+	triggering, err := strategy.NewNotionalAccount(1_000_000)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -110,7 +110,7 @@ func TestNotionalAccountExactBoundaryTriggersAndOneCentAboveDoesNot(t *testing.T
 		t.Fatalf("Observe(900000): len(steps) = %d, want 1 (exact boundary triggers)", len(steps))
 	}
 
-	notTriggering, err := strategy.New(1_000_000)
+	notTriggering, err := strategy.NewNotionalAccount(1_000_000)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -144,7 +144,7 @@ func TestNotionalAccountExactBoundaryTriggersAndOneCentAboveDoesNot(t *testing.T
 func TestNotionalAccountSingleObservationAppliesSeveralStepsInOrder(t *testing.T) {
 	t.Parallel()
 
-	account, err := strategy.New(1_000_000)
+	account, err := strategy.NewNotionalAccount(1_000_000)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -190,7 +190,7 @@ func TestNotionalAccountSingleObservationAppliesSeveralStepsInOrder(t *testing.T
 func TestNotionalAccountPartialRecoveryDoesNotRestore(t *testing.T) {
 	t.Parallel()
 
-	account, err := strategy.New(1_000_000)
+	account, err := strategy.NewNotionalAccount(1_000_000)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -221,7 +221,7 @@ func TestNewNotionalAccountRejectsNonFiniteOrNonPositiveStartingEquity(t *testin
 	t.Parallel()
 
 	for _, starting := range []float64{0, -1, math.NaN(), math.Inf(1), math.Inf(-1)} {
-		if _, err := strategy.New(starting); err == nil {
+		if _, err := strategy.NewNotionalAccount(starting); err == nil {
 			t.Errorf("New(%v) error = nil, want an error", starting)
 		}
 	}
@@ -231,7 +231,7 @@ func TestNotionalAccountObserveRejectsNonFiniteOrNonPositiveEquity(t *testing.T)
 	t.Parallel()
 
 	for _, equity := range []float64{0, -1, math.NaN(), math.Inf(1), math.Inf(-1)} {
-		account, err := strategy.New(1_000_000)
+		account, err := strategy.NewNotionalAccount(1_000_000)
 		if err != nil {
 			t.Fatalf("New() error = %v", err)
 		}
@@ -258,7 +258,7 @@ func TestNotionalAccountObserveRejectsNonFiniteOrNonPositiveEquity(t *testing.T)
 func TestHighWaterMarkResetDivergesFromNotionalAccount(t *testing.T) {
 	t.Parallel()
 
-	account, err := strategy.New(1_000_000)
+	account, err := strategy.NewNotionalAccount(1_000_000)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -311,4 +311,77 @@ func (h *highWaterMarkAccount) observe(equity float64) bool {
 	h.current = 0.8 * h.current
 	h.base = threshold
 	return true
+}
+
+// TestNotionalAccountEquityAtTheAsymptoteErrors is Greptile PR #66's finding
+// on this file: the Drawdown Step ladder's thresholds are a geometric
+// series (see notionalAccountUndefinedDrawdownFraction's doc comment) that
+// converges to, but never reaches, base - 50%*current — 500,000 for a
+// 1,000,000 account. Equity at or below that figure would leave every
+// future threshold still above it, so a literal application of the rule
+// never terminates. ADR 0007 (and Faith's source) do not address a drawdown
+// this deep; Observe fails closed instead.
+func TestNotionalAccountEquityAtTheAsymptoteErrors(t *testing.T) {
+	t.Parallel()
+
+	account, err := strategy.NewNotionalAccount(1_000_000)
+	if err != nil {
+		t.Fatalf("NewNotionalAccount() error = %v", err)
+	}
+	if _, err := account.Observe(500_000); err == nil { // base(1,000,000) - 50%*current(1,000,000)
+		t.Fatal("Observe(500000) error = nil, want an error: the rule is undefined at the 50% drawdown asymptote")
+	}
+}
+
+// TestNotionalAccountOneCentAboveTheAsymptoteTerminates confirms Observe
+// DOES terminate for equity strictly above the asymptote, even one cent
+// above it — in a large but finite number of steps. The step count and the
+// final account are empirically pinned (found by running the code, not
+// hand-derived): a constructed fact, in the same spirit as
+// internal/sizing's float truncation boundary test
+// (TestUnitQuantityTruncatesToTheTrueFloorAtAFloatBoundary), so the fixture
+// cannot go stale and pass vacuously.
+func TestNotionalAccountOneCentAboveTheAsymptoteTerminates(t *testing.T) {
+	t.Parallel()
+
+	account, err := strategy.NewNotionalAccount(1_000_000)
+	if err != nil {
+		t.Fatalf("NewNotionalAccount() error = %v", err)
+	}
+	steps, err := account.Observe(500_000.01)
+	if err != nil {
+		t.Fatalf("Observe(500000.01) error = %v, want it to terminate (one cent above the asymptote)", err)
+	}
+
+	const wantSteps = 79
+	if len(steps) != wantSteps {
+		t.Fatalf("len(steps) = %d, want %d", len(steps), wantSteps)
+	}
+	const wantCurrent = 0.022085588309729898
+	if account.Current() != wantCurrent {
+		t.Fatalf("Current() = %v, want %v", account.Current(), wantCurrent)
+	}
+}
+
+// TestNotionalAccountAsymptoteDoesNotAffectTheExistingMultiStepFixtures
+// confirms the asymptote check does not disturb any equity comfortably
+// above it: every existing golden and multi-step fixture in this file uses
+// equity well above 500,000 on a 1,000,000 account (750,000 at the tightest;
+// see TestNotionalAccountSingleObservationAppliesSeveralStepsInOrder), so
+// they are unaffected by construction — this test states that fact
+// explicitly rather than leaving it implicit.
+func TestNotionalAccountAsymptoteDoesNotAffectTheExistingMultiStepFixtures(t *testing.T) {
+	t.Parallel()
+
+	account, err := strategy.NewNotionalAccount(1_000_000)
+	if err != nil {
+		t.Fatalf("NewNotionalAccount() error = %v", err)
+	}
+	steps, err := account.Observe(750_000) // well above the 500,000 asymptote
+	if err != nil {
+		t.Fatalf("Observe(750000) error = %v, want nil", err)
+	}
+	if len(steps) != 3 {
+		t.Fatalf("len(steps) = %d, want 3", len(steps))
+	}
 }

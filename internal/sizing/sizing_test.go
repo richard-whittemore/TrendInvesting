@@ -945,3 +945,28 @@ func TestSizeUnitGridInvariants(t *testing.T) {
 			len(accounts)*len(fractions)*len(nValues)*len(stopMultiples)*len(dollarsPerPoints))
 	}
 }
+
+// TestDrawdownSteppedNotionalFaithsLadder is the direct, in-package test for
+// #16's shared derivation: internal/strategy.NotionalAccount.Observe and
+// event.DrawdownStepAppliedPayload.Validate both call this function so a
+// Drawdown Step's before/after figures are computed identically by producer
+// and validator (see the function's own doc comment). Faith's ladder (The
+// Turtle Rules p.17): $1,000,000 -> $800,000 -> $640,000, plus the derived
+// third step, $512,000.
+func TestDrawdownSteppedNotionalFaithsLadder(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		before float64
+		want   float64
+	}{
+		{before: 1_000_000, want: 800_000},
+		{before: 800_000, want: 640_000},
+		{before: 640_000, want: 512_000}, // derived, not printed in the source
+	}
+	for _, tt := range tests {
+		if got := sizing.DrawdownSteppedNotional(tt.before); got != tt.want {
+			t.Errorf("DrawdownSteppedNotional(%v) = %v, want %v", tt.before, got, tt.want)
+		}
+	}
+}

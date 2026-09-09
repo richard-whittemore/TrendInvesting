@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
 // This file holds #16's Notional Account state machine (ADR 0007) and the
@@ -27,15 +28,51 @@ import (
 // works #11 in the same package in parallel, and both tickets should be able
 // to land with a minimal, low-conflict reducer.go diff.
 
-// notionalAccountDrawdownFraction is the fraction the Notional Account is
-// multiplied by at each Drawdown Step: a 20% reduction (CONTEXT.md:
-// "Drawdown Step"; The Turtle Rules p.17, ADR 0007).
-const notionalAccountDrawdownFraction = 0.8
-
 // notionalAccountDrawdownThresholdFraction is the fraction of the CURRENT
 // Notional Account that actual equity must fall below the measurement base
 // to trigger a Drawdown Step: a 10% fall (The Turtle Rules p.17, ADR 0007).
+// The corresponding 20% reduction itself is sizing.DrawdownSteppedNotional,
+// shared with event.DrawdownStepAppliedPayload.Validate so producer and
+// validator compute the identical figure (see that function's doc comment).
 const notionalAccountDrawdownThresholdFraction = 0.10
+
+// notionalAccountUndefinedDrawdownFraction is the fraction of the account,
+// below the measurement base, that the Drawdown Step ladder's thresholds
+// approach but can never reach.
+//
+// Each step's threshold falls by notionalAccountDrawdownThresholdFraction
+// (0.10) times the CURRENT account, and the account itself shrinks by
+// sizing.DrawdownSteppedNotional's 0.8 at every step. Summed over
+// infinitely many steps, the total fall from the base is a geometric
+// series:
+//
+//	0.10 x A0 x (1 + 0.8 + 0.8^2 + ...) = 0.10 x A0 / (1 - 0.8) = 0.5 x A0
+//
+// (A0 being the account standing at the start of the observation), so the
+// threshold sequence converges to base - 0.5 x current but never crosses
+// it. Equity at or below that point would leave every future threshold
+// still above it, so a literal application of the rule would never
+// terminate — see the asymptote check at the top of Observe, which fails
+// closed instead (Greptile PR #66 finding: "deep drawdowns never
+// terminate").
+const notionalAccountUndefinedDrawdownFraction = notionalAccountDrawdownThresholdFraction / (1 - sizing.DrawdownStepRetainedFraction)
+
+// maxDrawdownStepsPerObservation bounds the number of Drawdown Steps Observe
+// will apply from one account snapshot.
+//
+// The asymptote check before the loop already makes an unbounded loop
+// unreachable from a valid equity reading; this is a belt-and-braces guard
+// so a future change to the drawdown fractions (or a defect in the
+// asymptote arithmetic) cannot silently reintroduce one. The tightest
+// legitimate case — equity one float64 ULP above the asymptote on a
+// $1,000,000 account — takes on the order of 165 iterations to resolve
+// (empirically confirmed by
+// TestNotionalAccountOneCentAboveTheAsymptoteTerminates, which pins the
+// exact count for one cent above); 1024 is many times that margin while
+// 0.8^1024 has long since underflowed to exactly zero, so a genuine defect
+// (a threshold that never advances) is still caught quickly rather than
+// consuming unbounded memory appending Steps forever.
+const maxDrawdownStepsPerObservation = 1024
 
 // Step is one Drawdown Step NotionalAccount.Observe applied: the Notional
 // Account fell From its prior value To 80% of it, because the observed
@@ -85,11 +122,12 @@ type NotionalAccount struct {
 	current float64
 }
 
-// New returns a NotionalAccount starting at starting, which becomes both the
-// initial Notional Account and the initial measurement base — ADR 0007: the
-// Notional Account equals the configured starting equity before any
-// Drawdown Step has been applied. starting must be finite and positive.
-func New(starting float64) (*NotionalAccount, error) {
+// NewNotionalAccount returns a NotionalAccount starting at starting, which
+// becomes both the initial Notional Account and the initial measurement
+// base — ADR 0007: the Notional Account equals the configured starting
+// equity before any Drawdown Step has been applied. starting must be finite
+// and positive.
+func NewNotionalAccount(starting float64) (*NotionalAccount, error) {
 	if err := checkEquity("starting equity", starting); err != nil {
 		return nil, fmt.Errorf("strategy: cannot start a notional account: %w", err)
 	}
@@ -138,19 +176,50 @@ func (n *NotionalAccount) MeasurementBase() float64 {
 // applies to every account-affecting figure, not only volatility readings,
 // and a raw comparison against a non-finite value would otherwise silently
 // apply zero steps rather than reject the reading.
+//
+// Undefined below a 50% drawdown of the figure standing at the start of this
+// call: equity at or below that asymptote (notionalAccountUndefinedDrawdownFraction's
+// doc comment derives it) is rejected with an error rather than looped over
+// forever — ADR 0007 and Faith's source do not address a drawdown this deep,
+// so this is a fail-closed design choice, not a transcribed rule (Greptile
+// PR #66 finding).
 func (n *NotionalAccount) Observe(equity float64) ([]Step, error) {
 	if err := checkEquity("equity", equity); err != nil {
 		return nil, fmt.Errorf("strategy: cannot observe an account snapshot: %w", err)
 	}
 
+	// The Drawdown Step ladder's thresholds approach, but mathematically
+	// never reach, this asymptote (see notionalAccountUndefinedDrawdownFraction's
+	// doc comment for the geometric series it comes from). Equity at or
+	// below it would leave every future threshold still above it, so the
+	// loop below would never break: checking once, up front, against the
+	// figures standing at the start of this call catches that without
+	// applying a single step first.
+	limit := n.base - notionalAccountUndefinedDrawdownFraction*n.current
+	if equity <= limit {
+		return nil, fmt.Errorf(
+			"strategy: equity %v is at or below %v, the asymptote of a %.0f%% drawdown from the yearly starting figure (measurement base %v, account %v): the Notional Account rule (ADR 0007) is undefined this deep — Faith's source does not address it — so trading must halt rather than apply an unbounded number of Drawdown Steps",
+			equity, limit, notionalAccountUndefinedDrawdownFraction*100, n.base, n.current)
+	}
+
 	var steps []Step
-	for {
+	for i := 0; ; i++ {
+		if i >= maxDrawdownStepsPerObservation {
+			// Unreachable given the asymptote check above and the fractions
+			// as declared: kept as a belt-and-braces guard (Greptile PR #66
+			// finding) so a future change to either cannot silently
+			// reintroduce an unbounded loop that consumes memory forever
+			// appending Steps.
+			return nil, fmt.Errorf(
+				"strategy: applied %d drawdown steps in one account snapshot observation without terminating; this indicates a defect in the drawdown ladder, not a legitimate market condition",
+				i)
+		}
 		threshold := n.base - notionalAccountDrawdownThresholdFraction*n.current
 		if equity > threshold {
 			break
 		}
 		from := n.current
-		to := notionalAccountDrawdownFraction * n.current
+		to := sizing.DrawdownSteppedNotional(n.current)
 		steps = append(steps, Step{From: from, To: to, Threshold: threshold, Equity: equity})
 		n.current = to
 		n.base = threshold
@@ -159,7 +228,7 @@ func (n *NotionalAccount) Observe(equity float64) ([]Step, error) {
 }
 
 // checkEquity rejects a non-finite or non-positive figure, named for the
-// error message. Shared by New (starting equity) and Observe (an observed
+// error message. Shared by NewNotionalAccount (starting equity) and Observe (an observed
 // equity reading): both are account-affecting figures that must fail closed
 // under .greptile/rules.md, the same way internal/sizing's checkN and
 // checkFraction do for volatility and equity-fraction inputs.
@@ -210,11 +279,13 @@ func (r *Reducer) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelop
 
 	steps, err := r.notionalAccount.Observe(snapshot.Equity)
 	if err != nil {
-		// Unreachable in practice: AccountSnapshotPayload.Validate has
-		// already required Equity to be finite and positive, which is
-		// everything Observe checks. Guarded anyway, matching this
-		// project's fail-closed style (see Reducer.sizeUnit's identical
-		// reasoning for sizing.SizeUnit's error path).
+		// Reachable: AccountSnapshotPayload.Validate has already required
+		// Equity to be finite and positive, but Observe can still fail
+		// closed here for a reason no payload-level check can see — equity
+		// at or below the Drawdown Step ladder's 50%-drawdown asymptote
+		// (NotionalAccount.Observe's doc comment; Greptile PR #66 finding).
+		// Wrapped, not swallowed: the run stops rather than sizing anything
+		// further from an undefined Notional Account.
 		return nil, fmt.Errorf("strategy: %w", err)
 	}
 

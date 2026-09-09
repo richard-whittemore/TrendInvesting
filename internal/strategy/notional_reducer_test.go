@@ -525,3 +525,43 @@ func TestReplayingAccountSnapshotFixtureTwiceYieldsByteIdenticalEmissions(t *tes
 		t.Fatalf("replay is not deterministic:\n  first:  %s\n  second: %s", firstBytes, secondBytes)
 	}
 }
+
+// TestReducerSurfacesTheNotionalAccountAsymptoteError is the event-seam
+// counterpart of notional_test.go's
+// TestNotionalAccountEquityAtTheAsymptoteErrors (Greptile PR #66 finding): an
+// account.snapshot at or below the Drawdown Step ladder's 50%-drawdown
+// asymptote makes NotionalAccount.Observe fail closed, and the reducer must
+// not swallow that — replay.Engine.Run surfaces it as a run error, and since
+// Run returns nil on any error, nothing is emitted for the whole run.
+func TestReducerSurfacesTheNotionalAccountAsymptoteError(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	// 500,000 is exactly the asymptote for validConfigurationPayload's
+	// 1,000,000 starting equity (base - 50%*current, both still 1,000,000
+	// since no step has been applied yet).
+	snap := accountSnapshotPayload(snapshotBefore(1), 500_000)
+	envelopes := []event.Envelope{
+		configEnvelope(t, 1, day(0)),
+		accountSnapshotEnvelope(t, 2, snap, snap.AsOf),
+	}
+
+	emitted, err := engine.Run(context.Background(), envelopes)
+	if err == nil {
+		t.Fatal("Run() error = nil, want an error: equity at the Notional Account's 50% drawdown asymptote is undefined (ADR 0007)")
+	}
+	if !strings.Contains(err.Error(), "undefined") {
+		t.Fatalf("Run() error = %v, want it to say the rule is undefined this deep", err)
+	}
+	if emitted != nil {
+		t.Fatalf("emitted = %v, want nil: the engine returns nothing for a run that failed closed", emitted)
+	}
+}

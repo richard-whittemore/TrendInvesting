@@ -3,8 +3,9 @@ package event
 import (
 	"errors"
 	"fmt"
-	"math"
 	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
 // DrawdownStepAppliedEventType identifies the Drawdown-Step-applied decision
@@ -28,31 +29,6 @@ const RuleNotionalAccountDrawdownStep = "notional-account.drawdown-step"
 // measured against the figure last measured from — not a high-water mark).
 const ADRNotionalAccountDrawdownStep = "0007"
 
-// drawdownStepFraction is the fraction the Notional Account is multiplied by
-// at each Drawdown Step: a 20% reduction, i.e. x0.8 (The Turtle Rules p.17,
-// ADR 0007). Mirrored here from internal/strategy.NotionalAccount so this
-// payload's own Validate can re-derive NotionalAfter without an import
-// cycle: internal/strategy already imports internal/event, so event cannot
-// import strategy back.
-const drawdownStepFraction = 0.8
-
-// drawdownStepTolerance bounds the float64 slack Validate allows between the
-// declared NotionalAfter and drawdownStepFraction x NotionalBefore.
-//
-// Unlike TradeProposalPayload's derivation checks, which each compare a
-// single closed-form expression against itself, NotionalAfter here can be
-// the last of several Drawdown Steps applied from one account snapshot
-// (strategy.NotionalAccount.Observe: "a single large drop can apply several
-// steps in one snapshot"). A chained x0.8 multiplication, correctly applied
-// step by step, is not guaranteed to agree bit-for-bit with a single
-// re-derivation performed independently here — not a defect, just float64's
-// ordinary last-bit behaviour under repeated multiplication. 1e-6 of the
-// pre-step account is many orders of magnitude below a cent on any account
-// size this system is built for, so a real defect (a wrong percentage, a
-// transposed figure) still fails this check by a wide margin — see
-// TestDrawdownStepAppliedPayloadValidateRejectsBeyondTolerance.
-const drawdownStepTolerance = 1e-6
-
 // DrawdownStepAppliedPayload records one Drawdown Step: the Notional Account
 // fell from NotionalBefore to NotionalAfter because Equity, read from an
 // account snapshot as of AsOf, crossed Threshold (CONTEXT.md: "Drawdown
@@ -71,9 +47,22 @@ type DrawdownStepAppliedPayload struct {
 	// account; equity above it does not — the boundary is inclusive.
 	Threshold float64 `json:"threshold"`
 	// NotionalBefore and NotionalAfter are the Notional Account immediately
-	// before and after this one step. NotionalAfter is always
-	// drawdownStepFraction (0.8) x NotionalBefore (within
-	// drawdownStepTolerance) and always strictly less.
+	// before and after this one step. NotionalAfter must equal
+	// sizing.DrawdownSteppedNotional(NotionalBefore) EXACTLY — no tolerance —
+	// and must always be strictly less than NotionalBefore.
+	//
+	// Exact float64 equality is deliberate, not merely convenient. Each step
+	// event carries its own NotionalBefore/NotionalAfter pair, and both the
+	// reducer (internal/strategy.NotionalAccount.Observe) and Validate call
+	// the identical exported sizing.DrawdownSteppedNotional on the identical
+	// NotionalBefore: nothing is chained or independently re-derived across
+	// the check, so a tolerance would only let a differently-derived number
+	// through — the defect the check exists to catch (#10's
+	// TradeProposalPayload precedent; #65 tracks this "one shared function,
+	// exact equality" discipline generally, including the risk that two
+	// textually identical expressions can be fused differently across
+	// architectures — see sizing.DrawdownSteppedNotional's doc comment for
+	// why that risk does not apply to this particular derivation).
 	NotionalBefore float64 `json:"notional_before"`
 	NotionalAfter  float64 `json:"notional_after"`
 	// StepNumber is this step's 1-based position among every Drawdown Step
@@ -90,10 +79,10 @@ type DrawdownStepAppliedPayload struct {
 
 // Validate checks that the payload identifies when it applies, that every
 // figure is finite and positive, that NotionalAfter is strictly below
-// NotionalBefore and matches drawdownStepFraction x NotionalBefore within
-// drawdownStepTolerance, that Equity is at or below Threshold (the inclusive
-// boundary The Turtle Rules p.17 describes), and that StepNumber, Rule, and
-// ADR are present.
+// NotionalBefore and matches sizing.DrawdownSteppedNotional(NotionalBefore)
+// EXACTLY (no tolerance — see the field's own doc comment for why), that
+// Equity is at or below Threshold (the inclusive boundary The Turtle Rules
+// p.17 describes), and that StepNumber, Rule, and ADR are present.
 func (p DrawdownStepAppliedPayload) Validate() error {
 	var errs []error
 	if p.AsOf.IsZero() {
@@ -138,11 +127,10 @@ func (p DrawdownStepAppliedPayload) Validate() error {
 				"notional after %v must be strictly below notional before %v: a drawdown step only ever reduces the account",
 				p.NotionalAfter, p.NotionalBefore))
 		}
-		derived := drawdownStepFraction * p.NotionalBefore
-		if math.Abs(p.NotionalAfter-derived) > drawdownStepTolerance*math.Max(1, math.Abs(p.NotionalBefore)) {
+		if derived := sizing.DrawdownSteppedNotional(p.NotionalBefore); p.NotionalAfter != derived {
 			errs = append(errs, fmt.Errorf(
-				"notional after %v does not match the derivation %v (%v x notional before %v, within tolerance %v)",
-				p.NotionalAfter, derived, drawdownStepFraction, p.NotionalBefore, drawdownStepTolerance))
+				"notional after %v does not match the derivation %v (sizing.DrawdownSteppedNotional of notional before %v)",
+				p.NotionalAfter, derived, p.NotionalBefore))
 		}
 	}
 
