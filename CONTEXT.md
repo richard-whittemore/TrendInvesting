@@ -38,7 +38,7 @@ Price exceeding the **Entry Channel**. A Breakout is an event in the market, not
 One indivisible increment of a position: the share count at which a 1N price move equals a declared fraction of account equity. The Turtle rules measure exposure and risk limits in Units rather than in currency.
 
 **Campaign**:
-The complete life of a position in one instrument, from the first Unit's entry to the exit of the last. A Campaign, not a Unit, is what gets entered, added to, stopped out, and exited.
+The complete life of a position in one instrument, from the first Unit's entry to the exit of the last. A Campaign, not a Unit, is what gets entered, added to, stopped out, and exited. A Campaign begins **only when a recorded fill says it does** — never when an order is submitted and never from a quoted price — and its **N** and **Unit** size are frozen at that first entry (ADR 0006), measured from the price that actually filled. A proposal that is never filled leaves no Campaign behind. While an instrument is in a Campaign it is not a **Setup**, so no new entry is signalled for it.
 _Avoid_: trade, position (both ambiguous between a Unit and the whole Campaign).
 
 **Add**:
@@ -72,7 +72,7 @@ The quality band of a Setup, derived from a mechanical score over its trend hist
 _Avoid_: tier.
 
 **Signal**:
-The event of a Setup reaching Tier A on a completed bar — the strategy recognising that its entry condition is met. In the Baseline a Signal is a Breakout; in the Sublime Variant it is the second breakout. A Signal belongs to one bar and expires with it.
+The event of a Setup reaching Tier A on a completed bar — the strategy recognising that its entry condition is met. In the Baseline a Signal is a Breakout; in the Sublime Variant it is the second breakout. A Signal belongs to one bar and expires with it, and so does the trade proposal a Signal produced: the next completed bar for that instrument supersedes an unfilled proposal (ADR 0011).
 _Avoid_: breakout (a market event, not a strategy decision), trigger, alert.
 
 **Watchlist**:

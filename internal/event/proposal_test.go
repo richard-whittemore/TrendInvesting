@@ -650,3 +650,213 @@ func TestProposalDeclinedPayloadJSONTags(t *testing.T) {
 		}
 	}
 }
+
+// --- #11: a proposal that was never filled expires with its bar ---
+
+// expiredAt is the period end of the bar that supersedes the proposal above:
+// the next completed bar for the same instrument.
+var expiredAt = proposalPeriodEnd.AddDate(0, 0, 1)
+
+// validProposalExpired returns the expiry of validTradeProposal, superseded by
+// the next bar without a fill ever arriving for it (ADR 0011: a Signal belongs
+// to one bar and expires with it, so the proposal derived from it does too).
+func validProposalExpired() event.ProposalExpiredPayload {
+	return event.ProposalExpiredPayload{
+		InstrumentID: "AAPL",
+		ProposalID:   "proposal:AAPL:2026-02-27T00:00:00.000000000Z",
+		SignalID:     "signal:AAPL:2026-02-27T00:00:00.000000000Z",
+		PeriodEnd:    proposalPeriodEnd,
+		ExpiredAt:    expiredAt,
+		Rule:         event.RuleSignalExpiresWithItsBar,
+		ADR:          event.ADRSignalExpiry,
+		Reason:       event.ExpiryReasonSupersededByNextBar,
+		Quantity:     133,
+		EntryLevel:   200,
+	}
+}
+
+func TestProposalExpiredPayloadValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(*event.ProposalExpiredPayload)
+		wantErr string
+	}{
+		{name: "valid expiry"},
+		{
+			name:    "missing instrument id",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.InstrumentID = "" },
+			wantErr: "instrument id",
+		},
+		{
+			// Without the proposal's id the journal cannot say which proposal
+			// expired, which is the whole reason this event exists: a fill
+			// arriving after it is rejected, and a reviewer must be able to see
+			// why.
+			name:    "missing proposal id",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.ProposalID = "" },
+			wantErr: "proposal id",
+		},
+		{
+			name:    "missing signal id",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.SignalID = "" },
+			wantErr: "signal id",
+		},
+		{
+			name:    "missing period end",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.PeriodEnd = time.Time{} },
+			wantErr: "period end",
+		},
+		{
+			name:    "missing expired at",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.ExpiredAt = time.Time{} },
+			wantErr: "expired at",
+		},
+		{
+			// A proposal is superseded by a LATER bar. An expiry stamped at or
+			// before the bar that produced the proposal would be describing an
+			// impossible ordering.
+			name:    "expired at equal to period end",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.ExpiredAt = p.PeriodEnd },
+			wantErr: "must be after",
+		},
+		{
+			name:    "expired at before period end",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.ExpiredAt = p.PeriodEnd.AddDate(0, 0, -1) },
+			wantErr: "must be after",
+		},
+		{
+			name:    "missing rule",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.Rule = "" },
+			wantErr: "rule",
+		},
+		{
+			name:    "missing adr",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.ADR = "" },
+			wantErr: "adr",
+		},
+		{
+			name:    "unrecognised reason",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.Reason = "changed our mind" },
+			wantErr: "reason",
+		},
+		{
+			name:    "zero quantity",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.Quantity = 0 },
+			wantErr: "quantity",
+		},
+		{
+			name:    "zero entry level",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.EntryLevel = 0 },
+			wantErr: "entry level",
+		},
+		{
+			name:    "non-finite entry level",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.EntryLevel = math.NaN() },
+			wantErr: "entry level must be finite",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := validProposalExpired()
+			if tt.mutate != nil {
+				tt.mutate(&payload)
+			}
+
+			err := payload.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestProposalExpiredEventConstants(t *testing.T) {
+	t.Parallel()
+
+	if event.ProposalExpiredEventType != "strategy.proposal.expired" {
+		t.Errorf("ProposalExpiredEventType = %q, want %q", event.ProposalExpiredEventType, "strategy.proposal.expired")
+	}
+	if event.ProposalExpiredSchemaVersion != 1 {
+		t.Errorf("ProposalExpiredSchemaVersion = %d, want 1", event.ProposalExpiredSchemaVersion)
+	}
+	if event.RuleSignalExpiresWithItsBar != "signal.expires.with-its-bar" {
+		t.Errorf("RuleSignalExpiresWithItsBar = %q", event.RuleSignalExpiresWithItsBar)
+	}
+	// ADR 0011 is the decision that a Signal belongs to one bar and expires
+	// with it; the proposal a Signal produced inherits that lifetime.
+	if event.ADRSignalExpiry != "0011" {
+		t.Errorf("ADRSignalExpiry = %q, want %q", event.ADRSignalExpiry, "0011")
+	}
+	if event.ExpiryReasonSupersededByNextBar == "" {
+		t.Error("the expiry reason constant must be a non-empty enumerated value")
+	}
+}
+
+func TestProposalExpiredPayloadRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := validProposalExpired()
+
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var decoded event.ProposalExpiredPayload
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("decoded.Validate() error = %v", err)
+	}
+
+	reEncoded, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatalf("re-Marshal() error = %v", err)
+	}
+	if !bytes.Equal(encoded, reEncoded) {
+		t.Fatalf("round trip not stable:\n  first:  %s\n  second: %s", encoded, reEncoded)
+	}
+}
+
+func TestProposalExpiredPayloadJSONTags(t *testing.T) {
+	t.Parallel()
+
+	encoded, err := json.Marshal(validProposalExpired())
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var asMap map[string]any
+	if err := json.Unmarshal(encoded, &asMap); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	for _, key := range []string{
+		"instrument_id",
+		"proposal_id",
+		"signal_id",
+		"period_end",
+		"expired_at",
+		"rule",
+		"adr",
+		"reason",
+		"quantity",
+		"entry_level",
+	} {
+		if _, ok := asMap[key]; !ok {
+			t.Errorf("encoded payload missing expected key %q: %s", key, encoded)
+		}
+	}
+}

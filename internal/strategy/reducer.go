@@ -110,6 +110,14 @@ type instrumentState struct {
 	lastPeriodEnd    time.Time
 	n                *indicator.WilderAverage
 	entryChannel     *indicator.EntryChannel
+
+	// #11's two additions, both defined and explained in campaign.go.
+	// pendingProposal is a trade proposal emitted and not yet resolved, and is
+	// deliberately NOT position state: no Campaign is ever derived from it
+	// alone. campaign is the instrument's open Campaign, and is nil unless a
+	// recorded fill brought one into being.
+	pendingProposal *pendingProposalState
+	campaign        *campaignState
 }
 
 // NewReducer returns a Reducer that stamps every decision it emits with
@@ -132,13 +140,15 @@ func NewReducer(strategyVersion, configurationHash string) (*Reducer, error) {
 	}, nil
 }
 
-// Apply implements replay.Handler. It recognises exactly three input event
+// Apply implements replay.Handler. It recognises exactly four input event
 // types:
 //
 //   - event.ConfigurationEventType: recorded, and required before any bar or
 //     account snapshot.
 //   - event.CompletedBarEventType: updates that instrument's True Range/N
 //     and emits one event.SetupEvaluatedEventType decision.
+//   - event.FillEventType: the only input that may change position state
+//     (#11; see campaign.go).
 //   - event.AccountSnapshotEventType: feeds actual equity to the Notional
 //     Account (ADR 0007; #16) and emits one
 //     event.DrawdownStepAppliedEventType decision per Drawdown Step applied
@@ -152,6 +162,8 @@ func (r *Reducer) Apply(_ context.Context, envelope event.Envelope) ([]event.Env
 		return r.applyConfiguration(envelope)
 	case event.CompletedBarEventType:
 		return r.applyCompletedBar(envelope)
+	case event.FillEventType:
+		return r.applyFill(envelope)
 	case event.AccountSnapshotEventType:
 		return r.applyAccountSnapshot(envelope)
 	default:
@@ -298,6 +310,14 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 			bar.InstrumentID, bar.PeriodEnd.Format(time.RFC3339), state.lastPeriodEnd.Format(time.RFC3339))
 	}
 
+	// #11: this bar is the first thing able to contradict an open Campaign's
+	// opening fill timestamp — see checkBarConfirmsCampaignOpening for why the
+	// check lives at this end rather than in applyFill. Before any state is
+	// read or advanced, so a rejected bar leaves nothing half-applied.
+	if err := checkBarConfirmsCampaignOpening(state, bar); err != nil {
+		return nil, err
+	}
+
 	// ADR 0004: signal computation, including N and the Entry Channel, runs
 	// on the split-adjusted view only.
 	view := bar.SplitAdjusted
@@ -330,6 +350,12 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	decisionN := state.n.Value()
 	nReady := state.n.Ready() && decisionN > 0
 
+	// #11: the period end of the bar BEFORE this one — the moment this bar
+	// opened — captured here because the advance block below overwrites it. It
+	// is the earliest instant at which an order proposed on this bar could
+	// have executed; see Reducer.applyFill for the window it bounds.
+	previousPeriodEnd := state.lastPeriodEnd
+
 	entryChannelHigh, entryChannelReady := state.entryChannel.Extreme()
 	// The Turtle Rules p.19: a Breakout "exceeds" the channel, so the
 	// comparison is strict; a tie is not a breakout.
@@ -345,6 +371,35 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	state.previousClose = view.Close
 	state.hasPreviousClose = true
 	state.lastPeriodEnd = bar.PeriodEnd
+
+	// --- #11: the previous bar's outstanding business, resolved so that it is
+	// EMITTED before any decision this bar produces — the ordering ADR 0010
+	// applies within a day, exits before entries. It sits below the advance
+	// block rather than above the evaluate block only so that the
+	// evaluate/advance pair stays contiguous; it reads and writes none of that
+	// state. A trade proposal that no fill arrived for expires with its bar,
+	// per ADR 0011; see Reducer.expireProposal for why the expiry is emitted
+	// rather than dropped.
+	var emissions []event.Envelope
+	if state.pendingProposal != nil {
+		expired, err := r.expireProposal(state, bar, envelope)
+		if err != nil {
+			return nil, err
+		}
+		emissions = append(emissions, expired)
+	}
+
+	// --- #11: no new entry while a Campaign is open in this instrument. N and
+	// the Entry Channel above are still tracked (#12's stop evaluation and
+	// #14's Exit Channel need them), but nothing further is emitted: CONTEXT.md
+	// defines a Setup as an Eligible instrument NOT in a Campaign, so emitting
+	// a Setup-evaluated event here would journal a claim that is false by the
+	// project's own vocabulary, and would report a Tier for something that
+	// cannot become a Signal. The Campaign's own per-bar decision events are
+	// #12 onward.
+	if state.campaign != nil {
+		return emissions, nil
+	}
 
 	// Tier follows three cases, per DistanceToEntryInN's sign and magnitude
 	// (see SetupEvaluatedPayload's doc comment): a strict breakout
@@ -402,7 +457,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		event.SetupEvaluatedEventType, event.SetupEvaluatedSchemaVersion,
 		bar.PeriodEnd, envelope, payloadBytes,
 	)
-	emissions := []event.Envelope{decision}
+	emissions = append(emissions, decision)
 
 	// #9: Tier A is a Signal. No Signal while N or the channel is not ready
 	// (tier is TierA only when ready is true, above), and never on a tie
@@ -454,6 +509,13 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 			return nil, err
 		}
 		emissions = append(emissions, sized)
+
+		// #11: a proposal is remembered as outstanding so that a fill can be
+		// checked against it — and NOTHING about position state moves here.
+		// See Reducer.rememberPendingProposal.
+		if err := r.rememberPendingProposal(state, sized, previousPeriodEnd); err != nil {
+			return nil, err
+		}
 	}
 
 	return emissions, nil
