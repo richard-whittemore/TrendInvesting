@@ -46,6 +46,8 @@ func TestEnvelopeValidate(t *testing.T) {
 		{name: "missing id", mutate: func(e *event.Envelope) { e.ID = "" }, wantErr: "event id"},
 		{name: "missing type", mutate: func(e *event.Envelope) { e.Type = "" }, wantErr: "event type"},
 		{name: "zero schema", mutate: func(e *event.Envelope) { e.SchemaVersion = 0 }, wantErr: "schema version"},
+		{name: "zero event time", mutate: func(e *event.Envelope) { e.EventTime = time.Time{} }, wantErr: "event time"},
+		{name: "zero recorded time", mutate: func(e *event.Envelope) { e.RecordedAt = time.Time{} }, wantErr: "recorded time"},
 		{name: "zero sequence", mutate: func(e *event.Envelope) { e.Sequence = 0 }, wantErr: "sequence"},
 		{name: "invalid payload", mutate: func(e *event.Envelope) { e.Payload = []byte(`{"symbol":`) }, wantErr: "valid JSON"},
 		{name: "missing source", mutate: func(e *event.Envelope) { e.Source = "" }, wantErr: "event source"},
