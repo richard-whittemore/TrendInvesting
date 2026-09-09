@@ -56,6 +56,17 @@ func WilderNext(previousN, tr float64, period int) float64 {
 // therefore the caller's responsibility — see
 // event.SetupEvaluatedPayload's NReady, which internal/strategy.Reducer
 // computes as Ready() && Value() > 0.
+//
+// Ordering is also the caller's responsibility, and it matters here as much
+// as EntryChannel's Extreme-then-Add does: a caller deciding a bar must read
+// Value (and Ready) BEFORE calling Add with that bar's True Range, or the
+// bar changes the N it is about to be decided against, and a wide bar
+// shrinks its own Unit and tightens its own Protective Stop (CONTEXT.md:
+// "Completed bar" — the decision bar is never an input to its own decision).
+// This type cannot enforce that, since Value and Add are legitimately
+// independent operations; internal/strategy.Reducer.applyCompletedBar is the
+// one call site, and its evaluate and advance blocks are laid out so the
+// order is visible at a glance.
 type WilderAverage struct {
 	period int
 	seed   []float64 // buffered True Range values until the seed is computed

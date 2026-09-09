@@ -28,11 +28,18 @@ const (
 )
 
 // SetupEvaluatedPayload carries the outcome of evaluating one instrument's
-// Setup (CONTEXT.md: "Setup") on one completed bar: the current value of N
-// (CONTEXT.md: "N") and whether it is a usable volatility reading, the
-// current Entry Channel high (CONTEXT.md: "Entry Channel"; The Turtle Rules
-// p.19, ADR 0002) and whether it is warmed up, the Setup's Tier, and its
-// distance to the Entry Channel in N.
+// Setup (CONTEXT.md: "Setup") on one completed bar: the N in force for
+// deciding this bar (CONTEXT.md: "N") and whether it is a usable volatility
+// reading, the current Entry Channel high (CONTEXT.md: "Entry Channel"; The
+// Turtle Rules p.19, ADR 0002) and whether it is warmed up, the Setup's
+// Tier, and its distance to the Entry Channel in N.
+//
+// N here is "the N in force for deciding this bar": the Wilder average of
+// the True Ranges of the completed bars PRECEDING it, never including this
+// bar's own. That matches the Entry Channel beside it and CONTEXT.md's
+// "Completed bar" rule — the decision bar is never an input to its own
+// decision — so the bar that completes N's twenty-bar warm-up is not itself
+// decided against the seed; the bar after it is the first that can be.
 //
 // NReady means "N is a usable volatility reading", which is stronger than
 // "bar-count warm-up (CONTEXT.md: 'Completed bar') is complete": twenty flat

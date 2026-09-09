@@ -13,10 +13,14 @@ const ConfigurationEventType = "strategy.configuration"
 // ConfigurationSchemaVersion is the current schema version of
 // ConfigurationPayload, for the Envelope's SchemaVersion field.
 //
-// Bumped to 2 for #9: TierBDistanceInN was added. A schema change is
+// Bumped to 2 for #9: TierBDistanceInN was added. Bumped to 3 for #10:
+// DollarsPerPoint and RiskAtStopFraction were added. A schema change is
 // explicit in this project (docs/development.md), never a silent field
-// addition.
-const ConfigurationSchemaVersion uint32 = 2
+// addition — and here it must be, because both #10 fields decode as the
+// float64 zero from an older record: a zero DollarsPerPoint divides by zero
+// in sizing, and a zero RiskAtStopFraction would make a fixed-risk-at-stop
+// run size every Unit from a risk budget of nothing.
+const ConfigurationSchemaVersion uint32 = 3
 
 // SizingMode selects which quantity position size is keyed to (ADR 0003).
 type SizingMode string
@@ -64,8 +68,36 @@ type ConfigurationPayload struct {
 	// state. It is a Baseline-declared adaptation (ADR 0012's provenance
 	// taxonomy) that whoever owns the Baseline configuration (#50) must
 	// choose deliberately, not a value transcribed from a source.
-	TierBDistanceInN float64               `json:"tier_b_distance_in_n"`
-	NotionalAccount  NotionalAccountConfig `json:"notional_account"`
+	TierBDistanceInN float64 `json:"tier_b_distance_in_n"`
+	// DollarsPerPoint is the instrument's contract multiplier: what one
+	// point of price movement is worth per share or contract. For US
+	// equities it is exactly 1 — one point of price is one dollar per share
+	// — and for Faith's Heating Oil example it is 42,000 (The Turtle Rules
+	// p.15). It is a parameter rather than a constant so that example
+	// reproduces exactly rather than being approximated.
+	//
+	// It lives on the strategy configuration for slice 1, which trades a
+	// single equity symbol where the multiplier is 1 for every instrument.
+	// That is a deliberate simplification, not a claim about the domain:
+	// the contract multiplier is genuinely a property of the instrument, not
+	// of the strategy, and a universe that ever contains a futures contract
+	// (or an instrument quoted in a different unit) will need it to arrive
+	// as per-instrument reference data instead. See #10's Concerns.
+	DollarsPerPoint float64 `json:"dollars_per_point"`
+	// RiskAtStopFraction is the fraction of the Notional Account one Unit
+	// loses at its Protective Stop — and it is a configurable input in
+	// exactly one Sizing Mode.
+	//
+	// Under SizingModeFixedRiskAtStop it is the sizing input [M p.56] and
+	// must be present and positive. Under SizingModeVolatilityNormalised it
+	// must be **zero**: ADR 0003's central decision is that Risk at Stop
+	// there is derived (Unit Volatility Fraction x Stop Multiple), never
+	// configured, and Validate rejects a configuration that states it rather
+	// than quietly ignoring the stated value. Quietly ignoring it is how a
+	// run comes to believe it risks a figure that nothing in the arithmetic
+	// honours — the exact confusion ADR 0003 was written to prevent.
+	RiskAtStopFraction float64               `json:"risk_at_stop_fraction"`
+	NotionalAccount    NotionalAccountConfig `json:"notional_account"`
 }
 
 // Validate checks that every Baseline parameter is present and in range. A
@@ -76,6 +108,11 @@ type ConfigurationPayload struct {
 // alongside PriceView in bar.go): NaN and +/-Inf are rejected explicitly,
 // before the range check that follows, rather than silently passing an
 // ordered comparison that is always false against NaN.
+//
+// RiskAtStopFraction is the one field whose validity depends on another: it
+// must be absent (zero) under volatility-normalised sizing and present and
+// positive under fixed-risk-at-stop. See the field's own comment for why the
+// first half is a rejection rather than an ignore.
 func (c ConfigurationPayload) Validate() error {
 	var errs []error
 	if c.StrategyID == "" {
@@ -119,6 +156,32 @@ func (c ConfigurationPayload) Validate() error {
 		errs = append(errs, errors.New("tier b distance in n must be finite"))
 	case c.TierBDistanceInN < 0:
 		errs = append(errs, errors.New("tier b distance in n must not be negative"))
+	}
+	switch {
+	case !isFinite(c.DollarsPerPoint):
+		errs = append(errs, errors.New("dollars per point must be finite"))
+	case c.DollarsPerPoint <= 0:
+		errs = append(errs, errors.New("dollars per point must be positive; it is 1 for shares and the contract multiplier for a futures contract"))
+	}
+	// Risk at Stop is configurable in exactly one Sizing Mode. The
+	// volatility-normalised branch is #10's named negative case, and it
+	// rejects any non-zero value including the one the derivation would
+	// itself produce: the rule is that the field is absent in this mode, not
+	// that it must agree. Comparing against zero rather than range-checking
+	// also catches NaN, which is a configured value, not an absent one.
+	switch c.SizingMode {
+	case SizingModeVolatilityNormalised:
+		if c.RiskAtStopFraction != 0 {
+			errs = append(errs, fmt.Errorf(
+				"risk at stop must not be configured under volatility-normalised sizing (ADR 0003: it is derived as unit volatility fraction x stop multiple), got %v", c.RiskAtStopFraction))
+		}
+	case SizingModeFixedRiskAtStop:
+		switch {
+		case !isFinite(c.RiskAtStopFraction):
+			errs = append(errs, errors.New("risk at stop fraction must be finite"))
+		case c.RiskAtStopFraction <= 0 || c.RiskAtStopFraction > 1:
+			errs = append(errs, errors.New("risk at stop fraction must be greater than zero and at most one under fixed-risk-at-stop sizing, where it is the sizing input"))
+		}
 	}
 	switch {
 	case !isFinite(c.NotionalAccount.StartingEquity):

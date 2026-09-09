@@ -28,6 +28,16 @@ func validConfiguration() event.ConfigurationPayload {
 		// default. Whoever owns the Baseline configuration (#50) must pick
 		// this deliberately.
 		TierBDistanceInN: 1.0,
+		// #10: for US equities one point of price is exactly one dollar per
+		// share, so the Baseline's multiplier is 1. It is a parameter, not a
+		// hard-coded constant, because Faith's futures examples need the
+		// contract multiplier (42,000 for Heating Oil, The Turtle Rules
+		// p.15).
+		DollarsPerPoint: 1,
+		// #10: zero, and required to be zero, while the Sizing Mode is
+		// volatility-normalised — Risk at Stop is derived there, never
+		// configured (ADR 0003).
+		RiskAtStopFraction: 0,
 		NotionalAccount: event.NotionalAccountConfig{
 			StartingEquity: 1_000_000,
 			RebasingMonth:  1,
@@ -61,8 +71,78 @@ func TestConfigurationPayloadValidate(t *testing.T) {
 			wantErr: "sizing mode",
 		},
 		{
-			name:    "fixed-risk-at-stop is accepted",
+			// Under fixed-risk-at-stop the risk fraction is the sizing
+			// input [M p.56], so it must be present and positive — the exact
+			// opposite of the requirement under volatility-normalised.
+			name: "fixed-risk-at-stop is accepted with a risk at stop fraction",
+			mutate: func(c *event.ConfigurationPayload) {
+				c.SizingMode = event.SizingModeFixedRiskAtStop
+				c.RiskAtStopFraction = 0.02
+			},
+			wantErr: "",
+		},
+		{
+			name:    "fixed-risk-at-stop without a risk at stop fraction",
 			mutate:  func(c *event.ConfigurationPayload) { c.SizingMode = event.SizingModeFixedRiskAtStop },
+			wantErr: "risk at stop fraction must be greater than zero and at most one under fixed-risk-at-stop sizing",
+		},
+		{
+			name: "fixed-risk-at-stop with a risk at stop fraction above one",
+			mutate: func(c *event.ConfigurationPayload) {
+				c.SizingMode = event.SizingModeFixedRiskAtStop
+				c.RiskAtStopFraction = 1.5
+			},
+			wantErr: "risk at stop fraction must be greater than zero and at most one under fixed-risk-at-stop sizing",
+		},
+		{
+			name: "fixed-risk-at-stop with a negative risk at stop fraction",
+			mutate: func(c *event.ConfigurationPayload) {
+				c.SizingMode = event.SizingModeFixedRiskAtStop
+				c.RiskAtStopFraction = -0.02
+			},
+			wantErr: "risk at stop fraction must be greater than zero and at most one under fixed-risk-at-stop sizing",
+		},
+		{
+			// #10's named negative test: Risk at Stop must not be directly
+			// configurable in the Baseline mode. ADR 0003 makes it a derived
+			// quantity (Unit Volatility Fraction x Stop Multiple); a
+			// configuration that also states it is rejected rather than
+			// having the stated value quietly ignored, because a run that
+			// believes it risks a figure nothing in the arithmetic honours is
+			// exactly the defect ADR 0003 was written to prevent.
+			name:    "volatility-normalised must not configure risk at stop",
+			mutate:  func(c *event.ConfigurationPayload) { c.RiskAtStopFraction = 0.01 },
+			wantErr: "risk at stop must not be configured under volatility-normalised sizing",
+		},
+		{
+			// Even the value the derivation would produce (0.005 x 2 = 0.01)
+			// is rejected: the rule is that the field is absent in this mode,
+			// not that it must agree.
+			name:    "volatility-normalised must not configure even the derived value",
+			mutate:  func(c *event.ConfigurationPayload) { c.RiskAtStopFraction = 0.005 * 2 },
+			wantErr: "risk at stop must not be configured under volatility-normalised sizing",
+		},
+		{
+			// NaN is not zero, so the "must be absent" rule catches it too.
+			name:    "volatility-normalised with a NaN risk at stop",
+			mutate:  func(c *event.ConfigurationPayload) { c.RiskAtStopFraction = math.NaN() },
+			wantErr: "risk at stop must not be configured under volatility-normalised sizing",
+		},
+		{
+			name:    "zero dollars per point",
+			mutate:  func(c *event.ConfigurationPayload) { c.DollarsPerPoint = 0 },
+			wantErr: "dollars per point must be positive",
+		},
+		{
+			name:    "negative dollars per point",
+			mutate:  func(c *event.ConfigurationPayload) { c.DollarsPerPoint = -1 },
+			wantErr: "dollars per point must be positive",
+		},
+		{
+			// Faith's Heating Oil contract multiplier (The Turtle Rules
+			// p.15) must be as configurable as the equity multiplier of 1.
+			name:    "a futures contract multiplier is accepted",
+			mutate:  func(c *event.ConfigurationPayload) { c.DollarsPerPoint = 42_000 },
 			wantErr: "",
 		},
 		{
@@ -240,6 +320,22 @@ func TestConfigurationPayloadValidateRejectsNonFiniteFields(t *testing.T) {
 			apply:   func(c *event.ConfigurationPayload, f float64) { c.TierBDistanceInN = f },
 			wantErr: "tier b distance in n must be finite",
 		},
+		{
+			name:    "dollars per point",
+			apply:   func(c *event.ConfigurationPayload, f float64) { c.DollarsPerPoint = f },
+			wantErr: "dollars per point must be finite",
+		},
+		{
+			// Only meaningful in the mode where the field is an input at
+			// all; under volatility-normalised a NaN is rejected by the
+			// must-be-absent rule instead (see the table above).
+			name: "risk at stop fraction under fixed-risk-at-stop",
+			apply: func(c *event.ConfigurationPayload, f float64) {
+				c.SizingMode = event.SizingModeFixedRiskAtStop
+				c.RiskAtStopFraction = f
+			},
+			wantErr: "risk at stop fraction must be finite",
+		},
 	}
 
 	nonFinite := []struct {
@@ -285,6 +381,7 @@ func TestConfigurationPayloadValidateAggregatesEveryField(t *testing.T) {
 		"exit channel length",
 		"maximum units",
 		"slippage",
+		"dollars per point",
 		"notional account starting equity",
 		"rebasing date",
 	} {
@@ -305,15 +402,20 @@ func TestConfigurationEventConstants(t *testing.T) {
 	}
 }
 
-// TestConfigurationSchemaVersionBumpedForTierBDistance pins #9's explicit
-// schema bump: TierBDistanceInN is a new field on an existing payload, so
-// the schema version must change (docs/development.md: a schema change is
-// explicit in this project, never a silent field addition).
-func TestConfigurationSchemaVersionBumpedForTierBDistance(t *testing.T) {
+// TestConfigurationSchemaVersionBumpedForSizingFields pins the explicit
+// schema bumps this payload has taken: 2 for #9's TierBDistanceInN, and 3 for
+// #10's DollarsPerPoint and RiskAtStopFraction. A new field on an existing
+// payload always changes the schema version (docs/development.md: a schema
+// change is explicit in this project, never a silent field addition), and
+// here it must, because both new fields decode as the float64 zero from an
+// older record — a zero DollarsPerPoint divides by zero, and a zero
+// RiskAtStopFraction would size a fixed-risk-at-stop Unit from a risk budget
+// of nothing.
+func TestConfigurationSchemaVersionBumpedForSizingFields(t *testing.T) {
 	t.Parallel()
 
-	if event.ConfigurationSchemaVersion != 2 {
-		t.Fatalf("ConfigurationSchemaVersion = %d, want 2", event.ConfigurationSchemaVersion)
+	if event.ConfigurationSchemaVersion != 3 {
+		t.Fatalf("ConfigurationSchemaVersion = %d, want 3", event.ConfigurationSchemaVersion)
 	}
 }
 
@@ -374,6 +476,8 @@ func TestConfigurationPayloadJSONTags(t *testing.T) {
 		"max_units",
 		"slippage_n",
 		"tier_b_distance_in_n",
+		"dollars_per_point",
+		"risk_at_stop_fraction",
 		"notional_account",
 	} {
 		if _, ok := asMap[key]; !ok {

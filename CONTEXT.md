@@ -19,7 +19,7 @@ _Avoid_: ATR (means something narrower here), volatility, sigma.
 The volatility measure used by the Sublime rules, whose lookback period the sources do not disclose. Deliberately a separate term from **N**: the two are conceptually similar but are not interchangeable, and a rule citing one must not be implemented with the other.
 
 **Completed bar**:
-A bar whose period has ended. Every signal is computed from completed bars only; the bar being decided on is never an input to its own decision.
+A bar whose period has ended. Every signal is computed from completed bars only; the bar being decided on is never an input to its own decision. This applies to *every* input to that decision, not only the **Entry Channel**: **N**, the Setup's **Tier**, the **Unit** size and the **Protective Stop** are all computed from the completed bars preceding the decision bar. Warm-up is likewise counted in completed bars, never calendar days.
 
 **Entry Channel**:
 The extreme of the preceding 55 completed daily bars, beyond which a new **Campaign** may begin.
