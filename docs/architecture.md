@@ -37,6 +37,12 @@ The provenance fields are required. Together they let a reviewer reading a journ
 
 Replay rejects invalid events, sequence gaps, and payloads that do not match their integrity hash. Payload schemas and upcasting rules will be introduced explicitly as the contract evolves.
 
+## Replay engine
+
+`internal/replay.Engine.Run` is the seam between events in and decisions out: it applies a contiguous input stream to a `Handler`, and returns every decision envelope the handler emitted, in emission order. A handler emitting nothing for a given input is valid.
+
+Emitted envelopes form their own contiguous output stream, independent of the input stream: the engine assigns each one's `Sequence` from a counter starting at 1, in emission order, overwriting whatever the handler set — input sequences are left exactly as the producer set them. A later journal writer interleaves the two streams by recording order; replay equivalence compares output streams. The engine also sets `CausationID` (the input envelope's `ID`) and `CorrelationID` (the input's `CorrelationID` if set, else its `ID`) on every emission, overwriting whatever the handler set — a handler cannot claim causation or correlation it did not have. Each emitted envelope is validated after stamping, so an invalid emission fails closed, naming the input sequence and the emission index. A handler remains responsible for `Source`, `StrategyVersion`, `ConfigurationHash`, `Payload`, and `PayloadHash` on what it emits.
+
 ## Safety invariants
 
 - If the Go decision engine is unavailable, the adapter submits no new orders.
