@@ -436,3 +436,118 @@ func (p ProposalDeclinedPayload) Validate() error {
 	}
 	return nil
 }
+
+// ProposalExpiredEventType identifies the payload recorded when a trade
+// proposal was superseded without ever being filled.
+//
+// It completes the lifecycle #10 began: a Signal is never followed by silence
+// (a proposal or a decline always follows it), and now neither is a proposal —
+// every proposal reaches exactly one terminal event, a Campaign
+// (CampaignOpenedEventType) or this. Without it, "this proposal expired" and
+// "this proposal never existed" are the same absence in the journal, and the
+// error a consumer raises for a fill arriving too late has nothing behind it
+// that a reviewer can check.
+const ProposalExpiredEventType = "strategy.proposal.expired"
+
+// ProposalExpiredSchemaVersion is the current schema version of
+// ProposalExpiredPayload.
+const ProposalExpiredSchemaVersion uint32 = 1
+
+// RuleSignalExpiresWithItsBar names the rule for ProposalExpiredPayload.Rule:
+// a Signal belongs to one bar and expires with it, so the proposal that Signal
+// produced inherits the same lifetime. A trending instrument re-qualifies by
+// making a new high and is proposed again on its own (ADR 0011).
+const RuleSignalExpiresWithItsBar = "signal.expires.with-its-bar"
+
+// ADRSignalExpiry is the ADR ProposalExpiredPayload.ADR cites: ADR 0011, which
+// decides that a Signal never outlives its bar and that persistent Signals are
+// a declared Variant rather than the Baseline.
+const ADRSignalExpiry = "0011"
+
+// ExpiryReasonSupersededByNextBar is the only expiry reason today: the next
+// completed bar for the instrument arrived and no fill for the proposal ever
+// did. It is an enumerated value rather than free text for the same reason the
+// decline reasons are — a journal must be groupable by it.
+const ExpiryReasonSupersededByNextBar = "superseded-by-next-bar"
+
+// ProposalExpiredPayload records a trade proposal that was never filled and
+// has now been superseded.
+//
+// An expiry is not an error and not a failure of the strategy: under ADR 0011
+// the Baseline holds no pending-Signal memory, so a proposal that the market
+// did not fill inside its own bar simply ceases to exist. What the event adds
+// is that the cessation is visible — including as the count a reviewer needs
+// to ask what fraction of proposals actually became Campaigns.
+type ProposalExpiredPayload struct {
+	InstrumentID string `json:"instrument_id"`
+	// ProposalID and SignalID name the decision chain that has now ended.
+	ProposalID string `json:"proposal_id"`
+	SignalID   string `json:"signal_id"`
+	// PeriodEnd is the completed bar the expired proposal belonged to;
+	// ExpiredAt is the period end of the bar that superseded it, and is always
+	// strictly later.
+	PeriodEnd time.Time `json:"period_end"`
+	ExpiredAt time.Time `json:"expired_at"`
+	// Rule and ADR name the rule that produced this decision.
+	Rule string `json:"rule"`
+	ADR  string `json:"adr"`
+	// Reason is one of the enumerated expiry reasons.
+	Reason string `json:"reason"`
+	// Quantity and EntryLevel restate what was proposed and not taken, so the
+	// expiry is readable without joining back to the proposal.
+	Quantity   int64   `json:"quantity"`
+	EntryLevel float64 `json:"entry_level"`
+}
+
+// Validate checks the identifying fields, that the expiry is stamped strictly
+// after the bar whose proposal expired (an expiry at or before it would
+// describe an impossible ordering), that Reason is one of the enumerated
+// constants, and that the restated proposal figures are usable.
+func (p ProposalExpiredPayload) Validate() error {
+	var errs []error
+	if p.InstrumentID == "" {
+		errs = append(errs, errors.New("instrument id is required"))
+	}
+	if p.ProposalID == "" {
+		errs = append(errs, errors.New("proposal id is required: an expiry must name the proposal that ended"))
+	}
+	if p.SignalID == "" {
+		errs = append(errs, errors.New("signal id is required: an expiry must name the signal behind the proposal"))
+	}
+	periodEndPresent := !p.PeriodEnd.IsZero()
+	if !periodEndPresent {
+		errs = append(errs, errors.New("period end is required"))
+	}
+	switch {
+	case p.ExpiredAt.IsZero():
+		errs = append(errs, errors.New("expired at is required"))
+	case periodEndPresent && !p.ExpiredAt.After(p.PeriodEnd):
+		errs = append(errs, fmt.Errorf("expired at %s must be after the proposal's period end %s: a proposal is superseded by a later bar",
+			p.ExpiredAt.Format(time.RFC3339), p.PeriodEnd.Format(time.RFC3339)))
+	}
+	if p.Rule == "" {
+		errs = append(errs, errors.New("rule is required"))
+	}
+	if p.ADR == "" {
+		errs = append(errs, errors.New("adr is required"))
+	}
+	switch p.Reason {
+	case ExpiryReasonSupersededByNextBar:
+		// recognised
+	default:
+		errs = append(errs, fmt.Errorf("reason %q is not a recognised expiry reason", p.Reason))
+	}
+	if p.Quantity <= 0 {
+		errs = append(errs, fmt.Errorf("quantity must be a positive whole number, got %d", p.Quantity))
+	}
+	switch {
+	case !isFinite(p.EntryLevel):
+		errs = append(errs, errors.New("entry level must be finite"))
+	case p.EntryLevel <= 0:
+		errs = append(errs, errors.New("entry level must be positive"))
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("invalid proposal expired payload: %w", err)
+	}
+	return nil
+}

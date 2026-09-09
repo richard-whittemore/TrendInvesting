@@ -48,6 +48,15 @@ func nextBreakoutBar(instrumentID string) event.CompletedBarPayload {
 	return syntheticBar(instrumentID, day(57), 101)
 }
 
+// quietBar is the same slot in the stream with a high of 150 instead: well
+// under the 200 Entry Channel and further than the configured Tier B distance
+// of 1N away from it, so it produces a Setup-evaluated event and nothing else.
+// It is what a test needs when the point is that the previous bar's proposal
+// expired leaving nothing outstanding, rather than being replaced.
+func quietBar(instrumentID string) event.CompletedBarPayload {
+	return syntheticBar(instrumentID, day(57), 50)
+}
+
 // testDecisionID mirrors the reducer's unexported decisionID so a fixture can
 // name the proposal a fill executes before the run that produces it. It is not
 // taken on trust: TestFillOpensACampaignWithNAndUnitSizeFrozen asserts the
@@ -530,14 +539,33 @@ func TestProposalWithNoFillOpensNoCampaignAndExpiresWithItsBar(t *testing.T) {
 // left to fill: acting on the fill would open a Campaign at a price and a
 // volatility reading the strategy no longer stands behind. The run fails
 // closed, and the journal already contains the expiry that explains it.
+//
+// Both shapes of "afterwards" are covered, because they take different
+// branches: the next bar may itself be a breakout, replacing the expired
+// proposal with a new one that the late fill does not name, or it may be
+// quiet, leaving nothing outstanding at all.
 func TestFillArrivingAfterItsProposalExpiredIsRejected(t *testing.T) {
 	t.Parallel()
 
-	newStream(t, validConfigurationPayload()).
-		bars(breakoutBars("AAPL")).
-		bar(nextBreakoutBar("AAPL")).
-		fill(openingFill("AAPL")).
-		wantRunError("AAPL", "no pending trade proposal")
+	t.Run("superseded by a new proposal", func(t *testing.T) {
+		t.Parallel()
+
+		newStream(t, validConfigurationPayload()).
+			bars(breakoutBars("AAPL")).
+			bar(nextBreakoutBar("AAPL")).
+			fill(openingFill("AAPL")).
+			wantRunError("AAPL", "2026-02-27", "the pending trade proposal is", "2026-02-28")
+	})
+
+	t.Run("nothing outstanding at all", func(t *testing.T) {
+		t.Parallel()
+
+		newStream(t, validConfigurationPayload()).
+			bars(breakoutBars("AAPL")).
+			bar(quietBar("AAPL")).
+			fill(openingFill("AAPL")).
+			wantRunError("AAPL", "no pending trade proposal")
+	})
 }
 
 // --- Partial fills ------------------------------------------------------

@@ -98,6 +98,14 @@ type instrumentState struct {
 	lastPeriodEnd    time.Time
 	n                *indicator.WilderAverage
 	entryChannel     *indicator.EntryChannel
+
+	// #11's two additions, both defined and explained in campaign.go.
+	// pendingProposal is a trade proposal emitted and not yet resolved, and is
+	// deliberately NOT position state: no Campaign is ever derived from it
+	// alone. campaign is the instrument's open Campaign, and is nil unless a
+	// recorded fill brought one into being.
+	pendingProposal *pendingProposalState
+	campaign        *campaignState
 }
 
 // NewReducer returns a Reducer that stamps every decision it emits with
@@ -120,12 +128,14 @@ func NewReducer(strategyVersion, configurationHash string) (*Reducer, error) {
 	}, nil
 }
 
-// Apply implements replay.Handler. It recognises exactly two input event
+// Apply implements replay.Handler. It recognises exactly three input event
 // types:
 //
 //   - event.ConfigurationEventType: recorded, and required before any bar.
 //   - event.CompletedBarEventType: updates that instrument's True Range/N
 //     and emits one event.SetupEvaluatedEventType decision.
+//   - event.FillEventType: the only input that may change position state
+//     (#11; see campaign.go).
 //
 // Any other event type fails closed rather than being silently ignored
 // (docs/development.md principle 4: "Fail closed on unknown schemas").
@@ -135,6 +145,8 @@ func (r *Reducer) Apply(_ context.Context, envelope event.Envelope) ([]event.Env
 		return r.applyConfiguration(envelope)
 	case event.CompletedBarEventType:
 		return r.applyCompletedBar(envelope)
+	case event.FillEventType:
+		return r.applyFill(envelope)
 	default:
 		return nil, fmt.Errorf("strategy: unrecognized event type %q", envelope.Type)
 	}
@@ -319,6 +331,32 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	state.hasPreviousClose = true
 	state.lastPeriodEnd = bar.PeriodEnd
 
+	// --- #11: the previous bar's outstanding business, closed before this bar
+	// is evaluated (the ordering ADR 0010 applies within a day). A trade
+	// proposal that no fill arrived for expires with its bar, per ADR 0011;
+	// see Reducer.expireProposal for why the expiry is emitted rather than
+	// dropped.
+	var emissions []event.Envelope
+	if state.pendingProposal != nil {
+		expired, err := r.expireProposal(state, bar, envelope)
+		if err != nil {
+			return nil, err
+		}
+		emissions = append(emissions, expired)
+	}
+
+	// --- #11: no new entry while a Campaign is open in this instrument. N and
+	// the Entry Channel above are still tracked (#12's stop evaluation and
+	// #14's Exit Channel need them), but nothing further is emitted: CONTEXT.md
+	// defines a Setup as an Eligible instrument NOT in a Campaign, so emitting
+	// a Setup-evaluated event here would journal a claim that is false by the
+	// project's own vocabulary, and would report a Tier for something that
+	// cannot become a Signal. The Campaign's own per-bar decision events are
+	// #12 onward.
+	if state.campaign != nil {
+		return emissions, nil
+	}
+
 	// Tier follows three cases, per DistanceToEntryInN's sign and magnitude
 	// (see SetupEvaluatedPayload's doc comment): a strict breakout
 	// (distance < 0) is TierA; a tie or an approach within the configured
@@ -375,7 +413,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		event.SetupEvaluatedEventType, event.SetupEvaluatedSchemaVersion,
 		bar.PeriodEnd, envelope, payloadBytes,
 	)
-	emissions := []event.Envelope{decision}
+	emissions = append(emissions, decision)
 
 	// #9: Tier A is a Signal. No Signal while N or the channel is not ready
 	// (tier is TierA only when ready is true, above), and never on a tie
@@ -427,6 +465,13 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 			return nil, err
 		}
 		emissions = append(emissions, sized)
+
+		// #11: a proposal is remembered as outstanding so that a fill can be
+		// checked against it — and NOTHING about position state moves here.
+		// See Reducer.rememberPendingProposal.
+		if err := r.rememberPendingProposal(state, sized); err != nil {
+			return nil, err
+		}
 	}
 
 	return emissions, nil
