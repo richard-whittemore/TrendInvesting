@@ -17,7 +17,7 @@ Issues and specs for this repo live as **GitHub issues in `richard-whittemore/Tr
 
 Notes and limits:
 
-- The MCP exposes no label-creation tool. If a required label does not exist, create it in the GitHub UI (or ask the operator to) rather than silently dropping it.
+- **The MCP cannot create labels, and it validates every label before writing.** Passing a label that does not already exist fails the whole call with `failed to resolve label "<name>"` — the issue is not created, so there is no partial state, but the write must be retried. `get_label` can check one label; there is no list-labels tool. If a required label is missing, ask the operator to create it in the GitHub UI, and carry the information in the issue body meanwhile. Labels confirmed present: `ready-for-agent`, `spec`.
 - The MCP exposes no native issue-dependency endpoint. Represent blocking edges as described under **Blocking** below.
 - Paginate in batches of 5–10 and use `minimal_output` when the full body isn't needed.
 
@@ -84,8 +84,16 @@ GitHub sub-issues are the canonical parent/child link (`mcp__github__sub_issue_w
 ## Labels
 
 - Triage roles: see `docs/agents/triage-labels.md`.
-- **Implementer tier** (which model should pick this up): `tier/sonnet` (well-specified slice), `tier/opus` (design-heavy slice), `tier/codex` (cross-vendor second opinion). Set this when the ticket is written.
+- **Implementer tier** (which model should pick this up): `tier/sonnet` (well-specified slice), `tier/opus` (design-heavy slice), `tier/codex` (cross-vendor second opinion).
 - **Area** (optional): `area/methodology`, `area/go-core`, `area/lean`, `area/risk`, `area/data`, `area/ops`.
+
+Until those labels exist in the repository, carry the same information as the first line of the issue body:
+
+```
+**Tier:** opus · **Area:** go-core · **Slice:** 1 · capital-safety
+```
+
+Once the labels are created, they can be applied to existing issues in a batch of `issue_write` updates.
 
 ## Pull requests as a triage surface
 
