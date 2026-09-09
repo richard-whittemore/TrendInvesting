@@ -25,17 +25,20 @@ var proposalPeriodEnd = time.Date(2026, time.February, 27, 0, 0, 0, 0, time.UTC)
 // Validate's derivation checks are exact by design. A fixture built from
 // constants would therefore be testing constant folding rather than the
 // producer's arithmetic.
-var proposalN = 40.69890254048816
+var proposalN = 37.57779214788228
 
 // validTradeProposal returns a Baseline (volatility-normalised, ADR 0003)
 // trade proposal that satisfies every validation rule, so each table row only
 // has to describe its one deviation.
 //
 // Hand-worked: a $1,000,000 Notional Account at the Baseline's 0.5 % Unit
-// Volatility Fraction gives a 1N budget of $5,000; 5,000 / 40.6989... =
-// 122.85..., truncated to 122 shares (The Turtle Rules p.14). Risk at Stop is
-// derived, never configured: 0.005 x 2 = 0.01. The Protective Stop intent is
-// the entry level less two N: 200 - 2 x 40.6989... = 118.60...
+// Volatility Fraction gives a 1N budget of $5,000; 5,000 / 37.5777... =
+// 133.07..., truncated to 133 shares (The Turtle Rules p.14). Risk at Stop is
+// derived, never configured: 0.005 x 2 = 0.01. The realised figure is what
+// those 133 whole shares actually risk, 133 x (2 x 37.5777...) / 1,000,000 =
+// 0.00999..., a little under the budget because of the truncation. The
+// Protective Stop intent is the entry level less two N: 200 - 2 x 37.5777...
+// = 124.84...
 func validTradeProposal() event.TradeProposalPayload {
 	return event.TradeProposalPayload{
 		InstrumentID:           "AAPL",
@@ -45,12 +48,13 @@ func validTradeProposal() event.TradeProposalPayload {
 		ADR:                    event.ADRUnitSizing,
 		Direction:              event.DirectionLong,
 		EntryLevel:             200,
-		Quantity:               122,
+		Quantity:               133,
 		N:                      proposalN,
 		SizingMode:             event.SizingModeVolatilityNormalised,
 		UnitVolatilityFraction: 0.005,
 		StopMultiple:           2,
 		RiskAtStop:             0.005 * 2,
+		RealisedRiskAtStop:     133 * (2 * proposalN * 1) / 1_000_000,
 		DollarsPerPoint:        1,
 		NotionalAccount:        1_000_000,
 		ProtectiveStopIntent:   200 - 2*proposalN,
@@ -58,8 +62,8 @@ func validTradeProposal() event.TradeProposalPayload {
 }
 
 // validFixedRiskTradeProposal is the Sublime Variant's counterpart [M p.56]:
-// a 2 % Risk at Stop with a 3N stop gives 1,000,000 x 0.02 / (3 x 40.6989...)
-// = 163.8... -> 163 shares, and Risk at Stop is the configured input rather
+// a 2 % Risk at Stop with a 3N stop gives 1,000,000 x 0.02 / (3 x 37.5777...)
+// = 177.4... -> 177 shares, and Risk at Stop is the configured input rather
 // than a derivation from the Unit Volatility Fraction.
 func validFixedRiskTradeProposal() event.TradeProposalPayload {
 	p := validTradeProposal()
@@ -67,7 +71,8 @@ func validFixedRiskTradeProposal() event.TradeProposalPayload {
 	p.SizingMode = event.SizingModeFixedRiskAtStop
 	p.StopMultiple = 3
 	p.RiskAtStop = 0.02
-	p.Quantity = 163
+	p.Quantity = 177
+	p.RealisedRiskAtStop = 177 * (3 * proposalN * 1) / 1_000_000
 	p.ProtectiveStopIntent = 200 - 3*proposalN
 	return p
 }
@@ -226,21 +231,67 @@ func TestTradeProposalPayloadValidate(t *testing.T) {
 			wantErr: "does not match the derivation",
 		},
 		{
-			// Truncation may only ever risk LESS than the budget. 123 shares
-			// at 40.6989... is 5,006.0..., above the $5,000 1N budget, so
+			// Truncation may only ever risk LESS than the budget. 134 shares
+			// at 37.5777... is 5,035.4..., above the $5,000 1N budget, so
 			// this payload claims a Unit larger than its own parameters
-			// permit.
-			name:    "quantity exceeds the volatility-normalised budget",
-			mutate:  func(p *event.TradeProposalPayload) { p.Quantity = 123 },
+			// permit. (The realised-risk check below catches it too; both
+			// are asserted because each is exact in its own mode's terms.)
+			name: "quantity exceeds the volatility-normalised budget",
+			mutate: func(p *event.TradeProposalPayload) {
+				p.Quantity = 134
+				p.RealisedRiskAtStop = 134 * (2 * proposalN * 1) / 1_000_000
+			},
 			wantErr: "exceeds the",
 		},
 		{
-			// The same overshoot in the other mode: 164 shares at a 3N stop
-			// is 20,023.8..., above the $20,000 Risk-at-Stop budget.
-			name:    "quantity exceeds the fixed-risk-at-stop budget",
-			base:    validFixedRiskTradeProposal,
-			mutate:  func(p *event.TradeProposalPayload) { p.Quantity = 164 },
+			// The same overshoot in the other mode: 178 shares at a 3N stop
+			// is 20,066.5..., above the $20,000 Risk-at-Stop budget.
+			name: "quantity exceeds the fixed-risk-at-stop budget",
+			base: validFixedRiskTradeProposal,
+			mutate: func(p *event.TradeProposalPayload) {
+				p.Quantity = 178
+				p.RealisedRiskAtStop = 178 * (3 * proposalN * 1) / 1_000_000
+			},
 			wantErr: "exceeds the",
+		},
+		{
+			// The realised figure is derived from the payload's own fields
+			// exactly as Risk at Stop and the Protective Stop intent are, so
+			// a stated value the quantity does not support is rejected. 0.005
+			// is what 133 shares would risk only if N were half what the
+			// payload says it is.
+			name:    "stated realised risk does not match the derivation",
+			mutate:  func(p *event.TradeProposalPayload) { p.RealisedRiskAtStop = 0.005 },
+			wantErr: "does not match the derivation",
+		},
+		{
+			name:    "stated realised risk does not match the derivation under fixed-risk-at-stop",
+			base:    validFixedRiskTradeProposal,
+			mutate:  func(p *event.TradeProposalPayload) { p.RealisedRiskAtStop = 0.01 },
+			wantErr: "does not match the derivation",
+		},
+		{
+			// A realised figure above the declared budget contradicts the
+			// direction truncation can only ever move in. Contrived here by
+			// shrinking the declared budget rather than the quantity, so
+			// that the derivation check still passes and this check is the
+			// one that fires.
+			name: "realised risk exceeds the declared budget",
+			mutate: func(p *event.TradeProposalPayload) {
+				p.UnitVolatilityFraction = 0.001
+				p.RiskAtStop = 0.001 * 2
+			},
+			wantErr: "exceeds the declared risk at stop",
+		},
+		{
+			name:    "zero realised risk at stop",
+			mutate:  func(p *event.TradeProposalPayload) { p.RealisedRiskAtStop = 0 },
+			wantErr: "realised risk at stop",
+		},
+		{
+			name:    "negative realised risk at stop",
+			mutate:  func(p *event.TradeProposalPayload) { p.RealisedRiskAtStop = -0.01 },
+			wantErr: "realised risk at stop",
 		},
 	}
 
@@ -285,6 +336,7 @@ func TestTradeProposalPayloadValidateRejectsNonFiniteFields(t *testing.T) {
 		{"unit volatility fraction", func(p *event.TradeProposalPayload, f float64) { p.UnitVolatilityFraction = f }, "unit volatility fraction must be finite"},
 		{"stop multiple", func(p *event.TradeProposalPayload, f float64) { p.StopMultiple = f }, "stop multiple must be finite"},
 		{"risk at stop", func(p *event.TradeProposalPayload, f float64) { p.RiskAtStop = f }, "risk at stop must be finite"},
+		{"realised risk at stop", func(p *event.TradeProposalPayload, f float64) { p.RealisedRiskAtStop = f }, "realised risk at stop must be finite"},
 		{"dollars per point", func(p *event.TradeProposalPayload, f float64) { p.DollarsPerPoint = f }, "dollars per point must be finite"},
 		{"notional account", func(p *event.TradeProposalPayload, f float64) { p.NotionalAccount = f }, "notional account must be finite"},
 		{"protective stop intent", func(p *event.TradeProposalPayload, f float64) { p.ProtectiveStopIntent = f }, "protective stop intent must be finite"},
@@ -338,6 +390,7 @@ func TestTradeProposalPayloadValidateAggregatesEveryField(t *testing.T) {
 		"unit volatility fraction",
 		"stop multiple",
 		"risk at stop",
+		"realised risk at stop",
 		"dollars per point",
 		"notional account",
 		"protective stop intent",
@@ -428,6 +481,7 @@ func TestTradeProposalPayloadJSONTags(t *testing.T) {
 		"unit_volatility_fraction",
 		"stop_multiple",
 		"risk_at_stop",
+		"realised_risk_at_stop",
 		"dollars_per_point",
 		"notional_account",
 		"protective_stop_intent",

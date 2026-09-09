@@ -235,6 +235,18 @@ type referenceStep struct {
 // several event-seam tests below compare the reducer's actual output
 // against, in place of hand-deriving many bars' worth of Tier/distance
 // arithmetic by hand.
+//
+// Both inputs are read BEFORE the bar is folded into them (PR #64 review):
+// the decision N and the channel high are the values standing after the
+// PRECEDING bars, and this bar's True Range and high are added afterwards,
+// for the next bar to see. This mirrors the reducer's own evaluate-then-add
+// ordering, so the oracle and the reducer agree about which bars each
+// decision may see; the property it is checking — that the decision bar is
+// never an input to its own decision (CONTEXT.md: "Completed bar") — is
+// asserted independently by
+// TestReducerSizesFromNThroughThePrecedingBarNotTheSignalBar and
+// TestAddThenEvaluateNWouldShrinkTheWideBarsOwnUnit, which do not use this
+// helper at all.
 func referenceSetupSteps(highs []float64, period, channelLength int, tierBDistance float64) []referenceStep {
 	steps := make([]referenceStep, len(highs))
 	var nValue float64
@@ -243,16 +255,10 @@ func referenceSetupSteps(highs []float64, period, channelLength int, tierBDistan
 
 	for i, high := range highs {
 		tr := high - 100
-		switch {
-		case i+1 < period:
-			seed = append(seed, tr)
-		case i+1 == period:
-			seed = append(seed, tr)
-			nValue = indicator.SMASeed(seed)
-		default:
-			nValue = indicator.WilderNext(nValue, tr, period)
-		}
-		nReady := i+1 >= period && nValue > 0
+
+		// Evaluate: N as it stands after the preceding bars only.
+		decisionN := nValue
+		nReady := i >= period && decisionN > 0
 
 		var channelHigh float64
 		channelReady := len(window) >= channelLength
@@ -271,7 +277,7 @@ func referenceSetupSteps(highs []float64, period, channelLength int, tierBDistan
 		var tier string
 		var distance float64
 		if ready {
-			distance = (channelHigh - high) / nValue
+			distance = (channelHigh - high) / decisionN
 			switch {
 			case breakout:
 				tier = event.TierA
@@ -285,8 +291,12 @@ func referenceSetupSteps(highs []float64, period, channelLength int, tierBDistan
 			}
 		}
 
+		reportedN := decisionN
+		if !nReady {
+			reportedN = 0
+		}
 		steps[i] = referenceStep{
-			n:                 nValue,
+			n:                 reportedN,
 			nReady:            nReady,
 			entryChannelHigh:  channelHigh,
 			entryChannelReady: channelReady,
@@ -295,6 +305,16 @@ func referenceSetupSteps(highs []float64, period, channelLength int, tierBDistan
 			breakout:          breakout,
 		}
 
+		// Add: fold this bar in, for the next bar's decision.
+		switch {
+		case len(seed) < period-1:
+			seed = append(seed, tr)
+		case len(seed) == period-1:
+			seed = append(seed, tr)
+			nValue = indicator.SMASeed(seed)
+		default:
+			nValue = indicator.WilderNext(nValue, tr, period)
+		}
 		window = append(window, high)
 	}
 	return steps
@@ -388,14 +408,20 @@ func TestReducerEmitsOneSetupEvaluatedPerBarWithExpectedNAndReadiness(t *testing
 		t.Fatalf("len(emitted) = %d, want %d (one per bar, none for the configuration event)", len(emitted), len(trs))
 	}
 
-	wantReadyFrom := 20 // 1-indexed bar count at which N becomes ready
+	// Evaluate-then-add (PR #64 review): the N a bar is decided against is
+	// the N standing after the bars BEFORE it, so the 20-bar seed first
+	// appears on bar 21's decision, not bar 20's. Bar 20 is the bar that
+	// completes the seed; it does not get to use it. The values themselves
+	// are unchanged — they are the same hand-worked series as
+	// internal/indicator's TestWilderAverageSyntheticSeriesSeedAndFirstSteps
+	// — each simply lands one bar later.
+	wantReadyFrom := 21 // 1-indexed bar count at which N becomes ready
 	wantNAfterSeed := []float64{
-		10.5,          // bar 20
-		10.225,        // bar 21
-		9.96375,       // bar 22
-		9.7155625,     // bar 23
-		9.479784375,   // bar 24
-		9.25579515625, // bar 25
+		10.5,        // bar 21 decides on the seed of bars 1..20
+		10.225,      // bar 22
+		9.96375,     // bar 23
+		9.7155625,   // bar 24
+		9.479784375, // bar 25
 	}
 
 	for i, decision := range emitted {
@@ -466,7 +492,11 @@ func TestReducerUsesSplitAdjustedViewOnly(t *testing.T) {
 
 	envelopes := []event.Envelope{configEnvelope(t, 1, day(0))}
 	seq := uint64(2)
-	for i := 0; i < 20; i++ {
+	// Twenty-one bars, not twenty: evaluate-then-add means the twentieth bar
+	// completes the seed and the twenty-first is the first bar decided
+	// against it (PR #64 review).
+	const bars = 21
+	for i := 0; i < bars; i++ {
 		periodEnd := day(i + 1)
 		bar := event.CompletedBarPayload{
 			InstrumentID: "AAPL",
@@ -485,24 +515,26 @@ func TestReducerUsesSplitAdjustedViewOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if len(emitted) != 20 {
-		t.Fatalf("len(emitted) = %d, want 20", len(emitted))
+	if len(emitted) != bars {
+		t.Fatalf("len(emitted) = %d, want %d", len(emitted), bars)
 	}
 
 	last := decodeSetupEvaluated(t, emitted[len(emitted)-1])
 	if !last.NReady {
-		t.Fatal("NReady = false after 20 bars, want true")
+		t.Fatalf("NReady = false on bar %d, want true", bars)
 	}
 	if diff := math.Abs(last.N - 1.0); diff > epsilon {
 		t.Fatalf("N = %v, want ~1.0 (split-adjusted True Range); got a value near the raw view's True Range would indicate ADR 0004 is violated", last.N)
 	}
 }
 
-// TestReducerKeepsSeparateStatePerInstrument warms AAPL up to Ready over 20
-// bars, then feeds a single MSFT bar. If the two instruments shared one
-// True Range/N tracker, that single MSFT bar would land as the tracker's
-// 21st input and read as Ready; kept separate, it must be MSFT's first bar
-// and read as not ready.
+// TestReducerKeepsSeparateStatePerInstrument warms AAPL up to Ready over 21
+// bars (twenty complete the seed, the twenty-first is the first bar decided
+// against it — see the evaluate-then-add note on the reducer), then feeds a
+// single MSFT bar. If the two instruments shared one True Range/N tracker,
+// that single MSFT bar would be decided against AAPL's warmed-up N and read
+// as Ready; kept separate, it must be MSFT's first bar and read as not
+// ready.
 func TestReducerKeepsSeparateStatePerInstrument(t *testing.T) {
 	t.Parallel()
 
@@ -517,28 +549,29 @@ func TestReducerKeepsSeparateStatePerInstrument(t *testing.T) {
 
 	envelopes := []event.Envelope{configEnvelope(t, 1, day(0))}
 	seq := uint64(2)
-	for i := 0; i < 20; i++ {
+	const aaplBars = 21
+	for i := 0; i < aaplBars; i++ {
 		bar := syntheticBar("AAPL", day(i+1), 1.0)
 		envelopes = append(envelopes, barEnvelope(t, seq, bar, day(i+1)))
 		seq++
 	}
-	msftBar := syntheticBar("MSFT", day(21), 1.0)
-	envelopes = append(envelopes, barEnvelope(t, seq, msftBar, day(21)))
+	msftBar := syntheticBar("MSFT", day(aaplBars+1), 1.0)
+	envelopes = append(envelopes, barEnvelope(t, seq, msftBar, day(aaplBars+1)))
 
 	emitted, err := engine.Run(context.Background(), envelopes)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if len(emitted) != 21 {
-		t.Fatalf("len(emitted) = %d, want 21", len(emitted))
+	if len(emitted) != aaplBars+1 {
+		t.Fatalf("len(emitted) = %d, want %d", len(emitted), aaplBars+1)
 	}
 
-	aaplLast := decodeSetupEvaluated(t, emitted[19])
+	aaplLast := decodeSetupEvaluated(t, emitted[aaplBars-1])
 	if aaplLast.InstrumentID != "AAPL" || !aaplLast.NReady {
-		t.Fatalf("AAPL after 20 bars: InstrumentID=%q NReady=%v, want AAPL, true", aaplLast.InstrumentID, aaplLast.NReady)
+		t.Fatalf("AAPL on bar %d: InstrumentID=%q NReady=%v, want AAPL, true", aaplBars, aaplLast.InstrumentID, aaplLast.NReady)
 	}
 
-	msftFirst := decodeSetupEvaluated(t, emitted[20])
+	msftFirst := decodeSetupEvaluated(t, emitted[aaplBars])
 	if msftFirst.InstrumentID != "MSFT" {
 		t.Fatalf("InstrumentID = %q, want MSFT", msftFirst.InstrumentID)
 	}
@@ -1136,18 +1169,24 @@ func TestReducerFlatInstrumentStaysNotReadyUntilNonZeroTrueRange(t *testing.T) {
 		envelopes = append(envelopes, barEnvelope(t, seq, bar, day(i+1)))
 		seq++
 	}
-	rangedBar := syntheticBar("AAPL", day(21), 1.0) // True Range = 1
-	envelopes = append(envelopes, barEnvelope(t, seq, rangedBar, day(21)))
+	// Two ranged bars, not one: under evaluate-then-add (PR #64 review) bar
+	// 21 is still decided against the all-zero seed, and bar 22 is the first
+	// bar that can see bar 21's non-zero True Range.
+	for i := 21; i <= 22; i++ {
+		rangedBar := syntheticBar("AAPL", day(i), 1.0) // True Range = 1
+		envelopes = append(envelopes, barEnvelope(t, seq, rangedBar, day(i)))
+		seq++
+	}
 
 	emitted, err := engine.Run(context.Background(), envelopes)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if len(emitted) != 21 {
-		t.Fatalf("len(emitted) = %d, want 21", len(emitted))
+	if len(emitted) != 22 {
+		t.Fatalf("len(emitted) = %d, want 22", len(emitted))
 	}
 
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 21; i++ {
 		payload := decodeSetupEvaluated(t, emitted[i])
 		if payload.NReady {
 			t.Fatalf("bar %d: NReady = true for a flat instrument, want false (warm-up complete but N is not a usable reading)", i+1)
@@ -1157,15 +1196,16 @@ func TestReducerFlatInstrumentStaysNotReadyUntilNonZeroTrueRange(t *testing.T) {
 		}
 	}
 
-	last := decodeSetupEvaluated(t, emitted[20])
+	last := decodeSetupEvaluated(t, emitted[21])
 	if !last.NReady {
-		t.Fatal("bar 21: NReady = false, want true: True Range is non-zero again")
+		t.Fatal("bar 22: NReady = false, want true: True Range was non-zero on bar 21")
 	}
 	// previousN is 0 (the 20-bar seed of an all-zero series); WilderNext(0, 1,
-	// 20) = (19*0+1)/20 = 1/20.
+	// 20) = (19*0+1)/20 = 1/20, contributed by bar 21 and first visible to
+	// bar 22's decision.
 	want := 1.0 / 20.0
 	if diff := math.Abs(last.N - want); diff > epsilon {
-		t.Fatalf("bar 21: N = %v, want %v (diff %v)", last.N, want, diff)
+		t.Fatalf("bar 22: N = %v, want %v (diff %v)", last.N, want, diff)
 	}
 }
 
@@ -1808,15 +1848,21 @@ func breakoutFixtureN(t *testing.T, cfg event.ConfigurationPayload) float64 {
 // Everything asserted here is hand-derivable from the fixture. The breakout
 // bar's high is 200 (breakoutFixtureHighs), so the entry level is 200 — the
 // level the Signal fired at; what actually fills there is #18's decision, not
-// this ticket's. N on that bar is 40.69890254048816 (the same value #9's
-// Signal test asserts). The Baseline configuration is a $1,000,000 Notional
-// Account at a 0.5 % Unit Volatility Fraction, so:
+// this ticket's. The N the bar is decided against is 37.57779214788228: the
+// Wilder average of the fifty-five True Ranges BEFORE it, excluding the
+// breakout bar's own (see
+// TestReducerSizesFromNThroughThePrecedingBarNotTheSignalBar). The Baseline
+// configuration is a $1,000,000 Notional Account at a 0.5 % Unit Volatility
+// Fraction, so:
 //
-//	quantity = floor(1,000,000 x 0.005 / (40.6989... x 1))
-//	         = floor(5,000 / 40.6989...) = floor(122.85...) = 122 shares
+//	quantity = floor(1,000,000 x 0.005 / (37.5777... x 1))
+//	         = floor(5,000 / 37.5777...) = floor(133.07...) = 133 shares
 //
-// Risk at Stop is derived, never configured (ADR 0003): 0.005 x 2 = 0.01. The
-// Protective Stop intent is 200 - 2 x 40.6989... = 118.60...
+// Risk at Stop is derived, never configured (ADR 0003): 0.005 x 2 = 0.01, the
+// declared budget. What those 133 whole shares actually risk is the realised
+// figure, 133 x (2 x 37.5777...) / 1,000,000 = 0.009995..., a little under
+// the budget — the gap is the truncation from 133.07 to 133. The Protective
+// Stop intent is 200 - 2 x 37.5777... = 124.84...
 func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 	t.Parallel()
 
@@ -1897,8 +1943,8 @@ func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 	if proposal.EntryLevel != 200 {
 		t.Errorf("Proposal EntryLevel = %v, want 200 (the breakout high)", proposal.EntryLevel)
 	}
-	if proposal.Quantity != 122 {
-		t.Errorf("Proposal Quantity = %d, want 122 (floor(5,000 / 40.6989...))", proposal.Quantity)
+	if proposal.Quantity != 133 {
+		t.Errorf("Proposal Quantity = %d, want 133 (floor(5,000 / 37.5777...))", proposal.Quantity)
 	}
 	wantN := breakoutFixtureN(t, cfg)
 	if proposal.N != wantN {
@@ -1923,6 +1969,17 @@ func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 	if proposal.RiskAtStop != cfg.UnitVolatilityFraction*cfg.StopMultiple {
 		t.Errorf("Proposal RiskAtStop = %v, want exactly %v (0.005 x 2)", proposal.RiskAtStop, cfg.UnitVolatilityFraction*cfg.StopMultiple)
 	}
+	// The declared budget above is what the strategy set out to risk; the
+	// realised figure below is what the whole-share quantity actually risks,
+	// and the gap between them is the truncation (PR #64 review).
+	wantRealised := 133 * (cfg.StopMultiple * wantN * cfg.DollarsPerPoint) / cfg.NotionalAccount.StartingEquity
+	if proposal.RealisedRiskAtStop != wantRealised {
+		t.Errorf("Proposal RealisedRiskAtStop = %v, want exactly %v", proposal.RealisedRiskAtStop, wantRealised)
+	}
+	if !(proposal.RealisedRiskAtStop < proposal.RiskAtStop) {
+		t.Errorf("Proposal RealisedRiskAtStop %v is not below the declared RiskAtStop %v; 133.07 shares truncated to 133 must leave a gap",
+			proposal.RealisedRiskAtStop, proposal.RiskAtStop)
+	}
 	if proposal.ProtectiveStopIntent != 200-cfg.StopMultiple*wantN {
 		t.Errorf("Proposal ProtectiveStopIntent = %v, want exactly %v (entry - 2N)", proposal.ProtectiveStopIntent, 200-cfg.StopMultiple*wantN)
 	}
@@ -1934,8 +1991,8 @@ func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 // TestReducerEmitsFixedRiskAtStopProposal runs the same fixture under the
 // Sublime Variant's Sizing Mode (ADR 0003; [M p.56]). Risk at Stop is 2 % —
 // the configured input, not a derivation — and the 3N stop makes the
-// quantity 1,000,000 x 0.02 / (3 x 40.6989...) = 163.80... -> 163, a
-// different number from the Baseline's 122 on the identical bar. That
+// quantity 1,000,000 x 0.02 / (3 x 37.5777...) = 177.42... -> 177, a
+// different number from the Baseline's 133 on the identical bar. That
 // difference is the whole reason the Sizing Mode is explicit.
 func TestReducerEmitsFixedRiskAtStopProposal(t *testing.T) {
 	t.Parallel()
@@ -1953,8 +2010,8 @@ func TestReducerEmitsFixedRiskAtStopProposal(t *testing.T) {
 	}
 
 	proposal := decodeTradeProposal(t, proposals[0])
-	if proposal.Quantity != 163 {
-		t.Errorf("Proposal Quantity = %d, want 163 (floor(20,000 / (3 x 40.6989...)))", proposal.Quantity)
+	if proposal.Quantity != 177 {
+		t.Errorf("Proposal Quantity = %d, want 177 (floor(20,000 / (3 x 37.5777...)))", proposal.Quantity)
 	}
 	if proposal.SizingMode != event.SizingModeFixedRiskAtStop {
 		t.Errorf("Proposal SizingMode = %q, want %q", proposal.SizingMode, event.SizingModeFixedRiskAtStop)
@@ -1966,6 +2023,15 @@ func TestReducerEmitsFixedRiskAtStopProposal(t *testing.T) {
 		t.Errorf("Proposal RiskAtStop = %v, want exactly the configured 0.02", proposal.RiskAtStop)
 	}
 	wantN := breakoutFixtureN(t, cfg)
+	// The realised-below-declared invariant holds in this mode too, where
+	// the declared figure is the configured input rather than a derivation.
+	wantRealised := 177 * (3 * wantN * cfg.DollarsPerPoint) / cfg.NotionalAccount.StartingEquity
+	if proposal.RealisedRiskAtStop != wantRealised {
+		t.Errorf("Proposal RealisedRiskAtStop = %v, want exactly %v", proposal.RealisedRiskAtStop, wantRealised)
+	}
+	if !(proposal.RealisedRiskAtStop < proposal.RiskAtStop) {
+		t.Errorf("Proposal RealisedRiskAtStop %v is not below the declared %v", proposal.RealisedRiskAtStop, proposal.RiskAtStop)
+	}
 	if proposal.ProtectiveStopIntent != 200-3*wantN {
 		t.Errorf("Proposal ProtectiveStopIntent = %v, want exactly %v (entry - 3N)", proposal.ProtectiveStopIntent, 200-3*wantN)
 	}
@@ -2041,18 +2107,18 @@ func TestReducerDeclinesWhenTheAccountIsTooSmallForOneShare(t *testing.T) {
 }
 
 // TestReducerDeclinesWhenTheProtectiveStopIntentIsNotPositive covers the
-// other fail-closed case: a Stop Multiple of 5 against N = 40.6989... puts
-// the Protective Stop at 200 - 203.49... = -3.49, below zero. A long equity
+// other fail-closed case: a Stop Multiple of 6 against N = 37.5777... puts
+// the Protective Stop at 200 - 225.46... = -25.46, below zero. A long equity
 // cannot fall below zero, so that stop is unreachable and the Unit would in
 // fact risk the entire position rather than the derived fraction. The
-// quantity is positive here (122 shares), so this is a genuinely separate
+// quantity is positive here (133 shares), so this is a genuinely separate
 // decline from the too-small-account case, and it must be journaled rather
 // than either proposed or silently dropped.
 func TestReducerDeclinesWhenTheProtectiveStopIntentIsNotPositive(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
-	cfg.StopMultiple = 5
+	cfg.StopMultiple = 6
 
 	emitted := runReducerOverHighs(t, "AAPL", breakoutFixtureHighs(), cfg)
 
@@ -2196,4 +2262,190 @@ func envelopesOfType(envelopes []event.Envelope, eventType string) []event.Envel
 		}
 	}
 	return matched
+}
+
+// --- PR #64 review: the decision bar is never an input to its own decision ---
+
+// runReducerOverBars replays a configuration event followed by the given
+// bars, in order, and returns every envelope the engine emitted. Unlike
+// runReducerOverHighs it lets a caller set a bar's low and close
+// independently of its high, which is what the two tests below need: they
+// vary a bar's True Range while holding its high — and therefore the
+// breakout level and the entry level — fixed.
+func runReducerOverBars(t *testing.T, cfg event.ConfigurationPayload, bars []event.CompletedBarPayload) []event.Envelope {
+	t.Helper()
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	envelopes := []event.Envelope{configEnvelopeWithConfig(t, 1, day(0), cfg)}
+	seq := uint64(2)
+	for _, bar := range bars {
+		envelopes = append(envelopes, barEnvelope(t, seq, bar, bar.PeriodEnd))
+		seq++
+	}
+
+	emitted, err := engine.Run(context.Background(), envelopes)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	return emitted
+}
+
+// breakoutBarsWithFinalRange builds #9's breakout fixture with the breakout
+// bar's True Range under the caller's control while its HIGH stays fixed at
+// 200.
+//
+// Bars 1..55 are the usual warm-up (high 100+i, low and close 100, so True
+// Range is exactly i). Bar 56's high is 200 in every case, so the breakout,
+// the Entry Channel it clears (155) and the entry level are identical no
+// matter what is passed; only its low, and therefore its True Range, changes.
+// The previous close is always 100, so the gap term (high - previous close)
+// is 100 and the bar's True Range is max(200-low, 100, 100-low) — a low of
+// 199 gives 100, a low of 1 gives 199.
+func breakoutBarsWithFinalRange(instrumentID string, finalLow, finalClose float64) []event.CompletedBarPayload {
+	bars := make([]event.CompletedBarPayload, 0, 56)
+	for i := 1; i <= 55; i++ {
+		bars = append(bars, completedBar(instrumentID, day(i), 100+float64(i), 100, 100))
+	}
+	return append(bars, completedBar(instrumentID, day(56), 200, finalLow, finalClose))
+}
+
+// TestReducerSizesFromNThroughThePrecedingBarNotTheSignalBar is the headline
+// invariant this review round exists to pin (Greptile P1 on PR #64, and the
+// same class of defect as the prototype's look-ahead Donchian read).
+//
+// Two fixtures differ in exactly one respect: the breakout bar's True Range.
+// One is a narrow bar (True Range 100, driven entirely by the gap from the
+// previous close), the other an extremely wide one (True Range 199). Their
+// highs — and so the breakout, the Entry Channel level cleared, and the entry
+// level — are identical.
+//
+// The Unit size and the Protective Stop intent must be IDENTICAL across the
+// two. Under ADR 0005 the entry is a resting order that fills *inside* the
+// breakout bar, so the quantity and the stop have to be computable before
+// that bar opens, from N through the previous completed bar. A bar that
+// changed its own N would shrink its own Unit and tighten its own stop by
+// having been volatile — deciding with information that did not exist when
+// the order was placed. CONTEXT.md's "Completed bar" states the rule
+// generally: the decision bar is never an input to its own decision.
+func TestReducerSizesFromNThroughThePrecedingBarNotTheSignalBar(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+
+	narrow := decodeTradeProposal(t, onlyProposal(t, runReducerOverBars(t, cfg, breakoutBarsWithFinalRange("AAPL", 199, 199.5))))
+	wide := decodeTradeProposal(t, onlyProposal(t, runReducerOverBars(t, cfg, breakoutBarsWithFinalRange("AAPL", 1, 150))))
+
+	if narrow.EntryLevel != wide.EntryLevel {
+		t.Fatalf("the two fixtures must differ only in the breakout bar's range: entry levels %v and %v", narrow.EntryLevel, wide.EntryLevel)
+	}
+	if narrow.N != wide.N {
+		t.Errorf("N = %v (narrow breakout bar) and %v (wide breakout bar); the bar being decided on must not change the N it is decided against", narrow.N, wide.N)
+	}
+	if narrow.Quantity != wide.Quantity {
+		t.Errorf("Quantity = %d (narrow breakout bar) and %d (wide breakout bar); a bar must not shrink its own Unit by having been volatile", narrow.Quantity, wide.Quantity)
+	}
+	if narrow.ProtectiveStopIntent != wide.ProtectiveStopIntent {
+		t.Errorf("ProtectiveStopIntent = %v (narrow) and %v (wide); a bar must not tighten its own stop by having been volatile", narrow.ProtectiveStopIntent, wide.ProtectiveStopIntent)
+	}
+
+	// And both agree with the Wilder average of the fifty-five PRECEDING
+	// True Ranges (1..55) — the same value breakoutFixtureN computes
+	// independently — rather than with anything the breakout bar contributed.
+	wantN := breakoutFixtureN(t, cfg)
+	if narrow.N != wantN {
+		t.Errorf("N = %v, want %v (the Wilder average of bars 1..55 only)", narrow.N, wantN)
+	}
+	if narrow.Quantity != 133 {
+		t.Errorf("Quantity = %d, want 133 (floor(5,000 / 37.5777...))", narrow.Quantity)
+	}
+}
+
+// TestAddThenEvaluateNWouldShrinkTheWideBarsOwnUnit is the negative half,
+// written in the same style as #9's TestLookAheadEntryChannelWouldMissTheBreakout:
+// it reproduces the rejected implementation locally, from scratch, and shows
+// it produces a materially different answer on the same fixture. It calls
+// nothing in internal/strategy or internal/indicator, so it cannot pass by
+// accidentally exercising the production code twice.
+//
+// The bug is one line of ordering: fold the bar's True Range into N and then
+// read N, rather than reading N and then folding. On the wide-bar fixture
+// that inflates N from 37.57... to 45.65..., which cuts the Unit from 133
+// shares to 109 and pulls the Protective Stop 16 points closer — all of it
+// caused by the bar the order was already resting inside.
+func TestAddThenEvaluateNWouldShrinkTheWideBarsOwnUnit(t *testing.T) {
+	t.Parallel()
+
+	const (
+		period          = 20
+		notionalAccount = 1_000_000.0
+		fraction        = 0.005
+		stopMultiple    = 2.0
+		entryLevel      = 200.0
+	)
+
+	// True Ranges of the fixture: bars 1..55 are 1..55, and the wide
+	// breakout bar is 199 (high 200, low 1, previous close 100).
+	trueRanges := make([]float64, 0, 56)
+	for i := 1; i <= 55; i++ {
+		trueRanges = append(trueRanges, float64(i))
+	}
+	trueRanges = append(trueRanges, 199)
+
+	// wilder replays the recursion over the first count True Ranges,
+	// seeded with the simple average of the first period of them.
+	wilder := func(count int) float64 {
+		var sum float64
+		for i := 0; i < period; i++ {
+			sum += trueRanges[i]
+		}
+		n := sum / period
+		for i := period; i < count; i++ {
+			n = (float64(period-1)*n + trueRanges[i]) / period
+		}
+		return n
+	}
+	quantity := func(n float64) int64 {
+		return int64(math.Floor(notionalAccount * fraction / n))
+	}
+
+	evaluateThenAdd := wilder(55) // N through bar 55: what the reducer must use
+	addThenEvaluate := wilder(56) // N including the bar being decided: the bug
+
+	if !(addThenEvaluate > evaluateThenAdd) {
+		t.Fatalf("fixture no longer exercises the defect: add-then-evaluate N %v is not above evaluate-then-add N %v", addThenEvaluate, evaluateThenAdd)
+	}
+	correctQuantity, buggyQuantity := quantity(evaluateThenAdd), quantity(addThenEvaluate)
+	if !(buggyQuantity < correctQuantity) {
+		t.Fatalf("add-then-evaluate quantity %d is not below the correct %d; the fixture must make the two outcomes genuinely opposite", buggyQuantity, correctQuantity)
+	}
+
+	// The production reducer, on the identical fixture, must produce the
+	// correct one — which is what makes this a regression guard rather than a
+	// restatement of the test author's mental model.
+	cfg := validConfigurationPayload()
+	proposal := decodeTradeProposal(t, onlyProposal(t, runReducerOverBars(t, cfg, breakoutBarsWithFinalRange("AAPL", 1, 150))))
+	if proposal.Quantity != correctQuantity {
+		t.Fatalf("reducer Quantity = %d, want %d (the add-then-evaluate implementation would give %d)", proposal.Quantity, correctQuantity, buggyQuantity)
+	}
+	if diff := math.Abs(proposal.N - evaluateThenAdd); diff > epsilon {
+		t.Fatalf("reducer N = %v, want %v (diff %v)", proposal.N, evaluateThenAdd, diff)
+	}
+}
+
+// onlyProposal returns the single trade proposal among the emitted
+// envelopes, failing the test if there is not exactly one.
+func onlyProposal(t *testing.T, emitted []event.Envelope) event.Envelope {
+	t.Helper()
+	proposals := envelopesOfType(emitted, event.TradeProposalEventType)
+	if len(proposals) != 1 {
+		t.Fatalf("got %d trade proposal(s), want exactly 1", len(proposals))
+	}
+	return proposals[0]
 }

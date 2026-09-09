@@ -285,7 +285,7 @@ func TestFixedRiskAtStopQuantityEqualsVolatilityNormalisedAtStopMultipleTwo(t *t
 		dollarsPerPoint        float64
 	}{
 		{"equities", 100_000, 0.005, 3, 1},
-		{"faith's fraction on equities", 1_000_000, 0.01, 40.69890254048816, 1},
+		{"faith's fraction on equities", 1_000_000, 0.01, 37.57779214788228, 1},
 		{"heating oil", 1_000_000, 0.01, 0.0141, 42_000},
 	}
 
@@ -621,6 +621,9 @@ func TestSizeUnitMatchesTheStandaloneArithmetic(t *testing.T) {
 		if unit.RiskAtStop != 0.01*2 {
 			t.Errorf("RiskAtStop = %v, want %v", unit.RiskAtStop, 0.01*2)
 		}
+		if want := 16 * (2 * 0.0141 * 42_000) / 1_000_000; unit.RealisedRiskAtStop != want {
+			t.Errorf("RealisedRiskAtStop = %v, want %v", unit.RealisedRiskAtStop, want)
+		}
 	})
 
 	t.Run("fixed-risk-at-stop", func(t *testing.T) {
@@ -644,7 +647,79 @@ func TestSizeUnitMatchesTheStandaloneArithmetic(t *testing.T) {
 		if unit.RiskAtStop != 0.01 {
 			t.Errorf("RiskAtStop = %v, want 0.01 (the input, under this mode)", unit.RiskAtStop)
 		}
+		if want := 166 * (3 * 2.0 * 1) / 100_000; unit.RealisedRiskAtStop != want {
+			t.Errorf("RealisedRiskAtStop = %v, want %v", unit.RealisedRiskAtStop, want)
+		}
 	})
+}
+
+// TestSizeUnitRealisedRiskAtStopShowsWhatTruncationLeftBehind covers the
+// distinction a reviewer of PR #64 asked for.
+//
+// RiskAtStop is the *declared budget* — the parameter the Sizing Mode is
+// keyed to, and under volatility-normalised it must stay exactly Unit
+// Volatility Fraction x Stop Multiple (ADR 0003; #10's acceptance criteria).
+// It is what the strategy set out to risk. RealisedRiskAtStop is what the
+// whole-share quantity that came out of the truncation actually risks. The
+// gap between the two is the truncation, and it always points the same way:
+// a truncated position risks LESS than the budget, never more.
+//
+// Faith's Heating Oil Unit makes the gap visible. The budget is 2 % (1 % per
+// N with a 2N stop, The Turtle Rules p.14 and p.22), but the truncation from
+// 16.88 to 16 contracts leaves the realised figure at
+// 16 x (2 x 0.0141 x 42,000) / 1,000,000 = 1.895 %. A journal that recorded
+// only the budget would overstate what this Unit stands to lose by roughly
+// five per cent of the figure.
+func TestSizeUnitRealisedRiskAtStopShowsWhatTruncationLeftBehind(t *testing.T) {
+	t.Parallel()
+
+	unit, err := sizing.SizeUnit(sizing.Inputs{
+		Mode:                   sizing.ModeVolatilityNormalised,
+		NotionalAccount:        1_000_000,
+		UnitVolatilityFraction: 0.01,
+		StopMultiple:           2,
+		N:                      0.0141,
+		DollarsPerPoint:        42_000,
+	})
+	if err != nil {
+		t.Fatalf("SizeUnit() error = %v", err)
+	}
+
+	if unit.RiskAtStop != 0.02 {
+		t.Errorf("RiskAtStop = %v, want exactly 0.02: the declared budget must not be adjusted for truncation (ADR 0003)", unit.RiskAtStop)
+	}
+	// 16 contracts x (2 x 0.0141 x 42,000) = 18,950.4, against a 1,000,000
+	// notional account.
+	if want := 16 * (2 * 0.0141 * 42_000) / 1_000_000; unit.RealisedRiskAtStop != want {
+		t.Errorf("RealisedRiskAtStop = %v, want %v", unit.RealisedRiskAtStop, want)
+	}
+	if !(unit.RealisedRiskAtStop < unit.RiskAtStop) {
+		t.Errorf("RealisedRiskAtStop %v is not below the declared RiskAtStop %v; truncation must leave a gap here, not close it",
+			unit.RealisedRiskAtStop, unit.RiskAtStop)
+	}
+
+	// An exactly-dividing case has no truncation, so the two coincide: the
+	// gap is the truncation and nothing else. 100,000 x 0.005 = 500;
+	// 500 / 2.5 = 200 exactly; 200 x (2 x 2.5 x 1) / 100,000 = 0.01 = the
+	// declared 0.005 x 2.
+	exact, err := sizing.SizeUnit(sizing.Inputs{
+		Mode:                   sizing.ModeVolatilityNormalised,
+		NotionalAccount:        100_000,
+		UnitVolatilityFraction: 0.005,
+		StopMultiple:           2,
+		N:                      2.5,
+		DollarsPerPoint:        1,
+	})
+	if err != nil {
+		t.Fatalf("SizeUnit(exact) error = %v", err)
+	}
+	if exact.Quantity != 200 {
+		t.Fatalf("Quantity = %d, want 200", exact.Quantity)
+	}
+	if exact.RealisedRiskAtStop != exact.RiskAtStop {
+		t.Errorf("RealisedRiskAtStop = %v, RiskAtStop = %v; with nothing truncated away the two must coincide",
+			exact.RealisedRiskAtStop, exact.RiskAtStop)
+	}
 }
 
 // TestSizeUnitFailsClosed covers the paths that belong to SizeUnit itself
@@ -720,7 +795,7 @@ func TestSizeUnitFailsClosed(t *testing.T) {
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("SizeUnit() error = %v, want substring %q", err, tt.wantErr)
 			}
-			if unit.Quantity != 0 || unit.RiskAtStop != 0 {
+			if unit.Quantity != 0 || unit.RiskAtStop != 0 || unit.RealisedRiskAtStop != 0 {
 				t.Fatalf("SizeUnit() = %+v alongside an error, want the zero Unit", unit)
 			}
 		})
@@ -744,6 +819,10 @@ func TestSizeUnitFailsClosed(t *testing.T) {
 //     the derived fraction, never more. This is the invariant that a
 //     rounding bug (or the float boundary in
 //     TestUnitQuantityTruncatesToTheTrueFloorAtAFloatBoundary) would break.
+//     Its per-account form is RealisedRiskAtStop <= RiskAtStop, which is
+//     asserted alongside it: the realised figure is exactly that product
+//     divided by the Notional Account, and it may never exceed the declared
+//     budget in either mode.
 //  4. In volatility-normalised mode the tighter 1N form also holds:
 //     Quantity x N x DollarsPerPoint <= NotionalAccount x
 //     UnitVolatilityFraction. That is the budget The Turtle Rules p.14
@@ -756,7 +835,7 @@ func TestSizeUnitGridInvariants(t *testing.T) {
 	fractions := []float64{0.0025, 0.005, 0.01, 0.02}
 	// Including Faith's Heating Oil N and the N the reducer fixture in
 	// internal/strategy produces, so the grid spans four orders of magnitude.
-	nValues := []float64{0.0141, 0.25, 1, 2.5, 3, 40.69890254048816, 137.5}
+	nValues := []float64{0.0141, 0.25, 1, 2.5, 3, 37.57779214788228, 137.5}
 	stopMultiples := []float64{1, 1.5, 2, 3, 4}
 	dollarsPerPoints := []float64{1, 100, 42_000}
 
@@ -795,6 +874,13 @@ func TestSizeUnitGridInvariants(t *testing.T) {
 							t.Fatalf("volatility-normalised risk at stop exceeded: %v > %v",
 								atStop, account*volatilityNormalised.RiskAtStop)
 						}
+						if want := float64(volatilityNormalised.Quantity) * (stopMultiple * n * dollarsPerPoint) / account; volatilityNormalised.RealisedRiskAtStop != want {
+							t.Fatalf("RealisedRiskAtStop = %v, want exactly %v", volatilityNormalised.RealisedRiskAtStop, want)
+						}
+						if volatilityNormalised.RealisedRiskAtStop > volatilityNormalised.RiskAtStop {
+							t.Fatalf("realised risk %v exceeds the declared budget %v at account=%v fraction=%v n=%v stopMultiple=%v dollarsPerPoint=%v: truncation may only ever risk less",
+								volatilityNormalised.RealisedRiskAtStop, volatilityNormalised.RiskAtStop, account, fraction, n, stopMultiple, dollarsPerPoint)
+						}
 
 						fixed, err := sizing.SizeUnit(sizing.Inputs{
 							Mode:                   sizing.ModeFixedRiskAtStop,
@@ -817,6 +903,13 @@ func TestSizeUnitGridInvariants(t *testing.T) {
 						}
 						if atStop := float64(fixed.Quantity) * (stopMultiple * n * dollarsPerPoint); atStop > account*fixed.RiskAtStop {
 							t.Fatalf("fixed-risk-at-stop risk at stop exceeded: %v > %v", atStop, account*fixed.RiskAtStop)
+						}
+						if want := float64(fixed.Quantity) * (stopMultiple * n * dollarsPerPoint) / account; fixed.RealisedRiskAtStop != want {
+							t.Fatalf("RealisedRiskAtStop = %v, want exactly %v", fixed.RealisedRiskAtStop, want)
+						}
+						if fixed.RealisedRiskAtStop > fixed.RiskAtStop {
+							t.Fatalf("realised risk %v exceeds the declared budget %v at account=%v fraction=%v n=%v stopMultiple=%v dollarsPerPoint=%v",
+								fixed.RealisedRiskAtStop, fixed.RiskAtStop, account, fraction, n, stopMultiple, dollarsPerPoint)
 						}
 
 						// ADR 0003's identity, re-asserted across the whole
