@@ -121,7 +121,7 @@ func TestReducerEmitsDrawdownStepEventsForAccountSnapshots(t *testing.T) {
 		t.Fatalf("replay.New() error = %v", err)
 	}
 
-	cfg := validConfigurationPayload() // NotionalAccount.StartingEquity = 1,000,000
+	cfg := validConfigurationPayload() // starting equity is 1,000,000
 	snap1 := accountSnapshotPayload(snapshotBefore(1), 900_000)
 	snap2 := accountSnapshotPayload(snapshotBefore(2), 820_000)
 	snap3 := accountSnapshotPayload(snapshotBefore(3), 950_000) // partial recovery: no step
