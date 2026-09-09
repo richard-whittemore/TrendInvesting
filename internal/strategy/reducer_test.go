@@ -13,6 +13,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/indicator"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
@@ -48,6 +49,17 @@ func validConfigurationPayload() event.ConfigurationPayload {
 		// default. Whoever owns the Baseline configuration (#50) must pick
 		// this deliberately.
 		TierBDistanceInN: 1.0,
+		// #10: the Baseline trades US equities, where one point of price is
+		// exactly one dollar per share. Faith's futures examples need the
+		// contract multiplier instead (42,000 for Heating Oil, The Turtle
+		// Rules p.15), which is why this is a parameter rather than a
+		// hard-coded 1.
+		DollarsPerPoint: 1,
+		// #10: Risk at Stop is derived, never configured, under the Baseline's
+		// volatility-normalised Sizing Mode (ADR 0003) — so this field must
+		// be zero here, and ConfigurationPayload.Validate rejects any other
+		// value while SizingMode is volatility-normalised.
+		RiskAtStopFraction: 0,
 		NotionalAccount: event.NotionalAccountConfig{
 			StartingEquity: 1_000_000,
 			RebasingMonth:  1,
@@ -1747,4 +1759,438 @@ func TestReplayingBreakoutFixtureTwiceYieldsByteIdenticalEmissions(t *testing.T)
 	if !bytes.Equal(firstBytes, secondBytes) {
 		t.Fatalf("replay is not deterministic:\n  first:  %s\n  second: %s", firstBytes, secondBytes)
 	}
+}
+
+// --- #10: Unit sizing and the trade proposal ---
+
+func decodeTradeProposal(t *testing.T, envelope event.Envelope) event.TradeProposalPayload {
+	t.Helper()
+	if envelope.Type != event.TradeProposalEventType {
+		t.Fatalf("envelope.Type = %q, want %q", envelope.Type, event.TradeProposalEventType)
+	}
+	var payload event.TradeProposalPayload
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(payload) error = %v", err)
+	}
+	return payload
+}
+
+func decodeProposalDeclined(t *testing.T, envelope event.Envelope) event.ProposalDeclinedPayload {
+	t.Helper()
+	if envelope.Type != event.ProposalDeclinedEventType {
+		t.Fatalf("envelope.Type = %q, want %q", envelope.Type, event.ProposalDeclinedEventType)
+	}
+	var payload event.ProposalDeclinedPayload
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(payload) error = %v", err)
+	}
+	return payload
+}
+
+// breakoutFixtureN is N on the breakout bar of breakoutFixtureHighs, computed
+// independently by referenceSetupSteps rather than read back from the
+// reducer, so the expected quantities below are anchored to the same
+// hand-checkable arithmetic as #8's and #9's expectations.
+func breakoutFixtureN(t *testing.T, cfg event.ConfigurationPayload) float64 {
+	t.Helper()
+	steps := referenceSetupSteps(breakoutFixtureHighs(), indicator.DefaultPeriod, cfg.EntryChannelLength, cfg.TierBDistanceInN)
+	return steps[len(steps)-1].n
+}
+
+// TestReducerEmitsTradeProposalOnSignal is #10's primary event-seam test:
+// #9's breakout fixture in, and now a trade proposal out alongside the
+// Signal, with the emission order Setup-evaluated -> Signal -> Proposal in
+// one Apply return.
+//
+// Everything asserted here is hand-derivable from the fixture. The breakout
+// bar's high is 200 (breakoutFixtureHighs), so the entry level is 200 — the
+// level the Signal fired at; what actually fills there is #18's decision, not
+// this ticket's. N on that bar is 40.69890254048816 (the same value #9's
+// Signal test asserts). The Baseline configuration is a $1,000,000 Notional
+// Account at a 0.5 % Unit Volatility Fraction, so:
+//
+//	quantity = floor(1,000,000 x 0.005 / (40.6989... x 1))
+//	         = floor(5,000 / 40.6989...) = floor(122.85...) = 122 shares
+//
+// Risk at Stop is derived, never configured (ADR 0003): 0.005 x 2 = 0.01. The
+// Protective Stop intent is 200 - 2 x 40.6989... = 118.60...
+func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	highs := breakoutFixtureHighs()
+	emitted := runReducerOverHighs(t, "AAPL", highs, cfg)
+
+	// 55 warm-up bars emit one Setup-evaluated event each; the breakout bar
+	// emits three (Setup-evaluated, Signal, Proposal).
+	if len(emitted) != len(highs)+2 {
+		t.Fatalf("len(emitted) = %d, want %d (55 x 1, plus the breakout bar's 3)", len(emitted), len(highs)+2)
+	}
+
+	setupIndex, signalIndex, proposalIndex := len(emitted)-3, len(emitted)-2, len(emitted)-1
+	wantOrder := []string{event.SetupEvaluatedEventType, event.SignalEventType, event.TradeProposalEventType}
+	for offset, want := range wantOrder {
+		index := setupIndex + offset
+		if emitted[index].Type != want {
+			t.Fatalf("emitted[%d].Type = %q, want %q (emission order must be Setup-evaluated, Signal, Proposal)", index, emitted[index].Type, want)
+		}
+	}
+
+	proposalEnvelope := emitted[proposalIndex]
+	wantPeriodEnd := day(56)
+	wantID := "proposal:AAPL:2026-02-27T00:00:00.000000000Z"
+	if proposalEnvelope.ID != wantID {
+		t.Errorf("Proposal ID = %q, want %q (deterministic and reproducible on replay)", proposalEnvelope.ID, wantID)
+	}
+	if proposalEnvelope.SchemaVersion != event.TradeProposalSchemaVersion {
+		t.Errorf("Proposal SchemaVersion = %d, want %d", proposalEnvelope.SchemaVersion, event.TradeProposalSchemaVersion)
+	}
+	if proposalEnvelope.EnvelopeVersion != event.CurrentEnvelopeVersion {
+		t.Errorf("Proposal EnvelopeVersion = %d, want %d", proposalEnvelope.EnvelopeVersion, event.CurrentEnvelopeVersion)
+	}
+	if !proposalEnvelope.EventTime.Equal(wantPeriodEnd) {
+		t.Errorf("Proposal EventTime = %v, want %v (the period end, never a wall clock read)", proposalEnvelope.EventTime, wantPeriodEnd)
+	}
+	if !proposalEnvelope.RecordedAt.Equal(emitted[signalIndex].RecordedAt) {
+		t.Errorf("Proposal RecordedAt = %v, want the input's %v", proposalEnvelope.RecordedAt, emitted[signalIndex].RecordedAt)
+	}
+	if proposalEnvelope.Source != "reducer" {
+		t.Errorf("Proposal Source = %q, want %q", proposalEnvelope.Source, "reducer")
+	}
+	if proposalEnvelope.StrategyVersion != testStrategyVersion {
+		t.Errorf("Proposal StrategyVersion = %q, want %q", proposalEnvelope.StrategyVersion, testStrategyVersion)
+	}
+	if proposalEnvelope.ConfigurationHash != testConfigurationHash {
+		t.Errorf("Proposal ConfigurationHash = %q, want %q", proposalEnvelope.ConfigurationHash, testConfigurationHash)
+	}
+
+	proposal := decodeTradeProposal(t, proposalEnvelope)
+	if proposal.InstrumentID != "AAPL" {
+		t.Errorf("Proposal InstrumentID = %q, want AAPL", proposal.InstrumentID)
+	}
+	if !proposal.PeriodEnd.Equal(wantPeriodEnd) {
+		t.Errorf("Proposal PeriodEnd = %v, want %v", proposal.PeriodEnd, wantPeriodEnd)
+	}
+	// The proposal names the Signal envelope that caused it, so a journal
+	// reader can join the two without inferring anything from timing.
+	if proposal.SignalID != emitted[signalIndex].ID {
+		t.Errorf("Proposal SignalID = %q, want the Signal envelope's ID %q", proposal.SignalID, emitted[signalIndex].ID)
+	}
+	if proposal.Rule != event.RuleUnitSizingVolatilityNormalised {
+		t.Errorf("Proposal Rule = %q, want %q", proposal.Rule, event.RuleUnitSizingVolatilityNormalised)
+	}
+	if proposal.ADR != event.ADRUnitSizing {
+		t.Errorf("Proposal ADR = %q, want %q", proposal.ADR, event.ADRUnitSizing)
+	}
+	if proposal.Direction != event.DirectionLong {
+		t.Errorf("Proposal Direction = %q, want %q", proposal.Direction, event.DirectionLong)
+	}
+	if proposal.SizingMode != event.SizingModeVolatilityNormalised {
+		t.Errorf("Proposal SizingMode = %q, want %q", proposal.SizingMode, event.SizingModeVolatilityNormalised)
+	}
+	// The entry level is the breakout high — the level the Signal fired at.
+	// What actually fills there is #18's concern (ADR 0013 puts slippage in
+	// the fill model, not in sizing), so no slippage is applied here.
+	if proposal.EntryLevel != 200 {
+		t.Errorf("Proposal EntryLevel = %v, want 200 (the breakout high)", proposal.EntryLevel)
+	}
+	if proposal.Quantity != 122 {
+		t.Errorf("Proposal Quantity = %d, want 122 (floor(5,000 / 40.6989...))", proposal.Quantity)
+	}
+	wantN := breakoutFixtureN(t, cfg)
+	if proposal.N != wantN {
+		t.Errorf("Proposal N = %v, want %v", proposal.N, wantN)
+	}
+	if proposal.UnitVolatilityFraction != cfg.UnitVolatilityFraction {
+		t.Errorf("Proposal UnitVolatilityFraction = %v, want %v", proposal.UnitVolatilityFraction, cfg.UnitVolatilityFraction)
+	}
+	if proposal.StopMultiple != cfg.StopMultiple {
+		t.Errorf("Proposal StopMultiple = %v, want %v", proposal.StopMultiple, cfg.StopMultiple)
+	}
+	if proposal.DollarsPerPoint != cfg.DollarsPerPoint {
+		t.Errorf("Proposal DollarsPerPoint = %v, want %v", proposal.DollarsPerPoint, cfg.DollarsPerPoint)
+	}
+	// The Notional Account used this ticket is the configured starting
+	// equity. Drawdown Steps and yearly re-basing (ADR 0007) are #16/#17.
+	if proposal.NotionalAccount != cfg.NotionalAccount.StartingEquity {
+		t.Errorf("Proposal NotionalAccount = %v, want the configured starting equity %v", proposal.NotionalAccount, cfg.NotionalAccount.StartingEquity)
+	}
+	// Exact equality is deliberate: the journal's Risk at Stop must be the
+	// identical float64 the derivation produces (ADR 0003).
+	if proposal.RiskAtStop != cfg.UnitVolatilityFraction*cfg.StopMultiple {
+		t.Errorf("Proposal RiskAtStop = %v, want exactly %v (0.005 x 2)", proposal.RiskAtStop, cfg.UnitVolatilityFraction*cfg.StopMultiple)
+	}
+	if proposal.ProtectiveStopIntent != 200-cfg.StopMultiple*wantN {
+		t.Errorf("Proposal ProtectiveStopIntent = %v, want exactly %v (entry - 2N)", proposal.ProtectiveStopIntent, 200-cfg.StopMultiple*wantN)
+	}
+	if err := proposal.Validate(); err != nil {
+		t.Errorf("emitted proposal fails its own Validate(): %v", err)
+	}
+}
+
+// TestReducerEmitsFixedRiskAtStopProposal runs the same fixture under the
+// Sublime Variant's Sizing Mode (ADR 0003; [M p.56]). Risk at Stop is 2 % —
+// the configured input, not a derivation — and the 3N stop makes the
+// quantity 1,000,000 x 0.02 / (3 x 40.6989...) = 163.80... -> 163, a
+// different number from the Baseline's 122 on the identical bar. That
+// difference is the whole reason the Sizing Mode is explicit.
+func TestReducerEmitsFixedRiskAtStopProposal(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	cfg.SizingMode = event.SizingModeFixedRiskAtStop
+	cfg.StopMultiple = 3
+	cfg.RiskAtStopFraction = 0.02
+
+	emitted := runReducerOverHighs(t, "AAPL", breakoutFixtureHighs(), cfg)
+
+	proposals := envelopesOfType(emitted, event.TradeProposalEventType)
+	if len(proposals) != 1 {
+		t.Fatalf("got %d proposal(s), want exactly 1", len(proposals))
+	}
+
+	proposal := decodeTradeProposal(t, proposals[0])
+	if proposal.Quantity != 163 {
+		t.Errorf("Proposal Quantity = %d, want 163 (floor(20,000 / (3 x 40.6989...)))", proposal.Quantity)
+	}
+	if proposal.SizingMode != event.SizingModeFixedRiskAtStop {
+		t.Errorf("Proposal SizingMode = %q, want %q", proposal.SizingMode, event.SizingModeFixedRiskAtStop)
+	}
+	if proposal.Rule != event.RuleUnitSizingFixedRiskAtStop {
+		t.Errorf("Proposal Rule = %q, want %q", proposal.Rule, event.RuleUnitSizingFixedRiskAtStop)
+	}
+	if proposal.RiskAtStop != 0.02 {
+		t.Errorf("Proposal RiskAtStop = %v, want exactly the configured 0.02", proposal.RiskAtStop)
+	}
+	wantN := breakoutFixtureN(t, cfg)
+	if proposal.ProtectiveStopIntent != 200-3*wantN {
+		t.Errorf("Proposal ProtectiveStopIntent = %v, want exactly %v (entry - 3N)", proposal.ProtectiveStopIntent, 200-3*wantN)
+	}
+	if err := proposal.Validate(); err != nil {
+		t.Errorf("emitted proposal fails its own Validate(): %v", err)
+	}
+}
+
+// TestReducerDeclinesWhenTheAccountIsTooSmallForOneShare is the fail-closed
+// case the ticket names: the Signal still fires (the strategy did recognise
+// its entry condition), but 100 x 0.005 = $0.50 of 1N budget cannot buy one
+// share at N = 40.6989..., so the quantity truncates to zero. No proposal is
+// emitted, and a strategy.proposal.declined event records why — a silent drop
+// would leave the journal unable to distinguish "no Signal" from "a Signal
+// that produced nothing" (The Turtle Rules p.15 notes small accounts lose
+// diversification exactly because truncation is coarse).
+func TestReducerDeclinesWhenTheAccountIsTooSmallForOneShare(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	cfg.NotionalAccount.StartingEquity = 100
+
+	highs := breakoutFixtureHighs()
+	emitted := runReducerOverHighs(t, "AAPL", highs, cfg)
+
+	if len(emitted) != len(highs)+2 {
+		t.Fatalf("len(emitted) = %d, want %d (55 x 1, plus the breakout bar's Setup-evaluated, Signal and decline)", len(emitted), len(highs)+2)
+	}
+	if got := len(envelopesOfType(emitted, event.SignalEventType)); got != 1 {
+		t.Fatalf("got %d Signal(s), want exactly 1: sizing declines the trade, it does not suppress the Signal", got)
+	}
+	if got := len(envelopesOfType(emitted, event.TradeProposalEventType)); got != 0 {
+		t.Fatalf("got %d proposal(s), want 0", got)
+	}
+
+	declines := envelopesOfType(emitted, event.ProposalDeclinedEventType)
+	if len(declines) != 1 {
+		t.Fatalf("got %d decline(s), want exactly 1", len(declines))
+	}
+	declineEnvelope := declines[0]
+	wantID := "proposal-declined:AAPL:2026-02-27T00:00:00.000000000Z"
+	if declineEnvelope.ID != wantID {
+		t.Errorf("Decline ID = %q, want %q", declineEnvelope.ID, wantID)
+	}
+	if declineEnvelope.SchemaVersion != event.ProposalDeclinedSchemaVersion {
+		t.Errorf("Decline SchemaVersion = %d, want %d", declineEnvelope.SchemaVersion, event.ProposalDeclinedSchemaVersion)
+	}
+	if !declineEnvelope.EventTime.Equal(day(56)) {
+		t.Errorf("Decline EventTime = %v, want %v", declineEnvelope.EventTime, day(56))
+	}
+	// The decline is the third emission of the bar, in the Signal's place in
+	// the ordering: Setup-evaluated, Signal, then the sizing outcome.
+	if emitted[len(emitted)-1].Type != event.ProposalDeclinedEventType {
+		t.Errorf("last emission = %q, want the decline", emitted[len(emitted)-1].Type)
+	}
+
+	decline := decodeProposalDeclined(t, declineEnvelope)
+	if decline.InstrumentID != "AAPL" {
+		t.Errorf("Decline InstrumentID = %q, want AAPL", decline.InstrumentID)
+	}
+	if decline.SignalID != envelopesOfType(emitted, event.SignalEventType)[0].ID {
+		t.Errorf("Decline SignalID = %q, want the Signal envelope's ID", decline.SignalID)
+	}
+	if decline.Reason != event.DeclineReasonQuantityBelowOneUnit {
+		t.Errorf("Decline Reason = %q, want %q", decline.Reason, event.DeclineReasonQuantityBelowOneUnit)
+	}
+	if decline.Detail == "" {
+		t.Error("Decline Detail is empty; the journal must record the numbers that produced the decline")
+	}
+	if err := decline.Validate(); err != nil {
+		t.Errorf("emitted decline fails its own Validate(): %v", err)
+	}
+}
+
+// TestReducerDeclinesWhenTheProtectiveStopIntentIsNotPositive covers the
+// other fail-closed case: a Stop Multiple of 5 against N = 40.6989... puts
+// the Protective Stop at 200 - 203.49... = -3.49, below zero. A long equity
+// cannot fall below zero, so that stop is unreachable and the Unit would in
+// fact risk the entire position rather than the derived fraction. The
+// quantity is positive here (122 shares), so this is a genuinely separate
+// decline from the too-small-account case, and it must be journaled rather
+// than either proposed or silently dropped.
+func TestReducerDeclinesWhenTheProtectiveStopIntentIsNotPositive(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	cfg.StopMultiple = 5
+
+	emitted := runReducerOverHighs(t, "AAPL", breakoutFixtureHighs(), cfg)
+
+	if got := len(envelopesOfType(emitted, event.TradeProposalEventType)); got != 0 {
+		t.Fatalf("got %d proposal(s), want 0", got)
+	}
+	declines := envelopesOfType(emitted, event.ProposalDeclinedEventType)
+	if len(declines) != 1 {
+		t.Fatalf("got %d decline(s), want exactly 1", len(declines))
+	}
+	decline := decodeProposalDeclined(t, declines[0])
+	if decline.Reason != event.DeclineReasonStopIntentNotPositive {
+		t.Fatalf("Decline Reason = %q, want %q", decline.Reason, event.DeclineReasonStopIntentNotPositive)
+	}
+}
+
+// TestReducerRejectsVolatilityNormalisedConfigurationThatConfiguresRiskAtStop
+// is the ticket's named negative test, at the event seam: Risk at Stop must
+// not be directly configurable in the Baseline mode (ADR 0003 — it is
+// derived, never configured). A configuration that sets both
+// SizingMode: volatility-normalised and a risk-at-stop fraction is rejected
+// at configuration time, before any bar can be sized from it, rather than
+// being quietly ignored — quietly ignoring it is exactly how a run comes to
+// believe it is risking a figure that nothing in the arithmetic honours.
+func TestReducerRejectsVolatilityNormalisedConfigurationThatConfiguresRiskAtStop(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	cfg.RiskAtStopFraction = 0.01 // even the "correct" 0.005 x 2 must be rejected
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	_, err = engine.Run(context.Background(), []event.Envelope{configEnvelopeWithConfig(t, 1, day(0), cfg)})
+	if err == nil {
+		t.Fatal("Run() error = nil, want a rejection of a volatility-normalised configuration that configures Risk at Stop")
+	}
+	if !strings.Contains(err.Error(), "risk at stop") {
+		t.Fatalf("Run() error = %v, want it to name the risk at stop fraction", err)
+	}
+}
+
+// TestReducerRejectsConfigurationWithTheSupersededSchemaVersion pins #10's
+// schema bump at the reducer: a configuration recorded under schema 2 (before
+// DollarsPerPoint and RiskAtStopFraction existed) must be rejected outright,
+// not decoded with both fields defaulting to the float64 zero. A zero
+// DollarsPerPoint would divide by zero, and a zero RiskAtStopFraction would
+// make a fixed-risk-at-stop run size every Unit from a risk budget of
+// nothing — both silent, both capital-safety defects. ADR 0015's rule: an
+// older schema is rejected, never silently upgraded, until an explicit
+// upcaster exists.
+func TestReducerRejectsConfigurationWithTheSupersededSchemaVersion(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	envelope := configEnvelope(t, 1, day(0))
+	envelope.SchemaVersion = 2
+
+	_, err = engine.Run(context.Background(), []event.Envelope{envelope})
+	if err == nil {
+		t.Fatal("Run() error = nil, want a rejection of a schema-2 configuration")
+	}
+	if !strings.Contains(err.Error(), "schema version") {
+		t.Fatalf("Run() error = %v, want it to name the schema version", err)
+	}
+}
+
+// TestReplayingProposalFixtureTwiceYieldsByteIdenticalEmissions extends #8's
+// replay-equivalence property to the two new emissions: two independent runs
+// of the proposal fixture through two fresh Reducer instances must produce
+// byte-identical envelopes, proving the sizing step introduces no wall-clock
+// read, no randomness and no map-iteration-order dependence.
+func TestReplayingProposalFixtureTwiceYieldsByteIdenticalEmissions(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	first := runReducerOverHighs(t, "AAPL", breakoutFixtureHighs(), cfg)
+	second := runReducerOverHighs(t, "AAPL", breakoutFixtureHighs(), cfg)
+
+	if len(envelopesOfType(first, event.TradeProposalEventType)) != 1 {
+		t.Fatal("fixture must emit exactly one proposal for this property to mean anything")
+	}
+	if len(first) != len(second) {
+		t.Fatalf("len(first) = %d, len(second) = %d", len(first), len(second))
+	}
+	for i := range first {
+		a, err := json.Marshal(first[i])
+		if err != nil {
+			t.Fatalf("Marshal(first[%d]) error = %v", i, err)
+		}
+		b, err := json.Marshal(second[i])
+		if err != nil {
+			t.Fatalf("Marshal(second[%d]) error = %v", i, err)
+		}
+		if !bytes.Equal(a, b) {
+			t.Fatalf("emission %d differs between runs:\n  first:  %s\n  second: %s", i, a, b)
+		}
+	}
+}
+
+// TestSizingModeConstantsMatchTheEventContract pins the one seam where the
+// two enumerations could drift. internal/sizing is a pure arithmetic package
+// that deliberately imports nothing from internal/event (the same rule
+// internal/indicator follows), so it declares its own Mode; the reducer maps
+// event.SizingMode onto it with an explicit fail-closed switch. This test
+// makes the string values equal by assertion, so a rename on either side is a
+// test failure rather than a run that silently falls through to the
+// unrecognised-mode branch.
+func TestSizingModeConstantsMatchTheEventContract(t *testing.T) {
+	t.Parallel()
+
+	if string(event.SizingModeVolatilityNormalised) != string(sizing.ModeVolatilityNormalised) {
+		t.Errorf("event.SizingModeVolatilityNormalised = %q, sizing.ModeVolatilityNormalised = %q", event.SizingModeVolatilityNormalised, sizing.ModeVolatilityNormalised)
+	}
+	if string(event.SizingModeFixedRiskAtStop) != string(sizing.ModeFixedRiskAtStop) {
+		t.Errorf("event.SizingModeFixedRiskAtStop = %q, sizing.ModeFixedRiskAtStop = %q", event.SizingModeFixedRiskAtStop, sizing.ModeFixedRiskAtStop)
+	}
+}
+
+// envelopesOfType filters emissions by event type, the shape several tests
+// above repeat by hand.
+func envelopesOfType(envelopes []event.Envelope, eventType string) []event.Envelope {
+	var matched []event.Envelope
+	for _, e := range envelopes {
+		if e.Type == eventType {
+			matched = append(matched, e)
+		}
+	}
+	return matched
 }
