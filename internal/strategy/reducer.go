@@ -304,13 +304,22 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		signalPayload := event.SignalPayload{
 			InstrumentID: bar.InstrumentID,
 			PeriodEnd:    bar.PeriodEnd,
-			Rule:         event.RuleSystem2Entry,
-			ADR:          event.ADRSystem2Baseline,
-			Direction:    event.DirectionLong,
-			// The length this Signal was actually computed with, not a
-			// hard-coded 55: a Variant configured with a different
-			// EntryChannelLength must not have its Signals mislabelled with
-			// the Baseline's length.
+			// Rule names the mechanism (a breakout above the preceding
+			// EntryChannelLength bars' high), not one of Faith's system
+			// labels: System 1 is a 20-day channel and System 2 a 55-day
+			// one (ADR 0002), so a name tied to "System 2" would misdescribe
+			// a Variant configured with EntryChannelLength 20 — that is
+			// System 1's channel, not System 2's. ADR names the rule's
+			// defining ADR (0002 defines the breakout rule and selects 55
+			// for the Baseline), not "the Baseline" or "the Variant
+			// currently running": whether this run IS the Baseline or a
+			// declared Variant is what the envelope's ConfigurationHash and
+			// StrategyVersion establish (ADR 0012), never this field. The
+			// length this Signal was actually computed with, not a
+			// hard-coded 55, is EntryChannelLength below.
+			Rule:               event.RuleEntryChannelBreakout,
+			ADR:                event.ADREntryChannelBreakout,
+			Direction:          event.DirectionLong,
 			EntryChannelLength: r.entryChannelLength,
 			EntryChannelHigh:   entryChannelHigh,
 			BreakoutHigh:       view.High,

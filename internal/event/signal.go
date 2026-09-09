@@ -17,17 +17,32 @@ const SignalEventType = "strategy.signal"
 // the Envelope's SchemaVersion field.
 const SignalSchemaVersion uint32 = 1
 
-// RuleSystem2Entry names System 2's Entry Channel breakout rule for
-// SignalPayload.Rule (The Turtle Rules p.19; ADR 0002). The channel length
-// is not baked into this name — a Variant may configure a different
-// EntryChannelLength than the Baseline's 55, and a rule name that hard-coded
-// "55" would misname the rule that actually produced a Variant's Signal.
-// SignalPayload.EntryChannelLength carries the length actually used.
-const RuleSystem2Entry = "system2.entry"
+// RuleEntryChannelBreakout names the rule for SignalPayload.Rule: a
+// breakout above the highest high of the preceding EntryChannelLength
+// completed bars (The Turtle Rules p.19; ADR 0002). The name describes what
+// the rule computes, not which of Faith's systems it happens to match at a
+// given length: System 1 is a 20-day channel and System 2 a 55-day one
+// (ADR 0002), so a name like "system2.entry" would misdescribe a Variant
+// configured with EntryChannelLength 20 — it would be System 1's channel,
+// not System 2's, and the rule name would be exactly as wrong as a
+// hard-coded "55" was. Naming by mechanism rather than by Faith's system
+// label sidesteps that: the rule is the same breakout computation at every
+// length, and SignalPayload.EntryChannelLength carries which length it was
+// actually evaluated at.
+const RuleEntryChannelBreakout = "entry.channel.breakout"
 
-// ADRSystem2Baseline is the ADR SignalPayload.ADR cites for a Baseline
-// Signal: ADR 0002, which selects System 2 as the Baseline.
-const ADRSystem2Baseline = "0002"
+// ADREntryChannelBreakout is the ADR SignalPayload.ADR cites: ADR 0002, the
+// decision that defines the entry-channel breakout rule itself and selects
+// 55 bars for the Baseline. This field names the rule's defining ADR, not
+// "the Baseline" or "the Variant currently running" — ADR 0002 applies
+// identically to a Signal produced at the Baseline's 55 and to one produced
+// by a Variant at some other configured length, because both are instances
+// of the same ADR-0002 rule at different EntryChannelLength values.
+// Whether a given run *is* the Baseline or a declared Variant is what the
+// envelope's ConfigurationHash and StrategyVersion establish (ADR 0012),
+// not this field: a Signal cites the rule that produced it, never a
+// per-variant ADR that does not exist.
+const ADREntryChannelBreakout = "0002"
 
 // DirectionLong is the only Direction value SignalPayload accepts today.
 // The Baseline is long-only (CONTEXT.md: "Universe" describes a stock-first
