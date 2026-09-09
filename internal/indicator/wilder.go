@@ -43,11 +43,19 @@ func WilderNext(previousN, tr float64, period int) float64 {
 //
 // The Turtle Rules p.13: N is seeded with a simple average of the first
 // Period True Range values (SMASeed), then updated by the Wilder recursion
-// (WilderNext) from the (Period+1)th completed bar onward. Ready reports
-// false until exactly Period values have been added; Value before that
-// point is the zero value (0), which is never a valid reading (True Range
-// is never negative, so a genuine N is never exactly zero in practice) and
-// must not be used for a decision — callers must check Ready first.
+// (WilderNext) from the (Period+1)th completed bar onward.
+//
+// Ready reports only whether bar-count warm-up is complete — whether at
+// least Period values have been added — not whether Value is a *usable*
+// volatility reading. Value before Ready is the zero value (0), which must
+// never be used for a decision. But Value can also legitimately be exactly 0
+// once Ready is true: Period flat bars (high==low==close, True Range 0 every
+// time) produce a seed of 0, and the Wilder recursion carries a 0 forward
+// until a non-zero True Range arrives. A genuine N is never negative, but it
+// can be zero. Distinguishing "warm-up complete" from "N is usable" is
+// therefore the caller's responsibility — see
+// event.SetupEvaluatedPayload's NReady, which internal/strategy.Reducer
+// computes as Ready() && Value() > 0.
 type WilderAverage struct {
 	period int
 	seed   []float64 // buffered True Range values until the seed is computed
@@ -84,7 +92,8 @@ func (w *WilderAverage) Add(tr float64) {
 }
 
 // Ready reports whether at least Period True Range values have been added,
-// i.e. whether Value is a genuine N rather than its unset zero value.
+// i.e. whether bar-count warm-up is complete. This is not the same as
+// "Value is a usable volatility reading" — see the type's doc comment.
 func (w *WilderAverage) Ready() bool {
 	return w.count >= w.period
 }
