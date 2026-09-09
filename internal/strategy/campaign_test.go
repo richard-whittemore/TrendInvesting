@@ -855,6 +855,124 @@ func TestReducerRejectsUndecodableFillPayload(t *testing.T) {
 	}
 }
 
+// --- When a fill could have executed (PR #69 review) --------------------
+
+// TestFillInsideTheDecisionBarOpensTheCampaignAtThatIntrabarTime is ADR 0005's
+// case, and the reason this review finding could not be fixed the way it was
+// literally written.
+//
+// The entry is a **resting order that fills inside the breakout bar** — that
+// is the whole fill model — so a fill timestamped earlier than the decision
+// bar's period end is the normal backtest case, not an anomaly. Rejecting
+// `FilledAt < PeriodEnd` would reject every legitimate fill #18's simulator
+// will ever produce.
+//
+// The Campaign therefore carries the intrabar time as its own: its `OpenedAt`,
+// its envelope `EventTime` and its deterministic id are all the moment the
+// position came into being, which is when the order executed and not when the
+// bar it executed inside happened to close.
+func TestFillInsideTheDecisionBarOpensTheCampaignAtThatIntrabarTime(t *testing.T) {
+	t.Parallel()
+
+	// Six hours before the decision bar's period end, and so eighteen hours
+	// after the previous bar's: strictly inside the bar the resting order was
+	// live in.
+	intrabar := day(56).Add(-6 * time.Hour)
+	fill := openingFill("AAPL")
+	fill.FilledAt = intrabar
+
+	emitted := newStream(t, validConfigurationPayload()).
+		bars(breakoutBars("AAPL")).
+		fill(fill).
+		mustRun()
+
+	campaignEnvelope := onlyEnvelopeOfType(t, emitted, event.CampaignOpenedEventType)
+	wantID := "campaign:AAPL:2026-02-26T18:00:00.000000000Z"
+	if campaignEnvelope.ID != wantID {
+		t.Errorf("Campaign opened ID = %q, want %q (keyed to when the position came into being)", campaignEnvelope.ID, wantID)
+	}
+	if !campaignEnvelope.EventTime.Equal(intrabar) {
+		t.Errorf("Campaign opened EventTime = %v, want the intrabar fill time %v", campaignEnvelope.EventTime, intrabar)
+	}
+
+	campaign := decodeCampaignOpened(t, campaignEnvelope)
+	if !campaign.OpenedAt.Equal(intrabar) {
+		t.Errorf("OpenedAt = %v, want the intrabar fill time %v", campaign.OpenedAt, intrabar)
+	}
+	if err := campaign.Validate(); err != nil {
+		t.Errorf("emitted Campaign-opened payload fails its own Validate(): %v", err)
+	}
+}
+
+// TestFillAtTheDecisionBarsPeriodEndIsAccepted pins the upper end of the
+// window, which is where a daily-bar backtest timestamps its fills by
+// convention and where a live fill's timestamp would sit at the earliest.
+func TestFillAtTheDecisionBarsPeriodEndIsAccepted(t *testing.T) {
+	t.Parallel()
+
+	fill := openingFill("AAPL")
+	if !fill.FilledAt.Equal(day(56)) {
+		t.Fatalf("fixture fill is timestamped %v, want the decision bar's period end %v", fill.FilledAt, day(56))
+	}
+
+	emitted := newStream(t, validConfigurationPayload()).
+		bars(breakoutBars("AAPL")).
+		fill(fill).
+		mustRun()
+
+	if got := len(envelopesOfType(emitted, event.CampaignOpenedEventType)); got != 1 {
+		t.Fatalf("got %d Campaign(s), want 1", got)
+	}
+}
+
+// TestFillPredatingTheBarTheOrderCouldHaveExecutedInIsRejected is the half of
+// the review finding that was real, correctly bounded.
+//
+// A fill cannot have executed before the bar it executed *inside* began. The
+// bound is therefore the period end of the bar **preceding** the decision bar
+// — the moment the decision bar opened — and not the decision bar's own period
+// end, which would reject ADR 0005's ordinary intrabar fill (see
+// TestFillInsideTheDecisionBarOpensTheCampaignAtThatIntrabarTime). Accepting a
+// fill from before then would journal a Campaign whose identity, OpenedAt and
+// EventTime predate the bar whose data produced the decision authorising it.
+func TestFillPredatingTheBarTheOrderCouldHaveExecutedInIsRejected(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		filledAt time.Time
+	}{
+		{
+			// Exactly the previous bar's period end: the decision bar had not
+			// opened yet, so the boundary is exclusive.
+			name:     "at the previous bar's period end",
+			filledAt: day(55),
+		},
+		{
+			name:     "inside the previous bar",
+			filledAt: day(55).Add(-1 * time.Hour),
+		},
+		{
+			name:     "long before the proposal existed",
+			filledAt: day(1),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fill := openingFill("AAPL")
+			fill.FilledAt = tt.filledAt
+
+			newStream(t, validConfigurationPayload()).
+				bars(breakoutBars("AAPL")).
+				fill(fill).
+				wantRunError("AAPL", "sim-fill-0001", "predates")
+		})
+	}
+}
+
 // --- No new entry while a Campaign is open ------------------------------
 
 // TestNoSignalOrProposalWhileACampaignIsOpen covers the ticket's rule that an
