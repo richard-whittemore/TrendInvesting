@@ -28,7 +28,7 @@ Go code must be formatted with `gofmt`. New behavior should include focused test
 
 ## Pull requests
 
-Each change should reference its Linear issue and state:
+Each change should reference its GitHub issue (`#N`) and state:
 
 - the rule, risk, or operational outcome addressed;
 - the evidence and tests added;
