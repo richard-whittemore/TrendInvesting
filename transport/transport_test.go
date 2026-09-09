@@ -539,15 +539,67 @@ func TestListenRequiresADecider(t *testing.T) {
 func TestListenReclaimsASocketLeftByAKilledEngine(t *testing.T) {
 	t.Parallel()
 	path := socketPath(t)
-	if err := os.WriteFile(path, []byte("stale"), 0o600); err != nil {
-		t.Fatalf("write stale socket: %v", err)
+	// A genuinely stale socket: bound, then closed without unlinking, which is
+	// the state a SIGKILLed engine leaves behind. Writing a regular file here
+	// would test a different thing entirely — see the refusal tests below.
+	abandoned, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatalf("bind the socket to be abandoned: %v", err)
 	}
+	abandoned.SetUnlinkOnClose(false)
+	if err := abandoned.Close(); err != nil {
+		t.Fatalf("abandon the socket: %v", err)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("the abandoned socket file should still exist: %v", err)
+	}
+
 	server, err := transport.Listen(path, echoDecider, transport.ServerConfig{})
 	if err != nil {
 		t.Fatalf("listen over a stale socket file: %v", err)
 	}
 	if err := server.Close(); err != nil {
 		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestListenRefusesToDeleteARegularFile(t *testing.T) {
+	t.Parallel()
+	path := socketPath(t)
+	// A misconfigured path can name anything. Removing whatever is there
+	// because a probe failed would make a typo in a config file destroy data.
+	const contents = "not a socket: somebody's data"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	_, err := transport.Listen(path, echoDecider, transport.ServerConfig{})
+	if err == nil {
+		t.Fatal("expected Listen to refuse a path that is not a socket")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("err = %v, want it to name the path", err)
+	}
+	survived, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("the file was removed: %v", readErr)
+	}
+	if string(survived) != contents {
+		t.Errorf("file contents = %q, want %q", survived, contents)
+	}
+}
+
+func TestListenRefusesToDeleteADirectory(t *testing.T) {
+	t.Parallel()
+	path := socketPath(t)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if _, err := transport.Listen(path, echoDecider, transport.ServerConfig{}); err == nil {
+		t.Fatal("expected Listen to refuse a path that is a directory")
+	}
+	if info, err := os.Lstat(path); err != nil || !info.IsDir() {
+		t.Errorf("the directory was removed or replaced: info=%v err=%v", info, err)
 	}
 }
 

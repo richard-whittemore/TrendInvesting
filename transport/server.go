@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -117,14 +118,45 @@ func unixAddr(path string) *net.UnixAddr {
 
 // clearStaleSocket removes a socket file that no process is listening on.
 //
-// It probes by connecting rather than by stat: the file's existence says
-// nothing about whether anyone is behind it, and a killed engine always leaves
-// its socket file on disk.
+// Two things have to be true before anything is deleted, and both are checked
+// rather than inferred.
+//
+// The path must already be a socket. A configured path can name anything, and
+// a typo that made this function delete a regular file or a directory would
+// turn a misconfiguration into data loss. Only a socket file is ever removed.
+//
+// Nothing must be listening on it. That is established by connecting, because
+// the file's existence says nothing about whether a process is behind it — a
+// killed engine always leaves its socket on disk. Only ECONNREFUSED proves
+// absence: it is the kernel saying the socket exists and has no listener.
+// Every other probe failure (EACCES, EAGAIN, a file that vanished after the
+// stat) means the probe did not answer the question, and binding over a server
+// that might still be live would break the single-active-executor invariant in
+// docs/architecture.md. Those fail closed instead.
 func clearStaleSocket(path string) error {
+	// Lstat, not Stat: a symlink must be judged as itself, so that a link
+	// pointing at something important is never followed and unlinked.
+	info, statErr := os.Lstat(path)
+	switch {
+	case errors.Is(statErr, os.ErrNotExist):
+		return nil
+	case statErr != nil:
+		return fmt.Errorf("transport: inspect %s: %w", path, statErr)
+	case info.Mode()&os.ModeSocket == 0:
+		return fmt.Errorf(
+			"transport: %s exists and is not a socket (%s); refusing to remove it",
+			path, info.Mode().Type(),
+		)
+	}
+
 	conn, dialErr := net.DialUnix("unix", nil, unixAddr(path))
 	if dialErr == nil {
 		_ = conn.Close()
 		return fmt.Errorf("transport: a server is already listening on %s", path)
+	}
+	if !errors.Is(dialErr, syscall.ECONNREFUSED) {
+		return fmt.Errorf(
+			"transport: cannot tell whether a server is listening on %s: %w", path, dialErr)
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("transport: remove stale socket %s: %w", path, err)
