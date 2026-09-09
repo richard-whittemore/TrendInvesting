@@ -25,6 +25,7 @@ Go never assumes an intended order was filled. Positions, protective stops, and 
 Every input and output uses an immutable envelope containing:
 
 - stable event identifier;
+- a required envelope shape version (`envelope_version`), distinct from the payload schema version below — it versions the envelope struct itself, and replay of a version this build does not recognise fails closed unless an explicit upcaster exists (ADR 0015);
 - event type and schema version;
 - event time and recording time;
 - ordered processing sequence;

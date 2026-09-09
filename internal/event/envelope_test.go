@@ -23,6 +23,7 @@ func validEnvelope() event.Envelope {
 		ID:                "evt-1",
 		Type:              "market.bar.completed",
 		SchemaVersion:     1,
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
 		EventTime:         now,
 		RecordedAt:        now,
 		Sequence:          1,
@@ -46,6 +47,24 @@ func TestEnvelopeValidate(t *testing.T) {
 		{name: "missing id", mutate: func(e *event.Envelope) { e.ID = "" }, wantErr: "event id"},
 		{name: "missing type", mutate: func(e *event.Envelope) { e.Type = "" }, wantErr: "event type"},
 		{name: "zero schema", mutate: func(e *event.Envelope) { e.SchemaVersion = 0 }, wantErr: "schema version"},
+		{name: "zero envelope version", mutate: func(e *event.Envelope) { e.EnvelopeVersion = 0 }, wantErr: "envelope version is required"},
+		{
+			name:    "envelope version above current",
+			mutate:  func(e *event.Envelope) { e.EnvelopeVersion = event.CurrentEnvelopeVersion + 1 },
+			wantErr: "newer build",
+		},
+		{
+			// The only integer below CurrentEnvelopeVersion (1) is 0, so this
+			// necessarily coincides with the zero-version input above; the
+			// point of this row is to confirm the below-current message is
+			// also reported, aggregated alongside the required-field one, not
+			// that a distinct input value exists yet. Once a future ticket
+			// raises CurrentEnvelopeVersion, nonzero values also hit this
+			// branch on their own.
+			name:    "envelope version below current",
+			mutate:  func(e *event.Envelope) { e.EnvelopeVersion = 0 },
+			wantErr: "no upcaster registered",
+		},
 		{name: "zero event time", mutate: func(e *event.Envelope) { e.EventTime = time.Time{} }, wantErr: "event time"},
 		{name: "zero recorded time", mutate: func(e *event.Envelope) { e.RecordedAt = time.Time{} }, wantErr: "recorded time"},
 		{name: "zero sequence", mutate: func(e *event.Envelope) { e.Sequence = 0 }, wantErr: "sequence"},
