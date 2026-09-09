@@ -58,4 +58,4 @@ The following are intentionally not selected in the initial scaffold:
 - brokerage; and
 - Kubernetes or service decomposition.
 
-These decisions require evidence from the corresponding Linear issues.
+These decisions require evidence from the corresponding GitHub issues (see #4 and `docs/agents/issue-tracker.md`).

@@ -14,7 +14,7 @@ That command verifies module integrity, formatting, `go vet`, Staticcheck, race-
 
 ## Changes
 
-- Link each change to its Linear issue.
+- Link each change to its GitHub issue: the PR title begins with the identifier (`#N: <title>`) and the body includes `Closes #N`. See `docs/agents/issue-tracker.md`.
 - Keep methodology claims separate from experimental rules.
 - Add tests for successful behavior, rejected inputs, and safety invariants.
 - Document replay, audit, schema, and configuration effects.

@@ -1,6 +1,6 @@
 ## Outcome
 
-Describe the completed outcome and link the Linear issue (for example, `P1-01`).
+Describe the completed outcome. The PR title begins with the issue identifier (`#N: <title>`) and the body includes `Closes #N`.
 
 ## Evidence
 

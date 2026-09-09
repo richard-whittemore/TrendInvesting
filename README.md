@@ -20,7 +20,7 @@ The first deployment is a modular monolith on one host. Microservices and Kubern
 
 ## Repository status
 
-This initial foundation contains the event contract, deterministic replay sequencing, tests, CI, and architectural documentation. Strategy semantics are intentionally not implemented until the source-grounded specifications in the Linear roadmap are frozen.
+This initial foundation contains the event contract, deterministic replay sequencing, tests, CI, and architectural documentation. Strategy semantics are implemented ticket by ticket from the specification (#4) and the ADRs in `docs/adr/`, never ahead of them; the ledger (#51) records what has landed.
 
 ## Quick start
 
