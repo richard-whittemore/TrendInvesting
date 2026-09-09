@@ -113,6 +113,7 @@ processing a single data point — the fail-closed behaviour required by
 
 ## The rejected alternative
 
-The gRPC half lives in [`transport/grpcspike/`](../../../transport/grpcspike),
-deliberately as a separate Go module so that measuring it cost the main module
-no dependency. See ADR 0014 for why it was not chosen.
+The gRPC half is not kept in the tree: it was measured from a separate Go
+module at commit `634e2cb` (`transport/grpcspike/` on the #26 branch), which
+remains the reproducible reference. See ADR 0014 for why it was not chosen and
+why the module was not merged.

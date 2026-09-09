@@ -174,10 +174,13 @@ one sequential stream, on one host (ADR 0001) — gRPC's real capabilities
 compatibility across many languages) are all things this boundary does not
 need. `net` and `encoding/json` do need it.
 
-The reference is preserved rather than deleted: `transport/grpcspike/` holds
-the gRPC implementation as a **separate Go module** with its own `go.mod`, so
-the measurement stays reproducible while the main module's dependency surface
-is untouched. `go build ./...` at the root does not descend into it.
+The gRPC implementation is not kept in the tree. It was measured from a
+separate Go module at commit `634e2cb` (`transport/grpcspike/`, on the #26
+branch), and that commit is the reproducible reference. Keeping a second
+module in the repository would have left a `go.sum` carrying 37 modules that
+neither Dependabot nor `govulncheck` covers — an unscanned dependency surface
+is what `docs/dependency-policy.md` exists to prevent, and it would have been
+paid for a candidate this ADR rejects.
 
 `docs/architecture.md`'s deferred decision "exact local transport" is now
 closed by this ADR.
