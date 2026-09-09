@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
 // TradeProposalEventType identifies the trade-proposal decision payload for
@@ -131,11 +133,25 @@ type TradeProposalPayload struct {
 	// which of the two applied.
 	UnitVolatilityFraction float64 `json:"unit_volatility_fraction"`
 	StopMultiple           float64 `json:"stop_multiple"`
-	// RiskAtStop is the fraction of the Notional Account this Unit loses if
-	// its Protective Stop is hit — derived under volatility-normalised
-	// sizing, the configured input under fixed-risk-at-stop (CONTEXT.md:
-	// "Risk at Stop"; ADR 0003).
+	// RiskAtStop is the **declared budget**: the fraction of the Notional
+	// Account the Sizing Mode is keyed to — derived as UnitVolatilityFraction
+	// x StopMultiple under volatility-normalised sizing, the configured input
+	// under fixed-risk-at-stop (CONTEXT.md: "Risk at Stop"; ADR 0003). It is
+	// deliberately not adjusted for truncation.
 	RiskAtStop float64 `json:"risk_at_stop"`
+	// RealisedRiskAtStop is what the whole-share Quantity above actually
+	// risks: Quantity x StopMultiple x N x DollarsPerPoint / NotionalAccount.
+	//
+	// The gap between it and RiskAtStop is the truncation from a fractional
+	// Unit to a whole one, and it always points the same way — a truncated
+	// position risks less than the budget, never more. Both are recorded
+	// because neither can stand for the other: RiskAtStop is what the
+	// strategy declared it would risk and is the figure the Sizing Mode's
+	// arithmetic is keyed to, while RealisedRiskAtStop is what this
+	// particular position stands to lose, and a journal carrying only the
+	// first overstates that (Faith's Heating Oil Unit declares 2 % and
+	// realises 1.895 %, The Turtle Rules p.15).
+	RealisedRiskAtStop float64 `json:"realised_risk_at_stop"`
 	// DollarsPerPoint is the instrument's contract multiplier: 1 for shares,
 	// 42,000 for Faith's Heating Oil contract (The Turtle Rules p.15).
 	DollarsPerPoint float64 `json:"dollars_per_point"`
@@ -176,7 +192,16 @@ type TradeProposalPayload struct {
 //     at the end, so a level folded from constants can differ in the last
 //     bit from the same expression evaluated at run time.
 //
-//  3. **Truncation never risks more than the budget.** Under
+//  3. **The realised risk matches its derivation and does not exceed the
+//     budget.** RealisedRiskAtStop must be exactly
+//     sizing.RealisedRiskAtStop of this payload's own fields — the same
+//     function the producer used, called rather than reimplemented, so the
+//     exact comparison cannot fail on a last-bit difference between two
+//     algebraically identical expressions — and it must not exceed
+//     RiskAtStop, in either mode. Truncation may only ever risk less than
+//     the declared budget.
+//
+//  4. **Truncation never risks more than the budget.** Under
 //     volatility-normalised sizing, Quantity x N x DollarsPerPoint must not
 //     exceed NotionalAccount x UnitVolatilityFraction — the 1N budget The
 //     Turtle Rules p.14 actually states, and the exact expression
@@ -261,6 +286,14 @@ func (p TradeProposalPayload) Validate() error {
 		errs = append(errs, errors.New("risk at stop must be greater than zero and at most one"))
 	}
 
+	realisedFinite := isFinite(p.RealisedRiskAtStop)
+	switch {
+	case !realisedFinite:
+		errs = append(errs, errors.New("realised risk at stop must be finite"))
+	case p.RealisedRiskAtStop <= 0 || p.RealisedRiskAtStop > 1:
+		errs = append(errs, errors.New("realised risk at stop must be greater than zero and at most one"))
+	}
+
 	dollarsPerPointFinite := isFinite(p.DollarsPerPoint)
 	switch {
 	case !dollarsPerPointFinite:
@@ -305,7 +338,22 @@ func (p TradeProposalPayload) Validate() error {
 		}
 	}
 
-	// Invariant 3: truncation never risks more than the budget.
+	// Invariant 3: the realised risk matches its derivation and does not
+	// exceed the declared budget.
+	if p.Quantity > 0 && stopMultipleFinite && nFinite && dollarsPerPointFinite && notionalAccountFinite && realisedFinite {
+		if derived := sizing.RealisedRiskAtStop(p.Quantity, p.StopMultiple, p.N, p.DollarsPerPoint, p.NotionalAccount); p.RealisedRiskAtStop != derived {
+			errs = append(errs, fmt.Errorf(
+				"stated realised risk at stop %v does not match the derivation %v (quantity %d x stop multiple %v x n %v x dollars per point %v / notional account %v)",
+				p.RealisedRiskAtStop, derived, p.Quantity, p.StopMultiple, p.N, p.DollarsPerPoint, p.NotionalAccount))
+		}
+	}
+	if realisedFinite && riskAtStopFinite && p.RealisedRiskAtStop > p.RiskAtStop {
+		errs = append(errs, fmt.Errorf(
+			"realised risk at stop %v exceeds the declared risk at stop %v: truncation may only ever risk less than the budget, never more",
+			p.RealisedRiskAtStop, p.RiskAtStop))
+	}
+
+	// Invariant 4: truncation never risks more than the budget.
 	if modeRecognised && p.Quantity > 0 && nFinite && dollarsPerPointFinite && notionalAccountFinite && fractionFinite && stopMultipleFinite && riskAtStopFinite {
 		switch p.SizingMode {
 		case SizingModeVolatilityNormalised:

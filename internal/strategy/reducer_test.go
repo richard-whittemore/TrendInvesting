@@ -2418,11 +2418,11 @@ func TestAddThenEvaluateNWouldShrinkTheWideBarsOwnUnit(t *testing.T) {
 	evaluateThenAdd := wilder(55) // N through bar 55: what the reducer must use
 	addThenEvaluate := wilder(56) // N including the bar being decided: the bug
 
-	if !(addThenEvaluate > evaluateThenAdd) {
+	if addThenEvaluate <= evaluateThenAdd {
 		t.Fatalf("fixture no longer exercises the defect: add-then-evaluate N %v is not above evaluate-then-add N %v", addThenEvaluate, evaluateThenAdd)
 	}
 	correctQuantity, buggyQuantity := quantity(evaluateThenAdd), quantity(addThenEvaluate)
-	if !(buggyQuantity < correctQuantity) {
+	if buggyQuantity >= correctQuantity {
 		t.Fatalf("add-then-evaluate quantity %d is not below the correct %d; the fixture must make the two outcomes genuinely opposite", buggyQuantity, correctQuantity)
 	}
 

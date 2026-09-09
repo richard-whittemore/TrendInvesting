@@ -42,6 +42,13 @@ const sourceReducer = "reducer"
 // Campaign's entries and exits stay consistent with the levels a live
 // system would have seen on the day.
 //
+// Every input to a bar's decision — N, the Entry Channel, and so the Setup's
+// Tier, the Signal, the Unit size and the Protective Stop intent — is read
+// from the state left by the bars BEFORE it, and the bar is folded into that
+// state only afterwards. CONTEXT.md, under "Completed bar": the decision bar
+// is never an input to its own decision. See applyCompletedBar's evaluate and
+// advance blocks.
+//
 // This reducer holds mutable per-instrument state (docs/architecture.md
 // notes a Handler applies events to "deterministic domain state"); it is not
 // safe for concurrent use, matching replay.Engine's sequential Run.
@@ -268,29 +275,49 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	// on the split-adjusted view only.
 	view := bar.SplitAdjusted
 	tr := indicator.TrueRange(view.High, view.Low, state.previousClose, state.hasPreviousClose)
-	state.n.Add(tr)
-	state.previousClose = view.Close
-	state.hasPreviousClose = true
-	state.lastPeriodEnd = bar.PeriodEnd
 
+	// --- Evaluate. Every input to this bar's decision is read here, from the
+	// state left by the bars BEFORE it. Nothing this bar contributes is
+	// folded in until the "advance" block below.
+	//
+	// This is the fix for the prototype's headline look-ahead bug (see
+	// indicator.EntryChannel's doc comment), applied uniformly rather than
+	// only to the channel — a PR #64 review finding. The rule is
+	// CONTEXT.md's, under "Completed bar": the decision bar is never an input
+	// to its own decision. For N specifically it is also what ADR 0005
+	// requires: the entry is a resting order that fills *inside* the breakout
+	// bar, so the Unit size and the Protective Stop have to be computable
+	// before that bar opens. A bar that updated N before being decided would
+	// shrink its own Unit and tighten its own stop by having been volatile —
+	// using information that did not exist when the order was placed.
+	//
 	// NReady means "N is a usable volatility reading", not merely "bar-count
 	// warm-up complete": twenty flat bars (high==low==close) legitimately
 	// warm up indicator.WilderAverage with N==0, which a volatility-normalised
 	// sizing step could not safely divide by. Such an instrument is reported
 	// not ready rather than erroring the run, and becomes ready again the
 	// moment True Range is non-zero (see indicator.WilderAverage's doc
-	// comment).
-	nReady := state.n.Ready() && state.n.Value() > 0
+	// comment). decisionN is 0 whenever nReady is false, since
+	// WilderAverage.Value is 0 until warm-up completes and a not-ready N past
+	// warm-up is not-ready precisely because it is 0.
+	decisionN := state.n.Value()
+	nReady := state.n.Ready() && decisionN > 0
 
-	// #9's ordering, the fix for the prototype's headline look-ahead bug
-	// (see indicator.EntryChannel's doc comment): Extreme is read BEFORE
-	// this bar's own high is Added, so the channel this bar is decided
-	// against never includes the bar itself.
 	entryChannelHigh, entryChannelReady := state.entryChannel.Extreme()
 	// The Turtle Rules p.19: a Breakout "exceeds" the channel, so the
 	// comparison is strict; a tie is not a breakout.
 	breakout := entryChannelReady && view.High > entryChannelHigh
+
+	// --- Advance. Every read that decides this bar has now happened, so the
+	// bar can be folded into the running state for the NEXT bar to see. The
+	// per-instrument tracking itself is unchanged: this bar's True Range and
+	// high still enter N and the Entry Channel, just after the decision
+	// rather than before it.
+	state.n.Add(tr)
 	state.entryChannel.Add(view.High)
+	state.previousClose = view.Close
+	state.hasPreviousClose = true
+	state.lastPeriodEnd = bar.PeriodEnd
 
 	// Tier follows three cases, per DistanceToEntryInN's sign and magnitude
 	// (see SetupEvaluatedPayload's doc comment): a strict breakout
@@ -304,7 +331,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	tier := event.TierNone
 	var distanceToEntryInN float64
 	if ready {
-		distanceToEntryInN = (entryChannelHigh - view.High) / state.n.Value()
+		distanceToEntryInN = (entryChannelHigh - view.High) / decisionN
 		switch {
 		case breakout:
 			tier = event.TierA
@@ -325,7 +352,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	decisionPayload := event.SetupEvaluatedPayload{
 		InstrumentID:       bar.InstrumentID,
 		PeriodEnd:          bar.PeriodEnd,
-		N:                  state.n.Value(),
+		N:                  decisionN,
 		NReady:             nReady,
 		EntryChannelHigh:   reportedEntryChannelHigh,
 		EntryChannelReady:  entryChannelReady,
@@ -378,7 +405,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 			EntryChannelLength: r.entryChannelLength,
 			EntryChannelHigh:   entryChannelHigh,
 			BreakoutHigh:       view.High,
-			N:                  state.n.Value(),
+			N:                  decisionN,
 		}
 		if err := signalPayload.Validate(); err != nil {
 			return nil, fmt.Errorf("strategy: built invalid signal payload: %w", err)
@@ -395,7 +422,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		// last of the bar. Exactly one emission always follows the Signal —
 		// a proposal, or a decline saying why there is none — so a Signal is
 		// never left with nothing after it (see sizeUnit).
-		sized, err := r.sizeUnit(bar, envelope, signalID, view.High, state.n.Value(), nReady)
+		sized, err := r.sizeUnit(bar, envelope, signalID, view.High, decisionN, nReady)
 		if err != nil {
 			return nil, err
 		}
@@ -495,6 +522,7 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 		UnitVolatilityFraction: r.unitVolatilityFrac,
 		StopMultiple:           r.stopMultiple,
 		RiskAtStop:             unit.RiskAtStop,
+		RealisedRiskAtStop:     unit.RealisedRiskAtStop,
 		DollarsPerPoint:        r.dollarsPerPoint,
 		NotionalAccount:        r.notionalAccount,
 		ProtectiveStopIntent:   protectiveStopIntent,

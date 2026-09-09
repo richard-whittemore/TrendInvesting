@@ -105,14 +105,14 @@ type Inputs struct {
 	DollarsPerPoint float64
 }
 
-// Unit is one Unit's sized outcome: how many shares or contracts, and what
-// fraction of the Notional Account that quantity risks if the Protective
-// Stop is hit.
+// Unit is one Unit's sized outcome: how many shares or contracts, what
+// fraction of the Notional Account the strategy set out to risk, and what
+// fraction that whole-share quantity actually risks.
 //
-// The two travel together deliberately. Risk at Stop is derived from the same
-// inputs that produced Quantity, so returning them from one call removes the
-// possibility of a caller stamping a Risk at Stop into a journal that the
-// quantity beside it does not actually imply.
+// All three travel together deliberately. Both risk figures are derived from
+// the same inputs that produced Quantity, so returning them from one call
+// removes the possibility of a caller stamping a risk figure into a journal
+// that the quantity beside it does not actually imply.
 type Unit struct {
 	// Quantity is a whole number of shares or contracts, truncated toward
 	// zero (The Turtle Rules p.14-15: 16.88 becomes 16). It is zero, with no
@@ -120,9 +120,30 @@ type Unit struct {
 	// legitimate arithmetic outcome the caller must decline on, not a
 	// failure.
 	Quantity int64
-	// RiskAtStop is the fraction of the Notional Account lost if the
-	// Protective Stop is hit (CONTEXT.md: "Risk at Stop").
+	// RiskAtStop is the **declared budget**: the fraction of the Notional
+	// Account the Sizing Mode is keyed to (CONTEXT.md: "Risk at Stop"). Under
+	// ModeVolatilityNormalised it is exactly UnitVolatilityFraction x
+	// StopMultiple and under ModeFixedRiskAtStop it is the configured input.
+	// It is deliberately NOT adjusted for truncation: it is the parameter the
+	// strategy declared, and ADR 0003 makes it a derived-or-configured
+	// property of the configuration rather than of any one position.
 	RiskAtStop float64
+	// RealisedRiskAtStop is what the whole-share Quantity above **actually**
+	// risks if the Protective Stop is hit:
+	//
+	//	Quantity x StopMultiple x N x DollarsPerPoint / NotionalAccount
+	//
+	// The gap between it and RiskAtStop is the truncation, and it always
+	// points one way — a truncated position risks less than the budget, never
+	// more, so RealisedRiskAtStop <= RiskAtStop always holds. Faith's Heating
+	// Oil Unit makes the gap concrete: a declared 2 % becomes a realised
+	// 1.895 % once 16.88 contracts truncate to 16 (The Turtle Rules p.15).
+	//
+	// A journal that recorded only the budget would overstate what an
+	// individual Unit stands to lose, which is why both are carried onto the
+	// proposal (event.TradeProposalPayload) rather than one standing for the
+	// other.
+	RealisedRiskAtStop float64
 }
 
 // SizeUnit sizes one Unit under the given Sizing Mode and returns both the
@@ -154,7 +175,35 @@ func SizeUnit(in Inputs) (Unit, error) {
 		return Unit{}, err
 	}
 
-	return Unit{Quantity: quantity, RiskAtStop: riskAtStop}, nil
+	return Unit{
+		Quantity:   quantity,
+		RiskAtStop: riskAtStop,
+		// One fixed expression order, shared with
+		// event.TradeProposalPayload.Validate's re-derivation so the two
+		// agree bit for bit rather than approximately. The numerator is the
+		// same product each quantity function already bounds by the budget,
+		// which is what makes RealisedRiskAtStop <= RiskAtStop hold.
+		RealisedRiskAtStop: RealisedRiskAtStop(quantity, in.StopMultiple, in.N, in.DollarsPerPoint, in.NotionalAccount),
+	}, nil
+}
+
+// RealisedRiskAtStop returns the fraction of the Notional Account a
+// whole-share quantity actually risks if its Protective Stop is hit:
+//
+//	quantity x stopMultiple x n x dollarsPerPoint / notionalAccount
+//
+// It is exported, and defined here once, so that every producer and every
+// validator computes it in the identical expression order. Both
+// sizing.SizeUnit and event.TradeProposalPayload.Validate call it, and the
+// payload's derivation check compares with exact float64 equality — a second
+// implementation, however algebraically identical, could differ in the last
+// bit and turn a correct proposal into a rejected one.
+//
+// It performs no validation of its own: callers reach it only after their
+// inputs have been checked, and it is called on a quantity that has already
+// been produced from those same inputs.
+func RealisedRiskAtStop(quantity int64, stopMultiple, n, dollarsPerPoint, notionalAccount float64) float64 {
+	return float64(quantity) * (stopMultiple * n * dollarsPerPoint) / notionalAccount
 }
 
 // UnitQuantity is Faith's Unit-sizing formula (The Turtle Rules p.14): one
