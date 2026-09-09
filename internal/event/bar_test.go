@@ -3,6 +3,7 @@ package event_test
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -151,6 +152,63 @@ func TestCompletedBarPayloadValidate(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// A NaN or infinite value must be rejected explicitly, before the range
+// checks: ordered float comparisons against NaN are always false in Go, so
+// without an explicit finiteness check a NaN price would pass every range
+// check silently and poison every downstream sizing calculation. +Inf and
+// -Inf are likewise rejected rather than treated as very large/small but
+// otherwise valid prices.
+func TestCompletedBarPayloadValidateRejectsNonFiniteFields(t *testing.T) {
+	t.Parallel()
+
+	type fieldCase struct {
+		name  string
+		apply func(v *event.PriceView, f float64)
+	}
+	fields := []fieldCase{
+		{"open", func(v *event.PriceView, f float64) { v.Open = f }},
+		{"high", func(v *event.PriceView, f float64) { v.High = f }},
+		{"low", func(v *event.PriceView, f float64) { v.Low = f }},
+		{"close", func(v *event.PriceView, f float64) { v.Close = f }},
+		{"volume", func(v *event.PriceView, f float64) { v.Volume = f }},
+	}
+
+	nonFinite := []struct {
+		name  string
+		value float64
+	}{
+		{"NaN", math.NaN()},
+		{"+Inf", math.Inf(1)},
+		{"-Inf", math.Inf(-1)},
+	}
+
+	views := []struct {
+		label string
+		get   func(b *event.CompletedBarPayload) *event.PriceView
+	}{
+		{"split-adjusted view", func(b *event.CompletedBarPayload) *event.PriceView { return &b.SplitAdjusted }},
+		{"raw view", func(b *event.CompletedBarPayload) *event.PriceView { return &b.Raw }},
+	}
+
+	for _, view := range views {
+		for _, field := range fields {
+			for _, nf := range nonFinite {
+				t.Run(view.label+" "+field.name+" "+nf.name, func(t *testing.T) {
+					t.Parallel()
+					bar := validCompletedBar()
+					field.apply(view.get(&bar), nf.value)
+
+					err := bar.Validate()
+					wantErr := view.label + ": " + field.name + " must be finite"
+					if err == nil || !strings.Contains(err.Error(), wantErr) {
+						t.Fatalf("Validate() error = %v, want substring %q", err, wantErr)
+					}
+				})
+			}
+		}
 	}
 }
 

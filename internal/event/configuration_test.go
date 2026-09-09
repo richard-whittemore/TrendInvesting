@@ -3,6 +3,7 @@ package event_test
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -184,6 +185,68 @@ func TestConfigurationPayloadValidate(t *testing.T) {
 
 // An entirely empty configuration must report every missing or invalid field
 // in one aggregated error.
+// A NaN or infinite value must be rejected explicitly, before the range
+// checks: ordered float comparisons against NaN are always false in Go, so
+// without an explicit finiteness check a NaN parameter would pass every
+// range check silently and poison every downstream sizing calculation. +Inf
+// and -Inf are likewise rejected rather than treated as very large/small but
+// otherwise valid parameters.
+func TestConfigurationPayloadValidateRejectsNonFiniteFields(t *testing.T) {
+	t.Parallel()
+
+	type fieldCase struct {
+		name    string
+		apply   func(c *event.ConfigurationPayload, f float64)
+		wantErr string
+	}
+	fields := []fieldCase{
+		{
+			name:    "unit volatility fraction",
+			apply:   func(c *event.ConfigurationPayload, f float64) { c.UnitVolatilityFraction = f },
+			wantErr: "unit volatility fraction must be finite",
+		},
+		{
+			name:    "stop multiple",
+			apply:   func(c *event.ConfigurationPayload, f float64) { c.StopMultiple = f },
+			wantErr: "stop multiple must be finite",
+		},
+		{
+			name:    "slippage",
+			apply:   func(c *event.ConfigurationPayload, f float64) { c.SlippageN = f },
+			wantErr: "slippage must be finite",
+		},
+		{
+			name:    "notional account starting equity",
+			apply:   func(c *event.ConfigurationPayload, f float64) { c.NotionalAccount.StartingEquity = f },
+			wantErr: "notional account starting equity must be finite",
+		},
+	}
+
+	nonFinite := []struct {
+		name  string
+		value float64
+	}{
+		{"NaN", math.NaN()},
+		{"+Inf", math.Inf(1)},
+		{"-Inf", math.Inf(-1)},
+	}
+
+	for _, field := range fields {
+		for _, nf := range nonFinite {
+			t.Run(field.name+" "+nf.name, func(t *testing.T) {
+				t.Parallel()
+				cfg := validConfiguration()
+				field.apply(&cfg, nf.value)
+
+				err := cfg.Validate()
+				if err == nil || !strings.Contains(err.Error(), field.wantErr) {
+					t.Fatalf("Validate() error = %v, want substring %q", err, field.wantErr)
+				}
+			})
+		}
+	}
+}
+
 func TestConfigurationPayloadValidateAggregatesEveryField(t *testing.T) {
 	t.Parallel()
 
