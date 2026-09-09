@@ -347,7 +347,7 @@ func TestModesDivergeAwayFromStopMultipleTwo(t *testing.T) {
 	if fixedAtThree != 111 {
 		t.Errorf("fixed-risk-at-stop at 3N = %d, want 111 (a wider stop buys fewer shares)", fixedAtThree)
 	}
-	if !(fixedAtThree < fixedAtTwo) {
+	if fixedAtThree >= fixedAtTwo {
 		t.Errorf("fixed-risk-at-stop: widening the stop must reduce the share count, got %d then %d", fixedAtTwo, fixedAtThree)
 	}
 
@@ -382,7 +382,7 @@ func TestModesDivergeAwayFromStopMultipleTwo(t *testing.T) {
 	if atTwo != unitVolatilityFraction*2 || atThree != unitVolatilityFraction*3 {
 		t.Fatalf("RiskAtStop(volatility-normalised) = %v then %v, want %v then %v", atTwo, atThree, unitVolatilityFraction*2, unitVolatilityFraction*3)
 	}
-	if !(atThree > atTwo) {
+	if atThree <= atTwo {
 		t.Errorf("volatility-normalised: widening the stop must raise Risk at Stop, got %v then %v", atTwo, atThree)
 	}
 }

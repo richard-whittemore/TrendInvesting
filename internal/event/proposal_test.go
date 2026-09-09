@@ -17,7 +17,15 @@ var proposalPeriodEnd = time.Date(2026, time.February, 27, 0, 0, 0, 0, time.UTC)
 // proposalN is the N the internal/strategy breakout fixture produces on its
 // breakout bar. Reusing it here keeps the payload fixtures and the event-seam
 // fixtures arithmetically continuous rather than independently invented.
-const proposalN = 40.69890254048816
+//
+// It is deliberately a float64 variable rather than an untyped constant.
+// Go evaluates untyped constant expressions in arbitrary precision and rounds
+// once at the end, so a constant `200 - 3*proposalN` can differ in the last
+// bit from the float64 arithmetic a producer actually performs — and
+// Validate's derivation checks are exact by design. A fixture built from
+// constants would therefore be testing constant folding rather than the
+// producer's arithmetic.
+var proposalN = 40.69890254048816
 
 // validTradeProposal returns a Baseline (volatility-normalised, ADR 0003)
 // trade proposal that satisfies every validation rule, so each table row only

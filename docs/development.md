@@ -24,6 +24,7 @@ Go code must be formatted with `gofmt`. New behavior should include focused test
 - `internal/event/` owns the shared event envelope and transport-level validation.
 - `internal/replay/` owns deterministic application of recorded events.
 - `internal/indicator/` owns pure, side-effect-free strategy arithmetic (True Range, N) with no knowledge of events or replay.
+- `internal/sizing/` owns the pure risk arithmetic that turns a volatility reading into a whole number of shares and the Risk at Stop it implies (ADR 0003), kept separate from `internal/indicator/` because sizing commits capital rather than measuring a price series, and likewise knowing nothing of events or replay.
 - `internal/strategy/` owns the `replay.Handler` reducers that turn a validated event stream into decision events.
 - Future strategy packages must not import LEAN, database, or transport implementations.
 - `adapter/lean/` documents and will contain the deliberately thin Python boundary.

@@ -869,13 +869,13 @@ func TestReducerRejectsConfigurationWithWrongSchemaVersion(t *testing.T) {
 	}
 
 	wrongVersion := configEnvelope(t, 1, day(0))
-	wrongVersion.SchemaVersion = 1 // event.ConfigurationSchemaVersion is 2
+	wrongVersion.SchemaVersion = 1 // the original schema, two bumps behind
 
 	_, err = engine.Run(context.Background(), []event.Envelope{wrongVersion})
 	if err == nil {
 		t.Fatal("Run() error = nil, want error for a configuration payload at the wrong schema version")
 	}
-	for _, want := range []string{"schema version", "1", "2"} {
+	for _, want := range []string{"schema version", "1", fmt.Sprintf("%d", event.ConfigurationSchemaVersion)} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("Run() error = %v, want substring %q", err, want)
 		}
@@ -1202,9 +1202,10 @@ func TestReducerEmitsExactlyOneSignalOnBreakoutBar(t *testing.T) {
 
 	// 55 warm-up bars each emit one Setup-evaluated event (no breakout: the
 	// channel is not ready until bar 55 has been added, i.e. when
-	// evaluating bar 56); bar 56 emits a Setup-evaluated event AND a Signal.
-	if len(emitted) != len(highs)+1 {
-		t.Fatalf("len(emitted) = %d, want %d (55 bars x 1 event, plus bar 56's 2 events)", len(emitted), len(highs)+1)
+	// evaluating bar 56); bar 56 emits a Setup-evaluated event, a Signal,
+	// and — since #10 — the trade proposal the Signal is sized into.
+	if len(emitted) != len(highs)+2 {
+		t.Fatalf("len(emitted) = %d, want %d (55 bars x 1 event, plus bar 56's 3 events)", len(emitted), len(highs)+2)
 	}
 
 	var signals []event.Envelope
@@ -1266,9 +1267,11 @@ func TestReducerEmitsExactlyOneSignalOnBreakoutBar(t *testing.T) {
 
 	// The Setup-evaluated event on the same bar must report Tier A and the
 	// same channel high, and the Signal must be emitted strictly after it
-	// in the returned slice (Apply returns [setup-evaluated, signal]).
-	setupIndex := len(emitted) - 2
-	signalIndex := len(emitted) - 1
+	// in the returned slice (Apply returns [setup-evaluated, signal,
+	// proposal] since #10; TestReducerEmitsTradeProposalOnSignal asserts the
+	// third).
+	setupIndex := len(emitted) - 3
+	signalIndex := len(emitted) - 2
 	if emitted[setupIndex].Type != event.SetupEvaluatedEventType {
 		t.Fatalf("emitted[%d].Type = %q, want %q", setupIndex, emitted[setupIndex].Type, event.SetupEvaluatedEventType)
 	}

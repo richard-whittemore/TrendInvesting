@@ -14,6 +14,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/indicator"
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
 // sourceReducer is the value stamped into every envelope this package
@@ -48,6 +49,17 @@ type Reducer struct {
 	configured         bool
 	entryChannelLength int
 	tierBDistanceInN   float64
+
+	// #10's sizing configuration, captured once from the configuration
+	// event. notionalAccount is the configured starting equity: Drawdown
+	// Steps and yearly re-basing (ADR 0007) are #16/#17, so nothing here
+	// reduces it yet.
+	sizingMode         sizing.Mode
+	unitVolatilityFrac float64
+	stopMultiple       float64
+	riskAtStopFraction float64
+	dollarsPerPoint    float64
+	notionalAccount    float64
 
 	instruments map[string]*instrumentState
 }
@@ -151,10 +163,50 @@ func (r *Reducer) applyConfiguration(envelope event.Envelope) ([]event.Envelope,
 	if err := payload.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: invalid configuration payload: %w", err)
 	}
+	sizingMode, err := sizingModeFor(payload.SizingMode)
+	if err != nil {
+		return nil, err
+	}
 	r.entryChannelLength = payload.EntryChannelLength
 	r.tierBDistanceInN = payload.TierBDistanceInN
+	r.sizingMode = sizingMode
+	r.unitVolatilityFrac = payload.UnitVolatilityFraction
+	r.stopMultiple = payload.StopMultiple
+	r.riskAtStopFraction = payload.RiskAtStopFraction
+	r.dollarsPerPoint = payload.DollarsPerPoint
+	// ADR 0007's Notional Account, at its configured starting value. The
+	// Drawdown Steps that reduce it, and the yearly re-basing that restores
+	// it, are #16/#17: nothing in this reducer changes this figure yet, so a
+	// proposal today is always sized against the configured equity.
+	r.notionalAccount = payload.NotionalAccount.StartingEquity
 	r.configured = true
 	return nil, nil
+}
+
+// sizingModeFor maps the configuration contract's Sizing Mode onto
+// internal/sizing's own.
+//
+// internal/sizing declares its own Mode rather than importing internal/event,
+// so that the arithmetic stays as free of the wire contract as
+// internal/indicator is. That leaves exactly one place where the two
+// enumerations meet — here — and it fails closed rather than defaulting, so a
+// mode this build does not know about can never be silently sized as if it
+// were the Baseline. The two enumerations' string values are pinned equal by
+// TestSizingModeConstantsMatchTheEventContract.
+//
+// ConfigurationPayload.Validate has already rejected any unrecognised mode by
+// the time this is reached, so the default branch is unreachable in practice;
+// it exists so that adding a third mode to the contract without extending
+// this mapping fails closed instead of falling through.
+func sizingModeFor(mode event.SizingMode) (sizing.Mode, error) {
+	switch mode {
+	case event.SizingModeVolatilityNormalised:
+		return sizing.ModeVolatilityNormalised, nil
+	case event.SizingModeFixedRiskAtStop:
+		return sizing.ModeFixedRiskAtStop, nil
+	default:
+		return "", fmt.Errorf("strategy: sizing mode %q is not a recognised sizing mode; failing closed rather than sizing a position under an unknown principle (ADR 0003)", mode)
+	}
 }
 
 // applyCompletedBar handles event.CompletedBarEventType. Like
@@ -274,25 +326,14 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		return nil, fmt.Errorf("strategy: marshal setup evaluated payload: %w", err)
 	}
 
-	decision := event.Envelope{
-		// Deterministic and reproducible on replay: one Setup-evaluated
-		// event exists per (instrument, completed bar), so the pair
-		// identifies it uniquely without any randomness or wall-clock read
-		// (forbidden in internal/ — see .golangci.yml forbidigo rules).
-		ID:              fmt.Sprintf("setup-evaluated:%s:%s", bar.InstrumentID, bar.PeriodEnd.UTC().Format("2006-01-02T15:04:05.000000000Z")),
-		Type:            event.SetupEvaluatedEventType,
-		SchemaVersion:   event.SetupEvaluatedSchemaVersion,
-		EnvelopeVersion: event.CurrentEnvelopeVersion,
-		EventTime:       bar.PeriodEnd,
-		// Never time.Now(): RecordedAt on an emission is the input's
-		// RecordedAt, not the wall clock at processing time.
-		RecordedAt:        envelope.RecordedAt,
-		Source:            sourceReducer,
-		StrategyVersion:   r.strategyVersion,
-		ConfigurationHash: r.configurationHash,
-		PayloadHash:       event.HashPayload(payloadBytes),
-		Payload:           payloadBytes,
-	}
+	// One Setup-evaluated event exists per (instrument, completed bar), so
+	// that pair identifies it uniquely — see stamp for why the ID is built
+	// this way rather than generated.
+	decision := r.stamp(
+		decisionID("setup-evaluated", bar.InstrumentID, bar.PeriodEnd),
+		event.SetupEvaluatedEventType, event.SetupEvaluatedSchemaVersion,
+		bar.PeriodEnd, envelope, payloadBytes,
+	)
 	emissions := []event.Envelope{decision}
 
 	// #9: Tier A is a Signal. No Signal while N or the channel is not ready
@@ -332,25 +373,209 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		if err != nil {
 			return nil, fmt.Errorf("strategy: marshal signal payload: %w", err)
 		}
-		signal := event.Envelope{
-			// Deterministic and reproducible on replay, same rationale as
-			// the Setup-evaluated event's ID above.
-			ID:                fmt.Sprintf("signal:%s:%s", bar.InstrumentID, bar.PeriodEnd.UTC().Format("2006-01-02T15:04:05.000000000Z")),
-			Type:              event.SignalEventType,
-			SchemaVersion:     event.SignalSchemaVersion,
-			EnvelopeVersion:   event.CurrentEnvelopeVersion,
-			EventTime:         bar.PeriodEnd,
-			RecordedAt:        envelope.RecordedAt,
-			Source:            sourceReducer,
-			StrategyVersion:   r.strategyVersion,
-			ConfigurationHash: r.configurationHash,
-			PayloadHash:       event.HashPayload(signalBytes),
-			Payload:           signalBytes,
-		}
+		signalID := decisionID("signal", bar.InstrumentID, bar.PeriodEnd)
+		signal := r.stamp(signalID, event.SignalEventType, event.SignalSchemaVersion, bar.PeriodEnd, envelope, signalBytes)
 		emissions = append(emissions, signal)
+
+		// #10: a Signal is sized into a trade proposal, emitted third and
+		// last of the bar. Exactly one emission always follows the Signal —
+		// a proposal, or a decline saying why there is none — so a Signal is
+		// never left with nothing after it (see sizeUnit).
+		sized, err := r.sizeUnit(bar, envelope, signalID, view.High, state.n.Value(), nReady)
+		if err != nil {
+			return nil, err
+		}
+		emissions = append(emissions, sized)
 	}
 
 	return emissions, nil
+}
+
+// sizeUnit turns a Signal into either a trade proposal or a recorded decline,
+// and returns exactly one envelope either way (#10).
+//
+// "Either way" is the point. A Signal that produces no position must leave a
+// journal entry saying so, or "no Signal today" and "a Signal whose sizing
+// produced nothing" become indistinguishable on replay — and the second is a
+// fact about the strategy's capacity that a reviewer needs. So every path
+// below that refuses to propose emits a strategy.proposal.declined event with
+// an enumerated reason instead; none of them silently returns nothing.
+//
+// The Notional Account is the configured starting equity: Drawdown Steps and
+// yearly re-basing (ADR 0007) are #16/#17. No cap of any kind is checked —
+// this is one Unit, and ADR 0008's four caps are #55 and later tickets. The
+// entry level is the breakout high, the level the Signal fired at; what fills
+// there is #18's decision, and slippage is a fill concern (ADR 0013), so
+// nothing is applied to it here.
+func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, signalID string, entryLevel, n float64, nReady bool) (event.Envelope, error) {
+	// Unreachable from this reducer: Tier A requires a ready N, and a
+	// Signal is only emitted at Tier A. Guarded anyway — .greptile/rules.md
+	// requires a zero, negative or not-yet-warm volatility value to fail
+	// closed, and "it cannot happen here" is not a reason to divide by it if
+	// the Tier logic above ever changes.
+	if !nReady {
+		return r.decline(bar, input, signalID, event.DeclineReasonNNotReady,
+			fmt.Sprintf("n is not a usable volatility reading (n %v); no unit can be sized from it", n))
+	}
+
+	unit, err := sizing.SizeUnit(sizing.Inputs{
+		Mode:                   r.sizingMode,
+		NotionalAccount:        r.notionalAccount,
+		UnitVolatilityFraction: r.unitVolatilityFrac,
+		StopMultiple:           r.stopMultiple,
+		RiskAtStopFraction:     r.riskAtStopFraction,
+		N:                      n,
+		DollarsPerPoint:        r.dollarsPerPoint,
+	})
+	if err != nil {
+		// Not a decline: the configuration has already been validated and N
+		// is known usable, so an error here means an input this reducer
+		// believed sound produced impossible arithmetic. That is a defect,
+		// and a defect stops the run rather than being journalled as a
+		// routine decline.
+		return event.Envelope{}, fmt.Errorf("strategy: instrument %q at %s: %w",
+			bar.InstrumentID, bar.PeriodEnd.Format(time.RFC3339), err)
+	}
+
+	if unit.Quantity <= 0 {
+		// The Turtle Rules p.15 names this outcome directly: small accounts
+		// lose diversification because truncation is coarse. It is a fact
+		// about the account, not an error.
+		return r.decline(bar, input, signalID, event.DeclineReasonQuantityBelowOneUnit,
+			fmt.Sprintf("notional account %v at %s sizing with n %v and dollars per point %v sizes fewer than one whole unit",
+				r.notionalAccount, r.sizingMode, n, r.dollarsPerPoint))
+	}
+
+	// The Protective Stop intent, in the expression order
+	// event.TradeProposalPayload.Validate re-derives it in, so the two agree
+	// bit for bit (CONTEXT.md: "Protective Stop"; The Turtle Rules p.22's 2N
+	// stop in the Baseline).
+	protectiveStopIntent := entryLevel - r.stopMultiple*n
+	if protectiveStopIntent <= 0 {
+		// A long equity cannot trade below zero, so this stop is
+		// unreachable: the Unit would in fact risk the whole position rather
+		// than the derived fraction. Declining is the fail-closed answer, and
+		// journalling it is how the condition becomes visible instead of
+		// looking like a bar that simply did not signal.
+		return r.decline(bar, input, signalID, event.DeclineReasonStopIntentNotPositive,
+			fmt.Sprintf("protective stop intent %v (entry level %v - stop multiple %v x n %v) is not a reachable price for a long position",
+				protectiveStopIntent, entryLevel, r.stopMultiple, n))
+	}
+
+	proposal := event.TradeProposalPayload{
+		InstrumentID: bar.InstrumentID,
+		PeriodEnd:    bar.PeriodEnd,
+		SignalID:     signalID,
+		// Rule names what the sizing computes, per Sizing Mode, never the
+		// parameter values it ran with — the same reasoning #9 applied to
+		// the Signal's rule name. ADR 0003 is the defining decision for both
+		// modes: it is what declares that there are two and that choosing
+		// between them is a declared experiment.
+		Rule:                   sizingRuleFor(r.sizingMode),
+		ADR:                    event.ADRUnitSizing,
+		Direction:              event.DirectionLong,
+		EntryLevel:             entryLevel,
+		Quantity:               unit.Quantity,
+		N:                      n,
+		SizingMode:             event.SizingMode(r.sizingMode),
+		UnitVolatilityFraction: r.unitVolatilityFrac,
+		StopMultiple:           r.stopMultiple,
+		RiskAtStop:             unit.RiskAtStop,
+		DollarsPerPoint:        r.dollarsPerPoint,
+		NotionalAccount:        r.notionalAccount,
+		ProtectiveStopIntent:   protectiveStopIntent,
+	}
+	if err := proposal.Validate(); err != nil {
+		return event.Envelope{}, fmt.Errorf("strategy: built invalid trade proposal payload: %w", err)
+	}
+	proposalBytes, err := json.Marshal(proposal)
+	if err != nil {
+		return event.Envelope{}, fmt.Errorf("strategy: marshal trade proposal payload: %w", err)
+	}
+	return r.stamp(
+		decisionID("proposal", bar.InstrumentID, bar.PeriodEnd),
+		event.TradeProposalEventType, event.TradeProposalSchemaVersion,
+		bar.PeriodEnd, input, proposalBytes,
+	), nil
+}
+
+// decline builds the strategy.proposal.declined emission for one Signal that
+// produced no position.
+func (r *Reducer) decline(bar event.CompletedBarPayload, input event.Envelope, signalID, reason, detail string) (event.Envelope, error) {
+	payload := event.ProposalDeclinedPayload{
+		InstrumentID: bar.InstrumentID,
+		PeriodEnd:    bar.PeriodEnd,
+		SignalID:     signalID,
+		Reason:       reason,
+		Detail:       detail,
+	}
+	if err := payload.Validate(); err != nil {
+		return event.Envelope{}, fmt.Errorf("strategy: built invalid proposal declined payload: %w", err)
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return event.Envelope{}, fmt.Errorf("strategy: marshal proposal declined payload: %w", err)
+	}
+	return r.stamp(
+		decisionID("proposal-declined", bar.InstrumentID, bar.PeriodEnd),
+		event.ProposalDeclinedEventType, event.ProposalDeclinedSchemaVersion,
+		bar.PeriodEnd, input, payloadBytes,
+	), nil
+}
+
+// sizingRuleFor names the rule a proposal cites, per Sizing Mode.
+//
+// The default is deliberately not a fallback to the Baseline's name: a
+// proposal is only ever built after sizing.SizeUnit has accepted the mode, so
+// reaching it would mean a mode this build cannot size produced a position.
+// An empty rule fails event.TradeProposalPayload.Validate, so the run stops
+// rather than journalling a proposal that names the wrong principle.
+func sizingRuleFor(mode sizing.Mode) string {
+	switch mode {
+	case sizing.ModeVolatilityNormalised:
+		return event.RuleUnitSizingVolatilityNormalised
+	case sizing.ModeFixedRiskAtStop:
+		return event.RuleUnitSizingFixedRiskAtStop
+	default:
+		return ""
+	}
+}
+
+// decisionID builds an emitted envelope's ID from the kind of decision, the
+// instrument, and the completed bar it belongs to.
+//
+// Exactly one decision of each kind exists per (instrument, completed bar),
+// so that triple identifies it uniquely — which makes the ID deterministic
+// and reproducible on replay without any randomness or wall-clock read (both
+// forbidden in internal/; see .golangci.yml's forbidigo rules). The timestamp
+// layout is fixed and includes nanoseconds so two bars can never collapse to
+// the same ID through formatting.
+func decisionID(kind, instrumentID string, periodEnd time.Time) string {
+	return fmt.Sprintf("%s:%s:%s", kind, instrumentID, periodEnd.UTC().Format("2006-01-02T15:04:05.000000000Z"))
+}
+
+// stamp fills in the envelope fields every emission from this reducer shares.
+//
+// EventTime is the completed bar's period end and RecordedAt is the input
+// envelope's RecordedAt — never time.Now(), which .golangci.yml forbids in
+// internal/ precisely because a decision must depend only on the ordered
+// event stream. Sequence, CausationID and CorrelationID are deliberately left
+// unset: replay.Engine assigns them, overwriting whatever a handler sets, so
+// a handler cannot claim causation it did not have (docs/architecture.md).
+func (r *Reducer) stamp(id, eventType string, schemaVersion uint32, periodEnd time.Time, input event.Envelope, payload json.RawMessage) event.Envelope {
+	return event.Envelope{
+		ID:                id,
+		Type:              eventType,
+		SchemaVersion:     schemaVersion,
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
+		EventTime:         periodEnd,
+		RecordedAt:        input.RecordedAt,
+		Source:            sourceReducer,
+		StrategyVersion:   r.strategyVersion,
+		ConfigurationHash: r.configurationHash,
+		PayloadHash:       event.HashPayload(payload),
+		Payload:           payload,
+	}
 }
 
 func (r *Reducer) stateFor(instrumentID string) (*instrumentState, error) {
