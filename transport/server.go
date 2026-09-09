@@ -325,15 +325,25 @@ func (s *Server) decideWithTimeout(bar event.Envelope) (event.Envelope, error) {
 }
 
 // ServeContext runs Serve and shuts the server down when ctx is cancelled.
+//
+// Serving can also end on its own — an accept failure, with the context still
+// live. The watcher therefore waits on either cancellation or the end of
+// Serve. Waiting only on ctx.Done() would leave it parked for ever in that
+// case, and ServeContext would never return the listener error that caused it.
 func (s *Server) ServeContext(ctx context.Context) error {
-	stopped := make(chan struct{})
+	served := make(chan struct{})
+	watching := make(chan struct{})
 	go func() {
-		defer close(stopped)
-		<-ctx.Done()
-		_ = s.Close()
+		defer close(watching)
+		select {
+		case <-ctx.Done():
+			_ = s.Close()
+		case <-served:
+		}
 	}()
 	err := s.Serve()
+	close(served)
 	_ = s.Close()
-	<-stopped
+	<-watching
 	return err
 }
