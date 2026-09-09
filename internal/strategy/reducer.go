@@ -315,6 +315,12 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	decisionN := state.n.Value()
 	nReady := state.n.Ready() && decisionN > 0
 
+	// #11: the period end of the bar BEFORE this one — the moment this bar
+	// opened — captured here because the advance block below overwrites it. It
+	// is the earliest instant at which an order proposed on this bar could
+	// have executed; see Reducer.applyFill for the window it bounds.
+	previousPeriodEnd := state.lastPeriodEnd
+
 	entryChannelHigh, entryChannelReady := state.entryChannel.Extreme()
 	// The Turtle Rules p.19: a Breakout "exceeds" the channel, so the
 	// comparison is strict; a tie is not a breakout.
@@ -472,7 +478,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		// #11: a proposal is remembered as outstanding so that a fill can be
 		// checked against it — and NOTHING about position state moves here.
 		// See Reducer.rememberPendingProposal.
-		if err := r.rememberPendingProposal(state, sized); err != nil {
+		if err := r.rememberPendingProposal(state, sized, previousPeriodEnd); err != nil {
 			return nil, err
 		}
 	}

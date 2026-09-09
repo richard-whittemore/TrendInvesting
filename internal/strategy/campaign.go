@@ -73,14 +73,27 @@ type campaignState struct {
 // the proposal a Signal produced inherits it: the next completed bar for the
 // instrument supersedes the proposal (see Reducer.expireProposal).
 type pendingProposalState struct {
-	proposalID   string
-	signalID     string
-	periodEnd    time.Time
-	direction    string
-	quantity     int64
-	n            float64
-	stopMultiple float64
-	entryLevel   float64
+	proposalID string
+	signalID   string
+	periodEnd  time.Time
+	// earliestFillAt is the period end of the bar BEFORE the decision bar —
+	// which is to say the moment the decision bar opened, and so the earliest
+	// instant at which an order for this proposal could have executed. See
+	// applyFill for why the bound is this rather than periodEnd.
+	//
+	// It is the zero time if the decision bar was the instrument's first,
+	// leaving such a proposal bounded above only. That cannot arise from this
+	// reducer — a proposal requires a Signal, which requires both a warm N
+	// (twenty completed bars) and a warm Entry Channel, so at least twenty
+	// bars always precede a decision bar — and the zero value degrades
+	// correctly rather than needing a special case: every real timestamp is
+	// after it, so the lower bound simply does not bind.
+	earliestFillAt time.Time
+	direction      string
+	quantity       int64
+	n              float64
+	stopMultiple   float64
+	entryLevel     float64
 }
 
 // rememberPendingProposal records the trade proposal just emitted for this
@@ -95,7 +108,10 @@ type pendingProposalState struct {
 // It reads the figures back out of the emitted payload rather than taking them
 // from the sizing step's locals, so what the reducer remembers as pending is
 // literally what it journalled; the two cannot drift apart.
-func (r *Reducer) rememberPendingProposal(state *instrumentState, emitted event.Envelope) error {
+//
+// earliestFillAt must be the period end of the bar preceding the decision bar,
+// read before applyCompletedBar's advance block overwrites it.
+func (r *Reducer) rememberPendingProposal(state *instrumentState, emitted event.Envelope, earliestFillAt time.Time) error {
 	if emitted.Type != event.TradeProposalEventType {
 		// A decline (#10) proposes nothing, so there is nothing to fill and
 		// nothing to expire.
@@ -110,14 +126,15 @@ func (r *Reducer) rememberPendingProposal(state *instrumentState, emitted event.
 		return fmt.Errorf("strategy: decode the trade proposal just emitted: %w", err)
 	}
 	state.pendingProposal = &pendingProposalState{
-		proposalID:   emitted.ID,
-		signalID:     proposal.SignalID,
-		periodEnd:    proposal.PeriodEnd,
-		direction:    proposal.Direction,
-		quantity:     proposal.Quantity,
-		n:            proposal.N,
-		stopMultiple: proposal.StopMultiple,
-		entryLevel:   proposal.EntryLevel,
+		proposalID:     emitted.ID,
+		signalID:       proposal.SignalID,
+		periodEnd:      proposal.PeriodEnd,
+		earliestFillAt: earliestFillAt,
+		direction:      proposal.Direction,
+		quantity:       proposal.Quantity,
+		n:              proposal.N,
+		stopMultiple:   proposal.StopMultiple,
+		entryLevel:     proposal.EntryLevel,
 	}
 	return nil
 }
@@ -196,8 +213,25 @@ func (r *Reducer) expireProposal(state *instrumentState, bar event.CompletedBarP
 //     identifiers must be idempotent (docs/architecture.md) — or something
 //     this ticket deliberately refuses (see applyFillToOpenCampaign).
 //  4. Otherwise the fill must match the outstanding proposal: the same
-//     proposal, the same direction, and no more than the quantity that was
-//     sized.
+//     proposal, the same direction, no more than the quantity that was sized,
+//     and a timestamp inside the window in which an order for it could have
+//     executed.
+//
+// **That window is (the previous bar's period end, the next bar's arrival),
+// and it is deliberately not anchored on the proposal's own period end.** ADR
+// 0005 makes the entry a resting order that fills *inside* the breakout bar,
+// so a fill timestamped before the decision bar's close is the ordinary
+// backtest case rather than an anomaly; live, the order rests into the
+// following session and fills after it. What cannot happen is a fill from
+// before the decision bar even opened — no order for that proposal could have
+// existed then, and accepting one would journal a Campaign whose identity,
+// OpenedAt and EventTime predate the bar whose data produced the decision
+// authorising it. That is the lower bound checked below (a PR #69 review
+// finding, rebounded: the finding proposed the proposal's period end, which
+// would have rejected every legitimate intrabar fill). The upper bound needs
+// no check because it is structural — the next completed bar for the
+// instrument expires the proposal, so a fill arriving after it finds nothing
+// pending and is rejected by that path.
 //
 // What a fill deliberately is NOT checked against: the proposal's entry level.
 // ADR 0005 makes a long entry fill at max(level, open) and ADR 0013 pushes it
@@ -259,6 +293,16 @@ func (r *Reducer) applyFill(envelope event.Envelope) ([]event.Envelope, error) {
 	if fill.Quantity > pending.quantity {
 		return nil, fmt.Errorf("strategy: instrument %q: fill %q executed %d against proposal %q, which sized %d; an over-execution risks more than the unit that was sized (ADR 0003) and is never absorbed",
 			fill.InstrumentID, fill.FillID, fill.Quantity, fill.ProposalID, pending.quantity)
+	}
+	// The lower bound on the window described above. Strict: a fill stamped
+	// exactly at the previous bar's period end is at the instant the decision
+	// bar opened, before which no order for this proposal existed. The zero
+	// bound (documented on pendingProposalState.earliestFillAt) needs no
+	// special case: every real timestamp is after it.
+	if !fill.FilledAt.After(pending.earliestFillAt) {
+		return nil, fmt.Errorf("strategy: instrument %q: fill %q is timestamped %s, which predates the bar in which an order for proposal %q could have executed (that bar opened at %s and ended at %s); a campaign may not be opened by an execution older than the decision that authorised it",
+			fill.InstrumentID, fill.FillID, fill.FilledAt.Format(time.RFC3339),
+			fill.ProposalID, pending.earliestFillAt.Format(time.RFC3339), pending.periodEnd.Format(time.RFC3339))
 	}
 
 	return r.openCampaign(state, pending, fill, envelope)
