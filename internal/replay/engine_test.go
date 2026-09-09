@@ -11,16 +11,23 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 )
 
+// envelope builds a valid envelope at the given sequence, so each test states
+// only what it is actually about.
 func envelope(sequence uint64) event.Envelope {
 	now := time.Date(2026, time.August, 29, 20, 0, 0, 0, time.UTC)
+	payload := json.RawMessage(`{}`)
 	return event.Envelope{
-		ID:            "evt",
-		Type:          "test.event",
-		SchemaVersion: 1,
-		EventTime:     now,
-		RecordedAt:    now,
-		Sequence:      sequence,
-		Payload:       json.RawMessage(`{}`),
+		ID:                "evt",
+		Type:              "test.event",
+		SchemaVersion:     1,
+		EventTime:         now,
+		RecordedAt:        now,
+		Sequence:          sequence,
+		Source:            "fixture",
+		StrategyVersion:   "test-strategy-1.0.0",
+		ConfigurationHash: "cfg-test",
+		PayloadHash:       event.HashPayload(payload),
+		Payload:           payload,
 	}
 }
 

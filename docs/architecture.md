@@ -28,10 +28,14 @@ Every input and output uses an immutable envelope containing:
 - event type and schema version;
 - event time and recording time;
 - ordered processing sequence;
-- correlation and causation identifiers; and
+- correlation and causation identifiers;
+- the source that emitted the event, the strategy version, and the configuration hash it was produced under;
+- a payload integrity hash — the SHA-256 of the payload bytes exactly as stored, hex-encoded; and
 - an immutable JSON payload.
 
-Replay rejects invalid events and sequence gaps. Payload schemas and upcasting rules will be introduced explicitly as the contract evolves.
+The provenance fields are required. Together they let a reviewer reading a journal say which component, which build, and which configuration produced a decision, and the integrity hash makes a payload altered after recording detectable rather than silent. Results are retained under their configuration hash (ADR 0012), so this is what ties a journal back to a declared Baseline or Variant.
+
+Replay rejects invalid events, sequence gaps, and payloads that do not match their integrity hash. Payload schemas and upcasting rules will be introduced explicitly as the contract evolves.
 
 ## Safety invariants
 
