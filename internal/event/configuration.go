@@ -59,8 +59,11 @@ type ConfigurationPayload struct {
 // Validate checks that every Baseline parameter is present and in range. A
 // zero slippage value is rejected (ADR 0013: "A backtest run with zero
 // slippage is invalid by construction"), the Sizing Mode must be one of the
-// two declared values, and channel lengths and maximum Units must be
-// positive integers.
+// two declared values, channel lengths and maximum Units must be positive
+// integers, and every float64 parameter must be finite (isFinite, defined
+// alongside PriceView in bar.go): NaN and +/-Inf are rejected explicitly,
+// before the range check that follows, rather than silently passing an
+// ordered comparison that is always false against NaN.
 func (c ConfigurationPayload) Validate() error {
 	var errs []error
 	if c.StrategyID == "" {
@@ -72,10 +75,16 @@ func (c ConfigurationPayload) Validate() error {
 	default:
 		errs = append(errs, fmt.Errorf("sizing mode %q is not a recognised sizing mode", c.SizingMode))
 	}
-	if c.UnitVolatilityFraction <= 0 || c.UnitVolatilityFraction > 1 {
+	switch {
+	case !isFinite(c.UnitVolatilityFraction):
+		errs = append(errs, errors.New("unit volatility fraction must be finite"))
+	case c.UnitVolatilityFraction <= 0 || c.UnitVolatilityFraction > 1:
 		errs = append(errs, errors.New("unit volatility fraction must be greater than zero and at most one"))
 	}
-	if c.StopMultiple <= 0 {
+	switch {
+	case !isFinite(c.StopMultiple):
+		errs = append(errs, errors.New("stop multiple must be finite"))
+	case c.StopMultiple <= 0:
 		errs = append(errs, errors.New("stop multiple must be positive"))
 	}
 	if c.EntryChannelLength <= 0 {
@@ -87,10 +96,16 @@ func (c ConfigurationPayload) Validate() error {
 	if c.MaxUnits <= 0 {
 		errs = append(errs, errors.New("maximum units must be a positive integer"))
 	}
-	if c.SlippageN <= 0 {
+	switch {
+	case !isFinite(c.SlippageN):
+		errs = append(errs, errors.New("slippage must be finite"))
+	case c.SlippageN <= 0:
 		errs = append(errs, errors.New("slippage must be positive; zero slippage is invalid by construction (ADR 0013)"))
 	}
-	if c.NotionalAccount.StartingEquity <= 0 {
+	switch {
+	case !isFinite(c.NotionalAccount.StartingEquity):
+		errs = append(errs, errors.New("notional account starting equity must be finite"))
+	case c.NotionalAccount.StartingEquity <= 0:
 		errs = append(errs, errors.New("notional account starting equity must be positive"))
 	}
 	if !validRebasingDate(c.NotionalAccount.RebasingMonth, c.NotionalAccount.RebasingDay) {

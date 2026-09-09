@@ -3,6 +3,7 @@ package event
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -37,6 +38,13 @@ type PriceView struct {
 // validate checks that the view carries the expected label and is internally
 // consistent OHLCV data. It returns the individual errors unwrapped so the
 // caller can attribute them to "split-adjusted view" or "raw view".
+//
+// Finiteness is checked before any comparison that uses the value: ordered
+// comparisons against NaN are always false in Go, so a NaN price would
+// otherwise satisfy every "must be positive" and cross-field check silently.
+// A field that fails the finiteness check is excluded from the checks that
+// follow, so the error names the real problem instead of a misleading range
+// or ordering message.
 func (v PriceView) validate(want string) []error {
 	var errs []error
 	switch v.View {
@@ -47,37 +55,69 @@ func (v PriceView) validate(want string) []error {
 	default:
 		errs = append(errs, fmt.Errorf("view label %q does not match expected %q", v.View, want))
 	}
-	if v.Open <= 0 {
+
+	openFinite := isFinite(v.Open)
+	highFinite := isFinite(v.High)
+	lowFinite := isFinite(v.Low)
+	closeFinite := isFinite(v.Close)
+	volumeFinite := isFinite(v.Volume)
+
+	switch {
+	case !openFinite:
+		errs = append(errs, errors.New("open must be finite"))
+	case v.Open <= 0:
 		errs = append(errs, errors.New("open must be positive"))
 	}
-	if v.High <= 0 {
+	switch {
+	case !highFinite:
+		errs = append(errs, errors.New("high must be finite"))
+	case v.High <= 0:
 		errs = append(errs, errors.New("high must be positive"))
 	}
-	if v.Low <= 0 {
+	switch {
+	case !lowFinite:
+		errs = append(errs, errors.New("low must be finite"))
+	case v.Low <= 0:
 		errs = append(errs, errors.New("low must be positive"))
 	}
-	if v.Close <= 0 {
+	switch {
+	case !closeFinite:
+		errs = append(errs, errors.New("close must be finite"))
+	case v.Close <= 0:
 		errs = append(errs, errors.New("close must be positive"))
 	}
-	if v.Volume < 0 {
+	switch {
+	case !volumeFinite:
+		errs = append(errs, errors.New("volume must be finite"))
+	case v.Volume < 0:
 		errs = append(errs, errors.New("volume must not be negative"))
 	}
-	if v.High < v.Low {
+
+	if highFinite && lowFinite && v.High < v.Low {
 		errs = append(errs, errors.New("high must be at least low"))
 	}
-	if v.High < v.Open {
+	if highFinite && openFinite && v.High < v.Open {
 		errs = append(errs, errors.New("high must be at least open"))
 	}
-	if v.High < v.Close {
+	if highFinite && closeFinite && v.High < v.Close {
 		errs = append(errs, errors.New("high must be at least close"))
 	}
-	if v.Low > v.Open {
+	if lowFinite && openFinite && v.Low > v.Open {
 		errs = append(errs, errors.New("low must be at most open"))
 	}
-	if v.Low > v.Close {
+	if lowFinite && closeFinite && v.Low > v.Close {
 		errs = append(errs, errors.New("low must be at most close"))
 	}
 	return errs
+}
+
+// isFinite reports whether f is neither NaN nor infinite. Shared by every
+// float64 field validated in this package: a NaN or Inf that passed
+// validation would poison every downstream sizing calculation silently,
+// which for a system trading real money is a capital-safety defect, not a
+// cosmetic one.
+func isFinite(f float64) bool {
+	return !math.IsNaN(f) && !math.IsInf(f, 0)
 }
 
 // CompletedBarPayload carries a completed bar's OHLCV data in both required
