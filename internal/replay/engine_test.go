@@ -23,6 +23,7 @@ func envelope(sequence uint64) event.Envelope {
 		ID:                fmt.Sprintf("evt-%d", sequence),
 		Type:              "test.event",
 		SchemaVersion:     1,
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
 		EventTime:         now,
 		RecordedAt:        now,
 		Sequence:          sequence,
@@ -45,6 +46,7 @@ func decision(id string) event.Envelope {
 		ID:                id,
 		Type:              "test.decision",
 		SchemaVersion:     1,
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
 		EventTime:         now,
 		RecordedAt:        now,
 		Source:            "handler",
@@ -323,6 +325,65 @@ func TestEngineRunRejectsInvalidInputEnvelope(t *testing.T) {
 	_, err = engine.Run(context.Background(), []event.Envelope{invalid})
 	if err == nil {
 		t.Fatal("Run() error = nil, want error")
+	}
+}
+
+// A wrong envelope version is the same fail-closed seam as any other invalid
+// input: the engine performs no version-specific handling of its own, it
+// just calls Envelope.Validate() on every input before applying it (#7).
+func TestEngineRunRejectsInputWithWrongEnvelopeVersion(t *testing.T) {
+	t.Parallel()
+
+	engine, err := replay.New(replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) { return nil, nil }))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	invalid := envelope(1)
+	invalid.EnvelopeVersion = event.CurrentEnvelopeVersion + 1 // produced by a newer build
+
+	_, err = engine.Run(context.Background(), []event.Envelope{invalid})
+	if err == nil || !strings.Contains(err.Error(), "newer build") {
+		t.Fatalf("Run() error = %v, want it to reject the wrong envelope version", err)
+	}
+}
+
+// A decision the handler emits is validated the same way, and an invalid
+// emission must fail closed naming the input sequence and emission index
+// (#7) even when the invalidity is a wrong envelope version.
+func TestEngineRunFailsClosedOnEmissionWithWrongEnvelopeVersion(t *testing.T) {
+	t.Parallel()
+
+	engine, err := replay.New(replay.HandlerFunc(func(_ context.Context, item event.Envelope) ([]event.Envelope, error) {
+		switch item.Sequence {
+		case 4:
+			return []event.Envelope{decision("a")}, nil
+		case 5:
+			valid := decision("b")
+			wrongVersion := decision("c")
+			wrongVersion.EnvelopeVersion = event.CurrentEnvelopeVersion + 1 // produced by a newer build
+			return []event.Envelope{valid, wrongVersion}, nil
+		default:
+			t.Fatalf("unexpected input sequence %d", item.Sequence)
+			return nil, nil
+		}
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = engine.Run(context.Background(), []event.Envelope{envelope(4), envelope(5)})
+	if err == nil {
+		t.Fatal("Run() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "sequence 5") {
+		t.Fatalf("Run() error = %v, want it to name the input sequence (5)", err)
+	}
+	if !strings.Contains(err.Error(), "emission 1") {
+		t.Fatalf("Run() error = %v, want it to name the emission index (1)", err)
+	}
+	if !strings.Contains(err.Error(), "newer build") {
+		t.Fatalf("Run() error = %v, want it to name the wrong-envelope-version cause", err)
 	}
 }
 
