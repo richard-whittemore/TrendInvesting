@@ -25,6 +25,7 @@ Go never assumes an intended order was filled. Positions, protective stops, and 
 Every input and output uses an immutable envelope containing:
 
 - stable event identifier;
+- a required envelope shape version (`envelope_version`), distinct from the payload schema version below — it versions the envelope struct itself, and replay of a version this build does not recognise fails closed unless an explicit upcaster exists (ADR 0015);
 - event type and schema version;
 - event time and recording time;
 - ordered processing sequence;
@@ -36,6 +37,12 @@ Every input and output uses an immutable envelope containing:
 The provenance fields are required. Together they let a reviewer reading a journal say which component, which build, and which configuration produced a decision, and the integrity hash makes a payload altered after recording detectable rather than silent. Results are retained under their configuration hash (ADR 0012), so this is what ties a journal back to a declared Baseline or Variant.
 
 Replay rejects invalid events, sequence gaps, and payloads that do not match their integrity hash. Payload schemas and upcasting rules will be introduced explicitly as the contract evolves.
+
+## Replay engine
+
+`internal/replay.Engine.Run` is the seam between events in and decisions out: it applies a contiguous input stream to a `Handler`, and returns every decision envelope the handler emitted, in emission order. A handler emitting nothing for a given input is valid.
+
+Emitted envelopes form their own contiguous output stream, independent of the input stream: the engine assigns each one's `Sequence` from a counter starting at 1, in emission order, overwriting whatever the handler set — input sequences are left exactly as the producer set them. A later journal writer interleaves the two streams by recording order; replay equivalence compares output streams. The engine also sets `CausationID` (the input envelope's `ID`) and `CorrelationID` (the input's `CorrelationID` if set, else its `ID`) on every emission, overwriting whatever the handler set — a handler cannot claim causation or correlation it did not have. Each emitted envelope is validated after stamping, so an invalid emission fails closed, naming the input sequence and the emission index. A handler remains responsible for `Source`, `StrategyVersion`, `ConfigurationHash`, `Payload`, and `PayloadHash` on what it emits.
 
 ## Local transport
 
@@ -63,4 +70,4 @@ The following are intentionally not selected in the initial scaffold:
 - brokerage; and
 - Kubernetes or service decomposition.
 
-These decisions require evidence from the corresponding Linear issues.
+These decisions require evidence from the corresponding GitHub issues (see #4 and `docs/agents/issue-tracker.md`).

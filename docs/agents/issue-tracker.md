@@ -96,6 +96,14 @@ Until those labels exist in the repository, carry the same information as the fi
 
 Once the labels are created, they can be applied to existing issues in a batch of `issue_write` updates.
 
+## Pull requests
+
+- **The title begins with the issue identifier:** `#N: <ticket title>`. The merge-commit title is `#N: <ticket title> (#PR)`, so `git log`, the PR list, and the ledger stay cross-referenceable.
+- One PR per ticket, from a `ticket/N-<slug>` branch cut from `origin/main`, worked in its own git worktree so parallel tickets never collide.
+- Merge method is **`merge`, never squash**: the red → green TDD commit sequence is evidence and must stay visible in history.
+- **Every merged PR is recorded in the ledger issue #51** (PR, issue, title, merge SHA, date) by the orchestrating session, so any change can be found and reviewed later.
+- Reviews from the orchestrating session are posted as **comments, not approvals** — GitHub refuses an approval on a PR opened under the same account, which every agent PR is. The ruleset requires zero approvals for exactly this reason.
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo ever treats external PRs as feature requests; `/triage` reads this flag.)_
