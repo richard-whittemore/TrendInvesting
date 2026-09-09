@@ -110,9 +110,19 @@ func (r *Reducer) Apply(_ context.Context, envelope event.Envelope) ([]event.Env
 
 // applyConfiguration handles event.ConfigurationEventType.
 //
-// Two checks guard the provenance the reducer stamps on every later
-// decision (Source, StrategyVersion, ConfigurationHash):
+// Three checks guard the provenance the reducer stamps on every later
+// decision (Source, StrategyVersion, ConfigurationHash), and the shape of
+// the payload itself:
 //
+//   - The envelope's SchemaVersion must equal event.ConfigurationSchemaVersion.
+//     This is the payload-level counterpart of ADR 0015's envelope-level
+//     rule: an older schema is rejected, never silently upgraded, until an
+//     explicit upcaster exists. Without this check, a schema-1 configuration
+//     (recorded before #9 added TierBDistanceInN) would still decode: the
+//     missing field unmarshals as the float64 zero value, ConfigurationPayload.Validate
+//     accepts a zero TierBDistanceInN as legitimately "no Tier B window", and
+//     Tier B silently changes meaning for that run rather than the run being
+//     rejected as incompatible.
 //   - The event's ConfigurationHash must match the hash this Reducer was
 //     constructed with. Without this check a valid configuration envelope
 //     carrying a *different* hash would still be accepted, and every
@@ -127,6 +137,9 @@ func (r *Reducer) Apply(_ context.Context, envelope event.Envelope) ([]event.Env
 func (r *Reducer) applyConfiguration(envelope event.Envelope) ([]event.Envelope, error) {
 	if r.configured {
 		return nil, fmt.Errorf("strategy: reducer is already configured (configuration hash %q); mid-stream reconfiguration is not supported (ADR 0006 freezes configuration at entry)", r.configurationHash)
+	}
+	if envelope.SchemaVersion != event.ConfigurationSchemaVersion {
+		return nil, fmt.Errorf("strategy: configuration payload schema version %d does not match the version %d this build requires; an older or newer schema is rejected, never silently upgraded, until an explicit upcaster exists (ADR 0015)", envelope.SchemaVersion, event.ConfigurationSchemaVersion)
 	}
 	if envelope.ConfigurationHash != r.configurationHash {
 		return nil, fmt.Errorf("strategy: configuration event's configuration hash %q does not match the reducer's configuration hash %q", envelope.ConfigurationHash, r.configurationHash)
@@ -144,9 +157,18 @@ func (r *Reducer) applyConfiguration(envelope event.Envelope) ([]event.Envelope,
 	return nil, nil
 }
 
+// applyCompletedBar handles event.CompletedBarEventType. Like
+// applyConfiguration, it rejects a schema version other than
+// event.CompletedBarSchemaVersion before decoding, for the same reason (ADR
+// 0015's envelope-level rule, applied here at the payload level): a schema
+// this build was not written against must never be silently interpreted as
+// the current one.
 func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, error) {
 	if !r.configured {
 		return nil, errors.New("strategy: received a completed bar before a configuration event; failing closed")
+	}
+	if envelope.SchemaVersion != event.CompletedBarSchemaVersion {
+		return nil, fmt.Errorf("strategy: completed bar payload schema version %d does not match the version %d this build requires; an older or newer schema is rejected, never silently upgraded, until an explicit upcaster exists (ADR 0015)", envelope.SchemaVersion, event.CompletedBarSchemaVersion)
 	}
 
 	var bar event.CompletedBarPayload
@@ -204,6 +226,14 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	breakout := entryChannelReady && view.High > entryChannelHigh
 	state.entryChannel.Add(view.High)
 
+	// Tier follows three cases, per DistanceToEntryInN's sign and magnitude
+	// (see SetupEvaluatedPayload's doc comment): a strict breakout
+	// (distance < 0) is TierA; a tie or an approach within the configured
+	// distance (0 <= distance <= TierBDistanceInN) is TierB — since
+	// TierBDistanceInN is always non-negative (ConfigurationPayload.Validate),
+	// a tie (distance exactly 0) is always at least TierB, never TierNone,
+	// so ADR 0011's Watchlist surfaces it as the closest possible approach
+	// without a breakout; anything farther is TierNone.
 	ready := nReady && entryChannelReady
 	tier := event.TierNone
 	var distanceToEntryInN float64
@@ -212,7 +242,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		switch {
 		case breakout:
 			tier = event.TierA
-		case distanceToEntryInN > 0 && distanceToEntryInN <= r.tierBDistanceInN:
+		case distanceToEntryInN >= 0 && distanceToEntryInN <= r.tierBDistanceInN:
 			tier = event.TierB
 		}
 	}
@@ -267,18 +297,24 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 
 	// #9: Tier A is a Signal. No Signal while N or the channel is not ready
 	// (tier is TierA only when ready is true, above), and never on a tie
-	// (breakout, and therefore tier==TierA, requires a strict >). Emitted
-	// after the Setup-evaluated event, per the ticket's ordering.
+	// (a tie is TierB, not TierA — breakout, and therefore tier==TierA,
+	// requires a strict >). Emitted after the Setup-evaluated event, per
+	// the ticket's ordering.
 	if tier == event.TierA {
 		signalPayload := event.SignalPayload{
-			InstrumentID:     bar.InstrumentID,
-			PeriodEnd:        bar.PeriodEnd,
-			Rule:             event.RuleSystem2Entry55,
-			ADR:              event.ADRSystem2Baseline,
-			Direction:        event.DirectionLong,
-			EntryChannelHigh: entryChannelHigh,
-			BreakoutHigh:     view.High,
-			N:                state.n.Value(),
+			InstrumentID: bar.InstrumentID,
+			PeriodEnd:    bar.PeriodEnd,
+			Rule:         event.RuleSystem2Entry,
+			ADR:          event.ADRSystem2Baseline,
+			Direction:    event.DirectionLong,
+			// The length this Signal was actually computed with, not a
+			// hard-coded 55: a Variant configured with a different
+			// EntryChannelLength must not have its Signals mislabelled with
+			// the Baseline's length.
+			EntryChannelLength: r.entryChannelLength,
+			EntryChannelHigh:   entryChannelHigh,
+			BreakoutHigh:       view.High,
+			N:                  state.n.Value(),
 		}
 		if err := signalPayload.Validate(); err != nil {
 			return nil, fmt.Errorf("strategy: built invalid signal payload: %w", err)

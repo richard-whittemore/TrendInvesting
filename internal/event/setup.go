@@ -56,11 +56,13 @@ const (
 // unambiguous "not evaluable" value rather than a stale or fabricated one.
 // When both are ready: DistanceToEntryInN is (EntryChannelHigh-High)/N —
 // positive while price sits below the channel, negative once price has
-// broken out above it (Tier is TierA exactly when this bar's high exceeds
-// the channel: The Turtle Rules p.19's "exceeds", so a high exactly equal to
-// the channel high is not a breakout and does not produce TierA). TierB is a
-// Setup approaching its entry condition, within a configured distance
-// (ConfigurationPayload.TierBDistanceInN) below the channel.
+// broken out above it, and exactly 0 on a tie (high exactly equal to the
+// channel high). The three cases: DistanceToEntryInN < 0 is TierA (The
+// Turtle Rules p.19's "exceeds" — a strict breakout); 0 <=
+// DistanceToEntryInN <= ConfigurationPayload.TierBDistanceInN is TierB
+// (since TierBDistanceInN is always non-negative, a tie is always at least
+// TierB — ADR 0011's Watchlist exists to surface exactly that closest
+// possible approach); otherwise TierNone.
 //
 // This payload is deliberately not a Signal (CONTEXT.md: "Signal" is a Tier
 // A event, SignalPayload): this event evaluates and reports the Setup's
@@ -144,10 +146,12 @@ func (p SetupEvaluatedPayload) Validate() error {
 		switch {
 		case p.Tier == TierA && !(p.DistanceToEntryInN < 0):
 			errs = append(errs, errors.New("tier a requires a negative distance to entry in n (a breakout strictly exceeds the entry channel)"))
-		case p.Tier == TierB && !(p.DistanceToEntryInN > 0):
-			errs = append(errs, errors.New("tier b requires a positive distance to entry in n"))
+		case p.Tier == TierB && !(p.DistanceToEntryInN >= 0):
+			errs = append(errs, errors.New("tier b requires a non-negative distance to entry in n"))
 		case p.Tier == TierNone && p.DistanceToEntryInN < 0:
 			errs = append(errs, errors.New("a negative distance to entry in n implies a breakout and must be tier a"))
+		case p.Tier == TierNone && p.DistanceToEntryInN == 0:
+			errs = append(errs, errors.New("a zero distance to entry in n (a tie) implies at least tier b, not tier none"))
 		}
 	}
 

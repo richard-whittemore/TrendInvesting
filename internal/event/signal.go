@@ -17,10 +17,13 @@ const SignalEventType = "strategy.signal"
 // the Envelope's SchemaVersion field.
 const SignalSchemaVersion uint32 = 1
 
-// RuleSystem2Entry55 names the Baseline's entry rule for SignalPayload.Rule:
-// System 2's 55-bar Entry Channel breakout (The Turtle Rules p.19; ADR
-// 0002).
-const RuleSystem2Entry55 = "system2.entry.55"
+// RuleSystem2Entry names System 2's Entry Channel breakout rule for
+// SignalPayload.Rule (The Turtle Rules p.19; ADR 0002). The channel length
+// is not baked into this name — a Variant may configure a different
+// EntryChannelLength than the Baseline's 55, and a rule name that hard-coded
+// "55" would misname the rule that actually produced a Variant's Signal.
+// SignalPayload.EntryChannelLength carries the length actually used.
+const RuleSystem2Entry = "system2.entry"
 
 // ADRSystem2Baseline is the ADR SignalPayload.ADR cites for a Baseline
 // Signal: ADR 0002, which selects System 2 as the Baseline.
@@ -51,6 +54,14 @@ type SignalPayload struct {
 	Rule      string `json:"rule"`
 	ADR       string `json:"adr"`
 	Direction string `json:"direction"`
+	// EntryChannelLength is the Entry Channel length (in completed bars)
+	// this Signal was actually computed with — 55 in the Baseline, but a
+	// Variant may configure a different value (ConfigurationPayload,
+	// EntryChannelLength). Carried as its own field, not folded into Rule
+	// as a suffix: a Signal is an audit record, and naming the wrong length
+	// in it is a defect this field exists to prevent regardless of Rule's
+	// text.
+	EntryChannelLength int `json:"entry_channel_length"`
 	// EntryChannelHigh is the Entry Channel high the breakout exceeded —
 	// computed from the preceding bars only, excluding this one (ADR 0002;
 	// see indicator.EntryChannel's doc comment). BreakoutHigh is this bar's
@@ -64,11 +75,12 @@ type SignalPayload struct {
 }
 
 // Validate checks that the payload identifies an instrument, period, rule,
-// and ADR, that Direction is the one recognised value, that both price
-// fields are finite and positive with BreakoutHigh strictly exceeding
-// EntryChannelHigh (The Turtle Rules p.19: a Breakout "exceeds" the
-// channel, so a Signal whose own fields contradict that is invalid by
-// construction), and that N is finite and positive.
+// and ADR, that Direction is the one recognised value, that
+// EntryChannelLength is a positive integer, that both price fields are
+// finite and positive with BreakoutHigh strictly exceeding EntryChannelHigh
+// (The Turtle Rules p.19: a Breakout "exceeds" the channel, so a Signal
+// whose own fields contradict that is invalid by construction), and that N
+// is finite and positive.
 func (p SignalPayload) Validate() error {
 	var errs []error
 	if p.InstrumentID == "" {
@@ -88,6 +100,9 @@ func (p SignalPayload) Validate() error {
 		// recognised
 	default:
 		errs = append(errs, fmt.Errorf("direction %q is not a recognised direction", p.Direction))
+	}
+	if p.EntryChannelLength <= 0 {
+		errs = append(errs, errors.New("entry channel length must be a positive integer"))
 	}
 
 	entryChannelHighFinite := isFinite(p.EntryChannelHigh)
