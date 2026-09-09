@@ -76,10 +76,22 @@ type Reducer struct {
 	stopMultiple         float64
 	riskAtStopFraction   float64
 	dollarsPerPoint      float64
-	// notionalAccount is the configured starting equity (ADR 0007). The
-	// Drawdown Steps that reduce it and the yearly re-basing that restores it
-	// are #16/#17: nothing in this reducer changes it yet.
-	notionalAccount float64
+	// notionalAccount is ADR 0007's Notional Account (CONTEXT.md),
+	// initialised to the configured starting equity and stepped down by
+	// event.AccountSnapshotEventType events (#16; see notional.go's
+	// applyAccountSnapshot). Yearly re-basing and recovery are #17, not
+	// implemented here.
+	notionalAccount *NotionalAccount
+	// drawdownStepsSeen counts every Drawdown Step applied so far in this
+	// run, for DrawdownStepAppliedPayload.StepNumber (1-based). #17's yearly
+	// re-basing will need to reset this at each re-basing date; out of scope
+	// here, so it counts for the life of the run.
+	drawdownStepsSeen int
+	// lastAccountSnapshotAt/hasAccountSnapshot enforce account snapshot
+	// chronology, the same shape as instrumentState's lastPeriodEnd/bar
+	// chronology check in applyCompletedBar.
+	lastAccountSnapshotAt time.Time
+	hasAccountSnapshot    bool
 
 	instruments map[string]*instrumentState
 }
@@ -120,12 +132,17 @@ func NewReducer(strategyVersion, configurationHash string) (*Reducer, error) {
 	}, nil
 }
 
-// Apply implements replay.Handler. It recognises exactly two input event
+// Apply implements replay.Handler. It recognises exactly three input event
 // types:
 //
-//   - event.ConfigurationEventType: recorded, and required before any bar.
+//   - event.ConfigurationEventType: recorded, and required before any bar or
+//     account snapshot.
 //   - event.CompletedBarEventType: updates that instrument's True Range/N
 //     and emits one event.SetupEvaluatedEventType decision.
+//   - event.AccountSnapshotEventType: feeds actual equity to the Notional
+//     Account (ADR 0007; #16) and emits one
+//     event.DrawdownStepAppliedEventType decision per Drawdown Step applied
+//     — see notional.go's applyAccountSnapshot.
 //
 // Any other event type fails closed rather than being silently ignored
 // (docs/development.md principle 4: "Fail closed on unknown schemas").
@@ -135,6 +152,8 @@ func (r *Reducer) Apply(_ context.Context, envelope event.Envelope) ([]event.Env
 		return r.applyConfiguration(envelope)
 	case event.CompletedBarEventType:
 		return r.applyCompletedBar(envelope)
+	case event.AccountSnapshotEventType:
+		return r.applyAccountSnapshot(envelope)
 	default:
 		return nil, fmt.Errorf("strategy: unrecognized event type %q", envelope.Type)
 	}
@@ -195,11 +214,19 @@ func (r *Reducer) applyConfiguration(envelope event.Envelope) ([]event.Envelope,
 	r.stopMultiple = payload.StopMultiple
 	r.riskAtStopFraction = payload.RiskAtStopFraction
 	r.dollarsPerPoint = payload.DollarsPerPoint
-	// ADR 0007's Notional Account, at its configured starting value. The
-	// Drawdown Steps that reduce it, and the yearly re-basing that restores
-	// it, are #16/#17: nothing in this reducer changes this figure yet, so a
-	// proposal today is always sized against the configured equity.
-	r.notionalAccount = payload.NotionalAccount.StartingEquity
+	// ADR 0007's Notional Account, at its configured starting value: before
+	// any account.snapshot arrives it equals StartingEquity exactly (#16's
+	// applyAccountSnapshot, in notional.go, is what steps it down). Yearly
+	// re-basing and recovery are #17.
+	notionalAccount, err := NewNotionalAccount(payload.NotionalAccount.StartingEquity)
+	if err != nil {
+		// Unreachable: ConfigurationPayload.Validate has already required
+		// StartingEquity to be finite and positive, which is everything
+		// NewNotionalAccount checks. Guarded anyway, matching this project's
+		// fail-closed style.
+		return nil, fmt.Errorf("strategy: %w", err)
+	}
+	r.notionalAccount = notionalAccount
 	r.configured = true
 	return nil, nil
 }
@@ -442,9 +469,11 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 // below that refuses to propose emits a strategy.proposal.declined event with
 // an enumerated reason instead; none of them silently returns nothing.
 //
-// The Notional Account is the configured starting equity: Drawdown Steps and
-// yearly re-basing (ADR 0007) are #16/#17. No cap of any kind is checked —
-// this is one Unit, and ADR 0008's four caps are #55 and later tickets. The
+// The Notional Account is read from r.notionalAccount.Current() (ADR 0007):
+// its configured starting value until an account.snapshot applies a
+// Drawdown Step (#16), never actual account equity. Yearly re-basing and
+// recovery are #17. No cap of any kind is checked — this is one Unit, and
+// ADR 0008's four caps are #55 and later tickets. The
 // entry level is the breakout high, the level the Signal fired at; what fills
 // there is #18's decision, and slippage is a fill concern (ADR 0013), so
 // nothing is applied to it here.
@@ -461,7 +490,7 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 
 	unit, err := sizing.SizeUnit(sizing.Inputs{
 		Mode:                   r.sizingMode,
-		NotionalAccount:        r.notionalAccount,
+		NotionalAccount:        r.notionalAccount.Current(),
 		UnitVolatilityFraction: r.unitVolatilityFrac,
 		StopMultiple:           r.stopMultiple,
 		RiskAtStopFraction:     r.riskAtStopFraction,
@@ -484,7 +513,7 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 		// about the account, not an error.
 		return r.decline(bar, input, signalID, event.DeclineReasonQuantityBelowOneUnit,
 			fmt.Sprintf("notional account %v under %s sizing, with n %v and dollars per point %v, sizes fewer than one whole unit",
-				r.notionalAccount, r.configuredSizingMode, n, r.dollarsPerPoint))
+				r.notionalAccount.Current(), r.configuredSizingMode, n, r.dollarsPerPoint))
 	}
 
 	// The Protective Stop intent, in the expression order
@@ -524,7 +553,7 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 		RiskAtStop:             unit.RiskAtStop,
 		RealisedRiskAtStop:     unit.RealisedRiskAtStop,
 		DollarsPerPoint:        r.dollarsPerPoint,
-		NotionalAccount:        r.notionalAccount,
+		NotionalAccount:        r.notionalAccount.Current(),
 		ProtectiveStopIntent:   protectiveStopIntent,
 	}
 	if err := proposal.Validate(); err != nil {
