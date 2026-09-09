@@ -1,8 +1,9 @@
 // Package strategy holds the deterministic reducers that turn a validated
 // event stream into decision events (docs/architecture.md: "Replay
 // engine"). It implements replay.Handler and depends only on internal/event,
-// internal/indicator, and internal/replay: no LEAN, database, transport, or
-// wall-clock access (AGENTS.md rule 7; enforced by depguard/forbidigo).
+// internal/indicator, internal/sizing, and internal/replay: no LEAN,
+// database, transport, or wall-clock access (AGENTS.md rule 7; enforced by
+// depguard/forbidigo).
 package strategy
 
 import (
@@ -22,15 +23,17 @@ import (
 // "the source that emitted the event").
 const sourceReducer = "reducer"
 
-// Reducer implements replay.Handler for #8/#9: it tracks each instrument's
-// True Range, N (CONTEXT.md: "True Range", "N"), and Entry Channel
-// (CONTEXT.md: "Entry Channel"; ADR 0002) from completed bars. It emits one
-// Setup-evaluated decision event per bar, reporting N, the Entry Channel,
-// the Setup's Tier, and its distance to entry in N; when the bar's high
-// exceeds the Entry Channel (a Breakout, Tier A), it additionally emits a
-// Signal, Setup-evaluated first (#9's ordering). It requires a configuration
-// event before any bar and fails closed if a bar arrives first, accepts
-// exactly one configuration event per run (matching its constructor's
+// Reducer implements replay.Handler for #8/#9/#10: it tracks each
+// instrument's True Range, N (CONTEXT.md: "True Range", "N"), and Entry
+// Channel (CONTEXT.md: "Entry Channel"; ADR 0002) from completed bars. It
+// emits one Setup-evaluated decision event per bar, reporting N, the Entry
+// Channel, the Setup's Tier, and its distance to entry in N; when the bar's
+// high exceeds the Entry Channel (a Breakout, Tier A), it additionally emits
+// a Signal and then the sizing outcome that Signal produced — either a trade
+// proposal or a recorded decline (see sizeUnit). The order within one Apply
+// return is always Setup-evaluated, Signal, sizing outcome. It requires a
+// configuration event before any bar and fails closed if a bar arrives first,
+// accepts exactly one configuration event per run (matching its constructor's
 // configuration hash — see applyConfiguration), and rejects a duplicate or
 // out-of-order bar for any one instrument (see applyCompletedBar).
 //
@@ -50,16 +53,26 @@ type Reducer struct {
 	entryChannelLength int
 	tierBDistanceInN   float64
 
-	// #10's sizing configuration, captured once from the configuration
-	// event. notionalAccount is the configured starting equity: Drawdown
-	// Steps and yearly re-basing (ADR 0007) are #16/#17, so nothing here
-	// reduces it yet.
-	sizingMode         sizing.Mode
-	unitVolatilityFrac float64
-	stopMultiple       float64
-	riskAtStopFraction float64
-	dollarsPerPoint    float64
-	notionalAccount    float64
+	// #10's sizing configuration, captured once from the configuration event.
+	//
+	// Both forms of the Sizing Mode are kept: configuredSizingMode is the
+	// value the configuration event declared and is what a proposal is
+	// stamped with; sizingMode is the same choice in internal/sizing's own
+	// vocabulary and is what the arithmetic is called with. Keeping both
+	// means the value written to the journal is the one that was configured,
+	// never a string conversion back from the arithmetic package — such a
+	// conversion would quietly launder a drift between the two enumerations
+	// into an audit record instead of failing on it.
+	configuredSizingMode event.SizingMode
+	sizingMode           sizing.Mode
+	unitVolatilityFrac   float64
+	stopMultiple         float64
+	riskAtStopFraction   float64
+	dollarsPerPoint      float64
+	// notionalAccount is the configured starting equity (ADR 0007). The
+	// Drawdown Steps that reduce it and the yearly re-basing that restores it
+	// are #16/#17: nothing in this reducer changes it yet.
+	notionalAccount float64
 
 	instruments map[string]*instrumentState
 }
@@ -169,6 +182,7 @@ func (r *Reducer) applyConfiguration(envelope event.Envelope) ([]event.Envelope,
 	}
 	r.entryChannelLength = payload.EntryChannelLength
 	r.tierBDistanceInN = payload.TierBDistanceInN
+	r.configuredSizingMode = payload.SizingMode
 	r.sizingMode = sizingMode
 	r.unitVolatilityFrac = payload.UnitVolatilityFraction
 	r.stopMultiple = payload.StopMultiple
@@ -442,8 +456,8 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 		// lose diversification because truncation is coarse. It is a fact
 		// about the account, not an error.
 		return r.decline(bar, input, signalID, event.DeclineReasonQuantityBelowOneUnit,
-			fmt.Sprintf("notional account %v at %s sizing with n %v and dollars per point %v sizes fewer than one whole unit",
-				r.notionalAccount, r.sizingMode, n, r.dollarsPerPoint))
+			fmt.Sprintf("notional account %v under %s sizing, with n %v and dollars per point %v, sizes fewer than one whole unit",
+				r.notionalAccount, r.configuredSizingMode, n, r.dollarsPerPoint))
 	}
 
 	// The Protective Stop intent, in the expression order
@@ -471,13 +485,13 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 		// the Signal's rule name. ADR 0003 is the defining decision for both
 		// modes: it is what declares that there are two and that choosing
 		// between them is a declared experiment.
-		Rule:                   sizingRuleFor(r.sizingMode),
+		Rule:                   sizingRuleFor(r.configuredSizingMode),
 		ADR:                    event.ADRUnitSizing,
 		Direction:              event.DirectionLong,
 		EntryLevel:             entryLevel,
 		Quantity:               unit.Quantity,
 		N:                      n,
-		SizingMode:             event.SizingMode(r.sizingMode),
+		SizingMode:             r.configuredSizingMode,
 		UnitVolatilityFraction: r.unitVolatilityFrac,
 		StopMultiple:           r.stopMultiple,
 		RiskAtStop:             unit.RiskAtStop,
@@ -530,11 +544,11 @@ func (r *Reducer) decline(bar event.CompletedBarPayload, input event.Envelope, s
 // reaching it would mean a mode this build cannot size produced a position.
 // An empty rule fails event.TradeProposalPayload.Validate, so the run stops
 // rather than journalling a proposal that names the wrong principle.
-func sizingRuleFor(mode sizing.Mode) string {
+func sizingRuleFor(mode event.SizingMode) string {
 	switch mode {
-	case sizing.ModeVolatilityNormalised:
+	case event.SizingModeVolatilityNormalised:
 		return event.RuleUnitSizingVolatilityNormalised
-	case sizing.ModeFixedRiskAtStop:
+	case event.SizingModeFixedRiskAtStop:
 		return event.RuleUnitSizingFixedRiskAtStop
 	default:
 		return ""
