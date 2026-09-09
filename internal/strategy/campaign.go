@@ -191,6 +191,32 @@ func (r *Reducer) expireProposal(state *instrumentState, bar event.CompletedBarP
 	), nil
 }
 
+// checkBarConfirmsCampaignOpening enforces the upper end of the window
+// described on applyFill, at the earliest point the reducer is able to.
+//
+// A fill timestamped after a bar that had not yet completed cannot have
+// happened: the execution claims a moment the stream has not reached. That
+// contradiction is invisible when the fill arrives — the next bar does not
+// exist yet, and no bar length is configured, so there is nothing to compare
+// against — and it becomes visible the instant the next completed bar for the
+// instrument does arrive. So it is checked here rather than in applyFill, and
+// the run fails rather than continuing with a Campaign whose id, OpenedAt and
+// EventTime sit in the stream's future.
+//
+// Equality is allowed: a fill at a bar's close happened within that bar.
+//
+// Only the first bar after the Campaign opened can fail this, since the run
+// stops when it does and every later bar ends after the one that did not.
+func checkBarConfirmsCampaignOpening(state *instrumentState, bar event.CompletedBarPayload) error {
+	if state.campaign == nil || !bar.PeriodEnd.Before(state.campaign.openedAt) {
+		return nil
+	}
+	return fmt.Errorf("strategy: instrument %q: bar period end %s predates campaign %q, which was opened by fill %q timestamped %s; an execution cannot have happened after a bar that had not yet completed, so the fill's timestamp is inconsistent with the bar stream",
+		bar.InstrumentID, bar.PeriodEnd.Format(time.RFC3339),
+		state.campaign.campaignID, state.campaign.openingFillID,
+		state.campaign.openedAt.Format(time.RFC3339))
+}
+
 // applyFill handles event.FillEventType: the only input in this system that
 // may change position state.
 //
@@ -217,21 +243,37 @@ func (r *Reducer) expireProposal(state *instrumentState, bar event.CompletedBarP
 //     and a timestamp inside the window in which an order for it could have
 //     executed.
 //
-// **That window is (the previous bar's period end, the next bar's arrival),
-// and it is deliberately not anchored on the proposal's own period end.** ADR
-// 0005 makes the entry a resting order that fills *inside* the breakout bar,
-// so a fill timestamped before the decision bar's close is the ordinary
-// backtest case rather than an anomaly; live, the order rests into the
-// following session and fills after it. What cannot happen is a fill from
-// before the decision bar even opened — no order for that proposal could have
-// existed then, and accepting one would journal a Campaign whose identity,
-// OpenedAt and EventTime predate the bar whose data produced the decision
-// authorising it. That is the lower bound checked below (a PR #69 review
-// finding, rebounded: the finding proposed the proposal's period end, which
-// would have rejected every legitimate intrabar fill). The upper bound needs
-// no check because it is structural — the next completed bar for the
-// instrument expires the proposal, so a fill arriving after it finds nothing
-// pending and is rejected by that path.
+// # The window a fill's timestamp must lie in
+//
+// It is **(the period end of the bar before the decision bar, the period end
+// of the next bar for that instrument]**, and it is deliberately not anchored
+// on the proposal's own period end at either end. ADR 0005 makes the entry a
+// resting order that fills *inside* the breakout bar, so a fill timestamped
+// before the decision bar's close is the ordinary backtest case; live, the
+// order rests into the following session and fills after that close. A bound
+// at the proposal's period end would therefore be wrong in both directions.
+//
+// The two ends are enforced in different places, because they become knowable
+// at different times:
+//
+//   - **Lower bound, here.** A fill from before the decision bar even opened
+//     is impossible: no order for that proposal existed then, and accepting
+//     one would journal a Campaign whose identity, OpenedAt and EventTime
+//     predate the bar whose data produced the decision authorising it. The
+//     bound is pendingProposalState.earliestFillAt, known the moment the
+//     proposal was made, so it is checked as the fill is applied.
+//   - **Upper bound, at the next completed bar** — see
+//     checkBarConfirmsCampaignOpening. A fill claiming a moment the stream has
+//     not reached is equally impossible, but it cannot be detected here: the
+//     next bar does not exist yet, and no bar length is configured, so there
+//     is nothing to compare against. It is checked at the first point the
+//     reducer can know it, which is when that bar arrives.
+//
+// Both bounds were PR #69 review findings, each rebounded from what the
+// finding literally proposed. Note that the upper bound is not the same rule
+// as ADR 0011's expiry, which handles a fill *arriving* after the next bar
+// (the proposal is gone, so there is nothing pending to match); this one
+// handles a fill arriving in time but *claiming* a time after it.
 //
 // What a fill deliberately is NOT checked against: the proposal's entry level.
 // ADR 0005 makes a long entry fill at max(level, open) and ADR 0013 pushes it
@@ -294,11 +336,13 @@ func (r *Reducer) applyFill(envelope event.Envelope) ([]event.Envelope, error) {
 		return nil, fmt.Errorf("strategy: instrument %q: fill %q executed %d against proposal %q, which sized %d; an over-execution risks more than the unit that was sized (ADR 0003) and is never absorbed",
 			fill.InstrumentID, fill.FillID, fill.Quantity, fill.ProposalID, pending.quantity)
 	}
-	// The lower bound on the window described above. Strict: a fill stamped
-	// exactly at the previous bar's period end is at the instant the decision
-	// bar opened, before which no order for this proposal existed. The zero
-	// bound (documented on pendingProposalState.earliestFillAt) needs no
-	// special case: every real timestamp is after it.
+	// The lower bound of the window described above; the upper bound is
+	// checked at the next completed bar, by checkBarConfirmsCampaignOpening.
+	// Strict: a fill stamped exactly at the previous bar's period end is at
+	// the instant the decision bar opened, before which no order for this
+	// proposal existed. The zero bound (documented on
+	// pendingProposalState.earliestFillAt) needs no special case: every real
+	// timestamp is after it.
 	if !fill.FilledAt.After(pending.earliestFillAt) {
 		return nil, fmt.Errorf("strategy: instrument %q: fill %q is timestamped %s, which predates the bar in which an order for proposal %q could have executed (that bar opened at %s and ended at %s); a campaign may not be opened by an execution older than the decision that authorised it",
 			fill.InstrumentID, fill.FillID, fill.FilledAt.Format(time.RFC3339),

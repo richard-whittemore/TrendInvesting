@@ -283,6 +283,14 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 			bar.InstrumentID, bar.PeriodEnd.Format(time.RFC3339), state.lastPeriodEnd.Format(time.RFC3339))
 	}
 
+	// #11: this bar is the first thing able to contradict an open Campaign's
+	// opening fill timestamp — see checkBarConfirmsCampaignOpening for why the
+	// check lives at this end rather than in applyFill. Before any state is
+	// read or advanced, so a rejected bar leaves nothing half-applied.
+	if err := checkBarConfirmsCampaignOpening(state, bar); err != nil {
+		return nil, err
+	}
+
 	// ADR 0004: signal computation, including N and the Entry Channel, runs
 	// on the split-adjusted view only.
 	view := bar.SplitAdjusted
