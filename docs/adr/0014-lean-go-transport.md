@@ -225,7 +225,6 @@ Constraints this puts on #27–#31:
     serialise with fixed separators so that hashing the payload alone yields
     the same bytes the envelope embeds. Changing the separators in one place
     makes every envelope fail `invalid_envelope`.
-
 11. **Use `net.DialUnix` and `net.ListenUnix`, not `net.Dial` and
     `net.Listen`.** The generic pair parses an address string and reaches
     `net.LookupPort`, which is meaningless for a socket path and is the subject
@@ -234,6 +233,14 @@ Constraints this puts on #27–#31:
     `make check` fails against the pinned Go 1.24.4 toolchain. Naming the
     address family removes the call path, so no toolchain bump and no
     time-bounded exception under `docs/dependency-policy.md` were needed.
+12. **Every envelope must declare `envelope_version`** (ADR 0015), and the
+    engine fails closed in both directions: an envelope with the field missing
+    decodes as version 0 and is rejected as `invalid_envelope`, never upgraded.
+    The Python adapter is a hand-written peer of the Go struct, so nothing
+    mechanical keeps its constant equal to `event.CurrentEnvelopeVersion` —
+    but the failure is loud and immediate rather than silent, and it costs one
+    bar rather than the session. When the envelope shape next changes, the
+    adapter is a second place that must change with it.
 
 Not addressed here, and deliberately out of scope:
 

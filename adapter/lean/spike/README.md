@@ -98,7 +98,7 @@ no engine, the algorithm calls `Quit()` in `Initialize` and LEAN stops before
 processing a single data point — the fail-closed behaviour required by
 `docs/architecture.md`.
 
-## Two traps this spike walked into
+## Three traps this spike walked into
 
 1. **`from AlgorithmImports import *` shadows the standard library.** It
    exports `datetime.time`, so `time.perf_counter()` raises
@@ -110,6 +110,12 @@ processing a single data point — the fail-closed behaviour required by
    everywhere, which makes the payload dumped alone byte-identical to the
    substring the envelope dump produces. Change the separators in one place
    only and every envelope is rejected as `invalid_envelope`.
+3. **`envelope_version` is required and is not inferred.** ADR 0015 versions
+   the envelope struct itself. An envelope without the field decodes as
+   version 0 on the Go side and is rejected — deliberately, because this build
+   has no upcaster. `client.py`'s `ENVELOPE_VERSION` must equal
+   `event.CurrentEnvelopeVersion` in `internal/event/envelope.go`; nothing
+   checks that for you except the round trip.
 
 ## The rejected alternative
 
