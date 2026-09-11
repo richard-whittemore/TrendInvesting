@@ -970,3 +970,89 @@ func TestDrawdownSteppedNotionalFaithsLadder(t *testing.T) {
 		}
 	}
 }
+
+// TestCashMovementScaledFigureDepositExample is #17's hand-derived deposit
+// fixture: after one Drawdown Step at equity 890,000 (yearly starting figure
+// S 1,000,000, measurement base B 900,000, Notional Account A 800,000), a
+// deposit of 200,000 scales every figure by (890,000+200,000)/890,000. The
+// expected values are pinned by math.Float64bits, found by running the
+// computation once (the same discipline #16's asymptote test and #10's
+// truncation-boundary test use for a figure not practical to hand-derive to
+// the last bit), not re-derived from sizing.CashMovementScaledFigure itself
+// — that would make the assertion tautological.
+func TestCashMovementScaledFigureDepositExample(t *testing.T) {
+	t.Parallel()
+
+	const (
+		equityBefore = 890_000.0
+		amount       = 200_000.0
+		equityAfter  = equityBefore + amount // 1,090,000
+
+		startingFigureBefore = 1_000_000.0
+		baseBefore           = 900_000.0
+		notionalBefore       = 800_000.0
+	)
+
+	tests := []struct {
+		name   string
+		before float64
+		want   float64
+		bits   uint64
+	}{
+		{name: "starting figure", before: startingFigureBefore, want: 1_224_719.1011235956, bits: 0x4132b00f19e33c68},
+		{name: "measurement base", before: baseBefore, want: 1_102_247.191011236, bits: 0x4130d1a730e61cc4},
+		{name: "notional account", before: notionalBefore, want: 979_775.2808988765, bits: 0x412de67e8fd1fa40},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := sizing.CashMovementScaledFigure(tt.before, equityBefore, equityAfter)
+			if got != tt.want {
+				t.Fatalf("CashMovementScaledFigure(%v, %v, %v) = %v, want %v", tt.before, equityBefore, equityAfter, got, tt.want)
+			}
+			if gotBits := math.Float64bits(got); gotBits != tt.bits {
+				t.Fatalf("CashMovementScaledFigure(%v, %v, %v) bits = %#x, want %#x", tt.before, equityBefore, equityAfter, gotBits, tt.bits)
+			}
+		})
+	}
+}
+
+// TestCashMovementScaledFigureWithdrawalExample is the symmetric withdrawal
+// fixture: a withdrawal of 100,000 from the same starting state as the
+// deposit example above, scaling by (890,000-100,000)/890,000.
+func TestCashMovementScaledFigureWithdrawalExample(t *testing.T) {
+	t.Parallel()
+
+	const (
+		equityBefore = 890_000.0
+		amount       = -100_000.0
+		equityAfter  = equityBefore + amount // 790,000
+
+		startingFigureBefore = 1_000_000.0
+		baseBefore           = 900_000.0
+		notionalBefore       = 800_000.0
+	)
+
+	tests := []struct {
+		name   string
+		before float64
+		want   float64
+		bits   uint64
+	}{
+		{name: "starting figure", before: startingFigureBefore, want: 887_640.4494382022, bits: 0x412b16b0e61cc398},
+		{name: "measurement base", before: baseBefore, want: 798_876.404494382, bits: 0x41286138cf19e33c},
+		{name: "notional account", before: notionalBefore, want: 710_112.3595505618, bits: 0x4125abc0b81702e0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := sizing.CashMovementScaledFigure(tt.before, equityBefore, equityAfter)
+			if got != tt.want {
+				t.Fatalf("CashMovementScaledFigure(%v, %v, %v) = %v, want %v", tt.before, equityBefore, equityAfter, got, tt.want)
+			}
+			if gotBits := math.Float64bits(got); gotBits != tt.bits {
+				t.Fatalf("CashMovementScaledFigure(%v, %v, %v) bits = %#x, want %#x", tt.before, equityBefore, equityAfter, gotBits, tt.bits)
+			}
+		})
+	}
+}

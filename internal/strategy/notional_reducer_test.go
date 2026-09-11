@@ -565,3 +565,597 @@ func TestReducerSurfacesTheNotionalAccountAsymptoteError(t *testing.T) {
 		t.Fatalf("emitted = %v, want nil: the engine returns nothing for a run that failed closed", emitted)
 	}
 }
+
+// --- #17: yearly re-basing, deposits, and withdrawals — event seam ---
+//
+// jan(day, year) is defined in notional_test.go (same package): a UTC
+// midnight time.Time. validConfigurationPayload's NotionalAccount re-bases
+// on 1 January (RebasingMonth/RebasingDay 1/1).
+
+func cashMovementPayload(asOf time.Time, amount, equityBefore float64) event.CashMovementPayload {
+	return event.CashMovementPayload{
+		AsOf:         asOf,
+		Amount:       amount,
+		EquityBefore: equityBefore,
+		Currency:     "USD",
+	}
+}
+
+func cashMovementEnvelope(t *testing.T, sequence uint64, payload event.CashMovementPayload, recordedAt time.Time) event.Envelope {
+	t.Helper()
+	encoded := mustMarshal(t, payload)
+	return event.Envelope{
+		ID:                fmt.Sprintf("cash-movement-%d", sequence),
+		Type:              event.CashMovementEventType,
+		SchemaVersion:     event.CashMovementSchemaVersion,
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
+		EventTime:         payload.AsOf,
+		RecordedAt:        recordedAt,
+		Sequence:          sequence,
+		Source:            "fixture",
+		StrategyVersion:   testStrategyVersion,
+		ConfigurationHash: testConfigurationHash,
+		PayloadHash:       event.HashPayload(encoded),
+		Payload:           encoded,
+	}
+}
+
+func decodeNotionalAccountRebased(t *testing.T, envelope event.Envelope) event.NotionalAccountRebasedPayload {
+	t.Helper()
+	if envelope.Type != event.NotionalAccountRebasedEventType {
+		t.Fatalf("envelope.Type = %q, want %q", envelope.Type, event.NotionalAccountRebasedEventType)
+	}
+	var payload event.NotionalAccountRebasedPayload
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(payload) error = %v", err)
+	}
+	return payload
+}
+
+func decodeNotionalAccountRecovered(t *testing.T, envelope event.Envelope) event.NotionalAccountRecoveredPayload {
+	t.Helper()
+	if envelope.Type != event.NotionalAccountRecoveredEventType {
+		t.Fatalf("envelope.Type = %q, want %q", envelope.Type, event.NotionalAccountRecoveredEventType)
+	}
+	var payload event.NotionalAccountRecoveredPayload
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(payload) error = %v", err)
+	}
+	return payload
+}
+
+func decodeNotionalAccountCashAdjusted(t *testing.T, envelope event.Envelope) event.NotionalAccountCashAdjustedPayload {
+	t.Helper()
+	if envelope.Type != event.NotionalAccountCashAdjustedEventType {
+		t.Fatalf("envelope.Type = %q, want %q", envelope.Type, event.NotionalAccountCashAdjustedEventType)
+	}
+	var payload event.NotionalAccountCashAdjustedPayload
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(payload) error = %v", err)
+	}
+	return payload
+}
+
+// TestReducerRebasesAcrossAYearBoundaryThenStepsAgainstTheNewFigure is the
+// ticket's headline event-seam case: a snapshot before the account's first
+// re-basing date establishes its period without re-basing, the first
+// snapshot on or after 1 January re-bases it to actual equity (emitting
+// strategy.notional-account.rebased), and a further snapshot's Drawdown
+// Step is measured against the NEW figure, not the one re-basing replaced.
+func TestReducerRebasesAcrossAYearBoundaryThenStepsAgainstTheNewFigure(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	cfg := validConfigurationPayload() // starting equity 1,000,000, rebasing 1 January
+	snap1 := accountSnapshotPayload(jan(2, 2026).Add(time.Hour), 970_000)
+	snap2 := accountSnapshotPayload(jan(1, 2027), 900_000) // rebases to 900,000
+	snap3 := accountSnapshotPayload(jan(2, 2027), 810_000) // steps against the NEW 900,000 figure
+
+	envelopes := []event.Envelope{
+		configEnvelopeWithConfig(t, 1, day(0), cfg),
+		accountSnapshotEnvelope(t, 2, snap1, snap1.AsOf),
+		accountSnapshotEnvelope(t, 3, snap2, snap2.AsOf),
+		accountSnapshotEnvelope(t, 4, snap3, snap3.AsOf),
+	}
+
+	emitted, err := engine.Run(context.Background(), envelopes)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(emitted) != 2 {
+		t.Fatalf("len(emitted) = %d, want 2 (a rebased event for snap2, a drawdown step for snap3; snap1 emits nothing)", len(emitted))
+	}
+
+	rebased := decodeNotionalAccountRebased(t, emitted[0])
+	if rebased.PreviousStartingFigure != 1_000_000 || rebased.NewStartingFigure != 900_000 || rebased.Equity != 900_000 {
+		t.Errorf("rebased = %+v, want previous 1,000,000 new 900,000 equity 900,000", rebased)
+	}
+	if !rebased.AsOf.Equal(snap2.AsOf) {
+		t.Errorf("rebased.AsOf = %v, want %v", rebased.AsOf, snap2.AsOf)
+	}
+	if rebased.Rule != event.RuleNotionalAccountRebase || rebased.ADR != event.ADRNotionalAccountRebase {
+		t.Errorf("rebased Rule/ADR = %q/%q, want %q/%q", rebased.Rule, rebased.ADR, event.RuleNotionalAccountRebase, event.ADRNotionalAccountRebase)
+	}
+	if err := rebased.Validate(); err != nil {
+		t.Errorf("rebased fails its own Validate(): %v", err)
+	}
+	wantRebasedID := fmt.Sprintf("notional-account-rebased:%s", snap2.AsOf.UTC().Format("2006-01-02T15:04:05.000000000Z"))
+	if emitted[0].ID != wantRebasedID {
+		t.Errorf("ID = %q, want %q", emitted[0].ID, wantRebasedID)
+	}
+
+	step := decodeDrawdownStepApplied(t, emitted[1])
+	if step.NotionalBefore != 900_000 || step.NotionalAfter != 720_000 || step.Threshold != 810_000 {
+		t.Errorf("step = %+v, want before 900,000 after 720,000 threshold 810,000 (measured against the re-based figure)", step)
+	}
+	if step.StepNumber != 1 {
+		t.Errorf("step.StepNumber = %d, want 1: re-basing resets the step count", step.StepNumber)
+	}
+	if err := step.Validate(); err != nil {
+		t.Errorf("step fails its own Validate(): %v", err)
+	}
+}
+
+// TestReducerFirstSnapshotAfterRebasingDateSizesFromTheConfiguredFigure
+// confirms #17's documented decision: the very first snapshot of a run,
+// even one well after the year's re-basing date, does not re-base, and
+// sizing continues to use the configured StartingEquity.
+func TestReducerFirstSnapshotAfterRebasingDateSizesFromTheConfiguredFigure(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	highs := breakoutFixtureHighs()
+	// June 2026 is well after the 1 January re-basing date, and this is the
+	// account's very first snapshot.
+	snap := accountSnapshotPayload(jan(2, 2026).AddDate(0, 5, 0), 950_000)
+
+	emitted := runReducerWithAccountSnapshotsThenHighs(t, "AAPL", []event.AccountSnapshotPayload{snap}, highs, cfg)
+
+	rebasedEvents := envelopesOfType(emitted, event.NotionalAccountRebasedEventType)
+	if len(rebasedEvents) != 0 {
+		t.Fatalf("len(rebasedEvents) = %d, want 0: the first snapshot of a run never re-bases", len(rebasedEvents))
+	}
+	drawdownSteps := envelopesOfType(emitted, event.DrawdownStepAppliedEventType)
+	if len(drawdownSteps) != 0 {
+		t.Fatalf("len(drawdownSteps) = %d, want 0: 950,000 is above the configured account's first threshold (900,000)", len(drawdownSteps))
+	}
+
+	proposals := envelopesOfType(emitted, event.TradeProposalEventType)
+	if len(proposals) != 1 {
+		t.Fatalf("len(proposals) = %d, want 1", len(proposals))
+	}
+	proposal := decodeTradeProposal(t, proposals[0])
+	if proposal.NotionalAccount != cfg.NotionalAccount.StartingEquity {
+		t.Fatalf("proposal.NotionalAccount = %v, want the configured starting equity %v unchanged (no re-basing on the first snapshot)", proposal.NotionalAccount, cfg.NotionalAccount.StartingEquity)
+	}
+}
+
+// TestReducerBreakoutAfterRebasingSizesFromTheRebasedFigure closes the loop
+// to #10's sizing after a re-basing: the account's first snapshot
+// establishes its period (no re-basing), a later snapshot on the re-basing
+// date re-bases it to 950,000, and the subsequent breakout is sized from
+// that re-based figure, not the configured 1,000,000.
+func TestReducerBreakoutAfterRebasingSizesFromTheRebasedFigure(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	highs := breakoutFixtureHighs()
+	snap1 := accountSnapshotPayload(jan(2, 2026).Add(time.Hour), 970_000) // establishes the period, no rebase
+	snap2 := accountSnapshotPayload(jan(1, 2027), 950_000)                // rebases to 950,000
+
+	emitted := runReducerWithAccountSnapshotsThenHighs(t, "AAPL", []event.AccountSnapshotPayload{snap1, snap2}, highs, cfg)
+
+	rebasedEvents := envelopesOfType(emitted, event.NotionalAccountRebasedEventType)
+	if len(rebasedEvents) != 1 {
+		t.Fatalf("len(rebasedEvents) = %d, want 1", len(rebasedEvents))
+	}
+	rebased := decodeNotionalAccountRebased(t, rebasedEvents[0])
+	if rebased.NewStartingFigure != 950_000 {
+		t.Fatalf("rebased.NewStartingFigure = %v, want 950,000", rebased.NewStartingFigure)
+	}
+
+	proposals := envelopesOfType(emitted, event.TradeProposalEventType)
+	if len(proposals) != 1 {
+		t.Fatalf("len(proposals) = %d, want 1", len(proposals))
+	}
+	proposal := decodeTradeProposal(t, proposals[0])
+	if proposal.NotionalAccount != 950_000 {
+		t.Fatalf("proposal.NotionalAccount = %v, want the re-based 950,000, not the configured starting equity %v", proposal.NotionalAccount, cfg.NotionalAccount.StartingEquity)
+	}
+
+	wantN := breakoutFixtureN(t, cfg)
+	wantQuantity, err := sizing.UnitQuantity(950_000, cfg.UnitVolatilityFraction, wantN, cfg.DollarsPerPoint)
+	if err != nil {
+		t.Fatalf("sizing.UnitQuantity() error = %v", err)
+	}
+	if proposal.Quantity != wantQuantity {
+		t.Fatalf("proposal.Quantity = %d, want %d (floor(950,000 x 0.005 / N))", proposal.Quantity, wantQuantity)
+	}
+}
+
+// TestReducerFullRecoveryClearsBothStepsAndEmitsRecoveredEvent: two Drawdown
+// Steps in, then a snapshot regaining the yearly starting figure emits the
+// step events (in order) followed by exactly one
+// strategy.notional-account.recovered event reporting both steps cleared.
+func TestReducerFullRecoveryClearsBothStepsAndEmitsRecoveredEvent(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	cfg := validConfigurationPayload()
+	snap1 := accountSnapshotPayload(snapshotBefore(1), 900_000)   // step 1: -> 800,000
+	snap2 := accountSnapshotPayload(snapshotBefore(2), 820_000)   // step 2: -> 640,000
+	snap3 := accountSnapshotPayload(snapshotBefore(3), 1_050_000) // full recovery
+
+	envelopes := []event.Envelope{
+		configEnvelopeWithConfig(t, 1, day(0), cfg),
+		accountSnapshotEnvelope(t, 2, snap1, snap1.AsOf),
+		accountSnapshotEnvelope(t, 3, snap2, snap2.AsOf),
+		accountSnapshotEnvelope(t, 4, snap3, snap3.AsOf),
+	}
+
+	emitted, err := engine.Run(context.Background(), envelopes)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(emitted) != 3 {
+		t.Fatalf("len(emitted) = %d, want 3 (two steps, one recovery)", len(emitted))
+	}
+	if emitted[0].Type != event.DrawdownStepAppliedEventType || emitted[1].Type != event.DrawdownStepAppliedEventType {
+		t.Fatalf("emitted[0].Type/emitted[1].Type = %q/%q, want two drawdown steps first", emitted[0].Type, emitted[1].Type)
+	}
+
+	recovered := decodeNotionalAccountRecovered(t, emitted[2])
+	want := event.NotionalAccountRecoveredPayload{
+		AsOf:           snap3.AsOf,
+		Equity:         1_050_000,
+		StartingFigure: 1_000_000,
+		NotionalBefore: 640_000,
+		StepsCleared:   2,
+		Rule:           event.RuleNotionalAccountRecovery,
+		ADR:            event.ADRNotionalAccountRecovery,
+	}
+	if recovered != want {
+		t.Errorf("recovered = %+v, want %+v", recovered, want)
+	}
+	if err := recovered.Validate(); err != nil {
+		t.Errorf("recovered fails its own Validate(): %v", err)
+	}
+
+	// A Drawdown Step after this recovery starts a fresh episode: StepNumber
+	// resets to 1, exactly as it does after a re-basing.
+	snap4 := accountSnapshotPayload(snapshotBefore(4), 900_000)
+	emitted, err = engine.Run(context.Background(), []event.Envelope{accountSnapshotEnvelope(t, 5, snap4, snap4.AsOf)})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(emitted) != 1 {
+		t.Fatalf("len(emitted) = %d, want 1", len(emitted))
+	}
+	if step := decodeDrawdownStepApplied(t, emitted[0]); step.StepNumber != 1 {
+		t.Fatalf("step.StepNumber = %d, want 1: a recovery resets the step count", step.StepNumber)
+	}
+}
+
+// TestReducerCashMovementMidDrawdownEmitsCashAdjustedAndNoStep is the
+// ticket's named deposit fixture through the full event seam: one Drawdown
+// Step, then a deposit at the SAME equity the step ladder is standing at
+// (890,000, between the first and second thresholds), then a snapshot at
+// the post-deposit equity that must neither step nor recover.
+func TestReducerCashMovementMidDrawdownEmitsCashAdjustedAndNoStep(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	cfg := validConfigurationPayload()
+	snap1 := accountSnapshotPayload(snapshotBefore(1), 900_000) // step: -> 800,000, base 900,000
+	movement := cashMovementPayload(snapshotBefore(2), 200_000, 890_000)
+	snap2 := accountSnapshotPayload(snapshotBefore(3), 1_090_000) // post-deposit equity: no step, no recovery
+
+	envelopes := []event.Envelope{
+		configEnvelopeWithConfig(t, 1, day(0), cfg),
+		accountSnapshotEnvelope(t, 2, snap1, snap1.AsOf),
+		cashMovementEnvelope(t, 3, movement, movement.AsOf),
+		accountSnapshotEnvelope(t, 4, snap2, snap2.AsOf),
+	}
+
+	emitted, err := engine.Run(context.Background(), envelopes)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(emitted) != 2 {
+		t.Fatalf("len(emitted) = %d, want 2 (one drawdown step, one cash adjustment; the final snapshot emits nothing)", len(emitted))
+	}
+	if emitted[0].Type != event.DrawdownStepAppliedEventType {
+		t.Fatalf("emitted[0].Type = %q, want %q", emitted[0].Type, event.DrawdownStepAppliedEventType)
+	}
+
+	adjusted := decodeNotionalAccountCashAdjusted(t, emitted[1])
+	want := event.NotionalAccountCashAdjustedPayload{
+		AsOf:                 movement.AsOf,
+		Amount:               200_000,
+		EquityBefore:         890_000,
+		EquityAfter:          1_090_000,
+		StartingFigureBefore: 1_000_000,
+		StartingFigureAfter:  1_224_719.1011235956,
+		NotionalBefore:       800_000,
+		NotionalAfter:        979_775.2808988765,
+		Rule:                 event.RuleNotionalAccountCashAdjustment,
+		ADR:                  event.ADRNotionalAccountCashAdjustment,
+	}
+	if adjusted != want {
+		t.Errorf("adjusted = %+v, want %+v", adjusted, want)
+	}
+	if err := adjusted.Validate(); err != nil {
+		t.Errorf("adjusted fails its own Validate(): %v", err)
+	}
+	wantID := fmt.Sprintf("notional-account-cash-adjusted:%s", movement.AsOf.UTC().Format("2006-01-02T15:04:05.000000000Z"))
+	if emitted[1].ID != wantID {
+		t.Errorf("ID = %q, want %q", emitted[1].ID, wantID)
+	}
+}
+
+func TestReducerRejectsCashMovementBeforeConfiguration(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	movement := cashMovementPayload(day(0), 200_000, 1_000_000)
+	_, err = engine.Run(context.Background(), []event.Envelope{cashMovementEnvelope(t, 1, movement, day(0))})
+	if err == nil {
+		t.Fatal("Run() error = nil, want an error for a cash movement before any configuration")
+	}
+	if !strings.Contains(err.Error(), "configuration") {
+		t.Fatalf("Run() error = %v, want it to name the missing configuration", err)
+	}
+}
+
+func TestReducerRejectsCashMovementWithWrongSchemaVersion(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	movement := cashMovementPayload(snapshotBefore(1), 200_000, 1_000_000)
+	wrongVersion := cashMovementEnvelope(t, 2, movement, movement.AsOf)
+	wrongVersion.SchemaVersion = 2
+
+	envelopes := []event.Envelope{configEnvelope(t, 1, day(0)), wrongVersion}
+	_, err = engine.Run(context.Background(), envelopes)
+	if err == nil {
+		t.Fatal("Run() error = nil, want error for a cash movement payload at the wrong schema version")
+	}
+	for _, want := range []string{"schema version", "2", "1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Run() error = %v, want substring %q", err, want)
+		}
+	}
+}
+
+func TestReducerRejectsInvalidCashMovementPayload(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	movement := cashMovementPayload(snapshotBefore(1), 0, 1_000_000) // invalid: zero amount
+	invalid := cashMovementEnvelope(t, 2, movement, movement.AsOf)
+
+	envelopes := []event.Envelope{configEnvelope(t, 1, day(0)), invalid}
+	_, err = engine.Run(context.Background(), envelopes)
+	if err == nil || !strings.Contains(err.Error(), "invalid cash movement payload") {
+		t.Fatalf("Run() error = %v, want it to name an invalid cash movement payload", err)
+	}
+}
+
+func TestReducerRejectsUndecodableCashMovementPayload(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	payload := json.RawMessage(`"not an object"`)
+	undecodable := event.Envelope{
+		ID:                "cash-movement-1",
+		Type:              event.CashMovementEventType,
+		SchemaVersion:     event.CashMovementSchemaVersion,
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
+		EventTime:         snapshotBefore(1),
+		RecordedAt:        snapshotBefore(1),
+		Sequence:          2,
+		Source:            "fixture",
+		StrategyVersion:   testStrategyVersion,
+		ConfigurationHash: testConfigurationHash,
+		PayloadHash:       event.HashPayload(payload),
+		Payload:           payload,
+	}
+
+	envelopes := []event.Envelope{configEnvelope(t, 1, day(0)), undecodable}
+	_, err = engine.Run(context.Background(), envelopes)
+	if err == nil || !strings.Contains(err.Error(), "decode cash movement payload") {
+		t.Fatalf("Run() error = %v, want it to name a decode failure", err)
+	}
+}
+
+// TestReducerRejectsOutOfOrderAccountEventsAcrossTypes: #17's decision that
+// snapshots and cash movements share ONE strictly-increasing account
+// timeline (ADR 0007 rule 4). A cash movement may not share an AsOf with a
+// snapshot, in either direction.
+func TestReducerRejectsOutOfOrderAccountEventsAcrossTypes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("cash movement at the same AsOf as a prior snapshot", func(t *testing.T) {
+		t.Parallel()
+		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		if err != nil {
+			t.Fatalf("NewReducer() error = %v", err)
+		}
+		engine, err := replay.New(reducer)
+		if err != nil {
+			t.Fatalf("replay.New() error = %v", err)
+		}
+
+		snap := accountSnapshotPayload(snapshotBefore(1), 900_000)
+		movement := cashMovementPayload(snap.AsOf, 200_000, 900_000) // same AsOf as snap
+
+		envelopes := []event.Envelope{
+			configEnvelope(t, 1, day(0)),
+			accountSnapshotEnvelope(t, 2, snap, snap.AsOf),
+			cashMovementEnvelope(t, 3, movement, movement.AsOf),
+		}
+		_, err = engine.Run(context.Background(), envelopes)
+		if err == nil || !strings.Contains(err.Error(), "duplicate or out-of-order cash movement") {
+			t.Fatalf("Run() error = %v, want it to name a duplicate or out-of-order cash movement", err)
+		}
+	})
+
+	t.Run("snapshot at the same AsOf as a prior cash movement", func(t *testing.T) {
+		t.Parallel()
+		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		if err != nil {
+			t.Fatalf("NewReducer() error = %v", err)
+		}
+		engine, err := replay.New(reducer)
+		if err != nil {
+			t.Fatalf("replay.New() error = %v", err)
+		}
+
+		movement := cashMovementPayload(snapshotBefore(1), 200_000, 1_000_000)
+		snap := accountSnapshotPayload(movement.AsOf, 900_000) // same AsOf as movement
+
+		envelopes := []event.Envelope{
+			configEnvelope(t, 1, day(0)),
+			cashMovementEnvelope(t, 2, movement, movement.AsOf),
+			accountSnapshotEnvelope(t, 3, snap, snap.AsOf),
+		}
+		_, err = engine.Run(context.Background(), envelopes)
+		if err == nil || !strings.Contains(err.Error(), "duplicate or out-of-order snapshot") {
+			t.Fatalf("Run() error = %v, want it to name a duplicate or out-of-order snapshot", err)
+		}
+	})
+
+	t.Run("snapshot before an earlier cash movement", func(t *testing.T) {
+		t.Parallel()
+		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		if err != nil {
+			t.Fatalf("NewReducer() error = %v", err)
+		}
+		engine, err := replay.New(reducer)
+		if err != nil {
+			t.Fatalf("replay.New() error = %v", err)
+		}
+
+		movement := cashMovementPayload(snapshotBefore(5), 200_000, 1_000_000)
+		snap := accountSnapshotPayload(snapshotBefore(2), 900_000) // earlier than movement
+
+		envelopes := []event.Envelope{
+			configEnvelope(t, 1, day(0)),
+			cashMovementEnvelope(t, 2, movement, movement.AsOf),
+			accountSnapshotEnvelope(t, 3, snap, snap.AsOf),
+		}
+		_, err = engine.Run(context.Background(), envelopes)
+		if err == nil || !strings.Contains(err.Error(), "duplicate or out-of-order snapshot") {
+			t.Fatalf("Run() error = %v, want it to name a duplicate or out-of-order snapshot", err)
+		}
+	})
+}
+
+// TestReplayingRebaseRecoveryCashMovementFixtureTwiceYieldsByteIdenticalEmissions
+// is the determinism property test for #17's whole seam: a fixture
+// combining a re-basing, a Drawdown Step measured against the new figure, a
+// cash movement, and a full recovery, replayed twice, must produce
+// byte-identical output.
+func TestReplayingRebaseRecoveryCashMovementFixtureTwiceYieldsByteIdenticalEmissions(t *testing.T) {
+	t.Parallel()
+
+	buildFixture := func(t *testing.T) []event.Envelope {
+		t.Helper()
+		cfg := validConfigurationPayload()
+		snap1 := accountSnapshotPayload(jan(2, 2026).Add(time.Hour), 970_000) // establishes the period
+		snap2 := accountSnapshotPayload(jan(1, 2027), 900_000)                // rebases to 900,000
+		snap3 := accountSnapshotPayload(jan(2, 2027), 810_000)                // step: -> 720,000, base 810,000
+		movement := cashMovementPayload(jan(3, 2027), 50_000, 800_000)        // deposit: scales S to 956,250
+		snap4 := accountSnapshotPayload(jan(4, 2027), 960_000)                // full recovery (>= the scaled 956,250)
+		return []event.Envelope{
+			configEnvelopeWithConfig(t, 1, day(0), cfg),
+			accountSnapshotEnvelope(t, 2, snap1, snap1.AsOf),
+			accountSnapshotEnvelope(t, 3, snap2, snap2.AsOf),
+			accountSnapshotEnvelope(t, 4, snap3, snap3.AsOf),
+			cashMovementEnvelope(t, 5, movement, movement.AsOf),
+			accountSnapshotEnvelope(t, 6, snap4, snap4.AsOf),
+		}
+	}
+
+	runOnce := func(t *testing.T) []event.Envelope {
+		t.Helper()
+		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		if err != nil {
+			t.Fatalf("NewReducer() error = %v", err)
+		}
+		engine, err := replay.New(reducer)
+		if err != nil {
+			t.Fatalf("replay.New() error = %v", err)
+		}
+		emitted, err := engine.Run(context.Background(), buildFixture(t))
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		return emitted
+	}
+
+	first := runOnce(t)
+	second := runOnce(t)
+
+	firstBytes := mustMarshal(t, first)
+	secondBytes := mustMarshal(t, second)
+	if !bytes.Equal(firstBytes, secondBytes) {
+		t.Fatalf("replay is not deterministic:\n  first:  %s\n  second: %s", firstBytes, secondBytes)
+	}
+}
