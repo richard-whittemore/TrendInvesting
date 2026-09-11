@@ -139,19 +139,31 @@ func buildCorruptedCampaignState(t *testing.T, r *Reducer, protectiveStop float6
 			exitChannel:   exitChannel,
 			lastPeriodEnd: day(1),
 			campaign: &campaignState{
-				campaignID:     "campaign:AAPL:corrupted",
-				proposalID:     "proposal:AAPL:corrupted",
-				signalID:       "signal:AAPL:corrupted",
-				openingFillID:  "sim-fill-corrupted",
-				direction:      event.DirectionLong,
-				campaignN:      1,
-				unitQuantity:   1,
-				filledQuantity: 1,
-				entryPrice:     100,
-				stopMultiple:   2,
-				protectiveStop: protectiveStop,
-				openedAt:       day(1),
-				units:          1,
+				campaignID:   "campaign:AAPL:corrupted",
+				instrumentID: instrumentID,
+				proposalID:   "proposal:AAPL:corrupted",
+				signalID:     "signal:AAPL:corrupted",
+				direction:    event.DirectionLong,
+				campaignN:    1,
+				unitQuantity: 1,
+				stopMultiple: 2,
+				// #14: maxUnits 1, not 4 — this fixture is already at its
+				// (deliberately tiny) maximum, so evaluateAdd proposes
+				// nothing regardless of the fixture bar's high. This file's
+				// point is the Protective Stop invariant, not the Add
+				// Ladder; TestCampaignWithAValidProtectiveStopDoesNotHalt's
+				// single expected emission would otherwise pick up a
+				// legitimate (but unrelated) Add proposal.
+				maxUnits: 1,
+				openedAt: day(1),
+				units: []unitState{{
+					index:          1,
+					openingFillID:  "sim-fill-corrupted",
+					fillPrice:      100,
+					quantity:       1,
+					protectiveStop: protectiveStop,
+					filledAt:       day(1),
+				}},
 			},
 		},
 	}

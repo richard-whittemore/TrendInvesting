@@ -471,22 +471,27 @@ func validCampaignExited() event.CampaignExitedPayload {
 	exit := campaignExitedStopPrice
 	n := proposalN
 	dpp := 1.0
+	var unitQuantity int64 = 133
+	realisedResult := float64(133) * (exit - entry) * dpp
 	return event.CampaignExitedPayload{
-		CampaignID:          "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
-		InstrumentID:        "AAPL",
-		FillID:              "sim-fill-0002",
-		ExitedAt:            proposalPeriodEnd.AddDate(0, 0, 1),
-		Reason:              event.ExitReasonStop,
-		EntryPrice:          entry,
-		ExitPrice:           exit,
-		Quantity:            133,
-		CampaignN:           n,
-		DollarsPerPoint:     dpp,
-		ProtectiveStopLevel: entry - 2*n,
-		RealisedResult:      float64(133) * (exit - entry) * dpp,
-		RealisedResultInN:   (exit - entry) / n,
-		Rule:                event.RuleCampaignExitedByStop,
-		ADR:                 event.ADRCampaignExitRecordsTheFill,
+		CampaignID:            "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
+		InstrumentID:          "AAPL",
+		FillID:                "sim-fill-0002",
+		ExitedAt:              proposalPeriodEnd.AddDate(0, 0, 1),
+		Reason:                event.ExitReasonStop,
+		EntryPrice:            entry,
+		ExitPrice:             exit,
+		Quantity:              133,
+		CampaignN:             n,
+		DollarsPerPoint:       dpp,
+		UnitQuantity:          unitQuantity,
+		ProtectiveStopLevel:   entry - 2*n,
+		RealisedResult:        realisedResult,
+		AverageMoveInN:        (exit - entry) / n,
+		RealisedResultInUnitN: realisedResult / (float64(unitQuantity) * n * dpp),
+		Units:                 1,
+		Rule:                  event.RuleCampaignExitedByStop,
+		ADR:                   event.ADRCampaignExitRecordsTheFill,
 	}
 }
 
@@ -584,11 +589,30 @@ func TestCampaignExitedPayloadValidate(t *testing.T) {
 			wantErr: "realised result",
 		},
 		{
-			name: "realised result in n does not match its derivation",
+			name: "average move in n does not match its derivation",
 			mutate: func(p *event.CampaignExitedPayload) {
-				p.RealisedResultInN += 0.01
+				p.AverageMoveInN += 0.01
 			},
-			wantErr: "realised result in n",
+			wantErr: "average move in n",
+		},
+		{
+			// #74 review ("N Result Ignores Units"): the aggregate Unit-N
+			// reading, re-derived via sizing.RealisedResultInUnitN.
+			name: "realised result in unit n does not match its derivation",
+			mutate: func(p *event.CampaignExitedPayload) {
+				p.RealisedResultInUnitN += 0.01
+			},
+			wantErr: "realised result in unit n",
+		},
+		{
+			name:    "zero unit quantity",
+			mutate:  func(p *event.CampaignExitedPayload) { p.UnitQuantity = 0 },
+			wantErr: "unit quantity",
+		},
+		{
+			name:    "negative unit quantity",
+			mutate:  func(p *event.CampaignExitedPayload) { p.UnitQuantity = -1 },
+			wantErr: "unit quantity",
 		},
 		{
 			// A gap fill below the level is legitimate under ADR 0005: the
@@ -600,6 +624,22 @@ func TestCampaignExitedPayloadValidate(t *testing.T) {
 				// Already true of validCampaignExited() itself; this case
 				// documents the intent explicitly with no further mutation.
 			},
+		},
+		{
+			// #14: a Campaign that added Units closes more than one at once
+			// (see the type's own "Multi-Unit aggregation" doc comment).
+			name:   "units above one is accepted",
+			mutate: func(p *event.CampaignExitedPayload) { p.Units = 4 },
+		},
+		{
+			name:    "zero units",
+			mutate:  func(p *event.CampaignExitedPayload) { p.Units = 0 },
+			wantErr: "units",
+		},
+		{
+			name:    "negative units",
+			mutate:  func(p *event.CampaignExitedPayload) { p.Units = -1 },
+			wantErr: "units",
 		},
 	}
 
@@ -641,7 +681,8 @@ func TestCampaignExitedPayloadValidateRejectsNonFiniteFields(t *testing.T) {
 		{"dollars per point", func(p *event.CampaignExitedPayload, f float64) { p.DollarsPerPoint = f }, "dollars per point must be finite"},
 		{"protective stop level", func(p *event.CampaignExitedPayload, f float64) { p.ProtectiveStopLevel = f }, "protective stop level must be finite"},
 		{"realised result", func(p *event.CampaignExitedPayload, f float64) { p.RealisedResult = f }, "realised result must be finite"},
-		{"realised result in n", func(p *event.CampaignExitedPayload, f float64) { p.RealisedResultInN = f }, "realised result in n must be finite"},
+		{"average move in n", func(p *event.CampaignExitedPayload, f float64) { p.AverageMoveInN = f }, "average move in n must be finite"},
+		{"realised result in unit n", func(p *event.CampaignExitedPayload, f float64) { p.RealisedResultInUnitN = f }, "realised result in unit n must be finite"},
 	}
 
 	nonFinite := []struct {
@@ -689,9 +730,11 @@ func TestCampaignExitedPayloadValidateAggregatesEveryField(t *testing.T) {
 		"entry price",
 		"exit price",
 		"quantity",
+		"unit quantity",
 		"campaign n",
 		"dollars per point",
 		"protective stop level",
+		"units",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("Validate() error = %v, want substring %q", err, want)
@@ -705,8 +748,9 @@ func TestCampaignExitedEventConstants(t *testing.T) {
 	if event.CampaignExitedEventType != "strategy.campaign.exited" {
 		t.Errorf("CampaignExitedEventType = %q, want %q", event.CampaignExitedEventType, "strategy.campaign.exited")
 	}
-	if event.CampaignExitedSchemaVersion != 1 {
-		t.Errorf("CampaignExitedSchemaVersion = %d, want 1", event.CampaignExitedSchemaVersion)
+	// Bumped 1 -> 2 for #14: Units was added.
+	if event.CampaignExitedSchemaVersion != 2 {
+		t.Errorf("CampaignExitedSchemaVersion = %d, want 2", event.CampaignExitedSchemaVersion)
 	}
 	if event.RuleCampaignExitedByStop != "campaign.exited.by-stop" {
 		t.Errorf("RuleCampaignExitedByStop = %q", event.RuleCampaignExitedByStop)
@@ -745,22 +789,27 @@ func validCampaignExitedByExitChannel() event.CampaignExitedPayload {
 	// exit (the two are unrelated numbers — see CampaignExitedPayload's doc
 	// comment).
 	stopLevel := entry - 2*n
+	var unitQuantity int64 = 133
+	realisedResult := float64(133) * (exit - entry) * dpp
 	return event.CampaignExitedPayload{
-		CampaignID:          "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
-		InstrumentID:        "AAPL",
-		FillID:              "sim-fill-0003",
-		ExitedAt:            proposalPeriodEnd.AddDate(0, 0, 21),
-		Reason:              event.ExitReasonExitChannel,
-		EntryPrice:          entry,
-		ExitPrice:           exit,
-		Quantity:            133,
-		CampaignN:           n,
-		DollarsPerPoint:     dpp,
-		ProtectiveStopLevel: stopLevel,
-		RealisedResult:      float64(133) * (exit - entry) * dpp,
-		RealisedResultInN:   (exit - entry) / n,
-		Rule:                event.RuleCampaignExitedByExitChannel,
-		ADR:                 event.ADRCampaignExitRecordsTheFill,
+		CampaignID:            "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
+		InstrumentID:          "AAPL",
+		FillID:                "sim-fill-0003",
+		ExitedAt:              proposalPeriodEnd.AddDate(0, 0, 21),
+		Reason:                event.ExitReasonExitChannel,
+		EntryPrice:            entry,
+		ExitPrice:             exit,
+		Quantity:              133,
+		CampaignN:             n,
+		DollarsPerPoint:       dpp,
+		UnitQuantity:          unitQuantity,
+		ProtectiveStopLevel:   stopLevel,
+		RealisedResult:        realisedResult,
+		AverageMoveInN:        (exit - entry) / n,
+		RealisedResultInUnitN: realisedResult / (float64(unitQuantity) * n * dpp),
+		Units:                 1,
+		Rule:                  event.RuleCampaignExitedByExitChannel,
+		ADR:                   event.ADRCampaignExitRecordsTheFill,
 	}
 }
 
@@ -772,6 +821,84 @@ func TestCampaignExitedPayloadValidateAcceptsExitChannelReason(t *testing.T) {
 
 	if err := validCampaignExitedByExitChannel().Validate(); err != nil {
 		t.Fatalf("Validate() error = %v, want nil for a valid exit-channel exit", err)
+	}
+}
+
+// TestCampaignExitedPayloadMultiUnitAggregationMatchesPerUnitSum is #14's
+// own headline case for the "Multi-Unit aggregation" design decision
+// recorded on the type's doc comment: EntryPrice as the quantity-weighted
+// average fill price, together with RealisedResult's UNCHANGED
+// Quantity x (ExitPrice - EntryPrice) x DollarsPerPoint formula, must equal
+// the sum of what each Unit realised on its own — proving the aggregate
+// formula was not a simplification that silently changed the number.
+//
+// It also covers the PR #74 review finding ("N Result Ignores Units") this
+// fixture was extended to catch: RealisedResultInUnitN, not AverageMoveInN,
+// is what sums to each Unit's own QUANTITY-WEIGHTED N contribution — a Unit
+// filled for only a fraction of the frozen Unit size contributes that same
+// fraction of its own N move, exactly mirroring how a partial Unit already
+// contributes only its own fraction to the dollar RealisedResult above. The
+// distinction the finding named — several Units each moving a real amount
+// of N must not be reported as if only one Unit had — is what separates
+// this from AverageMoveInN, which is a plain per-share average with no
+// quantity weighting of its own beyond the entry price average.
+func TestCampaignExitedPayloadMultiUnitAggregationMatchesPerUnitSum(t *testing.T) {
+	t.Parallel()
+
+	// Four Units, quantities and fills chosen to be genuinely unequal so the
+	// weighted average is not the same as a plain average, and so a
+	// partially-filled Unit's own N contribution is visibly scaled down.
+	quantities := []int64{133, 66, 54, 47}
+	fills := []float64{201.25, 220.04, 238.83, 257.62}
+	exit := 300.0
+	dpp := 1.0
+	n := proposalN
+	var unitQuantity int64 = 133 // the campaign's frozen full Unit size
+
+	var perUnitSum float64
+	var perUnitNWeightedSum float64
+	var totalQuantity int64
+	var weightedNumerator float64
+	for i := range quantities {
+		perUnitSum += float64(quantities[i]) * (exit - fills[i]) * dpp
+		perUnitNWeightedSum += (float64(quantities[i]) * (exit - fills[i])) / (float64(unitQuantity) * n)
+		totalQuantity += quantities[i]
+		weightedNumerator += float64(quantities[i]) * fills[i]
+	}
+	weightedEntry := weightedNumerator / float64(totalQuantity)
+
+	aggregateResult := float64(totalQuantity) * (exit - weightedEntry) * dpp
+	if diff := aggregateResult - perUnitSum; diff > 1e-6 || diff < -1e-6 {
+		t.Fatalf("aggregate result %v does not match the sum of per-unit results %v (diff %v)", aggregateResult, perUnitSum, diff)
+	}
+	averageMoveInN := (exit - weightedEntry) / n
+	realisedResultInUnitN := aggregateResult / (float64(unitQuantity) * n * dpp)
+	// The headline assertion: RealisedResultInUnitN, not AverageMoveInN,
+	// is what sums to each Unit's own quantity-weighted N contribution. If
+	// the payload only carried the (renamed) average, a reader would see
+	// ~averageMoveInN and understate the Campaign's real N result.
+	if diff := realisedResultInUnitN - perUnitNWeightedSum; diff > 1e-6 || diff < -1e-6 {
+		t.Fatalf("realised result in unit n %v does not match the sum of per-unit quantity-weighted n contributions %v (diff %v)", realisedResultInUnitN, perUnitNWeightedSum, diff)
+	}
+	if averageMoveInN == realisedResultInUnitN {
+		t.Fatalf("average move in n (%v) coincidentally equals realised result in unit n (%v); the fixture must keep them genuinely different so the two fields are provably distinct", averageMoveInN, realisedResultInUnitN)
+	}
+
+	payload := validCampaignExited()
+	payload.Quantity = totalQuantity
+	payload.EntryPrice = weightedEntry
+	payload.ExitPrice = exit
+	payload.DollarsPerPoint = dpp
+	payload.RealisedResult = aggregateResult
+	payload.CampaignN = n
+	payload.UnitQuantity = unitQuantity
+	payload.AverageMoveInN = averageMoveInN
+	payload.RealisedResultInUnitN = realisedResultInUnitN
+	payload.ProtectiveStopLevel = weightedEntry - 2*n
+	payload.Units = len(quantities)
+
+	if err := payload.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil for a genuinely multi-unit exit", err)
 	}
 }
 
@@ -855,9 +982,12 @@ func TestCampaignExitedPayloadJSONTags(t *testing.T) {
 		"quantity",
 		"campaign_n",
 		"dollars_per_point",
+		"unit_quantity",
 		"protective_stop_level",
 		"realised_result",
-		"realised_result_in_n",
+		"average_move_in_n",
+		"realised_result_in_unit_n",
+		"units",
 		"rule",
 		"adr",
 	} {

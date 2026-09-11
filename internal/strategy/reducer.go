@@ -80,6 +80,13 @@ type Reducer struct {
 	stopMultiple         float64
 	riskAtStopFraction   float64
 	dollarsPerPoint      float64
+	// maxUnits is #14's addition: event.ConfigurationPayload.MaxUnits (ADR
+	// 0008: 4 Units per instrument in the Baseline), captured once from the
+	// configuration event and frozen onto every Campaign it opens
+	// (campaignState.maxUnits) — a later reconfiguration (unsupported
+	// mid-run in any case, see applyConfiguration) must never change how
+	// many Units an already-open Campaign may hold.
+	maxUnits int
 	// notionalAccount is ADR 0007's Notional Account (CONTEXT.md),
 	// initialised to the configured starting equity and driven by
 	// event.AccountSnapshotEventType and event.CashMovementEventType events
@@ -153,6 +160,26 @@ type instrumentState struct {
 	// pendingProposal does — a Campaign closes only from a recorded exit
 	// fill, never from this proposal alone.
 	pendingExitProposal *pendingExitProposalState
+	// pendingAddProposal is #14's addition, defined and explained in
+	// campaign.go: an Add proposal (strategy.add.proposed) emitted and not
+	// yet resolved, holding the same "not position state" property
+	// pendingProposal/pendingExitProposal do — a further Unit joins the
+	// Campaign only from a recorded Add fill, never from this proposal
+	// alone.
+	pendingAddProposal *pendingAddProposalState
+	// lastBarHigh/lastBarPeriodEnd/lastBarEarliestFillAt are #14's memory of
+	// the most recently completed bar, set unconditionally at the end of
+	// every applyCompletedBar call regardless of Campaign state. They exist
+	// because the same-bar Add chain (see campaign.go's evaluateAdd and
+	// applyAddFill) re-evaluates the Add opportunity from an ADD FILL's own
+	// Apply call — a LATER call than the bar event that produced the
+	// opportunity for it — so the bar's high, its own period end (what the
+	// resulting proposal is attributed to), and the earliest instant an
+	// execution for it could exist all have to outlive the single Apply call
+	// that read the bar itself.
+	lastBarHigh           float64
+	lastBarPeriodEnd      time.Time
+	lastBarEarliestFillAt time.Time
 	// lastClosingFillAt is the FilledAt of the most recent fill that closed a
 	// Campaign for this instrument — a stop fill or an exit fill alike — and
 	// is the zero time.Time before any Campaign for this instrument has ever
@@ -275,6 +302,7 @@ func (r *Reducer) applyConfiguration(envelope event.Envelope) ([]event.Envelope,
 	r.stopMultiple = payload.StopMultiple
 	r.riskAtStopFraction = payload.RiskAtStopFraction
 	r.dollarsPerPoint = payload.DollarsPerPoint
+	r.maxUnits = payload.MaxUnits
 	// ADR 0007's Notional Account, at its configured starting value: before
 	// any account.snapshot arrives it equals StartingEquity exactly (#16's
 	// applyAccountSnapshot, in notional.go, is what steps it down; #17's
@@ -448,19 +476,31 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	state.previousClose = view.Close
 	state.hasPreviousClose = true
 	state.lastPeriodEnd = bar.PeriodEnd
+	// #14: remembered unconditionally, regardless of Campaign state, so the
+	// same-bar Add chain (campaign.go's evaluateAdd/applyAddFill) can read
+	// THIS bar's high, period end and earliest-fill-at bound from a LATER
+	// Apply call — the Add fill's own — after this bar's own call has
+	// already returned. See instrumentState's own doc comment on these
+	// fields for why they must outlive a single Apply call.
+	state.lastBarHigh = view.High
+	state.lastBarPeriodEnd = bar.PeriodEnd
+	state.lastBarEarliestFillAt = previousPeriodEnd
 
 	// --- #11/#13: the previous bar's outstanding business, resolved so that
 	// it is EMITTED before any decision this bar produces — the ordering ADR
 	// 0010 applies within a day, exits before entries. It sits below the
 	// advance block rather than above the evaluate block only so that the
 	// evaluate/advance pair stays contiguous; it reads and writes none of
-	// that state. A trade proposal or an exit proposal that no fill arrived
-	// for expires with its bar, per ADR 0011; see Reducer.expireEntryProposal
-	// and Reducer.expireExitProposal for why the expiry is emitted rather
-	// than dropped. At most one of the two can be outstanding for a given
+	// that state. A trade proposal, an exit proposal or an Add proposal
+	// (#14) that no fill arrived for expires with its bar, per ADR 0011; see
+	// Reducer.expireEntryProposal, Reducer.expireExitProposal and
+	// Reducer.expireAddProposal for why the expiry is emitted rather than
+	// dropped. At most one of the three can be outstanding for a given
 	// instrument at a time (a pending entry proposal is always cleared
-	// before a Campaign — and so an exit proposal — can exist), but both
-	// checks are unconditional here so neither is skipped by construction.
+	// before a Campaign, and so an exit or Add proposal, can exist; exit and
+	// Add proposals are themselves mutually exclusive per bar — ADR 0010's
+	// exit precedence), but all three checks are unconditional here so none
+	// is skipped by construction.
 	var emissions []event.Envelope
 	if state.pendingProposal != nil {
 		expired, err := r.expireEntryProposal(state, bar, envelope)
@@ -471,6 +511,13 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	}
 	if state.pendingExitProposal != nil {
 		expired, err := r.expireExitProposal(state, bar, envelope)
+		if err != nil {
+			return nil, err
+		}
+		emissions = append(emissions, expired)
+	}
+	if state.pendingAddProposal != nil {
+		expired, err := r.expireAddProposal(state, bar, envelope)
 		if err != nil {
 			return nil, err
 		}
@@ -487,23 +534,33 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	// the Campaign's own per-bar decision: the Protective Stop and Exit
 	// Channel levels in force, and — on a breach — the exit proposal.
 	//
-	// # The ADR 0010 ordering hook
+	// # The ADR 0010 ordering hook, closed by #14
 	//
-	// evaluateCampaign is called HERE, structurally before anywhere #14's Add
-	// evaluation will be inserted, so that "exits are evaluated and journaled
-	// before Adds" (ADR 0010) holds by construction rather than by a later
-	// reordering. Adds do not exist yet (#14), so there is nothing to order
-	// against today — the acceptance criterion "a bar that would both Add and
-	// exit results in the exit only" cannot be exercised until #14 lands (see
-	// issue #13's Findings) — but the call site is fixed now precisely so
-	// #14 only ever has to add its own evaluation AFTER this returns, never
-	// before it.
+	// evaluateCampaign runs FIRST, so "exits are evaluated and journaled
+	// before Adds" (ADR 0010) holds by construction. The Add evaluation
+	// below runs SECOND, and only when this bar did not itself propose an
+	// exit — evaluateCampaign clears state.pendingExitProposal before it
+	// runs (the top-of-function expiry block above) and sets it again only
+	// if THIS bar breaches the Exit Channel, so checking it here after the
+	// call is exactly "did this bar propose an exit", with no separate
+	// return value needed. This is the ticket's "a bar that would both Add
+	// and exit results in the exit only" criterion (#13's Findings named
+	// this exact call site as where it would land).
 	if state.campaign != nil {
 		campaignEmissions, err := r.evaluateCampaign(state, bar, exitChannelLow, exitChannelReady, previousPeriodEnd, envelope)
 		if err != nil {
 			return nil, err
 		}
 		emissions = append(emissions, campaignEmissions...)
+
+		if state.pendingExitProposal == nil && len(state.campaign.units) < state.campaign.maxUnits {
+			addEmissions, err := r.evaluateAdd(state, envelope)
+			if err != nil {
+				return nil, err
+			}
+			emissions = append(emissions, addEmissions...)
+		}
+
 		return emissions, nil
 	}
 

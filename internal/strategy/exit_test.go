@@ -3,10 +3,12 @@ package strategy_test
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
 // This file holds #13's tests: the Exit-Channel exit. Every fixture below
@@ -321,9 +323,29 @@ func TestExitFillClosesCampaignWithReasonExitChannel(t *testing.T) {
 	if !(exited.RealisedResult < 0) {
 		t.Errorf("RealisedResult = %v, want negative (the fixture exits well below entry)", exited.RealisedResult)
 	}
-	wantRealisedResultInN := (exitFill.Price - campaignFillPrice) / campaignN
-	if exited.RealisedResultInN != wantRealisedResultInN {
-		t.Errorf("RealisedResultInN = %v, want exactly %v", exited.RealisedResultInN, wantRealisedResultInN)
+	// A single-Unit Campaign: AverageMoveInN (the per-share average) and
+	// RealisedResultInUnitN (the aggregate Unit-N result) coincide
+	// NUMERICALLY (PR #74 review response to "N Result Ignores Units"), but
+	// each is asserted against sizing's own function — the same one the
+	// producer calls — since the two formulas are not guaranteed to agree
+	// bit-for-bit in float64 (they multiply and divide in a different
+	// order) even when they agree mathematically.
+	wantMoveInN, err := sizing.AverageMoveInN(exitFill.Price, campaignFillPrice, campaignN)
+	if err != nil {
+		t.Fatalf("sizing.AverageMoveInN() error = %v", err)
+	}
+	if exited.AverageMoveInN != wantMoveInN {
+		t.Errorf("AverageMoveInN = %v, want exactly %v", exited.AverageMoveInN, wantMoveInN)
+	}
+	wantResultInUnitN, err := sizing.RealisedResultInUnitN(wantRealisedResult, 133, campaignN, cfg.DollarsPerPoint)
+	if err != nil {
+		t.Fatalf("sizing.RealisedResultInUnitN() error = %v", err)
+	}
+	if exited.RealisedResultInUnitN != wantResultInUnitN {
+		t.Errorf("RealisedResultInUnitN = %v, want exactly %v", exited.RealisedResultInUnitN, wantResultInUnitN)
+	}
+	if math.Abs(wantMoveInN-wantResultInUnitN) > 1e-9 {
+		t.Errorf("AverageMoveInN (%v) and RealisedResultInUnitN (%v) should coincide numerically for a single, fully-filled unit", wantMoveInN, wantResultInUnitN)
 	}
 	if err := exited.Validate(); err != nil {
 		t.Errorf("emitted Campaign-exited payload fails its own Validate(): %v", err)

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
 // CampaignOpenedEventType identifies the Campaign-opened decision payload for
@@ -254,7 +256,13 @@ const CampaignExitedEventType = "strategy.campaign.exited"
 
 // CampaignExitedSchemaVersion is the current schema version of
 // CampaignExitedPayload, for the Envelope's SchemaVersion field.
-const CampaignExitedSchemaVersion uint32 = 1
+//
+// Bumped 1 -> 2 for #14: Units was added. A schema-1 record decodes Units as
+// the int zero, which is not a legitimate Unit count (Validate requires it
+// positive), so a schema-1 record is rejected outright rather than silently
+// read as a zero-Unit exit — ADR 0015's rule, the same discipline #12 and
+// #13 each applied to their own additive fields.
+const CampaignExitedSchemaVersion uint32 = 2
 
 // RuleCampaignExitedByStop names the rule for CampaignExitedPayload.Rule
 // when Reason is ExitReasonStop: a Campaign closes because a fill said its
@@ -292,15 +300,16 @@ const RuleCampaignExitedByExitChannel = "campaign.exited.by-exit-channel"
 // CampaignExitedPayload records a Campaign's life ending: what was filled to
 // close it, and the realised result.
 //
-// CampaignN, DollarsPerPoint and FillID are not named in the ticket's field
-// list but are added here deliberately, for the same reason
+// CampaignN, DollarsPerPoint, UnitQuantity and FillID are not named in the
+// ticket's field list but are added here deliberately, for the same reason
 // CampaignOpenedPayload carries CampaignN and StopMultiple rather than
 // leaving a reader to join back to the configuration: **Validate re-derives
-// RealisedResult and RealisedResultInN exactly, and a payload cannot
-// re-derive a value from a field it does not have.** RealisedResultInN's
-// formula divides by CampaignN; RealisedResult's multiplies by
-// DollarsPerPoint; neither number lives anywhere else on this payload.
-// FillID is added to close the same audit-chain gap CampaignOpenedPayload's
+// RealisedResult, AverageMoveInN and RealisedResultInUnitN exactly, and a
+// payload cannot re-derive a value from a field it does not have.**
+// AverageMoveInN's formula divides by CampaignN; RealisedResult's
+// multiplies by DollarsPerPoint; RealisedResultInUnitN's divides by
+// UnitQuantity x CampaignN x DollarsPerPoint; none of these numbers lives
+// anywhere else on this payload. FillID is added to close the same audit-chain gap CampaignOpenedPayload's
 // own FillID closes for the opening fill — without it, a reviewer cannot
 // join the exit decision back to the execution record that caused it, or
 // recognise a re-delivered closing fill as the duplicate that produced this
@@ -319,6 +328,54 @@ const RuleCampaignExitedByExitChannel = "campaign.exited.by-exit-channel"
 // no direction-dependent flip, because a long Campaign's gain is exactly
 // that difference. A short Campaign would need the opposite sign, which this
 // payload does not implement.
+//
+// # Multi-Unit aggregation (#14)
+//
+// A Campaign that added Units closes ALL of them in one decision (this
+// ticket keeps stop and exit fills whole-Campaign; #15 makes a stop
+// per-Unit). Quantity is therefore the SUM of every held Unit's own
+// quantity, and EntryPrice is their QUANTITY-WEIGHTED AVERAGE fill price —
+// chosen deliberately over a per-Unit breakdown on this payload (the
+// Campaign-opened and unit-added events already carry every individual
+// fill; this payload's job is the Campaign-level result, not a restatement
+// of the audit trail) and deliberately over reporting each Unit's own
+// result separately, because the weighted average keeps RealisedResult's
+// derivation IDENTICAL to the single-Unit formula: for quantities q_i and
+// fills e_i summing to Quantity Q and weighted average E,
+//
+//	sum(q_i x (ExitPrice - e_i)) = Quantity x (ExitPrice - E)
+//
+// so Quantity x (ExitPrice - EntryPrice) x DollarsPerPoint is EXACTLY the
+// sum of each Unit's own realised result, whether the Campaign held one Unit
+// or four — Validate's derivation check below needs no per-Unit case.
+// AverageMoveInN follows the same algebra with CampaignN in place of
+// DollarsPerPoint, since campaignN is common to every Unit of one Campaign
+// (ADR 0006 freezes it once, at first entry, for the Campaign's whole life)
+// — but see the next section for why that average is NOT the field a
+// reviewer should read as "the Campaign's result in N".
+//
+// # Two different N-denominated readings (PR #74 review finding)
+//
+// A review finding on this payload's first version ("N Result Ignores
+// Units") named a real confusion: what was then called RealisedResultInN
+// computed (ExitPrice - EntryPrice) / CampaignN, which is the average
+// PER-SHARE move, not the Campaign's aggregate result. Several equal-sized
+// Units each earning a full 1N would report there as ~1N, understating both
+// performance and risk for anyone reading it as "how many Units' worth of
+// gain". This payload now carries both readings, computed by
+// internal/sizing so Validate re-derives each from the identical arithmetic
+// a producer used (the #65 discipline: shared functions, not a formula
+// re-typed independently in two places):
+//
+//   - AverageMoveInN (sizing.AverageMoveInN) is the per-share average — what
+//     the field used to be, renamed to say what it actually measures.
+//   - RealisedResultInUnitN (sizing.RealisedResultInUnitN) is the aggregate
+//     Faith actually uses to describe an outcome ("that trade made 2N"):
+//     RealisedResult divided by one Unit's worth of a full 1N move
+//     (UnitQuantity x CampaignN x DollarsPerPoint). For a single Unit filled
+//     in full the two coincide exactly; for a multi-Unit Campaign they
+//     diverge, and RealisedResultInUnitN is the one that sums each Unit's
+//     own N result rather than averaging it away.
 type CampaignExitedPayload struct {
 	CampaignID   string `json:"campaign_id"`
 	InstrumentID string `json:"instrument_id"`
@@ -344,13 +401,18 @@ type CampaignExitedPayload struct {
 	// the Campaign's entire holding.
 	Quantity int64 `json:"quantity"`
 	// CampaignN is the Campaign's frozen campaign N (ADR 0006), restated so
-	// RealisedResultInN is independently re-derivable (see the type's doc
-	// comment).
+	// AverageMoveInN and RealisedResultInUnitN are independently
+	// re-derivable (see the type's doc comment).
 	CampaignN float64 `json:"campaign_n"`
 	// DollarsPerPoint is the instrument's contract multiplier (1 for
-	// shares), restated so RealisedResult is independently re-derivable (see
-	// the type's doc comment).
+	// shares), restated so RealisedResult and RealisedResultInUnitN are
+	// independently re-derivable (see the type's doc comment).
 	DollarsPerPoint float64 `json:"dollars_per_point"`
+	// UnitQuantity is the Campaign's frozen per-Unit share count (ADR
+	// 0006) — never a particular Unit's own actually-filled quantity —
+	// restated so RealisedResultInUnitN is independently re-derivable (see
+	// the type's doc comment).
+	UnitQuantity int64 `json:"unit_quantity"`
 	// ProtectiveStopLevel is the Protective Stop level that was in force
 	// when this exit happened — the Campaign's ProtectiveStop as it stood at
 	// close, not necessarily what was filled (see the type's doc comment).
@@ -359,12 +421,25 @@ type CampaignExitedPayload struct {
 	// Quantity x (ExitPrice - EntryPrice) x DollarsPerPoint. Negative for a
 	// loss, as a stop-out ordinarily is.
 	RealisedResult float64 `json:"realised_result"`
-	// RealisedResultInN is the same result expressed in campaign N:
-	// (ExitPrice - EntryPrice) / CampaignN. CONTEXT.md's risk vocabulary is
-	// stated in N throughout (Stop Multiple, Risk at Stop), so this is the
-	// unit a reviewer compares a result against, e.g. "this Campaign lost
-	// close to its full 2N risk".
-	RealisedResultInN float64 `json:"realised_result_in_n"`
+	// AverageMoveInN is the quantity-weighted average PER-SHARE price move,
+	// expressed in campaign N: (ExitPrice - EntryPrice) / CampaignN. This is
+	// NOT the Campaign's aggregate Unit-N result — see
+	// RealisedResultInUnitN below and the type's own doc comment ("Two
+	// different N-denominated readings").
+	AverageMoveInN float64 `json:"average_move_in_n"`
+	// RealisedResultInUnitN is the Campaign's realised result expressed in
+	// "one Unit moving 1N" terms (sizing.RealisedResultInUnitN): RealisedResult
+	// / (UnitQuantity x CampaignN x DollarsPerPoint). This is the aggregate
+	// measure Faith uses to describe an outcome ("that trade made 2N"), and
+	// what a reviewer should read when comparing a Campaign's result against
+	// its risk budget (CONTEXT.md: Stop Multiple, Risk at Stop, both stated
+	// in N). For a single Unit filled in full this coincides exactly with
+	// AverageMoveInN.
+	RealisedResultInUnitN float64 `json:"realised_result_in_unit_n"`
+	// Units is the number of Units this Campaign held at close, 1 through
+	// the configured maximum (#14; see the type's doc comment on multi-Unit
+	// aggregation). Always 1 before #14's Add Ladder exists.
+	Units int `json:"units"`
 	// Rule and ADR name the rule that produced this decision
 	// (docs/development.md principle 3).
 	Rule string `json:"rule"`
@@ -375,12 +450,16 @@ type CampaignExitedPayload struct {
 // and the decision chain, that Reason is one of the enumerated constants,
 // that every frozen number is usable, that ProtectiveStopLevel is positive
 // and strictly below EntryPrice (the same long-only shape
-// CampaignOpenedPayload.ProtectiveStop enforces), and that RealisedResult
-// and RealisedResultInN each match their derivation from the payload's own
-// fields EXACTLY — the same exact-equality discipline every derived field in
-// this package uses, and for the same reason: a tolerance would let a
-// differently-derived result through, which is the defect the check exists
-// to catch.
+// CampaignOpenedPayload.ProtectiveStop enforces), and that RealisedResult,
+// AverageMoveInN and RealisedResultInUnitN each match their derivation from
+// the payload's own fields EXACTLY — the same exact-equality discipline
+// every derived field in this package uses, and for the same reason: a
+// tolerance would let a differently-derived result through, which is the
+// defect the check exists to catch. AverageMoveInN and RealisedResultInUnitN
+// are re-derived by calling internal/sizing's own functions rather than
+// re-typing the formula here, so the two cannot drift apart (the #65
+// discipline, the same one TradeProposalPayload.Validate already follows
+// for sizing.RealisedRiskAtStop).
 func (p CampaignExitedPayload) Validate() error {
 	var errs []error
 	if p.CampaignID == "" {
@@ -427,6 +506,9 @@ func (p CampaignExitedPayload) Validate() error {
 	if p.Quantity <= 0 {
 		errs = append(errs, fmt.Errorf("quantity must be a positive whole number, got %d", p.Quantity))
 	}
+	if p.UnitQuantity <= 0 {
+		errs = append(errs, fmt.Errorf("unit quantity must be a positive whole number, got %d", p.UnitQuantity))
+	}
 
 	campaignNFinite := isFinite(p.CampaignN)
 	switch {
@@ -458,9 +540,13 @@ func (p CampaignExitedPayload) Validate() error {
 	if !realisedResultFinite {
 		errs = append(errs, errors.New("realised result must be finite"))
 	}
-	realisedResultInNFinite := isFinite(p.RealisedResultInN)
-	if !realisedResultInNFinite {
-		errs = append(errs, errors.New("realised result in n must be finite"))
+	averageMoveInNFinite := isFinite(p.AverageMoveInN)
+	if !averageMoveInNFinite {
+		errs = append(errs, errors.New("average move in n must be finite"))
+	}
+	realisedResultInUnitNFinite := isFinite(p.RealisedResultInUnitN)
+	if !realisedResultInUnitNFinite {
+		errs = append(errs, errors.New("realised result in unit n must be finite"))
 	}
 
 	if entryPriceFinite && exitPriceFinite && dollarsPerPointFinite && p.Quantity > 0 && realisedResultFinite {
@@ -470,12 +556,23 @@ func (p CampaignExitedPayload) Validate() error {
 				p.RealisedResult, derived, p.Quantity, p.ExitPrice, p.EntryPrice, p.DollarsPerPoint))
 		}
 	}
-	if entryPriceFinite && exitPriceFinite && campaignNFinite && realisedResultInNFinite {
-		if derived := (p.ExitPrice - p.EntryPrice) / p.CampaignN; p.RealisedResultInN != derived {
+	if entryPriceFinite && exitPriceFinite && campaignNFinite && averageMoveInNFinite {
+		if derived, err := sizing.AverageMoveInN(p.ExitPrice, p.EntryPrice, p.CampaignN); err == nil && p.AverageMoveInN != derived {
 			errs = append(errs, fmt.Errorf(
-				"stated realised result in n %v does not match the derivation %v ((exit price %v - entry price %v) / campaign n %v)",
-				p.RealisedResultInN, derived, p.ExitPrice, p.EntryPrice, p.CampaignN))
+				"stated average move in n %v does not match the derivation %v ((exit price %v - entry price %v) / campaign n %v)",
+				p.AverageMoveInN, derived, p.ExitPrice, p.EntryPrice, p.CampaignN))
 		}
+	}
+	if p.UnitQuantity > 0 && campaignNFinite && dollarsPerPointFinite && realisedResultFinite && realisedResultInUnitNFinite {
+		if derived, err := sizing.RealisedResultInUnitN(p.RealisedResult, p.UnitQuantity, p.CampaignN, p.DollarsPerPoint); err == nil && p.RealisedResultInUnitN != derived {
+			errs = append(errs, fmt.Errorf(
+				"stated realised result in unit n %v does not match the derivation %v (realised result %v / (unit quantity %d x campaign n %v x dollars per point %v))",
+				p.RealisedResultInUnitN, derived, p.RealisedResult, p.UnitQuantity, p.CampaignN, p.DollarsPerPoint))
+		}
+	}
+
+	if p.Units <= 0 {
+		errs = append(errs, fmt.Errorf("units must be a positive whole number, got %d", p.Units))
 	}
 
 	if err := errors.Join(errs...); err != nil {
