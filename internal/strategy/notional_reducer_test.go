@@ -1159,3 +1159,167 @@ func TestReplayingRebaseRecoveryCashMovementFixtureTwiceYieldsByteIdenticalEmiss
 		t.Fatalf("replay is not deterministic:\n  first:  %s\n  second: %s", firstBytes, secondBytes)
 	}
 }
+
+// --- Greptile PR #71 finding: the account's currency is pinned, not
+// merely validated for presence and discarded. Multi-currency accounts are
+// out of scope (issue #17 Findings). ---
+
+// TestReducerPinsAccountCurrencyFromTheFirstAccountEvent: the first account
+// event of a run (here, a snapshot) pins the account's currency, and a
+// later event of either type stating the SAME currency proceeds normally.
+func TestReducerPinsAccountCurrencyFromTheFirstAccountEvent(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	snap := event.AccountSnapshotPayload{AsOf: snapshotBefore(1), Equity: 900_000, Currency: "GBP"} // pins GBP
+	movement := event.CashMovementPayload{AsOf: snapshotBefore(2), Amount: 100_000, EquityBefore: 900_000, Currency: "GBP"}
+
+	envelopes := []event.Envelope{
+		configEnvelope(t, 1, day(0)),
+		accountSnapshotEnvelope(t, 2, snap, snap.AsOf),
+		cashMovementEnvelope(t, 3, movement, movement.AsOf),
+	}
+	if _, err := engine.Run(context.Background(), envelopes); err != nil {
+		t.Fatalf("Run() error = %v, want the matching-currency cash movement to proceed", err)
+	}
+}
+
+// TestReducerRejectsAccountEventWithMismatchedCurrency covers a later
+// event, of either type, stating a currency different from the pin: it
+// fails closed, names both currencies, and the engine emits nothing for the
+// whole run (replay.Engine.Run's own contract on any error).
+func TestReducerRejectsAccountEventWithMismatchedCurrency(t *testing.T) {
+	t.Parallel()
+
+	t.Run("snapshot after a snapshot pin", func(t *testing.T) {
+		t.Parallel()
+		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		if err != nil {
+			t.Fatalf("NewReducer() error = %v", err)
+		}
+		engine, err := replay.New(reducer)
+		if err != nil {
+			t.Fatalf("replay.New() error = %v", err)
+		}
+
+		first := accountSnapshotPayload(snapshotBefore(1), 950_000) // pins USD (accountSnapshotPayload's fixture currency)
+		mismatched := event.AccountSnapshotPayload{AsOf: snapshotBefore(2), Equity: 900_000, Currency: "EUR"}
+
+		envelopes := []event.Envelope{
+			configEnvelope(t, 1, day(0)),
+			accountSnapshotEnvelope(t, 2, first, first.AsOf),
+			accountSnapshotEnvelope(t, 3, mismatched, mismatched.AsOf),
+		}
+		emitted, err := engine.Run(context.Background(), envelopes)
+		if err == nil || !strings.Contains(err.Error(), "does not match the account's pinned currency") {
+			t.Fatalf("Run() error = %v, want it to name a currency mismatch", err)
+		}
+		if !strings.Contains(err.Error(), "USD") || !strings.Contains(err.Error(), "EUR") {
+			t.Fatalf("Run() error = %v, want it to name both currencies (USD and EUR)", err)
+		}
+		if emitted != nil {
+			t.Fatalf("emitted = %v, want nil: nothing is emitted for a run that failed closed", emitted)
+		}
+	})
+
+	t.Run("cash movement after a snapshot pin", func(t *testing.T) {
+		t.Parallel()
+		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		if err != nil {
+			t.Fatalf("NewReducer() error = %v", err)
+		}
+		engine, err := replay.New(reducer)
+		if err != nil {
+			t.Fatalf("replay.New() error = %v", err)
+		}
+
+		first := accountSnapshotPayload(snapshotBefore(1), 950_000) // pins USD
+		mismatched := event.CashMovementPayload{AsOf: snapshotBefore(2), Amount: 100_000, EquityBefore: 950_000, Currency: "EUR"}
+
+		envelopes := []event.Envelope{
+			configEnvelope(t, 1, day(0)),
+			accountSnapshotEnvelope(t, 2, first, first.AsOf),
+			cashMovementEnvelope(t, 3, mismatched, mismatched.AsOf),
+		}
+		emitted, err := engine.Run(context.Background(), envelopes)
+		if err == nil || !strings.Contains(err.Error(), "does not match the account's pinned currency") {
+			t.Fatalf("Run() error = %v, want it to name a currency mismatch", err)
+		}
+		if !strings.Contains(err.Error(), "USD") || !strings.Contains(err.Error(), "EUR") {
+			t.Fatalf("Run() error = %v, want it to name both currencies (USD and EUR)", err)
+		}
+		if emitted != nil {
+			t.Fatalf("emitted = %v, want nil: nothing is emitted for a run that failed closed", emitted)
+		}
+	})
+
+	t.Run("snapshot after a cash movement pin", func(t *testing.T) {
+		t.Parallel()
+		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		if err != nil {
+			t.Fatalf("NewReducer() error = %v", err)
+		}
+		engine, err := replay.New(reducer)
+		if err != nil {
+			t.Fatalf("replay.New() error = %v", err)
+		}
+
+		first := cashMovementPayload(snapshotBefore(1), 100_000, 900_000) // pins USD (cashMovementPayload's fixture currency)
+		mismatched := event.AccountSnapshotPayload{AsOf: snapshotBefore(2), Equity: 900_000, Currency: "EUR"}
+
+		envelopes := []event.Envelope{
+			configEnvelope(t, 1, day(0)),
+			cashMovementEnvelope(t, 2, first, first.AsOf),
+			accountSnapshotEnvelope(t, 3, mismatched, mismatched.AsOf),
+		}
+		emitted, err := engine.Run(context.Background(), envelopes)
+		if err == nil || !strings.Contains(err.Error(), "does not match the account's pinned currency") {
+			t.Fatalf("Run() error = %v, want it to name a currency mismatch", err)
+		}
+		if emitted != nil {
+			t.Fatalf("emitted = %v, want nil: nothing is emitted for a run that failed closed", emitted)
+		}
+	})
+}
+
+// TestReducerCurrencyPinSurvivesRebasing: the pin lives on the Reducer, not
+// on NotionalAccount, so re-basing must not reset or bypass it.
+func TestReducerCurrencyPinSurvivesRebasing(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	cfg := validConfigurationPayload()
+	snap1 := event.AccountSnapshotPayload{AsOf: jan(2, 2026).Add(time.Hour), Equity: 970_000, Currency: "USD"} // pins USD; establishes the period
+	snap2 := event.AccountSnapshotPayload{AsOf: jan(1, 2027), Equity: 900_000, Currency: "USD"}                // rebases; still USD
+	mismatched := event.AccountSnapshotPayload{AsOf: jan(2, 2027), Equity: 890_000, Currency: "EUR"}           // after the rebasing, mismatched
+
+	envelopes := []event.Envelope{
+		configEnvelopeWithConfig(t, 1, day(0), cfg),
+		accountSnapshotEnvelope(t, 2, snap1, snap1.AsOf),
+		accountSnapshotEnvelope(t, 3, snap2, snap2.AsOf),
+		accountSnapshotEnvelope(t, 4, mismatched, mismatched.AsOf),
+	}
+	emitted, err := engine.Run(context.Background(), envelopes)
+	if err == nil || !strings.Contains(err.Error(), "does not match the account's pinned currency") {
+		t.Fatalf("Run() error = %v, want it to name a currency mismatch even after a re-basing", err)
+	}
+	if emitted != nil {
+		t.Fatalf("emitted = %v, want nil: nothing is emitted for a run that failed closed", emitted)
+	}
+}

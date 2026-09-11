@@ -796,6 +796,61 @@ func TestNotionalAccountApplyCashMovementRejectsNonFiniteOrZeroAmount(t *testing
 	}
 }
 
+// TestNotionalAccountApplyCashMovementRejectsOverflowingEquityAfter is
+// Greptile PR #71's finding: equityBefore and amount can both be finite
+// while equityBefore+amount overflows to +Inf, which the original "<= 0"
+// check let through silently (+Inf is not <= 0). The account must be left
+// completely unchanged by a rejected cash movement — no partial scaling.
+func TestNotionalAccountApplyCashMovementRejectsOverflowingEquityAfter(t *testing.T) {
+	t.Parallel()
+
+	account, err := strategy.NewNotionalAccount(1_000_000, 1, 1)
+	if err != nil {
+		t.Fatalf("NewNotionalAccount() error = %v", err)
+	}
+	wantCurrent, wantBase, wantStarting := account.Current(), account.MeasurementBase(), account.StartingFigure()
+
+	const equityBefore = math.MaxFloat64
+	const amount = math.MaxFloat64 // equityBefore + amount overflows to +Inf
+
+	if _, err := account.ApplyCashMovement(equityBefore, amount); err == nil {
+		t.Fatal("ApplyCashMovement() error = nil, want an error: equity before plus amount overflows to +Inf")
+	}
+	if account.Current() != wantCurrent || account.MeasurementBase() != wantBase || account.StartingFigure() != wantStarting {
+		t.Fatalf("account state changed despite the rejected cash movement: Current()/MeasurementBase()/StartingFigure() = %v/%v/%v, want %v/%v/%v unchanged",
+			account.Current(), account.MeasurementBase(), account.StartingFigure(), wantCurrent, wantBase, wantStarting)
+	}
+}
+
+// TestNotionalAccountApplyCashMovementRejectsAnOverflowingScaledFigure is
+// the OTHER half of Greptile PR #71's finding: even when equityBefore+amount
+// is itself finite, the ratio it forms can still overflow a figure that was
+// already extreme when multiplied by it. This is what the fix's "compute
+// every scaled figure into a local and validate before mutating" ordering
+// exists to catch — reachable only if the account itself starts at an
+// astronomical figure, which a real account never does, but the ladder
+// makes no such assumption and must fail closed rather than silently commit
+// an infinite Notional Account.
+func TestNotionalAccountApplyCashMovementRejectsAnOverflowingScaledFigure(t *testing.T) {
+	t.Parallel()
+
+	account, err := strategy.NewNotionalAccount(math.MaxFloat64/1.5, 1, 1)
+	if err != nil {
+		t.Fatalf("NewNotionalAccount() error = %v", err)
+	}
+	wantCurrent, wantBase, wantStarting := account.Current(), account.MeasurementBase(), account.StartingFigure()
+
+	// The ratio (100+100)/100 = 2 applied to the already-astronomical
+	// starting figure (MaxFloat64/1.5) overflows to +Inf.
+	if _, err := account.ApplyCashMovement(100, 100); err == nil {
+		t.Fatal("ApplyCashMovement() error = nil, want an error: the scaled starting figure overflows to +Inf")
+	}
+	if account.Current() != wantCurrent || account.MeasurementBase() != wantBase || account.StartingFigure() != wantStarting {
+		t.Fatalf("account state changed despite the rejected cash movement: Current()/MeasurementBase()/StartingFigure() = %v/%v/%v, want %v/%v/%v unchanged",
+			account.Current(), account.MeasurementBase(), account.StartingFigure(), wantCurrent, wantBase, wantStarting)
+	}
+}
+
 func TestNewNotionalAccountRejectsAnInvalidRebasingDate(t *testing.T) {
 	t.Parallel()
 

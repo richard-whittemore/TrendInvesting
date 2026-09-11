@@ -83,6 +83,17 @@ func TestCashMovementPayloadValidate(t *testing.T) {
 			mutate:  func(p *event.CashMovementPayload) { p.Currency = "" },
 			wantErr: "currency is required",
 		},
+		{
+			// Greptile PR #71 finding: EquityBefore and Amount are both
+			// finite, but their sum overflows to +Inf, which the old "<= 0"
+			// check let through silently.
+			name: "equity before plus amount overflows to infinity",
+			mutate: func(p *event.CashMovementPayload) {
+				p.EquityBefore = math.MaxFloat64
+				p.Amount = math.MaxFloat64
+			},
+			wantErr: "is not finite",
+		},
 	}
 
 	for _, tt := range tests {
