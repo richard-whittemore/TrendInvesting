@@ -209,8 +209,8 @@ func (r *Reducer) rememberPendingProposal(state *instrumentState, emitted event.
 	return nil
 }
 
-// expireProposal ends an outstanding proposal that the next completed bar has
-// superseded, and returns the event that records it.
+// expireEntryProposal ends an outstanding entry (trade) proposal that the
+// next completed bar has superseded, and returns the event that records it.
 //
 // ADR 0011: a Signal belongs to one bar and expires with it — "never enter a
 // Tier A stock without first checking that it still belongs in Tier A" — and
@@ -225,12 +225,17 @@ func (r *Reducer) rememberPendingProposal(state *instrumentState, emitted event.
 // error would name a proposal the journal appears never to have made. It also
 // completes the lifecycle #10 began — a Signal is never followed by silence,
 // and now neither is a proposal: every one reaches a Campaign or an expiry.
-func (r *Reducer) expireProposal(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
+//
+// #13 reuses this exact payload and event type for an outstanding EXIT
+// proposal too (expireExitProposal, below), naming the difference with
+// Kind rather than minting a second event.
+func (r *Reducer) expireEntryProposal(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
 	pending := state.pendingProposal
 	state.pendingProposal = nil
 
 	payload := event.ProposalExpiredPayload{
 		InstrumentID: bar.InstrumentID,
+		Kind:         event.ProposalKindEntry,
 		ProposalID:   pending.proposalID,
 		SignalID:     pending.signalID,
 		PeriodEnd:    pending.periodEnd,
@@ -239,7 +244,7 @@ func (r *Reducer) expireProposal(state *instrumentState, bar event.CompletedBarP
 		ADR:          event.ADRSignalExpiry,
 		Reason:       event.ExpiryReasonSupersededByNextBar,
 		Quantity:     pending.quantity,
-		EntryLevel:   pending.entryLevel,
+		Level:        pending.entryLevel,
 	}
 	if err := payload.Validate(); err != nil {
 		return event.Envelope{}, fmt.Errorf("strategy: built invalid proposal expired payload: %w", err)
@@ -252,13 +257,188 @@ func (r *Reducer) expireProposal(state *instrumentState, bar event.CompletedBarP
 		return event.Envelope{}, fmt.Errorf("strategy: marshal proposal expired payload: %w", err)
 	}
 	// Keyed to the bar that superseded the proposal, not to the proposal's own
-	// bar: at most one expiry can happen per (instrument, completed bar), so
-	// that pair identifies it uniquely — the same reasoning as decisionID's.
+	// bar: at most one entry-kind expiry can happen per (instrument, completed
+	// bar), so that pair identifies it uniquely — the same reasoning as
+	// decisionID's.
 	return r.stamp(
 		decisionID("proposal-expired", bar.InstrumentID, bar.PeriodEnd),
 		event.ProposalExpiredEventType, event.ProposalExpiredSchemaVersion,
 		bar.PeriodEnd, input, payloadBytes,
 	), nil
+}
+
+// pendingExitProposalState is #13's exit-side mirror of pendingProposalState:
+// an exit proposal (strategy.exit.proposed) that has been emitted and not
+// yet resolved. It is NOT position state, for the identical reason
+// pendingProposalState is not: nothing about the Campaign's own life
+// depends on it, and the Campaign closes only from a recorded exit fill —
+// never from this proposal alone (see evaluateCampaign and applyExitFill).
+//
+// It carries far less than pendingProposalState because an exit proposal
+// carries no sizing of its own: it names the Campaign it would close, the
+// level that was breached, and the quantity already held, nothing more.
+//
+// It lives for one bar, the identical lifetime ADR 0011 gives every proposal
+// in this system: the next completed bar for the instrument supersedes it
+// (see Reducer.expireExitProposal).
+type pendingExitProposalState struct {
+	proposalID string
+	periodEnd  time.Time
+	quantity   int64
+	level      float64
+}
+
+// expireExitProposal ends an outstanding exit proposal that the next
+// completed bar has superseded, and returns the event that records it —
+// #13's exit-side mirror of expireEntryProposal, reusing the identical
+// event.ProposalExpiredPayload with Kind ProposalKindExit rather than a
+// second event type (see that payload's own doc comment). Unlike an
+// entry-kind expiry, SignalID is left empty: an exit proposal is not sized
+// from a Signal at all (event.ExitProposalPayload's doc comment).
+func (r *Reducer) expireExitProposal(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
+	pending := state.pendingExitProposal
+	state.pendingExitProposal = nil
+
+	payload := event.ProposalExpiredPayload{
+		InstrumentID: bar.InstrumentID,
+		Kind:         event.ProposalKindExit,
+		ProposalID:   pending.proposalID,
+		SignalID:     "",
+		PeriodEnd:    pending.periodEnd,
+		ExpiredAt:    bar.PeriodEnd,
+		Rule:         event.RuleExitProposalExpiresWithItsBar,
+		ADR:          event.ADRSignalExpiry,
+		Reason:       event.ExpiryReasonSupersededByNextBar,
+		Quantity:     pending.quantity,
+		Level:        pending.level,
+	}
+	if err := payload.Validate(); err != nil {
+		return event.Envelope{}, fmt.Errorf("strategy: built invalid proposal expired payload: %w", err)
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		// Unreachable, for the same reason expireEntryProposal's marshal
+		// guard is.
+		return event.Envelope{}, fmt.Errorf("strategy: marshal proposal expired payload: %w", err)
+	}
+	// A distinct decisionID kind from the entry-kind expiry's own
+	// ("exit-proposal-expired" vs "proposal-expired"), even though the two
+	// can never coexist for one instrument on one bar in practice (a pending
+	// entry proposal is always cleared before a Campaign, and so an exit
+	// proposal, can exist) — kept distinct so the ids stay self-describing
+	// rather than relying on that invariant to avoid a collision.
+	return r.stamp(
+		decisionID("exit-proposal-expired", bar.InstrumentID, bar.PeriodEnd),
+		event.ProposalExpiredEventType, event.ProposalExpiredSchemaVersion,
+		bar.PeriodEnd, input, payloadBytes,
+	), nil
+}
+
+// evaluateCampaign runs an open Campaign's per-bar decision (#13): the
+// Protective Stop and Exit Channel levels in force on this bar, journaled as
+// a CampaignEvaluatedPayload regardless of whether either one triggers
+// anything — this is the event that fills the hole #12's Concerns left open
+// ("a bar for an instrument in a Campaign currently emits nothing at all").
+//
+// If the Exit Channel is ready and this bar's low fell strictly below it
+// (The Turtle Rules p.26: price "falls below" the channel; a tie is not a
+// breach, mirroring the Entry Channel's strict "exceeds"), it additionally
+// proposes the exit: an ExitProposalPayload for the Campaign's WHOLE filled
+// quantity, at the channel level — a proposal only. Nothing about the
+// Campaign's own state moves here; only a recorded exit fill closes it (see
+// applyExitFill and this file's package doc comment on the invariant this
+// whole file exists to enforce).
+//
+// exitChannelLow/exitChannelReady are passed in rather than read from
+// state.exitChannel again here: applyCompletedBar's evaluate block already
+// read them, before the bar was folded into the channel for the NEXT bar to
+// see, and passing the same values through keeps this function from being
+// able to accidentally read a post-advance (and therefore look-ahead) value.
+func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBarPayload, exitChannelLow float64, exitChannelReady bool, input event.Envelope) ([]event.Envelope, error) {
+	campaign := state.campaign
+	view := bar.SplitAdjusted
+
+	// Matches N's and the Entry Channel's convention: a level computed from
+	// fewer than ExitChannelLength bars is not a real Exit Channel level and
+	// must never be read as one.
+	reportedExitChannelLow := exitChannelLow
+	if !exitChannelReady {
+		reportedExitChannelLow = 0
+	}
+	exitConditionMet := exitChannelReady && view.Low < exitChannelLow
+
+	evaluatedPayload := event.CampaignEvaluatedPayload{
+		CampaignID:       campaign.campaignID,
+		InstrumentID:     bar.InstrumentID,
+		PeriodEnd:        bar.PeriodEnd,
+		ProtectiveStop:   campaign.protectiveStop,
+		ExitChannelLow:   reportedExitChannelLow,
+		ExitChannelReady: exitChannelReady,
+		ExitConditionMet: exitConditionMet,
+	}
+	if err := evaluatedPayload.Validate(); err != nil {
+		return nil, fmt.Errorf("strategy: instrument %q: built invalid campaign evaluated payload: %w", bar.InstrumentID, err)
+	}
+	evaluatedBytes, err := json.Marshal(evaluatedPayload)
+	if err != nil {
+		// Unreachable: every field is a string, a float64, a bool or a
+		// time.Time, none of which can fail to marshal. Failing closed
+		// rather than panicking, in case the payload ever grows a field
+		// that can.
+		return nil, fmt.Errorf("strategy: marshal campaign evaluated payload: %w", err)
+	}
+	emissions := []event.Envelope{r.stamp(
+		decisionID("campaign-evaluated", bar.InstrumentID, bar.PeriodEnd),
+		event.CampaignEvaluatedEventType, event.CampaignEvaluatedSchemaVersion,
+		bar.PeriodEnd, input, evaluatedBytes,
+	)}
+
+	if !exitConditionMet {
+		return emissions, nil
+	}
+
+	// At most one exit proposal per bar (this function runs once per
+	// instrument per completed bar), and it expires with its bar exactly
+	// like an entry proposal does (see expireExitProposal) — reusing ADR
+	// 0011's mechanism rather than inventing a second one, per the ticket.
+	proposalPayload := event.ExitProposalPayload{
+		CampaignID:   campaign.campaignID,
+		InstrumentID: bar.InstrumentID,
+		PeriodEnd:    bar.PeriodEnd,
+		Reason:       event.ExitReasonExitChannel,
+		Level:        exitChannelLow,
+		Quantity:     campaign.filledQuantity,
+		Rule:         event.RuleExitChannelBreach,
+		ADR:          event.ADRExitChannelBreach,
+	}
+	if err := proposalPayload.Validate(); err != nil {
+		return nil, fmt.Errorf("strategy: instrument %q: built invalid exit proposal payload: %w", bar.InstrumentID, err)
+	}
+	proposalBytes, err := json.Marshal(proposalPayload)
+	if err != nil {
+		// Unreachable, for the same reason evaluatedBytes' marshal guard is.
+		return nil, fmt.Errorf("strategy: marshal exit proposal payload: %w", err)
+	}
+	proposalEnvelope := r.stamp(
+		decisionID("exit-proposal", bar.InstrumentID, bar.PeriodEnd),
+		event.ExitProposalEventType, event.ExitProposalSchemaVersion,
+		bar.PeriodEnd, input, proposalBytes,
+	)
+	emissions = append(emissions, proposalEnvelope)
+
+	// Remembered so a fill executing it can be checked against it, and so a
+	// later bar with no fill knows to expire it — the identical two reasons
+	// rememberPendingProposal exists for the entry side. No Campaign state
+	// moves here: this reducer's only path to closing a Campaign is
+	// applyExitFill, reading a recorded fill.
+	state.pendingExitProposal = &pendingExitProposalState{
+		proposalID: proposalEnvelope.ID,
+		periodEnd:  bar.PeriodEnd,
+		quantity:   campaign.filledQuantity,
+		level:      exitChannelLow,
+	}
+
+	return emissions, nil
 }
 
 // checkBarConfirmsCampaignOpening enforces the upper end of the window
@@ -408,22 +588,25 @@ func (r *Reducer) applyFill(envelope event.Envelope) ([]event.Envelope, error) {
 	// creating state here would make the reducer look as though it had.
 	state, known := r.instruments[fill.InstrumentID]
 	if !known {
-		if fill.Kind == event.FillKindStop {
-			return nil, fmt.Errorf("strategy: stop fill %q names campaign %q for instrument %q, which this reducer has never evaluated; a fill for a campaign this strategy has no history for is a reconciliation failure, not something to absorb (docs/architecture.md)",
-				fill.FillID, fill.CampaignID, fill.InstrumentID)
+		if fill.Kind == event.FillKindStop || fill.Kind == event.FillKindExit {
+			return nil, fmt.Errorf("strategy: %s fill %q names campaign %q for instrument %q, which this reducer has never evaluated; a fill for a campaign this strategy has no history for is a reconciliation failure, not something to absorb (docs/architecture.md)",
+				fill.Kind, fill.FillID, fill.CampaignID, fill.InstrumentID)
 		}
 		return nil, fmt.Errorf("strategy: fill %q names proposal %q for instrument %q, which this reducer has never evaluated; a fill for an order this strategy never proposed is a reconciliation failure, not something to absorb (docs/architecture.md)",
 			fill.FillID, fill.ProposalID, fill.InstrumentID)
 	}
 
-	// #12: a stop fill takes a completely different path from an entry
-	// fill — it closes a Campaign rather than opening one — so it is
-	// dispatched before any of the entry-fill logic below runs.
-	// fill.Validate() has already rejected any Kind other than
-	// event.FillKindEntry or event.FillKindStop, so the fall-through below
-	// is reached only for an entry fill.
+	// #12/#13: a stop fill or an exit fill each take a completely different
+	// path from an entry fill — they close a Campaign rather than opening
+	// one — so both are dispatched before any of the entry-fill logic below
+	// runs. fill.Validate() has already rejected any Kind other than
+	// event.FillKindEntry, event.FillKindStop or event.FillKindExit, so the
+	// fall-through below is reached only for an entry fill.
 	if fill.Kind == event.FillKindStop {
 		return r.applyStopFill(state, fill, envelope)
+	}
+	if fill.Kind == event.FillKindExit {
+		return r.applyExitFill(state, fill, envelope)
 	}
 
 	if state.campaign != nil {
@@ -742,6 +925,112 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 	// evaluates this instrument normally and may Signal, with no further
 	// change needed anywhere else.
 	state.campaign = nil
+
+	return []event.Envelope{exitEnvelope}, nil
+}
+
+// applyExitFill handles a fill.Kind == event.FillKindExit delivery: #13's
+// way of closing a Campaign, alongside #12's stop fill. Unlike a stop fill,
+// an exit fill always executes a specific outstanding exit proposal
+// (evaluateCampaign's ExitProposalPayload) — ADR 0005 makes the exit a
+// resting order, so it is always proposed before it can be filled — and
+// fill.Validate() has already required both CampaignID and ProposalID to be
+// present for this Kind.
+//
+// **No decision about WHETHER the channel was breached is made here**,
+// mirroring applyStopFill's own doc comment: this function only ever reacts
+// to a fill event that already says the exit was executed. It never reads
+// bar data, and nothing in this package compares a bar's low to
+// campaignState.protectiveStop or to an Exit Channel level except
+// evaluateCampaign's own reading (which proposes, but never fills).
+//
+// Reaching this function with state.campaign == nil now means, unqualified,
+// "there is no open campaign for this fill to close" — including the case
+// #13 explicitly names: a stop fill already closed this same Campaign, and
+// this exit fill is a second, later closing fill for it. applyFill's own
+// idempotency check has already resolved a re-delivery of a fill this
+// reducer previously accepted before dispatch ever reaches here (see
+// acceptedFillState's doc comment), so what is left is genuinely a second,
+// different execution racing the first — and it fails closed, exactly as two
+// stop fills racing each other already would.
+func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, input event.Envelope) ([]event.Envelope, error) {
+	campaign := state.campaign
+	if campaign == nil {
+		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q names campaign %q, but there is no open campaign for it; a closing fill for an unknown or already-closed campaign is a reconciliation failure (docs/architecture.md)",
+			fill.InstrumentID, fill.FillID, fill.CampaignID)
+	}
+	if campaign.campaignID != fill.CampaignID {
+		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q names campaign %q, but the open campaign is %q; a fill for a campaign this strategy does not hold is a reconciliation failure (docs/architecture.md)",
+			fill.InstrumentID, fill.FillID, fill.CampaignID, campaign.campaignID)
+	}
+	pending := state.pendingExitProposal
+	if pending == nil {
+		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q names proposal %q, but there is no outstanding exit proposal for campaign %q; an exit proposal expires with its bar (ADR 0011, see the strategy.proposal.expired event in the journal) and a fill for a proposal this strategy is no longer offering is a reconciliation failure (docs/architecture.md)",
+			fill.InstrumentID, fill.FillID, fill.ProposalID, campaign.campaignID)
+	}
+	if pending.proposalID != fill.ProposalID {
+		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q names proposal %q, but the outstanding exit proposal is %q; a fill for a proposal this strategy never made is a reconciliation failure (docs/architecture.md)",
+			fill.InstrumentID, fill.FillID, fill.ProposalID, pending.proposalID)
+	}
+	if fill.Direction != campaign.direction {
+		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)",
+			fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)
+	}
+	if fill.Quantity != campaign.filledQuantity {
+		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q executed %d but campaign %q holds %d; a partial exit fill is rejected — every Unit exits together (CONTEXT.md: 'Campaign'), the same fail-closed answer #12 gives a partial stop fill",
+			fill.InstrumentID, fill.FillID, fill.Quantity, campaign.campaignID, campaign.filledQuantity)
+	}
+	if fill.FilledAt.Before(campaign.openedAt) {
+		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q is timestamped %s, which predates campaign %q's own opening fill at %s; a campaign cannot be closed before it opened",
+			fill.InstrumentID, fill.FillID, fill.FilledAt.Format(time.RFC3339), campaign.campaignID, campaign.openedAt.Format(time.RFC3339))
+	}
+
+	// The realised result, in the exact expression order
+	// event.CampaignExitedPayload.Validate re-derives it in, so the two
+	// agree bit for bit — identical to applyStopFill's own derivation.
+	// ExitPrice is fill.Price — what actually filled, which under ADR 0005's
+	// gap rule may sit below the Exit Channel level — never pending.level
+	// itself.
+	realisedResult := float64(campaign.filledQuantity) * (fill.Price - campaign.entryPrice) * r.dollarsPerPoint
+	realisedResultInN := (fill.Price - campaign.entryPrice) / campaign.campaignN
+
+	exitedPayload := event.CampaignExitedPayload{
+		CampaignID:          campaign.campaignID,
+		InstrumentID:        fill.InstrumentID,
+		FillID:              fill.FillID,
+		ExitedAt:            fill.FilledAt,
+		Reason:              event.ExitReasonExitChannel,
+		EntryPrice:          campaign.entryPrice,
+		ExitPrice:           fill.Price,
+		Quantity:            campaign.filledQuantity,
+		CampaignN:           campaign.campaignN,
+		DollarsPerPoint:     r.dollarsPerPoint,
+		ProtectiveStopLevel: campaign.protectiveStop,
+		RealisedResult:      realisedResult,
+		RealisedResultInN:   realisedResultInN,
+		Rule:                event.RuleCampaignExitedByExitChannel,
+		ADR:                 event.ADRCampaignExitRecordsTheFill,
+	}
+	if err := exitedPayload.Validate(); err != nil {
+		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q would close campaign %q with an invalid exit: %w", fill.InstrumentID, fill.FillID, campaign.campaignID, err)
+	}
+	exitedPayloadBytes, err := json.Marshal(exitedPayload)
+	if err != nil {
+		// Unreachable, for the same reason as applyStopFill's marshal guard.
+		return nil, fmt.Errorf("strategy: marshal campaign exited payload: %w", err)
+	}
+
+	exitID := decisionID("campaign-exited", fill.InstrumentID, fill.FilledAt)
+	exitEnvelope := r.stamp(exitID, event.CampaignExitedEventType, event.CampaignExitedSchemaVersion, fill.FilledAt, input, exitedPayloadBytes)
+
+	// The state moves only now, after the payload it will be journalled as
+	// has been validated — identical discipline to applyStopFill's own.
+	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
+	// The instrument is a Setup again (CONTEXT.md), the same consequence
+	// applyStopFill's own closing has; and the exit proposal this fill
+	// executed is resolved, so a later bar does not try to expire it again.
+	state.campaign = nil
+	state.pendingExitProposal = nil
 
 	return []event.Envelope{exitEnvelope}, nil
 }

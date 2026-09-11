@@ -58,7 +58,11 @@ type Reducer struct {
 
 	configured         bool
 	entryChannelLength int
-	tierBDistanceInN   float64
+	// exitChannelLength is #13's addition: event.ConfigurationPayload.ExitChannelLength
+	// (20 in the Baseline, The Turtle Rules p.26, ADR 0002), captured once
+	// from the configuration event alongside entryChannelLength.
+	exitChannelLength int
+	tierBDistanceInN  float64
 
 	// #10's sizing configuration, captured once from the configuration event.
 	//
@@ -129,6 +133,12 @@ type instrumentState struct {
 	lastPeriodEnd    time.Time
 	n                *indicator.WilderAverage
 	entryChannel     *indicator.EntryChannel
+	// exitChannel is #13's addition: fed one more completed bar's low every
+	// completed bar, whether or not the instrument is currently in a
+	// Campaign — so the window is already warm the moment a Campaign opens
+	// (see reducer.go's applyCompletedBar). Evaluate-then-add, exactly like
+	// entryChannel and n.
+	exitChannel *indicator.ExitChannel
 
 	// #11's two additions, both defined and explained in campaign.go.
 	// pendingProposal is a trade proposal emitted and not yet resolved, and is
@@ -137,6 +147,12 @@ type instrumentState struct {
 	// recorded fill brought one into being.
 	pendingProposal *pendingProposalState
 	campaign        *campaignState
+	// pendingExitProposal is #13's addition, defined and explained in
+	// campaign.go: an exit proposal (strategy.exit.proposed) emitted and not
+	// yet resolved, holding the same "not position state" property
+	// pendingProposal does — a Campaign closes only from a recorded exit
+	// fill, never from this proposal alone.
+	pendingExitProposal *pendingExitProposalState
 }
 
 // NewReducer returns a Reducer that stamps every decision it emits with
@@ -243,6 +259,7 @@ func (r *Reducer) applyConfiguration(envelope event.Envelope) ([]event.Envelope,
 		return nil, err
 	}
 	r.entryChannelLength = payload.EntryChannelLength
+	r.exitChannelLength = payload.ExitChannelLength
 	r.tierBDistanceInN = payload.TierBDistanceInN
 	r.configuredSizingMode = payload.SizingMode
 	r.sizingMode = sizingMode
@@ -396,43 +413,82 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	// comparison is strict; a tie is not a breakout.
 	breakout := entryChannelReady && view.High > entryChannelHigh
 
+	// #13: the Exit Channel low in force for deciding THIS bar — computed
+	// from the preceding ExitChannelLength completed bars only, the same
+	// evaluate-then-add discipline as N and the Entry Channel (see
+	// indicator.ExitChannel's doc comment for the look-ahead rationale,
+	// mirroring indicator.EntryChannel's). Read here, before either channel
+	// is advanced, and used below regardless of whether this instrument is
+	// currently in a Campaign — the Exit Channel is fed every completed bar
+	// so it is already warm the moment a Campaign opens.
+	exitChannelLow, exitChannelReady := state.exitChannel.Extreme()
+
 	// --- Advance. Every read that decides this bar has now happened, so the
 	// bar can be folded into the running state for the NEXT bar to see. The
 	// per-instrument tracking itself is unchanged: this bar's True Range and
-	// high still enter N and the Entry Channel, just after the decision
-	// rather than before it.
+	// high/low still enter N, the Entry Channel and the Exit Channel, just
+	// after the decision rather than before it.
 	state.n.Add(tr)
 	state.entryChannel.Add(view.High)
+	state.exitChannel.Add(view.Low)
 	state.previousClose = view.Close
 	state.hasPreviousClose = true
 	state.lastPeriodEnd = bar.PeriodEnd
 
-	// --- #11: the previous bar's outstanding business, resolved so that it is
-	// EMITTED before any decision this bar produces — the ordering ADR 0010
-	// applies within a day, exits before entries. It sits below the advance
-	// block rather than above the evaluate block only so that the
-	// evaluate/advance pair stays contiguous; it reads and writes none of that
-	// state. A trade proposal that no fill arrived for expires with its bar,
-	// per ADR 0011; see Reducer.expireProposal for why the expiry is emitted
-	// rather than dropped.
+	// --- #11/#13: the previous bar's outstanding business, resolved so that
+	// it is EMITTED before any decision this bar produces — the ordering ADR
+	// 0010 applies within a day, exits before entries. It sits below the
+	// advance block rather than above the evaluate block only so that the
+	// evaluate/advance pair stays contiguous; it reads and writes none of
+	// that state. A trade proposal or an exit proposal that no fill arrived
+	// for expires with its bar, per ADR 0011; see Reducer.expireEntryProposal
+	// and Reducer.expireExitProposal for why the expiry is emitted rather
+	// than dropped. At most one of the two can be outstanding for a given
+	// instrument at a time (a pending entry proposal is always cleared
+	// before a Campaign — and so an exit proposal — can exist), but both
+	// checks are unconditional here so neither is skipped by construction.
 	var emissions []event.Envelope
 	if state.pendingProposal != nil {
-		expired, err := r.expireProposal(state, bar, envelope)
+		expired, err := r.expireEntryProposal(state, bar, envelope)
+		if err != nil {
+			return nil, err
+		}
+		emissions = append(emissions, expired)
+	}
+	if state.pendingExitProposal != nil {
+		expired, err := r.expireExitProposal(state, bar, envelope)
 		if err != nil {
 			return nil, err
 		}
 		emissions = append(emissions, expired)
 	}
 
-	// --- #11: no new entry while a Campaign is open in this instrument. N and
-	// the Entry Channel above are still tracked (#12's stop evaluation and
-	// #14's Exit Channel need them), but nothing further is emitted: CONTEXT.md
-	// defines a Setup as an Eligible instrument NOT in a Campaign, so emitting
-	// a Setup-evaluated event here would journal a claim that is false by the
-	// project's own vocabulary, and would report a Tier for something that
-	// cannot become a Signal. The Campaign's own per-bar decision events are
-	// #12 onward.
+	// --- #11/#13: while a Campaign is open, no new entry is evaluated (below):
+	// N and the Entry Channel above are still tracked (#12's stop evaluation
+	// needs them), but no Setup-evaluated/Signal/proposal path runs:
+	// CONTEXT.md defines a Setup as an Eligible instrument NOT in a Campaign,
+	// so emitting a Setup-evaluated event here would journal a claim that is
+	// false by the project's own vocabulary. Instead, evaluateCampaign runs
+	// the Campaign's own per-bar decision: the Protective Stop and Exit
+	// Channel levels in force, and — on a breach — the exit proposal.
+	//
+	// # The ADR 0010 ordering hook
+	//
+	// evaluateCampaign is called HERE, structurally before anywhere #14's Add
+	// evaluation will be inserted, so that "exits are evaluated and journaled
+	// before Adds" (ADR 0010) holds by construction rather than by a later
+	// reordering. Adds do not exist yet (#14), so there is nothing to order
+	// against today — the acceptance criterion "a bar that would both Add and
+	// exit results in the exit only" cannot be exercised until #14 lands (see
+	// issue #13's Findings) — but the call site is fixed now precisely so
+	// #14 only ever has to add its own evaluation AFTER this returns, never
+	// before it.
 	if state.campaign != nil {
+		campaignEmissions, err := r.evaluateCampaign(state, bar, exitChannelLow, exitChannelReady, envelope)
+		if err != nil {
+			return nil, err
+		}
+		emissions = append(emissions, campaignEmissions...)
 		return emissions, nil
 	}
 
@@ -765,7 +821,19 @@ func (r *Reducer) stateFor(instrumentID string) (*instrumentState, error) {
 		// than panicking, in case that ever changes.
 		return nil, fmt.Errorf("strategy: %w", err)
 	}
-	state := &instrumentState{n: n, entryChannel: entryChannel}
+	// #13: the Exit Channel, built alongside the Entry Channel and fed
+	// every completed bar regardless of Campaign state (see
+	// applyCompletedBar), so it is already warm the moment a Campaign
+	// opens.
+	exitChannel, err := indicator.NewExitChannel(r.exitChannelLength)
+	if err != nil {
+		// Unreachable in practice, for the same reason entryChannel's guard
+		// above is: ConfigurationPayload.Validate already requires
+		// ExitChannelLength to be positive. Failing closed anyway rather
+		// than panicking, in case that ever changes.
+		return nil, fmt.Errorf("strategy: %w", err)
+	}
+	state := &instrumentState{n: n, entryChannel: entryChannel, exitChannel: exitChannel}
 	r.instruments[instrumentID] = state
 	return state, nil
 }

@@ -41,6 +41,19 @@ func postEntryBar(instrumentID string, periodEnd time.Time, low float64) event.C
 	return completedBar(instrumentID, periodEnd, low+50, low, low+25)
 }
 
+// freshBreakoutBar builds a bar guaranteed to be a fresh Entry Channel
+// breakout for instrumentID at periodEnd, for fixtures below that need one
+// AFTER a Campaign has already closed (proving the instrument is a Setup
+// again). Unlike nextBreakoutBar (campaign_test.go, fixed at day(57)), which
+// these fixtures' own breach/exit bars already occupy, this can be placed at
+// any later day: its high (250) comfortably exceeds every high in
+// breakoutFixtureHighs (topping out at 200) and every postEntryBar high used
+// below, so it breaks out regardless of what the intervening bars added to
+// the Entry Channel.
+func freshBreakoutBar(instrumentID string, periodEnd time.Time) event.CompletedBarPayload {
+	return completedBar(instrumentID, periodEnd, 250, 150, 200)
+}
+
 // exitProposalID is the deterministic id #13's exit proposal for
 // instrumentID on periodEnd carries, mirroring testDecisionID's role for
 // entry proposals.
@@ -333,7 +346,7 @@ func TestAfterAnExitChannelExitTheInstrumentSignalsAgain(t *testing.T) {
 		fill(openingFill("AAPL")).
 		bar(postEntryBar("AAPL", breachAt, 99)).
 		fill(exitFill).
-		bar(nextBreakoutBar("AAPL")).
+		bar(freshBreakoutBar("AAPL", day(59))).
 		mustRun()
 
 	if got := countFor(t, emitted, event.CampaignExitedEventType, "AAPL"); got != 1 {
@@ -731,7 +744,7 @@ func TestReplayingTheExitChannelFixtureTwiceYieldsByteIdenticalEmissions(t *test
 			fill(openingFill("AAPL")).
 			bar(postEntryBar("AAPL", breachAt, 99)).
 			fill(exitFill).
-			bar(nextBreakoutBar("AAPL")).
+			bar(freshBreakoutBar("AAPL", day(59))).
 			mustRun()
 	}
 

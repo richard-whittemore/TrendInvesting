@@ -618,8 +618,11 @@ func TestProposalWithNoFillOpensNoCampaignAndExpiresWithItsBar(t *testing.T) {
 	if expired.ADR != "0011" {
 		t.Errorf("expiry ADR = %q, want %q", expired.ADR, "0011")
 	}
-	if expired.Quantity != 133 || expired.EntryLevel != 200 {
-		t.Errorf("expiry Quantity/EntryLevel = %d/%v, want 133/200 (what was proposed and not taken)", expired.Quantity, expired.EntryLevel)
+	if expired.Kind != event.ProposalKindEntry {
+		t.Errorf("expiry Kind = %q, want %q", expired.Kind, event.ProposalKindEntry)
+	}
+	if expired.Quantity != 133 || expired.Level != 200 {
+		t.Errorf("expiry Quantity/Level = %d/%v, want 133/200 (what was proposed and not taken)", expired.Quantity, expired.Level)
 	}
 	if err := expired.Validate(); err != nil {
 		t.Errorf("emitted proposal-expired payload fails its own Validate(): %v", err)
@@ -1104,10 +1107,11 @@ func TestFillAfterTheDecisionBarButBeforeTheNextIsAccepted(t *testing.T) {
 	if !campaign.OpenedAt.Equal(nextSession) {
 		t.Errorf("OpenedAt = %v, want the next session's fill time %v", campaign.OpenedAt, nextSession)
 	}
-	// The bar that follows is applied without error — it simply emits nothing,
-	// because the instrument is now in a Campaign.
-	if len(emitted) != 60 {
-		t.Errorf("len(emitted) = %d, want 60 (the bar after the fill is processed and emits nothing)", len(emitted))
+	// The bar that follows is applied without error — the instrument is now
+	// in a Campaign, so it produces no Setup/Signal/proposal, only its own
+	// Campaign-evaluated event (#13).
+	if len(emitted) != 61 {
+		t.Errorf("len(emitted) = %d, want 61 (the bar after the fill adds its own Campaign-evaluated event, #13)", len(emitted))
 	}
 }
 
