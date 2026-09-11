@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"sort"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -88,11 +90,50 @@ type campaignState struct {
 	stopMultiple float64
 	maxUnits     int
 	openedAt     time.Time
-	// units holds every accepted Unit, in order (units[0] is always Unit 1,
-	// the opening fill). Never empty once a Campaign exists: openCampaign is
-	// the only place a campaignState is constructed, and it always appends
-	// Unit 1 before returning.
+	// units holds every CURRENTLY OPEN Unit, in ascending index order.
+	// Non-empty for as long as the Campaign itself exists in state.campaign:
+	// openCampaign always appends Unit 1 before returning, and #15's
+	// per-Unit stop fill clears state.campaign entirely (not merely to an
+	// empty units slice) the instant the last Unit closes — see
+	// applyStopFill. A PARTIAL stop fill (#15, the gap case) removes only
+	// the Units it named, so this slice can shrink below maxUnits while the
+	// Campaign is still open.
 	units []unitState
+	// unitsOpened is the TOTAL number of Units this Campaign has EVER held,
+	// incremented once in openCampaign (to 1) and once per accepted Add —
+	// never decremented when a partial stop fill removes a Unit from
+	// units above. CampaignExitedPayload.Units reports this, not
+	// len(units), because #15's per-Unit stop fill can close a Campaign's
+	// Units across more than one fill (the gap case): by the time the LAST
+	// Unit closes, units may already have shrunk from an earlier partial
+	// close, but the exited record must still say how many Units the
+	// Campaign held over its WHOLE life.
+	unitsOpened int
+	// partiallyStopped is true from the moment any stop fill closes SOME
+	// but not all of this Campaign's Units, and never reset while the
+	// Campaign remains open. The Turtle Rules p.23-24 describes a Whipsaw
+	// variant in which Faith re-enters after such a partial stop-out; that
+	// is explicitly out of scope for the Baseline (ADR 0012 — a declared
+	// Variant, not assumed), so evaluateAdd refuses to propose a further
+	// Unit for as long as this is true: the Campaign continues with
+	// whatever Units remain until its own exit or full stop, never adding
+	// to a position that has already started coming off.
+	partiallyStopped bool
+	// closedQuantity, closedEntryWeightedSum and closedExitWeightedSum
+	// accumulate, across every stop fill that has already closed PART of
+	// this Campaign, the facts a LATER closing fill (a further stop fill
+	// that finally empties the Campaign, or an Exit-Channel fill closing
+	// whatever Units remain) needs to report the Campaign's WHOLE-LIFE
+	// aggregate result — see CampaignExitedPayload's own doc comment,
+	// "Accumulating partial stop-outs", for the algebra this generalises
+	// and why it reduces EXACTLY to the original single-fill formula
+	// whenever no partial close has ever happened (closedQuantity stays 0
+	// for the whole Campaign life in every #12/#13/#14 fixture). Populated
+	// by applyStopFill on every stop fill, whether or not it happens to
+	// empty the Campaign.
+	closedQuantity         int64
+	closedEntryWeightedSum float64
+	closedExitWeightedSum  float64
 }
 
 // lastUnit returns the most recently accepted Unit — the one the NEXT Add's
@@ -149,6 +190,79 @@ func (c *campaignState) protectiveStop() float64 {
 	return stop
 }
 
+// openRiskUnits maps every currently-held Unit onto sizing.UnitOpenRisk, in
+// the SAME ascending index order they are stored in — the shape
+// sizing.AggregateOpenRisk needs (#15, .greptile/rules.md's "risk
+// multiplication when pyramiding" failure mode). Callers pass the result
+// straight to sizing.AggregateOpenRisk and, separately, build
+// event.CampaignEvaluatedPayload.Units from the SAME campaign.units slice —
+// the identical order both places read it in is what makes the reducer's
+// own computation and event.CampaignEvaluatedPayload.Validate's
+// re-derivation agree bit for bit (the #65 discipline).
+func (c *campaignState) openRiskUnits() []sizing.UnitOpenRisk {
+	units := make([]sizing.UnitOpenRisk, len(c.units))
+	for i, u := range c.units {
+		units[i] = sizing.UnitOpenRisk{EntryPrice: u.fillPrice, ProtectiveStop: u.protectiveStop, Quantity: u.quantity}
+	}
+	return units
+}
+
+// aggregateOpenRisk returns the Campaign's aggregate open risk, computed by
+// the one shared function event.CampaignEvaluatedPayload.Validate also
+// calls (sizing.AggregateOpenRisk) — see openRiskUnits' own doc comment.
+func (c *campaignState) aggregateOpenRisk(dollarsPerPoint float64) (float64, error) {
+	return sizing.AggregateOpenRisk(c.openRiskUnits(), dollarsPerPoint)
+}
+
+// resolveUnits looks up every id in ids (a stop fill's UnitIDs, #15) against
+// this Campaign's CURRENTLY held Units, by openingFillID. It returns the
+// matched Units in ASCENDING index order — regardless of the order ids
+// itself named them in, so event.CampaignUnitsStoppedPayload.UnitIndexes,
+// which requires strictly ascending indexes, never depends on a producer's
+// own ordering — and every id from ids that did not resolve, so the caller
+// can fail closed naming exactly which ones: an id naming a Unit this
+// Campaign never held, or one an EARLIER stop fill already closed, is a
+// reconciliation failure either way (docs/architecture.md), and both read
+// identically from here — "not currently in c.units" — which is exactly
+// right: this function has no way to tell "never existed" from "already
+// closed" apart, and does not need to, since the caller's error message
+// covers both.
+func (c *campaignState) resolveUnits(ids []string) (found []unitState, missing []string) {
+	byFillID := make(map[string]unitState, len(c.units))
+	for _, u := range c.units {
+		byFillID[u.openingFillID] = u
+	}
+	for _, id := range ids {
+		u, ok := byFillID[id]
+		if !ok {
+			missing = append(missing, id)
+			continue
+		}
+		found = append(found, u)
+	}
+	sort.Slice(found, func(i, j int) bool { return found[i].index < found[j].index })
+	return found, missing
+}
+
+// removeUnits deletes every Unit named in toRemove (by openingFillID) from
+// c.units, preserving the ascending order of whatever remains. Called only
+// after every payload a stop fill will be journalled as has already been
+// validated (openCampaign's own discipline, applied here): a Unit that
+// could not be recorded as closed must not disappear from state either.
+func (c *campaignState) removeUnits(toRemove []unitState) {
+	remove := make(map[string]bool, len(toRemove))
+	for _, u := range toRemove {
+		remove[u.openingFillID] = true
+	}
+	remaining := make([]unitState, 0, len(c.units)-len(toRemove))
+	for _, u := range c.units {
+		if !remove[u.openingFillID] {
+			remaining = append(remaining, u)
+		}
+	}
+	c.units = remaining
+}
+
 // acceptedFillState remembers ONE fill this reducer has already accepted —
 // either the entry that opened a Campaign or the stop that closed one —
 // keyed by FillID on Reducer.acceptedFills, for the WHOLE run rather than
@@ -185,10 +299,18 @@ type acceptedFillState struct {
 	price        float64
 	direction    string
 	filledAt     time.Time
+	// unitIDs is #15's addition: a stop fill's own FillPayload.UnitIDs,
+	// compared alongside every other field so a re-delivered stop fill that
+	// reuses a FillID but names a DIFFERENT set of Units is caught as a
+	// reconciliation failure (a reused id with different contents), not
+	// silently accepted as the identical fact. Always nil for every other
+	// Kind, matching FillPayload.Validate's own closed-shape rule.
+	unitIDs []string
 }
 
 // acceptedFillFromPayload builds the record applyFill stores for fill once
-// it has been accepted (whether it opened or closed a Campaign).
+// it has been accepted (whether it opened or closed a Campaign, in whole or
+// in part).
 func acceptedFillFromPayload(fill event.FillPayload) acceptedFillState {
 	return acceptedFillState{
 		instrumentID: fill.InstrumentID,
@@ -199,6 +321,7 @@ func acceptedFillFromPayload(fill event.FillPayload) acceptedFillState {
 		price:        fill.Price,
 		direction:    fill.Direction,
 		filledAt:     fill.FilledAt,
+		unitIDs:      fill.UnitIDs,
 	}
 }
 
@@ -215,7 +338,8 @@ func (a acceptedFillState) matches(fill event.FillPayload) bool {
 		a.quantity == fill.Quantity &&
 		a.price == fill.Price &&
 		a.direction == fill.Direction &&
-		a.filledAt.Equal(fill.FilledAt)
+		a.filledAt.Equal(fill.FilledAt) &&
+		slices.Equal(a.unitIDs, fill.UnitIDs)
 }
 
 // pendingProposalState is a trade proposal that has been emitted and not yet
@@ -555,14 +679,40 @@ func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBa
 	}
 	exitConditionMet := exitChannelReady && view.Low < exitChannelLow
 
+	// #15: every held Unit's own facts, in the SAME ascending order
+	// campaign.units and campaign.openRiskUnits() share — the order both
+	// this producer and event.CampaignEvaluatedPayload.Validate's
+	// re-derivation read Units in, so the two agree bit for bit (the #65
+	// discipline).
+	units := make([]event.CampaignEvaluatedUnit, len(campaign.units))
+	for i, u := range campaign.units {
+		units[i] = event.CampaignEvaluatedUnit{UnitIndex: u.index, EntryPrice: u.fillPrice, Quantity: u.quantity, ProtectiveStop: u.protectiveStop}
+	}
+	aggregateOpenRisk, err := campaign.aggregateOpenRisk(r.dollarsPerPoint)
+	if err != nil {
+		// Unreachable from a Campaign this package itself built: every
+		// Unit's own fillPrice/protectiveStop/quantity has already passed
+		// sizing.ProtectiveStopLevel's and its own payload's Validate, and
+		// r.dollarsPerPoint is a configured, already-validated positive
+		// figure (event.ConfigurationPayload.Validate). Failing closed
+		// anyway rather than panicking, matching this package's own style.
+		return nil, fmt.Errorf("strategy: instrument %q: campaign %q cannot compute aggregate open risk: %w", bar.InstrumentID, campaign.campaignID, err)
+	}
+	notionalAccount := r.notionalAccount.Current()
+
 	evaluatedPayload := event.CampaignEvaluatedPayload{
-		CampaignID:       campaign.campaignID,
-		InstrumentID:     bar.InstrumentID,
-		PeriodEnd:        bar.PeriodEnd,
-		ProtectiveStop:   campaign.protectiveStop(),
-		ExitChannelLow:   reportedExitChannelLow,
-		ExitChannelReady: exitChannelReady,
-		ExitConditionMet: exitConditionMet,
+		CampaignID:                campaign.campaignID,
+		InstrumentID:              bar.InstrumentID,
+		PeriodEnd:                 bar.PeriodEnd,
+		ProtectiveStop:            campaign.protectiveStop(),
+		Units:                     units,
+		ExitChannelLow:            reportedExitChannelLow,
+		ExitChannelReady:          exitChannelReady,
+		ExitConditionMet:          exitConditionMet,
+		DollarsPerPoint:           r.dollarsPerPoint,
+		AggregateOpenRisk:         aggregateOpenRisk,
+		NotionalAccount:           notionalAccount,
+		AggregateOpenRiskFraction: aggregateOpenRisk / notionalAccount,
 	}
 	if err := evaluatedPayload.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: instrument %q: built invalid campaign evaluated payload: %w", bar.InstrumentID, err)
@@ -668,6 +818,18 @@ func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBa
 // fully-Loaded Campaign is an ordinary state, not an error.
 func (r *Reducer) evaluateAdd(state *instrumentState, input event.Envelope) ([]event.Envelope, error) {
 	campaign := state.campaign
+	if campaign.partiallyStopped {
+		// #15: The Turtle Rules p.23-24 describes a Whipsaw variant in
+		// which Faith re-enters after a partial stop-out; that is a
+		// declared Variant, not the Baseline (ADR 0012), so once any Unit
+		// has been stopped out, this Campaign continues with whatever
+		// Units remain until its own exit or full stop — never a further
+		// Add. Checked here, the one place both call sites (this
+		// function's own two: applyCompletedBar's per-bar evaluation, and
+		// the same-bar chain from applyAddFill) funnel through, rather
+		// than at each call site separately.
+		return nil, nil
+	}
 	if len(campaign.units) >= campaign.maxUnits {
 		return nil, nil
 	}
@@ -1125,6 +1287,8 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 	stopSetPayload := event.ProtectiveStopSetPayload{
 		CampaignID:    campaignID,
 		InstrumentID:  fill.InstrumentID,
+		UnitIndex:     1,
+		Reason:        event.ProtectiveStopReasonInitial,
 		AsOf:          fill.FilledAt,
 		Level:         protectiveStop,
 		PreviousLevel: 0,
@@ -1169,6 +1333,7 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 			protectiveStop: protectiveStop,
 			filledAt:       fill.FilledAt,
 		}},
+		unitsOpened: 1,
 	}
 	// The proposal has been executed, so it is no longer outstanding and must
 	// not later be expired as though it had never filled.
@@ -1188,21 +1353,53 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 	}, nil
 }
 
-// applyStopFill handles a fill.Kind == event.FillKindStop delivery: the only
-// way a Campaign closes in this ticket. #13's Exit-Channel exit and #24's
-// delisting exit are later tickets and will each produce their own kind of
-// terminal fact, sharing event.CampaignExitedPayload with their own Reason
-// rather than a new event type.
+// applyStopFill handles a fill.Kind == event.FillKindStop delivery: the way
+// a Campaign's Units close on their own Protective Stop. #13's Exit-Channel
+// exit and #24's delisting exit each produce their own kind of terminal
+// fact, sharing event.CampaignExitedPayload with their own Reason rather
+// than a new event type.
 //
-// **No decision about WHETHER the stop was hit is made here.** That is
-// #18's fill simulator, comparing a bar's low against the Protective Stop
-// level under ADR 0005. This function only ever reacts to a fill event that
-// already says the stop was hit — it never reads bar data, and nothing in
-// this package compares a price to campaignState.protectiveStop except the
-// capital-safety invariant check (checkCampaignHasAProtectiveStop), which
-// checks the stop's OWN shape, never a bar's price against it. A reviewer
-// checking for look-ahead should find none: this function's only inputs are
-// the fill and the Campaign state a fill already opened.
+// **No decision about WHETHER a stop was hit is made here.** That is #18's
+// fill simulator, comparing a bar's low against a Unit's own Protective
+// Stop level under ADR 0005. This function only ever reacts to a fill event
+// that already says one or more Units' own stop was hit — it never reads
+// bar data, and nothing in this package compares a price to a Unit's
+// protectiveStop except the capital-safety invariant check
+// (checkCampaignHasAProtectiveStop), which checks the stop's OWN shape,
+// never a bar's price against it. Likewise, WHETHER a named Unit's stop
+// level was actually reachable by this fill's price (the gap rule) is not
+// checked here either: ADR 0005 makes #18's simulator the sole authority on
+// fill legitimacy, the same restraint FillPayload.UnitIDs's own doc comment
+// states.
+//
+// # Per-Unit closing (#15, the gap case)
+//
+// A stop fill names, via FillIDs.UnitIDs, exactly which Units it closes —
+// possibly not all of them: The Turtle Rules p.23's gap case leaves a later
+// Unit's stop at a genuinely different level from earlier ones, so one
+// Unit's stop can be hit while the others' have not been. Every named id is
+// resolved against the Campaign's CURRENTLY held Units (campaignState.resolveUnits);
+// an id that does not resolve — naming a Unit this Campaign never held, or
+// one an earlier stop fill already closed — fails closed as a
+// reconciliation failure, never silently ignored.
+//
+// strategy.campaign.units-stopped (CampaignUnitsStoppedPayload) is emitted
+// for every accepted stop fill, whether or not it happens to close the
+// Campaign's last remaining Unit. When it does, strategy.campaign.exited
+// (Reason ExitReasonStop) follows immediately after, in the SAME Apply
+// return, aggregating the Campaign's WHOLE life — see
+// CampaignExitedPayload's own doc comment, "Accumulating partial
+// stop-outs", for how a stop-out spread across more than one fill
+// accumulates into that final record, and why the algebra reduces EXACTLY
+// to the original single-fill formula whenever (as in every #12/#13/#14
+// fixture) it never was.
+//
+// Once any stop fill closes PART of a Campaign while Units remain,
+// campaign.partiallyStopped is set: evaluateAdd refuses to propose any
+// further Unit for the rest of this Campaign's life (The Turtle Rules
+// p.23-24's Whipsaw variant — Faith re-entering after a partial stop-out —
+// is out of scope for the Baseline, ADR 0012), and the Campaign simply
+// continues with whatever Units remain until its own exit or full stop.
 //
 // Reaching this function with state.campaign == nil now means, unqualified,
 // "there is no open campaign for this fill to close": applyFill's own
@@ -1225,93 +1422,206 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)",
 			fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)
 	}
-	if fill.Quantity != campaign.filledQuantity() {
-		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q executed %d but campaign %q holds %d; a partial stop fill is rejected — accumulating a partial close into one campaign is deferred to its own issue, the same limitation #67 already records for a partial entry",
-			fill.InstrumentID, fill.FillID, fill.Quantity, campaign.campaignID, campaign.filledQuantity())
-	}
 	if fill.FilledAt.Before(campaign.openedAt) {
 		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q is timestamped %s, which predates campaign %q's own opening fill at %s; a campaign cannot be closed before it opened",
 			fill.InstrumentID, fill.FillID, fill.FilledAt.Format(time.RFC3339), campaign.campaignID, campaign.openedAt.Format(time.RFC3339))
 	}
 
-	// The realised result, in the exact expression order
-	// event.CampaignExitedPayload.Validate re-derives it in, so the two
-	// agree bit for bit. ExitPrice is fill.Price — what actually filled,
-	// which under ADR 0005's gap rule may sit below the Protective Stop
-	// level — never campaign.protectiveStop() itself. entryPrice() is the
-	// Campaign's quantity-weighted average fill price across every held
-	// Unit (event.CampaignExitedPayload's doc comment, "Multi-Unit
-	// aggregation") — exactly Unit 1's own fillPrice when no Add has ever
-	// happened, so every #12 fixture is unaffected.
-	entryPrice := campaign.entryPrice()
-	quantity := campaign.filledQuantity()
-	realisedResult := float64(quantity) * (fill.Price - entryPrice) * r.dollarsPerPoint
-	// #74 review ("N Result Ignores Units"): two different N-denominated
-	// readings, both computed by internal/sizing rather than re-typed here
-	// (see event.CampaignExitedPayload's own doc comment) — the per-share
-	// average, and the aggregate Unit-N result Faith actually measures.
-	averageMoveInN, err := sizing.AverageMoveInN(fill.Price, entryPrice, campaign.campaignN)
-	if err != nil {
-		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q cannot compute the average move in n: %w", fill.InstrumentID, fill.FillID, err)
+	// #15: resolve every named Unit against the Campaign's CURRENTLY held
+	// Units. fill.Validate() has already required UnitIDs to be non-empty
+	// and free of duplicates for a stop fill.
+	closingUnits, missing := campaign.resolveUnits(fill.UnitIDs)
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q names unit(s) %v for campaign %q, which are unknown or already closed; a stop fill naming an unknown or already-closed unit is a reconciliation failure (docs/architecture.md)",
+			fill.InstrumentID, fill.FillID, missing, campaign.campaignID)
 	}
-	realisedResultInUnitN, err := sizing.RealisedResultInUnitN(realisedResult, campaign.unitQuantity, campaign.campaignN, r.dollarsPerPoint)
-	if err != nil {
-		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q cannot compute the realised result in unit n: %w", fill.InstrumentID, fill.FillID, err)
+	var closingQuantity int64
+	for _, u := range closingUnits {
+		closingQuantity += u.quantity
+	}
+	if fill.Quantity != closingQuantity {
+		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q executed %d but the named unit(s) hold %d; a partial fill against the named units is rejected — accumulating a partial fill into one unit's own close is deferred to its own issue, the same limitation #67 already records for a partial entry",
+			fill.InstrumentID, fill.FillID, fill.Quantity, closingQuantity)
 	}
 
-	exitedPayload := event.CampaignExitedPayload{
-		CampaignID:            campaign.campaignID,
-		InstrumentID:          fill.InstrumentID,
-		FillID:                fill.FillID,
-		ExitedAt:              fill.FilledAt,
-		Reason:                event.ExitReasonStop,
-		EntryPrice:            entryPrice,
-		ExitPrice:             fill.Price,
-		Quantity:              quantity,
-		CampaignN:             campaign.campaignN,
-		DollarsPerPoint:       r.dollarsPerPoint,
-		UnitQuantity:          campaign.unitQuantity,
-		ProtectiveStopLevel:   campaign.protectiveStop(),
-		RealisedResult:        realisedResult,
-		AverageMoveInN:        averageMoveInN,
-		RealisedResultInUnitN: realisedResultInUnitN,
-		Units:                 len(campaign.units),
-		Rule:                  event.RuleCampaignExitedByStop,
-		ADR:                   event.ADRCampaignExitRecordsTheFill,
+	// The level that was in force, for THESE Units, at the moment this fill
+	// closed them: the minimum across the Units it actually names (never
+	// across the whole Campaign, which may hold other Units at other
+	// levels once the Stop Ladder has diverged — the gap case).
+	stopLevel := closingUnits[0].protectiveStop
+	for _, u := range closingUnits[1:] {
+		if u.protectiveStop < stopLevel {
+			stopLevel = u.protectiveStop
+		}
 	}
-	if err := exitedPayload.Validate(); err != nil {
-		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q would close campaign %q with an invalid exit: %w", fill.InstrumentID, fill.FillID, campaign.campaignID, err)
+
+	// This fill's OWN share: the quantity-weighted average entry of ONLY
+	// the Units it closes, and its realised result against that average —
+	// event.CampaignUnitsStoppedPayload's own figures, independent of
+	// whether any other fill has ever closed part of this Campaign before.
+	var thisEntryWeightedSum float64
+	unitIndexes := make([]int, len(closingUnits))
+	for i, u := range closingUnits {
+		thisEntryWeightedSum += float64(u.quantity) * u.fillPrice
+		unitIndexes[i] = u.index
 	}
-	exitedPayloadBytes, err := json.Marshal(exitedPayload)
+	thisEntryPrice := thisEntryWeightedSum / float64(closingQuantity)
+	thisRealisedResult := float64(closingQuantity) * (fill.Price - thisEntryPrice) * r.dollarsPerPoint
+
+	remainingAfter := len(campaign.units) - len(closingUnits)
+
+	// AggregateOpenRiskAfter (event.CampaignUnitsStoppedPayload's own
+	// required shape): 0 when nothing remains, else computed over the
+	// Units THIS fill does NOT close, exactly as they stand right now
+	// (their own stops are unaffected by a stop fill — only an Add ever
+	// moves a stop, #15's Stop Ladder). Computed before removal.
+	var aggregateOpenRiskAfter float64
+	if remainingAfter > 0 {
+		remainingUnits := make([]sizing.UnitOpenRisk, 0, remainingAfter)
+		closing := make(map[string]bool, len(closingUnits))
+		for _, u := range closingUnits {
+			closing[u.openingFillID] = true
+		}
+		for _, u := range campaign.units {
+			if !closing[u.openingFillID] {
+				remainingUnits = append(remainingUnits, sizing.UnitOpenRisk{EntryPrice: u.fillPrice, ProtectiveStop: u.protectiveStop, Quantity: u.quantity})
+			}
+		}
+		var err error
+		aggregateOpenRiskAfter, err = sizing.AggregateOpenRisk(remainingUnits, r.dollarsPerPoint)
+		if err != nil {
+			// Unreachable: every remaining Unit's own figures have already
+			// passed sizing.ProtectiveStopLevel's and its own payload's
+			// Validate. Failing closed anyway, matching this package's style.
+			return nil, fmt.Errorf("strategy: instrument %q: stop fill %q cannot compute the remaining aggregate open risk: %w", fill.InstrumentID, fill.FillID, err)
+		}
+	}
+
+	unitsStoppedPayload := event.CampaignUnitsStoppedPayload{
+		CampaignID:             campaign.campaignID,
+		InstrumentID:           fill.InstrumentID,
+		FillID:                 fill.FillID,
+		UnitIndexes:            unitIndexes,
+		FillPrice:              fill.Price,
+		QuantityClosed:         closingQuantity,
+		EntryPrice:             thisEntryPrice,
+		CampaignN:              campaign.campaignN,
+		DollarsPerPoint:        r.dollarsPerPoint,
+		RealisedResult:         thisRealisedResult,
+		StoppedAt:              fill.FilledAt,
+		RemainingUnits:         remainingAfter,
+		AggregateOpenRiskAfter: aggregateOpenRiskAfter,
+		Rule:                   event.RuleCampaignUnitsStoppedByStop,
+		ADR:                    event.ADRCampaignExitRecordsTheFill,
+	}
+	if err := unitsStoppedPayload.Validate(); err != nil {
+		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q would close unit(s) with an invalid units-stopped decision: %w", fill.InstrumentID, fill.FillID, err)
+	}
+	unitsStoppedBytes, err := json.Marshal(unitsStoppedPayload)
 	if err != nil {
 		// Unreachable, for the same reason as openCampaign's marshal guards.
-		return nil, fmt.Errorf("strategy: marshal campaign exited payload: %w", err)
+		return nil, fmt.Errorf("strategy: marshal campaign units stopped payload: %w", err)
 	}
 
-	exitID := decisionID("campaign-exited", fill.InstrumentID, fill.FilledAt)
-	exitEnvelope := r.stamp(exitID, event.CampaignExitedEventType, event.CampaignExitedSchemaVersion, fill.FilledAt, input, exitedPayloadBytes)
+	// If this fill empties the Campaign, build the WHOLE-LIFE Campaign-exited
+	// record too — see CampaignExitedPayload's own doc comment,
+	// "Accumulating partial stop-outs", for the algebra and why it reduces
+	// exactly to the ORIGINAL single-fill formula (entryPrice =
+	// campaign.entryPrice(), exitPrice = fill.Price) whenever
+	// campaign.closedQuantity is still 0 — every #12/#13/#14 fixture, byte
+	// for byte.
+	var exitedEnvelope *event.Envelope
+	if remainingAfter == 0 {
+		var lifeQuantity int64
+		var lifeEntryPrice, lifeExitPrice float64
+		if campaign.closedQuantity == 0 {
+			lifeQuantity = closingQuantity
+			lifeEntryPrice = campaign.entryPrice()
+			lifeExitPrice = fill.Price
+		} else {
+			lifeQuantity = campaign.closedQuantity + closingQuantity
+			lifeEntryPrice = (campaign.closedEntryWeightedSum + thisEntryWeightedSum) / float64(lifeQuantity)
+			lifeExitPrice = (campaign.closedExitWeightedSum + float64(closingQuantity)*fill.Price) / float64(lifeQuantity)
+		}
+		lifeRealisedResult := float64(lifeQuantity) * (lifeExitPrice - lifeEntryPrice) * r.dollarsPerPoint
+		averageMoveInN, err := sizing.AverageMoveInN(lifeExitPrice, lifeEntryPrice, campaign.campaignN)
+		if err != nil {
+			return nil, fmt.Errorf("strategy: instrument %q: stop fill %q cannot compute the average move in n: %w", fill.InstrumentID, fill.FillID, err)
+		}
+		realisedResultInUnitN, err := sizing.RealisedResultInUnitN(lifeRealisedResult, campaign.unitQuantity, campaign.campaignN, r.dollarsPerPoint)
+		if err != nil {
+			return nil, fmt.Errorf("strategy: instrument %q: stop fill %q cannot compute the realised result in unit n: %w", fill.InstrumentID, fill.FillID, err)
+		}
 
-	// The state moves only now, after the payload it will be journalled as
-	// has been validated. Recorded into acceptedFills before campaign is
-	// cleared, exactly as openCampaign does for the entry fill, so a
-	// re-delivery of this exact fill stays an idempotent no-op for the rest
-	// of the run regardless of what happens to this instrument afterwards
-	// (see acceptedFillState's doc comment).
+		exitedPayload := event.CampaignExitedPayload{
+			CampaignID:            campaign.campaignID,
+			InstrumentID:          fill.InstrumentID,
+			FillID:                fill.FillID,
+			ExitedAt:              fill.FilledAt,
+			Reason:                event.ExitReasonStop,
+			EntryPrice:            lifeEntryPrice,
+			ExitPrice:             lifeExitPrice,
+			Quantity:              lifeQuantity,
+			CampaignN:             campaign.campaignN,
+			DollarsPerPoint:       r.dollarsPerPoint,
+			UnitQuantity:          campaign.unitQuantity,
+			ProtectiveStopLevel:   stopLevel,
+			RealisedResult:        lifeRealisedResult,
+			AverageMoveInN:        averageMoveInN,
+			RealisedResultInUnitN: realisedResultInUnitN,
+			Units:                 campaign.unitsOpened,
+			Rule:                  event.RuleCampaignExitedByStop,
+			ADR:                   event.ADRCampaignExitRecordsTheFill,
+		}
+		if err := exitedPayload.Validate(); err != nil {
+			return nil, fmt.Errorf("strategy: instrument %q: stop fill %q would close campaign %q with an invalid exit: %w", fill.InstrumentID, fill.FillID, campaign.campaignID, err)
+		}
+		exitedPayloadBytes, err := json.Marshal(exitedPayload)
+		if err != nil {
+			// Unreachable, for the same reason as openCampaign's marshal guards.
+			return nil, fmt.Errorf("strategy: marshal campaign exited payload: %w", err)
+		}
+		envelope := r.stamp(decisionID("campaign-exited", fill.InstrumentID, fill.FilledAt), event.CampaignExitedEventType, event.CampaignExitedSchemaVersion, fill.FilledAt, input, exitedPayloadBytes)
+		exitedEnvelope = &envelope
+	}
+
+	// The state moves only now, after every payload it will be journalled as
+	// has been validated — identical discipline to openCampaign's own.
+	campaign.closedQuantity += closingQuantity
+	campaign.closedEntryWeightedSum += thisEntryWeightedSum
+	campaign.closedExitWeightedSum += float64(closingQuantity) * fill.Price
+	campaign.removeUnits(closingUnits)
 	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
-	// #12: the instrument is a Setup again — CONTEXT.md defines a Setup as
-	// an Eligible instrument not in a Campaign, and clearing this is the
-	// only thing that gate (applyCompletedBar's "no new entry while a
-	// Campaign is open") reads. The very next completed bar therefore
-	// evaluates this instrument normally and may Signal, with no further
-	// change needed anywhere else.
-	state.campaign = nil
-	// PR #73 review round: recorded so checkBarConfirmsCampaignClosing can
-	// catch a bar arriving that predates this closing fill — the identical
-	// upper-bound check checkBarConfirmsCampaignOpening already applies to
-	// an opening fill, mirrored here for a closing one.
-	state.lastClosingFillAt = fill.FilledAt
 
-	return []event.Envelope{exitEnvelope}, nil
+	emissions := []event.Envelope{r.stamp(
+		decisionID(fmt.Sprintf("units-stopped-%s", fill.FillID), fill.InstrumentID, fill.FilledAt),
+		event.CampaignUnitsStoppedEventType, event.CampaignUnitsStoppedSchemaVersion, fill.FilledAt, input, unitsStoppedBytes,
+	)}
+
+	if exitedEnvelope != nil {
+		// #12: the instrument is a Setup again — CONTEXT.md defines a Setup
+		// as an Eligible instrument not in a Campaign, and clearing this is
+		// the only thing that gate (applyCompletedBar's "no new entry while
+		// a Campaign is open") reads. The very next completed bar therefore
+		// evaluates this instrument normally and may Signal, with no
+		// further change needed anywhere else.
+		state.campaign = nil
+		// PR #73 review round: recorded so checkBarConfirmsCampaignClosing
+		// can catch a bar arriving that predates this closing fill — the
+		// identical upper-bound check checkBarConfirmsCampaignOpening
+		// already applies to an opening fill, mirrored here for a closing
+		// one.
+		state.lastClosingFillAt = fill.FilledAt
+		emissions = append(emissions, *exitedEnvelope)
+	} else {
+		// #15: a PARTIAL close leaves the Campaign open with whatever
+		// Units remain, and no further Add is ever proposed for it again
+		// (see evaluateAdd's own doc comment and this function's own,
+		// "Per-Unit closing").
+		campaign.partiallyStopped = true
+	}
+
+	return emissions, nil
 }
 
 // applyExitFill handles a fill.Kind == event.FillKindExit delivery: #13's
@@ -1571,13 +1881,15 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 		return nil, fmt.Errorf("strategy: marshal campaign unit added payload: %w", err)
 	}
 
-	// #14: a fresh Protective-Stop-set decision for THIS Unit alone — #12's
-	// event and payload, reused exactly as openCampaign reuses it for Unit
-	// 1. PreviousLevel is 0: this is a brand-new stop for a Unit that never
-	// had one before, not a raise of an earlier Unit's stop (#15's job).
-	stopSetPayload := event.ProtectiveStopSetPayload{
+	// #12/#14: a fresh Protective-Stop-set decision for THIS Unit alone,
+	// Reason ProtectiveStopReasonInitial. PreviousLevel is 0: this is a
+	// brand-new stop for a Unit that never had one before, not a raise of
+	// an earlier Unit's stop (#15's Stop Ladder, built below).
+	newUnitStopSetPayload := event.ProtectiveStopSetPayload{
 		CampaignID:    campaign.campaignID,
 		InstrumentID:  fill.InstrumentID,
+		UnitIndex:     unitIndex,
+		Reason:        event.ProtectiveStopReasonInitial,
 		AsOf:          fill.FilledAt,
 		Level:         protectiveStop,
 		PreviousLevel: 0,
@@ -1587,17 +1899,74 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 		Rule:          event.RuleProtectiveStopSetFromFill,
 		ADR:           event.ADRCampaignFrozenAtEntry,
 	}
-	if err := stopSetPayload.Validate(); err != nil {
+	if err := newUnitStopSetPayload.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: instrument %q: add fill %q would set an invalid protective stop: %w", fill.InstrumentID, fill.FillID, err)
 	}
-	stopSetPayloadBytes, err := json.Marshal(stopSetPayload)
+	newUnitStopSetBytes, err := json.Marshal(newUnitStopSetPayload)
 	if err != nil {
 		// Unreachable, for the same reason as openCampaign's marshal guards.
 		return nil, fmt.Errorf("strategy: marshal protective stop set payload: %w", err)
 	}
 
+	// #15's Stop Ladder (The Turtle Rules p.22-23): "if additional units
+	// were added, the stops for earlier units were raised by 1/2 N." Every
+	// EARLIER Unit's own stop — never the newly-added Unit's own, set
+	// above from ITS OWN fill — rises by exactly RaisedStop(previous,
+	// campaignN), regardless of how far the new Unit's own fill landed
+	// from its rung: this is what keeps the earlier Units at the standard
+	// raise even in the gap case (a later Unit filling well past its rung),
+	// implementing the source's literal first sentence rather than the
+	// paraphrase "set every stop to 2N below the newest fill" — see
+	// sizing.RaisedStop's own doc comment for why the two readings diverge
+	// there. Every raised payload is built and validated here, alongside
+	// the two above, before ANY of them mutate campaign state (openCampaign's
+	// own discipline: a Campaign, or a Unit's stop, that could not be
+	// recorded must not exist in memory either).
+	type raise struct {
+		unitIndex int
+		newStop   float64
+		payload   event.ProtectiveStopSetPayload
+		bytes     []byte
+	}
+	raises := make([]raise, 0, len(campaign.units))
+	for _, earlier := range campaign.units {
+		newStop, err := sizing.RaisedStop(earlier.protectiveStop, campaign.campaignN)
+		if err != nil {
+			return nil, fmt.Errorf("strategy: instrument %q: add fill %q cannot raise unit %d's protective stop: %w", fill.InstrumentID, fill.FillID, earlier.index, err)
+		}
+		raisedPayload := event.ProtectiveStopSetPayload{
+			CampaignID:    campaign.campaignID,
+			InstrumentID:  fill.InstrumentID,
+			UnitIndex:     earlier.index,
+			Reason:        event.ProtectiveStopReasonAddLadder,
+			AsOf:          fill.FilledAt,
+			Level:         newStop,
+			PreviousLevel: earlier.protectiveStop,
+			EntryPrice:    earlier.fillPrice,
+			CampaignN:     campaign.campaignN,
+			StopMultiple:  campaign.stopMultiple,
+			Rule:          event.RuleStopLadderRaisedByHalfN,
+			ADR:           event.ADRCampaignFrozenAtEntry,
+		}
+		if err := raisedPayload.Validate(); err != nil {
+			return nil, fmt.Errorf("strategy: instrument %q: add fill %q would raise unit %d to an invalid protective stop: %w", fill.InstrumentID, fill.FillID, earlier.index, err)
+		}
+		raisedBytes, err := json.Marshal(raisedPayload)
+		if err != nil {
+			// Unreachable, for the same reason as openCampaign's marshal guards.
+			return nil, fmt.Errorf("strategy: marshal protective stop set payload: %w", err)
+		}
+		raises = append(raises, raise{unitIndex: earlier.index, newStop: newStop, payload: raisedPayload, bytes: raisedBytes})
+	}
+
 	// The state moves only now, after every payload it will be journalled as
 	// has been validated — identical discipline to openCampaign's own.
+	// Earlier Units' stops are raised in place, in ascending index order,
+	// before the new Unit is appended, so the same-bar chain re-evaluation
+	// below reads the fully-updated Campaign.
+	for i := range campaign.units {
+		campaign.units[i].protectiveStop = raises[i].newStop
+	}
 	campaign.units = append(campaign.units, unitState{
 		index:          unitIndex,
 		openingFillID:  fill.FillID,
@@ -1606,12 +1975,19 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 		protectiveStop: protectiveStop,
 		filledAt:       fill.FilledAt,
 	})
+	campaign.unitsOpened++
 	state.pendingAddProposal = nil
 	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
 
 	emissions := []event.Envelope{
 		r.stamp(decisionID(fmt.Sprintf("unit-added-%d", unitIndex), fill.InstrumentID, fill.FilledAt), event.CampaignUnitAddedEventType, event.CampaignUnitAddedSchemaVersion, fill.FilledAt, input, unitAddedBytes),
-		r.stamp(decisionID(fmt.Sprintf("protective-stop-set-unit-%d", unitIndex), fill.InstrumentID, fill.FilledAt), event.ProtectiveStopSetEventType, event.ProtectiveStopSetSchemaVersion, fill.FilledAt, input, stopSetPayloadBytes),
+		r.stamp(decisionID(fmt.Sprintf("protective-stop-set-unit-%d", unitIndex), fill.InstrumentID, fill.FilledAt), event.ProtectiveStopSetEventType, event.ProtectiveStopSetSchemaVersion, fill.FilledAt, input, newUnitStopSetBytes),
+	}
+	for _, r2 := range raises {
+		emissions = append(emissions, r.stamp(
+			decisionID(fmt.Sprintf("protective-stop-raised-unit-%d-for-add-%d", r2.unitIndex, unitIndex), fill.InstrumentID, fill.FilledAt),
+			event.ProtectiveStopSetEventType, event.ProtectiveStopSetSchemaVersion, fill.FilledAt, input, r2.bytes,
+		))
 	}
 
 	// #14's same-bar Add chain: re-evaluate immediately for the NEXT rung,

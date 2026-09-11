@@ -376,6 +376,36 @@ const RuleCampaignExitedByExitChannel = "campaign.exited.by-exit-channel"
 //     in full the two coincide exactly; for a multi-Unit Campaign they
 //     diverge, and RealisedResultInUnitN is the one that sums each Unit's
 //     own N result rather than averaging it away.
+//
+// # Accumulating partial stop-outs (#15)
+//
+// #15's per-Unit stop fill can close a Campaign's Units across more than one
+// fill — the gap case closes Unit 4 alone while Units 1-3's own (lower)
+// stops have not yet been reached (strategy.campaign.units-stopped,
+// CampaignUnitsStoppedPayload), and this event is emitted only once the
+// LAST Unit closes, whether that happens in the same fill or a later one.
+// EntryPrice, ExitPrice and Quantity are therefore this payload's WHOLE-LIFE
+// aggregates, not merely this final fill's own share:
+//
+//	Quantity   = the sum of every Unit's own quantity, across every closing fill
+//	EntryPrice = the quantity-weighted average of every Unit's own fill price
+//	ExitPrice  = the quantity-weighted average of every CLOSING fill's own price,
+//	             weighted by how much quantity that fill closed
+//
+// This generalises the single-fill formula (Quantity x (ExitPrice -
+// EntryPrice) x DollarsPerPoint) EXACTLY, by the identical algebra the
+// "Multi-Unit aggregation" section above already relies on: for quantities
+// q_i, entries e_i and (possibly differing) exit prices x_i, define Q =
+// sum(q_i), E = sum(q_i x e_i)/Q, X = sum(q_i x x_i)/Q. Then Q x (X - E) =
+// sum(q_i x x_i) - sum(q_i x e_i) = sum(q_i x (x_i - e_i)), which is exactly
+// the sum of each closing fill's own realised result — so Validate needs no
+// per-fill case at all, whether every Unit closed in one fill at one price
+// (the #12/#13/#14 common case, where this reduces to the ORIGINAL
+// single-price formula bit-for-bit) or across several stop fills at several
+// different prices (the gap case). ProtectiveStopLevel is the minimum stop
+// level among the Units THIS (final) fill closes — "the level that was in
+// force when this exit happened," per the type's own doc comment above,
+// read as being about the moment of the final close, not the whole history.
 type CampaignExitedPayload struct {
 	CampaignID   string `json:"campaign_id"`
 	InstrumentID string `json:"instrument_id"`
@@ -436,9 +466,15 @@ type CampaignExitedPayload struct {
 	// in N). For a single Unit filled in full this coincides exactly with
 	// AverageMoveInN.
 	RealisedResultInUnitN float64 `json:"realised_result_in_unit_n"`
-	// Units is the number of Units this Campaign held at close, 1 through
-	// the configured maximum (#14; see the type's doc comment on multi-Unit
-	// aggregation). Always 1 before #14's Add Ladder exists.
+	// Units is the TOTAL number of Units this Campaign ever held over its
+	// whole life, 1 through the configured maximum (#14; see the type's doc
+	// comment on multi-Unit aggregation) — NOT how many were still open at
+	// the instant of this closing fill. #15's per-Unit stop fill can close a
+	// Campaign's Units across more than one fill (the gap case), so a
+	// Campaign that opened with 4 Units and had 1 stopped out earlier still
+	// reports 4 here when the remaining 3 finally close, matching
+	// RealisedResult's own whole-life aggregation (see "Accumulating partial
+	// stop-outs" above).
 	Units int `json:"units"`
 	// Rule and ADR name the rule that produced this decision
 	// (docs/development.md principle 3).

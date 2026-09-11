@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
 // ProtectiveStopSetEventType identifies the Protective-Stop-set decision
@@ -26,13 +28,48 @@ const ProtectiveStopSetEventType = "strategy.protective-stop.set"
 
 // ProtectiveStopSetSchemaVersion is the current schema version of
 // ProtectiveStopSetPayload, for the Envelope's SchemaVersion field.
-const ProtectiveStopSetSchemaVersion uint32 = 1
+//
+// Bumped 1 -> 2 for #15: UnitIndex and Reason were added. A schema-1 record
+// decodes UnitIndex as the int zero (not a legitimate Unit index — Validate
+// requires it positive) and Reason as the empty string (not one of the
+// enumerated ProtectiveStopReason* values), so a schema-1 record is rejected
+// outright rather than silently read as Unit 0 or an unrecognised reason
+// (ADR 0015's rule, the same discipline #13's CampaignExitedSchemaVersion
+// bump already applied to a new field with an ambiguous zero value).
+const ProtectiveStopSetSchemaVersion uint32 = 2
 
 // RuleProtectiveStopSetFromFill names the rule for
-// ProtectiveStopSetPayload.Rule: a Campaign's first Protective Stop is set
-// from its actual opening fill, not the intended entry level (ADR 0013
-// measures every ladder from the slipped fill).
+// ProtectiveStopSetPayload.Rule when Reason is ProtectiveStopReasonInitial:
+// a Campaign's first Protective Stop for a Unit is set from its actual fill
+// (the opening fill for Unit 1, an Add fill for a later Unit), not the
+// intended entry level (ADR 0013 measures every ladder from the slipped
+// fill).
 const RuleProtectiveStopSetFromFill = "protective-stop.set.from-fill"
+
+// RuleStopLadderRaisedByHalfN names the rule for ProtectiveStopSetPayload.Rule
+// when Reason is ProtectiveStopReasonAddLadder: an EARLIER Unit's Protective
+// Stop rose by half the campaign N because a further Unit was added
+// (#15's Stop Ladder). The Turtle Rules p.22: "if additional units were
+// added, the stops for earlier units were raised by 1/2 N."
+const RuleStopLadderRaisedByHalfN = "stop-ladder.raised-by-half-n"
+
+// The two reasons ProtectiveStopSetPayload.Reason carries today — a closed
+// set, not free text, for the same "groupable journal" reasoning
+// ProposalDeclinedPayload.Reason and ExitReasonStop/ExitReasonExitChannel
+// already follow.
+const (
+	// ProtectiveStopReasonInitial means this is a Unit's OWN first stop,
+	// set the moment its fill was accepted — Unit 1's at Campaign-open, or
+	// a later Unit's own at the Add that brought it into being. PreviousLevel
+	// is always 0 for this reason.
+	ProtectiveStopReasonInitial = "initial"
+	// ProtectiveStopReasonAddLadder means this is an EARLIER Unit's stop,
+	// raised by half the campaign N because a further Unit was just added
+	// (#15's Stop Ladder, The Turtle Rules p.22-23). PreviousLevel is always
+	// positive for this reason: there is always a prior level to have
+	// raised from.
+	ProtectiveStopReasonAddLadder = "add-ladder"
+)
 
 // ProtectiveStopSetPayload records a Campaign's Protective Stop coming into
 // force at Level.
@@ -53,32 +90,67 @@ const RuleProtectiveStopSetFromFill = "protective-stop.set.from-fill"
 // the proposal's intended level — see CampaignOpenedPayload's doc comment
 // for why (ADR 0013).
 //
-// PreviousLevel is 0 on a Campaign's first Protective-Stop-set (there is no
-// previous level to report) and is deliberately part of the payload from
-// this ticket onward, ahead of #15's need for it: adding a field to a
-// schema that already exists is a version bump every existing journal must
-// upcast through, while a field present and validated from day one, even
-// though every value produced today is 0, costs nothing and leaves #15
-// nothing to migrate.
+// PreviousLevel is 0 on a Unit's first Protective-Stop-set (Reason
+// ProtectiveStopReasonInitial: there is no previous level to report) and
+// positive on a Stop Ladder raise (Reason ProtectiveStopReasonAddLadder).
+// It was carried on this payload from #12 onward, ahead of #15's need for
+// it, specifically so #15 could reuse this event and payload for every
+// later raise rather than needing a schema migration for the field itself
+// (only UnitIndex and Reason needed adding, see ProtectiveStopSetSchemaVersion's
+// doc comment).
+//
+// # One event type, a Reason discriminator, not a second event type
+//
+// #12 named this event "...set", not "...moved", specifically so #15 could
+// reuse it (see ProtectiveStopSetEventType's own doc comment): "a consumer
+// that groups a journal by event type then sees every stop movement of a
+// Campaign's life in one place, first set and every later raise alike."
+// Reason is that reuse mechanism — the identical choice CampaignExitedPayload
+// already made for its own Reason field (ExitReasonStop /
+// ExitReasonExitChannel) rather than minting strategy.campaign.exited-by-stop
+// and strategy.campaign.exited-by-exit-channel as two types. A second event
+// type here would force every consumer that wants "every stop movement,
+// first set and raise alike" to subscribe to two types and merge them,
+// which is exactly the seam #12 built this payload to avoid.
 type ProtectiveStopSetPayload struct {
 	CampaignID   string `json:"campaign_id"`
 	InstrumentID string `json:"instrument_id"`
-	// AsOf is when this stop came into force: the fill's timestamp on the
-	// first set (matching CampaignOpenedPayload.OpenedAt), and — from #15
-	// onward — the Add's fill timestamp on a later raise. Never a bar's
-	// PeriodEnd: like the Campaign itself, a stop movement is caused by a
-	// fill, not by a bar closing.
+	// UnitIndex is which Unit this stop belongs to: 1 through the Campaign's
+	// configured maximum. Added by #15, which needs to move an INDIVIDUAL
+	// Unit's own stop rather than a single Campaign-level figure — the gap
+	// case (The Turtle Rules p.23) leaves Units at genuinely different
+	// levels, so an event that did not say which Unit it was about would be
+	// unreadable the moment levels diverge.
+	UnitIndex int `json:"unit_index"`
+	// Reason is one of the two enumerated ProtectiveStopReason* constants
+	// (see the type's doc comment, "One event type, a Reason discriminator").
+	Reason string `json:"reason"`
+	// AsOf is when this stop came into force: the fill's timestamp on an
+	// initial set (matching CampaignOpenedPayload.OpenedAt for Unit 1, or
+	// CampaignUnitAddedPayload.AddedAt for a later Unit's own), and the
+	// TRIGGERING Add fill's timestamp on a Stop Ladder raise (#15) — the
+	// raise of an EARLIER Unit's stop happens at the moment a LATER Unit's
+	// fill is accepted, not at any timestamp of the earlier Unit's own.
+	// Never a bar's PeriodEnd: like the Campaign itself, a stop movement is
+	// caused by a fill, not by a bar closing.
 	AsOf time.Time `json:"as_of"`
-	// Level is where the Protective Stop now sits. Validate re-derives it
-	// exactly as EntryPrice - StopMultiple x CampaignN.
+	// Level is where this Unit's Protective Stop now sits. Validate
+	// re-derives it exactly — as EntryPrice - StopMultiple x CampaignN when
+	// Reason is ProtectiveStopReasonInitial, or as PreviousLevel + 0.5 x
+	// CampaignN (sizing.RaisedStop) when Reason is
+	// ProtectiveStopReasonAddLadder.
 	Level float64 `json:"level"`
-	// PreviousLevel is the stop level this one replaces, or 0 on a first set
-	// (see the type's doc comment).
+	// PreviousLevel is the stop level this one replaces (see the type's doc
+	// comment).
 	PreviousLevel float64 `json:"previous_level"`
 	// EntryPrice, CampaignN and StopMultiple are restated from the Campaign
-	// (CampaignOpenedPayload carries the same three numbers) so Level is
-	// independently re-derivable from this payload alone, without joining
-	// back to the Campaign-opened event.
+	// (CampaignOpenedPayload carries the same three numbers) so an INITIAL
+	// Level is independently re-derivable from this payload alone, without
+	// joining back to the Campaign-opened event. EntryPrice is always THIS
+	// Unit's own fill price (unchanged by a later raise): on an add-ladder
+	// raise it is restated for identification and audit only — Level there
+	// is derived from PreviousLevel, not from EntryPrice (see the type's own
+	// doc comment on Level).
 	EntryPrice   float64 `json:"entry_price"`
 	CampaignN    float64 `json:"campaign_n"`
 	StopMultiple float64 `json:"stop_multiple"`
@@ -88,18 +160,20 @@ type ProtectiveStopSetPayload struct {
 	ADR  string `json:"adr"`
 }
 
-// Validate checks that the payload identifies the Campaign and the moment
-// the stop came into force, that every frozen number is usable, that Level
-// is exactly EntryPrice - StopMultiple x CampaignN (the same exact-equality
-// discipline CampaignOpenedPayload.Validate applies to ProtectiveStop, for
+// Validate checks that the payload identifies the Campaign, the Unit and the
+// moment the stop came into force, that Reason is one of the enumerated
+// constants, that every frozen number is usable, that Level is positive and
+// strictly below EntryPrice (a long position cannot be stopped out at or
+// below zero), that PreviousLevel is legitimate for the stated Reason (zero
+// for an initial set, positive and strictly below Level for an add-ladder
+// raise — the Baseline's Stop Ladder only ever raises a stop), and that
+// Level matches its derivation for the stated Reason EXACTLY — the same
+// exact-equality discipline every derived level in this package uses, for
 // the same reason: a tolerance would let a differently-derived stop
-// through), that Level is positive and strictly below EntryPrice (a long
-// position cannot be stopped out at or below zero), and that PreviousLevel
-// is a legitimate value: 0 (a first set) or a positive level strictly below
-// the new Level (the Baseline's Stop Ladder only ever raises a stop; #15 is
-// not implemented by this ticket, so PreviousLevel is always 0 today, but
-// the check is stated now rather than left to be added when a producer
-// first needs it).
+// through. The add-ladder derivation calls sizing.RaisedStop rather than
+// re-typing "PreviousLevel + 0.5 x CampaignN" here (the #65 discipline: one
+// shared function, called by both the producer and the validator, so the
+// two cannot silently disagree about the Stop Ladder's own arithmetic).
 func (p ProtectiveStopSetPayload) Validate() error {
 	var errs []error
 	if p.CampaignID == "" {
@@ -107,6 +181,15 @@ func (p ProtectiveStopSetPayload) Validate() error {
 	}
 	if p.InstrumentID == "" {
 		errs = append(errs, errors.New("instrument id is required"))
+	}
+	if p.UnitIndex < 1 {
+		errs = append(errs, fmt.Errorf("unit index must be at least 1, got %d", p.UnitIndex))
+	}
+	switch p.Reason {
+	case ProtectiveStopReasonInitial, ProtectiveStopReasonAddLadder:
+		// recognised
+	default:
+		errs = append(errs, fmt.Errorf("reason %q is not a recognised protective stop reason", p.Reason))
 	}
 	if p.AsOf.IsZero() {
 		errs = append(errs, errors.New("as of is required"))
@@ -152,24 +235,41 @@ func (p ProtectiveStopSetPayload) Validate() error {
 		errs = append(errs, fmt.Errorf("level %v must be below the entry price %v for a long position", p.Level, p.EntryPrice))
 	}
 
-	if entryPriceFinite && stopMultipleFinite && campaignNFinite && levelFinite {
-		if derived := p.EntryPrice - p.StopMultiple*p.CampaignN; p.Level != derived {
-			errs = append(errs, fmt.Errorf(
-				"stated level %v does not match the derivation %v (entry price %v - stop multiple %v x campaign n %v)",
-				p.Level, derived, p.EntryPrice, p.StopMultiple, p.CampaignN))
-		}
-	}
-
 	previousLevelFinite := isFinite(p.PreviousLevel)
 	switch {
 	case !previousLevelFinite:
 		errs = append(errs, errors.New("previous level must be finite"))
 	case p.PreviousLevel < 0:
-		errs = append(errs, errors.New("previous level must not be negative: zero means this is the campaign's first protective stop"))
+		errs = append(errs, errors.New("previous level must not be negative: zero means this unit's first protective stop"))
 	case p.PreviousLevel > 0 && levelFinite && p.PreviousLevel >= p.Level:
 		errs = append(errs, fmt.Errorf(
-			"previous level %v must be below the new level %v: the baseline's stop ladder only ever raises a campaign's stop",
+			"previous level %v must be below the new level %v: the baseline's stop ladder only ever raises a unit's stop",
 			p.PreviousLevel, p.Level))
+	}
+
+	switch p.Reason {
+	case ProtectiveStopReasonInitial:
+		if previousLevelFinite && p.PreviousLevel != 0 {
+			errs = append(errs, fmt.Errorf("previous level must be zero for an initial set, got %v: there is no prior level to have raised from", p.PreviousLevel))
+		}
+		if entryPriceFinite && stopMultipleFinite && campaignNFinite && levelFinite {
+			if derived := p.EntryPrice - p.StopMultiple*p.CampaignN; p.Level != derived {
+				errs = append(errs, fmt.Errorf(
+					"stated level %v does not match the derivation %v (entry price %v - stop multiple %v x campaign n %v)",
+					p.Level, derived, p.EntryPrice, p.StopMultiple, p.CampaignN))
+			}
+		}
+	case ProtectiveStopReasonAddLadder:
+		if previousLevelFinite && p.PreviousLevel <= 0 {
+			errs = append(errs, fmt.Errorf("previous level must be positive for an add-ladder raise, got %v: there is always a prior level to have raised from", p.PreviousLevel))
+		}
+		if previousLevelFinite && p.PreviousLevel > 0 && campaignNFinite && levelFinite {
+			if derived, err := sizing.RaisedStop(p.PreviousLevel, p.CampaignN); err == nil && p.Level != derived {
+				errs = append(errs, fmt.Errorf(
+					"stated level %v does not match the derivation %v (previous level %v + 0.5 x campaign n %v): the stop ladder raises an earlier unit's stop by half n (The Turtle Rules p.22)",
+					p.Level, derived, p.PreviousLevel, p.CampaignN))
+			}
+		}
 	}
 
 	if err := errors.Join(errs...); err != nil {

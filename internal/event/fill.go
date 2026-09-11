@@ -41,7 +41,17 @@ const FillEventType = "execution.fill"
 // exactly as before either way; #13 and #14 are each additive, not a
 // breaking reinterpretation of anything a schema-2 producer could have
 // written.
-const FillSchemaVersion uint32 = 2
+//
+// Bumped 2 -> 3 for #15: UnitIDs was added, and is now REQUIRED for
+// FillKindStop. A schema-2 stop fill decodes UnitIDs as nil (empty), which
+// is not a legitimate value under the new requirement — a stop fill must
+// name which Units it closes, because #15's Stop Ladder can leave Units at
+// genuinely different levels (the gap case, The Turtle Rules p.23), so
+// "closes everything" is no longer a safe default to infer for an old
+// record. A schema-2 record is therefore rejected outright rather than
+// silently reinterpreted (ADR 0015's rule, the same discipline #12 already
+// applied to its own Kind/CampaignID addition).
+const FillSchemaVersion uint32 = 3
 
 // The four Kind values FillPayload accepts today.
 const (
@@ -117,6 +127,27 @@ type FillPayload struct {
 	// second, genuinely different one. Reusing it for different contents is
 	// therefore a producer defect, not a duplicate.
 	FillID string `json:"fill_id"`
+	// UnitIDs names, for FillKindStop ONLY, the opening fill ids
+	// (unitState.openingFillID, via CampaignOpenedPayload.FillID for Unit 1
+	// or CampaignUnitAddedPayload.FillID for a later Unit) of the Units this
+	// stop fill closes. Required and non-empty for FillKindStop — #15's Stop
+	// Ladder can leave Units at genuinely different levels (the gap case,
+	// The Turtle Rules p.23), so a stop fill must say which Units traded
+	// through their OWN stop rather than assuming it closed every Unit — and
+	// must be empty for every other Kind, since only a stop fill can close a
+	// subset. Quantity must equal the sum of the named Units' own quantities
+	// (checked by internal/strategy against the Campaign's actual Unit
+	// state, which this package does not have visibility into).
+	//
+	// Whether a named Unit's stop level was ACTUALLY reached by this fill's
+	// price is deliberately not checked here, or anywhere in this package:
+	// ADR 0005 makes the simulator (#18) the sole authority on fill
+	// legitimacy — the same restraint FillPayload's own doc comment already
+	// states for whether an entry, Add or exit fill was arrived at
+	// correctly. A stop fill naming a Unit whose own stop sits, on its face,
+	// above the fill's price by more than the gap rule allows is a producer
+	// question, not a schema or reducer one.
+	UnitIDs []string `json:"unit_ids"`
 	// Direction is the POSITION's own direction (CONTEXT.md: long or short),
 	// held constant across every fill of one Campaign's life — the entry
 	// that opened it and the stop that closes it alike. It is deliberately
@@ -146,8 +177,8 @@ type FillPayload struct {
 }
 
 // Validate checks that the fill identifies an instrument and itself, that
-// Kind is one of the recognised values and that ProposalID/CampaignID are
-// present or absent exactly as that Kind requires, that Direction is a
+// Kind is one of the recognised values and that ProposalID/CampaignID/UnitIDs
+// are present or absent exactly as that Kind requires, that Direction is a
 // recognised value, that Quantity is positive, that Price is finite and
 // positive, and that FilledAt is present.
 func (p FillPayload) Validate() error {
@@ -163,12 +194,31 @@ func (p FillPayload) Validate() error {
 		if p.CampaignID != "" {
 			errs = append(errs, fmt.Errorf("campaign id must be empty for an entry fill (got %q): no campaign exists yet for it to name", p.CampaignID))
 		}
+		if len(p.UnitIDs) != 0 {
+			errs = append(errs, errors.New("unit ids must be empty for an entry fill: only a stop fill closes a named subset of units"))
+		}
 	case FillKindStop:
 		if p.CampaignID == "" {
 			errs = append(errs, errors.New("campaign id is required for a stop fill: it must name the campaign it closes"))
 		}
 		if p.ProposalID != "" {
 			errs = append(errs, fmt.Errorf("proposal id must be empty for a stop fill (got %q): a stop closes a campaign, not a proposal", p.ProposalID))
+		}
+		if len(p.UnitIDs) == 0 {
+			errs = append(errs, errors.New("unit ids is required for a stop fill: it must name which units their own protective stop closed (#15's stop ladder can leave units at different levels)"))
+		} else {
+			seen := make(map[string]bool, len(p.UnitIDs))
+			for i, id := range p.UnitIDs {
+				if id == "" {
+					errs = append(errs, fmt.Errorf("unit ids[%d] is empty", i))
+					continue
+				}
+				if seen[id] {
+					errs = append(errs, fmt.Errorf("unit ids contains %q more than once", id))
+					continue
+				}
+				seen[id] = true
+			}
 		}
 	case FillKindExit:
 		if p.CampaignID == "" {
@@ -177,12 +227,18 @@ func (p FillPayload) Validate() error {
 		if p.ProposalID == "" {
 			errs = append(errs, errors.New("proposal id is required for an exit fill: it must name the exit proposal it executes"))
 		}
+		if len(p.UnitIDs) != 0 {
+			errs = append(errs, errors.New("unit ids must be empty for an exit fill: an exit closes the campaign's whole remaining holding"))
+		}
 	case FillKindAdd:
 		if p.CampaignID == "" {
 			errs = append(errs, errors.New("campaign id is required for an add fill: it must name the campaign it extends"))
 		}
 		if p.ProposalID == "" {
 			errs = append(errs, errors.New("proposal id is required for an add fill: it must name the add proposal it executes"))
+		}
+		if len(p.UnitIDs) != 0 {
+			errs = append(errs, errors.New("unit ids must be empty for an add fill: only a stop fill closes a named subset of units"))
 		}
 	default:
 		errs = append(errs, fmt.Errorf("kind %q is not a recognised fill kind", p.Kind))
