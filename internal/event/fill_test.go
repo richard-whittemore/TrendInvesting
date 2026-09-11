@@ -106,7 +106,7 @@ func TestFillPayloadValidate(t *testing.T) {
 		},
 		{
 			name:    "unrecognised kind",
-			mutate:  func(f *event.FillPayload) { f.Kind = "add" },
+			mutate:  func(f *event.FillPayload) { f.Kind = "bogus" },
 			wantErr: "kind",
 		},
 		{
@@ -369,7 +369,7 @@ func TestFillEventConstants(t *testing.T) {
 		t.Errorf("FillEventType = %q, want %q", event.FillEventType, "execution.fill")
 	}
 	if event.FillSchemaVersion != 2 {
-		t.Errorf("FillSchemaVersion = %d, want 2 (#12 added Kind and CampaignID)", event.FillSchemaVersion)
+		t.Errorf("FillSchemaVersion = %d, want 2 (#12 added Kind and CampaignID; #13 and #14 each added a further Kind value without a further bump)", event.FillSchemaVersion)
 	}
 	if event.FillKindEntry != "entry" {
 		t.Errorf("FillKindEntry = %q, want %q", event.FillKindEntry, "entry")
@@ -379,6 +379,129 @@ func TestFillEventConstants(t *testing.T) {
 	}
 	if event.FillKindExit != "exit" {
 		t.Errorf("FillKindExit = %q, want %q", event.FillKindExit, "exit")
+	}
+	if event.FillKindAdd != "add" {
+		t.Errorf("FillKindAdd = %q, want %q", event.FillKindAdd, "add")
+	}
+}
+
+// validAddFill returns #14's fourth Kind: an add fill adding a further Unit
+// to the same Campaign as validStopFill/validExitFill, referencing the add
+// proposal it executes (Kind requires BOTH CampaignID and ProposalID for an
+// add — like an exit, unlike a stop, it always has a specific outstanding
+// proposal to join back to).
+func validAddFill() event.FillPayload {
+	return event.FillPayload{
+		InstrumentID: "AAPL",
+		Kind:         event.FillKindAdd,
+		CampaignID:   "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
+		ProposalID:   "add-proposal-unit-2:AAPL:2026-03-05T00:00:00.000000000Z",
+		FillID:       "sim-fill-0004",
+		Direction:    event.DirectionLong,
+		Quantity:     133,
+		Price:        220.04,
+		FilledAt:     proposalPeriodEnd.AddDate(0, 0, 6),
+	}
+}
+
+// TestAddFillPayloadValidate covers the add-kind pairing rule from
+// validAddFill: like an exit fill, and unlike a stop fill, an add fill
+// requires BOTH CampaignID and ProposalID.
+func TestAddFillPayloadValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(*event.FillPayload)
+		wantErr string
+	}{
+		{name: "valid add fill"},
+		{
+			name:    "missing campaign id",
+			mutate:  func(f *event.FillPayload) { f.CampaignID = "" },
+			wantErr: "campaign id",
+		},
+		{
+			// Unlike a stop fill, an add fill's ProposalID is required: it is
+			// the join back to the add proposal (strategy.add.proposed) this
+			// fill executes.
+			name:    "missing proposal id",
+			mutate:  func(f *event.FillPayload) { f.ProposalID = "" },
+			wantErr: "proposal id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := validAddFill()
+			if tt.mutate != nil {
+				tt.mutate(&payload)
+			}
+
+			err := payload.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestAddFillPayloadJSONTags(t *testing.T) {
+	t.Parallel()
+
+	encoded, err := json.Marshal(validAddFill())
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var asMap map[string]any
+	if err := json.Unmarshal(encoded, &asMap); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	if got, ok := asMap["kind"]; !ok || got != "add" {
+		t.Errorf("encoded payload kind = %v, want %q: %s", got, "add", encoded)
+	}
+	if got, ok := asMap["campaign_id"]; !ok || got == "" {
+		t.Errorf("encoded payload campaign_id = %v, want it populated: %s", got, encoded)
+	}
+	if got, ok := asMap["proposal_id"]; !ok || got == "" {
+		t.Errorf("encoded payload proposal_id = %v, want it populated: %s", got, encoded)
+	}
+}
+
+func TestAddFillPayloadRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := validAddFill()
+
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var decoded event.FillPayload
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("decoded.Validate() error = %v", err)
+	}
+
+	reEncoded, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatalf("re-Marshal() error = %v", err)
+	}
+	if !bytes.Equal(encoded, reEncoded) {
+		t.Fatalf("round trip not stable:\n  first:  %s\n  second: %s", encoded, reEncoded)
 	}
 }
 
