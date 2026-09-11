@@ -436,6 +436,9 @@ func TestMultiUnitCampaignExitsViaExitChannelWithAggregatedQuantityAndResult(t *
 	if exited.Quantity != 399 {
 		t.Errorf("Quantity = %d, want 399 (133 x 3 units)", exited.Quantity)
 	}
+	if exited.UnitQuantity != 133 {
+		t.Errorf("UnitQuantity = %d, want the campaign's frozen 133 (never a particular unit's own filled quantity)", exited.UnitQuantity)
+	}
 
 	// The quantity-weighted average, computed in the EXACT operation order
 	// campaignState.entryPrice() uses: multiply each fill by its own
@@ -453,9 +456,30 @@ func TestMultiUnitCampaignExitsViaExitChannelWithAggregatedQuantityAndResult(t *
 	if exited.RealisedResult != wantRealisedResult {
 		t.Errorf("RealisedResult = %v, want exactly %v", exited.RealisedResult, wantRealisedResult)
 	}
-	wantRealisedResultInN := (exitFill.Price - wantEntryPrice) / campaignN
-	if exited.RealisedResultInN != wantRealisedResultInN {
-		t.Errorf("RealisedResultInN = %v, want exactly %v", exited.RealisedResultInN, wantRealisedResultInN)
+	// PR #74 review ("N Result Ignores Units"): AverageMoveInN is the
+	// per-share average (which understates a multi-Unit Campaign's real N
+	// result if misread as the aggregate); RealisedResultInUnitN is the
+	// aggregate Faith actually uses. Both are asserted against sizing's own
+	// functions — the same ones the producer calls — for bit-exactness.
+	wantAverageMoveInN, err := sizing.AverageMoveInN(exitFill.Price, wantEntryPrice, campaignN)
+	if err != nil {
+		t.Fatalf("sizing.AverageMoveInN() error = %v", err)
+	}
+	if exited.AverageMoveInN != wantAverageMoveInN {
+		t.Errorf("AverageMoveInN = %v, want exactly %v", exited.AverageMoveInN, wantAverageMoveInN)
+	}
+	wantResultInUnitN, err := sizing.RealisedResultInUnitN(wantRealisedResult, 133, campaignN, cfg.DollarsPerPoint)
+	if err != nil {
+		t.Fatalf("sizing.RealisedResultInUnitN() error = %v", err)
+	}
+	if exited.RealisedResultInUnitN != wantResultInUnitN {
+		t.Errorf("RealisedResultInUnitN = %v, want exactly %v", exited.RealisedResultInUnitN, wantResultInUnitN)
+	}
+	// Distinct fields, distinct readings: the two must NOT coincide for a
+	// genuinely multi-Unit Campaign (unlike the single-Unit case) — the
+	// exact confusion the review finding named.
+	if wantAverageMoveInN == wantResultInUnitN {
+		t.Fatalf("average move in n (%v) coincidentally equals realised result in unit n (%v); this fixture must keep the two genuinely different", wantAverageMoveInN, wantResultInUnitN)
 	}
 
 	// The Protective Stop reported is the MINIMUM across all three units —
@@ -961,4 +985,47 @@ func TestBarPredatingAnAddFillFailsClosed(t *testing.T) {
 	// completed, so the bar stream is now inconsistent with the fill it
 	// already accepted.
 	s.bar(completedBar("AAPL", day(58), 200, 150, 150)).wantRunError("AAPL", "predates")
+}
+
+// --- Chained fills cannot reverse Unit order (PR #74 review finding) -----
+
+// TestChainedAddFillWithEarlierTimestampThanPreviousUnitIsRejected is a PR
+// #74 review finding (Greptile, "Chained Fills Allow Time Reversal"): a
+// same-bar Add proposal (the chain — see applyAddFill) is raised only AFTER
+// the preceding Unit's fill was accepted, so a later Unit's fill claiming a
+// timestamp EARLIER than the Unit immediately before it records causally
+// impossible ordering, and must be rejected — naming both times.
+//
+// The equal-timestamps case ("all four could be added in one day", The
+// Turtle Rules p.19) is deliberately NOT re-tested here:
+// TestFourUnitsAddedWithinOneBarViaTheSameBarChain (unchanged by this fix)
+// already delivers all three chained fills at the identical instant and
+// asserts all three succeed, which is exactly the boundary this rejection
+// must not cross.
+func TestChainedAddFillWithEarlierTimestampThanPreviousUnitIsRejected(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	campaignN := breakoutFixtureN(t, cfg)
+
+	ladder, err := sizing.AddLadder(campaignFillPrice, campaignN, cfg.MaxUnits, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("AddLadder() error = %v", err)
+	}
+
+	bigBar := addOpportunityBar("AAPL", day(57), ladder[3]+1)
+	unit2At := day(57).Add(-6 * time.Hour) // "15:00" on the breach day
+	unit3At := unit2At.Add(-1 * time.Hour) // strictly BEFORE unit 2's own fill
+
+	fill2 := addFill("AAPL", campaignID, 2, day(57), "sim-fill-add-2", ladder[1], 133, unit2At)
+	fill3 := addFill("AAPL", campaignID, 3, day(57), "sim-fill-add-3", ladder[2], 133, unit3At)
+
+	newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		bar(bigBar).
+		fill(fill2).
+		fill(fill3).
+		wantRunError("AAPL", unit2At.Format(time.RFC3339), unit3At.Format(time.RFC3339))
 }

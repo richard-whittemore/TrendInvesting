@@ -11,6 +11,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
@@ -1403,9 +1404,24 @@ func TestStopFillClosesTheCampaignWithReasonStopAndRealisedResult(t *testing.T) 
 	if !(exited.RealisedResult < 0) {
 		t.Errorf("RealisedResult = %v, want negative (the fixture stops out at a loss)", exited.RealisedResult)
 	}
-	wantRealisedResultInN := (stop.Price - campaignFillPrice) / campaignN
-	if exited.RealisedResultInN != wantRealisedResultInN {
-		t.Errorf("RealisedResultInN = %v, want exactly %v", exited.RealisedResultInN, wantRealisedResultInN)
+	// PR #74 review response to "N Result Ignores Units": each field is
+	// asserted against sizing's own function, the same one the producer
+	// calls, since the two are not guaranteed to agree bit-for-bit in
+	// float64 even though they coincide numerically for a single,
+	// fully-filled unit.
+	wantMoveInN, err := sizing.AverageMoveInN(stop.Price, campaignFillPrice, campaignN)
+	if err != nil {
+		t.Fatalf("sizing.AverageMoveInN() error = %v", err)
+	}
+	if exited.AverageMoveInN != wantMoveInN {
+		t.Errorf("AverageMoveInN = %v, want exactly %v", exited.AverageMoveInN, wantMoveInN)
+	}
+	wantResultInUnitN, err := sizing.RealisedResultInUnitN(wantRealisedResult, 133, campaignN, cfg.DollarsPerPoint)
+	if err != nil {
+		t.Fatalf("sizing.RealisedResultInUnitN() error = %v", err)
+	}
+	if exited.RealisedResultInUnitN != wantResultInUnitN {
+		t.Errorf("RealisedResultInUnitN = %v, want exactly %v", exited.RealisedResultInUnitN, wantResultInUnitN)
 	}
 	if err := exited.Validate(); err != nil {
 		t.Errorf("emitted Campaign-exited payload fails its own Validate(): %v", err)
@@ -1759,7 +1775,7 @@ func TestABarsLowThroughTheStopWithNoStopFillLeavesTheCampaignOpen(t *testing.T)
 // extends TestReplayingTheCampaignFixtureTwiceYieldsByteIdenticalEmissions
 // through a full Campaign life — entry, Protective-Stop-set, and a stop
 // exit — which covers the deterministic Campaign-exited id and every
-// derived figure on it (RealisedResult, RealisedResultInN) alongside the
+// derived figure on it (RealisedResult, AverageMoveInN, RealisedResultInUnitN) alongside the
 // Campaign-opened and Protective-Stop-set fields #11 already covered.
 func TestReplayingTheEntryThenStopFixtureTwiceYieldsByteIdenticalEmissions(t *testing.T) {
 	t.Parallel()
