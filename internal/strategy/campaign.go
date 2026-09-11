@@ -281,11 +281,23 @@ func (r *Reducer) expireEntryProposal(state *instrumentState, bar event.Complete
 // It lives for one bar, the identical lifetime ADR 0011 gives every proposal
 // in this system: the next completed bar for the instrument supersedes it
 // (see Reducer.expireExitProposal).
+//
+// earliestFillAt is the exit-side twin of pendingProposalState's own field of
+// the same name (see Reducer.applyFill's doc comment, "The window a fill's
+// timestamp must lie in"): the period end of the bar BEFORE the breach bar —
+// the moment the breach bar opened, and so the earliest instant at which an
+// order for this exit proposal could have executed. It degrades correctly at
+// its zero value for the same reason pendingProposalState's does: a breach
+// can only happen once a Campaign is open, which itself requires a Signal,
+// which requires a warm N and Entry Channel — so a real bar always precedes
+// a breach bar in practice, but the zero time needs no special case either
+// way, since every real timestamp is after it.
 type pendingExitProposalState struct {
-	proposalID string
-	periodEnd  time.Time
-	quantity   int64
-	level      float64
+	proposalID     string
+	periodEnd      time.Time
+	quantity       int64
+	level          float64
+	earliestFillAt time.Time
 }
 
 // expireExitProposal ends an outstanding exit proposal that the next
@@ -354,7 +366,13 @@ func (r *Reducer) expireExitProposal(state *instrumentState, bar event.Completed
 // read them, before the bar was folded into the channel for the NEXT bar to
 // see, and passing the same values through keeps this function from being
 // able to accidentally read a post-advance (and therefore look-ahead) value.
-func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBarPayload, exitChannelLow float64, exitChannelReady bool, input event.Envelope) ([]event.Envelope, error) {
+//
+// previousPeriodEnd is the period end of the bar BEFORE this one — the same
+// value applyCompletedBar captures for the entry-proposal path, passed
+// through here so a freshly raised exit proposal can record it as
+// pendingExitProposalState.earliestFillAt (see that field's doc comment and
+// applyExitFill's window check).
+func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBarPayload, exitChannelLow float64, exitChannelReady bool, previousPeriodEnd time.Time, input event.Envelope) ([]event.Envelope, error) {
 	campaign := state.campaign
 	view := bar.SplitAdjusted
 
@@ -432,10 +450,11 @@ func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBa
 	// moves here: this reducer's only path to closing a Campaign is
 	// applyExitFill, reading a recorded fill.
 	state.pendingExitProposal = &pendingExitProposalState{
-		proposalID: proposalEnvelope.ID,
-		periodEnd:  bar.PeriodEnd,
-		quantity:   campaign.filledQuantity,
-		level:      exitChannelLow,
+		proposalID:     proposalEnvelope.ID,
+		periodEnd:      bar.PeriodEnd,
+		quantity:       campaign.filledQuantity,
+		level:          exitChannelLow,
+		earliestFillAt: previousPeriodEnd,
 	}
 
 	return emissions, nil
@@ -465,6 +484,38 @@ func checkBarConfirmsCampaignOpening(state *instrumentState, bar event.Completed
 		bar.InstrumentID, bar.PeriodEnd.Format(time.RFC3339),
 		state.campaign.campaignID, state.campaign.openingFillID,
 		state.campaign.openedAt.Format(time.RFC3339))
+}
+
+// checkBarConfirmsCampaignClosing is checkBarConfirmsCampaignOpening's mirror
+// for the CLOSING fill (PR #73 review round): the identical contradiction,
+// checked at the identical point, for a stop or exit fill instead of an
+// opening one. A closing fill's FilledAt cannot be validated against "the
+// next bar" the moment the fill is applied (applyStopFill/applyExitFill), for
+// the same reason applyFill cannot validate an opening fill's upper bound —
+// the next bar does not exist yet, and no bar length is configured — so it
+// is checked here instead, the instant the next completed bar for the
+// instrument arrives.
+//
+// Unlike checkBarConfirmsCampaignOpening, this is NOT gated on
+// state.campaign being non-nil: state.lastClosingFillAt is set precisely
+// WHEN a Campaign closes, so the check that matters happens with
+// state.campaign already nil. It is also never reset afterwards, and that is
+// safe rather than a bug: applyCompletedBar's own bar-chronology check
+// (above, in the caller) already enforces that a given instrument's bar
+// PeriodEnd strictly increases across the WHOLE run, so once one bar has
+// passed this check, every later bar's PeriodEnd is later still and can
+// never fail it again — including every bar of any LATER Campaign the same
+// instrument goes on to open. Only the first bar after a Campaign's close
+// can therefore ever fail this, the same property
+// checkBarConfirmsCampaignOpening's own doc comment states for the opening
+// side.
+func checkBarConfirmsCampaignClosing(state *instrumentState, bar event.CompletedBarPayload) error {
+	if state.lastClosingFillAt.IsZero() || !bar.PeriodEnd.Before(state.lastClosingFillAt) {
+		return nil
+	}
+	return fmt.Errorf("strategy: instrument %q: bar period end %s predates the fill timestamped %s that most recently closed a campaign for this instrument; an execution cannot have happened after a bar that had not yet completed, so the fill's timestamp is inconsistent with the bar stream",
+		bar.InstrumentID, bar.PeriodEnd.Format(time.RFC3339),
+		state.lastClosingFillAt.Format(time.RFC3339))
 }
 
 // applyFill handles event.FillEventType: the only input in this system that
@@ -540,6 +591,19 @@ func checkBarConfirmsCampaignOpening(state *instrumentState, bar event.Completed
 // as ADR 0011's expiry, which handles a fill *arriving* after the next bar
 // (the proposal is gone, so there is nothing pending to match); this one
 // handles a fill arriving in time but *claiming* a time after it.
+//
+// #13's exit fill (applyExitFill) is bound by the IDENTICAL window, against
+// the breach bar that raised the outstanding exit proposal rather than the
+// entry's decision bar (a PR #73 review round finding): the lower bound is
+// pendingExitProposalState.earliestFillAt, checked in applyExitFill exactly
+// as pendingProposalState.earliestFillAt is checked here; the upper bound is
+// checkBarConfirmsCampaignClosing, checkBarConfirmsCampaignOpening's own
+// mirror for a CLOSING fill (stop or exit), called from applyCompletedBar
+// alongside it. A stop fill is not bound this way at all: it closes a
+// Campaign directly from the Protective Stop, with no proposal of its own to
+// bound against (see applyStopFill's own doc comment) — only its lower bound
+// (not before the Campaign opened) is checked, the same as it always has
+// been.
 //
 // What a fill deliberately is NOT checked against: the proposal's entry level.
 // ADR 0005 makes a long entry fill at max(level, open) and ADR 0013 pushes it
@@ -925,6 +989,11 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 	// evaluates this instrument normally and may Signal, with no further
 	// change needed anywhere else.
 	state.campaign = nil
+	// PR #73 review round: recorded so checkBarConfirmsCampaignClosing can
+	// catch a bar arriving that predates this closing fill — the identical
+	// upper-bound check checkBarConfirmsCampaignOpening already applies to
+	// an opening fill, mirrored here for a closing one.
+	state.lastClosingFillAt = fill.FilledAt
 
 	return []event.Envelope{exitEnvelope}, nil
 }
@@ -984,6 +1053,21 @@ func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, 
 		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q is timestamped %s, which predates campaign %q's own opening fill at %s; a campaign cannot be closed before it opened",
 			fill.InstrumentID, fill.FillID, fill.FilledAt.Format(time.RFC3339), campaign.campaignID, campaign.openedAt.Format(time.RFC3339))
 	}
+	// The lower bound of the exit fill's own execution window (PR #73 review
+	// round; see pendingExitProposalState.earliestFillAt's doc comment and
+	// applyFill's own "The window a fill's timestamp must lie in" for the
+	// identical reasoning applied to an entry fill). Strict: a fill stamped
+	// exactly at the bar before the breach is at the instant the breach bar
+	// opened, before which no order for this exit proposal existed. This is
+	// independent of, and strictly tighter than, the campaign-opening check
+	// above whenever the breach happens on a later bar than the opening —
+	// both are kept, since neither implies the other in every fixture (a
+	// breach on the SAME bar the campaign opened, were that ever possible,
+	// would make them coincide).
+	if !fill.FilledAt.After(pending.earliestFillAt) {
+		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q is timestamped %s, which predates the bar in which an order for the exit proposal could have executed (that bar opened at %s); a campaign may not be closed by an execution older than the decision that authorised it",
+			fill.InstrumentID, fill.FillID, fill.FilledAt.Format(time.RFC3339), pending.earliestFillAt.Format(time.RFC3339))
+	}
 
 	// The realised result, in the exact expression order
 	// event.CampaignExitedPayload.Validate re-derives it in, so the two
@@ -1031,6 +1115,10 @@ func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, 
 	// executed is resolved, so a later bar does not try to expire it again.
 	state.campaign = nil
 	state.pendingExitProposal = nil
+	// PR #73 review round: identical to applyStopFill's own recording, so
+	// checkBarConfirmsCampaignClosing catches a bar arriving that predates
+	// THIS closing fill regardless of which kind closed the campaign.
+	state.lastClosingFillAt = fill.FilledAt
 
 	return []event.Envelope{exitEnvelope}, nil
 }

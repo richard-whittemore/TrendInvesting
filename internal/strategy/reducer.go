@@ -153,6 +153,14 @@ type instrumentState struct {
 	// pendingProposal does — a Campaign closes only from a recorded exit
 	// fill, never from this proposal alone.
 	pendingExitProposal *pendingExitProposalState
+	// lastClosingFillAt is the FilledAt of the most recent fill that closed a
+	// Campaign for this instrument — a stop fill or an exit fill alike — and
+	// is the zero time.Time before any Campaign for this instrument has ever
+	// closed (every fill's FilledAt is required non-zero, so the zero value
+	// is unambiguous as "never"). It is never cleared once set, including
+	// across a later Campaign's whole life: see
+	// checkBarConfirmsCampaignClosing (campaign.go) for why that is safe.
+	lastClosingFillAt time.Time
 }
 
 // NewReducer returns a Reducer that stamps every decision it emits with
@@ -352,11 +360,17 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 			bar.InstrumentID, bar.PeriodEnd.Format(time.RFC3339), state.lastPeriodEnd.Format(time.RFC3339))
 	}
 
-	// #11: this bar is the first thing able to contradict an open Campaign's
-	// opening fill timestamp — see checkBarConfirmsCampaignOpening for why the
-	// check lives at this end rather than in applyFill. Before any state is
-	// read or advanced, so a rejected bar leaves nothing half-applied.
+	// #11/#13 (PR #73 review round): this bar is the first thing able to
+	// contradict an open Campaign's opening fill timestamp, or the instrument's
+	// most recent CLOSING fill timestamp (a stop or an exit alike) — see
+	// checkBarConfirmsCampaignOpening and checkBarConfirmsCampaignClosing for
+	// why each check lives at this end rather than in applyFill/applyStopFill/
+	// applyExitFill. Before any state is read or advanced, so a rejected bar
+	// leaves nothing half-applied.
 	if err := checkBarConfirmsCampaignOpening(state, bar); err != nil {
+		return nil, err
+	}
+	if err := checkBarConfirmsCampaignClosing(state, bar); err != nil {
 		return nil, err
 	}
 
@@ -485,7 +499,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	// #14 only ever has to add its own evaluation AFTER this returns, never
 	// before it.
 	if state.campaign != nil {
-		campaignEmissions, err := r.evaluateCampaign(state, bar, exitChannelLow, exitChannelReady, envelope)
+		campaignEmissions, err := r.evaluateCampaign(state, bar, exitChannelLow, exitChannelReady, previousPeriodEnd, envelope)
 		if err != nil {
 			return nil, err
 		}
