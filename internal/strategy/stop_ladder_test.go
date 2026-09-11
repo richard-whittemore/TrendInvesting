@@ -2,6 +2,7 @@ package strategy_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"math"
 	"strings"
@@ -9,7 +10,9 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
+	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
 // This file holds #15's own event-seam tests: the Stop Ladder (The Turtle
@@ -1090,5 +1093,174 @@ func TestStopMultipleOneRaisesUnitOneAboveItsEntry(t *testing.T) {
 	}
 	if err := last.Validate(); err != nil {
 		t.Errorf("emitted campaign evaluated payload fails its own Validate(): %v", err)
+	}
+}
+
+// --- Review round 2: validate-then-mutate for the stop-superseded expiry --
+
+// buildPendingAddScenario returns a stream builder positioned right after a
+// 2-Unit Campaign (unit1 via openingFill, unit2 via one Add) has an
+// outstanding Add proposal for Unit 3 (raised on bar58, whose own
+// EarliestFillAt — the bar BEFORE it, bar57's own period end, day(57) — a
+// partial stop's own timestamp is checked against, #15 review round "Stop
+// Expiry Commits Partial State"), plus every figure a test needs.
+func buildPendingAddScenario(t *testing.T) (s *stream, campaignID string, unit1RaisedStop float64) {
+	t.Helper()
+
+	cfg := validConfigurationPayload()
+	campaignID = testDecisionID("campaign", "AAPL", day(56))
+	campaignN := breakoutFixtureN(t, cfg)
+
+	rung2, err := sizing.NextAddLevel(campaignFillPrice, campaignN, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel(rung 2) error = %v", err)
+	}
+	bar57 := addOpportunityBar("AAPL", day(57), rung2+5)
+	fill2 := addFill("AAPL", campaignID, 2, day(57), "sim-fill-add-2", rung2, 133, day(57))
+
+	rung3, err := sizing.NextAddLevel(rung2, campaignN, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel(rung 3) error = %v", err)
+	}
+	// bar58 reaches rung3 (proposes unit 3's Add) and stays above the
+	// warmed-up Exit Channel, so nothing but the Add proposal comes of it.
+	// Its OWN EarliestFillAt (the bound this file's tests exercise) is
+	// bar57's own period end, day(57).
+	bar58 := addOpportunityBar("AAPL", day(58), rung3+5)
+
+	unit1Stop, err := sizing.ProtectiveStopLevel(campaignFillPrice, campaignN, cfg.StopMultiple, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("ProtectiveStopLevel() error = %v", err)
+	}
+	unit1RaisedStop, err = sizing.RaisedStop(unit1Stop, campaignN)
+	if err != nil {
+		t.Fatalf("RaisedStop() error = %v", err)
+	}
+
+	s = newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		bar(bar57).
+		fill(fill2).
+		bar(bar58)
+
+	return s, campaignID, unit1RaisedStop
+}
+
+// TestPartialStopInsideTheAddProposalsOwnBarCancelsItWithAValidExpiry is the
+// review round's own required positive: a partial stop filling INSIDE the
+// bar that proposed the pending Add (ADR 0005: a resting stop can fill in
+// the same bar) produces a legitimate expiry — ExpiredAt equal to that
+// bar's own PeriodEnd, not after it — and both units-stopped and the expiry
+// are journaled.
+func TestPartialStopInsideTheAddProposalsOwnBarCancelsItWithAValidExpiry(t *testing.T) {
+	t.Parallel()
+
+	stream, campaignID, unit1RaisedStop := buildPendingAddScenario(t)
+
+	// Unit 1 alone, stopped out AT bar58's own period end (day(58)) — inside
+	// the same bar the pending Add for unit 3 was raised on, and strictly
+	// after that proposal's own EarliestFillAt (day(57)).
+	partialStop := stopFillForUnits("AAPL", campaignID, "sim-fill-stop-1", []string{"sim-fill-0001"}, unit1RaisedStop-0.10, 133, day(58))
+
+	result := stream.fill(partialStop).mustRun()
+
+	unitsStopped := envelopesOfType(result, event.CampaignUnitsStoppedEventType)
+	if len(unitsStopped) != 1 {
+		t.Fatalf("got %d units-stopped event(s), want exactly 1", len(unitsStopped))
+	}
+	expired := envelopesOfType(result, event.ProposalExpiredEventType)
+	if len(expired) != 1 {
+		t.Fatalf("got %d proposal-expired event(s), want exactly 1", len(expired))
+	}
+	expiredPayload := decodeProposalExpired(t, expired[0])
+	if expiredPayload.Reason != event.ExpiryReasonSupersededByStop {
+		t.Errorf("Reason = %q, want %q", expiredPayload.Reason, event.ExpiryReasonSupersededByStop)
+	}
+	if !expiredPayload.ExpiredAt.Equal(day(58)) {
+		t.Errorf("ExpiredAt = %v, want %v (the stop's own timestamp)", expiredPayload.ExpiredAt, day(58))
+	}
+	if !expiredPayload.ExpiredAt.After(expiredPayload.PeriodEnd) && !expiredPayload.ExpiredAt.Equal(expiredPayload.PeriodEnd) {
+		t.Errorf("ExpiredAt = %v, want it at or after PeriodEnd %v", expiredPayload.ExpiredAt, expiredPayload.PeriodEnd)
+	}
+	if err := expiredPayload.Validate(); err != nil {
+		t.Errorf("emitted proposal expired payload fails its own Validate(): %v", err)
+	}
+
+	// The campaign continues with unit 2 alone; unit 3 never joined.
+	if got := len(envelopesOfType(result, event.CampaignUnitAddedEventType)); got != 1 {
+		t.Errorf("got %d unit-added event(s), want exactly 1 (unit 2's own)", got)
+	}
+}
+
+// TestPartialStopWithAnInvalidExpiryLeavesCampaignStateCompletelyUnchanged
+// is the review round's own required regression test: a partial stop fill
+// whose OWN timestamp predates the pending Add proposal's EarliestFillAt
+// bound produces an expiry that fails Validate — and, per the
+// validate-then-mutate discipline this fixes, the run must fail with NO
+// state moved at all: no units-stopped or expiry event journaled, the
+// Campaign's Units and their stops untouched, and the fill's own id NOT
+// recorded as accepted — so a retry of the identical fill fails again,
+// rather than being silently absorbed as an idempotent duplicate of a
+// transition that never actually happened.
+func TestPartialStopWithAnInvalidExpiryLeavesCampaignStateCompletelyUnchanged(t *testing.T) {
+	t.Parallel()
+
+	stream, campaignID, unit1RaisedStop := buildPendingAddScenario(t)
+
+	// Unit 1 alone, stopped out AT day(57) — the pending Add proposal's own
+	// EarliestFillAt (bar57's own period end), not strictly after it. The
+	// stop fill's OWN chronology checks (after campaign.openedAt, after the
+	// zero-valued lastCloseFillAt) pass; only the Add-proposal expiry's own
+	// Validate() fails.
+	invalidStop := stopFillForUnits("AAPL", campaignID, "sim-fill-stop-1", []string{"sim-fill-0001"}, unit1RaisedStop-0.10, 133, day(57))
+
+	// A single Reducer/Engine, reused across three separate Run calls, so
+	// state genuinely persists between them the way a long-running replay
+	// would — replay.Engine.Run only requires each CALL's own input
+	// sequence to be internally contiguous (see its own doc comment), not
+	// contiguous against a PRIOR call, so this is a supported way to drive
+	// one Reducer's history in stages.
+	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	if _, err := engine.Run(context.Background(), stream.envelopes); err != nil {
+		t.Fatalf("build-up Run() error = %v, want nil", err)
+	}
+
+	invalidEnvelope := fillEnvelope(t, 1, invalidStop)
+
+	firstEmitted, firstErr := engine.Run(context.Background(), []event.Envelope{invalidEnvelope})
+	if firstErr == nil {
+		t.Fatal("Run() error = nil, want the invalid expiry to fail the run")
+	}
+	if !strings.Contains(firstErr.Error(), "invalid proposal expired payload") {
+		t.Errorf("Run() error = %v, want it to name the invalid proposal expired payload", firstErr)
+	}
+	// NO state moved: nothing at all is journaled for this attempt.
+	if len(firstEmitted) != 0 {
+		t.Errorf("got %d emission(s) from the failing attempt, want 0: the whole transition must be rolled back", len(firstEmitted))
+	}
+
+	// Retrying the IDENTICAL fill, on the SAME Reducer, must fail AGAIN with
+	// the identical error — not be silently absorbed as an idempotent
+	// duplicate, which would only be correct if the first attempt had
+	// actually recorded the fill as accepted (it must not have, since
+	// nothing was mutated before the expiry failed to validate).
+	secondEmitted, secondErr := engine.Run(context.Background(), []event.Envelope{invalidEnvelope})
+	if secondErr == nil {
+		t.Fatal("retry Run() error = nil, want the SAME invalid-expiry failure again")
+	}
+	if !strings.Contains(secondErr.Error(), "invalid proposal expired payload") {
+		t.Errorf("retry Run() error = %v, want it to name the invalid proposal expired payload again (not absorbed as a duplicate)", secondErr)
+	}
+	if len(secondEmitted) != 0 {
+		t.Errorf("got %d emission(s) from the retry, want 0", len(secondEmitted))
 	}
 }

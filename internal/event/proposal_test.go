@@ -657,22 +657,29 @@ func TestProposalDeclinedPayloadJSONTags(t *testing.T) {
 // the next completed bar for the same instrument.
 var expiredAt = proposalPeriodEnd.AddDate(0, 0, 1)
 
+// earliestFillAt is the period end of the bar BEFORE the proposal's own
+// decision bar — the earliest instant at which an order for it could have
+// executed (see event.ProposalExpiredPayload.EarliestFillAt's own doc
+// comment).
+var earliestFillAt = proposalPeriodEnd.AddDate(0, 0, -1)
+
 // validProposalExpired returns the expiry of validTradeProposal, superseded by
 // the next bar without a fill ever arriving for it (ADR 0011: a Signal belongs
 // to one bar and expires with it, so the proposal derived from it does too).
 func validProposalExpired() event.ProposalExpiredPayload {
 	return event.ProposalExpiredPayload{
-		InstrumentID: "AAPL",
-		Kind:         event.ProposalKindEntry,
-		ProposalID:   "proposal:AAPL:2026-02-27T00:00:00.000000000Z",
-		SignalID:     "signal:AAPL:2026-02-27T00:00:00.000000000Z",
-		PeriodEnd:    proposalPeriodEnd,
-		ExpiredAt:    expiredAt,
-		Rule:         event.RuleSignalExpiresWithItsBar,
-		ADR:          event.ADRSignalExpiry,
-		Reason:       event.ExpiryReasonSupersededByNextBar,
-		Quantity:     133,
-		Level:        200,
+		InstrumentID:   "AAPL",
+		Kind:           event.ProposalKindEntry,
+		ProposalID:     "proposal:AAPL:2026-02-27T00:00:00.000000000Z",
+		SignalID:       "signal:AAPL:2026-02-27T00:00:00.000000000Z",
+		PeriodEnd:      proposalPeriodEnd,
+		ExpiredAt:      expiredAt,
+		EarliestFillAt: earliestFillAt,
+		Rule:           event.RuleSignalExpiresWithItsBar,
+		ADR:            event.ADRSignalExpiry,
+		Reason:         event.ExpiryReasonSupersededByNextBar,
+		Quantity:       133,
+		Level:          200,
 	}
 }
 
@@ -683,17 +690,18 @@ func validProposalExpired() event.ProposalExpiredPayload {
 // event.ExitProposalPayload).
 func validExitProposalExpired() event.ProposalExpiredPayload {
 	return event.ProposalExpiredPayload{
-		InstrumentID: "AAPL",
-		Kind:         event.ProposalKindExit,
-		ProposalID:   "exit-proposal:AAPL:2026-02-27T00:00:00.000000000Z",
-		SignalID:     "",
-		PeriodEnd:    proposalPeriodEnd,
-		ExpiredAt:    expiredAt,
-		Rule:         event.RuleExitProposalExpiresWithItsBar,
-		ADR:          event.ADRSignalExpiry,
-		Reason:       event.ExpiryReasonSupersededByNextBar,
-		Quantity:     133,
-		Level:        180,
+		InstrumentID:   "AAPL",
+		Kind:           event.ProposalKindExit,
+		ProposalID:     "exit-proposal:AAPL:2026-02-27T00:00:00.000000000Z",
+		SignalID:       "",
+		PeriodEnd:      proposalPeriodEnd,
+		ExpiredAt:      expiredAt,
+		EarliestFillAt: earliestFillAt,
+		Rule:           event.RuleExitProposalExpiresWithItsBar,
+		ADR:            event.ADRSignalExpiry,
+		Reason:         event.ExpiryReasonSupersededByNextBar,
+		Quantity:       133,
+		Level:          180,
 	}
 }
 
@@ -751,6 +759,31 @@ func TestProposalExpiredPayloadValidate(t *testing.T) {
 			name:    "missing period end",
 			mutate:  func(p *event.ProposalExpiredPayload) { p.PeriodEnd = time.Time{} },
 			wantErr: "period end",
+		},
+		{
+			// #15 review round ("Stop Expiry Commits Partial State"):
+			// ExpiredAt must be strictly after EarliestFillAt for EVERY
+			// Reason, including the ordinary next-bar one.
+			name:    "expired at at the earliest fill at",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.ExpiredAt = p.EarliestFillAt },
+			wantErr: "must be after the earliest instant",
+		},
+		{
+			name:    "expired at before the earliest fill at",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.ExpiredAt = p.EarliestFillAt.AddDate(0, 0, -1) },
+			wantErr: "must be after the earliest instant",
+		},
+		{
+			// A next-bar expiry must still be strictly after PeriodEnd, even
+			// though it is now comfortably after EarliestFillAt too.
+			name:    "next-bar expiry at the period end",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.ExpiredAt = p.PeriodEnd },
+			wantErr: "a proposal is superseded by a later bar",
+		},
+		{
+			name:    "next-bar expiry before the period end",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.ExpiredAt = p.PeriodEnd.AddDate(0, 0, -1) },
+			wantErr: "a proposal is superseded by a later bar",
 		},
 		{
 			// #15 review round: superseded-by-stop only ever applies to an
@@ -882,17 +915,18 @@ func TestExitProposalExpiredPayloadValidate(t *testing.T) {
 // event.AddProposalPayload).
 func validAddProposalExpired() event.ProposalExpiredPayload {
 	return event.ProposalExpiredPayload{
-		InstrumentID: "AAPL",
-		Kind:         event.ProposalKindAdd,
-		ProposalID:   "add-proposal-unit-2:AAPL:2026-02-27T00:00:00.000000000Z",
-		SignalID:     "",
-		PeriodEnd:    proposalPeriodEnd,
-		ExpiredAt:    expiredAt,
-		Rule:         event.RuleAddProposalExpiresWithItsBar,
-		ADR:          event.ADRSignalExpiry,
-		Reason:       event.ExpiryReasonSupersededByNextBar,
-		Quantity:     133,
-		Level:        220.04,
+		InstrumentID:   "AAPL",
+		Kind:           event.ProposalKindAdd,
+		ProposalID:     "add-proposal-unit-2:AAPL:2026-02-27T00:00:00.000000000Z",
+		SignalID:       "",
+		PeriodEnd:      proposalPeriodEnd,
+		ExpiredAt:      expiredAt,
+		EarliestFillAt: earliestFillAt,
+		Rule:           event.RuleAddProposalExpiresWithItsBar,
+		ADR:            event.ADRSignalExpiry,
+		Reason:         event.ExpiryReasonSupersededByNextBar,
+		Quantity:       133,
+		Level:          220.04,
 	}
 }
 
@@ -921,6 +955,29 @@ func TestAddProposalExpiredPayloadValidate(t *testing.T) {
 				p.Reason = event.ExpiryReasonSupersededByStop
 				p.Rule = event.RuleAddProposalSupersededByStop
 			},
+		},
+		{
+			// #15 review round ("Stop Expiry Commits Partial State"): a
+			// resting stop can fill INSIDE the same bar that proposed the
+			// Add it cancels (ADR 0005) — ExpiredAt EQUAL to PeriodEnd is
+			// legitimate for this Reason, unlike the next-bar one.
+			name: "stop-superseded expiry at the period end is legitimate",
+			mutate: func(p *event.ProposalExpiredPayload) {
+				p.Reason = event.ExpiryReasonSupersededByStop
+				p.Rule = event.RuleAddProposalSupersededByStop
+				p.ExpiredAt = p.PeriodEnd
+			},
+		},
+		{
+			// But never before EarliestFillAt — that rule holds for every
+			// Reason.
+			name: "stop-superseded expiry before earliest fill at is rejected",
+			mutate: func(p *event.ProposalExpiredPayload) {
+				p.Reason = event.ExpiryReasonSupersededByStop
+				p.Rule = event.RuleAddProposalSupersededByStop
+				p.ExpiredAt = p.EarliestFillAt
+			},
+			wantErr: "must be after the earliest instant",
 		},
 	}
 
@@ -986,8 +1043,10 @@ func TestProposalExpiredEventConstants(t *testing.T) {
 	// expiry mechanism for an outstanding exit proposal rather than minting a
 	// second event type. #14 added a third value (add) without a further
 	// bump (see ProposalExpiredSchemaVersion's own doc comment).
-	if event.ProposalExpiredSchemaVersion != 2 {
-		t.Errorf("ProposalExpiredSchemaVersion = %d, want 2", event.ProposalExpiredSchemaVersion)
+	// Bumped 2 -> 3 for #15's review round: EarliestFillAt was added (see
+	// ProposalExpiredSchemaVersion's own doc comment).
+	if event.ProposalExpiredSchemaVersion != 3 {
+		t.Errorf("ProposalExpiredSchemaVersion = %d, want 3", event.ProposalExpiredSchemaVersion)
 	}
 	if event.ProposalKindEntry != "entry" {
 		t.Errorf("ProposalKindEntry = %q, want %q", event.ProposalKindEntry, "entry")
@@ -1072,6 +1131,7 @@ func TestProposalExpiredPayloadJSONTags(t *testing.T) {
 		"signal_id",
 		"period_end",
 		"expired_at",
+		"earliest_fill_at",
 		"rule",
 		"adr",
 		"reason",
