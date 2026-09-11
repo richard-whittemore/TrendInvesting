@@ -57,6 +57,13 @@ func newConfiguredReducerForInvariantTest(t *testing.T) *Reducer {
 	r.entryChannelLength = 55
 	r.exitChannelLength = 20
 	r.tierBDistanceInN = 1.0
+	// #15: evaluateCampaign's per-bar event now reports AggregateOpenRisk,
+	// which requires a usable dollarsPerPoint to derive (sizing.AggregateOpenRisk
+	// fails closed on a non-positive one) — this fixture's bar reaches that
+	// path (TestCampaignWithAValidProtectiveStopDoesNotHalt), so it must be
+	// set here even though this file's own point is the Protective Stop
+	// invariant, not sizing.
+	r.dollarsPerPoint = 1
 	notionalAccount, err := NewNotionalAccount(1_000_000, 1, 1)
 	if err != nil {
 		t.Fatalf("NewNotionalAccount() error = %v", err)

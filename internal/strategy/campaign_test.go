@@ -103,10 +103,15 @@ func closingStopFill(instrumentID, campaignID string, campaignN float64, filledA
 		Kind:         event.FillKindStop,
 		CampaignID:   campaignID,
 		FillID:       "sim-fill-0002",
-		Direction:    event.DirectionLong,
-		Quantity:     133,
-		Price:        stopLevel - campaignStopGap,
-		FilledAt:     filledAt,
+		// Every caller of this helper opens its Campaign via openingFill
+		// alone (a single Unit, #11), so the opening fill's own id is
+		// always the one Unit a whole-Campaign stop fill closes (#15
+		// requires a stop fill to name which Units it closes).
+		UnitIDs:   []string{"sim-fill-0001"},
+		Direction: event.DirectionLong,
+		Quantity:  133,
+		Price:     stopLevel - campaignStopGap,
+		FilledAt:  filledAt,
 	}
 }
 
@@ -886,16 +891,16 @@ func TestFillWithAMismatchedDirectionIsRejected(t *testing.T) {
 func TestReducerRejectsFillWithWrongSchemaVersion(t *testing.T) {
 	t.Parallel()
 
-	// event.FillSchemaVersion is 2 (#12 bumped it for Kind/CampaignID);
-	// SchemaVersion 0 would also be rejected, but at Envelope.Validate()
-	// ("schema version must be positive") rather than by the check under
-	// test, so schema 1 — the version this build no longer accepts — is used
-	// here instead: a distinct positive-but-wrong value that also documents
-	// what actually changed.
+	// event.FillSchemaVersion is 3 (#12 bumped it for Kind/CampaignID; #15
+	// bumped it again for UnitIDs). SchemaVersion 0 would also be rejected,
+	// but at Envelope.Validate() ("schema version must be positive") rather
+	// than by the check under test, so schema 2 — the version this build no
+	// longer accepts — is used here instead: a distinct positive-but-wrong
+	// value that also documents what actually changed.
 	newStream(t, validConfigurationPayload()).
 		bars(breakoutBars("AAPL")).
-		fillAtSchema(openingFill("AAPL"), 1).
-		wantRunError("schema version", "1", "2")
+		fillAtSchema(openingFill("AAPL"), 2).
+		wantRunError("schema version", "2", "3")
 }
 
 // TestReducerRejectsFillBeforeConfiguration: the reducer cannot know what a
@@ -1496,8 +1501,8 @@ func TestDuplicateStopFillIsAnIdempotentNoOp(t *testing.T) {
 	}
 	// 55 x 1, the breakout bar's 3, the opening fill's 2, the stop fill's 1:
 	// the duplicate delivery emits nothing at all, not merely nothing new.
-	if len(emitted) != 61 {
-		t.Errorf("len(emitted) = %d, want 61 (the duplicate stop fill emits nothing)", len(emitted))
+	if len(emitted) != 62 {
+		t.Errorf("len(emitted) = %d, want 62 (the duplicate stop fill emits nothing)", len(emitted))
 	}
 }
 
@@ -1537,6 +1542,7 @@ func TestStopFillForAnUnknownCampaignIsRejected(t *testing.T) {
 		Kind:         event.FillKindStop,
 		CampaignID:   "campaign:AAPL:1999-01-01T00:00:00.000000000Z",
 		FillID:       "sim-fill-9999",
+		UnitIDs:      []string{"sim-fill-0001"},
 		Direction:    event.DirectionLong,
 		Quantity:     133,
 		Price:        100,
@@ -1581,6 +1587,7 @@ func TestStopFillForAnInstrumentWithNoHistoryIsRejected(t *testing.T) {
 		Kind:         event.FillKindStop,
 		CampaignID:   "campaign:TSLA:2026-02-27T00:00:00.000000000Z",
 		FillID:       "sim-fill-9999",
+		UnitIDs:      []string{"some-unit"},
 		Direction:    event.DirectionLong,
 		Quantity:     133,
 		Price:        100,
@@ -1626,7 +1633,7 @@ func TestStopFillWithWrongQuantityIsRejected(t *testing.T) {
 		bars(breakoutBars("AAPL")).
 		fill(openingFill("AAPL")).
 		fill(partial).
-		wantRunError("AAPL", "100", "133", "partial stop fill is rejected")
+		wantRunError("AAPL", "100", "133", "a partial fill against the named units is rejected")
 }
 
 // TestStopFillWithMismatchedDirectionIsRejected: the closing fill must be in
@@ -1661,8 +1668,8 @@ func TestStopFillAtWrongSchemaIsRejected(t *testing.T) {
 	newStream(t, cfg).
 		bars(breakoutBars("AAPL")).
 		fill(openingFill("AAPL")).
-		fillAtSchema(stop, 1).
-		wantRunError("schema version", "1", "2")
+		fillAtSchema(stop, 2).
+		wantRunError("schema version", "2", "3")
 }
 
 // TestStopFillNamingAProposalIsRejected covers the ticket's "a stop fill
@@ -1858,8 +1865,8 @@ func TestOpeningFillRedeliveredAfterTheCampaignClosedIsANoOp(t *testing.T) {
 	// nothing new: 55 warm-up + the breakout bar's 3 + the opening fill's 2
 	// (Campaign-opened, Protective-Stop-set) + the stop fill's 1
 	// (Campaign-exited).
-	if len(emitted) != 61 {
-		t.Errorf("len(emitted) = %d, want 61 (the redelivered opening fill emits nothing)", len(emitted))
+	if len(emitted) != 62 {
+		t.Errorf("len(emitted) = %d, want 62 (the redelivered opening fill emits nothing)", len(emitted))
 	}
 }
 
@@ -1898,6 +1905,7 @@ func TestStopFillRedeliveredAfterASecondCampaignHasOpenedAndClosedIsANoOp(t *tes
 		Kind:         event.FillKindStop,
 		CampaignID:   campaignID2,
 		FillID:       "sim-fill-1003",
+		UnitIDs:      []string{"sim-fill-1002"},
 		Direction:    event.DirectionLong,
 		Quantity:     1,
 		Price:        campaignFillPrice - 10,
@@ -1956,6 +1964,7 @@ func TestFillHistoryIsRememberedAcrossAnInstrumentsWholeLife(t *testing.T) {
 		Kind:         event.FillKindStop,
 		CampaignID:   campaignID2,
 		FillID:       stop1.FillID,
+		UnitIDs:      []string{"sim-fill-1002"},
 		Direction:    event.DirectionLong,
 		Quantity:     1,
 		Price:        campaignFillPrice - 10,

@@ -9,23 +9,47 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
 var campaignEvaluatedPeriodEnd = time.Date(2026, time.March, 20, 0, 0, 0, 0, time.UTC)
 
+// campaignEvaluatedUnitQuantity/campaignEvaluatedDollarsPerPoint/
+// campaignEvaluatedNotionalAccount are the fixture's own sizing figures,
+// matching the single-Unit Campaign campaignEntryPrice/proposalN (fill.go's
+// own fixtures) describe.
+const (
+	campaignEvaluatedUnitQuantity    = int64(133)
+	campaignEvaluatedDollarsPerPoint = 1.0
+	campaignEvaluatedNotionalAccount = 1_000_000.0
+)
+
 // validCampaignEvaluated returns a ready-channel, no-breach reading for the
 // Campaign validCampaignOpened describes: the Exit Channel low (180) sits
 // below the Campaign's Protective Stop, and both sit below the bar that
-// produced this reading, so nothing here is a breach.
+// produced this reading, so nothing here is a breach. Units holds the
+// single Unit this fixture's Campaign has ever held, so ProtectiveStop (the
+// minimum across Units) coincides with that Unit's own — #11/#12's own
+// single-Unit fixtures are unaffected by #15's Units/aggregate-risk
+// addition.
 func validCampaignEvaluated() event.CampaignEvaluatedPayload {
+	stop := 126.09441570423544
+	aggregateOpenRisk := (campaignEntryPrice - stop) * float64(campaignEvaluatedUnitQuantity) * campaignEvaluatedDollarsPerPoint
 	return event.CampaignEvaluatedPayload{
-		CampaignID:       "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
-		InstrumentID:     "AAPL",
-		PeriodEnd:        campaignEvaluatedPeriodEnd,
-		ProtectiveStop:   126.09441570423544,
-		ExitChannelLow:   180,
-		ExitChannelReady: true,
-		ExitConditionMet: false,
+		CampaignID:     "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
+		InstrumentID:   "AAPL",
+		PeriodEnd:      campaignEvaluatedPeriodEnd,
+		ProtectiveStop: stop,
+		Units: []event.CampaignEvaluatedUnit{
+			{UnitIndex: 1, EntryPrice: campaignEntryPrice, Quantity: campaignEvaluatedUnitQuantity, ProtectiveStop: stop},
+		},
+		ExitChannelLow:            180,
+		ExitChannelReady:          true,
+		ExitConditionMet:          false,
+		DollarsPerPoint:           campaignEvaluatedDollarsPerPoint,
+		AggregateOpenRisk:         aggregateOpenRisk,
+		NotionalAccount:           campaignEvaluatedNotionalAccount,
+		AggregateOpenRiskFraction: aggregateOpenRisk / campaignEvaluatedNotionalAccount,
 	}
 }
 
@@ -178,6 +202,9 @@ func TestCampaignEvaluatedPayloadValidateAggregatesEveryField(t *testing.T) {
 		"instrument id",
 		"period end",
 		"protective stop",
+		"units is required",
+		"dollars per point",
+		"notional account",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("Validate() error = %v, want substring %q", err, want)
@@ -191,8 +218,162 @@ func TestCampaignEvaluatedEventConstants(t *testing.T) {
 	if event.CampaignEvaluatedEventType != "strategy.campaign.evaluated" {
 		t.Errorf("CampaignEvaluatedEventType = %q, want %q", event.CampaignEvaluatedEventType, "strategy.campaign.evaluated")
 	}
-	if event.CampaignEvaluatedSchemaVersion != 1 {
-		t.Errorf("CampaignEvaluatedSchemaVersion = %d, want 1", event.CampaignEvaluatedSchemaVersion)
+	if event.CampaignEvaluatedSchemaVersion != 2 {
+		t.Errorf("CampaignEvaluatedSchemaVersion = %d, want 2", event.CampaignEvaluatedSchemaVersion)
+	}
+}
+
+// --- #15: Units, and the aggregate open risk re-derivation -----------------
+
+// validCampaignEvaluatedTwoUnits returns a legitimate two-Unit reading, with
+// Unit 1's stop already raised to match Unit 2's own (the non-gap case) —
+// so ProtectiveStop (the minimum) equals BOTH units' own level.
+func validCampaignEvaluatedTwoUnits(t *testing.T) event.CampaignEvaluatedPayload {
+	t.Helper()
+	const (
+		entry1 = 28.30
+		entry2 = 28.90
+		n      = 1.20
+	)
+	stop, err := sizing.ProtectiveStopLevel(entry2, n, 2.0, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("ProtectiveStopLevel() error = %v", err)
+	}
+	units := []event.CampaignEvaluatedUnit{
+		{UnitIndex: 1, EntryPrice: entry1, Quantity: 100, ProtectiveStop: stop},
+		{UnitIndex: 2, EntryPrice: entry2, Quantity: 100, ProtectiveStop: stop},
+	}
+	sizingUnits := make([]sizing.UnitOpenRisk, len(units))
+	for i, u := range units {
+		sizingUnits[i] = sizing.UnitOpenRisk{EntryPrice: u.EntryPrice, ProtectiveStop: u.ProtectiveStop, Quantity: u.Quantity}
+	}
+	aggregate, err := sizing.AggregateOpenRisk(sizingUnits, 1.0)
+	if err != nil {
+		t.Fatalf("AggregateOpenRisk() error = %v", err)
+	}
+	const notionalAccount = 1_000_000.0
+	return event.CampaignEvaluatedPayload{
+		CampaignID:                "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
+		InstrumentID:              "AAPL",
+		PeriodEnd:                 campaignEvaluatedPeriodEnd,
+		ProtectiveStop:            stop,
+		Units:                     units,
+		ExitChannelLow:            0,
+		ExitChannelReady:          false,
+		ExitConditionMet:          false,
+		DollarsPerPoint:           1.0,
+		AggregateOpenRisk:         aggregate,
+		NotionalAccount:           notionalAccount,
+		AggregateOpenRiskFraction: aggregate / notionalAccount,
+	}
+}
+
+func TestCampaignEvaluatedPayloadValidateAcceptsMultipleUnits(t *testing.T) {
+	t.Parallel()
+
+	payload := validCampaignEvaluatedTwoUnits(t)
+	if err := payload.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil for a legitimate two-unit reading", err)
+	}
+}
+
+// TestCampaignEvaluatedPayloadValidateProtectiveStopMustBeTheMinimum is the
+// ticket's required check: ProtectiveStop must equal the minimum across
+// Units' own ProtectiveStop, not some other figure.
+func TestCampaignEvaluatedPayloadValidateProtectiveStopMustBeTheMinimum(t *testing.T) {
+	t.Parallel()
+
+	payload := validCampaignEvaluatedTwoUnits(t)
+	payload.Units[0].ProtectiveStop -= 1 // now the true minimum, but ProtectiveStop is not updated to match
+	payload.Units[0].EntryPrice += 2     // keep entry > stop after lowering it
+
+	err := payload.Validate()
+	if err == nil || !strings.Contains(err.Error(), "does not equal the minimum") {
+		t.Fatalf("Validate() error = %v, want substring %q", err, "does not equal the minimum")
+	}
+}
+
+// TestCampaignEvaluatedPayloadValidateRejectsUnitsOutOfOrder covers a
+// non-ascending UnitIndex list.
+func TestCampaignEvaluatedPayloadValidateRejectsUnitsOutOfOrder(t *testing.T) {
+	t.Parallel()
+
+	payload := validCampaignEvaluatedTwoUnits(t)
+	payload.Units[0], payload.Units[1] = payload.Units[1], payload.Units[0]
+
+	err := payload.Validate()
+	if err == nil || !strings.Contains(err.Error(), "strictly ascending") {
+		t.Fatalf("Validate() error = %v, want substring %q", err, "strictly ascending")
+	}
+}
+
+// TestCampaignEvaluatedPayloadValidateRejectsAggregateOpenRiskMismatch is
+// the ticket's required negative: a payload claiming the CORRECTLY-laddered
+// aggregate while its own Units list carries the prototype's bug (each Unit
+// given a fresh, un-raised stop) must be rejected — the validator, not just
+// the reducer, must reject it (issue #15's "assert the validator rejects a
+// payload claiming the ladder's aggregate while carrying those stops").
+func TestCampaignEvaluatedPayloadValidateRejectsAggregateOpenRiskMismatch(t *testing.T) {
+	t.Parallel()
+
+	payload := validCampaignEvaluatedTwoUnits(t)
+	// Claim a smaller aggregate than what these (correctly-laddered) Units
+	// actually derive to.
+	payload.AggregateOpenRisk = 1
+	payload.AggregateOpenRiskFraction = payload.AggregateOpenRisk / payload.NotionalAccount
+
+	err := payload.Validate()
+	if err == nil || !strings.Contains(err.Error(), "does not match the derivation") {
+		t.Fatalf("Validate() error = %v, want substring %q", err, "does not match the derivation")
+	}
+}
+
+// TestCampaignEvaluatedPayloadValidateRejectsFreshRiskPerUnit is the
+// ticket's headline negative, at the payload seam: four Units, each given a
+// FRESH 2N stop (the prototype's risk-multiplication bug) rather than the
+// correctly-raised Stop Ladder, with AggregateOpenRisk claiming the
+// (smaller, correct) laddered figure. Validate must reject it.
+func TestCampaignEvaluatedPayloadValidateRejectsFreshRiskPerUnit(t *testing.T) {
+	t.Parallel()
+
+	const n = 1.20
+	entries := []float64{28.30, 28.90, 29.50, 30.10}
+	units := make([]event.CampaignEvaluatedUnit, len(entries))
+	for i, entry := range entries {
+		stop, err := sizing.ProtectiveStopLevel(entry, n, 2.0, sizing.DirectionLong)
+		if err != nil {
+			t.Fatalf("ProtectiveStopLevel(%v) error = %v", entry, err)
+		}
+		units[i] = event.CampaignEvaluatedUnit{UnitIndex: i + 1, EntryPrice: entry, Quantity: 100, ProtectiveStop: stop}
+	}
+	minStop := units[0].ProtectiveStop
+	for _, u := range units[1:] {
+		if u.ProtectiveStop < minStop {
+			minStop = u.ProtectiveStop
+		}
+	}
+	// The correctly-laddered aggregate this fixture WRONGLY claims: 5N x
+	// quantity, computed independently of the (bugged) Units list above.
+	const notionalAccount = 1_000_000.0
+	wrongAggregate := 100.0 * 5 * n
+	payload := event.CampaignEvaluatedPayload{
+		CampaignID:                "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
+		InstrumentID:              "AAPL",
+		PeriodEnd:                 campaignEvaluatedPeriodEnd,
+		ProtectiveStop:            minStop,
+		Units:                     units,
+		ExitChannelLow:            0,
+		ExitChannelReady:          false,
+		ExitConditionMet:          false,
+		DollarsPerPoint:           1.0,
+		AggregateOpenRisk:         wrongAggregate,
+		NotionalAccount:           notionalAccount,
+		AggregateOpenRiskFraction: wrongAggregate / notionalAccount,
+	}
+
+	err := payload.Validate()
+	if err == nil || !strings.Contains(err.Error(), "does not match the derivation") {
+		t.Fatalf("Validate() error = %v, want substring %q (a fresh 2N stop per unit is NOT the ladder's aggregate)", err, "does not match the derivation")
 	}
 }
 
@@ -244,6 +425,11 @@ func TestCampaignEvaluatedPayloadJSONTags(t *testing.T) {
 		"exit_channel_low",
 		"exit_channel_ready",
 		"exit_condition_met",
+		"units",
+		"dollars_per_point",
+		"aggregate_open_risk",
+		"notional_account",
+		"aggregate_open_risk_fraction",
 	} {
 		if _, ok := asMap[key]; !ok {
 			t.Errorf("encoded payload missing expected key %q: %s", key, encoded)
