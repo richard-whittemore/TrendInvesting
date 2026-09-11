@@ -502,17 +502,18 @@ func (r *Reducer) expireEntryProposal(state *instrumentState, bar event.Complete
 	state.pendingProposal = nil
 
 	payload := event.ProposalExpiredPayload{
-		InstrumentID: bar.InstrumentID,
-		Kind:         event.ProposalKindEntry,
-		ProposalID:   pending.proposalID,
-		SignalID:     pending.signalID,
-		PeriodEnd:    pending.periodEnd,
-		ExpiredAt:    bar.PeriodEnd,
-		Rule:         event.RuleSignalExpiresWithItsBar,
-		ADR:          event.ADRSignalExpiry,
-		Reason:       event.ExpiryReasonSupersededByNextBar,
-		Quantity:     pending.quantity,
-		Level:        pending.entryLevel,
+		InstrumentID:   bar.InstrumentID,
+		Kind:           event.ProposalKindEntry,
+		ProposalID:     pending.proposalID,
+		SignalID:       pending.signalID,
+		PeriodEnd:      pending.periodEnd,
+		ExpiredAt:      bar.PeriodEnd,
+		EarliestFillAt: pending.earliestFillAt,
+		Rule:           event.RuleSignalExpiresWithItsBar,
+		ADR:            event.ADRSignalExpiry,
+		Reason:         event.ExpiryReasonSupersededByNextBar,
+		Quantity:       pending.quantity,
+		Level:          pending.entryLevel,
 	}
 	if err := payload.Validate(); err != nil {
 		return event.Envelope{}, fmt.Errorf("strategy: built invalid proposal expired payload: %w", err)
@@ -580,17 +581,18 @@ func (r *Reducer) expireExitProposal(state *instrumentState, bar event.Completed
 	state.pendingExitProposal = nil
 
 	payload := event.ProposalExpiredPayload{
-		InstrumentID: bar.InstrumentID,
-		Kind:         event.ProposalKindExit,
-		ProposalID:   pending.proposalID,
-		SignalID:     "",
-		PeriodEnd:    pending.periodEnd,
-		ExpiredAt:    bar.PeriodEnd,
-		Rule:         event.RuleExitProposalExpiresWithItsBar,
-		ADR:          event.ADRSignalExpiry,
-		Reason:       event.ExpiryReasonSupersededByNextBar,
-		Quantity:     pending.quantity,
-		Level:        pending.level,
+		InstrumentID:   bar.InstrumentID,
+		Kind:           event.ProposalKindExit,
+		ProposalID:     pending.proposalID,
+		SignalID:       "",
+		PeriodEnd:      pending.periodEnd,
+		ExpiredAt:      bar.PeriodEnd,
+		EarliestFillAt: pending.earliestFillAt,
+		Rule:           event.RuleExitProposalExpiresWithItsBar,
+		ADR:            event.ADRSignalExpiry,
+		Reason:         event.ExpiryReasonSupersededByNextBar,
+		Quantity:       pending.quantity,
+		Level:          pending.level,
 	}
 	if err := payload.Validate(); err != nil {
 		return event.Envelope{}, fmt.Errorf("strategy: built invalid proposal expired payload: %w", err)
@@ -661,17 +663,18 @@ func (r *Reducer) expireAddProposal(state *instrumentState, bar event.CompletedB
 	state.pendingAddProposal = nil
 
 	payload := event.ProposalExpiredPayload{
-		InstrumentID: bar.InstrumentID,
-		Kind:         event.ProposalKindAdd,
-		ProposalID:   pending.proposalID,
-		SignalID:     "",
-		PeriodEnd:    pending.periodEnd,
-		ExpiredAt:    bar.PeriodEnd,
-		Rule:         event.RuleAddProposalExpiresWithItsBar,
-		ADR:          event.ADRSignalExpiry,
-		Reason:       event.ExpiryReasonSupersededByNextBar,
-		Quantity:     pending.quantity,
-		Level:        pending.level,
+		InstrumentID:   bar.InstrumentID,
+		Kind:           event.ProposalKindAdd,
+		ProposalID:     pending.proposalID,
+		SignalID:       "",
+		PeriodEnd:      pending.periodEnd,
+		ExpiredAt:      bar.PeriodEnd,
+		EarliestFillAt: pending.earliestFillAt,
+		Rule:           event.RuleAddProposalExpiresWithItsBar,
+		ADR:            event.ADRSignalExpiry,
+		Reason:         event.ExpiryReasonSupersededByNextBar,
+		Quantity:       pending.quantity,
+		Level:          pending.level,
 	}
 	if err := payload.Validate(); err != nil {
 		return event.Envelope{}, fmt.Errorf("strategy: built invalid proposal expired payload: %w", err)
@@ -705,26 +708,40 @@ func (r *Reducer) expireAddProposal(state *instrumentState, bar event.CompletedB
 //
 // Unlike expireAddProposal, ExpiredAt is the CLOSING FILL's own timestamp,
 // not a bar's PeriodEnd: the proposal was superseded by an execution, not by
-// a later bar closing. applyAddFill's own partiallyStopped guard is the
-// second half of this fix — belt and braces, since clearing
-// state.pendingAddProposal here already makes a later add fill for it fail
-// the ordinary "no outstanding add proposal" check on its own.
+// a later bar closing, and — since a resting stop can fill INSIDE the same
+// bar that proposed the Add (ADR 0005) — ExpiredAt can legitimately equal or
+// precede PeriodEnd here, unlike expireAddProposal's own next-bar case; see
+// event.ProposalExpiredPayload's own doc comment for the reason-dependent
+// rule this requires (#15 review round, "Stop Expiry Commits Partial
+// State"). applyAddFill's own partiallyStopped guard is a further,
+// independent line of defence, belt and braces alongside cancelling the
+// proposal outright here.
+//
+// **Deliberately does NOT mutate state.pendingAddProposal.** Building and
+// validating this payload can fail — genuinely, not merely defensively —
+// when the closing fill's own timestamp predates the proposal's own
+// EarliestFillAt bound, and openCampaign's own discipline applies here
+// exactly as everywhere else in this file: nothing may be committed to
+// memory before every payload for the transition has validated. The caller
+// (applyStopFill) clears state.pendingAddProposal itself, only after this
+// envelope — and every other payload the same stop fill produces — has
+// validated successfully.
 func (r *Reducer) expireAddProposalForStop(state *instrumentState, fill event.FillPayload, input event.Envelope) (event.Envelope, error) {
 	pending := state.pendingAddProposal
-	state.pendingAddProposal = nil
 
 	payload := event.ProposalExpiredPayload{
-		InstrumentID: fill.InstrumentID,
-		Kind:         event.ProposalKindAdd,
-		ProposalID:   pending.proposalID,
-		SignalID:     "",
-		PeriodEnd:    pending.periodEnd,
-		ExpiredAt:    fill.FilledAt,
-		Rule:         event.RuleAddProposalSupersededByStop,
-		ADR:          event.ADRSignalExpiry,
-		Reason:       event.ExpiryReasonSupersededByStop,
-		Quantity:     pending.quantity,
-		Level:        pending.level,
+		InstrumentID:   fill.InstrumentID,
+		Kind:           event.ProposalKindAdd,
+		ProposalID:     pending.proposalID,
+		SignalID:       "",
+		PeriodEnd:      pending.periodEnd,
+		ExpiredAt:      fill.FilledAt,
+		EarliestFillAt: pending.earliestFillAt,
+		Rule:           event.RuleAddProposalSupersededByStop,
+		ADR:            event.ADRSignalExpiry,
+		Reason:         event.ExpiryReasonSupersededByStop,
+		Quantity:       pending.quantity,
+		Level:          pending.level,
 	}
 	if err := payload.Validate(); err != nil {
 		return event.Envelope{}, fmt.Errorf("strategy: built invalid proposal expired payload: %w", err)
@@ -1695,6 +1712,23 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 		exitedEnvelope = &envelope
 	}
 
+	// #15 review round ("Stop Expiry Commits Partial State"): built and
+	// validated here too, BEFORE any state mutation below — this is
+	// genuinely reachable, not merely defensive: a stop-superseded expiry's
+	// ExpiredAt/EarliestFillAt chronology (see event.ProposalExpiredPayload's
+	// own doc comment) depends on the PENDING PROPOSAL's own bar, which this
+	// closing fill's own timestamp has no guaranteed relationship to. Only
+	// relevant for a PARTIAL close: a full close discards the whole Campaign
+	// (and so any pending Add proposal for it) regardless.
+	var addExpiryEnvelope *event.Envelope
+	if remainingAfter > 0 && state.pendingAddProposal != nil {
+		envelope, err := r.expireAddProposalForStop(state, fill, input)
+		if err != nil {
+			return nil, err
+		}
+		addExpiryEnvelope = &envelope
+	}
+
 	// The state moves only now, after every payload it will be journalled as
 	// has been validated — identical discipline to openCampaign's own.
 	campaign.closedQuantity += closingQuantity
@@ -1739,13 +1773,13 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 		// 0011's ordinary lifecycle), since a fill for it could otherwise
 		// arrive and be accepted before that next bar ever does (see
 		// applyAddFill's own new partiallyStopped guard for the second half
-		// of this fix).
-		if state.pendingAddProposal != nil {
-			expired, err := r.expireAddProposalForStop(state, fill, input)
-			if err != nil {
-				return nil, err
-			}
-			emissions = append(emissions, expired)
+		// of this fix). The envelope was already built and validated above,
+		// before any state moved; only now, once we know the WHOLE
+		// transition validated successfully, is state.pendingAddProposal
+		// actually cleared.
+		if addExpiryEnvelope != nil {
+			state.pendingAddProposal = nil
+			emissions = append(emissions, *addExpiryEnvelope)
 		}
 	}
 

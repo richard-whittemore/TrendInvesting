@@ -464,7 +464,15 @@ const ProposalExpiredEventType = "strategy.proposal.expired"
 // FillSchemaVersion was not bumped for FillKindAdd: Kind is already required
 // at schema 2, and no schema-2 record ever wrote "add" before this ticket,
 // so there is no existing record this new value could be mistaken for.
-const ProposalExpiredSchemaVersion uint32 = 2
+//
+// Bumped 2 -> 3 for #15's review round ("Stop Expiry Commits Partial
+// State"): EarliestFillAt was added, needed because ExpiredAt's required
+// relationship to PeriodEnd now differs by Reason (see EarliestFillAt's own
+// doc comment and Validate). A schema-2 record decodes EarliestFillAt as the
+// zero time, which Validate would read as "no lower bound at all" — silently
+// weakening the chronology check for every OLD record rather than rejecting
+// it outright — so schema 2 is rejected (ADR 0015's rule).
+const ProposalExpiredSchemaVersion uint32 = 3
 
 // The three Kind values ProposalExpiredPayload accepts. An entry-kind expiry
 // is a trade proposal (strategy.trade.proposed) that a Signal produced and
@@ -559,11 +567,34 @@ type ProposalExpiredPayload struct {
 	// comment).
 	ProposalID string `json:"proposal_id"`
 	SignalID   string `json:"signal_id"`
-	// PeriodEnd is the completed bar the expired proposal belonged to;
-	// ExpiredAt is the period end of the bar that superseded it, and is always
-	// strictly later.
+	// PeriodEnd is the completed bar the expired proposal belonged to.
+	// ExpiredAt is when the proposal actually ended: for Reason
+	// ExpiryReasonSupersededByNextBar, the period end of the bar that
+	// superseded it (always strictly LATER than PeriodEnd — a proposal is
+	// superseded by a later bar); for Reason ExpiryReasonSupersededByStop,
+	// the closing fill's own timestamp, which can legitimately fall AT OR
+	// BEFORE PeriodEnd (#15 review round, "Stop Expiry Commits Partial
+	// State" — ADR 0005 makes a stop a resting order that can fill inside
+	// the SAME bar that proposed the Add it cancels, not only on a later
+	// one). See Validate for the reason-dependent rule this asymmetry
+	// requires.
 	PeriodEnd time.Time `json:"period_end"`
 	ExpiredAt time.Time `json:"expired_at"`
+	// EarliestFillAt is the earliest instant at which an order for THIS
+	// proposal could have executed — the period end of the bar BEFORE the
+	// proposal's own decision bar (the identical figure
+	// pendingProposalState.earliestFillAt/pendingAddProposalState.earliestFillAt
+	// already carry internally), restated here so ExpiredAt's chronology is
+	// checkable from the event alone. Required to hold for EVERY Reason —
+	// unlike the PeriodEnd relationship above, ExpiredAt must always be
+	// strictly after this, since no execution or supersession can predate
+	// the earliest moment an order for the proposal could have existed. The
+	// zero time here means "no lower bound" (a proposal raised on an
+	// instrument's very first decision bar — see
+	// pendingProposalState.earliestFillAt's own doc comment for why that
+	// degrades correctly rather than needing a special case): every real
+	// ExpiredAt is after it.
+	EarliestFillAt time.Time `json:"earliest_fill_at"`
 	// Rule and ADR name the rule that produced this decision.
 	Rule string `json:"rule"`
 	ADR  string `json:"adr"`
@@ -579,10 +610,15 @@ type ProposalExpiredPayload struct {
 
 // Validate checks the identifying fields, that Kind is one of the recognised
 // values and that SignalID is present or absent exactly as that Kind
-// requires, that the expiry is stamped strictly after the bar whose proposal
-// expired (an expiry at or before it would describe an impossible ordering),
-// that Reason is one of the enumerated constants, and that the restated
-// proposal figures are usable.
+// requires, that Reason is one of the enumerated constants, that the
+// restated proposal figures are usable, and ExpiredAt's chronology:
+// strictly after EarliestFillAt for EVERY Reason (no execution or
+// supersession can predate the earliest moment an order for the proposal
+// could have existed), and — ADDITIONALLY, for Reason
+// ExpiryReasonSupersededByNextBar only — strictly after PeriodEnd too (a
+// proposal is superseded by a LATER bar in that case; ExpiryReasonSupersededByStop's
+// own closing fill can legitimately land inside the SAME bar, see
+// ExpiredAt's own doc comment).
 func (p ProposalExpiredPayload) Validate() error {
 	var errs []error
 	if p.InstrumentID == "" {
@@ -611,12 +647,23 @@ func (p ProposalExpiredPayload) Validate() error {
 	if !periodEndPresent {
 		errs = append(errs, errors.New("period end is required"))
 	}
-	switch {
-	case p.ExpiredAt.IsZero():
+	if p.ExpiredAt.IsZero() {
 		errs = append(errs, errors.New("expired at is required"))
-	case periodEndPresent && !p.ExpiredAt.After(p.PeriodEnd):
-		errs = append(errs, fmt.Errorf("expired at %s must be after the proposal's period end %s: a proposal is superseded by a later bar",
-			p.ExpiredAt.Format(time.RFC3339), p.PeriodEnd.Format(time.RFC3339)))
+	} else {
+		// Holds for EVERY Reason: see EarliestFillAt's own doc comment for
+		// why the zero value needs no special case.
+		if !p.ExpiredAt.After(p.EarliestFillAt) {
+			errs = append(errs, fmt.Errorf("expired at %s must be after the earliest instant an execution for this proposal could exist (%s)",
+				p.ExpiredAt.Format(time.RFC3339), p.EarliestFillAt.Format(time.RFC3339)))
+		}
+		// The stricter, next-bar-only rule: a stop-superseded expiry's
+		// ExpiredAt is the closing fill's own timestamp, which can
+		// legitimately fall inside the SAME bar that raised the proposal
+		// (ADR 0005) — see ExpiredAt's own doc comment.
+		if p.Reason == ExpiryReasonSupersededByNextBar && periodEndPresent && !p.ExpiredAt.After(p.PeriodEnd) {
+			errs = append(errs, fmt.Errorf("expired at %s must be after the proposal's period end %s: a proposal is superseded by a later bar",
+				p.ExpiredAt.Format(time.RFC3339), p.PeriodEnd.Format(time.RFC3339)))
+		}
 	}
 	if p.Rule == "" {
 		errs = append(errs, errors.New("rule is required"))
