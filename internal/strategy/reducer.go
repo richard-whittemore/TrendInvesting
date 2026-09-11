@@ -77,21 +77,32 @@ type Reducer struct {
 	riskAtStopFraction   float64
 	dollarsPerPoint      float64
 	// notionalAccount is ADR 0007's Notional Account (CONTEXT.md),
-	// initialised to the configured starting equity and stepped down by
-	// event.AccountSnapshotEventType events (#16; see notional.go's
-	// applyAccountSnapshot). Yearly re-basing and recovery are #17, not
-	// implemented here.
+	// initialised to the configured starting equity and driven by
+	// event.AccountSnapshotEventType and event.CashMovementEventType events
+	// (#16/#17; see notional.go's applyAccountSnapshot/applyCashMovement).
 	notionalAccount *NotionalAccount
-	// drawdownStepsSeen counts every Drawdown Step applied so far in this
-	// run, for DrawdownStepAppliedPayload.StepNumber (1-based). #17's yearly
-	// re-basing will need to reset this at each re-basing date; out of scope
-	// here, so it counts for the life of the run.
+	// drawdownStepsSeen counts every Drawdown Step applied since the ladder
+	// was last reset — by a re-basing or a full recovery (#17) — for
+	// DrawdownStepAppliedPayload.StepNumber (1-based).
 	drawdownStepsSeen int
-	// lastAccountSnapshotAt/hasAccountSnapshot enforce account snapshot
-	// chronology, the same shape as instrumentState's lastPeriodEnd/bar
-	// chronology check in applyCompletedBar.
-	lastAccountSnapshotAt time.Time
-	hasAccountSnapshot    bool
+	// lastAccountEventAt/hasAccountEvent enforce chronology across the
+	// WHOLE shared account timeline (#17, ADR 0007 rule 4): both account
+	// snapshots and cash movements share this one per-account clock, the
+	// same shape as instrumentState's lastPeriodEnd/bar chronology check in
+	// applyCompletedBar.
+	lastAccountEventAt time.Time
+	hasAccountEvent    bool
+	// accountCurrency is pinned from the Currency of the first account
+	// snapshot or cash movement accepted (Greptile PR #71 finding), and
+	// every later account event of either type must match it exactly. A
+	// multi-currency account is out of scope for this project (issue #17
+	// Findings): without this check, a later event stated in a different
+	// currency would be silently scaled and compared against figures stated
+	// in the pinned one. Empty until the first account event is accepted;
+	// AccountSnapshotPayload.Validate/CashMovementPayload.Validate already
+	// require Currency non-empty, so the empty string is unambiguous as
+	// "not yet pinned".
+	accountCurrency string
 
 	instruments map[string]*instrumentState
 }
@@ -150,9 +161,11 @@ func NewReducer(strategyVersion, configurationHash string) (*Reducer, error) {
 //   - event.FillEventType: the only input that may change position state
 //     (#11; see campaign.go).
 //   - event.AccountSnapshotEventType: feeds actual equity to the Notional
-//     Account (ADR 0007; #16) and emits one
-//     event.DrawdownStepAppliedEventType decision per Drawdown Step applied
-//     — see notional.go's applyAccountSnapshot.
+//     Account (ADR 0007; #16/#17: re-basing, the Drawdown Step ladder, and
+//     recovery, in that order) — see notional.go's applyAccountSnapshot.
+//   - event.CashMovementEventType: scales the Notional Account for a
+//     deposit or withdrawal (ADR 0007; #17) — see notional.go's
+//     applyCashMovement.
 //
 // Any other event type fails closed rather than being silently ignored
 // (docs/development.md principle 4: "Fail closed on unknown schemas").
@@ -166,6 +179,8 @@ func (r *Reducer) Apply(_ context.Context, envelope event.Envelope) ([]event.Env
 		return r.applyFill(envelope)
 	case event.AccountSnapshotEventType:
 		return r.applyAccountSnapshot(envelope)
+	case event.CashMovementEventType:
+		return r.applyCashMovement(envelope)
 	default:
 		return nil, fmt.Errorf("strategy: unrecognized event type %q", envelope.Type)
 	}
@@ -228,14 +243,15 @@ func (r *Reducer) applyConfiguration(envelope event.Envelope) ([]event.Envelope,
 	r.dollarsPerPoint = payload.DollarsPerPoint
 	// ADR 0007's Notional Account, at its configured starting value: before
 	// any account.snapshot arrives it equals StartingEquity exactly (#16's
-	// applyAccountSnapshot, in notional.go, is what steps it down). Yearly
-	// re-basing and recovery are #17.
-	notionalAccount, err := NewNotionalAccount(payload.NotionalAccount.StartingEquity)
+	// applyAccountSnapshot, in notional.go, is what steps it down; #17's
+	// applyAccountSnapshot/applyCashMovement re-base, recover, and scale it).
+	notionalAccount, err := NewNotionalAccount(payload.NotionalAccount.StartingEquity, payload.NotionalAccount.RebasingMonth, payload.NotionalAccount.RebasingDay)
 	if err != nil {
 		// Unreachable: ConfigurationPayload.Validate has already required
-		// StartingEquity to be finite and positive, which is everything
-		// NewNotionalAccount checks. Guarded anyway, matching this project's
-		// fail-closed style.
+		// StartingEquity to be finite and positive and the rebasing
+		// month/day to form a date that recurs every year, which is
+		// everything NewNotionalAccount checks. Guarded anyway, matching
+		// this project's fail-closed style.
 		return nil, fmt.Errorf("strategy: %w", err)
 	}
 	r.notionalAccount = notionalAccount
