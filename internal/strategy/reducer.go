@@ -105,6 +105,14 @@ type Reducer struct {
 	accountCurrency string
 
 	instruments map[string]*instrumentState
+	// acceptedFills is #12's addition, defined and explained in
+	// campaign.go: every fill this reducer has accepted, for the WHOLE
+	// run, keyed by FillID — not per instrument — so that a fill id reused
+	// across two different instruments is caught as a reconciliation
+	// failure rather than accepted twice (each instrument's history no
+	// longer being kept separately), and so a re-delivery stays idempotent
+	// no matter how much has happened since it was first accepted.
+	acceptedFills map[string]acceptedFillState
 }
 
 // instrumentState is one instrument's running True Range/N/Entry Channel
@@ -129,12 +137,6 @@ type instrumentState struct {
 	// recorded fill brought one into being.
 	pendingProposal *pendingProposalState
 	campaign        *campaignState
-	// acceptedFills is #12's addition, defined and explained in
-	// campaign.go: every fill this reducer has accepted for this
-	// instrument, keyed by FillID, for the whole life of the run — not only
-	// the current Campaign's — so a re-delivery stays idempotent no matter
-	// how much has happened to the instrument since.
-	acceptedFills map[string]acceptedFillState
 }
 
 // NewReducer returns a Reducer that stamps every decision it emits with
@@ -154,6 +156,7 @@ func NewReducer(strategyVersion, configurationHash string) (*Reducer, error) {
 		strategyVersion:   strategyVersion,
 		configurationHash: configurationHash,
 		instruments:       make(map[string]*instrumentState),
+		acceptedFills:     make(map[string]acceptedFillState),
 	}, nil
 }
 
@@ -762,7 +765,7 @@ func (r *Reducer) stateFor(instrumentID string) (*instrumentState, error) {
 		// than panicking, in case that ever changes.
 		return nil, fmt.Errorf("strategy: %w", err)
 	}
-	state := &instrumentState{n: n, entryChannel: entryChannel, acceptedFills: make(map[string]acceptedFillState)}
+	state := &instrumentState{n: n, entryChannel: entryChannel}
 	r.instruments[instrumentID] = state
 	return state, nil
 }

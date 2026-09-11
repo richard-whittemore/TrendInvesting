@@ -60,7 +60,8 @@ type campaignState struct {
 
 // acceptedFillState remembers ONE fill this reducer has already accepted —
 // either the entry that opened a Campaign or the stop that closed one —
-// keyed by FillID on instrumentState.acceptedFills (see applyFill).
+// keyed by FillID on Reducer.acceptedFills, for the WHOLE run rather than
+// per instrument (see applyFill).
 //
 // docs/architecture.md requires duplicate decision and order identifiers to
 // be idempotent WITHOUT qualification, and a fill's effect can be long gone
@@ -72,40 +73,52 @@ type campaignState struct {
 // what makes a re-delivery recognisable regardless of how much has happened
 // to the instrument since.
 //
+// It is keyed on the Reducer, not on instrumentState, and carries its own
+// instrumentID, because a fill id is a producer-assigned identifier with no
+// guarantee of being scoped to one instrument: a producer that reused a fill
+// id across two different instruments' executions must be rejected as a
+// reconciliation failure — the same "same id, different contents" rule as
+// any other reused id — rather than silently accepted as two independent
+// new fills because each instrument kept its own, separate history.
+//
 // Memory grows by one of these per fill this reducer actually accepts in a
 // run, which is bounded by the number of fills — the same order of
 // magnitude as the number of Campaigns and Adds a run produces, not a
 // concern at this system's scale.
 type acceptedFillState struct {
-	kind       string
-	proposalID string
-	campaignID string
-	quantity   int64
-	price      float64
-	direction  string
-	filledAt   time.Time
+	instrumentID string
+	kind         string
+	proposalID   string
+	campaignID   string
+	quantity     int64
+	price        float64
+	direction    string
+	filledAt     time.Time
 }
 
 // acceptedFillFromPayload builds the record applyFill stores for fill once
 // it has been accepted (whether it opened or closed a Campaign).
 func acceptedFillFromPayload(fill event.FillPayload) acceptedFillState {
 	return acceptedFillState{
-		kind:       fill.Kind,
-		proposalID: fill.ProposalID,
-		campaignID: fill.CampaignID,
-		quantity:   fill.Quantity,
-		price:      fill.Price,
-		direction:  fill.Direction,
-		filledAt:   fill.FilledAt,
+		instrumentID: fill.InstrumentID,
+		kind:         fill.Kind,
+		proposalID:   fill.ProposalID,
+		campaignID:   fill.CampaignID,
+		quantity:     fill.Quantity,
+		price:        fill.Price,
+		direction:    fill.Direction,
+		filledAt:     fill.FilledAt,
 	}
 }
 
 // matches reports whether fill is the identical fact a was recorded from —
-// same kind, same proposal/campaign it names, same quantity, price,
-// direction and timestamp — as opposed to merely reusing a's fill id for a
-// different execution.
+// same instrument, same kind, same proposal/campaign it names, same
+// quantity, price, direction and timestamp — as opposed to merely reusing
+// a's fill id for a different execution (possibly on a different
+// instrument entirely).
 func (a acceptedFillState) matches(fill event.FillPayload) bool {
-	return a.kind == fill.Kind &&
+	return a.instrumentID == fill.InstrumentID &&
+		a.kind == fill.Kind &&
 		a.proposalID == fill.ProposalID &&
 		a.campaignID == fill.CampaignID &&
 		a.quantity == fill.Quantity &&
@@ -289,20 +302,26 @@ func checkBarConfirmsCampaignOpening(state *instrumentState, bar event.Completed
 // The rules, in the order they are applied:
 //
 //  1. Schema and payload validity, like every other input (ADR 0015).
-//  2. An instrument this reducer has never evaluated can have no proposal
+//  2. Idempotency, checked first — BEFORE even the instrument lookup below —
+//     generically for every fill.Kind, against the WHOLE run's fill history
+//     (Reducer.acceptedFills), not only one instrument's current position: a
+//     re-delivery of a fill this reducer already accepted — whether it
+//     opened a Campaign, closed one, or (after this ticket) any later kind,
+//     for whichever instrument it named — is an idempotent no-op if the
+//     contents match, and a reconciliation failure if they don't
+//     (docs/architecture.md requires duplicate identifiers to be idempotent
+//     without qualification; see acceptedFillState's doc comment for why
+//     neither "current position" nor "per instrument" was enough — a fill id
+//     is a producer-assigned identifier with no guaranteed scope). Checking
+//     this before the instrument lookup means a fill id reused across two
+//     different instruments is caught here, as a reconciliation failure,
+//     rather than being accepted twice because each instrument kept its own
+//     separate history.
+//  3. An instrument this reducer has never evaluated can have no proposal
 //     outstanding, so any fill for it is unmatched.
-//  3. Idempotency, checked generically for every fill.Kind against the
-//     instrument's WHOLE fill history (state.acceptedFills), not only its
-//     current position: a re-delivery of a fill this reducer already
-//     accepted — whether it opened a Campaign, closed one, or (after this
-//     ticket) any later kind — is an idempotent no-op if the contents match,
-//     and a reconciliation failure if they don't (docs/architecture.md
-//     requires duplicate identifiers to be idempotent without
-//     qualification; see acceptedFillState's doc comment for why "current
-//     position" was not enough).
 //  4. If a Campaign is already open, an entry-kind fill with a genuinely new
 //     id is something this ticket deliberately refuses (see
-//     applyFillToOpenCampaign) — rule 3 has already resolved every
+//     applyFillToOpenCampaign) — rule 2 has already resolved every
 //     re-delivery by this point, so what remains here is always a second,
 //     different execution.
 //  5. Otherwise the fill must match the outstanding proposal: the same
@@ -365,6 +384,25 @@ func (r *Reducer) applyFill(envelope event.Envelope) ([]event.Envelope, error) {
 		return nil, fmt.Errorf("strategy: invalid fill payload: %w", err)
 	}
 
+	// Idempotency, checked first — before even the instrument lookup below —
+	// and generically against the WHOLE run's fill history, keyed only by
+	// FillID: see acceptedFillState's doc comment for why neither "current
+	// position" nor "per instrument" is enough. A fill id reused for a
+	// different instrument entirely is therefore caught here, as a
+	// reconciliation failure, rather than by an instrument-scoped check that
+	// would never see it.
+	if recorded, seen := r.acceptedFills[fill.FillID]; seen {
+		if !recorded.matches(fill) {
+			return nil, fmt.Errorf("strategy: fill %q was already recorded (instrument %q, kind %s, proposal %q, campaign %q, %d at %v %s on %s), but this delivery differs (instrument %q, kind %s, proposal %q, campaign %q, %d at %v %s on %s); a reused fill identifier carrying different contents is a reconciliation failure, not a duplicate delivery",
+				fill.FillID,
+				recorded.instrumentID, recorded.kind, recorded.proposalID, recorded.campaignID, recorded.quantity, recorded.price, recorded.direction, recorded.filledAt.Format(time.RFC3339),
+				fill.InstrumentID, fill.Kind, fill.ProposalID, fill.CampaignID, fill.Quantity, fill.Price, fill.Direction, fill.FilledAt.Format(time.RFC3339))
+		}
+		// The duplicate delivery of an execution already recorded: nothing
+		// to do, and nothing to complain about.
+		return nil, nil
+	}
+
 	// Deliberately a plain lookup rather than stateFor: an instrument the
 	// reducer has never seen a bar for cannot have been proposed for, and
 	// creating state here would make the reducer look as though it had.
@@ -376,23 +414,6 @@ func (r *Reducer) applyFill(envelope event.Envelope) ([]event.Envelope, error) {
 		}
 		return nil, fmt.Errorf("strategy: fill %q names proposal %q for instrument %q, which this reducer has never evaluated; a fill for an order this strategy never proposed is a reconciliation failure, not something to absorb (docs/architecture.md)",
 			fill.FillID, fill.ProposalID, fill.InstrumentID)
-	}
-
-	// Idempotency, checked first and generically against the instrument's
-	// WHOLE fill history — see acceptedFillState's doc comment for why a
-	// re-delivery must be recognisable no matter how much has happened to
-	// the instrument since the fill was first accepted (a closed Campaign,
-	// or a second Campaign that has itself already opened and closed).
-	if recorded, seen := state.acceptedFills[fill.FillID]; seen {
-		if !recorded.matches(fill) {
-			return nil, fmt.Errorf("strategy: instrument %q: fill %q was already recorded (kind %s, proposal %q, campaign %q, %d at %v %s on %s), but this delivery differs (kind %s, proposal %q, campaign %q, %d at %v %s on %s); a reused fill identifier carrying different contents is a reconciliation failure, not a duplicate delivery",
-				fill.InstrumentID, fill.FillID,
-				recorded.kind, recorded.proposalID, recorded.campaignID, recorded.quantity, recorded.price, recorded.direction, recorded.filledAt.Format(time.RFC3339),
-				fill.Kind, fill.ProposalID, fill.CampaignID, fill.Quantity, fill.Price, fill.Direction, fill.FilledAt.Format(time.RFC3339))
-		}
-		// The duplicate delivery of an execution already recorded: nothing
-		// to do, and nothing to complain about.
-		return nil, nil
 	}
 
 	// #12: a stop fill takes a completely different path from an entry
@@ -613,7 +634,7 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 	// idempotent no-op for the rest of this run, however much later it
 	// arrives and however much has happened to the instrument since (see
 	// acceptedFillState's doc comment).
-	state.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
+	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
 
 	// EventTime is the fill's timestamp on both: the Campaign, and its stop,
 	// came into being when the fill did, not when the Signal fired. Order is
@@ -713,7 +734,7 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 	// re-delivery of this exact fill stays an idempotent no-op for the rest
 	// of the run regardless of what happens to this instrument afterwards
 	// (see acceptedFillState's doc comment).
-	state.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
+	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
 	// #12: the instrument is a Setup again — CONTEXT.md defines a Setup as
 	// an Eligible instrument not in a Campaign, and clearing this is the
 	// only thing that gate (applyCompletedBar's "no new entry while a
