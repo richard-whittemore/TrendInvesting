@@ -137,8 +137,10 @@ type CampaignEvaluatedPayload struct {
 
 // Validate checks that the payload identifies the Campaign, instrument and
 // period, that Units is non-empty with strictly ascending positive indexes
-// and each Unit's own figures are usable and long-only-shaped (entry
-// positive, stop positive and strictly below entry), that ProtectiveStop is
+// and each Unit's own entry and stop are usable (entry positive, stop
+// positive — a RAISED stop may sit at or above its own entry, a legitimate
+// break-even or profit-protecting level under a narrow-enough Stop
+// Multiple; see the loop's own comment below), that ProtectiveStop is
 // EXACTLY the minimum across Units' own ProtectiveStop, that ExitChannelLow
 // is never negative and matches the zero-while-not-ready convention
 // EntryChannelHigh already uses, that ExitConditionMet is never true while
@@ -193,6 +195,21 @@ func (p CampaignEvaluatedPayload) Validate() error {
 			errs = append(errs, fmt.Errorf("units[%d]: entry price must be positive", i))
 			unitsUsable = false
 		}
+		// A Unit's protective stop must be positive and finite, but — since
+		// #15's review round — is NOT required to sit below its own entry
+		// price: repeated half-N raises (the Stop Ladder) can lift an
+		// earlier Unit's stop to or above its own entry under a Variant
+		// with a narrower Stop Multiple (e.g. StopMultiple 1 with four
+		// Units — the Baseline's 2N stop and four-Unit maximum never reach
+		// this, since the maximum raise is 1.5N). A stop at or above entry
+		// is a legitimate break-even or profit-protecting level (CONTEXT.md:
+		// a Unit in that state is "risk-free"), not a corrupted or
+		// mis-derived one, and its contribution to AggregateOpenRisk is
+		// simply zero (sizing.AggregateOpenRisk's own doc comment) rather
+		// than a validation failure. Only a Unit's INITIAL stop (Reason
+		// ProtectiveStopReasonInitial on ProtectiveStopSetPayload) is still
+		// required strictly below entry — a stop can only ever REACH entry
+		// by rising from there.
 		stopFinite := isFinite(u.ProtectiveStop)
 		switch {
 		case !stopFinite:
@@ -200,9 +217,6 @@ func (p CampaignEvaluatedPayload) Validate() error {
 			unitsUsable = false
 		case u.ProtectiveStop <= 0:
 			errs = append(errs, fmt.Errorf("units[%d]: protective stop must be positive", i))
-			unitsUsable = false
-		case entryFinite && u.ProtectiveStop >= u.EntryPrice:
-			errs = append(errs, fmt.Errorf("units[%d]: protective stop %v must be below entry price %v for a long position", i, u.ProtectiveStop, u.EntryPrice))
 			unitsUsable = false
 		}
 		if u.Quantity <= 0 {

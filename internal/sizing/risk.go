@@ -3,6 +3,7 @@ package sizing
 import (
 	"errors"
 	"fmt"
+	"math"
 )
 
 // UnitOpenRisk is one held Unit's own entry price, current Protective Stop,
@@ -48,14 +49,24 @@ type UnitOpenRisk struct {
 // validator, so the two cannot silently disagree about which arithmetic is
 // "the" aggregate).
 //
+// A Unit whose current stop sits AT OR ABOVE its own entry contributes ZERO
+// to the sum, never a negative figure and never a validation error (#15
+// review round). Repeated half-N raises (the Stop Ladder) can lift an
+// earlier Unit's stop to or above its own entry under a Variant with a
+// narrow enough Stop Multiple — StopMultiple 1 with four Units is the
+// smallest configuration that reaches it, since the maximum raise a
+// four-Unit Campaign ever applies is 1.5N (three raises of 0.5N on the
+// first Unit); the Baseline's own StopMultiple of 2 (ADR 0003) never
+// reaches this, because 1.5N < 2N always. A stop at or above entry is a
+// legitimate break-even or profit-protecting level — CONTEXT.md calls a
+// Unit in that state "risk-free" — not a corrupted or mis-derived one, and
+// its downside risk really is zero: max(0, EntryPrice - ProtectiveStop),
+// not the (would-be negative) raw difference.
+//
 // Fails closed (.greptile/rules.md) on: no Units at all (there is no
 // Campaign to report risk for); a non-finite or non-positive
 // dollarsPerPoint; and, per Unit, a non-finite or non-positive EntryPrice, a
-// non-finite or non-positive ProtectiveStop, a ProtectiveStop at or above
-// its own Unit's EntryPrice (a long position's stop always sits below
-// entry — CONTEXT.md: "Protective Stop"; such a Unit contributes negative or
-// zero risk, which is not a legitimate reading), or a non-positive
-// Quantity.
+// non-finite or non-positive ProtectiveStop, or a non-positive Quantity.
 func AggregateOpenRisk(units []UnitOpenRisk, dollarsPerPoint float64) (float64, error) {
 	var errs []error
 	if len(units) == 0 {
@@ -86,9 +97,6 @@ func AggregateOpenRisk(units []UnitOpenRisk, dollarsPerPoint float64) (float64, 
 		case u.ProtectiveStop <= 0:
 			errs = append(errs, fmt.Errorf("unit %d: protective stop must be positive", i))
 			stopFinite = false
-		case entryFinite && u.ProtectiveStop >= u.EntryPrice:
-			errs = append(errs, fmt.Errorf("unit %d: protective stop %v must be below entry price %v for a long position", i, u.ProtectiveStop, u.EntryPrice))
-			stopFinite = false
 		}
 
 		if u.Quantity <= 0 {
@@ -96,7 +104,7 @@ func AggregateOpenRisk(units []UnitOpenRisk, dollarsPerPoint float64) (float64, 
 			continue
 		}
 		if entryFinite && stopFinite {
-			total += (u.EntryPrice - u.ProtectiveStop) * float64(u.Quantity) * dollarsPerPoint
+			total += math.Max(0, u.EntryPrice-u.ProtectiveStop) * float64(u.Quantity) * dollarsPerPoint
 		}
 	}
 

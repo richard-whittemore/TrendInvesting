@@ -501,6 +501,12 @@ const RuleExitProposalExpiresWithItsBar = "exit-proposal.expires.with-its-bar"
 // misdescribe it.
 const RuleAddProposalExpiresWithItsBar = "add-proposal.expires.with-its-bar"
 
+// RuleAddProposalSupersededByStop names the rule for
+// ProposalExpiredPayload.Rule when Reason is ExpiryReasonSupersededByStop
+// (#15 review round): an outstanding Add proposal is cancelled by a stop
+// fill partially closing the same Campaign, not by the next bar.
+const RuleAddProposalSupersededByStop = "add-proposal.superseded-by-stop"
+
 // RuleSignalExpiresWithItsBar names the rule for ProposalExpiredPayload.Rule:
 // a Signal belongs to one bar and expires with it, so the proposal that Signal
 // produced inherits the same lifetime. A trending instrument re-qualifies by
@@ -512,11 +518,23 @@ const RuleSignalExpiresWithItsBar = "signal.expires.with-its-bar"
 // a declared Variant rather than the Baseline.
 const ADRSignalExpiry = "0011"
 
-// ExpiryReasonSupersededByNextBar is the only expiry reason today: the next
+// ExpiryReasonSupersededByNextBar is the ORDINARY expiry reason: the next
 // completed bar for the instrument arrived and no fill for the proposal ever
 // did. It is an enumerated value rather than free text for the same reason the
 // decline reasons are — a journal must be groupable by it.
 const ExpiryReasonSupersededByNextBar = "superseded-by-next-bar"
+
+// ExpiryReasonSupersededByStop is the SECOND expiry reason (#15 review
+// round, "Pending Adds Survive Stopouts"): an outstanding Add proposal
+// (ProposalKindAdd only — an entry or exit proposal has no analogous
+// interaction with a stop fill) is cancelled the instant a stop fill closes
+// PART of the same Campaign, rather than waiting for ADR 0011's ordinary
+// next-bar expiry. Without this, a fill for that stale proposal could still
+// arrive and be accepted before the next bar's own expiry ever ran,
+// bringing a further Unit into a Campaign that has already started coming
+// off. ExpiredAt for this reason is the CLOSING FILL's own timestamp, not a
+// bar's PeriodEnd.
+const ExpiryReasonSupersededByStop = "superseded-by-stop"
 
 // ProposalExpiredPayload records a trade proposal that was never filled and
 // has now been superseded.
@@ -609,6 +627,10 @@ func (p ProposalExpiredPayload) Validate() error {
 	switch p.Reason {
 	case ExpiryReasonSupersededByNextBar:
 		// recognised
+	case ExpiryReasonSupersededByStop:
+		if p.Kind != ProposalKindAdd {
+			errs = append(errs, fmt.Errorf("reason %q is only valid for kind %q (got %q): only an add proposal is cancelled by a stop fill", ExpiryReasonSupersededByStop, ProposalKindAdd, p.Kind))
+		}
 	default:
 		errs = append(errs, fmt.Errorf("reason %q is not a recognised expiry reason", p.Reason))
 	}

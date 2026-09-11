@@ -162,9 +162,14 @@ type ProtectiveStopSetPayload struct {
 
 // Validate checks that the payload identifies the Campaign, the Unit and the
 // moment the stop came into force, that Reason is one of the enumerated
-// constants, that every frozen number is usable, that Level is positive and
-// strictly below EntryPrice (a long position cannot be stopped out at or
-// below zero), that PreviousLevel is legitimate for the stated Reason (zero
+// constants, that every frozen number is usable, that Level is positive (a
+// long position cannot be stopped out at or below zero) and — for Reason
+// ProtectiveStopReasonInitial only — strictly below EntryPrice; a RAISED
+// stop (ProtectiveStopReasonAddLadder) may sit at or above EntryPrice, a
+// legitimate break-even or profit-protecting level under a narrow enough
+// Stop Multiple (#15 review round; see sizing.AggregateOpenRisk's own doc
+// comment for why the Baseline never reaches this). Validate also checks
+// that PreviousLevel is legitimate for the stated Reason (zero
 // for an initial set, positive and strictly below Level for an add-ladder
 // raise — the Baseline's Stop Ladder only ever raises a stop), and that
 // Level matches its derivation for the stated Reason EXACTLY — the same
@@ -225,14 +230,20 @@ func (p ProtectiveStopSetPayload) Validate() error {
 		errs = append(errs, errors.New("entry price must be positive"))
 	}
 
+	// Deliberately NOT checked here: "Level below EntryPrice" — that shape
+	// is required only for an INITIAL stop (see the Reason switch below). A
+	// stop RAISED by the Stop Ladder (Reason ProtectiveStopReasonAddLadder)
+	// may sit at or above its own Unit's entry once enough half-N raises
+	// have accumulated under a narrow enough Stop Multiple (#15 review
+	// round) — a legitimate break-even or profit-protecting level
+	// (CONTEXT.md: "risk-free"), never a corrupted one, since a stop only
+	// ever reaches entry by rising from below it.
 	levelFinite := isFinite(p.Level)
 	switch {
 	case !levelFinite:
 		errs = append(errs, errors.New("level must be finite"))
 	case p.Level <= 0:
 		errs = append(errs, errors.New("level must be positive: a long position cannot be stopped out at or below zero"))
-	case entryPriceFinite && p.Level >= p.EntryPrice:
-		errs = append(errs, fmt.Errorf("level %v must be below the entry price %v for a long position", p.Level, p.EntryPrice))
 	}
 
 	previousLevelFinite := isFinite(p.PreviousLevel)
@@ -251,6 +262,12 @@ func (p ProtectiveStopSetPayload) Validate() error {
 	case ProtectiveStopReasonInitial:
 		if previousLevelFinite && p.PreviousLevel != 0 {
 			errs = append(errs, fmt.Errorf("previous level must be zero for an initial set, got %v: there is no prior level to have raised from", p.PreviousLevel))
+		}
+		// Only an INITIAL stop is required strictly below entry — see this
+		// function's own doc comment and the levelFinite switch above for
+		// why a RAISED stop is not held to the same shape.
+		if entryPriceFinite && levelFinite && p.Level >= p.EntryPrice {
+			errs = append(errs, fmt.Errorf("level %v must be below the entry price %v for a long position's initial stop", p.Level, p.EntryPrice))
 		}
 		if entryPriceFinite && stopMultipleFinite && campaignNFinite && levelFinite {
 			if derived := p.EntryPrice - p.StopMultiple*p.CampaignN; p.Level != derived {
