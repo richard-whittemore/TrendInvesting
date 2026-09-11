@@ -1246,25 +1246,38 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 	entryPrice := campaign.entryPrice()
 	quantity := campaign.filledQuantity()
 	realisedResult := float64(quantity) * (fill.Price - entryPrice) * r.dollarsPerPoint
-	realisedResultInN := (fill.Price - entryPrice) / campaign.campaignN
+	// #74 review ("N Result Ignores Units"): two different N-denominated
+	// readings, both computed by internal/sizing rather than re-typed here
+	// (see event.CampaignExitedPayload's own doc comment) — the per-share
+	// average, and the aggregate Unit-N result Faith actually measures.
+	averageMoveInN, err := sizing.AverageMoveInN(fill.Price, entryPrice, campaign.campaignN)
+	if err != nil {
+		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q cannot compute the average move in n: %w", fill.InstrumentID, fill.FillID, err)
+	}
+	realisedResultInUnitN, err := sizing.RealisedResultInUnitN(realisedResult, campaign.unitQuantity, campaign.campaignN, r.dollarsPerPoint)
+	if err != nil {
+		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q cannot compute the realised result in unit n: %w", fill.InstrumentID, fill.FillID, err)
+	}
 
 	exitedPayload := event.CampaignExitedPayload{
-		CampaignID:          campaign.campaignID,
-		InstrumentID:        fill.InstrumentID,
-		FillID:              fill.FillID,
-		ExitedAt:            fill.FilledAt,
-		Reason:              event.ExitReasonStop,
-		EntryPrice:          entryPrice,
-		ExitPrice:           fill.Price,
-		Quantity:            quantity,
-		CampaignN:           campaign.campaignN,
-		DollarsPerPoint:     r.dollarsPerPoint,
-		ProtectiveStopLevel: campaign.protectiveStop(),
-		RealisedResult:      realisedResult,
-		RealisedResultInN:   realisedResultInN,
-		Units:               len(campaign.units),
-		Rule:                event.RuleCampaignExitedByStop,
-		ADR:                 event.ADRCampaignExitRecordsTheFill,
+		CampaignID:            campaign.campaignID,
+		InstrumentID:          fill.InstrumentID,
+		FillID:                fill.FillID,
+		ExitedAt:              fill.FilledAt,
+		Reason:                event.ExitReasonStop,
+		EntryPrice:            entryPrice,
+		ExitPrice:             fill.Price,
+		Quantity:              quantity,
+		CampaignN:             campaign.campaignN,
+		DollarsPerPoint:       r.dollarsPerPoint,
+		UnitQuantity:          campaign.unitQuantity,
+		ProtectiveStopLevel:   campaign.protectiveStop(),
+		RealisedResult:        realisedResult,
+		AverageMoveInN:        averageMoveInN,
+		RealisedResultInUnitN: realisedResultInUnitN,
+		Units:                 len(campaign.units),
+		Rule:                  event.RuleCampaignExitedByStop,
+		ADR:                   event.ADRCampaignExitRecordsTheFill,
 	}
 	if err := exitedPayload.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q would close campaign %q with an invalid exit: %w", fill.InstrumentID, fill.FillID, campaign.campaignID, err)
@@ -1382,25 +1395,36 @@ func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, 
 	entryPrice := campaign.entryPrice()
 	quantity := campaign.filledQuantity()
 	realisedResult := float64(quantity) * (fill.Price - entryPrice) * r.dollarsPerPoint
-	realisedResultInN := (fill.Price - entryPrice) / campaign.campaignN
+	// #74 review ("N Result Ignores Units"): see applyStopFill's identical
+	// comment.
+	averageMoveInN, err := sizing.AverageMoveInN(fill.Price, entryPrice, campaign.campaignN)
+	if err != nil {
+		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q cannot compute the average move in n: %w", fill.InstrumentID, fill.FillID, err)
+	}
+	realisedResultInUnitN, err := sizing.RealisedResultInUnitN(realisedResult, campaign.unitQuantity, campaign.campaignN, r.dollarsPerPoint)
+	if err != nil {
+		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q cannot compute the realised result in unit n: %w", fill.InstrumentID, fill.FillID, err)
+	}
 
 	exitedPayload := event.CampaignExitedPayload{
-		CampaignID:          campaign.campaignID,
-		InstrumentID:        fill.InstrumentID,
-		FillID:              fill.FillID,
-		ExitedAt:            fill.FilledAt,
-		Reason:              event.ExitReasonExitChannel,
-		EntryPrice:          entryPrice,
-		ExitPrice:           fill.Price,
-		Quantity:            quantity,
-		CampaignN:           campaign.campaignN,
-		DollarsPerPoint:     r.dollarsPerPoint,
-		ProtectiveStopLevel: campaign.protectiveStop(),
-		RealisedResult:      realisedResult,
-		RealisedResultInN:   realisedResultInN,
-		Units:               len(campaign.units),
-		Rule:                event.RuleCampaignExitedByExitChannel,
-		ADR:                 event.ADRCampaignExitRecordsTheFill,
+		CampaignID:            campaign.campaignID,
+		InstrumentID:          fill.InstrumentID,
+		FillID:                fill.FillID,
+		ExitedAt:              fill.FilledAt,
+		Reason:                event.ExitReasonExitChannel,
+		EntryPrice:            entryPrice,
+		ExitPrice:             fill.Price,
+		Quantity:              quantity,
+		CampaignN:             campaign.campaignN,
+		DollarsPerPoint:       r.dollarsPerPoint,
+		UnitQuantity:          campaign.unitQuantity,
+		ProtectiveStopLevel:   campaign.protectiveStop(),
+		RealisedResult:        realisedResult,
+		AverageMoveInN:        averageMoveInN,
+		RealisedResultInUnitN: realisedResultInUnitN,
+		Units:                 len(campaign.units),
+		Rule:                  event.RuleCampaignExitedByExitChannel,
+		ADR:                   event.ADRCampaignExitRecordsTheFill,
 	}
 	if err := exitedPayload.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q would close campaign %q with an invalid exit: %w", fill.InstrumentID, fill.FillID, campaign.campaignID, err)
@@ -1494,9 +1518,22 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 		return nil, fmt.Errorf("strategy: instrument %q: add fill %q is timestamped %s, which predates the bar in which an order for the add proposal could have executed (that bar opened at %s); a unit may not be added by an execution older than the decision that authorised it",
 			fill.InstrumentID, fill.FillID, fill.FilledAt.Format(time.RFC3339), pending.earliestFillAt.Format(time.RFC3339))
 	}
-	if fill.FilledAt.Before(campaign.openedAt) {
-		return nil, fmt.Errorf("strategy: instrument %q: add fill %q is timestamped %s, which predates campaign %q's own opening fill at %s; a unit cannot be added before the campaign it belongs to opened",
-			fill.InstrumentID, fill.FillID, fill.FilledAt.Format(time.RFC3339), campaign.campaignID, campaign.openedAt.Format(time.RFC3339))
+	// #74 review ("Chained Fills Allow Time Reversal"): a same-bar Add
+	// proposal (evaluateAdd's own chain, see applyAddFill's package doc
+	// comment) is raised only AFTER the preceding Unit's fill was accepted,
+	// so a later Unit's fill claiming a timestamp EARLIER than the Unit
+	// immediately before it records causally impossible ordering — the
+	// execution history would show Unit 3 filling before Unit 2 did. Equal
+	// timestamps are allowed: a gap that opens above every remaining rung
+	// fills every Unit at the same instant (The Turtle Rules p.19: "all
+	// four could be added in one day"). campaign.lastUnit() is exactly the
+	// Unit immediately before this one in the chain — Unit 1 itself when
+	// this is the second Unit, which is why this check also supersedes (and
+	// replaces) a standalone "before the campaign's own opening fill" check:
+	// lastUnit().filledAt equals campaign.openedAt in exactly that case.
+	if last := campaign.lastUnit(); fill.FilledAt.Before(last.filledAt) {
+		return nil, fmt.Errorf("strategy: instrument %q: add fill %q is timestamped %s, which is before unit %d's own fill at %s; a later unit cannot have executed before the unit immediately before it in the campaign",
+			fill.InstrumentID, fill.FillID, fill.FilledAt.Format(time.RFC3339), last.index, last.filledAt.Format(time.RFC3339))
 	}
 
 	// The Turtle Rules p.22's 2N stop, measured from THIS Unit's own actual
