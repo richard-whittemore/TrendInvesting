@@ -23,6 +23,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/indicator"
+	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 )
 
 // invariantTestStrategyVersion/ConfigurationHash mirror
@@ -245,5 +246,73 @@ func TestCampaignWithAValidProtectiveStopDoesNotHalt(t *testing.T) {
 	// suppresses everything else this bar would otherwise emit.
 	if len(emissions) != 0 {
 		t.Errorf("got %d emission(s), want 0: a campaign bar with a valid stop emits nothing (it is not a Setup)", len(emissions))
+	}
+}
+
+// TestCampaignWithoutAProtectiveStopHaltsTheEngineThroughReplayEngineRun
+// covers the review-round requirement that the halt is observable at the
+// seam that actually matters: the journal replay.Engine.Run produces, not
+// merely the Handler seam TestCampaignWithoutAProtectiveStopHaltsTheEngine
+// exercises directly.
+//
+// Before this ticket's review round, internal/replay.Engine.Run discarded
+// every emission a handler returned whenever Apply also returned an error,
+// so the engine-state halt this package emits would never reach a caller of
+// Run at all — the run would fail closed SILENTLY. The engine's contract
+// was changed (internal/replay/engine_test.go's
+// TestEngineRunJournalsPriorAndFinalEmissionsAlongsideHandlerError) so that
+// a handler's final emission on failure is stamped, validated, and
+// returned alongside the error; this test is the corresponding assertion
+// from #12's own side of that seam.
+func TestCampaignWithoutAProtectiveStopHaltsTheEngineThroughReplayEngineRun(t *testing.T) {
+	t.Parallel()
+
+	r := newConfiguredReducerForInvariantTest(t)
+	instrumentID := buildCorruptedCampaignState(t, r, -5)
+
+	engine, err := replay.New(r)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	bar := invariantTestBarEnvelope(t, 1, instrumentID, day(2))
+	emitted, err := engine.Run(context.Background(), []event.Envelope{bar})
+
+	if err == nil {
+		t.Fatal("Run() error = nil, want the capital-safety invariant to halt the run")
+	}
+	if !strings.Contains(err.Error(), "capital-safety invariant violated") {
+		t.Errorf("Run() error = %v, want it to name the capital-safety invariant", err)
+	}
+
+	if len(emitted) == 0 {
+		t.Fatal("got 0 emissions from Run(), want the engine-state halt to be journalled despite the error")
+	}
+	last := emitted[len(emitted)-1]
+	if last.Type != event.EngineStateEventType {
+		t.Fatalf("last emission Type = %q, want %q", last.Type, event.EngineStateEventType)
+	}
+	// Stamped by the engine, exactly like any successful emission: a
+	// contiguous output sequence starting at 1, and causation from the bar
+	// that triggered it.
+	if last.Sequence != 1 {
+		t.Errorf("last emission Sequence = %d, want 1 (the engine's own stamped sequence)", last.Sequence)
+	}
+	if last.CausationID != bar.ID {
+		t.Errorf("last emission CausationID = %q, want the bar's id %q", last.CausationID, bar.ID)
+	}
+	if last.PayloadHash != event.HashPayload(last.Payload) {
+		t.Error("last emission PayloadHash does not attest its own payload")
+	}
+
+	var payload event.EngineStatePayload
+	if err := json.Unmarshal(last.Payload, &payload); err != nil {
+		t.Fatalf("decode engine state payload: %v", err)
+	}
+	if payload.State != event.EngineStateHalted {
+		t.Errorf("State = %q, want %q", payload.State, event.EngineStateHalted)
+	}
+	if payload.Reason != event.EngineStateReasonCampaignWithoutProtectiveStop {
+		t.Errorf("Reason = %q, want %q", payload.Reason, event.EngineStateReasonCampaignWithoutProtectiveStop)
 	}
 }

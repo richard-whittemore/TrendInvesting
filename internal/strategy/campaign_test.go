@@ -1768,3 +1768,159 @@ func TestReplayingTheEntryThenStopFixtureTwiceYieldsByteIdenticalEmissions(t *te
 		}
 	}
 }
+
+// --- Idempotency across a Campaign's whole life (PR #72 review round) -----
+//
+// docs/architecture.md requires duplicate decision and order identifiers to
+// be idempotent WITHOUT qualification — not "idempotent while the fact it
+// caused is still the most recent one in this instrument's memory". The
+// three tests below each construct a re-delivery arriving after the fact it
+// originally caused is no longer the freshest thing that happened to the
+// instrument, which is exactly the shape the single-slot closedStopFillState
+// design could not answer correctly.
+
+// TestOpeningFillRedeliveredAfterTheCampaignClosedIsANoOp covers the first
+// gap: a re-delivery of the ENTRY fill arriving after its own Campaign has
+// already closed. Before this round, nothing remembered the opening fill
+// once state.campaign was cleared (only pendingProposalState did, and that
+// was already consumed at open), so this fixture used to be rejected as "no
+// pending trade proposal" — the wrong reason, and the wrong outcome for a
+// duplicate delivery.
+func TestOpeningFillRedeliveredAfterTheCampaignClosedIsANoOp(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	campaignN := breakoutFixtureN(t, cfg)
+	stop := closingStopFill("AAPL", campaignID, campaignN, day(57))
+
+	emitted := newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		fill(stop).
+		fill(openingFill("AAPL")). // redelivered, after the campaign already closed
+		mustRun()
+
+	if got := len(envelopesOfType(emitted, event.CampaignOpenedEventType)); got != 1 {
+		t.Fatalf("got %d Campaign-opened event(s), want exactly 1 despite the redelivered opening fill", got)
+	}
+	if got := len(envelopesOfType(emitted, event.CampaignExitedEventType)); got != 1 {
+		t.Fatalf("got %d Campaign-exited event(s), want exactly 1", got)
+	}
+	// The redelivered opening fill must emit nothing at all, not merely
+	// nothing new: 55 warm-up + the breakout bar's 3 + the opening fill's 2
+	// (Campaign-opened, Protective-Stop-set) + the stop fill's 1
+	// (Campaign-exited).
+	if len(emitted) != 61 {
+		t.Errorf("len(emitted) = %d, want 61 (the redelivered opening fill emits nothing)", len(emitted))
+	}
+}
+
+// TestStopFillRedeliveredAfterASecondCampaignHasOpenedAndClosedIsANoOp
+// covers the second gap: a re-delivery of a CLOSING stop fill arriving after
+// a SECOND Campaign, in the same instrument, has itself already opened and
+// closed. Before this round, closedStopFillState held only the single most
+// recently closed fill, so the second Campaign's closure overwrote the
+// first's record and this exact re-delivery was rejected as "no open
+// campaign for it" instead of recognised as the duplicate it is.
+func TestStopFillRedeliveredAfterASecondCampaignHasOpenedAndClosedIsANoOp(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignID1 := testDecisionID("campaign", "AAPL", day(56))
+	campaignN1 := breakoutFixtureN(t, cfg)
+	stop1 := closingStopFill("AAPL", campaignID1, campaignN1, day(57))
+
+	// A second Campaign in the same instrument: bar 57 is itself a fresh
+	// breakout (nextBreakoutBar's doc comment), proposed and filled with a
+	// deliberately tiny quantity so this fixture does not need to hand-derive
+	// the second proposal's actual sized quantity.
+	campaignID2 := testDecisionID("campaign", "AAPL", day(57))
+	entry2 := event.FillPayload{
+		InstrumentID: "AAPL",
+		Kind:         event.FillKindEntry,
+		ProposalID:   testDecisionID("proposal", "AAPL", day(57)),
+		FillID:       "sim-fill-1002",
+		Direction:    event.DirectionLong,
+		Quantity:     1,
+		Price:        campaignFillPrice,
+		FilledAt:     day(57),
+	}
+	stop2 := event.FillPayload{
+		InstrumentID: "AAPL",
+		Kind:         event.FillKindStop,
+		CampaignID:   campaignID2,
+		FillID:       "sim-fill-1003",
+		Direction:    event.DirectionLong,
+		Quantity:     1,
+		Price:        campaignFillPrice - 10,
+		FilledAt:     day(58),
+	}
+
+	emitted := newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		fill(stop1).
+		bar(nextBreakoutBar("AAPL")).
+		fill(entry2).
+		fill(stop2).
+		fill(stop1). // redelivered, after campaign 2 has already opened and closed
+		mustRun()
+
+	if got := len(envelopesOfType(emitted, event.CampaignOpenedEventType)); got != 2 {
+		t.Fatalf("got %d Campaign-opened event(s), want exactly 2 (one per campaign)", got)
+	}
+	if got := len(envelopesOfType(emitted, event.CampaignExitedEventType)); got != 2 {
+		t.Fatalf("got %d Campaign-exited event(s), want exactly 2 (one per campaign); the redelivered stop1 must add nothing", got)
+	}
+}
+
+// TestFillHistoryIsRememberedAcrossAnInstrumentsWholeLife is the "same id,
+// different contents still errors" case restated for the new,
+// whole-of-history idempotency store, on top of (not in place of) the
+// pre-existing TestFillReusingAFillIDWithDifferentContentsIsRejected and
+// TestStopFillReusingAFillIDWithDifferentContentsIsRejected: a stop fill's id
+// reused, after the fact, for what claims to be a DIFFERENT campaign's
+// closing fill must still be rejected as a reconciliation failure, not
+// absorbed as a duplicate of either recorded fill.
+func TestFillHistoryIsRememberedAcrossAnInstrumentsWholeLife(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignID1 := testDecisionID("campaign", "AAPL", day(56))
+	campaignN1 := breakoutFixtureN(t, cfg)
+	stop1 := closingStopFill("AAPL", campaignID1, campaignN1, day(57))
+
+	campaignID2 := testDecisionID("campaign", "AAPL", day(57))
+	entry2 := event.FillPayload{
+		InstrumentID: "AAPL",
+		Kind:         event.FillKindEntry,
+		ProposalID:   testDecisionID("proposal", "AAPL", day(57)),
+		FillID:       "sim-fill-1002",
+		Direction:    event.DirectionLong,
+		Quantity:     1,
+		Price:        campaignFillPrice,
+		FilledAt:     day(57),
+	}
+	// Reuses stop1's own fill id, but claims to close the SECOND campaign
+	// instead: same id, unmistakably different contents.
+	confused := event.FillPayload{
+		InstrumentID: "AAPL",
+		Kind:         event.FillKindStop,
+		CampaignID:   campaignID2,
+		FillID:       stop1.FillID,
+		Direction:    event.DirectionLong,
+		Quantity:     1,
+		Price:        campaignFillPrice - 10,
+		FilledAt:     day(58),
+	}
+
+	newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		fill(stop1).
+		bar(nextBreakoutBar("AAPL")).
+		fill(entry2).
+		fill(confused).
+		wantRunError(stop1.FillID, "differ")
+}
