@@ -118,11 +118,12 @@ type instrumentState struct {
 	// recorded fill brought one into being.
 	pendingProposal *pendingProposalState
 	campaign        *campaignState
-	// closedStopFill is #12's addition, defined and explained in
-	// campaign.go: the fill that most recently closed a Campaign here, kept
-	// only so a re-delivery of that exact fill stays idempotent after
-	// campaign above has already been cleared.
-	closedStopFill *closedStopFillState
+	// acceptedFills is #12's addition, defined and explained in
+	// campaign.go: every fill this reducer has accepted for this
+	// instrument, keyed by FillID, for the whole life of the run — not only
+	// the current Campaign's — so a re-delivery stays idempotent no matter
+	// how much has happened to the instrument since.
+	acceptedFills map[string]acceptedFillState
 }
 
 // NewReducer returns a Reducer that stamps every decision it emits with
@@ -745,7 +746,7 @@ func (r *Reducer) stateFor(instrumentID string) (*instrumentState, error) {
 		// than panicking, in case that ever changes.
 		return nil, fmt.Errorf("strategy: %w", err)
 	}
-	state := &instrumentState{n: n, entryChannel: entryChannel}
+	state := &instrumentState{n: n, entryChannel: entryChannel, acceptedFills: make(map[string]acceptedFillState)}
 	r.instruments[instrumentID] = state
 	return state, nil
 }

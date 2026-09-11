@@ -125,6 +125,7 @@ func buildCorruptedCampaignState(t *testing.T, r *Reducer, protectiveStop float6
 		instrumentID: {
 			n:             n,
 			entryChannel:  entryChannel,
+			acceptedFills: make(map[string]acceptedFillState),
 			lastPeriodEnd: day(1),
 			campaign: &campaignState{
 				campaignID:     "campaign:AAPL:corrupted",

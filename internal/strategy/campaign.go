@@ -58,27 +58,60 @@ type campaignState struct {
 	units          int
 }
 
-// closedStopFillState remembers the fill that most recently closed a
-// Campaign in this instrument, purely so a re-delivery of that EXACT fill is
-// still recognised as an idempotent no-op after the Campaign it closed is
-// gone from state (docs/architecture.md: "duplicate decision and order
-// identifiers must be idempotent"). Without it, a re-delivered stop fill
-// arriving after instrumentState.campaign has already been cleared would
-// look identical to a stop fill for an unknown Campaign — see applyStopFill.
+// acceptedFillState remembers ONE fill this reducer has already accepted —
+// either the entry that opened a Campaign or the stop that closed one —
+// keyed by FillID on instrumentState.acceptedFills (see applyFill).
 //
-// It holds the same fields applyFillToOpenCampaign already compares for an
-// entry fill's duplicate check, for the same reason: idempotency means "the
-// same fact delivered twice", not "any fact carrying a fill id already
-// seen" (see applyFillToOpenCampaign's doc comment). A producer that reuses
-// a fill id for a different execution is a reconciliation failure, not a
-// duplicate.
-type closedStopFillState struct {
+// docs/architecture.md requires duplicate decision and order identifiers to
+// be idempotent WITHOUT qualification, and a fill's effect can be long gone
+// from the rest of instrumentState by the time a re-delivery of the same
+// fill id arrives: the Campaign it opened may already have closed, or a
+// SECOND Campaign in the same instrument may itself have opened and closed
+// since. Remembering every accepted fill's identity for the life of the
+// run — rather than only the most recent one, as an earlier design did — is
+// what makes a re-delivery recognisable regardless of how much has happened
+// to the instrument since.
+//
+// Memory grows by one of these per fill this reducer actually accepts in a
+// run, which is bounded by the number of fills — the same order of
+// magnitude as the number of Campaigns and Adds a run produces, not a
+// concern at this system's scale.
+type acceptedFillState struct {
+	kind       string
+	proposalID string
 	campaignID string
-	fillID     string
 	quantity   int64
 	price      float64
 	direction  string
 	filledAt   time.Time
+}
+
+// acceptedFillFromPayload builds the record applyFill stores for fill once
+// it has been accepted (whether it opened or closed a Campaign).
+func acceptedFillFromPayload(fill event.FillPayload) acceptedFillState {
+	return acceptedFillState{
+		kind:       fill.Kind,
+		proposalID: fill.ProposalID,
+		campaignID: fill.CampaignID,
+		quantity:   fill.Quantity,
+		price:      fill.Price,
+		direction:  fill.Direction,
+		filledAt:   fill.FilledAt,
+	}
+}
+
+// matches reports whether fill is the identical fact a was recorded from —
+// same kind, same proposal/campaign it names, same quantity, price,
+// direction and timestamp — as opposed to merely reusing a's fill id for a
+// different execution.
+func (a acceptedFillState) matches(fill event.FillPayload) bool {
+	return a.kind == fill.Kind &&
+		a.proposalID == fill.ProposalID &&
+		a.campaignID == fill.CampaignID &&
+		a.quantity == fill.Quantity &&
+		a.price == fill.Price &&
+		a.direction == fill.Direction &&
+		a.filledAt.Equal(fill.FilledAt)
 }
 
 // pendingProposalState is a trade proposal that has been emitted and not yet
@@ -258,11 +291,21 @@ func checkBarConfirmsCampaignOpening(state *instrumentState, bar event.Completed
 //  1. Schema and payload validity, like every other input (ADR 0015).
 //  2. An instrument this reducer has never evaluated can have no proposal
 //     outstanding, so any fill for it is unmatched.
-//  3. If a Campaign is already open, the fill is either a duplicate delivery
-//     of the one that opened it — an idempotent no-op, since duplicate
-//     identifiers must be idempotent (docs/architecture.md) — or something
-//     this ticket deliberately refuses (see applyFillToOpenCampaign).
-//  4. Otherwise the fill must match the outstanding proposal: the same
+//  3. Idempotency, checked generically for every fill.Kind against the
+//     instrument's WHOLE fill history (state.acceptedFills), not only its
+//     current position: a re-delivery of a fill this reducer already
+//     accepted — whether it opened a Campaign, closed one, or (after this
+//     ticket) any later kind — is an idempotent no-op if the contents match,
+//     and a reconciliation failure if they don't (docs/architecture.md
+//     requires duplicate identifiers to be idempotent without
+//     qualification; see acceptedFillState's doc comment for why "current
+//     position" was not enough).
+//  4. If a Campaign is already open, an entry-kind fill with a genuinely new
+//     id is something this ticket deliberately refuses (see
+//     applyFillToOpenCampaign) — rule 3 has already resolved every
+//     re-delivery by this point, so what remains here is always a second,
+//     different execution.
+//  5. Otherwise the fill must match the outstanding proposal: the same
 //     proposal, the same direction, no more than the quantity that was sized,
 //     and a timestamp inside the window in which an order for it could have
 //     executed.
@@ -335,6 +378,23 @@ func (r *Reducer) applyFill(envelope event.Envelope) ([]event.Envelope, error) {
 			fill.FillID, fill.ProposalID, fill.InstrumentID)
 	}
 
+	// Idempotency, checked first and generically against the instrument's
+	// WHOLE fill history — see acceptedFillState's doc comment for why a
+	// re-delivery must be recognisable no matter how much has happened to
+	// the instrument since the fill was first accepted (a closed Campaign,
+	// or a second Campaign that has itself already opened and closed).
+	if recorded, seen := state.acceptedFills[fill.FillID]; seen {
+		if !recorded.matches(fill) {
+			return nil, fmt.Errorf("strategy: instrument %q: fill %q was already recorded (kind %s, proposal %q, campaign %q, %d at %v %s on %s), but this delivery differs (kind %s, proposal %q, campaign %q, %d at %v %s on %s); a reused fill identifier carrying different contents is a reconciliation failure, not a duplicate delivery",
+				fill.InstrumentID, fill.FillID,
+				recorded.kind, recorded.proposalID, recorded.campaignID, recorded.quantity, recorded.price, recorded.direction, recorded.filledAt.Format(time.RFC3339),
+				fill.Kind, fill.ProposalID, fill.CampaignID, fill.Quantity, fill.Price, fill.Direction, fill.FilledAt.Format(time.RFC3339))
+		}
+		// The duplicate delivery of an execution already recorded: nothing
+		// to do, and nothing to complain about.
+		return nil, nil
+	}
+
 	// #12: a stop fill takes a completely different path from an entry
 	// fill — it closes a Campaign rather than opening one — so it is
 	// dispatched before any of the entry-fill logic below runs.
@@ -390,48 +450,35 @@ func (r *Reducer) applyFill(envelope event.Envelope) ([]event.Envelope, error) {
 	return r.openCampaign(state, pending, fill, envelope)
 }
 
-// applyFillToOpenCampaign resolves a fill that arrives for an instrument
-// already in a Campaign.
+// applyFillToOpenCampaign resolves an entry-kind fill that arrives for an
+// instrument already in a Campaign, once applyFill's own idempotency check
+// (state.acceptedFills) has already established that fill.FillID is
+// genuinely new — never seen before, by this reducer, from this instrument.
 //
-// Exactly one case is benign: the same fill delivered twice. Duplicate
-// delivery is expected from any transport and docs/architecture.md requires
-// duplicate identifiers to be idempotent, so a re-delivery emits nothing and
-// errors nothing — the Campaign that already exists is the correct outcome.
+// That leaves exactly two possibilities, both of which fail closed:
 //
-// The other two cases fail closed:
+//   - A fill naming a different proposal. The instrument is already
+//     committed; a fill for some other order it never had outstanding is a
+//     reconciliation failure.
+//   - A second, different fill for the SAME proposal (a further partial
+//     fill). Accumulating successive partials into one Campaign is deferred
+//     to its own issue (#67); until it lands, rejecting is the only safe
+//     answer, because the alternative — opening a second Campaign for the
+//     same instrument — would double the position while every cap and
+//     ladder still counted one.
 //
-//   - A second, different fill for the same proposal (a further partial fill).
-//     Accumulating successive partials into one Campaign is deferred to its
-//     own issue; until it lands, rejecting is the only safe answer, because
-//     the alternative — opening a second Campaign for the same instrument —
-//     would double the position while every cap and ladder still counted one.
-//   - A fill naming a different proposal. The instrument is already committed;
-//     a fill for some other order it never had outstanding is a reconciliation
-//     failure.
-//
-// Idempotency means "the same fact delivered twice", not "any fact carrying an
-// identifier already seen". A producer that reuses a fill id for a different
-// execution is a defect, and treating it as a duplicate would silently discard
-// a real execution — so the contents are compared, not just the id.
+// Duplicate delivery of the fill that actually opened this Campaign never
+// reaches this function at all: applyFill's idempotency check resolves it
+// first, whether the re-delivery is identical (a no-op) or reused with
+// different contents (a reconciliation error) — see acceptedFillState's doc
+// comment.
 func applyFillToOpenCampaign(campaign *campaignState, fill event.FillPayload) ([]event.Envelope, error) {
 	if campaign.proposalID != fill.ProposalID {
 		return nil, fmt.Errorf("strategy: instrument %q: fill %q names proposal %q, but campaign %q is already open from proposal %q; a fill for an order this strategy never proposed is a reconciliation failure (docs/architecture.md)",
 			fill.InstrumentID, fill.FillID, fill.ProposalID, campaign.campaignID, campaign.proposalID)
 	}
-	if campaign.openingFillID != fill.FillID {
-		return nil, fmt.Errorf("strategy: instrument %q: campaign %q has already opened from fill %q, and fill %q is a second, different execution of the same proposal; accumulating successive partial fills into one campaign is deferred to its own issue, and opening a second campaign instead would double the position while every cap and ladder still counted one",
-			fill.InstrumentID, campaign.campaignID, campaign.openingFillID, fill.FillID)
-	}
-	if fill.Quantity != campaign.filledQuantity || fill.Price != campaign.entryPrice ||
-		fill.Direction != campaign.direction || !fill.FilledAt.Equal(campaign.openedAt) {
-		return nil, fmt.Errorf("strategy: instrument %q: fill %q was already recorded as campaign %q's opening fill, but this delivery's quantity, price, direction or timestamp differ from it (%d at %v %s on %s, against the recorded %d at %v %s on %s); a reused fill identifier carrying different contents is a reconciliation failure, not a duplicate delivery",
-			fill.InstrumentID, fill.FillID, campaign.campaignID,
-			fill.Quantity, fill.Price, fill.Direction, fill.FilledAt.Format(time.RFC3339),
-			campaign.filledQuantity, campaign.entryPrice, campaign.direction, campaign.openedAt.Format(time.RFC3339))
-	}
-	// The duplicate delivery of an execution already recorded: nothing to do,
-	// and nothing to complain about.
-	return nil, nil
+	return nil, fmt.Errorf("strategy: instrument %q: campaign %q has already opened from fill %q, and fill %q is a second, different execution of the same proposal; accumulating successive partial fills into one campaign is deferred to its own issue, and opening a second campaign instead would double the position while every cap and ladder still counted one",
+		fill.InstrumentID, campaign.campaignID, campaign.openingFillID, fill.FillID)
 }
 
 // openCampaign brings a Campaign into being from the fill that executed its
@@ -562,6 +609,11 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 	// The proposal has been executed, so it is no longer outstanding and must
 	// not later be expired as though it had never filled.
 	state.pendingProposal = nil
+	// Recorded so a re-delivery of this exact fill is recognised as an
+	// idempotent no-op for the rest of this run, however much later it
+	// arrives and however much has happened to the instrument since (see
+	// acceptedFillState's doc comment).
+	state.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
 
 	// EventTime is the fill's timestamp on both: the Campaign, and its stop,
 	// came into being when the fill did, not when the Signal fired. Order is
@@ -587,21 +639,17 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 // checks the stop's OWN shape, never a bar's price against it. A reviewer
 // checking for look-ahead should find none: this function's only inputs are
 // the fill and the Campaign state a fill already opened.
+//
+// Reaching this function with state.campaign == nil now means, unqualified,
+// "there is no open campaign for this fill to close": applyFill's own
+// idempotency check has already resolved a re-delivery of a fill this
+// reducer previously accepted — whether it closed THIS instrument's most
+// recent Campaign or an earlier one entirely — before dispatch ever reaches
+// here (see acceptedFillState's doc comment). What is left is genuinely
+// unknown.
 func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, input event.Envelope) ([]event.Envelope, error) {
 	campaign := state.campaign
 	if campaign == nil {
-		// Either the Campaign never existed, or it was already closed. A
-		// re-delivery of the EXACT fill that closed it is idempotent
-		// (docs/architecture.md); anything else — including this same fill
-		// id with different contents — is a reconciliation failure.
-		if closed := state.closedStopFill; closed != nil && closed.fillID == fill.FillID {
-			if closed.campaignID != fill.CampaignID || closed.quantity != fill.Quantity ||
-				closed.price != fill.Price || closed.direction != fill.Direction || !closed.filledAt.Equal(fill.FilledAt) {
-				return nil, fmt.Errorf("strategy: instrument %q: stop fill %q was already recorded as closing campaign %q, but this delivery's campaign id, quantity, price, direction or timestamp differ from it; a reused fill identifier carrying different contents is a reconciliation failure, not a duplicate delivery",
-					fill.InstrumentID, fill.FillID, closed.campaignID)
-			}
-			return nil, nil
-		}
 		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q names campaign %q, but there is no open campaign for it; a stop fill for an unknown or already-closed campaign is a reconciliation failure (docs/architecture.md)",
 			fill.InstrumentID, fill.FillID, fill.CampaignID)
 	}
@@ -660,17 +708,12 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 	exitEnvelope := r.stamp(exitID, event.CampaignExitedEventType, event.CampaignExitedSchemaVersion, fill.FilledAt, input, exitedPayloadBytes)
 
 	// The state moves only now, after the payload it will be journalled as
-	// has been validated. Remembering closedStopFill before clearing
-	// campaign is what lets a re-delivery of this exact fill be recognised
-	// as a duplicate afterwards (see this function's top).
-	state.closedStopFill = &closedStopFillState{
-		campaignID: campaign.campaignID,
-		fillID:     fill.FillID,
-		quantity:   fill.Quantity,
-		price:      fill.Price,
-		direction:  fill.Direction,
-		filledAt:   fill.FilledAt,
-	}
+	// has been validated. Recorded into acceptedFills before campaign is
+	// cleared, exactly as openCampaign does for the entry fill, so a
+	// re-delivery of this exact fill stays an idempotent no-op for the rest
+	// of the run regardless of what happens to this instrument afterwards
+	// (see acceptedFillState's doc comment).
+	state.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
 	// #12: the instrument is a Setup again — CONTEXT.md defines a Setup as
 	// an Eligible instrument not in a Campaign, and clearing this is the
 	// only thing that gate (applyCompletedBar's "no new entry while a
