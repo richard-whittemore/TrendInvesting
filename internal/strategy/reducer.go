@@ -118,6 +118,11 @@ type instrumentState struct {
 	// recorded fill brought one into being.
 	pendingProposal *pendingProposalState
 	campaign        *campaignState
+	// closedStopFill is #12's addition, defined and explained in
+	// campaign.go: the fill that most recently closed a Campaign here, kept
+	// only so a re-delivery of that exact fill stays idempotent after
+	// campaign above has already been cleared.
+	closedStopFill *closedStopFillState
 }
 
 // NewReducer returns a Reducer that stamps every decision it emits with
@@ -316,6 +321,16 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	// read or advanced, so a rejected bar leaves nothing half-applied.
 	if err := checkBarConfirmsCampaignOpening(state, bar); err != nil {
 		return nil, err
+	}
+
+	// #12: the capital-safety invariant — every open Campaign has a
+	// Protective Stop at all times — checked at the start of every
+	// completed bar, before anything else about this bar is read. See
+	// checkCampaignHasAProtectiveStop's doc comment for why a violation can
+	// only be memory corruption, not a bad input, and why the halt envelope
+	// is returned alongside the error.
+	if halt, err := r.checkCampaignHasAProtectiveStop(state, bar, envelope); err != nil {
+		return []event.Envelope{halt}, err
 	}
 
 	// ADR 0004: signal computation, including N and the Entry Channel, runs

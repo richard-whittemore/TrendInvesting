@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
 // This file holds everything #11 adds to the reducer: the two pieces of
@@ -55,6 +56,29 @@ type campaignState struct {
 	protectiveStop float64
 	openedAt       time.Time
 	units          int
+}
+
+// closedStopFillState remembers the fill that most recently closed a
+// Campaign in this instrument, purely so a re-delivery of that EXACT fill is
+// still recognised as an idempotent no-op after the Campaign it closed is
+// gone from state (docs/architecture.md: "duplicate decision and order
+// identifiers must be idempotent"). Without it, a re-delivered stop fill
+// arriving after instrumentState.campaign has already been cleared would
+// look identical to a stop fill for an unknown Campaign — see applyStopFill.
+//
+// It holds the same fields applyFillToOpenCampaign already compares for an
+// entry fill's duplicate check, for the same reason: idempotency means "the
+// same fact delivered twice", not "any fact carrying a fill id already
+// seen" (see applyFillToOpenCampaign's doc comment). A producer that reuses
+// a fill id for a different execution is a reconciliation failure, not a
+// duplicate.
+type closedStopFillState struct {
+	campaignID string
+	fillID     string
+	quantity   int64
+	price      float64
+	direction  string
+	filledAt   time.Time
 }
 
 // pendingProposalState is a trade proposal that has been emitted and not yet
@@ -303,8 +327,22 @@ func (r *Reducer) applyFill(envelope event.Envelope) ([]event.Envelope, error) {
 	// creating state here would make the reducer look as though it had.
 	state, known := r.instruments[fill.InstrumentID]
 	if !known {
+		if fill.Kind == event.FillKindStop {
+			return nil, fmt.Errorf("strategy: stop fill %q names campaign %q for instrument %q, which this reducer has never evaluated; a fill for a campaign this strategy has no history for is a reconciliation failure, not something to absorb (docs/architecture.md)",
+				fill.FillID, fill.CampaignID, fill.InstrumentID)
+		}
 		return nil, fmt.Errorf("strategy: fill %q names proposal %q for instrument %q, which this reducer has never evaluated; a fill for an order this strategy never proposed is a reconciliation failure, not something to absorb (docs/architecture.md)",
 			fill.FillID, fill.ProposalID, fill.InstrumentID)
+	}
+
+	// #12: a stop fill takes a completely different path from an entry
+	// fill — it closes a Campaign rather than opening one — so it is
+	// dispatched before any of the entry-fill logic below runs.
+	// fill.Validate() has already rejected any Kind other than
+	// event.FillKindEntry or event.FillKindStop, so the fall-through below
+	// is reached only for an entry fill.
+	if fill.Kind == event.FillKindStop {
+		return r.applyStopFill(state, fill, envelope)
 	}
 
 	if state.campaign != nil {
@@ -411,12 +449,21 @@ func applyFillToOpenCampaign(campaign *campaignState, fill event.FillPayload) ([
 // 0010), so resizing it would change what "one Unit" means partway through a
 // Campaign.
 //
-// A fill that produces an unreachable Protective Stop (at or below zero) fails
-// event.CampaignOpenedPayload.Validate and stops the run. That cannot arise
-// from a producer honouring ADR 0005, which fills a long entry at or above the
-// proposed level, on a proposal whose stop intent was already required to be
-// positive — so reaching it means the position could not be protected, which
-// is a condition to fail on rather than to journal.
+// A fill that would produce an unreachable Protective Stop (at or below
+// zero) is refused by sizing.ProtectiveStopLevel before any payload is even
+// built, and the run stops. That cannot arise from a producer honouring ADR
+// 0005, which fills a long entry at or above the proposed level, on a
+// proposal whose stop intent was already required to be positive — so
+// reaching it means the position could not be protected, which is a
+// condition to fail on rather than to journal.
+//
+// #12: every open Campaign has a Protective Stop from the moment it exists —
+// this function is the one place a Campaign is constructed (campaignState
+// has no "open without stop" zero value that would pass
+// checkCampaignHasAProtectiveStop), and it emits the Protective-Stop-set
+// decision (event.ProtectiveStopSetEventType) immediately after
+// Campaign-opened, in the same Apply return, so the two are never observed
+// apart in the journal.
 func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalState, fill event.FillPayload, input event.Envelope) ([]event.Envelope, error) {
 	// The Campaign's identity is the instrument plus the moment it came into
 	// being, which is the opening fill's timestamp. Deterministic, so replay
@@ -424,13 +471,19 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 	// the Campaign-opened envelope carries the same value as its own ID.
 	campaignID := decisionID("campaign", fill.InstrumentID, fill.FilledAt)
 
-	// The expression order event.CampaignOpenedPayload.Validate re-derives the
-	// stop in, so the two agree bit for bit (CONTEXT.md: "Protective Stop";
 	// The Turtle Rules p.22's 2N stop in the Baseline, measured from the
-	// actual fill).
-	protectiveStop := fill.Price - pending.stopMultiple*pending.n
+	// ACTUAL fill (ADR 0013) and the campaign's FROZEN N (ADR 0006).
+	// sizing.ProtectiveStopLevel computes entryPrice - stopMultiple x
+	// campaignN in exactly the expression order both
+	// event.CampaignOpenedPayload.Validate and
+	// event.ProtectiveStopSetPayload.Validate re-derive it in below, so all
+	// three agree bit for bit.
+	protectiveStop, err := sizing.ProtectiveStopLevel(fill.Price, pending.n, pending.stopMultiple, sizing.DirectionLong)
+	if err != nil {
+		return nil, fmt.Errorf("strategy: instrument %q: fill %q cannot compute a protective stop: %w", fill.InstrumentID, fill.FillID, err)
+	}
 
-	payload := event.CampaignOpenedPayload{
+	openedPayload := event.CampaignOpenedPayload{
 		CampaignID:     campaignID,
 		InstrumentID:   fill.InstrumentID,
 		ProposalID:     pending.proposalID,
@@ -448,10 +501,10 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 		Units:          1,
 		OpenedAt:       fill.FilledAt,
 	}
-	if err := payload.Validate(); err != nil {
+	if err := openedPayload.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: instrument %q: fill %q would open an invalid campaign: %w", fill.InstrumentID, fill.FillID, err)
 	}
-	payloadBytes, err := json.Marshal(payload)
+	openedPayloadBytes, err := json.Marshal(openedPayload)
 	if err != nil {
 		// Unreachable: every field is a string, an int, an int64, a float64 or
 		// a time.Time, none of which can fail to marshal. Failing closed
@@ -460,9 +513,37 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 		return nil, fmt.Errorf("strategy: marshal campaign opened payload: %w", err)
 	}
 
-	// The state moves only now, after the payload it will be journalled as has
-	// been validated: a Campaign that could not be recorded must not exist in
-	// memory either.
+	// #12: the Protective-Stop-set decision, built and validated before any
+	// state moves, for the same reason the Campaign-opened payload is —
+	// see this function's doc comment.
+	stopSetPayload := event.ProtectiveStopSetPayload{
+		CampaignID:    campaignID,
+		InstrumentID:  fill.InstrumentID,
+		AsOf:          fill.FilledAt,
+		Level:         protectiveStop,
+		PreviousLevel: 0,
+		EntryPrice:    fill.Price,
+		CampaignN:     pending.n,
+		StopMultiple:  pending.stopMultiple,
+		Rule:          event.RuleProtectiveStopSetFromFill,
+		ADR:           event.ADRCampaignFrozenAtEntry,
+	}
+	if err := stopSetPayload.Validate(); err != nil {
+		return nil, fmt.Errorf("strategy: instrument %q: fill %q would set an invalid protective stop: %w", fill.InstrumentID, fill.FillID, err)
+	}
+	stopSetPayloadBytes, err := json.Marshal(stopSetPayload)
+	if err != nil {
+		// Unreachable, for the same reason as openedPayloadBytes above.
+		return nil, fmt.Errorf("strategy: marshal protective stop set payload: %w", err)
+	}
+
+	// The state moves only now, after BOTH payloads it will be journalled as
+	// have been validated: a Campaign that could not be recorded, complete
+	// with its stop, must not exist in memory either. This is what makes
+	// "an open Campaign without a Protective Stop" unrepresentable by
+	// construction: there is no assignment to state.campaign anywhere else
+	// in this package, and this one never runs without a validated,
+	// positive, below-entry stop already in hand.
 	state.campaign = &campaignState{
 		campaignID:     campaignID,
 		proposalID:     pending.proposalID,
@@ -482,11 +563,185 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 	// not later be expired as though it had never filled.
 	state.pendingProposal = nil
 
-	// EventTime is the fill's timestamp: the Campaign came into being when the
-	// fill did, not when the Signal fired.
-	return []event.Envelope{r.stamp(
-		campaignID,
-		event.CampaignOpenedEventType, event.CampaignOpenedSchemaVersion,
-		fill.FilledAt, input, payloadBytes,
-	)}, nil
+	// EventTime is the fill's timestamp on both: the Campaign, and its stop,
+	// came into being when the fill did, not when the Signal fired. Order is
+	// Campaign-opened then Protective-Stop-set, per the ticket.
+	return []event.Envelope{
+		r.stamp(campaignID, event.CampaignOpenedEventType, event.CampaignOpenedSchemaVersion, fill.FilledAt, input, openedPayloadBytes),
+		r.stamp(decisionID("protective-stop-set", fill.InstrumentID, fill.FilledAt), event.ProtectiveStopSetEventType, event.ProtectiveStopSetSchemaVersion, fill.FilledAt, input, stopSetPayloadBytes),
+	}, nil
+}
+
+// applyStopFill handles a fill.Kind == event.FillKindStop delivery: the only
+// way a Campaign closes in this ticket. #13's Exit-Channel exit and #24's
+// delisting exit are later tickets and will each produce their own kind of
+// terminal fact, sharing event.CampaignExitedPayload with their own Reason
+// rather than a new event type.
+//
+// **No decision about WHETHER the stop was hit is made here.** That is
+// #18's fill simulator, comparing a bar's low against the Protective Stop
+// level under ADR 0005. This function only ever reacts to a fill event that
+// already says the stop was hit — it never reads bar data, and nothing in
+// this package compares a price to campaignState.protectiveStop except the
+// capital-safety invariant check (checkCampaignHasAProtectiveStop), which
+// checks the stop's OWN shape, never a bar's price against it. A reviewer
+// checking for look-ahead should find none: this function's only inputs are
+// the fill and the Campaign state a fill already opened.
+func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, input event.Envelope) ([]event.Envelope, error) {
+	campaign := state.campaign
+	if campaign == nil {
+		// Either the Campaign never existed, or it was already closed. A
+		// re-delivery of the EXACT fill that closed it is idempotent
+		// (docs/architecture.md); anything else — including this same fill
+		// id with different contents — is a reconciliation failure.
+		if closed := state.closedStopFill; closed != nil && closed.fillID == fill.FillID {
+			if closed.campaignID != fill.CampaignID || closed.quantity != fill.Quantity ||
+				closed.price != fill.Price || closed.direction != fill.Direction || !closed.filledAt.Equal(fill.FilledAt) {
+				return nil, fmt.Errorf("strategy: instrument %q: stop fill %q was already recorded as closing campaign %q, but this delivery's campaign id, quantity, price, direction or timestamp differ from it; a reused fill identifier carrying different contents is a reconciliation failure, not a duplicate delivery",
+					fill.InstrumentID, fill.FillID, closed.campaignID)
+			}
+			return nil, nil
+		}
+		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q names campaign %q, but there is no open campaign for it; a stop fill for an unknown or already-closed campaign is a reconciliation failure (docs/architecture.md)",
+			fill.InstrumentID, fill.FillID, fill.CampaignID)
+	}
+	if campaign.campaignID != fill.CampaignID {
+		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q names campaign %q, but the open campaign is %q; a fill for a campaign this strategy does not hold is a reconciliation failure (docs/architecture.md)",
+			fill.InstrumentID, fill.FillID, fill.CampaignID, campaign.campaignID)
+	}
+	if fill.Direction != campaign.direction {
+		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)",
+			fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)
+	}
+	if fill.Quantity != campaign.filledQuantity {
+		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q executed %d but campaign %q holds %d; a partial stop fill is rejected — accumulating a partial close into one campaign is deferred to its own issue, the same limitation #67 already records for a partial entry",
+			fill.InstrumentID, fill.FillID, fill.Quantity, campaign.campaignID, campaign.filledQuantity)
+	}
+	if fill.FilledAt.Before(campaign.openedAt) {
+		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q is timestamped %s, which predates campaign %q's own opening fill at %s; a campaign cannot be closed before it opened",
+			fill.InstrumentID, fill.FillID, fill.FilledAt.Format(time.RFC3339), campaign.campaignID, campaign.openedAt.Format(time.RFC3339))
+	}
+
+	// The realised result, in the exact expression order
+	// event.CampaignExitedPayload.Validate re-derives it in, so the two
+	// agree bit for bit. ExitPrice is fill.Price — what actually filled,
+	// which under ADR 0005's gap rule may sit below the Protective Stop
+	// level — never campaign.protectiveStop itself.
+	realisedResult := float64(campaign.filledQuantity) * (fill.Price - campaign.entryPrice) * r.dollarsPerPoint
+	realisedResultInN := (fill.Price - campaign.entryPrice) / campaign.campaignN
+
+	exitedPayload := event.CampaignExitedPayload{
+		CampaignID:          campaign.campaignID,
+		InstrumentID:        fill.InstrumentID,
+		FillID:              fill.FillID,
+		ExitedAt:            fill.FilledAt,
+		Reason:              event.ExitReasonStop,
+		EntryPrice:          campaign.entryPrice,
+		ExitPrice:           fill.Price,
+		Quantity:            campaign.filledQuantity,
+		CampaignN:           campaign.campaignN,
+		DollarsPerPoint:     r.dollarsPerPoint,
+		ProtectiveStopLevel: campaign.protectiveStop,
+		RealisedResult:      realisedResult,
+		RealisedResultInN:   realisedResultInN,
+		Rule:                event.RuleCampaignExitedByStop,
+		ADR:                 event.ADRCampaignExitRecordsTheFill,
+	}
+	if err := exitedPayload.Validate(); err != nil {
+		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q would close campaign %q with an invalid exit: %w", fill.InstrumentID, fill.FillID, campaign.campaignID, err)
+	}
+	exitedPayloadBytes, err := json.Marshal(exitedPayload)
+	if err != nil {
+		// Unreachable, for the same reason as openCampaign's marshal guards.
+		return nil, fmt.Errorf("strategy: marshal campaign exited payload: %w", err)
+	}
+
+	exitID := decisionID("campaign-exited", fill.InstrumentID, fill.FilledAt)
+	exitEnvelope := r.stamp(exitID, event.CampaignExitedEventType, event.CampaignExitedSchemaVersion, fill.FilledAt, input, exitedPayloadBytes)
+
+	// The state moves only now, after the payload it will be journalled as
+	// has been validated. Remembering closedStopFill before clearing
+	// campaign is what lets a re-delivery of this exact fill be recognised
+	// as a duplicate afterwards (see this function's top).
+	state.closedStopFill = &closedStopFillState{
+		campaignID: campaign.campaignID,
+		fillID:     fill.FillID,
+		quantity:   fill.Quantity,
+		price:      fill.Price,
+		direction:  fill.Direction,
+		filledAt:   fill.FilledAt,
+	}
+	// #12: the instrument is a Setup again — CONTEXT.md defines a Setup as
+	// an Eligible instrument not in a Campaign, and clearing this is the
+	// only thing that gate (applyCompletedBar's "no new entry while a
+	// Campaign is open") reads. The very next completed bar therefore
+	// evaluates this instrument normally and may Signal, with no further
+	// change needed anywhere else.
+	state.campaign = nil
+
+	return []event.Envelope{exitEnvelope}, nil
+}
+
+// checkCampaignHasAProtectiveStop enforces, at the start of every completed
+// bar, the ticket's capital-safety invariant: every open Campaign has a
+// Protective Stop, positive and strictly below its entry price, at all
+// times (CONTEXT.md: "Protective Stop" — "Every open Campaign has one at
+// all times").
+//
+// This is deliberately a *runtime* check on top of a representation that
+// already makes the violation unreachable in practice: openCampaign is the
+// only place state.campaign is ever assigned, and it never runs without a
+// protectiveStop that has already passed sizing.ProtectiveStopLevel's and
+// event.CampaignOpenedPayload.Validate's checks — there is no
+// "open-without-stop" zero value of campaignState that would satisfy the
+// type system. So reaching a violation here can only mean memory was
+// corrupted after the fact (a defect in this process, not a bad input
+// event), which is why the response is a HALT rather than an error naming
+// "the fill" or "the bar": there is no upstream input event to blame, and
+// continuing to trade an instrument whose stop this reducer can no longer
+// vouch for is exactly the state docs/architecture.md's safety invariants
+// exist to prevent ("material reconciliation differences force safe mode").
+//
+// Returns the halt envelope alongside the error (rather than only the
+// error) so a caller that does not discard emissions on error — the
+// test-only path in invariant_test.go calls Reducer.Apply directly rather
+// than through replay.Engine.Run, which DOES discard a handler's emissions
+// whenever it returns an error — can still see what was about to be
+// journalled.
+func (r *Reducer) checkCampaignHasAProtectiveStop(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
+	campaign := state.campaign
+	if campaign == nil {
+		return event.Envelope{}, nil
+	}
+	if campaign.protectiveStop > 0 && campaign.protectiveStop < campaign.entryPrice {
+		return event.Envelope{}, nil
+	}
+
+	detail := fmt.Sprintf(
+		"campaign %q for instrument %q has protective stop %v against entry price %v: every open campaign must have a protective stop, positive and below its entry price, at all times",
+		campaign.campaignID, bar.InstrumentID, campaign.protectiveStop, campaign.entryPrice)
+
+	payload := event.EngineStatePayload{
+		State:  event.EngineStateHalted,
+		Reason: event.EngineStateReasonCampaignWithoutProtectiveStop,
+		Detail: detail,
+	}
+	if err := payload.Validate(); err != nil {
+		// Unreachable: State and Reason are this package's own constants and
+		// Detail is built from a non-empty format string above. Guarded
+		// anyway, matching this project's fail-closed style: a payload that
+		// fails its own contract must never be journalled.
+		return event.Envelope{}, fmt.Errorf("strategy: built invalid engine state payload: %w", err)
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		// Unreachable, for the same reason as openCampaign's marshal guards.
+		return event.Envelope{}, fmt.Errorf("strategy: marshal engine state payload: %w", err)
+	}
+	haltEnvelope := r.stamp(
+		decisionID("engine-state", bar.InstrumentID, bar.PeriodEnd),
+		event.EngineStateEventType, event.EngineStateSchemaVersion,
+		bar.PeriodEnd, input, payloadBytes,
+	)
+	return haltEnvelope, fmt.Errorf("strategy: capital-safety invariant violated: %s", detail)
 }
