@@ -464,8 +464,9 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	}
 
 	// --- #11/#13: while a Campaign is open, no new entry is evaluated (below):
-	// N and the Entry Channel above are still tracked (#12's stop evaluation
-	// needs them), but no Setup-evaluated/Signal/proposal path runs:
+	// N and the Entry Channel above are still tracked, so both are already
+	// warm for the very next bar once the Campaign closes and the instrument
+	// is a Setup again, but no Setup-evaluated/Signal/proposal path runs:
 	// CONTEXT.md defines a Setup as an Eligible instrument NOT in a Campaign,
 	// so emitting a Setup-evaluated event here would journal a claim that is
 	// false by the project's own vocabulary. Instead, evaluateCampaign runs
