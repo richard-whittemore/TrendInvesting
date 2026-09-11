@@ -1208,13 +1208,23 @@ func TestNoSignalOrProposalWhileACampaignIsOpen(t *testing.T) {
 	if got := countFor(t, withCampaign, event.SetupEvaluatedEventType, "AAPL"); got != 56 {
 		t.Errorf("AAPL emitted %d Setup-evaluated event(s), want 56 (bars 1..56 only): an instrument in a Campaign is not a Setup", got)
 	}
-	// Bar 57 therefore emits nothing at all: the run's last emission is still
-	// the Protective-Stop-set that followed the Campaign the fill opened.
-	if last := withCampaign[len(withCampaign)-1]; last.Type != event.ProtectiveStopSetEventType {
-		t.Errorf("last emission is %q, want the Protective-Stop-set: the bar after it must emit nothing", last.Type)
+	// Bar 57 therefore emits no Setup/Signal/proposal at all — but #13 gives
+	// it exactly one Campaign-evaluated event, since nextBreakoutBar's Low
+	// (100, syntheticBar's fixed low) exactly TIES the Exit Channel low (100,
+	// the low of every one of the 56 warm-up/breakout bars): a tie is not a
+	// breach (The Turtle Rules p.26's "falls below"), so no exit proposal
+	// follows it.
+	if got := countFor(t, withCampaign, event.CampaignEvaluatedEventType, "AAPL"); got != 1 {
+		t.Errorf("AAPL emitted %d Campaign-evaluated event(s), want 1 (bar 57's, #13)", got)
 	}
-	if len(withCampaign) != 60 {
-		t.Errorf("len(emitted) = %d, want 60: the bar arriving during a Campaign adds no emission", len(withCampaign))
+	if got := countFor(t, withCampaign, event.ExitProposalEventType, "AAPL"); got != 0 {
+		t.Errorf("AAPL emitted %d exit proposal(s), want 0: bar 57's low ties the exit channel low rather than falling below it", got)
+	}
+	if last := withCampaign[len(withCampaign)-1]; last.Type != event.CampaignEvaluatedEventType {
+		t.Errorf("last emission is %q, want the Campaign-evaluated event bar 57 produces (#13)", last.Type)
+	}
+	if len(withCampaign) != 61 {
+		t.Errorf("len(emitted) = %d, want 61: the bar arriving during a Campaign now adds its own Campaign-evaluated event (#13)", len(withCampaign))
 	}
 }
 
@@ -1703,10 +1713,17 @@ func TestABarsLowThroughTheStopWithNoStopFillLeavesTheCampaignOpen(t *testing.T)
 	campaignN := breakoutFixtureN(t, cfg)
 	stopLevel := campaignFillPrice - cfg.StopMultiple*campaignN
 
-	// A bar whose entire range sits far below the Protective Stop level —
-	// exactly the shape a fill simulator would read as "the stop was hit" —
-	// with no corresponding stop fill in the stream at all.
-	throughTheStop := completedBar("AAPL", day(57), stopLevel-1, stopLevel-50, stopLevel-25)
+	// A bar whose entire range sits below the Protective Stop level — exactly
+	// the shape a fill simulator would read as "the stop was hit" — with no
+	// corresponding stop fill in the stream at all. The low (stopLevel-10,
+	// ~116) is deliberately kept ABOVE 100, the Exit Channel low every one of
+	// the 56 warm-up/breakout bars shares (#13): this test is about the
+	// Protective Stop invariant specifically, and a low below 100 would also
+	// breach the Exit Channel, entangling two independent negatives in one
+	// fixture. TestLookAheadExitChannelWouldMissTheBreach and the other #13
+	// tests in exit_test.go cover the exit-channel side on their own,
+	// unrelated fixtures.
+	throughTheStop := completedBar("AAPL", day(57), stopLevel-1, stopLevel-10, stopLevel-5)
 
 	emitted := newStream(t, cfg).
 		bars(breakoutBars("AAPL")).
@@ -1717,10 +1734,20 @@ func TestABarsLowThroughTheStopWithNoStopFillLeavesTheCampaignOpen(t *testing.T)
 	if got := len(envelopesOfType(emitted, event.CampaignExitedEventType)); got != 0 {
 		t.Fatalf("got %d Campaign-exited event(s), want 0: no stop fill arrived, so nothing may close the campaign", got)
 	}
-	// The bar itself emits nothing at all: an instrument in a Campaign is
-	// not a Setup (CONTEXT.md), and #12 does not decide fills from bar data.
-	if last := emitted[len(emitted)-1]; last.Type != event.ProtectiveStopSetEventType {
-		t.Errorf("last emission is %q, want the Protective-Stop-set from the opening fill: the bar through the stop must add nothing", last.Type)
+	// The bar produces no Setup/Signal/proposal — an instrument in a
+	// Campaign is not a Setup (CONTEXT.md), and #12 does not decide stop
+	// fills from bar data — but #13 gives it its own Campaign-evaluated
+	// event, reporting the level that was in force and no exit-channel
+	// breach (the fixture's low sits above the exit channel's own 100).
+	if last := emitted[len(emitted)-1]; last.Type != event.CampaignEvaluatedEventType {
+		t.Errorf("last emission is %q, want the bar's own Campaign-evaluated event (#13)", last.Type)
+	}
+	lastEvaluated := decodeCampaignEvaluated(t, emitted[len(emitted)-1])
+	if lastEvaluated.ExitConditionMet {
+		t.Error("ExitConditionMet = true, want false: the fixture's low sits above the exit channel low (100)")
+	}
+	if got := len(envelopesOfType(emitted, event.ExitProposalEventType)); got != 0 {
+		t.Errorf("got %d exit proposal(s), want 0", got)
 	}
 }
 

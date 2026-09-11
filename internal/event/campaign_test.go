@@ -720,6 +720,88 @@ func TestCampaignExitedEventConstants(t *testing.T) {
 	if event.ExitReasonStop != "stop" {
 		t.Errorf("ExitReasonStop = %q, want %q", event.ExitReasonStop, "stop")
 	}
+	// #13: the Exit-Channel exit reuses this same event type and payload
+	// (ADR 0002, The Turtle Rules p.26), adding a Reason value rather than
+	// minting a second event type — the pattern this payload's own doc
+	// comment already anticipated.
+	if event.ExitReasonExitChannel != "exit-channel" {
+		t.Errorf("ExitReasonExitChannel = %q, want %q", event.ExitReasonExitChannel, "exit-channel")
+	}
+	if event.RuleCampaignExitedByExitChannel != "campaign.exited.by-exit-channel" {
+		t.Errorf("RuleCampaignExitedByExitChannel = %q", event.RuleCampaignExitedByExitChannel)
+	}
+}
+
+// validCampaignExitedByExitChannel returns the Campaign-exited that would
+// close validCampaignOpened by an exit-channel fill gapping below the
+// channel level (ADR 0005's gap rule applies to every fill kind alike).
+func validCampaignExitedByExitChannel() event.CampaignExitedPayload {
+	entry := campaignEntryPrice
+	exit := 179.5
+	n := proposalN
+	dpp := 1.0
+	// ProtectiveStopLevel restates the Campaign's stop as it stood at close,
+	// independent of the exit-channel level that actually triggered this
+	// exit (the two are unrelated numbers — see CampaignExitedPayload's doc
+	// comment).
+	stopLevel := entry - 2*n
+	return event.CampaignExitedPayload{
+		CampaignID:          "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
+		InstrumentID:        "AAPL",
+		FillID:              "sim-fill-0003",
+		ExitedAt:            proposalPeriodEnd.AddDate(0, 0, 21),
+		Reason:              event.ExitReasonExitChannel,
+		EntryPrice:          entry,
+		ExitPrice:           exit,
+		Quantity:            133,
+		CampaignN:           n,
+		DollarsPerPoint:     dpp,
+		ProtectiveStopLevel: stopLevel,
+		RealisedResult:      float64(133) * (exit - entry) * dpp,
+		RealisedResultInN:   (exit - entry) / n,
+		Rule:                event.RuleCampaignExitedByExitChannel,
+		ADR:                 event.ADRCampaignExitRecordsTheFill,
+	}
+}
+
+// TestCampaignExitedPayloadValidateAcceptsExitChannelReason covers the
+// ticket's own reason value directly, since TestCampaignExitedPayloadValidate
+// above only ever mutates AWAY from validCampaignExited's stop-kind fixture.
+func TestCampaignExitedPayloadValidateAcceptsExitChannelReason(t *testing.T) {
+	t.Parallel()
+
+	if err := validCampaignExitedByExitChannel().Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil for a valid exit-channel exit", err)
+	}
+}
+
+// TestCampaignExitedPayloadByExitChannelRoundTrip mirrors
+// TestCampaignExitedPayloadRoundTrip for the exit-channel fixture.
+func TestCampaignExitedPayloadByExitChannelRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := validCampaignExitedByExitChannel()
+
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var decoded event.CampaignExitedPayload
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("decoded.Validate() error = %v", err)
+	}
+
+	reEncoded, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatalf("re-Marshal() error = %v", err)
+	}
+	if !bytes.Equal(encoded, reEncoded) {
+		t.Fatalf("round trip not stable:\n  first:  %s\n  second: %s", encoded, reEncoded)
+	}
 }
 
 func TestCampaignExitedPayloadRoundTrip(t *testing.T) {

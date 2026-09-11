@@ -272,14 +272,22 @@ const ADRCampaignExitRecordsTheFill = "0005"
 // for the same reason ProposalDeclinedPayload.Reason and
 // ProposalExpiredPayload.Reason are: a journal must be groupable by it.
 const (
-	// ExitReasonStop means a fill said the Protective Stop was hit (#12,
-	// this ticket).
+	// ExitReasonStop means a fill said the Protective Stop was hit (#12).
 	ExitReasonStop = "stop"
-	// #13 will add an Exit-Channel reason and #24 a delisting reason; adding
-	// either is a new enumerated value on an already-existing payload and
-	// event type, not a new one, since every exit is the same underlying
-	// fact — a Campaign's life ended, and why.
+	// ExitReasonExitChannel is declared in exit_proposal.go, next to
+	// ExitProposalPayload, which names the identical string: a fill said
+	// price fell below the Exit Channel low (#13, The Turtle Rules p.26,
+	// ADR 0002). #24 will add a delisting reason; adding it is a new
+	// enumerated value on this already-existing payload and event type, not
+	// a new one, since every exit is the same underlying fact — a
+	// Campaign's life ended, and why.
 )
+
+// RuleCampaignExitedByExitChannel names the rule for
+// CampaignExitedPayload.Rule when Reason is ExitReasonExitChannel: a
+// Campaign closes because a fill said price fell below the Exit Channel low
+// (#13).
+const RuleCampaignExitedByExitChannel = "campaign.exited.by-exit-channel"
 
 // CampaignExitedPayload records a Campaign's life ending: what was filled to
 // close it, and the realised result.
@@ -388,7 +396,7 @@ func (p CampaignExitedPayload) Validate() error {
 		errs = append(errs, errors.New("exited at is required"))
 	}
 	switch p.Reason {
-	case ExitReasonStop:
+	case ExitReasonStop, ExitReasonExitChannel:
 		// recognised
 	default:
 		errs = append(errs, fmt.Errorf("reason %q is not a recognised exit reason", p.Reason))
