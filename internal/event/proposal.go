@@ -459,19 +459,28 @@ const ProposalExpiredEventType = "strategy.proposal.expired"
 // recognised value, so it is rejected outright rather than silently
 // misread as one kind or the other (ADR 0015's rule, the same discipline
 // #12 applied when FillPayload gained its own Kind).
+//
+// NOT bumped again for #14's ProposalKindAdd, for the identical reason
+// FillSchemaVersion was not bumped for FillKindAdd: Kind is already required
+// at schema 2, and no schema-2 record ever wrote "add" before this ticket,
+// so there is no existing record this new value could be mistaken for.
 const ProposalExpiredSchemaVersion uint32 = 2
 
-// The two Kind values ProposalExpiredPayload accepts (#13). An entry-kind
-// expiry is a trade proposal (strategy.trade.proposed) that a Signal
-// produced and the next bar superseded without a fill; an exit-kind expiry
-// is an exit proposal (strategy.exit.proposed, ExitProposalPayload) that an
-// open Campaign's Exit Channel breach produced and the next bar superseded
-// without an exit fill. Both share the same lifecycle rule (ADR 0011: no
-// persistent proposal memory in the Baseline), which is why one payload
-// serves both rather than two.
+// The three Kind values ProposalExpiredPayload accepts. An entry-kind expiry
+// is a trade proposal (strategy.trade.proposed) that a Signal produced and
+// the next bar superseded without a fill; an exit-kind expiry is an exit
+// proposal (strategy.exit.proposed, ExitProposalPayload) that an open
+// Campaign's Exit Channel breach produced and the next bar superseded
+// without an exit fill; an add-kind expiry (#14) is an Add proposal
+// (strategy.add.proposed, AddProposalPayload) that an open Campaign's rung
+// being reached produced and the next bar superseded without an Add fill.
+// All three share the same lifecycle rule (ADR 0011: no persistent proposal
+// memory in the Baseline), which is why one payload serves all of them
+// rather than a separate one per kind.
 const (
 	ProposalKindEntry = "entry"
 	ProposalKindExit  = "exit"
+	ProposalKindAdd   = "add"
 )
 
 // RuleExitProposalExpiresWithItsBar names the rule for
@@ -482,6 +491,15 @@ const (
 // answers no Signal at all, so a rule named "signal.expires..." would
 // misdescribe it.
 const RuleExitProposalExpiresWithItsBar = "exit-proposal.expires.with-its-bar"
+
+// RuleAddProposalExpiresWithItsBar names the rule for
+// ProposalExpiredPayload.Rule when Kind is ProposalKindAdd (#14): an Add
+// proposal belongs to one bar and expires with it, the same lifecycle
+// RuleExitProposalExpiresWithItsBar states for an exit-kind proposal — kept
+// as a separate constant for the same reason that one is: an Add proposal
+// answers no Signal at all either, so a rule named "signal.expires..." would
+// misdescribe it.
+const RuleAddProposalExpiresWithItsBar = "add-proposal.expires.with-its-bar"
 
 // RuleSignalExpiresWithItsBar names the rule for ProposalExpiredPayload.Rule:
 // a Signal belongs to one bar and expires with it, so the proposal that Signal
@@ -563,6 +581,10 @@ func (p ProposalExpiredPayload) Validate() error {
 	case ProposalKindExit:
 		if p.SignalID != "" {
 			errs = append(errs, fmt.Errorf("signal id must be empty for an exit-kind expiry (got %q): an exit proposal is not sized from a signal", p.SignalID))
+		}
+	case ProposalKindAdd:
+		if p.SignalID != "" {
+			errs = append(errs, fmt.Errorf("signal id must be empty for an add-kind expiry (got %q): an add proposal is not sized from a signal", p.SignalID))
 		}
 	default:
 		errs = append(errs, fmt.Errorf("kind %q is not a recognised proposal kind", p.Kind))

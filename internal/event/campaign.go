@@ -254,7 +254,13 @@ const CampaignExitedEventType = "strategy.campaign.exited"
 
 // CampaignExitedSchemaVersion is the current schema version of
 // CampaignExitedPayload, for the Envelope's SchemaVersion field.
-const CampaignExitedSchemaVersion uint32 = 1
+//
+// Bumped 1 -> 2 for #14: Units was added. A schema-1 record decodes Units as
+// the int zero, which is not a legitimate Unit count (Validate requires it
+// positive), so a schema-1 record is rejected outright rather than silently
+// read as a zero-Unit exit — ADR 0015's rule, the same discipline #12 and
+// #13 each applied to their own additive fields.
+const CampaignExitedSchemaVersion uint32 = 2
 
 // RuleCampaignExitedByStop names the rule for CampaignExitedPayload.Rule
 // when Reason is ExitReasonStop: a Campaign closes because a fill said its
@@ -319,6 +325,29 @@ const RuleCampaignExitedByExitChannel = "campaign.exited.by-exit-channel"
 // no direction-dependent flip, because a long Campaign's gain is exactly
 // that difference. A short Campaign would need the opposite sign, which this
 // payload does not implement.
+//
+// # Multi-Unit aggregation (#14)
+//
+// A Campaign that added Units closes ALL of them in one decision (this
+// ticket keeps stop and exit fills whole-Campaign; #15 makes a stop
+// per-Unit). Quantity is therefore the SUM of every held Unit's own
+// quantity, and EntryPrice is their QUANTITY-WEIGHTED AVERAGE fill price —
+// chosen deliberately over a per-Unit breakdown on this payload (the
+// Campaign-opened and unit-added events already carry every individual
+// fill; this payload's job is the Campaign-level result, not a restatement
+// of the audit trail) and deliberately over reporting each Unit's own
+// result separately, because the weighted average keeps RealisedResult's
+// derivation IDENTICAL to the single-Unit formula: for quantities q_i and
+// fills e_i summing to Quantity Q and weighted average E,
+//
+//	sum(q_i x (ExitPrice - e_i)) = Quantity x (ExitPrice - E)
+//
+// so Quantity x (ExitPrice - EntryPrice) x DollarsPerPoint is EXACTLY the
+// sum of each Unit's own realised result, whether the Campaign held one Unit
+// or four — Validate's derivation check below needs no per-Unit case.
+// RealisedResultInN follows the same algebra with CampaignN in place of
+// DollarsPerPoint, since campaignN is common to every Unit of one Campaign
+// (ADR 0006 freezes it once, at first entry, for the Campaign's whole life).
 type CampaignExitedPayload struct {
 	CampaignID   string `json:"campaign_id"`
 	InstrumentID string `json:"instrument_id"`
@@ -365,6 +394,10 @@ type CampaignExitedPayload struct {
 	// unit a reviewer compares a result against, e.g. "this Campaign lost
 	// close to its full 2N risk".
 	RealisedResultInN float64 `json:"realised_result_in_n"`
+	// Units is the number of Units this Campaign held at close, 1 through
+	// the configured maximum (#14; see the type's doc comment on multi-Unit
+	// aggregation). Always 1 before #14's Add Ladder exists.
+	Units int `json:"units"`
 	// Rule and ADR name the rule that produced this decision
 	// (docs/development.md principle 3).
 	Rule string `json:"rule"`
@@ -476,6 +509,10 @@ func (p CampaignExitedPayload) Validate() error {
 				"stated realised result in n %v does not match the derivation %v ((exit price %v - entry price %v) / campaign n %v)",
 				p.RealisedResultInN, derived, p.ExitPrice, p.EntryPrice, p.CampaignN))
 		}
+	}
+
+	if p.Units <= 0 {
+		errs = append(errs, fmt.Errorf("units must be a positive whole number, got %d", p.Units))
 	}
 
 	if err := errors.Join(errs...); err != nil {
