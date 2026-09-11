@@ -1924,3 +1924,29 @@ func TestFillHistoryIsRememberedAcrossAnInstrumentsWholeLife(t *testing.T) {
 		fill(confused).
 		wantRunError(stop1.FillID, "differ")
 }
+
+// TestFillIDReusedForADifferentInstrumentIsRejected covers PR #72's third
+// review finding: the idempotency store keys purely by FillID for the whole
+// run, not per instrument (a producer's fill ids are not guaranteed
+// instrument-scoped), so reusing one instrument's fill id for a genuinely
+// different instrument's execution must be rejected as a reconciliation
+// failure — the same "same id, different contents" rule as any other reused
+// fill id — rather than silently accepted as two independent new fills.
+func TestFillIDReusedForADifferentInstrumentIsRejected(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	opensAAPL := openingFill("AAPL")
+
+	// MSFT's own opening fill in every other respect, but stamped with
+	// AAPL's exact fill id.
+	confused := openingFill("MSFT")
+	confused.FillID = opensAAPL.FillID
+
+	newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		bars(breakoutBars("MSFT")).
+		fill(opensAAPL).
+		fill(confused).
+		wantRunError(opensAAPL.FillID, "differ")
+}
