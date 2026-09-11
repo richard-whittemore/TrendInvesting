@@ -242,3 +242,236 @@ func (p CampaignOpenedPayload) Validate() error {
 	}
 	return nil
 }
+
+// CampaignExitedEventType identifies the Campaign-exited decision payload
+// for the Envelope's Type field: a Campaign's life ended (CONTEXT.md:
+// "Campaign" — "from the first Unit's entry to the exit of the last").
+//
+// Like Campaign-opened, this is a *decision* event even though a fill caused
+// it: the fill is the external fact, and this is the strategy stating what
+// that fact means for its own position state.
+const CampaignExitedEventType = "strategy.campaign.exited"
+
+// CampaignExitedSchemaVersion is the current schema version of
+// CampaignExitedPayload, for the Envelope's SchemaVersion field.
+const CampaignExitedSchemaVersion uint32 = 1
+
+// RuleCampaignExitedByStop names the rule for CampaignExitedPayload.Rule
+// when Reason is ExitReasonStop: a Campaign closes because a fill said its
+// Protective Stop was hit.
+const RuleCampaignExitedByStop = "campaign.exited.by-stop"
+
+// ADRCampaignExitRecordsTheFill is the ADR CampaignExitedPayload.ADR cites:
+// ADR 0005, whose resting-order fill model is why ExitPrice is the fill's
+// own price and may sit below ProtectiveStopLevel on a gap — "record what
+// was filled, never the level" (this payload's own doc comment) is a direct
+// restatement of ADR 0005's rule 1, "gaps fill at the open".
+const ADRCampaignExitRecordsTheFill = "0005"
+
+// The enumerated reasons a Campaign can exit. A closed set, not free text,
+// for the same reason ProposalDeclinedPayload.Reason and
+// ProposalExpiredPayload.Reason are: a journal must be groupable by it.
+const (
+	// ExitReasonStop means a fill said the Protective Stop was hit (#12,
+	// this ticket).
+	ExitReasonStop = "stop"
+	// #13 will add an Exit-Channel reason and #24 a delisting reason; adding
+	// either is a new enumerated value on an already-existing payload and
+	// event type, not a new one, since every exit is the same underlying
+	// fact — a Campaign's life ended, and why.
+)
+
+// CampaignExitedPayload records a Campaign's life ending: what was filled to
+// close it, and the realised result.
+//
+// CampaignN, DollarsPerPoint and FillID are not named in the ticket's field
+// list but are added here deliberately, for the same reason
+// CampaignOpenedPayload carries CampaignN and StopMultiple rather than
+// leaving a reader to join back to the configuration: **Validate re-derives
+// RealisedResult and RealisedResultInN exactly, and a payload cannot
+// re-derive a value from a field it does not have.** RealisedResultInN's
+// formula divides by CampaignN; RealisedResult's multiplies by
+// DollarsPerPoint; neither number lives anywhere else on this payload.
+// FillID is added to close the same audit-chain gap CampaignOpenedPayload's
+// own FillID closes for the opening fill — without it, a reviewer cannot
+// join the exit decision back to the execution record that caused it, or
+// recognise a re-delivered closing fill as the duplicate that produced this
+// exact exit.
+//
+// ExitPrice is the actual fill price, which under ADR 0005's gap rule may
+// sit strictly BELOW ProtectiveStopLevel: a stop fills at min(level, open)
+// on a gap, so what closed the Campaign can be worse than the level that
+// triggered it. This payload records what was filled, never the level —
+// ProtectiveStopLevel is carried alongside it only as "the level that was in
+// force", not as a substitute for ExitPrice.
+//
+// This is long-only, matching every other payload in this package today
+// (DirectionLong is the only recognised Direction anywhere in this system):
+// RealisedResult's sign falls out of ExitPrice - EntryPrice directly, with
+// no direction-dependent flip, because a long Campaign's gain is exactly
+// that difference. A short Campaign would need the opposite sign, which this
+// payload does not implement.
+type CampaignExitedPayload struct {
+	CampaignID   string `json:"campaign_id"`
+	InstrumentID string `json:"instrument_id"`
+	// FillID is the closing fill's producer-assigned id (see the type's doc
+	// comment).
+	FillID string `json:"fill_id"`
+	// ExitedAt is the closing fill's timestamp: the Campaign's life ended
+	// when the fill did, matching CampaignOpenedPayload.OpenedAt's own
+	// convention.
+	ExitedAt time.Time `json:"exited_at"`
+	// Reason is one of the enumerated Exit reason constants.
+	Reason string `json:"reason"`
+	// EntryPrice restates the Campaign's own entry price (CampaignOpenedPayload.EntryPrice),
+	// so this payload is readable and re-derivable without joining back to
+	// the Campaign-opened event.
+	EntryPrice float64 `json:"entry_price"`
+	// ExitPrice is the actual fill price that closed the Campaign — never
+	// the Protective Stop level (see the type's doc comment).
+	ExitPrice float64 `json:"exit_price"`
+	// Quantity is the whole position closed: the Campaign's own
+	// FilledQuantity. A partial stop close is out of scope for this ticket
+	// (see internal/strategy/campaign.go's applyStopFill), so this is always
+	// the Campaign's entire holding.
+	Quantity int64 `json:"quantity"`
+	// CampaignN is the Campaign's frozen campaign N (ADR 0006), restated so
+	// RealisedResultInN is independently re-derivable (see the type's doc
+	// comment).
+	CampaignN float64 `json:"campaign_n"`
+	// DollarsPerPoint is the instrument's contract multiplier (1 for
+	// shares), restated so RealisedResult is independently re-derivable (see
+	// the type's doc comment).
+	DollarsPerPoint float64 `json:"dollars_per_point"`
+	// ProtectiveStopLevel is the Protective Stop level that was in force
+	// when this exit happened — the Campaign's ProtectiveStop as it stood at
+	// close, not necessarily what was filled (see the type's doc comment).
+	ProtectiveStopLevel float64 `json:"protective_stop_level"`
+	// RealisedResult is the signed dollar result of the whole Campaign:
+	// Quantity x (ExitPrice - EntryPrice) x DollarsPerPoint. Negative for a
+	// loss, as a stop-out ordinarily is.
+	RealisedResult float64 `json:"realised_result"`
+	// RealisedResultInN is the same result expressed in campaign N:
+	// (ExitPrice - EntryPrice) / CampaignN. CONTEXT.md's risk vocabulary is
+	// stated in N throughout (Stop Multiple, Risk at Stop), so this is the
+	// unit a reviewer compares a result against, e.g. "this Campaign lost
+	// close to its full 2N risk".
+	RealisedResultInN float64 `json:"realised_result_in_n"`
+	// Rule and ADR name the rule that produced this decision
+	// (docs/development.md principle 3).
+	Rule string `json:"rule"`
+	ADR  string `json:"adr"`
+}
+
+// Validate checks that the payload identifies the Campaign, the closing fill
+// and the decision chain, that Reason is one of the enumerated constants,
+// that every frozen number is usable, that ProtectiveStopLevel is positive
+// and strictly below EntryPrice (the same long-only shape
+// CampaignOpenedPayload.ProtectiveStop enforces), and that RealisedResult
+// and RealisedResultInN each match their derivation from the payload's own
+// fields EXACTLY — the same exact-equality discipline every derived field in
+// this package uses, and for the same reason: a tolerance would let a
+// differently-derived result through, which is the defect the check exists
+// to catch.
+func (p CampaignExitedPayload) Validate() error {
+	var errs []error
+	if p.CampaignID == "" {
+		errs = append(errs, errors.New("campaign id is required"))
+	}
+	if p.InstrumentID == "" {
+		errs = append(errs, errors.New("instrument id is required"))
+	}
+	if p.FillID == "" {
+		errs = append(errs, errors.New("fill id is required: an exit must name the fill that closed it"))
+	}
+	if p.ExitedAt.IsZero() {
+		errs = append(errs, errors.New("exited at is required"))
+	}
+	switch p.Reason {
+	case ExitReasonStop:
+		// recognised
+	default:
+		errs = append(errs, fmt.Errorf("reason %q is not a recognised exit reason", p.Reason))
+	}
+	if p.Rule == "" {
+		errs = append(errs, errors.New("rule is required"))
+	}
+	if p.ADR == "" {
+		errs = append(errs, errors.New("adr is required"))
+	}
+
+	entryPriceFinite := isFinite(p.EntryPrice)
+	switch {
+	case !entryPriceFinite:
+		errs = append(errs, errors.New("entry price must be finite"))
+	case p.EntryPrice <= 0:
+		errs = append(errs, errors.New("entry price must be positive"))
+	}
+
+	exitPriceFinite := isFinite(p.ExitPrice)
+	switch {
+	case !exitPriceFinite:
+		errs = append(errs, errors.New("exit price must be finite"))
+	case p.ExitPrice <= 0:
+		errs = append(errs, errors.New("exit price must be positive"))
+	}
+
+	if p.Quantity <= 0 {
+		errs = append(errs, fmt.Errorf("quantity must be a positive whole number, got %d", p.Quantity))
+	}
+
+	campaignNFinite := isFinite(p.CampaignN)
+	switch {
+	case !campaignNFinite:
+		errs = append(errs, errors.New("campaign n must be finite"))
+	case p.CampaignN <= 0:
+		errs = append(errs, errors.New("campaign n must be positive"))
+	}
+
+	dollarsPerPointFinite := isFinite(p.DollarsPerPoint)
+	switch {
+	case !dollarsPerPointFinite:
+		errs = append(errs, errors.New("dollars per point must be finite"))
+	case p.DollarsPerPoint <= 0:
+		errs = append(errs, errors.New("dollars per point must be positive"))
+	}
+
+	stopLevelFinite := isFinite(p.ProtectiveStopLevel)
+	switch {
+	case !stopLevelFinite:
+		errs = append(errs, errors.New("protective stop level must be finite"))
+	case p.ProtectiveStopLevel <= 0:
+		errs = append(errs, errors.New("protective stop level must be positive: a long position cannot be stopped out at or below zero"))
+	case entryPriceFinite && p.ProtectiveStopLevel >= p.EntryPrice:
+		errs = append(errs, fmt.Errorf("protective stop level %v must be below the entry price %v for a long position", p.ProtectiveStopLevel, p.EntryPrice))
+	}
+
+	realisedResultFinite := isFinite(p.RealisedResult)
+	if !realisedResultFinite {
+		errs = append(errs, errors.New("realised result must be finite"))
+	}
+	realisedResultInNFinite := isFinite(p.RealisedResultInN)
+	if !realisedResultInNFinite {
+		errs = append(errs, errors.New("realised result in n must be finite"))
+	}
+
+	if entryPriceFinite && exitPriceFinite && dollarsPerPointFinite && p.Quantity > 0 && realisedResultFinite {
+		if derived := float64(p.Quantity) * (p.ExitPrice - p.EntryPrice) * p.DollarsPerPoint; p.RealisedResult != derived {
+			errs = append(errs, fmt.Errorf(
+				"stated realised result %v does not match the derivation %v (quantity %d x (exit price %v - entry price %v) x dollars per point %v)",
+				p.RealisedResult, derived, p.Quantity, p.ExitPrice, p.EntryPrice, p.DollarsPerPoint))
+		}
+	}
+	if entryPriceFinite && exitPriceFinite && campaignNFinite && realisedResultInNFinite {
+		if derived := (p.ExitPrice - p.EntryPrice) / p.CampaignN; p.RealisedResultInN != derived {
+			errs = append(errs, fmt.Errorf(
+				"stated realised result in n %v does not match the derivation %v ((exit price %v - entry price %v) / campaign n %v)",
+				p.RealisedResultInN, derived, p.ExitPrice, p.EntryPrice, p.CampaignN))
+		}
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("invalid campaign exited payload: %w", err)
+	}
+	return nil
+}

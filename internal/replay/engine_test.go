@@ -422,3 +422,100 @@ func TestEngineRunHonoursContextCancellation(t *testing.T) {
 		t.Fatal("Run() error = nil, want context error")
 	}
 }
+
+// TestEngineRunJournalsPriorAndFinalEmissionsAlongsideHandlerError covers the
+// engine contract change #12's review round required: a handler that fails
+// closed may still emit a final event explaining why (Handler's doc
+// comment), and the engine must stamp, validate, and return it — the prior
+// emissions from earlier, successful Apply calls, PLUS the failing call's
+// own emission — rather than discarding everything the moment Apply returns
+// an error. Without this, a handler's own halt-and-explain event (e.g.
+// internal/strategy's capital-safety halt) would never reach the journal:
+// the run would fail closed silently at exactly the moment a reviewer most
+// needs to see why.
+func TestEngineRunJournalsPriorAndFinalEmissionsAlongsideHandlerError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("handler failed closed")
+	engine, err := replay.New(replay.HandlerFunc(func(_ context.Context, item event.Envelope) ([]event.Envelope, error) {
+		switch item.Sequence {
+		case 4:
+			return []event.Envelope{decision("a")}, nil
+		case 5:
+			return []event.Envelope{decision("b")}, wantErr
+		default:
+			t.Fatalf("unexpected input sequence %d", item.Sequence)
+			return nil, nil
+		}
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	emitted, err := engine.Run(context.Background(), []event.Envelope{envelope(4), envelope(5)})
+	if err == nil {
+		t.Fatal("Run() error = nil, want the handler's error")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Run() error = %v, want it to wrap %v", err, wantErr)
+	}
+
+	// Both emissions: sequence 4's "a" from before the failure, and sequence
+	// 5's own "b" — the failing call's final emission — correctly sequenced
+	// and stamped exactly as a successful emission would be.
+	if len(emitted) != 2 {
+		t.Fatalf("len(emitted) = %d, want 2 (the prior emission plus the failing call's own)", len(emitted))
+	}
+	if emitted[0].ID != "a" || emitted[0].Sequence != 1 {
+		t.Errorf("emitted[0] = %+v, want ID a, Sequence 1", emitted[0])
+	}
+	if emitted[1].ID != "b" || emitted[1].Sequence != 2 {
+		t.Errorf("emitted[1] = %+v, want ID b, Sequence 2", emitted[1])
+	}
+	if emitted[1].CausationID != "evt-5" {
+		t.Errorf("emitted[1].CausationID = %q, want %q (the input that caused the failing Apply call)", emitted[1].CausationID, "evt-5")
+	}
+	if emitted[1].PayloadHash != event.HashPayload(emitted[1].Payload) {
+		t.Error("emitted[1].PayloadHash does not attest its own payload")
+	}
+}
+
+// TestEngineRunNamesBothAnInvalidFinalEmissionAndTheHandlerError covers the
+// case where a handler fails closed AND the explanatory emission it returns
+// is itself invalid: an emission that cannot be journalled is still an
+// error, and it must not be allowed to mask the original handler error that
+// caused it. Both are named, with the original error first in the chain
+// (errors.Is finds it).
+func TestEngineRunNamesBothAnInvalidFinalEmissionAndTheHandlerError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("handler failed closed")
+	engine, err := replay.New(replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) {
+		invalid := decision("x")
+		invalid.Source = "" // missing a required provenance field
+		return []event.Envelope{invalid}, wantErr
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = engine.Run(context.Background(), []event.Envelope{envelope(1)})
+	if err == nil {
+		t.Fatal("Run() error = nil, want error")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Run() error = %v, want it to wrap the original handler error %v", err, wantErr)
+	}
+	if !strings.Contains(err.Error(), "handler failed closed") {
+		t.Errorf("Run() error = %v, want it to name the original handler error", err)
+	}
+	if !strings.Contains(err.Error(), "sequence 1") {
+		t.Errorf("Run() error = %v, want it to name the input sequence (1)", err)
+	}
+	if !strings.Contains(err.Error(), "emission 0") {
+		t.Errorf("Run() error = %v, want it to name the emission index (0)", err)
+	}
+	if !strings.Contains(err.Error(), "invalid") {
+		t.Errorf("Run() error = %v, want it to name the emission as invalid", err)
+	}
+}

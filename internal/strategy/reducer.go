@@ -105,6 +105,14 @@ type Reducer struct {
 	accountCurrency string
 
 	instruments map[string]*instrumentState
+	// acceptedFills is #12's addition, defined and explained in
+	// campaign.go: every fill this reducer has accepted, for the WHOLE
+	// run, keyed by FillID — not per instrument — so that a fill id reused
+	// across two different instruments is caught as a reconciliation
+	// failure rather than accepted twice (each instrument's history no
+	// longer being kept separately), and so a re-delivery stays idempotent
+	// no matter how much has happened since it was first accepted.
+	acceptedFills map[string]acceptedFillState
 }
 
 // instrumentState is one instrument's running True Range/N/Entry Channel
@@ -148,6 +156,7 @@ func NewReducer(strategyVersion, configurationHash string) (*Reducer, error) {
 		strategyVersion:   strategyVersion,
 		configurationHash: configurationHash,
 		instruments:       make(map[string]*instrumentState),
+		acceptedFills:     make(map[string]acceptedFillState),
 	}, nil
 }
 
@@ -332,6 +341,16 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	// read or advanced, so a rejected bar leaves nothing half-applied.
 	if err := checkBarConfirmsCampaignOpening(state, bar); err != nil {
 		return nil, err
+	}
+
+	// #12: the capital-safety invariant — every open Campaign has a
+	// Protective Stop at all times — checked at the start of every
+	// completed bar, before anything else about this bar is read. See
+	// checkCampaignHasAProtectiveStop's doc comment for why a violation can
+	// only be memory corruption, not a bad input, and why the halt envelope
+	// is returned alongside the error.
+	if halt, err := r.checkCampaignHasAProtectiveStop(state, bar, envelope); err != nil {
+		return []event.Envelope{halt}, err
 	}
 
 	// ADR 0004: signal computation, including N and the Entry Channel, runs

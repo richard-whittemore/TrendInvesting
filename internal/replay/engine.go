@@ -18,6 +18,15 @@ import (
 // and PayloadHash (via event.HashPayload) on what it emits. It must not rely
 // on Sequence, CausationID, or CorrelationID it sets on an emitted envelope:
 // Engine.Run stamps all three, overwriting whatever the handler provided.
+//
+// A handler that fails closed may emit a final event explaining why —
+// alongside the error, in the same Apply call, not instead of it: Apply's
+// contract permits returning both a non-nil error and a non-empty emission
+// slice on the same call. The engine journals that emission (stamping and
+// validating it exactly like any successful one) before returning the
+// error, so a capital-safety halt or similar terminal decision reaches the
+// journal even though the run itself does not continue. A handler that has
+// nothing to explain returns (nil, err) as before.
 type Handler interface {
 	Apply(context.Context, event.Envelope) ([]event.Envelope, error)
 }
@@ -58,6 +67,17 @@ func New(handler Handler) (*Engine, error) {
 // override either. Each emitted envelope is validated after stamping, so an
 // invalid emission fails closed, naming the input sequence and the emission
 // index.
+//
+// When Apply returns an error, its emissions (if any — see Handler's doc
+// comment on a handler's final explanatory event) are still stamped,
+// validated, and appended exactly like a successful call's: Run returns
+// every emission collected up to and including the failing call's own,
+// alongside the error. A handler's error always wins the message: if the
+// failing call's own emission is ALSO invalid, both failures are named, with
+// the handler's original error first in the chain (errors.Is/As still finds
+// it) and the emission's invalidity appended, since an emission that cannot
+// be journalled is a failure in its own right and must not be silently
+// dropped behind the error that happened to arrive alongside it.
 func (e *Engine) Run(ctx context.Context, events []event.Envelope) ([]event.Envelope, error) {
 	var previous uint64
 	var outputSequence uint64
@@ -73,10 +93,7 @@ func (e *Engine) Run(ctx context.Context, events []event.Envelope) ([]event.Enve
 			return nil, fmt.Errorf("event %d: non-contiguous sequence: got %d after %d", index, envelope.Sequence, previous)
 		}
 
-		decisions, err := e.handler.Apply(ctx, envelope)
-		if err != nil {
-			return nil, fmt.Errorf("apply event %s at sequence %d: %w", envelope.ID, envelope.Sequence, err)
-		}
+		decisions, applyErr := e.handler.Apply(ctx, envelope)
 
 		correlationID := envelope.CorrelationID
 		if correlationID == "" {
@@ -88,9 +105,22 @@ func (e *Engine) Run(ctx context.Context, events []event.Envelope) ([]event.Enve
 			decision.CausationID = envelope.ID
 			decision.CorrelationID = correlationID
 			if err := decision.Validate(); err != nil {
-				return nil, fmt.Errorf("emit at input sequence %d, emission %d: %w", envelope.Sequence, emissionIndex, err)
+				validationErr := fmt.Errorf("emit at input sequence %d, emission %d: %w", envelope.Sequence, emissionIndex, err)
+				if applyErr != nil {
+					// The handler's own error is the reason this call
+					// failed; the invalid emission is a second, independent
+					// defect discovered while trying to journal what the
+					// handler said to explain the first. Both are named,
+					// with applyErr first so errors.Is/As still finds it.
+					return emitted, fmt.Errorf("apply event %s at sequence %d: %w; its final emission is also invalid: %w", envelope.ID, envelope.Sequence, applyErr, validationErr)
+				}
+				return nil, validationErr
 			}
 			emitted = append(emitted, decision)
+		}
+
+		if applyErr != nil {
+			return emitted, fmt.Errorf("apply event %s at sequence %d: %w", envelope.ID, envelope.Sequence, applyErr)
 		}
 
 		previous = envelope.Sequence

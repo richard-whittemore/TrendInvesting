@@ -26,17 +26,34 @@ import (
 // producer's float64 arithmetic.
 var campaignEntryPrice = 201.25
 
-// validFill returns a fill that satisfies every validation rule: the full
-// 133-share Unit of validTradeProposal, executed at campaignEntryPrice.
+// validFill returns an entry fill that satisfies every validation rule: the
+// full 133-share Unit of validTradeProposal, executed at campaignEntryPrice.
 func validFill() event.FillPayload {
 	return event.FillPayload{
 		InstrumentID: "AAPL",
+		Kind:         event.FillKindEntry,
 		ProposalID:   "proposal:AAPL:2026-02-27T00:00:00.000000000Z",
 		FillID:       "sim-fill-0001",
 		Direction:    event.DirectionLong,
 		Quantity:     133,
 		Price:        campaignEntryPrice,
 		FilledAt:     proposalPeriodEnd,
+	}
+}
+
+// validStopFill returns a stop fill that satisfies every validation rule:
+// the full 133-share Unit closing campaign:AAPL:2026-02-27T00:00:00.000000000Z,
+// the same Campaign validCampaignOpened describes.
+func validStopFill() event.FillPayload {
+	return event.FillPayload{
+		InstrumentID: "AAPL",
+		Kind:         event.FillKindStop,
+		CampaignID:   "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
+		FillID:       "sim-fill-0002",
+		Direction:    event.DirectionLong,
+		Quantity:     133,
+		Price:        126.09441570423544,
+		FilledAt:     proposalPeriodEnd.AddDate(0, 0, 1),
 	}
 }
 
@@ -61,6 +78,37 @@ func TestFillPayloadValidate(t *testing.T) {
 			// something to absorb.
 			name:    "missing proposal id",
 			mutate:  func(f *event.FillPayload) { f.ProposalID = "" },
+			wantErr: "proposal id",
+		},
+		{
+			name:    "missing kind",
+			mutate:  func(f *event.FillPayload) { f.Kind = "" },
+			wantErr: "kind",
+		},
+		{
+			name:    "unrecognised kind",
+			mutate:  func(f *event.FillPayload) { f.Kind = "add" },
+			wantErr: "kind",
+		},
+		{
+			// An entry fill has no Campaign yet: naming one would claim a
+			// position exists before the fill that is supposed to create it.
+			name:    "entry fill names a campaign",
+			mutate:  func(f *event.FillPayload) { f.CampaignID = "some-campaign" },
+			wantErr: "campaign id",
+		},
+		{
+			// A fill relabelled as a stop while still carrying the entry's
+			// proposal id: the stop-specific table below (TestStopFillPayloadValidate)
+			// covers the rest of the stop-kind pairing rules from
+			// validStopFill; this pins the same rule from the opposite base
+			// fixture, so both directions are covered.
+			name: "fill relabelled as a stop still names a proposal",
+			mutate: func(f *event.FillPayload) {
+				f.Kind = event.FillKindStop
+				f.CampaignID = "campaign:AAPL:2026-02-27T00:00:00.000000000Z"
+				// f.ProposalID is left set from validFill().
+			},
 			wantErr: "proposal id",
 		},
 		{
@@ -136,6 +184,56 @@ func TestFillPayloadValidate(t *testing.T) {
 	}
 }
 
+// TestStopFillPayloadValidate covers the stop-kind pairing rules from
+// validStopFill, the mirror image of the entry-kind cases pinned above.
+func TestStopFillPayloadValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(*event.FillPayload)
+		wantErr string
+	}{
+		{name: "valid stop fill"},
+		{
+			// A stop fill for an unknown campaign cannot be reconciled
+			// against anything the strategy holds.
+			name:    "missing campaign id",
+			mutate:  func(f *event.FillPayload) { f.CampaignID = "" },
+			wantErr: "campaign id",
+		},
+		{
+			// A stop closes a Campaign, not a proposal: naming one is a
+			// producer defect the payload rejects rather than absorbs.
+			name:    "stop fill names a proposal id",
+			mutate:  func(f *event.FillPayload) { f.ProposalID = "some-proposal" },
+			wantErr: "proposal id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := validStopFill()
+			if tt.mutate != nil {
+				tt.mutate(&payload)
+			}
+
+			err := payload.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestFillPayloadValidateRejectsNonFinitePrice(t *testing.T) {
 	t.Parallel()
 
@@ -161,6 +259,11 @@ func TestFillPayloadValidateRejectsNonFinitePrice(t *testing.T) {
 	}
 }
 
+// TestFillPayloadValidateAggregatesEveryField uses a totally zero payload,
+// whose Kind is therefore "" — an unrecognised kind, not either pairing
+// branch — so "proposal id"/"campaign id" are deliberately NOT asserted
+// here; TestStopFillPayloadValidate and the entry-kind table above cover
+// those once Kind is one of the two recognised values.
 func TestFillPayloadValidateAggregatesEveryField(t *testing.T) {
 	t.Parallel()
 
@@ -172,7 +275,7 @@ func TestFillPayloadValidateAggregatesEveryField(t *testing.T) {
 	}
 	for _, want := range []string{
 		"instrument id",
-		"proposal id",
+		"kind",
 		"fill id",
 		"direction",
 		"quantity",
@@ -195,8 +298,14 @@ func TestFillEventConstants(t *testing.T) {
 	if event.FillEventType != "execution.fill" {
 		t.Errorf("FillEventType = %q, want %q", event.FillEventType, "execution.fill")
 	}
-	if event.FillSchemaVersion != 1 {
-		t.Errorf("FillSchemaVersion = %d, want 1 (a new payload starts at 1)", event.FillSchemaVersion)
+	if event.FillSchemaVersion != 2 {
+		t.Errorf("FillSchemaVersion = %d, want 2 (#12 added Kind and CampaignID)", event.FillSchemaVersion)
+	}
+	if event.FillKindEntry != "entry" {
+		t.Errorf("FillKindEntry = %q, want %q", event.FillKindEntry, "entry")
+	}
+	if event.FillKindStop != "stop" {
+		t.Errorf("FillKindStop = %q, want %q", event.FillKindStop, "stop")
 	}
 }
 
@@ -242,7 +351,9 @@ func TestFillPayloadJSONTags(t *testing.T) {
 
 	for _, key := range []string{
 		"instrument_id",
+		"kind",
 		"proposal_id",
+		"campaign_id",
 		"fill_id",
 		"direction",
 		"quantity",
@@ -252,5 +363,58 @@ func TestFillPayloadJSONTags(t *testing.T) {
 		if _, ok := asMap[key]; !ok {
 			t.Errorf("encoded payload missing expected key %q: %s", key, encoded)
 		}
+	}
+}
+
+// TestStopFillPayloadJSONTags mirrors TestFillPayloadJSONTags from the
+// stop-kind fixture, so campaign_id's presence is asserted from a payload
+// that actually populates it (validFill leaves it at its zero value).
+func TestStopFillPayloadJSONTags(t *testing.T) {
+	t.Parallel()
+
+	encoded, err := json.Marshal(validStopFill())
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var asMap map[string]any
+	if err := json.Unmarshal(encoded, &asMap); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	if got, ok := asMap["kind"]; !ok || got != "stop" {
+		t.Errorf("encoded payload kind = %v, want %q: %s", got, "stop", encoded)
+	}
+	if got, ok := asMap["campaign_id"]; !ok || got == "" {
+		t.Errorf("encoded payload campaign_id = %v, want it populated: %s", got, encoded)
+	}
+}
+
+// TestStopFillPayloadRoundTrip mirrors TestFillPayloadRoundTrip for the
+// stop-kind fixture.
+func TestStopFillPayloadRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := validStopFill()
+
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var decoded event.FillPayload
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("decoded.Validate() error = %v", err)
+	}
+
+	reEncoded, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatalf("re-Marshal() error = %v", err)
+	}
+	if !bytes.Equal(encoded, reEncoded) {
+		t.Fatalf("round trip not stable:\n  first:  %s\n  second: %s", encoded, reEncoded)
 	}
 }

@@ -1284,8 +1284,14 @@ func TestReducerRejectsAccountEventWithMismatchedCurrency(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "does not match the account's pinned currency") {
 			t.Fatalf("Run() error = %v, want it to name a currency mismatch", err)
 		}
-		if emitted != nil {
-			t.Fatalf("emitted = %v, want nil: nothing is emitted for a run that failed closed", emitted)
+		// #12's review round changed replay.Engine.Run's contract: emissions
+		// from calls that succeeded BEFORE the failing one are now returned
+		// alongside the error, rather than discarded (docs/architecture.md's
+		// Replay engine section). The pinning cash movement itself emits a
+		// cash-adjusted decision, so that one emission — and only that one —
+		// must survive the later snapshot's rejection.
+		if len(emitted) != 1 || emitted[0].Type != event.NotionalAccountCashAdjustedEventType {
+			t.Fatalf("emitted = %v, want exactly the pinning cash movement's %q event (prior emissions are journalled even when a later call fails closed)", emitted, event.NotionalAccountCashAdjustedEventType)
 		}
 	})
 }
@@ -1319,7 +1325,13 @@ func TestReducerCurrencyPinSurvivesRebasing(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "does not match the account's pinned currency") {
 		t.Fatalf("Run() error = %v, want it to name a currency mismatch even after a re-basing", err)
 	}
-	if emitted != nil {
-		t.Fatalf("emitted = %v, want nil: nothing is emitted for a run that failed closed", emitted)
+	// #12's review round changed replay.Engine.Run's contract: emissions
+	// from calls that succeeded BEFORE the failing one are now returned
+	// alongside the error (docs/architecture.md's Replay engine section).
+	// snap2's re-basing itself emits a rebased decision, so that one
+	// emission — and only that one — must survive the later snapshot's
+	// rejection.
+	if len(emitted) != 1 || emitted[0].Type != event.NotionalAccountRebasedEventType {
+		t.Fatalf("emitted = %v, want exactly the re-basing's %q event (prior emissions are journalled even when a later call fails closed)", emitted, event.NotionalAccountRebasedEventType)
 	}
 }
