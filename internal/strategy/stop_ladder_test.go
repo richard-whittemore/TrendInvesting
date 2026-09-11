@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -789,5 +790,305 @@ func TestReplayingTheGapFixtureTwiceYieldsByteIdenticalEmissions(t *testing.T) {
 		if !bytes.Equal(a, b) {
 			t.Fatalf("emission %d differs between replays:\n  first:  %s\n  second: %s", i, a, b)
 		}
+	}
+}
+
+// --- Review round: four further fixes -------------------------------------
+//
+// The four tests below cover a second Greptile review round on PR #76,
+// each pinned to the specific gap the finding named.
+
+// TestExitFillAfterAPartialStopAggregatesTheWholeLife is "Exit Omits
+// Earlier Stopouts": a partial stop closes Unit 4 alone, and the Exit
+// Channel later closes Units 1-3 together. The resulting exited payload
+// must aggregate ALL FOUR units' worth of quantity and result — not merely
+// the three Units this particular fill closes — and Reason must still be
+// exit-channel (never relabelled as if a stop had closed it).
+func TestExitFillAfterAPartialStopAggregatesTheWholeLife(t *testing.T) {
+	t.Parallel()
+
+	stream, fixture := buildGapCampaign(t)
+
+	stop4Price := fixture.unit4Stop - 0.37
+	stop4 := stopFillForUnits("AAPL", fixture.campaignID, "sim-fill-stop-4", []string{fixture.unit4FillID}, stop4Price, 133, day(60))
+
+	// A bar whose low breaches the (warmed-up, see breakoutBars/exit_test.go)
+	// Exit Channel low of 100, proposing an exit for whatever remains (the
+	// 3 surviving units).
+	breachAt := day(61)
+	breachBar := postEntryBar("AAPL", breachAt, 99)
+	exitFillPrice := 99.5
+	exitFill := event.FillPayload{
+		InstrumentID: "AAPL",
+		Kind:         event.FillKindExit,
+		CampaignID:   fixture.campaignID,
+		ProposalID:   exitProposalID("AAPL", breachAt),
+		FillID:       "sim-fill-exit-remaining",
+		Direction:    event.DirectionLong,
+		Quantity:     399,
+		Price:        exitFillPrice,
+		FilledAt:     day(62),
+	}
+
+	emitted := stream.
+		fill(stop4).
+		bar(breachBar).
+		fill(exitFill).
+		mustRun()
+
+	exited := decodeCampaignExited(t, onlyEnvelopeOfType(t, emitted, event.CampaignExitedEventType))
+	if exited.Reason != event.ExitReasonExitChannel {
+		t.Errorf("Reason = %q, want %q (an exit-channel close, even though an earlier stop closed part of this campaign)", exited.Reason, event.ExitReasonExitChannel)
+	}
+	if exited.Units != 4 {
+		t.Errorf("Units = %d, want 4 (the campaign's whole life)", exited.Units)
+	}
+	if exited.Quantity != 532 {
+		t.Errorf("Quantity = %d, want 532 (133 x 4, across BOTH closing fills)", exited.Quantity)
+	}
+
+	wantEntryPrice := (133.0*fixture.unit4Fill + 133.0*fixture.unit1Fill + 133.0*fixture.unit2Fill + 133.0*fixture.unit3Fill) / 532.0
+	wantExitPrice := (133.0*stop4Price + 399.0*exitFillPrice) / 532.0
+	if math.Abs(exited.EntryPrice-wantEntryPrice) > 1e-9 {
+		t.Errorf("EntryPrice = %v, want ~%v", exited.EntryPrice, wantEntryPrice)
+	}
+	if math.Abs(exited.ExitPrice-wantExitPrice) > 1e-9 {
+		t.Errorf("ExitPrice = %v, want ~%v", exited.ExitPrice, wantExitPrice)
+	}
+	wantRealisedResult := 532.0 * (wantExitPrice - wantEntryPrice) * fixture.cfg.DollarsPerPoint
+	if math.Abs(exited.RealisedResult-wantRealisedResult) > 1e-6 {
+		t.Errorf("RealisedResult = %v, want ~%v", exited.RealisedResult, wantRealisedResult)
+	}
+	if err := exited.Validate(); err != nil {
+		t.Errorf("emitted campaign exited payload fails its own Validate(): %v", err)
+	}
+}
+
+// TestPendingAddIsCancelledByAPartialStopAndItsFillIsRejected is "Pending
+// Adds Survive Stopouts": a bar proposes an Add (for a THIRD Unit), and
+// before it fills, a stop fill partially closes the Campaign (Unit 1
+// alone, leaving Unit 2 open). The pending Add proposal must be cancelled
+// immediately (a strategy.proposal.expired event, Reason
+// superseded-by-stop) rather than surviving to the next bar, and the
+// add fill that later arrives for it must be rejected — the Unit count
+// (only ONE add ever having actually happened, unit 2's own) never moves.
+func TestPendingAddIsCancelledByAPartialStopAndItsFillIsRejected(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	campaignN := breakoutFixtureN(t, cfg)
+
+	rung2, err := sizing.NextAddLevel(campaignFillPrice, campaignN, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel(rung 2) error = %v", err)
+	}
+	bar57 := addOpportunityBar("AAPL", day(57), rung2+5)
+	fill2 := addFill("AAPL", campaignID, 2, day(57), "sim-fill-add-2", rung2, 133, day(57))
+
+	rung3, err := sizing.NextAddLevel(rung2, campaignN, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel(rung 3) error = %v", err)
+	}
+	// bar58 reaches rung3 (proposes unit 3's Add) but ALSO stays above the
+	// warmed-up Exit Channel (100), so nothing but the Add proposal comes
+	// of it.
+	bar58 := addOpportunityBar("AAPL", day(58), rung3+5)
+
+	unit1Stop, err := sizing.ProtectiveStopLevel(campaignFillPrice, campaignN, cfg.StopMultiple, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("ProtectiveStopLevel() error = %v", err)
+	}
+	unit1RaisedStop, err := sizing.RaisedStop(unit1Stop, campaignN)
+	if err != nil {
+		t.Fatalf("RaisedStop() error = %v", err)
+	}
+	// A partial stop, closing Unit 1 ALONE (Unit 2 survives), arriving
+	// AFTER bar58 raised the pending Add proposal for Unit 3 but BEFORE any
+	// fill for it.
+	partialStop := stopFillForUnits("AAPL", campaignID, "sim-fill-stop-1", []string{"sim-fill-0001"}, unit1RaisedStop-0.10, 133, day(59))
+
+	// The now-stale Add fill for Unit 3, naming the SAME proposal bar58
+	// raised — arriving anyway, "before the next bar" per the ticket's own
+	// framing.
+	staleAddFill := addFill("AAPL", campaignID, 3, day(58), "sim-fill-add-3", rung3, 133, day(60))
+
+	s := newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		bar(bar57).
+		fill(fill2).
+		bar(bar58).
+		fill(partialStop).
+		fill(staleAddFill)
+
+	emitted, runErr := s.run()
+	if runErr == nil {
+		t.Fatal("run() error = nil, want the stale add fill to be rejected")
+	}
+	if !strings.Contains(runErr.Error(), "sim-fill-add-3") {
+		t.Errorf("run() error = %v, want it to name the rejected fill", runErr)
+	}
+
+	expired := envelopesOfType(emitted, event.ProposalExpiredEventType)
+	if len(expired) != 1 {
+		t.Fatalf("got %d proposal-expired event(s), want exactly 1 (the pending add, cancelled by the partial stop)", len(expired))
+	}
+	expiredPayload := decodeProposalExpired(t, expired[0])
+	if expiredPayload.Kind != event.ProposalKindAdd {
+		t.Errorf("Kind = %q, want %q", expiredPayload.Kind, event.ProposalKindAdd)
+	}
+	if expiredPayload.Reason != event.ExpiryReasonSupersededByStop {
+		t.Errorf("Reason = %q, want %q", expiredPayload.Reason, event.ExpiryReasonSupersededByStop)
+	}
+	if !expiredPayload.ExpiredAt.Equal(day(59)) {
+		t.Errorf("ExpiredAt = %v, want %v (the partial stop's own timestamp)", expiredPayload.ExpiredAt, day(59))
+	}
+	if err := expiredPayload.Validate(); err != nil {
+		t.Errorf("emitted proposal expired payload fails its own Validate(): %v", err)
+	}
+
+	// Unit count never moved: unit 2's own add is the only one that ever
+	// happened.
+	if got := len(envelopesOfType(emitted, event.CampaignUnitAddedEventType)); got != 1 {
+		t.Errorf("got %d unit-added event(s), want exactly 1 (unit 2's own — unit 3 never joined)", got)
+	}
+}
+
+// TestStopFillTimestampMustNotRegress is "Stop Timestamps Can Regress": a
+// second partial stop fill timestamped BEFORE an already-accepted partial
+// stop is rejected; the identical fill timestamped at the SAME instant is
+// accepted (The Turtle Rules p.19's "several Units in one day" allowance,
+// mirrored on the closing side).
+func TestStopFillTimestampMustNotRegress(t *testing.T) {
+	t.Parallel()
+
+	t.Run("earlier timestamp is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		stream, fixture := buildGapCampaign(t)
+		stopAt := day(60)
+		stop4 := stopFillForUnits("AAPL", fixture.campaignID, "sim-fill-stop-4", []string{fixture.unit4FillID}, fixture.unit4Stop-0.37, 133, stopAt)
+		earlier := stopFillForUnits("AAPL", fixture.campaignID, "sim-fill-stop-123", []string{fixture.unit1FillID, fixture.unit2FillID, fixture.unit3FillID}, fixture.unit1Stop-0.20, 399, stopAt.Add(-1*time.Hour))
+
+		stream.fill(stop4).fill(earlier).wantRunError("sim-fill-stop-123", "predates")
+	})
+
+	t.Run("the same instant is accepted", func(t *testing.T) {
+		t.Parallel()
+
+		stream, fixture := buildGapCampaign(t)
+		stopAt := day(60)
+		stop4 := stopFillForUnits("AAPL", fixture.campaignID, "sim-fill-stop-4", []string{fixture.unit4FillID}, fixture.unit4Stop-0.37, 133, stopAt)
+		sameInstant := stopFillForUnits("AAPL", fixture.campaignID, "sim-fill-stop-123", []string{fixture.unit1FillID, fixture.unit2FillID, fixture.unit3FillID}, fixture.unit1Stop-0.20, 399, stopAt)
+
+		emitted := stream.fill(stop4).fill(sameInstant).mustRun()
+
+		if got := len(envelopesOfType(emitted, event.CampaignExitedEventType)); got != 1 {
+			t.Fatalf("got %d campaign-exited event(s), want exactly 1: an identical closing timestamp is legitimate (several units closing in one instant)", got)
+		}
+	})
+}
+
+// TestStopMultipleOneRaisesUnitOneAboveItsEntry is "Valid Stop Raises
+// Fail": a Variant with StopMultiple 1 (narrower than the Baseline's 2)
+// and four Units raises Unit 1's stop, via three standard half-N raises,
+// above its own entry — a legitimate break-even/profit-protecting level,
+// not a validation failure. Every emitted stop-set event validates, and
+// the per-bar aggregate open risk counts Unit 1's own contribution as
+// exactly zero.
+func TestStopMultipleOneRaisesUnitOneAboveItsEntry(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	cfg.StopMultiple = 1 // narrower than the Baseline's 2 (ADR 0003) — a declared Variant
+	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	campaignN := breakoutFixtureN(t, cfg)
+
+	rung2, err := sizing.NextAddLevel(campaignFillPrice, campaignN, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel(rung 2) error = %v", err)
+	}
+	rung3, err := sizing.NextAddLevel(rung2, campaignN, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel(rung 3) error = %v", err)
+	}
+	rung4, err := sizing.NextAddLevel(rung3, campaignN, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel(rung 4) error = %v", err)
+	}
+
+	bar57 := addOpportunityBar("AAPL", day(57), rung2+5)
+	fill2 := addFill("AAPL", campaignID, 2, day(57), "sim-fill-add-2", rung2, 133, day(57))
+	bar58 := addOpportunityBar("AAPL", day(58), rung3+5)
+	fill3 := addFill("AAPL", campaignID, 3, day(58), "sim-fill-add-3", rung3, 133, day(58))
+	bar59 := addOpportunityBar("AAPL", day(59), rung4+5)
+	fill4 := addFill("AAPL", campaignID, 4, day(59), "sim-fill-add-4", rung4, 133, day(59))
+	bar60 := addOpportunityBar("AAPL", day(60), rung4+5)
+
+	emitted := newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		bar(bar57).
+		fill(fill2).
+		bar(bar58).
+		fill(fill3).
+		bar(bar59).
+		fill(fill4).
+		bar(bar60).
+		mustRun()
+
+	stopSets := envelopesOfType(emitted, event.ProtectiveStopSetEventType)
+	if len(stopSets) != 10 {
+		t.Fatalf("got %d protective-stop-set event(s), want exactly 10", len(stopSets))
+	}
+	// Every emitted stop-set event validates on its own — including the
+	// ones that raise unit 1 to or above its own entry.
+	var unit1FinalRaise event.ProtectiveStopSetPayload
+	for _, e := range stopSets {
+		payload := decodeProtectiveStopSet(t, e)
+		if err := payload.Validate(); err != nil {
+			t.Errorf("stop-set event %q fails its own Validate(): %v", e.ID, err)
+		}
+		if payload.UnitIndex == 1 && payload.Reason == event.ProtectiveStopReasonAddLadder {
+			unit1FinalRaise = payload // the LAST of unit 1's raises, since they're emitted in ascending add order
+		}
+	}
+	if unit1FinalRaise.Level == 0 {
+		t.Fatal("never saw a raise for unit 1")
+	}
+	if !(unit1FinalRaise.Level > campaignFillPrice) {
+		t.Errorf("unit 1's final raised stop = %v, want it STRICTLY ABOVE its own entry %v (three half-N raises under StopMultiple 1)", unit1FinalRaise.Level, campaignFillPrice)
+	}
+
+	// The final bar's own aggregate open risk counts unit 1's contribution
+	// as exactly zero: hand-derived from the other three units' own
+	// (still-at-risk) figures alone, using the SAME production function.
+	evaluated := envelopesOfType(emitted, event.CampaignEvaluatedEventType)
+	last := decodeCampaignEvaluated(t, evaluated[len(evaluated)-1])
+	if len(last.Units) != 4 {
+		t.Fatalf("got %d unit(s) on the final bar's evaluated event, want 4", len(last.Units))
+	}
+	var unit1Reported event.CampaignEvaluatedUnit
+	otherUnits := make([]sizing.UnitOpenRisk, 0, 3)
+	for _, u := range last.Units {
+		if u.UnitIndex == 1 {
+			unit1Reported = u
+			continue
+		}
+		otherUnits = append(otherUnits, sizing.UnitOpenRisk{EntryPrice: u.EntryPrice, ProtectiveStop: u.ProtectiveStop, Quantity: u.Quantity})
+	}
+	if !(unit1Reported.ProtectiveStop >= unit1Reported.EntryPrice) {
+		t.Fatalf("unit 1's reported stop %v is not at or above its own entry %v", unit1Reported.ProtectiveStop, unit1Reported.EntryPrice)
+	}
+	wantAggregate, err := sizing.AggregateOpenRisk(otherUnits, cfg.DollarsPerPoint)
+	if err != nil {
+		t.Fatalf("AggregateOpenRisk() error = %v", err)
+	}
+	if last.AggregateOpenRisk != wantAggregate {
+		t.Errorf("AggregateOpenRisk = %v, want exactly %v (unit 1 contributes zero)", last.AggregateOpenRisk, wantAggregate)
+	}
+	if err := last.Validate(); err != nil {
+		t.Errorf("emitted campaign evaluated payload fails its own Validate(): %v", err)
 	}
 }

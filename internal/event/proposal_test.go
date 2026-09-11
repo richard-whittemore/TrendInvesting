@@ -753,6 +753,14 @@ func TestProposalExpiredPayloadValidate(t *testing.T) {
 			wantErr: "period end",
 		},
 		{
+			// #15 review round: superseded-by-stop only ever applies to an
+			// Add proposal — an entry (or exit) proposal has no analogous
+			// interaction with a stop fill.
+			name:    "superseded-by-stop reason on an entry-kind expiry",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.Reason = event.ExpiryReasonSupersededByStop },
+			wantErr: "only valid for kind",
+		},
+		{
 			name:    "missing expired at",
 			mutate:  func(p *event.ProposalExpiredPayload) { p.ExpiredAt = time.Time{} },
 			wantErr: "expired at",
@@ -904,6 +912,16 @@ func TestAddProposalExpiredPayloadValidate(t *testing.T) {
 			mutate:  func(p *event.ProposalExpiredPayload) { p.SignalID = "signal:AAPL:2026-02-27T00:00:00.000000000Z" },
 			wantErr: "signal id",
 		},
+		{
+			// #15 review round ("Pending Adds Survive Stopouts"): an Add
+			// proposal cancelled by a stop fill partially closing the same
+			// Campaign, not by the next bar.
+			name: "add-kind expiry superseded by a partial stop is legitimate",
+			mutate: func(p *event.ProposalExpiredPayload) {
+				p.Reason = event.ExpiryReasonSupersededByStop
+				p.Rule = event.RuleAddProposalSupersededByStop
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -998,6 +1016,12 @@ func TestProposalExpiredEventConstants(t *testing.T) {
 	}
 	if event.ExpiryReasonSupersededByNextBar == "" {
 		t.Error("the expiry reason constant must be a non-empty enumerated value")
+	}
+	if event.ExpiryReasonSupersededByStop != "superseded-by-stop" {
+		t.Errorf("ExpiryReasonSupersededByStop = %q, want %q", event.ExpiryReasonSupersededByStop, "superseded-by-stop")
+	}
+	if event.RuleAddProposalSupersededByStop != "add-proposal.superseded-by-stop" {
+		t.Errorf("RuleAddProposalSupersededByStop = %q", event.RuleAddProposalSupersededByStop)
 	}
 }
 

@@ -179,14 +179,22 @@ func buildCorruptedCampaignState(t *testing.T, r *Reducer, protectiveStop float6
 
 // TestCampaignWithoutAProtectiveStopHaltsTheEngine is #12's required
 // invariant test: a Campaign found, at the start of a completed bar, without
-// a Protective Stop that is positive and below its entry price, halts the
-// engine — emitting event.EngineStateEventType and failing the run — rather
-// than being silently tolerated or continuing to trade the instrument.
+// a Protective Stop that is positive, halts the engine — emitting
+// event.EngineStateEventType and failing the run — rather than being
+// silently tolerated or continuing to trade the instrument.
 //
-// Both ways the invariant can fail are covered: a stop at or below zero, and
-// a stop at or above the entry price. Neither is reachable from any valid
-// input stream (see this file's package doc comment); both are constructed
-// directly through buildCorruptedCampaignState.
+// The only way the invariant can fail is covered: a stop at or below zero.
+// Not reachable from any valid input stream (see this file's package doc
+// comment); constructed directly through buildCorruptedCampaignState.
+//
+// #15's review round removed "and below its entry price" from the
+// invariant: a stop RAISED by the Stop Ladder can legitimately reach or
+// exceed its own Unit's entry under a narrow enough Stop Multiple (a
+// break-even or profit-protecting level, CONTEXT.md's "risk-free"), so a
+// stop at or above entry is no longer treated as corruption — see
+// TestCampaignWithAStopAtOrAboveEntryDoesNotHalt just below, which is what
+// this table used to include as its OWN two "must halt" cases before that
+// finding.
 func TestCampaignWithoutAProtectiveStopHaltsTheEngine(t *testing.T) {
 	t.Parallel()
 
@@ -196,8 +204,6 @@ func TestCampaignWithoutAProtectiveStopHaltsTheEngine(t *testing.T) {
 	}{
 		{name: "stop at zero", protectiveStop: 0},
 		{name: "stop negative", protectiveStop: -5},
-		{name: "stop equal to entry price", protectiveStop: 100},
-		{name: "stop above entry price", protectiveStop: 150},
 	}
 
 	for _, tt := range tests {
@@ -301,6 +307,60 @@ func TestCampaignWithAValidProtectiveStopDoesNotHalt(t *testing.T) {
 	}
 	if payload.ProtectiveStop != 75 {
 		t.Errorf("ProtectiveStop = %v, want the fixture's 75", payload.ProtectiveStop)
+	}
+}
+
+// TestCampaignWithAStopAtOrAboveEntryDoesNotHalt is #15's review-round
+// counterpart to TestCampaignWithAValidProtectiveStopDoesNotHalt: a stop AT
+// or ABOVE its own Unit's entry — reachable in practice only via the Stop
+// Ladder's repeated raises under a narrow enough Stop Multiple (Variant
+// territory; the Baseline's own 2N/four-Unit configuration never reaches
+// it) — is a legitimate break-even or profit-protecting level, not the
+// corrupted state checkCampaignHasAProtectiveStop exists to catch, and must
+// not halt the engine. Also confirms the per-bar Campaign-evaluated event
+// still validates cleanly and reports this Unit's own contribution to
+// AggregateOpenRisk as exactly zero (sizing.AggregateOpenRisk's own
+// max(0, entry-stop) rule).
+func TestCampaignWithAStopAtOrAboveEntryDoesNotHalt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		protectiveStop float64
+	}{
+		{name: "stop equal to entry price", protectiveStop: 100},
+		{name: "stop above entry price", protectiveStop: 150},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := newConfiguredReducerForInvariantTest(t)
+			instrumentID := buildCorruptedCampaignState(t, r, tt.protectiveStop)
+
+			bar := invariantTestBarEnvelope(t, 1, instrumentID, day(2))
+			emissions, err := r.Apply(context.Background(), bar)
+			if err != nil {
+				t.Fatalf("Apply() error = %v, want nil: a stop at or above entry is a legitimate risk-free position, not an invariant violation", err)
+			}
+			if len(emissions) != 1 {
+				t.Fatalf("got %d emission(s), want exactly 1 (the bar's own Campaign-evaluated event)", len(emissions))
+			}
+			var payload event.CampaignEvaluatedPayload
+			if err := json.Unmarshal(emissions[0].Payload, &payload); err != nil {
+				t.Fatalf("decode campaign evaluated payload: %v", err)
+			}
+			if err := payload.Validate(); err != nil {
+				t.Errorf("emitted campaign evaluated payload fails its own Validate(): %v", err)
+			}
+			if payload.ProtectiveStop != tt.protectiveStop {
+				t.Errorf("ProtectiveStop = %v, want the fixture's %v", payload.ProtectiveStop, tt.protectiveStop)
+			}
+			if payload.AggregateOpenRisk != 0 {
+				t.Errorf("AggregateOpenRisk = %v, want exactly 0: a unit whose stop is at or above its own entry has zero downside risk", payload.AggregateOpenRisk)
+			}
+		})
 	}
 }
 

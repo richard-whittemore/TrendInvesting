@@ -278,6 +278,52 @@ func TestAggregateOpenRiskRejectsFreshRiskPerUnit(t *testing.T) {
 	}
 }
 
+// TestAggregateOpenRiskTreatsStopAtOrAboveEntryAsZeroRisk is the #15
+// review-round fixture ("Valid Stop Raises Fail"): repeated half-N raises
+// under a narrow enough Stop Multiple can legitimately lift an earlier
+// Unit's stop to or above its own entry (a break-even or
+// profit-protecting level, CONTEXT.md's "risk-free"), and such a Unit must
+// contribute exactly ZERO to the aggregate — never a negative figure, and
+// never a validation error.
+func TestAggregateOpenRiskTreatsStopAtOrAboveEntryAsZeroRisk(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		unit sizing.UnitOpenRisk
+	}{
+		{name: "stop equal to entry (break-even)", unit: sizing.UnitOpenRisk{EntryPrice: 100, ProtectiveStop: 100, Quantity: 10}},
+		{name: "stop above entry (profit-protecting)", unit: sizing.UnitOpenRisk{EntryPrice: 100, ProtectiveStop: 110, Quantity: 10}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := sizing.AggregateOpenRisk([]sizing.UnitOpenRisk{tt.unit}, 1.0)
+			if err != nil {
+				t.Fatalf("AggregateOpenRisk() error = %v, want nil", err)
+			}
+			if got != 0 {
+				t.Errorf("AggregateOpenRisk() = %v, want exactly 0", got)
+			}
+		})
+	}
+
+	// Mixed with a genuinely at-risk Unit: only that Unit's own distance
+	// contributes.
+	atRisk := sizing.UnitOpenRisk{EntryPrice: 200, ProtectiveStop: 190, Quantity: 5}
+	riskFree := sizing.UnitOpenRisk{EntryPrice: 100, ProtectiveStop: 105, Quantity: 10}
+	got, err := sizing.AggregateOpenRisk([]sizing.UnitOpenRisk{atRisk, riskFree}, 1.0)
+	if err != nil {
+		t.Fatalf("AggregateOpenRisk() error = %v, want nil", err)
+	}
+	want := (200.0 - 190.0) * 5.0
+	if got != want {
+		t.Errorf("AggregateOpenRisk() = %v, want exactly %v (only the at-risk unit's own distance)", got, want)
+	}
+}
+
 // TestAggregateOpenRiskFailsClosed covers every non-finite/non-positive
 // input and shape violation .greptile/rules.md requires to fail closed.
 func TestAggregateOpenRiskFailsClosed(t *testing.T) {
@@ -312,18 +358,6 @@ func TestAggregateOpenRiskFailsClosed(t *testing.T) {
 			units:           []sizing.UnitOpenRisk{{EntryPrice: 100, ProtectiveStop: 0, Quantity: 10}},
 			dollarsPerPoint: 1,
 			wantErr:         "protective stop must be positive",
-		},
-		{
-			name:            "protective stop at entry price",
-			units:           []sizing.UnitOpenRisk{{EntryPrice: 100, ProtectiveStop: 100, Quantity: 10}},
-			dollarsPerPoint: 1,
-			wantErr:         "must be below entry price",
-		},
-		{
-			name:            "protective stop above entry price",
-			units:           []sizing.UnitOpenRisk{{EntryPrice: 100, ProtectiveStop: 110, Quantity: 10}},
-			dollarsPerPoint: 1,
-			wantErr:         "must be below entry price",
 		},
 		{
 			name:            "zero quantity",
