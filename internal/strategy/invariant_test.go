@@ -55,6 +55,7 @@ func newConfiguredReducerForInvariantTest(t *testing.T) *Reducer {
 	}
 	r.configured = true
 	r.entryChannelLength = 55
+	r.exitChannelLength = 20
 	r.tierBDistanceInN = 1.0
 	notionalAccount, err := NewNotionalAccount(1_000_000, 1, 1)
 	if err != nil {
@@ -120,11 +121,22 @@ func buildCorruptedCampaignState(t *testing.T, r *Reducer, protectiveStop float6
 	if err != nil {
 		t.Fatalf("indicator.NewEntryChannel() error = %v", err)
 	}
+	// #13: every instrumentState now carries an Exit Channel too, fed
+	// alongside the Entry Channel regardless of Campaign state. A fresh,
+	// empty one here (never Added to) is deliberately NOT ready — the point
+	// of this file's fixture is the Protective Stop invariant, not the Exit
+	// Channel, so TestCampaignWithAValidProtectiveStopDoesNotHalt's bar must
+	// report ExitChannelReady false rather than a fabricated level.
+	exitChannel, err := indicator.NewExitChannel(r.exitChannelLength)
+	if err != nil {
+		t.Fatalf("indicator.NewExitChannel() error = %v", err)
+	}
 
 	r.instruments = map[string]*instrumentState{
 		instrumentID: {
 			n:             n,
 			entryChannel:  entryChannel,
+			exitChannel:   exitChannel,
 			lastPeriodEnd: day(1),
 			campaign: &campaignState{
 				campaignID:     "campaign:AAPL:corrupted",
@@ -243,9 +255,33 @@ func TestCampaignWithAValidProtectiveStopDoesNotHalt(t *testing.T) {
 		t.Fatalf("Apply() error = %v, want nil for a campaign with a legitimate protective stop", err)
 	}
 	// The instrument is in a Campaign, so CONTEXT.md's Setup gate still
-	// suppresses everything else this bar would otherwise emit.
-	if len(emissions) != 0 {
-		t.Errorf("got %d emission(s), want 0: a campaign bar with a valid stop emits nothing (it is not a Setup)", len(emissions))
+	// suppresses the Setup/Signal/proposal path entirely — but #13 gives
+	// every Campaign bar its own Campaign-evaluated event, reporting the
+	// level(s) in force. The fixture's Exit Channel was never warmed up
+	// (buildCorruptedCampaignState's doc comment), so it must report NOT
+	// ready rather than fabricate a level, and propose no exit.
+	if len(emissions) != 1 {
+		t.Fatalf("got %d emission(s), want exactly 1 (the bar's own Campaign-evaluated event, #13)", len(emissions))
+	}
+	evaluated := emissions[0]
+	if evaluated.Type != event.CampaignEvaluatedEventType {
+		t.Fatalf("emission Type = %q, want %q", evaluated.Type, event.CampaignEvaluatedEventType)
+	}
+	var payload event.CampaignEvaluatedPayload
+	if err := json.Unmarshal(evaluated.Payload, &payload); err != nil {
+		t.Fatalf("decode campaign evaluated payload: %v", err)
+	}
+	if payload.ExitChannelReady {
+		t.Error("ExitChannelReady = true, want false: this fixture's exit channel was never fed a single bar")
+	}
+	if payload.ExitChannelLow != 0 {
+		t.Errorf("ExitChannelLow = %v, want 0 while not ready", payload.ExitChannelLow)
+	}
+	if payload.ExitConditionMet {
+		t.Error("ExitConditionMet = true, want false")
+	}
+	if payload.ProtectiveStop != 75 {
+		t.Errorf("ProtectiveStop = %v, want the fixture's 75", payload.ProtectiveStop)
 	}
 }
 

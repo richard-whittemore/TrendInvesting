@@ -32,11 +32,19 @@ const FillEventType = "execution.fill"
 // interpreted as an entry — ADR 0015's rule, applied here at the payload
 // level, the same way #10 bumped ConfigurationSchemaVersion for
 // DollarsPerPoint and RiskAtStopFraction).
+//
+// NOT bumped for #13's FillKindExit: unlike #12's Kind and CampaignID, this
+// adds no new FIELD a schema-2 record might decode with an ambiguous zero
+// value — it only adds a third recognised value to a field that already
+// exists and is already required. A schema-2 record naming "entry" or
+// "stop" decodes and validates exactly as before; #13 is additive, not a
+// breaking reinterpretation of anything a schema-2 producer could have
+// written.
 const FillSchemaVersion uint32 = 2
 
-// The two Kind values FillPayload accepts today. #13's Add and #14's
-// Exit-Channel exit will each add their own (see the type's doc comment);
-// nothing here should be read as having decided their shape.
+// The three Kind values FillPayload accepts today. #14's Add will add its
+// own (see the type's doc comment); nothing here should be read as having
+// decided its shape.
 const (
 	// FillKindEntry is the fill that opens a Campaign (#11): it names the
 	// ProposalID it executes and must not name a CampaignID, since no
@@ -46,6 +54,14 @@ const (
 	// Stop (#12): it names the CampaignID it closes and must not name a
 	// ProposalID, since a stop closes a position, not a proposal.
 	FillKindStop = "stop"
+	// FillKindExit is the fill that closes a Campaign at its Exit Channel
+	// (#13, The Turtle Rules p.26): unlike a stop fill, it names BOTH the
+	// CampaignID it closes AND the ProposalID of the exit proposal
+	// (strategy.exit.proposed, ExitProposalPayload) it executes — an exit,
+	// unlike a stop, is always proposed first (ADR 0005 makes it a resting
+	// order at the Exit Channel level), so the fill has a proposal to join
+	// back to.
+	FillKindExit = "exit"
 )
 
 // FillPayload records one execution: either the entry that opens a Campaign
@@ -146,6 +162,13 @@ func (p FillPayload) Validate() error {
 		}
 		if p.ProposalID != "" {
 			errs = append(errs, fmt.Errorf("proposal id must be empty for a stop fill (got %q): a stop closes a campaign, not a proposal", p.ProposalID))
+		}
+	case FillKindExit:
+		if p.CampaignID == "" {
+			errs = append(errs, errors.New("campaign id is required for an exit fill: it must name the campaign it closes"))
+		}
+		if p.ProposalID == "" {
+			errs = append(errs, errors.New("proposal id is required for an exit fill: it must name the exit proposal it executes"))
 		}
 	default:
 		errs = append(errs, fmt.Errorf("kind %q is not a recognised fill kind", p.Kind))

@@ -663,6 +663,7 @@ var expiredAt = proposalPeriodEnd.AddDate(0, 0, 1)
 func validProposalExpired() event.ProposalExpiredPayload {
 	return event.ProposalExpiredPayload{
 		InstrumentID: "AAPL",
+		Kind:         event.ProposalKindEntry,
 		ProposalID:   "proposal:AAPL:2026-02-27T00:00:00.000000000Z",
 		SignalID:     "signal:AAPL:2026-02-27T00:00:00.000000000Z",
 		PeriodEnd:    proposalPeriodEnd,
@@ -671,7 +672,28 @@ func validProposalExpired() event.ProposalExpiredPayload {
 		ADR:          event.ADRSignalExpiry,
 		Reason:       event.ExpiryReasonSupersededByNextBar,
 		Quantity:     133,
-		EntryLevel:   200,
+		Level:        200,
+	}
+}
+
+// validExitProposalExpired returns #13's other Kind: the expiry of an exit
+// proposal (strategy.exit.proposed) that superseded, itself superseded by the
+// next bar without an exit fill ever arriving. Unlike an entry-kind expiry, it
+// names no Signal at all: an exit proposal is not sized from one (see
+// event.ExitProposalPayload).
+func validExitProposalExpired() event.ProposalExpiredPayload {
+	return event.ProposalExpiredPayload{
+		InstrumentID: "AAPL",
+		Kind:         event.ProposalKindExit,
+		ProposalID:   "exit-proposal:AAPL:2026-02-27T00:00:00.000000000Z",
+		SignalID:     "",
+		PeriodEnd:    proposalPeriodEnd,
+		ExpiredAt:    expiredAt,
+		Rule:         event.RuleExitProposalExpiresWithItsBar,
+		ADR:          event.ADRSignalExpiry,
+		Reason:       event.ExpiryReasonSupersededByNextBar,
+		Quantity:     133,
+		Level:        180,
 	}
 }
 
@@ -701,6 +723,28 @@ func TestProposalExpiredPayloadValidate(t *testing.T) {
 		{
 			name:    "missing signal id",
 			mutate:  func(p *event.ProposalExpiredPayload) { p.SignalID = "" },
+			wantErr: "signal id",
+		},
+		{
+			name:    "missing kind",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.Kind = "" },
+			wantErr: "kind",
+		},
+		{
+			name:    "unrecognised kind",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.Kind = "add" },
+			wantErr: "kind",
+		},
+		{
+			// An exit-kind expiry names no Signal at all (see
+			// event.ExitProposalPayload's doc comment): an exit proposal is not
+			// sized from one, so a signal id on it would claim a decision chain
+			// this expiry never had.
+			name: "exit-kind expiry names a signal id",
+			mutate: func(p *event.ProposalExpiredPayload) {
+				p.Kind = event.ProposalKindExit
+				p.SignalID = "signal:AAPL:2026-02-27T00:00:00.000000000Z"
+			},
 			wantErr: "signal id",
 		},
 		{
@@ -747,14 +791,14 @@ func TestProposalExpiredPayloadValidate(t *testing.T) {
 			wantErr: "quantity",
 		},
 		{
-			name:    "zero entry level",
-			mutate:  func(p *event.ProposalExpiredPayload) { p.EntryLevel = 0 },
-			wantErr: "entry level",
+			name:    "zero level",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.Level = 0 },
+			wantErr: "level",
 		},
 		{
-			name:    "non-finite entry level",
-			mutate:  func(p *event.ProposalExpiredPayload) { p.EntryLevel = math.NaN() },
-			wantErr: "entry level must be finite",
+			name:    "non-finite level",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.Level = math.NaN() },
+			wantErr: "level must be finite",
 		},
 	}
 
@@ -781,20 +825,76 @@ func TestProposalExpiredPayloadValidate(t *testing.T) {
 	}
 }
 
+// TestExitProposalExpiredPayloadValidate covers the exit-kind fixture's own
+// pairing rule (no signal id), mirroring how TestStopFillPayloadValidate
+// pins the stop-kind fixture in fill_test.go.
+func TestExitProposalExpiredPayloadValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(*event.ProposalExpiredPayload)
+		wantErr string
+	}{
+		{name: "valid exit-kind expiry"},
+		{
+			name:    "exit-kind expiry names a signal id",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.SignalID = "signal:AAPL:2026-02-27T00:00:00.000000000Z" },
+			wantErr: "signal id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := validExitProposalExpired()
+			if tt.mutate != nil {
+				tt.mutate(&payload)
+			}
+
+			err := payload.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestProposalExpiredEventConstants(t *testing.T) {
 	t.Parallel()
 
 	if event.ProposalExpiredEventType != "strategy.proposal.expired" {
 		t.Errorf("ProposalExpiredEventType = %q, want %q", event.ProposalExpiredEventType, "strategy.proposal.expired")
 	}
-	if event.ProposalExpiredSchemaVersion != 1 {
-		t.Errorf("ProposalExpiredSchemaVersion = %d, want 1", event.ProposalExpiredSchemaVersion)
+	// Bumped 1 -> 2 for #13: Kind was added (entry|exit), reusing this one
+	// expiry mechanism for an outstanding exit proposal rather than minting a
+	// second event type.
+	if event.ProposalExpiredSchemaVersion != 2 {
+		t.Errorf("ProposalExpiredSchemaVersion = %d, want 2", event.ProposalExpiredSchemaVersion)
+	}
+	if event.ProposalKindEntry != "entry" {
+		t.Errorf("ProposalKindEntry = %q, want %q", event.ProposalKindEntry, "entry")
+	}
+	if event.ProposalKindExit != "exit" {
+		t.Errorf("ProposalKindExit = %q, want %q", event.ProposalKindExit, "exit")
 	}
 	if event.RuleSignalExpiresWithItsBar != "signal.expires.with-its-bar" {
 		t.Errorf("RuleSignalExpiresWithItsBar = %q", event.RuleSignalExpiresWithItsBar)
 	}
+	if event.RuleExitProposalExpiresWithItsBar != "exit-proposal.expires.with-its-bar" {
+		t.Errorf("RuleExitProposalExpiresWithItsBar = %q", event.RuleExitProposalExpiresWithItsBar)
+	}
 	// ADR 0011 is the decision that a Signal belongs to one bar and expires
-	// with it; the proposal a Signal produced inherits that lifetime.
+	// with it; the proposal a Signal produced inherits that lifetime. #13
+	// cites the same ADR for an exit proposal's expiry: the Baseline holds no
+	// persistent proposal memory of any kind, entry or exit alike.
 	if event.ADRSignalExpiry != "0011" {
 		t.Errorf("ADRSignalExpiry = %q, want %q", event.ADRSignalExpiry, "0011")
 	}
@@ -845,6 +945,7 @@ func TestProposalExpiredPayloadJSONTags(t *testing.T) {
 
 	for _, key := range []string{
 		"instrument_id",
+		"kind",
 		"proposal_id",
 		"signal_id",
 		"period_end",
@@ -853,10 +954,39 @@ func TestProposalExpiredPayloadJSONTags(t *testing.T) {
 		"adr",
 		"reason",
 		"quantity",
-		"entry_level",
+		"level",
 	} {
 		if _, ok := asMap[key]; !ok {
 			t.Errorf("encoded payload missing expected key %q: %s", key, encoded)
 		}
+	}
+}
+
+// TestExitProposalExpiredPayloadRoundTrip mirrors
+// TestProposalExpiredPayloadRoundTrip for the exit-kind fixture.
+func TestExitProposalExpiredPayloadRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := validExitProposalExpired()
+
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var decoded event.ProposalExpiredPayload
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("decoded.Validate() error = %v", err)
+	}
+
+	reEncoded, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatalf("re-Marshal() error = %v", err)
+	}
+	if !bytes.Equal(encoded, reEncoded) {
+		t.Fatalf("round trip not stable:\n  first:  %s\n  second: %s", encoded, reEncoded)
 	}
 }

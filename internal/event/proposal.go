@@ -451,7 +451,37 @@ const ProposalExpiredEventType = "strategy.proposal.expired"
 
 // ProposalExpiredSchemaVersion is the current schema version of
 // ProposalExpiredPayload.
-const ProposalExpiredSchemaVersion uint32 = 1
+//
+// Bumped 1 -> 2 for #13: Kind was added (ProposalKindEntry|ProposalKindExit),
+// so this one expiry mechanism is reused for an outstanding exit proposal
+// (strategy.exit.proposed) rather than minting a second event type. An older
+// schema-1 record decodes Kind as the empty string, which is not a
+// recognised value, so it is rejected outright rather than silently
+// misread as one kind or the other (ADR 0015's rule, the same discipline
+// #12 applied when FillPayload gained its own Kind).
+const ProposalExpiredSchemaVersion uint32 = 2
+
+// The two Kind values ProposalExpiredPayload accepts (#13). An entry-kind
+// expiry is a trade proposal (strategy.trade.proposed) that a Signal
+// produced and the next bar superseded without a fill; an exit-kind expiry
+// is an exit proposal (strategy.exit.proposed, ExitProposalPayload) that an
+// open Campaign's Exit Channel breach produced and the next bar superseded
+// without an exit fill. Both share the same lifecycle rule (ADR 0011: no
+// persistent proposal memory in the Baseline), which is why one payload
+// serves both rather than two.
+const (
+	ProposalKindEntry = "entry"
+	ProposalKindExit  = "exit"
+)
+
+// RuleExitProposalExpiresWithItsBar names the rule for
+// ProposalExpiredPayload.Rule when Kind is ProposalKindExit: an exit
+// proposal belongs to one bar and expires with it, the same lifecycle
+// RuleSignalExpiresWithItsBar states for an entry-kind proposal — kept as a
+// separate constant (rather than reusing that one) because an exit proposal
+// answers no Signal at all, so a rule named "signal.expires..." would
+// misdescribe it.
+const RuleExitProposalExpiresWithItsBar = "exit-proposal.expires.with-its-bar"
 
 // RuleSignalExpiresWithItsBar names the rule for ProposalExpiredPayload.Rule:
 // a Signal belongs to one bar and expires with it, so the proposal that Signal
@@ -480,7 +510,17 @@ const ExpiryReasonSupersededByNextBar = "superseded-by-next-bar"
 // to ask what fraction of proposals actually became Campaigns.
 type ProposalExpiredPayload struct {
 	InstrumentID string `json:"instrument_id"`
+	// Kind discriminates which proposal this is: ProposalKindEntry or
+	// ProposalKindExit (#13). Required and closed, mirroring
+	// FillPayload.Kind's own discipline: an empty or unrecognised value is
+	// rejected rather than defaulted.
+	Kind string `json:"kind"`
 	// ProposalID and SignalID name the decision chain that has now ended.
+	// SignalID is required for ProposalKindEntry (a trade proposal always
+	// answers a Signal) and must be empty for ProposalKindExit (an exit
+	// proposal is raised directly from an open Campaign's per-bar
+	// evaluation, never from a Signal — see ExitProposalPayload's doc
+	// comment).
 	ProposalID string `json:"proposal_id"`
 	SignalID   string `json:"signal_id"`
 	// PeriodEnd is the completed bar the expired proposal belonged to;
@@ -493,16 +533,20 @@ type ProposalExpiredPayload struct {
 	ADR  string `json:"adr"`
 	// Reason is one of the enumerated expiry reasons.
 	Reason string `json:"reason"`
-	// Quantity and EntryLevel restate what was proposed and not taken, so the
-	// expiry is readable without joining back to the proposal.
-	Quantity   int64   `json:"quantity"`
-	EntryLevel float64 `json:"entry_level"`
+	// Quantity and Level restate what was proposed and not taken, so the
+	// expiry is readable without joining back to the proposal — the entry
+	// level for an entry-kind expiry, the Exit Channel level for an
+	// exit-kind expiry (#13).
+	Quantity int64   `json:"quantity"`
+	Level    float64 `json:"level"`
 }
 
-// Validate checks the identifying fields, that the expiry is stamped strictly
-// after the bar whose proposal expired (an expiry at or before it would
-// describe an impossible ordering), that Reason is one of the enumerated
-// constants, and that the restated proposal figures are usable.
+// Validate checks the identifying fields, that Kind is one of the recognised
+// values and that SignalID is present or absent exactly as that Kind
+// requires, that the expiry is stamped strictly after the bar whose proposal
+// expired (an expiry at or before it would describe an impossible ordering),
+// that Reason is one of the enumerated constants, and that the restated
+// proposal figures are usable.
 func (p ProposalExpiredPayload) Validate() error {
 	var errs []error
 	if p.InstrumentID == "" {
@@ -511,8 +555,17 @@ func (p ProposalExpiredPayload) Validate() error {
 	if p.ProposalID == "" {
 		errs = append(errs, errors.New("proposal id is required: an expiry must name the proposal that ended"))
 	}
-	if p.SignalID == "" {
-		errs = append(errs, errors.New("signal id is required: an expiry must name the signal behind the proposal"))
+	switch p.Kind {
+	case ProposalKindEntry:
+		if p.SignalID == "" {
+			errs = append(errs, errors.New("signal id is required: an expiry must name the signal behind the proposal"))
+		}
+	case ProposalKindExit:
+		if p.SignalID != "" {
+			errs = append(errs, fmt.Errorf("signal id must be empty for an exit-kind expiry (got %q): an exit proposal is not sized from a signal", p.SignalID))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("kind %q is not a recognised proposal kind", p.Kind))
 	}
 	periodEndPresent := !p.PeriodEnd.IsZero()
 	if !periodEndPresent {
@@ -541,10 +594,10 @@ func (p ProposalExpiredPayload) Validate() error {
 		errs = append(errs, fmt.Errorf("quantity must be a positive whole number, got %d", p.Quantity))
 	}
 	switch {
-	case !isFinite(p.EntryLevel):
-		errs = append(errs, errors.New("entry level must be finite"))
-	case p.EntryLevel <= 0:
-		errs = append(errs, errors.New("entry level must be positive"))
+	case !isFinite(p.Level):
+		errs = append(errs, errors.New("level must be finite"))
+	case p.Level <= 0:
+		errs = append(errs, errors.New("level must be positive"))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid proposal expired payload: %w", err)

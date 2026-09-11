@@ -57,6 +57,25 @@ func validStopFill() event.FillPayload {
 	}
 }
 
+// validExitFill returns #13's third Kind: an exit fill closing the same
+// Campaign as validStopFill, but referencing the exit proposal it executes
+// (Kind requires BOTH CampaignID and ProposalID for an exit — the fill names
+// the Campaign it closes AND the resting order it executed, unlike a stop
+// fill, which closes a Campaign directly with no proposal of its own).
+func validExitFill() event.FillPayload {
+	return event.FillPayload{
+		InstrumentID: "AAPL",
+		Kind:         event.FillKindExit,
+		CampaignID:   "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
+		ProposalID:   "exit-proposal:AAPL:2026-03-20T00:00:00.000000000Z",
+		FillID:       "sim-fill-0003",
+		Direction:    event.DirectionLong,
+		Quantity:     133,
+		Price:        179.5,
+		FilledAt:     proposalPeriodEnd.AddDate(0, 0, 21),
+	}
+}
+
 func TestFillPayloadValidate(t *testing.T) {
 	t.Parallel()
 
@@ -234,6 +253,57 @@ func TestStopFillPayloadValidate(t *testing.T) {
 	}
 }
 
+// TestExitFillPayloadValidate covers the exit-kind pairing rule from
+// validExitFill: unlike entry (requires ProposalID, forbids CampaignID) and
+// stop (requires CampaignID, forbids ProposalID), an exit fill requires
+// BOTH — it names the Campaign it closes and the exit proposal it executed.
+func TestExitFillPayloadValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(*event.FillPayload)
+		wantErr string
+	}{
+		{name: "valid exit fill"},
+		{
+			name:    "missing campaign id",
+			mutate:  func(f *event.FillPayload) { f.CampaignID = "" },
+			wantErr: "campaign id",
+		},
+		{
+			// Unlike a stop fill, an exit fill's ProposalID is not merely
+			// tolerated — it is required: it is the join back to the exit
+			// proposal (strategy.exit.proposed) this fill executes.
+			name:    "missing proposal id",
+			mutate:  func(f *event.FillPayload) { f.ProposalID = "" },
+			wantErr: "proposal id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := validExitFill()
+			if tt.mutate != nil {
+				tt.mutate(&payload)
+			}
+
+			err := payload.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestFillPayloadValidateRejectsNonFinitePrice(t *testing.T) {
 	t.Parallel()
 
@@ -306,6 +376,9 @@ func TestFillEventConstants(t *testing.T) {
 	}
 	if event.FillKindStop != "stop" {
 		t.Errorf("FillKindStop = %q, want %q", event.FillKindStop, "stop")
+	}
+	if event.FillKindExit != "exit" {
+		t.Errorf("FillKindExit = %q, want %q", event.FillKindExit, "exit")
 	}
 }
 
@@ -396,6 +469,62 @@ func TestStopFillPayloadRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	original := validStopFill()
+
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var decoded event.FillPayload
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("decoded.Validate() error = %v", err)
+	}
+
+	reEncoded, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatalf("re-Marshal() error = %v", err)
+	}
+	if !bytes.Equal(encoded, reEncoded) {
+		t.Fatalf("round trip not stable:\n  first:  %s\n  second: %s", encoded, reEncoded)
+	}
+}
+
+// TestExitFillPayloadJSONTags mirrors TestStopFillPayloadJSONTags for the
+// exit-kind fixture, so both campaign_id and proposal_id are asserted
+// populated together (an exit fill, unlike a stop fill, requires both).
+func TestExitFillPayloadJSONTags(t *testing.T) {
+	t.Parallel()
+
+	encoded, err := json.Marshal(validExitFill())
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var asMap map[string]any
+	if err := json.Unmarshal(encoded, &asMap); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	if got, ok := asMap["kind"]; !ok || got != "exit" {
+		t.Errorf("encoded payload kind = %v, want %q: %s", got, "exit", encoded)
+	}
+	if got, ok := asMap["campaign_id"]; !ok || got == "" {
+		t.Errorf("encoded payload campaign_id = %v, want it populated: %s", got, encoded)
+	}
+	if got, ok := asMap["proposal_id"]; !ok || got == "" {
+		t.Errorf("encoded payload proposal_id = %v, want it populated: %s", got, encoded)
+	}
+}
+
+// TestExitFillPayloadRoundTrip mirrors TestFillPayloadRoundTrip for the
+// exit-kind fixture.
+func TestExitFillPayloadRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := validExitFill()
 
 	encoded, err := json.Marshal(original)
 	if err != nil {
