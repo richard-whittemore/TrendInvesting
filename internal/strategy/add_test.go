@@ -866,3 +866,99 @@ func TestReplayingTheFourUnitAddFixtureTwiceYieldsByteIdenticalEmissions(t *test
 		}
 	}
 }
+
+// --- The add fill's own execution window (both sides, mirroring the
+// --- entry/exit fill precedent) --------------------------------------
+
+// TestAddFillPredatingTheBarTheAddOrderCouldHaveExecutedInIsRejected mirrors
+// TestExitFillPredatingTheBarTheExitOrderCouldHaveExecutedInIsRejected: a
+// fill timestamped at or before the bar BEFORE the one that raised the add
+// proposal predates any order that proposal could have produced, and is
+// rejected — the lower bound of the add fill's own window.
+func TestAddFillPredatingTheBarTheAddOrderCouldHaveExecutedInIsRejected(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	campaignN := breakoutFixtureN(t, cfg)
+	rung2, err := sizing.NextAddLevel(campaignFillPrice, campaignN, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel() error = %v", err)
+	}
+	proposedAt := day(57)
+
+	tests := []struct {
+		name     string
+		filledAt time.Time
+	}{
+		{
+			// Exactly the previous bar's period end: the bar that raised
+			// the proposal had not opened yet, so the boundary is
+			// exclusive.
+			name:     "at the previous bar's period end",
+			filledAt: day(56),
+		},
+		{
+			name:     "long before the proposal existed",
+			filledAt: day(1),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			early := addFill("AAPL", campaignID, 2, proposedAt, "sim-fill-add-2", rung2, 133, tt.filledAt)
+
+			newStream(t, cfg).
+				bars(breakoutBars("AAPL")).
+				fill(openingFill("AAPL")).
+				bar(addOpportunityBar("AAPL", proposedAt, rung2+5)).
+				fill(early).
+				wantRunError("AAPL", "predates")
+		})
+	}
+}
+
+// TestBarPredatingAnAddFillFailsClosed mirrors
+// TestBarPredatingTheCampaignsClosingFillFailsClosed: an add fill's
+// timestamp cannot be validated against "the next bar" the moment the fill
+// itself is applied (the next bar does not exist yet), so a fill claiming a
+// moment the stream has not reached is accepted then — and the
+// contradiction is caught by the very next bar for the instrument, which
+// fails the run (checkBarConfirmsCampaignOpening's #14 generalisation to
+// campaign.lastUnit().filledAt).
+func TestBarPredatingAnAddFillFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	campaignN := breakoutFixtureN(t, cfg)
+	rung2, err := sizing.NextAddLevel(campaignFillPrice, campaignN, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel() error = %v", err)
+	}
+	proposedAt := day(57)
+	future := day(60)
+
+	fill2 := addFill("AAPL", campaignID, 2, proposedAt, "sim-fill-add-2", rung2, 133, future)
+
+	s := newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		bar(addOpportunityBar("AAPL", proposedAt, rung2+5)).
+		fill(fill2)
+
+	// The fill alone is accepted: nothing about it is knowable as wrong at
+	// the moment it arrives.
+	accepted := s.mustRun()
+	if got := len(envelopesOfType(accepted, event.CampaignUnitAddedEventType)); got != 1 {
+		t.Fatalf("got %d unit-added event(s) from the fill alone, want exactly 1", got)
+	}
+
+	// The next bar's own period end (58) is BEFORE the add fill's timestamp
+	// (60): an execution cannot have happened after a bar that had not yet
+	// completed, so the bar stream is now inconsistent with the fill it
+	// already accepted.
+	s.bar(completedBar("AAPL", day(58), 200, 150, 150)).wantRunError("AAPL", "predates")
+}
