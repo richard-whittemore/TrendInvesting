@@ -50,6 +50,7 @@ func validStopFill() event.FillPayload {
 		Kind:         event.FillKindStop,
 		CampaignID:   "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
 		FillID:       "sim-fill-0002",
+		UnitIDs:      []string{"sim-fill-0001"},
 		Direction:    event.DirectionLong,
 		Quantity:     133,
 		Price:        126.09441570423544,
@@ -178,6 +179,14 @@ func TestFillPayloadValidate(t *testing.T) {
 			mutate:  func(f *event.FillPayload) { f.FilledAt = time.Time{} },
 			wantErr: "filled at",
 		},
+		{
+			// #15: UnitIDs is a stop-only field; an entry fill naming one is
+			// a producer defect, the same closed-shape rule every other
+			// kind-specific field in this payload already follows.
+			name:    "entry fill names unit ids",
+			mutate:  func(f *event.FillPayload) { f.UnitIDs = []string{"some-unit"} },
+			wantErr: "unit ids must be empty for an entry fill",
+		},
 	}
 
 	for _, tt := range tests {
@@ -227,6 +236,30 @@ func TestStopFillPayloadValidate(t *testing.T) {
 			name:    "stop fill names a proposal id",
 			mutate:  func(f *event.FillPayload) { f.ProposalID = "some-proposal" },
 			wantErr: "proposal id",
+		},
+		{
+			// #15: a stop fill must name which units its own protective
+			// stop closed, because the gap case can leave units at
+			// different levels — "closes everything" is no longer a safe
+			// default.
+			name:    "missing unit ids",
+			mutate:  func(f *event.FillPayload) { f.UnitIDs = nil },
+			wantErr: "unit ids is required",
+		},
+		{
+			name:    "empty unit id",
+			mutate:  func(f *event.FillPayload) { f.UnitIDs = []string{""} },
+			wantErr: "unit ids[0] is empty",
+		},
+		{
+			name:    "duplicate unit id",
+			mutate:  func(f *event.FillPayload) { f.UnitIDs = []string{"sim-fill-0001", "sim-fill-0001"} },
+			wantErr: "more than once",
+		},
+		{
+			// Several units, closed by one gapped fill, is legitimate.
+			name:   "several unit ids",
+			mutate: func(f *event.FillPayload) { f.UnitIDs = []string{"sim-fill-0001", "sim-fill-add-2", "sim-fill-add-3"} },
 		},
 	}
 
@@ -278,6 +311,11 @@ func TestExitFillPayloadValidate(t *testing.T) {
 			name:    "missing proposal id",
 			mutate:  func(f *event.FillPayload) { f.ProposalID = "" },
 			wantErr: "proposal id",
+		},
+		{
+			name:    "exit fill names unit ids",
+			mutate:  func(f *event.FillPayload) { f.UnitIDs = []string{"some-unit"} },
+			wantErr: "unit ids must be empty for an exit fill",
 		},
 	}
 
@@ -368,8 +406,8 @@ func TestFillEventConstants(t *testing.T) {
 	if event.FillEventType != "execution.fill" {
 		t.Errorf("FillEventType = %q, want %q", event.FillEventType, "execution.fill")
 	}
-	if event.FillSchemaVersion != 2 {
-		t.Errorf("FillSchemaVersion = %d, want 2 (#12 added Kind and CampaignID; #13 and #14 each added a further Kind value without a further bump)", event.FillSchemaVersion)
+	if event.FillSchemaVersion != 3 {
+		t.Errorf("FillSchemaVersion = %d, want 3 (#12 added Kind and CampaignID; #13 and #14 each added a further Kind value without a further bump; #15 added UnitIDs, required for a stop fill)", event.FillSchemaVersion)
 	}
 	if event.FillKindEntry != "entry" {
 		t.Errorf("FillKindEntry = %q, want %q", event.FillKindEntry, "entry")
@@ -428,6 +466,11 @@ func TestAddFillPayloadValidate(t *testing.T) {
 			name:    "missing proposal id",
 			mutate:  func(f *event.FillPayload) { f.ProposalID = "" },
 			wantErr: "proposal id",
+		},
+		{
+			name:    "add fill names unit ids",
+			mutate:  func(f *event.FillPayload) { f.UnitIDs = []string{"some-unit"} },
+			wantErr: "unit ids must be empty for an add fill",
 		},
 	}
 
@@ -583,6 +626,11 @@ func TestStopFillPayloadJSONTags(t *testing.T) {
 	}
 	if got, ok := asMap["campaign_id"]; !ok || got == "" {
 		t.Errorf("encoded payload campaign_id = %v, want it populated: %s", got, encoded)
+	}
+	if got, ok := asMap["unit_ids"]; !ok {
+		t.Errorf("encoded payload missing expected key %q: %s", "unit_ids", encoded)
+	} else if arr, ok := got.([]any); !ok || len(arr) == 0 {
+		t.Errorf("encoded payload unit_ids = %v, want it populated: %s", got, encoded)
 	}
 }
 

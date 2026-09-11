@@ -19,6 +19,8 @@ func validProtectiveStopSet() event.ProtectiveStopSetPayload {
 	return event.ProtectiveStopSetPayload{
 		CampaignID:    "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
 		InstrumentID:  "AAPL",
+		UnitIndex:     1,
+		Reason:        event.ProtectiveStopReasonInitial,
 		AsOf:          proposalPeriodEnd,
 		Level:         campaignEntryPrice - 2*proposalN,
 		PreviousLevel: 0,
@@ -26,6 +28,27 @@ func validProtectiveStopSet() event.ProtectiveStopSetPayload {
 		CampaignN:     proposalN,
 		StopMultiple:  2,
 		Rule:          event.RuleProtectiveStopSetFromFill,
+		ADR:           event.ADRCampaignFrozenAtEntry,
+	}
+}
+
+// validProtectiveStopSetRaised returns a legitimate Stop Ladder raise
+// (#15): Unit 1's stop, raised by half a campaign N because a further Unit
+// was added.
+func validProtectiveStopSetRaised() event.ProtectiveStopSetPayload {
+	previous := campaignEntryPrice - 2*proposalN
+	return event.ProtectiveStopSetPayload{
+		CampaignID:    "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
+		InstrumentID:  "AAPL",
+		UnitIndex:     1,
+		Reason:        event.ProtectiveStopReasonAddLadder,
+		AsOf:          proposalPeriodEnd,
+		Level:         previous + 0.5*proposalN,
+		PreviousLevel: previous,
+		EntryPrice:    campaignEntryPrice,
+		CampaignN:     proposalN,
+		StopMultiple:  2,
+		Rule:          event.RuleStopLadderRaisedByHalfN,
 		ADR:           event.ADRCampaignFrozenAtEntry,
 	}
 }
@@ -137,12 +160,51 @@ func TestProtectiveStopSetPayloadValidate(t *testing.T) {
 			wantErr: "baseline's stop ladder only ever raises",
 		},
 		{
-			// A positive previous level strictly below the new one is
-			// legitimate, even though this ticket never produces one.
+			// A positive previous level strictly below the new one, with
+			// Reason ProtectiveStopReasonAddLadder and Level matching
+			// sizing.RaisedStop's own derivation, is a legitimate Stop
+			// Ladder raise (#15).
 			name: "a legitimate raised stop",
 			mutate: func(p *event.ProtectiveStopSetPayload) {
-				p.PreviousLevel = p.Level - 1
+				p.Reason = event.ProtectiveStopReasonAddLadder
+				p.Rule = event.RuleStopLadderRaisedByHalfN
+				p.PreviousLevel = p.Level - 0.5*proposalN
 			},
+		},
+		{
+			name:    "missing unit index",
+			mutate:  func(p *event.ProtectiveStopSetPayload) { p.UnitIndex = 0 },
+			wantErr: "unit index",
+		},
+		{
+			name:    "unrecognised reason",
+			mutate:  func(p *event.ProtectiveStopSetPayload) { p.Reason = "raised" },
+			wantErr: "not a recognised protective stop reason",
+		},
+		{
+			name: "initial set with a non-zero previous level",
+			mutate: func(p *event.ProtectiveStopSetPayload) {
+				p.PreviousLevel = p.Level - 0.5*proposalN
+			},
+			wantErr: "previous level must be zero for an initial set",
+		},
+		{
+			name: "add-ladder raise with a zero previous level",
+			mutate: func(p *event.ProtectiveStopSetPayload) {
+				p.Reason = event.ProtectiveStopReasonAddLadder
+				p.Rule = event.RuleStopLadderRaisedByHalfN
+			},
+			wantErr: "previous level must be positive for an add-ladder raise",
+		},
+		{
+			name: "add-ladder raise whose level does not match the raise derivation",
+			mutate: func(p *event.ProtectiveStopSetPayload) {
+				p.Reason = event.ProtectiveStopReasonAddLadder
+				p.Rule = event.RuleStopLadderRaisedByHalfN
+				p.PreviousLevel = p.Level - 0.5*proposalN
+				p.Level += 0.01
+			},
+			wantErr: "does not match the derivation",
 		},
 	}
 
@@ -222,6 +284,8 @@ func TestProtectiveStopSetPayloadValidateAggregatesEveryField(t *testing.T) {
 	for _, want := range []string{
 		"campaign id",
 		"instrument id",
+		"unit index",
+		"reason",
 		"as of",
 		"rule",
 		"adr",
@@ -242,11 +306,43 @@ func TestProtectiveStopSetEventConstants(t *testing.T) {
 	if event.ProtectiveStopSetEventType != "strategy.protective-stop.set" {
 		t.Errorf("ProtectiveStopSetEventType = %q, want %q", event.ProtectiveStopSetEventType, "strategy.protective-stop.set")
 	}
-	if event.ProtectiveStopSetSchemaVersion != 1 {
-		t.Errorf("ProtectiveStopSetSchemaVersion = %d, want 1", event.ProtectiveStopSetSchemaVersion)
+	if event.ProtectiveStopSetSchemaVersion != 2 {
+		t.Errorf("ProtectiveStopSetSchemaVersion = %d, want 2", event.ProtectiveStopSetSchemaVersion)
 	}
 	if event.RuleProtectiveStopSetFromFill != "protective-stop.set.from-fill" {
 		t.Errorf("RuleProtectiveStopSetFromFill = %q", event.RuleProtectiveStopSetFromFill)
+	}
+	if event.RuleStopLadderRaisedByHalfN != "stop-ladder.raised-by-half-n" {
+		t.Errorf("RuleStopLadderRaisedByHalfN = %q", event.RuleStopLadderRaisedByHalfN)
+	}
+	if event.ProtectiveStopReasonInitial != "initial" {
+		t.Errorf("ProtectiveStopReasonInitial = %q, want %q", event.ProtectiveStopReasonInitial, "initial")
+	}
+	if event.ProtectiveStopReasonAddLadder != "add-ladder" {
+		t.Errorf("ProtectiveStopReasonAddLadder = %q, want %q", event.ProtectiveStopReasonAddLadder, "add-ladder")
+	}
+}
+
+// TestProtectiveStopSetPayloadRaisedRoundTrip mirrors
+// TestProtectiveStopSetPayloadRoundTrip for the add-ladder shape, so the
+// raised reason's own required fields (UnitIndex, Reason, a positive
+// PreviousLevel) round-trip through JSON cleanly too.
+func TestProtectiveStopSetPayloadRaisedRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := validProtectiveStopSetRaised()
+
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var decoded event.ProtectiveStopSetPayload
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("decoded.Validate() error = %v", err)
 	}
 }
 
@@ -293,6 +389,8 @@ func TestProtectiveStopSetPayloadJSONTags(t *testing.T) {
 	for _, key := range []string{
 		"campaign_id",
 		"instrument_id",
+		"unit_index",
+		"reason",
 		"as_of",
 		"level",
 		"previous_level",

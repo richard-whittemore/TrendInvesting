@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -150,9 +151,13 @@ func TestAddLadderOneRungPerBarUpToFourUnitsThenNoFifth(t *testing.T) {
 	if len(added) != 3 {
 		t.Fatalf("got %d unit-added event(s), want exactly 3", len(added))
 	}
-	// One Protective-Stop-set for the opening fill, plus one per Add.
-	if got := len(envelopesOfType(emitted, event.ProtectiveStopSetEventType)); got != 4 {
-		t.Errorf("got %d protective-stop-set event(s), want exactly 4 (unit 1's own, plus one per add)", got)
+	// #15's Stop Ladder: one Protective-Stop-set for the opening fill (unit
+	// 1's own initial), one INITIAL set per Add (units 2, 3, 4 = 3 more),
+	// and one RAISE per earlier unit on each Add — 1 raise on the second
+	// unit's add, 2 on the third's, 3 on the fourth's = 6 more. Total
+	// 1 + 3 + 6 = 10.
+	if got := len(envelopesOfType(emitted, event.ProtectiveStopSetEventType)); got != 10 {
+		t.Errorf("got %d protective-stop-set event(s), want exactly 10 (1 initial + 3 initial adds + 6 stop-ladder raises)", got)
 	}
 
 	wantRungs := []float64{rung2, rung3, rung4}
@@ -483,15 +488,24 @@ func TestMultiUnitCampaignExitsViaExitChannelWithAggregatedQuantityAndResult(t *
 	}
 
 	// The Protective Stop reported is the MINIMUM across all three units —
-	// which, since every fill under ADR 0005's resting-order model lands at
-	// or above its own rung, is always Unit 1's own (the lowest fill, and
-	// so the lowest stop): campaignFillPrice - 2N.
-	wantStopLevel, err := sizing.ProtectiveStopLevel(campaignFillPrice, campaignN, cfg.StopMultiple, sizing.DirectionLong)
+	// which, under #15's Stop Ladder, converges on the LAST (third) unit's
+	// own stop: every fill here landed exactly on its own rung (fill2Price
+	// == rung2, fill3Price == rung3), so the earlier units' stops were
+	// raised by exactly 1/2N per Add and end up equal to unit 3's own
+	// initial stop (The Turtle Rules p.22's normal, non-gap case).
+	// Not asserted to exact float64 equality: unit 1's stop reached this
+	// level via two RaisedStop calls, unit 2's via one, and unit 3's via a
+	// fresh sizing.ProtectiveStopLevel call — three different float64
+	// operation sequences that are mathematically equal but need not be
+	// bit-identical (the same reason stop_test.go's own Crude fixture
+	// compares against the printed decimal with a small tolerance, not
+	// exact equality).
+	wantStopLevel, err := sizing.ProtectiveStopLevel(fill3Price, campaignN, cfg.StopMultiple, sizing.DirectionLong)
 	if err != nil {
 		t.Fatalf("ProtectiveStopLevel() error = %v", err)
 	}
-	if exited.ProtectiveStopLevel != wantStopLevel {
-		t.Errorf("ProtectiveStopLevel = %v, want %v (unit 1's own stop, the minimum across all held units)", exited.ProtectiveStopLevel, wantStopLevel)
+	if math.Abs(exited.ProtectiveStopLevel-wantStopLevel) > 1e-9 {
+		t.Errorf("ProtectiveStopLevel = %v, want ~%v (unit 3's own stop, the minimum across all held units once the ladder has raised units 1 and 2 to match)", exited.ProtectiveStopLevel, wantStopLevel)
 	}
 
 	if err := exited.Validate(); err != nil {
