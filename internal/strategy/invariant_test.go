@@ -56,7 +56,7 @@ func newConfiguredReducerForInvariantTest(t *testing.T) *Reducer {
 	r.configured = true
 	r.entryChannelLength = 55
 	r.tierBDistanceInN = 1.0
-	notionalAccount, err := NewNotionalAccount(1_000_000)
+	notionalAccount, err := NewNotionalAccount(1_000_000, 1, 1)
 	if err != nil {
 		t.Fatalf("NewNotionalAccount() error = %v", err)
 	}
