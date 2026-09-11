@@ -855,3 +855,151 @@ func TestLookAheadExitChannelWouldMissTheBreach(t *testing.T) {
 		t.Errorf("exit proposal Level = %v, want %v (the 20 filler bars' low, excluding the decision bar's own %v)", proposal.Level, fillerLow, breachLow)
 	}
 }
+
+// --- The exit fill's own execution window (PR #73 review round) ----------
+//
+// The entry-fill path bounds a fill's timestamp to
+// (the period end of the bar before the decision bar, the period end of the
+// next bar for that instrument] — see Reducer.applyFill's own doc comment
+// for why (ADR 0005's resting order and the two places the bounds are
+// enforced). An exit fill needs the identical bound against the BREACH bar
+// (the bar whose evaluation produced the outstanding exit proposal) rather
+// than the entry's decision bar, for the same reason: a fill claiming to
+// have executed before the order for it could have existed, or after a bar
+// the stream has not reached yet, would journal a Campaign-exited event
+// whose ExitedAt is inconsistent with the bar stream. Every test below is
+// the exit-side mirror of one of applyFill's own window tests in
+// campaign_test.go.
+
+// TestExitFillInsideTheBreachBarClosesTheCampaignAtThatIntrabarTime mirrors
+// TestFillInsideTheDecisionBarOpensTheCampaignAtThatIntrabarTime: a fill
+// timestamped strictly inside the breach bar (after the previous bar's
+// period end, before the breach bar's own) is accepted, and ExitedAt carries
+// that intrabar time — ADR 0005's ordinary case.
+func TestExitFillInsideTheBreachBarClosesTheCampaignAtThatIntrabarTime(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	breachAt := day(57)
+	intrabar := breachAt.Add(-6 * time.Hour)
+	exitFill := closingExitFill("AAPL", campaignID, 100, breachAt, intrabar)
+
+	emitted := newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		bar(postEntryBar("AAPL", breachAt, 99)).
+		fill(exitFill).
+		mustRun()
+
+	exited := decodeCampaignExited(t, onlyEnvelopeOfType(t, emitted, event.CampaignExitedEventType))
+	if !exited.ExitedAt.Equal(intrabar) {
+		t.Errorf("ExitedAt = %v, want the intrabar fill time %v", exited.ExitedAt, intrabar)
+	}
+}
+
+// TestExitFillAtTheBreachBarsPeriodEndIsAccepted mirrors
+// TestFillAtTheDecisionBarsPeriodEndIsAccepted: a fill at the very close of
+// the breach bar is still a fill that happened within that bar.
+func TestExitFillAtTheBreachBarsPeriodEndIsAccepted(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	breachAt := day(57)
+	exitFill := closingExitFill("AAPL", campaignID, 100, breachAt, breachAt)
+
+	emitted := newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		bar(postEntryBar("AAPL", breachAt, 99)).
+		fill(exitFill).
+		mustRun()
+
+	if got := len(envelopesOfType(emitted, event.CampaignExitedEventType)); got != 1 {
+		t.Fatalf("got %d Campaign-exited event(s), want exactly 1", got)
+	}
+}
+
+// TestExitFillPredatingTheBarTheExitOrderCouldHaveExecutedInIsRejected
+// mirrors TestFillPredatingTheBarTheOrderCouldHaveExecutedInIsRejected: a
+// fill timestamped at or before the bar BEFORE the breach bar (day 56, the
+// moment the breach bar opened) predates any order the breach could have
+// produced, and is rejected — the lower bound of the exit fill's window.
+func TestExitFillPredatingTheBarTheExitOrderCouldHaveExecutedInIsRejected(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	breachAt := day(57)
+
+	tests := []struct {
+		name     string
+		filledAt time.Time
+	}{
+		{
+			// Exactly the previous bar's period end: the breach bar had not
+			// opened yet, so the boundary is exclusive.
+			name:     "at the previous bar's period end",
+			filledAt: day(56),
+		},
+		{
+			name:     "long before the breach bar existed",
+			filledAt: day(1),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			exitFill := closingExitFill("AAPL", campaignID, 100, breachAt, tt.filledAt)
+
+			newStream(t, cfg).
+				bars(breakoutBars("AAPL")).
+				fill(openingFill("AAPL")).
+				bar(postEntryBar("AAPL", breachAt, 99)).
+				fill(exitFill).
+				wantRunError("AAPL", "predates")
+		})
+	}
+}
+
+// TestBarPredatingTheCampaignsClosingFillFailsClosed mirrors
+// TestBarPredatingTheCampaignsOpeningFillFailsClosed on the closing side: a
+// fill claiming a moment the stream has not reached yet cannot be rejected
+// when it arrives (there is no bar-length configuration, and the next bar
+// does not exist yet), so it is accepted then — and the contradiction is
+// caught by the very next bar for that instrument, which fails the run
+// rather than continuing as though nothing were wrong. Both halves are
+// asserted, for the same reason the entry-side test asserts both: the point
+// is the split between "accepted at fill time" and "caught at the next bar".
+func TestBarPredatingTheCampaignsClosingFillFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	breachAt := day(57)
+	future := day(59)
+	exitFill := closingExitFill("AAPL", campaignID, 100, breachAt, future)
+	nextBar := postEntryBar("AAPL", day(58), 110)
+
+	s := newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		bar(postEntryBar("AAPL", breachAt, 99)).
+		fill(exitFill)
+
+	// The fill alone is accepted: nothing about it is knowable as wrong at
+	// the moment it arrives.
+	accepted := s.mustRun()
+	if got := len(envelopesOfType(accepted, event.CampaignExitedEventType)); got != 1 {
+		t.Fatalf("got %d Campaign-exited event(s) from the fill alone, want exactly 1", got)
+	}
+
+	// The next bar's own period end (58) is BEFORE the closing fill's
+	// timestamp (59): an execution cannot have happened after a bar that had
+	// not yet completed, so the bar stream is now inconsistent with the fill
+	// it already accepted.
+	s.bar(nextBar).wantRunError("AAPL", "predates")
+}
