@@ -234,6 +234,31 @@ func DrawdownSteppedNotional(before float64) float64 {
 	return DrawdownStepRetainedFraction * before
 }
 
+// CashMovementScaledFigure returns before scaled by a cash movement that
+// took equity from equityBefore to equityAfter (ADR 0007): before x
+// (equityAfter / equityBefore). It scales any one of the Notional Account's
+// three figures — the yearly starting figure, the measurement base, or the
+// account itself — by the identical factor, which is the whole of ADR
+// 0007's "neither triggers nor masks a Drawdown Step" property: since every
+// figure moves by the same ratio, a figure's position relative to any of the
+// others (in particular, equity's position relative to a threshold) is
+// unchanged by the movement.
+//
+// Exported, and defined here once — the same "one copy of each derivation"
+// discipline DrawdownSteppedNotional above establishes — so that
+// internal/strategy.NotionalAccount.ApplyCashMovement (the producer) and
+// event.NotionalAccountCashAdjustedPayload.Validate (the validator) compute
+// the identical float64 value for each of the three figures it scales, and
+// an exact-equality comparison between them is meaningful.
+//
+// It performs no validation of its own: callers reach it only after
+// equityBefore and equityAfter have already been checked (finite, positive,
+// and — per ApplyCashMovement — not the result of a withdrawal that would
+// take equity to zero or below).
+func CashMovementScaledFigure(before, equityBefore, equityAfter float64) float64 {
+	return before * (equityAfter / equityBefore)
+}
+
 // UnitQuantity is Faith's Unit-sizing formula (The Turtle Rules p.14): one
 // Unit is the Unit Volatility Fraction of the Notional Account divided by the
 // market's dollar volatility, N times dollars per point.
