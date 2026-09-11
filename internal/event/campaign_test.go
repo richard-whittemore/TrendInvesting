@@ -455,3 +455,332 @@ func TestCampaignOpenedPayloadJSONTags(t *testing.T) {
 		}
 	}
 }
+
+// --- CampaignExitedPayload (#12) -----------------------------------------
+
+// campaignExitedStopPrice is where validCampaignExited's stop fill actually
+// executes: campaignFillPrice - 2*proposalN's protective stop MINUS a small
+// gap, so ExitPrice sits strictly below ProtectiveStopLevel — proving the
+// payload records what was filled, never the level (ADR 0005's gap rule).
+var campaignExitedStopPrice = (campaignEntryPrice - 2*proposalN) - 0.50
+
+// validCampaignExited returns the Campaign-exited that would close
+// validCampaignOpened by a stop fill that gapped through the level.
+func validCampaignExited() event.CampaignExitedPayload {
+	entry := campaignEntryPrice
+	exit := campaignExitedStopPrice
+	n := proposalN
+	dpp := 1.0
+	return event.CampaignExitedPayload{
+		CampaignID:          "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
+		InstrumentID:        "AAPL",
+		FillID:              "sim-fill-0002",
+		ExitedAt:            proposalPeriodEnd.AddDate(0, 0, 1),
+		Reason:              event.ExitReasonStop,
+		EntryPrice:          entry,
+		ExitPrice:           exit,
+		Quantity:            133,
+		CampaignN:           n,
+		DollarsPerPoint:     dpp,
+		ProtectiveStopLevel: entry - 2*n,
+		RealisedResult:      float64(133) * (exit - entry) * dpp,
+		RealisedResultInN:   (exit - entry) / n,
+		Rule:                event.RuleCampaignExitedByStop,
+		ADR:                 event.ADRCampaignExitRecordsTheFill,
+	}
+}
+
+func TestCampaignExitedPayloadValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(*event.CampaignExitedPayload)
+		wantErr string
+	}{
+		{name: "valid campaign exited"},
+		{
+			name:    "missing campaign id",
+			mutate:  func(p *event.CampaignExitedPayload) { p.CampaignID = "" },
+			wantErr: "campaign id",
+		},
+		{
+			name:    "missing instrument id",
+			mutate:  func(p *event.CampaignExitedPayload) { p.InstrumentID = "" },
+			wantErr: "instrument id",
+		},
+		{
+			name:    "missing fill id",
+			mutate:  func(p *event.CampaignExitedPayload) { p.FillID = "" },
+			wantErr: "fill id",
+		},
+		{
+			name:    "missing exited at",
+			mutate:  func(p *event.CampaignExitedPayload) { p.ExitedAt = time.Time{} },
+			wantErr: "exited at",
+		},
+		{
+			name:    "unrecognised reason",
+			mutate:  func(p *event.CampaignExitedPayload) { p.Reason = "margin-call" },
+			wantErr: "reason",
+		},
+		{
+			name:    "missing rule",
+			mutate:  func(p *event.CampaignExitedPayload) { p.Rule = "" },
+			wantErr: "rule",
+		},
+		{
+			name:    "missing adr",
+			mutate:  func(p *event.CampaignExitedPayload) { p.ADR = "" },
+			wantErr: "adr",
+		},
+		{
+			name:    "zero entry price",
+			mutate:  func(p *event.CampaignExitedPayload) { p.EntryPrice = 0 },
+			wantErr: "entry price must be positive",
+		},
+		{
+			name:    "zero exit price",
+			mutate:  func(p *event.CampaignExitedPayload) { p.ExitPrice = 0 },
+			wantErr: "exit price must be positive",
+		},
+		{
+			name:    "zero quantity",
+			mutate:  func(p *event.CampaignExitedPayload) { p.Quantity = 0 },
+			wantErr: "quantity",
+		},
+		{
+			name:    "negative quantity",
+			mutate:  func(p *event.CampaignExitedPayload) { p.Quantity = -1 },
+			wantErr: "quantity",
+		},
+		{
+			name:    "zero campaign n",
+			mutate:  func(p *event.CampaignExitedPayload) { p.CampaignN = 0 },
+			wantErr: "campaign n must be positive",
+		},
+		{
+			name:    "zero dollars per point",
+			mutate:  func(p *event.CampaignExitedPayload) { p.DollarsPerPoint = 0 },
+			wantErr: "dollars per point must be positive",
+		},
+		{
+			name:    "protective stop level at zero",
+			mutate:  func(p *event.CampaignExitedPayload) { p.ProtectiveStopLevel = 0 },
+			wantErr: "protective stop level must be positive",
+		},
+		{
+			name:    "protective stop level at or above entry price",
+			mutate:  func(p *event.CampaignExitedPayload) { p.ProtectiveStopLevel = p.EntryPrice },
+			wantErr: "must be below the entry price",
+		},
+		{
+			// Exact float64 equality, same discipline as every other derived
+			// field in this package.
+			name: "realised result does not match its derivation",
+			mutate: func(p *event.CampaignExitedPayload) {
+				p.RealisedResult += 0.01
+			},
+			wantErr: "realised result",
+		},
+		{
+			name: "realised result in n does not match its derivation",
+			mutate: func(p *event.CampaignExitedPayload) {
+				p.RealisedResultInN += 0.01
+			},
+			wantErr: "realised result in n",
+		},
+		{
+			// A gap fill below the level is legitimate under ADR 0005: the
+			// payload must accept ExitPrice strictly below
+			// ProtectiveStopLevel, proving it never rejects "the fill missed
+			// the level".
+			name: "exit price below the protective stop level on a gap is accepted",
+			mutate: func(p *event.CampaignExitedPayload) {
+				// Already true of validCampaignExited() itself; this case
+				// documents the intent explicitly with no further mutation.
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := validCampaignExited()
+			if tt.mutate != nil {
+				tt.mutate(&payload)
+			}
+
+			err := payload.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCampaignExitedPayloadValidateRejectsNonFiniteFields(t *testing.T) {
+	t.Parallel()
+
+	type fieldCase struct {
+		name    string
+		apply   func(p *event.CampaignExitedPayload, f float64)
+		wantErr string
+	}
+	fields := []fieldCase{
+		{"entry price", func(p *event.CampaignExitedPayload, f float64) { p.EntryPrice = f }, "entry price must be finite"},
+		{"exit price", func(p *event.CampaignExitedPayload, f float64) { p.ExitPrice = f }, "exit price must be finite"},
+		{"campaign n", func(p *event.CampaignExitedPayload, f float64) { p.CampaignN = f }, "campaign n must be finite"},
+		{"dollars per point", func(p *event.CampaignExitedPayload, f float64) { p.DollarsPerPoint = f }, "dollars per point must be finite"},
+		{"protective stop level", func(p *event.CampaignExitedPayload, f float64) { p.ProtectiveStopLevel = f }, "protective stop level must be finite"},
+		{"realised result", func(p *event.CampaignExitedPayload, f float64) { p.RealisedResult = f }, "realised result must be finite"},
+		{"realised result in n", func(p *event.CampaignExitedPayload, f float64) { p.RealisedResultInN = f }, "realised result in n must be finite"},
+	}
+
+	nonFinite := []struct {
+		name  string
+		value float64
+	}{
+		{"NaN", math.NaN()},
+		{"+Inf", math.Inf(1)},
+		{"-Inf", math.Inf(-1)},
+	}
+
+	for _, field := range fields {
+		for _, nf := range nonFinite {
+			t.Run(field.name+" "+nf.name, func(t *testing.T) {
+				t.Parallel()
+				payload := validCampaignExited()
+				field.apply(&payload, nf.value)
+
+				err := payload.Validate()
+				if err == nil || !strings.Contains(err.Error(), field.wantErr) {
+					t.Fatalf("Validate() error = %v, want substring %q", err, field.wantErr)
+				}
+			})
+		}
+	}
+}
+
+func TestCampaignExitedPayloadValidateAggregatesEveryField(t *testing.T) {
+	t.Parallel()
+
+	var payload event.CampaignExitedPayload
+
+	err := payload.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want aggregated error")
+	}
+	for _, want := range []string{
+		"campaign id",
+		"instrument id",
+		"fill id",
+		"exited at",
+		"reason",
+		"rule",
+		"adr",
+		"entry price",
+		"exit price",
+		"quantity",
+		"campaign n",
+		"dollars per point",
+		"protective stop level",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Validate() error = %v, want substring %q", err, want)
+		}
+	}
+}
+
+func TestCampaignExitedEventConstants(t *testing.T) {
+	t.Parallel()
+
+	if event.CampaignExitedEventType != "strategy.campaign.exited" {
+		t.Errorf("CampaignExitedEventType = %q, want %q", event.CampaignExitedEventType, "strategy.campaign.exited")
+	}
+	if event.CampaignExitedSchemaVersion != 1 {
+		t.Errorf("CampaignExitedSchemaVersion = %d, want 1", event.CampaignExitedSchemaVersion)
+	}
+	if event.RuleCampaignExitedByStop != "campaign.exited.by-stop" {
+		t.Errorf("RuleCampaignExitedByStop = %q", event.RuleCampaignExitedByStop)
+	}
+	// ADR 0005 is the fill model: gaps fill at the open, so a stop's actual
+	// exit price may sit below the level — this event cites the ADR whose
+	// rule that is.
+	if event.ADRCampaignExitRecordsTheFill != "0005" {
+		t.Errorf("ADRCampaignExitRecordsTheFill = %q, want %q", event.ADRCampaignExitRecordsTheFill, "0005")
+	}
+	if event.ExitReasonStop != "stop" {
+		t.Errorf("ExitReasonStop = %q, want %q", event.ExitReasonStop, "stop")
+	}
+}
+
+func TestCampaignExitedPayloadRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := validCampaignExited()
+
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var decoded event.CampaignExitedPayload
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("decoded.Validate() error = %v", err)
+	}
+
+	reEncoded, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatalf("re-Marshal() error = %v", err)
+	}
+	if !bytes.Equal(encoded, reEncoded) {
+		t.Fatalf("round trip not stable:\n  first:  %s\n  second: %s", encoded, reEncoded)
+	}
+}
+
+func TestCampaignExitedPayloadJSONTags(t *testing.T) {
+	t.Parallel()
+
+	encoded, err := json.Marshal(validCampaignExited())
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var asMap map[string]any
+	if err := json.Unmarshal(encoded, &asMap); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	for _, key := range []string{
+		"campaign_id",
+		"instrument_id",
+		"fill_id",
+		"exited_at",
+		"reason",
+		"entry_price",
+		"exit_price",
+		"quantity",
+		"campaign_n",
+		"dollars_per_point",
+		"protective_stop_level",
+		"realised_result",
+		"realised_result_in_n",
+		"rule",
+		"adr",
+	} {
+		if _, ok := asMap[key]; !ok {
+			t.Errorf("encoded payload missing expected key %q: %s", key, encoded)
+		}
+	}
+}
