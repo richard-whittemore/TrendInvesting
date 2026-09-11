@@ -92,6 +92,17 @@ type Reducer struct {
 	// applyCompletedBar.
 	lastAccountEventAt time.Time
 	hasAccountEvent    bool
+	// accountCurrency is pinned from the Currency of the first account
+	// snapshot or cash movement accepted (Greptile PR #71 finding), and
+	// every later account event of either type must match it exactly. A
+	// multi-currency account is out of scope for this project (issue #17
+	// Findings): without this check, a later event stated in a different
+	// currency would be silently scaled and compared against figures stated
+	// in the pinned one. Empty until the first account event is accepted;
+	// AccountSnapshotPayload.Validate/CashMovementPayload.Validate already
+	// require Currency non-empty, so the empty string is unambiguous as
+	// "not yet pinned".
+	accountCurrency string
 
 	instruments map[string]*instrumentState
 }

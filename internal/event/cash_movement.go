@@ -3,6 +3,7 @@ package event
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -53,8 +54,9 @@ type CashMovementPayload struct {
 
 // Validate checks that the movement identifies when it occurred, that
 // Amount is finite and non-zero, that EquityBefore is finite and positive,
-// that EquityBefore+Amount is strictly positive (a withdrawal to zero or
-// below fails closed rather than being silently accepted), and that
+// that EquityBefore+Amount is finite (two finite inputs can still overflow
+// to +Inf — Greptile PR #71 finding) and strictly positive (a withdrawal to
+// zero or below fails closed rather than being silently accepted), and that
 // Currency is present.
 func (p CashMovementPayload) Validate() error {
 	var errs []error
@@ -79,7 +81,17 @@ func (p CashMovementPayload) Validate() error {
 	}
 
 	if amountFinite && equityBeforeFinite {
-		if equityAfter := p.EquityBefore + p.Amount; equityAfter <= 0 {
+		equityAfter := p.EquityBefore + p.Amount
+		switch {
+		case math.IsNaN(equityAfter) || math.IsInf(equityAfter, 0):
+			// Two finite inputs (EquityBefore and Amount are both already
+			// checked finite above) can still sum to +Inf: failing closed
+			// here, before the <= 0 check below, matters because +Inf is
+			// NOT <= 0 and would otherwise pass it silently.
+			errs = append(errs, fmt.Errorf(
+				"equity before %v plus amount %v is not finite (%v); failing closed",
+				p.EquityBefore, p.Amount, equityAfter))
+		case equityAfter <= 0:
 			errs = append(errs, fmt.Errorf(
 				"a withdrawal of %v from equity %v would take equity to %v, at or below zero; failing closed",
 				p.Amount, p.EquityBefore, equityAfter))

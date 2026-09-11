@@ -442,11 +442,16 @@ type CashMovement struct {
 // neither applies nor clears a Drawdown Step.
 //
 // equityBefore must be finite and positive, and amount must be finite and
-// non-zero (a "movement" of nothing is not a movement). A withdrawal that
-// would take equity to zero or below fails closed: ADR 0007 does not
-// address an account emptied or overdrawn by a withdrawal, and scaling
-// every figure by a non-positive or infinite factor would produce a
-// meaningless Notional Account rather than a legitimate one.
+// non-zero (a "movement" of nothing is not a movement). equityBefore+amount
+// must itself be finite (two finite inputs can still overflow to +/-Inf —
+// Greptile PR #71 finding) and strictly positive: a withdrawal that would
+// take equity to zero or below fails closed, since ADR 0007 does not
+// address an account emptied or overdrawn by a withdrawal. Every check,
+// including that each of the three scaled figures itself comes out finite
+// and positive (the ratio applied to an already-extreme figure can overflow
+// even when equityBefore+amount does not), runs BEFORE any field of n is
+// mutated: a rejected cash movement leaves the account exactly as it found
+// it, never partially scaled.
 func (n *NotionalAccount) ApplyCashMovement(equityBefore, amount float64) (*CashMovement, error) {
 	if err := checkEquity("equity before", equityBefore); err != nil {
 		return nil, fmt.Errorf("strategy: cannot apply a cash movement: %w", err)
@@ -458,16 +463,36 @@ func (n *NotionalAccount) ApplyCashMovement(equityBefore, amount float64) (*Cash
 		return nil, errors.New("strategy: cannot apply a cash movement: amount must be non-zero")
 	}
 	equityAfter := equityBefore + amount
-	if equityAfter <= 0 {
+	switch {
+	case math.IsNaN(equityAfter) || math.IsInf(equityAfter, 0):
+		return nil, fmt.Errorf("strategy: cannot apply a cash movement: equity before %v plus amount %v is not finite (%v); failing closed rather than scaling the Notional Account by a non-finite factor", equityBefore, amount, equityAfter)
+	case equityAfter <= 0:
 		return nil, fmt.Errorf("strategy: cannot apply a cash movement: a withdrawal of %v from equity %v would take equity to %v, at or below zero; failing closed rather than scaling the Notional Account by a non-positive factor", amount, equityBefore, equityAfter)
+	}
+
+	// Computed into locals, and validated, before anything on n is mutated
+	// (see this method's own doc comment): the ratio equityAfter/equityBefore
+	// applied to an already-extreme figure can itself overflow even though
+	// equityAfter is finite.
+	scaledStartingFigure := sizing.CashMovementScaledFigure(n.startingFigure, equityBefore, equityAfter)
+	scaledBase := sizing.CashMovementScaledFigure(n.base, equityBefore, equityAfter)
+	scaledCurrent := sizing.CashMovementScaledFigure(n.current, equityBefore, equityAfter)
+	if err := checkEquity("scaled yearly starting figure", scaledStartingFigure); err != nil {
+		return nil, fmt.Errorf("strategy: cannot apply a cash movement: %w", err)
+	}
+	if err := checkEquity("scaled measurement base", scaledBase); err != nil {
+		return nil, fmt.Errorf("strategy: cannot apply a cash movement: %w", err)
+	}
+	if err := checkEquity("scaled notional account", scaledCurrent); err != nil {
+		return nil, fmt.Errorf("strategy: cannot apply a cash movement: %w", err)
 	}
 
 	startingFigureBefore := n.startingFigure
 	notionalBefore := n.current
 
-	n.startingFigure = sizing.CashMovementScaledFigure(n.startingFigure, equityBefore, equityAfter)
-	n.base = sizing.CashMovementScaledFigure(n.base, equityBefore, equityAfter)
-	n.current = sizing.CashMovementScaledFigure(n.current, equityBefore, equityAfter)
+	n.startingFigure = scaledStartingFigure
+	n.base = scaledBase
+	n.current = scaledCurrent
 
 	return &CashMovement{
 		Amount:               amount,
@@ -517,6 +542,9 @@ func (r *Reducer) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelop
 	}
 	if err := snapshot.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: invalid account snapshot payload: %w", err)
+	}
+	if err := r.pinAccountCurrency(snapshot.Currency); err != nil {
+		return nil, err
 	}
 
 	// Chronology, mirroring applyCompletedBar's per-instrument rule: a
@@ -661,6 +689,9 @@ func (r *Reducer) applyCashMovement(envelope event.Envelope) ([]event.Envelope, 
 	if err := movement.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: invalid cash movement payload: %w", err)
 	}
+	if err := r.pinAccountCurrency(movement.Currency); err != nil {
+		return nil, err
+	}
 
 	if r.hasAccountEvent && !movement.AsOf.After(r.lastAccountEventAt) {
 		return nil, fmt.Errorf("strategy: cash movement as of %s is not strictly after the last recorded account event %s; rejecting a duplicate or out-of-order cash movement",
@@ -723,4 +754,26 @@ func drawdownStepID(asOf time.Time, stepNumber int) string {
 // that — so kind and AsOf together identify it uniquely without a counter.
 func notionalAccountEventID(kind string, asOf time.Time) string {
 	return fmt.Sprintf("%s:%s", kind, asOf.UTC().Format("2006-01-02T15:04:05.000000000Z"))
+}
+
+// pinAccountCurrency pins r.accountCurrency from the first account snapshot
+// or cash movement accepted, and rejects any later one of either type whose
+// Currency differs from the pin (Greptile PR #71 finding: Currency was
+// validated for presence only by AccountSnapshotPayload/CashMovementPayload
+// and then discarded, so nothing stopped a later event stated in a
+// different currency from being silently scaled and compared against
+// figures stated in the first one). Multi-currency accounts are out of
+// scope for this project (issue #17 Findings); this makes that explicit at
+// the reducer rather than leaving it silently unenforced. The pin survives
+// everything else the Notional Account does — re-basing, a Drawdown Step,
+// a recovery — since it lives on the Reducer, not on NotionalAccount.
+func (r *Reducer) pinAccountCurrency(currency string) error {
+	if r.accountCurrency == "" {
+		r.accountCurrency = currency
+		return nil
+	}
+	if currency != r.accountCurrency {
+		return fmt.Errorf("strategy: account event currency %q does not match the account's pinned currency %q; multi-currency accounts are out of scope", currency, r.accountCurrency)
+	}
+	return nil
 }
