@@ -43,6 +43,19 @@ func validConfiguration() event.ConfigurationPayload {
 			RebasingMonth:  1,
 			RebasingDay:    1,
 		},
+		// #18: ADR 0013's commission model, as Interactive Brokers' published
+		// US-stock Fixed pricing stood on 2026-09-11 — $0.005 per share, a
+		// $1.00 minimum per order, capped at 1 % of trade value
+		// (https://www.interactivebrokers.com/en/pricing/commissions-stocks.php).
+		// A Baseline-declared adaptation under ADR 0012's provenance taxonomy:
+		// the figures come from the broker's published schedule, not from a
+		// methodology source, and every test that depends on them
+		// parameterises them rather than folding them in.
+		Commission: event.CommissionConfig{
+			PerShare:                    0.005,
+			MinimumPerOrder:             1.00,
+			MaximumFractionOfTradeValue: 0.01,
+		},
 	}
 }
 
@@ -211,6 +224,51 @@ func TestConfigurationPayloadValidate(t *testing.T) {
 			wantErr: "slippage",
 		},
 		{
+			// #18/ADR 0013: a per-share rate of zero is a legitimate
+			// commission-free Variant (some venues charge nothing), so it is
+			// accepted rather than refused. It is the CAP below that fails
+			// closed, because an all-zero commission block is what an older
+			// record decodes to.
+			name:    "zero per-share commission is accepted",
+			mutate:  func(c *event.ConfigurationPayload) { c.Commission.PerShare = 0 },
+			wantErr: "",
+		},
+		{
+			name:    "negative per-share commission rejected",
+			mutate:  func(c *event.ConfigurationPayload) { c.Commission.PerShare = -0.005 },
+			wantErr: "commission per share",
+		},
+		{
+			name:    "zero commission minimum per order is accepted",
+			mutate:  func(c *event.ConfigurationPayload) { c.Commission.MinimumPerOrder = 0 },
+			wantErr: "",
+		},
+		{
+			name:    "negative commission minimum per order rejected",
+			mutate:  func(c *event.ConfigurationPayload) { c.Commission.MinimumPerOrder = -1 },
+			wantErr: "commission minimum per order",
+		},
+		{
+			// The cap is what makes an omitted commission block fail closed:
+			// a schema-3 record decodes every commission field as zero, and a
+			// cap of zero would charge nothing at all however large the
+			// per-share rate — a silently free backtest, which is the
+			// commission-side twin of ADR 0013's zero-slippage rule.
+			name:    "zero commission cap rejected",
+			mutate:  func(c *event.ConfigurationPayload) { c.Commission.MaximumFractionOfTradeValue = 0 },
+			wantErr: "commission maximum fraction of trade value",
+		},
+		{
+			name:    "negative commission cap rejected",
+			mutate:  func(c *event.ConfigurationPayload) { c.Commission.MaximumFractionOfTradeValue = -0.01 },
+			wantErr: "commission maximum fraction of trade value",
+		},
+		{
+			name:    "commission cap above one rejected",
+			mutate:  func(c *event.ConfigurationPayload) { c.Commission.MaximumFractionOfTradeValue = 1.5 },
+			wantErr: "commission maximum fraction of trade value",
+		},
+		{
 			name:    "zero tier b distance in n is accepted",
 			mutate:  func(c *event.ConfigurationPayload) { c.TierBDistanceInN = 0 },
 			wantErr: "",
@@ -326,6 +384,21 @@ func TestConfigurationPayloadValidateRejectsNonFiniteFields(t *testing.T) {
 			wantErr: "dollars per point must be finite",
 		},
 		{
+			name:    "commission per share",
+			apply:   func(c *event.ConfigurationPayload, f float64) { c.Commission.PerShare = f },
+			wantErr: "commission per share must be finite",
+		},
+		{
+			name:    "commission minimum per order",
+			apply:   func(c *event.ConfigurationPayload, f float64) { c.Commission.MinimumPerOrder = f },
+			wantErr: "commission minimum per order must be finite",
+		},
+		{
+			name:    "commission maximum fraction of trade value",
+			apply:   func(c *event.ConfigurationPayload, f float64) { c.Commission.MaximumFractionOfTradeValue = f },
+			wantErr: "commission maximum fraction of trade value must be finite",
+		},
+		{
 			// Only meaningful in the mode where the field is an input at
 			// all; under volatility-normalised a NaN is rejected by the
 			// must-be-absent rule instead (see the table above).
@@ -384,6 +457,7 @@ func TestConfigurationPayloadValidateAggregatesEveryField(t *testing.T) {
 		"dollars per point",
 		"notional account starting equity",
 		"rebasing date",
+		"commission maximum fraction of trade value",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("Validate() error = %v, want substring %q", err, want)
@@ -403,19 +477,40 @@ func TestConfigurationEventConstants(t *testing.T) {
 }
 
 // TestConfigurationSchemaVersionBumpedForSizingFields pins the explicit
-// schema bumps this payload has taken: 2 for #9's TierBDistanceInN, and 3 for
-// #10's DollarsPerPoint and RiskAtStopFraction. A new field on an existing
-// payload always changes the schema version (docs/development.md: a schema
-// change is explicit in this project, never a silent field addition), and
-// here it must, because both new fields decode as the float64 zero from an
-// older record — a zero DollarsPerPoint divides by zero, and a zero
-// RiskAtStopFraction would size a fixed-risk-at-stop Unit from a risk budget
-// of nothing.
+// schema bumps this payload has taken: 2 for #9's TierBDistanceInN, 3 for
+// #10's DollarsPerPoint and RiskAtStopFraction, and 4 for #18's Commission.
+// A new field on an existing payload always changes the schema version
+// (docs/development.md: a schema change is explicit in this project, never a
+// silent field addition), and here it must, because every new field decodes
+// as the float64 zero from an older record — a zero DollarsPerPoint divides
+// by zero, a zero RiskAtStopFraction would size a fixed-risk-at-stop Unit
+// from a risk budget of nothing, and a zero commission cap would charge
+// nothing at all on every order.
 func TestConfigurationSchemaVersionBumpedForSizingFields(t *testing.T) {
 	t.Parallel()
 
-	if event.ConfigurationSchemaVersion != 3 {
-		t.Fatalf("ConfigurationSchemaVersion = %d, want 3", event.ConfigurationSchemaVersion)
+	if event.ConfigurationSchemaVersion != 4 {
+		t.Fatalf("ConfigurationSchemaVersion = %d, want 4", event.ConfigurationSchemaVersion)
+	}
+}
+
+// TestConfigurationRecordedBeforeCommissionIsRejected is the #18 half of the
+// bump above, asserted through Validate rather than through the version
+// constant: a record written before the commission block existed decodes
+// every one of its fields as zero, and the zero cap is what makes such a
+// record fail closed instead of running a backtest that charges nothing.
+func TestConfigurationRecordedBeforeCommissionIsRejected(t *testing.T) {
+	t.Parallel()
+
+	payload := validConfiguration()
+	payload.Commission = event.CommissionConfig{}
+
+	err := payload.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want an error for a configuration with no commission model")
+	}
+	if !strings.Contains(err.Error(), "commission maximum fraction of trade value") {
+		t.Errorf("Validate() error = %v, want it to name the commission cap", err)
 	}
 }
 
@@ -479,6 +574,7 @@ func TestConfigurationPayloadJSONTags(t *testing.T) {
 		"dollars_per_point",
 		"risk_at_stop_fraction",
 		"notional_account",
+		"commission",
 	} {
 		if _, ok := asMap[key]; !ok {
 			t.Errorf("encoded payload missing expected key %q: %s", key, encoded)
@@ -492,6 +588,16 @@ func TestConfigurationPayloadJSONTags(t *testing.T) {
 	for _, key := range []string{"starting_equity", "rebasing_month", "rebasing_day"} {
 		if _, ok := notionalAccount[key]; !ok {
 			t.Errorf("encoded notional_account missing expected key %q: %s", key, encoded)
+		}
+	}
+
+	commission, ok := asMap["commission"].(map[string]any)
+	if !ok {
+		t.Fatalf("commission is not an object: %s", encoded)
+	}
+	for _, key := range []string{"per_share", "minimum_per_order", "maximum_fraction_of_trade_value"} {
+		if _, ok := commission[key]; !ok {
+			t.Errorf("encoded commission missing expected key %q: %s", key, encoded)
 		}
 	}
 }
