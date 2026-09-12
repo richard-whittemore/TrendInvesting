@@ -23,7 +23,7 @@ import (
 // "the source that emitted the event").
 const sourceReducer = "reducer"
 
-// Reducer implements replay.Handler for #8/#9/#10: it tracks each
+// Reducer implements replay.Handler: it tracks each
 // instrument's True Range, N (CONTEXT.md: "True Range", "N"), and Entry
 // Channel (CONTEXT.md: "Entry Channel"; ADR 0002) from completed bars. It
 // emits one Setup-evaluated decision event per bar, reporting N, the Entry
@@ -58,13 +58,13 @@ type Reducer struct {
 
 	configured         bool
 	entryChannelLength int
-	// exitChannelLength is #13's addition: event.ConfigurationPayload.ExitChannelLength
+	// exitChannelLength is event.ConfigurationPayload.ExitChannelLength
 	// (20 in the Baseline, The Turtle Rules p.26, ADR 0002), captured once
 	// from the configuration event alongside entryChannelLength.
 	exitChannelLength int
 	tierBDistanceInN  float64
 
-	// #10's sizing configuration, captured once from the configuration event.
+	// Sizing configuration, captured once from the configuration event.
 	//
 	// Both forms of the Sizing Mode are kept: configuredSizingMode is the
 	// value the configuration event declared and is what a proposal is
@@ -80,7 +80,7 @@ type Reducer struct {
 	stopMultiple         float64
 	riskAtStopFraction   float64
 	dollarsPerPoint      float64
-	// maxUnits is #14's addition: event.ConfigurationPayload.MaxUnits (ADR
+	// maxUnits is event.ConfigurationPayload.MaxUnits (ADR
 	// 0008: 4 Units per instrument in the Baseline), captured once from the
 	// configuration event and frozen onto every Campaign it opens
 	// (campaignState.maxUnits) — a later reconfiguration (unsupported
@@ -90,24 +90,23 @@ type Reducer struct {
 	// notionalAccount is ADR 0007's Notional Account (CONTEXT.md),
 	// initialised to the configured starting equity and driven by
 	// event.AccountSnapshotEventType and event.CashMovementEventType events
-	// (#16/#17; see notional.go's applyAccountSnapshot/applyCashMovement).
+	// (see notional.go's applyAccountSnapshot/applyCashMovement).
 	notionalAccount *NotionalAccount
 	// drawdownStepsSeen counts every Drawdown Step applied since the ladder
-	// was last reset — by a re-basing or a full recovery (#17) — for
+	// was last reset — by a re-basing or a full recovery — for
 	// DrawdownStepAppliedPayload.StepNumber (1-based).
 	drawdownStepsSeen int
 	// lastAccountEventAt/hasAccountEvent enforce chronology across the
-	// WHOLE shared account timeline (#17, ADR 0007 rule 4): both account
+	// WHOLE shared account timeline (ADR 0007 rule 4): both account
 	// snapshots and cash movements share this one per-account clock, the
 	// same shape as instrumentState's lastPeriodEnd/bar chronology check in
 	// applyCompletedBar.
 	lastAccountEventAt time.Time
 	hasAccountEvent    bool
 	// accountCurrency is pinned from the Currency of the first account
-	// snapshot or cash movement accepted (Greptile PR #71 finding), and
-	// every later account event of either type must match it exactly. A
-	// multi-currency account is out of scope for this project (issue #17
-	// Findings): without this check, a later event stated in a different
+	// snapshot or cash movement accepted, and every later account event of
+	// either type must match it exactly. A multi-currency account is out of
+	// scope for this project: without this check, a later event stated in a different
 	// currency would be silently scaled and compared against figures stated
 	// in the pinned one. Empty until the first account event is accepted;
 	// AccountSnapshotPayload.Validate/CashMovementPayload.Validate already
@@ -116,7 +115,7 @@ type Reducer struct {
 	accountCurrency string
 
 	instruments map[string]*instrumentState
-	// acceptedFills is #12's addition, defined and explained in
+	// acceptedFills is defined and explained in
 	// campaign.go: every fill this reducer has accepted, for the WHOLE
 	// run, keyed by FillID — not per instrument — so that a fill id reused
 	// across two different instruments is caught as a reconciliation
@@ -140,34 +139,34 @@ type instrumentState struct {
 	lastPeriodEnd    time.Time
 	n                *indicator.WilderAverage
 	entryChannel     *indicator.EntryChannel
-	// exitChannel is #13's addition: fed one more completed bar's low every
+	// exitChannel is fed one more completed bar's low every
 	// completed bar, whether or not the instrument is currently in a
 	// Campaign — so the window is already warm the moment a Campaign opens
 	// (see reducer.go's applyCompletedBar). Evaluate-then-add, exactly like
 	// entryChannel and n.
 	exitChannel *indicator.ExitChannel
 
-	// #11's two additions, both defined and explained in campaign.go.
+	// Two additions, both defined and explained in campaign.go.
 	// pendingProposal is a trade proposal emitted and not yet resolved, and is
 	// deliberately NOT position state: no Campaign is ever derived from it
 	// alone. campaign is the instrument's open Campaign, and is nil unless a
 	// recorded fill brought one into being.
 	pendingProposal *pendingProposalState
 	campaign        *campaignState
-	// pendingExitProposal is #13's addition, defined and explained in
+	// pendingExitProposal is defined and explained in
 	// campaign.go: an exit proposal (strategy.exit.proposed) emitted and not
 	// yet resolved, holding the same "not position state" property
 	// pendingProposal does — a Campaign closes only from a recorded exit
 	// fill, never from this proposal alone.
 	pendingExitProposal *pendingExitProposalState
-	// pendingAddProposal is #14's addition, defined and explained in
+	// pendingAddProposal is defined and explained in
 	// campaign.go: an Add proposal (strategy.add.proposed) emitted and not
 	// yet resolved, holding the same "not position state" property
 	// pendingProposal/pendingExitProposal do — a further Unit joins the
 	// Campaign only from a recorded Add fill, never from this proposal
 	// alone.
 	pendingAddProposal *pendingAddProposalState
-	// lastBarHigh/lastBarPeriodEnd/lastBarEarliestFillAt are #14's memory of
+	// lastBarHigh/lastBarPeriodEnd/lastBarEarliestFillAt are memory of
 	// the most recently completed bar, set unconditionally at the end of
 	// every applyCompletedBar call regardless of Campaign state. They exist
 	// because the same-bar Add chain (see campaign.go's evaluateAdd and
@@ -192,7 +191,7 @@ type instrumentState struct {
 
 // NewReducer returns a Reducer that stamps every decision it emits with
 // Source "reducer", the given strategyVersion, and a configurationHash
-// derived from payload (event.ConfigurationHash; #50, ADR 0016) — the single
+// derived from payload (event.ConfigurationHash; ADR 0016) — the single
 // place in this codebase a configuration hash is computed, so a caller can
 // never construct a Reducer whose stored hash disagrees with what
 // event.ConfigurationHash would compute for the same payload.
@@ -232,12 +231,12 @@ func NewReducer(strategyVersion string, payload event.ConfigurationPayload) (*Re
 //   - event.CompletedBarEventType: updates that instrument's True Range/N
 //     and emits one event.SetupEvaluatedEventType decision.
 //   - event.FillEventType: the only input that may change position state
-//     (#11; see campaign.go).
+//     (see campaign.go).
 //   - event.AccountSnapshotEventType: feeds actual equity to the Notional
-//     Account (ADR 0007; #16/#17: re-basing, the Drawdown Step ladder, and
-//     recovery, in that order) — see notional.go's applyAccountSnapshot.
+//     Account (ADR 0007: re-basing, the Drawdown Step ladder, and recovery,
+//     in that order) — see notional.go's applyAccountSnapshot.
 //   - event.CashMovementEventType: scales the Notional Account for a
-//     deposit or withdrawal (ADR 0007; #17) — see notional.go's
+//     deposit or withdrawal (ADR 0007) — see notional.go's
 //     applyCashMovement.
 //
 // Any other event type fails closed rather than being silently ignored
@@ -269,7 +268,7 @@ func (r *Reducer) Apply(_ context.Context, envelope event.Envelope) ([]event.Env
 //     This is the payload-level counterpart of ADR 0015's envelope-level
 //     rule: an older schema is rejected, never silently upgraded, until an
 //     explicit upcaster exists. Without this check, a schema-1 configuration
-//     (recorded before #9 added TierBDistanceInN) would still decode: the
+//     (recorded before TierBDistanceInN existed) would still decode: the
 //     missing field unmarshals as the float64 zero value, ConfigurationPayload.Validate
 //     accepts a zero TierBDistanceInN as legitimately "no Tier B window", and
 //     Tier B silently changes meaning for that run rather than the run being
@@ -317,8 +316,8 @@ func (r *Reducer) applyConfiguration(envelope event.Envelope) ([]event.Envelope,
 	r.dollarsPerPoint = payload.DollarsPerPoint
 	r.maxUnits = payload.MaxUnits
 	// ADR 0007's Notional Account, at its configured starting value: before
-	// any account.snapshot arrives it equals StartingEquity exactly (#16's
-	// applyAccountSnapshot, in notional.go, is what steps it down; #17's
+	// any account.snapshot arrives it equals StartingEquity exactly
+	// (applyAccountSnapshot, in notional.go, is what steps it down;
 	// applyAccountSnapshot/applyCashMovement re-base, recover, and scale it).
 	notionalAccount, err := NewNotionalAccount(payload.NotionalAccount.StartingEquity, payload.NotionalAccount.RebasingMonth, payload.NotionalAccount.RebasingDay)
 	if err != nil {
@@ -401,8 +400,8 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 			bar.InstrumentID, bar.PeriodEnd.Format(time.RFC3339), state.lastPeriodEnd.Format(time.RFC3339))
 	}
 
-	// #11/#13 (PR #73 review round): this bar is the first thing able to
-	// contradict an open Campaign's opening fill timestamp, or the instrument's
+	// This bar is the first thing able to contradict an open Campaign's
+	// opening fill timestamp, or the instrument's
 	// most recent CLOSING fill timestamp (a stop or an exit alike) — see
 	// checkBarConfirmsCampaignOpening and checkBarConfirmsCampaignClosing for
 	// why each check lives at this end rather than in applyFill/applyStopFill/
@@ -415,7 +414,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		return nil, err
 	}
 
-	// #12: the capital-safety invariant — every open Campaign has a
+	// The capital-safety invariant — every open Campaign has a
 	// Protective Stop at all times — checked at the start of every
 	// completed bar, before anything else about this bar is read. See
 	// checkCampaignHasAProtectiveStop's doc comment for why a violation can
@@ -436,8 +435,8 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	//
 	// This is the fix for the prototype's headline look-ahead bug (see
 	// indicator.EntryChannel's doc comment), applied uniformly rather than
-	// only to the channel — a PR #64 review finding. The rule is
-	// CONTEXT.md's, under "Completed bar": the decision bar is never an input
+	// only to the channel. The rule is CONTEXT.md's, under "Completed bar":
+	// the decision bar is never an input
 	// to its own decision. For N specifically it is also what ADR 0005
 	// requires: the entry is a resting order that fills *inside* the breakout
 	// bar, so the Unit size and the Protective Stop have to be computable
@@ -457,7 +456,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	decisionN := state.n.Value()
 	nReady := state.n.Ready() && decisionN > 0
 
-	// #11: the period end of the bar BEFORE this one — the moment this bar
+	// previousPeriodEnd is the period end of the bar BEFORE this one — the moment this bar
 	// opened — captured here because the advance block below overwrites it. It
 	// is the earliest instant at which an order proposed on this bar could
 	// have executed; see Reducer.applyFill for the window it bounds.
@@ -468,7 +467,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	// comparison is strict; a tie is not a breakout.
 	breakout := entryChannelReady && view.High > entryChannelHigh
 
-	// #13: the Exit Channel low in force for deciding THIS bar — computed
+	// exitChannelLow is the Exit Channel low in force for deciding THIS bar — computed
 	// from the preceding ExitChannelLength completed bars only, the same
 	// evaluate-then-add discipline as N and the Entry Channel (see
 	// indicator.ExitChannel's doc comment for the look-ahead rationale,
@@ -489,7 +488,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	state.previousClose = view.Close
 	state.hasPreviousClose = true
 	state.lastPeriodEnd = bar.PeriodEnd
-	// #14: remembered unconditionally, regardless of Campaign state, so the
+	// Remembered unconditionally, regardless of Campaign state, so the
 	// same-bar Add chain (campaign.go's evaluateAdd/applyAddFill) can read
 	// THIS bar's high, period end and earliest-fill-at bound from a LATER
 	// Apply call — the Add fill's own — after this bar's own call has
@@ -499,13 +498,13 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	state.lastBarPeriodEnd = bar.PeriodEnd
 	state.lastBarEarliestFillAt = previousPeriodEnd
 
-	// --- #11/#13: the previous bar's outstanding business, resolved so that
-	// it is EMITTED before any decision this bar produces — the ordering ADR
-	// 0010 applies within a day, exits before entries. It sits below the
-	// advance block rather than above the evaluate block only so that the
+	// --- The previous bar's outstanding business, resolved so that it is
+	// EMITTED before any decision this bar produces — the ordering ADR 0010
+	// applies within a day, exits before entries. It sits below the advance
+	// block rather than above the evaluate block only so that the
 	// evaluate/advance pair stays contiguous; it reads and writes none of
-	// that state. A trade proposal, an exit proposal or an Add proposal
-	// (#14) that no fill arrived for expires with its bar, per ADR 0011; see
+	// that state. A trade proposal, an exit proposal or an Add proposal that
+	// no fill arrived for expires with its bar, per ADR 0011; see
 	// Reducer.expireEntryProposal, Reducer.expireExitProposal and
 	// Reducer.expireAddProposal for why the expiry is emitted rather than
 	// dropped. At most one of the three can be outstanding for a given
@@ -537,7 +536,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		emissions = append(emissions, expired)
 	}
 
-	// --- #11/#13: while a Campaign is open, no new entry is evaluated (below):
+	// --- While a Campaign is open, no new entry is evaluated (below):
 	// N and the Entry Channel above are still tracked, so both are already
 	// warm for the very next bar once the Campaign closes and the instrument
 	// is a Setup again, but no Setup-evaluated/Signal/proposal path runs:
@@ -547,7 +546,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	// the Campaign's own per-bar decision: the Protective Stop and Exit
 	// Channel levels in force, and — on a breach — the exit proposal.
 	//
-	// # The ADR 0010 ordering hook, closed by #14
+	// # The ADR 0010 ordering hook
 	//
 	// evaluateCampaign runs FIRST, so "exits are evaluated and journaled
 	// before Adds" (ADR 0010) holds by construction. The Add evaluation
@@ -556,9 +555,8 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	// runs (the top-of-function expiry block above) and sets it again only
 	// if THIS bar breaches the Exit Channel, so checking it here after the
 	// call is exactly "did this bar propose an exit", with no separate
-	// return value needed. This is the ticket's "a bar that would both Add
-	// and exit results in the exit only" criterion (#13's Findings named
-	// this exact call site as where it would land).
+	// return value needed: a bar that would both Add and exit results in the
+	// exit only.
 	if state.campaign != nil {
 		campaignEmissions, err := r.evaluateCampaign(state, bar, exitChannelLow, exitChannelReady, previousPeriodEnd, envelope)
 		if err != nil {
@@ -635,11 +633,10 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	)
 	emissions = append(emissions, decision)
 
-	// #9: Tier A is a Signal. No Signal while N or the channel is not ready
+	// Tier A is a Signal. No Signal while N or the channel is not ready
 	// (tier is TierA only when ready is true, above), and never on a tie
 	// (a tie is TierB, not TierA — breakout, and therefore tier==TierA,
-	// requires a strict >). Emitted after the Setup-evaluated event, per
-	// the ticket's ordering.
+	// requires a strict >). Emitted after the Setup-evaluated event.
 	if tier == event.TierA {
 		signalPayload := event.SignalPayload{
 			InstrumentID: bar.InstrumentID,
@@ -676,21 +673,21 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		signal := r.stamp(signalID, event.SignalEventType, event.SignalSchemaVersion, bar.PeriodEnd, envelope, signalBytes)
 		emissions = append(emissions, signal)
 
-		// #10: a Signal is sized into a trade proposal, emitted third and
-		// last of the bar. Exactly one emission always follows the Signal —
-		// a proposal, or a decline saying why there is none — so a Signal is
+		// A Signal is sized into a trade proposal, emitted third and last of
+		// the bar. Exactly one emission always follows the Signal — a
+		// proposal, or a decline saying why there is none — so a Signal is
 		// never left with nothing after it (see sizeUnit).
 		//
-		// #79: the entry level is entryChannelHigh — the level a resting
-		// buy-stop actually sits at (ADR 0005) — not view.High, the breakout
-		// bar's own high. See sizeUnit's doc comment for why.
+		// The entry level is entryChannelHigh — the level a resting buy-stop
+		// actually sits at (ADR 0005) — not view.High, the breakout bar's
+		// own high. See sizeUnit's doc comment for why.
 		sized, err := r.sizeUnit(bar, envelope, signalID, entryChannelHigh, decisionN, nReady)
 		if err != nil {
 			return nil, err
 		}
 		emissions = append(emissions, sized)
 
-		// #11: a proposal is remembered as outstanding so that a fill can be
+		// A proposal is remembered as outstanding so that a fill can be
 		// checked against it — and NOTHING about position state moves here.
 		// See Reducer.rememberPendingProposal.
 		if err := r.rememberPendingProposal(state, sized, previousPeriodEnd); err != nil {
@@ -702,7 +699,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 }
 
 // sizeUnit turns a Signal into either a trade proposal or a recorded decline,
-// and returns exactly one envelope either way (#10).
+// and returns exactly one envelope either way.
 //
 // "Either way" is the point. A Signal that produces no position must leave a
 // journal entry saying so, or "no Signal today" and "a Signal whose sizing
@@ -713,22 +710,22 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 //
 // The Notional Account is read from r.notionalAccount.Current() (ADR 0007):
 // its configured starting value until an account.snapshot applies a
-// Drawdown Step (#16), never actual account equity. Yearly re-basing and
-// recovery are #17. No cap of any kind is checked — this is one Unit, and
-// ADR 0008's four caps are #55 and later tickets.
+// Drawdown Step, never actual account equity. Yearly re-basing and recovery
+// are handled separately (notional.go). No cap of any kind is checked — this
+// is one Unit, and ADR 0008's four caps are applied elsewhere.
 //
-// entryLevel is the Entry Channel high the breakout exceeded (#79) — the
-// level a resting buy-stop actually sits at under ADR 0005, not the breakout
-// bar's own high. Faith's own wording is "the price exceeded by a single
-// tick the high ... of the preceding 55 days" [T p.19]; the Baseline's tick
-// increment is zero, with the Signal's own strict exceedance doing that
-// work, declared as a baseline-declared adaptation under ADR 0012 rather
-// than an invented constant — a nominal tick is not a stable quantity on
-// split-adjusted prices (ADR 0004: it scales with the adjustment factor), and
-// ADR 0013's 0.05 N of slippage against the trader already exceeds a cent for
-// every instrument the Baseline's universe admits, so a tick would be
-// swallowed by slippage anyway (issue #79's Findings). What fills at this
-// level is #18's decision, and slippage is a fill concern (ADR 0013), so
+// entryLevel is the Entry Channel high the breakout exceeded — the level a
+// resting buy-stop actually sits at under ADR 0005, not the breakout bar's
+// own high. Faith's own wording is "the price exceeded by a single tick the
+// high ... of the preceding 55 days" [T p.19]; the Baseline's tick increment
+// is zero, with the Signal's own strict exceedance doing that work, declared
+// as a baseline-declared adaptation under ADR 0012 rather than an invented
+// constant — a nominal tick is not a stable quantity on split-adjusted
+// prices (ADR 0004: it scales with the adjustment factor), and ADR 0013's
+// 0.05 N of slippage against the trader already exceeds a cent for every
+// instrument the Baseline's universe admits, so a tick would be swallowed by
+// slippage anyway. What fills at this level is the fill model's decision,
+// and slippage is a fill concern (ADR 0013), so
 // nothing is applied to it here.
 func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, signalID string, entryLevel, n float64, nReady bool) (event.Envelope, error) {
 	// Unreachable from this reducer: Tier A requires a ready N, and a
@@ -790,8 +787,8 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 		PeriodEnd:    bar.PeriodEnd,
 		SignalID:     signalID,
 		// Rule names what the sizing computes, per Sizing Mode, never the
-		// parameter values it ran with — the same reasoning #9 applied to
-		// the Signal's rule name. ADR 0003 is the defining decision for both
+		// parameter values it ran with — the same reasoning the Signal's rule
+		// name follows. ADR 0003 is the defining decision for both
 		// modes: it is what declares that there are two and that choosing
 		// between them is a declared experiment.
 		Rule:                   sizingRuleFor(r.configuredSizingMode),
@@ -921,7 +918,7 @@ func (r *Reducer) stateFor(instrumentID string) (*instrumentState, error) {
 		// than panicking, in case that ever changes.
 		return nil, fmt.Errorf("strategy: %w", err)
 	}
-	// #13: the Exit Channel, built alongside the Entry Channel and fed
+	// The Exit Channel, built alongside the Entry Channel and fed
 	// every completed bar regardless of Campaign state (see
 	// applyCompletedBar), so it is already warm the moment a Campaign
 	// opens.
