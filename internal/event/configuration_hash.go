@@ -13,7 +13,7 @@ import (
 )
 
 // ConfigurationHash returns the identity ADR 0012 requires every experiment
-// run to be retained under (#50, ADR 0016): the same configuration always
+// run to be retained under (ADR 0016): the same configuration always
 // produces the same hash, and any parameter change — including a schema
 // bump — produces a different one.
 //
@@ -22,9 +22,9 @@ import (
 // encoded and prefixed "sha256:" so a reader can tell the algorithm from the
 // string. Only the payload and its schema version feed the hash — not the
 // strategy version, not the run span, not the data provenance tag. Those are
-// run-level facts recorded beside the hash (#39), so the same configuration
-// run over a different span or a different dataset is still recognisably
-// the same configuration.
+// run-level facts recorded beside the hash, so the same configuration run
+// over a different span or a different dataset is still recognisably the
+// same configuration.
 //
 // The schema version is inside the hashed bytes, not stored beside them,
 // precisely so that a schema bump — a field added to the payload — changes
