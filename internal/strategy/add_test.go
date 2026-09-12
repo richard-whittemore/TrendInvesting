@@ -236,6 +236,282 @@ func TestAddLadderOneRungPerBarUpToFourUnitsThenNoFifth(t *testing.T) {
 	}
 }
 
+// --- The same-bar chain starting from the entry fill itself (#79 review round) ---
+//
+// PR #85 review: before #79, the entry always filled at the breakout bar's
+// own high, so Unit 1's rung (fill + 1/2N) sat structurally above that bar's
+// own high and could never be covered by it — the same-bar chain below only
+// ever needed to start from applyAddFill (TestFourUnitsAddedWithinOneBarVia
+// TheSameBarChain, further down). #79 moves the entry to the Entry Channel
+// high, which removes that accidental guarantee: the bar that OPENS a
+// Campaign can now also cover Unit 2's rung, and openCampaign must propose
+// and fill it rather than silently skipping the opportunity (The Turtle
+// Rules p.19-20: "all four could be added in one day" — evaluateAdd's own
+// doc comment, call site 2).
+
+// breakoutBarsWithBar56High is breakoutBars, with the breakout bar's own high
+// (day 56) replaced by high instead of breakoutFixtureHighs' fixed 200. Bars
+// 1-55 (warm-up, and so the Entry Channel and N) are unchanged.
+func breakoutBarsWithBar56High(instrumentID string, high float64) []event.CompletedBarPayload {
+	highs := breakoutFixtureHighs()
+	highs[len(highs)-1] = high
+	bars := make([]event.CompletedBarPayload, 0, len(highs))
+	for i, h := range highs {
+		bars = append(bars, syntheticBar(instrumentID, day(i+1), h-100))
+	}
+	return bars
+}
+
+// TestAddWithinTheBreakoutBarItself is the positive case: the breakout bar's
+// own high clears Unit 2's rung but not Unit 3's, so exactly one Add is
+// proposed and filled from the SAME bar that opened the Campaign. It asserts
+// the Unit count, each Unit's fill price measured from the previous fill,
+// each Unit's own Protective Stop, and the emission order: Campaign opened
+// and its own stop set (from the entry fill), THEN the Add proposal (also
+// from the entry fill's own Apply call), then the Add fill's unit-added, its
+// own stop, and the earlier Unit's raise.
+func TestAddWithinTheBreakoutBarItself(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	campaignN := breakoutFixtureN(t, cfg)
+
+	ladder, err := sizing.AddLadder(campaignFillPrice, campaignN, cfg.MaxUnits, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("AddLadder() error = %v", err)
+	}
+
+	fill2 := addFill("AAPL", campaignID, 2, day(56), "sim-fill-add-2", ladder[1], 133, day(56))
+
+	emitted := newStream(t, cfg).
+		bars(breakoutBarsWithBar56High("AAPL", ladder[1]+1)). // clears rung 2, not rung 3
+		fill(openingFill("AAPL")).
+		fill(fill2).
+		mustRun()
+
+	proposals := envelopesOfType(emitted, event.AddProposalEventType)
+	if len(proposals) != 1 {
+		t.Fatalf("got %d add proposal(s), want exactly 1, attributed to the breakout bar %v itself", len(proposals), day(56))
+	}
+	proposal := decodeAddProposal(t, proposals[0])
+	if !proposal.PeriodEnd.Equal(day(56)) {
+		t.Errorf("proposal.PeriodEnd = %v, want %v: the breakout bar itself produced this opportunity", proposal.PeriodEnd, day(56))
+	}
+	if proposal.PreviousUnitFill != campaignFillPrice {
+		t.Errorf("proposal.PreviousUnitFill = %v, want the entry fill %v", proposal.PreviousUnitFill, campaignFillPrice)
+	}
+	if proposal.Level != ladder[1] {
+		t.Errorf("proposal.Level = %v, want %v", proposal.Level, ladder[1])
+	}
+
+	added := envelopesOfType(emitted, event.CampaignUnitAddedEventType)
+	if len(added) != 1 {
+		t.Fatalf("got %d unit-added event(s), want exactly 1", len(added))
+	}
+	unit2 := decodeCampaignUnitAdded(t, added[0])
+	if unit2.Units != 2 {
+		t.Errorf("added.Units = %d, want 2", unit2.Units)
+	}
+	if unit2.FillPrice != ladder[1] {
+		t.Errorf("added.FillPrice = %v, want %v", unit2.FillPrice, ladder[1])
+	}
+	wantUnit2Stop := ladder[1] - cfg.StopMultiple*campaignN
+	if unit2.ProtectiveStop != wantUnit2Stop {
+		t.Errorf("added.ProtectiveStop = %v, want %v", unit2.ProtectiveStop, wantUnit2Stop)
+	}
+
+	stopSets := envelopesOfType(emitted, event.ProtectiveStopSetEventType)
+	if len(stopSets) != 3 {
+		t.Fatalf("got %d protective-stop-set event(s), want 3 (unit 1's initial, unit 2's initial, unit 1's raise)", len(stopSets))
+	}
+	initial1 := decodeProtectiveStopSet(t, stopSets[0])
+	wantInitial1 := campaignFillPrice - cfg.StopMultiple*campaignN
+	if initial1.Level != wantInitial1 || initial1.Reason != event.ProtectiveStopReasonInitial || initial1.UnitIndex != 1 {
+		t.Errorf("stopSets[0] = %+v, want unit 1's initial stop at %v", initial1, wantInitial1)
+	}
+	initial2 := decodeProtectiveStopSet(t, stopSets[1])
+	if initial2.Level != wantUnit2Stop || initial2.Reason != event.ProtectiveStopReasonInitial || initial2.UnitIndex != 2 {
+		t.Errorf("stopSets[1] = %+v, want unit 2's initial stop at %v", initial2, wantUnit2Stop)
+	}
+	raised1 := decodeProtectiveStopSet(t, stopSets[2])
+	wantRaised1 := wantInitial1 + 0.5*campaignN
+	if raised1.Level != wantRaised1 || raised1.Reason != event.ProtectiveStopReasonAddLadder || raised1.UnitIndex != 1 {
+		t.Errorf("stopSets[2] = %+v, want unit 1 raised to %v", raised1, wantRaised1)
+	}
+
+	opened := onlyEnvelopeOfType(t, emitted, event.CampaignOpenedEventType)
+	wantOrder := []event.Envelope{opened, stopSets[0], proposals[0], added[0], stopSets[1], stopSets[2]}
+	for i := 1; i < len(wantOrder); i++ {
+		if wantOrder[i-1].Sequence >= wantOrder[i].Sequence {
+			t.Errorf("emission %d (Sequence %d) is not strictly before emission %d (Sequence %d): want Campaign opened, its stop set, the Add proposal, the Add fill's unit-added, its own stop, then the raise, in that order",
+				i-1, wantOrder[i-1].Sequence, i, wantOrder[i].Sequence)
+		}
+	}
+}
+
+// TestAllFourUnitsAddedInOneDayFromTheBreakoutBarItself is Faith's own
+// criterion, named for it [T p.19-20: "all four could be added in one
+// day"]: a breakout bar whose high clears every remaining rung ends that
+// SAME bar with four Units — the entry plus three Adds — and never proposes
+// a fifth.
+func TestAllFourUnitsAddedInOneDayFromTheBreakoutBarItself(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	campaignN := breakoutFixtureN(t, cfg)
+
+	ladder, err := sizing.AddLadder(campaignFillPrice, campaignN, cfg.MaxUnits, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("AddLadder() error = %v", err)
+	}
+	if len(ladder) != 4 {
+		t.Fatalf("len(ladder) = %d, want 4", len(ladder))
+	}
+
+	fill2 := addFill("AAPL", campaignID, 2, day(56), "sim-fill-add-2", ladder[1], 133, day(56))
+	fill3 := addFill("AAPL", campaignID, 3, day(56), "sim-fill-add-3", ladder[2], 133, day(56))
+	fill4 := addFill("AAPL", campaignID, 4, day(56), "sim-fill-add-4", ladder[3], 133, day(56))
+
+	emitted := newStream(t, cfg).
+		bars(breakoutBarsWithBar56High("AAPL", ladder[3]+1)). // clears every rung at once
+		fill(openingFill("AAPL")).
+		fill(fill2).
+		fill(fill3).
+		fill(fill4).
+		mustRun()
+
+	proposals := envelopesOfType(emitted, event.AddProposalEventType)
+	if len(proposals) != 3 {
+		t.Fatalf("got %d add proposal(s), want exactly 3, ALL attributed to the breakout bar %v itself", len(proposals), day(56))
+	}
+	wantLevels := []float64{ladder[1], ladder[2], ladder[3]}
+	for i, p := range proposals {
+		proposal := decodeAddProposal(t, p)
+		if !proposal.PeriodEnd.Equal(day(56)) {
+			t.Errorf("proposal[%d].PeriodEnd = %v, want %v", i, proposal.PeriodEnd, day(56))
+		}
+		if proposal.Level != wantLevels[i] {
+			t.Errorf("proposal[%d].Level = %v, want %v", i, proposal.Level, wantLevels[i])
+		}
+	}
+
+	added := envelopesOfType(emitted, event.CampaignUnitAddedEventType)
+	if len(added) != 3 {
+		t.Fatalf("got %d unit-added event(s), want exactly 3: all four Units (1 opening + 3 adds) by the end of the breakout bar itself", len(added))
+	}
+	for i, a := range added {
+		unit := decodeCampaignUnitAdded(t, a)
+		if unit.Units != i+2 {
+			t.Errorf("added[%d].Units = %d, want %d", i, unit.Units, i+2)
+		}
+	}
+
+	// No fifth: the Campaign is fully loaded (ADR 0008's four-Unit maximum).
+	if got := len(envelopesOfType(emitted, event.AddProposalEventType)); got != 3 {
+		t.Errorf("got %d add proposal(s) total, want still exactly 3", got)
+	}
+}
+
+// TestBreakoutBarThatDoesNotReachTheFirstRungAddsNoUnit is the negative: the
+// change must not fire spuriously. breakoutFixtureHighs' own bar 56 (high
+// 200) stays below Unit 2's rung, so the Campaign opens with exactly one
+// Unit and no Add proposal follows — the shape every #11/#12/#13 fixture
+// already assumed, named here explicitly rather than left implicit.
+func TestBreakoutBarThatDoesNotReachTheFirstRungAddsNoUnit(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignN := breakoutFixtureN(t, cfg)
+	rung2, err := sizing.NextAddLevel(campaignFillPrice, campaignN, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel() error = %v", err)
+	}
+	if !(200 < rung2) {
+		t.Fatalf("fixture no longer exercises the negative: bar 56's high 200 must stay below rung 2 %v", rung2)
+	}
+
+	emitted := newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		mustRun()
+
+	if got := len(envelopesOfType(emitted, event.AddProposalEventType)); got != 0 {
+		t.Errorf("got %d add proposal(s), want none: the breakout bar's own high does not reach the first rung", got)
+	}
+	if got := len(envelopesOfType(emitted, event.CampaignUnitAddedEventType)); got != 0 {
+		t.Errorf("got %d unit-added event(s), want none", got)
+	}
+	if got := len(envelopesOfType(emitted, event.CampaignOpenedEventType)); got != 1 {
+		t.Fatalf("got %d campaign-opened event(s), want exactly 1", got)
+	}
+}
+
+// TestEarlierUnitStopsAreRaisedThroughASameBarChainFromTheEntry pins #15's
+// Stop Ladder through a same-bar chain that starts from the entry fill: two
+// Adds within the breakout bar raise Unit 1 TWICE and Unit 2 ONCE, and the
+// final ladder — read back from the LATEST protective-stop-set per Unit —
+// reflects every one of those raises.
+func TestEarlierUnitStopsAreRaisedThroughASameBarChainFromTheEntry(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	campaignN := breakoutFixtureN(t, cfg)
+
+	ladder, err := sizing.AddLadder(campaignFillPrice, campaignN, cfg.MaxUnits, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("AddLadder() error = %v", err)
+	}
+
+	fill2 := addFill("AAPL", campaignID, 2, day(56), "sim-fill-add-2", ladder[1], 133, day(56))
+	fill3 := addFill("AAPL", campaignID, 3, day(56), "sim-fill-add-3", ladder[2], 133, day(56))
+
+	emitted := newStream(t, cfg).
+		bars(breakoutBarsWithBar56High("AAPL", ladder[2]+1)). // clears rungs 2 and 3, not 4
+		fill(openingFill("AAPL")).
+		fill(fill2).
+		fill(fill3).
+		mustRun()
+
+	if got := len(envelopesOfType(emitted, event.AddProposalEventType)); got != 2 {
+		t.Fatalf("got %d add proposal(s), want exactly 2 (units 2 and 3, never a 4th)", got)
+	}
+
+	raises := 0
+	for _, e := range envelopesOfType(emitted, event.ProtectiveStopSetEventType) {
+		if decodeProtectiveStopSet(t, e).Reason == event.ProtectiveStopReasonAddLadder {
+			raises++
+		}
+	}
+	// Unit 1 raised on Unit 2's add AND on Unit 3's; Unit 2 raised on Unit
+	// 3's own add only: 2 + 1 = 3 raises.
+	if raises != 3 {
+		t.Errorf("got %d stop-ladder raise(s), want 3 (unit 1 raised twice, unit 2 raised once)", raises)
+	}
+
+	wantStops := map[int]float64{
+		1: campaignFillPrice - cfg.StopMultiple*campaignN + 2*0.5*campaignN,
+		2: ladder[1] - cfg.StopMultiple*campaignN + 0.5*campaignN,
+		3: ladder[2] - cfg.StopMultiple*campaignN,
+	}
+	latest := map[int]event.ProtectiveStopSetPayload{}
+	for _, e := range envelopesOfType(emitted, event.ProtectiveStopSetEventType) {
+		p := decodeProtectiveStopSet(t, e)
+		latest[p.UnitIndex] = p // the LAST emission for a Unit is its current stop
+	}
+	for unitIndex, want := range wantStops {
+		got, ok := latest[unitIndex]
+		if !ok {
+			t.Fatalf("no protective-stop-set event for unit %d", unitIndex)
+		}
+		if got.Level != want {
+			t.Errorf("unit %d's final stop = %v, want %v", unitIndex, got.Level, want)
+		}
+	}
+}
+
 // --- Four Units added within one bar, via the same-bar chain --------------
 
 // TestFourUnitsAddedWithinOneBarViaTheSameBarChain is the ticket's "all four
