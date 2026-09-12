@@ -107,11 +107,6 @@ func (e *Engine) Run(ctx context.Context, events []event.Envelope) ([]event.Enve
 			if err := decision.Validate(); err != nil {
 				validationErr := fmt.Errorf("emit at input sequence %d, emission %d: %w", envelope.Sequence, emissionIndex, err)
 				if applyErr != nil {
-					// The handler's own error is the reason this call
-					// failed; the invalid emission is a second, independent
-					// defect discovered while trying to journal what the
-					// handler said to explain the first. Both are named,
-					// with applyErr first so errors.Is/As still finds it.
 					return emitted, fmt.Errorf("apply event %s at sequence %d: %w; its final emission is also invalid: %w", envelope.ID, envelope.Sequence, applyErr, validationErr)
 				}
 				return nil, validationErr
