@@ -18,7 +18,7 @@ func TestConfigurationHashStability(t *testing.T) {
 	t.Parallel()
 
 	got := event.ConfigurationHash(validConfiguration())
-	const want = "sha256:REPLACE_WITH_PINNED_HASH"
+	const want = "sha256:9b74eadaa35438307bf91513f3a685008aeb1f1878b1daf9a4822ff8d72c89d1"
 	if got != want {
 		t.Fatalf("ConfigurationHash(baseline) = %q, want the pinned hash %q", got, want)
 	}

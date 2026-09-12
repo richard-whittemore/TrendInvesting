@@ -185,7 +185,7 @@ func (s *stream) fillAtSchema(fill event.FillPayload, schemaVersion uint32) *str
 
 func (s *stream) run() ([]event.Envelope, error) {
 	s.t.Helper()
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		s.t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -908,7 +908,7 @@ func TestReducerRejectsFillWithWrongSchemaVersion(t *testing.T) {
 func TestReducerRejectsFillBeforeConfiguration(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -944,7 +944,7 @@ func TestReducerRejectsInvalidFillPayload(t *testing.T) {
 func TestReducerRejectsUndecodableFillPayload(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}

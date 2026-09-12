@@ -191,21 +191,34 @@ type instrumentState struct {
 }
 
 // NewReducer returns a Reducer that stamps every decision it emits with
-// Source "reducer", the given strategyVersion, and the given
-// configurationHash. Both are opaque strings supplied by the caller; their
-// derivation from a declared Baseline or Variant configuration is #50, out
-// of scope here. Both are required, matching the provenance fields
-// event.Envelope.Validate() requires on every emission.
-func NewReducer(strategyVersion, configurationHash string) (*Reducer, error) {
+// Source "reducer", the given strategyVersion, and a configurationHash
+// derived from payload (event.ConfigurationHash; #50, ADR 0016) — the single
+// place in this codebase a configuration hash is computed, so a caller can
+// never construct a Reducer whose stored hash disagrees with what
+// event.ConfigurationHash would compute for the same payload.
+//
+// strategyVersion remains an opaque string supplied by the caller: composing
+// it from the configuration's StrategyID, this project's declared rules
+// version, and the running build (ADR 0016) is the caller's job, via
+// event.ComposeStrategyVersion and strategy.RulesVersion, not something this
+// constructor does — the strategy version and the configuration hash are
+// independent provenance axes (ADR 0015 draws the same line between the
+// envelope shape and the strategy version), and only the hash has exactly
+// one payload to derive itself from.
+//
+// payload is validated here (ConfigurationPayload.Validate), so an invalid
+// configuration can never produce a hash at all, rather than surfacing only
+// later when the matching configuration event arrives in Apply.
+func NewReducer(strategyVersion string, payload event.ConfigurationPayload) (*Reducer, error) {
 	if strategyVersion == "" {
 		return nil, errors.New("strategy: strategy version is required")
 	}
-	if configurationHash == "" {
-		return nil, errors.New("strategy: configuration hash is required")
+	if err := payload.Validate(); err != nil {
+		return nil, fmt.Errorf("strategy: invalid configuration payload: %w", err)
 	}
 	return &Reducer{
 		strategyVersion:   strategyVersion,
-		configurationHash: configurationHash,
+		configurationHash: event.ConfigurationHash(payload),
 		instruments:       make(map[string]*instrumentState),
 		acceptedFills:     make(map[string]acceptedFillState),
 	}, nil

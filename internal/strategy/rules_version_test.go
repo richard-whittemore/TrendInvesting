@@ -8,7 +8,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
-var semanticVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+var semanticVersionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 // TestRulesVersionIsADeclaredSemanticVersion is #50/ADR 0016's requirement
 // that the rules version is "a hand-bumped semantic version declared in

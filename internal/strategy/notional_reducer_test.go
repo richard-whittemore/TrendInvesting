@@ -67,7 +67,7 @@ func decodeDrawdownStepApplied(t *testing.T, envelope event.Envelope) event.Draw
 // emitted.
 func runReducerWithAccountSnapshotsThenHighs(t *testing.T, instrumentID string, snapshots []event.AccountSnapshotPayload, highs []float64, cfg event.ConfigurationPayload) []event.Envelope {
 	t.Helper()
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -112,7 +112,7 @@ func snapshotBefore(bars int) time.Time {
 func TestReducerEmitsDrawdownStepEventsForAccountSnapshots(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -188,7 +188,7 @@ func TestReducerEmitsDrawdownStepEventsForAccountSnapshots(t *testing.T) {
 func TestReducerAppliesSeveralDrawdownStepsFromOneSnapshot(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -312,7 +312,7 @@ func TestReducerWithoutASnapshotSizesFromTheConfiguredStartingEquity(t *testing.
 func TestReducerRejectsAccountSnapshotBeforeConfiguration(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -334,7 +334,7 @@ func TestReducerRejectsAccountSnapshotBeforeConfiguration(t *testing.T) {
 func TestReducerRejectsAccountSnapshotWithWrongSchemaVersion(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -362,7 +362,7 @@ func TestReducerRejectsAccountSnapshotWithWrongSchemaVersion(t *testing.T) {
 func TestReducerRejectsInvalidAccountSnapshotPayload(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -384,7 +384,7 @@ func TestReducerRejectsInvalidAccountSnapshotPayload(t *testing.T) {
 func TestReducerRejectsUndecodableAccountSnapshotPayload(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -422,7 +422,7 @@ func TestReducerRejectsUndecodableAccountSnapshotPayload(t *testing.T) {
 func TestReducerRejectsDuplicateAccountSnapshotAsOf(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -456,7 +456,7 @@ func TestReducerRejectsDuplicateAccountSnapshotAsOf(t *testing.T) {
 func TestReducerRejectsOutOfOrderAccountSnapshot(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -501,7 +501,7 @@ func TestReplayingAccountSnapshotFixtureTwiceYieldsByteIdenticalEmissions(t *tes
 
 	runOnce := func(t *testing.T) []event.Envelope {
 		t.Helper()
-		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 		if err != nil {
 			t.Fatalf("NewReducer() error = %v", err)
 		}
@@ -536,7 +536,7 @@ func TestReplayingAccountSnapshotFixtureTwiceYieldsByteIdenticalEmissions(t *tes
 func TestReducerSurfacesTheNotionalAccountAsymptoteError(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -645,7 +645,7 @@ func decodeNotionalAccountCashAdjusted(t *testing.T, envelope event.Envelope) ev
 func TestReducerRebasesAcrossAYearBoundaryThenStepsAgainstTheNewFigure(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -788,7 +788,7 @@ func TestReducerBreakoutAfterRebasingSizesFromTheRebasedFigure(t *testing.T) {
 func TestReducerFullRecoveryClearsBothStepsAndEmitsRecoveredEvent(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -860,7 +860,7 @@ func TestReducerFullRecoveryClearsBothStepsAndEmitsRecoveredEvent(t *testing.T) 
 func TestReducerCashMovementMidDrawdownEmitsCashAdjustedAndNoStep(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -920,7 +920,7 @@ func TestReducerCashMovementMidDrawdownEmitsCashAdjustedAndNoStep(t *testing.T) 
 func TestReducerRejectsCashMovementBeforeConfiguration(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -942,7 +942,7 @@ func TestReducerRejectsCashMovementBeforeConfiguration(t *testing.T) {
 func TestReducerRejectsCashMovementWithWrongSchemaVersion(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -970,7 +970,7 @@ func TestReducerRejectsCashMovementWithWrongSchemaVersion(t *testing.T) {
 func TestReducerRejectsInvalidCashMovementPayload(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -992,7 +992,7 @@ func TestReducerRejectsInvalidCashMovementPayload(t *testing.T) {
 func TestReducerRejectsUndecodableCashMovementPayload(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -1033,7 +1033,7 @@ func TestReducerRejectsOutOfOrderAccountEventsAcrossTypes(t *testing.T) {
 
 	t.Run("cash movement at the same AsOf as a prior snapshot", func(t *testing.T) {
 		t.Parallel()
-		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 		if err != nil {
 			t.Fatalf("NewReducer() error = %v", err)
 		}
@@ -1058,7 +1058,7 @@ func TestReducerRejectsOutOfOrderAccountEventsAcrossTypes(t *testing.T) {
 
 	t.Run("snapshot at the same AsOf as a prior cash movement", func(t *testing.T) {
 		t.Parallel()
-		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 		if err != nil {
 			t.Fatalf("NewReducer() error = %v", err)
 		}
@@ -1083,7 +1083,7 @@ func TestReducerRejectsOutOfOrderAccountEventsAcrossTypes(t *testing.T) {
 
 	t.Run("snapshot before an earlier cash movement", func(t *testing.T) {
 		t.Parallel()
-		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 		if err != nil {
 			t.Fatalf("NewReducer() error = %v", err)
 		}
@@ -1135,7 +1135,7 @@ func TestReplayingRebaseRecoveryCashMovementFixtureTwiceYieldsByteIdenticalEmiss
 
 	runOnce := func(t *testing.T) []event.Envelope {
 		t.Helper()
-		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 		if err != nil {
 			t.Fatalf("NewReducer() error = %v", err)
 		}
@@ -1170,7 +1170,7 @@ func TestReplayingRebaseRecoveryCashMovementFixtureTwiceYieldsByteIdenticalEmiss
 func TestReducerPinsAccountCurrencyFromTheFirstAccountEvent(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -1201,7 +1201,7 @@ func TestReducerRejectsAccountEventWithMismatchedCurrency(t *testing.T) {
 
 	t.Run("snapshot after a snapshot pin", func(t *testing.T) {
 		t.Parallel()
-		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 		if err != nil {
 			t.Fatalf("NewReducer() error = %v", err)
 		}
@@ -1232,7 +1232,7 @@ func TestReducerRejectsAccountEventWithMismatchedCurrency(t *testing.T) {
 
 	t.Run("cash movement after a snapshot pin", func(t *testing.T) {
 		t.Parallel()
-		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 		if err != nil {
 			t.Fatalf("NewReducer() error = %v", err)
 		}
@@ -1263,7 +1263,7 @@ func TestReducerRejectsAccountEventWithMismatchedCurrency(t *testing.T) {
 
 	t.Run("snapshot after a cash movement pin", func(t *testing.T) {
 		t.Parallel()
-		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 		if err != nil {
 			t.Fatalf("NewReducer() error = %v", err)
 		}
@@ -1301,7 +1301,7 @@ func TestReducerRejectsAccountEventWithMismatchedCurrency(t *testing.T) {
 func TestReducerCurrencyPinSurvivesRebasing(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}

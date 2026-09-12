@@ -17,10 +17,15 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
-const (
-	testStrategyVersion   = "test-strategy-1.0.0"
-	testConfigurationHash = "cfg-test"
-)
+const testStrategyVersion = "test-strategy-1.0.0"
+
+// testConfigurationHash is event.ConfigurationHash(validConfigurationPayload()),
+// computed once here rather than declared as a literal: #50/ADR 0016 makes
+// NewReducer derive the hash from the payload itself, so a fixture asserting
+// a specific hash value must derive it the same way, not restate an opaque
+// string that could silently drift from what the production code actually
+// computes.
+var testConfigurationHash = event.ConfigurationHash(validConfigurationPayload())
 
 func mustMarshal(t *testing.T, v any) json.RawMessage {
 	t.Helper()
@@ -186,7 +191,7 @@ func decodeSignal(t *testing.T, envelope event.Envelope) event.SignalPayload {
 // Entry Channel.
 func runReducerOverHighs(t *testing.T, instrumentID string, highs []float64, cfg event.ConfigurationPayload) []event.Envelope {
 	t.Helper()
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -356,7 +361,7 @@ const epsilon = 1e-9
 func TestReducerFailsClosedOnBarBeforeConfiguration(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -382,7 +387,7 @@ func TestReducerFailsClosedOnBarBeforeConfiguration(t *testing.T) {
 func TestReducerEmitsOneSetupEvaluatedPerBarWithExpectedNAndReadiness(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -481,7 +486,7 @@ func TestReducerEmitsOneSetupEvaluatedPerBarWithExpectedNAndReadiness(t *testing
 func TestReducerUsesSplitAdjustedViewOnly(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -538,7 +543,7 @@ func TestReducerUsesSplitAdjustedViewOnly(t *testing.T) {
 func TestReducerKeepsSeparateStatePerInstrument(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -590,7 +595,7 @@ func TestReducerKeepsSeparateStatePerInstrument(t *testing.T) {
 func TestReducerBarCountWarmupIgnoresCalendarSpacing(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -632,7 +637,7 @@ func TestReducerBarCountWarmupIgnoresCalendarSpacing(t *testing.T) {
 func TestReducerRejectsUnrecognizedEventType(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -662,16 +667,11 @@ func TestReducerRejectsUnrecognizedEventType(t *testing.T) {
 	}
 }
 
-func TestNewReducerRequiresStrategyVersionAndConfigurationHash(t *testing.T) {
-	t.Parallel()
-
-	if _, err := strategy.NewReducer("", testConfigurationHash); err == nil {
-		t.Fatal("NewReducer(\"\", ...) error = nil, want error")
-	}
-	if _, err := strategy.NewReducer(testStrategyVersion, ""); err == nil {
-		t.Fatal("NewReducer(..., \"\") error = nil, want error")
-	}
-}
+// NewReducer's own required-strategy-version and
+// invalid-configuration-payload cases are covered by
+// TestNewReducerRequiresAStrategyVersion and
+// TestNewReducerRejectsAnInvalidConfigurationPayload in
+// configuration_hash_derivation_test.go (#50, ADR 0016).
 
 // TestReplayingSameFixtureTwiceYieldsByteIdenticalEmissions is the property
 // test: two independent runs of the same input stream through two fresh
@@ -697,7 +697,7 @@ func TestReplayingSameFixtureTwiceYieldsByteIdenticalEmissions(t *testing.T) {
 
 	runOnce := func(t *testing.T) []event.Envelope {
 		t.Helper()
-		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 		if err != nil {
 			t.Fatalf("NewReducer() error = %v", err)
 		}
@@ -730,7 +730,7 @@ func TestReplayingSameFixtureTwiceYieldsByteIdenticalEmissions(t *testing.T) {
 func TestReducerRejectsInvalidConfigurationPayload(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -768,7 +768,7 @@ func TestReducerRejectsInvalidConfigurationPayload(t *testing.T) {
 func TestReducerRejectsUndecodableConfigurationPayload(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -805,7 +805,7 @@ func TestReducerRejectsUndecodableConfigurationPayload(t *testing.T) {
 func TestReducerRejectsInvalidCompletedBarPayload(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -846,7 +846,7 @@ func TestReducerRejectsInvalidCompletedBarPayload(t *testing.T) {
 func TestReducerRejectsUndecodableCompletedBarPayload(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -892,7 +892,7 @@ func TestReducerRejectsUndecodableCompletedBarPayload(t *testing.T) {
 func TestReducerRejectsConfigurationWithWrongSchemaVersion(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -922,7 +922,7 @@ func TestReducerRejectsConfigurationWithWrongSchemaVersion(t *testing.T) {
 func TestReducerRejectsCompletedBarWithWrongSchemaVersion(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -963,7 +963,7 @@ func TestReducerRejectsCompletedBarWithWrongSchemaVersion(t *testing.T) {
 func TestReducerRejectsConfigurationWithMismatchedHash(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -992,7 +992,7 @@ func TestReducerRejectsConfigurationWithMismatchedHash(t *testing.T) {
 func TestReducerAcceptsConfigurationWithMatchingHash(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -1016,7 +1016,7 @@ func TestReducerAcceptsConfigurationWithMatchingHash(t *testing.T) {
 func TestReducerRejectsSecondConfigurationEvent(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -1045,7 +1045,7 @@ func TestReducerRejectsSecondConfigurationEvent(t *testing.T) {
 func TestReducerRejectsDuplicateBarPeriodEnd(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -1080,7 +1080,7 @@ func TestReducerRejectsDuplicateBarPeriodEnd(t *testing.T) {
 func TestReducerRejectsOutOfOrderBarPeriodEnd(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -1117,7 +1117,7 @@ func TestReducerRejectsOutOfOrderBarPeriodEnd(t *testing.T) {
 func TestReducerAcceptsEarlierPeriodEndForDifferentInstrument(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -1153,7 +1153,7 @@ func TestReducerAcceptsEarlierPeriodEndForDifferentInstrument(t *testing.T) {
 func TestReducerFlatInstrumentStaysNotReadyUntilNonZeroTrueRange(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -1682,7 +1682,7 @@ func TestReducerSignalsExpirePerBar(t *testing.T) {
 func TestReducerKeepsSeparateEntryChannelPerInstrument(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -1731,7 +1731,7 @@ func TestReducerRejectsConfigurationWithNonPositiveEntryChannelLength(t *testing
 	t.Parallel()
 
 	for _, length := range []int{0, -55} {
-		reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+		reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 		if err != nil {
 			t.Fatalf("NewReducer() error = %v", err)
 		}
@@ -1759,7 +1759,7 @@ func TestReducerRejectsConfigurationWithNonPositiveEntryChannelLength(t *testing
 func TestReducerRejectsConfigurationWithNegativeTierBDistanceInN(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -2149,7 +2149,7 @@ func TestReducerRejectsVolatilityNormalisedConfigurationThatConfiguresRiskAtStop
 	cfg := validConfigurationPayload()
 	cfg.RiskAtStopFraction = 0.01 // even the "correct" 0.005 x 2 must be rejected
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -2179,7 +2179,7 @@ func TestReducerRejectsVolatilityNormalisedConfigurationThatConfiguresRiskAtStop
 func TestReducerRejectsConfigurationWithTheSupersededSchemaVersion(t *testing.T) {
 	t.Parallel()
 
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -2274,7 +2274,7 @@ func envelopesOfType(envelopes []event.Envelope, eventType string) []event.Envel
 // breakout level and the entry level — fixed.
 func runReducerOverBars(t *testing.T, cfg event.ConfigurationPayload, bars []event.CompletedBarPayload) []event.Envelope {
 	t.Helper()
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}

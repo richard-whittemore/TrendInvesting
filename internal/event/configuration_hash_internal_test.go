@@ -15,6 +15,7 @@ package event
 // is not observable from the exported API alone.
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -45,7 +46,7 @@ func TestCanonicalJSONIsIndependentOfStructFieldDeclarationOrder(t *testing.T) {
 
 	gotA := canonicalJSON(a)
 	gotB := canonicalJSON(b)
-	if string(gotA) != string(gotB) {
+	if !bytes.Equal(gotA, gotB) {
 		t.Fatalf("canonicalJSON differs by struct field declaration order:\n  a: %s\n  b: %s", gotA, gotB)
 	}
 }
@@ -65,12 +66,49 @@ func TestCanonicalJSONIsIndependentOfMapInsertionOrder(t *testing.T) {
 
 	gotFirst := canonicalJSON(first)
 	gotSecond := canonicalJSON(second)
-	if string(gotFirst) != string(gotSecond) {
+	if !bytes.Equal(gotFirst, gotSecond) {
 		t.Fatalf("canonicalJSON differs by map insertion order:\n  first:  %s\n  second: %s", gotFirst, gotSecond)
 	}
 	const want = `{"alpha":2,"mu":3,"zeta":1}`
 	if string(gotFirst) != want {
 		t.Fatalf("canonicalJSON(map) = %s, want %s (keys sorted lexicographically)", gotFirst, want)
+	}
+}
+
+type withHiddenFields struct {
+	Visible    string `json:"visible"`
+	Hidden     string `json:"-"`
+	unexported string
+	NoTag      bool
+}
+
+// TestCanonicalJSONSkipsUnexportedAndDashTaggedFields confirms
+// writeCanonicalStruct's documented field selection: an unexported field is
+// never visible to canonicalJSON at all (reflection cannot read it), a field
+// tagged `json:"-"` is deliberately excluded the same way encoding/json
+// excludes it, and a field with no tag falls back to its Go name.
+func TestCanonicalJSONSkipsUnexportedAndDashTaggedFields(t *testing.T) {
+	t.Parallel()
+
+	v := withHiddenFields{Visible: "x", Hidden: "should not appear", unexported: "also hidden", NoTag: true}
+	got := canonicalJSON(v)
+	const want = `{"NoTag":true,"visible":"x"}`
+	if string(got) != want {
+		t.Fatalf("canonicalJSON(withHiddenFields) = %s, want %s", got, want)
+	}
+}
+
+// TestCanonicalJSONEncodesSlicesInOrderWithoutSorting confirms array
+// position, unlike an object's keys, is significant and left exactly as
+// given: sorting a slice the way object keys are sorted would silently
+// change what the encoded value means.
+func TestCanonicalJSONEncodesSlicesInOrderWithoutSorting(t *testing.T) {
+	t.Parallel()
+
+	got := canonicalJSON([]any{3.0, "b", true})
+	const want = `[3,"b",true]`
+	if string(got) != want {
+		t.Fatalf("canonicalJSON(slice) = %s, want %s", got, want)
 	}
 }
 

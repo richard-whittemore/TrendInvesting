@@ -50,8 +50,9 @@ type NotionalAccountConfig struct {
 //
 // The numeric policy for these fields (float64 precision, rounding,
 // eventual fixed-point representation) is deliberately unresolved here; that
-// is ADR territory, out of scope for this contract. ConfigurationHash
-// derivation (#50) is also out of scope: this payload is its obvious input.
+// is ADR territory, out of scope for this contract. ConfigurationHash (#50,
+// ADR 0016) derives from exactly this payload plus its schema version — see
+// ConfigurationHash.
 type ConfigurationPayload struct {
 	StrategyID             string     `json:"strategy_id"`
 	SizingMode             SizingMode `json:"sizing_mode"`

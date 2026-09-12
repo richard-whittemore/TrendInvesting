@@ -26,14 +26,37 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 )
 
-// invariantTestStrategyVersion/ConfigurationHash mirror
-// campaign_test.go's testStrategyVersion/testConfigurationHash, duplicated
-// here rather than imported: this file is `package strategy`, a different
-// package from `strategy_test` where those constants live.
-const (
-	invariantTestStrategyVersion   = "invariant-test-1.0.0"
-	invariantTestConfigurationHash = "invariant-test-cfg"
-)
+// invariantTestStrategyVersion/ConfigurationPayload mirror
+// campaign_test.go's testStrategyVersion/validConfigurationPayload,
+// duplicated here rather than imported: this file is `package strategy`, a
+// different package from `strategy_test` where those live.
+const invariantTestStrategyVersion = "invariant-test-1.0.0"
+
+// invariantTestConfigurationPayload is a valid configuration payload used
+// only to construct a Reducer for this file's tests — #50/ADR 0016 makes
+// NewReducer derive its configuration hash from the payload (and validate
+// it), so this file needs one even though the invariant under test never
+// reads it.
+func invariantTestConfigurationPayload() event.ConfigurationPayload {
+	return event.ConfigurationPayload{
+		StrategyID:             "invariant-test",
+		SizingMode:             event.SizingModeVolatilityNormalised,
+		UnitVolatilityFraction: 0.005,
+		StopMultiple:           2.0,
+		EntryChannelLength:     55,
+		ExitChannelLength:      20,
+		MaxUnits:               4,
+		SlippageN:              0.05,
+		TierBDistanceInN:       1.0,
+		DollarsPerPoint:        1,
+		RiskAtStopFraction:     0,
+		NotionalAccount: event.NotionalAccountConfig{
+			StartingEquity: 1_000_000,
+			RebasingMonth:  1,
+			RebasingDay:    1,
+		},
+	}
+}
 
 // day mirrors reducer_test.go's day helper (package strategy_test), which
 // this file cannot import since it lives in package strategy itself.
@@ -49,7 +72,7 @@ func day(i int) time.Time {
 // it.
 func newConfiguredReducerForInvariantTest(t *testing.T) *Reducer {
 	t.Helper()
-	r, err := NewReducer(invariantTestStrategyVersion, invariantTestConfigurationHash)
+	r, err := NewReducer(invariantTestStrategyVersion, invariantTestConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -104,7 +127,7 @@ func invariantTestBarEnvelope(t *testing.T, sequence uint64, instrumentID string
 		Sequence:          sequence,
 		Source:            "fixture",
 		StrategyVersion:   invariantTestStrategyVersion,
-		ConfigurationHash: invariantTestConfigurationHash,
+		ConfigurationHash: event.ConfigurationHash(invariantTestConfigurationPayload()),
 		PayloadHash:       event.HashPayload(payload),
 		Payload:           payload,
 	}
