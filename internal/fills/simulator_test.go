@@ -17,10 +17,13 @@ import (
 //
 // Both orders close the same Campaign and only one of them can close all of
 // it, so the bar's range cannot say which happened; worst-price-first is the
-// pessimistic tie-break. Here the four Units' own stops sit around 156.3 and
-// the Exit Channel at 159.3, so the stops are the worse close and take the
-// Campaign off one Unit at a time. The exit proposal is then cancelled — its
-// Campaign no longer exists — and never fills.
+// pessimistic tie-break. Here the four Units' own stops sit around 154.9 and
+// the Exit Channel at 159.3 (#79 moves the entry and Add fills down by 1 N,
+// which moves every stop with them; the Exit Channel is computed from bars
+// 60-79's own OHLC, not from any fill, so it is unaffected), so the stops are
+// the worse close and take the Campaign off one Unit at a time. The exit
+// proposal is then cancelled — its Campaign no longer exists — and never
+// fills.
 //
 // It also pins the per-Unit shape of a stop fill: every Unit's stop is its
 // own resting order at its own level, so four Units produce four fills, each
@@ -44,7 +47,7 @@ func TestWhenABarReachesBothTheStopsAndTheExitChannelTheStopsFillFirst(t *testin
 	// Worst price first, one Unit at a time: Unit 1's stop is the lowest
 	// (it has risen by half N three times from the lowest fill), Unit 4's
 	// the highest.
-	wantPrices := []float64{156.25, 156.325, 156.4, 156.475}
+	wantPrices := []float64{154.75, 154.825, 154.9, 154.975}
 	wantUnits := []string{got[0].FillID, got[1].FillID, got[2].FillID, got[3].FillID}
 	for i, stop := range stops {
 		if stop.Kind != event.FillKindStop {
@@ -96,7 +99,7 @@ func TestWhenABarReachesBothTheStopsAndTheExitChannelTheStopsFillFirst(t *testin
 func TestWhenTheExitChannelIsTheWorseCloseItFillsAndTheStopsAreCancelled(t *testing.T) {
 	t.Parallel()
 
-	bars := campaignLifeBars()[:59] // through day(59): four Units, stops ~156.3-156.55
+	bars := campaignLifeBars()[:59] // through day(59): four Units, stops ~154.8-155.05 (#79)
 	// The Exit Channel over bars 40..59 stands at 139, far below every stop.
 	bars = append(bars, bar(day(60), 159, 159.2, 138, 140))
 	run := runComposed(t, baselineConfig(), bars)
@@ -135,7 +138,10 @@ func TestWhenTheExitChannelIsTheWorseCloseItFillsAndTheStopsAreCancelled(t *test
 func TestRestingReportsEveryOrderInForce(t *testing.T) {
 	t.Parallel()
 
-	bars := append(warmUpBars(), breakoutBar(), bar(day(57), 157.2, 158.2, 157, 158))
+	// #79 moves the entry fill (and so this Add's rung) down by 1 N; this
+	// bar is shifted down by the same 1.5 (matching campaignLifeBars' own
+	// bar 57) so the Add still fills at its rung rather than gapping.
+	bars := append(warmUpBars(), breakoutBar(), bar(day(57), 155.7, 156.7, 155.5, 156.5))
 	simulator := observeRun(t, bars)
 
 	resting := simulator.Resting(testInstrument)
@@ -147,11 +153,11 @@ func TestRestingReportsEveryOrderInForce(t *testing.T) {
 		unit     int
 		quantity int64
 	}{
-		// Unit 1 entered at 157.075 with its stop 3 below, raised by half N
-		// when Unit 2 was added; Unit 2 entered at 157.9 with its own stop 3
+		// Unit 1 entered at 155.575 with its stop 3 below, raised by half N
+		// when Unit 2 was added; Unit 2 entered at 156.4 with its own stop 3
 		// below.
-		{154.825, 1, fixtureUnitQuantity},
-		{154.9, 2, fixtureUnitQuantity},
+		{153.325, 1, fixtureUnitQuantity},
+		{153.4, 2, fixtureUnitQuantity},
 	} {
 		if resting[i].Kind != event.FillKindStop || resting[i].Side != fills.SideSell {
 			t.Errorf("resting[%d] is a %s %s, want a sell stop", i, resting[i].Side, resting[i].Kind)
@@ -172,13 +178,14 @@ func TestRestingReportsEveryOrderInForce(t *testing.T) {
 
 // TestObserveRemovesAnExpiredProposal covers the expiry path directly.
 //
-// It has to be direct, because this reducer never reaches it: every proposal
-// it raises is covered by the bar that raised it, so the simulator always
-// fills one before ADR 0011's next-bar expiry can arrive (see
-// TestProposalsAreAlwaysCoveredByTheBarThatRaisedThem). The path exists for
-// the producers that are not this reducer — a Variant whose entry rests at
-// the Entry Channel level rather than the breakout bar's own high would leave
-// proposals unfilled routinely — and for #15's second expiry path, a pending
+// It has to be direct, because this reducer never reaches it for an entry:
+// a Signal already guarantees the bar's high strictly exceeds the Entry
+// Channel high it rests at (#79), so the SAME bar that raises the proposal
+// always covers it too, and the simulator always fills one before ADR 0011's
+// next-bar expiry can arrive (see TestProposalsAreAlwaysCoveredByTheBarThat
+// RaisedThem). The path exists for a proposal built directly, as this test
+// does, standing in for a producer this reducer's invariant does not
+// constrain — #30's adapter — and for #15's second expiry path, a pending
 // Add cancelled the instant a stop fill partially closes the Campaign.
 func TestObserveRemovesAnExpiredProposal(t *testing.T) {
 	t.Parallel()

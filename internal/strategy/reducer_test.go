@@ -1856,9 +1856,12 @@ func breakoutFixtureN(t *testing.T, cfg event.ConfigurationPayload) float64 {
 // one Apply return.
 //
 // Everything asserted here is hand-derivable from the fixture. The breakout
-// bar's high is 200 (breakoutFixtureHighs), so the entry level is 200 — the
-// level the Signal fired at; what actually fills there is #18's decision, not
-// this ticket's. The N the bar is decided against is 37.57779214788228: the
+// bar's high is 200 (breakoutFixtureHighs), but #79 makes the entry level the
+// Entry Channel high the breakout exceeded, not the bar's own high: the
+// preceding 55 bars top out at 155 (bar 55's high), so the entry level is 155
+// — well below the breakout bar's own 200, which is the point (see issue
+// #79's Findings). What actually fills there is #18's decision, not this
+// ticket's. The N the bar is decided against is 37.57779214788228: the
 // Wilder average of the fifty-five True Ranges BEFORE it, excluding the
 // breakout bar's own (see
 // TestReducerSizesFromNThroughThePrecedingBarNotTheSignalBar). The Baseline
@@ -1872,7 +1875,7 @@ func breakoutFixtureN(t *testing.T, cfg event.ConfigurationPayload) float64 {
 // declared budget. What those 133 whole shares actually risk is the realised
 // figure, 133 x (2 x 37.5777...) / 1,000,000 = 0.009995..., a little under
 // the budget — the gap is the truncation from 133.07 to 133. The Protective
-// Stop intent is 200 - 2 x 37.5777... = 124.84...
+// Stop intent is 155 - 2 x 37.5777... = 79.844...
 func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 	t.Parallel()
 
@@ -1947,11 +1950,13 @@ func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 	if proposal.SizingMode != event.SizingModeVolatilityNormalised {
 		t.Errorf("Proposal SizingMode = %q, want %q", proposal.SizingMode, event.SizingModeVolatilityNormalised)
 	}
-	// The entry level is the breakout high — the level the Signal fired at.
-	// What actually fills there is #18's concern (ADR 0013 puts slippage in
-	// the fill model, not in sizing), so no slippage is applied here.
-	if proposal.EntryLevel != 200 {
-		t.Errorf("Proposal EntryLevel = %v, want 200 (the breakout high)", proposal.EntryLevel)
+	// #79: the entry level is the Entry Channel high the breakout exceeded,
+	// not the breakout bar's own high — the level a resting buy-stop would
+	// actually sit at (The Turtle Rules p.19). What actually fills there is
+	// #18's concern (ADR 0013 puts slippage in the fill model, not in
+	// sizing), so no slippage is applied here.
+	if proposal.EntryLevel != 155 {
+		t.Errorf("Proposal EntryLevel = %v, want 155 (the Entry Channel high, not the breakout bar's own high of 200)", proposal.EntryLevel)
 	}
 	if proposal.Quantity != 133 {
 		t.Errorf("Proposal Quantity = %d, want 133 (floor(5,000 / 37.5777...))", proposal.Quantity)
@@ -1990,8 +1995,8 @@ func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 		t.Errorf("Proposal RealisedRiskAtStop %v is not below the declared RiskAtStop %v; 133.07 shares truncated to 133 must leave a gap",
 			proposal.RealisedRiskAtStop, proposal.RiskAtStop)
 	}
-	if proposal.ProtectiveStopIntent != 200-cfg.StopMultiple*wantN {
-		t.Errorf("Proposal ProtectiveStopIntent = %v, want exactly %v (entry - 2N)", proposal.ProtectiveStopIntent, 200-cfg.StopMultiple*wantN)
+	if proposal.ProtectiveStopIntent != 155-cfg.StopMultiple*wantN {
+		t.Errorf("Proposal ProtectiveStopIntent = %v, want exactly %v (entry - 2N)", proposal.ProtectiveStopIntent, 155-cfg.StopMultiple*wantN)
 	}
 	if err := proposal.Validate(); err != nil {
 		t.Errorf("emitted proposal fails its own Validate(): %v", err)
@@ -2042,8 +2047,8 @@ func TestReducerEmitsFixedRiskAtStopProposal(t *testing.T) {
 	if !(proposal.RealisedRiskAtStop < proposal.RiskAtStop) {
 		t.Errorf("Proposal RealisedRiskAtStop %v is not below the declared %v", proposal.RealisedRiskAtStop, proposal.RiskAtStop)
 	}
-	if proposal.ProtectiveStopIntent != 200-3*wantN {
-		t.Errorf("Proposal ProtectiveStopIntent = %v, want exactly %v (entry - 3N)", proposal.ProtectiveStopIntent, 200-3*wantN)
+	if proposal.ProtectiveStopIntent != 155-3*wantN {
+		t.Errorf("Proposal ProtectiveStopIntent = %v, want exactly %v (entry - 3N)", proposal.ProtectiveStopIntent, 155-3*wantN)
 	}
 	if err := proposal.Validate(); err != nil {
 		t.Errorf("emitted proposal fails its own Validate(): %v", err)
@@ -2118,12 +2123,14 @@ func TestReducerDeclinesWhenTheAccountIsTooSmallForOneShare(t *testing.T) {
 
 // TestReducerDeclinesWhenTheProtectiveStopIntentIsNotPositive covers the
 // other fail-closed case: a Stop Multiple of 6 against N = 37.5777... puts
-// the Protective Stop at 200 - 225.46... = -25.46, below zero. A long equity
-// cannot fall below zero, so that stop is unreachable and the Unit would in
-// fact risk the entire position rather than the derived fraction. The
-// quantity is positive here (133 shares), so this is a genuinely separate
-// decline from the too-small-account case, and it must be journaled rather
-// than either proposed or silently dropped.
+// the Protective Stop at 155 - 225.4667... = -70.4667..., below zero (#79
+// makes the entry level 155, the Entry Channel high, rather than the
+// breakout bar's own 200 — even further below zero than before). A long
+// equity cannot fall below zero, so that stop is unreachable and the Unit
+// would in fact risk the entire position rather than the derived fraction.
+// The quantity is positive here (133 shares), so this is a genuinely
+// separate decline from the too-small-account case, and it must be
+// journaled rather than either proposed or silently dropped.
 func TestReducerDeclinesWhenTheProtectiveStopIntentIsNotPositive(t *testing.T) {
 	t.Parallel()
 
