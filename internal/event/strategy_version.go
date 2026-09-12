@@ -1,8 +1,8 @@
 package event
 
 // ComposeStrategyVersion returns the Envelope.StrategyVersion this project
-// stamps on every emission: "<strategy-id>/<rules-version>+<build>" (#50,
-// ADR 0016).
+// stamps on every emission: "<strategy-id>/<rules-version>+<build>" (ADR
+// 0016).
 //
 //   - strategyID is the running configuration's StrategyID (e.g.
 //     "turtle-baseline").
@@ -13,8 +13,8 @@ package event
 //   - build is the running build's identifier (internal/buildinfo.Version).
 //
 // Two builds sharing the same rulesVersion must replay each other's
-// journals byte-identically — that is what replay equivalence (#20)
-// compares on — and the build suffix exists for traceability only, so a
+// journals byte-identically — that is what replay equivalence compares on —
+// and the build suffix exists for traceability only, so a
 // journal entry can be traced back to a specific git-derived build without
 // that identity ever being mistaken for a claim about the rules that
 // produced it.

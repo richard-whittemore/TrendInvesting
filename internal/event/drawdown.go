@@ -57,17 +57,17 @@ type DrawdownStepAppliedPayload struct {
 	// the identical exported sizing.DrawdownSteppedNotional on the identical
 	// NotionalBefore: nothing is chained or independently re-derived across
 	// the check, so a tolerance would only let a differently-derived number
-	// through — the defect the check exists to catch (#10's
-	// TradeProposalPayload precedent; #65 tracks this "one shared function,
-	// exact equality" discipline generally, including the risk that two
-	// textually identical expressions can be fused differently across
-	// architectures — see sizing.DrawdownSteppedNotional's doc comment for
-	// why that risk does not apply to this particular derivation).
+	// through — the defect the check exists to catch. This is the same "one
+	// shared function, exact equality" discipline TradeProposalPayload's own
+	// invariants follow, including the risk that two textually identical
+	// expressions can be fused differently across architectures — see
+	// sizing.DrawdownSteppedNotional's doc comment for why that risk does not
+	// apply to this particular derivation.
 	NotionalBefore float64 `json:"notional_before"`
 	NotionalAfter  float64 `json:"notional_after"`
 	// StepNumber is this step's 1-based position among every Drawdown Step
-	// applied so far in the run (yearly re-basing, which would reset this
-	// count, is #17). A single account snapshot with a large enough drop can
+	// applied so far in the run (yearly re-basing resets this count). A
+	// single account snapshot with a large enough drop can
 	// apply several steps, each with its own StepNumber, in the order
 	// applied.
 	StepNumber int `json:"step_number"`

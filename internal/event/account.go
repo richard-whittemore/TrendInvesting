@@ -10,7 +10,7 @@ import (
 // Envelope's Type field: a reading of actual account equity at a point in
 // time, which drives ADR 0007's Notional Account and Drawdown Step ladder
 // (CONTEXT.md: "Notional Account", "Drawdown Step"). Produced by fixtures
-// for this ticket (#16); the LEAN adapter/broker produces it later.
+// today; the LEAN adapter/broker produces it later.
 const AccountSnapshotEventType = "account.snapshot"
 
 // AccountSnapshotSchemaVersion is the current schema version of

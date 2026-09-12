@@ -10,7 +10,7 @@ import (
 // Notional-Account-recovered decision payload for the Envelope's Type
 // field: ADR 0007's full recovery, which restores the Notional Account only
 // when actual equity regains the yearly starting figure — never on a new
-// high-water mark (CONTEXT.md: "Notional Account"; #17).
+// high-water mark (CONTEXT.md: "Notional Account").
 const NotionalAccountRecoveredEventType = "strategy.notional-account.recovered"
 
 // NotionalAccountRecoveredSchemaVersion is the current schema version of

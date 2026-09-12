@@ -13,9 +13,9 @@ const SetupEvaluatedEventType = "strategy.setup.evaluated"
 // SetupEvaluatedSchemaVersion is the current schema version of
 // SetupEvaluatedPayload, for the Envelope's SchemaVersion field.
 //
-// Bumped to 2 for #9: EntryChannelHigh, EntryChannelReady, Tier, and
-// DistanceToEntryInN were added. A schema change is explicit in this
-// project (docs/development.md), never a silent field addition.
+// Version 2 added EntryChannelHigh, EntryChannelReady, Tier, and
+// DistanceToEntryInN. A schema change is explicit in this project
+// (docs/development.md), never a silent field addition.
 const SetupEvaluatedSchemaVersion uint32 = 2
 
 // The three Tier values (CONTEXT.md: "Tier"). TierNone means neither: the
