@@ -1631,7 +1631,7 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 		closingQuantity += u.quantity
 	}
 	if fill.Quantity != closingQuantity {
-		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q executed %d but the named unit(s) hold %d; a partial fill against the named units is rejected — accumulating a partial fill into one unit's own close is deferred to its own issue, the same limitation #67 already records for a partial entry",
+		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q executed %d but the named unit(s) hold %d; a partial fill against the named units is rejected — accumulating a partial fill into one unit's own close is not supported, the same limitation a partial entry fill is held to",
 			fill.InstrumentID, fill.FillID, fill.Quantity, closingQuantity)
 	}
 
@@ -1886,7 +1886,7 @@ func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, 
 			fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)
 	}
 	if fill.Quantity != campaign.filledQuantity() {
-		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q executed %d but campaign %q holds %d; a partial exit fill is rejected — every Unit exits together (CONTEXT.md: 'Campaign'), the same fail-closed answer #12 gives a partial stop fill",
+		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q executed %d but campaign %q holds %d; a partial exit fill is rejected — every Unit exits together (CONTEXT.md: 'Campaign')",
 			fill.InstrumentID, fill.FillID, fill.Quantity, campaign.campaignID, campaign.filledQuantity())
 	}
 	if fill.FilledAt.Before(campaign.openedAt) {

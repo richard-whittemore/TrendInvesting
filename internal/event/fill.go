@@ -246,7 +246,7 @@ func (p FillPayload) Validate() error {
 			errs = append(errs, fmt.Errorf("proposal id must be empty for a stop fill (got %q): a stop closes a campaign, not a proposal", p.ProposalID))
 		}
 		if len(p.UnitIDs) == 0 {
-			errs = append(errs, errors.New("unit ids is required for a stop fill: it must name which units their own protective stop closed (#15's stop ladder can leave units at different levels)"))
+			errs = append(errs, errors.New("unit ids is required for a stop fill: it must name which units their own protective stop closed (the Stop Ladder can leave units at different levels)"))
 		} else {
 			seen := make(map[string]bool, len(p.UnitIDs))
 			for i, id := range p.UnitIDs {
