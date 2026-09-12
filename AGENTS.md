@@ -8,7 +8,7 @@ A research and trading platform that evaluates three declared strategies on US e
 
 1. **TDD.** Write the failing test first, then the code (red–green–refactor). Golden scenarios come from primary sources — transcribe them, don't invent them.
 2. **`make check` must pass** before any PR: format, vet, staticcheck, race-enabled tests, coverage floor, `govulncheck`, build.
-3. **Cite the source of every strategy rule.** `docs/methodology/Methodology_Analysis.md` is the reference, with page and timestamp citations and provenance tags. Never restate a rule from memory. A rule tagged DISCLOSED for the baseline cannot be changed by an implementation — that is a specification change; stop and say so.
+3. **Cite the source of every strategy rule.** `docs/methodology/Methodology_Analysis.md` is the reference, with page and timestamp citations and provenance tags. Never restate a rule from memory. A rule tagged DISCLOSED for the baseline cannot be changed by an implementation — that is a specification change; stop and say so. Source comments follow `docs/development.md`'s comment standard: what it does, the rule and its citation, any invariant — never a ticket number, PR number, or review round.
 4. **Keep source rules separate from experiments.** Turtle baseline (½N adds, 2N stop) and Sublime/hybrid variants (1 ATR adds, 3×ATR stop) are distinct configurations, never silently blended.
 5. **No live-order behaviour** before the paper-trading and limited-live gates. Determinism, replay, and fail-closed states come first.
 6. **Preserve failed results.** Never rewrite or delete a recorded experiment configuration or its evidence.
@@ -43,7 +43,7 @@ Single-context: `CONTEXT.md` at the root, ADRs in `docs/adr/`. See `docs/agents/
 ## Further reading
 
 - `docs/architecture.md` — LEAN ↔ adapter ↔ Go boundary and safety invariants
-- `docs/development.md` — engineering principles, package boundaries, PR expectations
+- `docs/development.md` — engineering principles, package boundaries, source comment standard, PR expectations
 - `docs/dependency-policy.md` — when a runtime dependency is acceptable
 - `docs/methodology/` — source analysis, plan and backlog review. Third-party source material (the recording, its transcript, vendor PDFs) is deliberately **not** in this repository; the analysis names where it lives.
 - `CONTRIBUTING.md` — toolchain and local workflow

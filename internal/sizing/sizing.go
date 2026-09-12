@@ -3,13 +3,9 @@
 // number implies (CONTEXT.md: "Unit", "Risk at Stop", "Sizing Mode"; ADR
 // 0003).
 //
-// It is deliberately separate from internal/indicator. An indicator measures
-// something about a price series; sizing decides how much capital to commit,
-// which is a different kind of statement with a different failure mode — an
-// indicator that is wrong produces a bad reading, sizing that is wrong
-// produces a position the account cannot afford. Keeping it in its own
-// package means every line that stands between N and a share count is in one
-// file that a reviewer can read end to end.
+// It is deliberately separate from internal/indicator (docs/development.md's
+// package boundaries): an indicator measures a price series, sizing commits
+// capital, and the two have different failure modes.
 //
 // Like internal/indicator, this package has no knowledge of events or replay
 // and imports nothing from internal/event: it declares its own Mode, and the

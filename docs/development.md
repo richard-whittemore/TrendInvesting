@@ -8,6 +8,53 @@
 4. Fail closed on unknown schemas, missing sequences, stale data, or uncertain brokerage state.
 5. Prefer table-driven tests and replay fixtures over behavior hidden inside LEAN callbacks.
 
+## Source comment standard
+
+A doc comment states three things and no more:
+
+1. **What the thing does** — one sentence, plainly.
+2. **The rule it implements, with its citation** — a page/timestamp reference into `docs/methodology/`, an ADR number, or a `CONTEXT.md` term. Principle 3 above.
+3. **Any invariant a caller must uphold** — including a warning that exists because the opposite was once wrong (a look-ahead bug, a schema misread, a risk-multiplication defect). That warning is exactly as load-bearing as the code beside it and must survive any later edit to the comment.
+
+A doc comment does **not**:
+
+- Narrate what the next line plainly does.
+- Restate its own rationale in a second or third paragraph once the first has made the point.
+- Reference a ticket number, a PR number, a review round, or "call site N". That information is reachable from `git blame` to the commit, the linked issue, and the PR — a comment naming a ticket is stale the day it closes, and it is written for the reviewer of that week, not the maintainer of next year.
+
+When trimming an existing comment to this standard, treat every citation and every invariant as a fact, not prose: if removing a sentence would delete a fact recorded nowhere else, move the fact to the relevant ADR or the issue's Findings before deleting the sentence — never delete a fact outright.
+
+**Good**, from `internal/indicator/channel.go` — states the rule with its source, then a named invariant that exists because the opposite was a real, shipped bug:
+
+```go
+// EntryChannel is a rolling window that reports the highest high among the
+// last Length completed bars Added to it (CONTEXT.md: "Entry Channel"). The
+// Turtle Rules p.19: System 2 enters when price exceeds the highest high of
+// the preceding 55 completed bars (ADR 0002).
+//
+// # Evaluate-then-add: the ordering that fixes the prototype's headline bug
+//
+// Extreme reports the channel high computed from the values Added so far,
+// and nothing more. Callers MUST call Extreme to evaluate the bar under
+// decision BEFORE calling Add with that same bar's high. Getting this
+// backwards — adding the current bar to the window and then reading
+// Extreme — is the exact defect the legacy QuantConnect prototype shipped
+// with...
+```
+
+**Bad** — this codebase's own `event.FillSchemaVersion` comment, before this standard was applied to it:
+
+```go
+// Bumped to 2 for #12: Kind and CampaignID were added, and Kind is required
+// (an empty Kind decodes from a schema-1 record and is not a recognised
+// value, so a schema-1 fill is rejected outright rather than silently
+// interpreted as an entry — ADR 0015's rule, applied here at the payload
+// level, the same way #10 bumped ConfigurationSchemaVersion for
+// DollarsPerPoint and RiskAtStopFraction).
+```
+
+The ticket numbers age the moment those tickets close, and the same fact (which field forced which version, and why an old record must be rejected rather than reinterpreted) is stated without them, in the current source: a bulleted, per-version list citing ADR 0015 once, with no ticket number anywhere.
+
 ## Local checks
 
 Run the same checks used by CI:
