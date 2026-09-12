@@ -19,7 +19,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 )
 
 // fieldOrderA/fieldOrderB carry the same `json` tags in a different
@@ -109,6 +111,111 @@ func TestCanonicalJSONEncodesSlicesInOrderWithoutSorting(t *testing.T) {
 	const want = `[3,"b",true]`
 	if string(got) != want {
 		t.Fatalf("canonicalJSON(slice) = %s, want %s", got, want)
+	}
+}
+
+// noExportedFields has fields, but none exported: exactly the shape
+// time.Time has (wall, ext, loc are all unexported). writeCanonicalStruct
+// would otherwise silently encode this as {} regardless of what hidden
+// state it carries.
+type noExportedFields struct {
+	hidden string
+}
+
+// TestCanonicalJSONPanicsOnAStructWithNoExportedFields is the fail-closed
+// case a struct field added later without an exported representation would
+// hit: canonicalJSON must refuse to render it as {}, naming the type, rather
+// than silently producing a hash that cannot distinguish two different
+// values of that field.
+func TestCanonicalJSONPanicsOnAStructWithNoExportedFields(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("canonicalJSON(noExportedFields{}) did not panic, want it to")
+		}
+		msg := fmt.Sprint(r)
+		if !strings.Contains(msg, "noExportedFields") {
+			t.Errorf("panic message = %q, want it to name the type", msg)
+		}
+	}()
+	canonicalJSON(noExportedFields{hidden: "x"})
+}
+
+// TestCanonicalJSONPanicsOnTimeTime is the motivating case: a date or
+// timestamp field added to ConfigurationPayload in the future (an
+// effective-from, a re-basing date, a Regime Window boundary) as a
+// time.Time would otherwise encode as {} for every value, making every
+// configuration differing only in that field hash identically — precisely
+// the failure ConfigurationHash exists to prevent, and invisible: the
+// stability test would still pass, and the sensitivity test would only
+// catch it if someone remembered to add a row for the new field.
+func TestCanonicalJSONPanicsOnTimeTime(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("canonicalJSON(time.Time{}) did not panic, want it to: time.Time has no exported fields")
+		}
+	}()
+	canonicalJSON(time.Now())
+}
+
+func TestCanonicalJSONEncodesUnsignedIntegers(t *testing.T) {
+	t.Parallel()
+
+	type payload struct {
+		V uint32 `json:"v"`
+	}
+	got := canonicalJSON(payload{V: 42})
+	const want = `{"v":42}`
+	if string(got) != want {
+		t.Fatalf("canonicalJSON(uint32) = %s, want %s", got, want)
+	}
+}
+
+// uintOrderA/uintOrderB carry the same `json` tags, including an unsigned
+// integer field, in a different declaration order.
+type uintOrderA struct {
+	Count uint32 `json:"count"`
+	Name  string `json:"name"`
+}
+
+type uintOrderB struct {
+	Name  string `json:"name"`
+	Count uint32 `json:"count"`
+}
+
+func TestCanonicalJSONUnsignedIntegersAreIndependentOfFieldOrder(t *testing.T) {
+	t.Parallel()
+
+	a := uintOrderA{Count: 7, Name: "x"}
+	b := uintOrderB{Name: "x", Count: 7}
+
+	gotA := canonicalJSON(a)
+	gotB := canonicalJSON(b)
+	if !bytes.Equal(gotA, gotB) {
+		t.Fatalf("canonicalJSON differs by field declaration order with an unsigned integer field present:\n  a: %s\n  b: %s", gotA, gotB)
+	}
+}
+
+func TestCanonicalJSONPointerEncodesAsNullOrPointee(t *testing.T) {
+	t.Parallel()
+
+	type payload struct {
+		V *float64 `json:"v"`
+	}
+
+	got := canonicalJSON(payload{V: nil})
+	if want := `{"v":null}`; string(got) != want {
+		t.Errorf("canonicalJSON(nil pointer) = %s, want %s", got, want)
+	}
+
+	value := 2.5
+	got = canonicalJSON(payload{V: &value})
+	if want := `{"v":2.5}`; string(got) != want {
+		t.Errorf("canonicalJSON(non-nil pointer) = %s, want %s", got, want)
 	}
 }
 
