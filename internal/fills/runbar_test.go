@@ -597,6 +597,84 @@ func TestRunBarRequiresACompletedBar(t *testing.T) {
 	}
 }
 
+// TestDeliverRefusesACompletedBar is RunBar's own guard from the other side:
+// the two entry points are not interchangeable, because only one of them
+// applies the per-bar protocol. A bar delivered through Deliver would reach
+// the reducer with no fills around it at all.
+func TestDeliverRefusesACompletedBar(t *testing.T) {
+	t.Parallel()
+
+	simulator, reducer := newComposed(t, baselineConfig())
+	_, err := fills.Deliver(context.Background(), simulator, reducer, barEnvelope(t, breakoutBar()))
+	if err == nil {
+		t.Fatal("Deliver() error = nil, want a refusal for a completed bar")
+	}
+	if !strings.Contains(err.Error(), "RunBar") {
+		t.Errorf("Deliver() error = %v, want it to name RunBar", err)
+	}
+}
+
+// TestTheDriverEntryPointsRequireASimulatorAndAHandler: a nil either side is
+// a programming error in the driver, and it fails rather than panicking.
+func TestTheDriverEntryPointsRequireASimulatorAndAHandler(t *testing.T) {
+	t.Parallel()
+
+	simulator, reducer := newComposed(t, baselineConfig())
+	ctx := context.Background()
+
+	if _, err := fills.RunBar(ctx, nil, reducer, barEnvelope(t, breakoutBar())); err == nil {
+		t.Error("RunBar(nil simulator) error = nil, want a refusal")
+	}
+	if _, err := fills.RunBar(ctx, simulator, nil, barEnvelope(t, breakoutBar())); err == nil {
+		t.Error("RunBar(nil handler) error = nil, want a refusal")
+	}
+	if _, err := fills.Deliver(ctx, nil, reducer, configurationEnvelope(t, baselineConfig())); err == nil {
+		t.Error("Deliver(nil simulator) error = nil, want a refusal")
+	}
+	if _, err := fills.Deliver(ctx, simulator, nil, configurationEnvelope(t, baselineConfig())); err == nil {
+		t.Error("Deliver(nil handler) error = nil, want a refusal")
+	}
+}
+
+// TestRunBarRefusesAnInvalidBar: the bar is the one input the whole protocol
+// reads, and it is validated before a single order is priced against it — an
+// inconsistent bar (a low above its high, say) would otherwise decide fills.
+func TestRunBarRefusesAnInvalidBar(t *testing.T) {
+	t.Parallel()
+
+	simulator, reducer := newComposed(t, baselineConfig())
+	broken := bar(day(56), 155.5, 157, 155, 156.5)
+	broken.SplitAdjusted.Low = 200 // above its own high
+
+	_, err := fills.RunBar(context.Background(), simulator, reducer, barEnvelope(t, broken))
+	if err == nil {
+		t.Fatal("RunBar() error = nil, want a refusal for an internally inconsistent bar")
+	}
+	if !strings.Contains(err.Error(), "high must be at least low") {
+		t.Errorf("RunBar() error = %v, want it to name the inconsistency", err)
+	}
+}
+
+// TestRunBarReturnsTheReducersErrorAndWhatItEmittedAlongsideIt keeps
+// replay.Handler's contract (as of #12): a handler that fails closed may emit
+// a final event explaining why, and that event must still reach the journal.
+// Here the reducer refuses a bar before any configuration has been applied.
+func TestRunBarReturnsTheReducersErrorAndWhatItEmittedAlongsideIt(t *testing.T) {
+	t.Parallel()
+
+	simulator, reducer := newComposed(t, baselineConfig())
+	result, err := fills.RunBar(context.Background(), simulator, reducer, barEnvelope(t, breakoutBar()))
+	if err == nil {
+		t.Fatal("RunBar() error = nil, want the reducer's own refusal")
+	}
+	if !strings.Contains(err.Error(), "configuration") {
+		t.Errorf("RunBar() error = %v, want the reducer's reason", err)
+	}
+	if len(result.Inputs) != 1 {
+		t.Errorf("got %d input(s), want the bar itself: what was applied must still be journalled", len(result.Inputs))
+	}
+}
+
 // TestProposalsAreAlwaysCoveredByTheBarThatRaisedThem records a structural
 // finding, as a test so it cannot rot: under ADR 0005's fill model this
 // reducer never raises a proposal that its own bar does not already cover.

@@ -394,8 +394,8 @@ func TestCommissionModelCharge(t *testing.T) {
 		{
 			// A commission-free Variant: nothing in the methodology requires
 			// a commission to exist, unlike slippage (ADR 0013).
-			name:  "a commission-free schedule charges nothing",
-			model: fills.CommissionModel{PerShare: 0, MinimumPerOrder: 0, MaximumFractionOfTradeValue: 1},
+			name:     "a commission-free schedule charges nothing",
+			model:    fills.CommissionModel{PerShare: 0, MinimumPerOrder: 0, MaximumFractionOfTradeValue: 1},
 			quantity: 3333, price: 157.075, dollarsPerPoint: 1,
 			want: 0,
 			why:  "no rate and no floor",

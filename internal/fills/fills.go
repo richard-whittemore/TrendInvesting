@@ -64,7 +64,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -649,15 +648,26 @@ func (s *Simulator) covered(instrumentID string, periodEnd time.Time, view event
 	}
 
 	if b.campaign != nil {
-		// One fill per DISTINCT stop level and price, not one per Unit: Units
-		// whose stops stand at the same level are one resting order at that
-		// level (the Stop Ladder raises them together from equal inputs, so
-		// they are equal bit for bit), while The Turtle Rules p.23's gap case
-		// leaves genuinely different levels that are genuinely different
-		// orders. Grouping is by exact bits — an identity test on two derived
-		// numbers, not a price comparison deciding whether a level was
-		// reached — and the scan is in ascending Unit order, so the grouping
-		// never depends on map order.
+		// One resting order per Unit, and so one fill per Unit — never one
+		// fill covering several of them.
+		//
+		// That is what the source describes: a stop belongs to a Unit, the
+		// Stop Ladder moves each one individually, and a Unit that filled
+		// further away keeps its own level (The Turtle Rules p.22-23's Crude
+		// example, where the fourth Unit's stop sits at 28.40 while Units 1-3
+		// stay at 27.70). It is also the only shape that can be right here,
+		// because under this system's rules two Units NEVER share a level:
+		// Unit k+1's stop is its own fill less 2 N, Unit k's has risen by
+		// half N, and the two coincide only if the later Unit filled exactly
+		// half an N above the earlier one — which slippage, strictly positive
+		// by ADR 0013, always prevents. Grouping Units into one fill would
+		// therefore be code that never ran, and it would have had to compare
+		// two derived prices for equality to decide.
+		//
+		// event.FillPayload.UnitIDs stays plural: the contract permits a
+		// producer that genuinely closes several Units at one level (a
+		// Variant that set every stop from the newest fill would), and this
+		// producer simply always names exactly one.
 		for _, u := range b.campaign.units {
 			if u.stop <= 0 {
 				// A Unit whose stop-set event has not arrived yet cannot be
@@ -672,24 +682,6 @@ func (s *Simulator) covered(instrumentID string, periodEnd time.Time, view event
 				return nil, err
 			}
 			if !filled {
-				continue
-			}
-			merged := false
-			for i := range sells {
-				if sells[i].kind != event.FillKindStop {
-					continue
-				}
-				if math.Float64bits(sells[i].level) != math.Float64bits(c.level) ||
-					math.Float64bits(sells[i].price) != math.Float64bits(c.price) {
-					continue
-				}
-				sells[i].quantity += u.quantity
-				sells[i].unitIndexes = append(sells[i].unitIndexes, u.index)
-				sells[i].unitIDs = append(sells[i].unitIDs, u.openingFillID)
-				merged = true
-				break
-			}
-			if merged {
 				continue
 			}
 			c.campaignID = b.campaign.id
@@ -724,32 +716,14 @@ func (s *Simulator) covered(instrumentID string, periodEnd time.Time, view event
 	// Sells worst-price-first: the lowest price a long seller could have got
 	// is the pessimistic assumption, and it also decides which of two
 	// competing closes happened when both cannot (a stop that empties the
-	// Campaign cancels the exit, and vice versa). Ties broken by level, then
-	// by the lowest Unit index, so the order never depends on anything but
-	// the numbers.
-	sortStable(sells, func(a, b candidate) bool {
-		if a.price != b.price {
-			return a.price < b.price
-		}
-		if a.level != b.level {
-			return a.level < b.level
-		}
-		return firstIndex(a.unitIndexes) < firstIndex(b.unitIndexes)
-	})
+	// Campaign cancels the exit, and vice versa). The sort is stable and the
+	// comparison is price alone, so two sells at the same price keep the
+	// order they were collected in — ascending Unit index, with the exit
+	// last — rather than needing a tie-break that would never run: no two
+	// orders here can share a price, since each Unit's stop stands at its own
+	// level (see the loop above).
+	sortStable(sells, func(a, b candidate) bool { return a.price < b.price })
 	return append(buys, sells...), nil
-}
-
-func firstIndex(indexes []int) int {
-	if len(indexes) == 0 {
-		return 0
-	}
-	smallest := indexes[0]
-	for _, index := range indexes[1:] {
-		if index < smallest {
-			smallest = index
-		}
-	}
-	return smallest
 }
 
 // sortStable is an insertion sort, used rather than sort.SliceStable because

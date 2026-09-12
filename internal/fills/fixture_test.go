@@ -167,7 +167,15 @@ type composed struct {
 
 func runComposed(t *testing.T, cfg event.ConfigurationPayload, bars []event.CompletedBarPayload) composed {
 	t.Helper()
+	simulator, reducer := newComposed(t, cfg)
+	return driveComposed(t, simulator, reducer, cfg, bars)
+}
 
+// newComposed builds the pair the loop drives: a simulator and a reducer,
+// configured identically and with the same provenance, exactly as #19's
+// driver will compose them.
+func newComposed(t *testing.T, cfg event.ConfigurationPayload) (*fills.Simulator, *strategy.Reducer) {
+	t.Helper()
 	simulator, err := fills.New(cfg, testStrategyVersion, testConfigurationHash)
 	if err != nil {
 		t.Fatalf("fills.New() error = %v", err)
@@ -176,6 +184,11 @@ func runComposed(t *testing.T, cfg event.ConfigurationPayload, bars []event.Comp
 	if err != nil {
 		t.Fatalf("strategy.NewReducer() error = %v", err)
 	}
+	return simulator, reducer
+}
+
+func driveComposed(t *testing.T, simulator *fills.Simulator, reducer *strategy.Reducer, cfg event.ConfigurationPayload, bars []event.CompletedBarPayload) composed {
+	t.Helper()
 
 	ctx := context.Background()
 	var out composed
