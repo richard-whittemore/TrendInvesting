@@ -491,9 +491,28 @@ func TestEarlierUnitStopsAreRaisedThroughASameBarChainFromTheEntry(t *testing.T)
 		t.Errorf("got %d stop-ladder raise(s), want 3 (unit 1 raised twice, unit 2 raised once)", raises)
 	}
 
+	// Each raise is a SEQUENCE of exact steps (sizing.RaisedStop's own doc
+	// comment: "never recomputed from scratch"), so the expected value is
+	// built the same way production code builds it — via RaisedStop itself,
+	// applied once per raise — rather than a hand-folded "N x 0.5N" that can
+	// differ from it in the last bit (float64 addition is not associative).
+	unit1Initial := campaignFillPrice - cfg.StopMultiple*campaignN
+	unit1RaisedOnce, err := sizing.RaisedStop(unit1Initial, campaignN)
+	if err != nil {
+		t.Fatalf("RaisedStop(unit 1, 1st raise) error = %v", err)
+	}
+	unit1RaisedTwice, err := sizing.RaisedStop(unit1RaisedOnce, campaignN)
+	if err != nil {
+		t.Fatalf("RaisedStop(unit 1, 2nd raise) error = %v", err)
+	}
+	unit2Initial := ladder[1] - cfg.StopMultiple*campaignN
+	unit2Raised, err := sizing.RaisedStop(unit2Initial, campaignN)
+	if err != nil {
+		t.Fatalf("RaisedStop(unit 2) error = %v", err)
+	}
 	wantStops := map[int]float64{
-		1: campaignFillPrice - cfg.StopMultiple*campaignN + 2*0.5*campaignN,
-		2: ladder[1] - cfg.StopMultiple*campaignN + 0.5*campaignN,
+		1: unit1RaisedTwice,
+		2: unit2Raised,
 		3: ladder[2] - cfg.StopMultiple*campaignN,
 	}
 	latest := map[int]event.ProtectiveStopSetPayload{}

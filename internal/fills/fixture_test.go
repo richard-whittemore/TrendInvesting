@@ -123,9 +123,18 @@ func warmUpBars() []event.CompletedBarPayload {
 // breakoutBar is bar 56 in every fixture except the entered-then-stopped one:
 // a clean breakout above the 155.5 Entry Channel whose own low (155) stays
 // well clear of the Protective Stop the entry fill will set at 152.575 (#79:
-// the entry rests at the 155.5 channel high, not this bar's own high of 157).
+// the entry rests at the 155.5 channel high, not this bar's own high).
+//
+// The high is deliberately kept BELOW 156.325 — the Unit 2 rung half an N
+// above the 155.575 entry fill — so this bar produces the entry alone. A bar
+// whose own high also cleared that rung would, via the same-bar Add chain
+// (PR #85 review round: openCampaign now calls evaluateAdd, matching
+// applyAddFill), add Unit 2 immediately too, which is correct behaviour but
+// not what the tests that merely reuse this bar as "a breakout happened" are
+// about; TestAddWithinTheBreakoutBarItself and its neighbours in
+// internal/strategy/add_test.go exercise that chain directly instead.
 func breakoutBar() event.CompletedBarPayload {
-	return bar(day(56), 155.5, 157, 155, 156.5)
+	return bar(day(56), 155.5, 156.2, 155, 156.0)
 }
 
 // campaignLifeBars is the full-life fixture: warm-up, a breakout, three

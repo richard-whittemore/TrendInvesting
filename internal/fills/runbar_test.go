@@ -95,10 +95,12 @@ func TestGapUpBreakoutBarFillsAtTheOpenPlusSlippage(t *testing.T) {
 	t.Parallel()
 
 	// The Entry Channel (from warmUpBars) tops out at 155.5. This bar opens
-	// at 156.5 — already through the channel — and its high of 158 is what
+	// at 156.5 — already through the channel — and its high of 157.2 is what
 	// makes it a Signal at all (strictly exceeding 155.5, The Turtle Rules
-	// p.19's "exceeds").
-	gapUp := bar(day(56), 156.5, 158, 156, 157.5)
+	// p.19's "exceeds"), while staying below 157.325 — the Unit 2 rung half
+	// an N above the 156.575 gapped entry fill — so this bar produces the
+	// entry alone rather than also chaining an Add (PR #85 review round).
+	gapUp := bar(day(56), 156.5, 157.2, 156, 157.0)
 	bars := append(warmUpBars(), gapUp)
 	run := runComposed(t, baselineConfig(), bars)
 
@@ -251,10 +253,13 @@ func TestBarCoveringBothEntryAndStopEntersThenStops(t *testing.T) {
 	t.Parallel()
 
 	// #79: the entry level is now the Entry Channel high (155.5), not this
-	// bar's own high (157), so the entry fills at 155.5 + slippage regardless
-	// of the bar's own range — this bar's open (152.0) and low (151.5) exist
-	// only to pin the same-bar-ambiguity and Range.Reference rules below.
-	bars := append(warmUpBars(), bar(day(56), 152.0, 157, 151.5, 153.0))
+	// bar's own high, so the entry fills at 155.5 + slippage regardless of
+	// the bar's own range — this bar's open (152.0) and low (151.5) exist
+	// only to pin the same-bar-ambiguity and Range.Reference rules below. The
+	// high (156.0) stays below 156.325 — the Unit 2 rung half an N above the
+	// 155.575 entry fill — so this bar produces the entry and stop alone
+	// (PR #85 review round: a higher high would also chain an Add here).
+	bars := append(warmUpBars(), bar(day(56), 152.0, 156.0, 151.5, 153.0))
 	run := runComposed(t, baselineConfig(), bars)
 
 	got := fillPayloads(t, run.Inputs)
