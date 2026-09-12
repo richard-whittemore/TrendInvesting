@@ -64,9 +64,9 @@ const ADRCampaignFrozenAtEntry = "0006"
 // handled:
 //
 //   - Adds. Units is always 1 on this event — it is the Campaign-*opened*
-//     record. Adding a Unit is #13 and emits its own event.
-//   - Stop movement. The stop as the Campaign's ladder advances is #12; this
-//     payload states where it sits at entry.
+//     record. Adding a Unit emits its own event.
+//   - Stop movement. The stop as the Campaign's ladder advances is recorded
+//     by a separate event; this payload states where it sits at entry.
 //   - Accumulating partial fills. A partial fill opens a Campaign for the
 //     filled quantity (FilledQuantity below); combining a later partial into
 //     the same Campaign is deferred to its own issue.
@@ -257,11 +257,10 @@ const CampaignExitedEventType = "strategy.campaign.exited"
 // CampaignExitedSchemaVersion is the current schema version of
 // CampaignExitedPayload, for the Envelope's SchemaVersion field.
 //
-// Bumped 1 -> 2 for #14: Units was added. A schema-1 record decodes Units as
-// the int zero, which is not a legitimate Unit count (Validate requires it
-// positive), so a schema-1 record is rejected outright rather than silently
-// read as a zero-Unit exit — ADR 0015's rule, the same discipline #12 and
-// #13 each applied to their own additive fields.
+// Version 2 added Units, required. A version-1 record decodes Units as the
+// int zero, which is not a legitimate Unit count (Validate requires it
+// positive), so a version-1 record is rejected outright rather than
+// silently read as a zero-Unit exit (ADR 0015's rule).
 const CampaignExitedSchemaVersion uint32 = 2
 
 // RuleCampaignExitedByStop names the rule for CampaignExitedPayload.Rule
@@ -280,12 +279,12 @@ const ADRCampaignExitRecordsTheFill = "0005"
 // for the same reason ProposalDeclinedPayload.Reason and
 // ProposalExpiredPayload.Reason are: a journal must be groupable by it.
 const (
-	// ExitReasonStop means a fill said the Protective Stop was hit (#12).
+	// ExitReasonStop means a fill said the Protective Stop was hit.
 	ExitReasonStop = "stop"
 	// ExitReasonExitChannel is declared in exit_proposal.go, next to
 	// ExitProposalPayload, which names the identical string: a fill said
-	// price fell below the Exit Channel low (#13, The Turtle Rules p.26,
-	// ADR 0002). #24 will add a delisting reason; adding it is a new
+	// price fell below the Exit Channel low (The Turtle Rules p.26, ADR
+	// 0002). A Delisting Exit will add a further reason; adding it is a new
 	// enumerated value on this already-existing payload and event type, not
 	// a new one, since every exit is the same underlying fact — a
 	// Campaign's life ended, and why.
@@ -293,16 +292,15 @@ const (
 
 // RuleCampaignExitedByExitChannel names the rule for
 // CampaignExitedPayload.Rule when Reason is ExitReasonExitChannel: a
-// Campaign closes because a fill said price fell below the Exit Channel low
-// (#13).
+// Campaign closes because a fill said price fell below the Exit Channel low.
 const RuleCampaignExitedByExitChannel = "campaign.exited.by-exit-channel"
 
 // CampaignExitedPayload records a Campaign's life ending: what was filled to
 // close it, and the realised result.
 //
-// CampaignN, DollarsPerPoint, UnitQuantity and FillID are not named in the
-// ticket's field list but are added here deliberately, for the same reason
-// CampaignOpenedPayload carries CampaignN and StopMultiple rather than
+// CampaignN, DollarsPerPoint, UnitQuantity and FillID are added here
+// deliberately, for the same reason CampaignOpenedPayload carries CampaignN
+// and StopMultiple rather than
 // leaving a reader to join back to the configuration: **Validate re-derives
 // RealisedResult, AverageMoveInN and RealisedResultInUnitN exactly, and a
 // payload cannot re-derive a value from a field it does not have.**
@@ -329,11 +327,12 @@ const RuleCampaignExitedByExitChannel = "campaign.exited.by-exit-channel"
 // that difference. A short Campaign would need the opposite sign, which this
 // payload does not implement.
 //
-// # Multi-Unit aggregation (#14)
+// # Multi-Unit aggregation
 //
 // A Campaign that added Units closes ALL of them in one decision (this
-// ticket keeps stop and exit fills whole-Campaign; #15 makes a stop
-// per-Unit). Quantity is therefore the SUM of every held Unit's own
+// event keeps stop and exit fills whole-Campaign; a per-Unit stop fill is a
+// separate event, CampaignUnitsStoppedPayload). Quantity is therefore the
+// SUM of every held Unit's own
 // quantity, and EntryPrice is their QUANTITY-WEIGHTED AVERAGE fill price —
 // chosen deliberately over a per-Unit breakdown on this payload (the
 // Campaign-opened and unit-added events already carry every individual
@@ -354,18 +353,18 @@ const RuleCampaignExitedByExitChannel = "campaign.exited.by-exit-channel"
 // — but see the next section for why that average is NOT the field a
 // reviewer should read as "the Campaign's result in N".
 //
-// # Two different N-denominated readings (PR #74 review finding)
+// # Two different N-denominated readings
 //
-// A review finding on this payload's first version ("N Result Ignores
-// Units") named a real confusion: what was then called RealisedResultInN
+// A real confusion, caught in review of this payload's first version: what
+// was then called RealisedResultInN
 // computed (ExitPrice - EntryPrice) / CampaignN, which is the average
 // PER-SHARE move, not the Campaign's aggregate result. Several equal-sized
 // Units each earning a full 1N would report there as ~1N, understating both
 // performance and risk for anyone reading it as "how many Units' worth of
 // gain". This payload now carries both readings, computed by
 // internal/sizing so Validate re-derives each from the identical arithmetic
-// a producer used (the #65 discipline: shared functions, not a formula
-// re-typed independently in two places):
+// a producer used: shared functions, not a formula re-typed independently
+// in two places.
 //
 //   - AverageMoveInN (sizing.AverageMoveInN) is the per-share average — what
 //     the field used to be, renamed to say what it actually measures.
@@ -377,9 +376,9 @@ const RuleCampaignExitedByExitChannel = "campaign.exited.by-exit-channel"
 //     diverge, and RealisedResultInUnitN is the one that sums each Unit's
 //     own N result rather than averaging it away.
 //
-// # Accumulating partial stop-outs (#15)
+// # Accumulating partial stop-outs
 //
-// #15's per-Unit stop fill can close a Campaign's Units across more than one
+// A per-Unit stop fill can close a Campaign's Units across more than one
 // fill — the gap case closes Unit 4 alone while Units 1-3's own (lower)
 // stops have not yet been reached (strategy.campaign.units-stopped,
 // CampaignUnitsStoppedPayload), and this event is emitted only once the
@@ -400,7 +399,7 @@ const RuleCampaignExitedByExitChannel = "campaign.exited.by-exit-channel"
 // sum(q_i x x_i) - sum(q_i x e_i) = sum(q_i x (x_i - e_i)), which is exactly
 // the sum of each closing fill's own realised result — so Validate needs no
 // per-fill case at all, whether every Unit closed in one fill at one price
-// (the #12/#13/#14 common case, where this reduces to the ORIGINAL
+// (the common single-fill case, where this reduces to the ORIGINAL
 // single-price formula bit-for-bit) or across several stop fills at several
 // different prices (the gap case). ProtectiveStopLevel is the minimum stop
 // level among the Units THIS (final) fill closes — "the level that was in
@@ -467,9 +466,9 @@ type CampaignExitedPayload struct {
 	// AverageMoveInN.
 	RealisedResultInUnitN float64 `json:"realised_result_in_unit_n"`
 	// Units is the TOTAL number of Units this Campaign ever held over its
-	// whole life, 1 through the configured maximum (#14; see the type's doc
+	// whole life, 1 through the configured maximum (see the type's doc
 	// comment on multi-Unit aggregation) — NOT how many were still open at
-	// the instant of this closing fill. #15's per-Unit stop fill can close a
+	// the instant of this closing fill. A per-Unit stop fill can close a
 	// Campaign's Units across more than one fill (the gap case), so a
 	// Campaign that opened with 4 Units and had 1 stopped out earlier still
 	// reports 4 here when the remaining 3 finally close, matching
@@ -493,9 +492,9 @@ type CampaignExitedPayload struct {
 // tolerance would let a differently-derived result through, which is the
 // defect the check exists to catch. AverageMoveInN and RealisedResultInUnitN
 // are re-derived by calling internal/sizing's own functions rather than
-// re-typing the formula here, so the two cannot drift apart (the #65
-// discipline, the same one TradeProposalPayload.Validate already follows
-// for sizing.RealisedRiskAtStop).
+// re-typing the formula here, so the two cannot drift apart — the same
+// discipline TradeProposalPayload.Validate already follows for
+// sizing.RealisedRiskAtStop.
 func (p CampaignExitedPayload) Validate() error {
 	var errs []error
 	if p.CampaignID == "" {
