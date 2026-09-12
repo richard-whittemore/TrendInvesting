@@ -425,9 +425,9 @@ type CampaignExitedPayload struct {
 	// the Protective Stop level (see the type's doc comment).
 	ExitPrice float64 `json:"exit_price"`
 	// Quantity is the whole position closed: the Campaign's own
-	// FilledQuantity. A partial stop close is out of scope for this ticket
-	// (see internal/strategy/campaign.go's applyStopFill), so this is always
-	// the Campaign's entire holding.
+	// FilledQuantity. A partial stop close is handled separately
+	// (CampaignUnitsStoppedPayload; see internal/strategy/campaign.go's
+	// applyStopFill), so this is always the Campaign's entire holding.
 	Quantity int64 `json:"quantity"`
 	// CampaignN is the Campaign's frozen campaign N (ADR 0006), restated so
 	// AverageMoveInN and RealisedResultInUnitN are independently

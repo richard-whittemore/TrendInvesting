@@ -1359,7 +1359,8 @@ func applyFillToOpenCampaign(campaign *campaignState, fill event.FillPayload) ([
 // proposal, and returns the Campaign-opened and Protective-Stop-set events
 // that record it — plus, if the SAME bar that produced this fill also covers
 // Unit 2's own rung, the same-bar Add chain evaluateAdd continues from
-// applyAddFill (see evaluateAdd's own doc comment, call site 2).
+// applyAddFill (see evaluateAdd's own doc comment, the second of its three
+// call sites).
 //
 // The campaign N and the Unit share count are taken from the proposal, not
 // recomputed: ADR 0006 freezes them at first entry, and recomputing at fill

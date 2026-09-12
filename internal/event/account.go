@@ -37,7 +37,7 @@ type AccountSnapshotPayload struct {
 	// account-affecting figure, not only volatility readings.
 	Equity float64 `json:"equity"`
 	// Currency is the currency Equity is stated in, carried explicitly so a
-	// multi-currency account (out of scope for this ticket) cannot silently
+	// multi-currency account (out of scope for this project) cannot silently
 	// mix figures once one exists.
 	Currency string `json:"currency"`
 }
