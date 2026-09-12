@@ -8,21 +8,20 @@ import (
 
 // CampaignUnitsStoppedEventType identifies the per-fill decision payload for
 // the Envelope's Type field: a stop fill closed one or more (but not
-// necessarily all) of an open Campaign's Units (#15, the gap case).
+// necessarily all) of an open Campaign's Units.
 //
-// #12 made a stop fill close a Campaign's WHOLE filled quantity in one
-// decision. #15's Stop Ladder means a gapped Unit can carry a stop level
-// genuinely different from its Campaign-mates (The Turtle Rules p.23), so a
-// stop fill must be able to name and close a SUBSET of Units — Unit 4 alone,
-// in the gap fixture, while Units 1-3's own (lower) stops have not yet been
-// reached. This event records exactly that: which Units this ONE fill
-// closed, what it realised, and how many Units (and how much open risk)
-// remain. It is emitted for EVERY stop fill, whether or not it happens to
-// empty the Campaign; when it does, strategy.campaign.exited (Reason
-// ExitReasonStop) follows in the same Apply return, aggregating the whole
-// Campaign's life rather than only this fill's own share (see
-// CampaignExitedPayload's own doc comment, "Multi-Unit aggregation" and
-// "Accumulating partial stop-outs").
+// The Stop Ladder means a gapped Unit can carry a stop level genuinely
+// different from its Campaign-mates (The Turtle Rules p.23), so a stop fill
+// must be able to name and close a SUBSET of Units — one Unit alone, in the
+// gap case, while the others' own (lower) stops have not yet been reached.
+// This event records exactly that: which Units this ONE fill closed, what it
+// realised, and how many Units (and how much open risk) remain. It is
+// emitted for EVERY stop fill, whether or not it happens to empty the
+// Campaign; when it does, strategy.campaign.exited (Reason ExitReasonStop)
+// follows in the same Apply return, aggregating the whole Campaign's life
+// rather than only this fill's own share (see CampaignExitedPayload's own
+// doc comment, "Multi-Unit aggregation" and "Accumulating partial
+// stop-outs").
 const CampaignUnitsStoppedEventType = "strategy.campaign.units-stopped"
 
 // CampaignUnitsStoppedSchemaVersion is the current schema version of
@@ -61,8 +60,8 @@ const RuleCampaignUnitsStoppedByStop = "campaign.units-stopped.by-stop"
 // so Validate here checks only the SHAPE of the number it was handed
 // (finite, non-negative, and exactly zero when RemainingUnits is 0), the
 // same restraint CampaignEvaluatedPayload.ProtectiveStop's own doc comment
-// states applied to it before #15 added the Units list this event still does
-// not carry.
+// states applied to it before that event's Units list existed — a list
+// this event still does not carry.
 type CampaignUnitsStoppedPayload struct {
 	CampaignID   string `json:"campaign_id"`
 	InstrumentID string `json:"instrument_id"`
