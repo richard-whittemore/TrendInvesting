@@ -263,6 +263,124 @@ func TestGapDownThroughAStopFillsAtTheOpen(t *testing.T) {
 	}
 }
 
+// TestGapFillsCarryTheProvenanceOfTheBarWhoseOpenProducedThem is the
+// provenance rule for the open-instant pass, stated once and unmistakably.
+//
+// A gap fill is delivered to the reducer BEFORE the bar it belongs to, which
+// is correct — the order executed at that bar's open, the first instant of
+// the session. But it is still a fact ABOUT that bar, produced from that
+// bar's own open, so its EventTime and its RecordedAt are that bar's, and so
+// are those of every decision the reducer makes because of it (the reducer
+// stamps an emission with its input's own RecordedAt).
+//
+// Taking RecordedAt from the last input the simulator happened to have
+// delivered would date a gap fill, and the Campaign exit it causes, to the
+// PREVIOUS bar — a journal claiming an execution was recorded before the
+// session that produced it, which is exactly the kind of chronological
+// nonsense the reducer's own bar-versus-fill checks exist to catch on the
+// input side.
+func TestGapFillsCarryTheProvenanceOfTheBarWhoseOpenProducedThem(t *testing.T) {
+	t.Parallel()
+
+	gapping := bar(day(57), 150, 151, 148, 149)
+	bars := append(warmUpBars(), breakoutBar(), gapping)
+	run := runComposed(t, baselineConfig(), bars)
+
+	fillEnvelopes := envelopesOfType(run.Inputs, event.FillEventType)
+	if len(fillEnvelopes) != 2 {
+		t.Fatalf("got %d fill(s), want 2 (the entry and the gapped stop)%s", len(fillEnvelopes), describe(fillEnvelopes))
+	}
+	stop := fillEnvelopes[1]
+	if decodeFill(t, stop).Kind != event.FillKindStop {
+		t.Fatalf("second fill is not the stop%s", describe(fillEnvelopes))
+	}
+
+	// The bar whose open produced it, not the one before.
+	wantRecordedAt := barEnvelope(t, gapping).RecordedAt
+	if !stop.EventTime.Equal(gapping.PeriodEnd) {
+		t.Errorf("gap fill EventTime = %s, want the gapping bar's period end %s", stop.EventTime, gapping.PeriodEnd)
+	}
+	if !stop.RecordedAt.Equal(wantRecordedAt) {
+		t.Errorf("gap fill RecordedAt = %s, want the gapping bar's own %s (day 56 is the bar BEFORE the one whose open took the stop out)", stop.RecordedAt, wantRecordedAt)
+	}
+
+	// And every decision the reducer made because of it.
+	exited := onlyOfType(t, run.Decisions, event.CampaignExitedEventType)
+	if !exited.RecordedAt.Equal(wantRecordedAt) {
+		t.Errorf("campaign-exited RecordedAt = %s, want %s: a decision inherits its input's recording moment", exited.RecordedAt, wantRecordedAt)
+	}
+	for _, e := range envelopesOfType(run.Decisions, event.CampaignUnitsStoppedEventType) {
+		if !e.RecordedAt.Equal(wantRecordedAt) {
+			t.Errorf("units-stopped RecordedAt = %s, want %s", e.RecordedAt, wantRecordedAt)
+		}
+	}
+
+	// Delivery order is unchanged by any of this: the fill still precedes the
+	// bar, because it happened at that bar's open.
+	var sawStop bool
+	for _, e := range run.Inputs {
+		if e.Type == event.FillEventType && decodeFill(t, e).Kind == event.FillKindStop {
+			sawStop = true
+		}
+		if e.Type == event.CompletedBarEventType && e.EventTime.Equal(day(57)) && !sawStop {
+			t.Fatal("the gapping bar reached the reducer before the stop its own open took out")
+		}
+	}
+}
+
+// TestAGapUpBuyInTheOpenInstantPassCarriesTheSameProvenance is the buy side
+// of the rule above.
+//
+// It uses a stub handler rather than the reducer, because this reducer can
+// never reach the case: every proposal it raises is covered by the bar that
+// raised it, so no proposal ever rests into the next bar to be gapped over
+// (see TestProposalsAreAlwaysCoveredByTheBarThatRaisedThem). The path is
+// reachable for the producers that are not this reducer — #30's adapter, and
+// a Variant whose entry rests at the Entry Channel level rather than the
+// breakout bar's own high — and the stamping must be right for them too, so
+// it is tested at the seam #19 and #30 will actually compose.
+func TestAGapUpBuyInTheOpenInstantPassCarriesTheSameProvenance(t *testing.T) {
+	t.Parallel()
+
+	simulator, err := fills.New(baselineConfig(), testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	proposed := restingEntryProposal(t, 157)
+	if err := simulator.Observe(proposed); err != nil {
+		t.Fatalf("Observe(trade proposal) error = %v", err)
+	}
+
+	// Opens at 160, well above the 157 the order rests at: the buy-stop was
+	// triggered at the open and executed there.
+	gapping := bar(day(57), 160, 161, 159, 160.5)
+	handler := openCampaignOnEntryFill(t, proposed.ID)
+
+	result, err := fills.RunBar(context.Background(), simulator, handler, barEnvelope(t, gapping))
+	if err != nil {
+		t.Fatalf("RunBar() error = %v", err)
+	}
+
+	fillEnvelopes := envelopesOfType(result.Inputs, event.FillEventType)
+	if len(fillEnvelopes) != 1 {
+		t.Fatalf("got %d fill(s), want exactly 1%s", len(fillEnvelopes), describe(result.Inputs))
+	}
+	entry := fillEnvelopes[0]
+	if result.Inputs[0].Type != event.FillEventType {
+		t.Errorf("the gapped buy did not precede the bar: %s", describe(result.Inputs))
+	}
+	// max(level 157, open 160) + 0.075.
+	assertPrice(t, "gapped buy fill price", decodeFill(t, entry).Price, 160.075)
+
+	wantRecordedAt := barEnvelope(t, gapping).RecordedAt
+	if !entry.EventTime.Equal(gapping.PeriodEnd) {
+		t.Errorf("gap fill EventTime = %s, want %s", entry.EventTime, gapping.PeriodEnd)
+	}
+	if !entry.RecordedAt.Equal(wantRecordedAt) {
+		t.Errorf("gap fill RecordedAt = %s, want the gapping bar's own %s", entry.RecordedAt, wantRecordedAt)
+	}
+}
+
 // TestIntrabarStopFillsEvenThoughTheBarClosedAboveIt is the ticket's named
 // negative at the event seam: a bar whose low traded through the stop but
 // whose close finished above it must still fill the stop. A close-only check

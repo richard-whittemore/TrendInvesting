@@ -246,6 +246,86 @@ func envelope(t *testing.T, id, eventType string, schemaVersion uint32, at time.
 	}
 }
 
+// --- a resting entry order, without the reducer ---------------------------
+
+// restingEntryProposal is a trade proposal envelope a test can Observe
+// directly, for the cases this reducer cannot produce — an entry order left
+// resting into a later bar. Every figure is the fixture's own, so the
+// proposal is exactly what the reducer would have raised had its entry level
+// been level rather than the breakout bar's own high.
+func restingEntryProposal(t *testing.T, level float64) event.Envelope {
+	t.Helper()
+	proposal := event.TradeProposalPayload{
+		InstrumentID:           testInstrument,
+		PeriodEnd:              day(56),
+		SignalID:               "signal:AAPL:day-56",
+		Rule:                   event.RuleUnitSizingVolatilityNormalised,
+		ADR:                    event.ADRUnitSizing,
+		Direction:              event.DirectionLong,
+		EntryLevel:             level,
+		Quantity:               fixtureUnitQuantity,
+		N:                      fixtureN,
+		SizingMode:             event.SizingModeVolatilityNormalised,
+		UnitVolatilityFraction: 0.005,
+		StopMultiple:           2,
+		RiskAtStop:             0.005 * 2,
+		RealisedRiskAtStop:     float64(fixtureUnitQuantity) * 2 * fixtureN * 1 / 1_000_000,
+		DollarsPerPoint:        1,
+		NotionalAccount:        1_000_000,
+		ProtectiveStopIntent:   level - 2*fixtureN,
+	}
+	if err := proposal.Validate(); err != nil {
+		t.Fatalf("the fixture proposal is invalid: %v", err)
+	}
+	return envelope(t, "proposal:AAPL:day-56", event.TradeProposalEventType, event.TradeProposalSchemaVersion, day(56), proposal)
+}
+
+// openCampaignOnEntryFill is a stand-in for the reducer that answers an entry
+// fill the way the reducer does: with a Campaign-opened decision. The
+// simulator needs that answer, because an entry order leaves its book only
+// when a Campaign it opened is journalled — nothing in this package decides
+// that a proposal has been executed.
+//
+// It is deliberately the minimum that behaves correctly at that seam, and its
+// payload is validated like any other, so it cannot drift into being a double
+// that accepts what the real reducer would refuse.
+func openCampaignOnEntryFill(t *testing.T, proposalID string) replay.Handler {
+	t.Helper()
+	return replay.HandlerFunc(func(_ context.Context, in event.Envelope) ([]event.Envelope, error) {
+		if in.Type != event.FillEventType {
+			return nil, nil
+		}
+		var fill event.FillPayload
+		decodeInto(t, in, &fill)
+		if fill.Kind != event.FillKindEntry {
+			return nil, nil
+		}
+		campaignID := "campaign:" + testInstrument + ":" + fill.FilledAt.UTC().Format(time.RFC3339Nano)
+		opened := event.CampaignOpenedPayload{
+			CampaignID:     campaignID,
+			InstrumentID:   fill.InstrumentID,
+			ProposalID:     proposalID,
+			SignalID:       "signal:AAPL:day-56",
+			FillID:         fill.FillID,
+			Rule:           event.RuleCampaignOpenedFromFill,
+			ADR:            event.ADRCampaignFrozenAtEntry,
+			Direction:      fill.Direction,
+			CampaignN:      fixtureN,
+			UnitQuantity:   fixtureUnitQuantity,
+			FilledQuantity: fill.Quantity,
+			EntryPrice:     fill.Price,
+			StopMultiple:   2,
+			ProtectiveStop: fill.Price - 2*fixtureN,
+			Units:          1,
+			OpenedAt:       fill.FilledAt,
+		}
+		if err := opened.Validate(); err != nil {
+			t.Fatalf("the stand-in reducer built an invalid campaign-opened payload: %v", err)
+		}
+		return []event.Envelope{envelope(t, campaignID, event.CampaignOpenedEventType, event.CampaignOpenedSchemaVersion, fill.FilledAt, opened)}, nil
+	})
+}
+
 // --- reading what came out ------------------------------------------------
 
 func envelopesOfType(envelopes []event.Envelope, eventType string) []event.Envelope {

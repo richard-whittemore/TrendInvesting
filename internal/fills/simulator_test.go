@@ -188,29 +188,7 @@ func TestObserveRemovesAnExpiredProposal(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	proposal := event.TradeProposalPayload{
-		InstrumentID:           testInstrument,
-		PeriodEnd:              day(56),
-		SignalID:               "signal:AAPL",
-		Rule:                   event.RuleUnitSizingVolatilityNormalised,
-		ADR:                    event.ADRUnitSizing,
-		Direction:              event.DirectionLong,
-		EntryLevel:             157,
-		Quantity:               fixtureUnitQuantity,
-		N:                      fixtureN,
-		SizingMode:             event.SizingModeVolatilityNormalised,
-		UnitVolatilityFraction: 0.005,
-		StopMultiple:           2,
-		RiskAtStop:             0.005 * 2,
-		RealisedRiskAtStop:     float64(fixtureUnitQuantity) * 2 * fixtureN * 1 / 1_000_000,
-		DollarsPerPoint:        1,
-		NotionalAccount:        1_000_000,
-		ProtectiveStopIntent:   157 - 2*fixtureN,
-	}
-	if err := proposal.Validate(); err != nil {
-		t.Fatalf("the fixture proposal is invalid: %v", err)
-	}
-	proposed := envelope(t, "proposal:AAPL:day-56", event.TradeProposalEventType, event.TradeProposalSchemaVersion, day(56), proposal)
+	proposed := restingEntryProposal(t, 157)
 	if err := simulator.Observe(proposed); err != nil {
 		t.Fatalf("Observe(trade proposal) error = %v", err)
 	}
