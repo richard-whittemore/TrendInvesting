@@ -95,8 +95,8 @@ const (
 //     ConfigurationPayload.MaxUnits models one of ADR 0008's four levels;
 //     the cap check itself belongs to a later ticket). A proposal is not a
 //     permission to trade.
-//   - Fills. EntryLevel is the level the Signal fired at, not a fill price;
-//     slippage is a fill concern (ADR 0013) owned by #18.
+//   - Fills. EntryLevel is the level a resting order sits at, not a fill
+//     price; slippage is a fill concern (ADR 0013) owned by #18.
 //   - Drawdown. NotionalAccount is the configured starting equity; Drawdown
 //     Steps and yearly re-basing (ADR 0007) are #16/#17.
 //   - Campaign state. Freezing N and the Unit size at first entry (ADR 0006)
@@ -113,8 +113,13 @@ type TradeProposalPayload struct {
 	Rule      string `json:"rule"`
 	ADR       string `json:"adr"`
 	Direction string `json:"direction"`
-	// EntryLevel is the level the Signal fired at — the breakout high. What
-	// actually fills there is not decided here.
+	// EntryLevel is the Entry Channel high the breakout exceeded (SignalPayload.
+	// EntryChannelHigh) — the level a resting buy-stop actually sits at under
+	// ADR 0005, not the breakout bar's own high (SignalPayload.BreakoutHigh).
+	// Faith's wording is "exceeded by a single tick" [T p.19]; the Baseline's
+	// tick increment is zero, with the Signal's own strict exceedance doing
+	// that work (a baseline-declared adaptation, ADR 0012 — see issue #79's
+	// Findings). What actually fills there is not decided here.
 	EntryLevel float64 `json:"entry_level"`
 	// Quantity is a whole number of shares or contracts, truncated toward
 	// zero (The Turtle Rules p.14-15). It is always positive: a proposal for

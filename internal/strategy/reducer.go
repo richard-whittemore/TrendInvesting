@@ -680,7 +680,11 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		// last of the bar. Exactly one emission always follows the Signal —
 		// a proposal, or a decline saying why there is none — so a Signal is
 		// never left with nothing after it (see sizeUnit).
-		sized, err := r.sizeUnit(bar, envelope, signalID, view.High, decisionN, nReady)
+		//
+		// #79: the entry level is entryChannelHigh — the level a resting
+		// buy-stop actually sits at (ADR 0005) — not view.High, the breakout
+		// bar's own high. See sizeUnit's doc comment for why.
+		sized, err := r.sizeUnit(bar, envelope, signalID, entryChannelHigh, decisionN, nReady)
 		if err != nil {
 			return nil, err
 		}
@@ -711,9 +715,20 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 // its configured starting value until an account.snapshot applies a
 // Drawdown Step (#16), never actual account equity. Yearly re-basing and
 // recovery are #17. No cap of any kind is checked — this is one Unit, and
-// ADR 0008's four caps are #55 and later tickets. The
-// entry level is the breakout high, the level the Signal fired at; what fills
-// there is #18's decision, and slippage is a fill concern (ADR 0013), so
+// ADR 0008's four caps are #55 and later tickets.
+//
+// entryLevel is the Entry Channel high the breakout exceeded (#79) — the
+// level a resting buy-stop actually sits at under ADR 0005, not the breakout
+// bar's own high. Faith's own wording is "the price exceeded by a single
+// tick the high ... of the preceding 55 days" [T p.19]; the Baseline's tick
+// increment is zero, with the Signal's own strict exceedance doing that
+// work, declared as a baseline-declared adaptation under ADR 0012 rather
+// than an invented constant — a nominal tick is not a stable quantity on
+// split-adjusted prices (ADR 0004: it scales with the adjustment factor), and
+// ADR 0013's 0.05 N of slippage against the trader already exceeds a cent for
+// every instrument the Baseline's universe admits, so a tick would be
+// swallowed by slippage anyway (issue #79's Findings). What fills at this
+// level is #18's decision, and slippage is a fill concern (ADR 0013), so
 // nothing is applied to it here.
 func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, signalID string, entryLevel, n float64, nReady bool) (event.Envelope, error) {
 	// Unreachable from this reducer: Tier A requires a ready N, and a

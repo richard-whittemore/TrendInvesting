@@ -470,9 +470,11 @@ func TestIntrabarStopFillsEvenThoughTheBarClosedAboveIt(t *testing.T) {
 
 	// #79 moves the stop to 152.575 (2 N below the entry fill of 155.575,
 	// was 154.075 below the old 157.075), so the low must reach below that
-	// new level to still cover it; the open (156) and close (156.5) are
-	// unchanged and stay above it either way.
-	intrabar := bar(day(57), 156, 157, 152.0, 156.5)
+	// new level to still cover it. The high is also lowered, to 156.2, so
+	// this bar stays below the Add rung of 156.325 (0.75 above the entry
+	// fill) — otherwise this bar would ALSO raise and fill an Add, which is
+	// not what this test is about.
+	intrabar := bar(day(57), 156, 156.2, 152.0, 156.1)
 	bars := append(warmUpBars(), breakoutBar(), intrabar)
 	run := runComposed(t, baselineConfig(), bars)
 
