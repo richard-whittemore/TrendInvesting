@@ -15,7 +15,7 @@ import (
 // TradeProposalEventType: this is a decision the strategy made, not an
 // external fact — nothing here assumes a fill. ADR 0005 makes the Add a
 // resting order at the rung, filled in the bar whose range first covers it;
-// #18's fill simulator decides whether and at what price it actually filled.
+// the fill simulator decides whether and at what price it actually filled.
 //
 // A separate payload from both TradeProposalPayload and ExitProposalPayload,
 // for the same "closed set, not free text" reasoning ExitProposalPayload's
@@ -46,8 +46,8 @@ const RuleAddLadderHalfN = "add.ladder.half-n"
 // before the one this proposal would open, never from an intended or
 // proposed level, so that slippage on one fill pushes every later rung out
 // accordingly [T p.19]. What actually fills there is not decided here: ADR
-// 0005 makes it a resting order, and #18's fill simulator decides the
-// executed price.
+// 0005 makes it a resting order, and the fill simulator decides the executed
+// price.
 //
 // Quantity is always the Campaign's frozen UnitQuantity (ADR 0006): an Add
 // is never resized from the current Notional Account — the whole Add Ladder
@@ -58,8 +58,8 @@ const RuleAddLadderHalfN = "add.ladder.half-n"
 // Deliberately out of scope, so nothing here should be read as having
 // considered them:
 //
-//   - Whether the fill actually happens, and at what price. ADR 0005 and #18
-//     own that; a proposal is not a fill.
+//   - Whether the fill actually happens, and at what price. ADR 0005 and the
+//     fill model own that; a proposal is not a fill.
 //   - Caps (ADR 0008). A proposal is not a permission to trade.
 //   - Exit precedence (ADR 0010). This proposal exists only when the SAME
 //     bar did not already propose an exit — enforced by where
@@ -180,9 +180,9 @@ const CampaignUnitAddedSchemaVersion uint32 = 1
 // ProtectiveStop is this Unit's OWN stop — FillPrice - StopMultiple x
 // CampaignN, measured from THIS Unit's actual fill, exactly as
 // CampaignOpenedPayload.ProtectiveStop is measured from Unit 1's. It is
-// deliberately not a move of any earlier Unit's stop: #15's Stop Ladder is
-// what raises earlier Units' stops as later ones are added; this ticket only
-// ever sets a brand new stop for the Unit that was just added (see the
+// deliberately not a move of any earlier Unit's stop: the Stop Ladder is what
+// raises earlier Units' stops as later ones are added; this event only ever
+// sets a brand new stop for the Unit that was just added (see the
 // accompanying strategy.protective-stop.set event, emitted for this Unit
 // alone, in the same Apply return).
 //
@@ -203,7 +203,7 @@ type CampaignUnitAddedPayload struct {
 	FillPrice float64 `json:"fill_price"`
 	// Quantity is what actually executed for this Unit — at most the
 	// Campaign's frozen UnitQuantity; a partial Add is accepted for the
-	// filled quantity, mirroring the Campaign's own opening fill (#11).
+	// filled quantity, mirroring the Campaign's own opening fill.
 	Quantity int64 `json:"quantity"`
 	// CampaignN and StopMultiple are restated from the Campaign so
 	// ProtectiveStop is independently re-derivable from this payload alone,
