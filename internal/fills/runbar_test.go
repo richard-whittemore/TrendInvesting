@@ -701,7 +701,7 @@ func TestRunBarRequiresACompletedBar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, baselineConfig())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}

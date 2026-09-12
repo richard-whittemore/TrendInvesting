@@ -18,7 +18,16 @@ func TestConfigurationHashStability(t *testing.T) {
 	t.Parallel()
 
 	got := event.ConfigurationHash(validConfiguration())
-	const want = "sha256:9b74eadaa35438307bf91513f3a685008aeb1f1878b1daf9a4822ff8d72c89d1"
+	// Re-pinned for #18 (merged to main as PR #82, 8b36714): ConfigurationSchemaVersion
+	// bumped 3 -> 4 and ConfigurationPayload gained the Commission fields
+	// (PerShare, MinimumPerOrder, MaximumFractionOfTradeValue). Both feed
+	// this hash by design (ADR 0016: the schema version is inside the hashed
+	// prefix, and the new fields are inside the canonical bytes), so this
+	// pin moving is the first live demonstration of "a schema bump changes
+	// every hash" -- not a regression. The previous pin, for schema version
+	// 3 with no Commission field, was
+	// sha256:9b74eadaa35438307bf91513f3a685008aeb1f1878b1daf9a4822ff8d72c89d1.
+	const want = "sha256:acdf9cc9f6b45ea4658373abff96306af35539d68ad2a1e0eedee4a014fbb386"
 	if got != want {
 		t.Fatalf("ConfigurationHash(baseline) = %q, want the pinned hash %q", got, want)
 	}
@@ -82,6 +91,12 @@ func TestConfigurationHashChangesWithEveryField(t *testing.T) {
 		{"notional account starting equity", func(c *event.ConfigurationPayload) { c.NotionalAccount.StartingEquity = 2_000_000 }},
 		{"notional account rebasing month", func(c *event.ConfigurationPayload) { c.NotionalAccount.RebasingMonth = 6 }},
 		{"notional account rebasing day", func(c *event.ConfigurationPayload) { c.NotionalAccount.RebasingDay = 15 }},
+		// #18's Commission fields (schema version 4): no exception to "every
+		// field, one at a time" just because they arrived after this test
+		// was first written.
+		{"commission per share", func(c *event.ConfigurationPayload) { c.Commission.PerShare = 0.01 }},
+		{"commission minimum per order", func(c *event.ConfigurationPayload) { c.Commission.MinimumPerOrder = 2.00 }},
+		{"commission maximum fraction of trade value", func(c *event.ConfigurationPayload) { c.Commission.MaximumFractionOfTradeValue = 0.02 }},
 	}
 
 	for _, tt := range tests {

@@ -55,6 +55,14 @@ func invariantTestConfigurationPayload() event.ConfigurationPayload {
 			RebasingMonth:  1,
 			RebasingDay:    1,
 		},
+		// #18: ADR 0013's commission model. Nothing in this file reads it,
+		// but ConfigurationPayload.Validate requires the cap since schema
+		// version 4, so this fixture must state a whole configuration.
+		Commission: event.CommissionConfig{
+			PerShare:                    0.005,
+			MinimumPerOrder:             1.00,
+			MaximumFractionOfTradeValue: 0.01,
+		},
 	}
 }
 

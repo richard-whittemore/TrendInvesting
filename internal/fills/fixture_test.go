@@ -34,9 +34,8 @@ import (
 // Channel (20 bars) at 135, both stated in warmUpBars' own comment.
 
 const (
-	testStrategyVersion   = "test-strategy-1.0.0"
-	testConfigurationHash = "cfg-test"
-	testInstrument        = "AAPL"
+	testStrategyVersion = "test-strategy-1.0.0"
+	testInstrument      = "AAPL"
 
 	// fixtureN is what N is worth throughout, by construction.
 	fixtureN = 1.5
@@ -46,6 +45,14 @@ const (
 	// executes, frozen at the Campaign's first entry (ADR 0006).
 	fixtureUnitQuantity int64 = 3333
 )
+
+// testConfigurationHash is event.ConfigurationHash(baselineConfig()),
+// computed once here rather than declared as a literal: #50/ADR 0016 makes
+// strategy.NewReducer derive the hash from the payload itself, so a fixture
+// that stamps envelopes with a specific hash value must derive it the same
+// way, not restate an opaque string that could silently drift from what the
+// production code actually computes.
+var testConfigurationHash = event.ConfigurationHash(baselineConfig())
 
 // baselineConfig is the Baseline (ADRs 0002/0003/0005/0007/0008/0013) with
 // the Interactive Brokers commission schedule this ticket declares.
@@ -180,7 +187,7 @@ func newComposed(t *testing.T, cfg event.ConfigurationPayload) (*fills.Simulator
 	if err != nil {
 		t.Fatalf("fills.New() error = %v", err)
 	}
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, cfg)
 	if err != nil {
 		t.Fatalf("strategy.NewReducer() error = %v", err)
 	}
@@ -400,7 +407,7 @@ func assertPrice(t *testing.T, what string, got, want float64) {
 // loop produced stands on its own.
 func replayThrough(t *testing.T, inputs []event.Envelope) []event.Envelope {
 	t.Helper()
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, baselineConfig())
 	if err != nil {
 		t.Fatalf("strategy.NewReducer() error = %v", err)
 	}
