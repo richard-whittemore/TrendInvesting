@@ -14,8 +14,9 @@ import (
 //
 // Inputs is the input stream the loop actually applied, in order: the bar
 // itself plus every fill the simulator interleaved around it, each stamped
-// with its own contiguous sequence. It is what #19 journals, and replaying it
-// through replay.Engine.Run with a fresh reducer reproduces Decisions exactly
+// with its own contiguous sequence. It is what the backtest loop journals,
+// and replaying it through replay.Engine.Run with a fresh reducer reproduces
+// Decisions exactly
 // — which is the property that makes the journal evidence rather than a
 // summary.
 //
@@ -39,9 +40,9 @@ func (r *Result) add(input event.Envelope, decisions []event.Envelope) {
 // numbering it into the composed input stream and folding whatever the
 // handler emits into the simulator's resting-order book.
 //
-// It exists so that #19's driver has exactly one way to number the stream: a
-// configuration event applied around RunBar rather than through it would
-// leave a gap replay.Engine.Run refuses.
+// It exists so that the backtest driver has exactly one way to number the
+// stream: a configuration event applied around RunBar rather than through it
+// would leave a gap replay.Engine.Run refuses.
 func Deliver(ctx context.Context, sim *Simulator, handler replay.Handler, envelope event.Envelope) (Result, error) {
 	if sim == nil || handler == nil {
 		return Result{}, fmt.Errorf("fills: a simulator and a handler are both required")
@@ -58,7 +59,7 @@ func Deliver(ctx context.Context, sim *Simulator, handler replay.Handler, envelo
 
 // RunBar is the per-bar protocol: ADR 0005's fill model and ADR 0010's
 // ordering, applied to one completed bar of one instrument. It is the
-// function #19's backtest loop calls, so the protocol is tested here once
+// function the backtest loop calls, so the protocol is tested here once
 // rather than re-derived there.
 //
 // # The protocol
@@ -172,7 +173,7 @@ func RunBar(ctx context.Context, sim *Simulator, handler replay.Handler, barEnve
 	// delivered last. Step 1 below runs BEFORE the bar itself reaches the
 	// reducer, so a stamp taken from delivery order would date a gap fill,
 	// and every decision it causes, to the PREVIOUS bar: an execution
-	// recorded before the session that produced it (Greptile, PR #82).
+	// recorded before the session that produced it.
 	sim.recordedAt = barEnvelope.RecordedAt
 
 	fillsThisBar := 0
@@ -324,8 +325,8 @@ func (s *Simulator) fillEnvelopeFor(bar event.CompletedBarPayload, c candidate, 
 // calling here.
 //
 // A handler error is returned with the emissions it arrived alongside already
-// recorded (replay.Handler's contract, as of #12: a handler that fails closed
-// may emit a final event explaining why, and that event must still reach the
+// recorded (replay.Handler's contract: a handler that fails closed may emit
+// a final event explaining why, and that event must still reach the
 // journal).
 func (s *Simulator) deliver(ctx context.Context, handler replay.Handler, envelope event.Envelope, ref reference, result *Result) error {
 	if err := ctx.Err(); err != nil {

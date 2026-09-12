@@ -175,9 +175,8 @@ type CommissionModel struct {
 //
 // Trade value includes the contract multiplier (quantity x price x
 // dollarsPerPoint) so a futures contract's cap is computed on the notional
-// the multiplier implies rather than on the quoted price (#10; #63 records
-// that the multiplier belongs to the instrument rather than the strategy
-// configuration).
+// the multiplier implies rather than on the quoted price — the multiplier
+// belongs to the instrument, not the strategy configuration.
 func (m CommissionModel) Charge(quantity int64, price, dollarsPerPoint float64) (float64, error) {
 	if quantity <= 0 {
 		return 0, fmt.Errorf("fills: commission quantity must be a positive whole number, got %d", quantity)
