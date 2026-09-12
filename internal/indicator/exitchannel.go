@@ -7,13 +7,9 @@ import "fmt"
 // Rules p.26: System 2 closes an open Campaign in full when price falls
 // below the lowest low of the preceding 20 completed bars (ADR 0002).
 //
-// This is a sibling type to EntryChannel, not a generalisation of it. The two
-// share only a few lines of linear min/max scanning over a ring buffer, which
-// is not enough shared behaviour to justify threading an "extreme selector"
-// through one generic type — doing so would touch EntryChannel's own file and
-// put its already-passing tests at risk for no benefit here. Keeping them as
-// two small, independent types means EntryChannel's tests and this ticket's
-// are both untouched by the other's change.
+// This is a sibling type to EntryChannel, not a generalisation of it: the two
+// share only a few lines of linear min/max scanning, not enough to justify a
+// shared "extreme selector" type.
 //
 // # Evaluate-then-add: the same ordering EntryChannel enforces, mirrored
 //
@@ -63,10 +59,9 @@ func NewExitChannel(length int) (*ExitChannel, error) {
 // type's doc comment.
 //
 // The window is a straightforward ring buffer scanned linearly on every
-// call; at the Baseline's length (20, ADR 0002) this is a handful of
-// arithmetic operations and is not worth optimising (ADR 0011: per-bar
-// evaluation across the whole universe is dominated by data loading, not
-// this) — the same reasoning EntryChannel.Extreme documents.
+// call; at the Baseline's length (20, ADR 0002) this is not worth optimising
+// (ADR 0011: per-bar evaluation across the whole universe is dominated by
+// data loading, not this).
 func (c *ExitChannel) Extreme() (value float64, ready bool) {
 	if c.count == 0 {
 		return 0, false
