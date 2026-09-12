@@ -23,6 +23,11 @@ import (
 // is a resting order that fills INSIDE the breakout bar, not at the next
 // open. The fill price is the level the proposal named plus 0.05 N, and the
 // Campaign opens at that price, not at the level.
+//
+// #79: the level the proposal names is the Entry Channel high (155.5) that
+// the breakout exceeded, not the breakout bar's own high (157) — the bar's
+// high sits a full 1 N above the channel here, and the fill lands at the
+// channel plus slippage, never at the bar's high.
 func TestBreakoutBarFillsTheEntryInsideThatBar(t *testing.T) {
 	t.Parallel()
 
@@ -31,8 +36,8 @@ func TestBreakoutBarFillsTheEntryInsideThatBar(t *testing.T) {
 
 	var proposal event.TradeProposalPayload
 	decodeInto(t, onlyOfType(t, run.Decisions, event.TradeProposalEventType), &proposal)
-	if !closeTo(proposal.EntryLevel, 157) {
-		t.Fatalf("proposal.EntryLevel = %v, want 157 (the breakout bar's high)", proposal.EntryLevel)
+	if !closeTo(proposal.EntryLevel, 155.5) {
+		t.Fatalf("proposal.EntryLevel = %v, want 155.5 (the Entry Channel high the breakout exceeded, not its own high of 157)", proposal.EntryLevel)
 	}
 	if !closeTo(proposal.N, fixtureN) {
 		t.Fatalf("proposal.N = %v, want %v", proposal.N, fixtureN)
@@ -49,10 +54,12 @@ func TestBreakoutBarFillsTheEntryInsideThatBar(t *testing.T) {
 	if fill.Kind != event.FillKindEntry {
 		t.Errorf("fill.Kind = %q, want %q", fill.Kind, event.FillKindEntry)
 	}
-	assertPrice(t, "fill.Level", fill.Level, 157)
-	// max(level 157, open 155.5) + 0.075: the bar did not gap through, so the
-	// order executed where it rested and slippage pushed it against us.
-	assertPrice(t, "fill.Price", fill.Price, 157.075)
+	assertPrice(t, "fill.Level", fill.Level, 155.5)
+	// max(level 155.5, open 155.5) + 0.075: the bar did not gap through (the
+	// bar's own open sits exactly at the channel), so the order executed
+	// where it rested and slippage pushed it against us. It did NOT execute
+	// at the bar's own high of 157.
+	assertPrice(t, "fill.Price", fill.Price, 155.575)
 	assertPrice(t, "fill.SlippageApplied", fill.SlippageApplied, fixtureSlippage)
 	// 3333 x 0.005, above the 1.00 floor and far below 1 % of the trade.
 	assertPrice(t, "fill.Commission", fill.Commission, 16.665)
@@ -65,9 +72,75 @@ func TestBreakoutBarFillsTheEntryInsideThatBar(t *testing.T) {
 
 	var opened event.CampaignOpenedPayload
 	decodeInto(t, onlyOfType(t, run.Decisions, event.CampaignOpenedEventType), &opened)
-	assertPrice(t, "campaign entry price", opened.EntryPrice, 157.075)
+	assertPrice(t, "campaign entry price", opened.EntryPrice, 155.575)
 	// 2 N below the ACTUAL fill (The Turtle Rules p.22, ADR 0013).
-	assertPrice(t, "campaign protective stop", opened.ProtectiveStop, 154.075)
+	assertPrice(t, "campaign protective stop", opened.ProtectiveStop, 152.575)
+}
+
+// TestGapUpBreakoutBarFillsAtTheOpenPlusSlippage is #79's clearest evidence:
+// under the old defect, EntryLevel was the breakout bar's own high, which by
+// construction the bar itself always reaches, so a breakout bar could never
+// gap OVER its own entry level — ADR 0005 rule 1 ("gaps fill at the open")
+// was unreachable for an entry, no matter what fixture was tried. With
+// EntryLevel the Entry Channel high (a level fixed before the bar opened),
+// a bar that opens above the channel is a genuine gap, expressible for the
+// first time.
+//
+// It also isolates ADR 0013's rule from ADR 0006's: the proposal's
+// ProtectiveStopIntent is derived from EntryLevel and moves with it, but the
+// Campaign's ACTUAL Protective Stop is measured from the fill that actually
+// executed (here, the gapped-open price, well above both EntryLevel and the
+// proposal's stop intent) — the two are deliberately different numbers below.
+func TestGapUpBreakoutBarFillsAtTheOpenPlusSlippage(t *testing.T) {
+	t.Parallel()
+
+	// The Entry Channel (from warmUpBars) tops out at 155.5. This bar opens
+	// at 156.5 — already through the channel — and its high of 157.2 is what
+	// makes it a Signal at all (strictly exceeding 155.5, The Turtle Rules
+	// p.19's "exceeds"), while staying below 157.325 — the Unit 2 rung half
+	// an N above the 156.575 gapped entry fill — so this bar produces the
+	// entry alone rather than also chaining an Add (PR #85 review round).
+	gapUp := bar(day(56), 156.5, 157.2, 156, 157.0)
+	bars := append(warmUpBars(), gapUp)
+	run := runComposed(t, baselineConfig(), bars)
+
+	var proposal event.TradeProposalPayload
+	decodeInto(t, onlyOfType(t, run.Decisions, event.TradeProposalEventType), &proposal)
+	if !closeTo(proposal.EntryLevel, 155.5) {
+		t.Fatalf("proposal.EntryLevel = %v, want 155.5 (the Entry Channel high, fixed before this bar opened)", proposal.EntryLevel)
+	}
+	// The proposal's OWN stop intent is derived from EntryLevel (event.
+	// TradeProposalPayload.Validate re-derives it), never from what actually
+	// fills.
+	wantStopIntent := 155.5 - 2*fixtureN
+	if !closeTo(proposal.ProtectiveStopIntent, wantStopIntent) {
+		t.Fatalf("proposal.ProtectiveStopIntent = %v, want %v (entry level - 2N)", proposal.ProtectiveStopIntent, wantStopIntent)
+	}
+
+	got := fillPayloads(t, run.Inputs)
+	if len(got) != 1 {
+		t.Fatalf("got %d fill(s), want exactly 1 (the entry)", len(got))
+	}
+	fill := got[0]
+	if fill.Kind != event.FillKindEntry {
+		t.Errorf("fill.Kind = %q, want %q", fill.Kind, event.FillKindEntry)
+	}
+	assertPrice(t, "fill.Level", fill.Level, 155.5)
+	// max(level 155.5, open 156.5) + 0.075: the bar gapped OVER the level, so
+	// the order executed at the open, never at the level it rested at.
+	assertPrice(t, "fill.Price", fill.Price, 156.575)
+
+	var opened event.CampaignOpenedPayload
+	decodeInto(t, onlyOfType(t, run.Decisions, event.CampaignOpenedEventType), &opened)
+	assertPrice(t, "campaign entry price", opened.EntryPrice, 156.575)
+	// The Campaign's ACTUAL stop is 2 N below the ACTUAL fill (ADR 0013),
+	// not below EntryLevel: 156.575 - 3 = 153.575, deliberately different
+	// from the proposal's own stop intent of 152.5 above.
+	wantActualStop := 156.575 - 2*fixtureN
+	assertPrice(t, "campaign protective stop", opened.ProtectiveStop, wantActualStop)
+	if closeTo(opened.ProtectiveStop, proposal.ProtectiveStopIntent) {
+		t.Error("the Campaign's actual stop equals the proposal's stop intent; ADR 0013 requires it to come from the actual fill, which gapped away from the proposed level here")
+	}
 }
 
 // TestAddLadderRungsAreMeasuredFromTheSlippedFill walks the whole Add chain.
@@ -91,13 +164,13 @@ func TestAddLadderRungsAreMeasuredFromTheSlippedFill(t *testing.T) {
 		level float64
 		price float64
 	}{
-		{event.FillKindEntry, 157, 157.075},
-		// 157.075 + 0.75; bar 57 opened at 157.2, below the rung.
-		{event.FillKindAdd, 157.825, 157.9},
-		// 157.9 + 0.75; bar 58 opened at 158.3, below the rung.
-		{event.FillKindAdd, 158.65, 158.725},
-		// 158.725 + 0.75; bar 59 opened at 159.0, below the rung.
-		{event.FillKindAdd, 159.475, 159.55},
+		{event.FillKindEntry, 155.5, 155.575},
+		// 155.575 + 0.75; bar 57 opened at 155.7, below the rung.
+		{event.FillKindAdd, 156.325, 156.4},
+		// 156.4 + 0.75; bar 58 opened at 156.8, below the rung.
+		{event.FillKindAdd, 157.15, 157.225},
+		// 157.225 + 0.75; bar 59 opened at 157.5, below the rung.
+		{event.FillKindAdd, 157.975, 158.05},
 	}
 	for i, want := range wants {
 		if got[i].Kind != want.kind {
@@ -154,8 +227,8 @@ func TestExitChannelBreachFillsAtTheLevelLessSlippageAndClosesTheCampaign(t *tes
 	if exited.Units != 4 {
 		t.Errorf("exited.Units = %d, want 4", exited.Units)
 	}
-	// (157.075 + 157.9 + 158.725 + 159.55) / 4.
-	assertPrice(t, "exited.EntryPrice", exited.EntryPrice, 158.3125)
+	// (155.575 + 156.4 + 157.225 + 158.05) / 4.
+	assertPrice(t, "exited.EntryPrice", exited.EntryPrice, 156.8125)
 	assertPrice(t, "exited.ExitPrice", exited.ExitPrice, 159.225)
 	if exited.RealisedResult <= 0 {
 		t.Errorf("exited.RealisedResult = %v, want a profit: the fixture exits above its average entry", exited.RealisedResult)
@@ -171,15 +244,22 @@ func TestExitChannelBreachFillsAtTheLevelLessSlippageAndClosesTheCampaign(t *tes
 // The favourable ordering (stopped first, so never entered, so no loss) is
 // never assumed.
 //
-// The fixture also pins Range.Reference's own rule. The bar opens at 153.6,
-// BELOW the stop the entry sets at 154.075. Referenced to the bar's open, the
-// stop would look gapped-through and fill at 153.525 — a price that occurred
+// The fixture also pins Range.Reference's own rule. The bar opens at 152.0,
+// BELOW the stop the entry sets at 152.575. Referenced to the bar's open, the
+// stop would look gapped-through and fill at 151.925 — a price that occurred
 // before the stop existed. Referenced to the entry fill that created it, it
-// fills at its level less slippage, 154.0.
+// fills at its level less slippage, 152.5.
 func TestBarCoveringBothEntryAndStopEntersThenStops(t *testing.T) {
 	t.Parallel()
 
-	bars := append(warmUpBars(), bar(day(56), 153.6, 157, 153.5, 154))
+	// #79: the entry level is now the Entry Channel high (155.5), not this
+	// bar's own high, so the entry fills at 155.5 + slippage regardless of
+	// the bar's own range — this bar's open (152.0) and low (151.5) exist
+	// only to pin the same-bar-ambiguity and Range.Reference rules below. The
+	// high (156.0) stays below 156.325 — the Unit 2 rung half an N above the
+	// 155.575 entry fill — so this bar produces the entry and stop alone
+	// (PR #85 review round: a higher high would also chain an Add here).
+	bars := append(warmUpBars(), bar(day(56), 152.0, 156.0, 151.5, 153.0))
 	run := runComposed(t, baselineConfig(), bars)
 
 	got := fillPayloads(t, run.Inputs)
@@ -189,10 +269,10 @@ func TestBarCoveringBothEntryAndStopEntersThenStops(t *testing.T) {
 	if got[0].Kind != event.FillKindEntry || got[1].Kind != event.FillKindStop {
 		t.Fatalf("fill kinds = %q then %q, want entry then stop: the pessimistic ordering is entered-then-stopped", got[0].Kind, got[1].Kind)
 	}
-	assertPrice(t, "entry fill price", got[0].Price, 157.075)
-	assertPrice(t, "stop fill level", got[1].Level, 154.075)
-	assertPrice(t, "stop fill price", got[1].Price, 154.0)
-	if closeTo(got[1].Price, 153.525) {
+	assertPrice(t, "entry fill price", got[0].Price, 155.575)
+	assertPrice(t, "stop fill level", got[1].Level, 152.575)
+	assertPrice(t, "stop fill price", got[1].Price, 152.5)
+	if closeTo(got[1].Price, 151.925) {
 		t.Error("stop filled at the bar's open: a stop created by a fill inside the bar cannot have executed before it existed")
 	}
 	// Both fills belong to the same bar and carry the same timestamp; the
@@ -207,10 +287,10 @@ func TestBarCoveringBothEntryAndStopEntersThenStops(t *testing.T) {
 		t.Errorf("exited.Reason = %q, want %q", exited.Reason, event.ExitReasonStop)
 	}
 	if exited.RealisedResult >= 0 {
-		t.Errorf("exited.RealisedResult = %v, want a loss: entering at 157.075 and stopping at 154.0 loses money", exited.RealisedResult)
+		t.Errorf("exited.RealisedResult = %v, want a loss: entering at 155.575 and stopping at 152.5 loses money", exited.RealisedResult)
 	}
-	// 3333 x (154.0 - 157.075).
-	assertPrice(t, "exited.RealisedResult", exited.RealisedResult, float64(fixtureUnitQuantity)*(154.0-157.075))
+	// 3333 x (152.5 - 155.575).
+	assertPrice(t, "exited.RealisedResult", exited.RealisedResult, float64(fixtureUnitQuantity)*(152.5-155.575))
 }
 
 // --- ADR 0005 rule 1: gaps ------------------------------------------------
@@ -237,8 +317,11 @@ func TestGapDownThroughAStopFillsAtTheOpen(t *testing.T) {
 	if stop.Kind != event.FillKindStop {
 		t.Fatalf("second fill Kind = %q, want %q", stop.Kind, event.FillKindStop)
 	}
-	assertPrice(t, "stop fill level", stop.Level, 154.075)
-	// min(level 154.075, open 150) - 0.075.
+	// #79 moves the stop to 152.575 (2 N below the new 155.575 entry fill,
+	// was 154.075 below the old 157.075), but the open (150) still gaps
+	// below it either way, so the executed price is unchanged.
+	assertPrice(t, "stop fill level", stop.Level, 152.575)
+	// min(level 152.575, open 150) - 0.075.
 	assertPrice(t, "stop fill price", stop.Price, 149.925)
 
 	// The gap fill precedes the bar in the composed input stream, and the
@@ -332,13 +415,15 @@ func TestGapFillsCarryTheProvenanceOfTheBarWhoseOpenProducedThem(t *testing.T) {
 // of the rule above.
 //
 // It uses a stub handler rather than the reducer, because this reducer can
-// never reach the case: every proposal it raises is covered by the bar that
-// raised it, so no proposal ever rests into the next bar to be gapped over
-// (see TestProposalsAreAlwaysCoveredByTheBarThatRaisedThem). The path is
-// reachable for the producers that are not this reducer — #30's adapter, and
-// a Variant whose entry rests at the Entry Channel level rather than the
-// breakout bar's own high — and the stamping must be right for them too, so
-// it is tested at the seam #19 and #30 will actually compose.
+// never reach the case: a Signal already guarantees the bar's high strictly
+// exceeds the level the entry rests at (the Entry Channel high, #79), so the
+// SAME bar that raises the proposal always covers it too, and no proposal
+// ever rests into the next bar to be gapped over (see
+// TestProposalsAreAlwaysCoveredByTheBarThatRaisedThem). The path is reachable
+// for a proposal built directly, as this test does, standing in for a
+// producer this reducer's invariant does not constrain — #30's adapter — and
+// the stamping must be right for it too, so it is tested at the seam #19 and
+// #30 will actually compose.
 func TestAGapUpBuyInTheOpenInstantPassCarriesTheSameProvenance(t *testing.T) {
 	t.Parallel()
 
@@ -388,11 +473,17 @@ func TestAGapUpBuyInTheOpenInstantPassCarriesTheSameProvenance(t *testing.T) {
 func TestIntrabarStopFillsEvenThoughTheBarClosedAboveIt(t *testing.T) {
 	t.Parallel()
 
-	intrabar := bar(day(57), 156, 157, 154.0, 156.5)
+	// #79 moves the stop to 152.575 (2 N below the entry fill of 155.575,
+	// was 154.075 below the old 157.075), so the low must reach below that
+	// new level to still cover it. The high is also lowered, to 156.2, so
+	// this bar stays below the Add rung of 156.325 (0.75 above the entry
+	// fill) — otherwise this bar would ALSO raise and fill an Add, which is
+	// not what this test is about.
+	intrabar := bar(day(57), 156, 156.2, 152.0, 156.1)
 	bars := append(warmUpBars(), breakoutBar(), intrabar)
 	run := runComposed(t, baselineConfig(), bars)
 
-	if intrabar.SplitAdjusted.Close <= 154.075 {
+	if intrabar.SplitAdjusted.Close <= 152.575 {
 		t.Fatal("the fixture is wrong: the bar must CLOSE above the stop, or it does not distinguish the two checks")
 	}
 
@@ -402,7 +493,7 @@ func TestIntrabarStopFillsEvenThoughTheBarClosedAboveIt(t *testing.T) {
 	}
 	// The bar did NOT gap through the stop (it opened at 156, above the
 	// level), so the fill is at the level less slippage.
-	assertPrice(t, "stop fill price", got[1].Price, 154.0)
+	assertPrice(t, "stop fill price", got[1].Price, 152.5)
 
 	var exited event.CampaignExitedPayload
 	decodeInto(t, onlyOfType(t, run.Decisions, event.CampaignExitedEventType), &exited)
@@ -423,9 +514,11 @@ func TestOnlyTheUnitsWhoseOwnStopWasReachedAreStopped(t *testing.T) {
 
 	bars := append(warmUpBars(),
 		breakoutBar(),
-		// Gaps above the 157.825 rung: Unit 2 fills at the OPEN, 160.075,
-		// leaving its own stop at 157.075 while Unit 1's rises only to
-		// 154.825.
+		// #79: the rung is now 156.325 (0.75 above the 155.575 entry fill,
+		// was 157.825 above the old 157.075 one). This bar still gaps above
+		// it either way: Unit 2 fills at the OPEN, 160.075, leaving its own
+		// stop at 157.075 (unchanged: the gap fill price never depended on
+		// the rung) while Unit 1's rises only to 153.325 (was 154.825).
 		bar(day(57), 160, 160.5, 159.5, 160.2),
 		// Reaches 156: below Unit 2's stop, above Unit 1's.
 		bar(day(58), 160, 160.2, 156, 157),
@@ -440,8 +533,8 @@ func TestOnlyTheUnitsWhoseOwnStopWasReachedAreStopped(t *testing.T) {
 	if add.Kind != event.FillKindAdd {
 		t.Fatalf("second fill Kind = %q, want %q", add.Kind, event.FillKindAdd)
 	}
-	assertPrice(t, "add fill level", add.Level, 157.825)
-	// max(rung 157.825, open 160) + 0.075: the gap rule, applied to a buy.
+	assertPrice(t, "add fill level", add.Level, 156.325)
+	// max(rung 156.325, open 160) + 0.075: the gap rule, applied to a buy.
 	assertPrice(t, "add fill price", add.Price, 160.075)
 
 	stop := got[2]
@@ -795,11 +888,21 @@ func TestRunBarReturnsTheReducersErrorAndWhatItEmittedAlongsideIt(t *testing.T) 
 
 // TestProposalsAreAlwaysCoveredByTheBarThatRaisedThem records a structural
 // finding, as a test so it cannot rot: under ADR 0005's fill model this
-// reducer never raises a proposal that its own bar does not already cover.
-// An entry is proposed at the breakout bar's own high, an Add only once the
-// bar's high has reached the rung, an exit only once the bar's low has broken
-// the channel — so every proposal fills inside the bar that raised it, and
-// ADR 0011's next-bar expiry is never reached by the simulator.
+// reducer never raises a proposal that its own bar does not already cover —
+// UNCHANGED by #79, though the reasoning for the entry case is now different.
+//
+// Before #79, an entry rested at the breakout bar's own high, which that
+// bar's own range trivially reaches (High >= High) — always true, but for
+// the wrong reason. After #79 an entry rests at the Entry Channel high
+// instead, a level fixed BEFORE the bar opened; what makes the bar still
+// cover it is the Signal's own invariant (SignalPayload.Validate: BreakoutHigh
+// strictly exceeds EntryChannelHigh, The Turtle Rules p.19's "exceeds"), which
+// guarantees bar.High > EntryLevel for the very bar that raised the proposal.
+// An Add fills once the bar's high has reached its rung, and an exit once the
+// bar's low has broken the Exit Channel — so every proposal still fills
+// inside the bar that raised it, and ADR 0011's next-bar expiry remains
+// unreached by the simulator for any of the four proposal kinds (recorded in
+// issue #79's Findings).
 //
 // The consequence matters for the protocol: the only orders that ever rest
 // from one bar into the next are Protective Stops.

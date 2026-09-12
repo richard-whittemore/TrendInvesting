@@ -23,7 +23,8 @@ import (
 // and that only ever happens on a recorded fill.
 
 // campaignFillPrice is what the fixtures below actually fill at. It is
-// deliberately different from the breakout fixture's entry level of 200 (see
+// deliberately different from the breakout fixture's entry level of 155 (#79:
+// the Entry Channel high the breakout exceeded, not its own high of 200 — see
 // breakoutFixtureHighs), so a Campaign that recorded the intended level rather
 // than the executed price would be visible rather than indistinguishable. It
 // is above the level, which is the direction ADR 0013's slippage always pushes
@@ -329,12 +330,13 @@ func onlyEnvelopeOfType(t *testing.T, emitted []event.Envelope, eventType string
 // journaled, and the price that ACTUALLY filled rather than the level the
 // Signal fired at.
 //
-// The fill price (201.25) is deliberately not the entry level (200), so the
-// Protective Stop the Campaign records (201.25 - 2N = 126.09...) differs from
-// the proposal's stop intent (200 - 2N = 124.84...). ADR 0013 puts slippage in
-// the fill producer and measures the Add Ladder from the slipped fill, so a
-// Campaign that recorded the intended level would put every later rung of both
-// ladders in the wrong place.
+// The fill price (201.25) is deliberately not the entry level (155, #79's
+// Entry Channel high), so the Protective Stop the Campaign records
+// (201.25 - 2N = 126.09...) differs from the proposal's stop intent
+// (155 - 2N = 79.84...). ADR 0013 puts slippage in the fill producer and
+// measures the Add Ladder from the slipped fill, so a Campaign that recorded
+// the intended level would put every later rung of both ladders in the wrong
+// place.
 func TestFillOpensACampaignWithNAndUnitSizeFrozen(t *testing.T) {
 	t.Parallel()
 
@@ -646,8 +648,8 @@ func TestProposalWithNoFillOpensNoCampaignAndExpiresWithItsBar(t *testing.T) {
 	if expired.Kind != event.ProposalKindEntry {
 		t.Errorf("expiry Kind = %q, want %q", expired.Kind, event.ProposalKindEntry)
 	}
-	if expired.Quantity != 133 || expired.Level != 200 {
-		t.Errorf("expiry Quantity/Level = %d/%v, want 133/200 (what was proposed and not taken)", expired.Quantity, expired.Level)
+	if expired.Quantity != 133 || expired.Level != 155 {
+		t.Errorf("expiry Quantity/Level = %d/%v, want 133/155 (what was proposed and not taken; #79 makes 155 the Entry Channel high, not the breakout bar's own 200)", expired.Quantity, expired.Level)
 	}
 	if err := expired.Validate(); err != nil {
 		t.Errorf("emitted proposal-expired payload fails its own Validate(): %v", err)

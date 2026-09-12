@@ -122,9 +122,19 @@ func warmUpBars() []event.CompletedBarPayload {
 
 // breakoutBar is bar 56 in every fixture except the entered-then-stopped one:
 // a clean breakout above the 155.5 Entry Channel whose own low (155) stays
-// well clear of the Protective Stop the entry fill will set at 154.075.
+// well clear of the Protective Stop the entry fill will set at 152.575 (#79:
+// the entry rests at the 155.5 channel high, not this bar's own high).
+//
+// The high is deliberately kept BELOW 156.325 — the Unit 2 rung half an N
+// above the 155.575 entry fill — so this bar produces the entry alone. A bar
+// whose own high also cleared that rung would, via the same-bar Add chain
+// (PR #85 review round: openCampaign now calls evaluateAdd, matching
+// applyAddFill), add Unit 2 immediately too, which is correct behaviour but
+// not what the tests that merely reuse this bar as "a breakout happened" are
+// about; TestAddWithinTheBreakoutBarItself and its neighbours in
+// internal/strategy/add_test.go exercise that chain directly instead.
 func breakoutBar() event.CompletedBarPayload {
-	return bar(day(56), 155.5, 157, 155, 156.5)
+	return bar(day(56), 155.5, 156.2, 155, 156.0)
 }
 
 // campaignLifeBars is the full-life fixture: warm-up, a breakout, three
@@ -144,20 +154,30 @@ func campaignLifeBars() []event.CompletedBarPayload {
 	bars := warmUpBars()
 	bars = append(bars,
 		breakoutBar(),
-		// Unit 2: rung 157.825 (Unit 1 filled at 157.075).
-		bar(day(57), 157.2, 158.2, 157, 158),
-		// Unit 3: rung 158.65 (Unit 2 filled at 157.9).
-		bar(day(58), 158.3, 159.0, 158.2, 158.8),
-		// Unit 4: rung 159.475 (Unit 3 filled at 158.725). No fifth Unit is
+		// #79: the entry now rests at the Entry Channel high (155.5), not the
+		// breakout bar's own high (157), so Unit 1 fills at 155.575 rather
+		// than 157.075 — 1 N (1.5) lower. Bars 57-59 are shifted down by that
+		// same 1.5 so each Add still fills at its own rung rather than
+		// gapping at the bar's open, keeping this fixture's story (a rung
+		// measured from the previous fill, not from the intended level)
+		// unchanged in shape; bars 60 onward are untouched (see below).
+		//
+		// Unit 2: rung 156.325 (Unit 1 filled at 155.575).
+		bar(day(57), 155.7, 156.7, 155.5, 156.5),
+		// Unit 3: rung 157.15 (Unit 2 filled at 156.4).
+		bar(day(58), 156.8, 157.5, 156.7, 157.3),
+		// Unit 4: rung 157.975 (Unit 3 filled at 157.225). No fifth Unit is
 		// ever proposed (ADR 0008, MaxUnits 4).
-		bar(day(59), 159.0, 159.8, 158.9, 159.6),
+		bar(day(59), 157.5, 158.3, 157.4, 158.1),
 	)
 	for k := 60; k <= 79; k++ {
 		open := 159.5 + float64(k-60)*0.2
 		bars = append(bars, bar(day(k), open, open+0.3, open-0.2, open+0.15))
 	}
-	// The Exit Channel now stands at 159.3 (bar 60's low). This bar's low
-	// breaks it without reaching the highest Protective Stop (156.55).
+	// The Exit Channel stands at 159.3 (bar 60's low), unaffected by #79:
+	// it is computed from these bars' own OHLC, not from any fill. This
+	// bar's low breaks it without reaching the highest Protective Stop,
+	// which #79's shift DOES move (156.55 -> 155.05).
 	bars = append(bars, bar(day(80), 163.0, 163.1, 157.0, 158.0))
 	return bars
 }
@@ -257,9 +277,11 @@ func envelope(t *testing.T, id, eventType string, schemaVersion uint32, at time.
 
 // restingEntryProposal is a trade proposal envelope a test can Observe
 // directly, for the cases this reducer cannot produce — an entry order left
-// resting into a later bar. Every figure is the fixture's own, so the
-// proposal is exactly what the reducer would have raised had its entry level
-// been level rather than the breakout bar's own high.
+// resting into a later bar. This reducer never raises such a proposal
+// (#79): a Signal already guarantees the bar's high strictly exceeds the
+// Entry Channel high the entry rests at, so the SAME bar always covers it.
+// This stands in for a producer that invariant does not constrain, at
+// whatever level the caller passes.
 func restingEntryProposal(t *testing.T, level float64) event.Envelope {
 	t.Helper()
 	proposal := event.TradeProposalPayload{

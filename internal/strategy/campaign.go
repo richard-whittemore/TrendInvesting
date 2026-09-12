@@ -936,28 +936,39 @@ func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBa
 // "filled in the bar whose range first covers it"), so the comparison is
 // >=, not the strict > an Entry Channel breakout uses.
 //
-// # Two call sites, one function (the "four Units in one bar" criterion)
+// # Three call sites, one function (the "four Units in one bar" criterion)
 //
-// This is called from two places:
+// This is called from three places:
 //
 //  1. applyCompletedBar, once per completed bar, AFTER the exit evaluation
 //     (ADR 0010: exits before Adds) and only when this SAME bar did not
 //     itself propose an exit (exit takes precedence — the ticket's other
-//     ADR 0010 criterion).
-//  2. applyAddFill, immediately after a new Unit's fill is accepted: the
-//     SECOND, THIRD and FOURTH rungs each depend on the PREVIOUS Unit's
-//     actual fill, which is unknown until that fill arrives, so the
-//     opportunity for the NEXT Unit can only be evaluated once it has. If
-//     the bar that raised the JUST-EXECUTED proposal also covers the next
-//     rung, this re-evaluation proposes it immediately — still attributed
-//     to that same bar — which is how all four Units can be added within
-//     one bar from resting orders, each rung faithfully measured from the
-//     fill before it.
+//     ADR 0010 criterion). Only reachable for a Campaign already open when
+//     the bar arrives.
+//  2. openCampaign, immediately after a new Campaign's first Unit fills
+//     (#79 review round, "Breakout-bar Adds are skipped"): before #79, the
+//     entry always filled at the breakout bar's own high, so Unit 1's rung
+//     was structurally always above that bar's own high and this call site
+//     could never fire. #79 moves the entry to the Entry Channel high,
+//     which removes that accidental guarantee — the bar that opens a
+//     Campaign can now also cover Unit 2's rung, and without this call site
+//     that opportunity would be silently skipped, since applyCompletedBar
+//     already processed this bar as a Setup (no Campaign existed yet) and
+//     will never see it again.
+//  3. applyAddFill, immediately after a new Unit's fill is accepted: the
+//     THIRD and FOURTH rungs each depend on the PREVIOUS Unit's actual
+//     fill, which is unknown until that fill arrives, so the opportunity
+//     for the NEXT Unit can only be evaluated once it has. If the bar that
+//     raised the JUST-EXECUTED proposal also covers the next rung, this
+//     re-evaluation proposes it immediately — still attributed to that same
+//     bar — which is how all four Units can be added within one bar from
+//     resting orders, each rung faithfully measured from the fill before it
+//     (The Turtle Rules p.19-20: "all four could be added in one day").
 //
-// Both call sites therefore need the SAME bar's high, period end and
-// earliest-fill-at bound, even though the second one runs from a fill's own
-// Apply call — a later call than the bar event that produced the
-// opportunity. That is why both read state.lastBarHigh/lastBarPeriodEnd/
+// All three call sites therefore need the SAME bar's high, period end and
+// earliest-fill-at bound, even though the second and third run from a
+// fill's own Apply call — a later call than the bar event that produced the
+// opportunity. That is why all three read state.lastBarHigh/lastBarPeriodEnd/
 // lastBarEarliestFillAt (set once per completed bar, in applyCompletedBar)
 // rather than bar-local values only the first call site would have.
 //
@@ -1351,7 +1362,11 @@ func applyFillToOpenCampaign(campaign *campaignState, fill event.FillPayload) ([
 }
 
 // openCampaign brings a Campaign into being from the fill that executed its
-// proposal, and returns the one decision event that records it.
+// proposal, and returns the Campaign-opened and Protective-Stop-set events
+// that record it — plus, if the SAME bar that produced this fill also covers
+// Unit 2's own rung, the same-bar Add chain evaluateAdd continues from
+// applyAddFill (#79 review round; see evaluateAdd's own doc comment, call
+// site 2).
 //
 // The campaign N and the Unit share count are taken from the proposal, not
 // recomputed: ADR 0006 freezes them at first entry, and recomputing at fill
@@ -1495,10 +1510,33 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 	// EventTime is the fill's timestamp on both: the Campaign, and its stop,
 	// came into being when the fill did, not when the Signal fired. Order is
 	// Campaign-opened then Protective-Stop-set, per the ticket.
-	return []event.Envelope{
+	emissions := []event.Envelope{
 		r.stamp(campaignID, event.CampaignOpenedEventType, event.CampaignOpenedSchemaVersion, fill.FilledAt, input, openedPayloadBytes),
 		r.stamp(decisionID("protective-stop-set", fill.InstrumentID, fill.FilledAt), event.ProtectiveStopSetEventType, event.ProtectiveStopSetSchemaVersion, fill.FilledAt, input, stopSetPayloadBytes),
-	}, nil
+	}
+
+	// #79 review round ("Breakout-bar Adds are skipped"): before #79, the
+	// entry filled at the breakout bar's own high, so Unit 1's rung
+	// (fill + 1/2N) was always ABOVE that bar's own high and could never be
+	// covered by it — evaluateAdd's same-bar chain (see its own doc comment)
+	// only ever needed to start from applyAddFill, because the entry's own
+	// bar was structurally never a candidate. #79 moves the entry down to the
+	// Entry Channel high, which removes that accidental guarantee: the SAME
+	// bar that fills the entry can now also cover Unit 2's rung (The Turtle
+	// Rules p.19-20's "all four could be added in one day" — #14 built that
+	// chain, but hung it off applyAddFill alone for the reason above). This is
+	// the third call site the chain needs, using the identical path
+	// applyAddFill uses rather than a second one: state.lastBarHigh/
+	// lastBarPeriodEnd/lastBarEarliestFillAt already name the breakout bar
+	// (set when it was processed as a bar, before this fill arrived), exactly
+	// what evaluateAdd reads.
+	chainEmissions, err := r.evaluateAdd(state, input)
+	if err != nil {
+		return nil, err
+	}
+	emissions = append(emissions, chainEmissions...)
+
+	return emissions, nil
 }
 
 // applyStopFill handles a fill.Kind == event.FillKindStop delivery: the way
