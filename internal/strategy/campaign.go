@@ -359,6 +359,19 @@ type acceptedFillState struct {
 	// silently accepted as the identical fact. Always nil for every other
 	// Kind, matching FillPayload.Validate's own closed-shape rule.
 	unitIDs []string
+	// level, slippageApplied and commission are #18's additions, compared
+	// alongside every other field for exactly the reason unitIDs is: a
+	// re-delivered fill that reuses a FillID but states a different level, a
+	// different slippage or a different commission is not the identical
+	// fact, and a reused identifier carrying different contents is a
+	// reconciliation failure, not a duplicate delivery. The reducer makes no
+	// other use of them — it never re-derives a fill's price from its level,
+	// and the fill model and cost model both belong to the producer (ADR
+	// 0005/0013) — but it must not silently absorb a producer that changed
+	// them.
+	level           float64
+	slippageApplied float64
+	commission      float64
 }
 
 // acceptedFillFromPayload builds the record applyFill stores for fill once
@@ -366,15 +379,18 @@ type acceptedFillState struct {
 // in part).
 func acceptedFillFromPayload(fill event.FillPayload) acceptedFillState {
 	return acceptedFillState{
-		instrumentID: fill.InstrumentID,
-		kind:         fill.Kind,
-		proposalID:   fill.ProposalID,
-		campaignID:   fill.CampaignID,
-		quantity:     fill.Quantity,
-		price:        fill.Price,
-		direction:    fill.Direction,
-		filledAt:     fill.FilledAt,
-		unitIDs:      fill.UnitIDs,
+		instrumentID:    fill.InstrumentID,
+		kind:            fill.Kind,
+		proposalID:      fill.ProposalID,
+		campaignID:      fill.CampaignID,
+		quantity:        fill.Quantity,
+		price:           fill.Price,
+		direction:       fill.Direction,
+		filledAt:        fill.FilledAt,
+		unitIDs:         fill.UnitIDs,
+		level:           fill.Level,
+		slippageApplied: fill.SlippageApplied,
+		commission:      fill.Commission,
 	}
 }
 
@@ -392,7 +408,15 @@ func (a acceptedFillState) matches(fill event.FillPayload) bool {
 		a.price == fill.Price &&
 		a.direction == fill.Direction &&
 		a.filledAt.Equal(fill.FilledAt) &&
-		slices.Equal(a.unitIDs, fill.UnitIDs)
+		slices.Equal(a.unitIDs, fill.UnitIDs) &&
+		// #18: bit-for-bit, deliberately. This is not a price comparison
+		// deciding whether a level was reached (.greptile/rules.md's rule);
+		// it is an identity comparison asking whether two deliveries state
+		// the identical recorded fact, and a tolerance there would let a
+		// genuinely different execution pass as a duplicate.
+		a.level == fill.Level &&
+		a.slippageApplied == fill.SlippageApplied &&
+		a.commission == fill.Commission
 }
 
 // pendingProposalState is a trade proposal that has been emitted and not yet

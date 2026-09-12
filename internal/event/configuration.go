@@ -20,7 +20,18 @@ const ConfigurationEventType = "strategy.configuration"
 // float64 zero from an older record: a zero DollarsPerPoint divides by zero
 // in sizing, and a zero RiskAtStopFraction would make a fixed-risk-at-stop
 // run size every Unit from a risk budget of nothing.
-const ConfigurationSchemaVersion uint32 = 3
+//
+// Bumped 3 -> 4 for #18: Commission was added (ADR 0013's
+// Interactive-Brokers-style per-share model, the second half of the cost
+// model whose first half — SlippageN — this payload has carried since #8). A
+// schema-3 record decodes the whole block as zeros, and a
+// MaximumFractionOfTradeValue of zero is not a legitimate cap: it would
+// charge nothing on every order however large the per-share rate, which is
+// the commission-side twin of the zero-slippage run ADR 0013 declares invalid
+// by construction. So a schema-3 record is rejected outright rather than
+// silently run free of costs (ADR 0015's rule, the same discipline every
+// earlier bump in this package applied).
+const ConfigurationSchemaVersion uint32 = 4
 
 // SizingMode selects which quantity position size is keyed to (ADR 0003).
 type SizingMode string
@@ -33,6 +44,44 @@ const (
 	SizingModeVolatilityNormalised SizingMode = "volatility-normalised"
 	SizingModeFixedRiskAtStop      SizingMode = "fixed-risk-at-stop"
 )
+
+// CommissionConfig carries ADR 0013's commission model: the
+// Interactive-Brokers-style per-share schedule the Baseline charges on every
+// fill (#18).
+//
+// Three parameters, not one number, because that is the shape of the
+// published schedule the Baseline adopts: a rate per share, a floor per
+// order, and a ceiling expressed as a fraction of the order's own trade
+// value. The floor is what makes a small order expensive in percentage terms
+// (the reason Faith's own "small accounts lose diversification" warning has a
+// cost-side twin), and the ceiling is what stops the floor from swallowing a
+// tiny order whole.
+//
+// They are configuration, not constants, for the same reason every other
+// number in this payload is: a Variant that runs a different broker's
+// schedule is a declared experiment (ADR 0012), never an edit to the code.
+// The Baseline's own values are declared by whoever owns the Baseline
+// configuration (#50); see internal/fills for the arithmetic that applies
+// them, which is where the ordering of floor and ceiling is decided and
+// tested.
+type CommissionConfig struct {
+	// PerShare is the rate charged per share or contract executed. May be
+	// zero: a commission-free venue is a legitimate Variant, and unlike
+	// slippage (ADR 0013: never zero) nothing in the methodology requires a
+	// commission to exist.
+	PerShare float64 `json:"per_share"`
+	// MinimumPerOrder is the floor charged on any order that executes. May
+	// be zero, for the same reason PerShare may.
+	MinimumPerOrder float64 `json:"minimum_per_order"`
+	// MaximumFractionOfTradeValue caps the charge at a fraction of the
+	// order's own trade value (quantity x price x DollarsPerPoint). It must
+	// be positive and at most 1: a cap of zero would charge nothing at all
+	// however large the per-share rate — which is also exactly what a
+	// record written before this block existed decodes to, so this is the
+	// field that makes an older configuration fail closed (see
+	// ConfigurationSchemaVersion).
+	MaximumFractionOfTradeValue float64 `json:"maximum_fraction_of_trade_value"`
+}
 
 // NotionalAccountConfig carries the Notional Account settings (ADR 0007): a
 // configured starting equity, re-based to actual equity every year on the
@@ -98,6 +147,9 @@ type ConfigurationPayload struct {
 	// honours — the exact confusion ADR 0003 was written to prevent.
 	RiskAtStopFraction float64               `json:"risk_at_stop_fraction"`
 	NotionalAccount    NotionalAccountConfig `json:"notional_account"`
+	// Commission is ADR 0013's commission model (#18), the cost-model
+	// companion to SlippageN above.
+	Commission CommissionConfig `json:"commission"`
 }
 
 // Validate checks that every Baseline parameter is present and in range. A
@@ -191,6 +243,28 @@ func (c ConfigurationPayload) Validate() error {
 	}
 	if !validRebasingDate(c.NotionalAccount.RebasingMonth, c.NotionalAccount.RebasingDay) {
 		errs = append(errs, errors.New("notional account rebasing date must be a valid month and day"))
+	}
+	// #18: the commission model. The rate and the floor may legitimately be
+	// zero (a commission-free venue is a declared Variant); the cap may not,
+	// both because a zero cap charges nothing at all and because it is what
+	// an older record decodes to — see CommissionConfig's own field comments.
+	switch {
+	case !isFinite(c.Commission.PerShare):
+		errs = append(errs, errors.New("commission per share must be finite"))
+	case c.Commission.PerShare < 0:
+		errs = append(errs, errors.New("commission per share must not be negative"))
+	}
+	switch {
+	case !isFinite(c.Commission.MinimumPerOrder):
+		errs = append(errs, errors.New("commission minimum per order must be finite"))
+	case c.Commission.MinimumPerOrder < 0:
+		errs = append(errs, errors.New("commission minimum per order must not be negative"))
+	}
+	switch {
+	case !isFinite(c.Commission.MaximumFractionOfTradeValue):
+		errs = append(errs, errors.New("commission maximum fraction of trade value must be finite"))
+	case c.Commission.MaximumFractionOfTradeValue <= 0 || c.Commission.MaximumFractionOfTradeValue > 1:
+		errs = append(errs, errors.New("commission maximum fraction of trade value must be greater than zero and at most one; a zero cap would charge nothing on every order, and is what a configuration recorded before the commission model existed decodes to"))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid configuration payload: %w", err)
