@@ -1803,7 +1803,7 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 		// evaluates this instrument normally and may Signal, with no
 		// further change needed anywhere else.
 		state.campaign = nil
-		// PR #73 review round: recorded so checkBarConfirmsCampaignClosing
+		// Recorded so checkBarConfirmsCampaignClosing
 		// can catch a bar arriving that predates this closing fill — the
 		// identical upper-bound check checkBarConfirmsCampaignOpening
 		// already applies to an opening fill, mirrored here for a closing
@@ -1988,7 +1988,7 @@ func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, 
 	// executed is resolved, so a later bar does not try to expire it again.
 	state.campaign = nil
 	state.pendingExitProposal = nil
-	// PR #73 review round: identical to applyStopFill's own recording, so
+	// Identical to applyStopFill's own recording, so
 	// checkBarConfirmsCampaignClosing catches a bar arriving that predates
 	// THIS closing fill regardless of which kind closed the campaign.
 	state.lastClosingFillAt = fill.FilledAt
@@ -1996,7 +1996,7 @@ func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, 
 	return []event.Envelope{exitEnvelope}, nil
 }
 
-// applyAddFill handles a fill.Kind == event.FillKindAdd delivery: #14's way
+// applyAddFill handles a fill.Kind == event.FillKindAdd delivery: the way
 // of bringing a further Unit into an open Campaign. Like an exit fill, an
 // Add fill always executes a specific outstanding Add proposal
 // (evaluateAdd's AddProposalPayload) — ADR 0005 makes it a resting order, so
@@ -2010,17 +2010,17 @@ func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, 
 //
 // A partial Add is accepted for the quantity that actually filled — at most
 // the proposal's Quantity (the Campaign's frozen unitQuantity) — mirroring
-// #11's own rule for the opening fill; a second partial fill for the SAME
-// Add proposal is deferred to #67, the identical limitation applyFill
-// already enforces for a second partial entry.
+// the same rule for the opening fill; a second partial fill for the SAME
+// Add proposal is deferred to a future change, the identical limitation
+// applyFill already enforces for a second partial entry.
 //
 // Reaching this function with state.campaign == nil, or with the Campaign
 // already at its frozen maxUnits, means there is nothing valid for this fill
 // to have executed: applyFill's own idempotency check has already resolved
 // any re-delivery of a fill this reducer previously accepted before dispatch
 // reaches here (see acceptedFillState's doc comment), so what remains is
-// genuinely unmatched — the ticket's "an add fill arriving anyway fails
-// closed" criterion for a Campaign that is never proposed a fifth Unit.
+// genuinely unmatched — an Add fill arriving anyway fails closed for a
+// Campaign that is never proposed a fifth Unit.
 func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, input event.Envelope) ([]event.Envelope, error) {
 	campaign := state.campaign
 	if campaign == nil {
@@ -2031,7 +2031,7 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 		return nil, fmt.Errorf("strategy: instrument %q: add fill %q names campaign %q, but the open campaign is %q; a fill for a campaign this strategy does not hold is a reconciliation failure (docs/architecture.md)",
 			fill.InstrumentID, fill.FillID, fill.CampaignID, campaign.campaignID)
 	}
-	// #15 review round ("Pending Adds Survive Stopouts"): belt and braces
+	// Belt and braces
 	// alongside expireAddProposalForStop, which already clears
 	// state.pendingAddProposal the instant a stop fill partially closes
 	// this Campaign (so the "no outstanding add proposal" check below would
@@ -2072,7 +2072,7 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 		return nil, fmt.Errorf("strategy: instrument %q: add fill %q is timestamped %s, which predates the bar in which an order for the add proposal could have executed (that bar opened at %s); a unit may not be added by an execution older than the decision that authorised it",
 			fill.InstrumentID, fill.FillID, fill.FilledAt.Format(time.RFC3339), pending.earliestFillAt.Format(time.RFC3339))
 	}
-	// #74 review ("Chained Fills Allow Time Reversal"): a same-bar Add
+	// A same-bar Add
 	// proposal (evaluateAdd's own chain, see applyAddFill's package doc
 	// comment) is raised only AFTER the preceding Unit's fill was accepted,
 	// so a later Unit's fill claiming a timestamp EARLIER than the Unit
@@ -2125,10 +2125,10 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 		return nil, fmt.Errorf("strategy: marshal campaign unit added payload: %w", err)
 	}
 
-	// #12/#14: a fresh Protective-Stop-set decision for THIS Unit alone,
+	// A fresh Protective-Stop-set decision for THIS Unit alone,
 	// Reason ProtectiveStopReasonInitial. PreviousLevel is 0: this is a
 	// brand-new stop for a Unit that never had one before, not a raise of
-	// an earlier Unit's stop (#15's Stop Ladder, built below).
+	// an earlier Unit's stop (the Stop Ladder, built below).
 	newUnitStopSetPayload := event.ProtectiveStopSetPayload{
 		CampaignID:    campaign.campaignID,
 		InstrumentID:  fill.InstrumentID,
@@ -2152,7 +2152,7 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 		return nil, fmt.Errorf("strategy: marshal protective stop set payload: %w", err)
 	}
 
-	// #15's Stop Ladder (The Turtle Rules p.22-23): "if additional units
+	// The Stop Ladder (The Turtle Rules p.22-23): "if additional units
 	// were added, the stops for earlier units were raised by 1/2 N." Every
 	// EARLIER Unit's own stop — never the newly-added Unit's own, set
 	// above from ITS OWN fill — rises by exactly RaisedStop(previous,
@@ -2234,7 +2234,7 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 		))
 	}
 
-	// #14's same-bar Add chain: re-evaluate immediately for the NEXT rung,
+	// The same-bar Add chain: re-evaluate immediately for the NEXT rung,
 	// still measured against the bar that produced the opportunity for this
 	// whole chain (state.lastBarHigh/lastBarPeriodEnd/lastBarEarliestFillAt —
 	// see evaluateAdd's own doc comment). This is what lets all four Units
@@ -2250,18 +2250,18 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 }
 
 // checkCampaignHasAProtectiveStop enforces, at the start of every completed
-// bar, the ticket's capital-safety invariant: every open Campaign has a
+// bar, the capital-safety invariant: every open Campaign has a
 // Protective Stop, positive, at all times (CONTEXT.md: "Protective Stop" —
 // "Every open Campaign has one at all times").
 //
-// #14 generalises the check to every held Unit individually — each Unit's
+// The check applies to every held Unit individually — each Unit's
 // OWN protectiveStop must be positive — rather than a single Campaign-level
 // figure, since a multi-Unit Campaign has no single "the entry price" any
-// invariant could compare against. A single-Unit Campaign (every #11/#12/#13
-// fixture) reduces to exactly the original one-figure check.
+// invariant could compare against. A single-Unit Campaign reduces to
+// exactly the original one-figure check.
 //
-// #15's review round removed the "strictly below its own fill price" half
-// of this check: repeated half-N raises (the Stop Ladder) can legitimately
+// This check does NOT require a Unit's stop to sit strictly below its own
+// fill price: repeated half-N raises (the Stop Ladder) can legitimately
 // lift an earlier Unit's stop to or above its own entry under a Variant
 // with a narrow enough Stop Multiple (sizing.AggregateOpenRisk's own doc
 // comment works the arithmetic — the Baseline's own 2N stop and four-Unit
