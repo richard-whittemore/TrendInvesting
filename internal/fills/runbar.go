@@ -166,6 +166,15 @@ func RunBar(ctx context.Context, sim *Simulator, handler replay.Handler, barEnve
 	// too. See the package doc comment.
 	view := bar.SplitAdjusted
 
+	// Every fill this call produces is a fact about THIS bar, whichever side
+	// of it the fill is delivered on, so this bar's provenance is fixed
+	// before a single order is priced — not inferred from whatever was
+	// delivered last. Step 1 below runs BEFORE the bar itself reaches the
+	// reducer, so a stamp taken from delivery order would date a gap fill,
+	// and every decision it causes, to the PREVIOUS bar: an execution
+	// recorded before the session that produced it (Greptile, PR #82).
+	sim.recordedAt = barEnvelope.RecordedAt
+
 	fillsThisBar := 0
 
 	// Step 1: the open-instant pass.
@@ -240,9 +249,19 @@ func pick(candidates []candidate, onlyGapped bool) (candidate, bool) {
 // has exactly one bar per period end and the fills within a bar are numbered
 // in the order they were decided, so the triple is unique for the whole run.
 //
-// EventTime is the bar's period end, and RecordedAt the bar envelope's own:
-// the simulator observes the same recording moment as the data that produced
-// it, and has no clock of its own to offer.
+// EventTime is the bar's period end and RecordedAt is that same bar
+// envelope's own recording moment — both of them the bar this fill was
+// decided from, never whatever the simulator delivered last. The simulator
+// observes the same recording moment as the data that produced it and has no
+// clock of its own to offer (.golangci.yml forbids one in internal/), and a
+// fill produced by the open-instant pass is a fact about the bar whose open
+// produced it even though it is delivered before that bar. See RunBar, where
+// the provenance is fixed for the whole call.
+//
+// Note that RecordedAt and FilledAt answer different questions and are not
+// interchangeable: RecordedAt is when the system learned of the bar, FilledAt
+// is when the execution happened. Both being the bar's own is a property of
+// backtest fixtures, not a rule.
 func (s *Simulator) fillEnvelopeFor(bar event.CompletedBarPayload, c candidate, n int) (event.Envelope, error) {
 	commission, err := s.commission.Charge(c.quantity, c.price, s.dollarsPerPoint)
 	if err != nil {
@@ -314,11 +333,6 @@ func (s *Simulator) deliver(ctx context.Context, handler replay.Handler, envelop
 	}
 	s.sequence++
 	envelope.Sequence = s.sequence
-	if envelope.Type == event.CompletedBarEventType {
-		// The bar is the only input carrying a recording moment the fills
-		// around it can inherit; see fillEnvelopeFor.
-		s.recordedAt = envelope.RecordedAt
-	}
 	if err := envelope.Validate(); err != nil {
 		return fmt.Errorf("fills: input %d: %w", s.sequence, err)
 	}

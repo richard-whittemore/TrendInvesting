@@ -113,10 +113,16 @@ type Simulator struct {
 
 	books map[string]*book
 
-	// recordedAt is the RecordedAt of the most recent bar delivered, which is
-	// what every fill decided from that bar inherits: the simulator observes
-	// the same recording moment as the data that produced it, and has no
-	// clock of its own (.golangci.yml forbids time.Now in internal/).
+	// recordedAt is the RecordedAt of the bar RunBar is currently working,
+	// which is what every fill decided from that bar inherits: the simulator
+	// observes the same recording moment as the data that produced it, and
+	// has no clock of its own (.golangci.yml forbids time.Now in internal/).
+	//
+	// RunBar sets it from the bar envelope at the top of the call, BEFORE the
+	// open-instant pass — deliberately, and not as a side effect of
+	// delivering the bar, because that pass delivers its fills before the bar
+	// itself. A stamp that followed delivery order would date those fills to
+	// the previous bar.
 	recordedAt time.Time
 }
 
