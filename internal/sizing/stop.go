@@ -35,8 +35,7 @@ const DirectionLong = "long"
 // function does not implement. Any other value fails closed rather than
 // guessing which formula was meant.
 //
-// Fails closed (.greptile/rules.md: "A zero, negative, or not-yet-warm
-// volatility value must fail closed") on a non-finite or non-positive
+// Fails closed (.greptile/rules.md) on a non-finite or non-positive
 // entryPrice, campaignN or stopMultiple, on an unrecognised direction, and on
 // a derived level at or below zero: a long equity cannot be stopped out at
 // or below zero, so such a stop would leave the position unprotected in fact
