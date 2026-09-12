@@ -70,6 +70,16 @@ func validConfigurationPayload() event.ConfigurationPayload {
 			RebasingMonth:  1,
 			RebasingDay:    1,
 		},
+		// #18: ADR 0013's commission model, at the Baseline's declared
+		// Interactive Brokers US-stock Fixed figures. Nothing in this package
+		// reads it — the reducer never charges a commission; #18's simulator
+		// does — but ConfigurationPayload.Validate requires the cap, so every
+		// fixture here must state a whole configuration.
+		Commission: event.CommissionConfig{
+			PerShare:                    0.005,
+			MinimumPerOrder:             1.00,
+			MaximumFractionOfTradeValue: 0.01,
+		},
 	}
 }
 

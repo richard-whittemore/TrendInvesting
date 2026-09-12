@@ -115,8 +115,27 @@ func closingStopFill(instrumentID, campaignID string, campaignN float64, filledA
 	}
 }
 
+// withCostFields supplies #18's Level for any fixture in this package that
+// does not state one of its own.
+//
+// FillPayload.Level is required and positive from schema 4 onward, but what
+// level an order rested at is #18's concern, not this package's: the reducer
+// deliberately never compares a fill's price against its level (see
+// Reducer.applyFill, "What a fill deliberately is NOT checked against"). So a
+// fixture here that says nothing about a level gets the executed price as its
+// level — a legitimate value (an order that filled exactly where it rested) —
+// and every test in this package stays about the reducer's own rules.
+// SlippageApplied and Commission are legitimately zero and need no default.
+func withCostFields(fill event.FillPayload) event.FillPayload {
+	if fill.Level == 0 {
+		fill.Level = fill.Price
+	}
+	return fill
+}
+
 func fillEnvelope(t *testing.T, sequence uint64, fill event.FillPayload) event.Envelope {
 	t.Helper()
+	fill = withCostFields(fill)
 	payload := mustMarshal(t, fill)
 	return event.Envelope{
 		ID:              fmt.Sprintf("fill-%d", sequence),
@@ -769,6 +788,48 @@ func TestFillReusingAFillIDWithDifferentContentsIsRejected(t *testing.T) {
 		wantRunError("sim-fill-0001", "differ")
 }
 
+// TestFillReusingAFillIDWithDifferentCostFieldsIsRejected extends the rule
+// above to #18's three additions.
+//
+// The reducer makes no decision from a fill's Level, SlippageApplied or
+// Commission — it never re-derives a price from a level, and the fill model
+// and the cost model both belong to the producer (ADR 0005/0013) — but
+// "ignores" cannot extend to the idempotency key: a second delivery that
+// reuses a fill id while stating different costs is a different recorded
+// fact, and absorbing it as a duplicate would leave the journal claiming a
+// cost the producer has since contradicted. Same reasoning #15 applied when
+// it added UnitIDs to the comparison.
+func TestFillReusingAFillIDWithDifferentCostFieldsIsRejected(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*event.FillPayload)
+	}{
+		{"level", func(f *event.FillPayload) { f.Level = 199 }},
+		{"slippage applied", func(f *event.FillPayload) { f.SlippageApplied = 0.5 }},
+		{"commission", func(f *event.FillPayload) { f.Commission = 7.25 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			first := openingFill("AAPL")
+			first.Level = 200
+			first.SlippageApplied = 0.05
+			first.Commission = 1.00
+
+			second := first
+			tc.mutate(&second)
+
+			newStream(t, validConfigurationPayload()).
+				bars(breakoutBars("AAPL")).
+				fill(first).
+				fill(second).
+				wantRunError("sim-fill-0001", "differ")
+		})
+	}
+}
+
 // --- Fail-closed rules --------------------------------------------------
 
 // TestFillForAnUnknownProposalIsRejected: a fill for an order this system
@@ -891,16 +952,18 @@ func TestFillWithAMismatchedDirectionIsRejected(t *testing.T) {
 func TestReducerRejectsFillWithWrongSchemaVersion(t *testing.T) {
 	t.Parallel()
 
-	// event.FillSchemaVersion is 3 (#12 bumped it for Kind/CampaignID; #15
-	// bumped it again for UnitIDs). SchemaVersion 0 would also be rejected,
-	// but at Envelope.Validate() ("schema version must be positive") rather
-	// than by the check under test, so schema 2 — the version this build no
-	// longer accepts — is used here instead: a distinct positive-but-wrong
-	// value that also documents what actually changed.
+	// event.FillSchemaVersion is 4 (#12 bumped it for Kind/CampaignID; #15
+	// bumped it again for UnitIDs; #18 bumped it again for Level,
+	// SlippageApplied and Commission). SchemaVersion 0 would also be
+	// rejected, but at Envelope.Validate() ("schema version must be
+	// positive") rather than by the check under test, so schema 2 — a
+	// version this build no longer accepts — is used here instead: a
+	// distinct positive-but-wrong value that also documents what actually
+	// changed.
 	newStream(t, validConfigurationPayload()).
 		bars(breakoutBars("AAPL")).
 		fillAtSchema(openingFill("AAPL"), 2).
-		wantRunError("schema version", "2", "3")
+		wantRunError("schema version", "2", "4")
 }
 
 // TestReducerRejectsFillBeforeConfiguration: the reducer cannot know what a
@@ -1669,7 +1732,7 @@ func TestStopFillAtWrongSchemaIsRejected(t *testing.T) {
 		bars(breakoutBars("AAPL")).
 		fill(openingFill("AAPL")).
 		fillAtSchema(stop, 2).
-		wantRunError("schema version", "2", "3")
+		wantRunError("schema version", "2", "4")
 }
 
 // TestStopFillNamingAProposalIsRejected covers the ticket's "a stop fill

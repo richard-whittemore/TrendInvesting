@@ -51,7 +51,17 @@ const FillEventType = "execution.fill"
 // record. A schema-2 record is therefore rejected outright rather than
 // silently reinterpreted (ADR 0015's rule, the same discipline #12 already
 // applied to its own Kind/CampaignID addition).
-const FillSchemaVersion uint32 = 3
+//
+// Bumped 3 -> 4 for #18: Level, SlippageApplied and Commission were added,
+// and Level is REQUIRED and positive. Every fill in this system executes a
+// resting order at a stated level (ADR 0005), so a fill that does not say
+// which level it rested at cannot be reconciled against the order it claims
+// to have executed — and a schema-3 record decodes Level as the float64 zero,
+// which is not a legitimate price. Such a record is therefore rejected
+// outright rather than read as a fill that rested at nothing. SlippageApplied
+// and Commission decode as zero too, but zero is a legitimate value for both
+// (see their field comments), which is why Level alone carries the bump.
+const FillSchemaVersion uint32 = 4
 
 // The four Kind values FillPayload accepts today.
 const (
@@ -98,8 +108,11 @@ const (
 //     comparison of a bar's range against a Protective Stop level happens
 //     anywhere in this package (see internal/strategy/campaign.go's
 //     applyStopFill).
-//   - Commissions. ADR 0013 puts them in the cost model applied to the
-//     accounting view; a fill states the executed price.
+//   - Whether the stated costs are the RIGHT ones. #18 added Level,
+//     SlippageApplied and Commission so a journal reader can see what the
+//     fill model charged, but this payload range-checks them and nothing
+//     more: it never re-derives a commission from a configuration it cannot
+//     see, and never compares Price against Level.
 //   - Whether the execution was allowed. Caps (ADR 0008) and the cash rule
 //     (ADR 0010) are applied before an order is placed; a fill that arrived is
 //     a fact regardless.
@@ -174,13 +187,55 @@ type FillPayload struct {
 	// internal/), so this is what any decision caused by the fill is stamped
 	// with.
 	FilledAt time.Time `json:"filled_at"`
+	// Level is the price the order rested at (#18): the trade proposal's
+	// EntryLevel for an entry, the Add proposal's rung for an add, the Exit
+	// Channel level for an exit, and the Unit's own Protective Stop for a
+	// stop. Required and positive — every fill in this system executes a
+	// resting order at a stated level (ADR 0005), so a fill that cannot say
+	// which level it rested at cannot be reconciled against the order it
+	// claims to have executed.
+	//
+	// It is recorded so a journal reader can see the cost of the fill model
+	// itself — how far each execution landed from the level it was aiming
+	// at, which is the whole quantity ADR 0005's gap rule and ADR 0013's
+	// slippage exist to make visible. Price is deliberately NOT checked
+	// against it, here or in internal/strategy: see FillPayload's own doc
+	// comment on what this payload does not decide, and Reducer.applyFill's
+	// "What a fill deliberately is NOT checked against".
+	Level float64 `json:"level"`
+	// SlippageApplied is the absolute amount by which Price was moved
+	// against the trader from the price the order would otherwise have
+	// executed at — SlippageN x N for #18's simulator (ADR 0013), added to a
+	// buy and subtracted from a sell.
+	//
+	// Required to be finite and non-negative, and permitted to be zero. ADR
+	// 0013's "never zero" is a rule about a RUN's configuration, enforced
+	// where the run is configured (ConfigurationPayload.SlippageN and
+	// internal/fills' own constructor both refuse a non-positive value), not
+	// a claim this contract can make about every producer: an adapter fill
+	// (#30) reports what a real venue did, and a venue that executed exactly
+	// at the level moved the price by nothing.
+	SlippageApplied float64 `json:"slippage_applied"`
+	// Commission is what this execution cost in fees (ADR 0013's
+	// Interactive-Brokers-style per-share model, configured as
+	// ConfigurationPayload.Commission). Required to be finite and
+	// non-negative, and permitted to be zero: a commission-free venue is a
+	// legitimate Variant.
+	//
+	// It is stated per fill rather than derived by a consumer because the
+	// schedule is the venue's, not the strategy's: a live fill's commission
+	// is a fact reported by the broker, and a simulated one must be
+	// indistinguishable in shape from it (this ticket's criterion).
+	Commission float64 `json:"commission"`
 }
 
 // Validate checks that the fill identifies an instrument and itself, that
 // Kind is one of the recognised values and that ProposalID/CampaignID/UnitIDs
 // are present or absent exactly as that Kind requires, that Direction is a
 // recognised value, that Quantity is positive, that Price is finite and
-// positive, and that FilledAt is present.
+// positive, that FilledAt is present, and that #18's cost fields are in
+// range: Level finite and positive, SlippageApplied and Commission finite and
+// non-negative.
 func (p FillPayload) Validate() error {
 	var errs []error
 	if p.InstrumentID == "" {
@@ -263,6 +318,27 @@ func (p FillPayload) Validate() error {
 	}
 	if p.FilledAt.IsZero() {
 		errs = append(errs, errors.New("filled at is required"))
+	}
+	// #18's three cost fields. Each is range-checked and none is
+	// cross-derived against Price: see Level's own field comment for why this
+	// payload records the fill model's inputs without policing its output.
+	switch {
+	case !isFinite(p.Level):
+		errs = append(errs, errors.New("level must be finite"))
+	case p.Level <= 0:
+		errs = append(errs, errors.New("level must be positive: every fill executes a resting order at a stated level (ADR 0005)"))
+	}
+	switch {
+	case !isFinite(p.SlippageApplied):
+		errs = append(errs, errors.New("slippage applied must be finite"))
+	case p.SlippageApplied < 0:
+		errs = append(errs, errors.New("slippage applied must not be negative: it is the absolute amount the price was moved against the trader"))
+	}
+	switch {
+	case !isFinite(p.Commission):
+		errs = append(errs, errors.New("commission must be finite"))
+	case p.Commission < 0:
+		errs = append(errs, errors.New("commission must not be negative"))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid fill payload: %w", err)
