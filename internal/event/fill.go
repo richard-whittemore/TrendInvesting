@@ -18,63 +18,49 @@ import (
 // failure modes that already occurred in the predecessor prototype.
 //
 // The producer differs by slice and none of them is the reducer: fixtures
-// first, then #18's intraday fill simulator (ADR 0005), then the LEAN adapter
-// in slice 2 (#30). A consumer must treat every fill as a fact it did not
-// produce and cannot re-derive.
+// first, then the intraday fill simulator (ADR 0005), then the LEAN adapter.
+// A consumer must treat every fill as a fact it did not produce and cannot
+// re-derive.
 const FillEventType = "execution.fill"
 
 // FillSchemaVersion is the current schema version of FillPayload, for the
 // Envelope's SchemaVersion field.
 //
-// Bumped to 2 for #12: Kind and CampaignID were added, and Kind is required
-// (an empty Kind decodes from a schema-1 record and is not a recognised
-// value, so a schema-1 fill is rejected outright rather than silently
-// interpreted as an entry — ADR 0015's rule, applied here at the payload
-// level, the same way #10 bumped ConfigurationSchemaVersion for
-// DollarsPerPoint and RiskAtStopFraction).
+// A field that is REQUIRED always carries its own version bump (ADR 0015):
+// an older record decodes the field at its zero value, and that zero value
+// must not be a legitimate one, so the old record is rejected outright
+// rather than silently reinterpreted.
 //
-// NOT bumped for #13's FillKindExit, and NOT bumped again for #14's
-// FillKindAdd: unlike #12's Kind and CampaignID, neither adds a new FIELD a
-// schema-2 record might decode with an ambiguous zero value — each only adds
-// a further recognised value to a field that already exists and is already
-// required. A schema-2 record naming "entry" or "stop" decodes and validates
-// exactly as before either way; #13 and #14 are each additive, not a
-// breaking reinterpretation of anything a schema-2 producer could have
-// written.
-//
-// Bumped 2 -> 3 for #15: UnitIDs was added, and is now REQUIRED for
-// FillKindStop. A schema-2 stop fill decodes UnitIDs as nil (empty), which
-// is not a legitimate value under the new requirement — a stop fill must
-// name which Units it closes, because #15's Stop Ladder can leave Units at
-// genuinely different levels (the gap case, The Turtle Rules p.23), so
-// "closes everything" is no longer a safe default to infer for an old
-// record. A schema-2 record is therefore rejected outright rather than
-// silently reinterpreted (ADR 0015's rule, the same discipline #12 already
-// applied to its own Kind/CampaignID addition).
-//
-// Bumped 3 -> 4 for #18: Level, SlippageApplied and Commission were added,
-// and Level is REQUIRED and positive. Every fill in this system executes a
-// resting order at a stated level (ADR 0005), so a fill that does not say
-// which level it rested at cannot be reconciled against the order it claims
-// to have executed — and a schema-3 record decodes Level as the float64 zero,
-// which is not a legitimate price. Such a record is therefore rejected
-// outright rather than read as a fill that rested at nothing. SlippageApplied
-// and Commission decode as zero too, but zero is a legitimate value for both
-// (see their field comments), which is why Level alone carries the bump.
+//   - Version 2 added Kind (required) and CampaignID. FillKindExit and
+//     FillKindAdd were later recognised values of the same, already-required
+//     Kind field, so neither needed a further bump: a version-2 record
+//     naming "entry" or "stop" still decodes and validates exactly as
+//     before.
+//   - Version 3 added UnitIDs, required for FillKindStop: a stop fill must
+//     name which Units it closes, because the Stop Ladder can leave Units at
+//     genuinely different levels (the gap case, The Turtle Rules p.23), so
+//     "closes everything" is not a safe default to infer for an older
+//     record.
+//   - Version 4 added Level, required and positive: every fill executes a
+//     resting order at a stated level (ADR 0005), so a record with no Level
+//     cannot be reconciled against the order it claims to have executed.
+//     SlippageApplied and Commission were added at the same version but do
+//     not themselves carry the bump — zero is a legitimate value for both
+//     (see their field comments).
 const FillSchemaVersion uint32 = 4
 
 // The four Kind values FillPayload accepts today.
 const (
-	// FillKindEntry is the fill that opens a Campaign (#11): it names the
+	// FillKindEntry is the fill that opens a Campaign: it names the
 	// ProposalID it executes and must not name a CampaignID, since no
 	// Campaign exists yet.
 	FillKindEntry = "entry"
 	// FillKindStop is the fill that closes a Campaign at its Protective
-	// Stop (#12): it names the CampaignID it closes and must not name a
+	// Stop: it names the CampaignID it closes and must not name a
 	// ProposalID, since a stop closes a position, not a proposal.
 	FillKindStop = "stop"
 	// FillKindExit is the fill that closes a Campaign at its Exit Channel
-	// (#13, The Turtle Rules p.26): unlike a stop fill, it names BOTH the
+	// (The Turtle Rules p.26): unlike a stop fill, it names BOTH the
 	// CampaignID it closes AND the ProposalID of the exit proposal
 	// (strategy.exit.proposed, ExitProposalPayload) it executes — an exit,
 	// unlike a stop, is always proposed first (ADR 0005 makes it a resting
@@ -82,7 +68,7 @@ const (
 	// back to.
 	FillKindExit = "exit"
 	// FillKindAdd is the fill that adds a further Unit to an open Campaign
-	// (#14, The Turtle Rules p.19-20): like an exit fill, and unlike a stop
+	// (The Turtle Rules p.19-20): like an exit fill, and unlike a stop
 	// fill, it names BOTH the CampaignID it extends AND the ProposalID of
 	// the Add proposal (strategy.add.proposed, AddProposalPayload) it
 	// executes — an Add, like an exit, is always proposed first (ADR 0005
@@ -104,15 +90,15 @@ const (
 //
 //   - How the fill was arrived at. ADR 0005's resting-order model — gaps fill
 //     at the open, same-bar ambiguity resolves pessimistically — belongs to
-//     the producer (#18). This payload states what happened, not why: no
+//     the producer. This payload states what happened, not why: no
 //     comparison of a bar's range against a Protective Stop level happens
 //     anywhere in this package (see internal/strategy/campaign.go's
 //     applyStopFill).
-//   - Whether the stated costs are the RIGHT ones. #18 added Level,
-//     SlippageApplied and Commission so a journal reader can see what the
-//     fill model charged, but this payload range-checks them and nothing
-//     more: it never re-derives a commission from a configuration it cannot
-//     see, and never compares Price against Level.
+//   - Whether the stated costs are the RIGHT ones. Level, SlippageApplied and
+//     Commission let a journal reader see what the fill model charged, but
+//     this payload range-checks them and nothing more: it never re-derives a
+//     commission from a configuration it cannot see, and never compares
+//     Price against Level.
 //   - Whether the execution was allowed. Caps (ADR 0008) and the cash rule
 //     (ADR 0010) are applied before an order is placed; a fill that arrived is
 //     a fact regardless.
@@ -143,7 +129,7 @@ type FillPayload struct {
 	// UnitIDs names, for FillKindStop ONLY, the opening fill ids
 	// (unitState.openingFillID, via CampaignOpenedPayload.FillID for Unit 1
 	// or CampaignUnitAddedPayload.FillID for a later Unit) of the Units this
-	// stop fill closes. Required and non-empty for FillKindStop — #15's Stop
+	// stop fill closes. Required and non-empty for FillKindStop: the Stop
 	// Ladder can leave Units at genuinely different levels (the gap case,
 	// The Turtle Rules p.23), so a stop fill must say which Units traded
 	// through their OWN stop rather than assuming it closed every Unit — and
@@ -154,12 +140,12 @@ type FillPayload struct {
 	//
 	// Whether a named Unit's stop level was ACTUALLY reached by this fill's
 	// price is deliberately not checked here, or anywhere in this package:
-	// ADR 0005 makes the simulator (#18) the sole authority on fill
-	// legitimacy — the same restraint FillPayload's own doc comment already
-	// states for whether an entry, Add or exit fill was arrived at
-	// correctly. A stop fill naming a Unit whose own stop sits, on its face,
-	// above the fill's price by more than the gap rule allows is a producer
-	// question, not a schema or reducer one.
+	// ADR 0005 makes the simulator the sole authority on fill legitimacy —
+	// the same restraint FillPayload's own doc comment already states for
+	// whether an entry, Add or exit fill was arrived at correctly. A stop
+	// fill naming a Unit whose own stop sits, on its face, above the fill's
+	// price by more than the gap rule allows is a producer question, not a
+	// schema or reducer one.
 	UnitIDs []string `json:"unit_ids"`
 	// Direction is the POSITION's own direction (CONTEXT.md: long or short),
 	// held constant across every fill of one Campaign's life — the entry
@@ -187,7 +173,7 @@ type FillPayload struct {
 	// internal/), so this is what any decision caused by the fill is stamped
 	// with.
 	FilledAt time.Time `json:"filled_at"`
-	// Level is the price the order rested at (#18): the trade proposal's
+	// Level is the price the order rested at: the trade proposal's
 	// EntryLevel for an entry, the Add proposal's rung for an add, the Exit
 	// Channel level for an exit, and the Unit's own Protective Stop for a
 	// stop. Required and positive — every fill in this system executes a
@@ -205,16 +191,16 @@ type FillPayload struct {
 	Level float64 `json:"level"`
 	// SlippageApplied is the absolute amount by which Price was moved
 	// against the trader from the price the order would otherwise have
-	// executed at — SlippageN x N for #18's simulator (ADR 0013), added to a
-	// buy and subtracted from a sell.
+	// executed at — SlippageN x N (ADR 0013), added to a buy and subtracted
+	// from a sell.
 	//
 	// Required to be finite and non-negative, and permitted to be zero. ADR
 	// 0013's "never zero" is a rule about a RUN's configuration, enforced
 	// where the run is configured (ConfigurationPayload.SlippageN and
 	// internal/fills' own constructor both refuse a non-positive value), not
 	// a claim this contract can make about every producer: an adapter fill
-	// (#30) reports what a real venue did, and a venue that executed exactly
-	// at the level moved the price by nothing.
+	// reports what a real venue did, and a venue that executed exactly at
+	// the level moved the price by nothing.
 	SlippageApplied float64 `json:"slippage_applied"`
 	// Commission is what this execution cost in fees (ADR 0013's
 	// Interactive-Brokers-style per-share model, configured as
@@ -225,7 +211,7 @@ type FillPayload struct {
 	// It is stated per fill rather than derived by a consumer because the
 	// schedule is the venue's, not the strategy's: a live fill's commission
 	// is a fact reported by the broker, and a simulated one must be
-	// indistinguishable in shape from it (this ticket's criterion).
+	// indistinguishable in shape from it.
 	Commission float64 `json:"commission"`
 }
 
@@ -233,8 +219,8 @@ type FillPayload struct {
 // Kind is one of the recognised values and that ProposalID/CampaignID/UnitIDs
 // are present or absent exactly as that Kind requires, that Direction is a
 // recognised value, that Quantity is positive, that Price is finite and
-// positive, that FilledAt is present, and that #18's cost fields are in
-// range: Level finite and positive, SlippageApplied and Commission finite and
+// positive, that FilledAt is present, and that the cost fields are in range:
+// Level finite and positive, SlippageApplied and Commission finite and
 // non-negative.
 func (p FillPayload) Validate() error {
 	var errs []error
@@ -319,9 +305,9 @@ func (p FillPayload) Validate() error {
 	if p.FilledAt.IsZero() {
 		errs = append(errs, errors.New("filled at is required"))
 	}
-	// #18's three cost fields. Each is range-checked and none is
-	// cross-derived against Price: see Level's own field comment for why this
-	// payload records the fill model's inputs without policing its output.
+	// The three cost fields. Each is range-checked and none is cross-derived
+	// against Price: see Level's own field comment for why this payload
+	// records the fill model's inputs without policing its output.
 	switch {
 	case !isFinite(p.Level):
 		errs = append(errs, errors.New("level must be finite"))
