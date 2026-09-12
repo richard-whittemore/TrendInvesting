@@ -12,7 +12,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
-// This file holds everything #11 adds to the reducer: the two pieces of
+// This file holds the reducer's Campaign machinery: the two pieces of
 // per-instrument position state, and the handling of the one new input event
 // that may change them.
 //
@@ -28,9 +28,9 @@ import (
 // unitState is one Unit of an open Campaign (CONTEXT.md: "Unit"): the record
 // of one accepted entry or Add fill and the Protective Stop that fill set.
 //
-// #14 restructures campaignState around a slice of these — one per accepted
-// entry/Add fill — so that #15 (the Stop Ladder) can later move an
-// individual Unit's own protectiveStop and close a SUBSET of units (a
+// campaignState holds a slice of these — one per accepted entry/Add fill —
+// so that the Stop Ladder can move an individual Unit's own protectiveStop
+// and close a SUBSET of units (a
 // gapped Unit has its own stop level, so a stop fill may close some Units
 // and not others): every field below belongs to exactly one fill, and
 // nothing here is shared or aggregated across Units — aggregation (total
@@ -41,18 +41,18 @@ type unitState struct {
 	// index is this Unit's position in the Campaign: 1 for the opening fill,
 	// 2 through the Campaign's frozen maxUnits for each Add.
 	index int
-	// openingFillID is the fill that brought this Unit into being — #11's
-	// entry fill for Unit 1, an Add fill (#14) for every later Unit.
+	// openingFillID is the fill that brought this Unit into being — the
+	// entry fill for Unit 1, an Add fill for every later Unit.
 	openingFillID string
 	fillPrice     float64
 	// quantity is what actually executed for this Unit — at most the
 	// Campaign's frozen unitQuantity; a partial fill is accepted for the
-	// filled quantity, mirroring #11's own rule for Unit 1.
+	// filled quantity, mirroring the same rule for Unit 1.
 	quantity int64
 	// protectiveStop is THIS Unit's own stop, fillPrice - stopMultiple x
 	// campaignN, set once when the Unit's fill was accepted and never moved
-	// by this ticket (#15's Stop Ladder is what raises earlier Units' stops
-	// as later ones are added).
+	// here (the Stop Ladder is what raises earlier Units' stops as later
+	// ones are added).
 	protectiveStop float64
 	filledAt       time.Time
 }
@@ -92,18 +92,18 @@ type campaignState struct {
 	openedAt     time.Time
 	// units holds every CURRENTLY OPEN Unit, in ascending index order.
 	// Non-empty for as long as the Campaign itself exists in state.campaign:
-	// openCampaign always appends Unit 1 before returning, and #15's
-	// per-Unit stop fill clears state.campaign entirely (not merely to an
-	// empty units slice) the instant the last Unit closes — see
-	// applyStopFill. A PARTIAL stop fill (#15, the gap case) removes only
-	// the Units it named, so this slice can shrink below maxUnits while the
+	// openCampaign always appends Unit 1 before returning, and the per-Unit
+	// stop fill clears state.campaign entirely (not merely to an empty units
+	// slice) the instant the last Unit closes — see applyStopFill. A
+	// PARTIAL stop fill (the gap case) removes only the Units it named, so
+	// this slice can shrink below maxUnits while the
 	// Campaign is still open.
 	units []unitState
 	// unitsOpened is the TOTAL number of Units this Campaign has EVER held,
 	// incremented once in openCampaign (to 1) and once per accepted Add —
 	// never decremented when a partial stop fill removes a Unit from
 	// units above. CampaignExitedPayload.Units reports this, not
-	// len(units), because #15's per-Unit stop fill can close a Campaign's
+	// len(units), because a per-Unit stop fill can close a Campaign's
 	// Units across more than one fill (the gap case): by the time the LAST
 	// Unit closes, units may already have shrunk from an earlier partial
 	// close, but the exited record must still say how many Units the
@@ -128,8 +128,8 @@ type campaignState struct {
 	// "Accumulating partial stop-outs", for the algebra this generalises
 	// and why it reduces EXACTLY to the original single-fill formula
 	// whenever no partial close has ever happened (closedQuantity stays 0
-	// for the whole Campaign life in every #12/#13/#14 fixture). Populated
-	// by applyStopFill on every stop fill, whether or not it happens to
+	// for the whole Campaign life when no partial stop has occurred).
+	// Populated by applyStopFill on every stop fill, whether or not it happens to
 	// empty the Campaign.
 	closedQuantity         int64
 	closedEntryWeightedSum float64
@@ -138,8 +138,8 @@ type campaignState struct {
 	// fill for this Campaign — a stop fill (partial or final) or the final
 	// exit fill alike — and the zero time.Time before any closing fill has
 	// ever been accepted (every fill's FilledAt is required non-zero, so
-	// the zero value is unambiguous as "never"). #15's review round: two
-	// successive partial stop fills carry no other ordering guarantee
+	// the zero value is unambiguous as "never"). Two successive partial
+	// stop fills carry no other ordering guarantee
 	// against EACH OTHER — campaign.openedAt only bounds the FIRST closing
 	// fill, not a second, third, and so on — so without this, a
 	// later-delivered fill timestamped BEFORE an already-accepted partial
@@ -160,9 +160,9 @@ func (c *campaignState) lastUnit() unitState {
 }
 
 // filledQuantity is the Campaign's whole position: the sum of every held
-// Unit's own quantity. #14 keeps stop and exit fills whole-Campaign (#15
-// makes a stop per-Unit), so this is what a closing fill's own Quantity must
-// match, and what an exit proposal is raised for.
+// Unit's own quantity. An exit fill closes the whole Campaign (a stop fill
+// can close a per-Unit subset instead), so this is what a closing fill's own
+// Quantity must match, and what an exit proposal is raised for.
 func (c *campaignState) filledQuantity() int64 {
 	var total int64
 	for _, u := range c.units {
@@ -175,8 +175,8 @@ func (c *campaignState) filledQuantity() int64 {
 // every held Unit — see event.CampaignExitedPayload's doc comment ("Multi-Unit
 // aggregation") for why this is the aggregate that keeps RealisedResult's
 // derivation identical whether the Campaign held one Unit or four. For a
-// single-Unit Campaign this is exactly that Unit's own fillPrice, so every
-// #11/#12/#13 fixture that only ever opened one Unit is unaffected.
+// single-Unit Campaign this is exactly that Unit's own fillPrice, so a
+// Campaign that only ever opened one Unit is unaffected.
 func (c *campaignState) entryPrice() float64 {
 	var weighted float64
 	var quantity int64
@@ -195,17 +195,15 @@ func (c *campaignState) entryPrice() float64 {
 // event.CampaignExitedPayload's own doc comment, "Accumulating partial
 // stop-outs", for the algebra and why the result is EXACTLY the original
 // single-fill formula (entryPrice = c.entryPrice(), exitPrice = price)
-// whenever c.closedQuantity is still 0 — every #12/#13/#14 fixture, and
-// every Campaign that has never had a partial stop, byte for byte. Shared
-// by applyStopFill's own final close and applyExitFill (#15 review round:
-// "Exit Omits Earlier Stopouts" — an exit-channel fill closing whatever
-// Units survived an earlier partial stop must aggregate the WHOLE life
-// exactly as a final stop fill does, not merely the Units it happens to
-// close itself).
+// whenever c.closedQuantity is still 0 — every Campaign that has never had a
+// partial stop, byte for byte. Shared by applyStopFill's own final close
+// and applyExitFill: an exit-channel fill closing whatever Units survived
+// an earlier partial stop must aggregate the WHOLE life exactly as a final
+// stop fill does, not merely the Units it happens to close itself.
 //
 // thisQuantity/thisEntryWeightedSum describe the Units THIS fill closes —
 // campaign.units in full for an exit fill (which always closes the whole
-// remaining position), or only the named subset for a stop fill (#15's
+// remaining position), or only the named subset for a stop fill (the
 // per-Unit closing) — computed by the caller, which already has the
 // distinction to make.
 func (c *campaignState) lifeAggregate(thisQuantity int64, thisEntryWeightedSum, price float64) (quantity int64, entryPrice, exitPrice float64) {
@@ -226,13 +224,13 @@ func (c *campaignState) lifeAggregate(thisQuantity int64, thisEntryWeightedSum, 
 
 // protectiveStop is the MINIMUM of every held Unit's own protectiveStop —
 // the level at which the Campaign's protection is FIRST breached, and (since
-// #14 keeps every fill at or above its own rung, ADR 0005 rule 1: "a long
-// fills at max(level, open)") always Unit 1's own stop, because fills are
+// every fill stays at or above its own rung, ADR 0005 rule 1: "a long fills
+// at max(level, open)") always Unit 1's own stop, because fills are
 // strictly increasing while every Unit's distance-to-stop (stopMultiple x
 // campaignN) stays the same. Reported on every strategy.campaign.evaluated
-// event and checked by checkCampaignHasAProtectiveStop's invariant; #15's
-// Stop Ladder is what will move this by raising earlier Units' stops rather
-// than leaving them at their own original level.
+// event and checked by checkCampaignHasAProtectiveStop's invariant; the
+// Stop Ladder moves this by raising earlier Units' stops rather than
+// leaving them at their own original level.
 func (c *campaignState) protectiveStop() float64 {
 	stop := c.units[0].protectiveStop
 	for _, u := range c.units[1:] {
@@ -245,13 +243,13 @@ func (c *campaignState) protectiveStop() float64 {
 
 // openRiskUnits maps every currently-held Unit onto sizing.UnitOpenRisk, in
 // the SAME ascending index order they are stored in — the shape
-// sizing.AggregateOpenRisk needs (#15, .greptile/rules.md's "risk
-// multiplication when pyramiding" failure mode). Callers pass the result
-// straight to sizing.AggregateOpenRisk and, separately, build
+// sizing.AggregateOpenRisk needs (.greptile/rules.md's "risk multiplication
+// when pyramiding" failure mode). Callers pass the result straight to
+// sizing.AggregateOpenRisk and, separately, build
 // event.CampaignEvaluatedPayload.Units from the SAME campaign.units slice —
 // the identical order both places read it in is what makes the reducer's
 // own computation and event.CampaignEvaluatedPayload.Validate's
-// re-derivation agree bit for bit (the #65 discipline).
+// re-derivation agree bit for bit.
 func (c *campaignState) openRiskUnits() []sizing.UnitOpenRisk {
 	units := make([]sizing.UnitOpenRisk, len(c.units))
 	for i, u := range c.units {
@@ -267,7 +265,7 @@ func (c *campaignState) aggregateOpenRisk(dollarsPerPoint float64) (float64, err
 	return sizing.AggregateOpenRisk(c.openRiskUnits(), dollarsPerPoint)
 }
 
-// resolveUnits looks up every id in ids (a stop fill's UnitIDs, #15) against
+// resolveUnits looks up every id in ids (a stop fill's UnitIDs) against
 // this Campaign's CURRENTLY held Units, by openingFillID. It returns the
 // matched Units in ASCENDING index order — regardless of the order ids
 // itself named them in, so event.CampaignUnitsStoppedPayload.UnitIndexes,
@@ -352,14 +350,14 @@ type acceptedFillState struct {
 	price        float64
 	direction    string
 	filledAt     time.Time
-	// unitIDs is #15's addition: a stop fill's own FillPayload.UnitIDs,
+	// unitIDs is a stop fill's own FillPayload.UnitIDs,
 	// compared alongside every other field so a re-delivered stop fill that
 	// reuses a FillID but names a DIFFERENT set of Units is caught as a
 	// reconciliation failure (a reused id with different contents), not
 	// silently accepted as the identical fact. Always nil for every other
 	// Kind, matching FillPayload.Validate's own closed-shape rule.
 	unitIDs []string
-	// level, slippageApplied and commission are #18's additions, compared
+	// level, slippageApplied and commission are compared
 	// alongside every other field for exactly the reason unitIDs is: a
 	// re-delivered fill that reuses a FillID but states a different level, a
 	// different slippage or a different commission is not the identical
@@ -409,7 +407,7 @@ func (a acceptedFillState) matches(fill event.FillPayload) bool {
 		a.direction == fill.Direction &&
 		a.filledAt.Equal(fill.FilledAt) &&
 		slices.Equal(a.unitIDs, fill.UnitIDs) &&
-		// #18: bit-for-bit, deliberately. This is not a price comparison
+		// Bit-for-bit, deliberately. This is not a price comparison
 		// deciding whether a level was reached (.greptile/rules.md's rule);
 		// it is an identity comparison asking whether two deliveries state
 		// the identical recorded fact, and a tolerance there would let a
@@ -475,7 +473,7 @@ type pendingProposalState struct {
 // read before applyCompletedBar's advance block overwrites it.
 func (r *Reducer) rememberPendingProposal(state *instrumentState, emitted event.Envelope, earliestFillAt time.Time) error {
 	if emitted.Type != event.TradeProposalEventType {
-		// A decline (#10) proposes nothing, so there is nothing to fill and
+		// A decline proposes nothing, so there is nothing to fill and
 		// nothing to expire.
 		return nil
 	}
@@ -515,10 +513,11 @@ func (r *Reducer) rememberPendingProposal(state *instrumentState, emitted event.
 // arrives after its proposal has gone: without the record, "this proposal
 // expired" and "this proposal never existed" are the same absence, and the
 // error would name a proposal the journal appears never to have made. It also
-// completes the lifecycle #10 began — a Signal is never followed by silence,
-// and now neither is a proposal: every one reaches a Campaign or an expiry.
+// completes the lifecycle a Signal starts — a Signal is never followed by
+// silence, and now neither is a proposal: every one reaches a Campaign or
+// an expiry.
 //
-// #13 reuses this exact payload and event type for an outstanding EXIT
+// This exact payload and event type is reused for an outstanding EXIT
 // proposal too (expireExitProposal, below), naming the difference with
 // Kind rather than minting a second event.
 func (r *Reducer) expireEntryProposal(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
@@ -560,7 +559,7 @@ func (r *Reducer) expireEntryProposal(state *instrumentState, bar event.Complete
 	), nil
 }
 
-// pendingExitProposalState is #13's exit-side mirror of pendingProposalState:
+// pendingExitProposalState is the exit-side mirror of pendingProposalState:
 // an exit proposal (strategy.exit.proposed) that has been emitted and not
 // yet resolved. It is NOT position state, for the identical reason
 // pendingProposalState is not: nothing about the Campaign's own life
@@ -595,7 +594,7 @@ type pendingExitProposalState struct {
 
 // expireExitProposal ends an outstanding exit proposal that the next
 // completed bar has superseded, and returns the event that records it —
-// #13's exit-side mirror of expireEntryProposal, reusing the identical
+// the exit-side mirror of expireEntryProposal, reusing the identical
 // event.ProposalExpiredPayload with Kind ProposalKindExit rather than a
 // second event type (see that payload's own doc comment). Unlike an
 // entry-kind expiry, SignalID is left empty: an exit proposal is not sized
@@ -640,7 +639,7 @@ func (r *Reducer) expireExitProposal(state *instrumentState, bar event.Completed
 	), nil
 }
 
-// pendingAddProposalState is #14's Add-side mirror of pendingExitProposalState:
+// pendingAddProposalState is the Add-side mirror of pendingExitProposalState:
 // an Add proposal (strategy.add.proposed) that has been emitted and not yet
 // resolved. It is NOT position state, for the identical reason
 // pendingExitProposalState is not: nothing about the Campaign's own life
@@ -676,7 +675,7 @@ type pendingAddProposalState struct {
 }
 
 // expireAddProposal ends an outstanding Add proposal that the next completed
-// bar has superseded, and returns the event that records it — #14's Add-side
+// bar has superseded, and returns the event that records it — the Add-side
 // mirror of expireExitProposal, reusing the identical
 // event.ProposalExpiredPayload with Kind ProposalKindAdd rather than a third
 // event type. Like an exit-kind expiry, SignalID is left empty: an Add
@@ -721,14 +720,13 @@ func (r *Reducer) expireAddProposal(state *instrumentState, bar event.CompletedB
 }
 
 // expireAddProposalForStop cancels an outstanding Add proposal the instant a
-// stop fill closes PART of the same Campaign (#15 review round, "Pending
-// Adds Survive Stopouts") — the SECOND way an Add proposal can end, next to
-// expireAddProposal's ordinary next-bar expiry (ADR 0011). Reused payload
-// and event type (event.ProposalExpiredPayload / ProposalExpiredEventType),
-// discriminated by event.ExpiryReasonSupersededByStop rather than a second
-// event type — the same "one event type, a Reason discriminator" choice
-// this ticket already made for the Stop Ladder's own raise
-// (event.ProtectiveStopSetPayload).
+// stop fill closes PART of the same Campaign — the SECOND way an Add
+// proposal can end, next to expireAddProposal's ordinary next-bar expiry
+// (ADR 0011). Reused payload and event type (event.ProposalExpiredPayload /
+// ProposalExpiredEventType), discriminated by
+// event.ExpiryReasonSupersededByStop rather than a second event type — the
+// same "one event type, a Reason discriminator" choice already made for the
+// Stop Ladder's own raise (event.ProtectiveStopSetPayload).
 //
 // Unlike expireAddProposal, ExpiredAt is the CLOSING FILL's own timestamp,
 // not a bar's PeriodEnd: the proposal was superseded by an execution, not by
@@ -736,10 +734,9 @@ func (r *Reducer) expireAddProposal(state *instrumentState, bar event.CompletedB
 // bar that proposed the Add (ADR 0005) — ExpiredAt can legitimately equal or
 // precede PeriodEnd here, unlike expireAddProposal's own next-bar case; see
 // event.ProposalExpiredPayload's own doc comment for the reason-dependent
-// rule this requires (#15 review round, "Stop Expiry Commits Partial
-// State"). applyAddFill's own partiallyStopped guard is a further,
-// independent line of defence, belt and braces alongside cancelling the
-// proposal outright here.
+// rule this requires. applyAddFill's own partiallyStopped guard is a
+// further, independent line of defence, belt and braces alongside
+// cancelling the proposal outright here.
 //
 // **Deliberately does NOT mutate state.pendingAddProposal.** Building and
 // validating this payload can fail — genuinely, not merely defensively —
@@ -791,8 +788,8 @@ func (r *Reducer) expireAddProposalForStop(state *instrumentState, fill event.Fi
 // evaluateCampaign runs an open Campaign's per-bar decision (#13): the
 // Protective Stop and Exit Channel levels in force on this bar, journaled as
 // a CampaignEvaluatedPayload regardless of whether either one triggers
-// anything — this is the event that fills the hole #12's Concerns left open
-// ("a bar for an instrument in a Campaign currently emits nothing at all").
+// anything — this is the event that fills the hole that would otherwise
+// leave a bar for an instrument in a Campaign emitting nothing at all.
 //
 // If the Exit Channel is ready and this bar's low fell strictly below it
 // (The Turtle Rules p.26: price "falls below" the channel; a tie is not a
@@ -827,11 +824,10 @@ func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBa
 	}
 	exitConditionMet := exitChannelReady && view.Low < exitChannelLow
 
-	// #15: every held Unit's own facts, in the SAME ascending order
+	// Every held Unit's own facts, in the SAME ascending order
 	// campaign.units and campaign.openRiskUnits() share — the order both
 	// this producer and event.CampaignEvaluatedPayload.Validate's
-	// re-derivation read Units in, so the two agree bit for bit (the #65
-	// discipline).
+	// re-derivation read Units in, so the two agree bit for bit.
 	units := make([]event.CampaignEvaluatedUnit, len(campaign.units))
 	for i, u := range campaign.units {
 		units[i] = event.CampaignEvaluatedUnit{UnitIndex: u.index, EntryPrice: u.fillPrice, Quantity: u.quantity, ProtectiveStop: u.protectiveStop}
@@ -886,7 +882,7 @@ func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBa
 	// At most one exit proposal per bar (this function runs once per
 	// instrument per completed bar), and it expires with its bar exactly
 	// like an entry proposal does (see expireExitProposal) — reusing ADR
-	// 0011's mechanism rather than inventing a second one, per the ticket.
+	// 0011's mechanism rather than inventing a second one.
 	proposalPayload := event.ExitProposalPayload{
 		CampaignID:   campaign.campaignID,
 		InstrumentID: bar.InstrumentID,
@@ -928,7 +924,7 @@ func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBa
 	return emissions, nil
 }
 
-// evaluateAdd is #14's Add Ladder evaluation: it computes the next rung from
+// evaluateAdd is the Add Ladder evaluation: it computes the next rung from
 // the Campaign's LAST Unit's ACTUAL fill (The Turtle Rules p.19-20: "add 1
 // Unit every 1/2N measured from the actual fill of the previous Unit") and,
 // if the relevant bar's high reached it, proposes adding the next Unit — a
@@ -936,25 +932,24 @@ func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBa
 // "filled in the bar whose range first covers it"), so the comparison is
 // >=, not the strict > an Entry Channel breakout uses.
 //
-// # Three call sites, one function (the "four Units in one bar" criterion)
+// # Three call sites, one function (every Unit addable within one bar)
 //
 // This is called from three places:
 //
 //  1. applyCompletedBar, once per completed bar, AFTER the exit evaluation
 //     (ADR 0010: exits before Adds) and only when this SAME bar did not
-//     itself propose an exit (exit takes precedence — the ticket's other
-//     ADR 0010 criterion). Only reachable for a Campaign already open when
+//     itself propose an exit (exit takes precedence, ADR 0010's other
+//     ordering rule). Only reachable for a Campaign already open when
 //     the bar arrives.
-//  2. openCampaign, immediately after a new Campaign's first Unit fills
-//     (#79 review round, "Breakout-bar Adds are skipped"): before #79, the
-//     entry always filled at the breakout bar's own high, so Unit 1's rung
-//     was structurally always above that bar's own high and this call site
-//     could never fire. #79 moves the entry to the Entry Channel high,
-//     which removes that accidental guarantee — the bar that opens a
-//     Campaign can now also cover Unit 2's rung, and without this call site
-//     that opportunity would be silently skipped, since applyCompletedBar
-//     already processed this bar as a Setup (no Campaign existed yet) and
-//     will never see it again.
+//  2. openCampaign, immediately after a new Campaign's first Unit fills:
+//     if the entry proposal named the breakout bar's own high as the entry
+//     level, Unit 1's rung would be structurally always above that bar's
+//     own high and this call site could never fire; naming the Entry
+//     Channel high instead (as EntryLevel does) removes that accidental
+//     guarantee — the bar that opens a Campaign can also cover Unit 2's
+//     rung, and without this call site that opportunity would be silently
+//     skipped, since applyCompletedBar already processed this bar as a
+//     Setup (no Campaign existed yet) and will never see it again.
 //  3. applyAddFill, immediately after a new Unit's fill is accepted: the
 //     THIRD and FOURTH rungs each depend on the PREVIOUS Unit's actual
 //     fill, which is unknown until that fill arrives, so the opportunity
@@ -972,13 +967,13 @@ func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBa
 // lastBarEarliestFillAt (set once per completed bar, in applyCompletedBar)
 // rather than bar-local values only the first call site would have.
 //
-// A campaign already at its configured maximum Units proposes nothing — the
-// ticket's "no fifth Unit is ever proposed" criterion — silently, since a
-// fully-Loaded Campaign is an ordinary state, not an error.
+// A campaign already at its configured maximum Units proposes nothing —
+// silently, since a fully-Loaded Campaign is an ordinary state, not an
+// error.
 func (r *Reducer) evaluateAdd(state *instrumentState, input event.Envelope) ([]event.Envelope, error) {
 	campaign := state.campaign
 	if campaign.partiallyStopped {
-		// #15: The Turtle Rules p.23-24 describes a Whipsaw variant in
+		// The Turtle Rules p.23-24 describes a Whipsaw variant in
 		// which Faith re-enters after a partial stop-out; that is a
 		// declared Variant, not the Baseline (ADR 0012), so once any Unit
 		// has been stopped out, this Campaign continues with whatever
