@@ -33,8 +33,7 @@ import (
 // a short Campaign's Add Ladder would descend rather than ascend, a
 // different formula this function does not implement.
 //
-// Fails closed (.greptile/rules.md: "A zero, negative, or not-yet-warm
-// volatility value must fail closed") on a non-finite or non-positive
+// Fails closed (.greptile/rules.md) on a non-finite or non-positive
 // previousFill or campaignN, and on an unrecognised direction.
 func NextAddLevel(previousFill, campaignN float64, direction string) (float64, error) {
 	errs := []error{

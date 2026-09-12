@@ -3,13 +3,8 @@
 // number implies (CONTEXT.md: "Unit", "Risk at Stop", "Sizing Mode"; ADR
 // 0003).
 //
-// It is deliberately separate from internal/indicator. An indicator measures
-// something about a price series; sizing decides how much capital to commit,
-// which is a different kind of statement with a different failure mode — an
-// indicator that is wrong produces a bad reading, sizing that is wrong
-// produces a position the account cannot afford. Keeping it in its own
-// package means every line that stands between N and a share count is in one
-// file that a reviewer can read end to end.
+// It is deliberately separate from internal/indicator — see
+// docs/development.md's package boundaries.
 //
 // Like internal/indicator, this package has no knowledge of events or replay
 // and imports nothing from internal/event: it declares its own Mode, and the
@@ -19,10 +14,10 @@
 // pins the two enumerations' values equal so they cannot drift apart
 // silently.
 //
-// Every entry point fails closed. .greptile/rules.md: "A zero, negative, or
-// not-yet-warm volatility value must fail closed — never size a position from
-// it." Non-finite inputs are rejected explicitly, before any ordered
-// comparison, because every ordered comparison against NaN is false.
+// Every entry point fails closed on a zero, negative, or not-yet-warm
+// volatility value (.greptile/rules.md). Non-finite inputs are rejected
+// explicitly, before any ordered comparison, because every ordered
+// comparison against NaN is false.
 package sizing
 
 import (
@@ -31,13 +26,11 @@ import (
 	"math"
 )
 
-// Mode selects which quantity a position's size is keyed to (ADR 0003).
-//
-// The two modes are only equivalent at one particular Stop Multiple, so
-// which one is in force is an explicit, declared choice rather than a
-// consequence of some other parameter. Both the Notion notes and the earlier
-// QuantConnect prototype collapsed them into the fixed-risk-at-stop form,
-// which silently diverges from the source the moment the stop is widened.
+// Mode selects which quantity a position's size is keyed to. The two modes
+// are only equivalent at one particular Stop Multiple, so which one is in
+// force is an explicit, declared choice rather than a consequence of some
+// other parameter — see ADR 0003's Context for why the two were
+// historically conflated.
 type Mode string
 
 // The two declared Sizing Modes. Their string values are identical to
@@ -223,10 +216,11 @@ const DrawdownStepRetainedFraction = 0.8
 // internal/strategy.NotionalAccount.Observe (the producer) and
 // event.DrawdownStepAppliedPayload.Validate (the validator) compute the
 // identical float64 value and an exact-equality comparison between them is
-// meaningful rather than a source of false rejections. #65 tracks this
-// discipline generally, including the risk that two textually identical
-// expressions can be fused differently across architectures; that risk
-// applies to an expression combining a multiply with an add or subtract
+// meaningful rather than a source of false rejections. This "one shared
+// function, exact equality" discipline guards against the risk that two
+// textually identical expressions can be fused differently across
+// architectures; that risk applies to an expression combining a multiply
+// with an add or subtract
 // (e.g. EntryLevel - StopMultiple*N), which a compiler may fuse as a single
 // operation, not to this function's single multiplication, which has
 // nothing to fuse with.
@@ -314,12 +308,11 @@ func UnitQuantity(notionalAccount, unitVolatilityFraction, n, dollarsPerPoint fl
 //	                   stopMultiple x n x dollarsPerPoint
 //
 // **This is not the Baseline.** ADR 0003 makes the Baseline
-// volatility-normalised (UnitQuantity) and this the Sublime Variant. The two
-// are algebraically identical only when the Stop Multiple is 2 and the risk
+// volatility-normalised (UnitQuantity) and this the Sublime Variant — see
+// its Context for why the two were historically conflated. They are
+// algebraically identical only when the Stop Multiple is 2 and the risk
 // fraction is twice the Unit Volatility Fraction; away from that point they
-// diverge, and collapsing them — as both the Notion notes and the earlier
-// QuantConnect prototype did — silently re-scales the whole book the moment
-// the 3xATR stop experiment runs.
+// diverge.
 //
 // Under this form the entry-to-stop distance is stopMultiple x N x
 // dollarsPerPoint, so a wider stop buys fewer shares and leaves Risk at Stop

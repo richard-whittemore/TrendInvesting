@@ -8,7 +8,7 @@ import (
 
 // NotionalAccountRebasedEventType identifies the Notional-Account-rebased
 // decision payload for the Envelope's Type field: ADR 0007's yearly
-// re-basing to actual equity (CONTEXT.md: "Notional Account"; #17).
+// re-basing to actual equity (CONTEXT.md: "Notional Account").
 const NotionalAccountRebasedEventType = "strategy.notional-account.rebased"
 
 // NotionalAccountRebasedSchemaVersion is the current schema version of

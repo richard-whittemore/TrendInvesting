@@ -13,24 +13,24 @@ const ConfigurationEventType = "strategy.configuration"
 // ConfigurationSchemaVersion is the current schema version of
 // ConfigurationPayload, for the Envelope's SchemaVersion field.
 //
-// Bumped to 2 for #9: TierBDistanceInN was added. Bumped to 3 for #10:
-// DollarsPerPoint and RiskAtStopFraction were added. A schema change is
-// explicit in this project (docs/development.md), never a silent field
-// addition — and here it must be, because both #10 fields decode as the
-// float64 zero from an older record: a zero DollarsPerPoint divides by zero
-// in sizing, and a zero RiskAtStopFraction would make a fixed-risk-at-stop
-// run size every Unit from a risk budget of nothing.
+// A schema change is explicit in this project (docs/development.md), never a
+// silent field addition.
 //
-// Bumped 3 -> 4 for #18: Commission was added (ADR 0013's
-// Interactive-Brokers-style per-share model, the second half of the cost
-// model whose first half — SlippageN — this payload has carried since #8). A
-// schema-3 record decodes the whole block as zeros, and a
-// MaximumFractionOfTradeValue of zero is not a legitimate cap: it would
-// charge nothing on every order however large the per-share rate, which is
-// the commission-side twin of the zero-slippage run ADR 0013 declares invalid
-// by construction. So a schema-3 record is rejected outright rather than
-// silently run free of costs (ADR 0015's rule, the same discipline every
-// earlier bump in this package applied).
+//   - Version 2 added TierBDistanceInN.
+//   - Version 3 added DollarsPerPoint and RiskAtStopFraction, both of which
+//     must be rejected rather than silently defaulted: an older record
+//     decodes both as the float64 zero, and a zero DollarsPerPoint divides
+//     by zero in sizing while a zero RiskAtStopFraction would make a
+//     fixed-risk-at-stop run size every Unit from a risk budget of nothing.
+//   - Version 4 added Commission (ADR 0013's Interactive-Brokers-style
+//     per-share model, the second half of the cost model whose first half —
+//     SlippageN — this payload has carried since version 1). An older
+//     record decodes the whole block as zeros, and a
+//     MaximumFractionOfTradeValue of zero is not a legitimate cap: it would
+//     charge nothing on every order however large the per-share rate, the
+//     commission-side twin of the zero-slippage run ADR 0013 declares
+//     invalid by construction. So an older record is rejected outright
+//     rather than silently run free of costs (ADR 0015's rule).
 const ConfigurationSchemaVersion uint32 = 4
 
 // SizingMode selects which quantity position size is keyed to (ADR 0003).
@@ -47,7 +47,7 @@ const (
 
 // CommissionConfig carries ADR 0013's commission model: the
 // Interactive-Brokers-style per-share schedule the Baseline charges on every
-// fill (#18).
+// fill.
 //
 // Three parameters, not one number, because that is the shape of the
 // published schedule the Baseline adopts: a rate per share, a floor per
@@ -61,9 +61,8 @@ const (
 // number in this payload is: a Variant that runs a different broker's
 // schedule is a declared experiment (ADR 0012), never an edit to the code.
 // The Baseline's own values are declared by whoever owns the Baseline
-// configuration (#50); see internal/fills for the arithmetic that applies
-// them, which is where the ordering of floor and ceiling is decided and
-// tested.
+// configuration; see internal/fills for the arithmetic that applies them,
+// which is where the ordering of floor and ceiling is decided and tested.
 type CommissionConfig struct {
 	// PerShare is the rate charged per share or contract executed. May be
 	// zero: a commission-free venue is a legitimate Variant, and unlike
@@ -99,8 +98,8 @@ type NotionalAccountConfig struct {
 //
 // The numeric policy for these fields (float64 precision, rounding,
 // eventual fixed-point representation) is deliberately unresolved here; that
-// is ADR territory, out of scope for this contract. ConfigurationHash (#50,
-// ADR 0016) derives from exactly this payload plus its schema version — see
+// is ADR territory, out of scope for this contract. ConfigurationHash (ADR
+// 0016) derives from exactly this payload plus its schema version — see
 // ConfigurationHash.
 type ConfigurationPayload struct {
 	StrategyID             string     `json:"strategy_id"`
@@ -112,12 +111,12 @@ type ConfigurationPayload struct {
 	MaxUnits               int        `json:"max_units"`
 	SlippageN              float64    `json:"slippage_n"`
 	// TierBDistanceInN is how close (in N) a Setup's high may sit below the
-	// Entry Channel and still be reported as Tier B (CONTEXT.md: "Tier";
-	// #9). Unlike the channel lengths above, this is not a Faith number:
-	// System 2's own printed rules have no concept of an "approaching"
-	// state. It is a Baseline-declared adaptation (ADR 0012's provenance
-	// taxonomy) that whoever owns the Baseline configuration (#50) must
-	// choose deliberately, not a value transcribed from a source.
+	// Entry Channel and still be reported as Tier B (CONTEXT.md: "Tier").
+	// Unlike the channel lengths above, this is not a Faith number: System
+	// 2's own printed rules have no concept of an "approaching" state. It is
+	// a Baseline-declared adaptation (ADR 0012's provenance taxonomy) that
+	// whoever owns the Baseline configuration must choose deliberately, not
+	// a value transcribed from a source.
 	TierBDistanceInN float64 `json:"tier_b_distance_in_n"`
 	// DollarsPerPoint is the instrument's contract multiplier: what one
 	// point of price movement is worth per share or contract. For US
@@ -132,7 +131,7 @@ type ConfigurationPayload struct {
 	// the contract multiplier is genuinely a property of the instrument, not
 	// of the strategy, and a universe that ever contains a futures contract
 	// (or an instrument quoted in a different unit) will need it to arrive
-	// as per-instrument reference data instead. See #10's Concerns.
+	// as per-instrument reference data instead.
 	DollarsPerPoint float64 `json:"dollars_per_point"`
 	// RiskAtStopFraction is the fraction of the Notional Account one Unit
 	// loses at its Protective Stop — and it is a configurable input in
@@ -148,8 +147,8 @@ type ConfigurationPayload struct {
 	// honours — the exact confusion ADR 0003 was written to prevent.
 	RiskAtStopFraction float64               `json:"risk_at_stop_fraction"`
 	NotionalAccount    NotionalAccountConfig `json:"notional_account"`
-	// Commission is ADR 0013's commission model (#18), the cost-model
-	// companion to SlippageN above.
+	// Commission is ADR 0013's commission model, the cost-model companion to
+	// SlippageN above.
 	Commission CommissionConfig `json:"commission"`
 }
 
@@ -217,7 +216,7 @@ func (c ConfigurationPayload) Validate() error {
 		errs = append(errs, errors.New("dollars per point must be positive; it is 1 for shares and the contract multiplier for a futures contract"))
 	}
 	// Risk at Stop is configurable in exactly one Sizing Mode. The
-	// volatility-normalised branch is #10's named negative case, and it
+	// volatility-normalised branch is the named negative case, and it
 	// rejects any non-zero value including the one the derivation would
 	// itself produce: the rule is that the field is absent in this mode, not
 	// that it must agree. Comparing against zero rather than range-checking
@@ -245,7 +244,7 @@ func (c ConfigurationPayload) Validate() error {
 	if !validRebasingDate(c.NotionalAccount.RebasingMonth, c.NotionalAccount.RebasingDay) {
 		errs = append(errs, errors.New("notional account rebasing date must be a valid month and day"))
 	}
-	// #18: the commission model. The rate and the floor may legitimately be
+	// The commission model. The rate and the floor may legitimately be
 	// zero (a commission-free venue is a declared Variant); the cap may not,
 	// both because a zero cap charges nothing at all and because it is what
 	// an older record decodes to — see CommissionConfig's own field comments.

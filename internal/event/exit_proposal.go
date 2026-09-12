@@ -15,8 +15,8 @@ import (
 // (TradeProposalEventType), this is a decision the strategy made, not an
 // external fact — nothing here assumes a fill. ADR 0005 makes the exit a
 // resting order at the level, filled in the bar whose range first covers it
-// (never at the close); #18's fill simulator decides whether and at what
-// price it actually filled.
+// (never at the close); the fill simulator decides whether and at what price
+// it actually filled.
 //
 // A trade proposal and an exit proposal are deliberately two different event
 // types, not one payload discriminated by a field: an entry proposal is sized
@@ -51,7 +51,7 @@ const RuleExitChannelBreach = "exit.channel.breach"
 const ADRExitChannelBreach = "0002"
 
 // ExitReasonExitChannel is CampaignExitedPayload.Reason's value for a
-// Campaign closed by this proposal's fill (#13). Declared here, next to the
+// Campaign closed by this proposal's fill. Declared here, next to the
 // proposal that names it, rather than only on CampaignExitedPayload's own
 // enumeration, since the two must always agree: an exit fill executing this
 // proposal cites the identical string.
@@ -66,7 +66,7 @@ const ExitReasonExitChannel = "exit-channel"
 // indicator.ExitChannel's doc comment for why that exclusion matters: the
 // same look-ahead bug EntryChannel's doc comment names, mirrored). What
 // actually fills there is not decided here: ADR 0005 makes it a resting
-// order, and #18's fill simulator decides the executed price, which may sit
+// order, and the fill simulator decides the executed price, which may sit
 // below Level on a gap.
 //
 // Quantity is always the Campaign's full FilledQuantity: the Baseline has no
@@ -76,9 +76,9 @@ const ExitReasonExitChannel = "exit-channel"
 // Deliberately out of scope, so nothing here should be read as having
 // considered them:
 //
-//   - Whether the fill actually happens, and at what price. ADR 0005 and
-//     #18 own that; a proposal is not a fill.
-//   - Adds (#14). This proposal exists only because a Campaign is already
+//   - Whether the fill actually happens, and at what price. ADR 0005 and the
+//     fill model own that; a proposal is not a fill.
+//   - Adds. This proposal exists only because a Campaign is already
 //     open; it says nothing about whether the same bar would also have
 //     produced an Add. ADR 0010's ordering — exits evaluated and journaled
 //     before Adds — is enforced by where internal/strategy.Reducer emits
@@ -89,7 +89,7 @@ type ExitProposalPayload struct {
 	CampaignID   string    `json:"campaign_id"`
 	InstrumentID string    `json:"instrument_id"`
 	PeriodEnd    time.Time `json:"period_end"`
-	// Reason is ExitReasonExitChannel today; #24's delisting exit is a
+	// Reason is ExitReasonExitChannel today; a Delisting Exit is a
 	// different, non-proposed closing event (a Campaign is forced closed,
 	// never proposed first), so this field is not expected to grow the way
 	// CampaignExitedPayload.Reason does.

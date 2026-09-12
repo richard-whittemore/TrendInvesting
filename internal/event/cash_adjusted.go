@@ -12,7 +12,7 @@ import (
 // Notional-Account-cash-adjusted decision payload for the Envelope's Type
 // field: a deposit or withdrawal scaled the yearly starting figure and the
 // Notional Account so that it can neither trigger nor mask a Drawdown Step
-// (ADR 0007; #17).
+// (ADR 0007).
 const NotionalAccountCashAdjustedEventType = "strategy.notional-account.cash-adjusted"
 
 // NotionalAccountCashAdjustedSchemaVersion is the current schema version of

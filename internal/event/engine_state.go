@@ -14,11 +14,9 @@ import (
 // about itself, not an external fact. No existing name was found to reuse —
 // docs/architecture.md's "Safety invariants" section states the *rule*
 // ("material reconciliation differences force safe mode") but names no
-// event; #26 (LEAN transport) had not yet landed a safe-mode/engine-state
-// concept at the time this was written. A later ticket that needs an
-// engine-state event should reuse THIS type and EngineStatePayload — adding
-// a Reason value, the same way CampaignExitedPayload's Reason grows for #13
-// and #24 — rather than minting a second one.
+// event. Later work needing an engine-state event should reuse THIS type and
+// EngineStatePayload — adding a Reason value, the same way
+// CampaignExitedPayload's Reason grows — rather than minting a second one.
 const EngineStateEventType = "strategy.engine.state"
 
 // EngineStateSchemaVersion is the current schema version of

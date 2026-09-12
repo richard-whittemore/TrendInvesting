@@ -11,22 +11,22 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
-// This file holds #16's Notional Account state machine (ADR 0007) and the
+// This file holds the Notional Account state machine (ADR 0007) and the
 // Reducer method that drives it from account.snapshot events. It is placed
 // in internal/strategy rather than internal/indicator: an indicator measures
 // a price series (True Range, N — see internal/indicator's package
 // comment), while a Notional Account tracks capital that a drawdown reduces,
 // which is a different kind of fact with a different failure mode — the
-// same reasoning #10 used to split internal/sizing out from
-// internal/indicator. NotionalAccount itself stays pure (no event, replay,
-// or clock dependency; see its own doc comment) despite living alongside the
-// reducer that drives it, so it is independently testable exactly like an
-// indicator or a sizing function.
+// same reasoning that split internal/sizing out from internal/indicator.
+// NotionalAccount itself stays pure (no event, replay, or clock dependency;
+// see its own doc comment) despite living alongside the reducer that drives
+// it, so it is independently testable exactly like an indicator or a sizing
+// function.
 //
 // Kept in its own file, touching reducer.go only for the Apply switch case,
-// the notionalAccount field, and sizeUnit reading Current(): a second agent
-// works #11 in the same package in parallel, and both tickets should be able
-// to land with a minimal, low-conflict reducer.go diff.
+// the notionalAccount field, and sizeUnit reading Current(): keeping the
+// reducer.go diff minimal lets unrelated work land alongside it with low
+// conflict.
 
 // notionalAccountDrawdownThresholdFraction is the fraction of the CURRENT
 // Notional Account that actual equity must fall below the measurement base
@@ -52,9 +52,9 @@ const notionalAccountDrawdownThresholdFraction = 0.10
 // threshold sequence converges to base - 0.5 x current but never crosses
 // it. Equity at or below that point would leave every future threshold
 // still above it, so a literal application of the rule would never
-// terminate — see the asymptote check at the top of Observe, which fails
-// closed instead (Greptile PR #66 finding: "deep drawdowns never
-// terminate").
+// terminate — a deep-enough drawdown never terminating was a real defect
+// class here; see the asymptote check at the top of Observe, which fails
+// closed instead.
 const notionalAccountUndefinedDrawdownFraction = notionalAccountDrawdownThresholdFraction / (1 - sizing.DrawdownStepRetainedFraction)
 
 // maxDrawdownStepsPerObservation bounds the number of Drawdown Steps Observe
@@ -90,8 +90,8 @@ type Step struct {
 // the same as actual account equity (CONTEXT.md: "Notional Account").
 //
 // It tracks two figures, both initialised to the configured starting equity
-// (ADR 0007; this ticket, #16, does not implement the yearly re-basing or
-// recovery that would later move them — that is #17):
+// (ADR 0007; the yearly re-basing and recovery that later move them are
+// ObserveSnapshot's own concern, below):
 //
 //   - current (A): the Notional Account itself, returned by Current().
 //   - base (B): "the figure it was last measured from" (The Turtle Rules
@@ -123,8 +123,8 @@ type NotionalAccount struct {
 
 	// startingFigure is S, ADR 0007's "yearly starting figure": the equity
 	// level a full recovery must regain. It begins at the constructor's
-	// starting value, moves to actual equity at a re-basing (#17), and
-	// scales proportionally on a cash movement (#17) — but NEVER on a mere
+	// starting value, moves to actual equity at a re-basing, and scales
+	// proportionally on a cash movement — but NEVER on a mere
 	// rise in equity: that is the entire difference between this rule and a
 	// high-water-mark reset (see TestHighWaterMarkRecoveryDivergesFromNotionalAccountRecovery).
 	startingFigure float64
@@ -187,7 +187,7 @@ func (n *NotionalAccount) Current() float64 {
 // measured from (The Turtle Rules p.17: "the figure it was last measured
 // from"). It changes only when Observe applies a step, to the threshold
 // that step crossed, or when ObserveSnapshot re-bases or recovers the
-// account (#17); a rise in equity alone never moves it.
+// account; a rise in equity alone never moves it.
 func (n *NotionalAccount) MeasurementBase() float64 {
 	return n.base
 }
@@ -237,7 +237,7 @@ func validRebasingDate(month, day int) bool {
 // account: this is a measurement-base rule, not a high-water mark (ADR
 // 0007's declared Variant; see TestHighWaterMarkResetDivergesFromNotionalAccount).
 // Recovery, which requires the yearly starting figure to be regained, is
-// #17.
+// ObserveSnapshot's own concern, below.
 //
 // equity must be finite and positive: .greptile/rules.md's fail-closed rule
 // applies to every account-affecting figure, not only volatility readings,
@@ -248,8 +248,7 @@ func validRebasingDate(month, day int) bool {
 // call: equity at or below that asymptote (notionalAccountUndefinedDrawdownFraction's
 // doc comment derives it) is rejected with an error rather than looped over
 // forever — ADR 0007 and Faith's source do not address a drawdown this deep,
-// so this is a fail-closed design choice, not a transcribed rule (Greptile
-// PR #66 finding).
+// so this is a fail-closed design choice, not a transcribed rule.
 func (n *NotionalAccount) Observe(equity float64) ([]Step, error) {
 	if err := checkEquity("equity", equity); err != nil {
 		return nil, fmt.Errorf("strategy: cannot observe an account snapshot: %w", err)
@@ -273,10 +272,9 @@ func (n *NotionalAccount) Observe(equity float64) ([]Step, error) {
 	for i := 0; ; i++ {
 		if i >= maxDrawdownStepsPerObservation {
 			// Unreachable given the asymptote check above and the fractions
-			// as declared: kept as a belt-and-braces guard (Greptile PR #66
-			// finding) so a future change to either cannot silently
-			// reintroduce an unbounded loop that consumes memory forever
-			// appending Steps.
+			// as declared: kept as a belt-and-braces guard so a future change
+			// to either cannot silently reintroduce an unbounded loop that
+			// consumes memory forever appending Steps.
 			return nil, fmt.Errorf(
 				"strategy: applied %d drawdown steps in one account snapshot observation without terminating; this indicates a defect in the drawdown ladder, not a legitimate market condition",
 				i)
@@ -337,8 +335,8 @@ type Recovery struct {
 //     starting figure" the run never actually started the year with (see
 //     TestNotionalAccountFirstSnapshotAfterRebasingDateDoesNotRebase).
 //
-//  2. The Drawdown Step ladder (Observe, unchanged from #16), against
-//     whatever the measurement base and account are AFTER step 1.
+//  2. The Drawdown Step ladder (Observe), against whatever the measurement
+//     base and account are AFTER step 1.
 //
 //  3. Recovery. If the account is below the yearly starting figure (i.e.
 //     one or more Drawdown Steps are outstanding since the last reset) and
@@ -443,8 +441,8 @@ type CashMovement struct {
 //
 // equityBefore must be finite and positive, and amount must be finite and
 // non-zero (a "movement" of nothing is not a movement). equityBefore+amount
-// must itself be finite (two finite inputs can still overflow to +/-Inf —
-// Greptile PR #71 finding) and strictly positive: a withdrawal that would
+// must itself be finite (two finite inputs can still overflow to +/-Inf) and
+// strictly positive: a withdrawal that would
 // take equity to zero or below fails closed, since ADR 0007 does not
 // address an account emptied or overdrawn by a withdrawal. Every check,
 // including that each of the three scaled figures itself comes out finite
@@ -551,8 +549,8 @@ func (r *Reducer) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelop
 	// duplicate or out-of-order snapshot would silently re-derive Drawdown
 	// Steps from a stale or repeated reading, corrupting the Notional
 	// Account for every decision after it. There is one account for the
-	// whole run, and #17 puts cash movements on the SAME timeline (ADR
-	// 0007 rule 4), so chronology is tracked across both event types
+	// whole run, and cash movements share the SAME timeline as snapshots
+	// (ADR 0007 rule 4), so chronology is tracked across both event types
 	// together, not per-instrument and not per event type.
 	if r.hasAccountEvent && !snapshot.AsOf.After(r.lastAccountEventAt) {
 		return nil, fmt.Errorf("strategy: account snapshot as of %s is not strictly after the last recorded account event %s; rejecting a duplicate or out-of-order snapshot",
@@ -566,9 +564,9 @@ func (r *Reducer) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelop
 		// ObserveSnapshot) can still fail closed here for a reason no
 		// payload-level check can see — equity at or below the Drawdown
 		// Step ladder's 50%-drawdown asymptote (NotionalAccount.Observe's
-		// doc comment; Greptile PR #66 finding — note that re-basing moves
-		// what the asymptote is measured from, since it moves the
-		// measurement base and account themselves). Wrapped, not swallowed:
+		// doc comment — note that re-basing moves what the asymptote is
+		// measured from, since it moves the measurement base and account
+		// themselves). Wrapped, not swallowed:
 		// the run stops rather than sizing anything further from an
 		// undefined Notional Account.
 		return nil, fmt.Errorf("strategy: %w", err)
@@ -581,7 +579,7 @@ func (r *Reducer) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelop
 
 	if rebase != nil {
 		// A re-basing starts a fresh episode: the next Drawdown Step is
-		// step 1 again (#16's Concerns flagged this as #17's job).
+		// step 1 again.
 		r.drawdownStepsSeen = 0
 		payload := event.NotionalAccountRebasedPayload{
 			AsOf:                   snapshot.AsOf,
@@ -661,7 +659,7 @@ func (r *Reducer) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelop
 	return emissions, nil
 }
 
-// applyCashMovement handles event.CashMovementEventType (#17): a deposit or
+// applyCashMovement handles event.CashMovementEventType: a deposit or
 // withdrawal scales the Notional Account per ADR 0007 (see
 // NotionalAccount.ApplyCashMovement) and is journalled as a
 // strategy.notional-account.cash-adjusted decision.
@@ -671,9 +669,9 @@ func (r *Reducer) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelop
 // decoding (ADR 0015). Chronology is checked against the SAME
 // r.lastAccountEventAt/r.hasAccountEvent state as applyAccountSnapshot: ADR
 // 0007 rule 4 puts snapshots and cash movements on one shared per-account
-// timeline, and this ticket's decision is that they may not share an AsOf —
-// a cash movement carries its own EquityBefore precisely so the rule is
-// checkable from the event alone, without needing a same-instant snapshot.
+// timeline, and they may not share an AsOf — a cash movement carries its own
+// EquityBefore precisely so the rule is checkable from the event alone,
+// without needing a same-instant snapshot.
 func (r *Reducer) applyCashMovement(envelope event.Envelope) ([]event.Envelope, error) {
 	if !r.configured {
 		return nil, errors.New("strategy: received a cash movement before a configuration event; failing closed")
@@ -748,7 +746,7 @@ func drawdownStepID(asOf time.Time, stepNumber int) string {
 }
 
 // notionalAccountEventID builds a deterministic, reproducible-on-replay ID
-// for a re-basing, recovery, or cash-adjustment emission (#17). Unlike a
+// for a re-basing, recovery, or cash-adjustment emission. Unlike a
 // Drawdown Step, each of these can occur at most once per AsOf — ADR 0007
 // rule 4's shared, strictly-increasing account timeline already guarantees
 // that — so kind and AsOf together identify it uniquely without a counter.
@@ -758,13 +756,13 @@ func notionalAccountEventID(kind string, asOf time.Time) string {
 
 // pinAccountCurrency pins r.accountCurrency from the first account snapshot
 // or cash movement accepted, and rejects any later one of either type whose
-// Currency differs from the pin (Greptile PR #71 finding: Currency was
-// validated for presence only by AccountSnapshotPayload/CashMovementPayload
-// and then discarded, so nothing stopped a later event stated in a
-// different currency from being silently scaled and compared against
-// figures stated in the first one). Multi-currency accounts are out of
-// scope for this project (issue #17 Findings); this makes that explicit at
-// the reducer rather than leaving it silently unenforced. The pin survives
+// Currency differs from the pin. Currency was once validated for presence
+// only by AccountSnapshotPayload/CashMovementPayload and then discarded, so
+// nothing stopped a later event stated in a different currency from being
+// silently scaled and compared against figures stated in the first one.
+// Multi-currency accounts are out of scope for this project; this makes
+// that explicit at the reducer rather than leaving it silently unenforced.
+// The pin survives
 // everything else the Notional Account does — re-basing, a Drawdown Step,
 // a recovery — since it lives on the Reducer, not on NotionalAccount.
 func (r *Reducer) pinAccountCurrency(currency string) error {

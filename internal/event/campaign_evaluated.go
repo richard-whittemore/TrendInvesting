@@ -13,36 +13,32 @@ import (
 // this is the one decision event a completed bar produces for it.
 //
 // CONTEXT.md defines a Setup as an Eligible instrument NOT in a Campaign, so
-// an instrument already in a Campaign gets no Setup-evaluated event (#11's
-// Findings) — but that left a bar in a Campaign emitting nothing at all
-// except the invariant check (#12's Concerns explicitly named this a hole
-// for #13 to fill). This event is that fill: the levels in force on this
-// bar — the Protective Stop and the Exit Channel low — are journaled every
-// bar a Campaign is open, whether or not either one triggers anything.
+// an instrument already in a Campaign gets no Setup-evaluated event — but
+// that left a bar in a Campaign emitting nothing at all except the invariant
+// check. This event fills that hole: the levels in force on this bar — the
+// Protective Stop and the Exit Channel low — are journaled every bar a
+// Campaign is open, whether or not either one triggers anything.
 const CampaignEvaluatedEventType = "strategy.campaign.evaluated"
 
 // CampaignEvaluatedSchemaVersion is the current schema version of
 // CampaignEvaluatedPayload, for the Envelope's SchemaVersion field.
 //
-// Bumped 1 -> 2 for #15: Units, DollarsPerPoint, AggregateOpenRisk,
-// NotionalAccount and AggregateOpenRiskFraction were all added. A schema-1
-// record decodes Units as a nil (empty) slice, which is not a legitimate
-// value under the new requirement — ProtectiveStop's own re-derivation
-// depends on it being non-empty — so a schema-1 record is rejected outright
-// rather than silently read as a Campaign with no Units (ADR 0015's rule,
-// the same discipline #13/#14's own schema bumps applied to their new
-// fields).
+// Version 2 added Units, DollarsPerPoint, AggregateOpenRisk, NotionalAccount
+// and AggregateOpenRiskFraction, all required. A version-1 record decodes
+// Units as a nil (empty) slice, which is not a legitimate value under the
+// new requirement — ProtectiveStop's own re-derivation depends on it being
+// non-empty — so a version-1 record is rejected outright rather than
+// silently read as a Campaign with no Units (ADR 0015's rule).
 const CampaignEvaluatedSchemaVersion uint32 = 2
 
 // CampaignEvaluatedUnit is one held Unit's own facts as reported on a
-// per-bar CampaignEvaluatedPayload (#15): its identity (UnitIndex), its own
-// entry, its own quantity, and its own CURRENT Protective Stop — which, once
-// the Stop Ladder (The Turtle Rules p.22-23) has raised some Units and not
+// per-bar CampaignEvaluatedPayload: its identity (UnitIndex), its own entry,
+// its own quantity, and its own CURRENT Protective Stop — which, once the
+// Stop Ladder (The Turtle Rules p.22-23) has raised some Units and not
 // others (the gap case, p.23), may genuinely differ from every other Unit's
-// own level. Before #15, CampaignEvaluatedPayload reported only the
-// Campaign-wide minimum (ProtectiveStop, still carried below); this is what
-// lets a journal reader see every level actually in force, not only the
-// tightest one.
+// own level. CampaignEvaluatedPayload also reports the Campaign-wide minimum
+// (ProtectiveStop, still carried below); this list is what lets a journal
+// reader see every level actually in force, not only the tightest one.
 type CampaignEvaluatedUnit struct {
 	UnitIndex      int     `json:"unit_index"`
 	EntryPrice     float64 `json:"entry_price"`
@@ -87,13 +83,13 @@ type CampaignEvaluatedPayload struct {
 	// bar (CONTEXT.md: "Every open Campaign has one at all times") — the
 	// MINIMUM across every listed Unit's own ProtectiveStop (Validate checks
 	// the two agree exactly): the first level that would trigger. Kept
-	// alongside Units (#15) rather than replaced by it: a consumer that only
-	// cares "is the Campaign still protected, and at what worst-case level"
-	// reads this one field, without summarising Units itself.
+	// alongside Units rather than replaced by it: a consumer that only cares
+	// "is the Campaign still protected, and at what worst-case level" reads
+	// this one field, without summarising Units itself.
 	ProtectiveStop float64 `json:"protective_stop"`
 	// Units lists every held Unit's own entry, quantity and CURRENT
-	// Protective Stop (#15). Before the Stop Ladder ever raises a stop
-	// unevenly (the gap case, The Turtle Rules p.23), every Unit's own level
+	// Protective Stop. Before the Stop Ladder ever raises a stop unevenly
+	// (the gap case, The Turtle Rules p.23), every Unit's own level
 	// coincides and this list is redundant with ProtectiveStop; once levels
 	// diverge, this is the only place a journal reader sees every level
 	// actually in force. Always non-empty: an open Campaign always holds at
@@ -111,13 +107,13 @@ type CampaignEvaluatedPayload struct {
 	// shares), restated so AggregateOpenRisk is independently re-derivable
 	// from Units alone (see the type's doc comment on AggregateOpenRisk).
 	DollarsPerPoint float64 `json:"dollars_per_point"`
-	// AggregateOpenRisk is the Campaign's aggregate open risk (#15,
-	// .greptile/rules.md's "risk multiplication when pyramiding" failure
+	// AggregateOpenRisk is the Campaign's aggregate open risk
+	// (.greptile/rules.md's "risk multiplication when pyramiding" failure
 	// mode, fixed by construction): the sum, over every listed Unit, of
 	// (EntryPrice - ProtectiveStop) x Quantity x DollarsPerPoint —
 	// internal/sizing.AggregateOpenRisk, called identically by the producer
-	// and by Validate below (the #65 discipline), so the two cannot
-	// silently disagree about which figure is "the" aggregate. Computed
+	// and by Validate below, so the two cannot silently disagree about which
+	// figure is "the" aggregate. Computed
 	// from EACH Unit's own entry and OWN current stop, never assumed
 	// uniform across Units — the prototype's own risk-multiplication bug,
 	// closed by this re-derivation: a payload that claims a small (correct,
@@ -149,9 +145,9 @@ type CampaignEvaluatedPayload struct {
 // match their derivation from Units, DollarsPerPoint and NotionalAccount
 // EXACTLY (the same exact-equality discipline every derived field in this
 // package uses). AggregateOpenRisk is re-derived by calling
-// internal/sizing.AggregateOpenRisk rather than re-typing the summation here
-// (the #65 discipline, the same one CampaignExitedPayload.Validate already
-// follows for sizing.AverageMoveInN/RealisedResultInUnitN).
+// internal/sizing.AggregateOpenRisk rather than re-typing the summation
+// here — the same discipline CampaignExitedPayload.Validate already follows
+// for sizing.AverageMoveInN/RealisedResultInUnitN.
 func (p CampaignEvaluatedPayload) Validate() error {
 	var errs []error
 	if p.CampaignID == "" {
@@ -195,9 +191,9 @@ func (p CampaignEvaluatedPayload) Validate() error {
 			errs = append(errs, fmt.Errorf("units[%d]: entry price must be positive", i))
 			unitsUsable = false
 		}
-		// A Unit's protective stop must be positive and finite, but — since
-		// #15's review round — is NOT required to sit below its own entry
-		// price: repeated half-N raises (the Stop Ladder) can lift an
+		// A Unit's protective stop must be positive and finite, but is NOT
+		// required to sit below its own entry price: repeated half-N raises
+		// (the Stop Ladder) can lift an
 		// earlier Unit's stop to or above its own entry under a Variant
 		// with a narrower Stop Multiple (e.g. StopMultiple 1 with four
 		// Units — the Baseline's 2N stop and four-Unit maximum never reach

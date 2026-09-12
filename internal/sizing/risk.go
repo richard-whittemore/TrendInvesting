@@ -28,8 +28,8 @@ type UnitOpenRisk struct {
 // This is .greptile/rules.md's "risk multiplication when pyramiding" failure
 // mode, fixed by construction: "each added Unit must not be granted a fresh
 // full risk budget" and "aggregate open risk ... must be computed from each
-// Unit's own entry and its own current stop, not assumed uniform" (issue
-// #15). Summing EACH Unit's own entry and OWN current stop is the whole
+// Unit's own entry and its own current stop, not assumed uniform". Summing
+// EACH Unit's own entry and OWN current stop is the whole
 // point — a single Campaign-level entry/stop pair is not enough to compute
 // this once the Stop Ladder (RaisedStop) has raised some Units' stops and
 // not others, which is exactly what happens the moment a later Unit fills
@@ -44,14 +44,13 @@ type UnitOpenRisk struct {
 // UnitOpenRisk from anything but each Unit's own CURRENT (correctly raised)
 // stop, and why event.CampaignEvaluatedPayload.Validate calls this same
 // function to catch a payload that claims a smaller, "ladder" aggregate
-// while its own listed Units carry the inflated, unraised figures (the
-// #65 discipline: one shared function, called by both the producer and the
-// validator, so the two cannot silently disagree about which arithmetic is
-// "the" aggregate).
+// while its own listed Units carry the inflated, unraised figures: one
+// shared function, called by both the producer and the validator, so the
+// two cannot silently disagree about which arithmetic is "the" aggregate.
 //
 // A Unit whose current stop sits AT OR ABOVE its own entry contributes ZERO
-// to the sum, never a negative figure and never a validation error (#15
-// review round). Repeated half-N raises (the Stop Ladder) can lift an
+// to the sum, never a negative figure and never a validation error. Repeated
+// half-N raises (the Stop Ladder) can lift an
 // earlier Unit's stop to or above its own entry under a Variant with a
 // narrow enough Stop Multiple — StopMultiple 1 with four Units is the
 // smallest configuration that reaches it, since the maximum raise a

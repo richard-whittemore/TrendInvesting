@@ -9,8 +9,8 @@ import (
 // SignalEventType identifies the Signal decision payload for the Envelope's
 // Type field. CONTEXT.md: "Signal" — the event of a Setup reaching Tier A on
 // a completed bar, the strategy recognising that its entry condition is
-// met. A Signal is detection only: no position is taken here (#9); sizing
-// and order proposal are out of scope.
+// met. A Signal is detection only: no position is taken here; sizing and
+// order proposal are out of scope.
 const SignalEventType = "strategy.signal"
 
 // SignalSchemaVersion is the current schema version of SignalPayload, for

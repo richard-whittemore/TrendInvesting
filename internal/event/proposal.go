@@ -12,7 +12,7 @@ import (
 // the Envelope's Type field. docs/architecture.md names "trade proposals
 // returned to LEAN" as the decision boundary's output: this is the Go side of
 // that boundary, and it is a proposal, not an order — nothing here assumes a
-// fill (ADR 0005 and #18 own the fill model).
+// fill (ADR 0005 owns the fill model).
 const TradeProposalEventType = "strategy.trade.proposed"
 
 // TradeProposalSchemaVersion is the current schema version of
@@ -32,8 +32,8 @@ const ProposalDeclinedSchemaVersion uint32 = 1
 // The rule names for TradeProposalPayload.Rule, one per Sizing Mode.
 //
 // Each names what the rule computes, not which vendor's system it resembles
-// and not the parameter values it happened to run with — #9's finding
-// applied to sizing. A Variant that changes the Unit Volatility Fraction or
+// and not the parameter values it happened to run with. A Variant that
+// changes the Unit Volatility Fraction or
 // the Stop Multiple is still volatility-normalised sizing, and a rule name
 // carrying either number would misdescribe it; the numbers live in their own
 // fields on the payload. Which run this is — Baseline or a declared Variant —
@@ -91,16 +91,15 @@ const (
 // Deliberately out of scope, so nothing here should be read as having
 // considered them:
 //
-//   - Caps. This is one Unit, and no cap is checked (#55 records that
-//     ConfigurationPayload.MaxUnits models one of ADR 0008's four levels;
-//     the cap check itself belongs to a later ticket). A proposal is not a
-//     permission to trade.
+//   - Caps. This is one Unit, and no cap is checked (ConfigurationPayload.
+//     MaxUnits models one of ADR 0008's four levels; the cap check itself is
+//     applied elsewhere). A proposal is not a permission to trade.
 //   - Fills. EntryLevel is the level a resting order sits at, not a fill
-//     price; slippage is a fill concern (ADR 0013) owned by #18.
+//     price; slippage is a fill concern owned by the fill model (ADR 0013).
 //   - Drawdown. NotionalAccount is the configured starting equity; Drawdown
-//     Steps and yearly re-basing (ADR 0007) are #16/#17.
+//     Steps and yearly re-basing (ADR 0007) are applied elsewhere.
 //   - Campaign state. Freezing N and the Unit size at first entry (ADR 0006)
-//     is #11; this payload carries what that freeze will need.
+//     happens elsewhere; this payload carries what that freeze will need.
 type TradeProposalPayload struct {
 	InstrumentID string    `json:"instrument_id"`
 	PeriodEnd    time.Time `json:"period_end"`
@@ -118,8 +117,8 @@ type TradeProposalPayload struct {
 	// ADR 0005, not the breakout bar's own high (SignalPayload.BreakoutHigh).
 	// Faith's wording is "exceeded by a single tick" [T p.19]; the Baseline's
 	// tick increment is zero, with the Signal's own strict exceedance doing
-	// that work (a baseline-declared adaptation, ADR 0012 — see issue #79's
-	// Findings). What actually fills there is not decided here.
+	// that work (a baseline-declared adaptation, ADR 0012). What actually
+	// fills there is not decided here.
 	EntryLevel float64 `json:"entry_level"`
 	// Quantity is a whole number of shares or contracts, truncated toward
 	// zero (The Turtle Rules p.14-15). It is always positive: a proposal for
@@ -445,9 +444,9 @@ func (p ProposalDeclinedPayload) Validate() error {
 // ProposalExpiredEventType identifies the payload recorded when a trade
 // proposal was superseded without ever being filled.
 //
-// It completes the lifecycle #10 began: a Signal is never followed by silence
-// (a proposal or a decline always follows it), and now neither is a proposal —
-// every proposal reaches exactly one terminal event, a Campaign
+// It completes the lifecycle a Signal starts: a Signal is never followed by
+// silence (a proposal or a decline always follows it), and now neither is a
+// proposal — every proposal reaches exactly one terminal event, a Campaign
 // (CampaignOpenedEventType) or this. Without it, "this proposal expired" and
 // "this proposal never existed" are the same absence in the journal, and the
 // error a consumer raises for a fill arriving too late has nothing behind it
@@ -457,26 +456,23 @@ const ProposalExpiredEventType = "strategy.proposal.expired"
 // ProposalExpiredSchemaVersion is the current schema version of
 // ProposalExpiredPayload.
 //
-// Bumped 1 -> 2 for #13: Kind was added (ProposalKindEntry|ProposalKindExit),
-// so this one expiry mechanism is reused for an outstanding exit proposal
-// (strategy.exit.proposed) rather than minting a second event type. An older
-// schema-1 record decodes Kind as the empty string, which is not a
-// recognised value, so it is rejected outright rather than silently
-// misread as one kind or the other (ADR 0015's rule, the same discipline
-// #12 applied when FillPayload gained its own Kind).
+// A field that is REQUIRED always carries its own version bump (ADR 0015),
+// following the same discipline as FillSchemaVersion.
 //
-// NOT bumped again for #14's ProposalKindAdd, for the identical reason
-// FillSchemaVersion was not bumped for FillKindAdd: Kind is already required
-// at schema 2, and no schema-2 record ever wrote "add" before this ticket,
-// so there is no existing record this new value could be mistaken for.
-//
-// Bumped 2 -> 3 for #15's review round ("Stop Expiry Commits Partial
-// State"): EarliestFillAt was added, needed because ExpiredAt's required
-// relationship to PeriodEnd now differs by Reason (see EarliestFillAt's own
-// doc comment and Validate). A schema-2 record decodes EarliestFillAt as the
-// zero time, which Validate would read as "no lower bound at all" — silently
-// weakening the chronology check for every OLD record rather than rejecting
-// it outright — so schema 2 is rejected (ADR 0015's rule).
+//   - Version 2 added Kind (ProposalKindEntry|ProposalKindExit), required, so
+//     this one expiry mechanism is reused for an outstanding exit proposal
+//     (strategy.exit.proposed) rather than minting a second event type. An
+//     older version-1 record decodes Kind as the empty string, which is not
+//     a recognised value, so it is rejected outright. ProposalKindAdd was
+//     later a further recognised value of the same, already-required field,
+//     so it did not need its own bump: no version-2 record ever wrote "add",
+//     so there is no existing record the new value could be mistaken for.
+//   - Version 3 added EarliestFillAt, needed because ExpiredAt's required
+//     relationship to PeriodEnd differs by Reason (see EarliestFillAt's own
+//     doc comment and Validate). A version-2 record decodes EarliestFillAt
+//     as the zero time, which Validate would read as "no lower bound at
+//     all" — silently weakening the chronology check for an old record
+//     rather than rejecting it — so version 2 is rejected.
 const ProposalExpiredSchemaVersion uint32 = 3
 
 // The three Kind values ProposalExpiredPayload accepts. An entry-kind expiry
@@ -484,7 +480,7 @@ const ProposalExpiredSchemaVersion uint32 = 3
 // the next bar superseded without a fill; an exit-kind expiry is an exit
 // proposal (strategy.exit.proposed, ExitProposalPayload) that an open
 // Campaign's Exit Channel breach produced and the next bar superseded
-// without an exit fill; an add-kind expiry (#14) is an Add proposal
+// without an exit fill; an add-kind expiry is an Add proposal
 // (strategy.add.proposed, AddProposalPayload) that an open Campaign's rung
 // being reached produced and the next bar superseded without an Add fill.
 // All three share the same lifecycle rule (ADR 0011: no persistent proposal
@@ -506,7 +502,7 @@ const (
 const RuleExitProposalExpiresWithItsBar = "exit-proposal.expires.with-its-bar"
 
 // RuleAddProposalExpiresWithItsBar names the rule for
-// ProposalExpiredPayload.Rule when Kind is ProposalKindAdd (#14): an Add
+// ProposalExpiredPayload.Rule when Kind is ProposalKindAdd: an Add
 // proposal belongs to one bar and expires with it, the same lifecycle
 // RuleExitProposalExpiresWithItsBar states for an exit-kind proposal — kept
 // as a separate constant for the same reason that one is: an Add proposal
@@ -515,9 +511,9 @@ const RuleExitProposalExpiresWithItsBar = "exit-proposal.expires.with-its-bar"
 const RuleAddProposalExpiresWithItsBar = "add-proposal.expires.with-its-bar"
 
 // RuleAddProposalSupersededByStop names the rule for
-// ProposalExpiredPayload.Rule when Reason is ExpiryReasonSupersededByStop
-// (#15 review round): an outstanding Add proposal is cancelled by a stop
-// fill partially closing the same Campaign, not by the next bar.
+// ProposalExpiredPayload.Rule when Reason is ExpiryReasonSupersededByStop: an
+// outstanding Add proposal is cancelled by a stop fill partially closing the
+// same Campaign, not by the next bar.
 const RuleAddProposalSupersededByStop = "add-proposal.superseded-by-stop"
 
 // RuleSignalExpiresWithItsBar names the rule for ProposalExpiredPayload.Rule:
@@ -537,9 +533,8 @@ const ADRSignalExpiry = "0011"
 // decline reasons are — a journal must be groupable by it.
 const ExpiryReasonSupersededByNextBar = "superseded-by-next-bar"
 
-// ExpiryReasonSupersededByStop is the SECOND expiry reason (#15 review
-// round, "Pending Adds Survive Stopouts"): an outstanding Add proposal
-// (ProposalKindAdd only — an entry or exit proposal has no analogous
+// ExpiryReasonSupersededByStop is the SECOND expiry reason: an outstanding
+// Add proposal (ProposalKindAdd only — an entry or exit proposal has no analogous
 // interaction with a stop fill) is cancelled the instant a stop fill closes
 // PART of the same Campaign, rather than waiting for ADR 0011's ordinary
 // next-bar expiry. Without this, a fill for that stale proposal could still
@@ -560,7 +555,7 @@ const ExpiryReasonSupersededByStop = "superseded-by-stop"
 type ProposalExpiredPayload struct {
 	InstrumentID string `json:"instrument_id"`
 	// Kind discriminates which proposal this is: ProposalKindEntry or
-	// ProposalKindExit (#13). Required and closed, mirroring
+	// ProposalKindExit. Required and closed, mirroring
 	// FillPayload.Kind's own discipline: an empty or unrecognised value is
 	// rejected rather than defaulted.
 	Kind string `json:"kind"`
@@ -578,10 +573,9 @@ type ProposalExpiredPayload struct {
 	// superseded it (always strictly LATER than PeriodEnd — a proposal is
 	// superseded by a later bar); for Reason ExpiryReasonSupersededByStop,
 	// the closing fill's own timestamp, which can legitimately fall AT OR
-	// BEFORE PeriodEnd (#15 review round, "Stop Expiry Commits Partial
-	// State" — ADR 0005 makes a stop a resting order that can fill inside
-	// the SAME bar that proposed the Add it cancels, not only on a later
-	// one). See Validate for the reason-dependent rule this asymmetry
+	// BEFORE PeriodEnd (ADR 0005 makes a stop a resting order that can fill
+	// inside the SAME bar that proposed the Add it cancels, not only on a
+	// later one). See Validate for the reason-dependent rule this asymmetry
 	// requires.
 	PeriodEnd time.Time `json:"period_end"`
 	ExpiredAt time.Time `json:"expired_at"`
@@ -608,7 +602,7 @@ type ProposalExpiredPayload struct {
 	// Quantity and Level restate what was proposed and not taken, so the
 	// expiry is readable without joining back to the proposal — the entry
 	// level for an entry-kind expiry, the Exit Channel level for an
-	// exit-kind expiry (#13).
+	// exit-kind expiry.
 	Quantity int64   `json:"quantity"`
 	Level    float64 `json:"level"`
 }

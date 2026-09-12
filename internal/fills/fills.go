@@ -10,8 +10,8 @@
 // simulating. That follows the rest of internal/: "indicator" owns a
 // measurement, "sizing" owns an arithmetic, "strategy" owns the decisions.
 // The rules in here are not simulation-specific: the same three rules are
-// what a reviewer will check a LEAN or broker fill against (#30), and a
-// package called "simulator" would misdescribe that second use the moment it
+// what a reviewer will check a LEAN or broker fill against, and a package
+// called "simulator" would misdescribe that second use the moment it
 // arrives. The Source stamped on the envelopes this package produces IS
 // "simulator", because that field answers a different question — who
 // produced this particular event — and in a backtest the answer is the
@@ -40,8 +40,8 @@
 // rung and a Protective Stop are all derived from split-adjusted prices by
 // the reducer, and comparing them against raw prices would silently fill
 // orders at levels that never existed. The fill is reported in the same view
-// it was decided in. Raw-view accounting is #38's, and in slice 1 the two
-// views are identical in every fixture.
+// it was decided in. Raw-view accounting belongs elsewhere, and in slice 1
+// the two views are identical in every fixture.
 //
 // # The commission schedule the Baseline declares
 //
@@ -56,7 +56,7 @@
 // the page above refuses automated retrieval, so the figures were read from a
 // search of it on that date rather than from the page itself; every test that
 // depends on them parameterises them, and whoever owns the Baseline
-// configuration (#50) must confirm them against the live schedule before any
+// configuration must confirm them against the live schedule before any
 // paper-trading or limited-live gate.
 package fills
 
@@ -72,8 +72,8 @@ import (
 // Source is stamped on every envelope this package produces. It names the
 // component that emitted the event (docs/architecture.md), and is the ONLY
 // thing that distinguishes a simulated fill from an adapter-produced one: the
-// payload, the schema version and every field on it are identical in shape,
-// which is this ticket's own criterion.
+// payload, the schema version and every field on it are identical in shape
+// between the two producers.
 const Source = "simulator"
 
 // idTimeLayout is the fixed, nanosecond-precision layout every deterministic
@@ -483,7 +483,7 @@ func (s *Simulator) observeUnitAdded(envelope event.Envelope) error {
 }
 
 // observeProtectiveStopSet is where a Protective Stop becomes a resting
-// order, and where a Stop Ladder raise moves one (#15). One event type serves
+// order, and where a Stop Ladder raise moves one. One event type serves
 // both — the reducer discriminates with Reason — and so does this, because
 // the effect on the book is identical: the Unit's own stop is now at Level.
 func (s *Simulator) observeProtectiveStopSet(envelope event.Envelope, ref reference) error {
@@ -539,7 +539,7 @@ func (s *Simulator) observeCampaignExited(envelope event.Envelope) error {
 
 // observeProposalExpired drops whichever order the expiry names. It covers
 // both of the reducer's expiry paths: ADR 0011's ordinary next-bar expiry,
-// and #15's cancellation of a pending Add the instant a stop fill partially
+// and the cancellation of a pending Add the instant a stop fill partially
 // closes the Campaign.
 //
 // It matches on the proposal id rather than on Kind alone, so an expiry for a
@@ -562,7 +562,7 @@ func (s *Simulator) observeProposalExpired(envelope event.Envelope) error {
 // Resting returns the orders in force for instrumentID, in a deterministic
 // order: the entry, Add and exit proposals first, then one entry per held
 // Unit's Protective Stop in ascending Unit order. It exists for inspection —
-// by a test, or by #19's driver reporting what was left outstanding when a
+// by a test, or by a driver reporting what was left outstanding when a
 // run ended — and never to be mutated.
 func (s *Simulator) Resting(instrumentID string) []Order {
 	b, ok := s.books[instrumentID]

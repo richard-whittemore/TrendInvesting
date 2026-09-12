@@ -9,9 +9,9 @@ import (
 
 // CashMovementEventType identifies the cash-movement input payload for the
 // Envelope's Type field: a deposit into, or withdrawal from, the account
-// (ADR 0007; #17). Produced by fixtures for this ticket; a brokerage or
-// ledger integration produces it later, the same relationship
-// AccountSnapshotPayload has to the LEAN adapter/broker.
+// (ADR 0007). Produced by fixtures today; a brokerage or ledger integration
+// produces it later, the same relationship AccountSnapshotPayload has to the
+// LEAN adapter/broker.
 const CashMovementEventType = "account.cash-movement"
 
 // CashMovementSchemaVersion is the current schema version of
@@ -22,19 +22,15 @@ const CashMovementSchemaVersion uint32 = 1
 //
 // EquityBefore — actual equity immediately BEFORE this movement — is
 // carried on the event itself rather than left for the reducer to read off
-// the last account snapshot: #17's decision is that the "neither triggers
-// nor masks a Drawdown Step" rule (ADR 0007) must be checkable from the
-// event alone, without requiring a same-instant snapshot to exist. See
-// event_test's TestCashMovementPayloadValidate for the fail-closed cases
-// this carries, including a withdrawal that would take equity to zero or
-// below.
+// the last account snapshot: the "neither triggers nor masks a Drawdown
+// Step" rule (ADR 0007) must be checkable from the event alone, without
+// requiring a same-instant snapshot to exist.
 type CashMovementPayload struct {
 	// AsOf is when this movement occurred, sharing ADR 0007 rule 4's one
 	// per-account timeline with AccountSnapshotPayload.AsOf: a reducer
-	// requires AsOf strictly increasing across BOTH event types together
-	// (#17's decision — a cash movement and a snapshot may not share an
-	// AsOf), the same way it requires a snapshot's own AsOf strictly
-	// increasing.
+	// requires AsOf strictly increasing across BOTH event types together — a
+	// cash movement and a snapshot may not share an AsOf — the same way it
+	// requires a snapshot's own AsOf strictly increasing.
 	AsOf time.Time `json:"as_of"`
 	// Amount is the movement: positive for a deposit, negative for a
 	// withdrawal. Must be finite and non-zero — a "movement" of nothing is
@@ -55,9 +51,8 @@ type CashMovementPayload struct {
 // Validate checks that the movement identifies when it occurred, that
 // Amount is finite and non-zero, that EquityBefore is finite and positive,
 // that EquityBefore+Amount is finite (two finite inputs can still overflow
-// to +Inf — Greptile PR #71 finding) and strictly positive (a withdrawal to
-// zero or below fails closed rather than being silently accepted), and that
-// Currency is present.
+// to +Inf) and strictly positive (a withdrawal to zero or below fails closed
+// rather than being silently accepted), and that Currency is present.
 func (p CashMovementPayload) Validate() error {
 	var errs []error
 	if p.AsOf.IsZero() {
