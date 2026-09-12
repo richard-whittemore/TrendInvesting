@@ -1221,7 +1221,7 @@ func TestPartialStopWithAnInvalidExpiryLeavesCampaignStateCompletelyUnchanged(t 
 	// sequence to be internally contiguous (see its own doc comment), not
 	// contiguous against a PRIOR call, so this is a supported way to drive
 	// one Reducer's history in stages.
-	reducer, err := strategy.NewReducer(testStrategyVersion, testConfigurationHash)
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
 		t.Fatalf("NewReducer() error = %v", err)
 	}
