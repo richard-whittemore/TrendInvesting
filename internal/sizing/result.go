@@ -15,10 +15,10 @@ import (
 // move", not "how many Units' worth of a full 1N move did the Campaign
 // realise". Two Units each moving a full N report here as 1N — the same
 // reading a single Unit moving 1N would give — because this is a per-share
-// average, not a sum over Units. A PR #74 review finding (Greptile, "N
-// Result Ignores Units") is what separated the two: the field this function
-// backs used to be named as though it were the aggregate, which understated
-// a multi-Unit Campaign's realised risk and performance when read that way.
+// average, not a sum over Units. A review finding is what separated the
+// two: the field this function backs used to be named as though it were the
+// aggregate, which understated a multi-Unit Campaign's realised risk and
+// performance when read that way.
 //
 // entryPrice is the Campaign's own entry price — a single Unit's fill, or,
 // for a multi-Unit Campaign, the quantity-weighted average fill price
@@ -57,9 +57,8 @@ func AverageMoveInN(exitPrice, entryPrice, campaignN float64) (float64, error) {
 // dollar result by one Unit's worth of a full 1N move is what turns it into
 // a count of how many such moves the whole Campaign realised: several
 // equal-sized Units each earning a full 1N sum here to the number of
-// Units, not to ~1N the way a naive per-share average would understate it
-// (the exact defect a PR #74 review finding, "N Result Ignores Units",
-// named).
+// Units, not to ~1N the way a naive per-share average would understate it —
+// the exact defect AverageMoveInN's own doc comment names.
 //
 // Fails closed on a non-finite realisedResult, a non-positive unitQuantity,
 // and a non-finite or non-positive campaignN or dollarsPerPoint.

@@ -223,10 +223,11 @@ const DrawdownStepRetainedFraction = 0.8
 // internal/strategy.NotionalAccount.Observe (the producer) and
 // event.DrawdownStepAppliedPayload.Validate (the validator) compute the
 // identical float64 value and an exact-equality comparison between them is
-// meaningful rather than a source of false rejections. #65 tracks this
-// discipline generally, including the risk that two textually identical
-// expressions can be fused differently across architectures; that risk
-// applies to an expression combining a multiply with an add or subtract
+// meaningful rather than a source of false rejections. This "one shared
+// function, exact equality" discipline guards against the risk that two
+// textually identical expressions can be fused differently across
+// architectures; that risk applies to an expression combining a multiply
+// with an add or subtract
 // (e.g. EntryLevel - StopMultiple*N), which a compiler may fuse as a single
 // operation, not to this function's single multiplication, which has
 // nothing to fuse with.

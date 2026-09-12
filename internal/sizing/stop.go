@@ -40,7 +40,7 @@ const DirectionLong = "long"
 // entryPrice, campaignN or stopMultiple, on an unrecognised direction, and on
 // a derived level at or below zero: a long equity cannot be stopped out at
 // or below zero, so such a stop would leave the position unprotected in fact
-// while looking protected in the journal — the same rule #10's
+// while looking protected in the journal — the same rule
 // DeclineReasonStopIntentNotPositive encodes for a proposal's stop intent,
 // and CampaignOpenedPayload.Validate enforces again for the Campaign that
 // results from a fill.
