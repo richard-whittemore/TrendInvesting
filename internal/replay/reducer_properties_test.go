@@ -125,16 +125,16 @@ func propertyBarEnvelope(t *testing.T, sequence uint64, bar event.CompletedBarPa
 // so the proposal is superseded rather than filled or renewed. recordedAt
 // computes each envelope's RecordedAt from its EventTime, so a caller can
 // shift it independently of EventTime to test arrival-time independence.
-func signalNeverSurvivesFixture(t *testing.T, recordedAt func(eventTime time.Time) time.Time) (cfg event.ConfigurationPayload, envelopes []event.Envelope) {
+func signalNeverSurvivesFixture(t *testing.T, recordedAt arrivalSchedule) (cfg event.ConfigurationPayload, envelopes []event.Envelope) {
 	t.Helper()
 	cfg = propertyFixtureConfiguration()
-	envelopes = []event.Envelope{propertyConfigEnvelope(t, cfg, propertyDay(0), recordedAt(propertyDay(0)))}
+	envelopes = []event.Envelope{propertyConfigEnvelope(t, cfg, propertyDay(0), recordedAt(0, propertyDay(0)))}
 
 	seq := uint64(2)
 	for i := 0; i < 20; i++ {
 		high := 100 + float64(i+1) // 101..120: channel high after warm-up is 120
 		bar := flatBar("AAPL", propertyDay(i+1), high, high-2)
-		envelopes = append(envelopes, propertyBarEnvelope(t, seq, bar, cfg, recordedAt(bar.PeriodEnd)))
+		envelopes = append(envelopes, propertyBarEnvelope(t, seq, bar, cfg, recordedAt(i+1, bar.PeriodEnd)))
 		seq++
 	}
 
@@ -142,7 +142,7 @@ func signalNeverSurvivesFixture(t *testing.T, recordedAt func(eventTime time.Tim
 	// breakout, a Signal, and (this fixture's prices and starting equity
 	// size at least one whole Unit) a trade proposal.
 	breakout := flatBar("AAPL", propertyDay(21), 130, 128)
-	envelopes = append(envelopes, propertyBarEnvelope(t, seq, breakout, cfg, recordedAt(breakout.PeriodEnd)))
+	envelopes = append(envelopes, propertyBarEnvelope(t, seq, breakout, cfg, recordedAt(21, breakout.PeriodEnd)))
 	seq++
 
 	// Bar 22: high 125 does not exceed the channel high, now 130 (bars 2-21)
@@ -152,9 +152,39 @@ func signalNeverSurvivesFixture(t *testing.T, recordedAt func(eventTime time.Tim
 	// reducer's own decisions, not whether the fill simulator would have
 	// filled this proposal.
 	quiet := flatBar("AAPL", propertyDay(22), 125, 123)
-	envelopes = append(envelopes, propertyBarEnvelope(t, seq, quiet, cfg, recordedAt(quiet.PeriodEnd)))
+	envelopes = append(envelopes, propertyBarEnvelope(t, seq, quiet, cfg, recordedAt(22, quiet.PeriodEnd)))
 
 	return cfg, envelopes
+}
+
+// arrivalSchedule decides when the input at index i, carrying eventTime, was
+// recorded as arriving.
+type arrivalSchedule func(index int, eventTime time.Time) time.Time
+
+// arrivedWhenItHappened is the baseline schedule: RecordedAt tracks EventTime.
+func arrivedWhenItHappened(_ int, eventTime time.Time) time.Time { return eventTime }
+
+// arrivedOnADifferentSchedule is the schedule that makes arrival-time
+// independence a real test rather than a restatement.
+//
+// A single constant offset applied to every input preserves every interval
+// between consecutive arrivals, so it cannot detect a reducer that reads
+// ELAPSED time between events — which is at least as likely a wall-clock
+// leak as one reading an absolute instant, and is the reading a uniform
+// shift is structurally blind to. The per-index steps below vary, so every
+// interval changes and no two change alike.
+//
+// The offsets are cumulative and strictly increasing, so a monotonic arrival
+// stream stays monotonic: the shifted stream is one a real clock could have
+// produced, and a failure therefore means the reducer is wrong rather than
+// that the input was impossible. Every step is far under the fixture's
+// one-day bar spacing, so ordering is never inverted.
+func arrivedOnADifferentSchedule(index int, eventTime time.Time) time.Time {
+	offset := 37 * time.Minute
+	for k := 0; k <= index; k++ {
+		offset += time.Duration(k%7+1) * time.Minute
+	}
+	return eventTime.Add(offset)
 }
 
 func runFixture(t *testing.T, cfg event.ConfigurationPayload, inputs []event.Envelope) []event.Envelope {
@@ -181,7 +211,7 @@ func runFixture(t *testing.T, cfg event.ConfigurationPayload, inputs []event.Env
 func TestReplayTwiceIsByteIdentical(t *testing.T) {
 	t.Parallel()
 
-	cfg, inputs := signalNeverSurvivesFixture(t, func(eventTime time.Time) time.Time { return eventTime })
+	cfg, inputs := signalNeverSurvivesFixture(t, arrivedWhenItHappened)
 
 	first := runFixture(t, cfg, inputs)
 	second := runFixture(t, cfg, inputs)
@@ -202,13 +232,19 @@ func TestReplayTwiceIsByteIdentical(t *testing.T) {
 // leak would show up as a difference somewhere else: a Tier, a price, a
 // quantity computed from wall-clock arrival rather than from the ordered
 // event stream.
+//
+// The arrivals are RESCHEDULED, not translated. A single constant offset
+// leaves every interval between consecutive arrivals intact and so cannot
+// catch a reducer reading elapsed time between events; see
+// arrivedOnADifferentSchedule and TestTheArrivalTimeComparisonCatchesAnIntervalLeak,
+// which holds that sensitivity in place.
 func TestArrivalTimeIndependence(t *testing.T) {
 	t.Parallel()
 
-	const shift = 37 * time.Minute
+	cfg, original := signalNeverSurvivesFixture(t, arrivedWhenItHappened)
+	_, shifted := signalNeverSurvivesFixture(t, arrivedOnADifferentSchedule)
 
-	cfg, original := signalNeverSurvivesFixture(t, func(eventTime time.Time) time.Time { return eventTime })
-	_, shifted := signalNeverSurvivesFixture(t, func(eventTime time.Time) time.Time { return eventTime.Add(shift) })
+	assertArrivalsAreRescheduledNotTranslated(t, original, shifted)
 
 	fromOriginal := runFixture(t, cfg, original)
 	fromShifted := runFixture(t, cfg, shifted)
@@ -251,6 +287,135 @@ func TestArrivalTimeIndependence(t *testing.T) {
 	}
 }
 
+// assertArrivalsAreRescheduledNotTranslated is the sensitivity guard on the
+// arrival-time property: it confirms the two streams differ in the GAPS
+// between consecutive arrivals and not merely in their absolute instants. If
+// this ever passes vacuously the property test above silently weakens to the
+// uniform-shift version, which no interval-reading leak can fail.
+func assertArrivalsAreRescheduledNotTranslated(t *testing.T, original, shifted []event.Envelope) {
+	t.Helper()
+
+	if len(original) != len(shifted) || len(original) < 2 {
+		t.Fatalf("got %d original and %d shifted inputs; need the same count and at least two to have an interval at all", len(original), len(shifted))
+	}
+
+	changed := 0
+	for i := 1; i < len(original); i++ {
+		was := original[i].RecordedAt.Sub(original[i-1].RecordedAt)
+		now := shifted[i].RecordedAt.Sub(shifted[i-1].RecordedAt)
+		if now != was {
+			changed++
+		}
+		if now < 0 {
+			t.Fatalf("arrival %d goes backwards in the shifted stream (%s after %s); a rescheduled stream must still be one a real clock could produce",
+				i, shifted[i].RecordedAt, shifted[i-1].RecordedAt)
+		}
+	}
+	if changed == 0 {
+		t.Fatal("every interval between consecutive arrivals survived the shift unchanged; this is a translation, not a reschedule, and a reducer reading elapsed time between events would pass")
+	}
+}
+
+// TestTheArrivalTimeComparisonCatchesAnIntervalLeak is the test for the test.
+//
+// It runs the arrival-time comparison against a handler that deliberately
+// leaks the elapsed time between consecutive arrivals into what it emits, and
+// requires the comparison to report a divergence. It then runs the SAME
+// handler under a uniform shift and requires that to be missed — which is the
+// evidence that a constant offset is structurally blind to this leak, and the
+// reason the schedule above varies its steps.
+//
+// Without this, the property test could only show that a correct reducer
+// passes, which is the weaker half of what is worth knowing.
+func TestTheArrivalTimeComparisonCatchesAnIntervalLeak(t *testing.T) {
+	t.Parallel()
+
+	baseline := buildArrivals(t, arrivedWhenItHappened)
+	rescheduled := buildArrivals(t, arrivedOnADifferentSchedule)
+	translated := buildArrivals(t, func(_ int, eventTime time.Time) time.Time {
+		return eventTime.Add(37 * time.Minute)
+	})
+
+	if diverged := intervalLeakDiverges(t, baseline, rescheduled); !diverged {
+		t.Fatal("a reducer leaking the interval between arrivals was NOT caught by the rescheduled stream; the arrival-time property is not testing what it claims")
+	}
+	if diverged := intervalLeakDiverges(t, baseline, translated); diverged {
+		t.Fatal("a uniform shift caught the interval leak, so it is not blind after all; the reasoning behind the varying schedule needs re-reading")
+	}
+}
+
+// buildArrivals returns the fixture's input stream under one arrival schedule.
+func buildArrivals(t *testing.T, schedule arrivalSchedule) []event.Envelope {
+	t.Helper()
+	_, envelopes := signalNeverSurvivesFixture(t, schedule)
+	return envelopes
+}
+
+// intervalLeakDiverges runs an interval-leaking handler over both streams and
+// reports whether comparing the emissions, modulo RecordedAt, finds a
+// divergence — exactly the comparison TestArrivalTimeIndependence performs.
+func intervalLeakDiverges(t *testing.T, original, shifted []event.Envelope) bool {
+	t.Helper()
+
+	fromOriginal := runLeakingHandler(t, original)
+	fromShifted := runLeakingHandler(t, shifted)
+	if len(fromOriginal) != len(fromShifted) || len(fromOriginal) == 0 {
+		t.Fatalf("the leaking handler emitted %d and %d decisions; it must emit the same non-zero number for the comparison to mean anything", len(fromOriginal), len(fromShifted))
+	}
+
+	for i := range fromOriginal {
+		want, got := fromOriginal[i], fromShifted[i]
+		want.RecordedAt, got.RecordedAt = time.Time{}, time.Time{}
+		if replay.Equivalent([]event.Envelope{want}, []event.Envelope{got}) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func runLeakingHandler(t *testing.T, inputs []event.Envelope) []event.Envelope {
+	t.Helper()
+	engine, err := replay.New(&intervalLeakingHandler{})
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+	emitted, err := engine.Run(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("Engine.Run() error = %v", err)
+	}
+	return emitted
+}
+
+// intervalLeakingHandler is a deliberately wrong handler: it computes the
+// elapsed time since the previous input ARRIVED and puts it in what it emits.
+// A decision derived from how long the gap was, rather than from the ordered
+// event stream, is exactly the defect arrival-time independence exists to
+// catch.
+type intervalLeakingHandler struct{ previousArrival time.Time }
+
+func (h *intervalLeakingHandler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope, error) {
+	var elapsed time.Duration
+	if !h.previousArrival.IsZero() {
+		elapsed = in.RecordedAt.Sub(h.previousArrival)
+	}
+	h.previousArrival = in.RecordedAt
+
+	payload := json.RawMessage(fmt.Sprintf(`{"elapsed_since_previous_arrival_ns":%d}`, elapsed))
+	return []event.Envelope{{
+		ID:                "leak-" + in.ID,
+		Type:              "test.leaked",
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
+		SchemaVersion:     1,
+		EventTime:         in.EventTime,
+		RecordedAt:        in.RecordedAt,
+		Source:            "leaking-fixture",
+		StrategyVersion:   in.StrategyVersion,
+		ConfigurationHash: in.ConfigurationHash,
+		PayloadHash:       event.HashPayload(payload),
+		Payload:           payload,
+	}}, nil
+}
+
 // TestASignalNeverSurvivesItsBar: bar 21's Signal and the proposal it caused
 // belong to bar 21 alone. Bar 22 does not renew, repeat, or extend it — it
 // only records that the proposal is now dead, dated to the bar it was
@@ -259,7 +424,7 @@ func TestArrivalTimeIndependence(t *testing.T) {
 func TestASignalNeverSurvivesItsBar(t *testing.T) {
 	t.Parallel()
 
-	cfg, inputs := signalNeverSurvivesFixture(t, func(eventTime time.Time) time.Time { return eventTime })
+	cfg, inputs := signalNeverSurvivesFixture(t, arrivedWhenItHappened)
 	emitted := runFixture(t, cfg, inputs)
 
 	var signals []event.Envelope

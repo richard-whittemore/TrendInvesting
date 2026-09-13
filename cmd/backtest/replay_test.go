@@ -93,24 +93,51 @@ func TestTheCommittedGoldenJournalReplaysByteIdentically(t *testing.T) {
 // nothing else. The golden journal opens a Campaign, adds Units to it, sets
 // and re-sets protective stops, and exits — the paths where a wall-clock read
 // would do the most damage and would otherwise go unexamined by this
-// property. Every input's RecordedAt is shifted by a constant; every decision
-// must come back identical except its own RecordedAt, which the reducer
-// deliberately copies through from the input that caused it.
+// property.
+//
+// The arrivals are RESCHEDULED, not translated: each input's RecordedAt moves
+// by its own cumulative offset, so the GAPS between consecutive arrivals all
+// change too. A single constant offset preserves every gap, and so cannot
+// catch a reducer reading elapsed time between events — the leak a uniform
+// shift is structurally blind to. The offsets only ever increase, so the
+// stream stays monotonic and remains one a real clock could have produced.
+//
+// Every decision must come back identical except its own RecordedAt, which
+// the reducer deliberately copies through from the input that caused it.
 func TestTheGoldenJournalReplaysIdenticallyWhenItsInputsArriveAtDifferentTimes(t *testing.T) {
-	const shift = 37 * time.Minute
-
 	header, records := readJournalFile(t, goldenJournal)
 	inputs, recorded := splitJournal(t, records)
 
 	shifted := make([]event.Envelope, len(inputs))
+	arrivalByInputID := make(map[string]time.Time, len(inputs))
+	offset := 37 * time.Minute
 	for i, input := range inputs {
-		input.RecordedAt = input.RecordedAt.Add(shift)
+		offset += time.Duration(i%7+1) * time.Minute
+		input.RecordedAt = input.RecordedAt.Add(offset)
 		shifted[i] = input
+		arrivalByInputID[input.ID] = input.RecordedAt
+	}
+
+	// The reschedule is only a reschedule if the gaps actually moved, and the
+	// stream is only realistic if it never runs backwards.
+	gapsChanged := 0
+	for i := 1; i < len(inputs); i++ {
+		was := inputs[i].RecordedAt.Sub(inputs[i-1].RecordedAt)
+		now := shifted[i].RecordedAt.Sub(shifted[i-1].RecordedAt)
+		if now != was {
+			gapsChanged++
+		}
+		if now < 0 {
+			t.Fatalf("arrival %d runs backwards in the rescheduled stream (%s after %s)", i, shifted[i].RecordedAt, shifted[i-1].RecordedAt)
+		}
+	}
+	if gapsChanged == 0 {
+		t.Fatal("no gap between consecutive arrivals changed; this is a translation, not a reschedule, and an elapsed-time leak would pass")
 	}
 
 	emitted := replayInputs(t, header, shifted)
 	if len(emitted) != len(recorded) {
-		t.Fatalf("the shifted inputs produced %d decision(s), want the %d recorded", len(emitted), len(recorded))
+		t.Fatalf("the rescheduled inputs produced %d decision(s), want the %d recorded", len(emitted), len(recorded))
 	}
 	if len(emitted) == 0 {
 		t.Fatal("the golden journal records no decisions; this test would pass vacuously")
@@ -119,11 +146,19 @@ func TestTheGoldenJournalReplaysIdenticallyWhenItsInputsArriveAtDifferentTimes(t
 	for i := range recorded {
 		want, got := recorded[i], emitted[i]
 
-		// RecordedAt must move with the shift, or clearing it below would be
-		// comparing two values that were never going to differ and the test
-		// would not catch a reducer that ignored arrival time entirely.
-		if !got.RecordedAt.Equal(want.RecordedAt.Add(shift)) {
-			t.Fatalf("decision %d (%s) RecordedAt = %s, want the recorded %s shifted by %s", i, got.ID, got.RecordedAt, want.RecordedAt, shift)
+		// RecordedAt must track the rescheduled arrival of the input that
+		// caused this decision, or clearing it below would be comparing two
+		// values that were never going to differ and the test would not catch
+		// a reducer that ignored arrival time entirely.
+		wantArrival, ok := arrivalByInputID[got.CausationID]
+		if !ok {
+			t.Fatalf("decision %d (%s) names causation %q, which is not one of the journal's inputs", i, got.ID, got.CausationID)
+		}
+		if !got.RecordedAt.Equal(wantArrival) {
+			t.Fatalf("decision %d (%s) RecordedAt = %s, want its causing input's rescheduled arrival %s", i, got.ID, got.RecordedAt, wantArrival)
+		}
+		if got.RecordedAt.Equal(want.RecordedAt) {
+			t.Fatalf("decision %d (%s) RecordedAt did not move with the reschedule", i, got.ID)
 		}
 
 		want.RecordedAt, got.RecordedAt = time.Time{}, time.Time{}
