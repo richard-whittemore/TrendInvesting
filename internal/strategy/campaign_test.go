@@ -165,13 +165,50 @@ type stream struct {
 	seq       uint64
 }
 
+// streamDefaultAvailableCash is the AvailableCash newStream supplies by
+// default (see the account.snapshot it injects, below): comfortably clear of
+// any Unit's cost in this package's fixtures — at most a few hundred
+// thousand dollars (fixture prices in the low hundreds, quantities in the
+// hundreds of shares) — so that #23's cash-skip check (ADR 0010) never
+// interferes with a fixture whose own subject is something else. A test that
+// IS about affordability (internal/strategy's cash_skip_test.go) builds its
+// stream a different way, so it is never shadowed by this default.
+const streamDefaultAvailableCash = 1_000_000_000.0
+
+// defaultAccountSnapshot is the account.snapshot newStream injects
+// immediately after the configuration event, before any bar: #23's cash
+// basis (ADR 0010) requires one before the reducer will size any Unit, and
+// this package's fixtures are about Campaign life-cycle, not cash
+// affordability. Equity equals cfg's configured starting figure — a
+// deliberate no-op against the Notional Account (NotionalAccount.ObserveSnapshot's
+// own doc comment: the very first snapshot only establishes the re-basing
+// label, and equity unchanged from the starting figure crosses no Drawdown
+// Step threshold) — so every existing assertion about the Notional Account
+// defaulting to the configured starting equity is unaffected.
+func defaultAccountSnapshot(cfg event.ConfigurationPayload) event.AccountSnapshotPayload {
+	return event.AccountSnapshotPayload{
+		AsOf:          day(0),
+		Equity:        cfg.NotionalAccount.StartingEquity,
+		AvailableCash: streamDefaultAvailableCash,
+		Currency:      "USD",
+	}
+}
+
 func newStream(t *testing.T, cfg event.ConfigurationPayload) *stream {
 	t.Helper()
-	return &stream{
+	s := &stream{
 		t:         t,
 		envelopes: []event.Envelope{configEnvelopeWithConfig(t, 1, day(0), cfg)},
 		seq:       1,
 	}
+	return s.snapshot(defaultAccountSnapshot(cfg))
+}
+
+// snapshot appends an account.snapshot envelope to the stream.
+func (s *stream) snapshot(payload event.AccountSnapshotPayload) *stream {
+	s.seq++
+	s.envelopes = append(s.envelopes, accountSnapshotEnvelope(s.t, s.seq, payload, payload.AsOf))
+	return s
 }
 
 func (s *stream) bar(bar event.CompletedBarPayload) *stream {
@@ -414,7 +451,7 @@ func TestFillOpensACampaignWithNAndUnitSizeFrozen(t *testing.T) {
 	}
 	// The engine stamps causation from the input that produced the emission:
 	// the fill, not the bar.
-	if campaignEnvelope.CausationID != fmt.Sprintf("fill-%d", len(breakoutBars("AAPL"))+2) {
+	if campaignEnvelope.CausationID != fmt.Sprintf("fill-%d", len(breakoutBars("AAPL"))+3) {
 		t.Errorf("Campaign opened CausationID = %q, want the fill envelope's ID", campaignEnvelope.CausationID)
 	}
 
@@ -1417,7 +1454,7 @@ func TestStopFillClosesTheCampaignWithReasonStopAndRealisedResult(t *testing.T) 
 	if !exitEnvelope.EventTime.Equal(stopFilledAt) {
 		t.Errorf("Campaign exited EventTime = %v, want the stop fill's %v", exitEnvelope.EventTime, stopFilledAt)
 	}
-	if exitEnvelope.CausationID != fmt.Sprintf("fill-%d", len(breakoutBars("AAPL"))+3) {
+	if exitEnvelope.CausationID != fmt.Sprintf("fill-%d", len(breakoutBars("AAPL"))+4) {
 		t.Errorf("Campaign exited CausationID = %q, want the stop fill envelope's ID", exitEnvelope.CausationID)
 	}
 

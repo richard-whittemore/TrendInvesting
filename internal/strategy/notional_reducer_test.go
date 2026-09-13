@@ -21,11 +21,19 @@ import (
 // tickets working internal/strategy in parallel (#11 and this one) do not
 // collide on the same test file.
 
+// notionalFixtureAvailableCash is the AvailableCash every account.snapshot
+// fixture in this file supplies: this file's own subject is the Drawdown
+// Step ladder and re-basing (ADR 0007), not #23's cash-skip check (ADR
+// 0010), so it stays comfortably clear of any Unit's cost regardless of how
+// far a fixture steps the Notional Account down.
+const notionalFixtureAvailableCash = 1_000_000_000.0
+
 func accountSnapshotPayload(asOf time.Time, equity float64) event.AccountSnapshotPayload {
 	return event.AccountSnapshotPayload{
-		AsOf:     asOf,
-		Equity:   equity,
-		Currency: "USD",
+		AsOf:          asOf,
+		Equity:        equity,
+		AvailableCash: notionalFixtureAvailableCash,
+		Currency:      "USD",
 	}
 }
 
@@ -345,14 +353,14 @@ func TestReducerRejectsAccountSnapshotWithWrongSchemaVersion(t *testing.T) {
 
 	snap := accountSnapshotPayload(snapshotBefore(1), 900_000)
 	wrongVersion := accountSnapshotEnvelope(t, 2, snap, snap.AsOf)
-	wrongVersion.SchemaVersion = 2
+	wrongVersion.SchemaVersion = event.AccountSnapshotSchemaVersion + 1
 
 	envelopes := []event.Envelope{configEnvelope(t, 1, day(0)), wrongVersion}
 	_, err = engine.Run(context.Background(), envelopes)
 	if err == nil {
 		t.Fatal("Run() error = nil, want error for an account snapshot payload at the wrong schema version")
 	}
-	for _, want := range []string{"schema version", "2", "1"} {
+	for _, want := range []string{"schema version", fmt.Sprintf("%d", event.AccountSnapshotSchemaVersion+1), fmt.Sprintf("%d", event.AccountSnapshotSchemaVersion)} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("Run() error = %v, want substring %q", err, want)
 		}

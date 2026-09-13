@@ -574,6 +574,13 @@ func (r *Reducer) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelop
 
 	r.lastAccountEventAt = snapshot.AsOf
 	r.hasAccountEvent = true
+	// ADR 0010's cash basis: sizeUnit and evaluateAdd read r.availableCash
+	// as-is, so this snapshot's figure stands until a later one replaces it —
+	// exactly the "cash known at the previous close" a bar sees, since
+	// nothing later in this same Apply call, or in the bar(s) that follow
+	// before the next snapshot, ever changes it.
+	r.availableCash = snapshot.AvailableCash
+	r.hasAvailableCash = true
 
 	var emissions []event.Envelope
 

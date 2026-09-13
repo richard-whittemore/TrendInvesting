@@ -118,6 +118,20 @@ type Reducer struct {
 	// require Currency non-empty, so the empty string is unambiguous as
 	// "not yet pinned".
 	accountCurrency string
+	// availableCash is ADR 0010's cash basis: the cash known at the previous
+	// close, available to fund every Add and new entry on the CURRENT bar.
+	// It is fed exclusively by event.AccountSnapshotEventType's
+	// AvailableCash (see applyAccountSnapshot, notional.go) and read as-is by
+	// sizeUnit and evaluateAdd — never a running balance this reducer
+	// decrements as it proposes, since a proposal is not a commitment (ADR
+	// 0010 measures every same-day decision against the identical
+	// previous-close figure, not against what other proposals the same bar
+	// already made). hasAvailableCash is false until the first
+	// account.snapshot is accepted, and both sizeUnit and evaluateAdd fail
+	// closed while it is false rather than sizing a Unit as though cash were
+	// infinite — the failure this ticket exists to prevent.
+	availableCash    float64
+	hasAvailableCash bool
 
 	instruments map[string]*instrumentState
 	// acceptedFills is defined and explained in
@@ -745,7 +759,7 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 	// the Tier logic above ever changes.
 	if !nReady {
 		return r.decline(bar, input, signalID, event.DeclineReasonNNotReady,
-			fmt.Sprintf("n is not a usable volatility reading (n %v); no unit can be sized from it", n))
+			fmt.Sprintf("n is not a usable volatility reading (n %v); no unit can be sized from it", n), 0, 0)
 	}
 
 	unit, err := sizing.SizeUnit(sizing.Inputs{
@@ -773,7 +787,7 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 		// about the account, not an error.
 		return r.decline(bar, input, signalID, event.DeclineReasonQuantityBelowOneUnit,
 			fmt.Sprintf("notional account %v under %s sizing, with n %v and dollars per point %v, sizes fewer than one whole unit",
-				r.notionalAccount.Current(), r.configuredSizingMode, n, r.dollarsPerPoint))
+				r.notionalAccount.Current(), r.configuredSizingMode, n, r.dollarsPerPoint), 0, 0)
 	}
 
 	// The Protective Stop intent, in the expression order
@@ -789,7 +803,37 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 		// looking like a bar that simply did not signal.
 		return r.decline(bar, input, signalID, event.DeclineReasonStopIntentNotPositive,
 			fmt.Sprintf("protective stop intent %v (entry level %v - stop multiple %v x n %v) is not a reachable price for a long position",
-				protectiveStopIntent, entryLevel, r.stopMultiple, n))
+				protectiveStopIntent, entryLevel, r.stopMultiple, n), 0, 0)
+	}
+
+	// ADR 0010's cash basis: the cash known at the previous close. Every Add
+	// and new entry is checked against it, and this reducer fails closed
+	// rather than treating an unset figure as infinite cash — the failure
+	// this check exists to prevent. Only account.snapshot (applyAccountSnapshot,
+	// notional.go) ever sets hasAvailableCash, so this can only be reached
+	// when a run never delivered one before its first Signal.
+	if !r.hasAvailableCash {
+		return event.Envelope{}, fmt.Errorf(
+			"strategy: instrument %q at %s: no account.snapshot has ever supplied an available-cash figure; refusing to size a unit as though cash were infinite (ADR 0010)",
+			bar.InstrumentID, bar.PeriodEnd.Format(time.RFC3339))
+	}
+	// Cost is quantity x the order's resting level x dollars per point — the
+	// level a resting buy-stop actually sits at (ADR 0005), not a fill price
+	// the reducer cannot know yet (TradeProposalPayload.EntryLevel's own doc
+	// comment). This is a bare product feeding a comparison, never an
+	// addition or subtraction, so it needs no sizing.Product barrier
+	// (docs/development.md: "a*b*c with no addition is not fusible and
+	// needs nothing"); the comparison itself is a plain >, not a subtracted
+	// difference, for the identical reason — either form would otherwise be
+	// exactly where a fused multiply-add could move a boundary decision.
+	cost := float64(unit.Quantity) * entryLevel * r.dollarsPerPoint
+	if cost > r.availableCash {
+		// No partial Unit, ever: the whole Unit is skipped (ADR 0010), never
+		// resized down to what the available cash would cover.
+		return r.decline(bar, input, signalID, event.DeclineReasonInsufficientCash,
+			fmt.Sprintf("unit cost %v (%d shares x entry level %v x %v dollars per point) exceeds the cash available at the previous close %v",
+				cost, unit.Quantity, entryLevel, r.dollarsPerPoint, r.availableCash),
+			cost, r.availableCash)
 	}
 
 	proposal := event.TradeProposalPayload{
@@ -831,14 +875,23 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 }
 
 // decline builds the strategy.proposal.declined emission for one Signal that
-// produced no position.
-func (r *Reducer) decline(bar event.CompletedBarPayload, input event.Envelope, signalID, reason, detail string) (event.Envelope, error) {
+// produced no position (Kind ProposalDeclinedKindEntry — see declineAdd,
+// campaign.go, for the Add-kind counterpart).
+//
+// requiredCash and availableCash are only meaningful for reason
+// event.DeclineReasonInsufficientCash; every other caller passes 0, 0
+// (ProposalDeclinedPayload.Validate rejects a non-zero value for any other
+// reason).
+func (r *Reducer) decline(bar event.CompletedBarPayload, input event.Envelope, signalID, reason, detail string, requiredCash, availableCash float64) (event.Envelope, error) {
 	payload := event.ProposalDeclinedPayload{
-		InstrumentID: bar.InstrumentID,
-		PeriodEnd:    bar.PeriodEnd,
-		SignalID:     signalID,
-		Reason:       reason,
-		Detail:       detail,
+		InstrumentID:  bar.InstrumentID,
+		PeriodEnd:     bar.PeriodEnd,
+		Kind:          event.ProposalDeclinedKindEntry,
+		SignalID:      signalID,
+		Reason:        reason,
+		Detail:        detail,
+		RequiredCash:  requiredCash,
+		AvailableCash: availableCash,
 	}
 	if err := payload.Validate(); err != nil {
 		return event.Envelope{}, fmt.Errorf("strategy: built invalid proposal declined payload: %w", err)

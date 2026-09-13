@@ -210,8 +210,17 @@ func runReducerOverHighs(t *testing.T, instrumentID string, highs []float64, cfg
 		t.Fatalf("replay.New() error = %v", err)
 	}
 
-	envelopes := []event.Envelope{configEnvelopeWithConfig(t, 1, day(0), cfg)}
-	seq := uint64(2)
+	envelopes := []event.Envelope{
+		configEnvelopeWithConfig(t, 1, day(0), cfg),
+		// #23's cash basis (ADR 0010): a Unit is never sized without an
+		// account.snapshot ever having supplied an available-cash figure. A
+		// no-op reading (Equity equal to cfg's own starting figure, so the
+		// Notional Account is unaffected) and generous headroom, since this
+		// file's own subject is Setup/Signal/sizing mechanics, not
+		// affordability (internal/strategy's cash_skip_test.go owns that).
+		accountSnapshotEnvelope(t, 2, defaultAccountSnapshot(cfg), day(0)),
+	}
+	seq := uint64(3)
 	for i, high := range highs {
 		periodEnd := day(i + 1)
 		bar := syntheticBar(instrumentID, periodEnd, high-100)
@@ -1701,8 +1710,13 @@ func TestReducerKeepsSeparateEntryChannelPerInstrument(t *testing.T) {
 		t.Fatalf("replay.New() error = %v", err)
 	}
 
-	envelopes := []event.Envelope{configEnvelope(t, 1, day(0))}
-	seq := uint64(2)
+	envelopes := []event.Envelope{
+		configEnvelope(t, 1, day(0)),
+		// #23's cash basis (ADR 0010) — see runReducerOverHighs's identical
+		// snapshot.
+		accountSnapshotEnvelope(t, 2, defaultAccountSnapshot(validConfigurationPayload()), day(0)),
+	}
+	seq := uint64(3)
 	for i, high := range breakoutFixtureHighs() {
 		periodEnd := day(i + 1)
 		bar := syntheticBar("AAPL", periodEnd, high-100)
@@ -2300,8 +2314,13 @@ func runReducerOverBars(t *testing.T, cfg event.ConfigurationPayload, bars []eve
 		t.Fatalf("replay.New() error = %v", err)
 	}
 
-	envelopes := []event.Envelope{configEnvelopeWithConfig(t, 1, day(0), cfg)}
-	seq := uint64(2)
+	envelopes := []event.Envelope{
+		configEnvelopeWithConfig(t, 1, day(0), cfg),
+		// #23's cash basis (ADR 0010) — see runReducerOverHighs's identical
+		// snapshot for why this file supplies one unconditionally.
+		accountSnapshotEnvelope(t, 2, defaultAccountSnapshot(cfg), day(0)),
+	}
+	seq := uint64(3)
 	for _, bar := range bars {
 		envelopes = append(envelopes, barEnvelope(t, seq, bar, bar.PeriodEnd))
 		seq++

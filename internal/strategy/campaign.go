@@ -1012,6 +1012,41 @@ func (r *Reducer) evaluateAdd(state *instrumentState, input event.Envelope) ([]e
 	}
 
 	unitIndex := len(campaign.units) + 1
+
+	// ADR 0010's cash basis, the identical check sizeUnit (reducer.go)
+	// applies to a new entry: the cash known at the previous close, fed
+	// exclusively by account.snapshot's AvailableCash. Checked here, after
+	// the rung is confirmed reached (state.lastBarHigh >= rung, above) and
+	// before any proposal is built, so a decline carries the SAME rung and
+	// quantity a successful proposal would have. Failing closed rather than
+	// treating an unset figure as infinite cash is exactly what this check
+	// exists to prevent.
+	if !r.hasAvailableCash {
+		return nil, fmt.Errorf(
+			"strategy: instrument %q: campaign %q: no account.snapshot has ever supplied an available-cash figure; refusing to size a unit as though cash were infinite (ADR 0010)",
+			campaign.instrumentID, campaign.campaignID)
+	}
+	// Cost is the frozen Unit quantity x the rung (the resting order's own
+	// level, ADR 0005) x dollars per point — a bare product feeding a
+	// comparison, never an addition or subtraction, so it needs no
+	// sizing.Product barrier (docs/development.md), and the comparison
+	// itself is a plain >, not a subtracted difference, for the identical
+	// reason sizeUnit's own check is.
+	cost := float64(campaign.unitQuantity) * rung * r.dollarsPerPoint
+	if cost > r.availableCash {
+		// No partial Unit, ever: the whole Unit is skipped (ADR 0010). No
+		// pendingAddProposal is remembered — nothing was proposed, so there
+		// is nothing for a later bar to expire — and the NEXT bar
+		// re-evaluates this same rung on its own merits (evaluateAdd is
+		// re-entered from applyCompletedBar with no memory of this decline):
+		// a skip does not poison the ladder.
+		declined, err := r.declineAdd(campaign, state.lastBarPeriodEnd, unitIndex, rung, input, cost, r.availableCash)
+		if err != nil {
+			return nil, err
+		}
+		return []event.Envelope{declined}, nil
+	}
+
 	payload := event.AddProposalPayload{
 		CampaignID:       campaign.campaignID,
 		InstrumentID:     campaign.instrumentID,
@@ -1062,6 +1097,40 @@ func (r *Reducer) evaluateAdd(state *instrumentState, input event.Envelope) ([]e
 	}
 
 	return []event.Envelope{proposalEnvelope}, nil
+}
+
+// declineAdd builds the strategy.proposal.declined emission for an open
+// Campaign's Add Ladder rung that was reached but could not be afforded
+// (DeclineReasonInsufficientCash's own doc comment; ADR 0010) — the
+// Add-kind counterpart of Reducer.decline (reducer.go), which builds the
+// entry-kind emission.
+func (r *Reducer) declineAdd(campaign *campaignState, periodEnd time.Time, unitIndex int, level float64, input event.Envelope, requiredCash, availableCash float64) (event.Envelope, error) {
+	payload := event.ProposalDeclinedPayload{
+		InstrumentID:  campaign.instrumentID,
+		PeriodEnd:     periodEnd,
+		Kind:          event.ProposalDeclinedKindAdd,
+		CampaignID:    campaign.campaignID,
+		Reason:        event.DeclineReasonInsufficientCash,
+		Detail: fmt.Sprintf("unit %d cost %v (%d shares x rung %v x %v dollars per point) exceeds the cash available at the previous close %v",
+			unitIndex, requiredCash, campaign.unitQuantity, level, r.dollarsPerPoint, availableCash),
+		RequiredCash:  requiredCash,
+		AvailableCash: availableCash,
+	}
+	if err := payload.Validate(); err != nil {
+		return event.Envelope{}, fmt.Errorf("strategy: built invalid proposal declined payload: %w", err)
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return event.Envelope{}, fmt.Errorf("strategy: marshal proposal declined payload: %w", err)
+	}
+	// The decisionID kind carries the unit index for the same reason
+	// evaluateAdd's own proposal id does: more than one Add opportunity can
+	// belong to the same bar (the same-bar chain).
+	return r.stamp(
+		decisionID(fmt.Sprintf("add-proposal-declined-unit-%d", unitIndex), campaign.instrumentID, periodEnd),
+		event.ProposalDeclinedEventType, event.ProposalDeclinedSchemaVersion,
+		periodEnd, input, payloadBytes,
+	), nil
 }
 
 // checkBarConfirmsCampaignOpening enforces the upper end of the window

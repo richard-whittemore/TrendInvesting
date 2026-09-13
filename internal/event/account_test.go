@@ -14,9 +14,10 @@ import (
 // deviation.
 func validAccountSnapshot() event.AccountSnapshotPayload {
 	return event.AccountSnapshotPayload{
-		AsOf:     time.Date(2026, time.January, 2, 0, 0, 0, 0, time.UTC),
-		Equity:   1_000_000,
-		Currency: "USD",
+		AsOf:          time.Date(2026, time.January, 2, 0, 0, 0, 0, time.UTC),
+		Equity:        1_000_000,
+		AvailableCash: 500_000,
+		Currency:      "USD",
 	}
 }
 
@@ -63,6 +64,28 @@ func TestAccountSnapshotPayloadValidate(t *testing.T) {
 			name:    "missing currency",
 			mutate:  func(p *event.AccountSnapshotPayload) { p.Currency = "" },
 			wantErr: "currency is required",
+		},
+		{
+			// Zero is a legitimate reading (every dollar already deployed),
+			// unlike Equity: an account can have no spare cash at all.
+			name:    "zero available cash",
+			mutate:  func(p *event.AccountSnapshotPayload) { p.AvailableCash = 0 },
+			wantErr: "",
+		},
+		{
+			name:    "negative available cash",
+			mutate:  func(p *event.AccountSnapshotPayload) { p.AvailableCash = -1 },
+			wantErr: "available cash must not be negative",
+		},
+		{
+			name:    "nan available cash",
+			mutate:  func(p *event.AccountSnapshotPayload) { p.AvailableCash = math.NaN() },
+			wantErr: "available cash must be finite",
+		},
+		{
+			name:    "positive infinite available cash",
+			mutate:  func(p *event.AccountSnapshotPayload) { p.AvailableCash = math.Inf(1) },
+			wantErr: "available cash must be finite",
 		},
 	}
 
