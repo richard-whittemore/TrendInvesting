@@ -8,6 +8,20 @@
 4. Fail closed on unknown schemas, missing sequences, stale data, or uncertain brokerage state.
 5. Prefer table-driven tests and replay fixtures over behavior hidden inside LEAN callbacks.
 
+## Floating-point determinism: never leave a multiply-add fusible
+
+Go permits an implementation to fuse `a + b*c` into a single fused multiply-add, "possibly across statements", and arm64 does while amd64 does not. The fused form keeps the full-precision product, so the two architectures produce results that differ in the last bits — and a platform whose journal must be byte-identical for replay equivalence (ADR 0017) cannot afford that. This is the determinism rule in `.greptile/rules.md` applied to the arithmetic itself: same inputs, same configuration, same code version, same decisions — on any machine.
+
+An explicit conversion is the only barrier the language guarantees, so every product that feeds an addition or subtraction is rounded before it:
+
+```go
+level := entryPrice - float64(stopMultiple*campaignN)
+```
+
+Assigning the product to a variable first does **not** help; the specification allows fusion across statements. Round at the point of the product, in the producer *and* in any `event` payload validator that re-derives the same value, or the two will disagree.
+
+It cost a real defect to learn: `internal/strategy`'s whole-life exit price fused on arm64, and the committed golden journal — the first artifact in this repository that has to be byte-identical across machines — failed in CI on amd64 while passing locally.
+
 ## Source comment standard
 
 A doc comment states three things and no more:

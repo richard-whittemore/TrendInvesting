@@ -218,7 +218,10 @@ func (c *campaignState) lifeAggregate(thisQuantity int64, thisEntryWeightedSum, 
 	}
 	quantity = c.closedQuantity + thisQuantity
 	entryPrice = (c.closedEntryWeightedSum + thisEntryWeightedSum) / float64(quantity)
-	exitPrice = (c.closedExitWeightedSum + float64(thisQuantity)*price) / float64(quantity)
+	// The product is rounded before the sum: see docs/development.md,
+	// floating-point determinism. This expression is the one that fused on
+	// arm64 and made a journal architecture-dependent.
+	exitPrice = (c.closedExitWeightedSum + float64(float64(thisQuantity)*price)) / float64(quantity)
 	return quantity, entryPrice, exitPrice
 }
 
