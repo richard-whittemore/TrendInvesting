@@ -23,7 +23,15 @@ A journal is a header line followed by one record per line:
 {"sequence": N, "kind": "input"|"decision", "envelope": {...}, "record_hash": "sha256:..."}
 ```
 
-where `record_hash = SHA-256(previous_record_hash || kind || canonical_envelope_bytes)`, the previous hash is the 32 raw bytes of the previous record's digest, and the first record's predecessor is 32 zero bytes (`journal.ZeroRecordHash`). Canonical envelope bytes come from `event.CanonicalEnvelopeBytes`, which reuses ADR 0016's canonical encoder so this project has exactly one definition of "the canonical bytes of a value".
+where `record_hash = SHA-256(previous_record_hash || kind || canonical_envelope_bytes)`, the previous hash is the 32 raw bytes of the previous record's digest, and **the first record's predecessor is the hash of the header**: `SHA-256(canonical_header_bytes)`. Canonical bytes, for the header and the envelope alike, come from `event.CanonicalBytes` — ADR 0016's canonical encoder — so this project has exactly one definition of "the canonical bytes of a value".
+
+### Seeding the chain with the header, and why zeros were wrong
+
+The chain was first specified to start from a zero hash, which left the header outside it. That was a hole, found in review of the implementation and fixed here: the header states the configuration hash, the strategy version, the span and the chain algorithm — *which run this journal is* — and none of it was attested. Someone could rewrite a journal's configuration hash to claim it came from a different Variant, or its strategy version to claim a different build produced it, and every record hash would still verify perfectly. A chain that exists so a journal cannot be silently rewritten, but permits it to be silently **re-attributed**, protects the wrong half of the problem.
+
+Seeding the chain with the header's hash makes any edit to any header field break record 1, and therefore every record after it. `Verify` recomputes the seed from the header it actually read, never from what the header ought to say, so a tampered header fails at record 1 rather than being taken on trust. `ChainAlgorithm` states the seed as part of the formula, and is itself inside the seed, so a journal cannot claim to have been chained some other way either.
+
+There is consequently no zero-hash constant any more. A journal always has a header — `Write` requires a valid one and `Read` refuses a file that does not begin with one — so a header-less journal was never a thing this format supported.
 
 ### The record states whether its envelope was an input or a decision, and the chain covers that claim
 
@@ -72,4 +80,5 @@ Before paper trading, each completed run's final `record_hash` — which `journa
 - A journal is composed in memory and written in one pass, because the header states the span the run covered and that is not known until the last input has arrived. This is fine at fixture and daily-bar scale and will need revisiting for a run large enough that its journal does not fit in memory.
 - Replay equivalence reads `kind` to split a journal, rather than inferring the split from a producer's name.
 - A journal records the build that produced it, in every envelope's strategy version (ADR 0016). The build identifier is therefore injected at the composition root rather than read from `internal/buildinfo` inside the run, so a test asserting a journal byte for byte fixes it: a golden keyed to the build identifier would assert which machine produced the journal rather than what the platform decided.
+- A journal is written once. `cmd/backtest` refuses a path that already exists rather than truncating it (AGENTS.md rule 6: never rewrite or delete recorded evidence) and writes through a temporary file renamed into place, so an interrupted run cannot leave a partial journal that reads like a complete one. There is deliberately no overwrite flag.
 - Nobody should describe this as making the journal immutable. It makes the journal *checkable*.

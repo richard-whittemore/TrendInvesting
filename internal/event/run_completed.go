@@ -1,11 +1,5 @@
 package event
 
-import (
-	"errors"
-	"fmt"
-	"time"
-)
-
 // RunCompletedEventType identifies the fact that a run's input stream has
 // ended: no further input for this run exists.
 //
@@ -27,24 +21,23 @@ const RunCompletedEventType = "replay.run.completed"
 // RunCompletedPayload.
 const RunCompletedSchemaVersion uint32 = 1
 
-// RunCompletedPayload records when a run's input stream ended.
+// RunCompletedPayload records that a run's input stream has ended. It is
+// deliberately empty: the event type states the fact and the envelope's
+// EventTime states when, which is what every expiry the event causes is
+// stamped with.
 //
-// CompletedAt is the instant the stream ran to, and is what every expiry the
-// event causes is stamped with. It is stated in the payload rather than read
-// from the envelope's EventTime because it is the fact the event asserts,
-// and a reducer reads facts from payloads.
-type RunCompletedPayload struct {
-	CompletedAt time.Time `json:"completed_at"`
-}
+// It carried a CompletedAt of its own until a review observed the obvious
+// hazard: two instants that must always be equal are two instants that will
+// eventually disagree, and a disagreement here would stamp the expiries at
+// one of them while the journal's span — derived from input event times —
+// came from the other, placing decisions outside the span the journal
+// reports. One instant makes that unrepresentable rather than merely
+// invalid.
+type RunCompletedPayload struct{}
 
-// Validate checks that the payload states the instant the stream ended.
+// Validate reports the payload valid: it states nothing, so there is
+// nothing to check. It exists because every payload in this package has a
+// Validate, and a producer should not have to know which ones are empty.
 func (p RunCompletedPayload) Validate() error {
-	var errs []error
-	if p.CompletedAt.IsZero() {
-		errs = append(errs, errors.New("completed at is required"))
-	}
-	if err := errors.Join(errs...); err != nil {
-		return fmt.Errorf("invalid run completed payload: %w", err)
-	}
 	return nil
 }

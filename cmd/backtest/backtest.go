@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -133,7 +134,7 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 	completedAt := bars[len(bars)-1].PeriodEnd
 	completed, err := inputEnvelope("run-completed:"+completedAt.UTC().Format(time.RFC3339Nano),
 		event.RunCompletedEventType, event.RunCompletedSchemaVersion, completedAt,
-		event.RunCompletedPayload{CompletedAt: completedAt}, cfg, strategyVersion)
+		event.RunCompletedPayload{}, cfg, strategyVersion)
 	if err != nil {
 		return err
 	}
@@ -217,18 +218,52 @@ func readBars(path string) ([]event.CompletedBarPayload, error) {
 	return bars, nil
 }
 
-// writeJournal writes the run's journal to path.
+// writeJournal writes the run's journal to path, refusing to disturb
+// anything already there and leaving nothing behind if it fails.
+//
+// A journal is recorded evidence, and AGENTS.md rule 6 forbids rewriting or
+// deleting it: a path that already exists is refused outright rather than
+// truncated, so a rerun cannot destroy the previous run's evidence — least
+// of all before it has validated its own configuration. There is
+// deliberately no overwrite flag; moving the old journal aside is a
+// decision a person should make, and one this command should not offer to
+// make for them.
+//
+// The write goes to a temporary file in the destination's own directory,
+// is flushed to disk, and is renamed into place, so a run interrupted
+// mid-write leaves no partial journal that reads like a complete one. The
+// directory has to be the destination's own, because a rename across
+// filesystems is not atomic.
 func writeJournal(path string, header journal.Header, entries []journal.Entry) error {
-	file, err := os.Create(path)
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("backtest: %s already exists: a journal is recorded evidence and is never overwritten (AGENTS.md rule 6); move it aside or choose another path", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("backtest: check the journal path: %w", err)
+	}
+
+	file, err := os.CreateTemp(filepath.Dir(path), ".journal-*.partial")
 	if err != nil {
 		return fmt.Errorf("backtest: create the journal: %w", err)
 	}
-	if err := journal.Write(file, header, entries); err != nil {
+	temporary := file.Name()
+	// Every failure from here on removes the partial file, so the only way
+	// anything lands at path is the rename below.
+	defer func() {
 		_ = file.Close()
+		_ = os.Remove(temporary)
+	}()
+
+	if err := journal.Write(file, header, entries); err != nil {
 		return err
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("backtest: flush the journal to disk: %w", err)
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("backtest: close the journal: %w", err)
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return fmt.Errorf("backtest: move the journal into place: %w", err)
 	}
 	return nil
 }

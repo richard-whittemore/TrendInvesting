@@ -5,9 +5,11 @@
 // # Tamper-evidence, not tamper-proofing
 //
 // Each record carries a hash chained over the previous record's hash, the
-// record's own kind, and the canonical bytes of its envelope (ADR 0017), so
-// altering event k breaks every link after k and a silent edit to recorded
-// history is detectable without a secret. It is evidence, not proof: whoever
+// record's own kind, and the canonical bytes of its envelope, and the chain
+// is seeded with the hash of the header (ADR 0017). Altering event k breaks
+// every link after k, and altering the header — which run the journal claims
+// to be — breaks all of them, so neither a silent edit to recorded history
+// nor a silent re-attribution of it is possible without a secret. It is evidence, not proof: whoever
 // can rewrite one record can rewrite the whole file, and dropping records
 // from the end leaves a valid chain. Anchoring each run's final record hash outside the system —
 // the git-committed run registry — is what closes that, and is why Verify
@@ -50,13 +52,10 @@ import (
 const FormatVersion uint32 = 1
 
 // ChainAlgorithm names how a record hash is computed, recorded in the header
-// so a verifier is told rather than assuming.
-const ChainAlgorithm = "sha256(previous_record_hash||kind||canonical_envelope_bytes)"
-
-// ZeroRecordHash is the predecessor of the first record: 32 zero bytes. It
-// starts the chain, so the whole chain is reproducible from the envelope
-// stream alone.
-const ZeroRecordHash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+// so a verifier is told rather than assuming. The algorithm string is itself
+// inside the seed, so a journal cannot claim to have been chained some other
+// way either.
+const ChainAlgorithm = "seed=sha256(canonical_header_bytes); record=sha256(previous_record_hash||kind||canonical_envelope_bytes)"
 
 // maxLineBytes bounds one journal line while reading. A record is one
 // envelope and its payload, far smaller than this; the bound exists so a
@@ -155,11 +154,42 @@ type Record struct {
 	RecordHash string         `json:"record_hash"`
 }
 
-// Chain computes a journal's record hashes in order, starting from
-// ZeroRecordHash. It is the one definition of the chain: a writer advances
-// one, and a verifier recomputes with another.
+// Chain computes a journal's record hashes in order, starting from its
+// header. It is the one definition of the chain: a writer advances one, and
+// a verifier recomputes with another.
+//
+// Use NewChain: a Chain must be seeded from the header it belongs to, and
+// the zero value would chain a journal to no run at all.
 type Chain struct {
 	previous [sha256.Size]byte
+}
+
+// NewChain returns the chain for a journal under header.
+//
+// The chain is SEEDED with the header's own hash rather than with zeros,
+// which is what binds the journal to the run it claims to be (ADR 0017).
+// The header states the configuration hash, the strategy version, the span
+// and the chain algorithm; outside the chain, all four could be rewritten —
+// re-attributing a journal to a different configuration or a different
+// build — while every record still verified. Seeded, any edit to any header
+// field breaks record 1 and therefore every record after it.
+func NewChain(header Header) *Chain {
+	return &Chain{previous: sha256.Sum256(canonicalHeaderBytes(header))}
+}
+
+// canonicalHeaderBytes renders the header through the project's one
+// canonical encoder (event.CanonicalBytes; ADR 0016), with timestamps as RFC
+// 3339 in UTC so a journal round trip and a non-UTC process hash the same
+// bytes — the same treatment CanonicalEnvelopeBytes gives an envelope.
+func canonicalHeaderBytes(header Header) []byte {
+	return event.CanonicalBytes(map[string]any{
+		"journal_version":    header.JournalVersion,
+		"chain_algorithm":    header.ChainAlgorithm,
+		"configuration_hash": header.ConfigurationHash,
+		"strategy_version":   header.StrategyVersion,
+		"span_start":         header.SpanStart.UTC().Format(time.RFC3339Nano),
+		"span_end":           header.SpanEnd.UTC().Format(time.RFC3339Nano),
+	})
 }
 
 // Next returns the record hash for an entry, following everything already
@@ -218,7 +248,7 @@ func Write(w io.Writer, header Header, entries []Entry) error {
 	if err := writeLine(buffered, header); err != nil {
 		return err
 	}
-	var chain Chain
+	chain := NewChain(header)
 	var sequence uint64
 	for _, entry := range entries {
 		sequence++
@@ -322,7 +352,9 @@ func Verify(r io.Reader) (Verification, error) {
 		return Verification{}, errors.New("journal: the journal records no events at all")
 	}
 
-	var chain Chain
+	// Seeded from the header as READ, never from what it ought to say, so a
+	// rewritten header fails at record 1 instead of being trusted.
+	chain := NewChain(header)
 	var final string
 	var want uint64
 	for _, record := range records {

@@ -23,7 +23,7 @@ import "time"
 // entirely unexported — time.Time is exactly that shape — for the reason its
 // own doc comment gives.
 func CanonicalEnvelopeBytes(e Envelope) []byte {
-	return canonicalJSON(map[string]any{
+	return CanonicalBytes(map[string]any{
 		"id":                 e.ID,
 		"type":               e.Type,
 		"envelope_version":   e.EnvelopeVersion,
@@ -39,4 +39,18 @@ func CanonicalEnvelopeBytes(e Envelope) []byte {
 		"payload_hash":       e.PayloadHash,
 		"payload":            string(e.Payload),
 	})
+}
+
+// CanonicalBytes renders fields as canonical JSON: keys sorted, no
+// insignificant whitespace, numbers in Go's shortest round-trip formatting
+// (see canonicalJSON; ADR 0016).
+//
+// It exists so that a consumer hashing something other than an envelope —
+// the journal's header is the one there is — uses this project's single
+// canonical encoder rather than acquiring a second definition of "the
+// canonical bytes of a value". Render timestamps as RFC 3339 in UTC before
+// passing them: canonicalJSON refuses a value whose state is entirely
+// unexported, which time.Time is.
+func CanonicalBytes(fields map[string]any) []byte {
+	return canonicalJSON(fields)
 }

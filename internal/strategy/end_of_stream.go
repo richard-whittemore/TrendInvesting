@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -23,8 +24,13 @@ import (
 // The expiries are the Kind-discriminated ones the reducer already emits,
 // distinguished only by event.ExpiryReasonInputStreamEnded, and they are
 // stamped at the instant the stream ended rather than at a bar's period end
-// because no bar superseded them.
+// because no bar superseded them. That instant is the envelope's own
+// EventTime, and the payload states none of its own: see
+// event.RunCompletedPayload.
 func (r *Reducer) applyRunCompleted(envelope event.Envelope) ([]event.Envelope, error) {
+	if !r.configured {
+		return nil, errors.New("strategy: received an end-of-stream event before a configuration event; failing closed")
+	}
 	if envelope.SchemaVersion != event.RunCompletedSchemaVersion {
 		return nil, fmt.Errorf("strategy: run completed payload schema version %d does not match the version %d this build requires; an older or newer schema is rejected, never silently upgraded, until an explicit upcaster exists (ADR 0015)", envelope.SchemaVersion, event.RunCompletedSchemaVersion)
 	}
@@ -35,14 +41,16 @@ func (r *Reducer) applyRunCompleted(envelope event.Envelope) ([]event.Envelope, 
 	if err := payload.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: %w", err)
 	}
+	completedAt := envelope.EventTime
+
 	// Every expiry below is stamped with this instant, so a stream that
 	// claims to have ended before data it already delivered would record an
 	// expiry predating its own bar.
 	for _, instrumentID := range r.instrumentIDs() {
 		last := r.instruments[instrumentID].lastPeriodEnd
-		if payload.CompletedAt.Before(last) {
+		if completedAt.Before(last) {
 			return nil, fmt.Errorf("strategy: the input stream is declared to have ended at %s, which precedes the last completed bar for %s (%s)",
-				payload.CompletedAt.Format(time.RFC3339), instrumentID, last.Format(time.RFC3339))
+				completedAt.Format(time.RFC3339), instrumentID, last.Format(time.RFC3339))
 		}
 	}
 
@@ -50,7 +58,7 @@ func (r *Reducer) applyRunCompleted(envelope event.Envelope) ([]event.Envelope, 
 
 	var emitted []event.Envelope
 	for _, instrumentID := range r.instrumentIDs() {
-		expiries, err := r.expireOutstandingProposals(instrumentID, payload.CompletedAt, envelope)
+		expiries, err := r.expireOutstandingProposals(instrumentID, completedAt, envelope)
 		if err != nil {
 			return nil, err
 		}

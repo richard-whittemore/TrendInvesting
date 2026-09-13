@@ -11,13 +11,13 @@ go run ./cmd/backtest \
 
 - `-config` is a JSON `event.ConfigurationPayload`: the strategy identifier, Sizing Mode, channel lengths, maximum Units, slippage, the Notional Account and the commission schedule. A configuration with zero slippage is refused before any bar is read (ADR 0013).
 - `-bars` is a JSON array of `event.CompletedBarPayload`, in the order the run delivers them.
-- `-out` is where the journal is written.
+- `-out` is where the journal is written. **An existing file is never overwritten**: a journal is recorded evidence (AGENTS.md rule 6), so the command refuses and asks you to move it aside or choose another path. There is no overwrite flag. The write goes through a temporary file in the same directory and is renamed into place, so an interrupted run leaves nothing partial behind.
 
 ## What it writes
 
 A journal: the complete ordered stream of the run's input and decision events, one record per line, under a header. The header states the configuration hash and strategy version — both derived from the configuration actually run (ADR 0016), never supplied on the command line — the span of input event times covered, the chain algorithm, and the journal format version.
 
-Each record is `{"sequence": N, "kind": "input"|"decision", "envelope": {...}, "record_hash": "sha256:..."}`, chained over the previous record's hash, the record's kind, and the canonical bytes of its own envelope (ADR 0017). Records appear in recording order: each input, then the decisions that input caused. `kind` is what a reader — replay equivalence above all — uses to tell the two apart, and the chain covers it.
+Each record is `{"sequence": N, "kind": "input"|"decision", "envelope": {...}, "record_hash": "sha256:..."}`, chained over the previous record's hash, the record's kind, and the canonical bytes of its own envelope; the chain is seeded with the hash of the header, so editing which run the journal claims to be breaks it at the first record (ADR 0017). Records appear in recording order: each input, then the decisions that input caused. `kind` is what a reader — replay equivalence above all — uses to tell the two apart, and the chain covers it.
 
 The run's inputs are the configuration event, each completed bar (each one driven through the per-bar fill protocol of ADR 0005, so the fills the simulator decides are interleaved as inputs of their own), and finally an end-of-stream event that expires any proposal still outstanding — so every proposal in a completed run reaches exactly one terminal event.
 
