@@ -174,9 +174,11 @@ func Write(w io.Writer, header Header, envelopes []event.Envelope) error {
 		return err
 	}
 	var chain Chain
-	for i, envelope := range envelopes {
+	var sequence uint64
+	for _, envelope := range envelopes {
+		sequence++
 		record := Record{
-			Sequence:   uint64(i + 1),
+			Sequence:   sequence,
 			Envelope:   envelope,
 			RecordHash: chain.Next(envelope),
 		}
@@ -276,8 +278,9 @@ func Verify(r io.Reader) (Verification, error) {
 
 	var chain Chain
 	var final string
-	for i, record := range records {
-		want := uint64(i + 1)
+	var want uint64
+	for _, record := range records {
+		want++
 		if record.Sequence != want {
 			return Verification{}, fmt.Errorf("journal: record %d states sequence %d: a journal's own sequence is contiguous from 1, so a record is missing or out of order", want, record.Sequence)
 		}

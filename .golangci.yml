@@ -54,9 +54,14 @@ linters:
         cmd-is-composition-only:
           files:
             - "**/cmd/**"
+            - "!**/cmd/**/*_test.go"
           deny:
             - pkg: database/sql
               desc: "cmd/ is composition only; persistence belongs behind an interface."
+            - pkg: github.com/richard-whittemore/TrendInvesting/internal/indicator
+              desc: "cmd/ is composition only and contains no rules: an indicator is computed by the reducer that owns it, never by the composition root."
+            - pkg: github.com/richard-whittemore/TrendInvesting/internal/sizing
+              desc: "cmd/ is composition only and contains no rules: position size is decided by internal/strategy, never by the composition root."
 
     forbidigo:
       # Determinism: a decision must depend only on the ordered event stream and
@@ -103,6 +108,13 @@ linters:
           - forbidigo
           - gosec
           - unparam
+      # A command opens the file its operator named on the command line;
+      # that is what a command is for, and no path in internal/ is ever
+      # opened at all (depguard's domain-purity rule).
+      - path: ^cmd/
+        linters:
+          - gosec
+        text: G304
       # The composition root and the adapter boundary legitimately touch the
       # outside world; determinism is enforced in the domain.
       - path: ^cmd/

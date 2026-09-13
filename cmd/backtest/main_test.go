@@ -29,7 +29,7 @@ const (
 )
 
 // runBacktestTo runs the fixture and returns the journal it wrote.
-func runBacktestTo(t *testing.T, args ...string) ([]byte, string) {
+func runBacktestTo(t *testing.T, args ...string) (written []byte, path string) {
 	t.Helper()
 
 	out := filepath.Join(t.TempDir(), "journal.jsonl")
@@ -148,7 +148,8 @@ func TestTheHeaderRecordsTheDerivedConfigurationHashAndStrategyVersion(t *testin
 	}
 }
 
-// TestTheHeaderSpansTheRunsFirstAndLastInputEventTime.
+// TestTheHeaderSpansTheRunsFirstAndLastInputEventTime: the header states
+// the period the run covered, and nothing recorded falls outside it.
 func TestTheHeaderSpansTheRunsFirstAndLastInputEventTime(t *testing.T) {
 	written, _ := runBacktestTo(t)
 
