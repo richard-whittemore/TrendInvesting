@@ -218,6 +218,11 @@ func TestVerifyReportsTheFirstBrokenLinkBySequence(t *testing.T) {
 			if broken.Sequence != tt.wantSequence {
 				t.Fatalf("chain reported broken at record %d, want %d", broken.Sequence, tt.wantSequence)
 			}
+			// The message names the record too: a verifier's output is read
+			// by a person, not only matched on by a program.
+			if want := fmt.Sprintf("record %d", tt.wantSequence); !strings.Contains(broken.Error(), want) {
+				t.Fatalf("ChainBrokenError.Error() = %q, want it to name %q", broken.Error(), want)
+			}
 		})
 	}
 }
