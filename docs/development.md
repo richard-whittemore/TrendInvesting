@@ -63,6 +63,8 @@ Run the same checks used by CI:
 make check
 ```
 
+To run a backtest and verify the journal it writes, see `docs/running-a-backtest.md`.
+
 Go code must be formatted with `gofmt`. New behavior should include focused tests, including failure cases and invariant checks.
 
 ## Package boundaries
@@ -73,6 +75,7 @@ Go code must be formatted with `gofmt`. New behavior should include focused test
 - `internal/indicator/` owns pure, side-effect-free strategy arithmetic (True Range, N) with no knowledge of events or replay.
 - `internal/sizing/` owns the pure risk arithmetic that turns a volatility reading into a whole number of shares and the Risk at Stop it implies (ADR 0003), kept separate from `internal/indicator/` because sizing commits capital rather than measuring a price series, and likewise knowing nothing of events or replay.
 - `internal/strategy/` owns the `replay.Handler` reducers that turn a validated event stream into decision events.
+- `internal/journal/` owns the run's journal: the append-only file of input and decision records, the hash chain that makes an edit to one detectable (ADR 0017), and the `Verify` path that recomputes it — knowing nothing of strategy rules, and deliberately not answering replay equivalence's question.
 - `internal/fills/` owns the intraday fill model (ADR 0005) and the cost model (ADR 0013): the resting orders in force for an instrument, learned from the reducer's own emissions, and the per-bar protocol (`RunBar`) that turns one completed bar into `execution.fill` events indistinguishable in shape from adapter-produced ones — kept separate from `internal/strategy/` because it decides what a venue did, never what the strategy should do.
 - Future strategy packages must not import LEAN, database, or transport implementations.
 - `adapter/lean/` documents and will contain the deliberately thin Python boundary.

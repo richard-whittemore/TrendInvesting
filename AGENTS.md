@@ -44,6 +44,7 @@ Single-context: `CONTEXT.md` at the root, ADRs in `docs/adr/`. See `docs/agents/
 
 - `docs/architecture.md` — LEAN ↔ adapter ↔ Go boundary and safety invariants
 - `docs/development.md` — engineering principles, package boundaries, source comment standard, PR expectations
+- `docs/running-a-backtest.md` — running a fixture end to end, and verifying the journal it writes
 - `docs/dependency-policy.md` — when a runtime dependency is acceptable
 - `docs/methodology/` — source analysis, plan and backlog review. Third-party source material (the recording, its transcript, vendor PDFs) is deliberately **not** in this repository; the analysis names where it lives.
 - `CONTRIBUTING.md` — toolchain and local workflow
