@@ -347,7 +347,16 @@ func funcName(fn *ast.FuncDecl) string {
 }
 
 // offset converts a 1-based line and byte column into a byte offset, and
-// reports whether the position exists in this file at all.
+// reports whether that position exists on THAT LINE.
+//
+// Bounding the column against its own line rather than against the whole file
+// is the load-bearing part. A file long enough overall will happily accept a
+// column from a line that has since been shortened, and the span extracted
+// from it then runs past its line into the next — silently, since the result
+// is still valid source text. Every block in this audit is keyed by its own
+// source text, so a reinterpreted span does not fail: it matches the wrong
+// entry, or reports an entry as changed when it has not. A guard that turns a
+// loud panic into a quiet wrong answer is worse than the panic.
 func (s *sourceFile) offset(line, col int) (int, bool) {
 	if line < 1 || line > len(s.lineStarts) || col < 1 {
 		return 0, false
@@ -545,14 +554,27 @@ func TestAProfileSuppliedByTheEnvironmentResolvesAgainstTheModuleRoot(t *testing
 
 // TestAProfileTakenAgainstDifferentSourceIsRefusedRatherThanMisread is the
 // stale-profile case, which is easy to produce: edit a file, then reuse the
-// profile from before the edit. Every span in it describes code that has
-// moved, so reading them as if they were current would key blocks by whatever
-// text now happens to sit at those offsets — and silently rewrite the audit's
-// verdict.
+// profile from before the edit.
+//
+// The case that matters is the quiet one. A column recorded when its line was
+// longer still lands inside a file that is long enough overall, and the span
+// taken from it runs past its own line into the next — producing valid source
+// text that belongs to different code. Nothing downstream can tell: every
+// block in this audit is keyed by its own source text, so a reinterpreted
+// span does not fail, it matches the wrong entry or reports an unchanged
+// entry as changed. Bounding each coordinate against the whole file catches
+// only the loud half of this; bounding it against its own line catches both.
 func TestAProfileTakenAgainstDifferentSourceIsRefusedRatherThanMisread(t *testing.T) {
 	t.Parallel()
 
-	src := &sourceFile{text: []byte("package p\n\nfunc f() {}\n"), lineStarts: []int{0, 10, 11}}
+	// Three lines of quite different lengths, so a column from one of them
+	// can be inside the file and outside its own line. Offsets: line 1 at 0
+	// with its newline at 9, line 2 ("x", the line that was shortened) at 10
+	// with its newline at 11, line 3 at 12 with its newline at 23.
+	src := &sourceFile{
+		text:       []byte("package p\nx\nfunc f() {}\n"),
+		lineStarts: []int{0, 10, 12, 24},
+	}
 
 	tests := []struct {
 		name                                 string
@@ -560,10 +582,48 @@ func TestAProfileTakenAgainstDifferentSourceIsRefusedRatherThanMisread(t *testin
 		want                                 string
 		wantOK                               bool
 	}{
-		{name: "a span inside the file", startLine: 1, startCol: 1, endLine: 1, endCol: 8, want: "package", wantOK: true},
-		{name: "a line the file no longer has", startLine: 99, startCol: 1, endLine: 99, endCol: 2},
-		{name: "a column past the end of the file", startLine: 3, startCol: 1, endLine: 3, endCol: 500},
-		{name: "a span that runs backwards", startLine: 3, startCol: 9, endLine: 1, endCol: 1},
+		{
+			name:      "a span inside one line",
+			startLine: 1, startCol: 1, endLine: 1, endCol: 8,
+			want: "package", wantOK: true,
+		},
+		{
+			// A block ending in a closing brace at the end of its line puts
+			// the end column one past the last character, which is the
+			// newline's own offset. That is a position, not an overrun.
+			name:      "a span ending at its line's own newline",
+			startLine: 3, startCol: 1, endLine: 3, endCol: 12,
+			want: "func f() {}", wantOK: true,
+		},
+		{
+			// The quiet case. Line 2 held eleven characters when the profile
+			// was taken and holds one now. Offset 14 is comfortably inside a
+			// 24-byte file, so a file-length bound accepts it and the span
+			// comes back as "x\nfu" — line 2's content plus the start of
+			// line 3, which is code the block never described.
+			name:      "an end column from a line that has since been shortened",
+			startLine: 2, startCol: 1, endLine: 2, endCol: 5,
+		},
+		{
+			name:      "a start column from a line that has since been shortened",
+			startLine: 2, startCol: 6, endLine: 3, endCol: 2,
+		},
+		{
+			name:      "a line the file no longer has",
+			startLine: 99, startCol: 1, endLine: 99, endCol: 2,
+		},
+		{
+			name:      "an end line past the end of the file",
+			startLine: 3, startCol: 1, endLine: 99, endCol: 1,
+		},
+		{
+			name:      "a column past the end of the file",
+			startLine: 3, startCol: 1, endLine: 3, endCol: 500,
+		},
+		{
+			name:      "a span that runs backwards",
+			startLine: 3, startCol: 9, endLine: 1, endCol: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -571,7 +631,7 @@ func TestAProfileTakenAgainstDifferentSourceIsRefusedRatherThanMisread(t *testin
 			t.Parallel()
 			got, ok := src.slice(tt.startLine, tt.startCol, tt.endLine, tt.endCol)
 			if ok != tt.wantOK {
-				t.Fatalf("slice() ok = %v, want %v", ok, tt.wantOK)
+				t.Fatalf("slice() ok = %v, want %v (got %q)", ok, tt.wantOK, got)
 			}
 			if got != tt.want {
 				t.Errorf("slice() = %q, want %q", got, tt.want)
