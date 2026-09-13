@@ -224,15 +224,27 @@ func (c *campaignState) lifeAggregate(thisQuantity int64, thisEntryWeightedSum, 
 	return quantity, entryPrice, exitPrice
 }
 
-// protectiveStop is the MINIMUM of every held Unit's own protectiveStop —
-// the level at which the Campaign's protection is FIRST breached, and (since
-// every fill stays at or above its own rung, ADR 0005 rule 1: "a long fills
-// at max(level, open)") always Unit 1's own stop, because fills are
-// strictly increasing while every Unit's distance-to-stop (stopMultiple x
-// campaignN) stays the same. Reported on every strategy.campaign.evaluated
-// event and checked by checkCampaignHasAProtectiveStop's invariant; the
-// Stop Ladder moves this by raising earlier Units' stops rather than
-// leaving them at their own original level.
+// protectiveStop is the MINIMUM of every held Unit's own protectiveStop: the
+// level at which the Campaign's protection is FIRST breached. Reported on
+// every strategy.campaign.evaluated event and checked by
+// checkCampaignHasAProtectiveStop's invariant; the Stop Ladder moves it by
+// raising earlier Units' stops rather than leaving them at their own
+// original level.
+//
+// # The scan is live code, not a formality
+//
+// It is USUALLY Unit 1's own stop: every fill stays at or above its own rung
+// (ADR 0005 rule 1, "a long fills at max(level, open)"), so fills are
+// strictly increasing while every Unit's distance to its stop (stopMultiple
+// x campaignN) stays the same. It is not ALWAYS Unit 1's. The two levels
+// being compared are the same three terms added in a different order — a
+// later Unit's own stop is (previousFill + halfN) - stopDistance, and the
+// Unit before it, raised, is (previousFill - stopDistance) + halfN — and
+// float64 addition is not associative. For a great many ordinary prices the
+// two differ by one unit in the last place, and where they differ the NEWER
+// Unit's is the lower one. A comment claiming this returns Unit 1's own
+// would be wrong in the last bits; see
+// TestACampaignsProtectiveStopIsNotAlwaysTheFirstUnitsOwn.
 func (c *campaignState) protectiveStop() float64 {
 	stop := c.units[0].protectiveStop
 	for _, u := range c.units[1:] {
@@ -1598,6 +1610,11 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q names campaign %q, but the open campaign is %q; a fill for a campaign this strategy does not hold is a reconciliation failure (docs/architecture.md)",
 			fill.InstrumentID, fill.FillID, fill.CampaignID, campaign.campaignID)
 	}
+	// Unreachable while the Baseline is long-only: event.DirectionLong is the
+	// only direction FillPayload.Validate accepts, and a Campaign's own
+	// direction is only ever set from an accepted fill. Kept because the rule
+	// is about reconciliation rather than about the payload contract, and must
+	// already be in place on the day shorts are added (see applyFill's own).
 	if fill.Direction != campaign.direction {
 		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)",
 			fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)
@@ -1883,6 +1900,11 @@ func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, 
 		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q names proposal %q, but the outstanding exit proposal is %q; a fill for a proposal this strategy never made is a reconciliation failure (docs/architecture.md)",
 			fill.InstrumentID, fill.FillID, fill.ProposalID, pending.proposalID)
 	}
+	// Unreachable while the Baseline is long-only: event.DirectionLong is the
+	// only direction FillPayload.Validate accepts, and a Campaign's own
+	// direction is only ever set from an accepted fill. Kept because the rule
+	// is about reconciliation rather than about the payload contract, and must
+	// already be in place on the day shorts are added (see applyFill's own).
 	if fill.Direction != campaign.direction {
 		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)",
 			fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)
@@ -2059,6 +2081,11 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 		return nil, fmt.Errorf("strategy: instrument %q: add fill %q names proposal %q, but the outstanding add proposal is %q; a fill for a proposal this strategy never made is a reconciliation failure (docs/architecture.md)",
 			fill.InstrumentID, fill.FillID, fill.ProposalID, pending.proposalID)
 	}
+	// Unreachable while the Baseline is long-only: event.DirectionLong is the
+	// only direction FillPayload.Validate accepts, and a Campaign's own
+	// direction is only ever set from an accepted fill. Kept because the rule
+	// is about reconciliation rather than about the payload contract, and must
+	// already be in place on the day shorts are added (see applyFill's own).
 	if fill.Direction != campaign.direction {
 		return nil, fmt.Errorf("strategy: instrument %q: add fill %q is %s but campaign %q is %s; the add must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)",
 			fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)
@@ -2179,6 +2206,10 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 	for _, earlier := range campaign.units {
 		newStop, err := sizing.RaisedStop(earlier.protectiveStop, campaign.campaignN)
 		if err != nil {
+			// Unreachable: RaisedStop refuses a non-finite or non-positive
+			// previous stop, and checkCampaignHasAProtectiveStop halts the run
+			// at the start of any bar on which a held Unit's stop is not
+			// positive. The ladder only ever raises them from there.
 			return nil, fmt.Errorf("strategy: instrument %q: add fill %q cannot raise unit %d's protective stop: %w", fill.InstrumentID, fill.FillID, earlier.index, err)
 		}
 		raisedPayload := event.ProtectiveStopSetPayload{

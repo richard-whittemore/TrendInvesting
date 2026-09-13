@@ -88,6 +88,25 @@ To run a backtest and verify the journal it writes, see `docs/running-a-backtest
 
 Go code must be formatted with `gofmt`. New behavior should include focused tests, including failure cases and invariant checks.
 
+## The uncovered-branch audit
+
+A coverage percentage cannot detect a branch that has become unreachable: dead code raises the denominator and moves the score by a fraction of a point, so a defect that makes a path impossible to execute — and any second defect sitting on that path — passes a coverage floor unremarked. That has happened here twice.
+
+`internal/coverageaudit` compares the SET of statements no test executes against `exclusions.json`, a checked-in list of the blocks that cannot be executed. Every entry names a reason, and only two are admissible:
+
+- **unreachable by construction** — a value this code has just built cannot fail its own contract (`json.Marshal` of a struct of strings, numbers and `time.Time`; `Validate` on a payload assembled from already-validated figures a few lines above);
+- **unreachable by a named domain invariant** — a rule makes the state the branch tests for impossible, and the reason says which rule. Where the invariant is cheap to assert, a test asserts it, so the day it stops holding the list is forced to be re-read rather than quietly becoming wrong.
+
+"Nobody has got round to it" is not a category. A missing test is a missing test.
+
+The audit fails in both directions: an unlisted statement that becomes uncovered, and a listed one that becomes covered or no longer exists. It generates its own coverage profile, so `go test ./...` enforces it; set `COVERAGE_AUDIT_PROFILE` to reuse one you already have. After a refactor renames a function, re-author the list wholesale rather than by hand:
+
+```sh
+COVERAGE_AUDIT_DUMP=/tmp/uncovered.json go test ./internal/coverageaudit/
+```
+
+The audit covers `internal/`, where every strategy, risk and reconciliation rule lives. `cmd/` is composition and is held to its own tests — except the paths that decide whether a failed run still leaves evidence, which are held to the same bar as the domain.
+
 ## Package boundaries
 
 - `cmd/` contains executable composition only.

@@ -307,3 +307,64 @@ func TestConfigurationHashSchemaVersionParticipatesInTheHashedBytes(t *testing.T
 		t.Fatal("hashFor(current+1) == hashFor(current); the schema version must change the hash")
 	}
 }
+
+// TestCanonicalJSONEncodesBothBooleanValues pins the false arm alongside the
+// true one. A boolean field that encoded identically whichever way it was
+// set would make two configurations differing only in that field hash the
+// same — a Variant switched off and the same Variant switched on, indistinguishable
+// in the journal.
+func TestCanonicalJSONEncodesBothBooleanValues(t *testing.T) {
+	t.Parallel()
+
+	type payload struct {
+		V bool `json:"v"`
+	}
+	if got, want := string(canonicalJSON(payload{V: true})), `{"v":true}`; got != want {
+		t.Errorf("canonicalJSON(true) = %s, want %s", got, want)
+	}
+	if got, want := string(canonicalJSON(payload{V: false})), `{"v":false}`; got != want {
+		t.Errorf("canonicalJSON(false) = %s, want %s", got, want)
+	}
+}
+
+// TestCanonicalJSONPanicsOnAnUnsupportedKind is the fail-closed case for a
+// field whose type this encoder has no rendering for. Rendering nothing, or
+// rendering the zero value, would hash two different configurations alike;
+// the encoder names the kind and stops instead.
+func TestCanonicalJSONPanicsOnAnUnsupportedKind(t *testing.T) {
+	t.Parallel()
+
+	type payload struct {
+		V chan int `json:"v"`
+	}
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("canonicalJSON(chan) did not panic, want it to")
+		}
+		if msg := fmt.Sprint(r); !strings.Contains(msg, "unsupported kind chan") {
+			t.Errorf("panic message = %q, want it to name the unsupported kind", msg)
+		}
+	}()
+	canonicalJSON(payload{V: make(chan int)})
+}
+
+// TestCanonicalJSONPanicsOnANonStringMapKey guards the sort that makes map
+// encoding order-independent: the keys are compared as strings, so a map
+// keyed by anything else would sort by a rendering the encoder never
+// produced. Refusing is the only safe answer.
+func TestCanonicalJSONPanicsOnANonStringMapKey(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("canonicalJSON(map[int]string) did not panic, want it to")
+		}
+		if msg := fmt.Sprint(r); !strings.Contains(msg, "map key kind int") {
+			t.Errorf("panic message = %q, want it to name the key kind", msg)
+		}
+	}()
+	canonicalJSON(map[int]string{1: "one"})
+}
