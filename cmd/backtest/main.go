@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/buildinfo"
@@ -42,6 +43,14 @@ func run(args []string, out io.Writer) error {
 	verifyPath := flags.String("verify", "", "path of a journal to verify instead of running a backtest")
 	replayPath := flags.String("replay", "", "path of a journal to check for replay equivalence instead of running a backtest")
 	if err := flags.Parse(args); err != nil {
+		return err
+	}
+
+	// One invocation performs exactly one operation. Letting a mode win by
+	// branch order would let an audit command exit zero having done something
+	// other than what was asked — reporting a verified chain, say, while
+	// silently discarding the replay the operator also requested.
+	if err := checkOneOperation(named{"-verify", *verifyPath}, named{"-replay", *replayPath}, named{"-config", *configPath}, named{"-bars", *barsPath}, named{"-out", *outPath}); err != nil {
 		return err
 	}
 
@@ -72,6 +81,37 @@ func run(args []string, out io.Writer) error {
 		outPath:    *outPath,
 		build:      buildinfo.Version,
 	}, out)
+}
+
+// named is a flag and the value the invocation gave it, empty when unset.
+type named struct {
+	flag, value string
+}
+
+// checkOneOperation refuses an invocation that names more than one operation.
+// The two journal-reading modes are mutually exclusive with each other and
+// with the flags that describe a run to perform, so an operator who asks for
+// two things is told rather than silently given one of them.
+func checkOneOperation(verify, replay named, run ...named) error {
+	var modes, runFlags []string
+	for _, mode := range []named{verify, replay} {
+		if mode.value != "" {
+			modes = append(modes, mode.flag)
+		}
+	}
+	for _, flag := range run {
+		if flag.value != "" {
+			runFlags = append(runFlags, flag.flag)
+		}
+	}
+
+	switch {
+	case len(modes) > 1:
+		return fmt.Errorf("backtest: %s name different operations; give exactly one", strings.Join(modes, " and "))
+	case len(modes) == 1 && len(runFlags) > 0:
+		return fmt.Errorf("backtest: %s reads a journal that already exists and would ignore %s; give one or the other", modes[0], strings.Join(runFlags, ", "))
+	}
+	return nil
 }
 
 // verify recomputes a journal's chain and reports what it found: whether the

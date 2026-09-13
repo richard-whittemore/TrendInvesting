@@ -539,6 +539,63 @@ func TestTheCommandReportsADecisionTheReplayNeverProduced(t *testing.T) {
 	}
 }
 
+// TestAnInvocationNamingTwoOperationsIsRefused: before -replay existed there
+// was one mode flag and no way to ask for two things at once. With two, a
+// branch order silently picked a winner — `-verify a -replay b` reported a
+// verified chain and exited zero having never looked at b. An audit command
+// that succeeds after doing something other than what was asked is worse than
+// one that fails.
+func TestAnInvocationNamingTwoOperationsIsRefused(t *testing.T) {
+	_, path := runBacktestTo(t)
+
+	tests := []struct {
+		name    string
+		args    []string
+		wantsIn string
+	}{
+		{
+			name:    "two journal-reading modes",
+			args:    []string{"-verify", path, "-replay", path},
+			wantsIn: "-verify and -replay",
+		},
+		{
+			name:    "a mode alongside the flags describing a run",
+			args:    []string{"-replay", path, "-config", configurationFixture, "-bars", barsFixture},
+			wantsIn: "-config, -bars",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := run(tt.args, &out)
+			if err == nil {
+				t.Fatalf("run(%v) error = nil, want a refusal; it performed one operation and discarded the other", tt.args)
+			}
+			if !strings.Contains(err.Error(), tt.wantsIn) {
+				t.Fatalf("run(%v) error = %v, want it to name %q", tt.args, err, tt.wantsIn)
+			}
+			if out.Len() > 0 {
+				t.Fatalf("run(%v) wrote a report before refusing:\n%s", tt.args, out.String())
+			}
+		})
+	}
+}
+
+// Each operation on its own is unaffected by the check above.
+func TestEachOperationOnItsOwnIsStillAccepted(t *testing.T) {
+	_, path := runBacktestTo(t)
+
+	for _, args := range [][]string{{"-verify", path}, {"-replay", path}} {
+		var out bytes.Buffer
+		if err := run(args, &out); err != nil {
+			t.Fatalf("run(%v) error = %v", args, err)
+		}
+		if out.Len() == 0 {
+			t.Fatalf("run(%v) reported nothing", args)
+		}
+	}
+}
+
 // A path that names no file is an operator error, reported as one.
 func TestTheCommandRefusesToReplayAMissingFile(t *testing.T) {
 	var out bytes.Buffer

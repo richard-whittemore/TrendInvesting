@@ -43,6 +43,8 @@ This feeds the journal's own recorded inputs back through a freshly constructed 
 
 The reducer is built from the journal alone: the strategy version and configuration hash from its header, and the configuration payload from its own input stream. Nothing is supplied on the command line, because a journal is meant to be self-describing evidence.
 
+One invocation performs exactly one operation. `-verify` and `-replay` are mutually exclusive with each other and with the flags that describe a run to perform (`-config`, `-bars`, `-out`); asking for two is refused rather than silently given one of them.
+
 Replay refuses rather than reports a divergence whenever it cannot ask the question at all — a journal it cannot read, an unknown record kind, a header strategy version it cannot parse, a missing or undecodable configuration. Among those refusals, these are the **identity-consistency checks**, each holding one part of the header against what the journal itself records:
 
 - **The journal's rules version is not this build's.** Replay compares runs on the rules version alone; the build suffix is traceability only (ADR 0016). A mismatch means this engine's rules have moved on since the journal was written — which is not evidence that the journal is wrong. A journal written by a *different build of the same rules* replays normally, which is the point of splitting the two axes.
