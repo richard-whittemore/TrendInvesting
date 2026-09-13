@@ -11,7 +11,7 @@ go run ./cmd/backtest \
 
 - `-config` is a JSON `event.ConfigurationPayload`: the strategy identifier, Sizing Mode, channel lengths, maximum Units, slippage, the Notional Account and the commission schedule. A configuration with zero slippage is refused before any bar is read (ADR 0013).
 - `-bars` is a JSON array of `event.CompletedBarPayload`, in the order the run delivers them.
-- `-out` is where the journal is written. **An existing file is never overwritten**: a journal is recorded evidence (AGENTS.md rule 6), so the command refuses and asks you to move it aside or choose another path. There is no overwrite flag. The write goes through a temporary file in the same directory and is renamed into place, so an interrupted run leaves nothing partial behind.
+- `-out` is where the journal is written. **An existing file is never overwritten**: a journal is recorded evidence (AGENTS.md rule 6), so the command refuses and asks you to move it aside or choose another path. There is no overwrite flag. The write goes through a temporary file in the same directory, which is then linked into place — a hard link rather than a rename, because a rename would silently replace a journal that appeared while the run was in progress, whereas a link fails atomically. So an interrupted run leaves nothing partial behind, and two runs racing for the same path end with one journal and one clear error rather than one journal overwritten by the other.
 
 ## What it writes
 

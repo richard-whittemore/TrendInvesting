@@ -54,6 +54,14 @@ func backtest(opts options, out io.Writer) error {
 	if opts.build == "" {
 		return errors.New("backtest: the running build must be identified; it is part of every envelope's strategy version (ADR 0016)")
 	}
+	// Checked before the run rather than after it, so an operator is told
+	// the path is taken in a moment rather than at the end of a backtest.
+	// This is a courtesy, not the guarantee: writeJournal creates the
+	// destination exclusively, because a journal can appear while a run is
+	// in progress.
+	if err := checkJournalPathFree(opts.outPath); err != nil {
+		return err
+	}
 	cfg, err := readConfiguration(opts.configPath)
 	if err != nil {
 		return err
@@ -218,6 +226,22 @@ func readBars(path string) ([]event.CompletedBarPayload, error) {
 	return bars, nil
 }
 
+// checkJournalPathFree reports whether anything already occupies path.
+func checkJournalPathFree(path string) error {
+	_, err := os.Stat(path)
+	switch {
+	case err == nil:
+		return journalExistsError(path)
+	case !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("backtest: check the journal path: %w", err)
+	}
+	return nil
+}
+
+func journalExistsError(path string) error {
+	return fmt.Errorf("backtest: %s already exists: a journal is recorded evidence and is never overwritten (AGENTS.md rule 6); move it aside or choose another path", path)
+}
+
 // writeJournal writes the run's journal to path, refusing to disturb
 // anything already there and leaving nothing behind if it fails.
 //
@@ -229,18 +253,12 @@ func readBars(path string) ([]event.CompletedBarPayload, error) {
 // decision a person should make, and one this command should not offer to
 // make for them.
 //
-// The write goes to a temporary file in the destination's own directory,
-// is flushed to disk, and is renamed into place, so a run interrupted
-// mid-write leaves no partial journal that reads like a complete one. The
-// directory has to be the destination's own, because a rename across
-// filesystems is not atomic.
+// The write goes to a temporary file in the destination's own directory, is
+// flushed to disk, and is linked into place, so a run interrupted mid-write
+// leaves no partial journal that reads like a complete one and a run that
+// loses a race for the path loses it cleanly. The directory has to be the
+// destination's own: a hard link cannot cross filesystems.
 func writeJournal(path string, header journal.Header, entries []journal.Entry) error {
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("backtest: %s already exists: a journal is recorded evidence and is never overwritten (AGENTS.md rule 6); move it aside or choose another path", path)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("backtest: check the journal path: %w", err)
-	}
-
 	file, err := os.CreateTemp(filepath.Dir(path), ".journal-*.partial")
 	if err != nil {
 		return fmt.Errorf("backtest: create the journal: %w", err)
@@ -262,8 +280,19 @@ func writeJournal(path string, header journal.Header, entries []journal.Entry) e
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("backtest: close the journal: %w", err)
 	}
-	if err := os.Rename(temporary, path); err != nil {
-		return fmt.Errorf("backtest: move the journal into place: %w", err)
+	// A HARD LINK, not a rename, and this must not be "simplified" back:
+	// rename(2) replaces an existing destination silently, so a journal
+	// that appeared while this run was in progress — a concurrent run, a
+	// restored backup — would be destroyed by it. link(2) fails with EEXIST
+	// atomically instead, which is what makes the refusal a guarantee
+	// rather than a check that something can race past. The content is
+	// complete before the name exists either way, so there is still no
+	// partial journal at the destination.
+	if err := os.Link(temporary, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return journalExistsError(path)
+		}
+		return fmt.Errorf("backtest: install the journal at %s: %w", path, err)
 	}
 	return nil
 }

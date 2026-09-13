@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -390,6 +392,129 @@ func TestTheCommandRefusesToOverwriteAnExistingJournal(t *testing.T) {
 	}
 	if !bytes.Equal(after, existing) {
 		t.Fatalf("the existing journal was modified:\n before %q\n after  %q", existing, after)
+	}
+}
+
+// TestTheWriteItselfRefusesADestinationThatAppearedLate: the check before
+// the run is a courtesy — it saves an operator from waiting for a backtest
+// to finish before being told the path is taken. The guarantee has to be at
+// the write, or a journal that appears in between (a concurrent run, a
+// restored backup) is destroyed by a rename that replaces it silently.
+func TestTheWriteItselfRefusesADestinationThatAppearedLate(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "journal.jsonl")
+	existing := []byte("a journal that appeared after the run started\n")
+	if err := os.WriteFile(out, existing, 0o600); err != nil {
+		t.Fatalf("write the existing journal: %v", err)
+	}
+
+	header := journal.NewHeader("sha256:abc", "turtle-baseline/1.1.0+test", time.Unix(0, 0).UTC(), time.Unix(1, 0).UTC())
+	entries := []journal.Entry{{Kind: journal.KindInput, Envelope: validEnvelopeForWrite()}}
+
+	err := writeJournal(out, header, entries)
+	if err == nil {
+		t.Fatal("writeJournal() error = nil, want a refusal to replace the destination")
+	}
+	if !strings.Contains(err.Error(), out) {
+		t.Errorf("writeJournal() error = %v, want one naming %s", err, out)
+	}
+
+	after, readErr := os.ReadFile(out)
+	if readErr != nil {
+		t.Fatalf("read the journal back: %v", readErr)
+	}
+	if !bytes.Equal(after, existing) {
+		t.Fatalf("the destination was replaced:\n before %q\n after  %q", existing, after)
+	}
+
+	left, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read the directory: %v", err)
+	}
+	if len(left) != 1 {
+		t.Fatalf("the refused write left %d files behind, want only the original", len(left))
+	}
+}
+
+// TestConcurrentWritesLeaveExactlyOneJournal is the race itself, run for
+// real rather than through a seam: eight writes start on a path none of
+// them can see yet, so the interleaving is whatever the scheduler does, and
+// the assertion is deterministic anyway — exactly one may win, every loser
+// must say the path is taken, and the journal left behind must be one
+// complete run's rather than a mixture.
+func TestConcurrentWritesLeaveExactlyOneJournal(t *testing.T) {
+	const writers = 8
+
+	dir := t.TempDir()
+	out := filepath.Join(dir, "journal.jsonl")
+
+	var wg sync.WaitGroup
+	errs := make([]error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// A different configuration hash per writer, so the survivor
+			// names which run actually installed it.
+			header := journal.NewHeader(fmt.Sprintf("sha256:run-%d", i), "turtle-baseline/1.1.0+test", time.Unix(0, 0).UTC(), time.Unix(1, 0).UTC())
+			errs[i] = writeJournal(out, header, []journal.Entry{{Kind: journal.KindInput, Envelope: validEnvelopeForWrite()}})
+		}(i)
+	}
+	wg.Wait()
+
+	var won int
+	for i, err := range errs {
+		if err == nil {
+			won++
+			continue
+		}
+		if !strings.Contains(err.Error(), "already exists") {
+			t.Errorf("writer %d failed for the wrong reason: %v", i, err)
+		}
+	}
+	if won != 1 {
+		t.Fatalf("%d of %d concurrent writes succeeded, want exactly 1", won, writers)
+	}
+
+	written, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read the surviving journal: %v", err)
+	}
+	verification, err := journal.Verify(bytes.NewReader(written))
+	if err != nil {
+		t.Fatalf("the surviving journal does not verify: %v", err)
+	}
+	if !strings.HasPrefix(verification.Header.ConfigurationHash, "sha256:run-") {
+		t.Fatalf("the surviving journal's header is %q, want one writer's own", verification.Header.ConfigurationHash)
+	}
+
+	left, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read the directory: %v", err)
+	}
+	if len(left) != 1 {
+		t.Fatalf("the losers left %d files behind, want only the journal", len(left))
+	}
+}
+
+// validEnvelopeForWrite is the smallest envelope journal.Write accepts, so
+// the tests above fail on the destination rather than on their fixture.
+func validEnvelopeForWrite() event.Envelope {
+	payload := json.RawMessage(`{}`)
+	at := time.Unix(0, 0).UTC()
+	return event.Envelope{
+		ID:                "evt-1",
+		Type:              "test.event",
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
+		SchemaVersion:     1,
+		EventTime:         at,
+		RecordedAt:        at,
+		Sequence:          1,
+		Source:            "fixture",
+		StrategyVersion:   "turtle-baseline/1.1.0+test",
+		ConfigurationHash: "sha256:abc",
+		PayloadHash:       event.HashPayload(payload),
+		Payload:           payload,
 	}
 }
 
