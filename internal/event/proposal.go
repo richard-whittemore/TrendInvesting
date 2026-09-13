@@ -544,6 +544,22 @@ const ExpiryReasonSupersededByNextBar = "superseded-by-next-bar"
 // bar's PeriodEnd.
 const ExpiryReasonSupersededByStop = "superseded-by-stop"
 
+// ExpiryReasonInputStreamEnded is the THIRD expiry reason: the run's input
+// stream ended (RunCompletedEventType) while the proposal was still
+// outstanding, so the next bar that would have superseded it under ADR 0011
+// never arrived. It is valid for every Kind, since an entry, an Add and an
+// exit proposal can all be outstanding when a run ends.
+//
+// ExpiredAt for this reason is the instant the stream ended, which is at the
+// earliest the proposal's own bar: unlike ExpiryReasonSupersededByNextBar it
+// is therefore NOT required to fall strictly after PeriodEnd, because there
+// is no later bar — that absence is the whole reason the event exists.
+//
+// A new value of an already-required field needs no schema bump (see
+// ProposalExpiredSchemaVersion): no earlier record ever wrote it, so there is
+// nothing an older reader could mistake for it.
+const ExpiryReasonInputStreamEnded = "input-stream-ended"
+
 // ProposalExpiredPayload records a trade proposal that was never filled and
 // has now been superseded.
 //
@@ -673,6 +689,9 @@ func (p ProposalExpiredPayload) Validate() error {
 	switch p.Reason {
 	case ExpiryReasonSupersededByNextBar:
 		// recognised
+	case ExpiryReasonInputStreamEnded:
+		// Valid for every Kind, and subject only to the universal
+		// EarliestFillAt rule above: see the constant's own doc comment.
 	case ExpiryReasonSupersededByStop:
 		if p.Kind != ProposalKindAdd {
 			errs = append(errs, fmt.Errorf("reason %q is only valid for kind %q (got %q): only an add proposal is cancelled by a stop fill", ExpiryReasonSupersededByStop, ProposalKindAdd, p.Kind))
