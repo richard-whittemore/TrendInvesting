@@ -43,10 +43,12 @@ This feeds the journal's own recorded inputs back through a freshly constructed 
 
 The reducer is built from the journal alone: the strategy version and configuration hash from its header, and the configuration payload from its own input stream. Nothing is supplied on the command line, because a journal is meant to be self-describing evidence.
 
-Two conditions are refused before anything is replayed, and neither is a divergence:
+Replay refuses rather than reports a divergence whenever it cannot ask the question at all — a journal it cannot read, an unknown record kind, a header strategy version it cannot parse, a missing or undecodable configuration. Among those refusals, these are the **identity-consistency checks**, each holding one part of the header against what the journal itself records:
 
 - **The journal's rules version is not this build's.** Replay compares runs on the rules version alone; the build suffix is traceability only (ADR 0016). A mismatch means this engine's rules have moved on since the journal was written — which is not evidence that the journal is wrong. A journal written by a *different build of the same rules* replays normally, which is the point of splitting the two axes.
+- **The header names a strategy its own configuration does not declare.** The configuration hash pins only the payload, so without this a journal could claim one strategy in its header while having run another.
 - **The header claims a configuration the journal does not record.** The header's configuration hash is the run's identity (ADR 0012); replaying under a configuration the header does not claim would answer a question nobody asked.
+- **A record names a run other than the header's.** Every record must state the header's strategy version and configuration hash. This matters most for inputs: they are fed to the reducer and their own identity fields are never compared to anything, whereas recorded decisions are already pinned by the byte comparison.
 
 What this proves is the **reducer's** determinism. A journal's inputs include the fills the simulator decided (ADR 0005), so replaying them re-derives the reducer's own decisions — Setup evaluation, sizing, the Add, stop and exit rules — and says nothing about whether the fill simulator would produce the same fills again from the bars alone. That stronger, whole-pipeline property is a separate question.
 
