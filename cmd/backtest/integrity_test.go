@@ -2,18 +2,15 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
-	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
 // These two tests are the point of #48: a journal can fail either of two
@@ -31,36 +28,28 @@ import (
 
 // splitJournal separates the journal's input stream from the decisions the
 // reducer produced, from the record's own Kind — the claim the chain covers
-// (ADR 0017), not an inference from a producer's name.
-func splitJournal(records []journal.Record) (inputs, decisions []event.Envelope) {
-	for _, record := range records {
-		if record.Kind == journal.KindDecision {
-			decisions = append(decisions, record.Envelope)
-			continue
-		}
-		inputs = append(inputs, record.Envelope)
+// (ADR 0017), not an inference from a producer's name. journal.Split is the
+// production definition; a test helper that ignored the possibility of an
+// unrecognised kind would test something looser than what replay
+// equivalence actually reads.
+func splitJournal(t *testing.T, records []journal.Record) (inputs, decisions []event.Envelope) {
+	t.Helper()
+	inputs, decisions, err := journal.Split(records)
+	if err != nil {
+		t.Fatalf("journal.Split() error = %v", err)
 	}
 	return inputs, decisions
 }
 
 // replayInputs is replay equivalence's own question, asked of a journal's
-// input stream: run it through a fresh reducer and see what this build
-// decides now.
-func replayInputs(t *testing.T, inputs []event.Envelope) []event.Envelope {
+// input stream: run it through a fresh reducer, built from header exactly as
+// replayEquivalence builds one, and see what this build decides now.
+func replayInputs(t *testing.T, header journal.Header, inputs []event.Envelope) []event.Envelope {
 	t.Helper()
 
-	cfg := fixtureConfiguration(t)
-	reducer, err := strategy.NewReducer(event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, testBuild), cfg)
+	emitted, err := replayJournalInputs(header, inputs)
 	if err != nil {
-		t.Fatalf("strategy.NewReducer() error = %v", err)
-	}
-	engine, err := replay.New(reducer)
-	if err != nil {
-		t.Fatalf("replay.New() error = %v", err)
-	}
-	emitted, err := engine.Run(context.Background(), inputs)
-	if err != nil {
-		t.Fatalf("Engine.Run() error = %v", err)
+		t.Fatalf("replayJournalInputs() error = %v", err)
 	}
 	return emitted
 }
@@ -155,11 +144,11 @@ func TestAForgedDecisionPassesChainVerificationAndIsCaughtByReplayEquivalence(t 
 	}
 
 	// Replay equivalence is not: the inputs still say what really happened.
-	_, forgedRecords := readJournalFile(t, forgedPath)
-	inputs, recorded := splitJournal(forgedRecords)
-	replayed := replayInputs(t, inputs)
+	forgedHeader, forgedRecords := readJournalFile(t, forgedPath)
+	inputs, recorded := splitJournal(t, forgedRecords)
+	replayed := replayInputs(t, forgedHeader, inputs)
 
-	if reflect.DeepEqual(recorded, replayed) {
+	if replay.Equivalent(recorded, replayed) == nil {
 		t.Fatal("replaying the journal's inputs reproduced the forged decisions; the forgery went undetected by both checks")
 	}
 }
@@ -174,7 +163,7 @@ func TestACarelessEditIsCaughtByChainVerificationWhileReplayOfItsInputsStillRepr
 	_, path := runBacktestTo(t)
 	header, records := readJournalFile(t, path)
 
-	_, original := splitJournal(records)
+	_, original := splitJournal(t, records)
 
 	edited := lastDecision(t, records)
 	records[edited].Envelope = alterRecordedQuantity(t, records[edited].Envelope, false)
@@ -200,13 +189,13 @@ func TestACarelessEditIsCaughtByChainVerificationWhileReplayOfItsInputsStillRepr
 	// And a replay of the journal's inputs still reproduces the decisions
 	// the run originally made: the edit damaged the record of history, not
 	// the history the inputs describe.
-	_, editedRecords, err := journal.Read(bytes.NewReader(editedRaw))
+	editedHeader, editedRecords, err := journal.Read(bytes.NewReader(editedRaw))
 	if err != nil {
 		t.Fatalf("journal.Read() error = %v", err)
 	}
-	inputs, _ := splitJournal(editedRecords)
-	if !reflect.DeepEqual(replayInputs(t, inputs), original) {
-		t.Fatal("replaying the edited journal's inputs did not reproduce the run's original decisions")
+	inputs, _ := splitJournal(t, editedRecords)
+	if d := replay.Equivalent(original, replayInputs(t, editedHeader, inputs)); d != nil {
+		t.Fatalf("replaying the edited journal's inputs did not reproduce the run's original decisions; first divergence at %d:\n want %+v\n got  %+v", d.Index, d.Want, d.Got)
 	}
 }
 

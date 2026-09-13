@@ -3,6 +3,7 @@ package event
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -167,8 +168,17 @@ type ConfigurationPayload struct {
 // first half is a rejection rather than an ignore.
 func (c ConfigurationPayload) Validate() error {
 	var errs []error
-	if c.StrategyID == "" {
+	switch {
+	case c.StrategyID == "":
 		errs = append(errs, errors.New("strategy id is required"))
+	case strings.ContainsAny(c.StrategyID, StrategyVersionDelimiters):
+		// ADR 0016 composes "<strategy-id>/<rules-version>+<build>". An id
+		// carrying either delimiter produces a strategy version that
+		// decomposes to a different id and rules version than it was built
+		// from, so replay would refuse the journal for a rules-version
+		// mismatch that never happened — blaming the journal for a change in
+		// the engine. Rejecting the id here is what keeps that unreachable.
+		errs = append(errs, fmt.Errorf("strategy id %q must not contain any of %q, which separate the parts of a strategy version", c.StrategyID, StrategyVersionDelimiters))
 	}
 	switch c.SizingMode {
 	case SizingModeVolatilityNormalised, SizingModeFixedRiskAtStop:
