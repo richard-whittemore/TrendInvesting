@@ -20,10 +20,20 @@ The question was whether to use a keyed MAC or a hash chain, and where the resul
 A journal is a header line followed by one record per line:
 
 ```
-{"sequence": N, "envelope": {...}, "record_hash": "sha256:..."}
+{"sequence": N, "kind": "input"|"decision", "envelope": {...}, "record_hash": "sha256:..."}
 ```
 
-where `record_hash = SHA-256(previous_record_hash || canonical_envelope_bytes)`, the previous hash is the 32 raw bytes of the previous record's digest, and the first record's predecessor is 32 zero bytes (`journal.ZeroRecordHash`). Canonical envelope bytes come from `event.CanonicalEnvelopeBytes`, which reuses ADR 0016's canonical encoder so this project has exactly one definition of "the canonical bytes of a value".
+where `record_hash = SHA-256(previous_record_hash || kind || canonical_envelope_bytes)`, the previous hash is the 32 raw bytes of the previous record's digest, and the first record's predecessor is 32 zero bytes (`journal.ZeroRecordHash`). Canonical envelope bytes come from `event.CanonicalEnvelopeBytes`, which reuses ADR 0016's canonical encoder so this project has exactly one definition of "the canonical bytes of a value".
+
+### The record states whether its envelope was an input or a decision, and the chain covers that claim
+
+`kind` is a closed set: `input` for an event the run was given, `decision` for one the reducer produced. The alternative was to infer it from `Envelope.Source` — decisions carry the reducer's source, everything else is an input — and that was rejected for two reasons.
+
+First, it is implicit coupling: nothing stops a producer stamping that source on something that is not a reducer decision, and the journal's meaning should not depend on a string constant owned by another package.
+
+Second, and load-bearing: **if `kind` were outside the hash, flipping one record from `decision` to `input` would be undetectable.** That single flip changes what replay equivalence feeds in versus what it compares against — which is precisely the property replay equivalence exists to guarantee. A chain that protects the envelope but not the record's own claim about that envelope protects the wrong thing. So the kind is hashed with the envelope, and `Verify` also rejects any value outside the closed set, since a forger who recomputed the chain could otherwise write anything there.
+
+This refines the formula rather than contradicting the decision it came from: the intent was always that the chain protects the record, and the kind is part of the record. `journal.Recorder` is where the two are told apart, structurally and once — what arrives as `Apply`'s argument is an input, what the handler returns is a decision — so no reader re-derives it.
 
 The header records the run's configuration hash (ADR 0016), strategy version, the span of input event times covered, the chain algorithm, and the journal format version. An unrecognised format version fails closed in both directions, exactly as ADR 0015 requires of the envelope.
 
@@ -60,4 +70,6 @@ Before paper trading, each completed run's final `record_hash` — which `journa
 - A journal is self-verifying without a secret, and `backtest -verify` is the documented way to check one.
 - The envelope contract is untouched, so byte-identical replay stays satisfiable.
 - A journal is composed in memory and written in one pass, because the header states the span the run covered and that is not known until the last input has arrived. This is fine at fixture and daily-bar scale and will need revisiting for a run large enough that its journal does not fit in memory.
+- Replay equivalence reads `kind` to split a journal, rather than inferring the split from a producer's name.
+- A journal records the build that produced it, in every envelope's strategy version (ADR 0016). The build identifier is therefore injected at the composition root rather than read from `internal/buildinfo` inside the run, so a test asserting a journal byte for byte fixes it: a golden keyed to the build identifier would assert which machine produced the journal rather than what the platform decided.
 - Nobody should describe this as making the journal immutable. It makes the journal *checkable*.

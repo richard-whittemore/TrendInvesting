@@ -15,6 +15,11 @@ import (
 // caused. That recording order is the journal's single contiguous sequence
 // of inputs and decisions.
 //
+// It is also where the two are told apart, structurally and once: what
+// arrives as Apply's argument is an input, what the handler returns is a
+// decision. Every later reader takes that from the record's own Kind rather
+// than re-deriving it from a producer's name.
+//
 // A decision is stamped with replay.Stamp — the same function replay.Engine
 // uses — so a replay of the journal's own input stream reproduces the
 // recorded decisions byte for byte, which is what makes the journal evidence
@@ -25,8 +30,8 @@ import (
 // because the header states the span the run covered and that is not known
 // until the last input has arrived.
 type Recorder struct {
-	handler   replay.Handler
-	envelopes []event.Envelope
+	handler replay.Handler
+	entries []Entry
 
 	outputSequence uint64
 	spanStart      time.Time
@@ -47,7 +52,7 @@ func (r *Recorder) Apply(ctx context.Context, input event.Envelope) ([]event.Env
 		return nil, errors.New("journal: a recorder requires a handler to record")
 	}
 
-	r.envelopes = append(r.envelopes, input)
+	r.entries = append(r.entries, Entry{Kind: KindInput, Envelope: input})
 	r.observeInputTime(input.EventTime)
 
 	decisions, applyErr := r.handler.Apply(ctx, input)
@@ -57,7 +62,7 @@ func (r *Recorder) Apply(ctx context.Context, input event.Envelope) ([]event.Env
 		if err := stamped.Validate(); err != nil {
 			return decisions, fmt.Errorf("journal: emission %d of event %s cannot be journalled: %w", i, input.ID, err)
 		}
-		r.envelopes = append(r.envelopes, stamped)
+		r.entries = append(r.entries, Entry{Kind: KindDecision, Envelope: stamped})
 	}
 	return decisions, applyErr
 }
@@ -78,10 +83,10 @@ func (r *Recorder) observeInputTime(at time.Time) {
 	}
 }
 
-// Envelopes returns everything recorded, in recording order.
-func (r *Recorder) Envelopes() []event.Envelope {
-	out := make([]event.Envelope, len(r.envelopes))
-	copy(out, r.envelopes)
+// Entries returns everything recorded, in recording order.
+func (r *Recorder) Entries() []Entry {
+	out := make([]Entry, len(r.entries))
+	copy(out, r.entries)
 	return out
 }
 

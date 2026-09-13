@@ -4,10 +4,10 @@
 //
 // # Tamper-evidence, not tamper-proofing
 //
-// Each record carries a hash chained over the previous record's hash and the
-// canonical bytes of its own envelope (ADR 0017), so altering event k breaks
-// every link after k and a silent edit to recorded history is detectable
-// without a secret. It is evidence, not proof: whoever can rewrite one record
+// Each record carries a hash chained over the previous record's hash, the
+// record's own kind, and the canonical bytes of its envelope (ADR 0017), so
+// altering event k breaks every link after k and a silent edit to recorded
+// history is detectable without a secret. It is evidence, not proof: whoever can rewrite one record
 // can rewrite the whole file, and dropping records from the end leaves a
 // valid chain. Anchoring each run's final record hash outside the system —
 // the git-committed run registry — is what closes that, and is why Verify
@@ -23,6 +23,10 @@
 // a journal, and byte-identical replay would become unsatisfiable. A journal
 // can fail either check independently, and the two failures mean different
 // things.
+//
+// Which records are inputs and which are decisions is stated on the record
+// (Kind) and covered by the chain, because that claim is what replay
+// equivalence reads to decide what to feed in and what to compare against.
 package journal
 
 import (
@@ -47,7 +51,7 @@ const FormatVersion uint32 = 1
 
 // ChainAlgorithm names how a record hash is computed, recorded in the header
 // so a verifier is told rather than assuming.
-const ChainAlgorithm = "sha256(previous_record_hash||canonical_envelope_bytes)"
+const ChainAlgorithm = "sha256(previous_record_hash||kind||canonical_envelope_bytes)"
 
 // ZeroRecordHash is the predecessor of the first record: 32 zero bytes. It
 // starts the chain, so the whole chain is reproducible from the envelope
@@ -113,13 +117,40 @@ func (h Header) validate() error {
 	return nil
 }
 
-// Record is one line of a journal: an envelope, its position in the journal,
-// and the chain hash that attests everything up to and including it.
+// The two kinds of event a journal records. An input is an event the run was
+// given — a configuration, a bar, a fill; a decision is one the reducer
+// produced from it.
+//
+// The distinction is stated on the record rather than inferred from
+// Envelope.Source (ADR 0017). A producer's name answers a different
+// question, and nothing stops one stamping a reducer's source on something
+// that is not a decision — while replay equivalence depends on this split
+// being exactly right, since it feeds the inputs in and compares the
+// decisions against what comes out.
+const (
+	KindInput    = "input"
+	KindDecision = "decision"
+)
+
+// Entry is one event to record, and what it was in the run.
+type Entry struct {
+	Kind     string
+	Envelope event.Envelope
+}
+
+func validKind(kind string) bool {
+	return kind == KindInput || kind == KindDecision
+}
+
+// Record is one line of a journal: an envelope, what it was in the run, its
+// position in the journal, and the chain hash that attests everything up to
+// and including it.
 //
 // The envelope is recorded exactly as it was produced. Nothing about the
 // chain is written into it (ADR 0017).
 type Record struct {
 	Sequence   uint64         `json:"sequence"`
+	Kind       string         `json:"kind"`
 	Envelope   event.Envelope `json:"envelope"`
 	RecordHash string         `json:"record_hash"`
 }
@@ -131,10 +162,22 @@ type Chain struct {
 	previous [sha256.Size]byte
 }
 
-// Next returns the record hash for envelope, following everything already
+// Next returns the record hash for an entry, following everything already
 // passed to this Chain.
-func (c *Chain) Next(envelope event.Envelope) string {
-	sum := sha256.Sum256(append(c.previous[:], event.CanonicalEnvelopeBytes(envelope)...))
+//
+// The kind is hashed alongside the envelope, not beside it: flipping a
+// record from decision to input changes what a replay feeds in versus what
+// it compares against, so a chain that left the kind out would protect the
+// envelope but not the record's own claim about it (ADR 0017). The two kinds
+// are a closed set and canonical envelope bytes always begin with '{', so
+// the concatenation needs no separator to stay unambiguous.
+func (c *Chain) Next(kind string, envelope event.Envelope) string {
+	canonical := event.CanonicalEnvelopeBytes(envelope)
+	hashed := make([]byte, 0, len(c.previous)+len(kind)+len(canonical))
+	hashed = append(hashed, c.previous[:]...)
+	hashed = append(hashed, kind...)
+	hashed = append(hashed, canonical...)
+	sum := sha256.Sum256(hashed)
 	c.previous = sum
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
@@ -151,20 +194,23 @@ func (e *ChainBrokenError) Error() string {
 	return fmt.Sprintf("journal: the chain is broken at record %d: the record states %s, but its envelope following the previous record hashes to %s", e.Sequence, e.Got, e.Want)
 }
 
-// Write records header and every envelope, in order, as a journal.
+// Write records header and every entry, in order, as a journal.
 //
-// Every envelope is validated before anything is written, so a run that
+// Every entry is validated before anything is written, so a run that
 // produced one that cannot be journalled fails before leaving a partial
 // file behind rather than after.
-func Write(w io.Writer, header Header, envelopes []event.Envelope) error {
+func Write(w io.Writer, header Header, entries []Entry) error {
 	if err := header.validate(); err != nil {
 		return err
 	}
-	if len(envelopes) == 0 {
+	if len(entries) == 0 {
 		return errors.New("journal: a journal records at least one event; a run that recorded nothing is not evidence of anything")
 	}
-	for i, envelope := range envelopes {
-		if err := envelope.Validate(); err != nil {
+	for i, entry := range entries {
+		if !validKind(entry.Kind) {
+			return fmt.Errorf("journal: record %d: kind %q is neither %q nor %q", i+1, entry.Kind, KindInput, KindDecision)
+		}
+		if err := entry.Envelope.Validate(); err != nil {
 			return fmt.Errorf("journal: record %d: %w", i+1, err)
 		}
 	}
@@ -175,12 +221,13 @@ func Write(w io.Writer, header Header, envelopes []event.Envelope) error {
 	}
 	var chain Chain
 	var sequence uint64
-	for _, envelope := range envelopes {
+	for _, entry := range entries {
 		sequence++
 		record := Record{
 			Sequence:   sequence,
-			Envelope:   envelope,
-			RecordHash: chain.Next(envelope),
+			Kind:       entry.Kind,
+			Envelope:   entry.Envelope,
+			RecordHash: chain.Next(entry.Kind, entry.Envelope),
 		}
 		if err := writeLine(buffered, record); err != nil {
 			return err
@@ -284,7 +331,10 @@ func Verify(r io.Reader) (Verification, error) {
 		if record.Sequence != want {
 			return Verification{}, fmt.Errorf("journal: record %d states sequence %d: a journal's own sequence is contiguous from 1, so a record is missing or out of order", want, record.Sequence)
 		}
-		computed := chain.Next(record.Envelope)
+		if !validKind(record.Kind) {
+			return Verification{}, fmt.Errorf("journal: record %d states kind %q, which is neither %q nor %q", record.Sequence, record.Kind, KindInput, KindDecision)
+		}
+		computed := chain.Next(record.Kind, record.Envelope)
 		if !strings.EqualFold(computed, record.RecordHash) {
 			return Verification{}, &ChainBrokenError{Sequence: record.Sequence, Want: computed, Got: record.RecordHash}
 		}

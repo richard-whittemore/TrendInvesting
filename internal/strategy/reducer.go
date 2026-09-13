@@ -18,10 +18,10 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
-// Source is the value stamped into every envelope this package
+// sourceReducer is the value stamped into every envelope this package
 // emits, identifying the component that produced it (docs/architecture.md:
 // "the source that emitted the event").
-const Source = "reducer"
+const sourceReducer = "reducer"
 
 // Reducer implements replay.Handler: it tracks each
 // instrument's True Range, N (CONTEXT.md: "True Range", "N"), and Entry
@@ -901,7 +901,7 @@ func (r *Reducer) stamp(id, eventType string, schemaVersion uint32, periodEnd ti
 		EnvelopeVersion:   event.CurrentEnvelopeVersion,
 		EventTime:         periodEnd,
 		RecordedAt:        input.RecordedAt,
-		Source:            Source,
+		Source:            sourceReducer,
 		StrategyVersion:   r.strategyVersion,
 		ConfigurationHash: r.configurationHash,
 		PayloadHash:       event.HashPayload(payload),

@@ -10,7 +10,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/richard-whittemore/TrendInvesting/internal/buildinfo"
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
@@ -31,11 +30,11 @@ import (
 //     the careless edit.
 
 // splitJournal separates the journal's input stream from the decisions the
-// reducer produced. The producer is what distinguishes them: every decision
-// in this system carries strategy.Source (docs/architecture.md).
+// reducer produced, from the record's own Kind — the claim the chain covers
+// (ADR 0017), not an inference from a producer's name.
 func splitJournal(records []journal.Record) (inputs, decisions []event.Envelope) {
 	for _, record := range records {
-		if record.Envelope.Source == strategy.Source {
+		if record.Kind == journal.KindDecision {
 			decisions = append(decisions, record.Envelope)
 			continue
 		}
@@ -51,7 +50,7 @@ func replayInputs(t *testing.T, inputs []event.Envelope) []event.Envelope {
 	t.Helper()
 
 	cfg := fixtureConfiguration(t)
-	reducer, err := strategy.NewReducer(event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, buildinfo.Version), cfg)
+	reducer, err := strategy.NewReducer(event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, testBuild), cfg)
 	if err != nil {
 		t.Fatalf("strategy.NewReducer() error = %v", err)
 	}
@@ -106,7 +105,7 @@ func alterRecordedQuantity(t *testing.T, envelope event.Envelope, repairPayloadH
 func lastDecision(t *testing.T, records []journal.Record) int {
 	t.Helper()
 	for i := len(records) - 1; i >= 0; i-- {
-		if records[i].Envelope.Source == strategy.Source {
+		if records[i].Kind == journal.KindDecision {
 			return i
 		}
 	}
@@ -123,13 +122,13 @@ func TestAForgedDecisionPassesChainVerificationAndIsCaughtByReplayEquivalence(t 
 	header, records := readJournalFile(t, path)
 
 	forged := lastDecision(t, records)
-	envelopes := make([]event.Envelope, 0, len(records))
+	entries := make([]journal.Entry, 0, len(records))
 	for i, record := range records {
+		entry := journal.Entry{Kind: record.Kind, Envelope: record.Envelope}
 		if i == forged {
-			envelopes = append(envelopes, alterRecordedQuantity(t, record.Envelope, true))
-			continue
+			entry.Envelope = alterRecordedQuantity(t, record.Envelope, true)
 		}
-		envelopes = append(envelopes, record.Envelope)
+		entries = append(entries, entry)
 	}
 
 	// The forger rewrites the file with the chain recomputed over their own
@@ -139,7 +138,7 @@ func TestAForgedDecisionPassesChainVerificationAndIsCaughtByReplayEquivalence(t 
 	if err != nil {
 		t.Fatalf("create the forged journal: %v", err)
 	}
-	if err := journal.Write(file, header, envelopes); err != nil {
+	if err := journal.Write(file, header, entries); err != nil {
 		t.Fatalf("journal.Write() error = %v", err)
 	}
 	if err := file.Close(); err != nil {

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -26,18 +27,31 @@ const (
 	configurationFixture = "testdata/configuration.json"
 	barsFixture          = "testdata/bars.json"
 	goldenJournal        = "testdata/journal.golden.jsonl"
+
+	// testBuild is the build identifier every golden-asserting test runs
+	// under. The real one (buildinfo.Version) differs between a developer's
+	// machine, CI, and a release build, and a journal asserted byte for byte
+	// must record what the platform decided rather than which machine
+	// decided it.
+	testBuild = "test"
 )
 
-// runBacktestTo runs the fixture and returns the journal it wrote.
-func runBacktestTo(t *testing.T, args ...string) (written []byte, path string) {
+// runBacktestTo runs the fixture under a fixed build identifier and returns
+// the journal it wrote, with the path it was written to.
+func runBacktestTo(t *testing.T) (written []byte, path string) {
+	t.Helper()
+	return runBacktestAs(t, testBuild)
+}
+
+func runBacktestAs(t *testing.T, build string) (written []byte, path string) {
 	t.Helper()
 
 	out := filepath.Join(t.TempDir(), "journal.jsonl")
-	full := append([]string{"-config", configurationFixture, "-bars", barsFixture, "-out", out}, args...)
+	opts := options{configPath: configurationFixture, barsPath: barsFixture, outPath: out, build: build}
 
 	var log bytes.Buffer
-	if err := run(full, &log); err != nil {
-		t.Fatalf("run(%v) error = %v\n%s", full, err, log.String())
+	if err := backtest(opts, &log); err != nil {
+		t.Fatalf("backtest(%+v) error = %v\n%s", opts, err, log.String())
 	}
 	written, err := os.ReadFile(out)
 	if err != nil {
@@ -93,6 +107,73 @@ func TestRunningTheSameFixtureTwiceProducesIdenticalJournals(t *testing.T) {
 	}
 }
 
+// TestTheBuildIdentifierChangesNothingButTheStrategyVersion is what keeps
+// the golden journal meaningful across machines: the build a run was
+// produced by belongs in the record, but it is the only thing about the
+// journal that may depend on where the run happened.
+func TestTheBuildIdentifierChangesNothingButTheStrategyVersion(t *testing.T) {
+	alphaRaw, _ := runBacktestAs(t, "alpha")
+	betaRaw, _ := runBacktestAs(t, "beta")
+
+	alphaHeader, alphaRecords, err := journal.Read(bytes.NewReader(alphaRaw))
+	if err != nil {
+		t.Fatalf("journal.Read() error = %v", err)
+	}
+	betaHeader, betaRecords, err := journal.Read(bytes.NewReader(betaRaw))
+	if err != nil {
+		t.Fatalf("journal.Read() error = %v", err)
+	}
+
+	if !strings.HasSuffix(alphaHeader.StrategyVersion, "+alpha") || !strings.HasSuffix(betaHeader.StrategyVersion, "+beta") {
+		t.Fatalf("the build identifier did not reach the header: %q and %q", alphaHeader.StrategyVersion, betaHeader.StrategyVersion)
+	}
+
+	alphaHeader.StrategyVersion, betaHeader.StrategyVersion = "", ""
+	if alphaHeader != betaHeader {
+		t.Fatalf("two builds produced different headers:\n %+v\n %+v", alphaHeader, betaHeader)
+	}
+
+	if len(alphaRecords) != len(betaRecords) {
+		t.Fatalf("two builds recorded %d and %d records", len(alphaRecords), len(betaRecords))
+	}
+	for i := range alphaRecords {
+		alpha, beta := alphaRecords[i], betaRecords[i]
+		if alpha.Sequence != beta.Sequence || alpha.Kind != beta.Kind {
+			t.Fatalf("record %d differs in sequence or kind: %d %s vs %d %s", i+1, alpha.Sequence, alpha.Kind, beta.Sequence, beta.Kind)
+		}
+		if !strings.HasSuffix(alpha.Envelope.StrategyVersion, "+alpha") || !strings.HasSuffix(beta.Envelope.StrategyVersion, "+beta") {
+			t.Fatalf("record %d does not carry its own build: %q and %q", i+1, alpha.Envelope.StrategyVersion, beta.Envelope.StrategyVersion)
+		}
+		alpha.Envelope.StrategyVersion, beta.Envelope.StrategyVersion = "", ""
+		if !reflect.DeepEqual(alpha.Envelope, beta.Envelope) {
+			t.Fatalf("record %d (%s) differs between two builds in something other than the strategy version", i+1, alpha.Envelope.Type)
+		}
+	}
+}
+
+// TestTheCommandStampsTheRunningBuild: the golden tests fix the build
+// identifier, so this is what holds main's own wiring of buildinfo.Version
+// in place.
+func TestTheCommandStampsTheRunningBuild(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "journal.jsonl")
+
+	var log bytes.Buffer
+	if err := run([]string{"-config", configurationFixture, "-bars", barsFixture, "-out", out}, &log); err != nil {
+		t.Fatalf("run() error = %v\n%s", err, log.String())
+	}
+	written, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read the journal: %v", err)
+	}
+	header, _, err := journal.Read(bytes.NewReader(written))
+	if err != nil {
+		t.Fatalf("journal.Read() error = %v", err)
+	}
+	if want := "+" + buildinfo.Version; !strings.HasSuffix(header.StrategyVersion, want) {
+		t.Fatalf("header strategy version = %q, want it to end with %q", header.StrategyVersion, want)
+	}
+}
+
 // TestAZeroSlippageConfigurationIsRefused: ADR 0013 makes a zero-slippage
 // run invalid by construction, and the command says so before it processes
 // a single bar rather than leaving the first fill to notice.
@@ -139,7 +220,7 @@ func TestTheHeaderRecordsTheDerivedConfigurationHashAndStrategyVersion(t *testin
 	if want := event.ConfigurationHash(cfg); header.ConfigurationHash != want {
 		t.Errorf("header configuration hash = %q, want %q", header.ConfigurationHash, want)
 	}
-	want := event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, buildinfo.Version)
+	want := event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, testBuild)
 	if header.StrategyVersion != want {
 		t.Errorf("header strategy version = %q, want %q", header.StrategyVersion, want)
 	}
@@ -195,10 +276,13 @@ func TestTheJournalHoldsEveryInputAndDecisionInOneContiguousSequence(t *testing.
 		if err := record.Envelope.Validate(); err != nil {
 			t.Fatalf("record %d holds an invalid envelope: %v", record.Sequence, err)
 		}
-		if record.Envelope.Source == strategy.Source {
+		switch record.Kind {
+		case journal.KindDecision:
 			decisions++
-		} else {
+		case journal.KindInput:
 			inputs++
+		default:
+			t.Fatalf("record %d states kind %q", record.Sequence, record.Kind)
 		}
 	}
 	if inputs == 0 || decisions == 0 {

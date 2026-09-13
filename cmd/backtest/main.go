@@ -17,6 +17,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/richard-whittemore/TrendInvesting/internal/buildinfo"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 )
 
@@ -59,7 +60,12 @@ func run(args []string, out io.Writer) error {
 		return fmt.Errorf("backtest: %w", err)
 	}
 
-	return backtest(*configPath, *barsPath, *outPath, out)
+	return backtest(options{
+		configPath: *configPath,
+		barsPath:   *barsPath,
+		outPath:    *outPath,
+		build:      buildinfo.Version,
+	}, out)
 }
 
 // verify recomputes a journal's chain and reports what it found: whether the

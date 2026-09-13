@@ -267,8 +267,8 @@ func TestCampaignWithoutAProtectiveStopHaltsTheEngine(t *testing.T) {
 			if halt.SchemaVersion != event.EngineStateSchemaVersion {
 				t.Errorf("emission SchemaVersion = %d, want %d", halt.SchemaVersion, event.EngineStateSchemaVersion)
 			}
-			if halt.Source != Source {
-				t.Errorf("emission Source = %q, want %q", halt.Source, Source)
+			if halt.Source != sourceReducer {
+				t.Errorf("emission Source = %q, want %q", halt.Source, sourceReducer)
 			}
 			if halt.PayloadHash != event.HashPayload(halt.Payload) {
 				t.Error("emission PayloadHash does not attest its own payload")

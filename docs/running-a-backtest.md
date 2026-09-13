@@ -17,7 +17,7 @@ go run ./cmd/backtest \
 
 A journal: the complete ordered stream of the run's input and decision events, one record per line, under a header. The header states the configuration hash and strategy version — both derived from the configuration actually run (ADR 0016), never supplied on the command line — the span of input event times covered, the chain algorithm, and the journal format version.
 
-Each record is `{"sequence": N, "envelope": {...}, "record_hash": "sha256:..."}`, chained over the previous record's hash and the canonical bytes of its own envelope (ADR 0017). Records appear in recording order: each input, then the decisions that input caused.
+Each record is `{"sequence": N, "kind": "input"|"decision", "envelope": {...}, "record_hash": "sha256:..."}`, chained over the previous record's hash, the record's kind, and the canonical bytes of its own envelope (ADR 0017). Records appear in recording order: each input, then the decisions that input caused. `kind` is what a reader — replay equivalence above all — uses to tell the two apart, and the chain covers it.
 
 The run's inputs are the configuration event, each completed bar (each one driven through the per-bar fill protocol of ADR 0005, so the fills the simulator decides are interleaved as inputs of their own), and finally an end-of-stream event that expires any proposal still outstanding — so every proposal in a completed run reaches exactly one terminal event.
 
@@ -44,3 +44,5 @@ go test ./cmd/backtest -run TestTheCommandTurnsABarFixtureIntoTheGoldenJournal -
 ```
 
 A diff in that file is a change in what this system decides, to be read before it is accepted.
+
+The golden run fixes the build identifier (`+test`) rather than taking `internal/buildinfo.Version`, which differs between machines and release builds: a journal asserted byte for byte must record what the platform decided, not which machine decided it. `main` passes the real build, and a separate test holds that wiring in place.

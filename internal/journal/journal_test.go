@@ -44,12 +44,62 @@ func testEnvelope(sequence uint64) event.Envelope {
 	}
 }
 
-func testEnvelopes(n int) []event.Envelope {
+// testInputs is a contiguous run of input envelopes, for the tests that
+// drive a handler rather than write a file directly.
+func testInputs(n int) []event.Envelope {
 	out := make([]event.Envelope, 0, n)
 	for i := 1; i <= n; i++ {
 		out = append(out, testEnvelope(uint64(i)))
 	}
 	return out
+}
+
+// testEntries alternates input and decision so the kind genuinely varies
+// down the chain rather than being one constant the tests could not tell
+// from a missing field.
+func testEntries(n int) []journal.Entry {
+	out := make([]journal.Entry, 0, n)
+	for i := 1; i <= n; i++ {
+		kind := journal.KindInput
+		if i%2 == 0 {
+			kind = journal.KindDecision
+		}
+		out = append(out, journal.Entry{Kind: kind, Envelope: testEnvelope(uint64(i))})
+	}
+	return out
+}
+
+// chainHash is the record hash for one entry following previous, recomputed
+// here independently of the writer so the two definitions cannot drift.
+func chainHash(previous [sha256.Size]byte, kind string, envelope event.Envelope) [sha256.Size]byte {
+	hashed := append([]byte{}, previous[:]...)
+	hashed = append(hashed, kind...)
+	hashed = append(hashed, event.CanonicalEnvelopeBytes(envelope)...)
+	return sha256.Sum256(hashed)
+}
+
+func hashString(sum [sha256.Size]byte) string {
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// writeVerbatim renders header and records exactly as given, chain hashes
+// included — what an editor with a text editor leaves behind, and what a
+// test that builds its own records needs.
+func writeVerbatim(t *testing.T, header journal.Header, records []journal.Record) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	lines := []any{header}
+	for _, record := range records {
+		lines = append(lines, record)
+	}
+	for _, line := range lines {
+		encoded, err := json.Marshal(line)
+		if err != nil {
+			t.Fatalf("json.Marshal() error = %v", err)
+		}
+		buf.Write(append(encoded, '\n'))
+	}
+	return buf.Bytes()
 }
 
 func testHeader() journal.Header {
@@ -60,7 +110,7 @@ func testHeader() journal.Header {
 func writeJournal(t *testing.T) []byte {
 	t.Helper()
 	var buf bytes.Buffer
-	if err := journal.Write(&buf, testHeader(), testEnvelopes(3)); err != nil {
+	if err := journal.Write(&buf, testHeader(), testEntries(3)); err != nil {
 		t.Fatalf("journal.Write() error = %v", err)
 	}
 	return buf.Bytes()
@@ -109,8 +159,7 @@ func TestTheFirstRecordChainsFromTheZeroHash(t *testing.T) {
 	}
 
 	var zero [sha256.Size]byte
-	sum := sha256.Sum256(append(zero[:], event.CanonicalEnvelopeBytes(testEnvelope(1))...))
-	want := "sha256:" + hex.EncodeToString(sum[:])
+	want := hashString(chainHash(zero, journal.KindInput, testEnvelope(1)))
 	if records[0].RecordHash != want {
 		t.Fatalf("first record hash = %q, want %q", records[0].RecordHash, want)
 	}
@@ -134,9 +183,8 @@ func TestEachRecordChainsFromThePreviousRecordHash(t *testing.T) {
 		if record.Sequence != uint64(i+1) {
 			t.Fatalf("record %d has sequence %d, want %d", i, record.Sequence, i+1)
 		}
-		sum := sha256.Sum256(append(previous[:], event.CanonicalEnvelopeBytes(record.Envelope)...))
-		want := "sha256:" + hex.EncodeToString(sum[:])
-		if record.RecordHash != want {
+		sum := chainHash(previous, record.Kind, record.Envelope)
+		if want := hashString(sum); record.RecordHash != want {
 			t.Fatalf("record %d hash = %q, want %q", record.Sequence, record.RecordHash, want)
 		}
 		previous = sum
@@ -224,6 +272,73 @@ func TestVerifyReportsTheFirstBrokenLinkBySequence(t *testing.T) {
 				t.Fatalf("ChainBrokenError.Error() = %q, want it to name %q", broken.Error(), want)
 			}
 		})
+	}
+}
+
+// TestFlippingARecordsKindBreaksTheChain is why the kind is inside the hash
+// and not merely beside it. Replay equivalence reads the kind to decide what
+// to feed in and what to compare against, so a record relabelled from
+// decision to input changes what that check is even asking — and the chain
+// is what makes that relabelling visible.
+func TestFlippingARecordsKindBreaksTheChain(t *testing.T) {
+	t.Parallel()
+
+	edited := editRecordLine(t, writeJournal(t), 1, func(r *journal.Record) {
+		if r.Kind != journal.KindDecision {
+			t.Fatalf("the fixture's second record is a %s; this test needs a decision to relabel", r.Kind)
+		}
+		r.Kind = journal.KindInput
+	})
+
+	_, err := journal.Verify(bytes.NewReader(edited))
+	var broken *journal.ChainBrokenError
+	if !errors.As(err, &broken) {
+		t.Fatalf("journal.Verify() error = %v, want a ChainBrokenError", err)
+	}
+	if broken.Sequence != 2 {
+		t.Fatalf("chain reported broken at record %d, want 2", broken.Sequence)
+	}
+}
+
+// TestVerifyRejectsAnUnrecognisedRecordKind: the kind is a closed set, and a
+// record claiming anything else is rejected even when its chain is perfectly
+// consistent — which is exactly what a forger who recomputed the chain would
+// leave behind.
+func TestVerifyRejectsAnUnrecognisedRecordKind(t *testing.T) {
+	t.Parallel()
+
+	var previous [sha256.Size]byte
+	envelope := testEnvelope(1)
+	sum := chainHash(previous, "neither", envelope)
+	forged := writeVerbatim(t, testHeader(), []journal.Record{{
+		Sequence:   1,
+		Kind:       "neither",
+		Envelope:   envelope,
+		RecordHash: hashString(sum),
+	}})
+
+	_, err := journal.Verify(bytes.NewReader(forged))
+	if err == nil {
+		t.Fatal("journal.Verify() error = nil, want one naming the unrecognised kind")
+	}
+	if !strings.Contains(err.Error(), "kind") {
+		t.Fatalf("journal.Verify() error = %v, want one naming the unrecognised kind", err)
+	}
+}
+
+func TestWriteRefusesAnUnrecognisedKind(t *testing.T) {
+	t.Parallel()
+
+	entries := testEntries(2)
+	entries[1].Kind = ""
+
+	var buf bytes.Buffer
+	err := journal.Write(&buf, testHeader(), entries)
+	if err == nil {
+		t.Fatal("journal.Write() error = nil, want one naming the unrecognised kind")
+	}
+	if !strings.Contains(err.Error(), "kind") {
+		t.Fatalf("journal.Write() error = %v, want one naming the unrecognised kind", err)
 	}
 }
 
@@ -332,11 +447,11 @@ func TestVerifyRejectsANonContiguousRecordSequence(t *testing.T) {
 func TestWriteRefusesToRecordAnInvalidEnvelope(t *testing.T) {
 	t.Parallel()
 
-	envelopes := testEnvelopes(2)
-	envelopes[1].PayloadHash = "not-the-payload-hash"
+	entries := testEntries(2)
+	entries[1].Envelope.PayloadHash = "not-the-payload-hash"
 
 	var buf bytes.Buffer
-	err := journal.Write(&buf, testHeader(), envelopes)
+	err := journal.Write(&buf, testHeader(), entries)
 	if err == nil {
 		t.Fatal("journal.Write() error = nil, want one naming the invalid envelope")
 	}
@@ -388,7 +503,7 @@ func TestWriteRefusesAnIncompleteHeader(t *testing.T) {
 			tt.mutate(&header)
 
 			var buf bytes.Buffer
-			err := journal.Write(&buf, header, testEnvelopes(1))
+			err := journal.Write(&buf, header, testEntries(1))
 			if err == nil {
 				t.Fatalf("journal.Write() error = nil, want one containing %q", tt.wantErr)
 			}

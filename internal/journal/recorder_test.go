@@ -55,17 +55,24 @@ func TestRecorderRecordsEachInputThenTheDecisionsItCaused(t *testing.T) {
 	t.Parallel()
 
 	recorder := journal.NewRecorder(emittingHandler())
-	inputs := testEnvelopes(2)
+	inputs := testInputs(2)
 	driveRecorder(t, recorder, inputs)
 
-	got := recorder.Envelopes()
-	want := []string{"evt-1", "decision-1-0", "decision-1-1", "evt-2", "decision-2-0", "decision-2-1"}
-	if len(got) != len(want) {
-		t.Fatalf("recorded %d envelopes, want %d", len(got), len(want))
+	got := recorder.Entries()
+	want := []journal.Entry{
+		{Kind: journal.KindInput, Envelope: event.Envelope{ID: "evt-1"}},
+		{Kind: journal.KindDecision, Envelope: event.Envelope{ID: "decision-1-0"}},
+		{Kind: journal.KindDecision, Envelope: event.Envelope{ID: "decision-1-1"}},
+		{Kind: journal.KindInput, Envelope: event.Envelope{ID: "evt-2"}},
+		{Kind: journal.KindDecision, Envelope: event.Envelope{ID: "decision-2-0"}},
+		{Kind: journal.KindDecision, Envelope: event.Envelope{ID: "decision-2-1"}},
 	}
-	for i, id := range want {
-		if got[i].ID != id {
-			t.Fatalf("record %d is %q, want %q", i, got[i].ID, id)
+	if len(got) != len(want) {
+		t.Fatalf("recorded %d entries, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Envelope.ID != want[i].Envelope.ID || got[i].Kind != want[i].Kind {
+			t.Fatalf("entry %d is %s %q, want %s %q", i, got[i].Kind, got[i].Envelope.ID, want[i].Kind, want[i].Envelope.ID)
 		}
 	}
 }
@@ -76,7 +83,7 @@ func TestRecorderRecordsEachInputThenTheDecisionsItCaused(t *testing.T) {
 func TestRecorderStampsDecisionsExactlyAsTheReplayEngineWould(t *testing.T) {
 	t.Parallel()
 
-	inputs := testEnvelopes(3)
+	inputs := testInputs(3)
 
 	recorder := journal.NewRecorder(emittingHandler())
 	driveRecorder(t, recorder, inputs)
@@ -91,9 +98,9 @@ func TestRecorderStampsDecisionsExactlyAsTheReplayEngineWould(t *testing.T) {
 	}
 
 	var recorded []event.Envelope
-	for _, envelope := range recorder.Envelopes() {
-		if envelope.Source == "reducer" {
-			recorded = append(recorded, envelope)
+	for _, entry := range recorder.Entries() {
+		if entry.Kind == journal.KindDecision {
+			recorded = append(recorded, entry.Envelope)
 		}
 	}
 	if !reflect.DeepEqual(recorded, replayed) {
@@ -117,8 +124,8 @@ func TestRecorderRecordsTheFinalEmissionOfAFailingHandler(t *testing.T) {
 		t.Fatalf("Recorder.Apply() error = %v, want the handler's own", err)
 	}
 
-	got := recorder.Envelopes()
-	if len(got) != 2 || got[1].ID != "decision-1-0" {
+	got := recorder.Entries()
+	if len(got) != 2 || got[1].Envelope.ID != "decision-1-0" || got[1].Kind != journal.KindDecision {
 		t.Fatalf("the failing handler's final emission did not reach the journal: %+v", got)
 	}
 }
@@ -151,7 +158,7 @@ func TestRecorderHeaderSpansTheFirstAndLastInputEventTime(t *testing.T) {
 	t.Parallel()
 
 	recorder := journal.NewRecorder(emittingHandler())
-	driveRecorder(t, recorder, testEnvelopes(3))
+	driveRecorder(t, recorder, testInputs(3))
 
 	header, err := recorder.Header(testConfigurationHash, testStrategyVersion)
 	if err != nil {

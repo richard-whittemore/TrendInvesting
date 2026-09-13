@@ -10,7 +10,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/richard-whittemore/TrendInvesting/internal/buildinfo"
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/fills"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -23,8 +22,26 @@ import (
 // (docs/architecture.md).
 const sourceFixture = "fixture"
 
-// backtest runs the configuration at configPath over the bars at barsPath
-// and writes the journal to outPath.
+// options is one invocation of the backtest.
+//
+// build identifies the running build and is the only part of a run's
+// identity that comes from outside the configuration: the strategy version
+// is composed from the configuration's own StrategyID, the rules version
+// declared in code, and it (ADR 0016). main fills it from buildinfo.Version.
+// It is a parameter rather than a package read so that a test asserting a
+// journal byte for byte can fix it — a golden keyed to the build identifier
+// would assert which machine produced the journal rather than what the
+// platform decided, and would fail on every release build and every new
+// machine.
+type options struct {
+	configPath string
+	barsPath   string
+	outPath    string
+	build      string
+}
+
+// backtest runs the configuration at opts.configPath over the bars at
+// opts.barsPath and writes the journal to opts.outPath.
 //
 // The composition, in order: the configuration event, then each completed
 // bar through the per-bar protocol, then the end-of-stream event that
@@ -32,20 +49,23 @@ const sourceFixture = "fixture"
 // simulator so that one component numbers the composed stream — a
 // configuration event applied around RunBar rather than through it would
 // leave a gap replay.Engine.Run refuses.
-func backtest(configPath, barsPath, outPath string, out io.Writer) error {
-	cfg, err := readConfiguration(configPath)
+func backtest(opts options, out io.Writer) error {
+	if opts.build == "" {
+		return errors.New("backtest: the running build must be identified; it is part of every envelope's strategy version (ADR 0016)")
+	}
+	cfg, err := readConfiguration(opts.configPath)
 	if err != nil {
 		return err
 	}
-	bars, err := readBars(barsPath)
+	bars, err := readBars(opts.barsPath)
 	if err != nil {
 		return err
 	}
 
 	// Both derived from the configuration actually being run, never supplied
-	// as a string (ADR 0016).
+	// as a string (ADR 0016); only the build identifier comes from outside.
 	configurationHash := event.ConfigurationHash(cfg)
-	strategyVersion := event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, buildinfo.Version)
+	strategyVersion := event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, opts.build)
 
 	reducer, err := strategy.NewReducer(strategyVersion, cfg)
 	if err != nil {
@@ -57,7 +77,7 @@ func backtest(configPath, barsPath, outPath string, out io.Writer) error {
 	}
 	recorder := journal.NewRecorder(reducer)
 
-	runErr := drive(context.Background(), simulator, recorder, cfg, bars)
+	runErr := drive(context.Background(), simulator, recorder, cfg, strategyVersion, bars)
 
 	// The journal is written whether or not the run completed: a handler
 	// that failed closed may have emitted a final event explaining why, and
@@ -68,12 +88,12 @@ func backtest(configPath, barsPath, outPath string, out io.Writer) error {
 	if headerErr != nil {
 		return errors.Join(runErr, headerErr)
 	}
-	if err := writeJournal(outPath, header, recorder.Envelopes()); err != nil {
+	if err := writeJournal(opts.outPath, header, recorder.Entries()); err != nil {
 		return errors.Join(runErr, err)
 	}
 
 	report := fmt.Sprintf("wrote %s: %d record(s) over %s to %s\n",
-		outPath, len(recorder.Envelopes()),
+		opts.outPath, len(recorder.Entries()),
 		header.SpanStart.UTC().Format(time.RFC3339), header.SpanEnd.UTC().Format(time.RFC3339))
 	if _, err := io.WriteString(out, report); err != nil {
 		return errors.Join(runErr, fmt.Errorf("backtest: report the run: %w", err))
@@ -82,13 +102,13 @@ func backtest(configPath, barsPath, outPath string, out io.Writer) error {
 }
 
 // drive applies the run's inputs in order.
-func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, bars []event.CompletedBarPayload) error {
+func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, bars []event.CompletedBarPayload) error {
 	// The configuration event's own time is the first bar's period end: the
 	// run's configuration is in force from the moment the run starts, and
 	// this command has no clock to consult (nor would a recorded time from
 	// one be reproducible).
 	configuration, err := inputEnvelope("configuration:"+event.ConfigurationHash(cfg),
-		event.ConfigurationEventType, event.ConfigurationSchemaVersion, bars[0].PeriodEnd, cfg, cfg)
+		event.ConfigurationEventType, event.ConfigurationSchemaVersion, bars[0].PeriodEnd, cfg, cfg, strategyVersion)
 	if err != nil {
 		return err
 	}
@@ -98,7 +118,7 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 
 	for _, bar := range bars {
 		envelope, err := inputEnvelope("bar:"+bar.InstrumentID+":"+bar.PeriodEnd.UTC().Format(time.RFC3339Nano),
-			event.CompletedBarEventType, event.CompletedBarSchemaVersion, bar.PeriodEnd, bar, cfg)
+			event.CompletedBarEventType, event.CompletedBarSchemaVersion, bar.PeriodEnd, bar, cfg, strategyVersion)
 		if err != nil {
 			return err
 		}
@@ -113,7 +133,7 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 	completedAt := bars[len(bars)-1].PeriodEnd
 	completed, err := inputEnvelope("run-completed:"+completedAt.UTC().Format(time.RFC3339Nano),
 		event.RunCompletedEventType, event.RunCompletedSchemaVersion, completedAt,
-		event.RunCompletedPayload{CompletedAt: completedAt}, cfg)
+		event.RunCompletedPayload{CompletedAt: completedAt}, cfg, strategyVersion)
 	if err != nil {
 		return err
 	}
@@ -130,7 +150,7 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 // RecordedAt is the event's own time. That is a property of a backtest
 // fixture — the system "learns of" a bar at the moment the bar ends — and
 // not a rule; a live producer records when it actually received the data.
-func inputEnvelope(id, eventType string, schemaVersion uint32, at time.Time, payload any, cfg event.ConfigurationPayload) (event.Envelope, error) {
+func inputEnvelope(id, eventType string, schemaVersion uint32, at time.Time, payload any, cfg event.ConfigurationPayload, strategyVersion string) (event.Envelope, error) {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return event.Envelope{}, fmt.Errorf("backtest: encode the %s payload: %w", eventType, err)
@@ -143,7 +163,7 @@ func inputEnvelope(id, eventType string, schemaVersion uint32, at time.Time, pay
 		EventTime:         at,
 		RecordedAt:        at,
 		Source:            sourceFixture,
-		StrategyVersion:   event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, buildinfo.Version),
+		StrategyVersion:   strategyVersion,
 		ConfigurationHash: event.ConfigurationHash(cfg),
 		PayloadHash:       event.HashPayload(encoded),
 		Payload:           encoded,
@@ -198,12 +218,12 @@ func readBars(path string) ([]event.CompletedBarPayload, error) {
 }
 
 // writeJournal writes the run's journal to path.
-func writeJournal(path string, header journal.Header, envelopes []event.Envelope) error {
+func writeJournal(path string, header journal.Header, entries []journal.Entry) error {
 	file, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("backtest: create the journal: %w", err)
 	}
-	if err := journal.Write(file, header, envelopes); err != nil {
+	if err := journal.Write(file, header, entries); err != nil {
 		_ = file.Close()
 		return err
 	}
