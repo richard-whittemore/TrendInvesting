@@ -171,6 +171,14 @@ func TestRecorderHeaderSpansTheFirstAndLastInputEventTime(t *testing.T) {
 	}
 }
 
+func TestRecorderRequiresAHandler(t *testing.T) {
+	t.Parallel()
+
+	if _, err := journal.NewRecorder(nil).Apply(context.Background(), testEnvelope(1)); err == nil {
+		t.Fatal("Recorder.Apply() error = nil, want one naming the missing handler")
+	}
+}
+
 func TestRecorderHeaderRefusesARunWithNoInputs(t *testing.T) {
 	t.Parallel()
 
