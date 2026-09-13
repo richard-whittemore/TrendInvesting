@@ -380,8 +380,8 @@ func TestAnOrderTheBarNeverReachesDoesNotFill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunBar() error = %v", err)
 	}
-	if fills := envelopesOfType(result.Inputs, event.FillEventType); len(fills) != 0 {
-		t.Errorf("got %d fill(s), want none: the bar's high of 160 never reached the order at 500", len(fills))
+	if executed := envelopesOfType(result.Inputs, event.FillEventType); len(executed) != 0 {
+		t.Errorf("got %d fill(s), want none: the bar's high of 160 never reached the order at 500", len(executed))
 	}
 	if resting := simulator.Resting(testInstrument); len(resting) != 1 {
 		t.Errorf("Resting() = %+v, want the order still resting", resting)
