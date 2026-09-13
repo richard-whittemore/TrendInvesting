@@ -1106,11 +1106,11 @@ func (r *Reducer) evaluateAdd(state *instrumentState, input event.Envelope) ([]e
 // entry-kind emission.
 func (r *Reducer) declineAdd(campaign *campaignState, periodEnd time.Time, unitIndex int, level float64, input event.Envelope, requiredCash, availableCash float64) (event.Envelope, error) {
 	payload := event.ProposalDeclinedPayload{
-		InstrumentID:  campaign.instrumentID,
-		PeriodEnd:     periodEnd,
-		Kind:          event.ProposalDeclinedKindAdd,
-		CampaignID:    campaign.campaignID,
-		Reason:        event.DeclineReasonInsufficientCash,
+		InstrumentID: campaign.instrumentID,
+		PeriodEnd:    periodEnd,
+		Kind:         event.ProposalDeclinedKindAdd,
+		CampaignID:   campaign.campaignID,
+		Reason:       event.DeclineReasonInsufficientCash,
 		Detail: fmt.Sprintf("unit %d cost %v (%d shares x rung %v x %v dollars per point) exceeds the cash available at the previous close %v",
 			unitIndex, requiredCash, campaign.unitQuantity, level, r.dollarsPerPoint, availableCash),
 		RequiredCash:  requiredCash,
