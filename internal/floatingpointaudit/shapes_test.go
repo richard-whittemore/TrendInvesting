@@ -54,7 +54,3 @@ func TestFusibleShapes(t *testing.T) {
 		})
 	}
 }
-
-func fusibleProducts(_ *ast.File, _ *types.Info) []token.Pos {
-	return nil
-}

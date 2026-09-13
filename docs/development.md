@@ -29,6 +29,20 @@ Round in the producer *and* in any `event` payload validator that re-derives the
 
 It cost a real defect to learn, twice over. `internal/strategy`'s whole-life exit price fused on arm64, and the committed golden journal — the first artifact in this repository that has to be byte-identical across machines — failed in CI on amd64 while passing locally. The first sweep then missed every `+=` site, because the walk that found the others only looked at expressions and not at assignments; the golden passed anyway, because that fixture's numbers happened not to differ at those sites. The fixture now has four Units whose products need more than 53 bits, and `cmd/backtest`'s fusion tests hold that sensitivity in place.
 
+`internal/floatingpointaudit` enforces the local `+`, `-`, `+=` and `-=` shapes
+in production Go files under `internal/`, using `go/types` to exempt integer
+arithmetic and compile-time constant products. Explicit product conversions
+are rounding barriers. The test uses the Go toolchain's package selection, so
+each CI architecture checks its own active files. As with the other determinism
+linters, test fixture arithmetic is outside the production-source guard.
+`transport/spike` is also excluded: its generated prices and rounding serve a
+latency benchmark, never journalled trading decisions.
+
+The guard does not trace products across statements or function calls, including
+inlined callees. CI runs the Go suite on amd64 and arm64 against the same committed
+goldens; sensitive fixtures remain necessary to expose semantic divergence.
+The required check `go` succeeds only when both architecture jobs succeed.
+
 ## Source comment standard
 
 A doc comment states three things and no more:
