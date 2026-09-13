@@ -327,6 +327,38 @@ func checkFormatVersion(version uint32) error {
 	return nil
 }
 
+// CheckIdentity confirms every record states the run the header names: the
+// same strategy version and the same configuration hash. It reports the
+// first record that does not.
+//
+// Envelope.Validate requires both fields to be non-empty and nothing more,
+// and the chain covers what each record says without comparing records to
+// one another, so a journal can be internally consistent, verify cleanly,
+// and still carry records from a run the header does not describe.
+//
+// This matters most for the INPUT stream. Replay equivalence feeds inputs to
+// a reducer built from the header, and an input's own identity fields are
+// never compared to anything; recorded decisions are already pinned, because
+// the reducer stamps its emissions with the header's identity and any
+// difference shows up as a divergence. Checking inputs here is what makes the
+// header's claim load-bearing for the half of the journal that the byte
+// comparison cannot reach.
+//
+// This is a separate question from chain verification (ADR 0017) and is kept
+// a separate call for the same reason: "this file was edited" and "this file
+// describes more than one run" are different findings.
+func CheckIdentity(header Header, records []Record) error {
+	for _, record := range records {
+		if record.Envelope.StrategyVersion != header.StrategyVersion {
+			return fmt.Errorf("journal: record %d states strategy version %q, but the header names the run %q", record.Sequence, record.Envelope.StrategyVersion, header.StrategyVersion)
+		}
+		if record.Envelope.ConfigurationHash != header.ConfigurationHash {
+			return fmt.Errorf("journal: record %d states configuration %q, but the header names the run %q", record.Sequence, record.Envelope.ConfigurationHash, header.ConfigurationHash)
+		}
+	}
+	return nil
+}
+
 // Split separates a journal's two interleaved streams by each record's own
 // Kind (ADR 0017): every input, in recording order, then every decision, in
 // recording order. This is the split replay equivalence reads to decide what

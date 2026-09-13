@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -249,6 +250,110 @@ func TestReplayRefusesAHeaderThatClaimsAConfigurationTheJournalDoesNotRecord(t *
 	}
 	if !strings.Contains(err.Error(), claimed) {
 		t.Fatalf("replayEquivalence() error = %v, want it to name the hash the header claims", err)
+	}
+}
+
+// TestReplayRefusesAHeaderThatNamesADifferentStrategyFromItsConfiguration:
+// the strategy id is the other half of the header's strategy version, and
+// the configuration hash pins only the payload. Left unchecked, a journal
+// that verifies cleanly and is internally consistent could claim one strategy
+// in its header while having run another, and still report byte-identical
+// replay — because nothing would ever compare the two.
+func TestReplayRefusesAHeaderThatNamesADifferentStrategyFromItsConfiguration(t *testing.T) {
+	_, path := runBacktestTo(t)
+
+	const impostor = "some-other-strategy"
+	rewritten := rewriteJournal(t, path, func(header *journal.Header, entries []journal.Entry) []journal.Entry {
+		_, rulesVersion, build, err := event.DecomposeStrategyVersion(header.StrategyVersion)
+		if err != nil {
+			t.Fatalf("DecomposeStrategyVersion(%q) error = %v", header.StrategyVersion, err)
+		}
+		renamed := event.ComposeStrategyVersion(impostor, rulesVersion, build)
+		header.StrategyVersion = renamed
+		// Every record must agree with the header, or the identity check
+		// catches this first and the strategy-id check is never reached.
+		for i := range entries {
+			entries[i].Envelope.StrategyVersion = renamed
+		}
+		return entries
+	})
+
+	_, err := replayJournalFile(t, rewritten)
+	if err == nil {
+		t.Fatal("replayEquivalence() error = nil, want a refusal")
+	}
+	if !strings.Contains(err.Error(), impostor) {
+		t.Fatalf("replayEquivalence() error = %v, want it to name the strategy the header claims", err)
+	}
+}
+
+// The accepting direction: an unaltered journal names the same strategy in
+// its header and its configuration, and replays.
+func TestReplayAcceptsAHeaderThatNamesItsOwnConfigurationsStrategy(t *testing.T) {
+	_, path := runBacktestTo(t)
+
+	header, records := readJournalFile(t, path)
+	inputs, _ := splitJournal(t, records)
+	strategyID, _, _, err := event.DecomposeStrategyVersion(header.StrategyVersion)
+	if err != nil {
+		t.Fatalf("DecomposeStrategyVersion(%q) error = %v", header.StrategyVersion, err)
+	}
+	payload, err := configurationPayloadFrom(inputs)
+	if err != nil {
+		t.Fatalf("configurationPayloadFrom() error = %v", err)
+	}
+	if strategyID != payload.StrategyID {
+		t.Fatalf("the fixture's header names %q while its configuration declares %q; this test cannot show what it claims", strategyID, payload.StrategyID)
+	}
+
+	divergence, err := replayJournalFile(t, path)
+	if err != nil {
+		t.Fatalf("replayEquivalence() error = %v", err)
+	}
+	if divergence != nil {
+		t.Fatalf("an unaltered journal diverged: %+v", divergence)
+	}
+}
+
+// TestReplayRefusesAJournalWhoseRecordsNameAnotherRun: an input's own
+// identity fields are fed to the reducer and never compared to anything, so
+// without this check a record from a different run could sit in the input
+// stream of a journal that verifies cleanly. Recorded decisions are already
+// pinned by the byte comparison; inputs are not.
+func TestReplayRefusesAJournalWhoseRecordsNameAnotherRun(t *testing.T) {
+	_, path := runBacktestTo(t)
+
+	const foreign = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	var alteredSequence uint64
+	rewritten := rewriteJournal(t, path, func(header *journal.Header, entries []journal.Entry) []journal.Entry {
+		for i := range entries {
+			if entries[i].Kind != journal.KindInput || entries[i].Envelope.Type != event.CompletedBarEventType {
+				continue
+			}
+			entries[i].Envelope.ConfigurationHash = foreign
+			alteredSequence = uint64(i + 1)
+			return entries
+		}
+		t.Fatal("the fixture journal records no bar input to re-attribute")
+		return entries
+	})
+
+	// The chain is recomputed, so the file verifies: this is a journal whose
+	// records disagree with its header, not an edited one.
+	raw, err := os.ReadFile(rewritten)
+	if err != nil {
+		t.Fatalf("read the rewritten journal: %v", err)
+	}
+	if _, err := journal.Verify(bytes.NewReader(raw)); err != nil {
+		t.Fatalf("journal.Verify() error = %v; the rewritten journal must verify or this test proves nothing", err)
+	}
+
+	_, err = replayJournalFile(t, rewritten)
+	if err == nil {
+		t.Fatal("replayEquivalence() error = nil, want a refusal naming the record from another run")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("record %d", alteredSequence)) {
+		t.Fatalf("replayEquivalence() error = %v, want it to name record %d", err, alteredSequence)
 	}
 }
 
