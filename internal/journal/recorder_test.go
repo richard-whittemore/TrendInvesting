@@ -194,3 +194,52 @@ func TestRecorderHeaderRefusesARunWithNoInputs(t *testing.T) {
 		t.Fatal("Recorder.Header() error = nil, want one refusing to state a span for a run with no inputs")
 	}
 }
+
+// TestRecorderSpanWidensBackwardsForAnInputOutOfTimeOrder pins the span
+// against the order inputs actually arrive in. Nothing requires a composed
+// stream to be sorted by event time — several instruments interleave, and a
+// fill is delivered around the bar it belongs to rather than after it — so a
+// span taken as "the first input's time, then widened forwards only" would
+// report a journal as starting later than the earliest event it holds.
+func TestRecorderSpanWidensBackwardsForAnInputOutOfTimeOrder(t *testing.T) {
+	t.Parallel()
+
+	recorder := journal.NewRecorder(emittingHandler())
+	later, earlier := testEnvelope(3), testEnvelope(1)
+	driveRecorder(t, recorder, []event.Envelope{later, earlier})
+
+	header, err := recorder.Header(testConfigurationHash, testStrategyVersion)
+	if err != nil {
+		t.Fatalf("Recorder.Header() error = %v", err)
+	}
+	if !header.SpanStart.Equal(earlier.EventTime) {
+		t.Errorf("SpanStart = %s, want the earliest input's event time %s", header.SpanStart, earlier.EventTime)
+	}
+	if !header.SpanEnd.Equal(later.EventTime) {
+		t.Errorf("SpanEnd = %s, want the latest input's event time %s", header.SpanEnd, later.EventTime)
+	}
+}
+
+// TestRecorderHeaderRefusesARunWithoutItsIdentity is the other half of "the
+// span is derived, the identity is supplied": results are retained under
+// their configuration hash (ADR 0012) and two builds sharing a rules version
+// must replay each other's journals (ADR 0016), so a journal that names
+// neither is not evidence of a run at all.
+func TestRecorderHeaderRefusesARunWithoutItsIdentity(t *testing.T) {
+	t.Parallel()
+
+	recorder := journal.NewRecorder(emittingHandler())
+	driveRecorder(t, recorder, testInputs(1))
+
+	if _, err := recorder.Header("", testStrategyVersion); err == nil {
+		t.Error("Recorder.Header() error = nil for an empty configuration hash, want it refused")
+	} else if !strings.Contains(err.Error(), "configuration hash") {
+		t.Errorf("error = %v, want it to name the configuration hash", err)
+	}
+
+	if _, err := recorder.Header(testConfigurationHash, ""); err == nil {
+		t.Error("Recorder.Header() error = nil for an empty strategy version, want it refused")
+	} else if !strings.Contains(err.Error(), "strategy version") {
+		t.Errorf("error = %v, want it to name the strategy version", err)
+	}
+}

@@ -27,256 +27,18 @@
       "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
     },
     {
+      "file": "internal/journal/journal.go",
+      "function": "writeLine",
+      "statement": "return fmt.Errorf(\"journal: encode line: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "writeLine has two callers, a Header and a Record. A Header is strings, a uint32 and two time.Time values. A Record adds an event.Envelope, whose only field that could fail to encode is the raw-JSON payload \u2014 and Write has already required every entry's envelope to pass event.Envelope.Validate, which refuses a payload that is not valid JSON."
+    },
+    {
       "file": "internal/sizing/sizing.go",
       "function": "SizeUnit",
       "statement": "return Unit{}, unrecognisedModeError(in.Mode)",
       "category": "unreachable-by-invariant",
       "reason": "RiskAtStop, called at the top of the same function, already rejects every Mode but the two the switch handles. The arm is kept so that declaring a third Mode without extending this switch fails closed rather than silently sizing nothing (ADR 0003)."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).rememberPendingProposal",
-      "statement": "return fmt.Errorf(\"strategy: decode the trade proposal just emitted: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "json.Unmarshal of bytes this same Apply call marshalled from a validated TradeProposalPayload a few statements earlier."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).expireEntryProposal",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal expired payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).expireEntryProposal",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).expireExitProposal",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal expired payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).expireExitProposal",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).expireAddProposal",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal expired payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).expireAddProposal",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).expireAddProposalForStop",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).evaluateCampaign",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: campaign %q cannot compute aggregate open risk: %w\", bar.InstrumentID, campaign.campaignID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.AggregateOpenRisk over the Campaign's own held Units. Each Unit's entry, stop and quantity passed sizing.ProtectiveStopLevel and CampaignOpenedPayload.Validate when the Unit was created, and dollarsPerPoint passed ConfigurationPayload.Validate."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).evaluateCampaign",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: built invalid campaign evaluated payload: %w\", bar.InstrumentID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).evaluateCampaign",
-      "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign evaluated payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).evaluateCampaign",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: built invalid exit proposal payload: %w\", bar.InstrumentID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).evaluateCampaign",
-      "statement": "return nil, fmt.Errorf(\"strategy: marshal exit proposal payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).evaluateAdd",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: campaign %q cannot compute the next add rung: %w\", campaign.instrumentID, campaign.campaignID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.NextAddLevel over the last Unit's own fill price and the Campaign's frozen N. Both were required finite and positive by CampaignOpenedPayload.Validate or CampaignUnitAddedPayload.Validate before the Unit was recorded."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).evaluateAdd",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: built invalid add proposal payload: %w\", campaign.instrumentID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).evaluateAdd",
-      "statement": "return nil, fmt.Errorf(\"strategy: marshal add proposal payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: fill %q is %s but proposal %q is %s; a fill in the opposite direction is a different position, not the proposed one\", fill.InstrumentID, fill.FillID, fill.Direction, fill.ProposalID, pending.direction)",
-      "category": "unreachable-by-invariant",
-      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract \u2014 a fill in the opposite direction is a different position, not a variant of the same one \u2014 and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).openCampaign",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: fill %q would open an invalid campaign: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).openCampaign",
-      "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign opened payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).openCampaign",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: fill %q would set an invalid protective stop: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).openCampaign",
-      "statement": "return nil, fmt.Errorf(\"strategy: marshal protective stop set payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).openCampaign",
-      "statement": "return nil, err",
-      "category": "unreachable-by-construction",
-      "reason": "Propagates evaluateAdd's error. Every one of evaluateAdd's own failure paths is itself unreachable by construction (its three entries in this list), so this wrapper has nothing left to carry."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyStopFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)\", fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)",
-      "category": "unreachable-by-invariant",
-      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract \u2014 a fill in the opposite direction is a different position, not a variant of the same one \u2014 and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyStopFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q cannot compute the remaining aggregate open risk: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.AggregateOpenRisk over the Units this fill does not close, whose figures were validated when each Unit was created and are unchanged by a stop fill."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyStopFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q would close unit(s) with an invalid units-stopped decision: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyStopFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign units stopped payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyStopFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q cannot compute the average move in n: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.AverageMoveInN over the Campaign's whole-life entry and exit prices and its frozen N. The prices are quantity-weighted averages of fill prices each required positive by FillPayload.Validate, and the N was required positive when the Campaign opened."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyStopFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q cannot compute the realised result in unit n: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.RealisedResultInUnitN over the Campaign's frozen N, its Unit quantity and the configured dollars per point, all three required positive by CampaignOpenedPayload.Validate and ConfigurationPayload.Validate."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyStopFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q would close campaign %q with an invalid exit: %w\", fill.InstrumentID, fill.FillID, campaign.campaignID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyStopFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign exited payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyExitFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)\", fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)",
-      "category": "unreachable-by-invariant",
-      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract \u2014 a fill in the opposite direction is a different position, not a variant of the same one \u2014 and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyExitFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q cannot compute the average move in n: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.AverageMoveInN over the Campaign's whole-life entry and exit prices and its frozen N. The prices are quantity-weighted averages of fill prices each required positive by FillPayload.Validate, and the N was required positive when the Campaign opened."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyExitFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q cannot compute the realised result in unit n: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.RealisedResultInUnitN over the Campaign's frozen N, its Unit quantity and the configured dollars per point, all three required positive by CampaignOpenedPayload.Validate and ConfigurationPayload.Validate."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyExitFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q would close campaign %q with an invalid exit: %w\", fill.InstrumentID, fill.FillID, campaign.campaignID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyExitFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign exited payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -337,6 +99,104 @@
     },
     {
       "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyExitFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)\", fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)",
+      "category": "unreachable-by-invariant",
+      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract \u2014 a fill in the opposite direction is a different position, not a variant of the same one \u2014 and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyExitFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q cannot compute the average move in n: %w\", fill.InstrumentID, fill.FillID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "sizing.AverageMoveInN over the Campaign's whole-life entry and exit prices and its frozen N. The prices are quantity-weighted averages of fill prices each required positive by FillPayload.Validate, and the N was required positive when the Campaign opened."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyExitFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q cannot compute the realised result in unit n: %w\", fill.InstrumentID, fill.FillID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "sizing.RealisedResultInUnitN over the Campaign's frozen N, its Unit quantity and the configured dollars per point, all three required positive by CampaignOpenedPayload.Validate and ConfigurationPayload.Validate."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyExitFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q would close campaign %q with an invalid exit: %w\", fill.InstrumentID, fill.FillID, campaign.campaignID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyExitFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign exited payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: fill %q is %s but proposal %q is %s; a fill in the opposite direction is a different position, not the proposed one\", fill.InstrumentID, fill.FillID, fill.Direction, fill.ProposalID, pending.direction)",
+      "category": "unreachable-by-invariant",
+      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract \u2014 a fill in the opposite direction is a different position, not a variant of the same one \u2014 and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyStopFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)\", fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)",
+      "category": "unreachable-by-invariant",
+      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract \u2014 a fill in the opposite direction is a different position, not a variant of the same one \u2014 and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyStopFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q cannot compute the remaining aggregate open risk: %w\", fill.InstrumentID, fill.FillID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "sizing.AggregateOpenRisk over the Units this fill does not close, whose figures were validated when each Unit was created and are unchanged by a stop fill."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyStopFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q would close unit(s) with an invalid units-stopped decision: %w\", fill.InstrumentID, fill.FillID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyStopFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign units stopped payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyStopFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q cannot compute the average move in n: %w\", fill.InstrumentID, fill.FillID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "sizing.AverageMoveInN over the Campaign's whole-life entry and exit prices and its frozen N. The prices are quantity-weighted averages of fill prices each required positive by FillPayload.Validate, and the N was required positive when the Campaign opened."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyStopFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q cannot compute the realised result in unit n: %w\", fill.InstrumentID, fill.FillID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "sizing.RealisedResultInUnitN over the Campaign's frozen N, its Unit quantity and the configured dollars per point, all three required positive by CampaignOpenedPayload.Validate and ConfigurationPayload.Validate."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyStopFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q would close campaign %q with an invalid exit: %w\", fill.InstrumentID, fill.FillID, campaign.campaignID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyStopFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign exited payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).checkCampaignHasAProtectiveStop",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid engine state payload: %w\", err)",
       "category": "unreachable-by-construction",
@@ -350,19 +210,158 @@
       "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
     },
     {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).evaluateAdd",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: campaign %q cannot compute the next add rung: %w\", campaign.instrumentID, campaign.campaignID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "sizing.NextAddLevel over the last Unit's own fill price and the Campaign's frozen N. Both were required finite and positive by CampaignOpenedPayload.Validate or CampaignUnitAddedPayload.Validate before the Unit was recorded."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).evaluateAdd",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: built invalid add proposal payload: %w\", campaign.instrumentID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).evaluateAdd",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal add proposal payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).evaluateCampaign",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: campaign %q cannot compute aggregate open risk: %w\", bar.InstrumentID, campaign.campaignID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "sizing.AggregateOpenRisk over the Campaign's own held Units. Each Unit's entry, stop and quantity passed sizing.ProtectiveStopLevel and CampaignOpenedPayload.Validate when the Unit was created, and dollarsPerPoint passed ConfigurationPayload.Validate."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).evaluateCampaign",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: built invalid campaign evaluated payload: %w\", bar.InstrumentID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).evaluateCampaign",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign evaluated payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).evaluateCampaign",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: built invalid exit proposal payload: %w\", bar.InstrumentID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).evaluateCampaign",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal exit proposal payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).expireAddProposal",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal expired payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).expireAddProposal",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).expireAddProposalForStop",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).expireEntryProposal",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal expired payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).expireEntryProposal",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).expireExitProposal",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal expired payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).expireExitProposal",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).openCampaign",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: fill %q would open an invalid campaign: %w\", fill.InstrumentID, fill.FillID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).openCampaign",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign opened payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).openCampaign",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: fill %q would set an invalid protective stop: %w\", fill.InstrumentID, fill.FillID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).openCampaign",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal protective stop set payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).openCampaign",
+      "statement": "return nil, err",
+      "category": "unreachable-by-construction",
+      "reason": "Propagates evaluateAdd's error. Every one of evaluateAdd's own failure paths is itself unreachable by construction (its three entries in this list), so this wrapper has nothing left to carry."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).rememberPendingProposal",
+      "statement": "return fmt.Errorf(\"strategy: decode the trade proposal just emitted: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Unmarshal of bytes this same Apply call marshalled from a validated TradeProposalPayload a few statements earlier."
+    },
+    {
       "file": "internal/strategy/end_of_stream.go",
       "function": "(*Reducer).applyRunCompleted",
       "statement": "return nil, err",
       "category": "unreachable-by-construction",
       "reason": "Propagates expireOutstandingProposals' error, whose own three failure paths are themselves unreachable by construction (their entries in this list)."
-    },
-    {
-      "file": "internal/strategy/end_of_stream.go",
-      "function": "(*Reducer).expireOutstandingProposals",
-      "statement": "return nil, err",
-      "category": "unreachable-by-construction",
-      "reason": "Propagates emitEndOfStreamExpiry's error, whose two failure paths are a Validate and a Marshal of a payload built from an already-recorded pending proposal (their entries in this list).",
-      "count": 3
     },
     {
       "file": "internal/strategy/end_of_stream.go",
@@ -377,6 +376,14 @@
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
       "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+    },
+    {
+      "file": "internal/strategy/end_of_stream.go",
+      "function": "(*Reducer).expireOutstandingProposals",
+      "statement": "return nil, err",
+      "category": "unreachable-by-construction",
+      "reason": "Propagates emitEndOfStreamExpiry's error, whose two failure paths are a Validate and a Marshal of a payload built from an already-recorded pending proposal (their entries in this list).",
+      "count": 3
     },
     {
       "file": "internal/strategy/notional.go",
@@ -443,27 +450,6 @@
     },
     {
       "file": "internal/strategy/reducer.go",
-      "function": "(*Reducer).applyConfiguration",
-      "statement": "return nil, err",
-      "category": "unreachable-by-construction",
-      "reason": "Propagates sizingModeFor's error, which the configuration's own Validate has already made unreachable (its entry in this list)."
-    },
-    {
-      "file": "internal/strategy/reducer.go",
-      "function": "(*Reducer).applyConfiguration",
-      "statement": "return nil, fmt.Errorf(\"strategy: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "NewNotionalAccount requires a finite, positive starting equity and a rebasing month and day that form a date recurring every year; ConfigurationPayload.Validate has already required exactly that of the same three fields."
-    },
-    {
-      "file": "internal/strategy/reducer.go",
-      "function": "sizingModeFor",
-      "statement": "return \"\", fmt.Errorf(\"strategy: sizing mode %q is not a recognised sizing mode; failing closed rather than sizing a position under an unknown principle (ADR 0003)\", mode)",
-      "category": "unreachable-by-invariant",
-      "reason": "ConfigurationPayload.Validate accepts only event.SizingModeVolatilityNormalised and event.SizingModeFixedRiskAtStop, and a Reducer reads its mode from nowhere else. The guard is kept so that declaring a third Mode without extending the switch fails closed rather than sizing a position under an unknown principle (ADR 0003)."
-    },
-    {
-      "file": "internal/strategy/reducer.go",
       "function": "(*Reducer).applyCompletedBar",
       "statement": "return nil, err",
       "category": "unreachable-by-construction",
@@ -500,6 +486,34 @@
     },
     {
       "file": "internal/strategy/reducer.go",
+      "function": "(*Reducer).applyConfiguration",
+      "statement": "return nil, err",
+      "category": "unreachable-by-construction",
+      "reason": "Propagates sizingModeFor's error, which the configuration's own Validate has already made unreachable (its entry in this list)."
+    },
+    {
+      "file": "internal/strategy/reducer.go",
+      "function": "(*Reducer).applyConfiguration",
+      "statement": "return nil, fmt.Errorf(\"strategy: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "NewNotionalAccount requires a finite, positive starting equity and a rebasing month and day that form a date recurring every year; ConfigurationPayload.Validate has already required exactly that of the same three fields."
+    },
+    {
+      "file": "internal/strategy/reducer.go",
+      "function": "(*Reducer).decline",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal declined payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "ProposalDeclinedPayload.Validate on a payload whose Reason is one of this package's own constants and whose remaining fields come from the bar under decision, already validated."
+    },
+    {
+      "file": "internal/strategy/reducer.go",
+      "function": "(*Reducer).decline",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal declined payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+    },
+    {
+      "file": "internal/strategy/reducer.go",
       "function": "(*Reducer).sizeUnit",
       "statement": "return r.decline(bar, input, signalID, event.DeclineReasonNNotReady, fmt.Sprintf(\"n is not a usable volatility reading (n %v); no unit can be sized from it\", n))",
       "category": "unreachable-by-invariant",
@@ -528,17 +542,18 @@
     },
     {
       "file": "internal/strategy/reducer.go",
-      "function": "(*Reducer).decline",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal declined payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "ProposalDeclinedPayload.Validate on a payload whose Reason is one of this package's own constants and whose remaining fields come from the bar under decision, already validated."
+      "function": "(*Reducer).stateFor",
+      "statement": "return nil, fmt.Errorf(\"strategy: %w\", err)",
+      "category": "unreachable-by-invariant",
+      "reason": "indicator.NewWilderAverage, NewEntryChannel and NewExitChannel refuse a non-positive length. The period is indicator.DefaultPeriod, a positive compile-time constant, and the two channel lengths come from a ConfigurationPayload whose Validate has already required both to be positive.",
+      "count": 3
     },
     {
       "file": "internal/strategy/reducer.go",
-      "function": "(*Reducer).decline",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal declined payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "function": "sizingModeFor",
+      "statement": "return \"\", fmt.Errorf(\"strategy: sizing mode %q is not a recognised sizing mode; failing closed rather than sizing a position under an unknown principle (ADR 0003)\", mode)",
+      "category": "unreachable-by-invariant",
+      "reason": "ConfigurationPayload.Validate accepts only event.SizingModeVolatilityNormalised and event.SizingModeFixedRiskAtStop, and a Reducer reads its mode from nowhere else. The guard is kept so that declaring a third Mode without extending the switch fails closed rather than sizing a position under an unknown principle (ADR 0003)."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -546,14 +561,6 @@
       "statement": "return \"\"",
       "category": "unreachable-by-invariant",
       "reason": "ConfigurationPayload.Validate accepts only event.SizingModeVolatilityNormalised and event.SizingModeFixedRiskAtStop, and a Reducer reads its mode from nowhere else. The guard is kept so that declaring a third Mode without extending the switch fails closed rather than sizing a position under an unknown principle (ADR 0003)."
-    },
-    {
-      "file": "internal/strategy/reducer.go",
-      "function": "(*Reducer).stateFor",
-      "statement": "return nil, fmt.Errorf(\"strategy: %w\", err)",
-      "category": "unreachable-by-invariant",
-      "reason": "indicator.NewWilderAverage, NewEntryChannel and NewExitChannel refuse a non-positive length. The period is indicator.DefaultPeriod, a positive compile-time constant, and the two channel lengths come from a ConfigurationPayload whose Validate has already required both to be positive.",
-      "count": 3
     }
   ]
 }
