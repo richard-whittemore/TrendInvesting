@@ -213,9 +213,8 @@ func RealisedRiskAtStop(quantity int64, stopMultiple, n, dollarsPerPoint, notion
 // Use it wherever a product feeds an addition or subtraction — most
 // importantly an accumulator, where the divergence compounds with every term
 // rather than appearing once. `a*b*c` with no addition is NOT fusible and
-// needs nothing. internal/indicator, internal/event and internal/fills state
-// the same barrier inline (`float64(a*b)`), because none of them may depend
-// on this package.
+// needs nothing. internal/indicator and internal/fills state the same
+// barrier inline (`float64(a*b)`), because neither imports this package.
 func Product(a, b float64) float64 {
 	return float64(a * b)
 }

@@ -780,7 +780,7 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 	// event.TradeProposalPayload.Validate re-derives it in, so the two agree
 	// bit for bit (CONTEXT.md: "Protective Stop"; The Turtle Rules p.22's 2N
 	// stop in the Baseline).
-	protectiveStopIntent := entryLevel - float64(r.stopMultiple*n)
+	protectiveStopIntent := entryLevel - sizing.Product(r.stopMultiple, n)
 	if protectiveStopIntent <= 0 {
 		// A long equity cannot trade below zero, so this stop is
 		// unreachable: the Unit would in fact risk the whole position rather

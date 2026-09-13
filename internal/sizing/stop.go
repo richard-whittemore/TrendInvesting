@@ -56,7 +56,7 @@ func ProtectiveStopLevel(entryPrice, campaignN, stopMultiple float64, direction 
 		return 0, fmt.Errorf("sizing: cannot derive protective stop level: %w", err)
 	}
 
-	level := entryPrice - float64(stopMultiple*campaignN)
+	level := entryPrice - Product(stopMultiple, campaignN)
 	if level <= 0 {
 		return 0, fmt.Errorf(
 			"sizing: cannot derive protective stop level: derived level %v (entry price %v - stop multiple %v x campaign n %v) is not positive: a long position cannot be stopped out at or below zero",
@@ -125,5 +125,5 @@ func RaisedStop(previousStop, campaignN float64) (float64, error) {
 	if err := errors.Join(errs...); err != nil {
 		return 0, fmt.Errorf("sizing: cannot derive raised stop: %w", err)
 	}
-	return previousStop + float64(0.5*campaignN), nil
+	return previousStop + Product(0.5, campaignN), nil
 }

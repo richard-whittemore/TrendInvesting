@@ -12,7 +12,7 @@
 
 Go permits an implementation to fuse `a + b*c` into a single fused multiply-add, "possibly across statements", and arm64 does while amd64 does not. The fused form keeps the full-precision product, so the two architectures produce results that differ in the last bits — and a platform whose journal must be byte-identical for replay equivalence (ADR 0017) cannot afford that. This is the determinism rule in `.greptile/rules.md` applied to the arithmetic itself: same inputs, same configuration, same code version, same decisions — on any machine.
 
-An explicit conversion is the only barrier the language guarantees, so every product that feeds an addition or subtraction is rounded before it. `internal/sizing.Product` performs that conversion and names the intent; the packages that may not depend on `internal/sizing` — `internal/indicator`, `internal/event`, `internal/fills` — state the same barrier inline:
+An explicit conversion is the only barrier the language guarantees, so every product that feeds an addition or subtraction is rounded before it. `internal/sizing.Product` performs that conversion and names the intent; `internal/indicator` and `internal/fills`, which do not import that package, state the same barrier inline:
 
 ```go
 total += sizing.Product(risk, dollarsPerPoint)      // an accumulator

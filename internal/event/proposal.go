@@ -335,7 +335,7 @@ func (p TradeProposalPayload) Validate() error {
 
 	// Invariant 2: the Protective Stop intent matches its derivation.
 	if entryLevelFinite && stopMultipleFinite && nFinite && stopIntentFinite {
-		if derived := p.EntryLevel - float64(p.StopMultiple*p.N); p.ProtectiveStopIntent != derived {
+		if derived := p.EntryLevel - sizing.Product(p.StopMultiple, p.N); p.ProtectiveStopIntent != derived {
 			errs = append(errs, fmt.Errorf(
 				"stated protective stop intent %v does not match the derivation %v (entry level %v - stop multiple %v x n %v)",
 				p.ProtectiveStopIntent, derived, p.EntryLevel, p.StopMultiple, p.N))

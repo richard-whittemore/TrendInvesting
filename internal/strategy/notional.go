@@ -261,7 +261,7 @@ func (n *NotionalAccount) Observe(equity float64) ([]Step, error) {
 	// loop below would never break: checking once, up front, against the
 	// figures standing at the start of this call catches that without
 	// applying a single step first.
-	limit := n.base - float64(notionalAccountUndefinedDrawdownFraction*n.current)
+	limit := n.base - sizing.Product(notionalAccountUndefinedDrawdownFraction, n.current)
 	if equity <= limit {
 		return nil, fmt.Errorf(
 			"strategy: equity %v is at or below %v, the asymptote of a %.0f%% drawdown from the yearly starting figure (measurement base %v, account %v): the Notional Account rule (ADR 0007) is undefined this deep — Faith's source does not address it — so trading must halt rather than apply an unbounded number of Drawdown Steps",
@@ -279,7 +279,7 @@ func (n *NotionalAccount) Observe(equity float64) ([]Step, error) {
 				"strategy: applied %d drawdown steps in one account snapshot observation without terminating; this indicates a defect in the drawdown ladder, not a legitimate market condition",
 				i)
 		}
-		threshold := n.base - float64(notionalAccountDrawdownThresholdFraction*n.current)
+		threshold := n.base - sizing.Product(notionalAccountDrawdownThresholdFraction, n.current)
 		if equity > threshold {
 			break
 		}

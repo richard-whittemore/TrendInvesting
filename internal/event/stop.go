@@ -268,7 +268,7 @@ func (p ProtectiveStopSetPayload) Validate() error {
 			errs = append(errs, fmt.Errorf("level %v must be below the entry price %v for a long position's initial stop", p.Level, p.EntryPrice))
 		}
 		if entryPriceFinite && stopMultipleFinite && campaignNFinite && levelFinite {
-			if derived := p.EntryPrice - float64(p.StopMultiple*p.CampaignN); p.Level != derived {
+			if derived := p.EntryPrice - sizing.Product(p.StopMultiple, p.CampaignN); p.Level != derived {
 				errs = append(errs, fmt.Errorf(
 					"stated level %v does not match the derivation %v (entry price %v - stop multiple %v x campaign n %v)",
 					p.Level, derived, p.EntryPrice, p.StopMultiple, p.CampaignN))
