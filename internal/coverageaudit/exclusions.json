@@ -365,6 +365,13 @@
     },
     {
       "file": "internal/strategy/end_of_stream.go",
+      "function": "(*Reducer).applyRunCompleted",
+      "statement": "return nil, fmt.Errorf(\"strategy: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "event.RunCompletedPayload is an empty struct and its Validate returns nil unconditionally \u2014 the end-of-stream event states nothing, so there is nothing to check. The call is kept so that the payload growing a field is guarded from the day it does."
+    },
+    {
+      "file": "internal/strategy/end_of_stream.go",
       "function": "(*Reducer).emitEndOfStreamExpiry",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",

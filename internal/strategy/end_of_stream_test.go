@@ -265,3 +265,41 @@ func TestTheStreamCannotEndBeforeTheLastBarItDelivered(t *testing.T) {
 		endOfStream(day(55)).
 		wantRunError("precedes")
 }
+
+// endOfStreamAt appends an end-of-stream envelope after mutate has had a
+// chance to change it, for the cases where what is wrong is the envelope
+// rather than the run.
+func (s *stream) endOfStreamMutated(at time.Time, mutate func(*event.Envelope)) *stream {
+	s.seq++
+	envelope := runCompletedEnvelope(s.t, s.seq, at)
+	mutate(&envelope)
+	envelope.PayloadHash = event.HashPayload(envelope.Payload)
+	s.envelopes = append(s.envelopes, envelope)
+	return s
+}
+
+// TestAnEndOfStreamEventAtTheWrongSchemaVersionFailsClosed holds the last
+// input of a run to the same rule as the first: a schema this build was not
+// written against is rejected, never silently upgraded, until an explicit
+// upcaster exists (ADR 0015). The end-of-stream event is the one that
+// expires everything still outstanding, so reading it under a schema whose
+// meaning is unknown would terminate a run on a guess.
+func TestAnEndOfStreamEventAtTheWrongSchemaVersionFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	newStream(t, validConfigurationPayload()).
+		endOfStreamMutated(day(56), func(e *event.Envelope) {
+			e.SchemaVersion = event.RunCompletedSchemaVersion + 1
+		}).
+		wantRunError("run completed payload schema version", "ADR 0015")
+}
+
+func TestAnUndecodableEndOfStreamPayloadFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	newStream(t, validConfigurationPayload()).
+		endOfStreamMutated(day(56), func(e *event.Envelope) {
+			e.Payload = []byte(`[]`)
+		}).
+		wantRunError("decode run completed payload")
+}
