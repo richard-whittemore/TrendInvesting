@@ -1,56 +1,33 @@
 package event_test
 
 import (
-	"strings"
+	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
 
-func validRunCompleted() event.RunCompletedPayload {
-	return event.RunCompletedPayload{
-		CompletedAt: time.Date(2026, time.February, 27, 0, 0, 0, 0, time.UTC),
-	}
-}
-
-func TestRunCompletedPayloadValidate(t *testing.T) {
+// TestRunCompletedPayloadCarriesNoInstantOfItsOwn: the fact this event
+// states is "the input stream ended", and WHEN it ended is the envelope's
+// own EventTime. The payload is deliberately empty rather than restating it.
+//
+// Two instants that must always be equal are two instants that will
+// eventually disagree — and a disagreement here would stamp every
+// end-of-stream expiry at one of them while the journal's span was derived
+// from the other, placing decisions outside the span the journal reports.
+// An empty payload makes that unrepresentable rather than merely invalid.
+func TestRunCompletedPayloadCarriesNoInstantOfItsOwn(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name    string
-		mutate  func(*event.RunCompletedPayload)
-		wantErr string
-	}{
-		{name: "valid"},
-		{
-			name:    "missing completed at",
-			mutate:  func(p *event.RunCompletedPayload) { p.CompletedAt = time.Time{} },
-			wantErr: "completed at is required",
-		},
+	encoded, err := json.Marshal(event.RunCompletedPayload{})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			payload := validRunCompleted()
-			if tt.mutate != nil {
-				tt.mutate(&payload)
-			}
-			err := payload.Validate()
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("Validate() error = %v, want nil", err)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatalf("Validate() error = nil, want one containing %q", tt.wantErr)
-			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("Validate() error = %v, want one containing %q", err, tt.wantErr)
-			}
-		})
+	if string(encoded) != "{}" {
+		t.Fatalf("RunCompletedPayload marshals to %s, want {}: it must state no instant of its own", encoded)
+	}
+	if err := (event.RunCompletedPayload{}).Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
 	}
 }
 

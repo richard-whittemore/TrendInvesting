@@ -1,10 +1,14 @@
 package strategy_test
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/replay"
+	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
 // This file holds #68's tests: a proposal still outstanding when the input
@@ -18,7 +22,7 @@ import (
 // runCompletedEnvelope is the end-of-stream fact, as an input envelope.
 func runCompletedEnvelope(t *testing.T, sequence uint64, at time.Time) event.Envelope {
 	t.Helper()
-	payload := mustMarshal(t, event.RunCompletedPayload{CompletedAt: at})
+	payload := mustMarshal(t, event.RunCompletedPayload{})
 	return event.Envelope{
 		ID:                "run-completed",
 		Type:              event.RunCompletedEventType,
@@ -222,6 +226,31 @@ func TestAnInputAfterTheStreamEndedFailsClosed(t *testing.T) {
 			endOfStream(day(57)).
 			wantRunError("input stream has already ended")
 	})
+}
+
+// TestAnEndOfStreamEventBeforeAConfigurationFailsClosed: every other input
+// requires a configuration first, and this one is no different — a stream
+// consisting of nothing but an end-of-stream event would otherwise mark a
+// run complete that never ran.
+func TestAnEndOfStreamEventBeforeAConfigurationFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
+	if err != nil {
+		t.Fatalf("NewReducer() error = %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+
+	_, err = engine.Run(context.Background(), []event.Envelope{runCompletedEnvelope(t, 1, day(56))})
+	if err == nil {
+		t.Fatal("Run() error = nil, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "before a configuration event") {
+		t.Fatalf("Run() error = %v, want the same wording every other input uses", err)
+	}
 }
 
 // TestTheStreamCannotEndBeforeTheLastBarItDelivered: the end-of-stream

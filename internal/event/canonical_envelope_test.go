@@ -31,6 +31,23 @@ func canonicalSubject() event.Envelope {
 	}
 }
 
+// TestCanonicalBytesIsIndependentOfInsertionOrder: the exported encoder a
+// journal canonicalises its header with is the same one the envelope uses,
+// so a project that must not have two definitions of "the canonical bytes
+// of a value" does not acquire one.
+func TestCanonicalBytesIsIndependentOfInsertionOrder(t *testing.T) {
+	t.Parallel()
+
+	first := event.CanonicalBytes(map[string]any{"b": 2, "a": "x", "c": 1.5})
+	second := event.CanonicalBytes(map[string]any{"c": 1.5, "a": "x", "b": 2})
+	if !bytes.Equal(first, second) {
+		t.Fatalf("canonical bytes depend on insertion order:\n %s\n %s", first, second)
+	}
+	if want := `{"a":"x","b":2,"c":1.5}`; string(first) != want {
+		t.Fatalf("CanonicalBytes = %s, want %s", first, want)
+	}
+}
+
 func TestCanonicalEnvelopeBytesIsStableForTheSameEnvelope(t *testing.T) {
 	t.Parallel()
 

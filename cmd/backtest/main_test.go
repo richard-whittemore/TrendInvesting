@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/buildinfo"
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -360,6 +361,67 @@ func TestTheRunEndsByExpiringTheProposalItWasStillHolding(t *testing.T) {
 	}
 	if !sawRunCompleted {
 		t.Fatal("the journal records no end-of-stream event, so a replay could not reproduce the expiry it caused")
+	}
+}
+
+// TestTheCommandRefusesToOverwriteAnExistingJournal: a journal is recorded
+// evidence, and AGENTS.md rule 6 forbids rewriting or deleting it. A rerun
+// that pointed at an existing journal would destroy the earlier run's
+// evidence before it had even validated its own configuration.
+func TestTheCommandRefusesToOverwriteAnExistingJournal(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "journal.jsonl")
+	existing := []byte("the previous run's evidence\n")
+	if err := os.WriteFile(out, existing, 0o600); err != nil {
+		t.Fatalf("write the existing journal: %v", err)
+	}
+
+	var log bytes.Buffer
+	err := backtest(options{configPath: configurationFixture, barsPath: barsFixture, outPath: out, build: testBuild}, &log)
+	if err == nil {
+		t.Fatal("backtest() error = nil, want a refusal to overwrite")
+	}
+	if !strings.Contains(err.Error(), out) {
+		t.Errorf("backtest() error = %v, want one naming %s", err, out)
+	}
+
+	after, readErr := os.ReadFile(out)
+	if readErr != nil {
+		t.Fatalf("read the journal back: %v", readErr)
+	}
+	if !bytes.Equal(after, existing) {
+		t.Fatalf("the existing journal was modified:\n before %q\n after  %q", existing, after)
+	}
+}
+
+// TestAFailedWriteLeavesNothingAtTheDestination: the journal is written
+// through a temporary file and renamed into place, so a run interrupted
+// mid-write cannot leave a partial journal that reads like a complete one.
+func TestAFailedWriteLeavesNothingAtTheDestination(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "journal.jsonl")
+
+	// A header this build will not write: journal.Write refuses it, which is
+	// a failure arriving after the destination would have been created.
+	broken := journal.NewHeader("", "", time.Time{}, time.Time{})
+	entries := []journal.Entry{{Kind: journal.KindInput, Envelope: event.Envelope{}}}
+
+	if err := writeJournal(out, broken, entries); err == nil {
+		t.Fatal("writeJournal() error = nil, want the invalid header refused")
+	}
+
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("os.Stat(%s) = %v, want the destination untouched", out, err)
+	}
+	left, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read the directory: %v", err)
+	}
+	if len(left) != 0 {
+		names := make([]string, 0, len(left))
+		for _, entry := range left {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("a failed write left %v behind", names)
 	}
 }
 

@@ -69,6 +69,39 @@ func testEntries(n int) []journal.Entry {
 	return out
 }
 
+// headerSeed is the chain's starting value: the hash of the header's own
+// canonical bytes, recomputed here independently of the writer so a journal
+// cannot be re-attributed to a different run without breaking record 1.
+func headerSeed(h journal.Header) [sha256.Size]byte {
+	return sha256.Sum256(event.CanonicalBytes(map[string]any{
+		"journal_version":    h.JournalVersion,
+		"chain_algorithm":    h.ChainAlgorithm,
+		"configuration_hash": h.ConfigurationHash,
+		"strategy_version":   h.StrategyVersion,
+		"span_start":         h.SpanStart.UTC().Format(time.RFC3339Nano),
+		"span_end":           h.SpanEnd.UTC().Format(time.RFC3339Nano),
+	}))
+}
+
+// editHeaderLine rewrites the header without touching a single record — the
+// re-attribution a chain that only covered records would have missed.
+func editHeaderLine(t *testing.T, written []byte, mutate func(map[string]any)) []byte {
+	t.Helper()
+
+	lines := bytes.Split(bytes.TrimRight(written, "\n"), []byte("\n"))
+	var header map[string]any
+	if err := json.Unmarshal(lines[0], &header); err != nil {
+		t.Fatalf("decode header: %v", err)
+	}
+	mutate(header)
+	encoded, err := json.Marshal(header)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	lines[0] = encoded
+	return append(bytes.Join(lines, []byte("\n")), '\n')
+}
+
 // chainHash is the record hash for one entry following previous, recomputed
 // here independently of the writer so the two definitions cannot drift.
 func chainHash(previous [sha256.Size]byte, kind string, envelope event.Envelope) [sha256.Size]byte {
@@ -142,26 +175,56 @@ func TestWriteThenVerifyAcceptsAnUntouchedJournal(t *testing.T) {
 	}
 }
 
-// TestTheFirstRecordChainsFromTheZeroHash pins the start of the chain: the
-// first record's predecessor is 32 zero bytes, so the whole chain is
-// reproducible from the envelope stream alone.
-func TestTheFirstRecordChainsFromTheZeroHash(t *testing.T) {
+// TestTheFirstRecordChainsFromTheHeader pins the start of the chain. The
+// header states which run the journal is — its configuration hash, strategy
+// version and span — and seeding the chain with it is what stops a journal
+// being silently re-attributed to a different run while every record still
+// verifies (ADR 0017).
+func TestTheFirstRecordChainsFromTheHeader(t *testing.T) {
 	t.Parallel()
-
-	const wantZero = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-	if journal.ZeroRecordHash != wantZero {
-		t.Fatalf("ZeroRecordHash = %q, want %q", journal.ZeroRecordHash, wantZero)
-	}
 
 	_, records, err := journal.Read(bytes.NewReader(writeJournal(t)))
 	if err != nil {
 		t.Fatalf("journal.Read() error = %v", err)
 	}
 
-	var zero [sha256.Size]byte
-	want := hashString(chainHash(zero, journal.KindInput, testEnvelope(1)))
+	want := hashString(chainHash(headerSeed(testHeader()), journal.KindInput, testEnvelope(1)))
 	if records[0].RecordHash != want {
 		t.Fatalf("first record hash = %q, want %q", records[0].RecordHash, want)
+	}
+}
+
+// TestEditingAnyHeaderFieldBreaksTheChainAtTheFirstRecord: rewriting what
+// run a journal claims to be, without touching one record, is caught.
+func TestEditingAnyHeaderFieldBreaksTheChainAtTheFirstRecord(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		field  string
+		mutate func(map[string]any)
+	}{
+		{"configuration_hash", func(h map[string]any) { h["configuration_hash"] = "sha256:a-different-configuration" }},
+		{"strategy_version", func(h map[string]any) { h["strategy_version"] = "turtle-baseline/9.9.9+dev" }},
+		{"span_start", func(h map[string]any) { h["span_start"] = at(2).UTC().Format(time.RFC3339Nano) }},
+		{"span_end", func(h map[string]any) { h["span_end"] = at(9).UTC().Format(time.RFC3339Nano) }},
+		{"chain_algorithm", func(h map[string]any) { h["chain_algorithm"] = "sha256(something-else)" }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			t.Parallel()
+
+			edited := editHeaderLine(t, writeJournal(t), tt.mutate)
+
+			_, err := journal.Verify(bytes.NewReader(edited))
+			var broken *journal.ChainBrokenError
+			if !errors.As(err, &broken) {
+				t.Fatalf("journal.Verify() error = %v, want a ChainBrokenError: editing %s re-attributes the journal", err, tt.field)
+			}
+			if broken.Sequence != 1 {
+				t.Fatalf("chain reported broken at record %d, want 1: the header seeds the chain", broken.Sequence)
+			}
+		})
 	}
 }
 
@@ -178,7 +241,7 @@ func TestEachRecordChainsFromThePreviousRecordHash(t *testing.T) {
 		t.Fatalf("read %d records, want 3", len(records))
 	}
 
-	var previous [sha256.Size]byte
+	previous := headerSeed(testHeader())
 	for i, record := range records {
 		if record.Sequence != uint64(i+1) {
 			t.Fatalf("record %d has sequence %d, want %d", i, record.Sequence, i+1)
@@ -307,9 +370,8 @@ func TestFlippingARecordsKindBreaksTheChain(t *testing.T) {
 func TestVerifyRejectsAnUnrecognisedRecordKind(t *testing.T) {
 	t.Parallel()
 
-	var previous [sha256.Size]byte
 	envelope := testEnvelope(1)
-	sum := chainHash(previous, "neither", envelope)
+	sum := chainHash(headerSeed(testHeader()), "neither", envelope)
 	forged := writeVerbatim(t, testHeader(), []journal.Record{{
 		Sequence:   1,
 		Kind:       "neither",
