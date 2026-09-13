@@ -203,12 +203,21 @@ func moduleRoot(t *testing.T) string {
 	}
 }
 
+// resolveProfile turns whatever COVERAGE_AUDIT_PROFILE holds into a path this
+// test can open. A relative one is resolved against the module root, not
+// against this package's own directory, because the profile a caller already
+// has is the one `make test` wrote — `coverage.out`, at the root — and Go
+// runs every test in its own package directory.
+func resolveProfile(root, path string) string {
+	return path
+}
+
 // profile returns the path of a count-mode coverage profile for
 // auditedPackages, generating one if the environment does not supply it.
 func profile(t *testing.T, root string) string {
 	t.Helper()
 	if path := os.Getenv(profileEnv); path != "" {
-		return path
+		return resolveProfile(root, path)
 	}
 	path := filepath.Join(t.TempDir(), "audit.out")
 	cmd := exec.Command("go", "test", "-covermode=count", "-coverprofile="+path, auditedPackages)
@@ -463,4 +472,47 @@ func sortedCategories() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// TestAProfileSuppliedByTheEnvironmentResolvesAgainstTheModuleRoot covers the
+// documented reuse workflow rather than assuming it. `make test` writes
+// coverage.out at the module root and the guide says to pass it, but go test
+// runs each test in its own package directory, so a relative path taken
+// verbatim would be looked for inside internal/coverageaudit and the audit
+// would report a profile it could not read instead of the one it was given.
+func TestAProfileSuppliedByTheEnvironmentResolvesAgainstTheModuleRoot(t *testing.T) {
+	t.Parallel()
+
+	const root = "/module"
+
+	tests := []struct {
+		name  string
+		given string
+		want  string
+	}{
+		{
+			name:  "the path make test writes",
+			given: "coverage.out",
+			want:  filepath.Join(root, "coverage.out"),
+		},
+		{
+			name:  "a path relative to the module root",
+			given: filepath.Join("build", "coverage.out"),
+			want:  filepath.Join(root, "build", "coverage.out"),
+		},
+		{
+			name:  "an absolute path passes through",
+			given: filepath.Join(string(filepath.Separator), "tmp", "cov.out"),
+			want:  filepath.Join(string(filepath.Separator), "tmp", "cov.out"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := resolveProfile(root, tt.given); got != tt.want {
+				t.Errorf("resolveProfile(%q, %q) = %q, want %q", root, tt.given, got, tt.want)
+			}
+		})
+	}
 }

@@ -529,13 +529,6 @@
     {
       "file": "internal/strategy/reducer.go",
       "function": "(*Reducer).sizeUnit",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: instrument %q at %s: %w\", bar.InstrumentID, bar.PeriodEnd.Format(time.RFC3339), err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.SizeUnit over a configuration already validated and an N already known usable; the too-small-account and non-positive-stop outcomes it can legitimately produce are recorded as declines above, not as errors here."
-    },
-    {
-      "file": "internal/strategy/reducer.go",
-      "function": "(*Reducer).sizeUnit",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid trade proposal payload: %w\", err)",
       "category": "unreachable-by-construction",
       "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
