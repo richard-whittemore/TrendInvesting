@@ -15,16 +15,9 @@
     {
       "file": "internal/fills/runbar.go",
       "function": "(*Simulator).fillEnvelopeFor",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"fills: built an invalid fill payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "FillPayload.Validate on a payload built two statements above from a priced candidate: side, kind and ids are this package's own constants, quantity and price came from an order whose own payload was validated, and Charge has already refused a non-finite commission."
-    },
-    {
-      "file": "internal/fills/runbar.go",
-      "function": "(*Simulator).fillEnvelopeFor",
       "statement": "return event.Envelope{}, fmt.Errorf(\"fills: marshal fill payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/journal/journal.go",
@@ -52,28 +45,28 @@
       "function": "(*Reducer).applyAddFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: add fill %q would add an invalid unit: %w\", fill.InstrumentID, fill.FillID, err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).applyAddFill",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign unit added payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).applyAddFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: add fill %q would set an invalid protective stop: %w\", fill.InstrumentID, fill.FillID, err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).applyAddFill",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal protective stop set payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode.",
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it.",
       "count": 2
     },
     {
@@ -88,7 +81,7 @@
       "function": "(*Reducer).applyAddFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: add fill %q would raise unit %d to an invalid protective stop: %w\", fill.InstrumentID, fill.FillID, earlier.index, err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -123,14 +116,14 @@
       "function": "(*Reducer).applyExitFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q would close campaign %q with an invalid exit: %w\", fill.InstrumentID, fill.FillID, campaign.campaignID, err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).applyExitFill",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign exited payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -158,14 +151,14 @@
       "function": "(*Reducer).applyStopFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q would close unit(s) with an invalid units-stopped decision: %w\", fill.InstrumentID, fill.FillID, err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).applyStopFill",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign units stopped payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -186,14 +179,14 @@
       "function": "(*Reducer).applyStopFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q would close campaign %q with an invalid exit: %w\", fill.InstrumentID, fill.FillID, campaign.campaignID, err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).applyStopFill",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign exited payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -207,7 +200,7 @@
       "function": "(*Reducer).checkCampaignHasAProtectiveStop",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal engine state payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -221,14 +214,14 @@
       "function": "(*Reducer).evaluateAdd",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: built invalid add proposal payload: %w\", campaign.instrumentID, err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).evaluateAdd",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal add proposal payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -242,105 +235,105 @@
       "function": "(*Reducer).evaluateCampaign",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: built invalid campaign evaluated payload: %w\", bar.InstrumentID, err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).evaluateCampaign",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign evaluated payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).evaluateCampaign",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: built invalid exit proposal payload: %w\", bar.InstrumentID, err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).evaluateCampaign",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal exit proposal payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).expireAddProposal",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed."
+      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed. The two figures the validator range-checks, Quantity and Level, are carried across unchanged rather than re-derived."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).expireAddProposal",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).expireAddProposalForStop",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).expireEntryProposal",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed."
+      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed. The two figures the validator range-checks, Quantity and Level, are carried across unchanged rather than re-derived."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).expireEntryProposal",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).expireExitProposal",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed."
+      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed. The two figures the validator range-checks, Quantity and Level, are carried across unchanged rather than re-derived."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).expireExitProposal",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).openCampaign",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: fill %q would open an invalid campaign: %w\", fill.InstrumentID, fill.FillID, err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).openCampaign",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign opened payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).openCampaign",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: fill %q would set an invalid protective stop: %w\", fill.InstrumentID, fill.FillID, err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).openCampaign",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal protective stop set payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -375,14 +368,14 @@
       "function": "(*Reducer).emitEndOfStreamExpiry",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed."
+      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed. The two figures the validator range-checks, Quantity and Level, are carried across unchanged rather than re-derived."
     },
     {
       "file": "internal/strategy/end_of_stream.go",
       "function": "(*Reducer).emitEndOfStreamExpiry",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/end_of_stream.go",
@@ -404,92 +397,92 @@
       "function": "(*Reducer).applyAccountSnapshot",
       "statement": "return nil, fmt.Errorf(\"strategy: built invalid notional account rebased payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/notional.go",
       "function": "(*Reducer).applyAccountSnapshot",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal notional account rebased payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/notional.go",
       "function": "(*Reducer).applyAccountSnapshot",
       "statement": "return nil, fmt.Errorf(\"strategy: built invalid drawdown step applied payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/notional.go",
       "function": "(*Reducer).applyAccountSnapshot",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal drawdown step applied payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/notional.go",
       "function": "(*Reducer).applyAccountSnapshot",
       "statement": "return nil, fmt.Errorf(\"strategy: built invalid notional account recovered payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/notional.go",
       "function": "(*Reducer).applyAccountSnapshot",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal notional account recovered payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/notional.go",
       "function": "(*Reducer).applyCashMovement",
       "statement": "return nil, fmt.Errorf(\"strategy: built invalid notional account cash adjusted payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/notional.go",
       "function": "(*Reducer).applyCashMovement",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal notional account cash adjusted payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/reducer.go",
       "function": "(*Reducer).applyCompletedBar",
       "statement": "return nil, err",
       "category": "unreachable-by-construction",
-      "reason": "Propagation of an error from stateFor, an expire*Proposal, evaluateCampaign, evaluateAdd, sizeUnit or rememberPendingProposal. Every failure path in all six is itself in this list.",
-      "count": 8
+      "reason": "Propagation of an error from stateFor, an expire*Proposal, evaluateCampaign, evaluateAdd or rememberPendingProposal. Every failure path in all five is itself in this list. The sixth propagation, of sizeUnit's own error, is NOT here: sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account, so that one is reachable and is covered by TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun.",
+      "count": 7
     },
     {
       "file": "internal/strategy/reducer.go",
       "function": "(*Reducer).applyCompletedBar",
       "statement": "return nil, fmt.Errorf(\"strategy: built invalid setup evaluated payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/reducer.go",
       "function": "(*Reducer).applyCompletedBar",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal setup evaluated payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/reducer.go",
       "function": "(*Reducer).applyCompletedBar",
       "statement": "return nil, fmt.Errorf(\"strategy: built invalid signal payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/reducer.go",
       "function": "(*Reducer).applyCompletedBar",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal signal payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -517,7 +510,7 @@
       "function": "(*Reducer).decline",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal declined payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -531,14 +524,14 @@
       "function": "(*Reducer).sizeUnit",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid trade proposal payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function has just assembled from figures each of which passed its own check (sizing's guards, the configuration's Validate, or an already-accepted payload) before being copied in."
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/reducer.go",
       "function": "(*Reducer).sizeUnit",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal trade proposal payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a payload assembled from strings, ints, float64s, slices of those and time.Time a few lines above; no such value can fail to encode."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/reducer.go",

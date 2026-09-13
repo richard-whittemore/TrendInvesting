@@ -209,7 +209,10 @@ func moduleRoot(t *testing.T) string {
 // has is the one `make test` wrote — `coverage.out`, at the root — and Go
 // runs every test in its own package directory.
 func resolveProfile(root, path string) string {
-	return path
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(root, path)
 }
 
 // profile returns the path of a count-mode coverage profile for
@@ -267,11 +270,15 @@ func uncoveredBlocks(t *testing.T, root, path string) []block {
 			sources[rel] = src
 		}
 		startLine, startCol, endLine, endCol := parseSpan(t, span)
-		start, end := src.offset(startLine, startCol), src.offset(endLine, endCol)
+		text, ok := src.slice(startLine, startCol, endLine, endCol)
+		if !ok {
+			t.Fatalf("%s reports a block at %s:%s that does not lie inside the file as it stands; the profile was taken against different source — regenerate it", path, rel, span)
+		}
+		start, _ := src.offset(startLine, startCol)
 		blocks = append(blocks, block{
 			File:      rel,
 			Function:  src.enclosing(start),
-			Statement: normalise(string(src.text[start:end])),
+			Statement: normalise(text),
 			line:      startLine,
 		})
 	}
@@ -339,13 +346,32 @@ func funcName(fn *ast.FuncDecl) string {
 	return "(" + receiver + ")." + fn.Name.Name
 }
 
-// offset converts a 1-based line and byte column into a byte offset.
-func (s *sourceFile) offset(line, col int) int {
+// offset converts a 1-based line and byte column into a byte offset, and
+// reports whether the position exists in this file at all.
+func (s *sourceFile) offset(line, col int) (int, bool) {
+	if line < 1 || line > len(s.lineStarts) || col < 1 {
+		return 0, false
+	}
 	at := s.lineStarts[line-1] + col - 1
 	if at > len(s.text) {
-		return len(s.text)
+		return 0, false
 	}
-	return at
+	return at, true
+}
+
+// slice returns the source text of one coverage block, and reports whether
+// the span lies inside the file as it stands. A profile taken against
+// different source than the working tree holds produces spans that run past
+// the end of a file, or backwards; saying so is the only useful answer,
+// because every block read from that profile describes code that is no longer
+// there.
+func (s *sourceFile) slice(startLine, startCol, endLine, endCol int) (string, bool) {
+	start, startOK := s.offset(startLine, startCol)
+	end, endOK := s.offset(endLine, endCol)
+	if !startOK || !endOK || start > end {
+		return "", false
+	}
+	return string(s.text[start:end]), true
 }
 
 // enclosing names the top-level function a byte offset falls inside. A
@@ -512,6 +538,43 @@ func TestAProfileSuppliedByTheEnvironmentResolvesAgainstTheModuleRoot(t *testing
 			t.Parallel()
 			if got := resolveProfile(root, tt.given); got != tt.want {
 				t.Errorf("resolveProfile(%q, %q) = %q, want %q", root, tt.given, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestAProfileTakenAgainstDifferentSourceIsRefusedRatherThanMisread is the
+// stale-profile case, which is easy to produce: edit a file, then reuse the
+// profile from before the edit. Every span in it describes code that has
+// moved, so reading them as if they were current would key blocks by whatever
+// text now happens to sit at those offsets — and silently rewrite the audit's
+// verdict.
+func TestAProfileTakenAgainstDifferentSourceIsRefusedRatherThanMisread(t *testing.T) {
+	t.Parallel()
+
+	src := &sourceFile{text: []byte("package p\n\nfunc f() {}\n"), lineStarts: []int{0, 10, 11}}
+
+	tests := []struct {
+		name                                 string
+		startLine, startCol, endLine, endCol int
+		want                                 string
+		wantOK                               bool
+	}{
+		{name: "a span inside the file", startLine: 1, startCol: 1, endLine: 1, endCol: 8, want: "package", wantOK: true},
+		{name: "a line the file no longer has", startLine: 99, startCol: 1, endLine: 99, endCol: 2},
+		{name: "a column past the end of the file", startLine: 3, startCol: 1, endLine: 3, endCol: 500},
+		{name: "a span that runs backwards", startLine: 3, startCol: 9, endLine: 1, endCol: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := src.slice(tt.startLine, tt.startCol, tt.endLine, tt.endCol)
+			if ok != tt.wantOK {
+				t.Fatalf("slice() ok = %v, want %v", ok, tt.wantOK)
+			}
+			if got != tt.want {
+				t.Errorf("slice() = %q, want %q", got, tt.want)
 			}
 		})
 	}

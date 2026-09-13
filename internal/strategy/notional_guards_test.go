@@ -270,3 +270,8 @@ func cashMovementEnvelopeFor(t *testing.T, cfg event.ConfigurationPayload, seque
 	t.Helper()
 	return envelopeFor(t, cfg, fmt.Sprintf("cash-movement-%d", sequence), event.CashMovementEventType, event.CashMovementSchemaVersion, sequence, payload.AsOf, payload)
 }
+
+func barEnvelopeFor(t *testing.T, cfg event.ConfigurationPayload, sequence uint64, payload event.CompletedBarPayload) event.Envelope {
+	t.Helper()
+	return envelopeFor(t, cfg, fmt.Sprintf("bar-%d", sequence), event.CompletedBarEventType, event.CompletedBarSchemaVersion, sequence, payload.PeriodEnd, payload)
+}

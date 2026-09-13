@@ -710,3 +710,30 @@ func TestAProducerThatFailsOnAFillStopsTheBar(t *testing.T) {
 		t.Errorf("got %d fill(s) in the result, want the refused fill to still be recorded", len(filled))
 	}
 }
+
+// TestAFillThisSimulatorCannotDescribeIsNotEmitted is the last guard before a
+// fill envelope leaves this package. Every field in it is copied from an
+// order, and an order is copied from a producer's emission that nothing on
+// this seam validated — so a proposal missing something a fill needs produces
+// a fill payload that fails its own contract. Refusing it here is what keeps
+// an unjournallable event out of the composed input stream, which
+// replay.Engine.Run would then refuse wholesale.
+func TestAFillThisSimulatorCannotDescribeIsNotEmitted(t *testing.T) {
+	t.Parallel()
+
+	simulator := newSimulator(t)
+	// An Add proposal naming no Campaign. The book has no opinion about that
+	// — only an exit proposal is checked against an open Campaign — so the
+	// order rests, is covered, and is priced.
+	if err := observeDecisions(t, simulator, addProposal(t, "add-proposal:AAPL:day-56", "", 156, fixtureUnitQuantity, fixtureN)); err != nil {
+		t.Fatalf("observing an add proposal naming no campaign: %v", err)
+	}
+
+	_, err := fills.RunBar(context.Background(), simulator, emitting(), barEnvelope(t, bar(day(57), 150, 160, 149, 155)))
+	if err == nil {
+		t.Fatal("RunBar() error = nil, want a fill payload that fails its own contract to be refused")
+	}
+	if !strings.Contains(err.Error(), "built an invalid fill payload") {
+		t.Errorf("error = %v, want it to say the payload it built was invalid", err)
+	}
+}
