@@ -7,9 +7,9 @@
 // Each record carries a hash chained over the previous record's hash, the
 // record's own kind, and the canonical bytes of its envelope (ADR 0017), so
 // altering event k breaks every link after k and a silent edit to recorded
-// history is detectable without a secret. It is evidence, not proof: whoever can rewrite one record
-// can rewrite the whole file, and dropping records from the end leaves a
-// valid chain. Anchoring each run's final record hash outside the system —
+// history is detectable without a secret. It is evidence, not proof: whoever
+// can rewrite one record can rewrite the whole file, and dropping records
+// from the end leaves a valid chain. Anchoring each run's final record hash outside the system —
 // the git-committed run registry — is what closes that, and is why Verify
 // reports the final hash.
 //
@@ -172,11 +172,10 @@ type Chain struct {
 // are a closed set and canonical envelope bytes always begin with '{', so
 // the concatenation needs no separator to stay unambiguous.
 func (c *Chain) Next(kind string, envelope event.Envelope) string {
-	canonical := event.CanonicalEnvelopeBytes(envelope)
-	hashed := make([]byte, 0, len(c.previous)+len(kind)+len(canonical))
+	var hashed []byte
 	hashed = append(hashed, c.previous[:]...)
 	hashed = append(hashed, kind...)
-	hashed = append(hashed, canonical...)
+	hashed = append(hashed, event.CanonicalEnvelopeBytes(envelope)...)
 	sum := sha256.Sum256(hashed)
 	c.previous = sum
 	return "sha256:" + hex.EncodeToString(sum[:])
