@@ -199,6 +199,27 @@ func RealisedRiskAtStop(quantity int64, stopMultiple, n, dollarsPerPoint, notion
 	return float64(quantity) * (stopMultiple * n * dollarsPerPoint) / notionalAccount
 }
 
+// Product returns a*b rounded to float64, so the result cannot be fused into
+// an addition that follows it.
+//
+// Go permits an implementation to fuse `x + a*b` into a single fused
+// multiply-add "possibly across statements", and arm64 does while amd64 does
+// not: the fused form keeps the full-precision product, so the two
+// architectures disagree in the last bits. An explicit conversion is the only
+// barrier the language guarantees, and a function whose body performs it
+// carries that barrier through inlining. See docs/development.md,
+// floating-point determinism.
+//
+// Use it wherever a product feeds an addition or subtraction — most
+// importantly an accumulator, where the divergence compounds with every term
+// rather than appearing once. `a*b*c` with no addition is NOT fusible and
+// needs nothing. internal/indicator, internal/event and internal/fills state
+// the same barrier inline (`float64(a*b)`), because none of them may depend
+// on this package.
+func Product(a, b float64) float64 {
+	return float64(a * b)
+}
+
 // DrawdownStepRetainedFraction is the fraction of the Notional Account
 // retained (equivalently, the complement of the 20% reduction) at each
 // Drawdown Step: x0.8 (The Turtle Rules p.17, ADR 0007). Exported so

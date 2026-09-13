@@ -12,15 +12,22 @@
 
 Go permits an implementation to fuse `a + b*c` into a single fused multiply-add, "possibly across statements", and arm64 does while amd64 does not. The fused form keeps the full-precision product, so the two architectures produce results that differ in the last bits — and a platform whose journal must be byte-identical for replay equivalence (ADR 0017) cannot afford that. This is the determinism rule in `.greptile/rules.md` applied to the arithmetic itself: same inputs, same configuration, same code version, same decisions — on any machine.
 
-An explicit conversion is the only barrier the language guarantees, so every product that feeds an addition or subtraction is rounded before it:
+An explicit conversion is the only barrier the language guarantees, so every product that feeds an addition or subtraction is rounded before it. `internal/sizing.Product` performs that conversion and names the intent; the packages that may not depend on `internal/sizing` — `internal/indicator`, `internal/event`, `internal/fills` — state the same barrier inline:
 
 ```go
-level := entryPrice - float64(stopMultiple*campaignN)
+total += sizing.Product(risk, dollarsPerPoint)      // an accumulator
+level := entryPrice - float64(stopMultiple*campaignN) // inline, same barrier
 ```
 
-Assigning the product to a variable first does **not** help; the specification allows fusion across statements. Round at the point of the product, in the producer *and* in any `event` payload validator that re-derives the same value, or the two will disagree.
+Three things to know:
 
-It cost a real defect to learn: `internal/strategy`'s whole-life exit price fused on arm64, and the committed golden journal — the first artifact in this repository that has to be byte-identical across machines — failed in CI on amd64 while passing locally.
+- **`x += a*b` is the same shape** as `x = x + a*b`, and it is the worst case: the divergence compounds with every term instead of appearing once. The weighted entry and exit prices, and the aggregate open risk, are all accumulators.
+- **Assigning the product to a variable first does not help.** The specification allows fusion across statements; only the conversion is a barrier.
+- **`a*b*c` with no addition is not fusible** and needs nothing. Do not "fix" it.
+
+Round in the producer *and* in any `event` payload validator that re-derives the same value, or the two will disagree.
+
+It cost a real defect to learn, twice over. `internal/strategy`'s whole-life exit price fused on arm64, and the committed golden journal — the first artifact in this repository that has to be byte-identical across machines — failed in CI on amd64 while passing locally. The first sweep then missed every `+=` site, because the walk that found the others only looked at expressions and not at assignments; the golden passed anyway, because that fixture's numbers happened not to differ at those sites. The fixture now has four Units whose products need more than 53 bits, and `cmd/backtest`'s fusion tests hold that sensitivity in place.
 
 ## Source comment standard
 

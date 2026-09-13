@@ -5,7 +5,7 @@
   "stop_multiple": 2,
   "entry_channel_length": 20,
   "exit_channel_length": 10,
-  "max_units": 2,
+  "max_units": 4,
   "slippage_n": 0.05,
   "tier_b_distance_in_n": 1,
   "dollars_per_point": 1,

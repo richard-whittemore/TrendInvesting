@@ -181,7 +181,7 @@ func (c *campaignState) entryPrice() float64 {
 	var weighted float64
 	var quantity int64
 	for _, u := range c.units {
-		weighted += float64(u.quantity) * u.fillPrice
+		weighted += sizing.Product(float64(u.quantity), u.fillPrice)
 		quantity += u.quantity
 	}
 	return weighted / float64(quantity)
@@ -218,10 +218,9 @@ func (c *campaignState) lifeAggregate(thisQuantity int64, thisEntryWeightedSum, 
 	}
 	quantity = c.closedQuantity + thisQuantity
 	entryPrice = (c.closedEntryWeightedSum + thisEntryWeightedSum) / float64(quantity)
-	// The product is rounded before the sum: see docs/development.md,
-	// floating-point determinism. This expression is the one that fused on
-	// arm64 and made a journal architecture-dependent.
-	exitPrice = (c.closedExitWeightedSum + float64(float64(thisQuantity)*price)) / float64(quantity)
+	// sizing.Product, not a bare product: this expression is the one that
+	// fused on arm64 and made a journal architecture-dependent.
+	exitPrice = (c.closedExitWeightedSum + sizing.Product(float64(thisQuantity), price)) / float64(quantity)
 	return quantity, entryPrice, exitPrice
 }
 
@@ -1656,7 +1655,7 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 	var thisEntryWeightedSum float64
 	unitIndexes := make([]int, len(closingUnits))
 	for i, u := range closingUnits {
-		thisEntryWeightedSum += float64(u.quantity) * u.fillPrice
+		thisEntryWeightedSum += sizing.Product(float64(u.quantity), u.fillPrice)
 		unitIndexes[i] = u.index
 	}
 	thisEntryPrice := thisEntryWeightedSum / float64(closingQuantity)
@@ -1789,7 +1788,7 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 	// has been validated — identical discipline to openCampaign's own.
 	campaign.closedQuantity += closingQuantity
 	campaign.closedEntryWeightedSum += thisEntryWeightedSum
-	campaign.closedExitWeightedSum += float64(closingQuantity) * fill.Price
+	campaign.closedExitWeightedSum += sizing.Product(float64(closingQuantity), fill.Price)
 	campaign.lastCloseFillAt = fill.FilledAt
 	campaign.removeUnits(closingUnits)
 	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
@@ -1936,7 +1935,7 @@ func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, 
 	// stop ever preceded this exit — every such fixture, byte for byte.
 	var thisEntryWeightedSum float64
 	for _, u := range campaign.units {
-		thisEntryWeightedSum += float64(u.quantity) * u.fillPrice
+		thisEntryWeightedSum += sizing.Product(float64(u.quantity), u.fillPrice)
 	}
 	thisQuantity := campaign.filledQuantity()
 	quantity, entryPrice, exitPrice := campaign.lifeAggregate(thisQuantity, thisEntryWeightedSum, fill.Price)
