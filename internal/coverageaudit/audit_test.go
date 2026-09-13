@@ -346,6 +346,17 @@ func funcName(fn *ast.FuncDecl) string {
 	return "(" + receiver + ")." + fn.Name.Name
 }
 
+// lineEnd is the byte offset one past the last character of a 1-based line:
+// the newline that ended it, or the end of the file for a last line without
+// one. A coverage position may point AT that offset — a block ending in a
+// closing brace at the end of a line does — but never past it.
+func (s *sourceFile) lineEnd(line int) int {
+	if line < len(s.lineStarts) {
+		return s.lineStarts[line] - 1
+	}
+	return len(s.text)
+}
+
 // offset converts a 1-based line and byte column into a byte offset, and
 // reports whether that position exists on THAT LINE.
 //
@@ -362,7 +373,7 @@ func (s *sourceFile) offset(line, col int) (int, bool) {
 		return 0, false
 	}
 	at := s.lineStarts[line-1] + col - 1
-	if at > len(s.text) {
+	if at > s.lineEnd(line) {
 		return 0, false
 	}
 	return at, true
