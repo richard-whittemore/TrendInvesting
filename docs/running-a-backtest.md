@@ -33,6 +33,23 @@ Verification answers one question only — **was this file edited** — and deli
 
 A hash chain is tamper-**evidence**, not tamper-**proofing**: whoever can rewrite one record can rewrite the file. Anchoring each run's final record hash in the git-committed run registry is what closes that.
 
+## How to check a journal replays
+
+```sh
+go run ./cmd/backtest -replay run.jsonl
+```
+
+This feeds the journal's own recorded inputs back through a freshly constructed reducer and compares the decisions it emits, in order, with the decisions the journal recorded. It exits non-zero naming the first divergence — its position, what the journal records there, and what this build now produces instead.
+
+The reducer is built from the journal alone: the strategy version and configuration hash from its header, and the configuration payload from its own input stream. Nothing is supplied on the command line, because a journal is meant to be self-describing evidence.
+
+Two conditions are refused before anything is replayed, and neither is a divergence:
+
+- **The journal's rules version is not this build's.** Replay compares runs on the rules version alone; the build suffix is traceability only (ADR 0016). A mismatch means this engine's rules have moved on since the journal was written — which is not evidence that the journal is wrong. A journal written by a *different build of the same rules* replays normally, which is the point of splitting the two axes.
+- **The header claims a configuration the journal does not record.** The header's configuration hash is the run's identity (ADR 0012); replaying under a configuration the header does not claim would answer a question nobody asked.
+
+What this proves is the **reducer's** determinism. A journal's inputs include the fills the simulator decided (ADR 0005), so replaying them re-derives the reducer's own decisions — Setup evaluation, sizing, the Add, stop and exit rules — and says nothing about whether the fill simulator would produce the same fills again from the bars alone. That stronger, whole-pipeline property is a separate question.
+
 ## The committed fixture
 
 `cmd/backtest/testdata/` holds a one-instrument fixture and the golden journal it produces: a 32-bar run under a deliberately small test configuration (a 20-bar Entry Channel, a 10-bar Exit Channel, two Units) that opens a Campaign, adds its second Unit inside the breakout bar, and is finally stopped out on a bar that also breached the Exit Channel — leaving the exit proposal for the end-of-stream event to expire.

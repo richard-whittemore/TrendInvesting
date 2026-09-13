@@ -1,5 +1,10 @@
 package event
 
+import (
+	"fmt"
+	"strings"
+)
+
 // ComposeStrategyVersion returns the Envelope.StrategyVersion this project
 // stamps on every emission: "<strategy-id>/<rules-version>+<build>" (ADR
 // 0016).
@@ -27,4 +32,32 @@ package event
 // composition root that owns buildinfo.Version.
 func ComposeStrategyVersion(strategyID, rulesVersion, build string) string {
 	return strategyID + "/" + rulesVersion + "+" + build
+}
+
+// DecomposeStrategyVersion is ComposeStrategyVersion's inverse: it splits a
+// StrategyVersion back into the strategy id, rules version, and build it was
+// composed from.
+//
+// Replay equivalence compares two runs on rulesVersion alone — the build
+// suffix is traceability only (ADR 0016) — so this is exposed as its own
+// function rather than requiring every caller that needs just that one axis
+// to re-derive the split. The format is fixed: the FIRST "/" separates
+// strategyID from the rest, and the FIRST "+" in what remains separates
+// rulesVersion from build. A string that does not contain both separators,
+// or that contains one where any resulting part is empty, is refused rather
+// than partially decomposed: a caller comparing rules versions must not
+// silently accept a strategyVersion this project never composed.
+func DecomposeStrategyVersion(strategyVersion string) (strategyID, rulesVersion, build string, err error) {
+	id, rest, ok := strings.Cut(strategyVersion, "/")
+	if !ok {
+		return "", "", "", fmt.Errorf("event: strategy version %q does not contain the \"/\" separating strategy id from rules version and build", strategyVersion)
+	}
+	rules, buildPart, ok := strings.Cut(rest, "+")
+	if !ok {
+		return "", "", "", fmt.Errorf("event: strategy version %q does not contain the \"+\" separating rules version from build", strategyVersion)
+	}
+	if id == "" || rules == "" || buildPart == "" {
+		return "", "", "", fmt.Errorf("event: strategy version %q has an empty strategy id, rules version, or build", strategyVersion)
+	}
+	return id, rules, buildPart, nil
 }

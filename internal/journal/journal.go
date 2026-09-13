@@ -327,6 +327,29 @@ func checkFormatVersion(version uint32) error {
 	return nil
 }
 
+// Split separates a journal's two interleaved streams by each record's own
+// Kind (ADR 0017): every input, in recording order, then every decision, in
+// recording order. This is the split replay equivalence reads to decide what
+// to feed a fresh reducer and what to compare its output against — Kind
+// lives on the record and is covered by the chain precisely so this split
+// cannot be forged undetectably (see Chain.Next).
+//
+// A record whose Kind is outside the closed set fails closed rather than
+// being silently sorted into one pile or the other.
+func Split(records []Record) (inputs, decisions []event.Envelope, err error) {
+	for _, record := range records {
+		switch record.Kind {
+		case KindInput:
+			inputs = append(inputs, record.Envelope)
+		case KindDecision:
+			decisions = append(decisions, record.Envelope)
+		default:
+			return nil, nil, fmt.Errorf("journal: record %d states kind %q, which is neither %q nor %q", record.Sequence, record.Kind, KindInput, KindDecision)
+		}
+	}
+	return inputs, decisions, nil
+}
+
 // Verification is what a journal that verifies reports about itself. The
 // final record hash is the value a run registry anchors, turning "detectable
 // if you kept the original" into "detectable, full stop" (ADR 0017).

@@ -1,8 +1,10 @@
 // Command backtest runs a declared configuration over a bar fixture and
-// writes the run's journal, or verifies a journal it wrote earlier.
+// writes the run's journal, verifies a journal it wrote earlier, or checks
+// one for replay equivalence.
 //
 //	backtest -config <configuration.json> -bars <bars.json> -out <journal.jsonl>
 //	backtest -verify <journal.jsonl>
+//	backtest -replay <journal.jsonl>
 //
 // It is composition only: it wires the reducer, the fill simulator, the bar
 // source and the journal writer together and contains no rules
@@ -38,12 +40,16 @@ func run(args []string, out io.Writer) error {
 	barsPath := flags.String("bars", "", "path to the JSON array of completed bars to run over")
 	outPath := flags.String("out", "", "path to write the run's journal to")
 	verifyPath := flags.String("verify", "", "path of a journal to verify instead of running a backtest")
+	replayPath := flags.String("replay", "", "path of a journal to check for replay equivalence instead of running a backtest")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 
 	if *verifyPath != "" {
 		return verify(*verifyPath, out)
+	}
+	if *replayPath != "" {
+		return doReplay(*replayPath, out)
 	}
 
 	var missing []error
