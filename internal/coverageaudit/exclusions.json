@@ -350,6 +350,34 @@
       "reason": "json.Unmarshal of bytes this same Apply call marshalled from a validated TradeProposalPayload a few statements earlier."
     },
     {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).evaluateAdd",
+      "statement": "return nil, fmt.Errorf( \"strategy: instrument %q: campaign %q: no account.snapshot has ever supplied an available-cash figure; refusing to size a unit as though cash were infinite (ADR 0010)\", campaign.instrumentID, campaign.campaignID)",
+      "category": "unreachable-by-invariant",
+      "reason": "evaluateAdd only ever runs while state.campaign is non-nil, and the only way a Campaign comes into being is applyFill accepting a fill for a trade proposal sizeUnit produced (reducer.go) — CampaignOpenedEventType is never a recognised INPUT type (Apply's switch), so a Campaign can never be injected directly. sizeUnit itself refuses to build a proposal unless r.hasAvailableCash is already true (its own identical guard, reducer.go), and nothing in this codebase ever sets hasAvailableCash back to false once an account.snapshot has set it true (applyAccountSnapshot, notional.go). So by the time any Campaign exists, hasAvailableCash is already, and permanently, true. The guard stays for the same reason sizeUnit's nReady guard does: defence in depth if that call chain ever changes, not a claim that a caller would never construct this state."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).evaluateAdd",
+      "statement": "return nil, err",
+      "category": "unreachable-by-construction",
+      "reason": "Propagates declineAdd's error, whose own two failure paths (Validate and json.Marshal) are themselves unreachable by construction (their entries in this list, function (*Reducer).declineAdd)."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).declineAdd",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal declined payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a payload assembled field by field from campaign identifiers already known non-empty (an open Campaign always has both) and from requiredCash/availableCash figures the caller computed as a plain product and read from an already-validated AccountSnapshotPayload — both finite by construction, and requiredCash is strictly greater than availableCash by the caller's own if-condition (the only call site, evaluateAdd) before declineAdd is ever invoked. If that relationship ever stopped holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).declineAdd",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal declined payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold — a NaN or an infinity in a float64 field — and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, a time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+    },
+    {
       "file": "internal/strategy/end_of_stream.go",
       "function": "(*Reducer).applyRunCompleted",
       "statement": "return nil, err",
