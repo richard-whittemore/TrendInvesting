@@ -103,7 +103,10 @@ func AggregateOpenRisk(units []UnitOpenRisk, dollarsPerPoint float64) (float64, 
 			continue
 		}
 		if entryFinite && stopFinite {
-			total += math.Max(0, u.EntryPrice-u.ProtectiveStop) * float64(u.Quantity) * dollarsPerPoint
+			// Product, not a bare product, because this is an accumulator:
+			// see Product's own doc comment.
+			risk := math.Max(0, u.EntryPrice-u.ProtectiveStop) * float64(u.Quantity)
+			total += Product(risk, dollarsPerPoint)
 		}
 	}
 

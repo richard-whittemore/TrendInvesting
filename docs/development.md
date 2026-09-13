@@ -8,6 +8,27 @@
 4. Fail closed on unknown schemas, missing sequences, stale data, or uncertain brokerage state.
 5. Prefer table-driven tests and replay fixtures over behavior hidden inside LEAN callbacks.
 
+## Floating-point determinism: never leave a multiply-add fusible
+
+Go permits an implementation to fuse `a + b*c` into a single fused multiply-add, "possibly across statements", and arm64 does while amd64 does not. The fused form keeps the full-precision product, so the two architectures produce results that differ in the last bits — and a platform whose journal must be byte-identical for replay equivalence (ADR 0017) cannot afford that. This is the determinism rule in `.greptile/rules.md` applied to the arithmetic itself: same inputs, same configuration, same code version, same decisions — on any machine.
+
+An explicit conversion is the only barrier the language guarantees, so every product that feeds an addition or subtraction is rounded before it. `internal/sizing.Product` performs that conversion and names the intent; `internal/indicator` and `internal/fills`, which do not import that package, state the same barrier inline:
+
+```go
+total += sizing.Product(risk, dollarsPerPoint)      // an accumulator
+level := entryPrice - float64(stopMultiple*campaignN) // inline, same barrier
+```
+
+Three things to know:
+
+- **`x += a*b` is the same shape** as `x = x + a*b`, and it is the worst case: the divergence compounds with every term instead of appearing once. The weighted entry and exit prices, and the aggregate open risk, are all accumulators.
+- **Assigning the product to a variable first does not help.** The specification allows fusion across statements; only the conversion is a barrier.
+- **`a*b*c` with no addition is not fusible** and needs nothing. Do not "fix" it.
+
+Round in the producer *and* in any `event` payload validator that re-derives the same value, or the two will disagree.
+
+It cost a real defect to learn, twice over. `internal/strategy`'s whole-life exit price fused on arm64, and the committed golden journal — the first artifact in this repository that has to be byte-identical across machines — failed in CI on amd64 while passing locally. The first sweep then missed every `+=` site, because the walk that found the others only looked at expressions and not at assignments; the golden passed anyway, because that fixture's numbers happened not to differ at those sites. The fixture now has four Units whose products need more than 53 bits, and `cmd/backtest`'s fusion tests hold that sensitivity in place.
+
 ## Source comment standard
 
 A doc comment states three things and no more:
@@ -63,6 +84,8 @@ Run the same checks used by CI:
 make check
 ```
 
+To run a backtest and verify the journal it writes, see `docs/running-a-backtest.md`.
+
 Go code must be formatted with `gofmt`. New behavior should include focused tests, including failure cases and invariant checks.
 
 ## Package boundaries
@@ -73,6 +96,7 @@ Go code must be formatted with `gofmt`. New behavior should include focused test
 - `internal/indicator/` owns pure, side-effect-free strategy arithmetic (True Range, N) with no knowledge of events or replay.
 - `internal/sizing/` owns the pure risk arithmetic that turns a volatility reading into a whole number of shares and the Risk at Stop it implies (ADR 0003), kept separate from `internal/indicator/` because sizing commits capital rather than measuring a price series, and likewise knowing nothing of events or replay.
 - `internal/strategy/` owns the `replay.Handler` reducers that turn a validated event stream into decision events.
+- `internal/journal/` owns the run's journal: the append-only file of input and decision records, the hash chain that makes an edit to one detectable (ADR 0017), and the `Verify` path that recomputes it — knowing nothing of strategy rules, and deliberately not answering replay equivalence's question.
 - `internal/fills/` owns the intraday fill model (ADR 0005) and the cost model (ADR 0013): the resting orders in force for an instrument, learned from the reducer's own emissions, and the per-bar protocol (`RunBar`) that turns one completed bar into `execution.fill` events indistinguishable in shape from adapter-produced ones — kept separate from `internal/strategy/` because it decides what a venue did, never what the strategy should do.
 - Future strategy packages must not import LEAN, database, or transport implementations.
 - `adapter/lean/` documents and will contain the deliberately thin Python boundary.

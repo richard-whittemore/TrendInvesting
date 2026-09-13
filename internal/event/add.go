@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
 // AddProposalEventType identifies the Add-proposal decision payload for the
@@ -142,7 +144,7 @@ func (p AddProposalPayload) Validate() error {
 	}
 
 	if previousFillFinite && campaignNFinite && levelFinite {
-		if derived := p.PreviousUnitFill + 0.5*p.CampaignN; p.Level != derived {
+		if derived := p.PreviousUnitFill + sizing.Product(0.5, p.CampaignN); p.Level != derived {
 			errs = append(errs, fmt.Errorf(
 				"stated level %v does not match the derivation %v (previous unit fill %v + 0.5 x campaign n %v): the add ladder is measured from the actual fill (The Turtle Rules p.19)",
 				p.Level, derived, p.PreviousUnitFill, p.CampaignN))
@@ -281,7 +283,7 @@ func (p CampaignUnitAddedPayload) Validate() error {
 	}
 
 	if fillPriceFinite && stopMultipleFinite && campaignNFinite && stopFinite {
-		if derived := p.FillPrice - p.StopMultiple*p.CampaignN; p.ProtectiveStop != derived {
+		if derived := p.FillPrice - sizing.Product(p.StopMultiple, p.CampaignN); p.ProtectiveStop != derived {
 			errs = append(errs, fmt.Errorf(
 				"stated protective stop %v does not match the derivation %v (fill price %v - stop multiple %v x campaign n %v)",
 				p.ProtectiveStop, derived, p.FillPrice, p.StopMultiple, p.CampaignN))

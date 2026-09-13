@@ -748,7 +748,7 @@ func (s *Simulator) price(kind, side string, level, n float64, quantity int64, r
 	if !isFinite(n) || n <= 0 {
 		return candidate{}, false, fmt.Errorf("fills: a %s order at level %v carries n %v; slippage is measured in n (ADR 0013) and cannot be derived from a non-positive one", kind, level, n)
 	}
-	execution, err := Execute(side, level, r, s.slippageN*n)
+	execution, err := Execute(side, level, r, float64(s.slippageN*n))
 	if err != nil {
 		return candidate{}, false, err
 	}

@@ -39,6 +39,28 @@ func (f HandlerFunc) Apply(ctx context.Context, envelope event.Envelope) ([]even
 	return f(ctx, envelope)
 }
 
+// Stamp returns emission with the three fields a handler may not set for
+// itself: Sequence from the output stream's own counter, CausationID from
+// the input that caused the emission, and CorrelationID from that input's
+// own CorrelationID or, absent one, its ID (docs/architecture.md: "a handler
+// cannot claim causation or correlation it did not have").
+//
+// It is exported so that a journal writer recording decisions as they are
+// emitted stamps them exactly as Engine.Run does. The two must not drift: a
+// journal whose decisions were stamped differently could never be reproduced
+// by a replay of its own inputs, which is the property that makes it
+// evidence rather than a summary.
+func Stamp(input, emission event.Envelope, outputSequence uint64) event.Envelope {
+	correlationID := input.CorrelationID
+	if correlationID == "" {
+		correlationID = input.ID
+	}
+	emission.Sequence = outputSequence
+	emission.CausationID = input.ID
+	emission.CorrelationID = correlationID
+	return emission
+}
+
 // Engine enforces event validation and contiguous processing order.
 type Engine struct {
 	handler Handler
@@ -95,15 +117,9 @@ func (e *Engine) Run(ctx context.Context, events []event.Envelope) ([]event.Enve
 
 		decisions, applyErr := e.handler.Apply(ctx, envelope)
 
-		correlationID := envelope.CorrelationID
-		if correlationID == "" {
-			correlationID = envelope.ID
-		}
 		for emissionIndex, decision := range decisions {
 			outputSequence++
-			decision.Sequence = outputSequence
-			decision.CausationID = envelope.ID
-			decision.CorrelationID = correlationID
+			decision = Stamp(envelope, decision, outputSequence)
 			if err := decision.Validate(); err != nil {
 				validationErr := fmt.Errorf("emit at input sequence %d, emission %d: %w", envelope.Sequence, emissionIndex, err)
 				if applyErr != nil {

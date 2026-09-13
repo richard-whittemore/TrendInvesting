@@ -1,0 +1,23 @@
+{
+  "strategy_id": "backtest-fixture",
+  "sizing_mode": "volatility-normalised",
+  "unit_volatility_fraction": 0.005,
+  "stop_multiple": 2,
+  "entry_channel_length": 20,
+  "exit_channel_length": 10,
+  "max_units": 4,
+  "slippage_n": 0.05,
+  "tier_b_distance_in_n": 1,
+  "dollars_per_point": 1,
+  "risk_at_stop_fraction": 0,
+  "notional_account": {
+    "starting_equity": 1000000,
+    "rebasing_month": 1,
+    "rebasing_day": 1
+  },
+  "commission": {
+    "per_share": 0.005,
+    "minimum_per_order": 1,
+    "maximum_fraction_of_trade_value": 0.01
+  }
+}

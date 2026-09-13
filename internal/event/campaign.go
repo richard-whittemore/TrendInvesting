@@ -225,7 +225,7 @@ func (p CampaignOpenedPayload) Validate() error {
 	// Invariant 2's derivation half, checked whenever the operands are usable
 	// so that a stop which is wrong AND out of range reports both facts.
 	if entryPriceFinite && stopMultipleFinite && campaignNFinite && protectiveStopFinite {
-		if derived := p.EntryPrice - p.StopMultiple*p.CampaignN; p.ProtectiveStop != derived {
+		if derived := p.EntryPrice - sizing.Product(p.StopMultiple, p.CampaignN); p.ProtectiveStop != derived {
 			errs = append(errs, fmt.Errorf(
 				"stated protective stop %v does not match the derivation %v (entry price %v - stop multiple %v x campaign n %v): the stop is measured from the actual fill (ADR 0013)",
 				p.ProtectiveStop, derived, p.EntryPrice, p.StopMultiple, p.CampaignN))

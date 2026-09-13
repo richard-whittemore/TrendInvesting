@@ -34,7 +34,9 @@ func SMASeed(values []float64) float64 {
 // duplicating this formula, while DefaultPeriod (20) reproduces Faith's
 // printed constant exactly.
 func WilderNext(previousN, tr float64, period int) float64 {
-	return (float64(period-1)*previousN + tr) / float64(period)
+	// The product is rounded before the sum: see docs/development.md,
+	// floating-point determinism.
+	return (float64(float64(period-1)*previousN) + tr) / float64(period)
 }
 
 // WilderAverage computes N — the Wilder-smoothed average of True Range — one

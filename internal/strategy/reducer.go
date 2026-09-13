@@ -56,7 +56,12 @@ type Reducer struct {
 	strategyVersion   string
 	configurationHash string
 
-	configured         bool
+	configured bool
+	// streamEnded records that event.RunCompletedEventType has been applied.
+	// A run ends once, and an input arriving after it contradicts the fact
+	// that event states, so Apply fails closed rather than absorbing it (see
+	// applyRunCompleted).
+	streamEnded        bool
 	entryChannelLength int
 	// exitChannelLength is event.ConfigurationPayload.ExitChannelLength
 	// (20 in the Baseline, The Turtle Rules p.26, ADR 0002), captured once
@@ -242,6 +247,9 @@ func NewReducer(strategyVersion string, payload event.ConfigurationPayload) (*Re
 // Any other event type fails closed rather than being silently ignored
 // (docs/development.md principle 4: "Fail closed on unknown schemas").
 func (r *Reducer) Apply(_ context.Context, envelope event.Envelope) ([]event.Envelope, error) {
+	if r.streamEnded {
+		return nil, fmt.Errorf("strategy: the input stream has already ended, so %q at sequence %d cannot exist; a run ends once (see applyRunCompleted)", envelope.Type, envelope.Sequence)
+	}
 	switch envelope.Type {
 	case event.ConfigurationEventType:
 		return r.applyConfiguration(envelope)
@@ -253,6 +261,8 @@ func (r *Reducer) Apply(_ context.Context, envelope event.Envelope) ([]event.Env
 		return r.applyAccountSnapshot(envelope)
 	case event.CashMovementEventType:
 		return r.applyCashMovement(envelope)
+	case event.RunCompletedEventType:
+		return r.applyRunCompleted(envelope)
 	default:
 		return nil, fmt.Errorf("strategy: unrecognized event type %q", envelope.Type)
 	}
@@ -770,7 +780,7 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 	// event.TradeProposalPayload.Validate re-derives it in, so the two agree
 	// bit for bit (CONTEXT.md: "Protective Stop"; The Turtle Rules p.22's 2N
 	// stop in the Baseline).
-	protectiveStopIntent := entryLevel - r.stopMultiple*n
+	protectiveStopIntent := entryLevel - sizing.Product(r.stopMultiple, n)
 	if protectiveStopIntent <= 0 {
 		// A long equity cannot trade below zero, so this stop is
 		// unreachable: the Unit would in fact risk the whole position rather
