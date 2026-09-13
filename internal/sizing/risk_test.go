@@ -393,3 +393,23 @@ func TestAggregateOpenRiskFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// TestAggregateOpenRiskRefusesANonFiniteProtectiveStop is the guard that
+// stops a single unreadable Unit from silently emptying the Campaign's whole
+// risk figure. max(0, entry-stop) with a NaN stop returns NaN, which then
+// compares false against every risk budget the reducer checks it against —
+// the position would look like it had no risk at all rather than like an
+// unknown one.
+func TestAggregateOpenRiskRefusesANonFiniteProtectiveStop(t *testing.T) {
+	t.Parallel()
+
+	_, err := sizing.AggregateOpenRisk([]sizing.UnitOpenRisk{
+		{EntryPrice: 156, ProtectiveStop: math.NaN(), Quantity: 100},
+	}, 1)
+	if err == nil {
+		t.Fatal("AggregateOpenRisk() error = nil, want a non-finite protective stop to be refused")
+	}
+	if !strings.Contains(err.Error(), "protective stop must be finite") {
+		t.Errorf("error = %v, want it to name the protective stop", err)
+	}
+}
