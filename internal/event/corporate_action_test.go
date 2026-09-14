@@ -10,8 +10,8 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
 
-// This file holds #24's own tests: the corporate-action event a Delisting
-// Exit is built from (CONTEXT.md: "Delisting Exit"; ADR 0009).
+// This file holds the tests for the corporate-action event a Delisting Exit
+// is built from (CONTEXT.md: "Delisting Exit"; ADR 0009).
 
 func validCorporateAction() event.CorporateActionPayload {
 	return event.CorporateActionPayload{

@@ -813,10 +813,10 @@ func validCampaignExitedByExitChannel() event.CampaignExitedPayload {
 	}
 }
 
-// validCampaignExitedByDelisting mirrors validCampaignExitedByExitChannel for
-// #24's own reason: ADR 0009 forces the exit directly, so FillID names the
-// corporate-action envelope that forced it rather than an execution fill (see
-// CampaignExitedPayload.FillID's own doc comment).
+// validCampaignExitedByDelisting mirrors validCampaignExitedByExitChannel
+// with the one difference ADR 0009 makes: the exit is forced directly, so
+// FillID names the corporate-action envelope that forced it rather than an
+// execution fill (see CampaignExitedPayload.FillID's own doc comment).
 func validCampaignExitedByDelisting() event.CampaignExitedPayload {
 	entry := campaignEntryPrice
 	exit := 179.5
@@ -858,8 +858,8 @@ func TestCampaignExitedPayloadValidateAcceptsExitChannelReason(t *testing.T) {
 	}
 }
 
-// TestCampaignExitedPayloadValidateAcceptsDelistingReason is #24's own
-// counterpart: ExitReasonDelisting is recognised, and a delisting exit's
+// TestCampaignExitedPayloadValidateAcceptsDelistingReason is the
+// delisting counterpart: ExitReasonDelisting is recognised, and a delisting exit's
 // FillID (the corporate-action envelope's id, not an execution) validates
 // exactly like any other exit's.
 func TestCampaignExitedPayloadValidateAcceptsDelistingReason(t *testing.T) {
