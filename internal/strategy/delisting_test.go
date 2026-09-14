@@ -640,3 +640,131 @@ func TestDelistingEffectiveAtBeforeAnEarlierPartialStopFailsClosed(t *testing.T)
 		corporateAction(delistingAction("AAPL", day(59)))
 	stream.wantRunError("predates campaign", "most recently accepted closing fill")
 }
+
+// --- A delisted instrument cannot be traded again in this run --------------
+//
+// The three fixtures below pin the invariant applyDelisting's own doc comment
+// names. They exist because the invariant was once stated and not enforced:
+// the no-Campaign branch returned early, so a delisting arriving while an
+// entry proposal was outstanding left that proposal live, and nothing
+// recorded the instrument as delisted at all.
+
+// TestDelistingTerminallyResolvesAnOutstandingEntryProposal covers a
+// delisting that arrives with an ENTRY proposal outstanding — the case with no
+// open Campaign at all, since a pending entry proposal and a Campaign can
+// never coexist. The proposal reaches its terminal event, and the fill that
+// would have executed it opens no Campaign.
+func TestDelistingTerminallyResolvesAnOutstandingEntryProposal(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	proposalID := testDecisionID("proposal", "AAPL", day(56))
+	signalID := testDecisionID("signal", "AAPL", day(56))
+
+	stream := newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		corporateAction(delistingAction("AAPL", day(56))).
+		fill(openingFill("AAPL"))
+
+	emitted, err := stream.run()
+	if err == nil {
+		t.Fatal("Run() error = nil, want an error: a fill for a delisted instrument is a reconciliation failure")
+	}
+	for _, want := range []string{"delisted", "sim-fill-0001"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Run() error = %v, want substring %q", err, want)
+		}
+	}
+
+	// The capital-safety assertion: no Campaign came into being, in an
+	// instrument that had stopped trading.
+	if got := len(envelopesOfType(emitted, event.CampaignOpenedEventType)); got != 0 {
+		t.Fatalf("got %d campaign-opened event(s), want 0: a delisted instrument cannot be entered", got)
+	}
+
+	proposal := decodeTradeProposal(t, onlyEnvelopeOfType(t, emitted, event.TradeProposalEventType))
+	expired := decodeProposalExpired(t, onlyEnvelopeOfType(t, emitted, event.ProposalExpiredEventType))
+	if expired.Kind != event.ProposalKindEntry {
+		t.Errorf("Kind = %q, want %q", expired.Kind, event.ProposalKindEntry)
+	}
+	if expired.Reason != event.ExpiryReasonSupersededByDelisting {
+		t.Errorf("Reason = %q, want %q", expired.Reason, event.ExpiryReasonSupersededByDelisting)
+	}
+	if expired.Rule != event.RuleEntryProposalSupersededByDelisting {
+		t.Errorf("Rule = %q, want %q", expired.Rule, event.RuleEntryProposalSupersededByDelisting)
+	}
+	if expired.ProposalID != proposalID {
+		t.Errorf("ProposalID = %q, want the outstanding entry proposal's own %q", expired.ProposalID, proposalID)
+	}
+	if expired.SignalID != signalID {
+		t.Errorf("SignalID = %q, want %q: an entry-kind expiry names the signal behind the proposal", expired.SignalID, signalID)
+	}
+	if !expired.ExpiredAt.Equal(day(56)) {
+		t.Errorf("ExpiredAt = %v, want the delisting's own EffectiveAt %v", expired.ExpiredAt, day(56))
+	}
+	// Read back from the proposal this same run emitted, so the expiry
+	// restates what was actually proposed rather than a hand-copied constant.
+	if expired.Quantity != proposal.Quantity {
+		t.Errorf("Quantity = %d, want the proposal's own %d", expired.Quantity, proposal.Quantity)
+	}
+	if expired.Level != proposal.EntryLevel {
+		t.Errorf("Level = %v, want the proposal's own entry level %v", expired.Level, proposal.EntryLevel)
+	}
+	if err := expired.Validate(); err != nil {
+		t.Errorf("emitted proposal expired payload fails its own Validate(): %v", err)
+	}
+}
+
+// TestABarAfterADelistingEvaluatesNoSetup covers the other half of the same
+// invariant: once a delisting has closed a Campaign, a later bar for that
+// instrument — however plainly it breaks out — produces no Setup evaluation,
+// no Signal and no entry proposal, so no fresh Campaign can follow.
+func TestABarAfterADelistingEvaluatesNoSetup(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	// A high of 500 clears the fixture's own Entry Channel (which tops out at
+	// 200) by a wide margin, so this bar would be a Breakout — a Setup
+	// evaluation, a Signal and a proposal — on any instrument still trading.
+	staleBar := completedBar("AAPL", day(58), 500, 490, 495)
+
+	emitted := newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		bar(completedBar("AAPL", day(57), 160, 150, 155)).
+		corporateAction(delistingAction("AAPL", day(57))).
+		bar(staleBar).
+		mustRun()
+
+	exited := decodeCampaignExited(t, onlyEnvelopeOfType(t, emitted, event.CampaignExitedEventType))
+	if exited.Reason != event.ExitReasonDelisting {
+		t.Fatalf("fixture bug: Reason = %q, want %q (this test's premise is that the delisting closed the campaign)", exited.Reason, event.ExitReasonDelisting)
+	}
+
+	for _, envelope := range emitted {
+		if envelope.EventTime.Equal(staleBar.PeriodEnd) {
+			t.Errorf("emission %q of type %q is attributed to the bar after the delisting; a delisted instrument decides nothing", envelope.ID, envelope.Type)
+		}
+	}
+	if got := len(envelopesOfType(emitted, event.CampaignOpenedEventType)); got != 1 {
+		t.Errorf("got %d campaign-opened event(s), want exactly 1 (the original entry; the stale bar must open nothing)", got)
+	}
+}
+
+// TestADelistingForAnInstrumentNeverTradedBarsItFromBeingEnteredAtAll is the
+// third case: the ticket's own no-op criterion still holds — no event and no
+// error for an instrument this reducer has never seen — but the fact is
+// nonetheless recorded, so the bars that follow it are never evaluated.
+func TestADelistingForAnInstrumentNeverTradedBarsItFromBeingEnteredAtAll(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	emitted := newStream(t, cfg).
+		corporateAction(delistingAction("AAPL", day(1))).
+		bars(breakoutBars("AAPL")).
+		mustRun()
+
+	if len(emitted) != 0 {
+		t.Fatalf("got %d emission(s) after a delisting for an instrument never traded, want 0: %v", len(emitted), emitted)
+	}
+}
