@@ -27,7 +27,13 @@ const ProposalDeclinedEventType = "strategy.proposal.declined"
 
 // ProposalDeclinedSchemaVersion is the current schema version of
 // ProposalDeclinedPayload.
-const ProposalDeclinedSchemaVersion uint32 = 1
+//
+//   - Version 2 added Kind (ProposalKindEntry|ProposalKindAdd), required, and
+//     the CampaignID/RequiredCash/AvailableCash fields that go with it. A
+//     version-1 record decodes Kind as the empty string, which is not a
+//     recognised value, so it is rejected outright — the same discipline
+//     ProposalExpiredSchemaVersion's own version-2 bump follows.
+const ProposalDeclinedSchemaVersion uint32 = 2
 
 // The rule names for TradeProposalPayload.Rule, one per Sizing Mode.
 //
@@ -74,6 +80,38 @@ const (
 	// would in fact risk the whole position rather than the derived
 	// fraction.
 	DeclineReasonStopIntentNotPositive = "stop-intent-not-positive"
+	// DeclineReasonInsufficientCash means the Unit's cost — quantity x the
+	// order's resting level x dollars per point — exceeds the cash available
+	// at the previous close (ADR 0010). There is no partial Unit and no
+	// borrowing: the whole Unit is skipped, and RequiredCash/AvailableCash
+	// carry the two figures the comparison was made from.
+	DeclineReasonInsufficientCash = "insufficient-cash"
+	// DeclineReasonUnitCostNotRepresentable means the Unit's cost is a
+	// finite number only in exact arithmetic: quantity x the order's resting
+	// level x dollars per point, each of them finite, multiplies past the
+	// float64 range. Such a Unit costs more than any cash that can be held,
+	// so it is skipped exactly as an unaffordable one is (ADR 0010) rather
+	// than stopping the run. RequiredCash and AvailableCash are both zero:
+	// the cost is the one figure that cannot be stated — JSON cannot encode
+	// an infinity at all — and Detail carries the operands it was formed
+	// from instead.
+	DeclineReasonUnitCostNotRepresentable = "unit-cost-not-representable"
+)
+
+// The two Kind values ProposalDeclinedPayload accepts, mirroring
+// ProposalExpiredPayload's own Kind: which sizing path produced no position.
+// There is no ProposalKindExit here — an open Campaign's exit is a mandatory
+// closure, never a sized proposal that cash can decline.
+const (
+	// ProposalDeclinedKindEntry is a Signal that fired and was sized (or
+	// failed to size) into a new Campaign's opening Unit. SignalID is
+	// required; CampaignID must be empty, since no Campaign exists yet.
+	ProposalDeclinedKindEntry = ProposalKindEntry
+	// ProposalDeclinedKindAdd is an open Campaign's Add Ladder rung being
+	// reached and sized (or failing to size) into a further Unit. CampaignID
+	// is required; SignalID must be empty, since an Add answers no Signal
+	// (AddProposalPayload's own doc comment).
+	ProposalDeclinedKindAdd = ProposalKindAdd
 )
 
 // TradeProposalPayload is the first event in this system that states a number
@@ -397,24 +435,52 @@ func (p TradeProposalPayload) Validate() error {
 // reviewer needs to see. docs/development.md principle 3: record enough
 // immutable evidence to explain every accepted *and rejected* decision.
 //
-// A decline is not an error. The run continues; the Setup is simply not
-// traded on this bar, and a Signal is not carried forward (ADR 0011).
+// A decline is not an error. The run continues; the Setup (or the open
+// Campaign, for an Add) is simply not traded on this bar, and neither a
+// Signal nor an Add opportunity is carried forward (ADR 0011).
 type ProposalDeclinedPayload struct {
 	InstrumentID string    `json:"instrument_id"`
 	PeriodEnd    time.Time `json:"period_end"`
+	// Kind discriminates which sizing path produced no position:
+	// ProposalDeclinedKindEntry or ProposalDeclinedKindAdd. Required and
+	// closed, mirroring FillPayload.Kind's and ProposalExpiredPayload.Kind's
+	// own discipline: an empty or unrecognised value is rejected rather than
+	// defaulted.
+	Kind string `json:"kind"`
 	// SignalID is the ID of the Signal envelope that was declined, so the
-	// decline can be joined to the decision it answers.
+	// decline can be joined to the decision it answers. Required for Kind
+	// ProposalDeclinedKindEntry; must be empty for ProposalDeclinedKindAdd,
+	// which answers no Signal (AddProposalPayload's own doc comment).
 	SignalID string `json:"signal_id"`
+	// CampaignID identifies the open Campaign whose Add Ladder rung was
+	// declined. Required for Kind ProposalDeclinedKindAdd; must be empty for
+	// ProposalDeclinedKindEntry, since no Campaign exists yet.
+	CampaignID string `json:"campaign_id"`
 	// Reason is one of the enumerated DeclineReason constants — a closed set
 	// so a journal can be grouped by it.
 	Reason string `json:"reason"`
 	// Detail carries the numbers behind this particular decline, in prose.
 	// It is required: a reason without its figures cannot be checked.
 	Detail string `json:"detail"`
+	// RequiredCash and AvailableCash are the two figures
+	// DeclineReasonInsufficientCash was compared from (ADR 0010): the Unit's
+	// cost, and the cash available at the previous close. Required, finite,
+	// not negative, and RequiredCash strictly greater than AvailableCash —
+	// exactly the comparison that makes the Unit unaffordable — when Reason
+	// is DeclineReasonInsufficientCash; both must be exactly zero for every
+	// other reason, so a field that means nothing for that reason cannot
+	// carry a stray number.
+	RequiredCash  float64 `json:"required_cash"`
+	AvailableCash float64 `json:"available_cash"`
 }
 
-// Validate checks the identifying fields, that Reason is one of the
-// enumerated constants rather than free text, and that Detail is present.
+// Validate checks the identifying fields, that Kind is one of the recognised
+// values and that SignalID/CampaignID are present or absent exactly as that
+// Kind requires, that Reason is one of the enumerated constants rather than
+// free text, that Detail is present, and — only for Reason
+// DeclineReasonInsufficientCash — that RequiredCash and AvailableCash are
+// finite, not negative, and consistent with an actual shortfall; for every
+// other reason both must be exactly zero.
 func (p ProposalDeclinedPayload) Validate() error {
 	var errs []error
 	if p.InstrumentID == "" {
@@ -423,11 +489,27 @@ func (p ProposalDeclinedPayload) Validate() error {
 	if p.PeriodEnd.IsZero() {
 		errs = append(errs, errors.New("period end is required"))
 	}
-	if p.SignalID == "" {
-		errs = append(errs, errors.New("signal id is required: a decline must name the signal it answers"))
+	switch p.Kind {
+	case ProposalDeclinedKindEntry:
+		if p.SignalID == "" {
+			errs = append(errs, errors.New("signal id is required: an entry-kind decline must name the signal it answers"))
+		}
+		if p.CampaignID != "" {
+			errs = append(errs, fmt.Errorf("campaign id must be empty for an entry-kind decline (got %q): no campaign exists yet", p.CampaignID))
+		}
+	case ProposalDeclinedKindAdd:
+		if p.SignalID != "" {
+			errs = append(errs, fmt.Errorf("signal id must be empty for an add-kind decline (got %q): an add proposal answers no signal", p.SignalID))
+		}
+		if p.CampaignID == "" {
+			errs = append(errs, errors.New("campaign id is required: an add-kind decline must name the campaign whose rung it answers"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("kind %q is not a recognised proposal declined kind", p.Kind))
 	}
 	switch p.Reason {
-	case DeclineReasonNNotReady, DeclineReasonQuantityBelowOneUnit, DeclineReasonStopIntentNotPositive:
+	case DeclineReasonNNotReady, DeclineReasonQuantityBelowOneUnit, DeclineReasonStopIntentNotPositive,
+		DeclineReasonInsufficientCash, DeclineReasonUnitCostNotRepresentable:
 		// recognised
 	default:
 		errs = append(errs, fmt.Errorf("reason %q is not a recognised decline reason", p.Reason))
@@ -435,6 +517,40 @@ func (p ProposalDeclinedPayload) Validate() error {
 	if p.Detail == "" {
 		errs = append(errs, errors.New("detail is required: a decline must record the figures that produced it"))
 	}
+
+	requiredCashFinite := isFinite(p.RequiredCash)
+	availableCashFinite := isFinite(p.AvailableCash)
+	if p.Reason == DeclineReasonInsufficientCash {
+		switch {
+		case !requiredCashFinite:
+			errs = append(errs, errors.New("required cash must be finite"))
+		case p.RequiredCash < 0:
+			errs = append(errs, errors.New("required cash must not be negative"))
+		}
+		switch {
+		case !availableCashFinite:
+			errs = append(errs, errors.New("available cash must be finite"))
+		case p.AvailableCash < 0:
+			errs = append(errs, errors.New("available cash must not be negative"))
+		}
+		if requiredCashFinite && availableCashFinite && p.RequiredCash <= p.AvailableCash {
+			errs = append(errs, fmt.Errorf(
+				"required cash %v does not exceed available cash %v: a decline reasoned insufficient-cash must record an actual shortfall",
+				p.RequiredCash, p.AvailableCash))
+		}
+	} else {
+		// Compared with zero directly, never "finite and non-zero": NaN is
+		// not equal to zero and neither is an infinity, so both are caught
+		// by the same rule that keeps a field meaningless for this reason
+		// from carrying any number at all.
+		if p.RequiredCash != 0 {
+			errs = append(errs, fmt.Errorf("required cash must be zero for reason %q (got %v): it is only meaningful for %q", p.Reason, p.RequiredCash, DeclineReasonInsufficientCash))
+		}
+		if p.AvailableCash != 0 {
+			errs = append(errs, fmt.Errorf("available cash must be zero for reason %q (got %v): it is only meaningful for %q", p.Reason, p.AvailableCash, DeclineReasonInsufficientCash))
+		}
+	}
+
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid proposal declined payload: %w", err)
 	}

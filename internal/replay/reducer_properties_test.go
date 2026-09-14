@@ -88,6 +88,41 @@ func propertyConfigEnvelope(t *testing.T, cfg event.ConfigurationPayload, at, re
 	}
 }
 
+// propertyAvailableCash is the available-cash figure this file's fixture
+// supplies: comfortably clear of any Unit its prices and starting equity can
+// size, since these are replay-equivalence properties rather than
+// affordability tests (the cash-skip rule's own tests live in
+// internal/strategy).
+const propertyAvailableCash = 1_000_000_000.0
+
+// propertySnapshotEnvelope is ADR 0010's cash basis, delivered once before
+// any bar: the reducer refuses to size a Unit until an account.snapshot has
+// supplied an available-cash figure, and its AsOf is at or before every
+// decision bar's previous close.
+func propertySnapshotEnvelope(t *testing.T, sequence uint64, cfg event.ConfigurationPayload, at, recordedAt time.Time) event.Envelope {
+	t.Helper()
+	payload := mustMarshalT(t, event.AccountSnapshotPayload{
+		AsOf:          at,
+		Equity:        cfg.NotionalAccount.StartingEquity,
+		AvailableCash: propertyAvailableCash,
+		Currency:      "USD",
+	})
+	return event.Envelope{
+		ID:                "account-snapshot-1",
+		Type:              event.AccountSnapshotEventType,
+		SchemaVersion:     event.AccountSnapshotSchemaVersion,
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
+		EventTime:         at,
+		RecordedAt:        recordedAt,
+		Sequence:          sequence,
+		Source:            "fixture",
+		StrategyVersion:   propertyFixtureStrategyVersion,
+		ConfigurationHash: event.ConfigurationHash(cfg),
+		PayloadHash:       event.HashPayload(payload),
+		Payload:           payload,
+	}
+}
+
 // flatBar builds a bar whose split-adjusted and raw views are identical,
 // with Open and Close both at the midpoint of High and Low so the
 // cross-field OHLC checks are satisfied trivially.
@@ -128,9 +163,12 @@ func propertyBarEnvelope(t *testing.T, sequence uint64, bar event.CompletedBarPa
 func signalNeverSurvivesFixture(t *testing.T, recordedAt arrivalSchedule) (cfg event.ConfigurationPayload, envelopes []event.Envelope) {
 	t.Helper()
 	cfg = propertyFixtureConfiguration()
-	envelopes = []event.Envelope{propertyConfigEnvelope(t, cfg, propertyDay(0), recordedAt(0, propertyDay(0)))}
+	envelopes = []event.Envelope{
+		propertyConfigEnvelope(t, cfg, propertyDay(0), recordedAt(0, propertyDay(0))),
+		propertySnapshotEnvelope(t, 2, cfg, propertyDay(0), recordedAt(0, propertyDay(0))),
+	}
 
-	seq := uint64(2)
+	seq := uint64(3)
 	for i := 0; i < 20; i++ {
 		high := 100 + float64(i+1) // 101..120: channel high after warm-up is 120
 		bar := flatBar("AAPL", propertyDay(i+1), high, high-2)

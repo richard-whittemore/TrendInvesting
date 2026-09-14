@@ -350,6 +350,28 @@
       "reason": "json.Unmarshal of bytes this same Apply call marshalled from a validated TradeProposalPayload a few statements earlier."
     },
     {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).evaluateAdd",
+      "statement": "return nil, err",
+      "category": "unreachable-by-construction",
+      "reason": "Both propagate declineAdd's error — one per decline branch, the unrepresentable cost and the unaffordable one — and declineAdd's own two failure paths (Validate and json.Marshal) are themselves unreachable by construction (their entries in this list, function (*Reducer).declineAdd). The third propagation in this function, of cashAtPreviousClose's error, is NOT here: it is reachable and covered by TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd.",
+      "count": 2
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).declineAdd",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal declined payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a payload assembled field by field from campaign identifiers already known non-empty (an open Campaign always has both) and from cash figures the only call site, evaluateAdd, has already constrained to exactly the two shapes Validate accepts. Finiteness is not assumed: unitCost (reducer.go) reports whether the product left the float64 range, and evaluateAdd branches on that — the unrepresentable branch passes 0, 0 with a reason for which Validate requires exactly zero, and the unaffordable branch passes a requiredCash unitCost has just certified finite and which its own if-condition has just certified strictly greater than an availableCash read from an already-validated AccountSnapshotPayload. If either relationship ever stopped holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).declineAdd",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal declined payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold — a NaN or an infinity in a float64 field — and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, a time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+    },
+    {
       "file": "internal/strategy/end_of_stream.go",
       "function": "(*Reducer).applyRunCompleted",
       "statement": "return nil, err",
@@ -453,8 +475,8 @@
       "function": "(*Reducer).applyCompletedBar",
       "statement": "return nil, err",
       "category": "unreachable-by-construction",
-      "reason": "Propagation of an error from stateFor, an expire*Proposal, evaluateCampaign, evaluateAdd or rememberPendingProposal. Every failure path in all five is itself in this list. The sixth propagation, of sizeUnit's own error, is NOT here: sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account, so that one is reachable and is covered by TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun.",
-      "count": 7
+      "reason": "Propagation of an error from stateFor, an expire*Proposal, evaluateCampaign or rememberPendingProposal. Every failure path in all four is itself in this list. Two propagations are NOT here, both reachable and both covered: sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun), and evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd).",
+      "count": 6
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -503,7 +525,7 @@
       "function": "(*Reducer).decline",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal declined payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "ProposalDeclinedPayload.Validate on a payload whose Reason is one of this package's own constants and whose remaining fields come from the bar under decision, already validated."
+      "reason": "ProposalDeclinedPayload.Validate on a payload whose Reason is one of this package's own constants and whose remaining fields come from the bar under decision, already validated. The two cash figures are not assumed finite: sizeUnit passes 0, 0 for every reason for which Validate requires exactly zero, and for insufficient-cash it passes a requiredCash unitCost (reducer.go) has just certified representable and its own if-condition has just certified strictly greater than an availableCash read from an already-validated AccountSnapshotPayload."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -515,7 +537,7 @@
     {
       "file": "internal/strategy/reducer.go",
       "function": "(*Reducer).sizeUnit",
-      "statement": "return r.decline(bar, input, signalID, event.DeclineReasonNNotReady, fmt.Sprintf(\"n is not a usable volatility reading (n %v); no unit can be sized from it\", n))",
+      "statement": "return r.decline(bar, input, signalID, event.DeclineReasonNNotReady, fmt.Sprintf(\"n is not a usable volatility reading (n %v); no unit can be sized from it\", n), 0, 0)",
       "category": "unreachable-by-invariant",
       "reason": "sizeUnit has one call site, inside the branch guarded by `ready := nReady && entryChannelReady`, so nReady is always true here. The guard stays because it is what stops a division by an unusable N if that Tier gate ever changes, and 'it cannot happen here' is not a reason to divide by it."
     },

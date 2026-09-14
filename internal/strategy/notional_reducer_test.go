@@ -21,11 +21,19 @@ import (
 // tickets working internal/strategy in parallel (#11 and this one) do not
 // collide on the same test file.
 
+// notionalFixtureAvailableCash is the AvailableCash every account.snapshot
+// fixture in this file supplies: this file's own subject is the Drawdown
+// Step ladder and re-basing (ADR 0007), not the cash-skip check (ADR
+// 0010), so it stays comfortably clear of any Unit's cost regardless of how
+// far a fixture steps the Notional Account down.
+const notionalFixtureAvailableCash = 1_000_000_000.0
+
 func accountSnapshotPayload(asOf time.Time, equity float64) event.AccountSnapshotPayload {
 	return event.AccountSnapshotPayload{
-		AsOf:     asOf,
-		Equity:   equity,
-		Currency: "USD",
+		AsOf:          asOf,
+		Equity:        equity,
+		AvailableCash: notionalFixtureAvailableCash,
+		Currency:      "USD",
 	}
 }
 
@@ -62,10 +70,21 @@ func decodeDrawdownStepApplied(t *testing.T, envelope event.Envelope) event.Draw
 
 // runReducerWithAccountSnapshotsThenHighs replays a configuration event,
 // then one account.snapshot event per entry in snapshots, then one completed
-// bar per entry in highs (see runReducerOverHighs in reducer_test.go, which
-// this mirrors for the bar-only case), and returns every envelope the engine
-// emitted.
+// bar per entry in highs starting at day(1) (see runReducerOverHighs in
+// reducer_test.go, which this mirrors for the bar-only case), and returns
+// every envelope the engine emitted.
 func runReducerWithAccountSnapshotsThenHighs(t *testing.T, instrumentID string, snapshots []event.AccountSnapshotPayload, highs []float64, cfg event.ConfigurationPayload) []event.Envelope {
+	t.Helper()
+	return runReducerWithAccountSnapshotsThenHighsFrom(t, instrumentID, snapshots, highs, cfg, 1)
+}
+
+// runReducerWithAccountSnapshotsThenHighsFrom is the same fixture with the
+// first bar's day chosen by the caller, for a snapshot whose own AsOf is
+// months or a year out — a re-basing date, say. ADR 0010's cash basis is the
+// cash known at the decision bar's previous close, so a fixture whose
+// snapshot is stamped after its bars is a stream the reducer refuses; the
+// bars have to follow the snapshot in time, not only in the stream.
+func runReducerWithAccountSnapshotsThenHighsFrom(t *testing.T, instrumentID string, snapshots []event.AccountSnapshotPayload, highs []float64, cfg event.ConfigurationPayload, firstBarDay int) []event.Envelope {
 	t.Helper()
 	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
 	if err != nil {
@@ -83,7 +102,7 @@ func runReducerWithAccountSnapshotsThenHighs(t *testing.T, instrumentID string, 
 		seq++
 	}
 	for i, high := range highs {
-		periodEnd := day(i + 1)
+		periodEnd := day(firstBarDay + i)
 		bar := syntheticBar(instrumentID, periodEnd, high-100)
 		envelopes = append(envelopes, barEnvelope(t, seq, bar, periodEnd))
 		seq++
@@ -345,14 +364,14 @@ func TestReducerRejectsAccountSnapshotWithWrongSchemaVersion(t *testing.T) {
 
 	snap := accountSnapshotPayload(snapshotBefore(1), 900_000)
 	wrongVersion := accountSnapshotEnvelope(t, 2, snap, snap.AsOf)
-	wrongVersion.SchemaVersion = 2
+	wrongVersion.SchemaVersion = event.AccountSnapshotSchemaVersion + 1
 
 	envelopes := []event.Envelope{configEnvelope(t, 1, day(0)), wrongVersion}
 	_, err = engine.Run(context.Background(), envelopes)
 	if err == nil {
 		t.Fatal("Run() error = nil, want error for an account snapshot payload at the wrong schema version")
 	}
-	for _, want := range []string{"schema version", "2", "1"} {
+	for _, want := range []string{"schema version", fmt.Sprintf("%d", event.AccountSnapshotSchemaVersion+1), fmt.Sprintf("%d", event.AccountSnapshotSchemaVersion)} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("Run() error = %v, want substring %q", err, want)
 		}
@@ -714,10 +733,12 @@ func TestReducerFirstSnapshotAfterRebasingDateSizesFromTheConfiguredFigure(t *te
 	cfg := validConfigurationPayload()
 	highs := breakoutFixtureHighs()
 	// June 2026 is well after the 1 January re-basing date, and this is the
-	// account's very first snapshot.
+	// account's very first snapshot. The bars follow it in time, not only in
+	// the stream: ADR 0010's cash basis is the cash known at the decision
+	// bar's previous close.
 	snap := accountSnapshotPayload(jan(2, 2026).AddDate(0, 5, 0), 950_000)
 
-	emitted := runReducerWithAccountSnapshotsThenHighs(t, "AAPL", []event.AccountSnapshotPayload{snap}, highs, cfg)
+	emitted := runReducerWithAccountSnapshotsThenHighsFrom(t, "AAPL", []event.AccountSnapshotPayload{snap}, highs, cfg, 160)
 
 	rebasedEvents := envelopesOfType(emitted, event.NotionalAccountRebasedEventType)
 	if len(rebasedEvents) != 0 {
@@ -751,7 +772,10 @@ func TestReducerBreakoutAfterRebasingSizesFromTheRebasedFigure(t *testing.T) {
 	snap1 := accountSnapshotPayload(jan(2, 2026).Add(time.Hour), 970_000) // establishes the period, no rebase
 	snap2 := accountSnapshotPayload(jan(1, 2027), 950_000)                // rebases to 950,000
 
-	emitted := runReducerWithAccountSnapshotsThenHighs(t, "AAPL", []event.AccountSnapshotPayload{snap1, snap2}, highs, cfg)
+	// The bars run after the re-basing snapshot rather than a year before it:
+	// ADR 0010's cash basis is the cash known at the decision bar's previous
+	// close, so a bar dated before the snapshot it would spend is refused.
+	emitted := runReducerWithAccountSnapshotsThenHighsFrom(t, "AAPL", []event.AccountSnapshotPayload{snap1, snap2}, highs, cfg, 366)
 
 	rebasedEvents := envelopesOfType(emitted, event.NotionalAccountRebasedEventType)
 	if len(rebasedEvents) != 1 {

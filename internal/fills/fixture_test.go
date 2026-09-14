@@ -227,6 +227,20 @@ func driveComposed(t *testing.T, simulator *fills.Simulator, reducer *strategy.R
 	out.Inputs = append(out.Inputs, result.Inputs...)
 	out.Decisions = append(out.Decisions, result.Decisions...)
 
+	// ADR 0010's cash basis: every Add and entry is checked against
+	// the cash known at the previous close, fed by account.snapshot's
+	// AvailableCash, and the reducer fails closed absent one. This fixture's
+	// story is about the fill model, not cash affordability, so it supplies
+	// a figure with headroom well clear of any Unit's cost (fixtureUnitQuantity
+	// x a fixture price x DollarsPerPoint 1 stays far under this) before any
+	// bar runs.
+	snapshotResult, err := fills.Deliver(ctx, simulator, reducer, accountSnapshotEnvelope(t, cfg))
+	if err != nil {
+		t.Fatalf("Deliver(account snapshot) error = %v", err)
+	}
+	out.Inputs = append(out.Inputs, snapshotResult.Inputs...)
+	out.Decisions = append(out.Decisions, snapshotResult.Decisions...)
+
 	for i, b := range bars {
 		result, err := fills.RunBar(ctx, simulator, reducer, barEnvelope(t, b))
 		if err != nil {
@@ -241,6 +255,28 @@ func driveComposed(t *testing.T, simulator *fills.Simulator, reducer *strategy.R
 func configurationEnvelope(t *testing.T, cfg event.ConfigurationPayload) event.Envelope {
 	t.Helper()
 	return envelope(t, "cfg-1", event.ConfigurationEventType, event.ConfigurationSchemaVersion, day(0), cfg)
+}
+
+// fixtureAvailableCash is the AvailableCash every fixture in this package
+// supplies via accountSnapshotEnvelope: comfortably clear of any Unit's cost
+// under baselineConfig's DollarsPerPoint of 1 and fixtureUnitQuantity's
+// 3,333 shares at fixture prices in the low hundreds, since this package's
+// own subject is the fill model, not cash affordability (internal/strategy
+// owns that).
+const fixtureAvailableCash = 10_000_000.0
+
+// accountSnapshotEnvelope supplies ADR 0010's cash basis once, at
+// day(0) alongside the configuration and before any bar, so every fixture in
+// this package sizes a Unit without tripping the reducer's fail-closed "no
+// cash figure ever supplied" guard.
+func accountSnapshotEnvelope(t *testing.T, cfg event.ConfigurationPayload) event.Envelope {
+	t.Helper()
+	return envelope(t, "snapshot-1", event.AccountSnapshotEventType, event.AccountSnapshotSchemaVersion, day(0), event.AccountSnapshotPayload{
+		AsOf:          day(0),
+		Equity:        cfg.NotionalAccount.StartingEquity,
+		AvailableCash: fixtureAvailableCash,
+		Currency:      "USD",
+	})
 }
 
 func barEnvelope(t *testing.T, b event.CompletedBarPayload) event.Envelope {

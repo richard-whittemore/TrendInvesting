@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -118,6 +119,25 @@ type Reducer struct {
 	// require Currency non-empty, so the empty string is unambiguous as
 	// "not yet pinned".
 	accountCurrency string
+	// availableCash is ADR 0010's cash basis: the cash known at the previous
+	// close, available to fund every Add and new entry on the CURRENT bar.
+	// It is fed exclusively by event.AccountSnapshotEventType's
+	// AvailableCash (see applyAccountSnapshot, notional.go) and read as-is by
+	// sizeUnit and evaluateAdd — never a running balance this reducer
+	// decrements as it proposes, since a proposal is not a commitment (ADR
+	// 0010 measures every same-day decision against the identical
+	// previous-close figure, not against what other proposals the same bar
+	// already made).
+	//
+	// availableCashAsOf is when that figure was true, and hasAvailableCash is
+	// false until the first account.snapshot is accepted. Every read goes
+	// through cashAtPreviousClose, which fails closed on both an unset figure
+	// and one stamped later than the decision bar's previous close, rather
+	// than sizing a Unit as though cash were infinite or as though the
+	// current bar's own exits had already funded it.
+	availableCash     float64
+	availableCashAsOf time.Time
+	hasAvailableCash  bool
 
 	instruments map[string]*instrumentState
 	// acceptedFills is defined and explained in
@@ -691,7 +711,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		// The entry level is entryChannelHigh — the level a resting buy-stop
 		// actually sits at (ADR 0005) — not view.High, the breakout bar's
 		// own high. See sizeUnit's doc comment for why.
-		sized, err := r.sizeUnit(bar, envelope, signalID, entryChannelHigh, decisionN, nReady)
+		sized, err := r.sizeUnit(bar, envelope, signalID, entryChannelHigh, decisionN, nReady, previousPeriodEnd)
 		if err != nil {
 			return nil, err
 		}
@@ -737,7 +757,10 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 // slippage anyway. What fills at this level is the fill model's decision,
 // and slippage is a fill concern (ADR 0013), so
 // nothing is applied to it here.
-func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, signalID string, entryLevel, n float64, nReady bool) (event.Envelope, error) {
+// previousClose is the period end of the bar BEFORE the decision bar — the
+// moment the decision bar opened — and is what ADR 0010's cash basis is
+// measured at, not the decision bar's own close.
+func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, signalID string, entryLevel, n float64, nReady bool, previousClose time.Time) (event.Envelope, error) {
 	// Unreachable from this reducer: Tier A requires a ready N, and a
 	// Signal is only emitted at Tier A. Guarded anyway — .greptile/rules.md
 	// requires a zero, negative or not-yet-warm volatility value to fail
@@ -745,7 +768,7 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 	// the Tier logic above ever changes.
 	if !nReady {
 		return r.decline(bar, input, signalID, event.DeclineReasonNNotReady,
-			fmt.Sprintf("n is not a usable volatility reading (n %v); no unit can be sized from it", n))
+			fmt.Sprintf("n is not a usable volatility reading (n %v); no unit can be sized from it", n), 0, 0)
 	}
 
 	unit, err := sizing.SizeUnit(sizing.Inputs{
@@ -773,7 +796,7 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 		// about the account, not an error.
 		return r.decline(bar, input, signalID, event.DeclineReasonQuantityBelowOneUnit,
 			fmt.Sprintf("notional account %v under %s sizing, with n %v and dollars per point %v, sizes fewer than one whole unit",
-				r.notionalAccount.Current(), r.configuredSizingMode, n, r.dollarsPerPoint))
+				r.notionalAccount.Current(), r.configuredSizingMode, n, r.dollarsPerPoint), 0, 0)
 	}
 
 	// The Protective Stop intent, in the expression order
@@ -789,7 +812,30 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 		// looking like a bar that simply did not signal.
 		return r.decline(bar, input, signalID, event.DeclineReasonStopIntentNotPositive,
 			fmt.Sprintf("protective stop intent %v (entry level %v - stop multiple %v x n %v) is not a reachable price for a long position",
-				protectiveStopIntent, entryLevel, r.stopMultiple, n))
+				protectiveStopIntent, entryLevel, r.stopMultiple, n), 0, 0)
+	}
+
+	availableCash, err := r.cashAtPreviousClose(bar.InstrumentID, previousClose)
+	if err != nil {
+		return event.Envelope{}, err
+	}
+	cost, costRepresentable := unitCost(unit.Quantity, entryLevel, r.dollarsPerPoint)
+	if !costRepresentable {
+		// More than any cash that can be held, so the Unit is skipped on the
+		// same rule an unaffordable one is (ADR 0010) — journalled, with the
+		// operands in Detail, rather than stopping the run on a cost no
+		// payload can carry.
+		return r.decline(bar, input, signalID, event.DeclineReasonUnitCostNotRepresentable,
+			fmt.Sprintf("unit cost (%d shares x entry level %v x %v dollars per point) leaves the representable range, so it exceeds any cash that could fund it; the cash available at the previous close was %v",
+				unit.Quantity, entryLevel, r.dollarsPerPoint, availableCash), 0, 0)
+	}
+	if cost > availableCash {
+		// No partial Unit, ever: the whole Unit is skipped (ADR 0010), never
+		// resized down to what the available cash would cover.
+		return r.decline(bar, input, signalID, event.DeclineReasonInsufficientCash,
+			fmt.Sprintf("unit cost %v (%d shares x entry level %v x %v dollars per point) exceeds the cash available at the previous close %v",
+				cost, unit.Quantity, entryLevel, r.dollarsPerPoint, availableCash),
+			cost, availableCash)
 	}
 
 	proposal := event.TradeProposalPayload{
@@ -831,14 +877,23 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 }
 
 // decline builds the strategy.proposal.declined emission for one Signal that
-// produced no position.
-func (r *Reducer) decline(bar event.CompletedBarPayload, input event.Envelope, signalID, reason, detail string) (event.Envelope, error) {
+// produced no position (Kind ProposalDeclinedKindEntry — see declineAdd,
+// campaign.go, for the Add-kind counterpart).
+//
+// requiredCash and availableCash are only meaningful for reason
+// event.DeclineReasonInsufficientCash; every other caller passes 0, 0
+// (ProposalDeclinedPayload.Validate rejects a non-zero value for any other
+// reason).
+func (r *Reducer) decline(bar event.CompletedBarPayload, input event.Envelope, signalID, reason, detail string, requiredCash, availableCash float64) (event.Envelope, error) {
 	payload := event.ProposalDeclinedPayload{
-		InstrumentID: bar.InstrumentID,
-		PeriodEnd:    bar.PeriodEnd,
-		SignalID:     signalID,
-		Reason:       reason,
-		Detail:       detail,
+		InstrumentID:  bar.InstrumentID,
+		PeriodEnd:     bar.PeriodEnd,
+		Kind:          event.ProposalDeclinedKindEntry,
+		SignalID:      signalID,
+		Reason:        reason,
+		Detail:        detail,
+		RequiredCash:  requiredCash,
+		AvailableCash: availableCash,
 	}
 	if err := payload.Validate(); err != nil {
 		return event.Envelope{}, fmt.Errorf("strategy: built invalid proposal declined payload: %w", err)
@@ -852,6 +907,61 @@ func (r *Reducer) decline(bar event.CompletedBarPayload, input event.Envelope, s
 		event.ProposalDeclinedEventType, event.ProposalDeclinedSchemaVersion,
 		bar.PeriodEnd, input, payloadBytes,
 	), nil
+}
+
+// cashAtPreviousClose returns ADR 0010's cash basis for a decision on the bar
+// that opened at previousClose: the cash available to fund every Add and new
+// entry on that bar is the cash known at the PREVIOUS close, so that exits in
+// bar t free capital for bar t+1 and never for bar t.
+//
+// It fails closed twice over, because either state would size a Unit against
+// cash the decision was not entitled to:
+//
+//   - no account.snapshot has supplied a figure at all, which must not be
+//     read as infinite cash;
+//   - the figure that was supplied is stamped LATER than previousClose, so it
+//     reports an account the decision bar has already begun to change. A
+//     snapshot dated after the decision bar is the plainest case; a
+//     zero previousClose — an instrument with no bar before this one — is the
+//     same refusal, since a payload's AsOf is never the zero time
+//     (AccountSnapshotPayload.Validate).
+//
+// Accepting a snapshot onto the account timeline (applyAccountSnapshot,
+// notional.go) is deliberately separate from deciding whether it may be
+// spent: chronology there is per account, and this is per decision.
+func (r *Reducer) cashAtPreviousClose(instrumentID string, previousClose time.Time) (float64, error) {
+	if !r.hasAvailableCash {
+		return 0, fmt.Errorf(
+			"strategy: instrument %q: no account.snapshot has ever supplied an available-cash figure; refusing to size a unit as though cash were infinite (ADR 0010)",
+			instrumentID)
+	}
+	if r.availableCashAsOf.After(previousClose) {
+		return 0, fmt.Errorf(
+			"strategy: instrument %q: the available-cash figure as of %s is not cash known at the previous close %s; refusing to size a unit against cash the decision bar had not yet earned (ADR 0010)",
+			instrumentID, r.availableCashAsOf.Format(time.RFC3339), previousClose.Format(time.RFC3339))
+	}
+	return r.availableCash, nil
+}
+
+// unitCost is what one whole Unit costs to put on under ADR 0010: its
+// quantity x the order's own resting level (ADR 0005 — never a fill price the
+// reducer cannot know yet) x dollars per point, and whether that product is a
+// number this system can state.
+//
+// It reports false when three finite operands multiply past the float64
+// range. No guard on the operands can rule that out — no rule caps the
+// Notional Account, a contract multiplier is configured, and a bar's prices
+// need only be finite — and +Inf is not a figure a decline can carry, since
+// JSON cannot encode it. A caller that gets false must skip the Unit without
+// recording the cost, never record the cost.
+//
+// A bare product feeding a comparison, never an addition or subtraction, so
+// it needs no sizing.Product barrier (docs/development.md: "a*b*c with no
+// addition is not fusible and needs nothing"), and callers compare it with a
+// plain > rather than a subtracted difference for the identical reason.
+func unitCost(quantity int64, level, dollarsPerPoint float64) (float64, bool) {
+	cost := float64(quantity) * level * dollarsPerPoint
+	return cost, !math.IsInf(cost, 0) && !math.IsNaN(cost)
 }
 
 // sizingRuleFor names the rule a proposal cites, per Sizing Mode.

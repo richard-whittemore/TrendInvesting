@@ -500,9 +500,26 @@ func validProposalDeclined() event.ProposalDeclinedPayload {
 	return event.ProposalDeclinedPayload{
 		InstrumentID: "AAPL",
 		PeriodEnd:    proposalPeriodEnd,
+		Kind:         event.ProposalDeclinedKindEntry,
 		SignalID:     "signal:AAPL:2026-02-27T00:00:00.000000000Z",
 		Reason:       event.DeclineReasonQuantityBelowOneUnit,
 		Detail:       "notional account 100.00 at unit volatility fraction 0.005000 sizes 0 shares at n 40.698903",
+	}
+}
+
+// validProposalDeclinedInsufficientCash mirrors validProposalDeclined for
+// the add-kind, insufficient-cash shape: no SignalID, a CampaignID instead,
+// and RequiredCash strictly above AvailableCash.
+func validProposalDeclinedInsufficientCash() event.ProposalDeclinedPayload {
+	return event.ProposalDeclinedPayload{
+		InstrumentID:  "AAPL",
+		PeriodEnd:     proposalPeriodEnd,
+		Kind:          event.ProposalDeclinedKindAdd,
+		CampaignID:    "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
+		Reason:        event.DeclineReasonInsufficientCash,
+		Detail:        "unit cost 26,700.00 (200 shares x 133.50 x 1) exceeds available cash 10,000.00",
+		RequiredCash:  26_700,
+		AvailableCash: 10_000,
 	}
 }
 
@@ -526,6 +543,21 @@ func TestProposalDeclinedPayloadValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			// The cost is the one figure this reason cannot state, so both
+			// cash fields stay zero and the zero rule above applies to it.
+			name:    "unit cost not representable reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.Reason = event.DeclineReasonUnitCostNotRepresentable },
+			wantErr: "",
+		},
+		{
+			name: "unit cost not representable reason carrying a cash figure",
+			mutate: func(p *event.ProposalDeclinedPayload) {
+				p.Reason = event.DeclineReasonUnitCostNotRepresentable
+				p.RequiredCash = math.Inf(1)
+			},
+			wantErr: "required cash must be zero",
+		},
+		{
 			name:    "missing instrument id",
 			mutate:  func(p *event.ProposalDeclinedPayload) { p.InstrumentID = "" },
 			wantErr: "instrument id",
@@ -539,6 +571,23 @@ func TestProposalDeclinedPayloadValidate(t *testing.T) {
 			name:    "missing signal id",
 			mutate:  func(p *event.ProposalDeclinedPayload) { p.SignalID = "" },
 			wantErr: "signal id",
+		},
+		{
+			name:    "unrecognised kind",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.Kind = "because" },
+			wantErr: "is not a recognised proposal declined kind",
+		},
+		{
+			name:    "missing kind",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.Kind = "" },
+			wantErr: "is not a recognised proposal declined kind",
+		},
+		{
+			name: "entry kind with a campaign id",
+			mutate: func(p *event.ProposalDeclinedPayload) {
+				p.CampaignID = "campaign:AAPL:2026-02-27T00:00:00.000000000Z"
+			},
+			wantErr: "campaign id must be empty for an entry-kind decline",
 		},
 		{
 			// The reason is an enumerated constant, not free text: a
@@ -558,6 +607,40 @@ func TestProposalDeclinedPayloadValidate(t *testing.T) {
 			name:    "missing detail",
 			mutate:  func(p *event.ProposalDeclinedPayload) { p.Detail = "" },
 			wantErr: "detail is required",
+		},
+		{
+			name:    "required cash set for a non-cash reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.RequiredCash = 1 },
+			wantErr: "required cash must be zero",
+		},
+		{
+			name:    "available cash set for a non-cash reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.AvailableCash = 1 },
+			wantErr: "available cash must be zero",
+		},
+		{
+			// NaN and infinity are not zero, and the zero rule is what keeps
+			// a field that means nothing for this reason from carrying a
+			// number at all — so a non-finite value must be caught by it
+			// rather than waved through as "not a finite non-zero".
+			name:    "nan required cash for a non-cash reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.RequiredCash = math.NaN() },
+			wantErr: "required cash must be zero",
+		},
+		{
+			name:    "infinite required cash for a non-cash reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.RequiredCash = math.Inf(1) },
+			wantErr: "required cash must be zero",
+		},
+		{
+			name:    "nan available cash for a non-cash reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.AvailableCash = math.NaN() },
+			wantErr: "available cash must be zero",
+		},
+		{
+			name:    "infinite available cash for a non-cash reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.AvailableCash = math.Inf(-1) },
+			wantErr: "available cash must be zero",
 		},
 	}
 
@@ -584,22 +667,113 @@ func TestProposalDeclinedPayloadValidate(t *testing.T) {
 	}
 }
 
+// TestProposalDeclinedPayloadValidateInsufficientCash covers the add-kind,
+// insufficient-cash shape separately: it is the one combination the entry-kind
+// table above cannot exercise (a required SignalID and a required CampaignID
+// are mutually exclusive), and it pins the cash-figure invariants
+// (DeclineReasonInsufficientCash's own doc comment).
+func TestProposalDeclinedPayloadValidateInsufficientCash(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(*event.ProposalDeclinedPayload)
+		wantErr string
+	}{
+		{name: "valid"},
+		{
+			name:    "missing campaign id",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.CampaignID = "" },
+			wantErr: "campaign id is required",
+		},
+		{
+			name: "add kind with a signal id",
+			mutate: func(p *event.ProposalDeclinedPayload) {
+				p.SignalID = "signal:AAPL:2026-02-27T00:00:00.000000000Z"
+			},
+			wantErr: "signal id must be empty for an add-kind decline",
+		},
+		{
+			name:    "nan required cash",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.RequiredCash = math.NaN() },
+			wantErr: "required cash must be finite",
+		},
+		{
+			name:    "negative required cash",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.RequiredCash = -1 },
+			wantErr: "required cash must not be negative",
+		},
+		{
+			name:    "nan available cash",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.AvailableCash = math.NaN() },
+			wantErr: "available cash must be finite",
+		},
+		{
+			name:    "negative available cash",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.AvailableCash = -1 },
+			wantErr: "available cash must not be negative",
+		},
+		{
+			// The boundary this ticket cares most about: cost exactly equal
+			// to available cash is AFFORDABLE (the reducer never declines
+			// it), so a decline that claims insufficient-cash at that exact
+			// figure is internally inconsistent and must be rejected.
+			name:    "required cash equal to available cash",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.RequiredCash = p.AvailableCash },
+			wantErr: "does not exceed available cash",
+		},
+		{
+			name:    "required cash below available cash",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.RequiredCash = p.AvailableCash - 1 },
+			wantErr: "does not exceed available cash",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := validProposalDeclinedInsufficientCash()
+			if tt.mutate != nil {
+				tt.mutate(&payload)
+			}
+
+			err := payload.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestProposalDeclinedEventConstants(t *testing.T) {
 	t.Parallel()
 
 	if event.ProposalDeclinedEventType != "strategy.proposal.declined" {
 		t.Errorf("ProposalDeclinedEventType = %q, want %q", event.ProposalDeclinedEventType, "strategy.proposal.declined")
 	}
-	if event.ProposalDeclinedSchemaVersion != 1 {
-		t.Errorf("ProposalDeclinedSchemaVersion = %d, want 1", event.ProposalDeclinedSchemaVersion)
+	if event.ProposalDeclinedSchemaVersion != 2 {
+		t.Errorf("ProposalDeclinedSchemaVersion = %d, want 2", event.ProposalDeclinedSchemaVersion)
 	}
 	for _, reason := range []string{
 		event.DeclineReasonNNotReady,
 		event.DeclineReasonQuantityBelowOneUnit,
 		event.DeclineReasonStopIntentNotPositive,
+		event.DeclineReasonInsufficientCash,
 	} {
 		if reason == "" {
 			t.Error("every decline reason constant must be a non-empty enumerated value")
+		}
+	}
+	for _, kind := range []string{event.ProposalDeclinedKindEntry, event.ProposalDeclinedKindAdd} {
+		if kind == "" {
+			t.Error("every proposal declined kind constant must be a non-empty enumerated value")
 		}
 	}
 }
@@ -644,7 +818,7 @@ func TestProposalDeclinedPayloadJSONTags(t *testing.T) {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
 
-	for _, key := range []string{"instrument_id", "period_end", "signal_id", "reason", "detail"} {
+	for _, key := range []string{"instrument_id", "period_end", "kind", "signal_id", "campaign_id", "reason", "detail", "required_cash", "available_cash"} {
 		if _, ok := asMap[key]; !ok {
 			t.Errorf("encoded payload missing expected key %q: %s", key, encoded)
 		}
