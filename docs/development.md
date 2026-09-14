@@ -32,9 +32,13 @@ It cost a real defect to learn, twice over. `internal/strategy`'s whole-life exi
 `internal/floatingpointaudit` enforces the local `+`, `-`, `+=` and `-=` shapes
 in production Go files under `internal/`, using `go/types` to exempt integer
 arithmetic and compile-time constant products. Explicit product conversions
-are rounding barriers. The test uses the Go toolchain's package selection, so
-each CI architecture checks its own active files. As with the other determinism
-linters, test fixture arithmetic is outside the production-source guard.
+are rounding barriers. Generic constraints are checked for permitted floating-point
+terms, including mixed integer/float unions; embedded constraints intersect their
+type sets. The test uses the Go toolchain's package selection, so each CI
+architecture checks its own active files, including `CgoFiles`. Cgo's generated
+Go inputs provide type information for C types and source locations for diagnostics;
+the original sources also participate in test-cache invalidation. As with the other
+determinism linters, test fixture arithmetic is outside the production-source guard.
 `transport/spike` is also excluded: its generated prices and rounding serve a
 latency benchmark, never journalled trading decisions.
 

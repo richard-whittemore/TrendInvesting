@@ -34,7 +34,7 @@ func TestNoFusibleMultiplyAdd(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "list", "-deps", "-export", "-json", "./internal/...")
+	cmd := exec.Command("go", "list", "-deps", "-export", "-compiled", "-json", "./internal/...")
 	cmd.Dir = root
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -43,8 +43,8 @@ func TestNoFusibleMultiplyAdd(t *testing.T) {
 		t.Fatalf("load domain packages: %v\n%s", err, &stderr)
 	}
 	type listedPackage struct {
-		Dir, ImportPath, Export string
-		GoFiles                 []string
+		Dir, ImportPath, Export            string
+		GoFiles, CgoFiles, CompiledGoFiles []string
 	}
 	var packages []listedPackage
 	exports := make(map[string]string)
@@ -57,7 +57,7 @@ func TestNoFusibleMultiplyAdd(t *testing.T) {
 			t.Fatal(err)
 		}
 		exports[pkg.ImportPath] = pkg.Export
-		if strings.HasPrefix(pkg.Dir, filepath.Join(root, "internal")+string(filepath.Separator)) && len(pkg.GoFiles) > 0 {
+		if strings.HasPrefix(pkg.Dir, filepath.Join(root, "internal")+string(filepath.Separator)) && len(pkg.GoFiles)+len(pkg.CgoFiles) > 0 {
 			packages = append(packages, pkg)
 		}
 	}
@@ -67,7 +67,18 @@ func TestNoFusibleMultiplyAdd(t *testing.T) {
 	for _, pkg := range packages {
 		fset := token.NewFileSet()
 		var files []*ast.File
-		for _, name := range pkg.GoFiles {
+		// Original cgo files must participate in test-cache invalidation even
+		// though type checking uses the compiler's generated Go representation.
+		for _, name := range append(pkg.GoFiles, pkg.CgoFiles...) {
+			path := filepath.Join(pkg.Dir, name)
+			if _, err := os.ReadFile(path); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if len(pkg.CompiledGoFiles) == 0 {
+			t.Fatalf("no compiler input for %s", pkg.ImportPath)
+		}
+		for _, name := range pkg.CompiledGoFiles {
 			if !filepath.IsAbs(name) {
 				name = filepath.Join(pkg.Dir, name)
 			}
@@ -89,7 +100,8 @@ func TestNoFusibleMultiplyAdd(t *testing.T) {
 		}
 		for _, file := range files {
 			for _, pos := range fusibleProducts(file, info) {
-				where := strings.TrimPrefix(fset.Position(pos).String(), root+string(filepath.Separator))
+				position := fset.Position(pos)
+				where := strings.TrimPrefix(position.String(), root+string(filepath.Separator))
 				t.Errorf("%s: fusible floating-point multiply-add; round the product explicitly (docs/development.md: Floating-point determinism)", where)
 			}
 		}
@@ -117,8 +129,7 @@ func fusibleProducts(file *ast.File, info *types.Info) []token.Pos {
 					return
 				}
 				value := info.Types[product]
-				basic, ok := value.Type.Underlying().(*types.Basic)
-				if ok && basic.Info()&types.IsFloat != 0 && value.Value == nil {
+				if value.Value == nil && len(floatingTerms(value.Type)) > 0 {
 					positions = append(positions, product.OpPos)
 				}
 				return
@@ -142,4 +153,62 @@ func fusibleProducts(file *ast.File, info *types.Info) []token.Pos {
 		return true
 	})
 	return positions
+}
+
+// floatingTerms retains the floating-point portion of a type set, per the
+// determinism rule in docs/development.md (ADR 0017). Unions admit either term;
+// embedded interfaces intersect terms. A mixed constraint needs rounding
+// because any permitted float instantiation can fuse.
+func floatingTerms(typ types.Type) []*types.Term {
+	if param, ok := typ.(*types.TypeParam); ok {
+		return floatingTerms(param.Constraint())
+	}
+	switch t := typ.Underlying().(type) {
+	case *types.Basic:
+		if t.Info()&types.IsFloat != 0 {
+			return []*types.Term{types.NewTerm(false, typ)}
+		}
+	case *types.Union:
+		var terms []*types.Term
+		for i := 0; i < t.Len(); i++ {
+			term := t.Term(i)
+			for _, floating := range floatingTerms(term.Type()) {
+				terms = append(terms, types.NewTerm(term.Tilde() || floating.Tilde(), floating.Type()))
+			}
+		}
+		return terms
+	case *types.Interface:
+		terms := []*types.Term{
+			types.NewTerm(true, types.Typ[types.Float32]),
+			types.NewTerm(true, types.Typ[types.Float64]),
+		}
+		for i := 0; i < t.NumEmbeddeds(); i++ {
+			terms = intersectFloatingTerms(terms, floatingTerms(t.EmbeddedType(i)))
+		}
+		var permitted []*types.Term
+		for _, term := range terms {
+			if term.Tilde() || types.Satisfies(term.Type(), t) {
+				permitted = append(permitted, term)
+			}
+		}
+		return permitted
+	}
+	return nil
+}
+
+func intersectFloatingTerms(left, right []*types.Term) []*types.Term {
+	var terms []*types.Term
+	for _, a := range left {
+		for _, b := range right {
+			switch {
+			case types.Identical(a.Type(), b.Type()):
+				terms = append(terms, types.NewTerm(a.Tilde() && b.Tilde(), a.Type()))
+			case a.Tilde() && types.Identical(a.Type(), b.Type().Underlying()):
+				terms = append(terms, b)
+			case b.Tilde() && types.Identical(a.Type().Underlying(), b.Type()):
+				terms = append(terms, a)
+			}
+		}
+	}
+	return terms
 }
