@@ -48,7 +48,11 @@ func run(args []string, out io.Writer) error {
 	replayPath := flags.String("replay", "", "path of a journal to check for replay equivalence instead of running a backtest")
 	registryPath := flags.String("registry", "", "path of the run registry to record this run in, or to read recorded runs from")
 	runID := flags.String("run-id", "", "the identifier this run is recorded under in the registry")
-	variant := flags.String("variant", registry.Baseline, "the Variant this run declares, or the Baseline")
+	// Defaulted to empty rather than to registry.Baseline so that "the
+	// operator declared a Variant" is distinguishable from "the operator
+	// declared nothing". A flag that always carries a value cannot be checked
+	// against the operations that would ignore it.
+	variant := flags.String("variant", "", "the Variant this run declares; defaults to the Baseline")
 	runsHash := flags.String("runs", "", "configuration hash whose recorded runs to list instead of running a backtest")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -63,7 +67,7 @@ func run(args []string, out io.Writer) error {
 	// recorded, and where recorded runs are read from. It is therefore checked
 	// as a run flag only when the invocation is not asking to read the
 	// registry.
-	runFlags := []named{{"-config", *configPath}, {"-bars", *barsPath}, {"-out", *outPath}, {"-run-id", *runID}}
+	runFlags := []named{{"-config", *configPath}, {"-bars", *barsPath}, {"-out", *outPath}, {"-run-id", *runID}, {"-variant", *variant}}
 	if *runsHash == "" {
 		runFlags = append(runFlags, named{"-registry", *registryPath})
 	}
@@ -94,18 +98,34 @@ func run(args []string, out io.Writer) error {
 	if *outPath == "" {
 		missing = append(missing, errors.New("-out is required: where to write the run's journal"))
 	}
-	// A run is recorded under an identifier the operator chooses. Deriving
-	// one here would have to come from the clock or a counter, and a run
-	// registry whose identifiers are not reproducible cannot say that two
-	// records describe the same run.
-	switch {
-	case *registryPath != "" && *runID == "":
+	// -run-id and -variant describe how a run is RECORDED, so neither means
+	// anything without a registry to record it in. Accepting one without
+	// -registry would leave an operator believing they had declared a Variant
+	// when nothing kept the declaration — the failure that matters most for a
+	// registry whose point is that the graveyard of failed Variants survives.
+	if *registryPath == "" {
+		for _, flag := range []named{{"-run-id", *runID}, {"-variant", *variant}} {
+			if flag.value != "" {
+				missing = append(missing, fmt.Errorf("%s describes how a run is recorded, and -registry names no registry to record it in", flag.flag))
+			}
+		}
+	} else if *runID == "" {
+		// A run is recorded under an identifier the operator chooses.
+		// Deriving one here would have to come from the clock or a counter,
+		// and a registry whose identifiers are not reproducible cannot say
+		// that two records describe the same run.
 		missing = append(missing, errors.New("-run-id is required with -registry: a run is recorded under an identifier the operator chooses"))
-	case *registryPath == "" && *runID != "":
-		missing = append(missing, errors.New("-run-id names a run in a registry, and -registry names no registry to record it in"))
 	}
 	if err := errors.Join(missing...); err != nil {
 		return fmt.Errorf("backtest: %w", err)
+	}
+
+	// The Baseline is what a run declares when it declares nothing, and it is
+	// applied here rather than as the flag's default so that the check above
+	// can tell the two apart.
+	declaredVariant := *variant
+	if *registryPath != "" && declaredVariant == "" {
+		declaredVariant = registry.Baseline
 	}
 
 	return backtest(options{
@@ -114,7 +134,7 @@ func run(args []string, out io.Writer) error {
 		outPath:      *outPath,
 		registryPath: *registryPath,
 		runID:        *runID,
-		variant:      *variant,
+		variant:      declaredVariant,
 		build:        buildinfo.Version,
 	}, out)
 }
@@ -204,11 +224,20 @@ func listRuns(root, configurationHash string, out io.Writer) error {
 		if _, err := fmt.Fprintf(out, "%s\t%s\t%s\t%s to %s\t%s\n",
 			entry.RunID, entry.Status, entry.Variant,
 			entry.SpanStart.UTC().Format(time.RFC3339), entry.SpanEnd.UTC().Format(time.RFC3339),
-			entry.Artefacts.JournalPath); err != nil {
+			journalOf(root, entry)); err != nil {
 			return fmt.Errorf("backtest: report the recorded runs: %w", err)
 		}
 	}
 	return nil
+}
+
+// journalOf resolves a recorded journal path against the registry root it is
+// stored relative to, so that what is printed is what `-replay` can be given.
+func journalOf(root string, entry registry.Entry) string {
+	if entry.Artefacts.JournalPath == "" {
+		return "(no journal)"
+	}
+	return filepath.Join(root, filepath.FromSlash(entry.Artefacts.JournalPath))
 }
 
 // verify recomputes a journal's chain and reports what it found: whether the

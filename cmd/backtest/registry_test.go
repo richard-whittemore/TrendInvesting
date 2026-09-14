@@ -143,8 +143,15 @@ func TestARunLocatedByItsConfigurationHashReplays(t *testing.T) {
 		t.Fatalf("the registry holds %d runs, want one", len(found))
 	}
 
+	// The journal path is recorded relative to the registry root, so a caller
+	// resolves it against the root it read the entry from.
+	journalPath := filepath.Join(root, filepath.FromSlash(found[0].Artefacts.JournalPath))
+	if filepath.IsAbs(found[0].Artefacts.JournalPath) {
+		t.Fatalf("the entry records journal %q, an absolute path that means nothing on another machine", found[0].Artefacts.JournalPath)
+	}
+
 	var replayLog bytes.Buffer
-	if err := run([]string{"-replay", found[0].Artefacts.JournalPath}, &replayLog); err != nil {
+	if err := run([]string{"-replay", journalPath}, &replayLog); err != nil {
 		t.Fatalf("replaying the located run: %v\n%s", err, replayLog.String())
 	}
 	if !strings.Contains(replayLog.String(), "replays byte-identically") {
@@ -234,6 +241,121 @@ func TestARunWhoseJournalCouldNotBeWrittenIsStillRecorded(t *testing.T) {
 	}
 	if !strings.Contains(found[0].Detail, "create the journal") {
 		t.Errorf("detail = %q, want it to say why no journal survives the run", found[0].Detail)
+	}
+}
+
+// TestARunThatLostTheJournalRaceClaimsNoEvidence is the failure mode that
+// corrupts the audit trail rather than merely losing from it.
+//
+// The run finished, and its journal lost the hard-link race to a concurrent
+// run of the same configuration. A complete, valid, VERIFIABLE journal is
+// therefore sitting at this run's own destination — and it belongs to the
+// other run. Recording it here would produce an entry asserting that this run
+// produced evidence it did not produce, anchored to another run's chain head.
+// The header cannot tell them apart: two runs of one configuration have
+// identical headers, and a header carries no run id. So the only safe answer
+// is to record no artefacts at all.
+func TestARunThatLostTheJournalRaceClaimsNoEvidence(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "runs")
+
+	// The winner's journal: a real one, written by a run of the same
+	// configuration, so it verifies perfectly and names the same header.
+	winner := filepath.Join(dir, "winner.jsonl")
+	var log bytes.Buffer
+	if err := backtest(options{configPath: configurationFixture, barsPath: barsFixture, outPath: winner, build: testBuild}, &log); err != nil {
+		t.Fatalf("write the winning journal: %v", err)
+	}
+	winning := verifyJournal(t, winner)
+
+	cfg := fixtureConfiguration(t)
+	header := journal.NewHeader(event.ConfigurationHash(cfg), winning.Header.StrategyVersion, winning.Header.SpanStart, winning.Header.SpanEnd)
+
+	// The loser: the same run, whose own link to that destination failed.
+	err := registerRun(options{
+		outPath:      winner,
+		registryPath: root,
+		runID:        "lost-the-race",
+		variant:      registry.Baseline,
+		build:        testBuild,
+	}, cfg, winning.Header.StrategyVersion, header, nil, journalExistsError(winner))
+	if err != nil {
+		t.Fatalf("registerRun() error = %v, want the losing run recorded", err)
+	}
+
+	found := runsUnder(t, root, cfg)
+	if len(found) != 1 {
+		t.Fatalf("the registry holds %d runs, want the losing run recorded", len(found))
+	}
+	entry := found[0]
+
+	if entry.Status != registry.StatusFailed {
+		t.Errorf("status = %q, want %q", entry.Status, registry.StatusFailed)
+	}
+	if entry.Artefacts != (registry.Artefacts{}) {
+		t.Fatalf("the losing run claims artefacts %+v; the journal at its destination is another run's", entry.Artefacts)
+	}
+	if entry.Artefacts.FinalRecordHash == winning.FinalRecordHash {
+		t.Fatalf("the losing run anchored the winner's chain head %q as its own", winning.FinalRecordHash)
+	}
+}
+
+// TestARecordedJournalPathIsRelativeToTheRegistryRoot: the registry is
+// committed to git and read wherever it is cloned, so an absolute path in it
+// names a location that exists on exactly one machine.
+func TestARecordedJournalPathIsRelativeToTheRegistryRoot(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "runs")
+	journalPath := filepath.Join(dir, "journal.jsonl")
+
+	var log bytes.Buffer
+	err := run([]string{
+		"-config", configurationFixture,
+		"-bars", barsFixture,
+		"-out", journalPath,
+		"-registry", root,
+		"-run-id", "portable",
+	}, &log)
+	if err != nil {
+		t.Fatalf("run() error = %v\n%s", err, log.String())
+	}
+
+	found := runsUnder(t, root, fixtureConfiguration(t))
+	if len(found) != 1 {
+		t.Fatalf("the registry holds %d runs, want one", len(found))
+	}
+	recorded := found[0].Artefacts.JournalPath
+
+	if filepath.IsAbs(recorded) || strings.Contains(recorded, dir) {
+		t.Fatalf("recorded journal path = %q, want one relative to the registry root", recorded)
+	}
+	if resolved := filepath.Join(root, filepath.FromSlash(recorded)); resolved != journalPath {
+		t.Fatalf("the recorded path resolves to %q, want %q", resolved, journalPath)
+	}
+}
+
+// TestAJournalThatCannotBeRecordedRelativeToTheRegistryIsRefused: one
+// absolute and one relative path cannot be expressed relative to one another
+// at all, and recording the absolute one anyway is what this refusal exists
+// to prevent.
+func TestAJournalThatCannotBeRecordedRelativeToTheRegistryIsRefused(t *testing.T) {
+	dir := t.TempDir()
+
+	var log bytes.Buffer
+	err := backtest(options{
+		configPath:   configurationFixture,
+		barsPath:     barsFixture,
+		outPath:      filepath.Join(dir, "journal.jsonl"),
+		registryPath: "runs",
+		runID:        "unexpressible",
+		variant:      registry.Baseline,
+		build:        testBuild,
+	}, &log)
+	if err == nil {
+		t.Fatal("backtest() error = nil, want the path that cannot be recorded portably to be refused")
+	}
+	if !strings.Contains(err.Error(), "relative") {
+		t.Errorf("backtest() error = %v, want it to say what it could not express", err)
 	}
 }
 
@@ -464,6 +586,21 @@ func TestAnInvocationThatCannotBeRecordedIsRefused(t *testing.T) {
 		{
 			name: "a registry alongside a journal to replay",
 			args: []string{"-replay", goldenJournal, "-registry", filepath.Join(dir, "runs")},
+		},
+		// A declared Variant that nothing records is the failure that matters
+		// most for a registry whose point is that the graveyard of failed
+		// Variants survives: the operator believes they declared one.
+		{
+			name: "a Variant alongside a journal to verify",
+			args: []string{"-verify", goldenJournal, "-variant", "recompute-n-per-add"},
+		},
+		{
+			name: "a Variant alongside a listing of recorded runs",
+			args: []string{"-registry", filepath.Join(dir, "runs"), "-runs", "sha256:0", "-variant", "recompute-n-per-add"},
+		},
+		{
+			name: "a Variant on a run with no registry",
+			args: []string{"-config", configurationFixture, "-bars", barsFixture, "-out", filepath.Join(dir, "c.jsonl"), "-variant", "recompute-n-per-add"},
 		},
 	}
 	for _, test := range tests {

@@ -69,8 +69,8 @@ go run ./cmd/backtest \
 ```
 
 - `-registry` is the registry root, committed to git. `-run-id` is required with it: the identifier is chosen by you, never derived from a clock, so that two records of one run are recognisable as such. Lower-case letters, digits and interior hyphens only — it becomes a file name, and upper case would collide on a case-insensitive filesystem.
-- `-variant` is the Variant this run declares, defaulting to `baseline`. There is no unattributed run.
-- `-out` should be a path *inside the repository*, so that the journal a registry entry points at is committed beside it. The path is recorded exactly as given.
+- `-variant` is the Variant this run declares, defaulting to `baseline`. There is no unattributed run. `-run-id` and `-variant` both describe how a run is *recorded*, so both are refused without `-registry`, and alongside `-verify`, `-replay` or `-runs`, rather than being accepted and quietly dropped.
+- `-out` is recorded **relative to the registry root**, so put it inside the repository — ideally under the registry root itself — and the journal an entry points at is committed beside it. A `-out` and a `-registry` that cannot be expressed relative to one another (one absolute and one relative, or two volumes) are refused rather than recorded as an absolute path, which would name a location that exists on exactly one machine.
 
 ### The layout, and why it is this one
 
@@ -87,13 +87,15 @@ runs/
 
 **The layout is the index.** There is no manifest, catalogue or aggregate file, because any of those would be one mutable blob that every run rewrites — and two runs recorded on two branches would then conflict on every merge. Here two runs never write the same path, so two branches that each recorded a run merge as two additions.
 
-**Nothing is ever overwritten.** The entry is written to a temporary file in its own directory, flushed, and hard-linked into place: `link(2)` fails with `EEXIST` atomically, so a run id the registry already holds is refused rather than replaced, and two runs recorded at the same instant can neither interleave nor clobber one another. This is the same install the journal uses, and for the same reason — `rename(2)` would replace the destination silently.
+**Nothing is ever overwritten.** The entry is written to a temporary file in its own directory, flushed, and hard-linked into place: `link(2)` fails with `EEXIST` atomically, so a run id the registry already holds is refused rather than replaced, and two runs recorded at the same instant can neither interleave nor clobber one another. This is the same install the journal uses, and for the same reason — `rename(2)` would replace the destination silently. The entry's **content and its directory entry are both flushed**, including the configuration-hash directory created to hold it, so a power loss just after a command reports success cannot come back with the run reported as recorded and nothing on disk.
 
 ### What an entry records
 
 The configuration hash, the configuration itself (a hash identifies a run; it does not reproduce one), the strategy version, the span of input event times, the Variant, the status, the reason it ended, and where its evidence lives — including the journal's **final record hash and record count**, which is what anchors ADR 0017's chain outside the journal and closes its end-truncation gap.
 
 The hash is derived from the recorded configuration, never supplied, and re-derived when the entry is read back, so a run cannot be re-attributed to another Variant by editing one string. An entry filed under the wrong configuration, or in a file not named for its own run id, is refused rather than returned.
+
+**Artefacts are recorded only when this run actually installed that journal.** A journal is installed by hard link, so a run can lose that link to a concurrent run and find a complete, valid, verifiable journal at its own destination — belonging to the other run. Recording it would produce an entry claiming evidence this run did not produce, anchored to another run's chain head; the header cannot tell them apart, since two runs of one configuration have identical headers and a header carries no run id. A run that loses that race is therefore recorded as `failed` with **no artefacts at all**, which is strictly better than a corrupted audit trail.
 
 ### The status vocabulary
 
@@ -115,7 +117,7 @@ A zero-slippage run is invalid by construction (ADR 0013), and the refusal lives
 go run ./cmd/backtest -registry runs -runs sha256:<digest>
 ```
 
-This lists every run recorded under that configuration — id, status, Variant, span, and the journal each one wrote — whatever became of each. Feed a journal it names straight to `-replay`.
+This lists every run recorded under that configuration — id, status, Variant, span, and the journal each one wrote — whatever became of each. Journal paths are resolved against the registry root as they are printed, so a path it names can be fed straight to `-replay`; a run that left no journal says `(no journal)`.
 
 A registry root that does not exist is reported rather than read as an empty one: "this configuration has never been run" and "this registry is not there" are different findings, and only one of them is evidence.
 

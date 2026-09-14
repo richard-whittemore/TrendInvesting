@@ -118,6 +118,10 @@ func (s Status) recognised() bool {
 // into "detectable, full stop", and closes its end-truncation gap. A journal
 // recorded without them is an unanchored artefact and is refused.
 type Artefacts struct {
+	// JournalPath is where the run's journal lives, RELATIVE to the registry
+	// root and slash-separated. The registry is committed to git and read
+	// wherever it is cloned, so an absolute path here would name a location
+	// that exists on exactly one machine; one is refused rather than stored.
 	JournalPath     string `json:"journal_path"`
 	RecordCount     uint64 `json:"record_count"`
 	FinalRecordHash string `json:"final_record_hash"`
@@ -265,8 +269,27 @@ func (e Entry) checkArtefacts() []error {
 		}
 	case e.Artefacts.FinalRecordHash == "" || e.Artefacts.RecordCount == 0:
 		errs = append(errs, errors.New("the run records a journal without the final record hash and record count that anchor its chain from outside it (ADR 0017)"))
+	default:
+		if err := checkJournalPath(e.Artefacts.JournalPath); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errs
+}
+
+// checkJournalPath: a journal path is recorded relative to the registry root
+// and slash-separated, so that it means the same thing wherever the registry
+// is cloned. An absolute path, a volume name or a backslash all name a
+// location on one machine, and the registry is committed to git precisely so
+// that it can be read on another.
+func checkJournalPath(journalPath string) error {
+	switch {
+	case strings.HasPrefix(journalPath, "/"):
+		return fmt.Errorf("journal path %q is absolute; a journal is recorded relative to the registry root so the entry means the same thing wherever the registry is cloned", journalPath)
+	case strings.ContainsAny(journalPath, `\:`):
+		return fmt.Errorf("journal path %q names a volume or uses a backslash; a journal is recorded as a slash-separated path relative to the registry root", journalPath)
+	}
+	return nil
 }
 
 // checkRunID: the run id becomes a file name, so it is held to what survives
