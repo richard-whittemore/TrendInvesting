@@ -26,6 +26,7 @@
 package registry
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,11 +34,33 @@ import (
 	"io/fs"
 	"math"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
+
+// A Store is a run registry as it sits on disk: the names recorded in one
+// configuration's directory, and the bytes of one recorded run. It is the
+// repository interface the domain defines and something outside it
+// implements, which is what keeps this package free of I/O
+// (docs/development.md's package boundaries); cmd/backtest implements it over
+// a directory.
+//
+// Deliberately narrower than fs.FS, which would be the obvious choice: the
+// registry needs file NAMES and file BYTES and nothing else, while fs.ReadDir
+// hands back fs.DirEntry values carrying file metadata this package never
+// looks at. Names and bytes are the whole contract.
+type Store interface {
+	// ReadDir returns the names of the files recorded directly in dir, in
+	// any order. A dir that does not exist must report an error satisfying
+	// errors.Is(err, fs.ErrNotExist), because a configuration nothing has
+	// been run under is an empty answer rather than a failure.
+	ReadDir(dir string) ([]string, error)
+	// ReadFile returns the bytes of the recorded run at name.
+	ReadFile(name string) ([]byte, error)
+}
 
 // FormatVersion is the entry format this build writes and can read. Decode
 // rejects any other value in both directions, fail closed, because no
@@ -364,7 +387,7 @@ func Decode(r io.Reader) (Entry, error) {
 	return entry, nil
 }
 
-// Runs returns every run recorded under configurationHash in fsys, in run-id
+// Runs returns every run recorded under configurationHash in store, in run-id
 // order, whatever became of each: a failed or abandoned run is returned
 // beside a completed one, never dropped.
 //
@@ -377,27 +400,32 @@ func Decode(r io.Reader) (Entry, error) {
 // named for its own run id, is refused rather than returned. The directory
 // and the file name are the index, so an entry that disagrees with where it
 // sits has lost the guarantee that makes the layout trustworthy.
-func Runs(fsys fs.FS, configurationHash string) ([]Entry, error) {
+func Runs(store Store, configurationHash string) ([]Entry, error) {
 	directory, err := Dir(configurationHash)
 	if err != nil {
 		return nil, err
 	}
 
-	listed, err := fs.ReadDir(fsys, directory)
+	listed, err := store.ReadDir(directory)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, nil
 	case err != nil:
 		return nil, fmt.Errorf("registry: read the runs recorded under %s: %w", configurationHash, err)
 	}
+	// Sorted here rather than trusted from the store, so the order two runs
+	// come back in is the same wherever the registry is read.
+	slices.Sort(listed)
 
 	var entries []Entry
-	for _, file := range listed {
-		name := file.Name()
-		if file.IsDir() || !strings.HasSuffix(name, entrySuffix) {
+	for _, name := range listed {
+		// Anything that is not a recorded run is left alone: a note beside
+		// the runs, a subdirectory, and above all the temporary file an
+		// install in progress is still writing.
+		if !strings.HasSuffix(name, entrySuffix) {
 			continue
 		}
-		entry, err := readEntry(fsys, path.Join(directory, name))
+		entry, err := readEntry(store, path.Join(directory, name))
 		if err != nil {
 			return nil, err
 		}
@@ -412,14 +440,12 @@ func Runs(fsys fs.FS, configurationHash string) ([]Entry, error) {
 	return entries, nil
 }
 
-func readEntry(fsys fs.FS, name string) (Entry, error) {
-	file, err := fsys.Open(name)
+func readEntry(store Store, name string) (Entry, error) {
+	raw, err := store.ReadFile(name)
 	if err != nil {
-		return Entry{}, fmt.Errorf("registry: open the run recorded in %s: %w", name, err)
+		return Entry{}, fmt.Errorf("registry: read the run recorded in %s: %w", name, err)
 	}
-	defer func() { _ = file.Close() }()
-
-	entry, err := Decode(file)
+	entry, err := Decode(bytes.NewReader(raw))
 	if err != nil {
 		return Entry{}, fmt.Errorf("registry: %s: %w", name, err)
 	}
