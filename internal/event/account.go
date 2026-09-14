@@ -1,6 +1,7 @@
 package event
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -57,12 +58,49 @@ type AccountSnapshotPayload struct {
 	// 0010). It must be finite and not negative — zero is a legitimate
 	// reading (every dollar already deployed) — and is deliberately a
 	// separate figure from Equity: Equity includes the value of open
-	// positions, which is not spendable cash.
+	// positions, which is not spendable cash. It is required: a decoded
+	// record that omits the field is refused rather than read as zero (see
+	// UnmarshalJSON), since the two are otherwise the same value and the
+	// wrong one declines Units that were affordable.
 	AvailableCash float64 `json:"available_cash"`
 	// Currency is the currency Equity and AvailableCash are stated in,
 	// carried explicitly so a multi-currency account (out of scope for this
 	// project) cannot silently mix figures once one exists.
 	Currency string `json:"currency"`
+	// availableCashMissing records that a decoded record carried no
+	// available_cash field at all, which json.Unmarshal would otherwise
+	// leave indistinguishable from an explicit 0 — a malformed payload would
+	// then be read as "no cash" and decline every affordable Unit rather
+	// than being refused. Its zero value is "present", so a payload built in
+	// Go (a fixture, a producer) needs nothing; only UnmarshalJSON ever sets
+	// it.
+	availableCashMissing bool
+}
+
+// UnmarshalJSON decodes a snapshot and records whether available_cash was
+// present, since the field is required from version 2 on and its absence
+// decodes as the same float64 zero a genuine no-spare-cash reading does
+// (AvailableCash's own doc comment). An explicit 0, and only an explicit 0,
+// stays a legitimate reading.
+func (p *AccountSnapshotPayload) UnmarshalJSON(data []byte) error {
+	// The alias drops this method, so the embedded value decodes every other
+	// field by its own tags; the shallower AvailableCash shadows the
+	// embedded one, which is what makes presence visible.
+	type alias AccountSnapshotPayload
+	var decoded struct {
+		alias
+		AvailableCash *float64 `json:"available_cash"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*p = AccountSnapshotPayload(decoded.alias)
+	if decoded.AvailableCash == nil {
+		p.availableCashMissing = true
+		return nil
+	}
+	p.AvailableCash = *decoded.AvailableCash
+	return nil
 }
 
 // Validate checks that the snapshot identifies when it is as-of, that Equity
@@ -80,6 +118,8 @@ func (p AccountSnapshotPayload) Validate() error {
 		errs = append(errs, errors.New("equity must be positive"))
 	}
 	switch {
+	case p.availableCashMissing:
+		errs = append(errs, errors.New("available cash is required: a record that omits it is refused, never read as no spare cash"))
 	case !isFinite(p.AvailableCash):
 		errs = append(errs, errors.New("available cash must be finite"))
 	case p.AvailableCash < 0:
