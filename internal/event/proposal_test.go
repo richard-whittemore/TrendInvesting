@@ -968,6 +968,14 @@ func TestProposalExpiredPayloadValidate(t *testing.T) {
 			wantErr: "only valid for kind",
 		},
 		{
+			// #24: superseded-by-delisting only ever applies to an exit or an
+			// Add proposal — an entry proposal can never coexist with an open
+			// Campaign, so it has no analogous interaction with a delisting.
+			name:    "superseded-by-delisting reason on an entry-kind expiry",
+			mutate:  func(p *event.ProposalExpiredPayload) { p.Reason = event.ExpiryReasonSupersededByDelisting },
+			wantErr: "only valid for kind",
+		},
+		{
 			name:    "missing expired at",
 			mutate:  func(p *event.ProposalExpiredPayload) { p.ExpiredAt = time.Time{} },
 			wantErr: "expired at",
@@ -1056,6 +1064,28 @@ func TestExitProposalExpiredPayloadValidate(t *testing.T) {
 			name:    "exit-kind expiry names a signal id",
 			mutate:  func(p *event.ProposalExpiredPayload) { p.SignalID = "signal:AAPL:2026-02-27T00:00:00.000000000Z" },
 			wantErr: "signal id",
+		},
+		{
+			// #24: an outstanding exit proposal is cancelled the instant a
+			// delisting forces the same Campaign closed, rather than waiting
+			// for ADR 0011's ordinary next-bar expiry (which a delisted
+			// instrument will never produce).
+			name: "exit-kind expiry superseded by a delisting is legitimate",
+			mutate: func(p *event.ProposalExpiredPayload) {
+				p.Reason = event.ExpiryReasonSupersededByDelisting
+				p.Rule = event.RuleExitProposalSupersededByDelisting
+			},
+		},
+		{
+			// Like the stop-superseded case, ExpiredAt equal to PeriodEnd is
+			// legitimate here too: a delisting can take effect at the SAME
+			// bar that raised the exit proposal.
+			name: "delisting-superseded expiry at the period end is legitimate",
+			mutate: func(p *event.ProposalExpiredPayload) {
+				p.Reason = event.ExpiryReasonSupersededByDelisting
+				p.Rule = event.RuleExitProposalSupersededByDelisting
+				p.ExpiredAt = p.PeriodEnd
+			},
 		},
 	}
 
@@ -1152,6 +1182,15 @@ func TestAddProposalExpiredPayloadValidate(t *testing.T) {
 				p.ExpiredAt = p.EarliestFillAt
 			},
 			wantErr: "must be after the earliest instant",
+		},
+		{
+			// #24: the add-kind mirror of the exit-kind case above — a
+			// delisting cancels an outstanding Add proposal too.
+			name: "add-kind expiry superseded by a delisting is legitimate",
+			mutate: func(p *event.ProposalExpiredPayload) {
+				p.Reason = event.ExpiryReasonSupersededByDelisting
+				p.Rule = event.RuleAddProposalSupersededByDelisting
+			},
 		},
 	}
 
@@ -1255,6 +1294,15 @@ func TestProposalExpiredEventConstants(t *testing.T) {
 	}
 	if event.RuleAddProposalSupersededByStop != "add-proposal.superseded-by-stop" {
 		t.Errorf("RuleAddProposalSupersededByStop = %q", event.RuleAddProposalSupersededByStop)
+	}
+	if event.ExpiryReasonSupersededByDelisting != "superseded-by-delisting" {
+		t.Errorf("ExpiryReasonSupersededByDelisting = %q, want %q", event.ExpiryReasonSupersededByDelisting, "superseded-by-delisting")
+	}
+	if event.RuleExitProposalSupersededByDelisting != "exit-proposal.superseded-by-delisting" {
+		t.Errorf("RuleExitProposalSupersededByDelisting = %q", event.RuleExitProposalSupersededByDelisting)
+	}
+	if event.RuleAddProposalSupersededByDelisting != "add-proposal.superseded-by-delisting" {
+		t.Errorf("RuleAddProposalSupersededByDelisting = %q", event.RuleAddProposalSupersededByDelisting)
 	}
 }
 
