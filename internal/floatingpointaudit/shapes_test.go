@@ -54,3 +54,40 @@ func TestFusibleShapes(t *testing.T) {
 		})
 	}
 }
+
+func TestGenericFusibleShapes(t *testing.T) {
+	tests := []struct {
+		name, declarations, constraint, body string
+		want                                 int
+	}{
+		{"generic_float", "type N interface{ ~float32 | ~float64 }", "N", "return x + a*b", 1},
+		{"generic_mixed", "", "~int | ~float64", "x += a*b; return x", 1},
+		{"generic_subtract", "", "~float32", "return x - a*b", 1},
+		{"generic_subtract_assign", "", "~float64", "x -= a*b; return x", 1},
+		{"generic_integer", "", "~int | ~int64", "return x + a*b", 0},
+		{"generic_rounded", "", "~float32 | ~float64", "return x + T(a*b)", 0},
+		{"generic_unary", "", "~float64", "return x + -(a*b)", 1},
+		{"generic_constant", "", "~float64", "return x + 2.0*3.0", 0},
+		{"embedded_float", "type N interface{ ~int | ~float64 }; type F interface{ N; ~float64 }", "F", "return x + a*b", 1},
+		{"intersection_integer", "type N interface{ ~int | ~float64 }; type I interface{ N; ~int }", "I", "return x + a*b", 0},
+		{"named_float_term", "type Price float64", "Price | int", "return x + a*b", 1},
+		{"float_with_method", "", "interface{ ~float64; M() }", "return x + a*b", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, "shape.go", "package fixture\n"+tt.declarations+
+				"\nfunc f[T "+tt.constraint+"](x, a, b T) T { "+tt.body+" }\n", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info := &types.Info{Types: make(map[ast.Expr]types.TypeAndValue)}
+			if _, err := new(types.Config).Check("fixture", fset, []*ast.File{file}, info); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(fusibleProducts(file, info)); got != tt.want {
+				t.Errorf("fusible products = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
