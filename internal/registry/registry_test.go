@@ -667,6 +667,47 @@ func TestAJournalRecordedWithoutItsChainHeadIsRefused(t *testing.T) {
 	}
 }
 
+// TestAJournalPathThatOnlyMeansSomethingOnOneMachineIsRefused. The registry
+// is committed to git and read wherever it is cloned, so a journal is
+// recorded relative to the registry root: an absolute path, a volume name or
+// a backslash all name a location on exactly one machine, and an entry
+// pointing at one has stopped being evidence for anybody else.
+func TestAJournalPathThatOnlyMeansSomethingOnOneMachineIsRefused(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		journalPath string
+	}{
+		{"an absolute path", "/Users/someone/work/journals/a.jsonl"},
+		{"a temporary directory", "/tmp/backtest-1234/journal.jsonl"},
+		{"a windows volume", `C:/runs/journals/a.jsonl`},
+		{"a backslash", `journals\a.jsonl`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			run := completedRun("machine-specific")
+			run.Artefacts.JournalPath = test.journalPath
+
+			_, err := registry.NewEntry(run)
+			if err == nil {
+				t.Fatalf("registry.NewEntry() with journal path %q error = nil, want it refused", test.journalPath)
+			}
+			if !strings.Contains(err.Error(), "registry root") {
+				t.Errorf("registry.NewEntry() error = %v, want it to say what a journal path is relative to", err)
+			}
+		})
+	}
+
+	// A path that climbs out of the registry root is still portable — it
+	// means the same thing wherever the registry is cloned — so it stands.
+	run := completedRun("beside-the-registry")
+	run.Artefacts.JournalPath = "../journals/a.jsonl"
+	if _, err := registry.NewEntry(run); err != nil {
+		t.Fatalf("registry.NewEntry() error = %v, want a journal recorded beside the registry to be accepted", err)
+	}
+}
+
 // TestAFailedRunStatesWhyItFailed: a status of "failed" with no reason is a
 // record that something went wrong and nothing about what, which is the shape
 // a curated record takes. A completed run needs no explanation.
