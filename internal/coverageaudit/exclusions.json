@@ -20,6 +20,14 @@
       "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
+      "file": "internal/registry/registry.go",
+      "function": "Encode",
+      "statement": "return fmt.Errorf(\"registry: encode the run: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.MarshalIndent of the entry the Validate immediately above has just accepted. The encoder refuses exactly one thing this entry could hold — a NaN or an infinity in a float64 field — and every one of the ten float64 fields in event.ConfigurationPayload (including the nested NotionalAccountConfig and CommissionConfig) is tested for finiteness by ConfigurationPayload.Validate, which Entry.Validate calls. Nothing else in the entry (strings, a uint32, a uint64, two time.Time values) has a failing encoding at all. Reachable the moment a float field is added to the payload without a finiteness check beside it.",
+      "count": 1
+    },
+    {
       "file": "internal/journal/journal.go",
       "function": "writeLine",
       "statement": "return fmt.Errorf(\"journal: encode line: %w\", err)",
