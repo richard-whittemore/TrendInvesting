@@ -92,40 +92,182 @@ func (r *Reducer) applyCorporateAction(envelope event.Envelope) ([]event.Envelop
 //
 // # Delisting wins
 //
-// If an exit or an Add proposal is outstanding for this instrument's
-// Campaign — raised by the SAME bar whose close is now the last available
-// price — it is cancelled here rather than left to ADR 0011's ordinary
-// next-bar expiry, because a delisted instrument produces no further bar for
-// that expiry to ever run on (see expireExitProposalForDelisting/
-// expireAddProposalForDelisting). Cancelling it rather than letting a fill
+// Whichever proposal is outstanding for this instrument — an entry proposal,
+// or an exit or Add proposal raised by the SAME bar whose close is now the
+// last available price — is cancelled here rather than left to ADR 0011's
+// ordinary next-bar expiry, because a delisted instrument produces no further
+// bar for that expiry to ever run on. Cancelling rather than letting a fill
 // for it arrive later is what makes the outcome unambiguous: exactly one
 // Campaign-exited event, reason delisting, never a race with whatever the
-// same bar also proposed.
+// same bar also proposed — and, for an entry proposal, no Campaign at all.
 //
-// # No open Campaign is a no-op, not an error
+// # The invariant, and what enforces it
 //
-// Every other input this reducer accepts about an already-closed or
-// never-open Campaign fails closed (applyStopFill, applyExitFill,
-// applyFillToOpenCampaign): a fill or a proposal for a Campaign this reducer
-// does not hold is a reconciliation failure, because the producer that sent
-// it should have known better. A delisting notice is different in kind: it
-// originates from the instrument's own listing, not from anything this
-// system proposed, and it may legitimately name an instrument this strategy
-// was never in a Campaign for (never eligible, already exited on its own, or
-// simply never signalled). Absorbing it silently is therefore the deliberate
-// exception fail-closed elsewhere in this file is not — the named invariant
-// is that a delisted instrument cannot un-delist and cannot be traded again
-// in this run, so a repeated or late-arriving delisting notice for it states
-// no new fact this reducer needs to act on.
+// A delisted instrument cannot un-delist and cannot be traded again in this
+// run. Three things together make that true rather than merely stated:
+// r.delisted records the fact the moment a delisting arrives, whether or not
+// there was anything to close; applyCompletedBar then evaluates no Setup for
+// the instrument; and applyFill refuses any new execution naming it.
+//
+// The record is made in EVERY case, including the ones that emit nothing —
+// which is why the guard clauses below write to r.delisted before returning.
+// A delisting with no Campaign and no proposal outstanding is still a no-op
+// as far as the journal is concerned: no event, and no error. Every other
+// input this reducer accepts about an already-closed or never-open Campaign
+// fails closed (applyStopFill, applyExitFill, applyFillToOpenCampaign),
+// because a fill or a proposal for a Campaign this reducer does not hold is a
+// reconciliation failure. A delisting notice is different in kind: it
+// originates from the instrument's own listing, not from anything this system
+// proposed, and it may legitimately name an instrument this strategy was
+// never in a Campaign for (never eligible, already exited on its own, or
+// simply never signalled). A repeated or late-arriving notice states no new
+// fact either, since the first one was terminal.
 func (r *Reducer) applyDelisting(payload event.CorporateActionPayload, input event.Envelope) ([]event.Envelope, error) {
-	state, known := r.instruments[payload.InstrumentID]
-	if !known || state.campaign == nil {
+	if _, alreadyDelisted := r.delisted[payload.InstrumentID]; alreadyDelisted {
 		return nil, nil
 	}
+
+	state, known := r.instruments[payload.InstrumentID]
+	if !known || !state.hasOutstandingBusiness() {
+		// Nothing to close and nothing to cancel, so nothing is journalled —
+		// but the fact is recorded all the same, which is the whole
+		// difference between this no-op and the one that let a delisted
+		// instrument be entered.
+		//
+		// The chronology checks below are deliberately skipped here rather
+		// than applied first. Each of them guards a figure this transition
+		// would otherwise compute — the last available price, an expiry's own
+		// ExpiredAt — and with no Campaign and no proposal there is no such
+		// figure. Applying them anyway would make a stale notice for an
+		// instrument this strategy never traded halt the run.
+		r.delisted[payload.InstrumentID] = payload.EffectiveAt
+		return nil, nil
+	}
+
+	// The last available price, and every expiry stamped below, are only as of
+	// the last completed bar this reducer has actually accepted for the
+	// instrument (see this function's own doc comment); a delisting stated to
+	// take effect BEFORE that bar closed would be closing the campaign against
+	// a price from the future relative to its own stated moment.
+	//
+	// state.hasPreviousClose is unreachable false here: outstanding business
+	// of any kind — a Campaign, or a proposal of any of the three kinds —
+	// requires a completed bar to have produced it, so a previous close always
+	// exists. Guarded anyway, matching this package's fail-closed style.
+	if !state.hasPreviousClose || payload.EffectiveAt.Before(state.lastPeriodEnd) {
+		return nil, fmt.Errorf("strategy: instrument %q: delisting effective at %s predates the last completed bar %s this reducer has for it; the last available price is that bar's own close and cannot be read before it exists",
+			payload.InstrumentID, payload.EffectiveAt.Format(time.RFC3339), state.lastPeriodEnd.Format(time.RFC3339))
+	}
+
+	// --- Every payload this transition will be journalled as is built and
+	// validated HERE, before any state moves — the same discipline
+	// openCampaign/applyStopFill/applyExitFill all follow, and the reason
+	// expireAddProposalForStop deliberately leaves its own state untouched.
+	//
+	// All three proposal kinds are checked unconditionally, mirroring
+	// applyCompletedBar's own "all checks are unconditional here so none is
+	// skipped by construction" — not because more than one could ever be
+	// outstanding at once (an entry proposal is always cleared before a
+	// Campaign exists, and ADR 0010's exit precedence keeps exit and Add
+	// proposals mutually exclusive), but so that no path depends on that
+	// invariant to be exercised.
+	var cancelled []event.Envelope
+	if pending := state.pendingExitProposal; pending != nil {
+		envelope, err := r.emitDelistingExpiry(delistingExpiry{
+			idKind:         "exit-proposal-expired-by-delisting",
+			kind:           event.ProposalKindExit,
+			rule:           event.RuleExitProposalSupersededByDelisting,
+			proposalID:     pending.proposalID,
+			periodEnd:      pending.periodEnd,
+			earliestFillAt: pending.earliestFillAt,
+			quantity:       pending.quantity,
+			level:          pending.level,
+		}, payload, input)
+		if err != nil {
+			return nil, err
+		}
+		cancelled = append(cancelled, envelope)
+	}
+	if pending := state.pendingAddProposal; pending != nil {
+		envelope, err := r.emitDelistingExpiry(delistingExpiry{
+			idKind:         "add-proposal-expired-by-delisting",
+			kind:           event.ProposalKindAdd,
+			rule:           event.RuleAddProposalSupersededByDelisting,
+			proposalID:     pending.proposalID,
+			periodEnd:      pending.periodEnd,
+			earliestFillAt: pending.earliestFillAt,
+			quantity:       pending.quantity,
+			level:          pending.level,
+		}, payload, input)
+		if err != nil {
+			return nil, err
+		}
+		cancelled = append(cancelled, envelope)
+	}
+	if pending := state.pendingProposal; pending != nil {
+		envelope, err := r.emitDelistingExpiry(delistingExpiry{
+			idKind:         "entry-proposal-expired-by-delisting",
+			kind:           event.ProposalKindEntry,
+			rule:           event.RuleEntryProposalSupersededByDelisting,
+			proposalID:     pending.proposalID,
+			signalID:       pending.signalID,
+			periodEnd:      pending.periodEnd,
+			earliestFillAt: pending.earliestFillAt,
+			quantity:       pending.quantity,
+			level:          pending.entryLevel,
+		}, payload, input)
+		if err != nil {
+			return nil, err
+		}
+		cancelled = append(cancelled, envelope)
+	}
+
+	var exit []event.Envelope
+	if state.campaign != nil {
+		envelope, err := r.closeCampaignForDelisting(state, payload, input)
+		if err != nil {
+			return nil, err
+		}
+		exit = append(exit, envelope)
+	}
+
+	// --- State moves only now, after every payload above has validated.
+	r.delisted[payload.InstrumentID] = payload.EffectiveAt
+	if state.campaign != nil {
+		state.campaign = nil
+		state.lastClosingFillAt = payload.EffectiveAt
+	}
+	state.pendingProposal = nil
+	state.pendingExitProposal = nil
+	state.pendingAddProposal = nil
+
+	emissions := make([]event.Envelope, 0, len(cancelled)+len(exit))
+	emissions = append(emissions, cancelled...)
+	emissions = append(emissions, exit...)
+	return emissions, nil
+}
+
+// hasOutstandingBusiness reports whether a delisting for this instrument has
+// anything to resolve: an open Campaign to close, or a proposal of any kind
+// to cancel. It is the condition applyDelisting distinguishes a recorded
+// no-op from a transition by.
+func (s *instrumentState) hasOutstandingBusiness() bool {
+	return s.campaign != nil ||
+		s.pendingProposal != nil ||
+		s.pendingExitProposal != nil ||
+		s.pendingAddProposal != nil
+}
+
+// closeCampaignForDelisting builds the Campaign-exited event a delisting
+// forces, at the last available price (ADR 0009; see applyDelisting's doc
+// comment for which price that is and why the payload carries none of its
+// own). It moves no state: the caller commits, once every payload for the
+// transition has validated.
+func (r *Reducer) closeCampaignForDelisting(state *instrumentState, payload event.CorporateActionPayload, input event.Envelope) (event.Envelope, error) {
 	campaign := state.campaign
 
 	if payload.EffectiveAt.Before(campaign.openedAt) {
-		return nil, fmt.Errorf("strategy: instrument %q: delisting effective at %s predates campaign %q's own opening fill at %s; a campaign cannot be closed before it opened",
+		return event.Envelope{}, fmt.Errorf("strategy: instrument %q: delisting effective at %s predates campaign %q's own opening fill at %s; a campaign cannot be closed before it opened",
 			payload.InstrumentID, payload.EffectiveAt.Format(time.RFC3339), campaign.campaignID, campaign.openedAt.Format(time.RFC3339))
 	}
 	// The identical check applyStopFill/applyExitFill apply to their own
@@ -133,23 +275,8 @@ func (r *Reducer) applyDelisting(payload event.CorporateActionPayload, input eve
 	// partial stop must not claim a moment before that earlier closing
 	// fill's own (campaignState.lastCloseFillAt's own doc comment).
 	if !campaign.lastCloseFillAt.IsZero() && payload.EffectiveAt.Before(campaign.lastCloseFillAt) {
-		return nil, fmt.Errorf("strategy: instrument %q: delisting effective at %s predates campaign %q's most recently accepted closing fill at %s; a later closing event cannot have happened before an earlier one",
+		return event.Envelope{}, fmt.Errorf("strategy: instrument %q: delisting effective at %s predates campaign %q's most recently accepted closing fill at %s; a later closing event cannot have happened before an earlier one",
 			payload.InstrumentID, payload.EffectiveAt.Format(time.RFC3339), campaign.campaignID, campaign.lastCloseFillAt.Format(time.RFC3339))
-	}
-	// The last available price is only as of the last completed bar this
-	// reducer has actually accepted for the instrument (see this function's
-	// own doc comment); a delisting stated to take effect BEFORE that bar
-	// closed would be closing the campaign against a price from the future
-	// relative to its own stated moment.
-	//
-	// state.hasPreviousClose is unreachable false here: an open Campaign
-	// requires at least one accepted entry fill, which itself requires a
-	// completed bar to have produced the proposal it executed, so a
-	// previous close always exists whenever state.campaign is non-nil.
-	// Guarded anyway, matching this package's fail-closed style.
-	if !state.hasPreviousClose || payload.EffectiveAt.Before(state.lastPeriodEnd) {
-		return nil, fmt.Errorf("strategy: instrument %q: delisting effective at %s predates the last completed bar %s this reducer has for it; the last available price is that bar's own close and cannot be read before it exists",
-			payload.InstrumentID, payload.EffectiveAt.Format(time.RFC3339), state.lastPeriodEnd.Format(time.RFC3339))
 	}
 	lastAvailablePrice := state.previousClose
 
@@ -169,14 +296,14 @@ func (r *Reducer) applyDelisting(payload event.CorporateActionPayload, input eve
 		// Unreachable: campaign.campaignN was required positive when the
 		// Campaign opened (CampaignOpenedPayload.Validate) and is never
 		// recomputed while it is open (ADR 0006).
-		return nil, fmt.Errorf("strategy: instrument %q: delisting cannot compute the average move in n: %w", payload.InstrumentID, err)
+		return event.Envelope{}, fmt.Errorf("strategy: instrument %q: delisting cannot compute the average move in n: %w", payload.InstrumentID, err)
 	}
 	realisedResultInUnitN, err := sizing.RealisedResultInUnitN(realisedResult, campaign.unitQuantity, campaign.campaignN, r.dollarsPerPoint)
 	if err != nil {
 		// Unreachable: campaign.unitQuantity and campaign.campaignN were both
 		// required positive when the Campaign opened, and r.dollarsPerPoint
 		// by ConfigurationPayload.Validate.
-		return nil, fmt.Errorf("strategy: instrument %q: delisting cannot compute the realised result in unit n: %w", payload.InstrumentID, err)
+		return event.Envelope{}, fmt.Errorf("strategy: instrument %q: delisting cannot compute the realised result in unit n: %w", payload.InstrumentID, err)
 	}
 
 	exitedPayload := event.CampaignExitedPayload{
@@ -206,90 +333,69 @@ func (r *Reducer) applyDelisting(payload event.CorporateActionPayload, input eve
 		// required, using the SAME expression order lifeAggregate/AverageMoveInN/
 		// RealisedResultInUnitN compute, so the producer and this Validate call
 		// agree bit for bit rather than approximately.
-		return nil, fmt.Errorf("strategy: instrument %q: delisting would close campaign %q with an invalid exit: %w", payload.InstrumentID, campaign.campaignID, err)
+		return event.Envelope{}, fmt.Errorf("strategy: instrument %q: delisting would close campaign %q with an invalid exit: %w", payload.InstrumentID, campaign.campaignID, err)
 	}
 	exitedPayloadBytes, err := json.Marshal(exitedPayload)
 	if err != nil {
 		// Unreachable: json.Marshal of the payload Validate has just accepted;
 		// the only thing it could refuse is a NaN or an infinity in a float64
 		// field, and Validate has already tested every one for finiteness.
-		return nil, fmt.Errorf("strategy: marshal campaign exited payload: %w", err)
+		return event.Envelope{}, fmt.Errorf("strategy: marshal campaign exited payload: %w", err)
 	}
-	exitEnvelope := r.stamp(
+	return r.stamp(
 		decisionID("campaign-exited", payload.InstrumentID, payload.EffectiveAt),
 		event.CampaignExitedEventType, event.CampaignExitedSchemaVersion,
 		payload.EffectiveAt, input, exitedPayloadBytes,
-	)
-
-	// Delisting wins (see this function's own doc comment): whichever of an
-	// exit or an Add proposal is outstanding is cancelled here, explicitly,
-	// rather than left to ADR 0011's ordinary next-bar expiry — a delisted
-	// instrument produces no further bar for that expiry to ever run on.
-	// Built and validated BEFORE any state moves, the same discipline
-	// applyStopFill's own expireAddProposalForStop follows. Checked
-	// unconditionally for both kinds, mirroring applyCompletedBar's own
-	// "all checks are unconditional here so none is skipped by construction"
-	// — not because both could ever be outstanding at once (ADR 0010's exit
-	// precedence means at most one of the two ever is), but so that neither
-	// path depends on that invariant to be exercised.
-	var cancelled []event.Envelope
-	if state.pendingExitProposal != nil {
-		env, err := r.expireExitProposalForDelisting(state, payload, input)
-		if err != nil {
-			return nil, err
-		}
-		cancelled = append(cancelled, env)
-	}
-	if state.pendingAddProposal != nil {
-		env, err := r.expireAddProposalForDelisting(state, payload, input)
-		if err != nil {
-			return nil, err
-		}
-		cancelled = append(cancelled, env)
-	}
-
-	// State moves only now, after every payload this transition will be
-	// journalled as has validated — the same discipline
-	// openCampaign/applyStopFill/applyExitFill all follow.
-	state.campaign = nil
-	state.pendingExitProposal = nil
-	state.pendingAddProposal = nil
-	state.lastClosingFillAt = payload.EffectiveAt
-
-	emissions := make([]event.Envelope, 0, len(cancelled)+1)
-	emissions = append(emissions, cancelled...)
-	emissions = append(emissions, exitEnvelope)
-	return emissions, nil
+	), nil
 }
 
-// expireExitProposalForDelisting cancels an outstanding exit proposal the
-// instant a delisting forces the same Campaign closed — the delisting-side
-// counterpart of expireAddProposalForStop (campaign.go), for the identical
-// reason: ADR 0011's ordinary next-bar expiry never runs for a delisted
-// instrument, since there is no next bar.
-func (r *Reducer) expireExitProposalForDelisting(state *instrumentState, action event.CorporateActionPayload, input event.Envelope) (event.Envelope, error) {
-	pending := state.pendingExitProposal
+// delistingExpiry is what the three pending-proposal kinds differ in when a
+// delisting cancels them; the reason, the instant, the event type and the
+// schema are identical across them, which is why one builder serves all three
+// (end_of_stream.go's endOfStreamExpiry makes the same choice for the
+// end-of-stream expiries).
+type delistingExpiry struct {
+	idKind         string
+	kind           string
+	rule           string
+	proposalID     string
+	signalID       string
+	periodEnd      time.Time
+	earliestFillAt time.Time
+	quantity       int64
+	level          float64
+}
+
+// emitDelistingExpiry builds the terminal event for one proposal a delisting
+// cancels — the delisting-side counterpart of expireAddProposalForStop
+// (campaign.go), for the identical reason: ADR 0011's ordinary next-bar
+// expiry never runs for a delisted instrument, since there is no next bar.
+//
+// It moves no state, for the same reason expireAddProposalForStop does not:
+// the caller clears the proposal only once every payload the transition
+// produces has validated.
+func (r *Reducer) emitDelistingExpiry(expiry delistingExpiry, action event.CorporateActionPayload, input event.Envelope) (event.Envelope, error) {
 	payload := event.ProposalExpiredPayload{
 		InstrumentID:   action.InstrumentID,
-		Kind:           event.ProposalKindExit,
-		ProposalID:     pending.proposalID,
-		SignalID:       "",
-		PeriodEnd:      pending.periodEnd,
+		Kind:           expiry.kind,
+		ProposalID:     expiry.proposalID,
+		SignalID:       expiry.signalID,
+		PeriodEnd:      expiry.periodEnd,
 		ExpiredAt:      action.EffectiveAt,
-		EarliestFillAt: pending.earliestFillAt,
-		Rule:           event.RuleExitProposalSupersededByDelisting,
+		EarliestFillAt: expiry.earliestFillAt,
+		Rule:           expiry.rule,
 		ADR:            event.ADRSignalExpiry,
 		Reason:         event.ExpiryReasonSupersededByDelisting,
-		Quantity:       pending.quantity,
-		Level:          pending.level,
+		Quantity:       expiry.quantity,
+		Level:          expiry.level,
 	}
 	if err := payload.Validate(); err != nil {
 		// Unreachable: every field is copied from the pending proposal this
 		// reducer itself recorded, which passed the same contract when it was
 		// proposed, or is action.EffectiveAt, which the caller has already
-		// checked is not before state.lastPeriodEnd — later than
-		// pending.periodEnd's own predecessor bar, and so later than
-		// pending.earliestFillAt.
+		// checked is not before state.lastPeriodEnd — at the earliest the
+		// proposal's own bar, and so strictly after the bar before it, which
+		// is expiry.earliestFillAt.
 		return event.Envelope{}, fmt.Errorf("strategy: built invalid proposal expired payload: %w", err)
 	}
 	payloadBytes, err := json.Marshal(payload)
@@ -298,44 +404,11 @@ func (r *Reducer) expireExitProposalForDelisting(state *instrumentState, action 
 		// guard is.
 		return event.Envelope{}, fmt.Errorf("strategy: marshal proposal expired payload: %w", err)
 	}
+	// Keyed to the corporate action that superseded the proposal rather than
+	// to the bar that raised it, and to its own kind: a delisting is terminal,
+	// so one instrument produces at most one expiry of each kind from it.
 	return r.stamp(
-		decisionID("exit-proposal-expired-by-delisting", action.InstrumentID, action.EffectiveAt),
-		event.ProposalExpiredEventType, event.ProposalExpiredSchemaVersion,
-		action.EffectiveAt, input, payloadBytes,
-	), nil
-}
-
-// expireAddProposalForDelisting is
-// expireExitProposalForDelisting's Add-side counterpart.
-func (r *Reducer) expireAddProposalForDelisting(state *instrumentState, action event.CorporateActionPayload, input event.Envelope) (event.Envelope, error) {
-	pending := state.pendingAddProposal
-	payload := event.ProposalExpiredPayload{
-		InstrumentID:   action.InstrumentID,
-		Kind:           event.ProposalKindAdd,
-		ProposalID:     pending.proposalID,
-		SignalID:       "",
-		PeriodEnd:      pending.periodEnd,
-		ExpiredAt:      action.EffectiveAt,
-		EarliestFillAt: pending.earliestFillAt,
-		Rule:           event.RuleAddProposalSupersededByDelisting,
-		ADR:            event.ADRSignalExpiry,
-		Reason:         event.ExpiryReasonSupersededByDelisting,
-		Quantity:       pending.quantity,
-		Level:          pending.level,
-	}
-	if err := payload.Validate(); err != nil {
-		// Unreachable, for the identical reason
-		// expireExitProposalForDelisting's own Validate guard is.
-		return event.Envelope{}, fmt.Errorf("strategy: built invalid proposal expired payload: %w", err)
-	}
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		// Unreachable, for the same reason expireAddProposalForStop's marshal
-		// guard is.
-		return event.Envelope{}, fmt.Errorf("strategy: marshal proposal expired payload: %w", err)
-	}
-	return r.stamp(
-		decisionID("add-proposal-expired-by-delisting", action.InstrumentID, action.EffectiveAt),
+		decisionID(expiry.idKind, action.InstrumentID, action.EffectiveAt),
 		event.ProposalExpiredEventType, event.ProposalExpiredSchemaVersion,
 		action.EffectiveAt, input, payloadBytes,
 	), nil

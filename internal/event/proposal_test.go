@@ -1082,7 +1082,7 @@ func TestExitProposalExpiredPayloadValidate(t *testing.T) {
 			wantErr: "signal id",
 		},
 		{
-			// #24: an outstanding exit proposal is cancelled the instant a
+			// An outstanding exit proposal is cancelled the instant a
 			// delisting forces the same Campaign closed, rather than waiting
 			// for ADR 0011's ordinary next-bar expiry (which a delisted
 			// instrument will never produce).
@@ -1200,7 +1200,7 @@ func TestAddProposalExpiredPayloadValidate(t *testing.T) {
 			wantErr: "must be after the earliest instant",
 		},
 		{
-			// #24: the add-kind mirror of the exit-kind case above — a
+			// The add-kind mirror of the exit-kind case above: a
 			// delisting cancels an outstanding Add proposal too.
 			name: "add-kind expiry superseded by a delisting is legitimate",
 			mutate: func(p *event.ProposalExpiredPayload) {

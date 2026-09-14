@@ -140,6 +140,22 @@ type Reducer struct {
 	hasAvailableCash  bool
 
 	instruments map[string]*instrumentState
+	// delisted records, per instrument, the EffectiveAt of the delisting that
+	// ended its life in this run (ADR 0009). It is the memory that makes
+	// delisting.go's named invariant true rather than merely stated: a
+	// delisted instrument cannot un-delist and cannot be traded again in this
+	// run. Every entry is terminal — nothing ever removes one.
+	//
+	// It is held here rather than on instrumentState because a delisting
+	// legitimately names an instrument this reducer has no state for at all
+	// (see applyDelisting), and fabricating indicator state for one would make
+	// the reducer look as though it had evaluated an instrument it never saw.
+	//
+	// Three places read it, and two of them are the capital-safety guards:
+	// applyCompletedBar refuses to evaluate a delisted instrument as a Setup,
+	// applyFill refuses an execution naming one, and applyDelisting itself
+	// treats a repeated notice as stating no new fact.
+	delisted map[string]time.Time
 	// acceptedFills is defined and explained in
 	// campaign.go: every fill this reducer has accepted, for the WHOLE
 	// run, keyed by FillID — not per instrument — so that a fill id reused
@@ -244,6 +260,7 @@ func NewReducer(strategyVersion string, payload event.ConfigurationPayload) (*Re
 		strategyVersion:   strategyVersion,
 		configurationHash: event.ConfigurationHash(payload),
 		instruments:       make(map[string]*instrumentState),
+		delisted:          make(map[string]time.Time),
 		acceptedFills:     make(map[string]acceptedFillState),
 	}, nil
 }
@@ -416,6 +433,31 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	}
 	if err := bar.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: invalid completed bar payload: %w", err)
+	}
+
+	// A bar for a delisted instrument decides nothing (ADR 0009: a delisting
+	// ends the instrument's life in this run — see r.delisted). CONTEXT.md
+	// defines a Setup as an ELIGIBLE instrument not in a Campaign, and a
+	// delisted instrument is not eligible, so evaluating one here would
+	// journal a claim that is false by the project's own vocabulary — the
+	// identical reason no Setup-evaluated event is emitted for an instrument
+	// already in a Campaign, below. Read before stateFor, so a delisting for
+	// an instrument this reducer never saw does not acquire indicator state
+	// from the bars that follow it.
+	//
+	// Absorbed rather than failed closed, which is this package's default and
+	// is what applyFill does with a fill for the same instrument. The
+	// asymmetry is deliberate and rests on what each input is. A delisting
+	// notice is a fact about a listing, and it may legitimately name an
+	// instrument this strategy has no stake in whatsoever; making a later bar
+	// for that instrument halt the run would turn applyDelisting's no-op into
+	// a trap, failing a whole multi-instrument run over a name it never
+	// traded. A fill is a report that money moved, which is never absorbable.
+	// Nothing is hidden either way: the corporate action is itself an input
+	// envelope in the journal, so a reader can see why the instrument fell
+	// silent.
+	if _, delisted := r.delisted[bar.InstrumentID]; delisted {
+		return nil, nil
 	}
 
 	state, err := r.stateFor(bar.InstrumentID)

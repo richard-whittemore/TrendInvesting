@@ -14,9 +14,9 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
-// This file holds #24's own tests: the Delisting Exit (CONTEXT.md: "Delisting
+// This file holds the tests for the Delisting Exit (CONTEXT.md: "Delisting
 // Exit"; ADR 0009), the third and last of the three ways a Campaign can end.
-// Every fixture below builds on #11/#12/#13/#14/#15's
+// Every fixture below builds on the existing
 // breakoutBars/openingFill/postEntryBar/addOpportunityBar/buildGapCampaign
 // fixtures (campaign_test.go, exit_test.go, add_test.go, stop_ladder_test.go),
 // which open a 133-share AAPL Campaign at day(56) with campaignN ==
@@ -30,11 +30,12 @@ import (
 // implementation could reach for instead: the campaignFillPrice entry
 // (201.25), the campaign's Protective Stop (entryPrice - 2*campaignN), the
 // warmed-up Exit Channel low (100, see exit_test.go's header), and the
-// closing bar's own High and Low (never its Close). #79, #19 and #86 are this
-// project's own record of a fixture whose constants happened to coincide and
-// so never exercised the difference; every bar below is built with an
-// explicit, distinct Close for exactly that reason — completedBar/postEntryBar/
-// addOpportunityBar never default Close to Low or High.
+// closing bar's own High and Low (never its Close). This project has shipped
+// more than one fixture whose constants happened to coincide, so the
+// assertion never exercised the difference it was written for; every bar
+// below is built with an explicit, distinct Close for exactly that reason —
+// completedBar/postEntryBar/addOpportunityBar never default Close to Low or
+// High.
 
 // corporateActionEnvelope builds a market.corporate-action envelope for
 // payload, mirroring barEnvelope/fillEnvelope's own shape.
@@ -89,12 +90,12 @@ func delistingAction(instrumentID string, effectiveAt time.Time) event.Corporate
 
 // --- The headline behaviour --------------------------------------------
 
-// TestDelistingClosesAnOpenCampaignAtTheLastAvailablePrice is #24's primary
-// event-seam test: a delisting for an instrument with an open Campaign closes
-// it at the last available price (the closing bar's own Close — see this
-// file's header for why 155 is deliberately unlike every other number in the
-// fixture), reason delisting, with no fill involved (FillID names the
-// corporate-action envelope instead).
+// TestDelistingClosesAnOpenCampaignAtTheLastAvailablePrice is the primary
+// event-seam test for a Delisting Exit: a delisting for an instrument with an
+// open Campaign closes it at the last available price (the closing bar's own
+// Close — see this file's header for why 155 is deliberately unlike every
+// other number in the fixture), reason delisting, with no fill involved
+// (FillID names the corporate-action envelope instead).
 func TestDelistingClosesAnOpenCampaignAtTheLastAvailablePrice(t *testing.T) {
 	t.Parallel()
 
@@ -542,10 +543,19 @@ func TestDelistingEffectiveAtBeforeCampaignOpenedFailsClosed(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
+	// The opening fill claims day(57), a moment the stream has not yet reached
+	// a bar for (legitimate in itself: ADR 0005 rests the order into the
+	// following session, and the upper bound is only checked when that bar
+	// arrives — see checkBarConfirmsCampaignOpening). That is what leaves room
+	// for a delisting at day(56) to clear the last completed bar, which is
+	// also day(56), while still predating the campaign's own opening.
+	lateFill := openingFill("AAPL")
+	lateFill.FilledAt = day(57)
+
 	stream := newStream(t, cfg).
 		bars(breakoutBars("AAPL")).
-		fill(openingFill("AAPL")).
-		corporateAction(delistingAction("AAPL", day(50))) // well before day(56)'s opening fill
+		fill(lateFill).
+		corporateAction(delistingAction("AAPL", day(56)))
 	stream.wantRunError("predates campaign", "own opening fill")
 }
 
@@ -568,7 +578,7 @@ func TestDelistingEffectiveAtBeforeTheLastCompletedBarFailsClosed(t *testing.T) 
 	stream.wantRunError("predates the last completed bar")
 }
 
-// TestDelistingAfterAPartialStopAggregatesTheWholeLife is #24's own
+// TestDelistingAfterAPartialStopAggregatesTheWholeLife is the delisting
 // counterpart of TestExitFillAfterAPartialStopAggregatesTheWholeLife
 // (stop_ladder_test.go): a delisting closing whatever units survived an
 // earlier partial stop must aggregate the campaign's WHOLE life, exactly as
