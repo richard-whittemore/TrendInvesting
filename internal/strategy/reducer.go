@@ -263,6 +263,11 @@ func NewReducer(strategyVersion string, payload event.ConfigurationPayload) (*Re
 //   - event.CashMovementEventType: scales the Notional Account for a
 //     deposit or withdrawal (ADR 0007) — see notional.go's
 //     applyCashMovement.
+//   - event.MarketCorporateActionEventType: a fact about an instrument's own
+//     listing, external to any decision this system made — today, only a
+//     Delisting Exit (CONTEXT.md; ADR 0009), which forces an open Campaign
+//     closed at the last available price — see delisting.go's
+//     applyCorporateAction.
 //
 // Any other event type fails closed rather than being silently ignored
 // (docs/development.md principle 4: "Fail closed on unknown schemas").
@@ -281,6 +286,8 @@ func (r *Reducer) Apply(_ context.Context, envelope event.Envelope) ([]event.Env
 		return r.applyAccountSnapshot(envelope)
 	case event.CashMovementEventType:
 		return r.applyCashMovement(envelope)
+	case event.MarketCorporateActionEventType:
+		return r.applyCorporateAction(envelope)
 	case event.RunCompletedEventType:
 		return r.applyRunCompleted(envelope)
 	default:
