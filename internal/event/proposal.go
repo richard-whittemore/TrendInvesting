@@ -528,10 +528,14 @@ func (p ProposalDeclinedPayload) Validate() error {
 				p.RequiredCash, p.AvailableCash))
 		}
 	} else {
-		if requiredCashFinite && p.RequiredCash != 0 {
+		// Compared with zero directly, never "finite and non-zero": NaN is
+		// not equal to zero and neither is an infinity, so both are caught
+		// by the same rule that keeps a field meaningless for this reason
+		// from carrying any number at all.
+		if p.RequiredCash != 0 {
 			errs = append(errs, fmt.Errorf("required cash must be zero for reason %q (got %v): it is only meaningful for %q", p.Reason, p.RequiredCash, DeclineReasonInsufficientCash))
 		}
-		if availableCashFinite && p.AvailableCash != 0 {
+		if p.AvailableCash != 0 {
 			errs = append(errs, fmt.Errorf("available cash must be zero for reason %q (got %v): it is only meaningful for %q", p.Reason, p.AvailableCash, DeclineReasonInsufficientCash))
 		}
 	}

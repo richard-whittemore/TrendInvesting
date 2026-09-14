@@ -603,6 +603,30 @@ func TestProposalDeclinedPayloadValidate(t *testing.T) {
 			mutate:  func(p *event.ProposalDeclinedPayload) { p.AvailableCash = 1 },
 			wantErr: "available cash must be zero",
 		},
+		{
+			// NaN and infinity are not zero, and the zero rule is what keeps
+			// a field that means nothing for this reason from carrying a
+			// number at all — so a non-finite value must be caught by it
+			// rather than waved through as "not a finite non-zero".
+			name:    "nan required cash for a non-cash reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.RequiredCash = math.NaN() },
+			wantErr: "required cash must be zero",
+		},
+		{
+			name:    "infinite required cash for a non-cash reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.RequiredCash = math.Inf(1) },
+			wantErr: "required cash must be zero",
+		},
+		{
+			name:    "nan available cash for a non-cash reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.AvailableCash = math.NaN() },
+			wantErr: "available cash must be zero",
+		},
+		{
+			name:    "infinite available cash for a non-cash reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.AvailableCash = math.Inf(-1) },
+			wantErr: "available cash must be zero",
+		},
 	}
 
 	for _, tt := range tests {
