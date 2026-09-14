@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
-	"testing/fstest"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -100,19 +100,62 @@ func mustPath(t *testing.T, entry registry.Entry) string {
 	return path
 }
 
-// recordedIn is a registry root holding exactly the given entries, as the
-// files a caller would have installed for them.
-func recordedIn(t *testing.T, entries ...registry.Entry) fs.FS {
-	t.Helper()
-	fsys := fstest.MapFS{}
-	for _, entry := range entries {
-		var encoded bytes.Buffer
-		if err := registry.Encode(&encoded, entry); err != nil {
-			t.Fatalf("registry.Encode() error = %v", err)
+// files is a registry as it sits on disk, keyed by slash-separated path.
+type files map[string][]byte
+
+func (f files) ReadDir(dir string) ([]string, error) {
+	var names []string
+	var exists bool
+	for name := range f {
+		rest, ok := strings.CutPrefix(name, dir+"/")
+		if !ok {
+			continue
 		}
-		fsys[mustPath(t, entry)] = &fstest.MapFile{Data: encoded.Bytes()}
+		exists = true
+		// Only what is directly in dir; a nested path contributes the name
+		// of the directory holding it, exactly as a real listing would.
+		entry, _, _ := strings.Cut(rest, "/")
+		if !slices.Contains(names, entry) {
+			names = append(names, entry)
+		}
 	}
-	return fsys
+	if !exists {
+		return nil, &fs.PathError{Op: "open", Path: dir, Err: fs.ErrNotExist}
+	}
+	// Deliberately reverse-sorted: nothing may depend on a store's order.
+	slices.Sort(names)
+	slices.Reverse(names)
+	return names, nil
+}
+
+func (f files) ReadFile(name string) ([]byte, error) {
+	raw, ok := f[name]
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	return raw, nil
+}
+
+// encoded is entry as the file a caller would have installed for it.
+func encoded(t *testing.T, entry registry.Entry) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	if err := registry.Encode(&buf, entry); err != nil {
+		t.Fatalf("registry.Encode() error = %v", err)
+	}
+	return buf.Bytes()
+}
+
+// recordedIn is a registry holding exactly the given entries.
+func recordedIn(t *testing.T, entries ...registry.Entry) files {
+	t.Helper()
+
+	store := files{}
+	for _, entry := range entries {
+		store[mustPath(t, entry)] = encoded(t, entry)
+	}
+	return store
 }
 
 // TestTheSameConfigurationRegistersTheSameHashTwice is ADR 0012's first
@@ -453,13 +496,9 @@ func TestARunFiledUnderTheWrongConfigurationIsRefused(t *testing.T) {
 		t.Fatalf("registry.Dir() error = %v", err)
 	}
 
-	var encoded bytes.Buffer
-	if err := registry.Encode(&encoded, misfiled); err != nil {
-		t.Fatalf("registry.Encode() error = %v", err)
-	}
-	fsys := fstest.MapFS{wrongDir + "/misfiled.json": &fstest.MapFile{Data: encoded.Bytes()}}
+	store := files{wrongDir + "/misfiled.json": encoded(t, misfiled)}
 
-	if _, err := registry.Runs(fsys, wrongHash); err == nil {
+	if _, err := registry.Runs(store, wrongHash); err == nil {
 		t.Fatal("registry.Runs() error = nil, want a run filed under another configuration to be refused")
 	}
 }
@@ -477,13 +516,9 @@ func TestARunWhoseFileNameIsNotItsRunIDIsRefused(t *testing.T) {
 		t.Fatalf("registry.Dir() error = %v", err)
 	}
 
-	var encoded bytes.Buffer
-	if err := registry.Encode(&encoded, entry); err != nil {
-		t.Fatalf("registry.Encode() error = %v", err)
-	}
-	fsys := fstest.MapFS{dir + "/renamed.json": &fstest.MapFile{Data: encoded.Bytes()}}
+	store := files{dir + "/renamed.json": encoded(t, entry)}
 
-	if _, err := registry.Runs(fsys, entry.ConfigurationHash); err == nil {
+	if _, err := registry.Runs(store, entry.ConfigurationHash); err == nil {
 		t.Fatal("registry.Runs() error = nil, want a run whose file name is not its run id to be refused")
 	}
 }
@@ -544,7 +579,7 @@ func TestAConfigurationHashThatIsNotOneIsRefused(t *testing.T) {
 			if _, err := registry.Dir(test.hash); err == nil {
 				t.Fatalf("registry.Dir(%q) error = nil, want it refused", test.hash)
 			}
-			if _, err := registry.Runs(fstest.MapFS{}, test.hash); err == nil {
+			if _, err := registry.Runs(files{}, test.hash); err == nil {
 				t.Fatalf("registry.Runs(%q) error = nil, want it refused", test.hash)
 			}
 		})
@@ -891,9 +926,9 @@ func TestAnUndecodableEntryIsReported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registry.Dir() error = %v", err)
 	}
-	fsys := fstest.MapFS{dir + "/corrupt.json": &fstest.MapFile{Data: []byte("{not json")}}
+	store := files{dir + "/corrupt.json": []byte("{not json")}
 
-	_, err = registry.Runs(fsys, entry.ConfigurationHash)
+	_, err = registry.Runs(store, entry.ConfigurationHash)
 	if err == nil {
 		t.Fatal("registry.Runs() error = nil, want a corrupt entry to be reported")
 	}
@@ -914,17 +949,14 @@ func TestANonEntryInAConfigurationsDirectoryIsIgnored(t *testing.T) {
 		t.Fatalf("registry.Dir() error = %v", err)
 	}
 
-	var encoded bytes.Buffer
-	if err := registry.Encode(&encoded, entry); err != nil {
-		t.Fatalf("registry.Encode() error = %v", err)
-	}
-	fsys := fstest.MapFS{
-		dir + "/recorded.json": &fstest.MapFile{Data: encoded.Bytes()},
-		dir + "/NOTES.md":      &fstest.MapFile{Data: []byte("why this configuration was run\n")},
-		dir + "/nested/other":  &fstest.MapFile{Data: []byte("not a run either\n")},
+	store := files{
+		dir + "/recorded.json":     encoded(t, entry),
+		dir + "/NOTES.md":          []byte("why this configuration was run\n"),
+		dir + "/.run-1234.partial": []byte("an install still in progress\n"),
+		dir + "/nested/other":      []byte("not a run either\n"),
 	}
 
-	found, err := registry.Runs(fsys, entry.ConfigurationHash)
+	found, err := registry.Runs(store, entry.ConfigurationHash)
 	if err != nil {
 		t.Fatalf("registry.Runs() error = %v", err)
 	}
@@ -945,7 +977,7 @@ func TestAnUnreadableRegistryIsReported(t *testing.T) {
 		t.Fatalf("registry.Dir() error = %v", err)
 	}
 
-	_, err = registry.Runs(refusingFS{dir: dir}, entry.ConfigurationHash)
+	_, err = registry.Runs(refusingStore{dir: dir}, entry.ConfigurationHash)
 	if err == nil {
 		t.Fatal("registry.Runs() error = nil, want the read failure to be reported")
 	}
@@ -966,14 +998,10 @@ func TestARecordedRunThatCannotBeOpenedIsReported(t *testing.T) {
 		t.Fatalf("registry.Dir() error = %v", err)
 	}
 
-	var encoded bytes.Buffer
-	if err := registry.Encode(&encoded, entry); err != nil {
-		t.Fatalf("registry.Encode() error = %v", err)
-	}
 	name := dir + "/unopenable.json"
-	fsys := unopenableFS{FS: fstest.MapFS{name: &fstest.MapFile{Data: encoded.Bytes()}}, name: name}
+	store := unreadableStore{files: files{name: encoded(t, entry)}, name: name}
 
-	_, err = registry.Runs(fsys, entry.ConfigurationHash)
+	_, err = registry.Runs(store, entry.ConfigurationHash)
 	if err == nil {
 		t.Fatal("registry.Runs() error = nil, want the run it could not open to be reported")
 	}
@@ -1014,27 +1042,30 @@ func (failingWriter) Write([]byte) (int, error) { return 0, errRefused }
 
 var errRefused = errors.New("the registry could not be read")
 
-// unopenableFS lists a run and will not open it: a permission change, a
+// unreadableStore lists a run and will not read it: a permission change, a
 // failing disk, a half-mounted volume.
-type unopenableFS struct {
-	fs.FS
+type unreadableStore struct {
+	files
 	name string
 }
 
-func (f unopenableFS) Open(name string) (fs.File, error) {
-	if name == f.name {
+func (s unreadableStore) ReadFile(name string) ([]byte, error) {
+	if name == s.name {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: errRefused}
 	}
-	return f.FS.Open(name)
+	return s.files.ReadFile(name)
 }
 
-// refusingFS is a registry whose directory exists and cannot be read: a
-// permission change, a half-mounted volume, a failing disk.
-type refusingFS struct{ dir string }
+// refusingStore is a registry whose directory exists and cannot be listed.
+type refusingStore struct{ dir string }
 
-func (f refusingFS) Open(name string) (fs.File, error) {
-	if name == f.dir {
-		return nil, &fs.PathError{Op: "open", Path: name, Err: errRefused}
+func (s refusingStore) ReadDir(dir string) ([]string, error) {
+	if dir == s.dir {
+		return nil, &fs.PathError{Op: "open", Path: dir, Err: errRefused}
 	}
+	return nil, &fs.PathError{Op: "open", Path: dir, Err: fs.ErrNotExist}
+}
+
+func (s refusingStore) ReadFile(name string) ([]byte, error) {
 	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 }

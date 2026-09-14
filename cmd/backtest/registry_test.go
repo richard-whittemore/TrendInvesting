@@ -53,7 +53,7 @@ func verifyJournal(t *testing.T, path string) journal.Verification {
 func runsUnder(t *testing.T, root string, cfg event.ConfigurationPayload) []registry.Entry {
 	t.Helper()
 
-	found, err := registry.Runs(os.DirFS(root), event.ConfigurationHash(cfg))
+	found, err := registry.Runs(registryStore{root: root}, event.ConfigurationHash(cfg))
 	if err != nil {
 		t.Fatalf("registry.Runs() error = %v", err)
 	}
@@ -197,6 +197,43 @@ func TestAFailedRunIsRecordedWithItsPartialEvidence(t *testing.T) {
 	}
 	if _, statErr := os.Stat(journalPath); statErr != nil {
 		t.Errorf("os.Stat(%s) error = %v, want the partial journal to have been written", journalPath, statErr)
+	}
+}
+
+// TestARunWhoseJournalCouldNotBeWrittenIsStillRecorded: the run itself
+// finished and its evidence did not land. Recording nothing would leave the
+// registry claiming the run never happened, so it is recorded as failed, with
+// no artefacts and the reason its journal is missing.
+func TestARunWhoseJournalCouldNotBeWrittenIsStillRecorded(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "runs")
+
+	var log bytes.Buffer
+	err := backtest(options{
+		configPath:   configurationFixture,
+		barsPath:     barsFixture,
+		outPath:      filepath.Join(dir, "no-such-directory", "journal.jsonl"),
+		registryPath: root,
+		runID:        "journal-lost",
+		variant:      registry.Baseline,
+		build:        testBuild,
+	}, &log)
+	if err == nil {
+		t.Fatal("backtest() error = nil, want the journal it could not write to be reported")
+	}
+
+	found := runsUnder(t, root, fixtureConfiguration(t))
+	if len(found) != 1 {
+		t.Fatalf("the registry holds %d runs, want the run recorded regardless", len(found))
+	}
+	if found[0].Status != registry.StatusFailed {
+		t.Errorf("status = %q, want %q", found[0].Status, registry.StatusFailed)
+	}
+	if found[0].Artefacts.JournalPath != "" {
+		t.Errorf("the entry names journal %q, which was never written", found[0].Artefacts.JournalPath)
+	}
+	if !strings.Contains(found[0].Detail, "create the journal") {
+		t.Errorf("detail = %q, want it to say why no journal survives the run", found[0].Detail)
 	}
 }
 

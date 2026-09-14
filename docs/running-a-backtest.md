@@ -43,7 +43,7 @@ This feeds the journal's own recorded inputs back through a freshly constructed 
 
 The reducer is built from the journal alone: the strategy version and configuration hash from its header, and the configuration payload from its own input stream. Nothing is supplied on the command line, because a journal is meant to be self-describing evidence.
 
-One invocation performs exactly one operation. `-verify` and `-replay` are mutually exclusive with each other and with the flags that describe a run to perform (`-config`, `-bars`, `-out`); asking for two is refused rather than silently given one of them.
+One invocation performs exactly one operation. `-verify`, `-replay` and `-runs` are mutually exclusive with each other and with the flags that describe a run to perform (`-config`, `-bars`, `-out`, `-run-id`); asking for two is refused rather than silently given one of them. `-registry` is the one flag two operations share — it names where a run is recorded, and where recorded runs are read from — so it is refused alongside `-verify` or `-replay`, which would ignore it.
 
 Replay refuses rather than reports a divergence whenever it cannot ask the question at all — a journal it cannot read, an unknown record kind, a header strategy version it cannot parse, a missing or undecodable configuration. Among those refusals, these are the **identity-consistency checks**, each holding one part of the header against what the journal itself records:
 
@@ -53,6 +53,71 @@ Replay refuses rather than reports a divergence whenever it cannot ask the quest
 - **A record names a run other than the header's.** Every record must state the header's strategy version and configuration hash. This matters most for inputs: they are fed to the reducer and their own identity fields are never compared to anything, whereas recorded decisions are already pinned by the byte comparison.
 
 What this proves is the **reducer's** determinism. A journal's inputs include the fills the simulator decided (ADR 0005), so replaying them re-derives the reducer's own decisions — Setup evaluation, sizing, the Add, stop and exit rules — and says nothing about whether the fill simulator would produce the same fills again from the bars alone. That stronger, whole-pipeline property is a separate question.
+
+## Recording the run in the registry
+
+Every run — successful, failed, or abandoned — belongs in the run registry, under the configuration hash that identifies it (ADR 0012). Add `-registry` and `-run-id` to the run:
+
+```sh
+go run ./cmd/backtest \
+  -config   cmd/backtest/testdata/configuration.json \
+  -bars     cmd/backtest/testdata/bars.json \
+  -out      runs/journals/baseline-2026-09-13.jsonl \
+  -registry runs \
+  -run-id   baseline-2026-09-13 \
+  -variant  baseline
+```
+
+- `-registry` is the registry root, committed to git. `-run-id` is required with it: the identifier is chosen by you, never derived from a clock, so that two records of one run are recognisable as such. Lower-case letters, digits and interior hyphens only — it becomes a file name, and upper case would collide on a case-insensitive filesystem.
+- `-variant` is the Variant this run declares, defaulting to `baseline`. There is no unattributed run.
+- `-out` should be a path *inside the repository*, so that the journal a registry entry points at is committed beside it. The path is recorded exactly as given.
+
+### The layout, and why it is this one
+
+One file per run, in a directory named for its configuration hash:
+
+```
+runs/
+  sha256-<digest>/
+    baseline-2026-09-13.json
+    baseline-2026-09-14.json
+  sha256-<other digest>/
+    recompute-n-2026-09-15.json
+```
+
+**The layout is the index.** There is no manifest, catalogue or aggregate file, because any of those would be one mutable blob that every run rewrites — and two runs recorded on two branches would then conflict on every merge. Here two runs never write the same path, so two branches that each recorded a run merge as two additions.
+
+**Nothing is ever overwritten.** The entry is written to a temporary file in its own directory, flushed, and hard-linked into place: `link(2)` fails with `EEXIST` atomically, so a run id the registry already holds is refused rather than replaced, and two runs recorded at the same instant can neither interleave nor clobber one another. This is the same install the journal uses, and for the same reason — `rename(2)` would replace the destination silently.
+
+### What an entry records
+
+The configuration hash, the configuration itself (a hash identifies a run; it does not reproduce one), the strategy version, the span of input event times, the Variant, the status, the reason it ended, and where its evidence lives — including the journal's **final record hash and record count**, which is what anchors ADR 0017's chain outside the journal and closes its end-truncation gap.
+
+The hash is derived from the recorded configuration, never supplied, and re-derived when the entry is read back, so a run cannot be re-attributed to another Variant by editing one string. An entry filed under the wrong configuration, or in a file not named for its own run id, is refused rather than returned.
+
+### The status vocabulary
+
+Closed, and about the **run** rather than the verdict on it:
+
+- `completed` — the run reached the end of its input stream and wrote a journal.
+- `failed` — the run stopped before the end of its input stream. Whatever partial journal it left is recorded with it, because that is exactly what a reviewer reads.
+- `abandoned` — the run was declared and deliberately not carried through, or its output discarded.
+
+An unrecognised status fails closed on the way in *and* on the way out; it is never stored as read. Whether a Variant is adopted or rejected is a judgement made over many runs against ADR 0012's five criteria, and is deliberately not something a single run's own record can assert about itself.
+
+### Zero slippage is refused twice
+
+A zero-slippage run is invalid by construction (ADR 0013), and the refusal lives in two places on purpose. The **run** refuses it before a single bar is read, because a refusal that could be avoided by not registering the run would not be one — the invalid run must never produce an equity curve at all. The **registry** refuses it too, whatever the run's status, because it accepts entries it did not itself produce and ADR 0013 names it as the thing that must reject one. Retention is not a licence here: nothing was produced that is evidence of anything.
+
+### Finding a run, and replaying it
+
+```sh
+go run ./cmd/backtest -registry runs -runs sha256:<digest>
+```
+
+This lists every run recorded under that configuration — id, status, Variant, span, and the journal each one wrote — whatever became of each. Feed a journal it names straight to `-replay`.
+
+A registry root that does not exist is reported rather than read as an empty one: "this configuration has never been run" and "this registry is not there" are different findings, and only one of them is evidence.
 
 ## The committed fixture
 
