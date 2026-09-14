@@ -574,12 +574,14 @@ func (r *Reducer) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelop
 
 	r.lastAccountEventAt = snapshot.AsOf
 	r.hasAccountEvent = true
-	// ADR 0010's cash basis: sizeUnit and evaluateAdd read r.availableCash
-	// as-is, so this snapshot's figure stands until a later one replaces it —
-	// exactly the "cash known at the previous close" a bar sees, since
-	// nothing later in this same Apply call, or in the bar(s) that follow
-	// before the next snapshot, ever changes it.
+	// ADR 0010's cash basis. The figure stands until a later snapshot
+	// replaces it, and AsOf travels with it: whether it may be spent on a
+	// given bar is not decided here but at the decision itself, where the
+	// bar's previous close is known (Reducer.cashAtPreviousClose,
+	// reducer.go). A snapshot is accepted on its own account-timeline
+	// chronology alone; it is the spending that is bound to the bar.
 	r.availableCash = snapshot.AvailableCash
+	r.availableCashAsOf = snapshot.AsOf
 	r.hasAvailableCash = true
 
 	var emissions []event.Envelope

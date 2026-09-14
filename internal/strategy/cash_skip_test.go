@@ -255,7 +255,7 @@ func runCashSkipLadderFixture(t *testing.T) []event.Envelope {
 		bar(bar57).
 		fill(fill2).
 		bar(bar58).
-		snapshot(cashSnapshot(cfg, day(58).Add(time.Hour), recoveredCash)).
+		snapshot(cashSnapshot(cfg, day(58), recoveredCash)).
 		bar(bar59).
 		fill(fill3).
 		bar(bar60).
@@ -377,4 +377,74 @@ func TestByteIdenticalReplayOfAFixtureContainingASkip(t *testing.T) {
 			t.Fatalf("emission %d differs between runs:\n  first:  %s\n  second: %s", i, a, b)
 		}
 	}
+}
+
+// --- The cash basis is the PREVIOUS close's, and only that ----------------
+
+// cashSkipGenerousCash is comfortably clear of every cost in this file's
+// fixtures, used where the subject is WHICH snapshot may be spent rather than
+// how much it holds.
+const cashSkipGenerousCash = 1_000_000_000.0
+
+// TestSnapshotDatedAfterTheDecisionBarIsRefusedOnEntry is ADR 0010's cash
+// basis at the seam it is actually decided: the cash a bar may spend is the
+// cash known at the PREVIOUS close. A snapshot stamped after the decision bar
+// itself reports cash that did not exist when the bar opened — the exact
+// look-ahead ADR 0010 forbids — so the run fails closed rather than sizing a
+// Unit against it.
+func TestSnapshotDatedAfterTheDecisionBarIsRefusedOnEntry(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	bars := breakoutBars("AAPL")
+	newStream(t, cfg).
+		bars(bars[:len(bars)-1]).
+		snapshot(cashSnapshot(cfg, day(56).Add(time.Hour), cashSkipGenerousCash)).
+		bar(bars[len(bars)-1]).
+		wantRunError("AAPL", "previous close", "0010")
+}
+
+// TestSnapshotDatedAtThePreviousCloseIsSpendable is the control the test above
+// needs: the same stream, with the same figure stamped AT the previous close
+// instead of after the decision bar, proposes normally. Without it, a reducer
+// that refused every mid-stream snapshot would satisfy the test above.
+func TestSnapshotDatedAtThePreviousCloseIsSpendable(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	bars := breakoutBars("AAPL")
+	emitted := newStream(t, cfg).
+		bars(bars[:len(bars)-1]).
+		snapshot(cashSnapshot(cfg, day(55), cashSkipGenerousCash)).
+		bar(bars[len(bars)-1]).
+		mustRun()
+
+	if proposals := envelopesOfType(emitted, event.TradeProposalEventType); len(proposals) != 1 {
+		t.Fatalf("got %d trade proposal(s), want exactly 1: cash known at the previous close is spendable", len(proposals))
+	}
+	if declines := envelopesOfType(emitted, event.ProposalDeclinedEventType); len(declines) != 0 {
+		t.Fatalf("got %d decline(s), want 0", len(declines))
+	}
+}
+
+// TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd is the same rule on the
+// Add Ladder: an open Campaign's rung is sized against the cash known at the
+// previous close too, so a snapshot stamped after the bar the rung is reached
+// on fails the run closed rather than funding the Add.
+func TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignN := breakoutFixtureN(t, cfg)
+	rung2, err := sizing.NextAddLevel(campaignFillPrice, campaignN, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel(rung 2) error = %v", err)
+	}
+
+	newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		snapshot(cashSnapshot(cfg, day(57).Add(time.Hour), cashSkipGenerousCash)).
+		bar(addOpportunityBar("AAPL", day(57), rung2+5)).
+		wantRunError("AAPL", "previous close", "0010")
 }

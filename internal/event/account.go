@@ -35,12 +35,11 @@ const AccountSnapshotSchemaVersion uint32 = 2
 // AvailableCash rides on the same event as Equity, rather than a separate
 // one, because ADR 0010 needs exactly the same thing Equity already has: a
 // single, chronologically-ordered reading. ADR 0010's cash basis is the cash
-// known at the PREVIOUS close — never a running balance updated mid-bar —
-// and that is a property of when this event is delivered relative to the
-// completed bars it precedes, not of anything this payload's own fields
-// state; a producer that wants the rule honoured delivers the snapshot for
-// bar t+1 only after bar t's exits are known, exactly as it already must for
-// Equity's own Drawdown Step ladder.
+// known at the PREVIOUS close — never a running balance updated mid-bar — so
+// a producer states AsOf as the instant the figure was true and the reducer
+// refuses to spend a figure stamped later than the decision bar's previous
+// close (internal/strategy's Reducer.cashAtPreviousClose). A snapshot dated
+// after the bar it would fund is a misordered stream, not a usable reading.
 type AccountSnapshotPayload struct {
 	// AsOf is when this equity and cash figure were true, not when it was
 	// recorded — Envelope.RecordedAt carries that. A reducer requires AsOf

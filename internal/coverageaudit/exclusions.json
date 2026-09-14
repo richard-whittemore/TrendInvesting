@@ -352,13 +352,6 @@
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).evaluateAdd",
-      "statement": "return nil, fmt.Errorf( \"strategy: instrument %q: campaign %q: no account.snapshot has ever supplied an available-cash figure; refusing to size a unit as though cash were infinite (ADR 0010)\", campaign.instrumentID, campaign.campaignID)",
-      "category": "unreachable-by-invariant",
-      "reason": "evaluateAdd only ever runs while state.campaign is non-nil, and the only way a Campaign comes into being is applyFill accepting a fill for a trade proposal sizeUnit produced (reducer.go) — CampaignOpenedEventType is never a recognised INPUT type (Apply's switch), so a Campaign can never be injected directly. sizeUnit itself refuses to build a proposal unless r.hasAvailableCash is already true (its own identical guard, reducer.go), and nothing in this codebase ever sets hasAvailableCash back to false once an account.snapshot has set it true (applyAccountSnapshot, notional.go). So by the time any Campaign exists, hasAvailableCash is already, and permanently, true. The guard stays for the same reason sizeUnit's nReady guard does: defence in depth if that call chain ever changes, not a claim that a caller would never construct this state."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).evaluateAdd",
       "statement": "return nil, err",
       "category": "unreachable-by-construction",
       "reason": "Propagates declineAdd's error, whose own two failure paths (Validate and json.Marshal) are themselves unreachable by construction (their entries in this list, function (*Reducer).declineAdd)."
@@ -481,8 +474,8 @@
       "function": "(*Reducer).applyCompletedBar",
       "statement": "return nil, err",
       "category": "unreachable-by-construction",
-      "reason": "Propagation of an error from stateFor, an expire*Proposal, evaluateCampaign, evaluateAdd or rememberPendingProposal. Every failure path in all five is itself in this list. The sixth propagation, of sizeUnit's own error, is NOT here: sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account, so that one is reachable and is covered by TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun.",
-      "count": 7
+      "reason": "Propagation of an error from stateFor, an expire*Proposal, evaluateCampaign or rememberPendingProposal. Every failure path in all four is itself in this list. Two propagations are NOT here, both reachable and both covered: sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun), and evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd).",
+      "count": 6
     },
     {
       "file": "internal/strategy/reducer.go",
