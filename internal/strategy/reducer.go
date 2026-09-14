@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -818,16 +819,16 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 	if err != nil {
 		return event.Envelope{}, err
 	}
-	// Cost is quantity x the order's resting level x dollars per point — the
-	// level a resting buy-stop actually sits at (ADR 0005), not a fill price
-	// the reducer cannot know yet (TradeProposalPayload.EntryLevel's own doc
-	// comment). This is a bare product feeding a comparison, never an
-	// addition or subtraction, so it needs no sizing.Product barrier
-	// (docs/development.md: "a*b*c with no addition is not fusible and
-	// needs nothing"); the comparison itself is a plain >, not a subtracted
-	// difference, for the identical reason — either form would otherwise be
-	// exactly where a fused multiply-add could move a boundary decision.
-	cost := float64(unit.Quantity) * entryLevel * r.dollarsPerPoint
+	cost, costRepresentable := unitCost(unit.Quantity, entryLevel, r.dollarsPerPoint)
+	if !costRepresentable {
+		// More than any cash that can be held, so the Unit is skipped on the
+		// same rule an unaffordable one is (ADR 0010) — journalled, with the
+		// operands in Detail, rather than stopping the run on a cost no
+		// payload can carry.
+		return r.decline(bar, input, signalID, event.DeclineReasonUnitCostNotRepresentable,
+			fmt.Sprintf("unit cost (%d shares x entry level %v x %v dollars per point) leaves the representable range, so it exceeds any cash that could fund it; the cash available at the previous close was %v",
+				unit.Quantity, entryLevel, r.dollarsPerPoint, availableCash), 0, 0)
+	}
 	if cost > availableCash {
 		// No partial Unit, ever: the whole Unit is skipped (ADR 0010), never
 		// resized down to what the available cash would cover.
@@ -940,6 +941,27 @@ func (r *Reducer) cashAtPreviousClose(instrumentID string, previousClose time.Ti
 			instrumentID, r.availableCashAsOf.Format(time.RFC3339), previousClose.Format(time.RFC3339))
 	}
 	return r.availableCash, nil
+}
+
+// unitCost is what one whole Unit costs to put on under ADR 0010: its
+// quantity x the order's own resting level (ADR 0005 — never a fill price the
+// reducer cannot know yet) x dollars per point, and whether that product is a
+// number this system can state.
+//
+// It reports false when three finite operands multiply past the float64
+// range. No guard on the operands can rule that out — no rule caps the
+// Notional Account, a contract multiplier is configured, and a bar's prices
+// need only be finite — and +Inf is not a figure a decline can carry, since
+// JSON cannot encode it. A caller that gets false must skip the Unit without
+// recording the cost, never record the cost.
+//
+// A bare product feeding a comparison, never an addition or subtraction, so
+// it needs no sizing.Product barrier (docs/development.md: "a*b*c with no
+// addition is not fusible and needs nothing"), and callers compare it with a
+// plain > rather than a subtracted difference for the identical reason.
+func unitCost(quantity int64, level, dollarsPerPoint float64) (float64, bool) {
+	cost := float64(quantity) * level * dollarsPerPoint
+	return cost, !math.IsInf(cost, 0) && !math.IsNaN(cost)
 }
 
 // sizingRuleFor names the rule a proposal cites, per Sizing Mode.

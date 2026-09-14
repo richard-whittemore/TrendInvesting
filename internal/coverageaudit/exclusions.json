@@ -354,14 +354,15 @@
       "function": "(*Reducer).evaluateAdd",
       "statement": "return nil, err",
       "category": "unreachable-by-construction",
-      "reason": "Propagates declineAdd's error, whose own two failure paths (Validate and json.Marshal) are themselves unreachable by construction (their entries in this list, function (*Reducer).declineAdd)."
+      "reason": "Both propagate declineAdd's error — one per decline branch, the unrepresentable cost and the unaffordable one — and declineAdd's own two failure paths (Validate and json.Marshal) are themselves unreachable by construction (their entries in this list, function (*Reducer).declineAdd). The third propagation in this function, of cashAtPreviousClose's error, is NOT here: it is reachable and covered by TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd.",
+      "count": 2
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).declineAdd",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal declined payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload assembled field by field from campaign identifiers already known non-empty (an open Campaign always has both) and from requiredCash/availableCash figures the caller computed as a plain product and read from an already-validated AccountSnapshotPayload — both finite by construction, and requiredCash is strictly greater than availableCash by the caller's own if-condition (the only call site, evaluateAdd) before declineAdd is ever invoked. If that relationship ever stopped holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
+      "reason": "Validate on a payload assembled field by field from campaign identifiers already known non-empty (an open Campaign always has both) and from cash figures the only call site, evaluateAdd, has already constrained to exactly the two shapes Validate accepts. Finiteness is not assumed: unitCost (reducer.go) reports whether the product left the float64 range, and evaluateAdd branches on that — the unrepresentable branch passes 0, 0 with a reason for which Validate requires exactly zero, and the unaffordable branch passes a requiredCash unitCost has just certified finite and which its own if-condition has just certified strictly greater than an availableCash read from an already-validated AccountSnapshotPayload. If either relationship ever stopped holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -524,7 +525,7 @@
       "function": "(*Reducer).decline",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal declined payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "ProposalDeclinedPayload.Validate on a payload whose Reason is one of this package's own constants and whose remaining fields come from the bar under decision, already validated."
+      "reason": "ProposalDeclinedPayload.Validate on a payload whose Reason is one of this package's own constants and whose remaining fields come from the bar under decision, already validated. The two cash figures are not assumed finite: sizeUnit passes 0, 0 for every reason for which Validate requires exactly zero, and for insufficient-cash it passes a requiredCash unitCost (reducer.go) has just certified representable and its own if-condition has just certified strictly greater than an availableCash read from an already-validated AccountSnapshotPayload."
     },
     {
       "file": "internal/strategy/reducer.go",

@@ -1024,21 +1024,32 @@ func (r *Reducer) evaluateAdd(state *instrumentState, input event.Envelope) ([]e
 	if err != nil {
 		return nil, err
 	}
-	// Cost is the frozen Unit quantity x the rung (the resting order's own
-	// level, ADR 0005) x dollars per point — a bare product feeding a
-	// comparison, never an addition or subtraction, so it needs no
-	// sizing.Product barrier (docs/development.md), and the comparison
-	// itself is a plain >, not a subtracted difference, for the identical
-	// reason sizeUnit's own check is.
-	cost := float64(campaign.unitQuantity) * rung * r.dollarsPerPoint
-	if cost > availableCash {
-		// No partial Unit, ever: the whole Unit is skipped (ADR 0010). No
-		// pendingAddProposal is remembered — nothing was proposed, so there
-		// is nothing for a later bar to expire — and the NEXT bar
-		// re-evaluates this same rung on its own merits (evaluateAdd is
-		// re-entered from applyCompletedBar with no memory of this decline):
-		// a skip does not poison the ladder.
-		declined, err := r.declineAdd(campaign, state.lastBarPeriodEnd, unitIndex, rung, input, cost, availableCash)
+	// The rung is the resting order's own level (ADR 0005), and the quantity
+	// is the one frozen at entry — an Add is never resized. Either outcome
+	// below skips the whole Unit and remembers no pendingAddProposal —
+	// nothing was proposed, so there is nothing for a later bar to expire —
+	// and the NEXT bar re-evaluates this same rung on its own merits
+	// (evaluateAdd is re-entered from applyCompletedBar with no memory of
+	// this decline): a skip does not poison the ladder.
+	cost, costRepresentable := unitCost(campaign.unitQuantity, rung, r.dollarsPerPoint)
+	switch {
+	case !costRepresentable:
+		declined, err := r.declineAdd(campaign, state.lastBarPeriodEnd, unitIndex, input,
+			event.DeclineReasonUnitCostNotRepresentable,
+			fmt.Sprintf("unit %d cost (%d shares x rung %v x %v dollars per point) leaves the representable range, so it exceeds any cash that could fund it; the cash available at the previous close was %v",
+				unitIndex, campaign.unitQuantity, rung, r.dollarsPerPoint, availableCash),
+			0, 0)
+		if err != nil {
+			return nil, err
+		}
+		return []event.Envelope{declined}, nil
+	case cost > availableCash:
+		// No partial Unit, ever: the whole Unit is skipped (ADR 0010).
+		declined, err := r.declineAdd(campaign, state.lastBarPeriodEnd, unitIndex, input,
+			event.DeclineReasonInsufficientCash,
+			fmt.Sprintf("unit %d cost %v (%d shares x rung %v x %v dollars per point) exceeds the cash available at the previous close %v",
+				unitIndex, cost, campaign.unitQuantity, rung, r.dollarsPerPoint, availableCash),
+			cost, availableCash)
 		if err != nil {
 			return nil, err
 		}
@@ -1098,19 +1109,22 @@ func (r *Reducer) evaluateAdd(state *instrumentState, input event.Envelope) ([]e
 }
 
 // declineAdd builds the strategy.proposal.declined emission for an open
-// Campaign's Add Ladder rung that was reached but could not be afforded
-// (DeclineReasonInsufficientCash's own doc comment; ADR 0010) — the
+// Campaign's Add Ladder rung that was reached but not taken (ADR 0010) — the
 // Add-kind counterpart of Reducer.decline (reducer.go), which builds the
 // entry-kind emission.
-func (r *Reducer) declineAdd(campaign *campaignState, periodEnd time.Time, unitIndex int, level float64, input event.Envelope, requiredCash, availableCash float64) (event.Envelope, error) {
+//
+// requiredCash and availableCash are only meaningful for reason
+// event.DeclineReasonInsufficientCash; every other caller passes 0, 0
+// (ProposalDeclinedPayload.Validate rejects a non-zero value for any other
+// reason).
+func (r *Reducer) declineAdd(campaign *campaignState, periodEnd time.Time, unitIndex int, input event.Envelope, reason, detail string, requiredCash, availableCash float64) (event.Envelope, error) {
 	payload := event.ProposalDeclinedPayload{
-		InstrumentID: campaign.instrumentID,
-		PeriodEnd:    periodEnd,
-		Kind:         event.ProposalDeclinedKindAdd,
-		CampaignID:   campaign.campaignID,
-		Reason:       event.DeclineReasonInsufficientCash,
-		Detail: fmt.Sprintf("unit %d cost %v (%d shares x rung %v x %v dollars per point) exceeds the cash available at the previous close %v",
-			unitIndex, requiredCash, campaign.unitQuantity, level, r.dollarsPerPoint, availableCash),
+		InstrumentID:  campaign.instrumentID,
+		PeriodEnd:     periodEnd,
+		Kind:          event.ProposalDeclinedKindAdd,
+		CampaignID:    campaign.campaignID,
+		Reason:        reason,
+		Detail:        detail,
 		RequiredCash:  requiredCash,
 		AvailableCash: availableCash,
 	}

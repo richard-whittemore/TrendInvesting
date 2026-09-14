@@ -86,6 +86,16 @@ const (
 	// borrowing: the whole Unit is skipped, and RequiredCash/AvailableCash
 	// carry the two figures the comparison was made from.
 	DeclineReasonInsufficientCash = "insufficient-cash"
+	// DeclineReasonUnitCostNotRepresentable means the Unit's cost is a
+	// finite number only in exact arithmetic: quantity x the order's resting
+	// level x dollars per point, each of them finite, multiplies past the
+	// float64 range. Such a Unit costs more than any cash that can be held,
+	// so it is skipped exactly as an unaffordable one is (ADR 0010) rather
+	// than stopping the run. RequiredCash and AvailableCash are both zero:
+	// the cost is the one figure that cannot be stated — JSON cannot encode
+	// an infinity at all — and Detail carries the operands it was formed
+	// from instead.
+	DeclineReasonUnitCostNotRepresentable = "unit-cost-not-representable"
 )
 
 // The two Kind values ProposalDeclinedPayload accepts, mirroring
@@ -498,7 +508,8 @@ func (p ProposalDeclinedPayload) Validate() error {
 		errs = append(errs, fmt.Errorf("kind %q is not a recognised proposal declined kind", p.Kind))
 	}
 	switch p.Reason {
-	case DeclineReasonNNotReady, DeclineReasonQuantityBelowOneUnit, DeclineReasonStopIntentNotPositive, DeclineReasonInsufficientCash:
+	case DeclineReasonNNotReady, DeclineReasonQuantityBelowOneUnit, DeclineReasonStopIntentNotPositive,
+		DeclineReasonInsufficientCash, DeclineReasonUnitCostNotRepresentable:
 		// recognised
 	default:
 		errs = append(errs, fmt.Errorf("reason %q is not a recognised decline reason", p.Reason))

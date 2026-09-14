@@ -543,6 +543,21 @@ func TestProposalDeclinedPayloadValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			// The cost is the one figure this reason cannot state, so both
+			// cash fields stay zero and the zero rule above applies to it.
+			name:    "unit cost not representable reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.Reason = event.DeclineReasonUnitCostNotRepresentable },
+			wantErr: "",
+		},
+		{
+			name: "unit cost not representable reason carrying a cash figure",
+			mutate: func(p *event.ProposalDeclinedPayload) {
+				p.Reason = event.DeclineReasonUnitCostNotRepresentable
+				p.RequiredCash = math.Inf(1)
+			},
+			wantErr: "required cash must be zero",
+		},
+		{
 			name:    "missing instrument id",
 			mutate:  func(p *event.ProposalDeclinedPayload) { p.InstrumentID = "" },
 			wantErr: "instrument id",

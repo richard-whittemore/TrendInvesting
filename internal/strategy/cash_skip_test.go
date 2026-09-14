@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +19,10 @@ import (
 // Unit would cost more than the cash available at the previous close, it is
 // skipped — no partial Unit, no borrowing, no deferred queue — and the
 // rejection is journalled with reason event.DeclineReasonInsufficientCash,
-// carrying both the required and the available figure.
+// carrying both the required and the available figure. A cost that leaves
+// the float64 range is the same skip under
+// event.DeclineReasonUnitCostNotRepresentable, which carries neither figure
+// because the cost is the one that cannot be stated.
 //
 // Every fixture below builds on reducer_test.go's breakout fixture (entry
 // level 155, quantity 133, so cost 133 x 155 = 20,615 exactly) and, for the
@@ -447,4 +451,172 @@ func TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd(t *testing.T) {
 		snapshot(cashSnapshot(cfg, day(57).Add(time.Hour), cashSkipGenerousCash)).
 		bar(addOpportunityBar("AAPL", day(57), rung2+5)).
 		wantRunError("AAPL", "previous close", "0010")
+}
+
+// --- A cost that leaves the float64 range is still a skip -----------------
+
+// The fixture below is deliberately extreme, and every figure in it is
+// admissible: no rule caps the Notional Account, a contract multiplier is a
+// configured parameter (The Turtle Rules p.15 needs 42,000 for Heating Oil),
+// and a bar's prices are required to be finite and positive and nothing more.
+// Three individually finite operands can still multiply past the float64
+// range, and the product is then +Inf — a figure no journal can record, since
+// JSON cannot even encode it. The Unit costs more than any cash that can
+// exist, so ADR 0010 skips it; what must not happen is the run halting on a
+// payload it built itself.
+const (
+	// overflowChannelHigh and overflowTrueRange give an Entry Channel high
+	// 100,000 times N: wide enough that quantity x level x dollars per point
+	// overflows while the Protective Stop intent (level - 2N) stays a
+	// reachable price.
+	overflowChannelHigh = 1e11
+	overflowTrueRange   = 1e6
+)
+
+// cashSkipOverflowConfiguration is the Baseline fixture with an account and a
+// contract multiplier large enough that a whole Unit's cost leaves the
+// float64 range, while the quantity itself stays far under sizing's own
+// exactly-representable limit.
+func cashSkipOverflowConfiguration() event.ConfigurationPayload {
+	cfg := validConfigurationPayload()
+	cfg.NotionalAccount.StartingEquity = 3.6e307
+	cfg.DollarsPerPoint = 1e290
+	return cfg
+}
+
+// cashSkipOverflowBars warms the Entry Channel to overflowChannelHigh with a
+// True Range of exactly overflowTrueRange on every bar — so N is exactly
+// overflowTrueRange — and then breaks out above it.
+func cashSkipOverflowBars(instrumentID string) []event.CompletedBarPayload {
+	low := overflowChannelHigh - overflowTrueRange
+	bars := make([]event.CompletedBarPayload, 0, 56)
+	for i := 1; i <= 55; i++ {
+		bars = append(bars, completedBar(instrumentID, day(i), overflowChannelHigh, low, low))
+	}
+	return append(bars, completedBar(instrumentID, day(56), 2*overflowChannelHigh, low, low))
+}
+
+// TestEntryCostBeyondTheRepresentableRangeIsSkippedNotHalted pins the
+// promised decline behaviour for inputs the reducer accepted: a Unit whose
+// cost overflows float64 is skipped and journalled, never recorded as +Inf
+// and never allowed to stop the run.
+func TestEntryCostBeyondTheRepresentableRangeIsSkippedNotHalted(t *testing.T) {
+	t.Parallel()
+
+	cfg := cashSkipOverflowConfiguration()
+	envelopes := []event.Envelope{accountSnapshotEnvelopeFor(t, cfg, 2, cashSnapshot(cfg, day(0), cashSkipGenerousCash))}
+	for i, bar := range cashSkipOverflowBars("AAPL") {
+		envelopes = append(envelopes, barEnvelopeFor(t, cfg, uint64(i+3), bar))
+	}
+
+	emitted, err := runReducerOverAccountEvents(t, cfg, envelopes)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want the unaffordable unit journalled as a skip", err)
+	}
+	if proposals := envelopesOfType(emitted, event.TradeProposalEventType); len(proposals) != 0 {
+		t.Fatalf("got %d trade proposal(s), want 0", len(proposals))
+	}
+	declines := envelopesOfType(emitted, event.ProposalDeclinedEventType)
+	if len(declines) != 1 {
+		t.Fatalf("got %d decline(s), want exactly 1", len(declines))
+	}
+	decline := decodeProposalDeclined(t, declines[0])
+	if decline.Reason != event.DeclineReasonUnitCostNotRepresentable {
+		t.Errorf("Reason = %q, want %q", decline.Reason, event.DeclineReasonUnitCostNotRepresentable)
+	}
+	if decline.Kind != event.ProposalDeclinedKindEntry {
+		t.Errorf("Kind = %q, want %q", decline.Kind, event.ProposalDeclinedKindEntry)
+	}
+	if decline.RequiredCash != 0 || decline.AvailableCash != 0 {
+		t.Errorf("RequiredCash/AvailableCash = %v/%v, want 0/0: the cost is the one figure that cannot be stated", decline.RequiredCash, decline.AvailableCash)
+	}
+	if err := decline.Validate(); err != nil {
+		t.Errorf("emitted decline fails its own Validate(): %v", err)
+	}
+}
+
+// TestAddCostBeyondTheRepresentableRangeIsSkippedNotHalted is the same
+// property on the Add Ladder: a Campaign opened at an affordable cost can
+// still reach a rung whose own cost overflows, since the ladder is measured
+// from the ACTUAL fill rather than from the level that was proposed.
+func TestAddCostBeyondTheRepresentableRangeIsSkippedNotHalted(t *testing.T) {
+	t.Parallel()
+
+	// The entry is affordable at the Entry Channel high, but the ladder is
+	// measured from the ACTUAL fill (The Turtle Rules p.19), and this Unit
+	// fills ten orders of magnitude above the level it rested at — slippage
+	// no rule caps. Rung 2 therefore lands where the same frozen quantity
+	// costs more than float64 can state, while the entry's own cost was a
+	// perfectly ordinary number.
+	cfg := cashSkipOverflowConfiguration()
+	cfg.NotionalAccount.StartingEquity = 2e297
+	cfg.DollarsPerPoint = 1e280
+
+	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	quantity, err := sizing.UnitQuantity(cfg.NotionalAccount.StartingEquity, cfg.UnitVolatilityFraction, overflowTrueRange, cfg.DollarsPerPoint)
+	if err != nil {
+		t.Fatalf("sizing.UnitQuantity() error = %v", err)
+	}
+	if entryCost := float64(quantity) * overflowChannelHigh * cfg.DollarsPerPoint; math.IsInf(entryCost, 0) {
+		t.Fatalf("fixture is wrong: the ENTRY cost overflowed too, so this test would prove nothing about the Add path")
+	}
+
+	const fillPrice = 1e21
+	rung2, err := sizing.NextAddLevel(fillPrice, overflowTrueRange, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel(rung 2) error = %v", err)
+	}
+
+	opening := event.FillPayload{
+		InstrumentID: "AAPL",
+		Kind:         event.FillKindEntry,
+		ProposalID:   testDecisionID("proposal", "AAPL", day(56)),
+		FillID:       "sim-fill-0001",
+		Direction:    event.DirectionLong,
+		Quantity:     quantity,
+		Price:        fillPrice,
+		FilledAt:     day(56),
+	}
+
+	envelopes := []event.Envelope{accountSnapshotEnvelopeFor(t, cfg, 2, cashSnapshot(cfg, day(0), math.MaxFloat64))}
+	seq := uint64(3)
+	for _, bar := range cashSkipOverflowBars("AAPL") {
+		envelopes = append(envelopes, barEnvelopeFor(t, cfg, seq, bar))
+		seq++
+	}
+	envelopes = append(envelopes, fillEnvelopeFor(t, cfg, seq, opening))
+	seq++
+	envelopes = append(envelopes, barEnvelopeFor(t, cfg, seq, completedBar("AAPL", day(57), rung2, fillPrice-overflowTrueRange, fillPrice-overflowTrueRange)))
+
+	emitted, err := runReducerOverAccountEvents(t, cfg, envelopes)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want the unaffordable rung journalled as a skip", err)
+	}
+
+	if opened := envelopesOfType(emitted, event.CampaignOpenedEventType); len(opened) != 1 {
+		t.Fatalf("got %d campaign-opened event(s), want exactly 1: the entry itself must be affordable", len(opened))
+	}
+	declines := envelopesOfType(emitted, event.ProposalDeclinedEventType)
+	if len(declines) != 1 {
+		t.Fatalf("got %d decline(s), want exactly 1", len(declines))
+	}
+	decline := decodeProposalDeclined(t, declines[0])
+	if decline.Reason != event.DeclineReasonUnitCostNotRepresentable {
+		t.Errorf("Reason = %q, want %q", decline.Reason, event.DeclineReasonUnitCostNotRepresentable)
+	}
+	if decline.Kind != event.ProposalDeclinedKindAdd {
+		t.Errorf("Kind = %q, want %q", decline.Kind, event.ProposalDeclinedKindAdd)
+	}
+	if decline.CampaignID != campaignID {
+		t.Errorf("CampaignID = %q, want %q", decline.CampaignID, campaignID)
+	}
+	if decline.RequiredCash != 0 || decline.AvailableCash != 0 {
+		t.Errorf("RequiredCash/AvailableCash = %v/%v, want 0/0", decline.RequiredCash, decline.AvailableCash)
+	}
+	if proposals := envelopesOfType(emitted, event.AddProposalEventType); len(proposals) != 0 {
+		t.Fatalf("got %d add proposal(s), want 0", len(proposals))
+	}
+	if err := decline.Validate(); err != nil {
+		t.Errorf("emitted decline fails its own Validate(): %v", err)
+	}
 }
