@@ -632,6 +632,28 @@ const RuleAddProposalExpiresWithItsBar = "add-proposal.expires.with-its-bar"
 // same Campaign, not by the next bar.
 const RuleAddProposalSupersededByStop = "add-proposal.superseded-by-stop"
 
+// RuleExitProposalSupersededByDelisting names the rule for
+// ProposalExpiredPayload.Rule when Reason is
+// ExpiryReasonSupersededByDelisting and Kind is ProposalKindExit: an
+// outstanding exit proposal is cancelled the instant a delisting forces the
+// same Campaign closed (ADR 0009), rather than waiting for ADR 0011's
+// ordinary next-bar expiry — a delisted instrument produces no further bar
+// for that expiry to ever run on.
+const RuleExitProposalSupersededByDelisting = "exit-proposal.superseded-by-delisting"
+
+// RuleAddProposalSupersededByDelisting is RuleExitProposalSupersededByDelisting's
+// counterpart for Kind ProposalKindAdd.
+const RuleAddProposalSupersededByDelisting = "add-proposal.superseded-by-delisting"
+
+// RuleEntryProposalSupersededByDelisting is
+// RuleExitProposalSupersededByDelisting's counterpart for Kind
+// ProposalKindEntry: an outstanding entry proposal is cancelled the instant a
+// delisting arrives for the instrument. The invariant this serves is ADR
+// 0009's — a delisted instrument cannot be traded again in the run — and
+// cancelling is what upholds it: a proposal left outstanding could still be
+// filled, opening a Campaign in an instrument that has stopped trading.
+const RuleEntryProposalSupersededByDelisting = "entry-proposal.superseded-by-delisting"
+
 // RuleSignalExpiresWithItsBar names the rule for ProposalExpiredPayload.Rule:
 // a Signal belongs to one bar and expires with it, so the proposal that Signal
 // produced inherits the same lifetime. A trending instrument re-qualifies by
@@ -675,6 +697,32 @@ const ExpiryReasonSupersededByStop = "superseded-by-stop"
 // ProposalExpiredSchemaVersion): no earlier record ever wrote it, so there is
 // nothing an older reader could mistake for it.
 const ExpiryReasonInputStreamEnded = "input-stream-ended"
+
+// ExpiryReasonSupersededByDelisting is the FOURTH expiry reason: whatever
+// proposal is outstanding for an instrument is cancelled the instant a
+// delisting arrives for it (ADR 0009), rather than waiting for ADR 0011's
+// ordinary next-bar expiry. A delisted instrument produces no further
+// completed bar, so without this the ordinary mechanism would never run and
+// the proposal would simply be forgotten in memory rather than reaching a
+// journalled terminal event — "every proposal reaches a Campaign or an
+// expiry" (see this payload's own doc comment).
+//
+// Valid for every Kind, and an ENTRY proposal is not the marginal case but
+// the dangerous one: it is outstanding precisely when no Campaign is open,
+// which is the state a delisting would otherwise pass over as a no-op, and a
+// proposal left live there can still be filled — opening a Campaign in an
+// instrument that has stopped trading.
+//
+// ExpiredAt for this reason is the corporate action's own EffectiveAt
+// (CorporateActionPayload), mirroring ExpiryReasonSupersededByStop's use of
+// the closing fill's own timestamp rather than a bar's PeriodEnd, and for the
+// identical reason: it can legitimately fall inside the SAME bar that raised
+// the proposal.
+//
+// A new value of an already-required field needs no schema bump, for the
+// identical reason ExpiryReasonInputStreamEnded's own bump-free addition
+// states above.
+const ExpiryReasonSupersededByDelisting = "superseded-by-delisting"
 
 // ProposalExpiredPayload records a trade proposal that was never filled and
 // has now been superseded.
@@ -812,6 +860,9 @@ func (p ProposalExpiredPayload) Validate() error {
 		if p.Kind != ProposalKindAdd {
 			errs = append(errs, fmt.Errorf("reason %q is only valid for kind %q (got %q): only an add proposal is cancelled by a stop fill", ExpiryReasonSupersededByStop, ProposalKindAdd, p.Kind))
 		}
+	case ExpiryReasonSupersededByDelisting:
+		// Valid for every Kind, and subject only to the universal
+		// EarliestFillAt rule above: see the constant's own doc comment.
 	default:
 		errs = append(errs, fmt.Errorf("reason %q is not a recognised expiry reason", p.Reason))
 	}

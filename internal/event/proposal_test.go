@@ -968,6 +968,30 @@ func TestProposalExpiredPayloadValidate(t *testing.T) {
 			wantErr: "only valid for kind",
 		},
 		{
+			// An ENTRY proposal is precisely the kind that can be outstanding
+			// when a delisting arrives, because no Campaign is open then: the
+			// proposal must reach a terminal event there, or a later fill for
+			// it would open a Campaign in an instrument that has stopped
+			// trading (ADR 0009).
+			name: "entry-kind expiry superseded by a delisting is legitimate",
+			mutate: func(p *event.ProposalExpiredPayload) {
+				p.Reason = event.ExpiryReasonSupersededByDelisting
+				p.Rule = event.RuleEntryProposalSupersededByDelisting
+			},
+		},
+		{
+			// ExpiredAt equal to PeriodEnd is legitimate for a
+			// delisting-superseded entry expiry, exactly as for the exit- and
+			// Add-kind ones: a delisting can take effect at the SAME bar that
+			// raised the proposal.
+			name: "delisting-superseded entry expiry at the period end is legitimate",
+			mutate: func(p *event.ProposalExpiredPayload) {
+				p.Reason = event.ExpiryReasonSupersededByDelisting
+				p.Rule = event.RuleEntryProposalSupersededByDelisting
+				p.ExpiredAt = p.PeriodEnd
+			},
+		},
+		{
 			name:    "missing expired at",
 			mutate:  func(p *event.ProposalExpiredPayload) { p.ExpiredAt = time.Time{} },
 			wantErr: "expired at",
@@ -1056,6 +1080,28 @@ func TestExitProposalExpiredPayloadValidate(t *testing.T) {
 			name:    "exit-kind expiry names a signal id",
 			mutate:  func(p *event.ProposalExpiredPayload) { p.SignalID = "signal:AAPL:2026-02-27T00:00:00.000000000Z" },
 			wantErr: "signal id",
+		},
+		{
+			// An outstanding exit proposal is cancelled the instant a
+			// delisting forces the same Campaign closed, rather than waiting
+			// for ADR 0011's ordinary next-bar expiry (which a delisted
+			// instrument will never produce).
+			name: "exit-kind expiry superseded by a delisting is legitimate",
+			mutate: func(p *event.ProposalExpiredPayload) {
+				p.Reason = event.ExpiryReasonSupersededByDelisting
+				p.Rule = event.RuleExitProposalSupersededByDelisting
+			},
+		},
+		{
+			// Like the stop-superseded case, ExpiredAt equal to PeriodEnd is
+			// legitimate here too: a delisting can take effect at the SAME
+			// bar that raised the exit proposal.
+			name: "delisting-superseded expiry at the period end is legitimate",
+			mutate: func(p *event.ProposalExpiredPayload) {
+				p.Reason = event.ExpiryReasonSupersededByDelisting
+				p.Rule = event.RuleExitProposalSupersededByDelisting
+				p.ExpiredAt = p.PeriodEnd
+			},
 		},
 	}
 
@@ -1152,6 +1198,15 @@ func TestAddProposalExpiredPayloadValidate(t *testing.T) {
 				p.ExpiredAt = p.EarliestFillAt
 			},
 			wantErr: "must be after the earliest instant",
+		},
+		{
+			// The add-kind mirror of the exit-kind case above: a
+			// delisting cancels an outstanding Add proposal too.
+			name: "add-kind expiry superseded by a delisting is legitimate",
+			mutate: func(p *event.ProposalExpiredPayload) {
+				p.Reason = event.ExpiryReasonSupersededByDelisting
+				p.Rule = event.RuleAddProposalSupersededByDelisting
+			},
 		},
 	}
 
@@ -1255,6 +1310,18 @@ func TestProposalExpiredEventConstants(t *testing.T) {
 	}
 	if event.RuleAddProposalSupersededByStop != "add-proposal.superseded-by-stop" {
 		t.Errorf("RuleAddProposalSupersededByStop = %q", event.RuleAddProposalSupersededByStop)
+	}
+	if event.ExpiryReasonSupersededByDelisting != "superseded-by-delisting" {
+		t.Errorf("ExpiryReasonSupersededByDelisting = %q, want %q", event.ExpiryReasonSupersededByDelisting, "superseded-by-delisting")
+	}
+	if event.RuleExitProposalSupersededByDelisting != "exit-proposal.superseded-by-delisting" {
+		t.Errorf("RuleExitProposalSupersededByDelisting = %q", event.RuleExitProposalSupersededByDelisting)
+	}
+	if event.RuleAddProposalSupersededByDelisting != "add-proposal.superseded-by-delisting" {
+		t.Errorf("RuleAddProposalSupersededByDelisting = %q", event.RuleAddProposalSupersededByDelisting)
+	}
+	if event.RuleEntryProposalSupersededByDelisting != "entry-proposal.superseded-by-delisting" {
+		t.Errorf("RuleEntryProposalSupersededByDelisting = %q", event.RuleEntryProposalSupersededByDelisting)
 	}
 }
 

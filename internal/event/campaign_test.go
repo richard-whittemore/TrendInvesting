@@ -813,6 +813,40 @@ func validCampaignExitedByExitChannel() event.CampaignExitedPayload {
 	}
 }
 
+// validCampaignExitedByDelisting mirrors validCampaignExitedByExitChannel
+// with the one difference ADR 0009 makes: the exit is forced directly, so
+// FillID names the corporate-action envelope that forced it rather than an
+// execution fill (see CampaignExitedPayload.FillID's own doc comment).
+func validCampaignExitedByDelisting() event.CampaignExitedPayload {
+	entry := campaignEntryPrice
+	exit := 179.5
+	n := proposalN
+	dpp := 1.0
+	stopLevel := entry - 2*n
+	var unitQuantity int64 = 133
+	realisedResult := float64(133) * (exit - entry) * dpp
+	return event.CampaignExitedPayload{
+		CampaignID:            "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
+		InstrumentID:          "AAPL",
+		FillID:                "corp-action-0001",
+		ExitedAt:              proposalPeriodEnd.AddDate(0, 0, 21),
+		Reason:                event.ExitReasonDelisting,
+		EntryPrice:            entry,
+		ExitPrice:             exit,
+		Quantity:              133,
+		CampaignN:             n,
+		DollarsPerPoint:       dpp,
+		UnitQuantity:          unitQuantity,
+		ProtectiveStopLevel:   stopLevel,
+		RealisedResult:        realisedResult,
+		AverageMoveInN:        (exit - entry) / n,
+		RealisedResultInUnitN: realisedResult / (float64(unitQuantity) * n * dpp),
+		Units:                 1,
+		Rule:                  event.RuleCampaignExitedByDelisting,
+		ADR:                   event.ADRDelistingForcesExit,
+	}
+}
+
 // TestCampaignExitedPayloadValidateAcceptsExitChannelReason covers the
 // ticket's own reason value directly, since TestCampaignExitedPayloadValidate
 // above only ever mutates AWAY from validCampaignExited's stop-kind fixture.
@@ -821,6 +855,18 @@ func TestCampaignExitedPayloadValidateAcceptsExitChannelReason(t *testing.T) {
 
 	if err := validCampaignExitedByExitChannel().Validate(); err != nil {
 		t.Fatalf("Validate() error = %v, want nil for a valid exit-channel exit", err)
+	}
+}
+
+// TestCampaignExitedPayloadValidateAcceptsDelistingReason is the
+// delisting counterpart: ExitReasonDelisting is recognised, and a delisting exit's
+// FillID (the corporate-action envelope's id, not an execution) validates
+// exactly like any other exit's.
+func TestCampaignExitedPayloadValidateAcceptsDelistingReason(t *testing.T) {
+	t.Parallel()
+
+	if err := validCampaignExitedByDelisting().Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil for a valid delisting exit", err)
 	}
 }
 
