@@ -507,6 +507,7 @@ func TestARunIDThatWouldNotSurviveTheFilesystemIsRefused(t *testing.T) {
 		{"a space", "baseline 01"},
 		{"a trailing hyphen", "baseline-"},
 		{"a backslash", `2026\baseline`},
+		{"longer than a file name holds", strings.Repeat("a", 200)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -565,6 +566,20 @@ func TestTheDirectoryIsTheConfigurationHash(t *testing.T) {
 	}
 	if strings.Contains(path, ":") {
 		t.Errorf("Entry.Path() = %q, want no %q: it is not a legal file name on every filesystem the registry is cloned onto", path, ":")
+	}
+}
+
+// TestAnEntryThatMayNotBeRecordedHasNoPath: a path is where a run will be
+// written, so an entry that may not be written has nowhere to go.
+func TestAnEntryThatMayNotBeRecordedHasNoPath(t *testing.T) {
+	t.Parallel()
+
+	path, err := registry.Entry{}.Path()
+	if err == nil {
+		t.Fatal("Entry.Path() error = nil, want an entry that may not be recorded to have no path")
+	}
+	if path != "" {
+		t.Fatalf("Entry.Path() = %q, want no path alongside the refusal", path)
 	}
 }
 
@@ -939,7 +954,79 @@ func TestAnUnreadableRegistryIsReported(t *testing.T) {
 	}
 }
 
+// TestARecordedRunThatCannotBeOpenedIsReported: the directory lists it and
+// the file will not open. A registry that skipped it would report fewer runs
+// than it holds, which is the one thing this registry exists to prevent.
+func TestARecordedRunThatCannotBeOpenedIsReported(t *testing.T) {
+	t.Parallel()
+
+	entry := mustEntry(t, completedRun("unopenable"))
+	dir, err := registry.Dir(entry.ConfigurationHash)
+	if err != nil {
+		t.Fatalf("registry.Dir() error = %v", err)
+	}
+
+	var encoded bytes.Buffer
+	if err := registry.Encode(&encoded, entry); err != nil {
+		t.Fatalf("registry.Encode() error = %v", err)
+	}
+	name := dir + "/unopenable.json"
+	fsys := unopenableFS{FS: fstest.MapFS{name: &fstest.MapFile{Data: encoded.Bytes()}}, name: name}
+
+	_, err = registry.Runs(fsys, entry.ConfigurationHash)
+	if err == nil {
+		t.Fatal("registry.Runs() error = nil, want the run it could not open to be reported")
+	}
+	if !errors.Is(err, errRefused) {
+		t.Errorf("registry.Runs() error = %v, want it to carry the underlying failure", err)
+	}
+}
+
+// TestAnEntryThatMayNotBeRecordedIsNeverWritten: Encode is the last point
+// before an entry becomes a file, so it refuses one Validate would refuse
+// rather than leaving the check to whoever reads it back.
+func TestAnEntryThatMayNotBeRecordedIsNeverWritten(t *testing.T) {
+	t.Parallel()
+
+	var encoded bytes.Buffer
+	if err := registry.Encode(&encoded, registry.Entry{}); err == nil {
+		t.Fatal("registry.Encode() error = nil, want an entry that may not be recorded to be refused")
+	}
+	if encoded.Len() != 0 {
+		t.Fatalf("registry.Encode() wrote %d bytes before refusing", encoded.Len())
+	}
+}
+
+// TestAnEntryThatCannotBeWrittenIsReported: a full disk, a closed pipe. The
+// caller installs the file, so it has to be told the content never arrived.
+func TestAnEntryThatCannotBeWrittenIsReported(t *testing.T) {
+	t.Parallel()
+
+	err := registry.Encode(failingWriter{}, mustEntry(t, completedRun("unwritable")))
+	if !errors.Is(err, errRefused) {
+		t.Fatalf("registry.Encode() error = %v, want the write failure reported", err)
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errRefused }
+
 var errRefused = errors.New("the registry could not be read")
+
+// unopenableFS lists a run and will not open it: a permission change, a
+// failing disk, a half-mounted volume.
+type unopenableFS struct {
+	fs.FS
+	name string
+}
+
+func (f unopenableFS) Open(name string) (fs.File, error) {
+	if name == f.name {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: errRefused}
+	}
+	return f.FS.Open(name)
+}
 
 // refusingFS is a registry whose directory exists and cannot be read: a
 // permission change, a half-mounted volume, a failing disk.

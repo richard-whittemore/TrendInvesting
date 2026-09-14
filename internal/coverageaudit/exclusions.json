@@ -20,6 +20,21 @@
       "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
+      "file": "internal/registry/registry.go",
+      "function": "Encode",
+      "statement": "return fmt.Errorf(\"registry: encode the run: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.MarshalIndent of the entry the Validate immediately above has just accepted. The encoder refuses exactly one thing this entry could hold — a NaN or an infinity in a float64 field — and every one of the ten float64 fields in event.ConfigurationPayload (including the nested NotionalAccountConfig and CommissionConfig) is tested for finiteness by ConfigurationPayload.Validate, which Entry.Validate calls. Nothing else in the entry (strings, a uint32, a uint64, two time.Time values) has a failing encoding at all. Reachable the moment a float field is added to the payload without a finiteness check beside it.",
+      "count": 1
+    },
+    {
+      "file": "internal/journal/journal.go",
+      "function": "writeLine",
+      "statement": "return fmt.Errorf(\"journal: encode line: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "writeLine has two callers, a Header and a Record. A Header is strings, a uint32 and two time.Time values. A Record adds an event.Envelope, whose only field that could fail to encode is the raw-JSON payload \u2014 and Write has already required every entry's envelope to pass event.Envelope.Validate, which refuses a payload that is not valid JSON."
+    },
+    {
       "file": "internal/sizing/sizing.go",
       "function": "SizeUnit",
       "statement": "return Unit{}, unrecognisedModeError(in.Mode)",
