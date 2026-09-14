@@ -9,11 +9,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/buildinfo"
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/registry"
+	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
 // writeConfiguration writes cfg to a file the command can be pointed at.
@@ -639,6 +641,181 @@ func TestARunUnderADeclaredVariantIsRecordedAsThatVariant(t *testing.T) {
 	}
 	if found[0].Variant != "recompute-n-per-add" {
 		t.Fatalf("variant = %q, want the declared one", found[0].Variant)
+	}
+}
+
+// entryFor is a valid entry for the fixture configuration, recorded under
+// runID and pointing at journalPath. Two entries differing only in their
+// journal path are two different runs claiming one id.
+func entryFor(t *testing.T, runID, journalPath string) registry.Entry {
+	t.Helper()
+
+	cfg := fixtureConfiguration(t)
+	span := time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC)
+	entry, err := registry.NewEntry(registry.Run{
+		RunID:           runID,
+		Variant:         registry.Baseline,
+		Status:          registry.StatusCompleted,
+		StrategyVersion: event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, testBuild),
+		SpanStart:       span,
+		SpanEnd:         span,
+		Configuration:   cfg,
+		Artefacts: registry.Artefacts{
+			JournalPath:     journalPath,
+			RecordCount:     1,
+			FinalRecordHash: "sha256:" + strings.Repeat("0", 64),
+		},
+	})
+	if err != nil {
+		t.Fatalf("registry.NewEntry() error = %v", err)
+	}
+	return entry
+}
+
+// entryPath is the file entry occupies in the registry rooted at root.
+func entryPath(t *testing.T, root string, entry registry.Entry) string {
+	t.Helper()
+
+	relative, err := entry.Path()
+	if err != nil {
+		t.Fatalf("Entry.Path() error = %v", err)
+	}
+	return filepath.Join(root, filepath.FromSlash(relative))
+}
+
+// TestAnEntryThatCouldNotBeFlushedIsReportedAsRecorded. The hard link is the
+// commit point and the flush after it is a second, separate fact, so a flush
+// that fails leaves the entry installed. Reporting only "registration failed"
+// would tell the operator the opposite of the truth about a record that is
+// sitting there, and send them to record the same run under another id —
+// which would put two entries in the registry for one run.
+func TestAnEntryThatCouldNotBeFlushedIsReportedAsRecorded(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "runs")
+
+	// Writable and traversable but not readable: the entry links into the
+	// configuration-hash directory below it, and the flush of the root's own
+	// handle cannot open it.
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		t.Fatalf("create the registry root: %v", err)
+	}
+	if err := os.Chmod(root, 0o300); err != nil {
+		t.Fatalf("chmod the registry root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o750) })
+	if file, err := os.Open(root); err == nil {
+		_ = file.Close()
+		t.Skip("this user reads a directory it has no read permission on, so the flush cannot be made to fail here")
+	}
+
+	var log bytes.Buffer
+	err := backtest(options{
+		configPath:   configurationFixture,
+		barsPath:     barsFixture,
+		outPath:      filepath.Join(dir, "journal.jsonl"),
+		registryPath: root,
+		runID:        "unflushed",
+		variant:      registry.Baseline,
+		build:        testBuild,
+	}, &log)
+	if err == nil {
+		t.Fatal("backtest() error = nil, want the flush that failed to be reported")
+	}
+	for _, want := range []string{"unflushed", "recorded", root} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("backtest() error = %v, want it to mention %q", err, want)
+		}
+	}
+
+	// The state the message claims: the entry is there and readable.
+	found := runsUnder(t, root, fixtureConfiguration(t))
+	if len(found) != 1 {
+		t.Fatalf("the registry holds %d runs, want the entry the link installed", len(found))
+	}
+	if found[0].RunID != "unflushed" {
+		t.Errorf("run id = %q, want the one the invocation declared", found[0].RunID)
+	}
+}
+
+// TestReRecordingTheIdenticalEntryIsNotAnOverwrite: a run id the registry
+// already holds with byte-identical content is the same record, so recording
+// it again writes nothing and is not refused. Nothing on disk changes, which
+// is what keeps AGENTS.md rule 6 intact.
+func TestReRecordingTheIdenticalEntryIsNotAnOverwrite(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "runs")
+	entry := entryFor(t, "recorded-twice", "journal.jsonl")
+
+	if err := installEntry(root, entry); err != nil {
+		t.Fatalf("installEntry() error = %v", err)
+	}
+	destination := entryPath(t, root, entry)
+	before, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatalf("read the recorded entry: %v", err)
+	}
+
+	if err := installEntry(root, entry); err != nil {
+		t.Fatalf("installEntry() error = %v, want the identical entry already recorded to be accepted", err)
+	}
+
+	after, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatalf("read the recorded entry: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("the recorded entry was rewritten:\n%s\n%s", before, after)
+	}
+	if found := runsUnder(t, root, fixtureConfiguration(t)); len(found) != 1 {
+		t.Fatalf("the registry holds %d runs, want the one record", len(found))
+	}
+
+	names, err := os.ReadDir(filepath.Dir(destination))
+	if err != nil {
+		t.Fatalf("os.ReadDir() error = %v", err)
+	}
+	if len(names) != 1 {
+		t.Errorf("the configuration's directory holds %d files, want the entry alone", len(names))
+	}
+}
+
+// TestARunIDHoldingADifferentRunIsRefused: identical content is the same
+// record, and anything else is a genuine collision. The recorded run is
+// evidence and is left exactly as it was (AGENTS.md rule 6).
+func TestARunIDHoldingADifferentRunIsRefused(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "runs")
+	first := entryFor(t, "one-id-two-runs", "first.jsonl")
+	second := entryFor(t, "one-id-two-runs", "second.jsonl")
+
+	if err := installEntry(root, first); err != nil {
+		t.Fatalf("installEntry() error = %v", err)
+	}
+	destination := entryPath(t, root, first)
+	before, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatalf("read the recorded entry: %v", err)
+	}
+
+	err = installEntry(root, second)
+	if err == nil {
+		t.Fatal("installEntry() error = nil, want the recorded run left alone")
+	}
+	if !strings.Contains(err.Error(), "one-id-two-runs") {
+		t.Errorf("installEntry() error = %v, want it to name the run already recorded", err)
+	}
+
+	after, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatalf("read the recorded entry: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("the recorded entry was replaced by the second run:\n%s\n%s", before, after)
+	}
+	found := runsUnder(t, root, fixtureConfiguration(t))
+	if len(found) != 1 {
+		t.Fatalf("the registry holds %d runs, want the original one only", len(found))
+	}
+	if found[0].Artefacts.JournalPath != "first.jsonl" {
+		t.Errorf("recorded journal = %q, want the first run's", found[0].Artefacts.JournalPath)
 	}
 }
 
