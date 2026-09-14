@@ -373,6 +373,77 @@
       "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
+      "file": "internal/strategy/delisting.go",
+      "function": "(*Reducer).applyCorporateAction",
+      "statement": "return nil, fmt.Errorf(\"strategy: corporate action kind %q is not implemented by this reducer\", payload.Kind)",
+      "category": "unreachable-by-invariant",
+      "reason": "event.CorporateActionPayload.Validate accepts only event.CorporateActionKindDelisting today, and this switch is reached only after that Validate has already run. The arm is kept so that a payload contract which later recognises a second kind (a merger, a spinoff) fails closed here the moment it does, rather than a reducer that does not yet implement it silently doing nothing."
+    },
+    {
+      "file": "internal/strategy/delisting.go",
+      "function": "(*Reducer).applyDelisting",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: delisting cannot compute the average move in n: %w\", payload.InstrumentID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "sizing.AverageMoveInN over the Campaign's whole-life entry and exit prices and its frozen N. The prices are quantity-weighted averages of fill prices each required positive by FillPayload.Validate/CampaignOpenedPayload.Validate, and CampaignN was required positive when the Campaign opened and is never recomputed while it is open (ADR 0006) — the identical reasoning applyExitFill's own entry in this list gives for the same call."
+    },
+    {
+      "file": "internal/strategy/delisting.go",
+      "function": "(*Reducer).applyDelisting",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: delisting cannot compute the realised result in unit n: %w\", payload.InstrumentID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "sizing.RealisedResultInUnitN over the Campaign's frozen N, its Unit quantity and the configured dollars per point, all three required positive by CampaignOpenedPayload.Validate and ConfigurationPayload.Validate — the identical reasoning applyExitFill's own entry in this list gives for the same call."
+    },
+    {
+      "file": "internal/strategy/delisting.go",
+      "function": "(*Reducer).applyDelisting",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: delisting would close campaign %q with an invalid exit: %w\", payload.InstrumentID, campaign.campaignID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
+    },
+    {
+      "file": "internal/strategy/delisting.go",
+      "function": "(*Reducer).applyDelisting",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign exited payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold — a NaN or an infinity in a float64 field — and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, a time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+    },
+    {
+      "file": "internal/strategy/delisting.go",
+      "function": "(*Reducer).applyDelisting",
+      "statement": "return nil, err",
+      "category": "unreachable-by-construction",
+      "reason": "Propagates expireExitProposalForDelisting's or expireAddProposalForDelisting's own error, whose own two failure paths each (a Validate and a Marshal of a payload built from an already-recorded pending proposal) are themselves unreachable by construction (their entries in this list).",
+      "count": 2
+    },
+    {
+      "file": "internal/strategy/delisting.go",
+      "function": "(*Reducer).expireExitProposalForDelisting",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal expired payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed, or is the corporate action's own EffectiveAt, which applyDelisting has already checked is not before state.lastPeriodEnd and so, transitively, after pending.earliestFillAt (the period end of the bar before the decision bar that raised the proposal, always strictly earlier than the CURRENT last completed bar)."
+    },
+    {
+      "file": "internal/strategy/delisting.go",
+      "function": "(*Reducer).expireExitProposalForDelisting",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold — a NaN or an infinity in a float64 field — and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, a time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+    },
+    {
+      "file": "internal/strategy/delisting.go",
+      "function": "(*Reducer).expireAddProposalForDelisting",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal expired payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "ProposalExpiredPayload.Validate on a payload whose every field is copied from the pending proposal this reducer itself recorded, which passed the same contract when it was proposed, or is the corporate action's own EffectiveAt, for the identical chronology reason expireExitProposalForDelisting's own entry in this list gives."
+    },
+    {
+      "file": "internal/strategy/delisting.go",
+      "function": "(*Reducer).expireAddProposalForDelisting",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold — a NaN or an infinity in a float64 field — and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, a time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+    },
+    {
       "file": "internal/strategy/end_of_stream.go",
       "function": "(*Reducer).applyRunCompleted",
       "statement": "return nil, err",
