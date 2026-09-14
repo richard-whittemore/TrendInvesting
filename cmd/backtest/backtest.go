@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -249,6 +250,15 @@ func verifyWritten(path string) (journal.Verification, error) {
 // and nothing on disk to show for it. The registry is the durable record of
 // what was run, so "reported as recorded" and "recorded" have to be the same
 // thing.
+//
+// # The link commits, and the flush after it is a second fact
+//
+// That flush happens after the link, so a flush that fails leaves the entry
+// installed. Both facts are therefore reported, never merged into one
+// failure: the error says the entry IS recorded and where, because an
+// operator told only that registration failed would record the same run again
+// under another id, and two entries for one run is the corrupted audit trail
+// the registry exists to avoid.
 func installEntry(root string, entry registry.Entry) error {
 	relative, err := entry.Path()
 	if err != nil {
@@ -258,6 +268,13 @@ func installEntry(root string, entry registry.Entry) error {
 	directory := filepath.Dir(destination)
 	if err := os.MkdirAll(directory, 0o750); err != nil {
 		return fmt.Errorf("backtest: create the registry directory: %w", err)
+	}
+
+	// Encoded before it is written, so the bytes this install would put on
+	// disk are in hand to compare against whatever is already there.
+	var encoded bytes.Buffer
+	if err := registry.Encode(&encoded, entry); err != nil {
+		return err
 	}
 
 	file, err := os.CreateTemp(directory, ".run-*.partial")
@@ -272,8 +289,8 @@ func installEntry(root string, entry registry.Entry) error {
 		_ = os.Remove(temporary)
 	}()
 
-	if err := registry.Encode(file, entry); err != nil {
-		return err
+	if _, err := file.Write(encoded.Bytes()); err != nil {
+		return fmt.Errorf("backtest: write the registry entry: %w", err)
 	}
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("backtest: flush the registry entry to disk: %w", err)
@@ -281,18 +298,44 @@ func installEntry(root string, entry registry.Entry) error {
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("backtest: close the registry entry: %w", err)
 	}
-	if err := os.Link(temporary, destination); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("backtest: run %q is already recorded under this configuration: a recorded run is evidence and is never overwritten (AGENTS.md rule 6); record this one under another id", entry.RunID)
+	switch err := os.Link(temporary, destination); {
+	case err == nil:
+	case errors.Is(err, os.ErrExist):
+		if err := alreadyRecorded(destination, encoded.Bytes(), entry.RunID); err != nil {
+			return err
 		}
+	default:
 		return fmt.Errorf("backtest: install the registry entry at %s: %w", destination, err)
 	}
 	// Innermost first: the link, then the configuration-hash directory's own
 	// entry in the root that MkdirAll may have just created it in.
 	for _, synced := range []string{directory, root} {
 		if err := syncDir(synced); err != nil {
-			return fmt.Errorf("backtest: flush the registry directory %s to disk: %w", synced, err)
+			return fmt.Errorf("backtest: run %q is recorded at %s and can be read there now, but flushing the registry directory %s to disk failed, so the entry may not survive a power loss: the run is recorded and must not be recorded again under another id, and committing the registry to git is what makes the record durable (ADR 0017): %w", entry.RunID, destination, synced, err)
 		}
+	}
+	return nil
+}
+
+// alreadyRecorded says what an entry already occupying destination means for
+// the one being installed.
+//
+// Byte-identical content is the same record rather than a collision: nothing
+// is written, so the never-overwrite rule (AGENTS.md rule 6) is untouched,
+// and an install that committed its link and then failed at a later step can
+// be repeated instead of being refused. Anything else is a different run
+// claiming a recorded id, and is refused.
+//
+// The comparison is on the bytes, never on a decode of each side: two entries
+// that decode alike can differ on disk, and the registry is committed to git
+// and read as a diff, so what is on disk is what "identical" has to mean.
+func alreadyRecorded(destination string, installing []byte, runID string) error {
+	recorded, err := os.ReadFile(destination)
+	if err != nil {
+		return fmt.Errorf("backtest: run %q is already recorded under this configuration, and the entry recorded at %s cannot be read to say whether it is this one: %w", runID, destination, err)
+	}
+	if !bytes.Equal(recorded, installing) {
+		return fmt.Errorf("backtest: run %q is already recorded under this configuration, and what is recorded is a different run: a recorded run is evidence and is never overwritten (AGENTS.md rule 6); record this one under another id", runID)
 	}
 	return nil
 }
