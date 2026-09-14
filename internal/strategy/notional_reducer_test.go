@@ -23,7 +23,7 @@ import (
 
 // notionalFixtureAvailableCash is the AvailableCash every account.snapshot
 // fixture in this file supplies: this file's own subject is the Drawdown
-// Step ladder and re-basing (ADR 0007), not #23's cash-skip check (ADR
+// Step ladder and re-basing (ADR 0007), not the cash-skip check (ADR
 // 0010), so it stays comfortably clear of any Unit's cost regardless of how
 // far a fixture steps the Notional Account down.
 const notionalFixtureAvailableCash = 1_000_000_000.0

@@ -227,7 +227,7 @@ func driveComposed(t *testing.T, simulator *fills.Simulator, reducer *strategy.R
 	out.Inputs = append(out.Inputs, result.Inputs...)
 	out.Decisions = append(out.Decisions, result.Decisions...)
 
-	// #23's cash basis (ADR 0010): every Add and entry is checked against
+	// ADR 0010's cash basis: every Add and entry is checked against
 	// the cash known at the previous close, fed by account.snapshot's
 	// AvailableCash, and the reducer fails closed absent one. This fixture's
 	// story is about the fill model, not cash affordability, so it supplies
@@ -261,11 +261,11 @@ func configurationEnvelope(t *testing.T, cfg event.ConfigurationPayload) event.E
 // supplies via accountSnapshotEnvelope: comfortably clear of any Unit's cost
 // under baselineConfig's DollarsPerPoint of 1 and fixtureUnitQuantity's
 // 3,333 shares at fixture prices in the low hundreds, since this package's
-// own subject is the fill model, not cash affordability (#23 owns that,
-// internal/strategy).
+// own subject is the fill model, not cash affordability (internal/strategy
+// owns that).
 const fixtureAvailableCash = 10_000_000.0
 
-// accountSnapshotEnvelope supplies #23's cash basis (ADR 0010) once, at
+// accountSnapshotEnvelope supplies ADR 0010's cash basis once, at
 // day(0) alongside the configuration and before any bar, so every fixture in
 // this package sizes a Unit without tripping the reducer's fail-closed "no
 // cash figure ever supplied" guard.

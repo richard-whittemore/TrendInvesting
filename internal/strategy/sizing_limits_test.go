@@ -31,7 +31,7 @@ func TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun(t *testing
 	// account above roughly 6.8e19.
 	cfg.NotionalAccount.StartingEquity = 1e20
 
-	// #23's cash basis (ADR 0010): a Unit is never sized without an
+	// ADR 0010's cash basis: a Unit is never sized without an
 	// account.snapshot ever having supplied an available-cash figure. This
 	// test's subject is the sizing arithmetic's own representable-range
 	// limit, not affordability, so the figure is generous.
@@ -65,7 +65,7 @@ func TestTheSameBreakoutSizesNormallyAtTheBaselineAccount(t *testing.T) {
 
 	cfg := validConfigurationPayload()
 
-	// #23's cash basis (ADR 0010) — see the sibling test above for why this
+	// ADR 0010's cash basis — see the sibling test above for why this
 	// file supplies one unconditionally.
 	envelopes := []event.Envelope{accountSnapshotEnvelopeFor(t, cfg, 2, event.AccountSnapshotPayload{
 		AsOf: day(0), Equity: cfg.NotionalAccount.StartingEquity, AvailableCash: 1_000_000_000, Currency: "USD",

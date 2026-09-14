@@ -14,7 +14,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
-// This file holds #23's tests: the cash-skip rule (ADR 0010). When the next
+// This file holds the cash-skip rule's tests (ADR 0010). When the next
 // Unit would cost more than the cash available at the previous close, it is
 // skipped — no partial Unit, no borrowing, no deferred queue — and the
 // rejection is journalled with reason event.DeclineReasonInsufficientCash,

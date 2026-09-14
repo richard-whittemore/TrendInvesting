@@ -212,7 +212,7 @@ func runReducerOverHighs(t *testing.T, instrumentID string, highs []float64, cfg
 
 	envelopes := []event.Envelope{
 		configEnvelopeWithConfig(t, 1, day(0), cfg),
-		// #23's cash basis (ADR 0010): a Unit is never sized without an
+		// ADR 0010's cash basis: a Unit is never sized without an
 		// account.snapshot ever having supplied an available-cash figure. A
 		// no-op reading (Equity equal to cfg's own starting figure, so the
 		// Notional Account is unaffected) and generous headroom, since this
@@ -1712,7 +1712,7 @@ func TestReducerKeepsSeparateEntryChannelPerInstrument(t *testing.T) {
 
 	envelopes := []event.Envelope{
 		configEnvelope(t, 1, day(0)),
-		// #23's cash basis (ADR 0010) — see runReducerOverHighs's identical
+		// ADR 0010's cash basis — see runReducerOverHighs's identical
 		// snapshot.
 		accountSnapshotEnvelope(t, 2, defaultAccountSnapshot(validConfigurationPayload()), day(0)),
 	}
@@ -2316,7 +2316,7 @@ func runReducerOverBars(t *testing.T, cfg event.ConfigurationPayload, bars []eve
 
 	envelopes := []event.Envelope{
 		configEnvelopeWithConfig(t, 1, day(0), cfg),
-		// #23's cash basis (ADR 0010) — see runReducerOverHighs's identical
+		// ADR 0010's cash basis — see runReducerOverHighs's identical
 		// snapshot for why this file supplies one unconditionally.
 		accountSnapshotEnvelope(t, 2, defaultAccountSnapshot(cfg), day(0)),
 	}

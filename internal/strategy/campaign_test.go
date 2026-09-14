@@ -169,15 +169,15 @@ type stream struct {
 // default (see the account.snapshot it injects, below): comfortably clear of
 // any Unit's cost in this package's fixtures — at most a few hundred
 // thousand dollars (fixture prices in the low hundreds, quantities in the
-// hundreds of shares) — so that #23's cash-skip check (ADR 0010) never
+// hundreds of shares) — so that the cash-skip check (ADR 0010) never
 // interferes with a fixture whose own subject is something else. A test that
 // IS about affordability (internal/strategy's cash_skip_test.go) builds its
 // stream a different way, so it is never shadowed by this default.
 const streamDefaultAvailableCash = 1_000_000_000.0
 
 // defaultAccountSnapshot is the account.snapshot newStream injects
-// immediately after the configuration event, before any bar: #23's cash
-// basis (ADR 0010) requires one before the reducer will size any Unit, and
+// immediately after the configuration event, before any bar: ADR 0010's
+// cash basis requires one before the reducer will size any Unit, and
 // this package's fixtures are about Campaign life-cycle, not cash
 // affordability. Equity equals cfg's configured starting figure — a
 // deliberate no-op against the Notional Account (NotionalAccount.ObserveSnapshot's

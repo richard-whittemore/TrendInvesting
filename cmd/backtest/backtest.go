@@ -125,13 +125,12 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 		return fmt.Errorf("backtest: %w", err)
 	}
 
-	// #23's cash basis (ADR 0010): the reducer sizes no Unit until an
+	// ADR 0010's cash basis: the reducer sizes no Unit until an
 	// account.snapshot has supplied an available-cash figure. This command
-	// has no brokerage or LEAN feed to read one from (that is #30's concern,
-	// the LEAN adapter), so a fixture-driven backtest starts the run fully
-	// in cash, at the configuration's own starting equity — the same
-	// assumption the Notional Account itself makes before any snapshot
-	// arrives (ADR 0007).
+	// has no brokerage or LEAN feed to read one from, so a fixture-driven
+	// backtest starts the run fully in cash, at the configuration's own
+	// starting equity — the same assumption the Notional Account itself
+	// makes before any snapshot arrives (ADR 0007).
 	startingCash, err := inputEnvelope("account-snapshot:starting",
 		event.AccountSnapshotEventType, event.AccountSnapshotSchemaVersion, bars[0].PeriodEnd,
 		event.AccountSnapshotPayload{
