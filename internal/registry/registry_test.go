@@ -573,6 +573,14 @@ func TestAConfigurationHashThatIsNotOneIsRefused(t *testing.T) {
 		{"a path separator in the digest", "sha256:../../etc"},
 		{"a parent directory", ".."},
 		{"upper case", "SHA256:" + strings.Repeat("AB", 32)},
+		// A digest of the wrong length or alphabet is the shape that reads
+		// as evidence of absence: it becomes a directory that happens not to
+		// exist, and the answer comes back "no run is recorded".
+		{"a truncated digest", "sha256:0"},
+		{"a digest one character short", "sha256:" + strings.Repeat("a", 63)},
+		{"a digest one character long", "sha256:" + strings.Repeat("a", 65)},
+		{"a non-hexadecimal digest", "sha256:g" + strings.Repeat("a", 63)},
+		{"an algorithm this build never derives", "md5:" + strings.Repeat("ab", 16)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1109,4 +1117,90 @@ func (s refusingStore) ReadDir(dir string) ([]string, error) {
 
 func (s refusingStore) ReadFile(name string) ([]byte, error) {
 	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+}
+
+// TestARunIDWindowsResolvesAsADeviceIsRefused. A run id becomes a file name,
+// and Win32 resolves the MS-DOS device names ahead of a file of the same
+// name, with or without an extension — so `<run-id>.json` for one of them is
+// a name the registry cannot create there. The registry is committed to git
+// and cloned onto whatever machine reads it, so the id is refused when it is
+// chosen rather than on the machine that cannot honour it.
+//
+// This project's CI does not run on Windows, so the refusal is tested here
+// and the Win32 behaviour behind it is not: what this test pins is that the
+// id is refused, not that Windows would have refused it.
+func TestARunIDWindowsResolvesAsADeviceIsRefused(t *testing.T) {
+	t.Parallel()
+
+	for _, runID := range []string{"con", "prn", "aux", "nul", "com1", "com9", "lpt1", "lpt9"} {
+		t.Run(runID, func(t *testing.T) {
+			run := completedRun("placeholder")
+			run.RunID = runID
+
+			if _, err := registry.NewEntry(run); err == nil {
+				t.Fatalf("registry.NewEntry() with run id %q error = nil, want it refused", runID)
+			}
+		})
+	}
+
+	// A device name is reserved as a whole name, not as a prefix.
+	for _, runID := range []string{"console", "com1-baseline", "nullable"} {
+		t.Run(runID, func(t *testing.T) {
+			run := completedRun("placeholder")
+			run.RunID = runID
+
+			if _, err := registry.NewEntry(run); err != nil {
+				t.Fatalf("registry.NewEntry() with run id %q error = %v, want it accepted", runID, err)
+			}
+		})
+	}
+}
+
+// TestASpanTheRegistryCannotWriteDownIsRefused. Validate reports every way an
+// entry may not be recorded, so a span it accepts must be one Encode can
+// write: an entry that passes validation and then fails to encode is a
+// contract disagreeing with itself, and it fails at the install rather than
+// at the point the span was chosen.
+//
+// RFC 3339 spans years 0 to 9999, which is what encoding/json holds a
+// time.Time to.
+func TestASpanTheRegistryCannotWriteDownIsRefused(t *testing.T) {
+	t.Parallel()
+
+	outOfRange := time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		start, end time.Time
+	}{
+		{"a span that ends outside the years RFC 3339 spans", spanStart, outOfRange},
+		{"a span that starts outside them", outOfRange, outOfRange.AddDate(1, 0, 0)},
+		{"a span before year zero", time.Date(-1, time.January, 1, 0, 0, 0, 0, time.UTC), spanEnd},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			run := completedRun("unwritable-span")
+			run.SpanStart, run.SpanEnd = test.start, test.end
+
+			if _, err := registry.NewEntry(run); err == nil {
+				t.Fatalf("registry.NewEntry() error = nil, want a span the registry cannot write down to be refused")
+			}
+		})
+	}
+}
+
+// TestAnEntryThatValidatesEncodes is the other half of the contract above: an
+// entry Validate accepts can always be written down, so nothing that passes
+// validation is lost at the install.
+func TestAnEntryThatValidatesEncodes(t *testing.T) {
+	t.Parallel()
+
+	run := completedRun("at-the-edge")
+	run.SpanStart = time.Date(1, time.January, 1, 0, 0, 0, 0, time.UTC)
+	run.SpanEnd = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+
+	var encoded bytes.Buffer
+	if err := registry.Encode(&encoded, mustEntry(t, run)); err != nil {
+		t.Fatalf("registry.Encode() error = %v, want an entry Validate accepted to be writable", err)
+	}
 }
