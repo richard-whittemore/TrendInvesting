@@ -63,7 +63,7 @@ func validStopFill() event.FillPayload {
 		Price:        126.09441570423544,
 		FilledAt:     proposalPeriodEnd.AddDate(0, 0, 1),
 		// A sell executes BELOW its level once slippage is applied
-		// against the trader, the mirror of validFill's buy.
+		// against the trader (ADR 0013), the mirror of validFill's buy.
 		Level:           126.14441570423544,
 		SlippageApplied: 0.05,
 		Commission:      1.00,
@@ -207,7 +207,8 @@ func TestFillPayloadValidate(t *testing.T) {
 			wantErr: "filled at",
 		},
 		{
-			// UnitIDs is a stop-only field; an entry fill naming one is
+			// UnitIDs is a stop-only field (FillPayload.UnitIDs, fill.go);
+			// an entry fill naming one is
 			// a producer defect, the same closed-shape rule every other
 			// kind-specific field in this payload already follows.
 			name:    "entry fill names unit ids",
@@ -266,9 +267,9 @@ func TestStopFillPayloadValidate(t *testing.T) {
 		},
 		{
 			// A stop fill must name which units its own protective
-			// stop closed, because the gap case can leave units at
-			// different levels — "closes everything" is no longer a safe
-			// default.
+			// stop closed (FillPayload.UnitIDs, fill.go), because the gap
+			// case leaves units at different levels (The Turtle Rules p.23)
+			// — "closes everything" is no longer a safe default.
 			name:    "missing unit ids",
 			mutate:  func(f *event.FillPayload) { f.UnitIDs = nil },
 			wantErr: "unit ids is required",
