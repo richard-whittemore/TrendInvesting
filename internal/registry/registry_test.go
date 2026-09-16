@@ -1162,8 +1162,8 @@ func TestARunIDWindowsResolvesAsADeviceIsRefused(t *testing.T) {
 // contract disagreeing with itself, and it fails at the install rather than
 // at the point the span was chosen.
 //
-// RFC 3339 spans years 0 to 9999, which is what encoding/json holds a
-// time.Time to.
+// The refusal is whatever time.Time.MarshalJSON refuses: years outside 0
+// to 9999, and timezone offsets outside [0,23] hours.
 func TestASpanTheRegistryCannotWriteDownIsRefused(t *testing.T) {
 	t.Parallel()
 
@@ -1176,6 +1176,12 @@ func TestASpanTheRegistryCannotWriteDownIsRefused(t *testing.T) {
 		{"a span that ends outside the years RFC 3339 spans", spanStart, outOfRange},
 		{"a span that starts outside them", outOfRange, outOfRange.AddDate(1, 0, 0)},
 		{"a span before year zero", time.Date(-1, time.January, 1, 0, 0, 0, 0, time.UTC), spanEnd},
+		// A year check alone let this through: time.Time.MarshalJSON also
+		// refuses a timezone offset outside [0,23] hours, which is why
+		// writableTime asks the encoder instead of restating its rules.
+		{"a span in a timezone RFC 3339 cannot state",
+			time.Date(2020, time.January, 2, 3, 4, 5, 0, time.FixedZone("out-of-range", 24*60*60)),
+			time.Date(2020, time.January, 3, 3, 4, 5, 0, time.FixedZone("out-of-range", 24*60*60))},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

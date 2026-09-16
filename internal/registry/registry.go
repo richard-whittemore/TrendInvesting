@@ -258,18 +258,24 @@ func (e Entry) checkSpan() []error {
 	case e.SpanStart.IsZero() && e.Status == StatusCompleted:
 		return []error{errors.New("a completed run states the span of input event times it covered")}
 	case !writableTime(e.SpanStart) || !writableTime(e.SpanEnd):
-		return []error{fmt.Errorf("the span %s to %s falls outside the years RFC 3339 spans, so the entry cannot be written down", e.SpanStart.Format(time.RFC3339), e.SpanEnd.Format(time.RFC3339))}
+		return []error{fmt.Errorf("the span %s to %s cannot be written as RFC 3339, so the entry cannot be recorded", e.SpanStart.Format(time.RFC3339), e.SpanEnd.Format(time.RFC3339))}
 	}
 	return nil
 }
 
 // writableTime reports whether t survives being written as RFC 3339, which is
 // how a recorded run states the span it covered and the only encoding of a
-// time this format has. encoding/json holds a time.Time to years 0 to 9999
-// for the same reason.
+// time this format has.
+//
+// It asks the encoder rather than restating the encoder's rules. Restating
+// them is how this check was wrong twice: first it tested nothing at all, then
+// it tested only the year, and time.Time.MarshalJSON also refuses a timezone
+// offset outside [0,23] hours. A validator that predicts a serialiser must be
+// re-derived every time the serialiser changes; one that calls it cannot
+// disagree with it.
 func writableTime(t time.Time) bool {
-	year := t.Year()
-	return year >= 0 && year <= 9999
+	_, err := t.MarshalJSON()
+	return err == nil
 }
 
 // checkArtefacts: a completed run points at the journal it wrote, because a
