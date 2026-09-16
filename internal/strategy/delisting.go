@@ -112,7 +112,10 @@ func (r *Reducer) applyCorporateAction(envelope event.Envelope) ([]event.Envelop
 // The record is made in EVERY case, including the ones that emit nothing —
 // which is why the guard clauses below write to r.delisted before returning.
 // A delisting with no Campaign and no proposal outstanding is still a no-op
-// as far as the journal is concerned: no event, and no error. Every other
+// as far as the journal is concerned: no event, and no error — but it is a
+// no-op only once its own chronology has cleared the instrument's last
+// completed bar; the tombstone it records is exactly as terminal as the one
+// that closes a Campaign, so it is checked to the same standard. Every other
 // input this reducer accepts about an already-closed or never-open Campaign
 // fails closed (applyStopFill, applyExitFill, applyFillToOpenCampaign),
 // because a fill or a proposal for a Campaign this reducer does not hold is a
@@ -128,18 +131,14 @@ func (r *Reducer) applyDelisting(payload event.CorporateActionPayload, input eve
 	}
 
 	state, known := r.instruments[payload.InstrumentID]
-	if !known || !state.hasOutstandingBusiness() {
-		// Nothing to close and nothing to cancel, so nothing is journalled —
-		// but the fact is recorded all the same, which is the whole
-		// difference between this no-op and the one that let a delisted
-		// instrument be entered.
-		//
-		// The chronology checks below are deliberately skipped here rather
-		// than applied first. Each of them guards a figure this transition
-		// would otherwise compute — the last available price, an expiry's own
-		// ExpiredAt — and with no Campaign and no proposal there is no such
-		// figure. Applying them anyway would make a stale notice for an
-		// instrument this strategy never traded halt the run.
+	if !known {
+		// Genuinely unknown: no completed bar has ever been accepted for the
+		// instrument, so there is no last completed bar for the chronology
+		// check below to compare against, and nothing to close or cancel. The
+		// fact is recorded all the same, which is the whole difference
+		// between this no-op and the one that let a delisted instrument be
+		// entered. Applying the chronology check anyway would make a stale
+		// notice for an instrument this strategy never traded halt the run.
 		r.delisted[payload.InstrumentID] = payload.EffectiveAt
 		return nil, nil
 	}
@@ -150,13 +149,30 @@ func (r *Reducer) applyDelisting(payload event.CorporateActionPayload, input eve
 	// take effect BEFORE that bar closed would be closing the campaign against
 	// a price from the future relative to its own stated moment.
 	//
-	// state.hasPreviousClose is unreachable false here: outstanding business
-	// of any kind — a Campaign, or a proposal of any of the three kinds —
-	// requires a completed bar to have produced it, so a previous close always
-	// exists. Guarded anyway, matching this package's fail-closed style.
+	// Checked here, for every KNOWN instrument, before deciding whether there
+	// is any outstanding business to close — not only on the path that has
+	// some. A known but idle instrument's chronology can be violated exactly
+	// as an active one's can, and the no-op below records r.delisted just as
+	// terminally: absorbing a stale notice there would let an event history
+	// contradict itself (an earlier SetupEvaluated event for a bar after the
+	// stated delisting) and would permanently block every later, correct
+	// notice and every bar that follows, with no way to repair it.
+	//
+	// state.hasPreviousClose is unreachable false here: state only exists in
+	// r.instruments once applyCompletedBar's advance block has run for it,
+	// which sets hasPreviousClose unconditionally before returning. Guarded
+	// anyway, matching this package's fail-closed style.
 	if !state.hasPreviousClose || payload.EffectiveAt.Before(state.lastPeriodEnd) {
 		return nil, fmt.Errorf("strategy: instrument %q: delisting effective at %s predates the last completed bar %s this reducer has for it; the last available price is that bar's own close and cannot be read before it exists",
 			payload.InstrumentID, payload.EffectiveAt.Format(time.RFC3339), state.lastPeriodEnd.Format(time.RFC3339))
+	}
+
+	if !state.hasOutstandingBusiness() {
+		// Nothing to close and nothing to cancel, so nothing is journalled —
+		// but the fact is recorded all the same, exactly as it is for a
+		// genuinely unknown instrument above.
+		r.delisted[payload.InstrumentID] = payload.EffectiveAt
+		return nil, nil
 	}
 
 	// --- Every payload this transition will be journalled as is built and
