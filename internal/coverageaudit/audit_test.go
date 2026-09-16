@@ -49,8 +49,8 @@ const dumpEnv = "COVERAGE_AUDIT_DUMP"
 // missing test, not a category.
 var categories = map[string]string{
 	// A value this package itself has just built cannot fail its own
-	// contract: json.Marshal of a struct of strings, numbers, slices of
-	// those and time.Time, or Validate on a payload whose every field was
+	// contract: json.Marshal after validated-payload-json is established
+	// (docs/development.md), or Validate on a payload whose every field was
 	// assigned from an already-validated source a few lines above.
 	"unreachable-by-construction": "the value was built, and validated, by the code immediately above the guard",
 	// A domain rule makes the state the branch tests for impossible. The

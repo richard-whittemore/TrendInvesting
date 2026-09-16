@@ -194,8 +194,11 @@ func (p ProtectiveStopSetPayload) Validate() error {
 	default:
 		errs = append(errs, fmt.Errorf("reason %q is not a recognised protective stop reason", p.Reason))
 	}
-	if p.AsOf.IsZero() {
+	switch {
+	case p.AsOf.IsZero():
 		errs = append(errs, errors.New("as of is required"))
+	case !writableTime(p.AsOf):
+		errs = append(errs, errors.New("as of cannot be written as RFC 3339"))
 	}
 	if p.Rule == "" {
 		errs = append(errs, errors.New("rule is required"))

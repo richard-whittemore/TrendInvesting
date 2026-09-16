@@ -302,8 +302,11 @@ func (p FillPayload) Validate() error {
 	case p.Price <= 0:
 		errs = append(errs, errors.New("price must be positive"))
 	}
-	if p.FilledAt.IsZero() {
+	switch {
+	case p.FilledAt.IsZero():
 		errs = append(errs, errors.New("filled at is required"))
+	case !writableTime(p.FilledAt):
+		errs = append(errs, errors.New("filled at cannot be written as RFC 3339"))
 	}
 	// The three cost fields. Each is range-checked and none is cross-derived
 	// against Price: see Level's own field comment for why this payload

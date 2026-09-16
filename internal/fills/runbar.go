@@ -292,9 +292,8 @@ func (s *Simulator) fillEnvelopeFor(bar event.CompletedBarPayload, c candidate, 
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		// Unreachable: every field is a string, an int64, a float64, a
-		// []string or a time.Time. Guarded anyway, matching this project's
-		// fail-closed style.
+		// validated-payload-json (docs/development.md): Validate above
+		// accepted every field; event.TestValidatedPayloadsMarshal pins it.
 		return event.Envelope{}, fmt.Errorf("fills: marshal fill payload: %w", err)
 	}
 	return event.Envelope{

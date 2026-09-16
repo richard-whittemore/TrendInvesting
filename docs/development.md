@@ -112,7 +112,7 @@ A coverage percentage cannot detect a branch that has become unreachable: dead c
 
 `internal/coverageaudit` compares the SET of statements no test executes against `exclusions.json`, a checked-in list of the blocks that cannot be executed. Every entry names a reason, and only two are admissible:
 
-- **unreachable by construction** — a value this code has just built cannot fail its own contract (`json.Marshal` of a struct of strings, numbers and `time.Time`; `Validate` on a payload assembled from already-validated figures a few lines above);
+- **unreachable by construction** — a value this code has just built cannot fail its own contract (`json.Marshal` after the validated-payload-json invariant below is established; `Validate` on a payload assembled from already-validated figures a few lines above);
 - **unreachable by a named domain invariant** — a rule makes the state the branch tests for impossible, and the reason says which rule. Where the invariant is cheap to assert, a test asserts it, so the day it stops holding the list is forced to be re-read rather than quietly becoming wrong.
 
 "Nobody has got round to it" is not a category. A missing test is a missing test.
@@ -124,6 +124,30 @@ COVERAGE_AUDIT_DUMP=/tmp/uncovered.json go test ./internal/coverageaudit/
 ```
 
 The audit covers `internal/`, where every strategy, risk and reconciliation rule lives. `cmd/` is composition and is held to its own tests — except the paths that decide whether a failed run still leaves evidence, which are held to the same bar as the domain.
+
+### validated-payload-json
+
+For every event payload `p`, `p.Validate() == nil` implies `json.Marshal(p)`
+succeeds, provided the value is not mutated between the two calls. Each
+timestamp is checked by `writableTime`, which calls `time.Time.MarshalJSON`;
+required timestamps are also checked for zero. Numeric validation checks every
+float, including nested structs and slice elements, for finiteness.
+
+`internal/event`'s `TestValidatedPayloadsMarshal` tests this implication for
+every payload type with valid fixtures, boundary mutations of every JSON-visible
+leaf, and reproducible generated mutations. `TestMarshalInvariantIncludesEveryPayload`
+compares the fixtures with the package's declared payload types, so adding a
+type requires extending the property test. The traversal fails on unsupported
+field types instead of silently skipping them. `TestPayloadTimestampsRejectUnwritableTimes`
+independently tests a year outside 0–9999 and a +24:00 offset for every timestamp
+field. These are regression checks, not substitutes for asking the encoder.
+
+The timestamp-free payloads are `ConfigurationPayload` (ten finite-checked
+floats, including `NotionalAccount` and `Commission`, plus strings and integers),
+`EngineStatePayload` (three strings), and `RunCompletedPayload` (empty). They
+participate in the same property test. The invariant applies to payloads, not
+envelopes or journal headers: `journal.TestWriteReturnsTimestampEncodingErrors`
+exercises their encoding-error path, which must not be excluded from coverage.
 
 ## Package boundaries
 

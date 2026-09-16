@@ -557,9 +557,7 @@ func (r *Reducer) expireEntryProposal(state *instrumentState, bar event.Complete
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		// Unreachable: every field is a string, an int64, a float64 or a
-		// time.Time, none of which can fail to marshal. Failing closed rather
-		// than panicking, in case the payload ever grows a field that can.
+		// validated-payload-json (docs/development.md).
 		return event.Envelope{}, fmt.Errorf("strategy: marshal proposal expired payload: %w", err)
 	}
 	// Keyed to the bar that superseded the proposal, not to the proposal's own
@@ -636,8 +634,7 @@ func (r *Reducer) expireExitProposal(state *instrumentState, bar event.Completed
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		// Unreachable, for the same reason expireEntryProposal's marshal
-		// guard is.
+		// validated-payload-json (docs/development.md).
 		return event.Envelope{}, fmt.Errorf("strategy: marshal proposal expired payload: %w", err)
 	}
 	// A distinct decisionID kind from the entry-kind expiry's own
@@ -718,8 +715,7 @@ func (r *Reducer) expireAddProposal(state *instrumentState, bar event.CompletedB
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		// Unreachable, for the same reason expireExitProposal's marshal
-		// guard is.
+		// validated-payload-json (docs/development.md).
 		return event.Envelope{}, fmt.Errorf("strategy: marshal proposal expired payload: %w", err)
 	}
 	// A distinct decisionID kind from the other two expiry paths' own, even
@@ -783,8 +779,7 @@ func (r *Reducer) expireAddProposalForStop(state *instrumentState, fill event.Fi
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		// Unreachable, for the same reason expireAddProposal's marshal
-		// guard is.
+		// validated-payload-json (docs/development.md).
 		return event.Envelope{}, fmt.Errorf("strategy: marshal proposal expired payload: %w", err)
 	}
 	// Keyed to the stop fill that superseded the proposal, not to the bar
@@ -877,10 +872,7 @@ func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBa
 	}
 	evaluatedBytes, err := json.Marshal(evaluatedPayload)
 	if err != nil {
-		// Unreachable: every field is a string, a float64, a bool or a
-		// time.Time, none of which can fail to marshal. Failing closed
-		// rather than panicking, in case the payload ever grows a field
-		// that can.
+		// validated-payload-json (docs/development.md).
 		return nil, fmt.Errorf("strategy: marshal campaign evaluated payload: %w", err)
 	}
 	emissions := []event.Envelope{r.stamp(
@@ -912,7 +904,7 @@ func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBa
 	}
 	proposalBytes, err := json.Marshal(proposalPayload)
 	if err != nil {
-		// Unreachable, for the same reason evaluatedBytes' marshal guard is.
+		// validated-payload-json (docs/development.md).
 		return nil, fmt.Errorf("strategy: marshal exit proposal payload: %w", err)
 	}
 	proposalEnvelope := r.stamp(
@@ -1073,10 +1065,7 @@ func (r *Reducer) evaluateAdd(state *instrumentState, input event.Envelope) ([]e
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		// Unreachable: every field is a string, an int, an int64, a float64
-		// or a time.Time, none of which can fail to marshal. Failing closed
-		// rather than panicking, in case the payload ever grows a field that
-		// can.
+		// validated-payload-json (docs/development.md).
 		return nil, fmt.Errorf("strategy: marshal add proposal payload: %w", err)
 	}
 
@@ -1526,10 +1515,7 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 	}
 	openedPayloadBytes, err := json.Marshal(openedPayload)
 	if err != nil {
-		// Unreachable: every field is a string, an int, an int64, a float64 or
-		// a time.Time, none of which can fail to marshal. Failing closed
-		// rather than panicking, in case the payload ever grows a field that
-		// can.
+		// validated-payload-json (docs/development.md).
 		return nil, fmt.Errorf("strategy: marshal campaign opened payload: %w", err)
 	}
 
@@ -1555,7 +1541,7 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 	}
 	stopSetPayloadBytes, err := json.Marshal(stopSetPayload)
 	if err != nil {
-		// Unreachable, for the same reason as openedPayloadBytes above.
+		// validated-payload-json (docs/development.md).
 		return nil, fmt.Errorf("strategy: marshal protective stop set payload: %w", err)
 	}
 
@@ -1810,7 +1796,7 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 	}
 	unitsStoppedBytes, err := json.Marshal(unitsStoppedPayload)
 	if err != nil {
-		// Unreachable, for the same reason as openCampaign's marshal guards.
+		// validated-payload-json (docs/development.md).
 		return nil, fmt.Errorf("strategy: marshal campaign units stopped payload: %w", err)
 	}
 
@@ -1859,7 +1845,7 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 		}
 		exitedPayloadBytes, err := json.Marshal(exitedPayload)
 		if err != nil {
-			// Unreachable, for the same reason as openCampaign's marshal guards.
+			// validated-payload-json (docs/development.md).
 			return nil, fmt.Errorf("strategy: marshal campaign exited payload: %w", err)
 		}
 		envelope := r.stamp(decisionID("campaign-exited", fill.InstrumentID, fill.FilledAt), event.CampaignExitedEventType, event.CampaignExitedSchemaVersion, fill.FilledAt, input, exitedPayloadBytes)
@@ -2079,7 +2065,7 @@ func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, 
 	}
 	exitedPayloadBytes, err := json.Marshal(exitedPayload)
 	if err != nil {
-		// Unreachable, for the same reason as applyStopFill's marshal guard.
+		// validated-payload-json (docs/development.md).
 		return nil, fmt.Errorf("strategy: marshal campaign exited payload: %w", err)
 	}
 
@@ -2232,7 +2218,7 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 	}
 	unitAddedBytes, err := json.Marshal(unitAddedPayload)
 	if err != nil {
-		// Unreachable, for the same reason as openCampaign's marshal guards.
+		// validated-payload-json (docs/development.md).
 		return nil, fmt.Errorf("strategy: marshal campaign unit added payload: %w", err)
 	}
 
@@ -2259,7 +2245,7 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 	}
 	newUnitStopSetBytes, err := json.Marshal(newUnitStopSetPayload)
 	if err != nil {
-		// Unreachable, for the same reason as openCampaign's marshal guards.
+		// validated-payload-json (docs/development.md).
 		return nil, fmt.Errorf("strategy: marshal protective stop set payload: %w", err)
 	}
 
@@ -2312,7 +2298,7 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 		}
 		raisedBytes, err := json.Marshal(raisedPayload)
 		if err != nil {
-			// Unreachable, for the same reason as openCampaign's marshal guards.
+			// validated-payload-json (docs/development.md).
 			return nil, fmt.Errorf("strategy: marshal protective stop set payload: %w", err)
 		}
 		raises = append(raises, raise{unitIndex: earlier.index, newStop: newStop, payload: raisedPayload, bytes: raisedBytes})
@@ -2441,7 +2427,7 @@ func (r *Reducer) checkCampaignHasAProtectiveStop(state *instrumentState, bar ev
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		// Unreachable, for the same reason as openCampaign's marshal guards.
+		// validated-payload-json (docs/development.md).
 		return event.Envelope{}, fmt.Errorf("strategy: marshal engine state payload: %w", err)
 	}
 	haltEnvelope := r.stamp(

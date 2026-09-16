@@ -10,21 +10,14 @@
       "function": "writeCanonicalString",
       "statement": "panic(fmt.Sprintf(\"event: canonicalJSON: marshal string %q: %v\", s, err))",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of a Go string. The encoder rejects only invalid UTF-8 in byte slices and unsupported kinds; a string is neither, and is re-encoded with invalid runes replaced rather than refused."
+      "reason": "json.Marshal of a Go string; event.TestJSONStringsMarshal checks arbitrary bytes converted to strings, including invalid UTF-8 and JSON escapes."
     },
     {
       "file": "internal/fills/runbar.go",
       "function": "(*Simulator).fillEnvelopeFor",
       "statement": "return event.Envelope{}, fmt.Errorf(\"fills: marshal fill payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
-    },
-    {
-      "file": "internal/journal/journal.go",
-      "function": "writeLine",
-      "statement": "return fmt.Errorf(\"journal: encode line: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "writeLine has two callers, a Header and a Record. A Header is strings, a uint32 and two time.Time values. A Record adds an event.Envelope, whose only field that could fail to encode is the raw-JSON payload \u2014 and Write has already required every entry's envelope to pass event.Envelope.Validate, which refuses a payload that is not valid JSON."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/sizing/sizing.go",
@@ -52,7 +45,7 @@
       "function": "(*Reducer).applyAddFill",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign unit added payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -66,7 +59,7 @@
       "function": "(*Reducer).applyAddFill",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal protective stop set payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it.",
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal.",
       "count": 2
     },
     {
@@ -123,7 +116,7 @@
       "function": "(*Reducer).applyExitFill",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign exited payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -158,7 +151,7 @@
       "function": "(*Reducer).applyStopFill",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign units stopped payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -186,7 +179,7 @@
       "function": "(*Reducer).applyStopFill",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign exited payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -200,7 +193,7 @@
       "function": "(*Reducer).checkCampaignHasAProtectiveStop",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal engine state payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -221,7 +214,7 @@
       "function": "(*Reducer).evaluateAdd",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal add proposal payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -242,7 +235,7 @@
       "function": "(*Reducer).evaluateCampaign",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign evaluated payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -256,7 +249,7 @@
       "function": "(*Reducer).evaluateCampaign",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal exit proposal payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -270,14 +263,14 @@
       "function": "(*Reducer).expireAddProposal",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).expireAddProposalForStop",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -291,7 +284,7 @@
       "function": "(*Reducer).expireEntryProposal",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -305,7 +298,7 @@
       "function": "(*Reducer).expireExitProposal",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -319,7 +312,7 @@
       "function": "(*Reducer).openCampaign",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign opened payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -333,7 +326,7 @@
       "function": "(*Reducer).openCampaign",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal protective stop set payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -369,7 +362,7 @@
       "function": "(*Reducer).declineAdd",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal declined payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold — a NaN or an infinity in a float64 field — and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, a time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/end_of_stream.go",
@@ -397,7 +390,7 @@
       "function": "(*Reducer).emitEndOfStreamExpiry",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/end_of_stream.go",
@@ -426,7 +419,7 @@
       "function": "(*Reducer).applyAccountSnapshot",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal notional account rebased payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/notional.go",
@@ -440,7 +433,7 @@
       "function": "(*Reducer).applyAccountSnapshot",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal drawdown step applied payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/notional.go",
@@ -454,7 +447,7 @@
       "function": "(*Reducer).applyAccountSnapshot",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal notional account recovered payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/notional.go",
@@ -468,7 +461,7 @@
       "function": "(*Reducer).applyCashMovement",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal notional account cash adjusted payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -490,7 +483,7 @@
       "function": "(*Reducer).applyCompletedBar",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal setup evaluated payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -504,7 +497,7 @@
       "function": "(*Reducer).applyCompletedBar",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal signal payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -532,7 +525,7 @@
       "function": "(*Reducer).decline",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal declined payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -553,7 +546,7 @@
       "function": "(*Reducer).sizeUnit",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal trade proposal payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, slices of those, time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/reducer.go",

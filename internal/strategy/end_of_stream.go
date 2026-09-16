@@ -185,8 +185,7 @@ func (r *Reducer) emitEndOfStreamExpiry(expiry endOfStreamExpiry, completedAt ti
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		// Unreachable, for the same reason expireEntryProposal's marshal guard
-		// is.
+		// validated-payload-json (docs/development.md).
 		return event.Envelope{}, fmt.Errorf("strategy: marshal proposal expired payload: %w", err)
 	}
 	// Keyed to the instant the stream ended rather than to a bar, and to its

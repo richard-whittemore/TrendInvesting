@@ -139,8 +139,11 @@ func (b CompletedBarPayload) Validate() error {
 	if b.InstrumentID == "" {
 		errs = append(errs, errors.New("instrument id is required"))
 	}
-	if b.PeriodEnd.IsZero() {
+	switch {
+	case b.PeriodEnd.IsZero():
 		errs = append(errs, errors.New("period end is required"))
+	case !writableTime(b.PeriodEnd):
+		errs = append(errs, errors.New("period end cannot be written as RFC 3339"))
 	}
 	for _, err := range b.SplitAdjusted.validate(ViewSplitAdjusted) {
 		errs = append(errs, fmt.Errorf("split-adjusted view: %w", err))

@@ -187,8 +187,11 @@ func (p CampaignUnitsStoppedPayload) Validate() error {
 		}
 	}
 
-	if p.StoppedAt.IsZero() {
+	switch {
+	case p.StoppedAt.IsZero():
 		errs = append(errs, errors.New("stopped at is required"))
+	case !writableTime(p.StoppedAt):
+		errs = append(errs, errors.New("stopped at cannot be written as RFC 3339"))
 	}
 
 	if p.RemainingUnits < 0 {

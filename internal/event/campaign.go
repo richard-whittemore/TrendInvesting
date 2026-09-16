@@ -235,8 +235,11 @@ func (p CampaignOpenedPayload) Validate() error {
 	if p.Units != 1 {
 		errs = append(errs, fmt.Errorf("units must be exactly 1, got %d: this is the campaign-opened record, and an add emits its own event", p.Units))
 	}
-	if p.OpenedAt.IsZero() {
+	switch {
+	case p.OpenedAt.IsZero():
 		errs = append(errs, errors.New("opened at is required"))
+	case !writableTime(p.OpenedAt):
+		errs = append(errs, errors.New("opened at cannot be written as RFC 3339"))
 	}
 
 	if err := errors.Join(errs...); err != nil {
@@ -506,8 +509,11 @@ func (p CampaignExitedPayload) Validate() error {
 	if p.FillID == "" {
 		errs = append(errs, errors.New("fill id is required: an exit must name the fill that closed it"))
 	}
-	if p.ExitedAt.IsZero() {
+	switch {
+	case p.ExitedAt.IsZero():
 		errs = append(errs, errors.New("exited at is required"))
+	case !writableTime(p.ExitedAt):
+		errs = append(errs, errors.New("exited at cannot be written as RFC 3339"))
 	}
 	switch p.Reason {
 	case ExitReasonStop, ExitReasonExitChannel:
