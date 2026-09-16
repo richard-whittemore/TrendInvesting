@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -28,7 +29,7 @@ func (failingWriter) Write([]byte) (int, error) { return 0, errReport }
 func TestAJournalThatCannotBeWrittenIsReported(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "no-such-directory", "journal.jsonl")
 
-	err := backtest(options{configPath: configurationFixture, barsPath: barsFixture, outPath: out, build: testBuild}, failingWriter{})
+	err := backtest(context.Background(), options{configPath: configurationFixture, barsPath: barsFixture, outPath: out, build: testBuild}, failingWriter{})
 	if err == nil {
 		t.Fatal("backtest() error = nil, want the journal it could not write to be reported")
 	}
@@ -48,7 +49,7 @@ func TestAJournalThatCannotBeWrittenIsReported(t *testing.T) {
 func TestAReportThatCannotBeWrittenIsReported(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "journal.jsonl")
 
-	err := backtest(options{configPath: configurationFixture, barsPath: barsFixture, outPath: out, build: testBuild}, failingWriter{})
+	err := backtest(context.Background(), options{configPath: configurationFixture, barsPath: barsFixture, outPath: out, build: testBuild}, failingWriter{})
 	if !errors.Is(err, errReport) {
 		t.Fatalf("backtest() error = %v, want the report stream's own failure", err)
 	}

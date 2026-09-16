@@ -14,13 +14,16 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/buildinfo"
@@ -28,8 +31,19 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/registry"
 )
 
+// main wires the run to an interrupt that cancels it rather than ending it.
+//
+// An interrupt reaches the run as a cancelled context and nothing else: it
+// never ends the process, because a run killed between its last bar and its
+// registry entry is the one outcome the registry cannot record, and a
+// deliberately abandoned run is retained beside the completed ones (ADR
+// 0012). The handler stays installed for the life of the command, so a second
+// interrupt is absorbed too — the window it would otherwise open is exactly
+// the finalisation this exists to protect. SIGKILL is still SIGKILL.
 func main() {
-	if err := run(os.Args[1:], os.Stdout); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -38,7 +52,10 @@ func main() {
 // run parses the invocation and performs it, writing what it has to say to
 // out. It exists separately from main so the command is testable as a
 // function rather than as a process.
-func run(args []string, out io.Writer) error {
+//
+// ctx carries the operator's interrupt to the run and is not consulted by the
+// operations that read something already written.
+func run(ctx context.Context, args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("backtest", flag.ContinueOnError)
 	flags.SetOutput(out)
 	configPath := flags.String("config", "", "path to the JSON strategy configuration to run")
@@ -128,7 +145,7 @@ func run(args []string, out io.Writer) error {
 		declaredVariant = registry.Baseline
 	}
 
-	return backtest(options{
+	return backtest(ctx, options{
 		configPath:   *configPath,
 		barsPath:     *barsPath,
 		outPath:      *outPath,

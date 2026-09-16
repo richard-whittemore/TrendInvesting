@@ -61,7 +61,7 @@ type options struct {
 // simulator so that one component numbers the composed stream — a
 // configuration event applied around RunBar rather than through it would
 // leave a gap replay.Engine.Run refuses.
-func backtest(opts options, out io.Writer) error {
+func backtest(ctx context.Context, opts options, out io.Writer) error {
 	if opts.build == "" {
 		return errors.New("backtest: the running build must be identified; it is part of every envelope's strategy version (ADR 0016)")
 	}
@@ -97,7 +97,7 @@ func backtest(opts options, out io.Writer) error {
 	}
 	recorder := journal.NewRecorder(reducer)
 
-	runErr := drive(context.Background(), simulator, recorder, cfg, strategyVersion, bars)
+	runErr := drive(ctx, simulator, recorder, cfg, strategyVersion, bars)
 
 	// The journal is written whether or not the run completed: a handler
 	// that failed closed may have emitted a final event explaining why, and

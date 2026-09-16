@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -53,7 +54,7 @@ func runBacktestAs(t *testing.T, build string) (written []byte, path string) {
 	opts := options{configPath: configurationFixture, barsPath: barsFixture, outPath: out, build: build}
 
 	var log bytes.Buffer
-	if err := backtest(opts, &log); err != nil {
+	if err := backtest(context.Background(), opts, &log); err != nil {
 		t.Fatalf("backtest(%+v) error = %v\n%s", opts, err, log.String())
 	}
 	written, err := os.ReadFile(out)
@@ -161,7 +162,7 @@ func TestTheCommandStampsTheRunningBuild(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "journal.jsonl")
 
 	var log bytes.Buffer
-	if err := run([]string{"-config", configurationFixture, "-bars", barsFixture, "-out", out}, &log); err != nil {
+	if err := run(context.Background(), []string{"-config", configurationFixture, "-bars", barsFixture, "-out", out}, &log); err != nil {
 		t.Fatalf("run() error = %v\n%s", err, log.String())
 	}
 	written, err := os.ReadFile(out)
@@ -196,7 +197,7 @@ func TestAZeroSlippageConfigurationIsRefused(t *testing.T) {
 	journalPath := filepath.Join(dir, "journal.jsonl")
 
 	var log bytes.Buffer
-	err = run([]string{"-config", configPath, "-bars", barsFixture, "-out", journalPath}, &log)
+	err = run(context.Background(), []string{"-config", configPath, "-bars", barsFixture, "-out", journalPath}, &log)
 	if err == nil {
 		t.Fatal("run() error = nil, want a refusal")
 	}
@@ -299,7 +300,7 @@ func TestTheJournalTheCommandWritesVerifies(t *testing.T) {
 	_, path := runBacktestTo(t)
 
 	var out bytes.Buffer
-	if err := run([]string{"-verify", path}, &out); err != nil {
+	if err := run(context.Background(), []string{"-verify", path}, &out); err != nil {
 		t.Fatalf("run(-verify) error = %v", err)
 	}
 	if !strings.Contains(out.String(), "verified") {
@@ -321,7 +322,7 @@ func TestVerifyRefusesAnEditedJournal(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := run([]string{"-verify", path}, &out)
+	err := run(context.Background(), []string{"-verify", path}, &out)
 	if err == nil {
 		t.Fatal("run(-verify) error = nil, want a refusal")
 	}
@@ -378,7 +379,7 @@ func TestTheCommandRefusesToOverwriteAnExistingJournal(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	err := backtest(options{configPath: configurationFixture, barsPath: barsFixture, outPath: out, build: testBuild}, &log)
+	err := backtest(context.Background(), options{configPath: configurationFixture, barsPath: barsFixture, outPath: out, build: testBuild}, &log)
 	if err == nil {
 		t.Fatal("backtest() error = nil, want a refusal to overwrite")
 	}
@@ -565,7 +566,7 @@ func TestTheCommandRefusesAnIncompleteInvocation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var out bytes.Buffer
-			err := run(tt.args, &out)
+			err := run(context.Background(), tt.args, &out)
 			if err == nil {
 				t.Fatalf("run(%v) error = nil, want one naming %q", tt.args, tt.want)
 			}

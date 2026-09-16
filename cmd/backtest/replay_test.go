@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -472,7 +473,7 @@ func TestTheCommandReportsReplayEquivalence(t *testing.T) {
 	_, path := runBacktestTo(t)
 
 	var out bytes.Buffer
-	if err := run([]string{"-replay", path}, &out); err != nil {
+	if err := run(context.Background(), []string{"-replay", path}, &out); err != nil {
 		t.Fatalf("run(-replay) error = %v", err)
 	}
 	if !strings.Contains(out.String(), "replays byte-identically") {
@@ -501,7 +502,7 @@ func TestTheCommandReportsTheFirstDivergingDecision(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	err := run([]string{"-replay", rewritten}, &out)
+	err := run(context.Background(), []string{"-replay", rewritten}, &out)
 	if err == nil {
 		t.Fatal("run(-replay) error = nil, want the forgery reported")
 	}
@@ -530,7 +531,7 @@ func TestTheCommandReportsADecisionTheReplayNeverProduced(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	err := run([]string{"-replay", rewritten}, &out)
+	err := run(context.Background(), []string{"-replay", rewritten}, &out)
 	if err == nil {
 		t.Fatal("run(-replay) error = nil, want the extra decision reported")
 	}
@@ -567,7 +568,7 @@ func TestAnInvocationNamingTwoOperationsIsRefused(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var out bytes.Buffer
-			err := run(tt.args, &out)
+			err := run(context.Background(), tt.args, &out)
 			if err == nil {
 				t.Fatalf("run(%v) error = nil, want a refusal; it performed one operation and discarded the other", tt.args)
 			}
@@ -587,7 +588,7 @@ func TestEachOperationOnItsOwnIsStillAccepted(t *testing.T) {
 
 	for _, args := range [][]string{{"-verify", path}, {"-replay", path}} {
 		var out bytes.Buffer
-		if err := run(args, &out); err != nil {
+		if err := run(context.Background(), args, &out); err != nil {
 			t.Fatalf("run(%v) error = %v", args, err)
 		}
 		if out.Len() == 0 {
@@ -599,7 +600,7 @@ func TestEachOperationOnItsOwnIsStillAccepted(t *testing.T) {
 // A path that names no file is an operator error, reported as one.
 func TestTheCommandRefusesToReplayAMissingFile(t *testing.T) {
 	var out bytes.Buffer
-	err := run([]string{"-replay", filepath.Join(t.TempDir(), "absent.jsonl")}, &out)
+	err := run(context.Background(), []string{"-replay", filepath.Join(t.TempDir(), "absent.jsonl")}, &out)
 	if err == nil {
 		t.Fatal("run(-replay) error = nil, want a refusal")
 	}

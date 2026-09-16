@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -71,7 +72,7 @@ func TestARunIsRecordedUnderItsConfigurationHash(t *testing.T) {
 	journalPath := filepath.Join(dir, "journal.jsonl")
 
 	var log bytes.Buffer
-	err := run([]string{
+	err := run(context.Background(), []string{
 		"-config", configurationFixture,
 		"-bars", barsFixture,
 		"-out", journalPath,
@@ -129,7 +130,7 @@ func TestARunLocatedByItsConfigurationHashReplays(t *testing.T) {
 	root := filepath.Join(dir, "runs")
 
 	var log bytes.Buffer
-	err := run([]string{
+	err := run(context.Background(), []string{
 		"-config", configurationFixture,
 		"-bars", barsFixture,
 		"-out", filepath.Join(dir, "journal.jsonl"),
@@ -153,7 +154,7 @@ func TestARunLocatedByItsConfigurationHashReplays(t *testing.T) {
 	}
 
 	var replayLog bytes.Buffer
-	if err := run([]string{"-replay", journalPath}, &replayLog); err != nil {
+	if err := run(context.Background(), []string{"-replay", journalPath}, &replayLog); err != nil {
 		t.Fatalf("replaying the located run: %v\n%s", err, replayLog.String())
 	}
 	if !strings.Contains(replayLog.String(), "replays byte-identically") {
@@ -178,7 +179,7 @@ func TestAFailedRunIsRecordedWithItsPartialEvidence(t *testing.T) {
 	configPath := writeConfiguration(t, dir, cfg)
 
 	var log bytes.Buffer
-	err := run([]string{
+	err := run(context.Background(), []string{
 		"-config", configPath,
 		"-bars", barsFixture,
 		"-out", journalPath,
@@ -218,7 +219,7 @@ func TestARunWhoseJournalCouldNotBeWrittenIsStillRecorded(t *testing.T) {
 	root := filepath.Join(dir, "runs")
 
 	var log bytes.Buffer
-	err := backtest(options{
+	err := backtest(context.Background(), options{
 		configPath:   configurationFixture,
 		barsPath:     barsFixture,
 		outPath:      filepath.Join(dir, "no-such-directory", "journal.jsonl"),
@@ -265,7 +266,7 @@ func TestARunThatLostTheJournalRaceClaimsNoEvidence(t *testing.T) {
 	// configuration, so it verifies perfectly and names the same header.
 	winner := filepath.Join(dir, "winner.jsonl")
 	var log bytes.Buffer
-	if err := backtest(options{configPath: configurationFixture, barsPath: barsFixture, outPath: winner, build: testBuild}, &log); err != nil {
+	if err := backtest(context.Background(), options{configPath: configurationFixture, barsPath: barsFixture, outPath: winner, build: testBuild}, &log); err != nil {
 		t.Fatalf("write the winning journal: %v", err)
 	}
 	winning := verifyJournal(t, winner)
@@ -311,7 +312,7 @@ func TestARecordedJournalPathIsRelativeToTheRegistryRoot(t *testing.T) {
 	journalPath := filepath.Join(dir, "journal.jsonl")
 
 	var log bytes.Buffer
-	err := run([]string{
+	err := run(context.Background(), []string{
 		"-config", configurationFixture,
 		"-bars", barsFixture,
 		"-out", journalPath,
@@ -344,7 +345,7 @@ func TestAJournalThatCannotBeRecordedRelativeToTheRegistryIsRefused(t *testing.T
 	dir := t.TempDir()
 
 	var log bytes.Buffer
-	err := backtest(options{
+	err := backtest(context.Background(), options{
 		configPath:   configurationFixture,
 		barsPath:     barsFixture,
 		outPath:      filepath.Join(dir, "journal.jsonl"),
@@ -373,7 +374,7 @@ func TestAZeroSlippageRunIsRefusedAndNothingIsRegistered(t *testing.T) {
 	configPath := writeConfiguration(t, dir, cfg)
 
 	var log bytes.Buffer
-	err := run([]string{
+	err := run(context.Background(), []string{
 		"-config", configPath,
 		"-bars", barsFixture,
 		"-out", filepath.Join(dir, "journal.jsonl"),
@@ -407,7 +408,7 @@ func TestConcurrentRunsAreEachRecorded(t *testing.T) {
 		go func() {
 			defer wait.Done()
 			var log bytes.Buffer
-			errs[i] = backtest(options{
+			errs[i] = backtest(context.Background(), options{
 				configPath:   configurationFixture,
 				barsPath:     barsFixture,
 				outPath:      filepath.Join(dir, fmt.Sprintf("journal-%d.jsonl", i)),
@@ -456,7 +457,7 @@ func TestTwoRunsClaimingOneRunIDLeaveExactlyOneEntry(t *testing.T) {
 		go func() {
 			defer wait.Done()
 			var log bytes.Buffer
-			errs[i] = backtest(options{
+			errs[i] = backtest(context.Background(), options{
 				configPath:   configurationFixture,
 				barsPath:     barsFixture,
 				outPath:      filepath.Join(dir, fmt.Sprintf("journal-%d.jsonl", i)),
@@ -497,7 +498,7 @@ func TestARecordedRunIsNeverOverwritten(t *testing.T) {
 
 	record := func(journal string) error {
 		var log bytes.Buffer
-		return backtest(options{
+		return backtest(context.Background(), options{
 			configPath:   configurationFixture,
 			barsPath:     barsFixture,
 			outPath:      filepath.Join(dir, journal),
@@ -532,7 +533,7 @@ func TestTheCommandListsTheRunsRecordedUnderAConfigurationHash(t *testing.T) {
 	journalPath := filepath.Join(dir, "journal.jsonl")
 
 	var log bytes.Buffer
-	err := run([]string{
+	err := run(context.Background(), []string{
 		"-config", configurationFixture,
 		"-bars", barsFixture,
 		"-out", journalPath,
@@ -545,7 +546,7 @@ func TestTheCommandListsTheRunsRecordedUnderAConfigurationHash(t *testing.T) {
 
 	var listing bytes.Buffer
 	hash := event.ConfigurationHash(fixtureConfiguration(t))
-	if err := run([]string{"-registry", root, "-runs", hash}, &listing); err != nil {
+	if err := run(context.Background(), []string{"-registry", root, "-runs", hash}, &listing); err != nil {
 		t.Fatalf("run(-runs) error = %v\n%s", err, listing.String())
 	}
 	for _, want := range []string{"listed", string(registry.StatusCompleted), journalPath} {
@@ -608,7 +609,7 @@ func TestAnInvocationThatCannotBeRecordedIsRefused(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var log bytes.Buffer
-			if err := run(test.args, &log); err == nil {
+			if err := run(context.Background(), test.args, &log); err == nil {
 				t.Fatalf("run(%v) error = nil, want the invocation refused", test.args)
 			}
 		})
@@ -623,7 +624,7 @@ func TestARunUnderADeclaredVariantIsRecordedAsThatVariant(t *testing.T) {
 	root := filepath.Join(dir, "runs")
 
 	var log bytes.Buffer
-	err := run([]string{
+	err := run(context.Background(), []string{
 		"-config", configurationFixture,
 		"-bars", barsFixture,
 		"-out", filepath.Join(dir, "journal.jsonl"),
@@ -709,7 +710,7 @@ func TestAnEntryThatCouldNotBeFlushedIsReportedAsRecorded(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	err := backtest(options{
+	err := backtest(context.Background(), options{
 		configPath:   configurationFixture,
 		barsPath:     barsFixture,
 		outPath:      filepath.Join(dir, "journal.jsonl"),
@@ -826,7 +827,7 @@ func TestARunIsNotRecordedWhenNoRegistryIsNamed(t *testing.T) {
 	dir := t.TempDir()
 
 	var log bytes.Buffer
-	err := run([]string{
+	err := run(context.Background(), []string{
 		"-config", configurationFixture,
 		"-bars", barsFixture,
 		"-out", filepath.Join(dir, "journal.jsonl"),
@@ -841,5 +842,319 @@ func TestARunIsNotRecordedWhenNoRegistryIsNamed(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("the run left %d files behind, want only its journal", len(entries))
+	}
+}
+
+// TestARunThatFailedAfterItsConfigurationWasAcceptedIsRecorded. The registry's
+// promise is that every run is recorded, successful or not (ADR 0012), and a
+// failure between accepting the configuration and finishing the run used to
+// return before anything was written — so an unreadable bar fixture under a
+// perfectly valid configuration left no entry at all, which is the shape a
+// curated record takes.
+func TestARunThatFailedAfterItsConfigurationWasAcceptedIsRecorded(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "runs")
+
+	var log bytes.Buffer
+	err := run(context.Background(), []string{
+		"-config", configurationFixture,
+		"-bars", filepath.Join(dir, "no-such-bars.json"),
+		"-out", filepath.Join(dir, "journal.jsonl"),
+		"-registry", root,
+		"-run-id", "bars-unreadable",
+	}, &log)
+	if err == nil {
+		t.Fatal("run() error = nil, want the bars it could not read to be reported")
+	}
+
+	found := runsUnder(t, root, fixtureConfiguration(t))
+	if len(found) != 1 {
+		t.Fatalf("the registry holds %d runs, want the run that failed before its first bar", len(found))
+	}
+	entry := found[0]
+
+	if entry.Status != registry.StatusFailed {
+		t.Errorf("status = %q, want %q", entry.Status, registry.StatusFailed)
+	}
+	if !strings.Contains(entry.Detail, "read the bars") {
+		t.Errorf("detail = %q, want it to say why the run never started", entry.Detail)
+	}
+	if entry.Artefacts != (registry.Artefacts{}) {
+		t.Errorf("the run claims artefacts %+v; it processed no input at all", entry.Artefacts)
+	}
+	if !entry.SpanStart.IsZero() || !entry.SpanEnd.IsZero() {
+		t.Errorf("span = %s..%s, want none: the run covered no input", entry.SpanStart, entry.SpanEnd)
+	}
+}
+
+// TestARunRefusedBeforeItsConfigurationWasAcceptedIsNotRecorded draws the
+// other side of that line. Registration begins once the configuration has
+// been read and accepted; a refusal before that produced nothing, and an
+// entry for it would assert that a run was performed.
+//
+// Two refusals sit there: the zero-slippage one, which ADR 0013 makes invalid
+// by construction (TestAZeroSlippageRunIsRefusedAndNothingIsRegistered), and
+// an occupied journal path, which is refused before the configuration is even
+// read.
+func TestARunRefusedBeforeItsConfigurationWasAcceptedIsNotRecorded(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "runs")
+	journalPath := filepath.Join(dir, "journal.jsonl")
+	if err := os.WriteFile(journalPath, []byte("an earlier run's evidence\n"), 0o600); err != nil {
+		t.Fatalf("write the journal already there: %v", err)
+	}
+
+	var log bytes.Buffer
+	err := run(context.Background(), []string{
+		"-config", configurationFixture,
+		"-bars", barsFixture,
+		"-out", journalPath,
+		"-registry", root,
+		"-run-id", "path-taken",
+	}, &log)
+	if err == nil {
+		t.Fatal("run() error = nil, want the occupied journal path to be refused")
+	}
+	if _, statErr := os.Stat(root); !os.IsNotExist(statErr) {
+		t.Errorf("os.Stat(%s) = %v, want nothing to have been registered at all", root, statErr)
+	}
+}
+
+// stopAfter is a context that reports itself cancelled once it has been
+// consulted more than n times.
+//
+// A run consults its context once per input event (fills.Simulator checks it
+// before each delivery), so this stops a run at a fixed point in its own
+// stream rather than at a moment the scheduler chooses — which is what makes
+// the partial journal an interrupted run leaves behind assertable at all.
+type stopAfter struct {
+	context.Context
+	consulted *int
+	n         int
+}
+
+func (s stopAfter) Err() error {
+	*s.consulted++
+	if *s.consulted > s.n {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestAnInterruptedRunIsRecordedAsAbandoned. An operator who stops a run has
+// deliberately not carried it through, which is what StatusAbandoned records,
+// and ADR 0012 retains it beside the completed ones — the acceptance
+// criterion is that failed AND abandoned runs survive. The interrupt cancels
+// the run rather than ending the process, so whatever the run did produce is
+// installed and anchored as its own.
+func TestAnInterruptedRunIsRecordedAsAbandoned(t *testing.T) {
+	t.Run("part way through its stream, keeping what it produced", func(t *testing.T) {
+		dir := t.TempDir()
+		root := filepath.Join(dir, "runs")
+		journalPath := filepath.Join(dir, "journal.jsonl")
+
+		consulted := 0
+		ctx := stopAfter{Context: context.Background(), consulted: &consulted, n: 12}
+
+		var log bytes.Buffer
+		err := run(ctx, []string{
+			"-config", configurationFixture,
+			"-bars", barsFixture,
+			"-out", journalPath,
+			"-registry", root,
+			"-run-id", "stopped-part-way",
+		}, &log)
+		if err == nil {
+			t.Fatal("run() error = nil, want the interruption to be reported")
+		}
+
+		entry := onlyRun(t, root)
+		if entry.Status != registry.StatusAbandoned {
+			t.Fatalf("status = %q, want %q", entry.Status, registry.StatusAbandoned)
+		}
+		if entry.Detail == "" {
+			t.Error("the abandoned run records no reason; a status with no reason is not evidence of anything")
+		}
+
+		// What it did produce, anchored as its own (ADR 0017).
+		if entry.Artefacts.JournalPath == "" {
+			t.Fatal("the abandoned run records no journal; the partial one is exactly what a reviewer reads")
+		}
+		verification := verifyJournal(t, journalPath)
+		if entry.Artefacts.FinalRecordHash != verification.FinalRecordHash {
+			t.Errorf("recorded final record hash = %q, want the partial journal's own %q", entry.Artefacts.FinalRecordHash, verification.FinalRecordHash)
+		}
+		if complete := verifyJournal(t, mustCompleteJournal(t)); verification.RecordCount >= complete.RecordCount {
+			t.Errorf("the abandoned run recorded %d records, want fewer than the %d a complete run writes", verification.RecordCount, complete.RecordCount)
+		}
+	})
+
+	t.Run("before its first input, with nothing to show for it", func(t *testing.T) {
+		dir := t.TempDir()
+		root := filepath.Join(dir, "runs")
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		var log bytes.Buffer
+		err := run(ctx, []string{
+			"-config", configurationFixture,
+			"-bars", barsFixture,
+			"-out", filepath.Join(dir, "journal.jsonl"),
+			"-registry", root,
+			"-run-id", "stopped-at-once",
+		}, &log)
+		if err == nil {
+			t.Fatal("run() error = nil, want the interruption to be reported")
+		}
+
+		entry := onlyRun(t, root)
+		if entry.Status != registry.StatusAbandoned {
+			t.Fatalf("status = %q, want %q", entry.Status, registry.StatusAbandoned)
+		}
+		if entry.Artefacts != (registry.Artefacts{}) {
+			t.Errorf("the run claims artefacts %+v; it produced none", entry.Artefacts)
+		}
+		if entry.Detail == "" {
+			t.Error("the abandoned run records no reason")
+		}
+	})
+}
+
+// onlyRun is the single run the registry at root holds for the fixture
+// configuration.
+func onlyRun(t *testing.T, root string) registry.Entry {
+	t.Helper()
+
+	found := runsUnder(t, root, fixtureConfiguration(t))
+	if len(found) != 1 {
+		t.Fatalf("the registry holds %d runs, want exactly one", len(found))
+	}
+	return found[0]
+}
+
+// mustCompleteJournal is the journal an uninterrupted run of the fixture
+// writes, for a test that needs to say what "the whole stream" looks like.
+func mustCompleteJournal(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "complete.jsonl")
+	var log bytes.Buffer
+	if err := backtest(context.Background(), options{
+		configPath: configurationFixture,
+		barsPath:   barsFixture,
+		outPath:    path,
+		build:      testBuild,
+	}, &log); err != nil {
+		t.Fatalf("backtest() error = %v\n%s", err, log.String())
+	}
+	return path
+}
+
+// unreadableDir makes dir writable and traversable but not readable, so that
+// a name can still be created in it and syncDir's own open of it fails. A
+// user who can read such a directory anyway skips the test rather than
+// letting it pass without exercising anything.
+func unreadableDir(t *testing.T, dir string) {
+	t.Helper()
+
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("create %s: %v", dir, err)
+	}
+	if err := os.Chmod(dir, 0o300); err != nil {
+		t.Fatalf("chmod %s: %v", dir, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o750) })
+	if file, err := os.Open(dir); err == nil {
+		_ = file.Close()
+		t.Skip("this user reads a directory it has no read permission on, so the flush cannot be made to fail here")
+	}
+}
+
+// TestAJournalWhoseDirectoryCouldNotBeFlushedIsStillTheRunsOwnEvidence. The
+// journal is installed by hard link and its directory's own entry is flushed
+// after it, exactly as the registry entry's is: a crash between the two would
+// otherwise leave the registry anchoring a journal whose name did not survive
+// (ADR 0017).
+//
+// The link is the commit point, so a flush that fails leaves the journal
+// installed BY THIS RUN — which is what decides whether its chain head may be
+// anchored here. The command reports the flush and the entry still carries
+// the artefacts.
+func TestAJournalWhoseDirectoryCouldNotBeFlushedIsStillTheRunsOwnEvidence(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "runs")
+	journals := filepath.Join(dir, "journals")
+	unreadableDir(t, journals)
+	journalPath := filepath.Join(journals, "journal.jsonl")
+
+	var log bytes.Buffer
+	err := backtest(context.Background(), options{
+		configPath:   configurationFixture,
+		barsPath:     barsFixture,
+		outPath:      journalPath,
+		registryPath: root,
+		runID:        "journal-unflushed",
+		variant:      registry.Baseline,
+		build:        testBuild,
+	}, &log)
+	if err == nil {
+		t.Fatal("backtest() error = nil, want the flush that failed to be reported")
+	}
+	for _, want := range []string{journalPath, journals} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("backtest() error = %v, want it to mention %q", err, want)
+		}
+	}
+
+	found := runsUnder(t, root, fixtureConfiguration(t))
+	if len(found) != 1 {
+		t.Fatalf("the registry holds %d runs, want the run recorded", len(found))
+	}
+	entry := found[0]
+	if entry.Status != registry.StatusCompleted {
+		t.Errorf("status = %q, want %q: the run reached the end of its stream and installed its journal", entry.Status, registry.StatusCompleted)
+	}
+	if entry.Detail == "" {
+		t.Error("the entry records nothing about the flush that failed")
+	}
+	verification := verifyJournal(t, journalPath)
+	if entry.Artefacts.FinalRecordHash != verification.FinalRecordHash {
+		t.Errorf("recorded final record hash = %q, want the journal this run installed %q", entry.Artefacts.FinalRecordHash, verification.FinalRecordHash)
+	}
+}
+
+// TestTheRegistryRootThisCommandCreatedIsFlushedWhereItsNameLives. MkdirAll
+// creates the registry root when it is not there, and a name is only durable
+// once the directory HOLDING it is flushed. Flushing the root and the
+// configuration-hash directory below it leaves the root's own entry in the
+// page cache, so a power loss could come back with the whole registry gone
+// and the command having reported success.
+func TestTheRegistryRootThisCommandCreatedIsFlushedWhereItsNameLives(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "evidence")
+	unreadableDir(t, parent)
+	root := filepath.Join(parent, "runs")
+
+	var log bytes.Buffer
+	err := backtest(context.Background(), options{
+		configPath:   configurationFixture,
+		barsPath:     barsFixture,
+		outPath:      filepath.Join(dir, "journal.jsonl"),
+		registryPath: root,
+		runID:        "root-created",
+		variant:      registry.Baseline,
+		build:        testBuild,
+	}, &log)
+	if err == nil {
+		t.Fatal("backtest() error = nil, want the flush of the directory holding the new root to be reported")
+	}
+	if !strings.Contains(err.Error(), parent) {
+		t.Errorf("backtest() error = %v, want it to mention %q, where the root's own name lives", err, parent)
+	}
+
+	found := runsUnder(t, root, fixtureConfiguration(t))
+	if len(found) != 1 {
+		t.Fatalf("the registry holds %d runs, want the entry the link installed", len(found))
 	}
 }
