@@ -242,6 +242,13 @@ func (e Entry) Validate() error {
 // checkSpan: a completed run covered a span and states it, because a result
 // that cannot be placed in a Regime Window cannot be evaluated (ADR 0012). A
 // run that processed no input has no span to state, and states neither end.
+//
+// A span the entry cannot be WRITTEN DOWN with is refused here rather than at
+// the install. Validate reports every way an entry may not be recorded, so an
+// entry it accepts and Encode cannot write is a contract disagreeing with
+// itself — and the disagreement surfaces as a JSON encoder message at the
+// moment the run is being recorded, which is the worst moment for a registry
+// whose point is that every run is recorded (ADR 0012).
 func (e Entry) checkSpan() []error {
 	switch {
 	case e.SpanStart.IsZero() != e.SpanEnd.IsZero():
@@ -250,8 +257,19 @@ func (e Entry) checkSpan() []error {
 		return []error{fmt.Errorf("the span runs backwards: %s to %s", e.SpanStart.Format(time.RFC3339), e.SpanEnd.Format(time.RFC3339))}
 	case e.SpanStart.IsZero() && e.Status == StatusCompleted:
 		return []error{errors.New("a completed run states the span of input event times it covered")}
+	case !writableTime(e.SpanStart) || !writableTime(e.SpanEnd):
+		return []error{fmt.Errorf("the span %s to %s falls outside the years RFC 3339 spans, so the entry cannot be written down", e.SpanStart.Format(time.RFC3339), e.SpanEnd.Format(time.RFC3339))}
 	}
 	return nil
+}
+
+// writableTime reports whether t survives being written as RFC 3339, which is
+// how a recorded run states the span it covered and the only encoding of a
+// time this format has. encoding/json holds a time.Time to years 0 to 9999
+// for the same reason.
+func writableTime(t time.Time) bool {
+	year := t.Year()
+	return year >= 0 && year <= 9999
 }
 
 // checkArtefacts: a completed run points at the journal it wrote, because a
@@ -292,6 +310,19 @@ func checkJournalPath(journalPath string) error {
 	return nil
 }
 
+// deviceNames are the MS-DOS device names Win32 resolves ahead of a file of
+// the same name, with or without an extension. A run id is checked against
+// them on every platform: the registry is committed to git and cloned onto
+// whatever machine reads it, so an id that cannot be a file name there is
+// refused where it is chosen rather than where it is unusable.
+var deviceNames = map[string]bool{
+	"con": true, "prn": true, "aux": true, "nul": true,
+	"com0": true, "com1": true, "com2": true, "com3": true, "com4": true,
+	"com5": true, "com6": true, "com7": true, "com8": true, "com9": true,
+	"lpt0": true, "lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true,
+	"lpt5": true, "lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
+}
+
 // checkRunID: the run id becomes a file name, so it is held to what survives
 // being one. Upper case is refused because a case-insensitive filesystem
 // would collide two ids that a case-sensitive one keeps apart, and a run
@@ -312,26 +343,46 @@ func checkRunID(runID string) error {
 			return fmt.Errorf("run id %q holds %q: a run id may hold only lower-case letters, digits and interior hyphens, because it becomes a file name", runID, string(c))
 		}
 	}
+	if deviceNames[runID] {
+		return fmt.Errorf("run id %q names an MS-DOS device: Windows resolves it as one whatever extension follows, so %q could not be created there", runID, runID+entrySuffix)
+	}
 	return nil
 }
+
+// sha256Algorithm is the algorithm event.ConfigurationHash derives a hash
+// with, and sha256DigestLength the hex length of what it produces (ADR 0016).
+const (
+	sha256Algorithm    = "sha256"
+	sha256DigestLength = 64
+)
 
 // Dir is the directory, relative to a registry root, that every run of
 // configurationHash is recorded in: the hash with its algorithm separator
 // replaced, since ":" is not a legal file name character everywhere the
 // registry is cloned.
 //
-// It refuses anything that is not a hash. The argument reaches this from an
-// operator's command line, and a value that is not a hash must not become a
-// path.
+// It refuses anything that is not a hash this build derives, digest and all.
+// The argument reaches this from an operator's command line, and a directory
+// name is the registry's whole index: a malformed selector that became a path
+// would name a directory that happens not to exist, and Runs reports a
+// missing directory as no runs. For an audit tool, answering "nothing here"
+// to a malformed question is the wrong failure — a mistyped hash would read
+// as evidence that a Variant was never run, which is the one thing the
+// registry exists to make impossible (ADR 0012).
+//
+// An algorithm other than the one ADR 0016 derives is refused rather than
+// carried opaquely: this build computes exactly one, so an unrecognised
+// algorithm is a selector it cannot honour, and failing closed is the same
+// rule ADR 0015 applies to a version no upcaster exists for.
 func Dir(configurationHash string) (string, error) {
 	algorithm, digest, ok := strings.Cut(configurationHash, ":")
 	if !ok {
 		return "", fmt.Errorf("registry: configuration hash %q does not name the algorithm that produced it, which ADR 0016 prefixes", configurationHash)
 	}
-	if err := checkHashPart("algorithm", algorithm); err != nil {
-		return "", err
+	if algorithm != sha256Algorithm {
+		return "", fmt.Errorf("registry: configuration hash %q names algorithm %q, and this build derives only %q (ADR 0016)", configurationHash, algorithm, sha256Algorithm)
 	}
-	if err := checkHashPart("digest", digest); err != nil {
+	if err := checkDigest(configurationHash, digest); err != nil {
 		return "", err
 	}
 	return dir(algorithm, digest), nil
@@ -341,16 +392,20 @@ func dir(algorithm, digest string) string {
 	return algorithm + "-" + digest
 }
 
-func checkHashPart(what, part string) error {
-	if part == "" {
-		return fmt.Errorf("registry: the %s of a configuration hash is empty", what)
+// checkDigest holds a sha256 digest to exactly what ADR 0016's hex encoding
+// produces: 64 lower-case hexadecimal characters. Upper case is refused for
+// the reason a run id is — a case-insensitive filesystem would map two
+// selectors onto one directory.
+func checkDigest(configurationHash, digest string) error {
+	if len(digest) != sha256DigestLength {
+		return fmt.Errorf("registry: configuration hash %q carries a %d-character digest; a %s digest is exactly %d lower-case hexadecimal characters (ADR 0016)", configurationHash, len(digest), sha256Algorithm, sha256DigestLength)
 	}
-	for i := 0; i < len(part); i++ {
-		c := part[i]
-		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+	for i := 0; i < len(digest); i++ {
+		c := digest[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') {
 			continue
 		}
-		return fmt.Errorf("registry: the %s of configuration hash %q holds %q: it becomes a directory name, so only lower-case letters and digits are accepted", what, part, string(c))
+		return fmt.Errorf("registry: configuration hash %q holds %q in its digest; a %s digest is exactly %d lower-case hexadecimal characters (ADR 0016)", configurationHash, string(c), sha256Algorithm, sha256DigestLength)
 	}
 	return nil
 }

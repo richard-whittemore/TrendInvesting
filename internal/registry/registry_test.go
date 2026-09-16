@@ -1196,7 +1196,10 @@ func TestAnEntryThatValidatesEncodes(t *testing.T) {
 	t.Parallel()
 
 	run := completedRun("at-the-edge")
-	run.SpanStart = time.Date(1, time.January, 1, 0, 0, 0, 0, time.UTC)
+	// Year 1 January 2, not January 1: the zero time is year 1 January 1
+	// UTC, and a span of two zero times is "no span at all" rather than an
+	// early one.
+	run.SpanStart = time.Date(1, time.January, 2, 0, 0, 0, 0, time.UTC)
 	run.SpanEnd = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
 
 	var encoded bytes.Buffer
