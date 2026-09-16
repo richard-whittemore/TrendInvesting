@@ -219,9 +219,9 @@ type FillPayload struct {
 // Kind is one of the recognised values and that ProposalID/CampaignID/UnitIDs
 // are present or absent exactly as that Kind requires, that Direction is a
 // recognised value, that Quantity is positive, that Price is finite and
-// positive, that FilledAt is present, and that the cost fields are in range:
-// Level finite and positive, SlippageApplied and Commission finite and
-// non-negative.
+// positive, that FilledAt is present and writable as RFC 3339, and that the
+// cost fields are in range: Level finite and positive, SlippageApplied and
+// Commission finite and non-negative.
 func (p FillPayload) Validate() error {
 	var errs []error
 	if p.InstrumentID == "" {
