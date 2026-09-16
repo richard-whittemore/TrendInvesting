@@ -103,11 +103,17 @@ The hash is derived from the recorded configuration, never supplied, and re-deri
 
 Closed, and about the **run** rather than the verdict on it:
 
-- `completed` — the run reached the end of its input stream and wrote a journal.
-- `failed` — the run stopped before the end of its input stream. Whatever partial journal it left is recorded with it, because that is exactly what a reviewer reads.
-- `abandoned` — the run was declared and deliberately not carried through, or its output discarded.
+- `completed` — the run reached the end of its input stream and wrote a journal. A step *after* that which failed — flushing a directory to disk, say — is recorded in the reason and fails the command, but does not make the run something other than completed.
+- `failed` — the run stopped before the end of its input stream, or its journal never landed. Whatever partial journal it left is recorded with it, because that is exactly what a reviewer reads.
+- `abandoned` — the run was deliberately not carried through. Interrupting a run (Ctrl-C, or `SIGTERM`) records it as this: the signal cancels the run rather than ending the process, so the partial journal it had written is still installed and still anchored, and the entry is still written. The handler stays installed until the command finishes, so a second interrupt will not kill it part-way through recording the run.
 
 An unrecognised status fails closed on the way in *and* on the way out; it is never stored as read. Whether a Variant is adopted or rejected is a judgement made over many runs against ADR 0012's five criteria, and is deliberately not something a single run's own record can assert about itself.
+
+### What is recorded, and what is refused before anything is
+
+Registration begins once the configuration has been **read and accepted**. From there on every outcome is recorded, including one that stopped before the first bar: an unreadable bar fixture under a valid configuration is a failed run with no journal, no span and the reason it never started. A registry that only held runs that got far enough to go wrong interestingly would be a curated one.
+
+Before that line, nothing is recorded, because nothing was performed: an unreadable or invalid configuration, the zero-slippage refusal below, and a `-out` that already exists (refused before the configuration is even read).
 
 ### Zero slippage is refused twice
 
@@ -121,7 +127,7 @@ go run ./cmd/backtest -registry runs -runs sha256:<digest>
 
 This lists every run recorded under that configuration — id, status, Variant, span, and the journal each one wrote — whatever became of each. Journal paths are resolved against the registry root as they are printed, so a path it names can be fed straight to `-replay`; a run that left no journal says `(no journal)`.
 
-A registry root that does not exist is reported rather than read as an empty one: "this configuration has never been run" and "this registry is not there" are different findings, and only one of them is evidence.
+A registry root that does not exist is reported rather than read as an empty one: "this configuration has never been run" and "this registry is not there" are different findings, and only one of them is evidence. For the same reason a hash that is not one is **refused** rather than answered: `sha256:` and exactly 64 lower-case hexadecimal characters (ADR 0016), and no other algorithm. A mistyped digest would otherwise name a directory that happens not to exist, and come back as "no run is recorded" — a typo reading as evidence that a Variant was never run.
 
 ## The committed fixture
 
