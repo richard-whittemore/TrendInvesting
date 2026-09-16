@@ -31,7 +31,7 @@ func TestNextAddLevelGoldGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextAddLevel(unit 2) error = %v", err)
 	}
-	if want := firstFill + 0.5*campaignN; second != want {
+	if want := firstFill + float64(0.5*campaignN); second != want {
 		t.Errorf("second unit = %v, want exactly %v (The Turtle Rules p.20)", second, want)
 	}
 
@@ -39,7 +39,7 @@ func TestNextAddLevelGoldGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextAddLevel(unit 3) error = %v", err)
 	}
-	if want := second + 0.5*campaignN; third != want {
+	if want := second + float64(0.5*campaignN); third != want {
 		t.Errorf("third unit = %v, want exactly %v (The Turtle Rules p.20)", third, want)
 	}
 
@@ -47,7 +47,7 @@ func TestNextAddLevelGoldGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextAddLevel(unit 4) error = %v", err)
 	}
-	if want := third + 0.5*campaignN; fourth != want {
+	if want := third + float64(0.5*campaignN); fourth != want {
 		t.Errorf("fourth unit = %v, want exactly %v (The Turtle Rules p.20)", fourth, want)
 	}
 

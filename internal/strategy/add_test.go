@@ -210,7 +210,7 @@ func TestAddLadderOneRungPerBarUpToFourUnitsThenNoFifth(t *testing.T) {
 		if unit.Units != unitIndex {
 			t.Errorf("added[%d].Units = %d, want %d (the count after this add)", i, unit.Units, unitIndex)
 		}
-		wantStop := wantFillPrices[i] - cfg.StopMultiple*campaignN
+		wantStop := wantFillPrices[i] - float64(cfg.StopMultiple*campaignN)
 		if unit.ProtectiveStop != wantStop {
 			t.Errorf("added[%d].ProtectiveStop = %v, want %v", i, unit.ProtectiveStop, wantStop)
 		}
@@ -223,7 +223,7 @@ func TestAddLadderOneRungPerBarUpToFourUnitsThenNoFifth(t *testing.T) {
 	// (unit 3) must NOT equal what an "intended level" implementation would
 	// have produced — rung2 + 0.5N, ignoring the 0.06 slip on unit 2's own
 	// fill.
-	wrongRung3 := rung2 + 0.5*campaignN
+	wrongRung3 := rung2 + float64(0.5*campaignN)
 	if proposal := decodeAddProposal(t, proposals[1]); proposal.Level == wrongRung3 {
 		t.Errorf("proposal[1].Level = %v equals the INTENDED-level rung %v; it must be measured from the actual (slipped) fill instead", proposal.Level, wrongRung3)
 	}
@@ -316,7 +316,7 @@ func TestAddWithinTheBreakoutBarItself(t *testing.T) {
 	if unit2.FillPrice != ladder[1] {
 		t.Errorf("added.FillPrice = %v, want %v", unit2.FillPrice, ladder[1])
 	}
-	wantUnit2Stop := ladder[1] - cfg.StopMultiple*campaignN
+	wantUnit2Stop := ladder[1] - float64(cfg.StopMultiple*campaignN)
 	if unit2.ProtectiveStop != wantUnit2Stop {
 		t.Errorf("added.ProtectiveStop = %v, want %v", unit2.ProtectiveStop, wantUnit2Stop)
 	}
@@ -326,7 +326,7 @@ func TestAddWithinTheBreakoutBarItself(t *testing.T) {
 		t.Fatalf("got %d protective-stop-set event(s), want 3 (unit 1's initial, unit 2's initial, unit 1's raise)", len(stopSets))
 	}
 	initial1 := decodeProtectiveStopSet(t, stopSets[0])
-	wantInitial1 := campaignFillPrice - cfg.StopMultiple*campaignN
+	wantInitial1 := campaignFillPrice - float64(cfg.StopMultiple*campaignN)
 	if initial1.Level != wantInitial1 || initial1.Reason != event.ProtectiveStopReasonInitial || initial1.UnitIndex != 1 {
 		t.Errorf("stopSets[0] = %+v, want unit 1's initial stop at %v", initial1, wantInitial1)
 	}
@@ -335,7 +335,7 @@ func TestAddWithinTheBreakoutBarItself(t *testing.T) {
 		t.Errorf("stopSets[1] = %+v, want unit 2's initial stop at %v", initial2, wantUnit2Stop)
 	}
 	raised1 := decodeProtectiveStopSet(t, stopSets[2])
-	wantRaised1 := wantInitial1 + 0.5*campaignN
+	wantRaised1 := wantInitial1 + float64(0.5*campaignN)
 	if raised1.Level != wantRaised1 || raised1.Reason != event.ProtectiveStopReasonAddLadder || raised1.UnitIndex != 1 {
 		t.Errorf("stopSets[2] = %+v, want unit 1 raised to %v", raised1, wantRaised1)
 	}
@@ -496,7 +496,7 @@ func TestEarlierUnitStopsAreRaisedThroughASameBarChainFromTheEntry(t *testing.T)
 	// built the same way production code builds it — via RaisedStop itself,
 	// applied once per raise — rather than a hand-folded "N x 0.5N" that can
 	// differ from it in the last bit (float64 addition is not associative).
-	unit1Initial := campaignFillPrice - cfg.StopMultiple*campaignN
+	unit1Initial := campaignFillPrice - float64(cfg.StopMultiple*campaignN)
 	unit1RaisedOnce, err := sizing.RaisedStop(unit1Initial, campaignN)
 	if err != nil {
 		t.Fatalf("RaisedStop(unit 1, 1st raise) error = %v", err)
@@ -505,7 +505,7 @@ func TestEarlierUnitStopsAreRaisedThroughASameBarChainFromTheEntry(t *testing.T)
 	if err != nil {
 		t.Fatalf("RaisedStop(unit 1, 2nd raise) error = %v", err)
 	}
-	unit2Initial := ladder[1] - cfg.StopMultiple*campaignN
+	unit2Initial := ladder[1] - float64(cfg.StopMultiple*campaignN)
 	unit2Raised, err := sizing.RaisedStop(unit2Initial, campaignN)
 	if err != nil {
 		t.Fatalf("RaisedStop(unit 2) error = %v", err)
@@ -513,7 +513,7 @@ func TestEarlierUnitStopsAreRaisedThroughASameBarChainFromTheEntry(t *testing.T)
 	wantStops := map[int]float64{
 		1: unit1RaisedTwice,
 		2: unit2Raised,
-		3: ladder[2] - cfg.StopMultiple*campaignN,
+		3: ladder[2] - float64(cfg.StopMultiple*campaignN),
 	}
 	latest := map[int]event.ProtectiveStopSetPayload{}
 	for _, e := range envelopesOfType(emitted, event.ProtectiveStopSetEventType) {
@@ -746,7 +746,7 @@ func TestMultiUnitCampaignExitsViaExitChannelWithAggregatedQuantityAndResult(t *
 	// constant-folding-vs-runtime-float64 discipline), sum left to right,
 	// divide once at the end.
 	q := float64(133)
-	weighted := q*campaignFillPrice + q*fill2Price + q*fill3Price
+	weighted := float64(q*campaignFillPrice) + float64(q*fill2Price) + float64(q*fill3Price)
 	wantEntryPrice := weighted / float64(399)
 	if exited.EntryPrice != wantEntryPrice {
 		t.Errorf("EntryPrice = %v, want exactly %v (the quantity-weighted average fill price)", exited.EntryPrice, wantEntryPrice)

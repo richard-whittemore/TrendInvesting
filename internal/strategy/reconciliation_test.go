@@ -131,7 +131,7 @@ func TestAnAddFillThatWouldLeaveTheNewUnitUnprotectedIsRejected(t *testing.T) {
 	}
 
 	// Positive, and less than the 2N the stop sits below it.
-	unprotected := cfg.StopMultiple*campaignN - 1
+	unprotected := float64(cfg.StopMultiple*campaignN) - 1
 	fill := addFill("AAPL", campaignID, 2, day(57), "sim-fill-add-unprotected", unprotected, 133, day(57))
 
 	newStream(t, cfg).

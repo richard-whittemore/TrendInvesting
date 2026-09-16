@@ -20,6 +20,7 @@ func TestSourceScope(t *testing.T) {
 		{"external_test", "internal/fixture", "shape_test.go", "fixture_test"},
 		{"test_only", "internal/testonly", "shape_test.go", "testonly"},
 		{"cmd", "cmd/fixture", "shape.go", "main"},
+		{"cmd_dot_test", "cmd/fixture.test", "shape.go", "main"},
 		{"cmd_test", "cmd/fixture", "shape_test.go", "main"},
 		{"transport", "transport", "shape.go", "transport"},
 		{"spike", "transport/spike", "shape.go", "spike"},

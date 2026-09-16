@@ -22,7 +22,7 @@ func validProtectiveStopSet() event.ProtectiveStopSetPayload {
 		UnitIndex:     1,
 		Reason:        event.ProtectiveStopReasonInitial,
 		AsOf:          proposalPeriodEnd,
-		Level:         campaignEntryPrice - 2*proposalN,
+		Level:         campaignEntryPrice - float64(2*proposalN),
 		PreviousLevel: 0,
 		EntryPrice:    campaignEntryPrice,
 		CampaignN:     proposalN,
@@ -36,14 +36,14 @@ func validProtectiveStopSet() event.ProtectiveStopSetPayload {
 // (#15): Unit 1's stop, raised by half a campaign N because a further Unit
 // was added.
 func validProtectiveStopSetRaised() event.ProtectiveStopSetPayload {
-	previous := campaignEntryPrice - 2*proposalN
+	previous := campaignEntryPrice - float64(2*proposalN)
 	return event.ProtectiveStopSetPayload{
 		CampaignID:    "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
 		InstrumentID:  "AAPL",
 		UnitIndex:     1,
 		Reason:        event.ProtectiveStopReasonAddLadder,
 		AsOf:          proposalPeriodEnd,
-		Level:         previous + 0.5*proposalN,
+		Level:         previous + float64(0.5*proposalN),
 		PreviousLevel: previous,
 		EntryPrice:    campaignEntryPrice,
 		CampaignN:     proposalN,
@@ -140,7 +140,7 @@ func TestProtectiveStopSetPayloadValidate(t *testing.T) {
 			// identical value the derivation produces.
 			name: "level does not match its derivation",
 			mutate: func(p *event.ProtectiveStopSetPayload) {
-				p.Level = campaignEntryPrice - 2*proposalN + 0.01
+				p.Level = campaignEntryPrice - float64(2*proposalN) + 0.01
 			},
 			wantErr: "does not match the derivation",
 		},
@@ -168,7 +168,7 @@ func TestProtectiveStopSetPayloadValidate(t *testing.T) {
 			mutate: func(p *event.ProtectiveStopSetPayload) {
 				p.Reason = event.ProtectiveStopReasonAddLadder
 				p.Rule = event.RuleStopLadderRaisedByHalfN
-				p.PreviousLevel = p.Level - 0.5*proposalN
+				p.PreviousLevel = p.Level - float64(0.5*proposalN)
 			},
 		},
 		{
@@ -184,7 +184,7 @@ func TestProtectiveStopSetPayloadValidate(t *testing.T) {
 		{
 			name: "initial set with a non-zero previous level",
 			mutate: func(p *event.ProtectiveStopSetPayload) {
-				p.PreviousLevel = p.Level - 0.5*proposalN
+				p.PreviousLevel = p.Level - float64(0.5*proposalN)
 			},
 			wantErr: "previous level must be zero for an initial set",
 		},
@@ -201,7 +201,7 @@ func TestProtectiveStopSetPayloadValidate(t *testing.T) {
 			mutate: func(p *event.ProtectiveStopSetPayload) {
 				p.Reason = event.ProtectiveStopReasonAddLadder
 				p.Rule = event.RuleStopLadderRaisedByHalfN
-				p.PreviousLevel = p.Level - 0.5*proposalN
+				p.PreviousLevel = p.Level - float64(0.5*proposalN)
 				p.Level += 0.01
 			},
 			wantErr: "does not match the derivation",

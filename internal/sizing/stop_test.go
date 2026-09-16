@@ -33,7 +33,7 @@ func TestProtectiveStopLevelCrudeGolden(t *testing.T) {
 	entryPrice := 28.30
 	campaignN := 1.20
 	stopMultiple := 2.0
-	want := entryPrice - stopMultiple*campaignN
+	want := entryPrice - float64(stopMultiple*campaignN)
 
 	got, err := sizing.ProtectiveStopLevel(entryPrice, campaignN, stopMultiple, sizing.DirectionLong)
 	if err != nil {
@@ -90,7 +90,7 @@ func TestProtectiveStopLevelHandComputedCases(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			want := tt.entryPrice - tt.stopMultiple*tt.campaignN
+			want := tt.entryPrice - float64(tt.stopMultiple*tt.campaignN)
 			got, err := sizing.ProtectiveStopLevel(tt.entryPrice, tt.campaignN, tt.stopMultiple, sizing.DirectionLong)
 			if err != nil {
 				t.Fatalf("ProtectiveStopLevel() error = %v, want nil", err)
@@ -484,7 +484,7 @@ func TestRaisedStopHandComputedCases(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			want := tt.previousStop + 0.5*tt.campaignN
+			want := tt.previousStop + float64(0.5*tt.campaignN)
 			got, err := sizing.RaisedStop(tt.previousStop, tt.campaignN)
 			if err != nil {
 				t.Fatalf("RaisedStop() error = %v, want nil", err)

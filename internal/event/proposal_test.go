@@ -57,7 +57,7 @@ func validTradeProposal() event.TradeProposalPayload {
 		RealisedRiskAtStop:     133 * (2 * proposalN * 1) / 1_000_000,
 		DollarsPerPoint:        1,
 		NotionalAccount:        1_000_000,
-		ProtectiveStopIntent:   200 - 2*proposalN,
+		ProtectiveStopIntent:   200 - float64(2*proposalN),
 	}
 }
 
@@ -73,7 +73,7 @@ func validFixedRiskTradeProposal() event.TradeProposalPayload {
 	p.RiskAtStop = 0.02
 	p.Quantity = 177
 	p.RealisedRiskAtStop = 177 * (3 * proposalN * 1) / 1_000_000
-	p.ProtectiveStopIntent = 200 - 3*proposalN
+	p.ProtectiveStopIntent = 200 - float64(3*proposalN)
 	return p
 }
 

@@ -35,7 +35,7 @@ func validCampaignOpened() event.CampaignOpenedPayload {
 		FilledQuantity: 133,
 		EntryPrice:     campaignEntryPrice,
 		StopMultiple:   2,
-		ProtectiveStop: campaignEntryPrice - 2*proposalN,
+		ProtectiveStop: campaignEntryPrice - float64(2*proposalN),
 		Units:          1,
 		OpenedAt:       proposalPeriodEnd,
 	}
@@ -176,7 +176,7 @@ func TestCampaignOpenedPayloadValidate(t *testing.T) {
 			// exists to catch.
 			name: "protective stop does not match its derivation",
 			mutate: func(p *event.CampaignOpenedPayload) {
-				p.ProtectiveStop = campaignEntryPrice - 2*proposalN + 0.01
+				p.ProtectiveStop = campaignEntryPrice - float64(2*proposalN) + 0.01
 			},
 			wantErr: "does not match the derivation",
 		},
@@ -187,7 +187,7 @@ func TestCampaignOpenedPayloadValidate(t *testing.T) {
 			name: "protective stop at zero",
 			mutate: func(p *event.CampaignOpenedPayload) {
 				p.CampaignN = campaignEntryPrice / 2
-				p.ProtectiveStop = p.EntryPrice - p.StopMultiple*p.CampaignN
+				p.ProtectiveStop = p.EntryPrice - float64(p.StopMultiple*p.CampaignN)
 			},
 			wantErr: "protective stop must be positive",
 		},
@@ -196,7 +196,7 @@ func TestCampaignOpenedPayloadValidate(t *testing.T) {
 			mutate: func(p *event.CampaignOpenedPayload) {
 				p.StopMultiple = 2
 				p.CampaignN = -1 // negative N would put the stop above entry
-				p.ProtectiveStop = p.EntryPrice - p.StopMultiple*p.CampaignN
+				p.ProtectiveStop = p.EntryPrice - float64(p.StopMultiple*p.CampaignN)
 			},
 			wantErr: "must be below the entry price",
 		},
@@ -406,7 +406,7 @@ func TestCampaignOpenedPayloadCarriesEverythingTheLaddersNeed(t *testing.T) {
 		{0.5, 220.03889607394115},
 		{1.0, 238.8277921478823},
 	} {
-		got := decoded.EntryPrice + rung.inN*decoded.CampaignN
+		got := decoded.EntryPrice + float64(rung.inN*decoded.CampaignN)
 		if diff := math.Abs(got - rung.want); diff > tolerance {
 			t.Errorf("add level at %vN = %v, want %v (diff %v)", rung.inN, got, rung.want, diff)
 		}
@@ -462,7 +462,7 @@ func TestCampaignOpenedPayloadJSONTags(t *testing.T) {
 // executes: campaignFillPrice - 2*proposalN's protective stop MINUS a small
 // gap, so ExitPrice sits strictly below ProtectiveStopLevel — proving the
 // payload records what was filled, never the level (ADR 0005's gap rule).
-var campaignExitedStopPrice = (campaignEntryPrice - 2*proposalN) - 0.50
+var campaignExitedStopPrice = (campaignEntryPrice - float64(2*proposalN)) - 0.50
 
 // validCampaignExited returns the Campaign-exited that would close
 // validCampaignOpened by a stop fill that gapped through the level.
@@ -485,7 +485,7 @@ func validCampaignExited() event.CampaignExitedPayload {
 		CampaignN:             n,
 		DollarsPerPoint:       dpp,
 		UnitQuantity:          unitQuantity,
-		ProtectiveStopLevel:   entry - 2*n,
+		ProtectiveStopLevel:   entry - float64(2*n),
 		RealisedResult:        realisedResult,
 		AverageMoveInN:        (exit - entry) / n,
 		RealisedResultInUnitN: realisedResult / (float64(unitQuantity) * n * dpp),
@@ -788,7 +788,7 @@ func validCampaignExitedByExitChannel() event.CampaignExitedPayload {
 	// independent of the exit-channel level that actually triggered this
 	// exit (the two are unrelated numbers — see CampaignExitedPayload's doc
 	// comment).
-	stopLevel := entry - 2*n
+	stopLevel := entry - float64(2*n)
 	var unitQuantity int64 = 133
 	realisedResult := float64(133) * (exit - entry) * dpp
 	return event.CampaignExitedPayload{
@@ -860,10 +860,10 @@ func TestCampaignExitedPayloadMultiUnitAggregationMatchesPerUnitSum(t *testing.T
 	var totalQuantity int64
 	var weightedNumerator float64
 	for i := range quantities {
-		perUnitSum += float64(quantities[i]) * (exit - fills[i]) * dpp
+		perUnitSum += float64(float64(quantities[i]) * (exit - fills[i]) * dpp)
 		perUnitNWeightedSum += (float64(quantities[i]) * (exit - fills[i])) / (float64(unitQuantity) * n)
 		totalQuantity += quantities[i]
-		weightedNumerator += float64(quantities[i]) * fills[i]
+		weightedNumerator += float64(float64(quantities[i]) * fills[i])
 	}
 	weightedEntry := weightedNumerator / float64(totalQuantity)
 
@@ -894,7 +894,7 @@ func TestCampaignExitedPayloadMultiUnitAggregationMatchesPerUnitSum(t *testing.T
 	payload.UnitQuantity = unitQuantity
 	payload.AverageMoveInN = averageMoveInN
 	payload.RealisedResultInUnitN = realisedResultInUnitN
-	payload.ProtectiveStopLevel = weightedEntry - 2*n
+	payload.ProtectiveStopLevel = weightedEntry - float64(2*n)
 	payload.Units = len(quantities)
 
 	if err := payload.Validate(); err != nil {

@@ -51,7 +51,7 @@ var heatingOilTable = []struct {
 // is printed at. The small epsilon guards against a value landing exactly on
 // a .00005 boundary due to binary floating-point representation.
 func round4(v float64) float64 {
-	return math.Round(v*10000+1e-9) / 10000
+	return math.Round(float64(v*10000)+1e-9) / 10000
 }
 
 func TestHeatingOilTrueRangeMatchesTableToFourDecimals(t *testing.T) {
