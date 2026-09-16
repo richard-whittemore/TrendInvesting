@@ -578,6 +578,31 @@ func TestDelistingEffectiveAtBeforeTheLastCompletedBarFailsClosed(t *testing.T) 
 	stream.wantRunError("predates the last completed bar")
 }
 
+// TestDelistingEffectiveAtBeforeTheLastCompletedBarFailsClosedForAnIdleKnownInstrument
+// is the previous test's no-Campaign, no-proposal twin: the identical
+// chronology check must hold for a known instrument with nothing outstanding
+// to close, not only for one with an open Campaign. Before this test, that
+// check ran only on the outstanding-business path, so a stale notice for a
+// known but idle instrument fell into the no-op branch instead and recorded
+// a tombstone that contradicted the SetupEvaluated events this reducer had
+// already emitted for the bars after the one the notice actually predates —
+// and, being terminal, could never be corrected by a later, accurate notice.
+func TestDelistingEffectiveAtBeforeTheLastCompletedBarFailsClosedForAnIdleKnownInstrument(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	// The first 55 bars of the fixture only: warm-up, with no breakout (the
+	// channel is not ready until bar 55 has been added — see
+	// breakoutFixtureHighs' own caller), so this instrument is known to the
+	// reducer but has no Campaign and no pending proposal of any kind.
+	idleBars := breakoutBars("AAPL")[:55]
+	stream := newStream(t, cfg).
+		bars(idleBars).
+		// Strictly before bar 55's own period end (day(55)).
+		corporateAction(delistingAction("AAPL", day(54).Add(12*time.Hour)))
+	stream.wantRunError("predates the last completed bar")
+}
+
 // TestDelistingAfterAPartialStopAggregatesTheWholeLife is the delisting
 // counterpart of TestExitFillAfterAPartialStopAggregatesTheWholeLife
 // (stop_ladder_test.go): a delisting closing whatever units survived an
@@ -776,5 +801,36 @@ func TestADelistingForAnInstrumentNeverTradedBarsItFromBeingEnteredAtAll(t *test
 
 	if len(emitted) != 0 {
 		t.Fatalf("got %d emission(s) after a delisting for an instrument never traded, want 0: %v", len(emitted), emitted)
+	}
+}
+
+// TestDelistingForAnIdleKnownInstrumentStillRecordsTheTombstone is the
+// previous test's known-but-idle twin: an instrument with completed bars
+// accepted, but no Campaign and no pending proposal, still has its delisting
+// recorded once the notice's own chronology clears the last completed bar —
+// and the tombstone bars every later bar from being evaluated, exactly as it
+// does for an instrument never traded at all.
+func TestDelistingForAnIdleKnownInstrumentStillRecordsTheTombstone(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	// Warm-up only (see the idle fixture above): known to the reducer, but
+	// idle — no breakout has ever raised a proposal.
+	idleBars := breakoutBars("AAPL")[:55]
+	// Clears the fixture's own Entry Channel (topping out at 155) by a wide
+	// margin, so this bar would be a Breakout — a Setup evaluation, a Signal
+	// and a proposal — on any instrument still trading.
+	staleBar := completedBar("AAPL", day(56), 500, 490, 495)
+
+	emitted := newStream(t, cfg).
+		bars(idleBars).
+		corporateAction(delistingAction("AAPL", day(55))).
+		bar(staleBar).
+		mustRun()
+
+	for _, envelope := range emitted {
+		if envelope.EventTime.Equal(staleBar.PeriodEnd) {
+			t.Errorf("emission %q of type %q is attributed to the bar after the idle delisting notice; a delisted instrument decides nothing", envelope.ID, envelope.Type)
+		}
 	}
 }
