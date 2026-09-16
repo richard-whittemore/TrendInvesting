@@ -281,7 +281,10 @@ func TestARunThatLostTheJournalRaceClaimsNoEvidence(t *testing.T) {
 		runID:        "lost-the-race",
 		variant:      registry.Baseline,
 		build:        testBuild,
-	}, cfg, winning.Header.StrategyVersion, header, nil, journalExistsError(winner))
+	}, cfg, winning.Header.StrategyVersion, outcome{
+		header:     header,
+		journalErr: journalExistsError(winner),
+	})
 	if err != nil {
 		t.Fatalf("registerRun() error = %v, want the losing run recorded", err)
 	}

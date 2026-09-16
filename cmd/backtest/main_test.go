@@ -412,7 +412,7 @@ func TestTheWriteItselfRefusesADestinationThatAppearedLate(t *testing.T) {
 	header := journal.NewHeader("sha256:abc", "turtle-baseline/1.1.0+test", time.Unix(0, 0).UTC(), time.Unix(1, 0).UTC())
 	entries := []journal.Entry{{Kind: journal.KindInput, Envelope: validEnvelopeForWrite()}}
 
-	err := writeJournal(out, header, entries)
+	_, err := writeJournal(out, header, entries)
 	if err == nil {
 		t.Fatal("writeJournal() error = nil, want a refusal to replace the destination")
 	}
@@ -458,7 +458,7 @@ func TestConcurrentWritesLeaveExactlyOneJournal(t *testing.T) {
 			// A different configuration hash per writer, so the survivor
 			// names which run actually installed it.
 			header := journal.NewHeader(fmt.Sprintf("sha256:run-%d", i), "turtle-baseline/1.1.0+test", time.Unix(0, 0).UTC(), time.Unix(1, 0).UTC())
-			errs[i] = writeJournal(out, header, []journal.Entry{{Kind: journal.KindInput, Envelope: validEnvelopeForWrite()}})
+			_, errs[i] = writeJournal(out, header, []journal.Entry{{Kind: journal.KindInput, Envelope: validEnvelopeForWrite()}})
 		}(i)
 	}
 	wg.Wait()
@@ -531,7 +531,7 @@ func TestAFailedWriteLeavesNothingAtTheDestination(t *testing.T) {
 	broken := journal.NewHeader("", "", time.Time{}, time.Time{})
 	entries := []journal.Entry{{Kind: journal.KindInput, Envelope: event.Envelope{}}}
 
-	if err := writeJournal(out, broken, entries); err == nil {
+	if _, err := writeJournal(out, broken, entries); err == nil {
 		t.Fatal("writeJournal() error = nil, want the invalid header refused")
 	}
 

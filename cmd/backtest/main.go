@@ -42,8 +42,11 @@ import (
 // the finalisation this exists to protect. SIGKILL is still SIGKILL.
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
+	err := run(ctx, os.Args[1:], os.Stdout)
+	// Released here rather than deferred: the exit below would skip a defer,
+	// and the handler has to outlive the whole run, finalisation included.
+	stop()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
