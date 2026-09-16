@@ -195,6 +195,17 @@ func TestFillPayloadValidate(t *testing.T) {
 			wantErr: "filled at",
 		},
 		{
+			// encoding/json's time.Time.MarshalJSON refuses a year outside
+			// 0-9999 (it also refuses a zone offset outside [0,23] hours, the
+			// same defect class): a non-zero FilledAt that cannot be written
+			// as RFC 3339 must be refused here, not accepted and then fail to
+			// marshal downstream where there is no Validate call left to
+			// blame.
+			name:    "filled at cannot be written as RFC 3339",
+			mutate:  func(f *event.FillPayload) { f.FilledAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC) },
+			wantErr: "filled at",
+		},
+		{
 			// #15: UnitIDs is a stop-only field; an entry fill naming one is
 			// a producer defect, the same closed-shape rule every other
 			// kind-specific field in this payload already follows.
