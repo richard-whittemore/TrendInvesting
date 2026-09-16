@@ -10,18 +10,12 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 )
 
-// A golden journal only guards against fused multiply-add if its own numbers
-// are sensitive to it. Go permits fusing `x + a*b` into one operation and
-// arm64 does while amd64 does not, so an accumulator over Units — the
-// weighted entry price, the weighted exit price, the aggregate open risk —
-// can hold a different value on the two machines. The fixture's quantities
-// and prices are chosen so that it does: four Units, whose products need
-// more than 53 bits.
-//
-// These tests hold that sensitivity in place. Without them a later edit to
-// the fixture could quietly make every product exact, the golden would pass
-// on both architectures whatever the arithmetic did, and the next fusion
-// defect would be invisible again.
+// The golden fixture must remain sensitive to fused multiply-add to enforce
+// byte-identical replay (ADR 0017; docs/development.md). Go permits fusion,
+// which arm64 performs and amd64 does not: weighted entry/exit prices and
+// aggregate open risk can differ across architectures. These four Units use
+// quantity-price products needing more than 53 bits; making all products
+// exact would let the golden pass even with fusible arithmetic.
 
 // fusedSum accumulates quantity x price the way an arm64 build would if the
 // product were not rounded first: one operation, one rounding, the

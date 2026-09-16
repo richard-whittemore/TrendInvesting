@@ -13,25 +13,9 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 )
 
-// These two tests are the point of #48: a journal can fail either of two
-// independent checks, and the two failures mean different things.
-//
-//   - Chain verification answers "was this file edited after it was
-//     written". A forger who recomputes the chain defeats it.
-//   - Replay equivalence answers "does this engine still produce these
-//     decisions". It reads the journal's INPUT stream and compares what the
-//     reducer produces from it against the decisions the journal recorded,
-//     so it catches a forged decision however well the chain was repaired —
-//     and it is undisturbed by an edit to a record the inputs do not depend
-//     on, which is what leaves chain verification the only check that sees
-//     the careless edit.
-
-// splitJournal separates the journal's input stream from the decisions the
-// reducer produced, from the record's own Kind — the claim the chain covers
-// (ADR 0017), not an inference from a producer's name. journal.Split is the
-// production definition; a test helper that ignored the possibility of an
-// unrecognised kind would test something looser than what replay
-// equivalence actually reads.
+// splitJournal separates inputs and decisions by the record's chain-covered
+// Kind (ADR 0017). It uses journal.Split so unknown kinds fail exactly as they
+// do in production; a producer's name must never determine the split.
 func splitJournal(t *testing.T, records []journal.Record) (inputs, decisions []event.Envelope) {
 	t.Helper()
 	inputs, decisions, err := journal.Split(records)
@@ -41,9 +25,8 @@ func splitJournal(t *testing.T, records []journal.Record) (inputs, decisions []e
 	return inputs, decisions
 }
 
-// replayInputs is replay equivalence's own question, asked of a journal's
-// input stream: run it through a fresh reducer, built from header exactly as
-// replayEquivalence builds one, and see what this build decides now.
+// replayInputs runs a journal's inputs through a fresh reducer built from
+// its header, using the production replay path (ADR 0017).
 func replayInputs(t *testing.T, header journal.Header, inputs []event.Envelope) []event.Envelope {
 	t.Helper()
 
@@ -67,9 +50,9 @@ func readJournalFile(t *testing.T, path string) (journal.Header, []journal.Recor
 	return header, records
 }
 
-// alterRecordedQuantity changes what a recorded expiry says was proposed.
-// repairPayloadHash is what separates the two editors below: a careful
-// forger leaves the envelope internally consistent, a careless one does not.
+// alterRecordedQuantity changes a recorded expiry's proposed quantity.
+// repairPayloadHash preserves envelope integrity for a forgery; leaving it
+// false models a careless edit (ADR 0017).
 func alterRecordedQuantity(t *testing.T, envelope event.Envelope, repairPayloadHash bool) event.Envelope {
 	t.Helper()
 
@@ -89,8 +72,8 @@ func alterRecordedQuantity(t *testing.T, envelope event.Envelope, repairPayloadH
 	return envelope
 }
 
-// lastDecision is the index in records of the final decision, which every
-// fixture run ends with (the end-of-stream expiry).
+// lastDecision finds the final decision; this fixture ends with an
+// end-of-stream proposal expiry (ADR 0011; event.RunCompletedEventType).
 func lastDecision(t *testing.T, records []journal.Record) int {
 	t.Helper()
 	for i := len(records) - 1; i >= 0; i-- {
@@ -102,10 +85,9 @@ func lastDecision(t *testing.T, records []journal.Record) int {
 	return 0
 }
 
-// TestAForgedDecisionPassesChainVerificationAndIsCaughtByReplayEquivalence:
-// the forger edits a recorded decision and recomputes the whole chain, so
-// the file verifies. Replaying the journal's own inputs reproduces what the
-// reducer actually decided, which is not what the file now says.
+// TestAForgedDecisionPassesChainVerificationAndIsCaughtByReplayEquivalence
+// checks ADR 0017's independent checks: repaired payload and chain hashes
+// pass verification, but unchanged inputs cannot reproduce a forged decision.
 func TestAForgedDecisionPassesChainVerificationAndIsCaughtByReplayEquivalence(t *testing.T) {
 	_, path := runBacktestTo(t)
 	header, records := readJournalFile(t, path)
@@ -120,8 +102,6 @@ func TestAForgedDecisionPassesChainVerificationAndIsCaughtByReplayEquivalence(t 
 		entries = append(entries, entry)
 	}
 
-	// The forger rewrites the file with the chain recomputed over their own
-	// version of history.
 	forgedPath := filepath.Join(t.TempDir(), "forged.jsonl")
 	file, err := os.Create(forgedPath)
 	if err != nil {
@@ -134,7 +114,6 @@ func TestAForgedDecisionPassesChainVerificationAndIsCaughtByReplayEquivalence(t 
 		t.Fatalf("close the forged journal: %v", err)
 	}
 
-	// Chain verification is satisfied: the forgery is internally consistent.
 	forgedRaw, err := os.ReadFile(forgedPath)
 	if err != nil {
 		t.Fatalf("read the forged journal: %v", err)
@@ -143,7 +122,6 @@ func TestAForgedDecisionPassesChainVerificationAndIsCaughtByReplayEquivalence(t 
 		t.Fatalf("journal.Verify() error = %v; a forger who recomputes the chain must defeat it, or this test is not testing what it claims", err)
 	}
 
-	// Replay equivalence is not: the inputs still say what really happened.
 	forgedHeader, forgedRecords := readJournalFile(t, forgedPath)
 	inputs, recorded := splitJournal(t, forgedRecords)
 	replayed := replayInputs(t, forgedHeader, inputs)
@@ -153,12 +131,10 @@ func TestAForgedDecisionPassesChainVerificationAndIsCaughtByReplayEquivalence(t 
 	}
 }
 
-// TestACarelessEditIsCaughtByChainVerificationWhileReplayOfItsInputsStillReproducesTheOriginalDecisions:
-// the careless editor changes a recorded decision and leaves the chain
-// alone. The chain names the record they touched. The input stream is
-// untouched, so replaying it produces exactly the decisions the run
-// originally made — which is why the chain, not replay, is what attributes
-// this edit.
+// TestACarelessEditIsCaughtByChainVerificationWhileReplayOfItsInputsStillReproducesTheOriginalDecisions
+// checks that chain verification identifies an edited decision (ADR 0017).
+// The unchanged input stream must still reproduce the original decisions;
+// this comparison uses the originals, not the edited decisions.
 func TestACarelessEditIsCaughtByChainVerificationWhileReplayOfItsInputsStillReproducesTheOriginalDecisions(t *testing.T) {
 	_, path := runBacktestTo(t)
 	header, records := readJournalFile(t, path)
@@ -176,7 +152,6 @@ func TestACarelessEditIsCaughtByChainVerificationWhileReplayOfItsInputsStillRepr
 		t.Fatalf("read the edited journal: %v", err)
 	}
 
-	// Chain verification catches it, and names the record.
 	_, err = journal.Verify(bytes.NewReader(editedRaw))
 	var broken *journal.ChainBrokenError
 	if !errors.As(err, &broken) {
@@ -186,9 +161,6 @@ func TestACarelessEditIsCaughtByChainVerificationWhileReplayOfItsInputsStillRepr
 		t.Fatalf("the chain broke at record %d, want %d", broken.Sequence, records[edited].Sequence)
 	}
 
-	// And a replay of the journal's inputs still reproduces the decisions
-	// the run originally made: the edit damaged the record of history, not
-	// the history the inputs describe.
 	editedHeader, editedRecords, err := journal.Read(bytes.NewReader(editedRaw))
 	if err != nil {
 		t.Fatalf("journal.Read() error = %v", err)
@@ -199,9 +171,8 @@ func TestACarelessEditIsCaughtByChainVerificationWhileReplayOfItsInputsStillRepr
 	}
 }
 
-// writeRecordsVerbatim writes records exactly as given, chain hashes
-// included — what an editor with a text editor and no intent to repair
-// anything leaves behind.
+// writeRecordsVerbatim preserves supplied chain hashes when writing edited
+// records, modelling a careless edit without hash repair (ADR 0017).
 func writeRecordsVerbatim(t *testing.T, path string, header journal.Header, records []journal.Record) {
 	t.Helper()
 

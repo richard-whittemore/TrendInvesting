@@ -20,11 +20,8 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
-// updateGolden rewrites the committed golden journal instead of asserting
-// against it. Regenerating is a deliberate act: the golden journal is the
-// recorded behaviour of the whole platform over a fixed fixture, so a diff
-// in it is a change in what this system decides, to be read rather than
-// accepted.
+// updateGolden regenerates the fixed fixture's recorded platform behaviour
+// (ADR 0017). Review the resulting decision changes before accepting them.
 var updateGolden = flag.Bool("update", false, "rewrite the golden journal from this run")
 
 const (
@@ -32,11 +29,8 @@ const (
 	barsFixture          = "testdata/bars.json"
 	goldenJournal        = "testdata/journal.golden.jsonl"
 
-	// testBuild is the build identifier every golden-asserting test runs
-	// under. The real one (buildinfo.Version) differs between a developer's
-	// machine, CI, and a release build, and a journal asserted byte for byte
-	// must record what the platform decided rather than which machine
-	// decided it.
+	// testBuild fixes golden-test provenance across developer, CI and release
+	// builds so byte comparisons measure decisions (ADR 0017).
 	testBuild = "test"
 )
 
@@ -77,8 +71,8 @@ func fixtureConfiguration(t *testing.T) event.ConfigurationPayload {
 	return cfg
 }
 
-// TestTheCommandTurnsABarFixtureIntoTheGoldenJournal is #19's headline: one
-// documented command runs a fixture end to end and writes a journal.
+// TestTheCommandTurnsABarFixtureIntoTheGoldenJournal checks the documented
+// end-to-end command against committed decision evidence (ADR 0017).
 func TestTheCommandTurnsABarFixtureIntoTheGoldenJournal(t *testing.T) {
 	written, _ := runBacktestTo(t)
 
@@ -99,9 +93,8 @@ func TestTheCommandTurnsABarFixtureIntoTheGoldenJournal(t *testing.T) {
 	}
 }
 
-// TestRunningTheSameFixtureTwiceProducesIdenticalJournals: a journal is
-// evidence, and evidence that varied between two runs of the same inputs
-// would be worthless.
+// TestRunningTheSameFixtureTwiceProducesIdenticalJournals checks ADR 0017's
+// byte-identical evidence requirement for repeated inputs.
 func TestRunningTheSameFixtureTwiceProducesIdenticalJournals(t *testing.T) {
 	first, _ := runBacktestTo(t)
 	second, _ := runBacktestTo(t)
@@ -111,10 +104,8 @@ func TestRunningTheSameFixtureTwiceProducesIdenticalJournals(t *testing.T) {
 	}
 }
 
-// TestTheBuildIdentifierChangesNothingButTheStrategyVersion is what keeps
-// the golden journal meaningful across machines: the build a run was
-// produced by belongs in the record, but it is the only thing about the
-// journal that may depend on where the run happened.
+// TestTheBuildIdentifierChangesNothingButTheStrategyVersion checks that
+// build provenance is recorded but cannot change decisions (ADR 0016).
 func TestTheBuildIdentifierChangesNothingButTheStrategyVersion(t *testing.T) {
 	alphaRaw, _ := runBacktestAs(t, "alpha")
 	betaRaw, _ := runBacktestAs(t, "beta")
@@ -155,9 +146,8 @@ func TestTheBuildIdentifierChangesNothingButTheStrategyVersion(t *testing.T) {
 	}
 }
 
-// TestTheCommandStampsTheRunningBuild: the golden tests fix the build
-// identifier, so this is what holds main's own wiring of buildinfo.Version
-// in place.
+// TestTheCommandStampsTheRunningBuild checks main's buildinfo.Version
+// wiring (ADR 0016), which the fixed-build golden tests bypass.
 func TestTheCommandStampsTheRunningBuild(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "journal.jsonl")
 
@@ -233,8 +223,8 @@ func TestTheHeaderRecordsTheDerivedConfigurationHashAndStrategyVersion(t *testin
 	}
 }
 
-// TestTheHeaderSpansTheRunsFirstAndLastInputEventTime: the header states
-// the period the run covered, and nothing recorded falls outside it.
+// TestTheHeaderSpansTheRunsFirstAndLastInputEventTime checks the input-time
+// span required by ADR 0017; all recorded decisions must fall inside it.
 func TestTheHeaderSpansTheRunsFirstAndLastInputEventTime(t *testing.T) {
 	written, _ := runBacktestTo(t)
 
@@ -261,9 +251,8 @@ func TestTheHeaderSpansTheRunsFirstAndLastInputEventTime(t *testing.T) {
 	}
 }
 
-// TestTheJournalHoldsEveryInputAndDecisionInOneContiguousSequence: #19's
-// second acceptance criterion. Journal sequence numbers are contiguous from
-// 1, and both kinds of event are present.
+// TestTheJournalHoldsEveryInputAndDecisionInOneContiguousSequence checks
+// ADR 0017's journal order: both kinds are present, numbered from one.
 func TestTheJournalHoldsEveryInputAndDecisionInOneContiguousSequence(t *testing.T) {
 	written, _ := runBacktestTo(t)
 
@@ -294,8 +283,8 @@ func TestTheJournalHoldsEveryInputAndDecisionInOneContiguousSequence(t *testing.
 	}
 }
 
-// TestTheJournalTheCommandWritesVerifies: the chain the writer computed is
-// the chain the verifier recomputes.
+// TestTheJournalTheCommandWritesVerifies checks the command's chain
+// verification path against its own output (ADR 0017).
 func TestTheJournalTheCommandWritesVerifies(t *testing.T) {
 	_, path := runBacktestTo(t)
 
@@ -308,8 +297,8 @@ func TestTheJournalTheCommandWritesVerifies(t *testing.T) {
 	}
 }
 
-// TestVerifyRefusesAnEditedJournal: the documented way to check a journal
-// catches an edit to it.
+// TestVerifyRefusesAnEditedJournal checks that the documented verification
+// command rejects an edit without hash repair (ADR 0017).
 func TestVerifyRefusesAnEditedJournal(t *testing.T) {
 	written, path := runBacktestTo(t)
 
@@ -331,9 +320,10 @@ func TestVerifyRefusesAnEditedJournal(t *testing.T) {
 	}
 }
 
-// TestTheRunEndsByExpiringTheProposalItWasStillHolding: #68, end to end.
-// The fixture's last bar breaks out without the entry ever filling, so the
-// journal's final decision is that proposal's expiry rather than silence.
+// TestTheRunEndsByExpiringTheProposalItWasStillHolding checks the terminal
+// event for ADR 0011's one-bar proposal lifetime when no next bar arrives.
+// The fixture ends with an unfilled breakout; its expiry and causing
+// end-of-stream input must both be journalled for replay (ADR 0017).
 func TestTheRunEndsByExpiringTheProposalItWasStillHolding(t *testing.T) {
 	written, _ := runBacktestTo(t)
 
@@ -354,8 +344,6 @@ func TestTheRunEndsByExpiringTheProposalItWasStillHolding(t *testing.T) {
 		t.Fatalf("the final expiry's reason is %q, want %q", expiry.Reason, event.ExpiryReasonInputStreamEnded)
 	}
 
-	// And the end-of-stream event that caused it is itself in the journal,
-	// which is what lets a replay reproduce the expiry.
 	var sawRunCompleted bool
 	for _, record := range records {
 		if record.Envelope.Type == event.RunCompletedEventType {
@@ -396,11 +384,10 @@ func TestTheCommandRefusesToOverwriteAnExistingJournal(t *testing.T) {
 	}
 }
 
-// TestTheWriteItselfRefusesADestinationThatAppearedLate: the check before
-// the run is a courtesy — it saves an operator from waiting for a backtest
-// to finish before being told the path is taken. The guarantee has to be at
-// the write, or a journal that appears in between (a concurrent run, a
-// restored backup) is destroyed by a rename that replaces it silently.
+// TestTheWriteItselfRefusesADestinationThatAppearedLate checks ADR 0017's
+// atomic refusal at installation. The early path check only saves run time;
+// a concurrent run or restored backup may occupy the destination afterward.
+// A rename would silently destroy that evidence.
 func TestTheWriteItselfRefusesADestinationThatAppearedLate(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "journal.jsonl")
@@ -437,12 +424,10 @@ func TestTheWriteItselfRefusesADestinationThatAppearedLate(t *testing.T) {
 	}
 }
 
-// TestConcurrentWritesLeaveExactlyOneJournal is the race itself, run for
-// real rather than through a seam: eight writes start on a path none of
-// them can see yet, so the interleaving is whatever the scheduler does, and
-// the assertion is deterministic anyway — exactly one may win, every loser
-// must say the path is taken, and the journal left behind must be one
-// complete run's rather than a mixture.
+// TestConcurrentWritesLeaveExactlyOneJournal exercises ADR 0017's atomic
+// installation with eight concurrent writes to an initially absent path.
+// Exactly one complete run must survive any scheduler interleaving; every
+// loser must report an occupied path and remove its temporary file.
 func TestConcurrentWritesLeaveExactlyOneJournal(t *testing.T) {
 	const writers = 8
 
@@ -519,15 +504,15 @@ func validEnvelopeForWrite() event.Envelope {
 	}
 }
 
-// TestAFailedWriteLeavesNothingAtTheDestination: the journal is written
-// through a temporary file and renamed into place, so a run interrupted
-// mid-write cannot leave a partial journal that reads like a complete one.
+// TestAFailedWriteLeavesNothingAtTheDestination checks ADR 0017's complete
+// journal installation: a failed temporary-file write must leave neither
+// a partial destination nor a temporary file.
 func TestAFailedWriteLeavesNothingAtTheDestination(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "journal.jsonl")
 
-	// A header this build will not write: journal.Write refuses it, which is
-	// a failure arriving after the destination would have been created.
+	// Invalid header validation fails after temporary-file creation,
+	// exercising cleanup before installation.
 	broken := journal.NewHeader("", "", time.Time{}, time.Time{})
 	entries := []journal.Entry{{Kind: journal.KindInput, Envelope: event.Envelope{}}}
 

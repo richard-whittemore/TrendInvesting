@@ -1,9 +1,6 @@
-// Command transport-spike runs the Go side of the LEAN transport spike
-// (issue #26): a decision engine on a Unix-domain socket, and a Go client that
-// measures round trips against it.
-//
-// It is a measurement tool, not part of the trading path. See
-// docs/adr/0014-lean-go-transport.md and adapter/lean/spike/README.md.
+// Command transport-spike measures round trips between a Unix-domain socket
+// decision engine and a Go client (ADR 0014; adapter/lean/spike/README.md).
+// It is a measurement tool outside the trading path.
 package main
 
 import (
