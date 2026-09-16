@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -190,5 +192,94 @@ func TestDiffRefusesAMissingJournal(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "does-not-exist.jsonl") {
 		t.Fatalf("run() error = %v, want it to name the missing file", err)
+	}
+}
+
+// TestDiffRefusesAJournalWhoseChainIsBroken: -diff has no reducer of its
+// own to re-derive a comparison from — unlike -replay, which would still
+// catch a forged decision by recomputing it from the input stream, -diff
+// takes both sides' decisions straight from the file. An edited-but-
+// unrepaired journal (the chain not recomputed, exactly what
+// TestVerifyRefusesAnEditedJournal exercises for -verify) must be refused
+// before it is compared, not silently treated as evidence.
+func TestDiffRefusesAJournalWhoseChainIsBroken(t *testing.T) {
+	written, goodPath := runBacktestTo(t)
+	_, otherPath := runBacktestTo(t)
+
+	edited := bytes.Replace(written, []byte(`"source":"fixture"`), []byte(`"source":"forged"`), 1)
+	if bytes.Equal(edited, written) {
+		t.Fatal("the fixture no longer contains the text this test edits")
+	}
+	brokenPath := filepath.Join(t.TempDir(), "broken.jsonl")
+	if err := os.WriteFile(brokenPath, edited, 0o600); err != nil {
+		t.Fatalf("write the edited journal: %v", err)
+	}
+
+	for _, args := range [][]string{
+		{"-diff-want", brokenPath, "-diff-got", otherPath},
+		{"-diff-want", goodPath, "-diff-got", brokenPath},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var out bytes.Buffer
+			err := run(args, &out)
+			if err == nil {
+				t.Fatal("run(-diff-want, -diff-got) error = nil, want the broken chain refused")
+			}
+			if !strings.Contains(err.Error(), "chain") {
+				t.Fatalf("run() error = %v, want it to name the broken chain", err)
+			}
+			if out.Len() > 0 {
+				t.Fatalf("run() reported a divergence for evidence it never validated:\n%s", out.String())
+			}
+		})
+	}
+}
+
+// TestDiffRefusesAJournalThatDescribesMoreThanOneRun: a journal whose chain
+// is intact (recomputed by the editor, exactly as
+// TestReplayRefusesAJournalWhoseRecordsNameAnotherRun forges one for
+// -replay) but whose records disagree with its own header is refused by
+// journal.CheckIdentity — a different finding from a broken chain, and
+// reported distinguishably from one.
+func TestDiffRefusesAJournalThatDescribesMoreThanOneRun(t *testing.T) {
+	_, wantPath := runBacktestTo(t)
+	_, otherPath := runBacktestTo(t)
+
+	const foreign = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	gotPath := rewriteJournal(t, wantPath, func(header *journal.Header, entries []journal.Entry) []journal.Entry {
+		for i := range entries {
+			if entries[i].Kind != journal.KindInput || entries[i].Envelope.Type != event.CompletedBarEventType {
+				continue
+			}
+			entries[i].Envelope.ConfigurationHash = foreign
+			return entries
+		}
+		t.Fatal("the fixture journal records no bar input to re-attribute")
+		return entries
+	})
+
+	// The chain is recomputed by rewriteJournal, so this is CheckIdentity's
+	// own refusal, not chain verification leaking through.
+	raw, err := os.ReadFile(gotPath)
+	if err != nil {
+		t.Fatalf("read the rewritten journal: %v", err)
+	}
+	if _, err := journal.Verify(bytes.NewReader(raw)); err != nil {
+		t.Fatalf("journal.Verify() error = %v; the rewritten journal must verify or this test proves nothing about identity", err)
+	}
+
+	var out bytes.Buffer
+	err = run([]string{"-diff-want", otherPath, "-diff-got", gotPath}, &out)
+	if err == nil {
+		t.Fatal("run(-diff-want, -diff-got) error = nil, want the foreign record refused")
+	}
+	if strings.Contains(err.Error(), "chain") {
+		t.Fatalf("run() error = %v, want an identity refusal, not a chain one", err)
+	}
+	if !strings.Contains(err.Error(), foreign) {
+		t.Fatalf("run() error = %v, want it to name the foreign configuration hash %s", err, foreign)
+	}
+	if out.Len() > 0 {
+		t.Fatalf("run() reported a divergence for evidence it never validated:\n%s", out.String())
 	}
 }

@@ -3,6 +3,7 @@ package replay_test
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -314,6 +315,75 @@ func TestDiffReportsAOneULPFloatDivergenceDistinguishably(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), wantLevel) || !strings.Contains(string(encoded), gotLevel) {
 		t.Fatalf("MarshalJSON = %s, want both %q and %q to appear distinguishably", encoded, wantLevel, gotLevel)
+	}
+}
+
+// TestDiffDistinguishesIntegersFloat64WouldCollapse is the integer
+// counterpart to the ULP test above: 9007199254740992 (2^53) and
+// 9007199254740993 (2^53+1) are different valid JSON integers, but the
+// second is not exactly representable as a float64 and rounds down to the
+// first — verified below via strconv.ParseFloat, the exact conversion a
+// plain json.Unmarshal into `any` performs. A reporter that decoded payload
+// numbers as float64 would see these as equal and fall all the way back to
+// reporting the whole payload rather than naming "quantity", which is
+// strictly worse than not reporting at all: it turns "I could not tell"
+// into "there is no difference". envelopeTree decodes with UseNumber
+// instead, so the field walk compares the literal digits and never makes
+// that mistake.
+func TestDiffDistinguishesIntegersFloat64WouldCollapse(t *testing.T) {
+	t.Parallel()
+
+	const wantQuantity = "9007199254740992"
+	const gotQuantity = "9007199254740993"
+	wantAsFloat, err := strconv.ParseFloat(wantQuantity, 64)
+	if err != nil {
+		t.Fatalf("strconv.ParseFloat(%q) error = %v", wantQuantity, err)
+	}
+	gotAsFloat, err := strconv.ParseFloat(gotQuantity, 64)
+	if err != nil {
+		t.Fatalf("strconv.ParseFloat(%q) error = %v", gotQuantity, err)
+	}
+	if wantAsFloat != gotAsFloat {
+		t.Fatalf("test setup: %s and %s do not collide as float64 (%v vs %v); this test would prove nothing", wantQuantity, gotQuantity, wantAsFloat, gotAsFloat)
+	}
+
+	want := []event.Envelope{fieldEnvelope("d-1", 1, `{"quantity":`+wantQuantity+`}`)}
+	got := []event.Envelope{fieldEnvelope("d-1", 1, `{"quantity":`+gotQuantity+`}`)}
+
+	report, err := replay.Diff(want, got)
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
+	if report == nil {
+		t.Fatal("Diff() = nil, want a report: 9007199254740992 and 9007199254740993 are different integers")
+	}
+	if report.FieldPath != "payload.quantity" {
+		t.Fatalf("FieldPath = %q, want %q (a reporter that collapsed the two through float64 would fall back to %q instead)", report.FieldPath, "payload.quantity", "payload")
+	}
+
+	wantNumber, ok := report.Want.(json.Number)
+	if !ok {
+		t.Fatalf("Want = %#v, want a json.Number", report.Want)
+	}
+	gotNumber, ok := report.Got.(json.Number)
+	if !ok {
+		t.Fatalf("Got = %#v, want a json.Number", report.Got)
+	}
+	if wantNumber.String() != wantQuantity || gotNumber.String() != gotQuantity {
+		t.Fatalf("Want/Got = %s/%s, want the exact literals %s/%s untouched", wantNumber, gotNumber, wantQuantity, gotQuantity)
+	}
+
+	line := report.String()
+	if !strings.Contains(line, wantQuantity) || !strings.Contains(line, gotQuantity) {
+		t.Fatalf("String() = %q, want both %q and %q to appear distinguishably", line, wantQuantity, gotQuantity)
+	}
+
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("json.Marshal(report) error = %v", err)
+	}
+	if !strings.Contains(string(encoded), wantQuantity) || !strings.Contains(string(encoded), gotQuantity) {
+		t.Fatalf("MarshalJSON = %s, want both %q and %q to appear distinguishably", encoded, wantQuantity, gotQuantity)
 	}
 }
 
