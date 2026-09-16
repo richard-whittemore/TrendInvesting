@@ -63,8 +63,11 @@ type NotionalAccountRecoveredPayload struct {
 // that StepsCleared is a positive count, and that Rule and ADR are present.
 func (p NotionalAccountRecoveredPayload) Validate() error {
 	var errs []error
-	if p.AsOf.IsZero() {
+	switch {
+	case p.AsOf.IsZero():
 		errs = append(errs, errors.New("as of is required"))
+	case !writableTime(p.AsOf):
+		errs = append(errs, errors.New("as of cannot be written as RFC 3339"))
 	}
 
 	equityFinite := isFinite(p.Equity)

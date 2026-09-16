@@ -109,8 +109,11 @@ func (p AddProposalPayload) Validate() error {
 	if p.InstrumentID == "" {
 		errs = append(errs, errors.New("instrument id is required"))
 	}
-	if p.PeriodEnd.IsZero() {
+	switch {
+	case p.PeriodEnd.IsZero():
 		errs = append(errs, errors.New("period end is required"))
+	case !writableTime(p.PeriodEnd):
+		errs = append(errs, errors.New("period end cannot be written as RFC 3339"))
 	}
 	if p.UnitIndex < 2 {
 		errs = append(errs, fmt.Errorf("unit index must be at least 2, got %d: unit 1 is the campaign's own opening fill, never an add proposal", p.UnitIndex))
@@ -293,8 +296,11 @@ func (p CampaignUnitAddedPayload) Validate() error {
 	if p.Units != p.UnitIndex {
 		errs = append(errs, fmt.Errorf("units %d does not match unit index %d: units are added strictly in order, so the count after this add must equal the index of the unit just added", p.Units, p.UnitIndex))
 	}
-	if p.AddedAt.IsZero() {
+	switch {
+	case p.AddedAt.IsZero():
 		errs = append(errs, errors.New("added at is required"))
+	case !writableTime(p.AddedAt):
+		errs = append(errs, errors.New("added at cannot be written as RFC 3339"))
 	}
 	if p.Rule == "" {
 		errs = append(errs, errors.New("rule is required"))

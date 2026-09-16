@@ -172,6 +172,28 @@ func fieldName(path string) string {
 	return path[strings.LastIndex(path, ".")+1:]
 }
 
+func TestPayloadTimestampsAcceptWritableTimes(t *testing.T) {
+	for _, p := range marshalPayloads() {
+		for _, year := range []int{0, 9999} {
+			for _, offset := range []int{-86399, 0, 86399} {
+				t.Run(fmt.Sprintf("%T/year=%d/offset=%d", p, year, offset), func(t *testing.T) {
+					v := payloadCopy(p)
+					payloadLeaves(t, v, v.Type().Name(), func(_ string, field reflect.Value) {
+						if field.Type() != reflect.TypeFor[time.Time]() {
+							return
+						}
+						at := field.Interface().(time.Time)
+						if !at.IsZero() {
+							field.Set(reflect.ValueOf(time.Date(year, at.Month(), at.Day(), at.Hour(), at.Minute(), at.Second(), at.Nanosecond(), time.FixedZone("writable", offset))))
+						}
+					})
+					requirePayloadMarshals(t, v.Interface().(validatedPayload))
+				})
+			}
+		}
+	}
+}
+
 // TestValidatedPayloadsMarshal checks the validated-payload-json invariant
 // (docs/development.md) against boundaries and reproducible generated values.
 func TestValidatedPayloadsMarshal(t *testing.T) {
@@ -241,6 +263,10 @@ func marshalBoundaries(t *testing.T, v reflect.Value) []any {
 func marshalGeneratedValue(t *testing.T, v reflect.Value, bits uint64, year int16, offset int32) any {
 	t.Helper()
 	if v.Type() == reflect.TypeFor[time.Time]() {
+		if bits%2 == 0 {
+			year = int16(uint16(year) % 10000)
+			offset %= 24 * 3600
+		}
 		return time.Date(int(year), 1, 2, 0, 0, 0, int(bits%1e9), time.FixedZone("generated", int(offset)))
 	}
 	switch v.Kind() {
@@ -257,5 +283,18 @@ func marshalGeneratedValue(t *testing.T, v reflect.Value, bits uint64, year int1
 	default:
 		t.Fatalf("no generator for %s", v.Type())
 		return nil
+	}
+}
+
+func TestJSONStringsMarshal(t *testing.T) {
+	property := func(data []byte) bool {
+		_, err := json.Marshal(string(data))
+		return err == nil
+	}
+	if !property([]byte{0xff, 0, '"', '\\'}) {
+		t.Fatal("string containing invalid UTF-8 and escapes must marshal")
+	}
+	if err := quick.Check(property, &quick.Config{MaxCount: 100, Rand: rand.New(rand.NewSource(1))}); err != nil {
+		t.Fatal(err)
 	}
 }

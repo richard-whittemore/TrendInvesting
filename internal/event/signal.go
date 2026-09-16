@@ -101,8 +101,11 @@ func (p SignalPayload) Validate() error {
 	if p.InstrumentID == "" {
 		errs = append(errs, errors.New("instrument id is required"))
 	}
-	if p.PeriodEnd.IsZero() {
+	switch {
+	case p.PeriodEnd.IsZero():
 		errs = append(errs, errors.New("period end is required"))
+	case !writableTime(p.PeriodEnd):
+		errs = append(errs, errors.New("period end cannot be written as RFC 3339"))
 	}
 	if p.Rule == "" {
 		errs = append(errs, errors.New("rule is required"))

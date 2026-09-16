@@ -257,8 +257,11 @@ func (p TradeProposalPayload) Validate() error {
 	if p.InstrumentID == "" {
 		errs = append(errs, errors.New("instrument id is required"))
 	}
-	if p.PeriodEnd.IsZero() {
+	switch {
+	case p.PeriodEnd.IsZero():
 		errs = append(errs, errors.New("period end is required"))
+	case !writableTime(p.PeriodEnd):
+		errs = append(errs, errors.New("period end cannot be written as RFC 3339"))
 	}
 	if p.SignalID == "" {
 		errs = append(errs, errors.New("signal id is required: a proposal must name the signal it answers"))
@@ -486,8 +489,11 @@ func (p ProposalDeclinedPayload) Validate() error {
 	if p.InstrumentID == "" {
 		errs = append(errs, errors.New("instrument id is required"))
 	}
-	if p.PeriodEnd.IsZero() {
+	switch {
+	case p.PeriodEnd.IsZero():
 		errs = append(errs, errors.New("period end is required"))
+	case !writableTime(p.PeriodEnd):
+		errs = append(errs, errors.New("period end cannot be written as RFC 3339"))
 	}
 	switch p.Kind {
 	case ProposalDeclinedKindEntry:
@@ -775,12 +781,21 @@ func (p ProposalExpiredPayload) Validate() error {
 		errs = append(errs, fmt.Errorf("kind %q is not a recognised proposal kind", p.Kind))
 	}
 	periodEndPresent := !p.PeriodEnd.IsZero()
-	if !periodEndPresent {
+	switch {
+	case !periodEndPresent:
 		errs = append(errs, errors.New("period end is required"))
+	case !writableTime(p.PeriodEnd):
+		errs = append(errs, errors.New("period end cannot be written as RFC 3339"))
 	}
-	if p.ExpiredAt.IsZero() {
+	if !writableTime(p.EarliestFillAt) {
+		errs = append(errs, errors.New("earliest fill at cannot be written as RFC 3339"))
+	}
+	switch {
+	case p.ExpiredAt.IsZero():
 		errs = append(errs, errors.New("expired at is required"))
-	} else {
+	case !writableTime(p.ExpiredAt):
+		errs = append(errs, errors.New("expired at cannot be written as RFC 3339"))
+	default:
 		// Holds for EVERY Reason: see EarliestFillAt's own doc comment for
 		// why the zero value needs no special case.
 		if !p.ExpiredAt.After(p.EarliestFillAt) {

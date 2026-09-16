@@ -225,9 +225,9 @@ func (e *ChainBrokenError) Error() string {
 
 // Write records header and every entry, in order, as a journal.
 //
-// Every entry is validated before anything is written, so a run that
-// produced one that cannot be journalled fails before leaving a partial
-// file behind rather than after.
+// Every entry passes envelope validation before writing (ADR 0017).
+// Encoding and I/O errors can still leave partial output; callers must
+// retain the error alongside that evidence.
 func Write(w io.Writer, header Header, entries []Entry) error {
 	if err := header.validate(); err != nil {
 		return err
