@@ -368,7 +368,7 @@ func TestTheRunEndsByExpiringTheProposalItWasStillHolding(t *testing.T) {
 }
 
 // TestTheCommandRefusesToOverwriteAnExistingJournal: a journal is recorded
-// evidence, and AGENTS.md rule 6 forbids rewriting or deleting it. A rerun
+// evidence, and ADR 0018 forbids rewriting or deleting it. A rerun
 // that pointed at an existing journal would destroy the earlier run's
 // evidence before it had even validated its own configuration.
 func TestTheCommandRefusesToOverwriteAnExistingJournal(t *testing.T) {

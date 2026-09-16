@@ -1,6 +1,6 @@
 # The run registry
 
-Every backtest — successful, failed, or abandoned — is recorded here, under the configuration hash that identifies it (ADR 0012). Nothing in this directory is ever rewritten or deleted (AGENTS.md rule 6): the graveyard of failed Variants is the point, because a Variant that is still standing can only be judged against the ones that are not.
+Every backtest — successful, failed, or abandoned — is recorded here, under the configuration hash that identifies it (ADR 0012). Nothing in this directory is ever rewritten or deleted (AGENTS.md rule 6; ADR 0018 for how an entry is installed): the graveyard of failed Variants is the point, because a Variant that is still standing can only be judged against the ones that are not.
 
 ```
 runs/

@@ -267,7 +267,7 @@ func TestAnyParameterChangeChangesTheHash(t *testing.T) {
 
 // TestAZeroSlippageRunIsRefused is ADR 0013: a backtest run with zero
 // slippage is invalid by construction and must be rejected by the run
-// registry. Retention (AGENTS.md rule 6) is not a licence to record it —
+// registry. Retention (ADR 0012) is not a licence to record it —
 // nothing was produced that is evidence of anything — so every status is
 // refused, not just the successful one.
 func TestAZeroSlippageRunIsRefused(t *testing.T) {

@@ -13,7 +13,7 @@
 // that each recorded one merge as two additions and a run recorded on either
 // cannot clobber the other.
 //
-// Nothing here rewrites or deletes an existing entry (AGENTS.md rule 6). The
+// Nothing here rewrites or deletes an existing entry (ADR 0018). The
 // exclusive create that enforces that is the caller's, because this package
 // performs no I/O of its own; see cmd/backtest.
 //
@@ -179,9 +179,9 @@ func NewEntry(run Run) (Entry, error) {
 //
 //   - A run stating zero (or negative, or non-finite) slippage is refused
 //     whatever its status. ADR 0013 makes such a run invalid by construction
-//     and names the run registry as what must reject it. Retention (AGENTS.md
-//     rule 6) is not a reason to record one: nothing was produced that is
-//     evidence of anything. The check is stated here rather than left to
+//     and names the run registry as what must reject it. Retention (ADR 0012)
+//     is not a reason to record one: nothing was produced that is evidence of
+//     anything. The check is stated here rather than left to
 //     ConfigurationPayload.Validate below so that relaxing the payload
 //     contract cannot quietly relax this.
 //   - The configuration hash must be the one event.ConfigurationHash derives

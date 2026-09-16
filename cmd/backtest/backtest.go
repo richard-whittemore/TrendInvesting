@@ -383,7 +383,7 @@ func installEntry(root string, entry registry.Entry) error {
 // the one being installed.
 //
 // Byte-identical content is the same record rather than a collision: nothing
-// is written, so the never-overwrite rule (AGENTS.md rule 6) is untouched,
+// is written, so the never-overwrite rule (ADR 0018) is untouched,
 // and an install that committed its link and then failed at a later step can
 // be repeated instead of being refused. Anything else is a different run
 // claiming a recorded id, and is refused.
@@ -397,7 +397,7 @@ func alreadyRecorded(destination string, installing []byte, runID string) error 
 		return fmt.Errorf("backtest: run %q is already recorded under this configuration, and the entry recorded at %s cannot be read to say whether it is this one: %w", runID, destination, err)
 	}
 	if !bytes.Equal(recorded, installing) {
-		return fmt.Errorf("backtest: run %q is already recorded under this configuration, and what is recorded is a different run: a recorded run is evidence and is never overwritten (AGENTS.md rule 6); record this one under another id", runID)
+		return fmt.Errorf("backtest: run %q is already recorded under this configuration, and what is recorded is a different run: a recorded run is evidence and is never overwritten (ADR 0018); record this one under another id", runID)
 	}
 	return nil
 }
@@ -624,13 +624,13 @@ func checkJournalPathFree(path string) error {
 }
 
 func journalExistsError(path string) error {
-	return fmt.Errorf("backtest: %s already exists: a journal is recorded evidence and is never overwritten (AGENTS.md rule 6); move it aside or choose another path", path)
+	return fmt.Errorf("backtest: %s already exists: a journal is recorded evidence and is never overwritten (ADR 0018); move it aside or choose another path", path)
 }
 
 // writeJournal writes the run's journal to path, refusing to disturb
 // anything already there and leaving nothing behind if it fails.
 //
-// A journal is recorded evidence, and AGENTS.md rule 6 forbids rewriting or
+// A journal is recorded evidence, and ADR 0018 forbids rewriting or
 // deleting it: a path that already exists is refused outright rather than
 // truncated, so a rerun cannot destroy the previous run's evidence — least
 // of all before it has validated its own configuration. There is

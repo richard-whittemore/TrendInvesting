@@ -445,7 +445,7 @@ func TestConcurrentRunsAreEachRecorded(t *testing.T) {
 
 // TestTwoRunsClaimingOneRunIDLeaveExactlyOneEntry: same configuration, same
 // run id, at the same moment. Nothing in the registry is ever overwritten
-// (AGENTS.md rule 6), so the second is refused rather than replacing the
+// (ADR 0018), so the second is refused rather than replacing the
 // first — and the refusal is the exclusive create itself, not a check
 // something can race past.
 func TestTwoRunsClaimingOneRunIDLeaveExactlyOneEntry(t *testing.T) {
@@ -744,7 +744,7 @@ func TestAnEntryThatCouldNotBeFlushedIsReportedAsRecorded(t *testing.T) {
 // TestReRecordingTheIdenticalEntryIsNotAnOverwrite: a run id the registry
 // already holds with byte-identical content is the same record, so recording
 // it again writes nothing and is not refused. Nothing on disk changes, which
-// is what keeps AGENTS.md rule 6 intact.
+// is what keeps ADR 0018 intact.
 func TestReRecordingTheIdenticalEntryIsNotAnOverwrite(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "runs")
 	entry := entryFor(t, "recorded-twice", "journal.jsonl")
@@ -784,7 +784,7 @@ func TestReRecordingTheIdenticalEntryIsNotAnOverwrite(t *testing.T) {
 
 // TestARunIDHoldingADifferentRunIsRefused: identical content is the same
 // record, and anything else is a genuine collision. The recorded run is
-// evidence and is left exactly as it was (AGENTS.md rule 6).
+// evidence and is left exactly as it was (ADR 0018).
 func TestARunIDHoldingADifferentRunIsRefused(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "runs")
 	first := entryFor(t, "one-id-two-runs", "first.jsonl")
