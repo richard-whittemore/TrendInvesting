@@ -544,9 +544,12 @@ func isFinite(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
-// finiteResult is the guard every derivation in this package returns
-// through: a figure no float64 can state is an error, never a successful
-// result.
+// finiteResult is the guard this package's error-returning derivations
+// return through: a figure no float64 can state is an error, never a
+// successful result. The ones that report through a boolean instead
+// (RealisedRiskAtStop, DrawdownSteppedNotional, CashMovementScaledFigure)
+// refuse the same figures, in their own bodies, for callers that treat an
+// unusable result as a fact rather than a failure.
 //
 // Checking the inputs is not enough and cannot be made enough. Each of this
 // package's derivations divides or subtracts figures that are individually
