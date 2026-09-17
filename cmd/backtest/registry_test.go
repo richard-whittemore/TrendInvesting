@@ -63,9 +63,9 @@ func runsUnder(t *testing.T, root string, cfg event.ConfigurationPayload) []regi
 	return found
 }
 
-// TestARunIsRecordedUnderItsConfigurationHash is #39's headline: the command
-// that produces a result is the command that records it, so the record cannot
-// be the part someone forgets.
+// TestARunIsRecordedUnderItsConfigurationHash pins ADR 0012's provenance
+// rule: the command that produces a result is the command that records it, so
+// the record cannot be the part someone forgets.
 func TestARunIsRecordedUnderItsConfigurationHash(t *testing.T) {
 	dir := t.TempDir()
 	root := filepath.Join(dir, "runs")
