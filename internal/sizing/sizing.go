@@ -168,6 +168,10 @@ func SizeUnit(in Inputs) (Unit, error) {
 		return Unit{}, err
 	}
 
+	realisedRisk, ok := RealisedRiskAtStop(quantity, in.StopMultiple, in.N, in.DollarsPerPoint, in.NotionalAccount)
+	if !ok {
+		return Unit{}, errors.New("sizing: realised risk at stop is not representable")
+	}
 	return Unit{
 		Quantity:   quantity,
 		RiskAtStop: riskAtStop,
@@ -176,7 +180,7 @@ func SizeUnit(in Inputs) (Unit, error) {
 		// agree bit for bit rather than approximately. The numerator is the
 		// same product each quantity function already bounds by the budget,
 		// which is what makes RealisedRiskAtStop <= RiskAtStop hold.
-		RealisedRiskAtStop: RealisedRiskAtStop(quantity, in.StopMultiple, in.N, in.DollarsPerPoint, in.NotionalAccount),
+		RealisedRiskAtStop: realisedRisk,
 	}, nil
 }
 
@@ -192,15 +196,17 @@ func SizeUnit(in Inputs) (Unit, error) {
 // implementation, however algebraically identical, could differ in the last
 // bit and turn a correct proposal into a rejected one.
 //
-// It performs no validation of its own: callers reach it only after their
-// inputs have been checked, and it is called on a quantity that has already
-// been produced from those same inputs.
-func RealisedRiskAtStop(quantity int64, stopMultiple, n, dollarsPerPoint, notionalAccount float64) float64 {
-	return float64(quantity) * (stopMultiple * n * dollarsPerPoint) / notionalAccount
+// Callers validate inputs and derive quantity from those same inputs (ADR
+// 0003). The boolean certifies that the cost and result are finite; a false
+// result must never enter a decision payload.
+func RealisedRiskAtStop(quantity int64, stopMultiple, n, dollarsPerPoint, notionalAccount float64) (float64, bool) {
+	cost := stopMultiple * n * dollarsPerPoint
+	result := float64(quantity) * cost / notionalAccount
+	return result, isFinite(cost) && isFinite(result)
 }
 
 // Product returns a*b rounded to float64, so the result cannot be fused into
-// an addition that follows it.
+// an addition that follows it, and reports whether it is finite (ADR 0017).
 //
 // Go permits an implementation to fuse `x + a*b` into a single fused
 // multiply-add "possibly across statements", and arm64 does while amd64 does
@@ -215,8 +221,9 @@ func RealisedRiskAtStop(quantity int64, stopMultiple, n, dollarsPerPoint, notion
 // rather than appearing once. `a*b*c` with no addition is NOT fusible and
 // needs nothing. internal/indicator and internal/fills state the same
 // barrier inline (`float64(a*b)`), because neither imports this package.
-func Product(a, b float64) float64 {
-	return float64(a * b)
+func Product(a, b float64) (float64, bool) {
+	result := float64(a * b)
+	return result, isFinite(result)
 }
 
 // DrawdownStepRetainedFraction is the fraction of the Notional Account
@@ -243,9 +250,10 @@ const DrawdownStepRetainedFraction = 0.8
 // with an add or subtract
 // (e.g. EntryLevel - StopMultiple*N), which a compiler may fuse as a single
 // operation, not to this function's single multiplication, which has
-// nothing to fuse with.
-func DrawdownSteppedNotional(before float64) float64 {
-	return DrawdownStepRetainedFraction * before
+// nothing to fuse with. The boolean certifies a finite result.
+func DrawdownSteppedNotional(before float64) (float64, bool) {
+	result := DrawdownStepRetainedFraction * before
+	return result, isFinite(result)
 }
 
 // CashMovementScaledFigure returns before scaled by a cash movement that
@@ -265,12 +273,13 @@ func DrawdownSteppedNotional(before float64) float64 {
 // the identical float64 value for each of the three figures it scales, and
 // an exact-equality comparison between them is meaningful.
 //
-// It performs no validation of its own: callers reach it only after
-// equityBefore and equityAfter have already been checked (finite, positive,
-// and — per ApplyCashMovement — not the result of a withdrawal that would
-// take equity to zero or below).
-func CashMovementScaledFigure(before, equityBefore, equityAfter float64) float64 {
-	return before * (equityAfter / equityBefore)
+// Callers validate positive, finite inputs and refuse withdrawals taking
+// equity to zero or below. The boolean certifies that both the ratio and
+// scaled result are finite; callers must also require a positive account.
+func CashMovementScaledFigure(before, equityBefore, equityAfter float64) (float64, bool) {
+	ratio := equityAfter / equityBefore
+	result := before * ratio
+	return result, isFinite(ratio) && isFinite(result)
 }
 
 // UnitQuantity is Faith's Unit-sizing formula (The Turtle Rules p.14): one
@@ -423,6 +432,9 @@ func RiskAtStop(mode Mode, unitVolatilityFraction, stopMultiple, riskAtStopFract
 // cost, and the same order event.TradeProposalPayload.Validate re-checks, so
 // the three agree bit for bit rather than approximately.
 func truncate(budget, cost float64) (int64, error) {
+	if !isFinite(budget) || !isFinite(cost) || cost <= 0 {
+		return 0, errors.New("sizing: quantity budget or cost is not representable")
+	}
 	quotient := math.Floor(budget / cost)
 	if quotient >= maxExactWholeQuantity {
 		return 0, fmt.Errorf(
@@ -502,4 +514,13 @@ func unrecognisedModeError(mode Mode) error {
 // would otherwise let a NaN through every range check silently.
 func isFinite(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
+// finiteResult enforces representable risk arithmetic (ADR 0003) before a
+// successful result can enter a decision payload; zero and signed results remain valid.
+func finiteResult(name string, value float64) (float64, error) {
+	if !isFinite(value) {
+		return 0, fmt.Errorf("sizing: %s is not representable", name)
+	}
+	return value, nil
 }

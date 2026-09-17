@@ -42,7 +42,7 @@ func AverageMoveInN(exitPrice, entryPrice, campaignN float64) (float64, error) {
 	if err := errors.Join(errs...); err != nil {
 		return 0, fmt.Errorf("sizing: cannot derive average move in n: %w", err)
 	}
-	return (exitPrice - entryPrice) / campaignN, nil
+	return finiteResult("average move in n", (exitPrice-entryPrice)/campaignN)
 }
 
 // RealisedResultInUnitN returns a Campaign's realised result expressed in
@@ -79,5 +79,9 @@ func RealisedResultInUnitN(realisedResult float64, unitQuantity int64, campaignN
 	if err := errors.Join(errs...); err != nil {
 		return 0, fmt.Errorf("sizing: cannot derive realised result in unit n: %w", err)
 	}
-	return realisedResult / (float64(unitQuantity) * campaignN * dollarsPerPoint), nil
+	denominator := float64(unitQuantity) * campaignN * dollarsPerPoint
+	if !isFinite(denominator) || denominator <= 0 {
+		return 0, fmt.Errorf("sizing: realised result in unit n denominator is not representable")
+	}
+	return finiteResult("realised result in unit n", realisedResult/denominator)
 }

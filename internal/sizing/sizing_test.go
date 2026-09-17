@@ -965,7 +965,7 @@ func TestDrawdownSteppedNotionalFaithsLadder(t *testing.T) {
 		{before: 640_000, want: 512_000}, // derived, not printed in the source
 	}
 	for _, tt := range tests {
-		if got := sizing.DrawdownSteppedNotional(tt.before); got != tt.want {
+		if got, ok := sizing.DrawdownSteppedNotional(tt.before); !ok || got != tt.want {
 			t.Errorf("DrawdownSteppedNotional(%v) = %v, want %v", tt.before, got, tt.want)
 		}
 	}
@@ -1006,7 +1006,10 @@ func TestCashMovementScaledFigureDepositExample(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := sizing.CashMovementScaledFigure(tt.before, equityBefore, equityAfter)
+			got, ok := sizing.CashMovementScaledFigure(tt.before, equityBefore, equityAfter)
+			if !ok {
+				t.Fatal("valid cash movement is not representable")
+			}
 			if got != tt.want {
 				t.Fatalf("CashMovementScaledFigure(%v, %v, %v) = %v, want %v", tt.before, equityBefore, equityAfter, got, tt.want)
 			}
@@ -1046,7 +1049,10 @@ func TestCashMovementScaledFigureWithdrawalExample(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := sizing.CashMovementScaledFigure(tt.before, equityBefore, equityAfter)
+			got, ok := sizing.CashMovementScaledFigure(tt.before, equityBefore, equityAfter)
+			if !ok {
+				t.Fatal("valid cash movement is not representable")
+			}
 			if got != tt.want {
 				t.Fatalf("CashMovementScaledFigure(%v, %v, %v) = %v, want %v", tt.before, equityBefore, equityAfter, got, tt.want)
 			}

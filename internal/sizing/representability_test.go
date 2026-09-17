@@ -68,15 +68,15 @@ func TestSizingInvariantIncludesEveryExportedFunction(t *testing.T) {
 	}
 }
 
-func callSizing(c sizingCall) ([]reflect.Value, bool) {
+func callSizing(t *testing.T, c sizingCall) ([]reflect.Value, bool) {
 	args := make([]reflect.Value, len(c.args))
 	for i, a := range c.args {
 		args[i] = reflect.ValueOf(a)
 	}
 	out := reflect.ValueOf(c.fn).Call(args)
-	if len(out) == 1 {
-		return out, true
-	} // Detect unchecked APIs before their migration.
+	if len(out) != 2 {
+		t.Fatalf("%s must return a value and an error or representability flag", c.name)
+	}
 	last := out[len(out)-1]
 	if last.Kind() == reflect.Bool {
 		return out[:len(out)-1], last.Bool()
@@ -110,7 +110,7 @@ func TestSizingSuccessfulResultsAreFinite(t *testing.T) {
 	for _, fixture := range sizingCalls() {
 		t.Run(fixture.name, func(t *testing.T) {
 			check := func(c sizingCall) {
-				out, success := callSizing(c)
+				out, success := callSizing(t, c)
 				if !success {
 					return
 				}
@@ -189,7 +189,7 @@ func TestSizingRejectsUnrepresentableResults(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			out, ok := callSizing(c)
+			out, ok := callSizing(t, c)
 			if ok {
 				t.Fatalf("%s returned %v with success; want representability failure", c.name, out)
 			}

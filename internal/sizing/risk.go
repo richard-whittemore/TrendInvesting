@@ -103,15 +103,14 @@ func AggregateOpenRisk(units []UnitOpenRisk, dollarsPerPoint float64) (float64, 
 			continue
 		}
 		if entryFinite && stopFinite {
-			// Product, not a bare product, because this is an accumulator:
-			// see Product's own doc comment.
+			// Round before accumulation (ADR 0017; docs/development.md).
 			risk := math.Max(0, u.EntryPrice-u.ProtectiveStop) * float64(u.Quantity)
-			total += Product(risk, dollarsPerPoint)
+			total += float64(risk * dollarsPerPoint)
 		}
 	}
 
 	if err := errors.Join(errs...); err != nil {
 		return 0, fmt.Errorf("sizing: cannot derive aggregate open risk: %w", err)
 	}
-	return total, nil
+	return finiteResult("aggregate open risk", total)
 }

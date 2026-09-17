@@ -139,7 +139,7 @@ func (p NotionalAccountCashAdjustedPayload) Validate() error {
 	}
 
 	if startingBeforeFinite && startingAfterFinite && equityBeforeFinite && equityAfterFinite {
-		if derived := sizing.CashMovementScaledFigure(p.StartingFigureBefore, p.EquityBefore, p.EquityAfter); p.StartingFigureAfter != derived {
+		if derived, ok := sizing.CashMovementScaledFigure(p.StartingFigureBefore, p.EquityBefore, p.EquityAfter); !ok || p.StartingFigureAfter != derived {
 			errs = append(errs, fmt.Errorf(
 				"starting figure after %v does not match the derivation %v (sizing.CashMovementScaledFigure of starting figure before %v)",
 				p.StartingFigureAfter, derived, p.StartingFigureBefore))
@@ -163,7 +163,7 @@ func (p NotionalAccountCashAdjustedPayload) Validate() error {
 	}
 
 	if notionalBeforeFinite && notionalAfterFinite && equityBeforeFinite && equityAfterFinite {
-		if derived := sizing.CashMovementScaledFigure(p.NotionalBefore, p.EquityBefore, p.EquityAfter); p.NotionalAfter != derived {
+		if derived, ok := sizing.CashMovementScaledFigure(p.NotionalBefore, p.EquityBefore, p.EquityAfter); !ok || p.NotionalAfter != derived {
 			errs = append(errs, fmt.Errorf(
 				"notional after %v does not match the derivation %v (sizing.CashMovementScaledFigure of notional before %v)",
 				p.NotionalAfter, derived, p.NotionalBefore))

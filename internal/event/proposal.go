@@ -376,7 +376,7 @@ func (p TradeProposalPayload) Validate() error {
 
 	// Invariant 2: the Protective Stop intent matches its derivation.
 	if entryLevelFinite && stopMultipleFinite && nFinite && stopIntentFinite {
-		if derived := p.EntryLevel - sizing.Product(p.StopMultiple, p.N); p.ProtectiveStopIntent != derived {
+		if derived := p.EntryLevel - float64(p.StopMultiple*p.N); p.ProtectiveStopIntent != derived {
 			errs = append(errs, fmt.Errorf(
 				"stated protective stop intent %v does not match the derivation %v (entry level %v - stop multiple %v x n %v)",
 				p.ProtectiveStopIntent, derived, p.EntryLevel, p.StopMultiple, p.N))
@@ -386,7 +386,7 @@ func (p TradeProposalPayload) Validate() error {
 	// Invariant 3: the realised risk matches its derivation and does not
 	// exceed the declared budget.
 	if p.Quantity > 0 && stopMultipleFinite && nFinite && dollarsPerPointFinite && notionalAccountFinite && realisedFinite {
-		if derived := sizing.RealisedRiskAtStop(p.Quantity, p.StopMultiple, p.N, p.DollarsPerPoint, p.NotionalAccount); p.RealisedRiskAtStop != derived {
+		if derived, ok := sizing.RealisedRiskAtStop(p.Quantity, p.StopMultiple, p.N, p.DollarsPerPoint, p.NotionalAccount); !ok || p.RealisedRiskAtStop != derived {
 			errs = append(errs, fmt.Errorf(
 				"stated realised risk at stop %v does not match the derivation %v (quantity %d x stop multiple %v x n %v x dollars per point %v / notional account %v)",
 				p.RealisedRiskAtStop, derived, p.Quantity, p.StopMultiple, p.N, p.DollarsPerPoint, p.NotionalAccount))

@@ -46,7 +46,7 @@ func NextAddLevel(previousFill, campaignN float64, direction string) (float64, e
 	if err := errors.Join(errs...); err != nil {
 		return 0, fmt.Errorf("sizing: cannot derive next add level: %w", err)
 	}
-	return previousFill + Product(0.5, campaignN), nil
+	return finiteResult("next add level", previousFill+float64(0.5*campaignN))
 }
 
 // AddLadder returns the whole INTENDED Add Ladder for a Campaign: firstFill,
@@ -94,7 +94,11 @@ func AddLadder(firstFill, campaignN float64, maxUnits int, direction string) ([]
 		// actual fill — the two agree bit for bit whenever every fill lands
 		// exactly on its own rung, which is the assumption this function
 		// deliberately makes (see the type's doc comment).
-		ladder[i] = ladder[i-1] + Product(0.5, campaignN)
+		level := ladder[i-1] + float64(0.5*campaignN)
+		if !isFinite(level) {
+			return nil, fmt.Errorf("sizing: add ladder rung %d is not representable", i)
+		}
+		ladder[i] = level
 	}
 	return ladder, nil
 }
