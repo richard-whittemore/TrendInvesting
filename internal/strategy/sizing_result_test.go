@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
-	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
 // TestCampaignUnrepresentableResultHaltsAtTheFill preserves the fill as input
@@ -61,15 +60,7 @@ func TestCampaignUnrepresentableResultHaltsAtTheFill(t *testing.T) {
 				if figure == "average move in n" {
 					fill.Price = 1e200
 				}
-				r, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, input := range s.envelopes {
-					if _, err := r.Apply(context.Background(), input); err != nil {
-						t.Fatal(err)
-					}
-				}
+				r := s.mustApply()
 				bad := fillEnvelope(t, s.seq+1, fill)
 				out, err := r.Apply(context.Background(), bad)
 				if err == nil || !strings.Contains(err.Error(), "cannot compute the "+figure) || !strings.Contains(err.Error(), "not representable") {
