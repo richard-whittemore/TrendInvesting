@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -311,6 +312,53 @@ func TestDecisionTextExitConfirmationFollowsTheExitReason(t *testing.T) {
 			}
 			if tc.reason == event.ExitReasonDelisting && strings.Contains(got, "confirmed by fill") {
 				t.Fatalf("a Delisting Exit has no fill to confirm it: %s", got)
+			}
+		})
+	}
+}
+
+// Envelope and chain validation do not restrict the Unicode a journal's text
+// fields may carry, so a decision line must not be able to lie about its own
+// shape: a separator that splits it in two, or an override that reverses the
+// order a reader sees it in.
+func TestDecisionTextEscapesRunesThatReshapeTheLine(t *testing.T) {
+	_, records := readJournalFile(t, goldenJournal)
+	for _, tc := range []struct {
+		name   string
+		detail string
+		want   string
+	}{
+		{"line separator", "halted  and cleared", `"halted  and cleared"`},
+		{"paragraph separator", "halted  and cleared", `"halted  and cleared"`},
+		{"right-to-left override", "halted‮ and cleared", `"halted‮ and cleared"`},
+		{"left-to-right mark", "halted‎ and cleared", `"halted‎ and cleared"`},
+		{"newline", "halted\n and cleared", `"halted\n and cleared"`},
+		// Ordinary text stays readable, whatever alphabet it is written in.
+		{"printable non-ascii", "clôture à 1 234,50 € — 日経 ±2N", "clôture à 1 234,50 € — 日経 ±2N"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonCampaignWithoutProtectiveStop, Detail: tc.detail}
+			if err := p.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := records[0].Envelope
+			e.Type = event.EngineStateEventType
+			e.SchemaVersion = event.EngineStateSchemaVersion
+			e.Payload = raw
+			e.PayloadHash = event.HashPayload(raw)
+			line, _, err := decisionLine(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(line, "campaign-without-protective-stop: "+tc.want) {
+				t.Fatalf("got %s\nwant detail %s", line, tc.want)
+			}
+			if strings.ContainsFunc(line, func(r rune) bool { return !unicode.IsGraphic(r) }) {
+				t.Fatalf("a non-graphic rune survived into %q", line)
 			}
 		})
 	}
