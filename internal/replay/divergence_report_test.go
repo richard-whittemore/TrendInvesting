@@ -926,7 +926,7 @@ func TestDiffDistinguishesAnAbsentFieldFromItsOwnMarkerText(t *testing.T) {
 		WantAbsent bool            `json:"want_absent"`
 		GotAbsent  bool            `json:"got_absent"`
 		Want       json.RawMessage `json:"want"`
-		Got        json.RawMessage `json:"got"`
+		Got        string          `json:"got"`
 	}
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatalf("json.Unmarshal(encoded) error = %v", err)
@@ -940,7 +940,7 @@ func TestDiffDistinguishesAnAbsentFieldFromItsOwnMarkerText(t *testing.T) {
 	if decoded.Want != nil {
 		t.Fatalf("decoded want = %s, want it omitted", decoded.Want)
 	}
-	if string(decoded.Got) != `"<absent>"` {
-		t.Fatalf("decoded got = %s, want the JSON string %q", decoded.Got, `"<absent>"`)
+	if decoded.Got != "<absent>" {
+		t.Fatalf("decoded got = %q, want the present string %q", decoded.Got, "<absent>")
 	}
 }

@@ -24,22 +24,34 @@ import (
 // decoded from JSON: an ordinary number is a float64, an integer literal
 // float64 cannot carry exactly is a json.Number holding its exact digits
 // instead (see envelopeTree and diffNumber), and a path present on only one
-// side is an absentField.
+// side holds an absentField, with the matching *Absent flag also set.
+//
+// WantAbsent/GotAbsent, not the value at Want/Got, are what a caller must
+// check for absence: a path can be genuinely present with a value that
+// happens to equal however a renderer would describe "missing", and that
+// value must still be reported as present.
 type FieldDivergence struct {
 	Path string
 	Want any
 	Got  any
+	// WantAbsent and GotAbsent report whether Path exists at all on that
+	// side. At most one is ever true: diffMap and diffSlice only take the
+	// missing-side branch when a path is absent from exactly one side; a
+	// path absent from both never enters the walk.
+	WantAbsent bool
+	GotAbsent  bool
 }
 
 // absentField marks the side of a FieldDivergence where the path does not
 // exist at all: a key missing from an object, or an index beyond a shorter
 // array. It is distinct from a field that is present and explicitly JSON
-// null, which decodes as a plain nil and is reported as such. encodeValue
-// renders it as the JSON string "<absent>" — distinct from JSON null — in
-// both the human-readable (String) and machine-readable (MarshalJSON)
-// reports; it does not implement json.Marshaler itself, since every path
-// that renders a value goes through encodeValue rather than calling
-// encoding/json on a Want/Got value directly.
+// null, which decodes as a plain nil and is reported as such.
+//
+// Its own String() exists only for direct inspection of a Want/Got value
+// (via fmt, or a test); Report's own renderers do not call it; they read
+// WantAbsent/GotAbsent instead, so that a field genuinely present with a
+// value equal to this type's own text is never mistaken for one that does
+// not exist at all.
 type absentField struct{}
 
 func (absentField) String() string { return "<absent>" }
@@ -77,7 +89,9 @@ func Field(d *Divergence) (*FieldDivergence, error) {
 	}
 
 	if path, wantVal, gotVal, found := diffAny("", want, got); found {
-		return &FieldDivergence{Path: path, Want: wantVal, Got: gotVal}, nil
+		_, wantAbsent := wantVal.(absentField)
+		_, gotAbsent := gotVal.(absentField)
+		return &FieldDivergence{Path: path, Want: wantVal, Got: gotVal, WantAbsent: wantAbsent, GotAbsent: gotAbsent}, nil
 	}
 	return &FieldDivergence{Path: "payload", Want: string(d.Want.Payload), Got: string(d.Got.Payload)}, nil
 }
@@ -342,6 +356,13 @@ type Report struct {
 	FieldPath string
 	Want      any
 	Got       any
+	// WantAbsent and GotAbsent report whether FieldPath exists at all on
+	// that side, as opposed to existing with an ordinary value — including
+	// one that happens to equal however String or MarshalJSON would
+	// otherwise describe "missing". Check these, not Want/Got's own
+	// rendering, to tell the two apart.
+	WantAbsent bool
+	GotAbsent  bool
 }
 
 // Explain turns a Divergence into a Report: the field within the compared
@@ -363,12 +384,14 @@ func Explain(d *Divergence) (*Report, error) {
 		return nil, err
 	}
 	return &Report{
-		Sequence:  d.Want.Sequence,
-		EventID:   d.Want.ID,
-		EventType: d.Want.Type,
-		FieldPath: field.Path,
-		Want:      field.Want,
-		Got:       field.Got,
+		Sequence:   d.Want.Sequence,
+		EventID:    d.Want.ID,
+		EventType:  d.Want.Type,
+		FieldPath:  field.Path,
+		Want:       field.Want,
+		Got:        field.Got,
+		WantAbsent: field.WantAbsent,
+		GotAbsent:  field.GotAbsent,
 	}, nil
 }
 
@@ -391,7 +414,21 @@ func (r *Report) String() string {
 			r.EndedStream, r.Sequence, r.EventID, r.EventType)
 	}
 	return fmt.Sprintf("sequence %d, event %s (%s): %s differs — want %s, got %s",
-		r.Sequence, r.EventID, r.EventType, r.FieldPath, renderValue(r.Want), renderValue(r.Got))
+		r.Sequence, r.EventID, r.EventType, r.FieldPath, renderSide(r.Want, r.WantAbsent), renderSide(r.Got, r.GotAbsent))
+}
+
+// renderSide renders one side of a field divergence for String(): the bare
+// word "absent" when the field does not exist on that side at all, or the
+// value itself otherwise. "absent" is not a value renderValue ever
+// produces — every real value comes out quoted, bracketed, or as one of
+// JSON's own literal tokens (true, false, null) — so a present field whose
+// value happens to be the string "<absent>" is never rendered the same way
+// as a field that is actually missing.
+func renderSide(v any, absent bool) string {
+	if absent {
+		return "absent"
+	}
+	return renderValue(v)
 }
 
 // MarshalJSON renders Report for a machine-readable consumer such as CI.
@@ -401,6 +438,11 @@ func (r *Report) String() string {
 // one defect class this project has actually shipped (docs/development.md,
 // "never leave a multiply-add fusible") — still is once JSON has
 // round-tripped it.
+//
+// want/got is omitted, rather than filled with placeholder text, on
+// whichever side want_absent/got_absent is true: presence is carried by
+// those two fields alone, so a value that happens to equal any particular
+// placeholder still round-trips as the present value it is.
 func (r Report) MarshalJSON() ([]byte, error) {
 	wire := struct {
 		Sequence    uint64          `json:"sequence"`
@@ -408,6 +450,8 @@ func (r Report) MarshalJSON() ([]byte, error) {
 		EventType   string          `json:"event_type"`
 		EndedStream string          `json:"ended_stream,omitempty"`
 		FieldPath   string          `json:"field_path,omitempty"`
+		WantAbsent  bool            `json:"want_absent,omitempty"`
+		GotAbsent   bool            `json:"got_absent,omitempty"`
 		Want        json.RawMessage `json:"want,omitempty"`
 		Got         json.RawMessage `json:"got,omitempty"`
 	}{
@@ -416,10 +460,16 @@ func (r Report) MarshalJSON() ([]byte, error) {
 		EventType:   r.EventType,
 		EndedStream: r.EndedStream,
 		FieldPath:   r.FieldPath,
+		WantAbsent:  r.WantAbsent,
+		GotAbsent:   r.GotAbsent,
 	}
 	if r.EndedStream == "" {
-		wire.Want = encodeValue(r.Want)
-		wire.Got = encodeValue(r.Got)
+		if !r.WantAbsent {
+			wire.Want = encodeValue(r.Want)
+		}
+		if !r.GotAbsent {
+			wire.Got = encodeValue(r.Got)
+		}
 	}
 	return json.Marshal(wire)
 }
@@ -435,16 +485,16 @@ func renderValue(v any) string {
 // (ADR 0016's canonical encoder), the one place in this project a float64
 // is already proven to render with Go's shortest round-trip formatting
 // (strconv.FormatFloat(v, 'g', -1, 64)) rather than a second, independently
-// maintained formatter that could drift from it.
+// maintained formatter that could drift from it. It is never called with an
+// absentField: both callers (String, via renderSide; MarshalJSON) check
+// WantAbsent/GotAbsent first, since presence is not something a rendered
+// value can carry on its own.
 //
 // CanonicalBytes takes a map of named fields, so v is wrapped as the sole
 // field "v" and the wrapper stripped back off: canonicalJSON never emits
 // insignificant whitespace, so the result is always exactly `{"v":<value>}`
 // and the strip is unconditional.
 func encodeValue(v any) json.RawMessage {
-	if _, ok := v.(absentField); ok {
-		return json.RawMessage(`"<absent>"`)
-	}
 	if n, ok := v.(json.Number); ok {
 		// json.Number's underlying string is exactly the literal digits
 		// UseNumber decoded it from — the entire reason to carry it this way
