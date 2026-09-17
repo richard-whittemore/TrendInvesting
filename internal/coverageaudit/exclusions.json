@@ -28,13 +28,6 @@
       "count": 1
     },
     {
-      "file": "internal/journal/journal.go",
-      "function": "writeLine",
-      "statement": "return fmt.Errorf(\"journal: encode line: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "writeLine has two callers, a Header and a Record. A Header is strings, a uint32 and two time.Time values. A Record adds an event.Envelope, whose only field that could fail to encode is the raw-JSON payload \u2014 and Write has already required every entry's envelope to pass event.Envelope.Validate, which refuses a payload that is not valid JSON."
-    },
-    {
       "file": "internal/sizing/sizing.go",
       "function": "SizeUnit",
       "statement": "return Unit{}, unrecognisedModeError(in.Mode)",
@@ -46,7 +39,7 @@
       "function": "(*Reducer).applyAddFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: add fill %q is %s but campaign %q is %s; the add must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)\", fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)",
       "category": "unreachable-by-invariant",
-      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract \u2014 a fill in the opposite direction is a different position, not a variant of the same one \u2014 and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
+      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract — a fill in the opposite direction is a different position, not a variant of the same one — and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -82,7 +75,7 @@
       "function": "(*Reducer).applyAddFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: add fill %q cannot raise unit %d's protective stop: %w\", fill.InstrumentID, fill.FillID, earlier.index, err)",
       "category": "unreachable-by-invariant",
-      "reason": "sizing.RaisedStop refuses a non-finite or non-positive previous stop. Every open Campaign holds Units whose stops are positive at the start of every bar \u2014 checkCampaignHasAProtectiveStop halts the run otherwise \u2014 and the Stop Ladder only ever raises them."
+      "reason": "sizing.RaisedStop refuses a non-finite or non-positive previous stop. Every open Campaign holds Units whose stops are positive at the start of every bar — checkCampaignHasAProtectiveStop halts the run otherwise — and the Stop Ladder only ever raises them."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -103,7 +96,7 @@
       "function": "(*Reducer).applyExitFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)\", fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)",
       "category": "unreachable-by-invariant",
-      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract \u2014 a fill in the opposite direction is a different position, not a variant of the same one \u2014 and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
+      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract — a fill in the opposite direction is a different position, not a variant of the same one — and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -138,14 +131,14 @@
       "function": "(*Reducer).applyFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: fill %q is %s but proposal %q is %s; a fill in the opposite direction is a different position, not the proposed one\", fill.InstrumentID, fill.FillID, fill.Direction, fill.ProposalID, pending.direction)",
       "category": "unreachable-by-invariant",
-      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract \u2014 a fill in the opposite direction is a different position, not a variant of the same one \u2014 and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
+      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract — a fill in the opposite direction is a different position, not a variant of the same one — and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).applyStopFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)\", fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)",
       "category": "unreachable-by-invariant",
-      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract \u2014 a fill in the opposite direction is a different position, not a variant of the same one \u2014 and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
+      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract — a fill in the opposite direction is a different position, not a variant of the same one — and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -391,7 +384,7 @@
       "function": "(*Reducer).applyRunCompleted",
       "statement": "return nil, fmt.Errorf(\"strategy: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "event.RunCompletedPayload is an empty struct and its Validate returns nil unconditionally \u2014 the end-of-stream event states nothing, so there is nothing to check. The call is kept so that the payload growing a field is guarded from the day it does."
+      "reason": "event.RunCompletedPayload is an empty struct and its Validate returns nil unconditionally — the end-of-stream event states nothing, so there is nothing to check. The call is kept so that the payload growing a field is guarded from the day it does."
     },
     {
       "file": "internal/strategy/end_of_stream.go",
