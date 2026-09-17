@@ -284,7 +284,10 @@ func (n *NotionalAccount) Observe(equity float64) ([]Step, error) {
 			break
 		}
 		from := n.current
-		to := sizing.DrawdownSteppedNotional(n.current)
+		to, ok := sizing.DrawdownSteppedNotional(n.current)
+		if !ok {
+			return nil, errors.New("strategy: drawdown step is not representable")
+		}
 		steps = append(steps, Step{From: from, To: to, Threshold: threshold, Equity: equity})
 		n.current = to
 		n.base = threshold
@@ -472,17 +475,17 @@ func (n *NotionalAccount) ApplyCashMovement(equityBefore, amount float64) (*Cash
 	// (see this method's own doc comment): the ratio equityAfter/equityBefore
 	// applied to an already-extreme figure can itself overflow even though
 	// equityAfter is finite.
-	scaledStartingFigure := sizing.CashMovementScaledFigure(n.startingFigure, equityBefore, equityAfter)
-	scaledBase := sizing.CashMovementScaledFigure(n.base, equityBefore, equityAfter)
-	scaledCurrent := sizing.CashMovementScaledFigure(n.current, equityBefore, equityAfter)
-	if err := checkEquity("scaled yearly starting figure", scaledStartingFigure); err != nil {
-		return nil, fmt.Errorf("strategy: cannot apply a cash movement: %w", err)
+	scaledStartingFigure, err := scaleAccountFigure("scaled yearly starting figure", n.startingFigure, equityBefore, equityAfter)
+	if err != nil {
+		return nil, err
 	}
-	if err := checkEquity("scaled measurement base", scaledBase); err != nil {
-		return nil, fmt.Errorf("strategy: cannot apply a cash movement: %w", err)
+	scaledBase, err := scaleAccountFigure("scaled measurement base", n.base, equityBefore, equityAfter)
+	if err != nil {
+		return nil, err
 	}
-	if err := checkEquity("scaled notional account", scaledCurrent); err != nil {
-		return nil, fmt.Errorf("strategy: cannot apply a cash movement: %w", err)
+	scaledCurrent, err := scaleAccountFigure("scaled notional account", n.current, equityBefore, equityAfter)
+	if err != nil {
+		return nil, err
 	}
 
 	startingFigureBefore := n.startingFigure
@@ -783,4 +786,17 @@ func (r *Reducer) pinAccountCurrency(currency string) error {
 		return fmt.Errorf("strategy: account event currency %q does not match the account's pinned currency %q; multi-currency accounts are out of scope", currency, r.accountCurrency)
 	}
 	return nil
+}
+
+// scaleAccountFigure rejects an unrepresentable cash adjustment before state
+// mutation (ADR 0007); all three Notional Account figures must remain positive.
+func scaleAccountFigure(name string, before, equityBefore, equityAfter float64) (float64, error) {
+	result, ok := sizing.CashMovementScaledFigure(before, equityBefore, equityAfter)
+	if !ok {
+		return 0, fmt.Errorf("strategy: cannot apply a cash movement: %s must be finite (not representable)", name)
+	}
+	if result <= 0 {
+		return 0, fmt.Errorf("strategy: cannot apply a cash movement: %s must be positive", name)
+	}
+	return result, nil
 }

@@ -125,5 +125,5 @@ func RaisedStop(previousStop, campaignN float64) (float64, error) {
 	if err := errors.Join(errs...); err != nil {
 		return 0, fmt.Errorf("sizing: cannot derive raised stop: %w", err)
 	}
-	return previousStop + Product(0.5, campaignN), nil
+	return finiteResult("raised stop", previousStop+Product(0.5, campaignN))
 }

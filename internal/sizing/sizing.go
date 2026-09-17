@@ -168,6 +168,12 @@ func SizeUnit(in Inputs) (Unit, error) {
 		return Unit{}, err
 	}
 
+	realisedRisk, ok := RealisedRiskAtStop(quantity, in.StopMultiple, in.N, in.DollarsPerPoint, in.NotionalAccount)
+	if !ok {
+		return Unit{}, fmt.Errorf(
+			"sizing: realised risk at stop is %v for a quantity of %d, which no decision payload can state",
+			realisedRisk, quantity)
+	}
 	return Unit{
 		Quantity:   quantity,
 		RiskAtStop: riskAtStop,
@@ -176,7 +182,7 @@ func SizeUnit(in Inputs) (Unit, error) {
 		// agree bit for bit rather than approximately. The numerator is the
 		// same product each quantity function already bounds by the budget,
 		// which is what makes RealisedRiskAtStop <= RiskAtStop hold.
-		RealisedRiskAtStop: RealisedRiskAtStop(quantity, in.StopMultiple, in.N, in.DollarsPerPoint, in.NotionalAccount),
+		RealisedRiskAtStop: realisedRisk,
 	}, nil
 }
 
@@ -192,11 +198,23 @@ func SizeUnit(in Inputs) (Unit, error) {
 // implementation, however algebraically identical, could differ in the last
 // bit and turn a correct proposal into a rejected one.
 //
-// It performs no validation of its own: callers reach it only after their
-// inputs have been checked, and it is called on a quantity that has already
-// been produced from those same inputs.
-func RealisedRiskAtStop(quantity int64, stopMultiple, n, dollarsPerPoint, notionalAccount float64) float64 {
-	return float64(quantity) * (stopMultiple * n * dollarsPerPoint) / notionalAccount
+// Callers validate inputs and derive quantity from those same inputs (ADR
+// 0003). The boolean certifies that the cost and result are finite AND that
+// the result is one a decision payload can state; a false result must never
+// enter one.
+//
+// Finiteness alone is not that certificate. Zero is finite, and a positive
+// quantity really does risk something, so a zero alongside one is an
+// underflow — of the cost, or of the division — and
+// event.TradeProposalPayload.Validate requires this figure above zero. Only
+// a quantity of zero legitimately risks nothing.
+func RealisedRiskAtStop(quantity int64, stopMultiple, n, dollarsPerPoint, notionalAccount float64) (float64, bool) {
+	cost := stopMultiple * n * dollarsPerPoint
+	result := float64(quantity) * cost / notionalAccount
+	if !isFinite(cost) || !isFinite(result) {
+		return result, false
+	}
+	return result, quantity == 0 || result > 0
 }
 
 // Product returns a*b rounded to float64, so the result cannot be fused into
@@ -215,6 +233,14 @@ func RealisedRiskAtStop(quantity int64, stopMultiple, n, dollarsPerPoint, notion
 // rather than appearing once. `a*b*c` with no addition is NOT fusible and
 // needs nothing. internal/indicator and internal/fills state the same
 // barrier inline (`float64(a*b)`), because neither imports this package.
+//
+// It is deliberately the one exported function here that reports no
+// representability flag: a barrier is not a derivation. Rounding a product
+// that overflows is still the right answer, and the caller's own enclosing
+// expression — an accumulator's validated total, a validator's exact
+// comparison against a separately finite-checked field — is what refuses
+// the infinity. internal/sizing's representability invariant records that
+// exception and pins this contract rather than exempting it.
 func Product(a, b float64) float64 {
 	return float64(a * b)
 }
@@ -243,9 +269,10 @@ const DrawdownStepRetainedFraction = 0.8
 // with an add or subtract
 // (e.g. EntryLevel - StopMultiple*N), which a compiler may fuse as a single
 // operation, not to this function's single multiplication, which has
-// nothing to fuse with.
-func DrawdownSteppedNotional(before float64) float64 {
-	return DrawdownStepRetainedFraction * before
+// nothing to fuse with. The boolean certifies a finite result.
+func DrawdownSteppedNotional(before float64) (float64, bool) {
+	result := DrawdownStepRetainedFraction * before
+	return result, isFinite(result)
 }
 
 // CashMovementScaledFigure returns before scaled by a cash movement that
@@ -265,12 +292,13 @@ func DrawdownSteppedNotional(before float64) float64 {
 // the identical float64 value for each of the three figures it scales, and
 // an exact-equality comparison between them is meaningful.
 //
-// It performs no validation of its own: callers reach it only after
-// equityBefore and equityAfter have already been checked (finite, positive,
-// and — per ApplyCashMovement — not the result of a withdrawal that would
-// take equity to zero or below).
-func CashMovementScaledFigure(before, equityBefore, equityAfter float64) float64 {
-	return before * (equityAfter / equityBefore)
+// Callers validate positive, finite inputs and refuse withdrawals taking
+// equity to zero or below. The boolean certifies that both the ratio and
+// scaled result are finite; callers must also require a positive account.
+func CashMovementScaledFigure(before, equityBefore, equityAfter float64) (float64, bool) {
+	ratio := equityAfter / equityBefore
+	result := before * ratio
+	return result, isFinite(ratio) && isFinite(result)
 }
 
 // UnitQuantity is Faith's Unit-sizing formula (The Turtle Rules p.14): one
@@ -392,6 +420,15 @@ func RiskAtStop(mode Mode, unitVolatilityFraction, stopMultiple, riskAtStopFract
 				"sizing: cannot derive risk at stop: derived risk at stop %v exceeds one: unit volatility fraction %v x stop multiple %v would lose more than the entire notional account at the protective stop",
 				derived, unitVolatilityFraction, stopMultiple)
 		}
+		// Two positive fractions whose product is not: small enough, they
+		// underflow, and a budget of zero is a Unit the strategy declares
+		// it will risk nothing on — not a small budget, and not one
+		// event.TradeProposalPayload.Validate accepts.
+		if derived <= 0 {
+			return 0, fmt.Errorf(
+				"sizing: cannot derive risk at stop: derived risk at stop %v is not positive: unit volatility fraction %v x stop multiple %v underflowed, and no decision payload can state a unit that risks nothing at its protective stop",
+				derived, unitVolatilityFraction, stopMultiple)
+		}
 		return derived, nil
 
 	case ModeFixedRiskAtStop:
@@ -423,6 +460,9 @@ func RiskAtStop(mode Mode, unitVolatilityFraction, stopMultiple, riskAtStopFract
 // cost, and the same order event.TradeProposalPayload.Validate re-checks, so
 // the three agree bit for bit rather than approximately.
 func truncate(budget, cost float64) (int64, error) {
+	if !isFinite(budget) || !isFinite(cost) || cost <= 0 {
+		return 0, errors.New("sizing: quantity budget or cost is not representable")
+	}
 	quotient := math.Floor(budget / cost)
 	if quotient >= maxExactWholeQuantity {
 		return 0, fmt.Errorf(
@@ -502,4 +542,30 @@ func unrecognisedModeError(mode Mode) error {
 // would otherwise let a NaN through every range check silently.
 func isFinite(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
+// finiteResult is the guard this package's error-returning derivations
+// return through: a figure no float64 can state is an error, never a
+// successful result. The ones that report through a boolean instead
+// (RealisedRiskAtStop, DrawdownSteppedNotional, CashMovementScaledFigure)
+// refuse the same figures, in their own bodies, for callers that treat an
+// unusable result as a fact rather than a failure.
+//
+// Checking the inputs is not enough and cannot be made enough. Each of this
+// package's derivations divides or subtracts figures that are individually
+// finite and in range, and an overflowing product or a denormal divisor
+// turns them into an infinity no input guard could have predicted — the
+// caller then stamps +Inf into a decision payload whose own validator
+// rejects exactly that, or, worse, into a journal. Zero and negative
+// results stay valid: a Campaign really can end flat or down.
+//
+// internal/sizing's TestSizingSuccessfulResultsAreFinite pins this over
+// every exported function, and
+// TestSizingInvariantIncludesEveryExportedFunction pins that inventory to
+// the package's own source, so a derivation added later cannot skip it.
+func finiteResult(name string, value float64) (float64, error) {
+	if !isFinite(value) {
+		return 0, fmt.Errorf("sizing: %s is %v, which no decision payload can state: the inputs were each in range but their result is not representable", name, value)
+	}
+	return value, nil
 }

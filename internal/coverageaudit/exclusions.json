@@ -52,13 +52,6 @@
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).applyAddFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: add fill %q would add an invalid unit: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyAddFill",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign unit added payload: %w\", err)",
       "category": "unreachable-by-construction",
       "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
@@ -80,52 +73,10 @@
     },
     {
       "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyAddFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: add fill %q cannot raise unit %d's protective stop: %w\", fill.InstrumentID, fill.FillID, earlier.index, err)",
-      "category": "unreachable-by-invariant",
-      "reason": "sizing.RaisedStop refuses a non-finite or non-positive previous stop. Every open Campaign holds Units whose stops are positive at the start of every bar — checkCampaignHasAProtectiveStop halts the run otherwise — and the Stop Ladder only ever raises them."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyAddFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: add fill %q would raise unit %d to an invalid protective stop: %w\", fill.InstrumentID, fill.FillID, earlier.index, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyAddFill",
-      "statement": "return nil, err",
-      "category": "unreachable-by-construction",
-      "reason": "Propagates evaluateAdd's error. Every one of evaluateAdd's own failure paths is itself unreachable by construction (its three entries in this list), so this wrapper has nothing left to carry."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).applyExitFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)\", fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)",
       "category": "unreachable-by-invariant",
       "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract — a fill in the opposite direction is a different position, not a variant of the same one — and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyExitFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q cannot compute the average move in n: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.AverageMoveInN over the Campaign's whole-life entry and exit prices and its frozen N. The prices are quantity-weighted averages of fill prices each required positive by FillPayload.Validate, and the N was required positive when the Campaign opened."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyExitFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q cannot compute the realised result in unit n: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.RealisedResultInUnitN over the Campaign's frozen N, its Unit quantity and the configured dollars per point, all three required positive by CampaignOpenedPayload.Validate and ConfigurationPayload.Validate."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyExitFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q would close campaign %q with an invalid exit: %w\", fill.InstrumentID, fill.FillID, campaign.campaignID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -151,44 +102,9 @@
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).applyStopFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q cannot compute the remaining aggregate open risk: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.AggregateOpenRisk over the Units this fill does not close, whose figures were validated when each Unit was created and are unchanged by a stop fill."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyStopFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q would close unit(s) with an invalid units-stopped decision: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyStopFill",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign units stopped payload: %w\", err)",
       "category": "unreachable-by-construction",
       "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyStopFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q cannot compute the average move in n: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.AverageMoveInN over the Campaign's whole-life entry and exit prices and its frozen N. The prices are quantity-weighted averages of fill prices each required positive by FillPayload.Validate, and the N was required positive when the Campaign opened."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyStopFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q cannot compute the realised result in unit n: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.RealisedResultInUnitN over the Campaign's frozen N, its Unit quantity and the configured dollars per point, all three required positive by CampaignOpenedPayload.Validate and ConfigurationPayload.Validate."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).applyStopFill",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q would close campaign %q with an invalid exit: %w\", fill.InstrumentID, fill.FillID, campaign.campaignID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -214,13 +130,6 @@
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).evaluateAdd",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: campaign %q cannot compute the next add rung: %w\", campaign.instrumentID, campaign.campaignID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.NextAddLevel over the last Unit's own fill price and the Campaign's frozen N. Both were required finite and positive by CampaignOpenedPayload.Validate or CampaignUnitAddedPayload.Validate before the Unit was recorded."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).evaluateAdd",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: built invalid add proposal payload: %w\", campaign.instrumentID, err)",
       "category": "unreachable-by-construction",
       "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
@@ -231,20 +140,6 @@
       "statement": "return nil, fmt.Errorf(\"strategy: marshal add proposal payload: %w\", err)",
       "category": "unreachable-by-construction",
       "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).evaluateCampaign",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: campaign %q cannot compute aggregate open risk: %w\", bar.InstrumentID, campaign.campaignID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "sizing.AggregateOpenRisk over the Campaign's own held Units. Each Unit's entry, stop and quantity passed sizing.ProtectiveStopLevel and CampaignOpenedPayload.Validate when the Unit was created, and dollarsPerPoint passed ConfigurationPayload.Validate."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).evaluateCampaign",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: built invalid campaign evaluated payload: %w\", bar.InstrumentID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -319,13 +214,6 @@
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).openCampaign",
-      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: fill %q would open an invalid campaign: %w\", fill.InstrumentID, fill.FillID, err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).openCampaign",
       "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign opened payload: %w\", err)",
       "category": "unreachable-by-construction",
       "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
@@ -343,13 +231,6 @@
       "statement": "return nil, fmt.Errorf(\"strategy: marshal protective stop set payload: %w\", err)",
       "category": "unreachable-by-construction",
       "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*Reducer).openCampaign",
-      "statement": "return nil, err",
-      "category": "unreachable-by-construction",
-      "reason": "Propagates evaluateAdd's error. Every one of evaluateAdd's own failure paths is itself unreachable by construction (its three entries in this list), so this wrapper has nothing left to carry."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -537,19 +418,19 @@
       "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
-      "file": "internal/strategy/reducer.go",
-      "function": "(*Reducer).applyCompletedBar",
-      "statement": "return nil, err",
-      "category": "unreachable-by-construction",
-      "reason": "Propagation of an error from stateFor, an expire*Proposal, evaluateCampaign or rememberPendingProposal. Every failure path in all four is itself in this list. Two propagations are NOT here, both reachable and both covered: sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun), and evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd).",
-      "count": 6
+      "file": "internal/strategy/notional.go",
+      "function": "(*NotionalAccount).Observe",
+      "statement": "return nil, errors.New(\"strategy: drawdown step is not representable\")",
+      "category": "unreachable-by-invariant",
+      "reason": "A Drawdown Step multiplies by 0.8, so it can only ever shrink the figure it steps from: sizing.DrawdownSteppedNotional reports false only for a figure that was not finite when it arrived, pinned by sizing.TestDrawdownSteppedNotionalIsRepresentableForEveryFiniteAccount. The figure that arrives here is finite because n.current is only ever assigned three ways, each of which checks: NewNotionalAccount and ObserveSnapshot set it from an equity checkEquity has required finite and positive, ApplyCashMovement from a scaled figure scaleAccountFigure has required the same of (TestApplyCashMovementChecksEachScaledFigureSeparately), and this loop from this function's own already-checked result. Reachable the moment any one of those three stops checking."
     },
     {
       "file": "internal/strategy/reducer.go",
       "function": "(*Reducer).applyCompletedBar",
-      "statement": "return nil, fmt.Errorf(\"strategy: built invalid setup evaluated payload: %w\", err)",
+      "statement": "return nil, err",
       "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
+      "reason": "Five of this function's ten identical error propagations; the other five are reachable and covered, and this entry's count is the only thing keeping the two sets apart, so a guard that becomes reachable is reported here rather than absorbed. Excluded: the propagations from stateFor, from each of the three expire*Proposal calls, and from rememberPendingProposal — every failure path in all five of those functions is itself in this list. Covered: checkBarConfirmsCampaignOpening's and checkBarConfirmsCampaignClosing's (TestBarPredatingTheCampaignsOpeningFillFailsClosed, TestBarPredatingTheCampaignsClosingFillFailsClosed); sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun); evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd); and evaluateCampaign's, which was listed here until #110 showed it reachable — sizing.AggregateOpenRisk refuses a Campaign whose open risk leaves the float64 range, and the risk fraction it feeds can overflow after a rebase, even though every Unit's own figures are finite (TestCampaignAggregateRiskOverflowIsRefused, TestCampaignRiskFractionCanOverflowAfterARebase).",
+      "count": 5
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -606,13 +487,6 @@
       "statement": "return r.decline(bar, input, signalID, event.DeclineReasonNNotReady, fmt.Sprintf(\"n is not a usable volatility reading (n %v); no unit can be sized from it\", n), 0, 0)",
       "category": "unreachable-by-invariant",
       "reason": "sizeUnit has one call site, inside the branch guarded by `ready := nReady && entryChannelReady`, so nReady is always true here. The guard stays because it is what stops a division by an unusable N if that Tier gate ever changes, and 'it cannot happen here' is not a reason to divide by it."
-    },
-    {
-      "file": "internal/strategy/reducer.go",
-      "function": "(*Reducer).sizeUnit",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid trade proposal payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload this function assembled, field by field, from figures that had already passed sizing's own guards, the configuration's Validate, or an accepted payload's Validate. Where the validator re-derives a figure rather than range-checking it, the producer above forms it in the SAME expression order, so the two agree bit for bit rather than approximately (docs/development.md's fusion rule). If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     },
     {
       "file": "internal/strategy/reducer.go",

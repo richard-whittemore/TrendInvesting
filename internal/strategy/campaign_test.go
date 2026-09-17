@@ -161,6 +161,7 @@ func fillEnvelope(t *testing.T, sequence uint64, fill event.FillPayload) event.E
 // followed by bars and fills in the order a producer would deliver them.
 type stream struct {
 	t         *testing.T
+	cfg       event.ConfigurationPayload
 	envelopes []event.Envelope
 	seq       uint64
 }
@@ -198,7 +199,8 @@ func newStream(t *testing.T, cfg event.ConfigurationPayload) *stream {
 	t.Helper()
 	s := &stream{
 		t:         t,
-		envelopes: []event.Envelope{configEnvelopeWithConfig(t, 1, day(0), cfg)},
+		cfg:       cfg,
+		envelopes: []event.Envelope{configEnvelopeFor(t, cfg, 1)},
 		seq:       1,
 	}
 	return s.snapshot(defaultAccountSnapshot(cfg))
@@ -242,7 +244,7 @@ func (s *stream) fillAtSchema(fill event.FillPayload, schemaVersion uint32) *str
 
 func (s *stream) run() ([]event.Envelope, error) {
 	s.t.Helper()
-	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
+	reducer, err := strategy.NewReducer(testStrategyVersion, s.cfg)
 	if err != nil {
 		s.t.Fatalf("NewReducer() error = %v", err)
 	}
@@ -260,6 +262,33 @@ func (s *stream) mustRun() []event.Envelope {
 		s.t.Fatalf("Run() error = %v", err)
 	}
 	return emitted
+}
+
+// mustApply is run for a test that needs to keep applying to the SAME
+// reducer after the stream has been consumed — a corrected retry of an input
+// the reducer has just rejected, say. It returns the reducer with every
+// envelope of the stream already applied. The reducer is configured from the
+// stream's own cfg, the one the stream's configuration envelope carries and
+// stamps its hash from, so a fixture that varies the configuration cannot
+// end up replaying it into a reducer configured from a different one.
+//
+// The rule is ADR 0016: a run's identity is the hash of the configuration it
+// actually ran, and the reducer refuses an envelope whose hash is not its
+// own. A fixture whose envelope hash and payload disagree satisfies that
+// check while contradicting it, which is how the disagreement this helper
+// exists to prevent stayed invisible.
+func (s *stream) mustApply() *strategy.Reducer {
+	s.t.Helper()
+	reducer, err := strategy.NewReducer(testStrategyVersion, s.cfg)
+	if err != nil {
+		s.t.Fatalf("NewReducer() error = %v", err)
+	}
+	for _, input := range s.envelopes {
+		if _, err := reducer.Apply(context.Background(), input); err != nil {
+			s.t.Fatalf("Apply() error = %v", err)
+		}
+	}
+	return reducer
 }
 
 // wantRunError asserts the run fails closed, naming each expected substring.

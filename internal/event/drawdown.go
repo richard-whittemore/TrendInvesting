@@ -130,7 +130,7 @@ func (p DrawdownStepAppliedPayload) Validate() error {
 				"notional after %v must be strictly below notional before %v: a drawdown step only ever reduces the account",
 				p.NotionalAfter, p.NotionalBefore))
 		}
-		if derived := sizing.DrawdownSteppedNotional(p.NotionalBefore); p.NotionalAfter != derived {
+		if derived, ok := sizing.DrawdownSteppedNotional(p.NotionalBefore); !ok || p.NotionalAfter != derived {
 			errs = append(errs, fmt.Errorf(
 				"notional after %v does not match the derivation %v (sizing.DrawdownSteppedNotional of notional before %v)",
 				p.NotionalAfter, derived, p.NotionalBefore))

@@ -113,5 +113,5 @@ func AggregateOpenRisk(units []UnitOpenRisk, dollarsPerPoint float64) (float64, 
 	if err := errors.Join(errs...); err != nil {
 		return 0, fmt.Errorf("sizing: cannot derive aggregate open risk: %w", err)
 	}
-	return total, nil
+	return finiteResult("aggregate open risk", total)
 }

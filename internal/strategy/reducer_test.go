@@ -105,6 +105,13 @@ func configEnvelope(t *testing.T, sequence uint64, at time.Time) event.Envelope 
 // configEnvelopeWithConfig behaves like configEnvelope but lets the caller
 // supply a full ConfigurationPayload, for tests that vary EntryChannelLength
 // or TierBDistanceInN away from the Baseline fixture.
+//
+// The envelope still carries the BASELINE configuration hash, so it belongs
+// to a fixture whose reducer is constructed from validConfigurationPayload()
+// — applyConfiguration compares the envelope's hash against the reducer's
+// and never against the payload the envelope carries. A fixture that
+// configures its reducer from its own varied payload wants configEnvelopeFor
+// instead, which stamps that payload's own hash.
 func configEnvelopeWithConfig(t *testing.T, sequence uint64, at time.Time, payload event.ConfigurationPayload) event.Envelope {
 	t.Helper()
 	encoded := mustMarshal(t, payload)
