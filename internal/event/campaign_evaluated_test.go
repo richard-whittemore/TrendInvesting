@@ -277,6 +277,44 @@ func TestCampaignEvaluatedPayloadValidateAcceptsMultipleUnits(t *testing.T) {
 	}
 }
 
+// TestCampaignEvaluatedPayloadValidateAcceptsAUnitStopAtOrAboveEntry pins
+// (#78) the behaviour Validate's own doc comment already documents but no
+// prior test exercised directly: a listed Unit's ProtectiveStop is NOT
+// required to sit below its own EntryPrice, because this payload reports
+// each Unit's CURRENT level without saying whether the Stop Ladder has
+// raised it — only a Unit's initial stop carries that requirement, and this
+// payload cannot tell which a given level is. A stop at or above entry is
+// the legitimate risk-free level CONTEXT.md describes, contributing zero to
+// AggregateOpenRisk (sizing.AggregateOpenRisk's own max(0, ...) rule), not a
+// validation failure.
+func TestCampaignEvaluatedPayloadValidateAcceptsAUnitStopAtOrAboveEntry(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		delta float64
+	}{
+		{name: "stop equal to entry", delta: 0},
+		{name: "stop above entry", delta: 25},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := validCampaignEvaluated()
+			raised := campaignEntryPrice + tt.delta
+			payload.Units[0].ProtectiveStop = raised
+			payload.ProtectiveStop = raised // still the (only) unit's own level
+			payload.AggregateOpenRisk = 0   // a stop at or above entry risks nothing
+			payload.AggregateOpenRiskFraction = 0
+
+			if err := payload.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v, want nil: a unit's stop at or above its own entry is a legitimate risk-free level", err)
+			}
+		})
+	}
+}
+
 // TestCampaignEvaluatedPayloadValidateProtectiveStopMustBeTheMinimum is the
 // ticket's required check: ProtectiveStop must equal the minimum across
 // Units' own ProtectiveStop, not some other figure.
