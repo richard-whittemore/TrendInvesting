@@ -170,7 +170,9 @@ func SizeUnit(in Inputs) (Unit, error) {
 
 	realisedRisk, ok := RealisedRiskAtStop(quantity, in.StopMultiple, in.N, in.DollarsPerPoint, in.NotionalAccount)
 	if !ok {
-		return Unit{}, errors.New("sizing: realised risk at stop is not representable")
+		return Unit{}, fmt.Errorf(
+			"sizing: realised risk at stop is %v for a quantity of %d, which no decision payload can state",
+			realisedRisk, quantity)
 	}
 	return Unit{
 		Quantity:   quantity,
@@ -197,12 +199,22 @@ func SizeUnit(in Inputs) (Unit, error) {
 // bit and turn a correct proposal into a rejected one.
 //
 // Callers validate inputs and derive quantity from those same inputs (ADR
-// 0003). The boolean certifies that the cost and result are finite; a false
-// result must never enter a decision payload.
+// 0003). The boolean certifies that the cost and result are finite AND that
+// the result is one a decision payload can state; a false result must never
+// enter one.
+//
+// Finiteness alone is not that certificate. Zero is finite, and a positive
+// quantity really does risk something, so a zero alongside one is an
+// underflow — of the cost, or of the division — and
+// event.TradeProposalPayload.Validate requires this figure above zero. Only
+// a quantity of zero legitimately risks nothing.
 func RealisedRiskAtStop(quantity int64, stopMultiple, n, dollarsPerPoint, notionalAccount float64) (float64, bool) {
 	cost := stopMultiple * n * dollarsPerPoint
 	result := float64(quantity) * cost / notionalAccount
-	return result, isFinite(cost) && isFinite(result)
+	if !isFinite(cost) || !isFinite(result) {
+		return result, false
+	}
+	return result, quantity == 0 || result > 0
 }
 
 // Product returns a*b rounded to float64, so the result cannot be fused into
@@ -406,6 +418,15 @@ func RiskAtStop(mode Mode, unitVolatilityFraction, stopMultiple, riskAtStopFract
 		if derived > 1 {
 			return 0, fmt.Errorf(
 				"sizing: cannot derive risk at stop: derived risk at stop %v exceeds one: unit volatility fraction %v x stop multiple %v would lose more than the entire notional account at the protective stop",
+				derived, unitVolatilityFraction, stopMultiple)
+		}
+		// Two positive fractions whose product is not: small enough, they
+		// underflow, and a budget of zero is a Unit the strategy declares
+		// it will risk nothing on — not a small budget, and not one
+		// event.TradeProposalPayload.Validate accepts.
+		if derived <= 0 {
+			return 0, fmt.Errorf(
+				"sizing: cannot derive risk at stop: derived risk at stop %v is not positive: unit volatility fraction %v x stop multiple %v underflowed, and no decision payload can state a unit that risks nothing at its protective stop",
 				derived, unitVolatilityFraction, stopMultiple)
 		}
 		return derived, nil
