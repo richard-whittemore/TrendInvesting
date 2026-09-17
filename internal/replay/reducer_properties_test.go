@@ -306,17 +306,34 @@ func propertyFixture(t *testing.T, recordedAt arrivalSchedule) (cfg event.Config
 	arrival++
 
 	addFillPrice := rung + 0.5
+
+	// The Protective Stop in force when the stop fill arrives: the entry's
+	// own 2N stop, raised by half an N because a second Unit was added
+	// (The Turtle Rules p.23; ADR 0002). Derived through sizing rather
+	// than written down, so the fixture cannot drift from the rule.
+	entryStop, err := sizing.ProtectiveStopLevel(propertyEntryFillPrice, propertyCampaignN, cfg.StopMultiple, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("sizing.ProtectiveStopLevel() error = %v", err)
+	}
+	propertyStopLevel, err := sizing.RaisedStop(entryStop, propertyCampaignN)
+	if err != nil {
+		t.Fatalf("sizing.RaisedStop() error = %v", err)
+	}
+	// ADR 0013: slippage is 0.05N against the trader, so a long stop fills
+	// BELOW its level.
+	propertyStopSlippage := cfg.SlippageN * propertyCampaignN
 	addFill := event.FillPayload{
-		InstrumentID: "AAPL",
-		Kind:         event.FillKindAdd,
-		CampaignID:   campaignID,
-		ProposalID:   propertyDecisionID("add-proposal-unit-2", "AAPL", propertyDay(22)),
-		FillID:       "sim-fill-add",
-		Direction:    event.DirectionLong,
-		Quantity:     1,
-		Price:        addFillPrice,
-		Level:        addFillPrice,
-		FilledAt:     propertyDay(22),
+		InstrumentID:    "AAPL",
+		Kind:            event.FillKindAdd,
+		CampaignID:      campaignID,
+		ProposalID:      propertyDecisionID("add-proposal-unit-2", "AAPL", propertyDay(22)),
+		FillID:          "sim-fill-add",
+		Direction:       event.DirectionLong,
+		Quantity:        1,
+		Price:           addFillPrice,
+		Level:           rung,
+		SlippageApplied: addFillPrice - rung,
+		FilledAt:        propertyDay(22),
 	}
 	envelopes = append(envelopes, propertyFillEnvelope(t, seq, addFill, cfg, recordedAt(arrival, addFill.FilledAt)))
 	seq++
@@ -329,16 +346,17 @@ func propertyFixture(t *testing.T, recordedAt arrivalSchedule) (cfg event.Config
 	// against any level (event.FillPayload's own doc comment), so this
 	// fixture's exit needs no further arithmetic.
 	stopFill := event.FillPayload{
-		InstrumentID: "AAPL",
-		Kind:         event.FillKindStop,
-		CampaignID:   campaignID,
-		FillID:       "sim-fill-stop",
-		UnitIDs:      []string{"sim-fill-entry", "sim-fill-add"},
-		Direction:    event.DirectionLong,
-		Quantity:     2,
-		Price:        90,
-		Level:        90,
-		FilledAt:     propertyDay(22),
+		InstrumentID:    "AAPL",
+		Kind:            event.FillKindStop,
+		CampaignID:      campaignID,
+		FillID:          "sim-fill-stop",
+		UnitIDs:         []string{"sim-fill-entry", "sim-fill-add"},
+		Direction:       event.DirectionLong,
+		Quantity:        2,
+		Price:           propertyStopLevel - propertyStopSlippage,
+		Level:           propertyStopLevel,
+		SlippageApplied: propertyStopSlippage,
+		FilledAt:        propertyDay(22),
 	}
 	envelopes = append(envelopes, propertyFillEnvelope(t, seq, stopFill, cfg, recordedAt(arrival, stopFill.FilledAt)))
 	seq++
@@ -346,8 +364,8 @@ func propertyFixture(t *testing.T, recordedAt arrivalSchedule) (cfg event.Config
 
 	// The Campaign has exited, so AAPL is a Setup again (CONTEXT.md:
 	// "Campaign"). Bar 23 is a fresh breakout — its high of 300 clears
-	// every high folded into the Entry Channel so far (bar 21's 130 is the
-	// largest) — raising a second Signal and proposal.
+	// every high folded into the Entry Channel so far (bar 22's rung+1 is
+	// the largest) — raising a second Signal and proposal.
 	freshBreakout := flatBar("AAPL", propertyDay(23), 300, 200)
 	envelopes = append(envelopes, propertyBarEnvelope(t, seq, freshBreakout, cfg, recordedAt(arrival, freshBreakout.PeriodEnd)))
 	seq++
