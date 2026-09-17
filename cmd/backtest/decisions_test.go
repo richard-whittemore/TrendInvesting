@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -154,3 +156,50 @@ func TestDecisionLogVerifiesBothJournalsBeforeOutput(t *testing.T) {
 		}
 	}
 }
+
+func TestDecisionDateUsesUTCEventTime(t *testing.T) {
+	path := rewriteJournal(t, signalJournal(t), func(_ *journal.Header, entries []journal.Entry) []journal.Entry {
+		for i := range entries {
+			if entries[i].Kind != journal.KindDecision {
+				continue
+			}
+			entries[i].Envelope.EventTime = entries[i].Envelope.EventTime.In(time.FixedZone("EST", -5*60*60))
+			entries[i].Envelope.RecordedAt = entries[i].Envelope.RecordedAt.Add(24 * time.Hour)
+		}
+		return entries
+	})
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"-decisions", path, "-date", "2026-01-22"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out.String(), "2026-01-22T00:00:00Z [decision 22]") {
+		t.Fatal(&out)
+	}
+}
+
+func TestDecisionLogIOAndIdentityFailures(t *testing.T) {
+	foreign := rewriteJournal(t, goldenJournal, func(_ *journal.Header, entries []journal.Entry) []journal.Entry {
+		entries[0].Envelope.ConfigurationHash = "foreign"
+		return entries
+	})
+	for _, args := range [][]string{
+		{"-decisions", "missing.jsonl"},
+		{"-decisions", goldenJournal, "-reference", "missing.jsonl"},
+		{"-decisions", foreign},
+		{"-decisions", goldenJournal, "-reference", foreign},
+	} {
+		var out bytes.Buffer
+		if err := run(context.Background(), args, &out); err == nil || out.Len() != 0 {
+			t.Fatalf("%v: %v %s", args, err, &out)
+		}
+	}
+	sentinel := errors.New("output unavailable")
+	err := run(context.Background(), []string{"-decisions", signalJournal(t)}, decisionFailWriter{sentinel})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+type decisionFailWriter struct{ err error }
+
+func (w decisionFailWriter) Write([]byte) (int, error) { return 0, w.err }
