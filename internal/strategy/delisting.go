@@ -68,8 +68,14 @@ func (r *Reducer) applyCorporateAction(envelope event.Envelope) ([]event.Envelop
 // # The last available price
 //
 // state.previousClose — the split-adjusted close of the most recently
-// completed bar this reducer has accepted for the instrument (ADR 0004: every
-// downstream calculation reads the split-adjusted view, never the raw one).
+// completed bar this reducer has accepted for the instrument. ADR 0004, as
+// amended: a Campaign's money is computed entirely within the one price view
+// its own fills were priced in, and internal/fills prices every fill on the
+// split-adjusted view. This is the only exit that reaches a bar price
+// directly instead of through a fill, and so the only place the exit price
+// and the entry prices it is subtracted from could come from different
+// views.
+//
 // This is state the reducer already owns from applyCompletedBar's advance
 // block, not a new figure the corporate action states:
 // event.CorporateActionPayload deliberately carries no price of its own (see

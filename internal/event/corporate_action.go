@@ -39,9 +39,9 @@ const CorporateActionKindDelisting = "delisting"
 // Exit closes at (CONTEXT.md: "Delisting Exit") is not a new fact this
 // payload needs to state: it is the split-adjusted close of the last
 // completed bar the reducer has already accepted for this instrument (ADR
-// 0004 — signal computation, and everything downstream of it, runs on the
-// split-adjusted view only), which internal/strategy already holds in its
-// own per-instrument state. Carrying a second, independent price here would
+// 0004, as amended — a Campaign's money stays in the one price view its own
+// fills were priced in, which in this build is the split-adjusted view),
+// which internal/strategy already holds in its own per-instrument state. Carrying a second, independent price here would
 // let a producer state a delisting price that disagrees with the bars it
 // also sent, with no way for the reducer to tell which one is wrong.
 type CorporateActionPayload struct {
