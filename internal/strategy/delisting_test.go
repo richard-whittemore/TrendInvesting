@@ -238,7 +238,14 @@ func TestDelistingPricesTheExitInTheViewItsCampaignWasEnteredIn(t *testing.T) {
 	cfg := validConfigurationPayload()
 	campaignN := breakoutFixtureN(t, cfg)
 	effectiveAt := day(57)
+	entryBars := breakoutBars("AAPL")
 	lastBar := completedBarWithDistinctViews("AAPL", day(57), 160, 150, 155, 2)
+	for _, bar := range append(entryBars, lastBar) {
+		adjusted, raw := bar.SplitAdjusted, bar.Raw
+		if raw.Open != 2*adjusted.Open || raw.High != 2*adjusted.High || raw.Low != 2*adjusted.Low || raw.Close != 2*adjusted.Close {
+			t.Fatalf("fixture bug: bar %v changes price basis; every raw OHLC price must be twice its split-adjusted price", bar.PeriodEnd)
+		}
+	}
 
 	// The raw view's own high reaches the second Unit's Add rung and the
 	// split-adjusted one stays well below it, so a reducer that read the
@@ -256,7 +263,7 @@ func TestDelistingPricesTheExitInTheViewItsCampaignWasEnteredIn(t *testing.T) {
 	}
 
 	emitted := newStream(t, cfg).
-		bars(breakoutBars("AAPL")).
+		bars(entryBars).
 		fill(openingFill("AAPL")).
 		bar(lastBar).
 		corporateAction(delistingAction("AAPL", effectiveAt)).
