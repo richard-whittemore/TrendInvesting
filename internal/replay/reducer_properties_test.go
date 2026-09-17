@@ -431,6 +431,76 @@ func TestReplayTwiceIsByteIdentical(t *testing.T) {
 	}
 }
 
+// leakyCounterHandler is a deliberately wrong Handler: every emission is
+// stamped with *counter, incremented on each call. Two instances built with
+// counter POINTING AT THE SAME int model state that leaks across what
+// should be two independent, freshly constructed reducers (a package-level
+// cache or singleton is the realistic shape of this bug); two instances each
+// given their OWN int model the correct shape — genuinely fresh construction.
+type leakyCounterHandler struct{ counter *int }
+
+func (h *leakyCounterHandler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope, error) {
+	*h.counter++
+	payload := json.RawMessage(fmt.Sprintf(`{"call_count":%d}`, *h.counter))
+	return []event.Envelope{{
+		ID:                "count-" + in.ID,
+		Type:              "test.counted",
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
+		SchemaVersion:     1,
+		EventTime:         in.EventTime,
+		RecordedAt:        in.RecordedAt,
+		Source:            "counting-fixture",
+		StrategyVersion:   in.StrategyVersion,
+		ConfigurationHash: in.ConfigurationHash,
+		PayloadHash:       event.HashPayload(payload),
+		Payload:           payload,
+	}}, nil
+}
+
+func runCountingHandler(t *testing.T, handler *leakyCounterHandler, inputs []event.Envelope) []event.Envelope {
+	t.Helper()
+	engine, err := replay.New(handler)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+	emitted, err := engine.Run(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("Engine.Run() error = %v", err)
+	}
+	return emitted
+}
+
+// TestTheReplayTwiceComparisonCatchesACounterSharedAcrossFreshInstances is
+// the test for the test, for replay-twice identity — mirroring
+// TestTheArrivalTimeComparisonCatchesAnIntervalLeak's role for arrival-time
+// independence: it proves TestReplayTwiceIsByteIdentical's own comparison
+// (replay.Equivalent over two independent runs) actually catches a
+// non-deterministic handler, not only that a correct one passes.
+func TestTheReplayTwiceComparisonCatchesACounterSharedAcrossFreshInstances(t *testing.T) {
+	t.Parallel()
+
+	_, inputs := propertyFixture(t, arrivedWhenItHappened)
+
+	// The defect: two handler instances sharing ONE counter, so the second
+	// "fresh" instance's first emission carries a count left over from the
+	// first instance's run.
+	shared := new(int)
+	first := runCountingHandler(t, &leakyCounterHandler{counter: shared}, inputs)
+	second := runCountingHandler(t, &leakyCounterHandler{counter: shared}, inputs)
+	if d := replay.Equivalent(first, second); d == nil {
+		t.Fatal("two handler instances sharing one counter were NOT caught as diverging; the replay-twice comparison is not testing what it claims")
+	}
+
+	// The control: two genuinely fresh instances, each with its own counter
+	// starting at zero, must be byte-identical — the case a correct reducer
+	// (and TestReplayTwiceIsByteIdentical, against the real one) is in.
+	third := runCountingHandler(t, &leakyCounterHandler{counter: new(int)}, inputs)
+	fourth := runCountingHandler(t, &leakyCounterHandler{counter: new(int)}, inputs)
+	if d := replay.Equivalent(third, fourth); d != nil {
+		t.Fatalf("two independently-counted runs diverged unexpectedly:\n want %+v\n got  %+v", d.Want, d.Got)
+	}
+}
+
 // TestArrivalTimeIndependence is the test that catches a wall-clock leak: an
 // input stream fed with a different, but still valid, RecordedAt on every
 // envelope must produce decisions identical to the original run in every
@@ -653,24 +723,104 @@ func TestASignalNeverSurvivesItsBar(t *testing.T) {
 		}
 	}
 
-	if len(signals) != 1 {
-		t.Fatalf("got %d Signal(s), want exactly 1 (bar 21's)", len(signals))
+	if len(signals) != 2 {
+		t.Fatalf("got %d Signal(s), want exactly 2 (bar 21's, filled, and bar 23's, left to expire)", len(signals))
 	}
 	if !signals[0].EventTime.Equal(propertyDay(21)) {
-		t.Fatalf("the Signal's EventTime is %s, want bar 21 (%s)", signals[0].EventTime, propertyDay(21))
+		t.Fatalf("the first Signal's EventTime is %s, want bar 21 (%s)", signals[0].EventTime, propertyDay(21))
+	}
+	if !signals[1].EventTime.Equal(propertyDay(23)) {
+		t.Fatalf("the second Signal's EventTime is %s, want bar 23 (%s)", signals[1].EventTime, propertyDay(23))
 	}
 
 	if len(expiries) != 1 {
-		t.Fatalf("got %d expiry(ies), want exactly 1 (bar 21's unfilled proposal, superseded by bar 22)", len(expiries))
+		t.Fatalf("got %d expiry(ies), want exactly 1 (bar 23's unfilled proposal, superseded by bar 24; bar 21's proposal was filled, not expired)", len(expiries))
 	}
 	expiry := expiries[0]
 	if expiry.Reason != event.ExpiryReasonSupersededByNextBar {
 		t.Fatalf("expiry reason = %q, want %q", expiry.Reason, event.ExpiryReasonSupersededByNextBar)
 	}
-	if !expiry.PeriodEnd.Equal(propertyDay(21)) {
-		t.Fatalf("expiry PeriodEnd = %s, want bar 21 (%s): the proposal belongs to the bar that raised it, not the bar that superseded it", expiry.PeriodEnd, propertyDay(21))
+	// PeriodEnd names the bar the expired proposal BELONGED to — bar 23,
+	// where the second Signal fired — never bar 24, which only supersedes
+	// it. A Signal "surviving its bar" would look exactly like this field
+	// naming the wrong bar.
+	if !expiry.PeriodEnd.Equal(propertyDay(23)) {
+		t.Fatalf("expiry PeriodEnd = %s, want bar 23 (%s): the proposal belongs to the bar that raised it, not the bar that superseded it", expiry.PeriodEnd, propertyDay(23))
 	}
-	if !expiry.ExpiredAt.Equal(propertyDay(22)) {
-		t.Fatalf("expiry ExpiredAt = %s, want bar 22 (%s): supersession is only observable once the next bar arrives", expiry.ExpiredAt, propertyDay(22))
+	if !expiry.ExpiredAt.Equal(propertyDay(24)) {
+		t.Fatalf("expiry ExpiredAt = %s, want bar 24 (%s): supersession is only observable once the next bar arrives", expiry.ExpiredAt, propertyDay(24))
+	}
+}
+
+// onlyEmissionOfType asserts exactly one envelope of typ exists in emitted
+// and returns it.
+func onlyEmissionOfType(t *testing.T, emitted []event.Envelope, typ string) event.Envelope {
+	t.Helper()
+	var found []event.Envelope
+	for _, e := range emitted {
+		if e.Type == typ {
+			found = append(found, e)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("got %d emission(s) of type %q, want exactly 1", len(found), typ)
+	}
+	return found[0]
+}
+
+// TestThePropertyFixtureOpensACampaignTakesAnAddAndExits is this fixture's
+// own real deliverable: an explicit assertion that it reaches Campaign-open,
+// an Add and an exit, so it cannot silently regress to raising and declining
+// Setups alone — this file's own header names the defect that would
+// reproduce.
+func TestThePropertyFixtureOpensACampaignTakesAnAddAndExits(t *testing.T) {
+	t.Parallel()
+
+	cfg, inputs := propertyFixture(t, arrivedWhenItHappened)
+	emitted := runFixture(t, cfg, inputs)
+
+	opened := onlyEmissionOfType(t, emitted, event.CampaignOpenedEventType)
+	var openedPayload event.CampaignOpenedPayload
+	if err := json.Unmarshal(opened.Payload, &openedPayload); err != nil {
+		t.Fatalf("decode %s: %v", opened.ID, err)
+	}
+	if openedPayload.CampaignN != propertyCampaignN {
+		t.Fatalf("Campaign-opened CampaignN = %v, want %v (this fixture's own hand-derived N; a mismatch means the warm-up bars no longer produce the N the Add rung above was computed from)", openedPayload.CampaignN, propertyCampaignN)
+	}
+	if openedPayload.FilledQuantity != 1 {
+		t.Errorf("Campaign-opened FilledQuantity = %d, want 1", openedPayload.FilledQuantity)
+	}
+	if openedPayload.EntryPrice != propertyEntryFillPrice {
+		t.Errorf("Campaign-opened EntryPrice = %v, want the entry fill's own %v", openedPayload.EntryPrice, propertyEntryFillPrice)
+	}
+
+	added := onlyEmissionOfType(t, emitted, event.CampaignUnitAddedEventType)
+	var addedPayload event.CampaignUnitAddedPayload
+	if err := json.Unmarshal(added.Payload, &addedPayload); err != nil {
+		t.Fatalf("decode %s: %v", added.ID, err)
+	}
+	if addedPayload.CampaignID != openedPayload.CampaignID {
+		t.Errorf("Campaign-unit-added CampaignID = %q, want the opened Campaign's own %q", addedPayload.CampaignID, openedPayload.CampaignID)
+	}
+	if addedPayload.Units != 2 {
+		t.Errorf("Campaign-unit-added Units = %d, want 2 (one Add on top of the opening Unit)", addedPayload.Units)
+	}
+	if addedPayload.Quantity != 1 {
+		t.Errorf("Campaign-unit-added Quantity = %d, want 1", addedPayload.Quantity)
+	}
+
+	exited := onlyEmissionOfType(t, emitted, event.CampaignExitedEventType)
+	var exitedPayload event.CampaignExitedPayload
+	if err := json.Unmarshal(exited.Payload, &exitedPayload); err != nil {
+		t.Fatalf("decode %s: %v", exited.ID, err)
+	}
+	if exitedPayload.CampaignID != openedPayload.CampaignID {
+		t.Errorf("Campaign-exited CampaignID = %q, want the opened Campaign's own %q", exitedPayload.CampaignID, openedPayload.CampaignID)
+	}
+	if exitedPayload.Reason != event.ExitReasonStop {
+		t.Errorf("Campaign-exited Reason = %q, want %q", exitedPayload.Reason, event.ExitReasonStop)
+	}
+	if exitedPayload.Quantity != 2 {
+		t.Errorf("Campaign-exited Quantity = %d, want 2 (both the opening Unit and the Add, stopped out together)", exitedPayload.Quantity)
 	}
 }
