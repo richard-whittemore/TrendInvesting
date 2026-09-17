@@ -28,10 +28,7 @@ func TestProductRoundsItsResult(t *testing.T) {
 	t.Parallel()
 
 	a, b := 1.4213-1.1, 42000.0
-	got, ok := sizing.Product(a, b)
-	if !ok {
-		t.Fatal("product is not representable")
-	}
+	got := sizing.Product(a, b)
 	if want := a * b; got != want {
 		t.Fatalf("Product(%v, %v) = %v, want %v", a, b, got, want)
 	}

@@ -20,6 +20,19 @@ type sizingCall struct {
 	args []any
 }
 
+// barrierFunctions are the exported functions that deliberately do NOT join
+// the finite-result contract, each with the reason and the test that pins
+// it. A rounding barrier is not a derivation: Product returns float64(a*b)
+// for every pair by contract, an overflowing pair included, and the
+// caller's own enclosing expression — a total this package validates once
+// it is complete, or an event validator's exact comparison against a field
+// it has separately checked finite — is what refuses the infinity. The map
+// exists so that a second such function is a deliberate, reviewable entry
+// rather than a function nobody noticed was missing.
+var barrierFunctions = map[string]string{
+	"Product": "a rounding barrier, not a derivation (ADR 0017); its contract is pinned by TestProductReturnsAnOverflowRatherThanReportingIt and TestProductRoundsItsResult",
+}
+
 func sizingCalls() []sizingCall {
 	return []sizingCall{
 		{"AverageMoveInN", sizing.AverageMoveInN, []any{110., 100., 5.}},
@@ -32,7 +45,6 @@ func sizingCalls() []sizingCall {
 		{"SizeUnit", sizing.SizeUnit, []any{sizing.Inputs{Mode: sizing.ModeVolatilityNormalised, NotionalAccount: 1e6, UnitVolatilityFraction: .005, StopMultiple: 2, N: 5, DollarsPerPoint: 1}}},
 		{"SizeUnit", sizing.SizeUnit, []any{sizing.Inputs{Mode: sizing.ModeFixedRiskAtStop, NotionalAccount: 1e6, RiskAtStopFraction: .01, StopMultiple: 2, N: 5, DollarsPerPoint: 1}}},
 		{"RealisedRiskAtStop", sizing.RealisedRiskAtStop, []any{int64(10), 2., 5., 1., 1e6}},
-		{"Product", sizing.Product, []any{2., 5.}},
 		{"DrawdownSteppedNotional", sizing.DrawdownSteppedNotional, []any{1e6}},
 		{"CashMovementScaledFigure", sizing.CashMovementScaledFigure, []any{1e6, 1e6, 2e6}},
 		{"UnitQuantity", sizing.UnitQuantity, []any{1e6, .005, 5., 1.}},
@@ -42,9 +54,19 @@ func sizingCalls() []sizingCall {
 	}
 }
 
-// TestSizingInvariantIncludesEveryExportedFunction makes the finite-result
-// contract's inventory falsifiable when the package grows (ADR 0003).
+// TestSizingInvariantIncludesEveryExportedFunction pins the fixture
+// inventory to the package's own declared functions, so a function added
+// later cannot quietly sit outside the finite-result contract: it parses
+// this package's source and requires every exported function to be either a
+// sizingCalls fixture or a named barrierFunctions exception.
+//
+// This is the half that makes the defect a class rather than a list. The
+// fixtures below prove the functions that exist today never return a
+// non-finite figure alongside success; this test is what makes that still
+// true of the package a month from now.
 func TestSizingInvariantIncludesEveryExportedFunction(t *testing.T) {
+	t.Parallel()
+
 	registered := map[string]bool{}
 	for _, c := range sizingCalls() {
 		registered[c.name] = true
@@ -53,18 +75,55 @@ func TestSizingInvariantIncludesEveryExportedFunction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range pkgs["sizing"].Files {
+	pkg, ok := pkgs["sizing"]
+	if !ok {
+		t.Fatal("the sizing package did not parse; the inventory cannot be checked against nothing")
+	}
+	for _, f := range pkg.Files {
 		for _, d := range f.Decls {
-			if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.IsExported() {
-				if !registered[fn.Name.Name] {
-					t.Errorf("%s needs a sizingCalls fixture", fn.Name.Name)
-				}
-				delete(registered, fn.Name.Name)
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || !fn.Name.IsExported() {
+				continue
 			}
+			if _, exempt := barrierFunctions[fn.Name.Name]; exempt {
+				continue
+			}
+			if !registered[fn.Name.Name] {
+				t.Errorf("%s needs a sizingCalls fixture, so that the finite-result contract is checked against it, or a named barrierFunctions entry saying why it carries no representability report", fn.Name.Name)
+			}
+			delete(registered, fn.Name.Name)
 		}
 	}
 	for name := range registered {
-		t.Errorf("%s is not an exported function", name)
+		t.Errorf("fixture %s is not an exported function of this package", name)
+	}
+}
+
+// TestProductReturnsAnOverflowRatherThanReportingIt checks the exception
+// barrierFunctions claims instead of trusting its prose. Product hands an
+// overflowing product on unchanged; it is the caller's enclosing
+// expression, not Product, that refuses the infinity, and a future guard
+// added here would silently move that responsibility.
+func TestProductReturnsAnOverflowRatherThanReportingIt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		a, b float64
+		want float64
+	}{
+		{"an ordinary product", 2, 5, 10},
+		{"a product that overflows", 1e308, 2, math.Inf(1)},
+		{"a product that overflows negative", -1e308, 2, math.Inf(-1)},
+		{"a product that underflows", math.SmallestNonzeroFloat64, 0.5, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sizing.Product(tt.a, tt.b); got != tt.want {
+				t.Errorf("Product(%v, %v) = %v, want %v", tt.a, tt.b, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -103,9 +162,15 @@ func floatLeaves(t *testing.T, v reflect.Value, visit func(reflect.Value)) {
 	}
 }
 
-// TestSizingSuccessfulResultsAreFinite probes all float leaves with boundary
-// values and reproducible IEEE-754 bit patterns, including simultaneous mutations.
+// TestSizingSuccessfulResultsAreFinite is the invariant itself: no exported
+// function returns a non-finite figure alongside a nil error or a true
+// representability flag. It probes every float leaf of every fixture's
+// arguments with the boundary values and with reproducible IEEE-754 bit
+// patterns, one leaf at a time and then all of them at once, because the
+// defect this package had needed two individually valid inputs to show it.
 func TestSizingSuccessfulResultsAreFinite(t *testing.T) {
+	t.Parallel()
+
 	boundary := []float64{0, math.Copysign(0, -1), 1, -1, .005, math.SmallestNonzeroFloat64, 1e-200, 1e200, 1e300, math.MaxFloat64, -math.MaxFloat64, math.Inf(1), math.Inf(-1), math.NaN()}
 	for _, fixture := range sizingCalls() {
 		t.Run(fixture.name, func(t *testing.T) {
@@ -167,7 +232,12 @@ func TestSizingSuccessfulResultsAreFinite(t *testing.T) {
 	}
 }
 
+// TestSizingRejectsUnrepresentableResults names the concrete pairs of
+// individually valid inputs whose result cannot be stated, so the guards
+// have a regression test that reads as the defect rather than as a probe.
 func TestSizingRejectsUnrepresentableResults(t *testing.T) {
+	t.Parallel()
+
 	cases := []sizingCall{
 		{"AverageMoveInN", sizing.AverageMoveInN, []any{1e300, 1., math.SmallestNonzeroFloat64}},
 		{"AverageMoveInN/subtraction", sizing.AverageMoveInN, []any{math.MaxFloat64, -math.MaxFloat64, 1.}},
@@ -181,7 +251,6 @@ func TestSizingRejectsUnrepresentableResults(t *testing.T) {
 		{"RaisedStop", sizing.RaisedStop, []any{math.MaxFloat64, math.MaxFloat64}},
 		{"RealisedRiskAtStop", sizing.RealisedRiskAtStop, []any{int64(1), 2., 1e308, 1., 1.}},
 		{"CashMovementScaledFigure", sizing.CashMovementScaledFigure, []any{1., 1e-200, 1e200}},
-		{"Product", sizing.Product, []any{1e308, 2.}},
 		{"UnitQuantity/cost-overflow", sizing.UnitQuantity, []any{1., .5, 1e308, 2.}},
 		{"UnitQuantity/zero-over-zero", sizing.UnitQuantity, []any{math.SmallestNonzeroFloat64, .5, 1e-200, 1e-200}},
 		{"FixedRiskAtStopQuantity", sizing.FixedRiskAtStopQuantity, []any{1., .5, 2., 1e308, 1.}},

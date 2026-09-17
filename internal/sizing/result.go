@@ -79,9 +79,17 @@ func RealisedResultInUnitN(realisedResult float64, unitQuantity int64, campaignN
 	if err := errors.Join(errs...); err != nil {
 		return 0, fmt.Errorf("sizing: cannot derive realised result in unit n: %w", err)
 	}
+	// Three individually valid factors whose product is not: one Unit's
+	// worth of a full 1N move overflows for a large enough frozen quantity
+	// or contract multiplier, and underflows to zero for a small enough
+	// campaign N. Dividing by either would hand back an infinity with no
+	// error, which is the defect this guard and finiteResult below exist
+	// to make impossible.
 	denominator := float64(unitQuantity) * campaignN * dollarsPerPoint
 	if !isFinite(denominator) || denominator <= 0 {
-		return 0, fmt.Errorf("sizing: realised result in unit n denominator is not representable")
+		return 0, fmt.Errorf(
+			"sizing: cannot derive realised result in unit n: one unit's worth of a full 1n move is %v (unit quantity %d x campaign n %v x dollars per point %v), which cannot be divided by",
+			denominator, unitQuantity, campaignN, dollarsPerPoint)
 	}
 	return finiteResult("realised result in unit n", realisedResult/denominator)
 }

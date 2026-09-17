@@ -206,7 +206,7 @@ func RealisedRiskAtStop(quantity int64, stopMultiple, n, dollarsPerPoint, notion
 }
 
 // Product returns a*b rounded to float64, so the result cannot be fused into
-// an addition that follows it, and reports whether it is finite (ADR 0017).
+// an addition that follows it.
 //
 // Go permits an implementation to fuse `x + a*b` into a single fused
 // multiply-add "possibly across statements", and arm64 does while amd64 does
@@ -221,9 +221,16 @@ func RealisedRiskAtStop(quantity int64, stopMultiple, n, dollarsPerPoint, notion
 // rather than appearing once. `a*b*c` with no addition is NOT fusible and
 // needs nothing. internal/indicator and internal/fills state the same
 // barrier inline (`float64(a*b)`), because neither imports this package.
-func Product(a, b float64) (float64, bool) {
-	result := float64(a * b)
-	return result, isFinite(result)
+//
+// It is deliberately the one exported function here that reports no
+// representability flag: a barrier is not a derivation. Rounding a product
+// that overflows is still the right answer, and the caller's own enclosing
+// expression — an accumulator's validated total, a validator's exact
+// comparison against a separately finite-checked field — is what refuses
+// the infinity. internal/sizing's representability invariant records that
+// exception and pins this contract rather than exempting it.
+func Product(a, b float64) float64 {
+	return float64(a * b)
 }
 
 // DrawdownStepRetainedFraction is the fraction of the Notional Account
@@ -516,11 +523,25 @@ func isFinite(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
-// finiteResult enforces representable risk arithmetic (ADR 0003) before a
-// successful result can enter a decision payload; zero and signed results remain valid.
+// finiteResult is the guard every derivation in this package returns
+// through: a figure no float64 can state is an error, never a successful
+// result.
+//
+// Checking the inputs is not enough and cannot be made enough. Each of this
+// package's derivations divides or subtracts figures that are individually
+// finite and in range, and an overflowing product or a denormal divisor
+// turns them into an infinity no input guard could have predicted — the
+// caller then stamps +Inf into a decision payload whose own validator
+// rejects exactly that, or, worse, into a journal. Zero and negative
+// results stay valid: a Campaign really can end flat or down.
+//
+// internal/sizing's TestSizingSuccessfulResultsAreFinite pins this over
+// every exported function, and
+// TestSizingInvariantIncludesEveryExportedFunction pins that inventory to
+// the package's own source, so a derivation added later cannot skip it.
 func finiteResult(name string, value float64) (float64, error) {
 	if !isFinite(value) {
-		return 0, fmt.Errorf("sizing: %s is not representable", name)
+		return 0, fmt.Errorf("sizing: %s is %v, which no decision payload can state: the inputs were each in range but their result is not representable", name, value)
 	}
 	return value, nil
 }
