@@ -271,6 +271,12 @@ func (s *stream) mustRun() []event.Envelope {
 // stream's own cfg, the one the stream's configuration envelope carries and
 // stamps its hash from, so a fixture that varies the configuration cannot
 // end up replaying it into a reducer configured from a different one.
+//
+// The rule is ADR 0016: a run's identity is the hash of the configuration it
+// actually ran, and the reducer refuses an envelope whose hash is not its
+// own. A fixture whose envelope hash and payload disagree satisfies that
+// check while contradicting it, which is how the disagreement this helper
+// exists to prevent stayed invisible.
 func (s *stream) mustApply() *strategy.Reducer {
 	s.t.Helper()
 	reducer, err := strategy.NewReducer(testStrategyVersion, s.cfg)
