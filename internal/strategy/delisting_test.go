@@ -197,6 +197,93 @@ func TestDelistingClosesAnOpenCampaignAtTheLastAvailablePrice(t *testing.T) {
 	}
 }
 
+// completedBarWithDistinctViews builds a bar whose raw view is the
+// split-adjusted one multiplied through by factor — the shape a split
+// adjustment takes, one multiplier across every price in the bar. Every
+// other bar fixture in this package makes the two views identical, which is
+// what makes the view a price was read from unobservable; this one exists so
+// that it is observable.
+func completedBarWithDistinctViews(instrumentID string, periodEnd time.Time, high, low, closeAt, factor float64) event.CompletedBarPayload {
+	return event.CompletedBarPayload{
+		InstrumentID:  instrumentID,
+		PeriodEnd:     periodEnd,
+		SplitAdjusted: priceView(event.ViewSplitAdjusted, high, low, closeAt),
+		Raw:           priceView(event.ViewRaw, high*factor, low*factor, closeAt*factor),
+	}
+}
+
+// TestDelistingPricesTheExitInTheViewItsCampaignWasEnteredIn is the fixture
+// in which a bar's two price views differ, so which one a Delisting Exit is
+// accounted at is observable rather than a coincidence of equal numbers.
+//
+// ADR 0004, as amended: a Campaign's realised result is computed entirely
+// within ONE price view, the view its own fills were priced in, which in this
+// build is the split-adjusted one (internal/fills). A Delisting Exit is the
+// only exit that reaches a bar price directly instead of through a fill, so
+// it is the only place the two views could be mixed into one subtraction.
+//
+// Every expected number is derived from the fixture by hand:
+//
+//	entry price 201.25 (campaignFillPrice), quantity 133, dollars per point 1
+//	closing bar split-adjusted close 155, raw close 310
+//	exit price  155
+//	realised    133 x (155 - 201.25) x 1 = -6151.25
+//
+// Pricing the exit from the raw close instead would report 133 x (310 -
+// 201.25) = 14463.75: a loss recorded as a profit, in the artefact whose
+// purpose is an honest record.
+func TestDelistingPricesTheExitInTheViewItsCampaignWasEnteredIn(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignN := breakoutFixtureN(t, cfg)
+	effectiveAt := day(57)
+	lastBar := completedBarWithDistinctViews("AAPL", day(57), 160, 150, 155, 2)
+
+	// The raw view's own high reaches the second Unit's Add rung and the
+	// split-adjusted one stays well below it, so a reducer that read the
+	// wrong view would betray itself with an extra Add proposal as well as a
+	// wrong exit price.
+	rung2, err := sizing.NextAddLevel(campaignFillPrice, campaignN, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel() error = %v", err)
+	}
+	if lastBar.SplitAdjusted.High >= rung2 || lastBar.Raw.High < rung2 {
+		t.Fatalf("fixture bug: the split-adjusted high %v must stay below the add rung %v and the raw high %v must reach it", lastBar.SplitAdjusted.High, rung2, lastBar.Raw.High)
+	}
+	if lastBar.Raw.Close == lastBar.SplitAdjusted.Close {
+		t.Fatalf("fixture bug: the two views' closes are both %v; this test asserts nothing unless they differ", lastBar.Raw.Close)
+	}
+
+	emitted := newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		bar(lastBar).
+		corporateAction(delistingAction("AAPL", effectiveAt)).
+		mustRun()
+
+	if got := len(envelopesOfType(emitted, event.AddProposalEventType)); got != 0 {
+		t.Fatalf("got %d add proposal(s), want 0: only the raw view's high reaches the add rung", got)
+	}
+
+	exited := decodeCampaignExited(t, onlyEnvelopeOfType(t, emitted, event.CampaignExitedEventType))
+	if exited.EntryPrice != campaignFillPrice || exited.Quantity != 133 {
+		t.Fatalf("EntryPrice = %v and Quantity = %d, want %v and 133: the realised result derived below assumes both", exited.EntryPrice, exited.Quantity, campaignFillPrice)
+	}
+
+	const wantExitPrice = 155.0
+	if exited.ExitPrice != wantExitPrice {
+		t.Errorf("ExitPrice = %v, want the split-adjusted close %v; the raw close is %v", exited.ExitPrice, wantExitPrice, lastBar.Raw.Close)
+	}
+	const wantRealisedResult = -6151.25
+	if exited.RealisedResult != wantRealisedResult {
+		t.Errorf("RealisedResult = %v, want exactly %v", exited.RealisedResult, wantRealisedResult)
+	}
+	if err := exited.Validate(); err != nil {
+		t.Errorf("emitted Campaign-exited payload fails its own Validate(): %v", err)
+	}
+}
+
 // TestDelistingWithNoOpenCampaignIsANoOp pins the ticket's own deliberate
 // exception to this project's fail-closed default: a delisting for an
 // instrument this reducer has never even seen a bar for produces no event
