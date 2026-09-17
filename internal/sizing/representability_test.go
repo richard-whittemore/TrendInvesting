@@ -232,6 +232,50 @@ func TestSizingSuccessfulResultsAreFinite(t *testing.T) {
 	}
 }
 
+// TestSizeUnitStatesARiskADecisionPayloadCanAccept is the invariant's other
+// half. A figure that underflowed to zero is finite, so finiteness alone
+// does not see it, and zero is the one value
+// event.TradeProposalPayload.Validate refuses of both risk fields: a Unit
+// reported as sized, with a positive quantity beside a zero risk, is the
+// producer/validator disagreement these shared derivations exist to
+// prevent, dressed as a success.
+//
+// Zero survives where it is the answer rather than an underflow: a quantity
+// of zero risks nothing, and the caller declines on it.
+func TestSizeUnitStatesARiskADecisionPayloadCanAccept(t *testing.T) {
+	t.Parallel()
+
+	check := func(in sizing.Inputs) {
+		unit, err := sizing.SizeUnit(in)
+		switch {
+		case err != nil:
+		case unit.RiskAtStop <= 0:
+			t.Fatalf("SizeUnit(%+v) succeeded with risk at stop %v", in, unit.RiskAtStop)
+		case unit.Quantity > 0 && unit.RealisedRiskAtStop <= 0:
+			t.Fatalf("SizeUnit(%+v) succeeded with a quantity of %d risking %v", in, unit.Quantity, unit.RealisedRiskAtStop)
+		case unit.Quantity == 0 && unit.RealisedRiskAtStop != 0:
+			t.Fatalf("SizeUnit(%+v) succeeded with no quantity risking %v", in, unit.RealisedRiskAtStop)
+		}
+	}
+	rng := rand.New(rand.NewSource(110))
+	for i := 0; i < 200_000; i++ {
+		in := sizing.Inputs{
+			Mode:            sizing.ModeVolatilityNormalised,
+			NotionalAccount: math.Float64frombits(rng.Uint64()),
+			StopMultiple:    math.Float64frombits(rng.Uint64()),
+			N:               math.Float64frombits(rng.Uint64()),
+			DollarsPerPoint: math.Float64frombits(rng.Uint64()),
+		}
+		if i%2 == 0 {
+			in.UnitVolatilityFraction = math.Float64frombits(rng.Uint64())
+		} else {
+			in.Mode = sizing.ModeFixedRiskAtStop
+			in.RiskAtStopFraction = math.Float64frombits(rng.Uint64())
+		}
+		check(in)
+	}
+}
+
 // TestSizingRejectsUnrepresentableResults names the concrete pairs of
 // individually valid inputs whose result cannot be stated, so the guards
 // have a regression test that reads as the defect rather than as a probe.
@@ -250,6 +294,17 @@ func TestSizingRejectsUnrepresentableResults(t *testing.T) {
 		{"AddLadder", sizing.AddLadder, []any{1e308, 1e308, 4, sizing.DirectionLong}},
 		{"RaisedStop", sizing.RaisedStop, []any{math.MaxFloat64, math.MaxFloat64}},
 		{"RealisedRiskAtStop", sizing.RealisedRiskAtStop, []any{int64(1), 2., 1e308, 1., 1.}},
+		// Zero, the second way a result is unusable. One share really does
+		// risk something, so a zero here is an underflow reported as a
+		// figure, and event.TradeProposalPayload.Validate refuses it.
+		{"RealisedRiskAtStop/underflow", sizing.RealisedRiskAtStop, []any{int64(1), math.SmallestNonzeroFloat64, 5e307, 1., 1e308}},
+		{"RiskAtStop/underflow", sizing.RiskAtStop, []any{sizing.ModeVolatilityNormalised, math.SmallestNonzeroFloat64, .5, 0.}},
+		{"SizeUnit/underflowed-budget", sizing.SizeUnit, []any{sizing.Inputs{Mode: sizing.ModeVolatilityNormalised, NotionalAccount: 1, UnitVolatilityFraction: math.SmallestNonzeroFloat64, StopMultiple: .5, N: math.SmallestNonzeroFloat64, DollarsPerPoint: 1}}},
+		// The declared budget survives here and only the realised figure
+		// underflows: stop multiple x n overflows downward before dollars
+		// per point can lift it back, so the two guards are needed
+		// separately.
+		{"SizeUnit/underflowed-realised-risk", sizing.SizeUnit, []any{sizing.Inputs{Mode: sizing.ModeVolatilityNormalised, NotionalAccount: 1e100, UnitVolatilityFraction: 1e-100, StopMultiple: 1e-200, N: 1e-200, DollarsPerPoint: 1e200}}},
 		{"CashMovementScaledFigure", sizing.CashMovementScaledFigure, []any{1., 1e-200, 1e200}},
 		{"UnitQuantity/cost-overflow", sizing.UnitQuantity, []any{1., .5, 1e308, 2.}},
 		{"UnitQuantity/zero-over-zero", sizing.UnitQuantity, []any{math.SmallestNonzeroFloat64, .5, 1e-200, 1e-200}},
