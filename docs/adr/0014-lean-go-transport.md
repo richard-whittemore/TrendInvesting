@@ -207,8 +207,9 @@ Constraints this puts on #27–#31:
    LEAN stopped before processing a single data point and placed no orders.
 5. **A restarting engine must not displace a live one.** `transport.Listen`
    removes a socket file only after confirming nothing answers on it, and
-   refuses to bind over a live server. This is what keeps the
-   "only one active executor may submit orders" invariant true across a restart.
+   refuses to bind over a live server. This prevents a routine restart from
+   displacing the existing listener; it does not elect or fence executors.
+   The single-active-executor requirement still belongs to the execution gate.
 6. **1 MiB is the frame limit.** A 2,000-instrument universe is 182 KB, so the
    limit is roughly a 10,000-instrument universe. It is a configured value, and
    exceeding it costs one bar rather than the session.
@@ -244,12 +245,68 @@ Constraints this puts on #27–#31:
 
 Not addressed here, and deliberately out of scope:
 
-- **The socket has no access control beyond filesystem permissions**, and
-  `net.Listen("unix", ...)` creates it with the process umask. Anything that
-  can open the file can inject decision requests. This needs an explicit mode
-  and a decision about ownership before paper trading.
 - The spike client is not the adapter. Reconnection with backoff, safe-mode
   entry and exit, and idempotent replay of an unacknowledged decision are #27
   onwards.
 - Throughput under concurrent connections was not measured: the boundary is
   sequential by design and by LEAN's threading model.
+
+## Amendment: socket access and deployment identity (2026-09-17)
+
+**The access boundary is a private parent directory, mode exactly `0700`,
+owned by the engine's effective UID. The socket mode is exactly `0600` before
+`Listen` returns.** `Listen` creates the immediate parent with `mkdir(0700)`
+if absent and validates its type, mode and owner before inspecting a stale
+socket or binding. An existing wider directory, symlink, special mode, or
+foreign owner is refused, never chmodded or chowned into compliance. Missing
+ancestors are an operator error. The private directory survives server close.
+Only filesystem pathnames are accepted; Linux abstract sockets bypass this
+boundary and are refused.
+
+`ListenUnix` cannot specify the initial socket mode. It binds inside the already
+private directory, then applies `0600`; failure closes the listener and removes
+its socket. The directory denies other UIDs traversal throughout this interval,
+including under umask `000`. Changing the process-wide umask around bind would
+race unrelated file creation. Socket chmod alone leaves an exposure window and
+is not the control. See [Go's Mkdir contract](https://pkg.go.dev/os#Mkdir) and
+[pathname socket permissions](https://man7.org/linux/man-pages/man7/unix.7.html).
+An umask that removes owner directory permissions causes startup refusal rather
+than silently widening permissions.
+
+Provision the engine and the sole permitted adapter with the **same dedicated
+numeric effective UID** (for example `10001`) in the same kernel/user-namespace
+mapping. Across containers, share a named volume, provision its private socket
+subdirectory for that UID, and run both containers with `--user 10001:10001`.
+The common GID is operational convenience; no group access is granted. On the
+host, run both processes as the same dedicated account. Account names alone do
+not establish equality across containers. Provisioning and container startup
+must complete before the adapter connects; an ownership or permission failure
+must stop startup, not trigger a permissions fallback.
+
+This trusts every process with that UID, the host administrator, and privileged
+containers able to bypass filesystem permissions. Do not run unrelated workloads
+under the executor UID or grant them the shared volume. Ancestors (including
+any ancestor symlink targets) must remain administrator/engine controlled and
+stable: an attacker able to rename the private directory or redirect an ancestor
+could defeat a pathname check. A root-owned sticky `/tmp` is suitable for a
+private host-development subdirectory. Provision without ACLs granting other
+identities access, including inherited/default ACLs; mode and owner checks do
+not audit ACLs or container/user-namespace configuration. The engine and adapter
+must not widen the directory permissions after startup.
+
+No peer-credential handshake, token, or TLS is added. A different UID is denied
+by filesystem traversal, not by a wire rejection frame. The server still allows
+multiple connections from the trusted UID. This is an access policy, **not a
+single-executor election or broker fencing mechanism**: the architecture's
+single-active-executor requirement remains a prerequisite of paper/live order
+submission, together with its existing reconciliation and readiness gates.
+
+Regression tests read socket and directory modes from `os.Stat`, run socket
+creation under umasks `000`, `022` and `077` in isolated subprocesses, reject
+wide/symlinked parents, and compare actual directory ownership against matching
+and mismatched expected UIDs. The ownership test changes the expected identity;
+it does not impersonate another OS user. These tests use APIs available on both
+Darwin and Linux and run in the existing Linux CI jobs. Local evidence is in
+[the access-control work log](../development-evidence/decision-socket.md);
+Linux runtime and cross-UID/container enforcement are not inferred from a
+Darwin run or a cross-compilation.

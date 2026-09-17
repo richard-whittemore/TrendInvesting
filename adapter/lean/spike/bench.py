@@ -1,6 +1,6 @@
 """Measure Python-to-Go round trips over the Unix-socket transport.
 
-    python3 bench.py --socket /tmp/trend-spike.sock --rounds 500 --universe 1000
+    python3 bench.py --socket /tmp/trend-spike/s.sock --rounds 500 --universe 1000
 
 Prints one row in the same shape as the Go client's, so the two are directly
 comparable in docs/adr/0014-lean-go-transport.md.
@@ -79,7 +79,7 @@ def run(path, rounds, warmup, universe, label, transport_timeout):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--socket", default="/tmp/trend-spike.sock")
+    parser.add_argument("--socket", default="/tmp/trend-spike/s.sock")
     parser.add_argument("--rounds", type=int, default=500)
     parser.add_argument("--warmup", type=int, default=50)
     parser.add_argument("--universe", type=int, default=1000)

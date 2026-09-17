@@ -42,7 +42,7 @@ func run(args []string, out io.Writer) error {
 
 func serve(args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
-	socket := flags.String("socket", "/tmp/trend-spike.sock", "Unix-domain socket path")
+	socket := flags.String("socket", "/tmp/trend-spike/s.sock", "Unix-domain socket path")
 	maxFrame := flags.Int("max-frame", transport.DefaultMaxFrameBytes, "maximum frame size in bytes")
 	timeout := flags.Duration("decision-timeout", 5*time.Second, "per-decision timeout; 0 disables")
 	stall := flags.Duration("stall", 0, "delay every decision by this much, to model a slow engine")
@@ -83,7 +83,7 @@ func stalling(decide transport.Decider, delay time.Duration) transport.Decider {
 
 func bench(args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("bench", flag.ContinueOnError)
-	socket := flags.String("socket", "/tmp/trend-spike.sock", "Unix-domain socket path")
+	socket := flags.String("socket", "/tmp/trend-spike/s.sock", "Unix-domain socket path")
 	rounds := flags.Int("rounds", 500, "measured round trips")
 	warmup := flags.Int("warmup", 50, "discarded round trips before measuring")
 	universe := flags.Int("universe", 1000, "instruments per bar")

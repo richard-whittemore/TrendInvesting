@@ -34,7 +34,7 @@ for candidate in ("/LeanCLI", os.path.dirname(os.path.abspath(__file__))):
 
 import client as spike  # noqa: E402 - path must be set first
 
-SOCKET_PATH = os.environ.get("TREND_SPIKE_SOCKET", "/run/spike/s.sock")
+SOCKET_PATH = os.environ.get("TREND_SPIKE_SOCKET", "/run/spike/private/s.sock")
 # Fail closed: if the engine does not answer within this, the algorithm stops
 # rather than trading on stale or absent decisions.
 DECISION_TIMEOUT_S = float(os.environ.get("TREND_SPIKE_TIMEOUT", "5"))
