@@ -83,9 +83,12 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 
 	// -diff-want and -diff-got name one operation between them, so either
-	// both are given or neither is; this is checked before
-	// checkOneOperation, which only knows how to say "these flags together
-	// name more than one operation", not "half of one operation was given".
+	// both are given or neither is. An audit command must not exit zero
+	// having done something other than what was asked (docs/development.md
+	// principle 4, fail closed), and half an operation is that: a lone
+	// -diff-want would fall through to a backtest run. Checked before
+	// checkOneOperation, which can say "these flags name more than one
+	// operation" but not "half of one operation was given".
 	if (*diffWantPath == "") != (*diffGotPath == "") {
 		return errors.New("backtest: -diff-want and -diff-got must be given together")
 	}
