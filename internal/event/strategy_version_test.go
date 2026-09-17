@@ -94,6 +94,10 @@ func TestDecomposeStrategyVersionRejectsMalformedInput(t *testing.T) {
 		// as a different id and rules version. Refused, not guessed at.
 		{"a strategy id that carried a slash", "desk/turtle/1.1.0+abc1234"},
 		{"a strategy id that carried two slashes", "a/b/c/1.1.0+abc1234"},
+		{"strategy id with invalid characters", "turtle baseline/1.1.0+abc1234"},
+		{"strategy id too long", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1.1.0+abc1234"},
+		{"rules version with invalid characters", "turtle-baseline/1.1.0\n+abc1234"},
+		{"rules version too long", "turtle-baseline/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa+abc1234"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -129,6 +133,7 @@ func TestComposeDecomposeRoundTripsOrRefusesDelimiterBearingParts(t *testing.T) 
 		{"build carrying a plus", "turtle-baseline", "1.1.0", "abc1234+dirty"},
 		{"build carrying a slash", "turtle-baseline", "1.1.0", "feature/x"},
 		{"build carrying both", "turtle-baseline", "1.1.0", "feature/x+dirty"},
+		{"boundary legal id", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "1.1.0", "abc1234"},
 	}
 	for _, tt := range legal {
 		t.Run(tt.name, func(t *testing.T) {
