@@ -28,7 +28,7 @@ func validAddProposal() event.AddProposalPayload {
 		InstrumentID:     "AAPL",
 		PeriodEnd:        addProposalPeriodEnd,
 		UnitIndex:        2,
-		Level:            previousFill + 0.5*n,
+		Level:            previousFill + float64(0.5*n),
 		Quantity:         133,
 		PreviousUnitFill: previousFill,
 		CampaignN:        n,
@@ -281,7 +281,7 @@ func TestAddProposalPayloadJSONTags(t *testing.T) {
 // validCampaignUnitAdded returns the unit-added record for the Add fill that
 // would execute validAddProposal.
 func validCampaignUnitAdded() event.CampaignUnitAddedPayload {
-	fillPrice := campaignEntryPrice + 0.5*proposalN
+	fillPrice := campaignEntryPrice + float64(0.5*proposalN)
 	n := proposalN
 	stopMultiple := 2.0
 	return event.CampaignUnitAddedPayload{
@@ -293,7 +293,7 @@ func validCampaignUnitAdded() event.CampaignUnitAddedPayload {
 		Quantity:       133,
 		CampaignN:      n,
 		StopMultiple:   stopMultiple,
-		ProtectiveStop: fillPrice - stopMultiple*n,
+		ProtectiveStop: fillPrice - float64(stopMultiple*n),
 		Units:          2,
 		AddedAt:        addProposalPeriodEnd,
 		Rule:           event.RuleAddLadderHalfN,

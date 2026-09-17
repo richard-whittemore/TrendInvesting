@@ -2009,8 +2009,8 @@ func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 		t.Errorf("Proposal RealisedRiskAtStop %v is not below the declared RiskAtStop %v; 133.07 shares truncated to 133 must leave a gap",
 			proposal.RealisedRiskAtStop, proposal.RiskAtStop)
 	}
-	if proposal.ProtectiveStopIntent != 155-cfg.StopMultiple*wantN {
-		t.Errorf("Proposal ProtectiveStopIntent = %v, want exactly %v (entry - 2N)", proposal.ProtectiveStopIntent, 155-cfg.StopMultiple*wantN)
+	if proposal.ProtectiveStopIntent != 155-float64(cfg.StopMultiple*wantN) {
+		t.Errorf("Proposal ProtectiveStopIntent = %v, want exactly %v (entry - 2N)", proposal.ProtectiveStopIntent, 155-float64(cfg.StopMultiple*wantN))
 	}
 	if err := proposal.Validate(); err != nil {
 		t.Errorf("emitted proposal fails its own Validate(): %v", err)
@@ -2061,8 +2061,8 @@ func TestReducerEmitsFixedRiskAtStopProposal(t *testing.T) {
 	if !(proposal.RealisedRiskAtStop < proposal.RiskAtStop) {
 		t.Errorf("Proposal RealisedRiskAtStop %v is not below the declared %v", proposal.RealisedRiskAtStop, proposal.RiskAtStop)
 	}
-	if proposal.ProtectiveStopIntent != 155-3*wantN {
-		t.Errorf("Proposal ProtectiveStopIntent = %v, want exactly %v (entry - 3N)", proposal.ProtectiveStopIntent, 155-3*wantN)
+	if proposal.ProtectiveStopIntent != 155-float64(3*wantN) {
+		t.Errorf("Proposal ProtectiveStopIntent = %v, want exactly %v (entry - 3N)", proposal.ProtectiveStopIntent, 155-float64(3*wantN))
 	}
 	if err := proposal.Validate(); err != nil {
 		t.Errorf("emitted proposal fails its own Validate(): %v", err)
@@ -2443,7 +2443,7 @@ func TestAddThenEvaluateNWouldShrinkTheWideBarsOwnUnit(t *testing.T) {
 		}
 		n := sum / period
 		for i := period; i < count; i++ {
-			n = (float64(period-1)*n + trueRanges[i]) / period
+			n = (float64(float64(period-1)*n) + trueRanges[i]) / period
 		}
 		return n
 	}

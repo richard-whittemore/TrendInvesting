@@ -17,9 +17,8 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
-// replayJournalFile is replay equivalence asked of a file, which is how every
-// test here asks it: the property is about what a journal on disk can still
-// prove, not about an in-memory value a test just built.
+// replayJournalFile checks replay equivalence from a file (ADR 0017); the
+// evidence under test must be read from disk rather than supplied in memory.
 func replayJournalFile(t *testing.T, path string) (*replay.Divergence, error) {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -29,11 +28,9 @@ func replayJournalFile(t *testing.T, path string) (*replay.Divergence, error) {
 	return replayEquivalence(bytes.NewReader(raw))
 }
 
-// rewriteJournal reads the journal at path, lets mutate change the header and
-// the entries, and writes the result to a new file with the chain recomputed
-// over the altered history — an editor with every incentive and no
-// constraint. The chain is therefore always intact in what this returns, so a
-// refusal from replay is replay's own and never chain verification leaking in.
+// rewriteJournal writes an altered header and history to a new file with
+// recomputed chain hashes (ADR 0017). The chain must remain valid so replay
+// refusals cannot be attributed to chain verification.
 func rewriteJournal(t *testing.T, path string, mutate func(header *journal.Header, entries []journal.Entry) []journal.Entry) string {
 	t.Helper()
 
@@ -58,16 +55,10 @@ func rewriteJournal(t *testing.T, path string, mutate func(header *journal.Heade
 	return rewritten
 }
 
-// TestTheCommittedGoldenJournalReplaysByteIdentically is this ticket's
-// headline, asked of the one artifact in this repository that has to survive
-// it: the committed slice-1 journal, read from disk rather than regenerated,
-// replays to decisions byte-identical to the ones recorded in it.
-//
-// Reading the committed file rather than re-running the fixture is the whole
-// point. A test that ran the backtest and replayed its output would still
-// pass on a build whose rules had silently changed, because both halves would
-// have changed together; only the committed bytes hold this build to what the
-// platform decided when the golden was accepted.
+// TestTheCommittedGoldenJournalReplaysByteIdentically checks ADR 0017's
+// replay equivalence against the committed slice-1 journal read from disk.
+// Regenerating the fixture here would let changed rules affect both sides
+// and conceal a divergence from the previously accepted decisions.
 func TestTheCommittedGoldenJournalReplaysByteIdentically(t *testing.T) {
 	divergence, err := replayJournalFile(t, goldenJournal)
 	if err != nil {
@@ -169,15 +160,10 @@ func TestTheGoldenJournalReplaysIdenticallyWhenItsInputsArriveAtDifferentTimes(t
 	}
 }
 
-// TestReplayComparesOnTheRulesVersionAndNotTheBuild is the accepting half of
-// the rules-version rule: a journal written by a different build of the same
-// rules replays, because the build suffix is traceability only (ADR 0016).
-//
-// This is the direction that is easy to get wrong in the safe-looking
-// direction. A replay that compared whole strategy versions would refuse every
-// journal not written by the running binary, which would make replay
-// equivalence unfalsifiable in CI and useless for the cross-machine
-// reproduction it exists to provide.
+// TestReplayComparesOnTheRulesVersionAndNotTheBuild accepts a journal from
+// a different build with the same rules (ADR 0016). Comparing the entire
+// strategy version would reject cross-machine reproduction and make replay
+// equivalence unfalsifiable in CI.
 func TestReplayComparesOnTheRulesVersionAndNotTheBuild(t *testing.T) {
 	_, path := runBacktestAs(t, "a-different-build")
 
@@ -202,11 +188,9 @@ func TestReplayComparesOnTheRulesVersionAndNotTheBuild(t *testing.T) {
 	}
 }
 
-// TestReplayRefusesAJournalWhoseRulesVersionIsNotThisBuilds is the refusing
-// half. A rules-version bump is the declaration that two builds no longer
-// replay each other's journals (ADR 0016), so the refusal has to come before
-// any comparison: "the engine changed" and "the journal is wrong" are
-// different findings, and a divergence report would assert the second.
+// TestReplayRefusesAJournalWhoseRulesVersionIsNotThisBuilds requires refusal
+// before decision comparison on a rules-version mismatch (ADR 0016). A changed
+// engine does not establish that the journal is wrong.
 func TestReplayRefusesAJournalWhoseRulesVersionIsNotThisBuilds(t *testing.T) {
 	_, path := runBacktestTo(t)
 
@@ -263,11 +247,9 @@ func TestReplayRefusesAHeaderWhoseStrategyVersionIsNotComposed(t *testing.T) {
 	}
 }
 
-// TestReplayRefusesAHeaderThatClaimsAConfigurationTheJournalDoesNotRecord:
-// the header's configuration hash is the run's identity (ADR 0012). A replay
-// that took the configuration from the input stream while ignoring the
-// header's claim about it would answer a question nobody asked — and would
-// report equivalence for a journal whose own two halves disagree.
+// TestReplayRefusesAHeaderThatClaimsAConfigurationTheJournalDoesNotRecord
+// checks the header's run identity (ADR 0012). Replaying only the input
+// configuration would falsely accept a journal whose header claims another run.
 func TestReplayRefusesAHeaderThatClaimsAConfigurationTheJournalDoesNotRecord(t *testing.T) {
 	_, path := runBacktestTo(t)
 
@@ -393,10 +375,9 @@ func TestReplayRefusesAJournalWhoseRecordsNameAnotherRun(t *testing.T) {
 	}
 }
 
-// TestReplayRefusesAJournalThatRecordsNoConfiguration: the reducer is built
-// from the journal's own configuration event, so a journal without one cannot
-// be replayed at all. Failing closed says that, rather than replaying under
-// some default and reporting a divergence that is really a missing input.
+// TestReplayRefusesAJournalThatRecordsNoConfiguration checks that missing
+// recorded configuration fails closed (ADR 0017). A default would replay a
+// different run and misreport the missing input as a decision divergence.
 func TestReplayRefusesAJournalThatRecordsNoConfiguration(t *testing.T) {
 	_, path := runBacktestTo(t)
 
@@ -540,12 +521,10 @@ func TestTheCommandReportsADecisionTheReplayNeverProduced(t *testing.T) {
 	}
 }
 
-// TestAnInvocationNamingTwoOperationsIsRefused: before -replay existed there
-// was one mode flag and no way to ask for two things at once. With two, a
-// branch order silently picked a winner — `-verify a -replay b` reported a
-// verified chain and exited zero having never looked at b. An audit command
-// that succeeds after doing something other than what was asked is worse than
-// one that fails.
+// TestAnInvocationNamingTwoOperationsIsRefused protects ADR 0017's separate
+// verification and replay checks. Branch order previously allowed
+// `-verify a -replay b` to exit successfully without reading b; conflicting
+// operations must fail instead of silently selecting one.
 func TestAnInvocationNamingTwoOperationsIsRefused(t *testing.T) {
 	_, path := runBacktestTo(t)
 
@@ -582,7 +561,6 @@ func TestAnInvocationNamingTwoOperationsIsRefused(t *testing.T) {
 	}
 }
 
-// Each operation on its own is unaffected by the check above.
 func TestEachOperationOnItsOwnIsStillAccepted(t *testing.T) {
 	_, path := runBacktestTo(t)
 
@@ -597,7 +575,6 @@ func TestEachOperationOnItsOwnIsStillAccepted(t *testing.T) {
 	}
 }
 
-// A path that names no file is an operator error, reported as one.
 func TestTheCommandRefusesToReplayAMissingFile(t *testing.T) {
 	var out bytes.Buffer
 	err := run(context.Background(), []string{"-replay", filepath.Join(t.TempDir(), "absent.jsonl")}, &out)

@@ -9,23 +9,16 @@ import (
 	"testing"
 )
 
-// A run's journal is the only durable evidence it leaves, so the two places
-// the command can fail AFTER the run itself has finished both have to be
-// reported rather than absorbed. Neither is composition: the first decides
-// whether the evidence lands at all, and the second decides whether an
-// operator is told where it landed.
-
-// failingWriter is the operator's own output stream, gone.
+// failingWriter models an unavailable operator report stream.
 type failingWriter struct{}
 
 var errReport = errors.New("the report stream failed")
 
 func (failingWriter) Write([]byte) (int, error) { return 0, errReport }
 
-// TestAJournalThatCannotBeWrittenIsReported: the destination directory does
-// not exist, so the exclusive create that makes the journal cannot even
-// begin. The run itself succeeded, and saying nothing would leave an
-// operator with a completed backtest and no evidence of it.
+// TestAJournalThatCannotBeWrittenIsReported checks that a completed run
+// reports failure to persist its only durable evidence (ADR 0017). A missing
+// destination directory prevents temporary-file creation.
 func TestAJournalThatCannotBeWrittenIsReported(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "no-such-directory", "journal.jsonl")
 
@@ -41,11 +34,9 @@ func TestAJournalThatCannotBeWrittenIsReported(t *testing.T) {
 	}
 }
 
-// TestAReportThatCannotBeWrittenIsReported: the journal landed and the
-// operator's own output stream did not. The journal is left exactly where it
-// is — it is the evidence, and the report is only the note saying where to
-// find it — but the command still fails, because a run that cannot tell
-// anyone what it did has not finished.
+// TestAReportThatCannotBeWrittenIsReported requires a command failure when
+// the operator cannot be told where the completed run's evidence landed.
+// The journal must survive the reporting failure (ADR 0017; AGENTS.md rule 6).
 func TestAReportThatCannotBeWrittenIsReported(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "journal.jsonl")
 

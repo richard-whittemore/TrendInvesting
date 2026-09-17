@@ -10,22 +10,24 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 )
 
-// A golden journal only guards against fused multiply-add if its own numbers
-// are sensitive to it. Go permits fusing `x + a*b` into one operation and
-// arm64 does while amd64 does not, so an accumulator over Units — the
-// weighted entry price, the weighted exit price, the aggregate open risk —
-// can hold a different value on the two machines. The fixture's quantities
-// and prices are chosen so that it does: four Units, whose products need
-// more than 53 bits.
+// The golden fixture must remain sensitive to fused multiply-add to enforce
+// byte-identical replay (ADR 0017; docs/development.md). The Go specification
+// permits an implementation to fuse a multiply-add, and permits it not to; it
+// guarantees nothing per architecture. What this project observed is narrower
+// and is the reason the rule exists: with gc 1.24.4, linux/arm64 fused and
+// linux/amd64 did not, and a committed golden that passed on one failed on the
+// other. Treat that as a property of a toolchain and target, not of arm64, and
+// re-establish it rather than assume it if either changes.
 //
-// These tests hold that sensitivity in place. Without them a later edit to
-// the fixture could quietly make every product exact, the golden would pass
-// on both architectures whatever the arithmetic did, and the next fusion
-// defect would be invisible again.
+// These four Units use quantity-price products needing more than 53 bits, so
+// weighted entry/exit prices and aggregate open risk diverge when a product is
+// left fusible; making all products exact would let the golden pass even with
+// fusible arithmetic.
 
-// fusedSum accumulates quantity x price the way an arm64 build would if the
+// fusedSum accumulates quantity x price the way a fusing build would if the
 // product were not rounded first: one operation, one rounding, the
-// full-precision product kept.
+// full-precision product kept. math.FMA states that shape explicitly rather
+// than relying on any target to produce it.
 func fusedSum(quantity float64, prices []float64) float64 {
 	var sum float64
 	for _, price := range prices {

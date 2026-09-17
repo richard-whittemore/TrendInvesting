@@ -142,7 +142,7 @@ func TestCampaignEvaluatedEmittedEveryBarWhileCampaignOpenWithNoBreach(t *testin
 		if payload.InstrumentID != "AAPL" {
 			t.Errorf("evaluated[%d].InstrumentID = %q, want AAPL", i, payload.InstrumentID)
 		}
-		wantStop := campaignFillPrice - cfg.StopMultiple*campaignN
+		wantStop := campaignFillPrice - float64(cfg.StopMultiple*campaignN)
 		if payload.ProtectiveStop != wantStop {
 			t.Errorf("evaluated[%d].ProtectiveStop = %v, want %v", i, payload.ProtectiveStop, wantStop)
 		}

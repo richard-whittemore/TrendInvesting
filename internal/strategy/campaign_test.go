@@ -98,7 +98,7 @@ const campaignStopGap = 0.37
 // re-deriving it, so a fixture that got the Campaign's identity wrong fails
 // loudly instead of silently matching).
 func closingStopFill(instrumentID, campaignID string, campaignN float64, filledAt time.Time) event.FillPayload {
-	stopLevel := campaignFillPrice - 2*campaignN
+	stopLevel := campaignFillPrice - float64(2*campaignN)
 	return event.FillPayload{
 		InstrumentID: instrumentID,
 		Kind:         event.FillKindStop,
@@ -519,7 +519,7 @@ func TestFillOpensACampaignWithNAndUnitSizeFrozen(t *testing.T) {
 	// The stop is measured from what actually filled (#12 restates this; ADR
 	// 0013 requires it for the ladders). Exact equality, in the expression
 	// order CampaignOpenedPayload.Validate re-derives it in.
-	wantStop := campaignFillPrice - cfg.StopMultiple*wantN
+	wantStop := campaignFillPrice - float64(cfg.StopMultiple*wantN)
 	if campaign.ProtectiveStop != wantStop {
 		t.Errorf("ProtectiveStop = %v, want exactly %v (fill price - 2N)", campaign.ProtectiveStop, wantStop)
 	}
@@ -1485,7 +1485,7 @@ func TestStopFillClosesTheCampaignWithReasonStopAndRealisedResult(t *testing.T) 
 	if exited.ExitPrice != stop.Price {
 		t.Errorf("ExitPrice = %v, want the stop fill's own price %v", exited.ExitPrice, stop.Price)
 	}
-	wantStopLevel := campaignFillPrice - cfg.StopMultiple*campaignN
+	wantStopLevel := campaignFillPrice - float64(cfg.StopMultiple*campaignN)
 	if exited.ProtectiveStopLevel != wantStopLevel {
 		t.Errorf("ProtectiveStopLevel = %v, want exactly %v (the level that was in force)", exited.ProtectiveStopLevel, wantStopLevel)
 	}
@@ -1840,7 +1840,7 @@ func TestABarsLowThroughTheStopWithNoStopFillLeavesTheCampaignOpen(t *testing.T)
 
 	cfg := validConfigurationPayload()
 	campaignN := breakoutFixtureN(t, cfg)
-	stopLevel := campaignFillPrice - cfg.StopMultiple*campaignN
+	stopLevel := campaignFillPrice - float64(cfg.StopMultiple*campaignN)
 
 	// A bar whose entire range sits below the Protective Stop level — exactly
 	// the shape a fill simulator would read as "the stop was hit" — with no

@@ -76,7 +76,7 @@ func TestRealisedResultInUnitNFourUnitCrudeLadderGolden(t *testing.T) {
 	var realisedResult float64
 	var wantUnitN float64
 	for _, fill := range fills {
-		realisedResult += float64(unitQuantity) * (exit - fill) * dpp
+		realisedResult += float64(float64(unitQuantity) * (exit - fill) * dpp)
 		wantUnitN += (exit - fill) / n
 	}
 	if math.Abs(wantUnitN-7.0) > 1e-9 {

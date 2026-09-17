@@ -19,9 +19,9 @@ import (
 )
 
 // TestNoFusibleMultiplyAdd enforces docs/development.md's floating-point
-// determinism rule (ADR 0017) on production Go files in internal/. It checks local
-// expression shapes; cross-statement and inlined-call fusion need the two
-// architecture CI suites and sensitive golden fixtures.
+// determinism rule (ADR 0017) on production and test Go files in the module.
+// It checks local expression shapes; cross-statement and inlined-call fusion
+// need both architecture CI suites and sensitive golden fixtures.
 func TestNoFusibleMultiplyAdd(t *testing.T) {
 	root, err := filepath.Abs("../..")
 	if err != nil {
@@ -29,21 +29,22 @@ func TestNoFusibleMultiplyAdd(t *testing.T) {
 	}
 	// Register directory reads with Go's test cache: go list's subprocess
 	// reads are invisible to it, so new files must invalidate success here.
-	if err := filepath.WalkDir(filepath.Join(root, "internal"), func(_ string, _ fs.DirEntry, err error) error {
+	if err := filepath.WalkDir(root, func(_ string, _ fs.DirEntry, err error) error {
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "list", "-deps", "-export", "-compiled", "-json", "./internal/...")
+	cmd := exec.Command("go", "list", "-deps", "-test", "-export", "-compiled", "-json", "./...")
 	cmd.Dir = root
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("load domain packages: %v\n%s", err, &stderr)
+		t.Fatalf("load module packages: %v\n%s", err, &stderr)
 	}
 	type listedPackage struct {
-		Dir, ImportPath, Export            string
+		Dir, ImportPath, Export, Name      string
+		ImportMap                          map[string]string
 		GoFiles, CgoFiles, CompiledGoFiles []string
 	}
 	var packages []listedPackage
@@ -57,20 +58,30 @@ func TestNoFusibleMultiplyAdd(t *testing.T) {
 			t.Fatal(err)
 		}
 		exports[pkg.ImportPath] = pkg.Export
-		if strings.HasPrefix(pkg.Dir, filepath.Join(root, "internal")+string(filepath.Separator)) && len(pkg.GoFiles)+len(pkg.CgoFiles) > 0 {
+		// Toolchain-generated test mains have no compiled inputs. A source
+		// package whose name ends in .test still has inputs and is audited.
+		if pkg.Name == "main" && strings.HasSuffix(pkg.ImportPath, ".test") && len(pkg.CompiledGoFiles) == 0 {
+			continue
+		}
+		if (pkg.Dir == root || strings.HasPrefix(pkg.Dir, root+string(filepath.Separator))) &&
+			len(pkg.GoFiles)+len(pkg.CgoFiles) > 0 {
 			packages = append(packages, pkg)
 		}
 	}
 	if len(packages) == 0 {
-		t.Fatal("no internal packages loaded")
+		t.Fatal("no module packages loaded")
 	}
+	reported := make(map[string]bool)
 	for _, pkg := range packages {
 		fset := token.NewFileSet()
 		var files []*ast.File
 		// Original cgo files must participate in test-cache invalidation even
 		// though type checking uses the compiler's generated Go representation.
 		for _, name := range append(pkg.GoFiles, pkg.CgoFiles...) {
-			path := filepath.Join(pkg.Dir, name)
+			path := name
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(pkg.Dir, path)
+			}
 			if _, err := os.ReadFile(path); err != nil {
 				t.Fatal(err)
 			}
@@ -89,6 +100,9 @@ func TestNoFusibleMultiplyAdd(t *testing.T) {
 			files = append(files, file)
 		}
 		config := types.Config{Importer: importer.ForCompiler(fset, "gc", func(path string) (io.ReadCloser, error) {
+			if mapped := pkg.ImportMap[path]; mapped != "" {
+				path = mapped
+			}
 			if exports[path] == "" {
 				return nil, fmt.Errorf("missing export data for %s", path)
 			}
@@ -102,6 +116,11 @@ func TestNoFusibleMultiplyAdd(t *testing.T) {
 			for _, pos := range fusibleProducts(file, info) {
 				position := fset.Position(pos)
 				where := strings.TrimPrefix(position.String(), root+string(filepath.Separator))
+				// Production files also occur in augmented test packages.
+				if reported[where] {
+					continue
+				}
+				reported[where] = true
 				t.Errorf("%s: fusible floating-point multiply-add; round the product explicitly (docs/development.md: Floating-point determinism)", where)
 			}
 		}

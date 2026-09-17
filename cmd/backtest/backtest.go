@@ -521,9 +521,8 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 		}
 	}
 
-	// The last bar's period end is where the input stream ran to, so it is
-	// what every proposal still outstanding expires at (#68's rule, in
-	// internal/strategy).
+	// Outstanding proposals expire at the last input time when no next bar
+	// can end their one-bar lifetime (ADR 0011; event.RunCompletedEventType).
 	completedAt := bars[len(bars)-1].PeriodEnd
 	completed, err := inputEnvelope("run-completed:"+completedAt.UTC().Format(time.RFC3339Nano),
 		event.RunCompletedEventType, event.RunCompletedSchemaVersion, completedAt,
@@ -564,8 +563,9 @@ func inputEnvelope(id, eventType string, schemaVersion uint32, at time.Time, pay
 	}, nil
 }
 
-// readConfiguration loads the configuration and refuses the one run that is
-// invalid by construction before any bar is processed.
+// readConfiguration loads and validates the declared configuration.
+// ADR 0013 requires positive slippage; reject nonpositive values before
+// reading bars or constructing the simulator.
 func readConfiguration(path string) (event.ConfigurationPayload, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -575,11 +575,6 @@ func readConfiguration(path string) (event.ConfigurationPayload, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return event.ConfigurationPayload{}, fmt.Errorf("backtest: decode the configuration in %s: %w", path, err)
 	}
-	// ADR 0013: a backtest run with zero slippage is invalid by
-	// construction. The simulator refuses one too, but only once it is
-	// built; a run is refused here, before a single bar is read, so the
-	// operator is told what is wrong with their configuration rather than
-	// what went wrong during their run.
 	if math.IsNaN(cfg.SlippageN) || cfg.SlippageN <= 0 {
 		return event.ConfigurationPayload{}, fmt.Errorf("backtest: the configuration in %s states slippage %v: a run with zero slippage is invalid by construction (ADR 0013)", path, cfg.SlippageN)
 	}
@@ -627,8 +622,9 @@ func journalExistsError(path string) error {
 	return fmt.Errorf("backtest: %s already exists: a journal is recorded evidence and is never overwritten (ADR 0018); move it aside or choose another path", path)
 }
 
-// writeJournal writes the run's journal to path, refusing to disturb
-// anything already there and leaving nothing behind if it fails.
+// writeJournal installs a completed journal without replacing existing
+// evidence (ADR 0017; AGENTS.md rule 6). There is deliberately no overwrite
+// option; moving prior evidence is an operator decision.
 //
 // A journal is recorded evidence, and ADR 0018 forbids rewriting or
 // deleting it: a path that already exists is refused outright rather than
@@ -663,8 +659,8 @@ func writeJournal(path string, header journal.Header, entries []journal.Entry) (
 		return false, fmt.Errorf("backtest: create the journal: %w", err)
 	}
 	temporary := file.Name()
-	// Every failure from here on removes the partial file, so the only way
-	// anything lands at path is the rename below.
+	// Cleanup removes the temporary name on success and failure; only the
+	// hard link below can install a completed journal at path (ADR 0017).
 	defer func() {
 		_ = file.Close()
 		_ = os.Remove(temporary)
@@ -679,14 +675,9 @@ func writeJournal(path string, header journal.Header, entries []journal.Entry) (
 	if err := file.Close(); err != nil {
 		return false, fmt.Errorf("backtest: close the journal: %w", err)
 	}
-	// A HARD LINK, not a rename, and this must not be "simplified" back:
-	// rename(2) replaces an existing destination silently, so a journal
-	// that appeared while this run was in progress — a concurrent run, a
-	// restored backup — would be destroyed by it. link(2) fails with EEXIST
-	// atomically instead, which is what makes the refusal a guarantee
-	// rather than a check that something can race past. The content is
-	// complete before the name exists either way, so there is still no
-	// partial journal at the destination.
+	// Keep link(2): it fails atomically with EEXIST if a concurrent run or
+	// restored backup occupies path. rename(2) would silently replace that
+	// evidence, violating ADR 0017 even after a successful early path check.
 	if err := os.Link(temporary, path); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return false, journalExistsError(path)

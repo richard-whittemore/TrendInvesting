@@ -111,7 +111,7 @@ func buildGapCampaign(t *testing.T) (*stream, gapCampaignFixture) {
 	// large enough that no reasonable float64 tolerance could mistake it
 	// for "on the rung" — The Turtle Rules p.23's own Crude gap (30.10 ->
 	// 30.80) is itself about 20x the ladder's own 0.60 spacing.
-	gapFill4Price := rung4 + 20*campaignN
+	gapFill4Price := rung4 + float64(20*campaignN)
 
 	bar57 := addOpportunityBar("AAPL", day(57), rung2+5)
 	fill2 := addFill("AAPL", campaignID, 2, day(57), "sim-fill-add-2", fill2Price, 133, day(57))
@@ -687,8 +687,8 @@ func TestStopFillClosingTheRemainingUnitsExitsWithTheAggregatedResult(t *testing
 	// re-derivation (checked below) is what pins the internal bit-for-bit
 	// consistency between RealisedResult and the payload's own stated
 	// EntryPrice/ExitPrice/Quantity.
-	wantEntryPrice := (133.0*fixture.unit4Fill + 133.0*fixture.unit1Fill + 133.0*fixture.unit2Fill + 133.0*fixture.unit3Fill) / 532.0
-	wantExitPrice := (133.0*stop4Price + 399.0*stop123Price) / 532.0
+	wantEntryPrice := (float64(133.0*fixture.unit4Fill) + float64(133.0*fixture.unit1Fill) + float64(133.0*fixture.unit2Fill) + float64(133.0*fixture.unit3Fill)) / 532.0
+	wantExitPrice := (float64(133.0*stop4Price) + float64(399.0*stop123Price)) / 532.0
 	if math.Abs(exited.EntryPrice-wantEntryPrice) > 1e-9 {
 		t.Errorf("EntryPrice = %v, want ~%v", exited.EntryPrice, wantEntryPrice)
 	}
@@ -850,8 +850,8 @@ func TestExitFillAfterAPartialStopAggregatesTheWholeLife(t *testing.T) {
 		t.Errorf("Quantity = %d, want 532 (133 x 4, across BOTH closing fills)", exited.Quantity)
 	}
 
-	wantEntryPrice := (133.0*fixture.unit4Fill + 133.0*fixture.unit1Fill + 133.0*fixture.unit2Fill + 133.0*fixture.unit3Fill) / 532.0
-	wantExitPrice := (133.0*stop4Price + 399.0*exitFillPrice) / 532.0
+	wantEntryPrice := (float64(133.0*fixture.unit4Fill) + float64(133.0*fixture.unit1Fill) + float64(133.0*fixture.unit2Fill) + float64(133.0*fixture.unit3Fill)) / 532.0
+	wantExitPrice := (float64(133.0*stop4Price) + float64(399.0*exitFillPrice)) / 532.0
 	if math.Abs(exited.EntryPrice-wantEntryPrice) > 1e-9 {
 		t.Errorf("EntryPrice = %v, want ~%v", exited.EntryPrice, wantEntryPrice)
 	}

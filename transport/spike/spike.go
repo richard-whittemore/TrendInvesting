@@ -77,7 +77,7 @@ func NewBarEnvelope(sequence uint64, universe int, now Clock) event.Envelope {
 		// Two coprime strides over a fixed range give every symbol a distinct
 		// price that still changes from bar to bar. The arithmetic is done in
 		// float64 so no width conversion can wrap.
-		spread := math.Mod(float64(sequence%1000)*7919+float64(i)*104729, 18000)
+		spread := math.Mod(float64(float64(sequence%1000)*7919)+float64(float64(i)*104729), 18000)
 		base := 20 + spread/100
 		bars = append(bars, Bar{
 			Symbol: fmt.Sprintf("SPK%04d", i),
@@ -117,7 +117,7 @@ func NewBarEnvelope(sequence uint64, universe int, now Clock) event.Envelope {
 }
 
 func round2(v float64) float64 {
-	return float64(int64(v*100+0.5)) / 100
+	return float64(int64(float64(v*100)+0.5)) / 100
 }
 
 // Decider is the reference decision engine for the spike.

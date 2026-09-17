@@ -171,7 +171,7 @@ func campaignLifeBars() []event.CompletedBarPayload {
 		bar(day(59), 157.5, 158.3, 157.4, 158.1),
 	)
 	for k := 60; k <= 79; k++ {
-		open := 159.5 + float64(k-60)*0.2
+		open := 159.5 + float64(float64(k-60)*0.2)
 		bars = append(bars, bar(day(k), open, open+0.3, open-0.2, open+0.15))
 	}
 	// The Exit Channel stands at 159.3 (bar 60's low), unaffected by #79:

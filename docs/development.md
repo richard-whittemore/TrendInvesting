@@ -30,17 +30,28 @@ Round in the producer *and* in any `event` payload validator that re-derives the
 It cost a real defect to learn, twice over. `internal/strategy`'s whole-life exit price fused on arm64, and the committed golden journal — the first artifact in this repository that has to be byte-identical across machines — failed in CI on amd64 while passing locally. The first sweep then missed every `+=` site, because the walk that found the others only looked at expressions and not at assignments; the golden passed anyway, because that fixture's numbers happened not to differ at those sites. The fixture now has four Units whose products need more than 53 bits, and `cmd/backtest`'s fusion tests hold that sensitivity in place.
 
 `internal/floatingpointaudit` enforces the local `+`, `-`, `+=` and `-=` shapes
-in production Go files under `internal/`, using `go/types` to exempt integer
+in production and test Go files throughout the module, using `go/types` to exempt integer
 arithmetic and compile-time constant products. Explicit product conversions
 are rounding barriers. Generic constraints are checked for permitted floating-point
 terms, including mixed integer/float unions; embedded constraints intersect their
 type sets. The test uses the Go toolchain's package selection, so each CI
-architecture checks its own active files, including `CgoFiles`. Cgo's generated
+architecture checks its own active files, including internal and external test
+packages, packages containing only tests, and `CgoFiles`. Test-package import
+remapping uses the corresponding export data. Cgo's generated
 Go inputs provide type information for C types and source locations for diagnostics;
-the original sources also participate in test-cache invalidation. As with the other
-determinism linters, test fixture arithmetic is outside the production-source guard.
-`transport/spike` is also excluded: its generated prices and rounding serve a
-latency benchmark, never journalled trading decisions.
+the original sources also participate in test-cache invalidation. Test expectations
+need the same rounding barriers as production calculations: otherwise both can
+fuse and agree locally while concealing cross-architecture differences.
+
+The scope includes `cmd/`, `transport/` and `transport/spike`, without a benchmark
+exception. The spike generates benchmark traffic rather than journalled trading
+decisions, but explicit rounding also serves its repeatable-payload invariant.
+An audit of `cmd/backtest` found no floating-point decision arithmetic: it copies
+fixture/configuration inputs and delegates calculations to `internal/strategy`
+and `internal/fills`. Ordinary transport code frames and validates envelopes
+without computing prices or risk. The wider guard enforces rounding wherever
+future arithmetic is added. See [the scope audit](audits/floating-point-scope.md)
+for the exposed sites and regression evidence.
 
 The guard does not trace products across statements or function calls, including
 inlined callees. CI runs the Go suite on amd64 and arm64 against the same committed

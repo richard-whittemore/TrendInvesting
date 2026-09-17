@@ -186,7 +186,7 @@ func TestNotionalAccountSingleObservationAppliesSeveralStepsInOrder(t *testing.T
 	// Confirms the fixture is exactly the boundary case it claims to be: the
 	// next threshold (704,800) is NOT crossed by 750,000, so the loop
 	// correctly stopped at three steps rather than continuing to a fourth.
-	if next := account.MeasurementBase() - 0.10*account.Current(); equity <= next {
+	if next := account.MeasurementBase() - float64(0.10*account.Current()); equity <= next {
 		t.Fatalf("test fixture invalid: %v must be above the next threshold %v, or a fourth step was missed", float64(equity), next)
 	}
 }
@@ -312,7 +312,7 @@ func (h *highWaterMarkAccount) observe(equity float64) bool {
 	if equity > h.base {
 		h.base = equity // high-water-mark reset: the rejected behaviour
 	}
-	threshold := h.base - 0.10*h.current
+	threshold := h.base - float64(0.10*h.current)
 	if equity > threshold {
 		return false
 	}
@@ -945,7 +945,7 @@ func (h *highWaterMarkRecoveryAccount) observe(equity float64) string {
 		h.base = equity
 		return "recovered"
 	}
-	threshold := h.base - 0.10*h.current
+	threshold := h.base - float64(0.10*h.current)
 	if equity > threshold {
 		return ""
 	}

@@ -174,7 +174,7 @@ func TestAStopFillPredatingTheCampaignsOwnOpeningFillIsRejected(t *testing.T) {
 	cfg := validConfigurationPayload()
 	campaignID := testDecisionID("campaign", "AAPL", day(56))
 	campaignN := breakoutFixtureN(t, cfg)
-	stopLevel := campaignFillPrice - cfg.StopMultiple*campaignN
+	stopLevel := campaignFillPrice - float64(cfg.StopMultiple*campaignN)
 
 	newStream(t, cfg).
 		bars(breakoutBars("AAPL")).
