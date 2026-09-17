@@ -50,10 +50,16 @@ func decisionNumber(v float64) string {
 	return string(raw[len(prefix) : len(raw)-1])
 }
 
-// logText keeps recorded control characters from creating spurious log lines.
+// logText keeps recorded text from lying about the shape of the line it is
+// written on. A journal's text fields are unrestricted Unicode — neither the
+// envelope nor the chain narrows them — so besides control characters they
+// can carry a line or paragraph separator (U+2028, U+2029) that splits the
+// line in a viewer, or a bidi override (U+202E) that reverses the order it
+// is read in. Every non-graphic rune is escaped; printable text, in any
+// alphabet, is left readable.
 func logText(s string) string {
-	if strings.IndexFunc(s, unicode.IsControl) >= 0 {
-		return strconv.Quote(s)
+	if strings.IndexFunc(s, func(r rune) bool { return !unicode.IsGraphic(r) }) >= 0 {
+		return strconv.QuoteToGraphic(s)
 	}
 	return s
 }
