@@ -253,3 +253,65 @@ func TestDecisionAccountAndHaltSentences(t *testing.T) {
 		})
 	}
 }
+
+func TestDecisionTextExitConfirmationFollowsTheExitReason(t *testing.T) {
+	_, records := readJournalFile(t, goldenJournal)
+	var base event.Envelope
+	for _, r := range records {
+		if r.Envelope.Type == event.CampaignExitedEventType {
+			base = r.Envelope
+			break
+		}
+	}
+	if base.Type == "" {
+		t.Fatal("missing Campaign exit")
+	}
+	var exited event.CampaignExitedPayload
+	if err := json.Unmarshal(base.Payload, &exited); err != nil {
+		t.Fatal(err)
+	}
+	const campaign = `exited Campaign "campaign:AAPL:2026-01-22T00:00:00.000000000Z" because `
+	const closed = `; 4 Units and 20000 shares closed at `
+	const result = ` 126.585; realised result -26000.000000000226`
+	for _, tc := range []struct {
+		reason string
+		rule   string
+		adr    string
+		cause  string
+		want   string
+	}{
+		{event.ExitReasonStop, event.RuleCampaignExitedByStop, event.ADRCampaignExitRecordsTheFill, exited.FillID,
+			campaign + `stop, confirmed by fill "fill:AAPL:2026-02-02T00:00:00.000000000Z:4"` + closed + `average price` + result},
+		{event.ExitReasonExitChannel, event.RuleCampaignExitedByExitChannel, event.ADRCampaignExitRecordsTheFill, exited.FillID,
+			campaign + `exit-channel, confirmed by fill "fill:AAPL:2026-02-02T00:00:00.000000000Z:4"` + closed + `average price` + result},
+		// ADR 0009 forces a Delisting Exit directly, so its FillID names the
+		// corporate-action envelope and there is no execution to reconcile.
+		{event.ExitReasonDelisting, event.RuleCampaignExitedByDelisting, event.ADRDelistingForcesExit, "corp-action-42",
+			campaign + `delisting, forced by corporate action "corp-action-42"; no fill was recorded for this exit` + closed + `last available price` + result},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			p := exited
+			p.Reason, p.Rule, p.ADR, p.FillID = tc.reason, tc.rule, tc.adr, tc.cause
+			if err := p.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := base
+			e.Payload = raw
+			e.PayloadHash = event.HashPayload(raw)
+			got, err := decisionSentence(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("got  %s\nwant %s", got, tc.want)
+			}
+			if tc.reason == event.ExitReasonDelisting && strings.Contains(got, "confirmed by fill") {
+				t.Fatalf("a Delisting Exit has no fill to confirm it: %s", got)
+			}
+		})
+	}
+}
