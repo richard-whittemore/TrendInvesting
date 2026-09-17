@@ -278,8 +278,8 @@ func TestCampaignEvaluatedPayloadValidateAcceptsMultipleUnits(t *testing.T) {
 }
 
 // TestCampaignEvaluatedPayloadValidateAcceptsAUnitStopAtOrAboveEntry pins
-// (#78) the behaviour Validate's own doc comment already documents but no
-// prior test exercised directly: a listed Unit's ProtectiveStop is NOT
+// the behaviour Validate's own doc comment already documents but no prior
+// test exercised directly: a listed Unit's ProtectiveStop is NOT
 // required to sit below its own EntryPrice, because this payload reports
 // each Unit's CURRENT level without saying whether the Stop Ladder has
 // raised it — only a Unit's initial stop carries that requirement, and this
