@@ -130,10 +130,28 @@ func ValidStopLevel(entryPrice, level float64, kind StopKind) error {
 		errs = append(errs, errors.New("protective stop level must be finite"))
 	case level <= 0:
 		errs = append(errs, errors.New("protective stop level must be positive: a long position cannot be stopped out at or below zero"))
-	case kind == StopKindInitial && isFinite(entryPrice) && level >= entryPrice:
-		errs = append(errs, fmt.Errorf(
-			"protective stop level %v must be below the entry price %v for an initial stop: a stop only reaches entry once the stop ladder has raised it",
-			level, entryPrice))
+	default:
+		switch kind {
+		case StopKindInitial:
+			if isFinite(entryPrice) && level >= entryPrice {
+				errs = append(errs, fmt.Errorf(
+					"protective stop level %v must be below the entry price %v for an initial stop: a stop only reaches entry once the stop ladder has raised it",
+					level, entryPrice))
+			}
+		case StopKindRaised:
+			// No further constraint: a raised stop may legitimately sit at
+			// or above entry (see the doc comment above).
+		default:
+			// Fail closed rather than silently applying the more permissive
+			// StopKindRaised rule to a kind this package never declared: an
+			// unrecognised kind — including a zero value from a field that
+			// was never set, or a future third kind nobody has taught this
+			// switch yet — must be refused, not defaulted, or this
+			// predicate's entire reason to exist (one statement of the
+			// rule, everywhere) is undone by exactly the values that most
+			// need it enforced.
+			errs = append(errs, fmt.Errorf("stop kind %d is not a declared StopKind: only StopKindInitial and StopKindRaised are valid", kind))
+		}
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("sizing: invalid protective stop level: %w", err)
