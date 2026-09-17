@@ -99,6 +99,8 @@ There is also a point about what streaming would buy. The run already holds ever
 
 Nor does a partial journal argue for streaming. Nothing is ever written at a journal's final path: it is composed in a temporary file and hard-linked in (ADR 0018), precisely so an interrupted run leaves no partial journal that reads like a complete one. A streamed partial file would still not be linked, and one carrying a placeholder span would present as a *tampered* journal. Installing partial evidence is a change to ADR 0018, and a separate decision.
 
+An **incomplete temporary file** and an **incomplete run** are different things, and only the first is withheld. A run stopped by the record bound is not interrupted: it reaches the end of the inputs it took, and its journal is written, synced and linked like any other — complete, chain-valid, and stating the span it actually covered rather than the one it intended. What marks it is its status in the registry (`failed`, with the bound named) and a non-zero exit, not a defect in the file. A reader who trusted the file alone would be reading an honest record of a shorter run, which is the outcome the bound exists to produce.
+
 ### Anchoring is the intended next step
 
 Before paper trading, each completed run's final `record_hash` — which `journal.Verify` returns for this purpose — together with its record count and span, should be recorded in the run registry and that registry committed to git. The git history then anchors the chain heads outside the system, turning "detectable if you kept the original" into "detectable, full stop", with no key management, and it closes the end-truncation gap above.
