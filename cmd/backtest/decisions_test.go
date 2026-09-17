@@ -203,3 +203,35 @@ func TestDecisionLogIOAndIdentityFailures(t *testing.T) {
 type decisionFailWriter struct{ err error }
 
 func (w decisionFailWriter) Write([]byte) (int, error) { return 0, w.err }
+
+// A reference journal is evidence, exactly as the candidate is, so invalid
+// evidence must be refused rather than allowed to decide the comparison.
+func TestDecisionLogValidatesTheReferenceBeforeComparing(t *testing.T) {
+	path := signalJournal(t)
+	for _, tc := range []struct {
+		name  string
+		spoil func(e *event.Envelope)
+	}{
+		{"unsupported schema", func(e *event.Envelope) { e.SchemaVersion++ }},
+		{"invalid payload", func(e *event.Envelope) {
+			e.Payload = []byte(`{}`)
+			e.PayloadHash = event.HashPayload(e.Payload)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reference := rewriteJournal(t, path, func(_ *journal.Header, entries []journal.Entry) []journal.Entry {
+				for i := range entries {
+					if entries[i].Kind == journal.KindDecision {
+						tc.spoil(&entries[i].Envelope)
+					}
+				}
+				return entries
+			})
+			var out bytes.Buffer
+			err := run(context.Background(), []string{"-decisions", path, "-reference", reference}, &out)
+			if err == nil || !strings.Contains(err.Error(), "reference decision") || out.Len() != 0 {
+				t.Fatalf("invalid reference decided the comparison: %v %s", err, &out)
+			}
+		})
+	}
+}
