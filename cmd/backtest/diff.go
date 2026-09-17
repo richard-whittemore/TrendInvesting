@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,18 +13,33 @@ import (
 )
 
 // decisionsFromJournal reads the journal at path and returns the decisions
-// it recorded — the stream replay.Diff compares — via journal.Read and
-// journal.Split (ADR 0017's Kind split), the same route -replay reads a
-// journal's own decisions through.
+// it recorded — the stream replay.Diff compares.
+//
+// Unlike -replay, -diff has no reducer of its own to re-derive a comparison
+// from: it takes both sides' decisions straight from the file, so a forged
+// or edited record would otherwise be treated as evidence rather than
+// refused. journal.Verify (was this file edited after it was written) and
+// journal.CheckIdentity (does every record actually describe the run the
+// header names) both run before journal.Split hands back a stream to
+// compare — the same two checks -replay's own journal reading applies,
+// reused rather than re-implemented, and left unconditional: an audit tool
+// with an opt-out to skip validating its evidence would eventually be run
+// with it.
 func decisionsFromJournal(path string) ([]event.Envelope, error) {
-	file, err := os.Open(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("backtest: open %s: %w", path, err)
 	}
-	defer func() { _ = file.Close() }()
 
-	_, records, err := journal.Read(file)
+	if _, err := journal.Verify(bytes.NewReader(raw)); err != nil {
+		return nil, fmt.Errorf("backtest: %s: %w", path, err)
+	}
+
+	header, records, err := journal.Read(bytes.NewReader(raw))
 	if err != nil {
+		return nil, fmt.Errorf("backtest: %s: %w", path, err)
+	}
+	if err := journal.CheckIdentity(header, records); err != nil {
 		return nil, fmt.Errorf("backtest: %s: %w", path, err)
 	}
 	_, decisions, err := journal.Split(records)
