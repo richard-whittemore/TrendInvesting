@@ -15,9 +15,10 @@ const StrategyVersionDelimiters = "/+"
 var validIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // isPathAlias reports whether s is one of the two special directory names
-// that filepath.Join resolves outside the expected tree. filepath.Join(root,
-// "..") escapes root; filepath.Join(root, ".") aliases root itself. Both
-// match validIdentifierPattern, so this check must be stated separately
+// that do not name a distinct location. They fail differently and both are
+// wrong here: filepath.Join(root, "..") resolves OUTSIDE root, while
+// filepath.Join(root, ".") aliases root ITSELF rather than a child of it.
+// Both match validIdentifierPattern, so this check must be stated separately
 // rather than encoded in the regex: excluding exactly two literals from every
 // other dot-containing string is clearer as an equality test than as a
 // negative lookahead.

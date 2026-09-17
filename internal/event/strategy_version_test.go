@@ -211,7 +211,9 @@ func TestAnAmbiguousStrategyVersionIsUnreachableRatherThanDetectable(t *testing.
 func TestDotAndDoubleDotArePathUnsafe(t *testing.T) {
 	t.Parallel()
 
-	// --- Validate rejects "." and ".." for StrategyID ---
+	// A configuration is where an identifier enters the system, so the
+	// path-alias refusal has to hold here (ADR 0012: these values key the
+	// run registry's directories).
 	for _, id := range []string{".", ".."} {
 		t.Run("Validate rejects strategy id "+id, func(t *testing.T) {
 			t.Parallel()
@@ -223,7 +225,8 @@ func TestDotAndDoubleDotArePathUnsafe(t *testing.T) {
 		})
 	}
 
-	// --- DecomposeStrategyVersion rejects "." and ".." as strategy id ---
+	// And again on the way back out: a version parsed from a journal header
+	// is held to the same rule as one composed fresh (ADR 0016).
 	for _, id := range []string{".", ".."} {
 		composed := id + "/1.0.0+abc1234"
 		t.Run("Decompose rejects strategy id "+id, func(t *testing.T) {
@@ -235,7 +238,7 @@ func TestDotAndDoubleDotArePathUnsafe(t *testing.T) {
 		})
 	}
 
-	// --- DecomposeStrategyVersion rejects "." and ".." as rules version ---
+	// DecomposeStrategyVersion rejects "." and ".." as rules version.
 	for _, rv := range []string{".", ".."} {
 		composed := "turtle-baseline/" + rv + "+abc1234"
 		t.Run("Decompose rejects rules version "+rv, func(t *testing.T) {
@@ -247,7 +250,7 @@ func TestDotAndDoubleDotArePathUnsafe(t *testing.T) {
 		})
 	}
 
-	// --- "..." is a legal, unambiguous directory name — must remain accepted ---
+	// "..." is a legal, unambiguous directory name — must remain accepted.
 	t.Run("Decompose accepts strategy id ...", func(t *testing.T) {
 		t.Parallel()
 		composed := event.ComposeStrategyVersion("...", "1.0.0", "abc1234")
@@ -268,7 +271,7 @@ func TestDotAndDoubleDotArePathUnsafe(t *testing.T) {
 		}
 	})
 
-	// --- Other dot-prefixed and dot-containing identifiers remain accepted ---
+	// Other dot-prefixed and dot-containing identifiers remain accepted.
 	for _, id := range []string{".hidden", "v1.2.3", "turtle.baseline"} {
 		id := id
 		t.Run("Validate accepts "+id, func(t *testing.T) {
