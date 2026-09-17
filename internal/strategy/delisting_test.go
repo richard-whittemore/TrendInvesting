@@ -174,7 +174,7 @@ func TestDelistingClosesAnOpenCampaignAtTheLastAvailablePrice(t *testing.T) {
 	if exited.ExitPrice != wantExitPrice {
 		t.Errorf("ExitPrice = %v, want %v (the closing bar's own Close, the last available price)", exited.ExitPrice, wantExitPrice)
 	}
-	stopLevel := campaignFillPrice - cfg.StopMultiple*campaignN
+	stopLevel := campaignFillPrice - float64(cfg.StopMultiple*campaignN)
 	if wantExitPrice == 100 || wantExitPrice == stopLevel || wantExitPrice == lastBar.SplitAdjusted.Low || wantExitPrice == lastBar.SplitAdjusted.High {
 		t.Fatalf("fixture bug: the chosen exit price %v coincides with a level a wrong implementation might reach for instead; the assertion above would be vacuous", wantExitPrice)
 	}
@@ -639,8 +639,8 @@ func TestDelistingAfterAPartialStopAggregatesTheWholeLife(t *testing.T) {
 	}
 
 	const lastAvailablePrice = 150.0 // buildGapCampaign's own bar59 Close
-	wantEntryPrice := (133.0*fixture.unit4Fill + 133.0*fixture.unit1Fill + 133.0*fixture.unit2Fill + 133.0*fixture.unit3Fill) / 532.0
-	wantExitPrice := (133.0*stop4Price + 399.0*lastAvailablePrice) / 532.0
+	wantEntryPrice := (float64(133.0*fixture.unit4Fill) + float64(133.0*fixture.unit1Fill) + float64(133.0*fixture.unit2Fill) + float64(133.0*fixture.unit3Fill)) / 532.0
+	wantExitPrice := (float64(133.0*stop4Price) + float64(399.0*lastAvailablePrice)) / 532.0
 	if math.Abs(exited.EntryPrice-wantEntryPrice) > 1e-9 {
 		t.Errorf("EntryPrice = %v, want ~%v", exited.EntryPrice, wantEntryPrice)
 	}

@@ -822,7 +822,7 @@ func validCampaignExitedByDelisting() event.CampaignExitedPayload {
 	exit := 179.5
 	n := proposalN
 	dpp := 1.0
-	stopLevel := entry - 2*n
+	stopLevel := entry - float64(2*n)
 	var unitQuantity int64 = 133
 	realisedResult := float64(133) * (exit - entry) * dpp
 	return event.CampaignExitedPayload{
