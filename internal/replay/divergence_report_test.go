@@ -588,13 +588,30 @@ func TestDiffReportsUnderflowingExponentLiteralExactly(t *testing.T) {
 // itself, so a payload that is not exactly one JSON value is refused the
 // same way Unmarshal would refuse it, rather than being silently narrowed
 // to its first value.
+//
+// "closing brace" and "closing bracket" are the case json.Decoder.More
+// itself gets wrong: More reports whether the decoder can read another
+// value, and returns false the moment the next non-whitespace byte is a
+// bare "}" or "]" — exactly what trails a payload's real value here — so a
+// trailing-data guard built on More alone would wave both through as
+// having nothing left to read, rather than refusing them.
 func TestDiffRefusesAPayloadWithTrailingDataAfterItsJSONValue(t *testing.T) {
 	t.Parallel()
 
-	want := []event.Envelope{fieldEnvelope("d-1", 1, `{"a":1} 2`)}
-	got := []event.Envelope{fieldEnvelope("d-1", 1, `{"a":1}`)}
-	if _, err := replay.Diff(want, got); err == nil {
-		t.Fatal("Diff() error = nil, want the trailing data refused")
+	cases := map[string]string{
+		"a second value":  `{"a":1} 2`,
+		"closing brace":   `{"a":1}}`,
+		"closing bracket": `{"a":1}]`,
+	}
+	for name, payload := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			want := []event.Envelope{fieldEnvelope("d-1", 1, payload)}
+			got := []event.Envelope{fieldEnvelope("d-1", 1, `{"a":1}`)}
+			if _, err := replay.Diff(want, got); err == nil {
+				t.Fatal("Diff() error = nil, want the trailing data refused")
+			}
+		})
 	}
 }
 
