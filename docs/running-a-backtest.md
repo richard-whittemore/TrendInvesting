@@ -159,6 +159,12 @@ including declined and expired proposals. Each line identifies the decision's
 UTC event time and envelope sequence, the instrument (or account), the action,
 the recorded reason or supporting figures, and the payload's rule and ADR.
 A proposal is described as a proposal; only a recorded fill opens a Campaign.
+An exit is described by its recorded reason: a stop or an Exit-Channel exit
+names the fill that confirmed it, while a Delisting Exit names the
+corporate action that forced it and says no fill was recorded, because ADR
+0009 closes the Campaign at the last available price with no order behind it.
+Recorded text is escaped wherever it carries a rune that is not graphic, so
+nothing a journal holds can split a line or reverse the order it reads in.
 No strategy conditions are recomputed by this mode.
 
 `-date` selects a UTC **event** date (`YYYY-MM-DD`), not the recording date.
@@ -175,9 +181,10 @@ Both journals pass the existing `journal.Verify`, `Read`, `CheckIdentity`, and
 present edited evidence as a decision explanation. This is chain verification
 and run-identity checking, not replay equivalence or external registry anchoring.
 `journal.CheckSpan` is not present in this checkout; the log makes no additional
-span-validation claim. The candidate's decision envelopes and typed payloads
-are validated before filtering, and unknown decision types or schemas are
-refused before any decision lines are written.
+span-validation claim. Both journals' decision envelopes and typed payloads are
+validated before anything is compared, filtered or written: a reference is
+evidence too, so an unknown decision type or an unsupported schema on either
+side is refused rather than reported as a divergence between the two runs.
 
 With `-reference`, `replay.Diff` compares the **complete** decision streams,
 independent of display filters. Its existing human-readable reporter supplies
