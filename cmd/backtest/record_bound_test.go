@@ -31,6 +31,7 @@ func TestARunThatReachesTheRecordBoundIsJournalledAndRecordedAsFailed(t *testing
 		maxRecords:   5,
 		registryPath: root,
 		runID:        "reached-the-bound",
+		variant:      registry.Baseline,
 	}, &log)
 
 	var limit *journal.RecordLimitError

@@ -243,6 +243,13 @@ func Write(w io.Writer, header Header, entries []Entry) error {
 			return fmt.Errorf("journal: record %d: %w", i+1, err)
 		}
 	}
+	// Checked here rather than left to the caller: Recorder derives the span
+	// from the run, but Write takes a header from anyone, and a span nothing
+	// compares to the records is one a caller can state wrongly.
+	start, end, ok := inputSpan(entries, entrySpanOf)
+	if err := checkSpan(header, start, end, ok); err != nil {
+		return err
+	}
 
 	buffered := bufio.NewWriter(w)
 	if err := writeLine(buffered, header); err != nil {
@@ -358,6 +365,77 @@ func CheckIdentity(header Header, records []Record) error {
 	}
 	return nil
 }
+
+// CheckSpan confirms the header states exactly the span its records cover:
+// the first and last event time among the INPUTS, which is the period the run
+// was given. It is the reader's half of the rule Write enforces on a writer.
+//
+// The chain covers the header's span (ADR 0017), so an edit to it is
+// detectable — but only against a chain nobody repaired, and a run that
+// composes its own header is trusted to state the span honestly rather than
+// checked. Comparing the claim with the records is what makes it falsifiable,
+// which matters most for a journal whose header was composed anywhere but
+// Recorder.
+//
+// The span is a claim about the input stream alone: a decision is attributed
+// to the input that caused it, and nothing stamps a decision's event time, so
+// a decision outside the span is not the span's business. Records with no
+// input among them fail closed — a file of decisions alone has no span it
+// could state truthfully.
+//
+// Like CheckIdentity this is a separate question from chain verification, and
+// a separate call for the same reason: "this file was edited" and "this file
+// claims a span it did not cover" are different findings.
+func CheckSpan(header Header, records []Record) error {
+	start, end, ok := inputSpan(records, recordSpanOf)
+	return checkSpan(header, start, end, ok)
+}
+
+func entrySpanOf(entry Entry) (string, time.Time) { return entry.Kind, entry.Envelope.EventTime }
+
+func recordSpanOf(record Record) (string, time.Time) {
+	return record.Kind, record.Envelope.EventTime
+}
+
+// inputSpan is the earliest and latest event time among the inputs in items,
+// and whether items held an input at all.
+//
+// Widening in both directions is deliberate. Nothing requires a composed
+// stream to be sorted by event time — several instruments interleave, and a
+// fill is delivered around the bar it belongs to — so a span taken as "the
+// first input's time, widened forwards" would report a journal as starting
+// later than the earliest event it holds.
+func inputSpan[T any](items []T, of func(T) (string, time.Time)) (start, end time.Time, ok bool) {
+	for _, item := range items {
+		kind, at := of(item)
+		if kind != KindInput {
+			continue
+		}
+		switch {
+		case !ok:
+			start, end, ok = at, at, true
+		case at.Before(start):
+			start = at
+		case at.After(end):
+			end = at
+		}
+	}
+	return start, end, ok
+}
+
+// checkSpan compares a header's stated span with the one its records derive.
+func checkSpan(header Header, start, end time.Time, ok bool) error {
+	if !ok {
+		return errors.New("journal: the header states a span but no record is an input: the span is the first and last input event time, and a journal of decisions alone is not evidence of anything the run was given")
+	}
+	if !header.SpanStart.Equal(start) || !header.SpanEnd.Equal(end) {
+		return fmt.Errorf("journal: the header states the span %s to %s, but the inputs recorded run from %s to %s: a header cannot state a span the run did not cover",
+			spanTime(header.SpanStart), spanTime(header.SpanEnd), spanTime(start), spanTime(end))
+	}
+	return nil
+}
+
+func spanTime(at time.Time) string { return at.UTC().Format(time.RFC3339Nano) }
 
 // Split separates a journal's two interleaved streams by each record's own
 // Kind (ADR 0017): every input, in recording order, then every decision, in

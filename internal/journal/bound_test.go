@@ -19,8 +19,8 @@ func TestABoundedRecorderStopsAtItsBound(t *testing.T) {
 	t.Parallel()
 
 	// The handler emits two decisions per input, so each input costs three
-	// entries: one input fits under a bound of four and a second does not.
-	recorder := journal.NewBoundedRecorder(emittingHandler(), 4)
+	// entries: one input fits under a bound of three and a second does not.
+	recorder := journal.NewBoundedRecorder(emittingHandler(), 3)
 	if _, err := recorder.Apply(context.Background(), testEnvelope(1)); err != nil {
 		t.Fatalf("Recorder.Apply() error = %v, want the first input recorded", err)
 	}
@@ -31,8 +31,8 @@ func TestABoundedRecorderStopsAtItsBound(t *testing.T) {
 	if !errors.As(err, &limit) {
 		t.Fatalf("Recorder.Apply() error = %v, want a *journal.RecordLimitError", err)
 	}
-	if limit.Limit != 4 {
-		t.Errorf("Limit = %d, want the 4 the recorder was bounded at", limit.Limit)
+	if limit.Limit != 3 {
+		t.Errorf("Limit = %d, want the 3 the recorder was bounded at", limit.Limit)
 	}
 	if limit.Recorded != 3 {
 		t.Errorf("Recorded = %d, want the 3 entries the first input cost", limit.Recorded)
@@ -46,7 +46,7 @@ func TestABoundedRecorderStopsAtItsBound(t *testing.T) {
 func TestTheBoundIsCheckedBeforeAnInputIsRecorded(t *testing.T) {
 	t.Parallel()
 
-	recorder := journal.NewBoundedRecorder(emittingHandler(), 4)
+	recorder := journal.NewBoundedRecorder(emittingHandler(), 3)
 	if _, err := recorder.Apply(context.Background(), testEnvelope(1)); err != nil {
 		t.Fatalf("Recorder.Apply() error = %v", err)
 	}
@@ -74,7 +74,7 @@ func TestTheBoundIsCheckedBeforeAnInputIsRecorded(t *testing.T) {
 func TestARunStoppedAtTheBoundStillJournalsWhatItRecorded(t *testing.T) {
 	t.Parallel()
 
-	recorder := journal.NewBoundedRecorder(emittingHandler(), 4)
+	recorder := journal.NewBoundedRecorder(emittingHandler(), 3)
 	if _, err := recorder.Apply(context.Background(), testEnvelope(1)); err != nil {
 		t.Fatalf("Recorder.Apply() error = %v", err)
 	}
@@ -110,7 +110,11 @@ func TestTheRecordBoundErrorNamesWhatToDoAboutIt(t *testing.T) {
 	t.Parallel()
 
 	recorder := journal.NewBoundedRecorder(emittingHandler(), 1)
-	_, err := recorder.Apply(context.Background(), testEnvelope(1))
+	if _, err := recorder.Apply(context.Background(), testEnvelope(1)); err != nil {
+		t.Fatalf("Recorder.Apply() error = %v", err)
+	}
+
+	_, err := recorder.Apply(context.Background(), testEnvelope(3))
 	if err == nil {
 		t.Fatal("Recorder.Apply() error = nil, want the bound reached")
 	}

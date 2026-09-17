@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -78,6 +79,10 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	runsHash := flags.String("runs", "", "configuration hash whose recorded runs to list instead of running a backtest")
 	diffWantPath := flags.String("diff-want", "", "path of the reference journal to diff against another (used together with -diff-got)")
 	diffGotPath := flags.String("diff-got", "", "path of the candidate journal to diff against the reference (used together with -diff-want)")
+	// A string rather than an int for the same reason -variant is: a flag
+	// that always carries a value cannot be checked against the operations
+	// that would ignore it.
+	maxRecords := flags.String("max-records", "", "the most records this run may hold in memory before its journal is written; defaults to 2000000")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -102,7 +107,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	// recorded, and where recorded runs are read from. It is therefore checked
 	// as a run flag only when the invocation is not asking to read the
 	// registry.
-	runFlags := []named{{"-config", *configPath}, {"-bars", *barsPath}, {"-out", *outPath}, {"-run-id", *runID}, {"-variant", *variant}}
+	runFlags := []named{{"-config", *configPath}, {"-bars", *barsPath}, {"-out", *outPath}, {"-run-id", *runID}, {"-variant", *variant}, {"-max-records", *maxRecords}}
 	if *runsHash == "" {
 		runFlags = append(runFlags, named{"-registry", *registryPath})
 	}
@@ -158,6 +163,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return fmt.Errorf("backtest: %w", err)
 	}
 
+	recordBound, err := parseRecordBound(*maxRecords)
+	if err != nil {
+		return err
+	}
+
 	// The Baseline is what a run declares when it declares nothing, and it is
 	// applied here rather than as the flag's default so that the check above
 	// can tell the two apart.
@@ -174,7 +184,22 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		runID:        *runID,
 		variant:      declaredVariant,
 		build:        buildinfo.Version,
+		maxRecords:   recordBound,
 	}, out)
+}
+
+// parseRecordBound reads -max-records: the most records a run may hold in
+// memory before its journal is written (ADR 0017). An invocation that named
+// no bound reads as zero, which options.recordBound resolves to the default.
+func parseRecordBound(value string) (int, error) {
+	if value == "" {
+		return 0, nil
+	}
+	bound, err := strconv.Atoi(value)
+	if err != nil || bound < 1 {
+		return 0, fmt.Errorf("backtest: -max-records is the most records a run may hold in memory before its journal is written, and must be a whole number of at least 1, not %q", value)
+	}
+	return bound, nil
 }
 
 // named is a flag and the value the invocation gave it, empty when unset.

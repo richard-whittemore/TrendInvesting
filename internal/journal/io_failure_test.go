@@ -51,7 +51,7 @@ func TestWriteReportsAFailureOnTheHeaderLine(t *testing.T) {
 	// failure lands on the header line itself rather than on a later flush.
 	header := journal.NewHeader(testConfigurationHash, strings.Repeat("v", 8<<10), at(1), at(3))
 
-	err := journal.Write(failingWriter{}, header, testEntries(1))
+	err := journal.Write(failingWriter{}, header, testEntries(3))
 	if !errors.Is(err, errWrite) {
 		t.Fatalf("Write() error = %v, want the writer's own failure", err)
 	}
@@ -64,8 +64,10 @@ func TestWriteReportsAFailureOnARecordLine(t *testing.T) {
 	t.Parallel()
 
 	// The header fits in the buffer, so the first failure can only come from
-	// the records: enough of them to force a flush.
-	err := journal.Write(failingWriter{}, testHeader(), testEntries(64))
+	// the records: enough of them to force a flush. testEntries numbers its
+	// inputs oddly, so 64 of them span day 1 to day 63.
+	header := journal.NewHeader(testConfigurationHash, testStrategyVersion, at(1), at(63))
+	err := journal.Write(failingWriter{}, header, testEntries(64))
 	if !errors.Is(err, errWrite) {
 		t.Fatalf("Write() error = %v, want the writer's own failure", err)
 	}
