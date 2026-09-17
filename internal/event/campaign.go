@@ -139,10 +139,12 @@ type CampaignOpenedPayload struct {
 //     direction TradeProposalPayload's truncation invariants never permit.
 //
 //  2. **The Protective Stop matches its derivation and is reachable.** It must
-//     be exactly EntryPrice - StopMultiple x CampaignN, strictly below the
-//     entry price, and positive — a long position cannot be stopped out at or
-//     below zero, so such a Campaign would be unprotected in fact while
-//     looking protected in the journal. Exact float64 equality is deliberate,
+//     be exactly EntryPrice - StopMultiple x CampaignN, and a legitimate stop
+//     for a Unit's own first level — sizing.ValidStopLevel is the one place
+//     that shape (strictly below entry, positive) is stated; a long position
+//     cannot be stopped out at or below zero, so a level failing it would
+//     leave a Campaign unprotected in fact while looking protected in the
+//     journal. Exact float64 equality on the derivation is deliberate,
 //     for the reason recorded on TradeProposalPayload.Validate: the stated
 //     value must be the identical value the derivation produces, so any
 //     tolerance would let a differently-derived stop through, which is the
@@ -218,8 +220,14 @@ func (p CampaignOpenedPayload) Validate() error {
 		errs = append(errs, errors.New("protective stop must be finite"))
 	case p.ProtectiveStop <= 0:
 		errs = append(errs, errors.New("protective stop must be positive: a long position cannot be stopped out at or below zero"))
-	case entryPriceFinite && p.ProtectiveStop >= p.EntryPrice:
-		errs = append(errs, fmt.Errorf("protective stop %v must be below the entry price %v for a long position", p.ProtectiveStop, p.EntryPrice))
+	case entryPriceFinite:
+		// This event always describes a Unit's OWN first stop (see the
+		// type's doc comment: Units is always 1, an Add emits its own
+		// event), so it is always StopKindInitial — sizing.ValidStopLevel is
+		// the one place that shape (strictly below entry) is stated.
+		if err := sizing.ValidStopLevel(p.EntryPrice, p.ProtectiveStop, sizing.StopKindInitial); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	// Invariant 2's derivation half, checked whenever the operands are usable

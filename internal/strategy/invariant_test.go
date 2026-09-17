@@ -17,6 +17,7 @@ package strategy
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -214,9 +215,13 @@ func buildCorruptedCampaignState(t *testing.T, r *Reducer, protectiveStop float6
 // event.EngineStateEventType and failing the run — rather than being
 // silently tolerated or continuing to trade the instrument.
 //
-// The only way the invariant can fail is covered: a stop at or below zero.
-// Not reachable from any valid input stream (see this file's package doc
-// comment); constructed directly through buildCorruptedCampaignState.
+// Covers every way the invariant can fail except a positive but infinite
+// stop, which TestCampaignWithAPositiveInfiniteProtectiveStopHaltsTheEngine
+// covers on its own (#78's finding: this invariant's own comparison,
+// `protectiveStop > 0`, does not reject +Inf, unlike the other three seams
+// that assert this same rule). Not reachable from any valid input stream
+// (see this file's package doc comment); constructed directly through
+// buildCorruptedCampaignState.
 //
 // #15's review round removed "and below its entry price" from the
 // invariant: a stop RAISED by the Stop Ladder can legitimately reach or
@@ -235,6 +240,8 @@ func TestCampaignWithoutAProtectiveStopHaltsTheEngine(t *testing.T) {
 	}{
 		{name: "stop at zero", protectiveStop: 0},
 		{name: "stop negative", protectiveStop: -5},
+		{name: "stop is NaN", protectiveStop: math.NaN()},
+		{name: "stop is negative infinity", protectiveStop: math.Inf(-1)},
 	}
 
 	for _, tt := range tests {
@@ -291,6 +298,38 @@ func TestCampaignWithoutAProtectiveStopHaltsTheEngine(t *testing.T) {
 				t.Errorf("emitted engine state payload fails its own Validate(): %v", err)
 			}
 		})
+	}
+}
+
+// TestCampaignWithAPositiveInfiniteProtectiveStopHaltsTheEngine is #78's
+// finding: checkCampaignHasAProtectiveStop's own comparison, `protectiveStop
+// > 0`, is true for positive infinity, so a corrupted Unit whose stop is
+// +Inf passed this invariant undetected — unlike
+// event.CampaignEvaluatedPayload.Validate, event.CampaignOpenedPayload.Validate
+// and event.ProtectiveStopSetPayload.Validate, which each reject a
+// non-finite level explicitly and already did so before this ticket. A stop
+// of +Inf can never trigger, which is the opposite of "protected": the
+// Campaign this invariant exists to catch would look fine on every read
+// while being unstoppable in fact. Consolidating onto sizing.ValidStopLevel
+// closes this gap by construction, since every other seam already refused
+// it.
+func TestCampaignWithAPositiveInfiniteProtectiveStopHaltsTheEngine(t *testing.T) {
+	t.Parallel()
+
+	r := newConfiguredReducerForInvariantTest(t)
+	instrumentID := buildCorruptedCampaignState(t, r, math.Inf(1))
+
+	bar := invariantTestBarEnvelope(t, 1, instrumentID, day(2))
+	emissions, err := r.Apply(context.Background(), bar)
+
+	if err == nil {
+		t.Fatal("Apply() error = nil, want the capital-safety invariant to halt the run for a +Inf protective stop")
+	}
+	if !strings.Contains(err.Error(), "capital-safety invariant violated") {
+		t.Errorf("Apply() error = %v, want it to name the capital-safety invariant", err)
+	}
+	if len(emissions) != 1 || emissions[0].Type != event.EngineStateEventType {
+		t.Fatalf("emissions = %+v, want exactly 1 engine-state halt", emissions)
 	}
 }
 

@@ -84,18 +84,22 @@ func TestNonFiniteFiguresAreRejected(t *testing.T) {
 			wantErr: "units[0]: entry price must be positive",
 		},
 		{
+			// #78 wires this check through sizing.ValidStopLevel, which
+			// wraps the reason with the predicate's own name — the unit
+			// index and the reason are both still present, just no longer
+			// contiguous as one substring.
 			name: "campaign evaluated unit protective stop is positive infinity",
 			payload: mutateEvaluated(func(p *event.CampaignEvaluatedPayload) {
 				p.Units[0].ProtectiveStop = math.Inf(1)
 			}),
-			wantErr: "units[0]: protective stop must be finite",
+			wantErr: "units[0]: sizing: invalid protective stop level: protective stop level must be finite",
 		},
 		{
 			name: "campaign evaluated unit protective stop is not positive",
 			payload: mutateEvaluated(func(p *event.CampaignEvaluatedPayload) {
 				p.Units[0].ProtectiveStop = -1
 			}),
-			wantErr: "units[0]: protective stop must be positive",
+			wantErr: "units[0]: sizing: invalid protective stop level: protective stop level must be positive",
 		},
 		{
 			name: "campaign evaluated unit quantity is not positive",

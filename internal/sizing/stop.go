@@ -65,6 +65,100 @@ func ProtectiveStopLevel(entryPrice, campaignN, stopMultiple float64, direction 
 	return level, nil
 }
 
+// StopKind distinguishes how a Unit's current Protective Stop level came to
+// be, because ValidStopLevel's rule differs by which: a Unit's own FIRST
+// stop must sit strictly below its entry, while a stop the Stop Ladder has
+// RAISED (RaisedStop, The Turtle Rules p.22-23) may reach or pass entry once
+// enough half-N raises have made the Unit risk-free, open risk clamped at
+// zero (AggregateOpenRisk's own doc comment works the arithmetic).
+//
+// Declared here rather than imported from internal/event's
+// ProtectiveStopReasonInitial/ProtectiveStopReasonAddLadder, for the same
+// package-boundary reason DirectionLong is this package's own constant (see
+// its doc comment): internal/sizing imports nothing from internal/event.
+type StopKind int
+
+const (
+	// StopKindInitial is a Unit's own first Protective Stop, set the moment
+	// its fill was accepted.
+	StopKindInitial StopKind = iota
+	// StopKindRaised is an earlier Unit's stop after the Stop Ladder has
+	// raised it at least once.
+	StopKindRaised
+)
+
+// ValidStopLevel reports whether level is a legitimate Protective Stop for a
+// Unit that entered at entryPrice (CONTEXT.md: "Protective Stop" — "Every
+// open Campaign has one at all times"), given whether level is the Unit's
+// own initial stop or one the Stop Ladder has raised (see StopKind).
+//
+// entryPrice and level must each be finite and positive: a long position
+// cannot be stopped out at or below zero, so a level there would leave the
+// position unprotected in fact while looking protected in a journal. Beyond
+// that, the rule is conditional on kind:
+//
+//   - StopKindInitial: level must sit STRICTLY BELOW entryPrice (The Turtle
+//     Rules p.22 gives no stop at entry) — a stop can only ever REACH entry
+//     by later being raised, never as its own first level.
+//   - StopKindRaised: level may sit AT OR ABOVE entryPrice, a legitimate
+//     break-even or profit-protecting level once enough half-N raises have
+//     made the Unit risk-free (CONTEXT.md's "risk-free"; AggregateOpenRisk
+//     treats such a Unit's own contribution as exactly zero, never an
+//     error).
+//
+// This is the one place the rule is stated: event.ProtectiveStopSetPayload.Validate,
+// event.CampaignOpenedPayload.Validate and event.CampaignEvaluatedPayload.Validate,
+// and internal/strategy's reducer invariant that every open Campaign's Units
+// carry a usable stop, each call this rather than re-typing the comparison —
+// a rule asserted independently in four places is a rule that can drift the
+// moment one of them is updated and the others are not.
+//
+// Returns an error, not a bool, because every caller here needs to produce a
+// message a journal reader can act on; a caller wraps the returned error
+// with its own context (which field, which Unit index) rather than
+// discarding it, so a failure still names which validation seam refused.
+func ValidStopLevel(entryPrice, level float64, kind StopKind) error {
+	var errs []error
+	switch {
+	case !isFinite(entryPrice):
+		errs = append(errs, errors.New("entry price must be finite"))
+	case entryPrice <= 0:
+		errs = append(errs, errors.New("entry price must be positive"))
+	}
+	switch {
+	case !isFinite(level):
+		errs = append(errs, errors.New("protective stop level must be finite"))
+	case level <= 0:
+		errs = append(errs, errors.New("protective stop level must be positive: a long position cannot be stopped out at or below zero"))
+	default:
+		switch kind {
+		case StopKindInitial:
+			if isFinite(entryPrice) && level >= entryPrice {
+				errs = append(errs, fmt.Errorf(
+					"protective stop level %v must be below the entry price %v for an initial stop: a stop only reaches entry once the stop ladder has raised it",
+					level, entryPrice))
+			}
+		case StopKindRaised:
+			// No further constraint: a raised stop may legitimately sit at
+			// or above entry (see the doc comment above).
+		default:
+			// Fail closed rather than silently applying the more permissive
+			// StopKindRaised rule to a kind this package never declared: an
+			// unrecognised kind — including a zero value from a field that
+			// was never set, or a future third kind nobody has taught this
+			// switch yet — must be refused, not defaulted, or this
+			// predicate's entire reason to exist (one statement of the
+			// rule, everywhere) is undone by exactly the values that most
+			// need it enforced.
+			errs = append(errs, fmt.Errorf("stop kind %d is not a declared StopKind: only StopKindInitial and StopKindRaised are valid", kind))
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("sizing: invalid protective stop level: %w", err)
+	}
+	return nil
+}
+
 func checkEntryPrice(v float64) error {
 	switch {
 	case !isFinite(v):

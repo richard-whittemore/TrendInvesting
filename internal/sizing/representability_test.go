@@ -30,7 +30,8 @@ type sizingCall struct {
 // exists so that a second such function is a deliberate, reviewable entry
 // rather than a function nobody noticed was missing.
 var barrierFunctions = map[string]string{
-	"Product": "a rounding barrier, not a derivation (ADR 0017); its contract is pinned by TestProductReturnsAnOverflowRatherThanReportingIt and TestProductRoundsItsResult",
+	"Product":        "a rounding barrier, not a derivation (ADR 0017); its contract is pinned by TestProductReturnsAnOverflowRatherThanReportingIt and TestProductRoundsItsResult",
+	"ValidStopLevel": "a predicate, not a derivation: it reports only an error, with no float result the finite-result contract could apply to. Its own rule table is TestValidStopLevel.",
 }
 
 func sizingCalls() []sizingCall {

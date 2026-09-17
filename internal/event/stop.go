@@ -160,13 +160,13 @@ type ProtectiveStopSetPayload struct {
 
 // Validate checks that the payload identifies the Campaign, the Unit and the
 // moment the stop came into force, that Reason is one of the enumerated
-// constants, that every frozen number is usable, that Level is positive (a
-// long position cannot be stopped out at or below zero) and — for Reason
-// ProtectiveStopReasonInitial only — strictly below EntryPrice; a RAISED
-// stop (ProtectiveStopReasonAddLadder) may sit at or above EntryPrice, a
-// legitimate break-even or profit-protecting level under a narrow enough
-// Stop Multiple (see sizing.AggregateOpenRisk's own doc comment for why the
-// Baseline never reaches this). Validate also checks
+// constants, that every frozen number is usable, and that Level is a
+// legitimate stop for EntryPrice given Reason — sizing.ValidStopLevel is the
+// one place that rule is stated: Level strictly below EntryPrice when Reason
+// is ProtectiveStopReasonInitial, or at or above it once Reason is
+// ProtectiveStopReasonAddLadder (a legitimate break-even or
+// profit-protecting level; see sizing.AggregateOpenRisk's own doc comment
+// for why the Baseline never reaches this). Validate also checks
 // that PreviousLevel is legitimate for the stated Reason (zero
 // for an initial set, positive and strictly below Level for an add-ladder
 // raise — the Baseline's Stop Ladder only ever raises a stop), and that
@@ -231,14 +231,9 @@ func (p ProtectiveStopSetPayload) Validate() error {
 		errs = append(errs, errors.New("entry price must be positive"))
 	}
 
-	// Deliberately NOT checked here: "Level below EntryPrice" — that shape
-	// is required only for an INITIAL stop (see the Reason switch below). A
-	// stop RAISED by the Stop Ladder (Reason ProtectiveStopReasonAddLadder)
-	// may sit at or above its own Unit's entry once enough half-N raises
-	// have accumulated under a narrow enough Stop Multiple — a legitimate
-	// break-even or profit-protecting level (CONTEXT.md: "risk-free"), never
-	// a corrupted one, since a stop only ever reaches entry by rising from
-	// below it.
+	// Deliberately NOT checked here: Level's relation to EntryPrice — that
+	// is conditional on Reason and is the Reason switch below's job, via
+	// sizing.ValidStopLevel (see this function's own doc comment).
 	levelFinite := isFinite(p.Level)
 	switch {
 	case !levelFinite:
@@ -264,11 +259,13 @@ func (p ProtectiveStopSetPayload) Validate() error {
 		if previousLevelFinite && p.PreviousLevel != 0 {
 			errs = append(errs, fmt.Errorf("previous level must be zero for an initial set, got %v: there is no prior level to have raised from", p.PreviousLevel))
 		}
-		// Only an INITIAL stop is required strictly below entry — see this
-		// function's own doc comment and the levelFinite switch above for
-		// why a RAISED stop is not held to the same shape.
-		if entryPriceFinite && levelFinite && p.Level >= p.EntryPrice {
-			errs = append(errs, fmt.Errorf("level %v must be below the entry price %v for a long position's initial stop", p.Level, p.EntryPrice))
+		// sizing.ValidStopLevel is the one place the initial-vs-raised shape
+		// is stated (see that function's own doc comment); StopKindInitial
+		// is what requires Level strictly below EntryPrice here.
+		if entryPriceFinite && levelFinite {
+			if err := sizing.ValidStopLevel(p.EntryPrice, p.Level, sizing.StopKindInitial); err != nil {
+				errs = append(errs, err)
+			}
 		}
 		if entryPriceFinite && stopMultipleFinite && campaignNFinite && levelFinite {
 			if derived := p.EntryPrice - sizing.Product(p.StopMultiple, p.CampaignN); p.Level != derived {
@@ -280,6 +277,16 @@ func (p ProtectiveStopSetPayload) Validate() error {
 	case ProtectiveStopReasonAddLadder:
 		if previousLevelFinite && p.PreviousLevel <= 0 {
 			errs = append(errs, fmt.Errorf("previous level must be positive for an add-ladder raise, got %v: there is always a prior level to have raised from", p.PreviousLevel))
+		}
+		// StopKindRaised imposes no relation to EntryPrice — a raised stop
+		// may legitimately sit at or above it (see this function's own doc
+		// comment) — so this call only re-asserts Level's own finiteness and
+		// positivity, already checked above; it is here so this seam is
+		// visibly wired to the shared predicate rather than assumed exempt.
+		if entryPriceFinite && levelFinite {
+			if err := sizing.ValidStopLevel(p.EntryPrice, p.Level, sizing.StopKindRaised); err != nil {
+				errs = append(errs, err)
+			}
 		}
 		if previousLevelFinite && p.PreviousLevel > 0 && campaignNFinite && levelFinite {
 			if derived, err := sizing.RaisedStop(p.PreviousLevel, p.CampaignN); err == nil && p.Level != derived {

@@ -133,10 +133,9 @@ type CampaignEvaluatedPayload struct {
 
 // Validate checks that the payload identifies the Campaign, instrument and
 // period, that Units is non-empty with strictly ascending positive indexes
-// and each Unit's own entry and stop are usable (entry positive, stop
-// positive — a RAISED stop may sit at or above its own entry, a legitimate
-// break-even or profit-protecting level under a narrow-enough Stop
-// Multiple; see the loop's own comment below), that ProtectiveStop is
+// and each Unit's own entry is usable and its stop is a legitimate level per
+// sizing.ValidStopLevel (see the loop's own comment below for why every Unit
+// is checked with StopKindRaised, the permissive kind), that ProtectiveStop is
 // EXACTLY the minimum across Units' own ProtectiveStop, that ExitChannelLow
 // is never negative and matches the zero-while-not-ready convention
 // EntryChannelHigh already uses, that ExitConditionMet is never true while
@@ -194,28 +193,19 @@ func (p CampaignEvaluatedPayload) Validate() error {
 			errs = append(errs, fmt.Errorf("units[%d]: entry price must be positive", i))
 			unitsUsable = false
 		}
-		// A Unit's protective stop must be positive and finite, but is NOT
-		// required to sit below its own entry price: repeated half-N raises
-		// (the Stop Ladder) can lift an
-		// earlier Unit's stop to or above its own entry under a Variant
-		// with a narrower Stop Multiple (e.g. StopMultiple 1 with four
-		// Units — the Baseline's 2N stop and four-Unit maximum never reach
-		// this, since the maximum raise is 1.5N). A stop at or above entry
-		// is a legitimate break-even or profit-protecting level (CONTEXT.md:
-		// a Unit in that state is "risk-free"), not a corrupted or
-		// mis-derived one, and its contribution to AggregateOpenRisk is
-		// simply zero (sizing.AggregateOpenRisk's own doc comment) rather
-		// than a validation failure. Only a Unit's INITIAL stop (Reason
-		// ProtectiveStopReasonInitial on ProtectiveStopSetPayload) is still
-		// required strictly below entry — a stop can only ever REACH entry
-		// by rising from there.
+		// This payload reports each Unit's CURRENT stop without saying
+		// whether the Stop Ladder has raised it, so it cannot tell an
+		// unraised Unit from a raised one and calls sizing.ValidStopLevel
+		// with StopKindRaised for every Unit — the permissive kind, imposing
+		// no relation to EntryPrice (see that function's own doc comment for
+		// why: a stop at or above entry is a legitimate risk-free level,
+		// contributing zero to AggregateOpenRisk, not a validation failure).
+		// Only a Unit's INITIAL stop (event.ProtectiveStopReasonInitial) is
+		// held to the stricter shape, at the seam that knows which one a
+		// given level is.
 		stopFinite := isFinite(u.ProtectiveStop)
-		switch {
-		case !stopFinite:
-			errs = append(errs, fmt.Errorf("units[%d]: protective stop must be finite", i))
-			unitsUsable = false
-		case u.ProtectiveStop <= 0:
-			errs = append(errs, fmt.Errorf("units[%d]: protective stop must be positive", i))
+		if err := sizing.ValidStopLevel(u.EntryPrice, u.ProtectiveStop, sizing.StopKindRaised); err != nil {
+			errs = append(errs, fmt.Errorf("units[%d]: %w", i, err))
 			unitsUsable = false
 		}
 		if u.Quantity <= 0 {
