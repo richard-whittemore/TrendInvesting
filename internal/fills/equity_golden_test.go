@@ -8,6 +8,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/fills"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
@@ -246,8 +247,10 @@ func equityGoldenDelisting() event.CorporateActionPayload {
 }
 
 // equityGoldenRun drives the whole scenario through the real simulator and
-// the real reducer, in the order the backtest loop delivers inputs:
-// configuration, the cash basis, every bar, then the delisting.
+// the real reducer behind a journal.Recorder, in the order the backtest loop
+// delivers inputs: configuration, the cash basis, every bar, then the
+// delisting. The recorder is the loop's own way of collecting decisions, and
+// the only one that stamps them as the journal holds them (see composed).
 func equityGoldenRun(t *testing.T) composed {
 	t.Helper()
 
@@ -261,17 +264,14 @@ func equityGoldenRun(t *testing.T) composed {
 	if err != nil {
 		t.Fatalf("strategy.NewReducer() error = %v", err)
 	}
+	recorder := journal.NewRecorder(reducer)
 
 	ctx := context.Background()
-	var out composed
 	deliver := func(what string, e event.Envelope) {
 		t.Helper()
-		result, err := fills.Deliver(ctx, simulator, reducer, e)
-		if err != nil {
+		if _, err := fills.Deliver(ctx, simulator, recorder, e); err != nil {
 			t.Fatalf("Deliver(%s) error = %v", what, err)
 		}
-		out.Inputs = append(out.Inputs, result.Inputs...)
-		out.Decisions = append(out.Decisions, result.Decisions...)
 	}
 
 	deliver("configuration", equityGoldenEnvelope(t, hash, "cfg-1", event.ConfigurationEventType, event.ConfigurationSchemaVersion, day(0), cfg))
@@ -284,17 +284,14 @@ func equityGoldenRun(t *testing.T) composed {
 		}))
 
 	for i, b := range equityGoldenBars() {
-		result, err := fills.RunBar(ctx, simulator, reducer, equityGoldenEnvelope(t, hash,
-			"bar:"+b.PeriodEnd.Format(time.RFC3339), event.CompletedBarEventType, event.CompletedBarSchemaVersion, b.PeriodEnd, b))
-		if err != nil {
+		if _, err := fills.RunBar(ctx, simulator, recorder, equityGoldenEnvelope(t, hash,
+			"bar:"+b.PeriodEnd.Format(time.RFC3339), event.CompletedBarEventType, event.CompletedBarSchemaVersion, b.PeriodEnd, b)); err != nil {
 			t.Fatalf("RunBar(bar %d, period end %s) error = %v", i+1, b.PeriodEnd.Format(time.RFC3339), err)
 		}
-		out.Inputs = append(out.Inputs, result.Inputs...)
-		out.Decisions = append(out.Decisions, result.Decisions...)
 	}
 
 	deliver("delisting", equityGoldenEnvelope(t, hash, "delisting-1", event.MarketCorporateActionEventType, event.MarketCorporateActionSchemaVersion, day(58), equityGoldenDelisting()))
-	return out
+	return recorded(t, recorder)
 }
 
 // equityGoldenEnvelope wraps one payload as an input envelope stamped with
@@ -538,15 +535,12 @@ func TestEquityGoldenScenarioReplaysByteIdentically(t *testing.T) {
 		t.Fatalf("two replays of the same input stream diverged at decision %d", divergence.Index)
 	}
 
-	if len(first) != len(run.Decisions) {
-		t.Fatalf("replay emitted %d decision(s), the composed run observed %d%s%s",
-			len(first), len(run.Decisions), describe(first), describe(run.Decisions))
+	report, err := replay.Diff(run.Decisions, first)
+	if err != nil {
+		t.Fatalf("replay.Diff() error = %v", err)
 	}
-	for i := range first {
-		if first[i].Type != run.Decisions[i].Type || first[i].PayloadHash != run.Decisions[i].PayloadHash {
-			t.Fatalf("decision %d differs between the composed run and its replay: %s/%s vs %s/%s",
-				i, run.Decisions[i].Type, run.Decisions[i].PayloadHash, first[i].Type, first[i].PayloadHash)
-		}
+	if report != nil {
+		t.Fatalf("the run's journalled decisions and a replay of its own inputs differ: %s", report)
 	}
 }
 

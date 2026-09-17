@@ -8,6 +8,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/fills"
+	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
@@ -624,20 +625,16 @@ func TestComposedRunReplaysByteIdentically(t *testing.T) {
 	second := replayThrough(t, run.Inputs)
 	assertIdentical(t, first, second)
 
-	// And the loop's own observation of what the reducer emitted matches
-	// what a replay of its input stream produces — the property #19's
-	// backtest loop depends on when it writes one journal and expects a
-	// later replay of it to agree.
-	if len(first) != len(run.Decisions) {
-		t.Fatalf("replay emitted %d decision(s), the composed run observed %d", len(first), len(run.Decisions))
+	// And what the run journalled matches what a replay of its own input
+	// stream produces, field for field — the property the backtest loop
+	// depends on when it writes one journal and expects a later replay of it
+	// to agree.
+	report, err := replay.Diff(run.Decisions, first)
+	if err != nil {
+		t.Fatalf("replay.Diff() error = %v", err)
 	}
-	for i := range first {
-		if first[i].Type != run.Decisions[i].Type {
-			t.Fatalf("decision %d type = %q on replay, %q in the composed run", i, first[i].Type, run.Decisions[i].Type)
-		}
-		if !bytes.Equal(first[i].Payload, run.Decisions[i].Payload) {
-			t.Fatalf("decision %d (%s) payload differs between the composed run and its replay", i, first[i].Type)
-		}
+	if report != nil {
+		t.Fatalf("the run's journalled decisions and a replay of its own inputs differ: %s", report)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/fills"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
@@ -185,11 +186,38 @@ func campaignLifeBars() []event.CompletedBarPayload {
 // --- driving the composed simulator and reducer --------------------------
 
 // composed is one run of the backtest loop: a fresh simulator and a fresh
-// reducer, driven bar by bar through fills.RunBar, accumulating the input
-// stream the loop produced and every decision the reducer emitted.
+// reducer behind a journal.Recorder, driven bar by bar through fills.RunBar.
+// Inputs is the stream the loop applied; Decisions is what the journal
+// records, each one stamped with its own output sequence and the input that
+// caused it.
+//
+// The stamp is why the recorder is here rather than fills.Result's own
+// Decisions, which leave Sequence, CausationID and CorrelationID unset by
+// contract: comparing those against a replay of Inputs would compare
+// something no journal holds, and would agree on every field it looked at
+// for that reason alone.
 type composed struct {
 	Inputs    []event.Envelope
 	Decisions []event.Envelope
+}
+
+// recorded splits what a recorder observed into the two streams a journal
+// interleaves, by each entry's own Kind — the split journal.Split makes over
+// a written journal (ADR 0017).
+func recorded(t *testing.T, recorder *journal.Recorder) composed {
+	t.Helper()
+	var out composed
+	for i, entry := range recorder.Entries() {
+		switch entry.Kind {
+		case journal.KindInput:
+			out.Inputs = append(out.Inputs, entry.Envelope)
+		case journal.KindDecision:
+			out.Decisions = append(out.Decisions, entry.Envelope)
+		default:
+			t.Fatalf("entry %d has kind %q, which is neither %q nor %q", i, entry.Kind, journal.KindInput, journal.KindDecision)
+		}
+	}
+	return out
 }
 
 func runComposed(t *testing.T, cfg event.ConfigurationPayload, bars []event.CompletedBarPayload) composed {
@@ -218,14 +246,11 @@ func driveComposed(t *testing.T, simulator *fills.Simulator, reducer *strategy.R
 	t.Helper()
 
 	ctx := context.Background()
-	var out composed
+	recorder := journal.NewRecorder(reducer)
 
-	result, err := fills.Deliver(ctx, simulator, reducer, configurationEnvelope(t, cfg))
-	if err != nil {
+	if _, err := fills.Deliver(ctx, simulator, recorder, configurationEnvelope(t, cfg)); err != nil {
 		t.Fatalf("Deliver(configuration) error = %v", err)
 	}
-	out.Inputs = append(out.Inputs, result.Inputs...)
-	out.Decisions = append(out.Decisions, result.Decisions...)
 
 	// ADR 0010's cash basis: every Add and entry is checked against
 	// the cash known at the previous close, fed by account.snapshot's
@@ -234,22 +259,16 @@ func driveComposed(t *testing.T, simulator *fills.Simulator, reducer *strategy.R
 	// a figure with headroom well clear of any Unit's cost (fixtureUnitQuantity
 	// x a fixture price x DollarsPerPoint 1 stays far under this) before any
 	// bar runs.
-	snapshotResult, err := fills.Deliver(ctx, simulator, reducer, accountSnapshotEnvelope(t, cfg))
-	if err != nil {
+	if _, err := fills.Deliver(ctx, simulator, recorder, accountSnapshotEnvelope(t, cfg)); err != nil {
 		t.Fatalf("Deliver(account snapshot) error = %v", err)
 	}
-	out.Inputs = append(out.Inputs, snapshotResult.Inputs...)
-	out.Decisions = append(out.Decisions, snapshotResult.Decisions...)
 
 	for i, b := range bars {
-		result, err := fills.RunBar(ctx, simulator, reducer, barEnvelope(t, b))
-		if err != nil {
+		if _, err := fills.RunBar(ctx, simulator, recorder, barEnvelope(t, b)); err != nil {
 			t.Fatalf("RunBar(bar %d, period end %s) error = %v", i+1, b.PeriodEnd.Format(time.RFC3339), err)
 		}
-		out.Inputs = append(out.Inputs, result.Inputs...)
-		out.Decisions = append(out.Decisions, result.Decisions...)
 	}
-	return out
+	return recorded(t, recorder)
 }
 
 func configurationEnvelope(t *testing.T, cfg event.ConfigurationPayload) event.Envelope {
