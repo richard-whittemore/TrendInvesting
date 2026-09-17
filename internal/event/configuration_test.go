@@ -74,6 +74,39 @@ func TestConfigurationPayloadValidate(t *testing.T) {
 			wantErr: "strategy id",
 		},
 		{
+			name:    "strategy id with space",
+			mutate:  func(c *event.ConfigurationPayload) { c.StrategyID = "my strategy" },
+			wantErr: "valid identifier",
+		},
+		{
+			name:    "strategy id with tab",
+			mutate:  func(c *event.ConfigurationPayload) { c.StrategyID = "my\tstrategy" },
+			wantErr: "valid identifier",
+		},
+		{
+			name:    "strategy id with newline",
+			mutate:  func(c *event.ConfigurationPayload) { c.StrategyID = "my\nstrategy" },
+			wantErr: "valid identifier",
+		},
+		{
+			name:    "strategy id with control character",
+			mutate:  func(c *event.ConfigurationPayload) { c.StrategyID = "strategy\x01" },
+			wantErr: "valid identifier",
+		},
+		{
+			name: "strategy id too long",
+			mutate: func(c *event.ConfigurationPayload) {
+				c.StrategyID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			}, // 65 chars
+			wantErr: "valid identifier",
+		},
+		{
+			name: "strategy id at length limit is accepted",
+			mutate: func(c *event.ConfigurationPayload) {
+				c.StrategyID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			}, // 64 chars
+		},
+		{
 			name:    "invalid sizing mode",
 			mutate:  func(c *event.ConfigurationPayload) { c.SizingMode = "risk-parity" },
 			wantErr: "sizing mode",

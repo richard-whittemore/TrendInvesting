@@ -94,6 +94,10 @@ func TestDecomposeStrategyVersionRejectsMalformedInput(t *testing.T) {
 		// as a different id and rules version. Refused, not guessed at.
 		{"a strategy id that carried a slash", "desk/turtle/1.1.0+abc1234"},
 		{"a strategy id that carried two slashes", "a/b/c/1.1.0+abc1234"},
+		{"strategy id with invalid characters", "turtle baseline/1.1.0+abc1234"},
+		{"strategy id too long", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1.1.0+abc1234"},
+		{"rules version with invalid characters", "turtle-baseline/1.1.0\n+abc1234"},
+		{"rules version too long", "turtle-baseline/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa+abc1234"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -129,6 +133,7 @@ func TestComposeDecomposeRoundTripsOrRefusesDelimiterBearingParts(t *testing.T) 
 		{"build carrying a plus", "turtle-baseline", "1.1.0", "abc1234+dirty"},
 		{"build carrying a slash", "turtle-baseline", "1.1.0", "feature/x"},
 		{"build carrying both", "turtle-baseline", "1.1.0", "feature/x+dirty"},
+		{"boundary legal id", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "1.1.0", "abc1234"},
 	}
 	for _, tt := range legal {
 		t.Run(tt.name, func(t *testing.T) {
@@ -189,5 +194,104 @@ func TestAnAmbiguousStrategyVersionIsUnreachableRatherThanDetectable(t *testing.
 	cfg.StrategyID = ambiguousID
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("ConfigurationPayload.Validate() accepted the ambiguous strategy id; this is the only check standing between it and a journal nobody can decompose correctly")
+	}
+}
+
+// TestDotAndDoubleDotArePathUnsafe records the contract: "." and ".." are the
+// two directory-traversal aliases that filepath.Join resolves specially.
+// filepath.Join(root, "..") escapes root; filepath.Join(root, ".") aliases
+// root itself. A StrategyID or RulesVersion equal to either literal must be
+// refused at every entry point — Validate and DecomposeStrategyVersion — so
+// that the path-safety guarantee the PR introduces is not a lie the moment a
+// run registry (ADR 0012) joins one into a path.
+//
+// "..." is not a traversal alias: it is an ordinary directory name that
+// resolves exactly where you put it. The boundary is "not exactly . and not
+// exactly ..", not "no leading dot".
+func TestDotAndDoubleDotArePathUnsafe(t *testing.T) {
+	t.Parallel()
+
+	// A configuration is where an identifier enters the system, so the
+	// path-alias refusal has to hold here (ADR 0012: these values key the
+	// run registry's directories).
+	for _, id := range []string{".", ".."} {
+		t.Run("Validate rejects strategy id "+id, func(t *testing.T) {
+			t.Parallel()
+			cfg := validConfiguration()
+			cfg.StrategyID = id
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("ConfigurationPayload.Validate() accepted strategy id %q; it is a path-traversal alias and must be refused", id)
+			}
+		})
+	}
+
+	// And again on the way back out: a version parsed from a journal header
+	// is held to the same rule as one composed fresh (ADR 0016).
+	for _, id := range []string{".", ".."} {
+		composed := id + "/1.0.0+abc1234"
+		t.Run("Decompose rejects strategy id "+id, func(t *testing.T) {
+			t.Parallel()
+			_, _, _, err := event.DecomposeStrategyVersion(composed)
+			if err == nil {
+				t.Fatalf("DecomposeStrategyVersion(%q) error = nil; strategy id %q is a path-traversal alias and must be refused", composed, id)
+			}
+		})
+	}
+
+	// DecomposeStrategyVersion rejects "." and ".." as rules version.
+	for _, rv := range []string{".", ".."} {
+		composed := "turtle-baseline/" + rv + "+abc1234"
+		t.Run("Decompose rejects rules version "+rv, func(t *testing.T) {
+			t.Parallel()
+			_, _, _, err := event.DecomposeStrategyVersion(composed)
+			if err == nil {
+				t.Fatalf("DecomposeStrategyVersion(%q) error = nil; rules version %q is a path-traversal alias and must be refused", composed, rv)
+			}
+		})
+	}
+
+	// "..." is a legal, unambiguous directory name — must remain accepted.
+	t.Run("Decompose accepts strategy id ...", func(t *testing.T) {
+		t.Parallel()
+		composed := event.ComposeStrategyVersion("...", "1.0.0", "abc1234")
+		gotID, _, _, err := event.DecomposeStrategyVersion(composed)
+		if err != nil {
+			t.Fatalf("DecomposeStrategyVersion(%q) error = %v; \"...\" is not a traversal alias and must be accepted", composed, err)
+		}
+		if gotID != "..." {
+			t.Fatalf("DecomposeStrategyVersion(%q) strategy id = %q, want %q", composed, gotID, "...")
+		}
+	})
+	t.Run("Validate accepts strategy id ...", func(t *testing.T) {
+		t.Parallel()
+		cfg := validConfiguration()
+		cfg.StrategyID = "..."
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("ConfigurationPayload.Validate() error = %v; \"...\" is not a traversal alias and must be accepted", err)
+		}
+	})
+
+	// Other dot-prefixed and dot-containing identifiers remain accepted.
+	for _, id := range []string{".hidden", "v1.2.3", "turtle.baseline"} {
+		id := id
+		t.Run("Validate accepts "+id, func(t *testing.T) {
+			t.Parallel()
+			cfg := validConfiguration()
+			cfg.StrategyID = id
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("ConfigurationPayload.Validate() error = %v; %q must remain a valid strategy id", err, id)
+			}
+		})
+		t.Run("Decompose accepts "+id, func(t *testing.T) {
+			t.Parallel()
+			composed := event.ComposeStrategyVersion(id, "1.0.0", "abc1234")
+			gotID, _, _, err := event.DecomposeStrategyVersion(composed)
+			if err != nil {
+				t.Fatalf("DecomposeStrategyVersion(%q) error = %v; %q must remain a valid strategy id", composed, err, id)
+			}
+			if gotID != id {
+				t.Fatalf("DecomposeStrategyVersion(%q) strategy id = %q, want %q", composed, gotID, id)
+			}
+		})
 	}
 }
