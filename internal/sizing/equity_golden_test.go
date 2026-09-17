@@ -245,6 +245,19 @@ func TestEquityCampaignLaddersFromTheSlippedFill(t *testing.T) {
 		t.Errorf("NextAddLevel() = %v, want %v (156.125 + 0.5 x 2.5)", rung, equityRungTwo)
 	}
 
+	// The same two derivations from the level the order RESTED at, which is
+	// what makes "measured from the actual fill" load-bearing rather than
+	// decorative: both come out a fraction lower, and the event-seam
+	// fixture's bar 57 turns on the difference.
+	fromLevel, err := sizing.ProtectiveStopLevel(equityEntryLevel, equityN, equityStopMultiple, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("ProtectiveStopLevel(from the resting level) error = %v", err)
+	}
+	if equityClose(fromLevel, equityUnitOneStop) {
+		t.Errorf("a stop measured from the resting level %v is indistinguishable from one measured from the fill %v: this fixture's slippage no longer separates them",
+			equityEntryLevel, equityEntryFill)
+	}
+
 	ladder, err := sizing.AddLadder(equityEntryFill, equityN, 4, sizing.DirectionLong)
 	if err != nil {
 		t.Fatalf("AddLadder() error = %v", err)
