@@ -7,12 +7,22 @@ package replay_test
 // internal/strategy because they are about what replay.Engine plus a
 // Handler guarantee, not about any one strategy rule, and internal/strategy
 // has no reason to import internal/replay's test helpers back. Feeding
-// events straight to a fresh Reducer, with no fill simulator in the loop,
-// is deliberate: a journal's inputs include fills the simulator produced,
-// so this is the reducer's own determinism, which is what replay
-// equivalence actually tests (the simulator's determinism is a separate,
-// stronger property, exercised end to end in cmd/backtest against the
-// committed golden journal).
+// events straight to a fresh Reducer, with no fill SIMULATOR in the loop, is
+// deliberate: a journal's inputs include fills the simulator produced, so
+// this is the reducer's own determinism, which is what replay equivalence
+// actually tests (the simulator's determinism is a separate, stronger
+// property, exercised end to end in cmd/backtest against the committed
+// golden journal). The fills below are hand-authored fixture inputs standing
+// in for what that simulator would have delivered — the same discipline
+// internal/strategy's own event-seam fixtures (campaign_test.go) already
+// follow.
+//
+// propertyFixture (below) is deliberately richer than a fixture that only
+// ever raises and declines Setups: it opens a Campaign, takes an Add, and
+// exits it, because a reducer that only ever evaluates Setups never
+// exercises the Stop Ladder, the Notional Account or the Add Ladder — the
+// code where a wall-clock leak or an ordering dependency does the most
+// damage, since that is where state accumulates across bars.
 
 import (
 	"context"
@@ -23,10 +33,36 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
 const propertyFixtureStrategyVersion = "replay-fixture/1.1.0+test"
+
+// propertyCampaignN is N as the fixture's 20 warm-up bars leave it: every
+// one of them has a True Range of exactly 2 (flatBar's Open/Close sit at the
+// midpoint of High and Low, and each bar's High steps up by 1 from the one
+// before, so every gap term but High-Low itself resolves to 0 or 2 — see
+// flatBar's own doc comment). Twenty identical True Range values seed
+// Wilder's average at exactly that value and hold it there, so N is 2 the
+// moment bar 21 is decided. Asserted, not merely assumed: see
+// TestThePropertyFixtureOpensACampaignTakesAnAddAndExits.
+const propertyCampaignN = 2.0
+
+// propertyEntryFillPrice is what bar 21's proposal actually fills at: above
+// the warmed-up Entry Channel high of 120 (bar 20's own High) — the
+// direction ADR 0013's slippage always pushes a long entry — and BELOW bar
+// 21's own High of 121.5, an ordinary fill inside the bar's range (ADR
+// 0005). The Add Ladder below is measured from this price, never from the
+// level the proposal named (CONTEXT.md: "Add Ladder"), and kept close to
+// bar 21's own High deliberately: were the breakout bar's High to itself
+// clear the first Add rung, opening the Campaign would immediately chain
+// into proposing an Add from THAT SAME bar (openCampaign's own same-bar
+// chain, campaign.go), which is a real and separately-tested behaviour but
+// not the one this fixture is for — it would fold the Add into the entry
+// bar rather than exercising the reducer's handling of a Campaign already
+// open across a later, independent bar.
+const propertyEntryFillPrice = 121.0
 
 // propertyFixtureConfiguration is a small, valid Baseline-shaped
 // configuration: a 20-bar Entry Channel, matching indicator.DefaultPeriod so
@@ -153,14 +189,56 @@ func propertyBarEnvelope(t *testing.T, sequence uint64, bar event.CompletedBarPa
 	}
 }
 
-// signalNeverSurvivesFixture builds 20 warm-up bars (a rising high each day,
-// so True Range is non-zero and the Entry Channel is unambiguous), a bar 21
-// breakout that raises a Signal and a trade proposal, and a bar 22 that does
-// NOT confirm it — its high stays below the channel as bar 21 widened it —
-// so the proposal is superseded rather than filled or renewed. recordedAt
-// computes each envelope's RecordedAt from its EventTime, so a caller can
-// shift it independently of EventTime to test arrival-time independence.
-func signalNeverSurvivesFixture(t *testing.T, recordedAt arrivalSchedule) (cfg event.ConfigurationPayload, envelopes []event.Envelope) {
+// propertyDecisionID mirrors internal/strategy's own (unexported) decisionID
+// so this fixture can name a proposal, or the Campaign it opens, before the
+// run that produces it — exactly what internal/strategy's own fixtures do
+// (testDecisionID, campaign_test.go). Not taken on trust: the assertions
+// below decode the actual emitted envelopes and check their IDs against it.
+func propertyDecisionID(kind, instrumentID string, periodEnd time.Time) string {
+	return fmt.Sprintf("%s:%s:%s", kind, instrumentID, periodEnd.UTC().Format("2006-01-02T15:04:05.000000000Z"))
+}
+
+// propertyFillEnvelope wraps a hand-authored fill (this file's stand-in for
+// the intraday fill simulator, ADR 0005) in an envelope.
+func propertyFillEnvelope(t *testing.T, sequence uint64, fill event.FillPayload, cfg event.ConfigurationPayload, recordedAt time.Time) event.Envelope {
+	t.Helper()
+	payload := mustMarshalT(t, fill)
+	return event.Envelope{
+		ID:                fmt.Sprintf("fill-%d", sequence),
+		Type:              event.FillEventType,
+		SchemaVersion:     event.FillSchemaVersion,
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
+		EventTime:         fill.FilledAt,
+		RecordedAt:        recordedAt,
+		Sequence:          sequence,
+		Source:            "fill-simulator",
+		StrategyVersion:   propertyFixtureStrategyVersion,
+		ConfigurationHash: event.ConfigurationHash(cfg),
+		PayloadHash:       event.HashPayload(payload),
+		Payload:           payload,
+	}
+}
+
+// propertyFixture builds the small property fixture's input stream: 20
+// warm-up bars, a breakout that Signals and is filled (opening a Campaign),
+// a further bar that reaches the Add Ladder's first rung and is filled
+// (adding a Unit), a stop fill that closes the whole Campaign, and — once
+// the instrument is a Setup again (CONTEXT.md: "Campaign") — a fresh
+// breakout whose proposal is NOT confirmed by the bar after it, so it is
+// superseded rather than filled (ADR 0011).
+//
+// This is the shortest sequence found that reaches Campaign-open, an Add
+// and an exit while keeping "a Signal never survives its bar" meaningful:
+// the previous version of this fixture only ever raised a Signal and let it
+// expire, so it never delivered a fill and never opened a Campaign — leaving
+// the Add Ladder, the Stop Ladder and the Notional Account completely
+// unexercised by replay equivalence, exactly where state accumulates across
+// bars and a wall-clock leak or an ordering dependency does the most damage.
+//
+// recordedAt computes each envelope's RecordedAt from its EventTime, so a
+// caller can shift it independently of EventTime to test arrival-time
+// independence.
+func propertyFixture(t *testing.T, recordedAt arrivalSchedule) (cfg event.ConfigurationPayload, envelopes []event.Envelope) {
 	t.Helper()
 	cfg = propertyFixtureConfiguration()
 	envelopes = []event.Envelope{
@@ -169,28 +247,137 @@ func signalNeverSurvivesFixture(t *testing.T, recordedAt arrivalSchedule) (cfg e
 	}
 
 	seq := uint64(3)
+	arrival := 1
+
 	for i := 0; i < 20; i++ {
 		high := 100 + float64(i+1) // 101..120: channel high after warm-up is 120
 		bar := flatBar("AAPL", propertyDay(i+1), high, high-2)
-		envelopes = append(envelopes, propertyBarEnvelope(t, seq, bar, cfg, recordedAt(i+1, bar.PeriodEnd)))
+		envelopes = append(envelopes, propertyBarEnvelope(t, seq, bar, cfg, recordedAt(arrival, bar.PeriodEnd)))
 		seq++
+		arrival++
 	}
 
-	// Bar 21: high 130 exceeds the warmed-up channel high of 120 — a
+	// Bar 21: high 121.5 exceeds the warmed-up channel high of 120 — a
 	// breakout, a Signal, and (this fixture's prices and starting equity
-	// size at least one whole Unit) a trade proposal.
-	breakout := flatBar("AAPL", propertyDay(21), 130, 128)
-	envelopes = append(envelopes, propertyBarEnvelope(t, seq, breakout, cfg, recordedAt(21, breakout.PeriodEnd)))
+	// size at least one whole Unit) a trade proposal. Kept just above the
+	// channel high, rather than far above it, for propertyEntryFillPrice's
+	// own reason: see its doc comment.
+	breakout := flatBar("AAPL", propertyDay(21), 121.5, 119.5)
+	envelopes = append(envelopes, propertyBarEnvelope(t, seq, breakout, cfg, recordedAt(arrival, breakout.PeriodEnd)))
 	seq++
+	arrival++
 
-	// Bar 22: high 125 does not exceed the channel high, now 130 (bars 2-21)
-	// since bar 21 entered the window — not a breakout, so the proposal bar
-	// 21 raised is superseded rather than confirmed. No fill is ever
-	// delivered, matching this ticket's scope: replay equivalence tests the
-	// reducer's own decisions, not whether the fill simulator would have
-	// filled this proposal.
-	quiet := flatBar("AAPL", propertyDay(22), 125, 123)
-	envelopes = append(envelopes, propertyBarEnvelope(t, seq, quiet, cfg, recordedAt(22, quiet.PeriodEnd)))
+	// Unlike the fixture this replaced, bar 21's proposal IS executed: a
+	// one-share partial fill (event.FillPayload's own partial-fill rule)
+	// opens the Campaign without this fixture having to reproduce the
+	// reducer's own sizing arithmetic to name a "correct" quantity.
+	campaignID := propertyDecisionID("campaign", "AAPL", propertyDay(21))
+	entryFill := event.FillPayload{
+		InstrumentID: "AAPL",
+		Kind:         event.FillKindEntry,
+		ProposalID:   propertyDecisionID("proposal", "AAPL", propertyDay(21)),
+		FillID:       "sim-fill-entry",
+		Direction:    event.DirectionLong,
+		Quantity:     1,
+		Price:        propertyEntryFillPrice,
+		Level:        propertyEntryFillPrice,
+		FilledAt:     propertyDay(21),
+	}
+	envelopes = append(envelopes, propertyFillEnvelope(t, seq, entryFill, cfg, recordedAt(arrival, entryFill.FilledAt)))
+	seq++
+	arrival++
+
+	// Bar 22: the Add Ladder's first rung (The Turtle Rules p.19: half a
+	// campaign N above the previous Unit's ACTUAL fill), reached without
+	// also breaching the Protective Stop (117: entry - 2N) or the
+	// already-warm Exit Channel low (110 over the preceding 10 bars, ADR
+	// 0005) — Low stays comfortably above both.
+	rung, err := sizing.NextAddLevel(propertyEntryFillPrice, propertyCampaignN, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("sizing.NextAddLevel() error = %v", err)
+	}
+	// High clears the rung by exactly 1 and no more: enough above rung2 to
+	// propose the Add, but (mirroring propertyEntryFillPrice's own reason)
+	// still short of rung3 — measured from addFillPrice below — so adding
+	// Unit 2 does not itself chain into proposing Unit 3 from this same bar.
+	addBar := flatBar("AAPL", propertyDay(22), rung+1, 119)
+	envelopes = append(envelopes, propertyBarEnvelope(t, seq, addBar, cfg, recordedAt(arrival, addBar.PeriodEnd)))
+	seq++
+	arrival++
+
+	addFillPrice := rung + 0.5
+
+	// The Protective Stop in force when the stop fill arrives: the entry's
+	// own 2N stop, raised by half an N because a second Unit was added
+	// (The Turtle Rules p.23; ADR 0002). Derived through sizing rather
+	// than written down, so the fixture cannot drift from the rule.
+	entryStop, err := sizing.ProtectiveStopLevel(propertyEntryFillPrice, propertyCampaignN, cfg.StopMultiple, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("sizing.ProtectiveStopLevel() error = %v", err)
+	}
+	propertyStopLevel, err := sizing.RaisedStop(entryStop, propertyCampaignN)
+	if err != nil {
+		t.Fatalf("sizing.RaisedStop() error = %v", err)
+	}
+	// ADR 0013: slippage is 0.05N against the trader, so a long stop fills
+	// BELOW its level.
+	propertyStopSlippage := cfg.SlippageN * propertyCampaignN
+	addFill := event.FillPayload{
+		InstrumentID:    "AAPL",
+		Kind:            event.FillKindAdd,
+		CampaignID:      campaignID,
+		ProposalID:      propertyDecisionID("add-proposal-unit-2", "AAPL", propertyDay(22)),
+		FillID:          "sim-fill-add",
+		Direction:       event.DirectionLong,
+		Quantity:        1,
+		Price:           addFillPrice,
+		Level:           rung,
+		SlippageApplied: addFillPrice - rung,
+		FilledAt:        propertyDay(22),
+	}
+	envelopes = append(envelopes, propertyFillEnvelope(t, seq, addFill, cfg, recordedAt(arrival, addFill.FilledAt)))
+	seq++
+	arrival++
+
+	// The exit: one stop fill closing BOTH Units at once (The Turtle Rules
+	// p.19's "all four could be added in one day" allowance, mirrored here
+	// for closing) — the shortest way to reach an exit without a further
+	// bar to breach the Exit Channel. A stop fill's price is never checked
+	// against any level (event.FillPayload's own doc comment), so this
+	// fixture's exit needs no further arithmetic.
+	stopFill := event.FillPayload{
+		InstrumentID:    "AAPL",
+		Kind:            event.FillKindStop,
+		CampaignID:      campaignID,
+		FillID:          "sim-fill-stop",
+		UnitIDs:         []string{"sim-fill-entry", "sim-fill-add"},
+		Direction:       event.DirectionLong,
+		Quantity:        2,
+		Price:           propertyStopLevel - propertyStopSlippage,
+		Level:           propertyStopLevel,
+		SlippageApplied: propertyStopSlippage,
+		FilledAt:        propertyDay(22),
+	}
+	envelopes = append(envelopes, propertyFillEnvelope(t, seq, stopFill, cfg, recordedAt(arrival, stopFill.FilledAt)))
+	seq++
+	arrival++
+
+	// The Campaign has exited, so AAPL is a Setup again (CONTEXT.md:
+	// "Campaign"). Bar 23 is a fresh breakout — its high of 300 clears
+	// every high folded into the Entry Channel so far (bar 22's rung+1 is
+	// the largest) — raising a second Signal and proposal.
+	freshBreakout := flatBar("AAPL", propertyDay(23), 300, 200)
+	envelopes = append(envelopes, propertyBarEnvelope(t, seq, freshBreakout, cfg, recordedAt(arrival, freshBreakout.PeriodEnd)))
+	seq++
+	arrival++
+
+	// Bar 24: high 250 does not exceed the channel high, now 300 (bar 23
+	// entered the window) — not a breakout, so the proposal bar 23 raised
+	// is superseded rather than confirmed. This is the fixture's "a Signal
+	// never survives its bar" case (ADR 0011): no fill is ever delivered
+	// for it.
+	quiet := flatBar("AAPL", propertyDay(24), 250, 248)
+	envelopes = append(envelopes, propertyBarEnvelope(t, seq, quiet, cfg, recordedAt(arrival, quiet.PeriodEnd)))
 
 	return cfg, envelopes
 }
@@ -249,7 +436,7 @@ func runFixture(t *testing.T, cfg event.ConfigurationPayload, inputs []event.Env
 func TestReplayTwiceIsByteIdentical(t *testing.T) {
 	t.Parallel()
 
-	cfg, inputs := signalNeverSurvivesFixture(t, arrivedWhenItHappened)
+	cfg, inputs := propertyFixture(t, arrivedWhenItHappened)
 
 	first := runFixture(t, cfg, inputs)
 	second := runFixture(t, cfg, inputs)
@@ -259,6 +446,76 @@ func TestReplayTwiceIsByteIdentical(t *testing.T) {
 	}
 	if len(first) == 0 {
 		t.Fatal("the fixture produced no decisions at all; this test would pass vacuously")
+	}
+}
+
+// leakyCounterHandler is a deliberately wrong Handler: every emission is
+// stamped with *counter, incremented on each call. Two instances built with
+// counter POINTING AT THE SAME int model state that leaks across what
+// should be two independent, freshly constructed reducers (a package-level
+// cache or singleton is the realistic shape of this bug); two instances each
+// given their OWN int model the correct shape — genuinely fresh construction.
+type leakyCounterHandler struct{ counter *int }
+
+func (h *leakyCounterHandler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope, error) {
+	*h.counter++
+	payload := json.RawMessage(fmt.Sprintf(`{"call_count":%d}`, *h.counter))
+	return []event.Envelope{{
+		ID:                "count-" + in.ID,
+		Type:              "test.counted",
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
+		SchemaVersion:     1,
+		EventTime:         in.EventTime,
+		RecordedAt:        in.RecordedAt,
+		Source:            "counting-fixture",
+		StrategyVersion:   in.StrategyVersion,
+		ConfigurationHash: in.ConfigurationHash,
+		PayloadHash:       event.HashPayload(payload),
+		Payload:           payload,
+	}}, nil
+}
+
+func runCountingHandler(t *testing.T, handler *leakyCounterHandler, inputs []event.Envelope) []event.Envelope {
+	t.Helper()
+	engine, err := replay.New(handler)
+	if err != nil {
+		t.Fatalf("replay.New() error = %v", err)
+	}
+	emitted, err := engine.Run(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("Engine.Run() error = %v", err)
+	}
+	return emitted
+}
+
+// TestTheReplayTwiceComparisonCatchesACounterSharedAcrossFreshInstances is
+// the test for the test, for replay-twice identity — mirroring
+// TestTheArrivalTimeComparisonCatchesAnIntervalLeak's role for arrival-time
+// independence: it proves TestReplayTwiceIsByteIdentical's own comparison
+// (replay.Equivalent over two independent runs) actually catches a
+// non-deterministic handler, not only that a correct one passes.
+func TestTheReplayTwiceComparisonCatchesACounterSharedAcrossFreshInstances(t *testing.T) {
+	t.Parallel()
+
+	_, inputs := propertyFixture(t, arrivedWhenItHappened)
+
+	// The defect: two handler instances sharing ONE counter, so the second
+	// "fresh" instance's first emission carries a count left over from the
+	// first instance's run.
+	shared := new(int)
+	first := runCountingHandler(t, &leakyCounterHandler{counter: shared}, inputs)
+	second := runCountingHandler(t, &leakyCounterHandler{counter: shared}, inputs)
+	if d := replay.Equivalent(first, second); d == nil {
+		t.Fatal("two handler instances sharing one counter were NOT caught as diverging; the replay-twice comparison is not testing what it claims")
+	}
+
+	// The control: two genuinely fresh instances, each with its own counter
+	// starting at zero, must be byte-identical — the case a correct reducer
+	// (and TestReplayTwiceIsByteIdentical, against the real one) is in.
+	third := runCountingHandler(t, &leakyCounterHandler{counter: new(int)}, inputs)
+	fourth := runCountingHandler(t, &leakyCounterHandler{counter: new(int)}, inputs)
+	if d := replay.Equivalent(third, fourth); d != nil {
+		t.Fatalf("two independently-counted runs diverged unexpectedly:\n want %+v\n got  %+v", d.Want, d.Got)
 	}
 }
 
@@ -279,8 +536,8 @@ func TestReplayTwiceIsByteIdentical(t *testing.T) {
 func TestArrivalTimeIndependence(t *testing.T) {
 	t.Parallel()
 
-	cfg, original := signalNeverSurvivesFixture(t, arrivedWhenItHappened)
-	_, shifted := signalNeverSurvivesFixture(t, arrivedOnADifferentSchedule)
+	cfg, original := propertyFixture(t, arrivedWhenItHappened)
+	_, shifted := propertyFixture(t, arrivedOnADifferentSchedule)
 
 	assertArrivalsAreRescheduledNotTranslated(t, original, shifted)
 
@@ -385,7 +642,7 @@ func TestTheArrivalTimeComparisonCatchesAnIntervalLeak(t *testing.T) {
 // buildArrivals returns the fixture's input stream under one arrival schedule.
 func buildArrivals(t *testing.T, schedule arrivalSchedule) []event.Envelope {
 	t.Helper()
-	_, envelopes := signalNeverSurvivesFixture(t, schedule)
+	_, envelopes := propertyFixture(t, schedule)
 	return envelopes
 }
 
@@ -454,15 +711,19 @@ func (h *intervalLeakingHandler) Apply(_ context.Context, in event.Envelope) ([]
 	}}, nil
 }
 
-// TestASignalNeverSurvivesItsBar: bar 21's Signal and the proposal it caused
-// belong to bar 21 alone. Bar 22 does not renew, repeat, or extend it — it
-// only records that the proposal is now dead, dated to the bar it was
-// raised on (PeriodEnd) even though the supersession is only observable once
-// bar 22 arrives (ExpiredAt) — CONTEXT.md: "Signal", ADR 0011.
+// TestASignalNeverSurvivesItsBar: each Signal's own bar is the only bar it
+// belongs to. Two Signals fire in this fixture — bar 21's, which is FILLED
+// (opening the Campaign the rest of the fixture exercises), and bar 23's,
+// which is not. Only the second is this test's subject: a Signal that gets
+// filled has been acted on, not left to survive past its bar. Bar 24 does
+// not renew, repeat, or extend bar 23's Signal — it only records that the
+// proposal it raised is now dead, dated to the bar it was raised on
+// (PeriodEnd) even though the supersession is only observable once bar 24
+// arrives (ExpiredAt) — CONTEXT.md: "Signal", ADR 0011.
 func TestASignalNeverSurvivesItsBar(t *testing.T) {
 	t.Parallel()
 
-	cfg, inputs := signalNeverSurvivesFixture(t, arrivedWhenItHappened)
+	cfg, inputs := propertyFixture(t, arrivedWhenItHappened)
 	emitted := runFixture(t, cfg, inputs)
 
 	var signals []event.Envelope
@@ -480,28 +741,104 @@ func TestASignalNeverSurvivesItsBar(t *testing.T) {
 		}
 	}
 
-	if len(signals) != 1 {
-		t.Fatalf("got %d Signal(s), want exactly 1 (bar 22 must not repeat or renew bar 21's)", len(signals))
+	if len(signals) != 2 {
+		t.Fatalf("got %d Signal(s), want exactly 2 (bar 21's, filled, and bar 23's, left to expire)", len(signals))
 	}
 	if !signals[0].EventTime.Equal(propertyDay(21)) {
-		t.Fatalf("the Signal's EventTime is %s, want bar 21 (%s)", signals[0].EventTime, propertyDay(21))
+		t.Fatalf("the first Signal's EventTime is %s, want bar 21 (%s)", signals[0].EventTime, propertyDay(21))
+	}
+	if !signals[1].EventTime.Equal(propertyDay(23)) {
+		t.Fatalf("the second Signal's EventTime is %s, want bar 23 (%s)", signals[1].EventTime, propertyDay(23))
 	}
 
 	if len(expiries) != 1 {
-		t.Fatalf("got %d expiry(ies), want exactly 1 (bar 21's unfilled proposal, superseded by bar 22)", len(expiries))
+		t.Fatalf("got %d expiry(ies), want exactly 1 (bar 23's unfilled proposal, superseded by bar 24; bar 21's proposal was filled, not expired)", len(expiries))
 	}
 	expiry := expiries[0]
 	if expiry.Reason != event.ExpiryReasonSupersededByNextBar {
 		t.Fatalf("expiry reason = %q, want %q", expiry.Reason, event.ExpiryReasonSupersededByNextBar)
 	}
-	// PeriodEnd names the bar the expired proposal BELONGED to — bar 21,
-	// where the Signal fired — never bar 22, which only supersedes it. A
-	// Signal "surviving its bar" would look exactly like this field naming
-	// the wrong bar.
-	if !expiry.PeriodEnd.Equal(propertyDay(21)) {
-		t.Fatalf("expiry PeriodEnd = %s, want bar 21 (%s): the proposal belongs to the bar that raised it, not the bar that superseded it", expiry.PeriodEnd, propertyDay(21))
+	// PeriodEnd names the bar the expired proposal BELONGED to — bar 23,
+	// where the second Signal fired — never bar 24, which only supersedes
+	// it. A Signal "surviving its bar" would look exactly like this field
+	// naming the wrong bar.
+	if !expiry.PeriodEnd.Equal(propertyDay(23)) {
+		t.Fatalf("expiry PeriodEnd = %s, want bar 23 (%s): the proposal belongs to the bar that raised it, not the bar that superseded it", expiry.PeriodEnd, propertyDay(23))
 	}
-	if !expiry.ExpiredAt.Equal(propertyDay(22)) {
-		t.Fatalf("expiry ExpiredAt = %s, want bar 22 (%s): supersession is only observable once the next bar arrives", expiry.ExpiredAt, propertyDay(22))
+	if !expiry.ExpiredAt.Equal(propertyDay(24)) {
+		t.Fatalf("expiry ExpiredAt = %s, want bar 24 (%s): supersession is only observable once the next bar arrives", expiry.ExpiredAt, propertyDay(24))
+	}
+}
+
+// onlyEmissionOfType asserts exactly one envelope of typ exists in emitted
+// and returns it.
+func onlyEmissionOfType(t *testing.T, emitted []event.Envelope, typ string) event.Envelope {
+	t.Helper()
+	var found []event.Envelope
+	for _, e := range emitted {
+		if e.Type == typ {
+			found = append(found, e)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("got %d emission(s) of type %q, want exactly 1", len(found), typ)
+	}
+	return found[0]
+}
+
+// TestThePropertyFixtureOpensACampaignTakesAnAddAndExits is this fixture's
+// own real deliverable: an explicit assertion that it reaches Campaign-open,
+// an Add and an exit, so it cannot silently regress to raising and declining
+// Setups alone — this file's own header names the defect that would
+// reproduce.
+func TestThePropertyFixtureOpensACampaignTakesAnAddAndExits(t *testing.T) {
+	t.Parallel()
+
+	cfg, inputs := propertyFixture(t, arrivedWhenItHappened)
+	emitted := runFixture(t, cfg, inputs)
+
+	opened := onlyEmissionOfType(t, emitted, event.CampaignOpenedEventType)
+	var openedPayload event.CampaignOpenedPayload
+	if err := json.Unmarshal(opened.Payload, &openedPayload); err != nil {
+		t.Fatalf("decode %s: %v", opened.ID, err)
+	}
+	if openedPayload.CampaignN != propertyCampaignN {
+		t.Fatalf("Campaign-opened CampaignN = %v, want %v (this fixture's own hand-derived N; a mismatch means the warm-up bars no longer produce the N the Add rung above was computed from)", openedPayload.CampaignN, propertyCampaignN)
+	}
+	if openedPayload.FilledQuantity != 1 {
+		t.Errorf("Campaign-opened FilledQuantity = %d, want 1", openedPayload.FilledQuantity)
+	}
+	if openedPayload.EntryPrice != propertyEntryFillPrice {
+		t.Errorf("Campaign-opened EntryPrice = %v, want the entry fill's own %v", openedPayload.EntryPrice, propertyEntryFillPrice)
+	}
+
+	added := onlyEmissionOfType(t, emitted, event.CampaignUnitAddedEventType)
+	var addedPayload event.CampaignUnitAddedPayload
+	if err := json.Unmarshal(added.Payload, &addedPayload); err != nil {
+		t.Fatalf("decode %s: %v", added.ID, err)
+	}
+	if addedPayload.CampaignID != openedPayload.CampaignID {
+		t.Errorf("Campaign-unit-added CampaignID = %q, want the opened Campaign's own %q", addedPayload.CampaignID, openedPayload.CampaignID)
+	}
+	if addedPayload.Units != 2 {
+		t.Errorf("Campaign-unit-added Units = %d, want 2 (one Add on top of the opening Unit)", addedPayload.Units)
+	}
+	if addedPayload.Quantity != 1 {
+		t.Errorf("Campaign-unit-added Quantity = %d, want 1", addedPayload.Quantity)
+	}
+
+	exited := onlyEmissionOfType(t, emitted, event.CampaignExitedEventType)
+	var exitedPayload event.CampaignExitedPayload
+	if err := json.Unmarshal(exited.Payload, &exitedPayload); err != nil {
+		t.Fatalf("decode %s: %v", exited.ID, err)
+	}
+	if exitedPayload.CampaignID != openedPayload.CampaignID {
+		t.Errorf("Campaign-exited CampaignID = %q, want the opened Campaign's own %q", exitedPayload.CampaignID, openedPayload.CampaignID)
+	}
+	if exitedPayload.Reason != event.ExitReasonStop {
+		t.Errorf("Campaign-exited Reason = %q, want %q", exitedPayload.Reason, event.ExitReasonStop)
+	}
+	if exitedPayload.Quantity != 2 {
+		t.Errorf("Campaign-exited Quantity = %d, want 2 (both the opening Unit and the Add, stopped out together)", exitedPayload.Quantity)
 	}
 }
