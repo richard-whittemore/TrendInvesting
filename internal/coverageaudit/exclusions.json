@@ -28,6 +28,14 @@
       "count": 1
     },
     {
+      "file": "internal/replay/divergence_report.go",
+      "function": "numberIsFloat64Safe",
+      "statement": "return false",
+      "category": "unreachable-by-invariant",
+      "count": 2,
+      "reason": "Both `!ok` guards parse a string this function already knows is well-formed. The first parses n's own literal: json.Number's only producer in this codebase is a json.Decoder with UseNumber, whose contract is to hand back a string that already matches JSON's number grammar (RFC 8259) — a strict subset of the decimal-or-exponent syntax big.Rat.SetString accepts — so it always succeeds. The second parses strconv.FormatFloat's own output for f, and f is finite whenever n.Float64() returns a nil error on the line immediately above (ParseFloat's only route to a non-finite result is through a non-nil error), so FormatFloat's 'g' output is always a valid, finite decimal-or-exponent literal, which SetString also always accepts. Reachable the moment either producer's own contract stops holding."
+    },
+    {
       "file": "internal/sizing/sizing.go",
       "function": "SizeUnit",
       "statement": "return Unit{}, unrecognisedModeError(in.Mode)",

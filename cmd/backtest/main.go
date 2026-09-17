@@ -1,12 +1,14 @@
 // Command backtest runs a declared configuration over a bar fixture and
-// writes the run's journal, verifies a journal it wrote earlier, or checks
-// one for replay equivalence.
+// writes the run's journal, verifies a journal it wrote earlier, checks one
+// for replay equivalence, or diffs two journals' decisions against each
+// other.
 //
 //	backtest -config <configuration.json> -bars <bars.json> -out <journal.jsonl>
 //	     [-registry <runs/> -run-id <id> [-variant <id>]]
 //	backtest -verify <journal.jsonl>
 //	backtest -replay <journal.jsonl>
 //	backtest -registry <runs/> -runs <configuration-hash>
+//	backtest -diff-want <journal.jsonl> -diff-got <journal.jsonl>
 //
 // It is composition only: it wires the reducer, the fill simulator, the bar
 // source and the journal writer together and contains no rules
@@ -74,8 +76,21 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	// against the operations that would ignore it.
 	variant := flags.String("variant", "", "the Variant this run declares; defaults to the Baseline")
 	runsHash := flags.String("runs", "", "configuration hash whose recorded runs to list instead of running a backtest")
+	diffWantPath := flags.String("diff-want", "", "path of the reference journal to diff against another (used together with -diff-got)")
+	diffGotPath := flags.String("diff-got", "", "path of the candidate journal to diff against the reference (used together with -diff-want)")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+
+	// -diff-want and -diff-got name one operation between them, so either
+	// both are given or neither is. An audit command must not exit zero
+	// having done something other than what was asked (docs/development.md
+	// principle 4, fail closed), and half an operation is that: a lone
+	// -diff-want would fall through to a backtest run. Checked before
+	// checkOneOperation, which can say "these flags name more than one
+	// operation" but not "half of one operation was given".
+	if (*diffWantPath == "") != (*diffGotPath == "") {
+		return errors.New("backtest: -diff-want and -diff-got must be given together")
 	}
 
 	// One invocation performs exactly one operation. Letting a mode win by
@@ -91,7 +106,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	if *runsHash == "" {
 		runFlags = append(runFlags, named{"-registry", *registryPath})
 	}
-	if err := checkOneOperation([]named{{"-verify", *verifyPath}, {"-replay", *replayPath}, {"-runs", *runsHash}}, runFlags); err != nil {
+	if err := checkOneOperation([]named{{"-verify", *verifyPath}, {"-replay", *replayPath}, {"-runs", *runsHash}, {"-diff-want and -diff-got", *diffWantPath}}, runFlags); err != nil {
 		return err
 	}
 
@@ -106,6 +121,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return errors.New("backtest: -runs reads a registry; -registry names which one")
 		}
 		return listRuns(*registryPath, *runsHash, out)
+	}
+	if *diffWantPath != "" {
+		return doDiff(*diffWantPath, *diffGotPath, out)
 	}
 
 	var missing []error
