@@ -82,7 +82,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	// A string rather than an int for the same reason -variant is: a flag
 	// that always carries a value cannot be checked against the operations
 	// that would ignore it.
-	maxRecords := flags.String("max-records", "", "the most records this run may hold in memory before its journal is written; defaults to 2000000")
+	maxRecords := flags.String("max-records", "", "bounds the records this run holds in memory before its journal is written, checked between inputs; defaults to 2000000")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -188,8 +188,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}, out)
 }
 
-// parseRecordBound reads -max-records: the most records a run may hold in
-// memory before its journal is written (ADR 0017). An invocation that named
+// parseRecordBound reads -max-records: the bound on the records a run holds
+// in memory before its journal is written (ADR 0017). An invocation that named
 // no bound reads as zero, which options.recordBound resolves to the default.
 func parseRecordBound(value string) (int, error) {
 	if value == "" {
@@ -197,7 +197,7 @@ func parseRecordBound(value string) (int, error) {
 	}
 	bound, err := strconv.Atoi(value)
 	if err != nil || bound < 1 {
-		return 0, fmt.Errorf("backtest: -max-records is the most records a run may hold in memory before its journal is written, and must be a whole number of at least 1, not %q", value)
+		return 0, fmt.Errorf("backtest: -max-records bounds the records a run holds in memory before its journal is written, and must be a whole number of at least 1, not %q", value)
 	}
 	return bound, nil
 }

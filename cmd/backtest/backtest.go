@@ -50,14 +50,16 @@ type options struct {
 	runID        string
 	variant      string
 	build        string
-	// maxRecords is the most records this run may hold in memory before its
+	// maxRecords bounds the records this run holds in memory before its
 	// journal is written. Zero is an invocation that named no bound.
 	maxRecords int
 }
 
-// recordBound is the most records this run may hold in memory before its
-// journal is written (ADR 0017), from the invocation or the default when it
-// named none.
+// recordBound bounds the records this run holds in memory before its journal
+// is written (ADR 0017), from the invocation or the default when it named
+// none. The bound is checked between inputs, so a run exceeds it by the
+// decisions of the input that reached it, and by no more than
+// journal.MaxEmissionsPerInput.
 func (o options) recordBound() int {
 	if o.maxRecords < 1 {
 		return journal.DefaultMaxRecords
