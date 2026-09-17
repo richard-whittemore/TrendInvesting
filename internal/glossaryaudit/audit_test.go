@@ -97,6 +97,11 @@ func TestCitedTermsFindsOnlyGenuineCitations(t *testing.T) {
 			want: []string{"Notional Account"},
 		},
 		{
+			name: "compound citation checks both the header and its quoted body prose",
+			text: `the Baseline has no partial exit (CONTEXT.md: "Campaign" — "not a Unit, is what gets entered, added to, stopped out, and exited").`,
+			want: []string{"Campaign", "not a Unit, is what gets entered, added to, stopped out, and exited"},
+		},
+		{
 			name: "term after intervening prose",
 			text: `a stop at or above entry is a legitimate break-even or profit-protecting level (CONTEXT.md: a Unit in that state is "risk-free"), not a corrupted one.`,
 			want: []string{"risk-free"},
@@ -148,6 +153,72 @@ func TestResolvesAcceptsHeadersAndVerbatimBody(t *testing.T) {
 	}
 	if resolves("risk-free", headers, body) {
 		t.Error(`resolves("risk-free") = true, want false (not defined anywhere in the fixture)`)
+	}
+}
+
+// TestGlossaryTermsScopesBodyToDefinitionProse pins the fix for a citation
+// that could "resolve" against prose outside any definition: the file's
+// intro paragraph, a section heading, or another entry's "_Avoid_" synonym
+// note. Resolving must mean the term's own definition says this, not these
+// words appear somewhere in the file.
+func TestGlossaryTermsScopesBodyToDefinitionProse(t *testing.T) {
+	t.Parallel()
+	const fixture = "This glossary is deliberately opinionated about strict definitions.\n\n" +
+		"### Positions\n\n" +
+		"**Campaign**:\n" +
+		"The complete life of a position in one instrument.\n" +
+		"_Avoid_: trade, position (both ambiguous between a Unit and the whole Campaign).\n\n" +
+		"**Unit**:\nOne indivisible increment of a position.\n"
+	headers, body := glossaryTerms(fixture)
+
+	if resolves("deliberately opinionated about strict definitions", headers, body) {
+		t.Error(`resolves(intro prose) = true, want false: the file's intro is not any term's own definition`)
+	}
+	if resolves("Positions", headers, body) {
+		t.Error(`resolves(a section heading) = true, want false: a section heading is not a definition`)
+	}
+	if resolves("ambiguous between a Unit and the whole Campaign", headers, body) {
+		t.Error(`resolves(an _Avoid_ note) = true, want false: a synonym warning is not the definition itself`)
+	}
+	if !resolves("The complete life of a position in one instrument", headers, body) {
+		t.Error(`resolves(Campaign's own definition) = false, want true`)
+	}
+}
+
+// TestCompoundCitationCatchesAFabricatedSecondQuotation demonstrates the
+// fix for the defect this package exists to close: a compound citation that
+// names a header and then separately quotes that header's own body prose
+// must have EVERY quotation checked, not only the first. A real term named
+// first must never let a fabricated quotation following it escape — which
+// is exactly the shape the one real fabrication this PR fixed (in
+// exit_proposal.go) took.
+func TestCompoundCitationCatchesAFabricatedSecondQuotation(t *testing.T) {
+	t.Parallel()
+	const fixture = "**Campaign**:\nThe complete life of a position in one instrument, from the first Unit's entry to the exit of the last. A Campaign, not a Unit, is what gets entered, added to, stopped out, and exited.\n"
+	headers, body := glossaryTerms(fixture)
+
+	genuine := citedTerms(`the Baseline has no partial exit (CONTEXT.md: "Campaign" — "not a Unit, is what gets entered, added to, stopped out, and exited").`)
+	if len(genuine) != 2 {
+		t.Fatalf("citedTerms found %d terms in the genuine compound citation, want 2: %v", len(genuine), genuine)
+	}
+	for _, term := range genuine {
+		if !resolves(term, headers, body) {
+			t.Errorf("resolves(%q) = false, want true: both quotations in a genuine compound citation should resolve", term)
+		}
+	}
+
+	// Same shape, but the second quotation is fabricated: a real term
+	// ("Campaign") still comes first, exactly as it did in the escaped
+	// defect, and only the body text after the dash is invented.
+	fabricated := citedTerms(`the Baseline has no partial exit (CONTEXT.md: "Campaign" — "not a Unit, but the whole position").`)
+	if len(fabricated) != 2 {
+		t.Fatalf("citedTerms found %d terms in the fabricated compound citation, want 2: %v", len(fabricated), fabricated)
+	}
+	if !resolves(fabricated[0], headers, body) {
+		t.Errorf("resolves(%q) = false, want true: the first quotation names a real header", fabricated[0])
+	}
+	if resolves(fabricated[1], headers, body) {
+		t.Errorf("resolves(%q) = true, want false: this is the fabricated quotation a compound citation must still catch", fabricated[1])
 	}
 }
 
