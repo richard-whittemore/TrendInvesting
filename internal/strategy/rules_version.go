@@ -9,7 +9,9 @@ package strategy
 // refactor, a performance change, or any other change that leaves every
 // existing journal replayable byte-identically. It composes into
 // Envelope.StrategyVersion alongside the running configuration's StrategyID
-// and the build (event.ComposeStrategyVersion).
+// and the build (event.ComposeStrategyVersion). It shares StrategyID's
+// [A-Za-z0-9._-]{1,64} constraint to be safely usable as a directory name
+// (ADR 0012).
 //
 // Replay equivalence compares two runs on this value alone: two builds
 // sharing a RulesVersion must replay each other's journals byte-identically,

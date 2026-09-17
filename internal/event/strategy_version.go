@@ -2,12 +2,17 @@ package event
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
 // StrategyVersionDelimiters are the two characters ADR 0016 makes structural
 // in a composed StrategyVersion.
 const StrategyVersionDelimiters = "/+"
+
+// validIdentifierPattern is the permitted character set and length for both
+// a StrategyID and a RulesVersion.
+var validIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // ComposeStrategyVersion returns the Envelope.StrategyVersion this project
 // stamps on every emission: "<strategy-id>/<rules-version>+<build>" (ADR
@@ -44,6 +49,12 @@ func DecomposeStrategyVersion(strategyVersion string) (strategyID, rulesVersion,
 	}
 	if strings.Contains(rules, "/") {
 		return "", "", "", fmt.Errorf("event: strategy version %q does not decompose unambiguously: the rules version reads as %q, so the strategy id carried a %q", strategyVersion, rules, "/")
+	}
+	if !validIdentifierPattern.MatchString(id) {
+		return "", "", "", fmt.Errorf("event: strategy version %q decomposes to a strategy id %q that is not a valid identifier (must match %s)", strategyVersion, id, validIdentifierPattern)
+	}
+	if !validIdentifierPattern.MatchString(rules) {
+		return "", "", "", fmt.Errorf("event: strategy version %q decomposes to a rules version %q that is not a valid identifier (must match %s)", strategyVersion, rules, validIdentifierPattern)
 	}
 	return id, rules, buildPart, nil
 }

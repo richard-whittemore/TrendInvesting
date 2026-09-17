@@ -103,6 +103,9 @@ type NotionalAccountConfig struct {
 // 0016) derives from exactly this payload plus its schema version — see
 // ConfigurationHash.
 type ConfigurationPayload struct {
+	// StrategyID is the declared identifier for this configuration. It must
+	// match [A-Za-z0-9._-]{1,64} to be safely usable as a run registry
+	// directory name (ADR 0012).
 	StrategyID             string     `json:"strategy_id"`
 	SizingMode             SizingMode `json:"sizing_mode"`
 	UnitVolatilityFraction float64    `json:"unit_volatility_fraction"`
@@ -179,6 +182,8 @@ func (c ConfigurationPayload) Validate() error {
 		// mismatch that never happened — blaming the journal for a change in
 		// the engine. Rejecting the id here is what keeps that unreachable.
 		errs = append(errs, fmt.Errorf("strategy id %q must not contain any of %q, which separate the parts of a strategy version", c.StrategyID, StrategyVersionDelimiters))
+	case !validIdentifierPattern.MatchString(c.StrategyID):
+		errs = append(errs, fmt.Errorf("strategy id %q is not a valid identifier (must match %s)", c.StrategyID, validIdentifierPattern))
 	}
 	switch c.SizingMode {
 	case SizingModeVolatilityNormalised, SizingModeFixedRiskAtStop:
