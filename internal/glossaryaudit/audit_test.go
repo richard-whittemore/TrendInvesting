@@ -87,9 +87,14 @@ func TestCitedTermsFindsOnlyGenuineCitations(t *testing.T) {
 			want: []string{"Completed bar"},
 		},
 		{
-			name: "single-quoted term after a possessive citation",
+			name: "single-quoted term after a colon citation",
 			text: `bar-count warm-up (CONTEXT.md: 'Completed bar') is complete.`,
 			want: []string{"Completed bar"},
+		},
+		{
+			name: "double-quoted term after a possessive citation",
+			text: `CONTEXT.md's "Notional Account" entry exists precisely because the two are not the same figure.`,
+			want: []string{"Notional Account"},
 		},
 		{
 			name: "term after intervening prose",
