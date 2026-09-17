@@ -29,36 +29,78 @@ var headerPattern = regexp.MustCompile(`(?m)^\*\*([^*]+)\*\*:`)
 // quoted term, in either form this codebase uses: a colon then a quoted
 // term (CONTEXT.md: "N"), or a possessive apostrophe-s then a quoted term
 // (CONTEXT.md's "N"). A short run of ordinary prose is allowed between the
-// citation and the quote, since some comments read "a Unit in that state
-// is" between the colon and its quoted term rather than quoting
+// citation and its first quote, since some comments read "a Unit in that
+// state is" between the colon and its quoted term rather than quoting
 // immediately — bounded to 40 characters, well past the longest existing
 // case and far short of a second, unrelated citation such as an ADR's own
 // quoted rule.
 var citationPattern = regexp.MustCompile(`CONTEXT\.md(?:'s|:)[^"'\n]{0,40}(["'])([^"']+)['"]`)
 
-// glossaryTerms returns CONTEXT.md's own header terms and its full raw text,
-// the latter so a citation may also quote a defined term's body prose
-// verbatim (e.g. Protective Stop's "Every open Campaign has one at all
-// times") without that phrase needing to be a heading of its own.
+// continuationPattern matches a second (or later) quotation chained onto a
+// citation citationPattern already matched: a compound citation such as
+// CONTEXT.md: "Campaign" — "not a Unit, is what gets entered, added to,
+// stopped out, and exited" names one header and then separately quotes that
+// header's own definition verbatim, and BOTH quotations are a claim this
+// audit must check — the fabricated instance this package exists to catch
+// took exactly this shape, with a genuine term first and the fabricated
+// text second. The gap before the next quote is restricted to whitespace,
+// dashes and list punctuation only — no letters, digits or colon — so a
+// genuinely new attribution (the "; ADR 0009: " that introduces an
+// unrelated ADR quotation) can never be mistaken for a continuation of this
+// citation: reaching a letter before a quote stops the chain.
+var continuationPattern = regexp.MustCompile(`^[\s—\-,;]{0,10}(["'])([^"']+)['"]`)
+
+// glossaryTerms returns CONTEXT.md's own header terms and the concatenated
+// prose of each entry's own definition — never the file's raw text, so a
+// citation's body quote can only resolve against what a term's own entry
+// actually says (see resolves), not against a heading elsewhere, the
+// file's intro paragraph, or another entry's "_Avoid_" synonym note. Each
+// entry's span runs from its own "**Term**:" heading to the next heading (or
+// EOF); the "_Avoid_" line that convention always places last in that span,
+// when present, is stripped before the span is kept, since a citation
+// resolving means the definition says this, not the note warning readers off
+// a near-synonym does.
 func glossaryTerms(contextMD string) (headers map[string]bool, body string) {
 	headers = make(map[string]bool)
-	for _, m := range headerPattern.FindAllStringSubmatch(contextMD, -1) {
-		headers[m[1]] = true
+	locs := headerPattern.FindAllStringSubmatchIndex(contextMD, -1)
+	defs := make([]string, 0, len(locs))
+	for i, loc := range locs {
+		headers[contextMD[loc[2]:loc[3]]] = true
+		start, end := loc[1], len(contextMD)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		def := contextMD[start:end]
+		if avoid := strings.Index(def, "_Avoid_"); avoid >= 0 {
+			def = def[:avoid]
+		}
+		defs = append(defs, def)
 	}
-	return headers, contextMD
+	return headers, strings.Join(defs, "\n")
 }
 
-// citedTerms extracts every term a comment's text cites CONTEXT.md for. An
-// *ast.CommentGroup's own Text() strips "//" markers but keeps each source
-// line's own newline, so a quoted term gofmt wrapped across two comment
-// lines (e.g. "Delisting\nExit") would otherwise read as two words neither
-// side can resolve; collapsing all whitespace to single spaces first reads
-// it the way a person reading the rendered comment would.
+// citedTerms extracts every term a comment's text cites CONTEXT.md for,
+// including every quotation chained onto a compound citation, not only its
+// first (see continuationPattern). An *ast.CommentGroup's own Text() strips
+// "//" markers but keeps each source line's own newline, so a quoted term
+// gofmt wrapped across two comment lines (e.g. "Delisting\nExit") would
+// otherwise read as two words neither side can resolve; collapsing all
+// whitespace to single spaces first reads it the way a person reading the
+// rendered comment would.
 func citedTerms(text string) []string {
 	flat := strings.Join(strings.Fields(text), " ")
 	var terms []string
-	for _, m := range citationPattern.FindAllStringSubmatch(flat, -1) {
-		terms = append(terms, m[2])
+	for _, m := range citationPattern.FindAllStringSubmatchIndex(flat, -1) {
+		terms = append(terms, flat[m[4]:m[5]])
+		pos := m[1]
+		for {
+			cont := continuationPattern.FindStringSubmatchIndex(flat[pos:])
+			if cont == nil {
+				break
+			}
+			terms = append(terms, flat[pos+cont[4]:pos+cont[5]])
+			pos += cont[1]
+		}
 	}
 	return terms
 }
