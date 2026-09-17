@@ -192,10 +192,17 @@ func campaignLifeBars() []event.CompletedBarPayload {
 // caused it.
 //
 // The stamp is why the recorder is here rather than fills.Result's own
-// Decisions, which leave Sequence, CausationID and CorrelationID unset by
-// contract: comparing those against a replay of Inputs would compare
-// something no journal holds, and would agree on every field it looked at
-// for that reason alone.
+// Decisions. Stamping belongs to the engine, not to the handler that
+// proposed the decision: the engine assigns every emission's Sequence from
+// its own counter, "in emission order, overwriting whatever the handler
+// set", and likewise sets CausationID and CorrelationID on each one, so
+// that "a handler cannot claim causation or correlation it did not have"
+// (docs/architecture.md). fills.Result's Decisions are therefore pre-stamp
+// by construction, and the invariant this fixture rests on is that every
+// envelope a journal holds has been through that stamping. Comparing
+// unstamped decisions against a replay of Inputs would compare something no
+// journal holds, and would agree on all three identity fields for the sole
+// reason that both sides left them zero.
 type composed struct {
 	Inputs    []event.Envelope
 	Decisions []event.Envelope
