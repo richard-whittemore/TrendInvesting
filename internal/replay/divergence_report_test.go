@@ -387,6 +387,51 @@ func TestDiffDistinguishesIntegersFloat64WouldCollapse(t *testing.T) {
 	}
 }
 
+// TestDiffTreatsIdenticalHugeIntegersAsEqualAndKeepsWalking: a bare integer
+// literal outside int64's own range (so numberIsFloat64Safe cannot even ask
+// float64 about it) is compared by its literal digits, the same as any
+// other number — identical on both sides here — so it must not itself be
+// reported as a divergence, and the walk must continue past it to the field
+// that actually differs.
+func TestDiffTreatsIdenticalHugeIntegersAsEqualAndKeepsWalking(t *testing.T) {
+	t.Parallel()
+
+	const beyondInt64 = "99999999999999999999" // 20 nines; math.MaxInt64 has 19 digits
+	want := []event.Envelope{fieldEnvelope("d-1", 1, `{"a_quantity":`+beyondInt64+`,"z_other":1}`)}
+	got := []event.Envelope{fieldEnvelope("d-1", 1, `{"a_quantity":`+beyondInt64+`,"z_other":2}`)}
+
+	report, err := replay.Diff(want, got)
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
+	if report == nil {
+		t.Fatal("Diff() = nil, want a report: z_other differs")
+	}
+	if report.FieldPath != "payload.z_other" {
+		t.Fatalf("FieldPath = %q, want %q (the identical a_quantity must compare equal and be walked past)", report.FieldPath, "payload.z_other")
+	}
+	if report.Want != 1.0 || report.Got != 2.0 {
+		t.Fatalf("Want/Got = %v/%v, want 1/2", report.Want, report.Got)
+	}
+}
+
+// TestDiffRefusesAPayloadWithTrailingDataAfterItsJSONValue: envelopeTree
+// decodes with a json.Decoder rather than json.Unmarshal (so it can call
+// UseNumber), and a Decoder, unlike Unmarshal, does not by itself refuse
+// trailing bytes after the one value it decodes. Field checks for that
+// itself, so a payload that is not exactly one JSON value is refused the
+// same way Unmarshal would refuse it, rather than being silently narrowed
+// to its first value.
+func TestDiffRefusesAPayloadWithTrailingDataAfterItsJSONValue(t *testing.T) {
+	t.Parallel()
+
+	want := []event.Envelope{fieldEnvelope("d-1", 1, `{"a":1} 2`)}
+	got := []event.Envelope{fieldEnvelope("d-1", 1, `{"a":1}`)}
+	if _, err := replay.Diff(want, got); err == nil {
+		t.Fatal("Diff() error = nil, want the trailing data refused")
+	}
+}
+
 // TestDiffFallsBackToThePayloadWhenDecodedValuesAreEqual:
 // CanonicalEnvelopeBytes hashes the payload's raw bytes, not its decoded
 // shape (see that function's own doc comment), so it is possible for

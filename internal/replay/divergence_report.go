@@ -1,10 +1,12 @@
 package replay
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -17,8 +19,10 @@ import (
 // an array element ("payload.units[2].price"); array position is never
 // treated as a named field, since sorting it away would report the wrong
 // element as "the same". Want and Got are the two values found there,
-// decoded from JSON — so a number is a float64 — or an absentField when the
-// path exists on only one side.
+// decoded from JSON: an ordinary number is a float64, an integer literal
+// float64 cannot carry exactly is a json.Number holding its exact digits
+// instead (see envelopeTree and diffNumber), and a path present on only one
+// side is an absentField.
 type FieldDivergence struct {
 	Path string
 	Want any
@@ -82,10 +86,22 @@ func Field(d *Divergence) (*FieldDivergence, error) {
 // into it. Timestamps are rendered as RFC 3339 in UTC, the same treatment
 // CanonicalEnvelopeBytes gives them, so two envelopes recording the same
 // instant in different zones compare equal here too.
+//
+// The payload is decoded with json.Decoder.UseNumber, so every JSON number
+// becomes a json.Number carrying its exact literal digits rather than a
+// plain json.Unmarshal's float64, which would round two distinct integers
+// above 2^53 to the same value and make them indistinguishable to the field
+// walk. diffNumber is what later decides, field by field, whether float64
+// is safe to report or whether the literal itself must be.
 func envelopeTree(e event.Envelope) (map[string]any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(e.Payload))
+	decoder.UseNumber()
 	var payload any
-	if err := json.Unmarshal(e.Payload, &payload); err != nil {
+	if err := decoder.Decode(&payload); err != nil {
 		return nil, err
+	}
+	if decoder.More() {
+		return nil, fmt.Errorf("replay: envelope %s: payload has trailing data after its JSON value", e.ID)
 	}
 	return map[string]any{
 		"id":                 e.ID,
@@ -107,9 +123,10 @@ func envelopeTree(e event.Envelope) (map[string]any, error) {
 
 // diffAny reports the first field at which want and got disagree, walking
 // objects and arrays recursively; found is false when the two are equal all
-// the way down. Values that are neither both objects nor both arrays are
-// compared with reflect.DeepEqual, the exact-value discipline this project
-// already applies to every derived float (see
+// the way down. A pair of decoded JSON numbers is routed to diffNumber
+// rather than compared here (see its own doc comment for why). Every other
+// value is compared with reflect.DeepEqual, the exact-value discipline this
+// project already applies to every derived float (see
 // ProtectiveStopSetPayload.Validate): two float64 values one bit apart are
 // unequal, never rounded together.
 func diffAny(path string, want, got any) (foundPath string, wantVal, gotVal any, found bool) {
@@ -123,10 +140,75 @@ func diffAny(path string, want, got any) (foundPath string, wantVal, gotVal any,
 			return diffSlice(path, wantSlice, gotSlice)
 		}
 	}
+	if wantNum, ok := want.(json.Number); ok {
+		if gotNum, ok := got.(json.Number); ok {
+			return diffNumber(path, wantNum, gotNum)
+		}
+	}
 	if reflect.DeepEqual(want, got) {
 		return "", nil, nil, false
 	}
 	return path, want, got, true
+}
+
+// diffNumber compares two decoded JSON numbers and reports the pair in the
+// representation a caller can trust.
+//
+// When both sides round-trip through float64 without changing value
+// (numberIsFloat64Safe), they are compared and reported as float64 —
+// exactly what every other numeric field in this reporter has always done,
+// including the one-ULP float divergence this reporter exists to catch.
+// When either side does not — an integer literal above float64's 53-bit
+// mantissa, where two distinct integers (2^53 and 2^53+1, for instance)
+// convert to the identical float64 — comparing the converted floats would
+// call them equal, and reporting them would print the same text for two
+// different values. Both the comparison and the reported values use the
+// literal token itself in that case, never a lossy float64 conversion of
+// it.
+func diffNumber(path string, want, got json.Number) (foundPath string, wantVal, gotVal any, found bool) {
+	if numberIsFloat64Safe(want) && numberIsFloat64Safe(got) {
+		wantFloat, _ := want.Float64()
+		gotFloat, _ := got.Float64()
+		if wantFloat == gotFloat {
+			return "", nil, nil, false
+		}
+		return path, wantFloat, gotFloat, true
+	}
+	if want == got {
+		return "", nil, nil, false
+	}
+	return path, want, got, true
+}
+
+// numberIsFloat64Safe reports whether n converts to float64 and back
+// without changing value. Every literal with a decimal point or an
+// exponent is JSON's own float syntax — this reporter already trusts those
+// to float64 (encodeValue) — so it is always safe. A bare integer literal
+// is safe only when converting it to float64 and back to int64 reproduces
+// the same integer; one whose magnitude exceeds float64's exact range, or
+// int64's range entirely, is not, and diffNumber falls back to comparing
+// and reporting its literal digits instead.
+func numberIsFloat64Safe(n json.Number) bool {
+	if strings.ContainsAny(string(n), ".eE") {
+		return true
+	}
+	i, err := n.Int64()
+	if err != nil {
+		return false
+	}
+	return int64(float64(i)) == i
+}
+
+// normalizeLoneNumber renders a value reported on its own — one side of an
+// absent-field pair, where there is no counterpart to weigh a lossy
+// conversion against — the same way diffNumber renders a pair: float64 when
+// that loses nothing, the literal json.Number when it would.
+func normalizeLoneNumber(v any) any {
+	if n, ok := v.(json.Number); ok && numberIsFloat64Safe(n) {
+		f, _ := n.Float64()
+		return f
+	}
+	return v
 }
 
 // diffMap compares two decoded JSON objects key by key, in SORTED key
@@ -158,9 +240,9 @@ func diffMap(path string, want, got map[string]any) (foundPath string, wantVal, 
 		gotChild, gotOK := got[key]
 		switch {
 		case !wantOK:
-			return childPath, absentField{}, gotChild, true
+			return childPath, absentField{}, normalizeLoneNumber(gotChild), true
 		case !gotOK:
-			return childPath, wantChild, absentField{}, true
+			return childPath, normalizeLoneNumber(wantChild), absentField{}, true
 		default:
 			if p, w, g, found := diffAny(childPath, wantChild, gotChild); found {
 				return p, w, g, true
@@ -186,9 +268,9 @@ func diffSlice(path string, want, got []any) (foundPath string, wantVal, gotVal 
 		childPath := fmt.Sprintf("%s[%d]", path, i)
 		switch {
 		case i >= len(want):
-			return childPath, absentField{}, got[i], true
+			return childPath, absentField{}, normalizeLoneNumber(got[i]), true
 		case i >= len(got):
-			return childPath, want[i], absentField{}, true
+			return childPath, normalizeLoneNumber(want[i]), absentField{}, true
 		default:
 			if p, w, g, found := diffAny(childPath, want[i], got[i]); found {
 				return p, w, g, true
@@ -326,6 +408,16 @@ func renderValue(v any) string {
 func encodeValue(v any) json.RawMessage {
 	if _, ok := v.(absentField); ok {
 		return json.RawMessage(`"<absent>"`)
+	}
+	if n, ok := v.(json.Number); ok {
+		// json.Number's underlying string is exactly the literal digits
+		// UseNumber decoded it from — the entire reason to carry it this way
+		// instead of a float64 — so it is written out verbatim as a JSON
+		// number rather than through CanonicalBytes, whose reflect-driven
+		// encoder sees json.Number's underlying string kind and would quote
+		// it, and which formats floats via a float64 conversion that is
+		// exactly the lossy step this exists to avoid.
+		return json.RawMessage(n.String())
 	}
 	const prefix = `{"v":`
 	wrapped := event.CanonicalBytes(map[string]any{"v": v})
