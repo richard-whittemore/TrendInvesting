@@ -832,11 +832,13 @@ func TestReportStringForEndedStream(t *testing.T) {
 	}
 }
 
-// TestAbsentFieldRendersConsistentlyInStringAndJSON: encodeValue's absent
-// branch is exercised by both the human-readable and machine-readable
-// renderers, not only by the sentinel's own String() method that a test
-// might otherwise observe directly via fmt.
-func TestAbsentFieldRendersConsistentlyInStringAndJSON(t *testing.T) {
+// TestAbsentFieldRendersDistinctlyInStringAndJSON: a field that does not
+// exist at all must be shown as absent in both the human-readable and
+// machine-readable reports, via WantAbsent/GotAbsent rather than by
+// rendering some particular text into the value itself — see
+// TestDiffDistinguishesAnAbsentFieldFromItsOwnMarkerText for why the
+// latter breaks the moment a real value happens to equal that text.
+func TestAbsentFieldRendersDistinctlyInStringAndJSON(t *testing.T) {
 	t.Parallel()
 
 	want := []event.Envelope{fieldEnvelope("d-1", 1, `{"note":"present"}`)}
@@ -850,20 +852,95 @@ func TestAbsentFieldRendersConsistentlyInStringAndJSON(t *testing.T) {
 		t.Fatal("Diff() = nil, want a report")
 	}
 
-	if line := report.String(); !strings.Contains(line, "<absent>") {
-		t.Fatalf("String() = %q, want it to contain %q", line, "<absent>")
+	if !report.GotAbsent {
+		t.Fatal("GotAbsent = false, want true: note does not exist on the got side")
 	}
+	if report.WantAbsent {
+		t.Fatal("WantAbsent = true, want false: note is present on the want side")
+	}
+	if line := report.String(); !strings.Contains(line, "absent") {
+		t.Fatalf("String() = %q, want it to say the field is absent", line)
+	}
+
 	encoded, err := json.Marshal(report)
 	if err != nil {
 		t.Fatalf("json.Marshal(report) error = %v", err)
 	}
 	var decoded struct {
-		Got string `json:"got"`
+		GotAbsent bool            `json:"got_absent"`
+		Got       json.RawMessage `json:"got"`
 	}
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatalf("json.Unmarshal(encoded) error = %v", err)
 	}
-	if decoded.Got != "<absent>" {
-		t.Fatalf("MarshalJSON's \"got\" = %q, want %q (encoding/json HTML-escapes the angle brackets on the wire, which is expected and does not affect the decoded value)", decoded.Got, "<absent>")
+	if !decoded.GotAbsent {
+		t.Fatalf("decoded got_absent = false, want true")
+	}
+	if decoded.Got != nil {
+		t.Fatalf("decoded got = %s, want it omitted: there is nothing to show for a field that does not exist", decoded.Got)
+	}
+}
+
+// TestDiffDistinguishesAnAbsentFieldFromItsOwnMarkerText: a field can be
+// genuinely present with the value "<absent>" — the exact text a reporter
+// might otherwise use to render a field that does not exist at all.
+// WantAbsent/GotAbsent, not the rendered text, are what a caller must
+// check to tell the two apart; encodeValue no longer has a text rendering
+// for "missing" to collide with a real value in the first place.
+func TestDiffDistinguishesAnAbsentFieldFromItsOwnMarkerText(t *testing.T) {
+	t.Parallel()
+
+	want := []event.Envelope{fieldEnvelope("d-1", 1, `{}`)}
+	got := []event.Envelope{fieldEnvelope("d-1", 1, `{"x":"<absent>"}`)}
+
+	report, err := replay.Diff(want, got)
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
+	if report == nil {
+		t.Fatal("Diff() = nil, want a report")
+	}
+	if report.FieldPath != "payload.x" {
+		t.Fatalf("FieldPath = %q, want %q", report.FieldPath, "payload.x")
+	}
+	if !report.WantAbsent {
+		t.Fatal("WantAbsent = false, want true: x does not exist on the want side at all")
+	}
+	if report.GotAbsent {
+		t.Fatal("GotAbsent = true, want false: x is present on the got side; its value merely equals the absent marker's own text")
+	}
+	if report.Got != "<absent>" {
+		t.Fatalf("Got = %v, want the literal string %q", report.Got, "<absent>")
+	}
+
+	line := report.String()
+	if strings.Contains(line, `"<absent>"`) {
+		t.Fatalf("String() = %q, renders the present value the same way as an actually-missing field would be", line)
+	}
+
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("json.Marshal(report) error = %v", err)
+	}
+	var decoded struct {
+		WantAbsent bool            `json:"want_absent"`
+		GotAbsent  bool            `json:"got_absent"`
+		Want       json.RawMessage `json:"want"`
+		Got        json.RawMessage `json:"got"`
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal(encoded) error = %v", err)
+	}
+	if !decoded.WantAbsent {
+		t.Fatal("decoded want_absent = false, want true")
+	}
+	if decoded.GotAbsent {
+		t.Fatal("decoded got_absent = true, want false")
+	}
+	if decoded.Want != nil {
+		t.Fatalf("decoded want = %s, want it omitted", decoded.Want)
+	}
+	if string(decoded.Got) != `"<absent>"` {
+		t.Fatalf("decoded got = %s, want the JSON string %q", decoded.Got, `"<absent>"`)
 	}
 }
