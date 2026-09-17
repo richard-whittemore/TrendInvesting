@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"reflect"
 	"sort"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -167,6 +168,9 @@ func diffAny(path string, want, got any) (foundPath string, wantVal, gotVal any,
 // it.
 func diffNumber(path string, want, got json.Number) (foundPath string, wantVal, gotVal any, found bool) {
 	if numberIsFloat64Safe(want) && numberIsFloat64Safe(got) {
+		// numberIsFloat64Safe already parsed each literal through Float64
+		// successfully as part of its own round trip, so neither call here
+		// can newly fail.
 		wantFloat, _ := want.Float64()
 		gotFloat, _ := got.Float64()
 		if wantFloat == gotFloat {
@@ -180,23 +184,43 @@ func diffNumber(path string, want, got json.Number) (foundPath string, wantVal, 
 	return path, want, got, true
 }
 
-// numberIsFloat64Safe reports whether n converts to float64 and back
-// without changing value. Every literal with a decimal point or an
-// exponent is JSON's own float syntax — this reporter already trusts those
-// to float64 (encodeValue) — so it is always safe. A bare integer literal
-// is safe only when converting it to float64 and back to int64 reproduces
-// the same integer; one whose magnitude exceeds float64's exact range, or
-// int64's range entirely, is not, and diffNumber falls back to comparing
-// and reporting its literal digits instead.
+// numberIsFloat64Safe reports whether n's value survives a round trip
+// through float64 without changing: parsed to the nearest float64, then
+// formatted back with the same shortest round-trip formatting encodeValue
+// itself uses for a float64 (strconv.FormatFloat(f, 'g', -1, 64)), does the
+// result still name the exact value n started as. Both sides are compared
+// as arbitrary-precision rationals (math/big), never by re-parsing either
+// one back to another float64, which would just ask the same lossy
+// question of itself and always answer yes.
+//
+// This is a question about n's value, not about how its literal happens to
+// be spelled — an integer, a decimal, and an exponent form all go through
+// the identical check, because round 1 of this reporter fixed the
+// bare-integer case and left every literal containing "." or "e"/"E"
+// trusted on the strength of its shape alone, which let a decimal literal
+// with the same excess precision (9007199254740993.0, spelling 2^53+1)
+// reach exactly the collision the integer fix was meant to close.
+//
+// A magnitude float64 cannot represent at all — an exponent large enough
+// to overflow to +Inf, or small enough to underflow to 0 without
+// strconv.ParseFloat itself reporting an error — fails this the same way:
+// the round trip does not reproduce the value either way, so diffNumber
+// falls back to comparing and reporting the literal digits instead of a
+// lossy float64.
 func numberIsFloat64Safe(n json.Number) bool {
-	if strings.ContainsAny(string(n), ".eE") {
-		return true
+	exact, ok := new(big.Rat).SetString(string(n))
+	if !ok {
+		return false
 	}
-	i, err := n.Int64()
+	f, err := n.Float64()
 	if err != nil {
 		return false
 	}
-	return int64(float64(i)) == i
+	roundTripped, ok := new(big.Rat).SetString(strconv.FormatFloat(f, 'g', -1, 64))
+	if !ok {
+		return false
+	}
+	return exact.Cmp(roundTripped) == 0
 }
 
 // normalizeLoneNumber renders a value reported on its own — one side of an
