@@ -198,11 +198,14 @@ func campaignLifeBars() []event.CompletedBarPayload {
 // set", and likewise sets CausationID and CorrelationID on each one, so
 // that "a handler cannot claim causation or correlation it did not have"
 // (docs/architecture.md). fills.Result's Decisions are therefore pre-stamp
-// by construction, and the invariant this fixture rests on is that every
-// envelope a journal holds has been through that stamping. Comparing
-// unstamped decisions against a replay of Inputs would compare something no
-// journal holds, and would agree on all three identity fields for the sole
-// reason that both sides left them zero.
+// by construction, and the invariant this fixture rests on is narrower than
+// the whole journal: every entry a journal holds of Kind KindDecision has
+// been through that stamping, while its KindInput entries are recorded
+// exactly as the producer set them. journal.Recorder.Apply appends the
+// input first and stamps only what the handler returns. Comparing unstamped
+// decisions against a replay of Inputs would compare something no journal
+// holds, and would agree on all three identity fields for the sole reason
+// that both sides left them zero.
 type composed struct {
 	Inputs    []event.Envelope
 	Decisions []event.Envelope
