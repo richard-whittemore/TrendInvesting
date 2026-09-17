@@ -40,8 +40,9 @@
 // rung and a Protective Stop are all derived from split-adjusted prices by
 // the reducer, and comparing them against raw prices would silently fill
 // orders at levels that never existed. The fill is reported in the same view
-// it was decided in. Raw-view accounting belongs elsewhere, and in slice 1
-// the two views are identical in every fixture.
+// it was decided in, which is what keeps a Campaign's whole life in one
+// view: ADR 0004, as amended, requires that a Campaign's money never
+// subtracts prices read from two different views.
 //
 // # The commission schedule the Baseline declares
 //
