@@ -2,6 +2,7 @@ package sizing_test
 
 import (
 	"math"
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -967,6 +968,50 @@ func TestDrawdownSteppedNotionalFaithsLadder(t *testing.T) {
 	for _, tt := range tests {
 		if got, ok := sizing.DrawdownSteppedNotional(tt.before); !ok || got != tt.want {
 			t.Errorf("DrawdownSteppedNotional(%v) = %v, want %v", tt.before, got, tt.want)
+		}
+	}
+}
+
+// TestDrawdownSteppedNotionalIsRepresentableForEveryFiniteAccount pins the
+// half of this function's contract its callers rely on but cannot see: a
+// Drawdown Step only ever SHRINKS the account (x0.8), so the product is
+// bounded by the figure it came from and a finite Notional Account always
+// steps to a finite one. The flag can therefore only ever be false for an
+// input that was not finite to begin with.
+//
+// internal/strategy.NotionalAccount.Observe's refusal to step an
+// unrepresentable account is excluded from the coverage audit on the
+// strength of exactly this, and the exclusion names this test: the
+// Notional Account's own figures are checked finite and positive on entry
+// (checkEquity) and only ever replaced by another checked figure or by this
+// function's result, so Observe's guard is unreachable while that holds
+// rather than while somebody believes it does.
+func TestDrawdownSteppedNotionalIsRepresentableForEveryFiniteAccount(t *testing.T) {
+	t.Parallel()
+
+	finite := []float64{
+		math.SmallestNonzeroFloat64, 1e-300, 1e-8, 0.5, 1, 1_000_000, 1e100, 1e300,
+		math.MaxFloat64, 0, -1, -math.MaxFloat64,
+	}
+	for _, before := range finite {
+		got, ok := sizing.DrawdownSteppedNotional(before)
+		if !ok {
+			t.Errorf("DrawdownSteppedNotional(%v) reported an unrepresentable step for a finite account", before)
+			continue
+		}
+		if math.Abs(got) > math.Abs(before) {
+			t.Errorf("DrawdownSteppedNotional(%v) = %v, which is further from zero than the figure it stepped from", before, got)
+		}
+	}
+
+	rng := rand.New(rand.NewSource(0x5eed))
+	for range 20_000 {
+		before := math.Float64frombits(rng.Uint64())
+		if math.IsNaN(before) || math.IsInf(before, 0) {
+			continue
+		}
+		if _, ok := sizing.DrawdownSteppedNotional(before); !ok {
+			t.Fatalf("DrawdownSteppedNotional(%v) reported an unrepresentable step for a finite account", before)
 		}
 	}
 }
