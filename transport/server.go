@@ -182,7 +182,6 @@ func (s *Server) Serve() error {
 			_ = conn.Close()
 			return nil
 		}
-		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
 			defer s.untrack(conn)
@@ -226,6 +225,15 @@ func (s *Server) isClosed() bool {
 	return s.closed
 }
 
+// track registers conn and counts it, or reports false once the server is
+// closing.
+//
+// The WaitGroup counter is incremented HERE, under the same lock that decides
+// whether the server is still open, and not by the caller afterwards. sync
+// requires that an Add which takes the counter off zero happens before a
+// concurrent Wait; doing it after track returned left a window in which Close
+// observed a zero counter, waited on nothing, and returned while a connection
+// goroutine was still being launched.
 func (s *Server) track(conn net.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -233,6 +241,7 @@ func (s *Server) track(conn net.Conn) bool {
 		return false
 	}
 	s.conns[conn] = struct{}{}
+	s.wg.Add(1)
 	return true
 }
 
