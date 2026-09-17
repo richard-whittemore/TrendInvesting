@@ -328,10 +328,10 @@ func TestDecisionTextEscapesRunesThatReshapeTheLine(t *testing.T) {
 		detail string
 		want   string
 	}{
-		{"line separator", "halted  and cleared", `"halted  and cleared"`},
-		{"paragraph separator", "halted  and cleared", `"halted  and cleared"`},
-		{"right-to-left override", "halted‮ and cleared", `"halted‮ and cleared"`},
-		{"left-to-right mark", "halted‎ and cleared", `"halted‎ and cleared"`},
+		{"line separator", "halted\u2028 and cleared", "\"halted\\u2028 and cleared\""},
+		{"paragraph separator", "halted\u2029 and cleared", "\"halted\\u2029 and cleared\""},
+		{"right-to-left override", "halted\u202e and cleared", "\"halted\\u202e and cleared\""},
+		{"left-to-right mark", "halted\u200e and cleared", "\"halted\\u200e and cleared\""},
 		{"newline", "halted\n and cleared", `"halted\n and cleared"`},
 		// Ordinary text stays readable, whatever alphabet it is written in.
 		{"printable non-ascii", "clôture à 1 234,50 € — 日経 ±2N", "clôture à 1 234,50 € — 日経 ±2N"},
