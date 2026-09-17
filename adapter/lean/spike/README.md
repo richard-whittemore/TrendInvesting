@@ -35,8 +35,8 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/transport-spike-linux ./c
 ### On the host
 
 ```sh
-/tmp/transport-spike serve --socket /tmp/trend-spike.sock &
-python3 bench.py --socket /tmp/trend-spike.sock --rounds 500 --universe 1000
+/tmp/transport-spike serve --socket /tmp/trend-spike/s.sock &
+python3 bench.py --socket /tmp/trend-spike/s.sock --rounds 500 --universe 1000
 python3 faults.py --engine /tmp/transport-spike
 ```
 
@@ -55,10 +55,10 @@ cp *.py /tmp/leanstage/
 docker run --rm -v /tmp/leanstage:/spike --entrypoint /bin/bash \
   quantconnect/lean:latest -lc '
     mkdir -p /run/spike
-    /spike/transport-spike serve --socket /run/spike/s.sock &
+    /spike/transport-spike serve --socket /run/spike/private/s.sock &
     sleep 1
     cd /spike
-    python bench.py --socket /run/spike/s.sock --rounds 500 --universe 1000
+    python bench.py --socket /run/spike/private/s.sock --rounds 500 --universe 1000
     python faults.py --engine /spike/transport-spike
   '
 ```
@@ -69,15 +69,24 @@ This is the shape a real deployment has, and the one that works on macOS.
 
 ```sh
 docker volume create spikesock
-docker run -d --name spike-engine \
+# Provision once, using the deployment's dedicated numeric UID/GID.
+docker run --rm -v spikesock:/run/spike --entrypoint /bin/sh \
+  quantconnect/lean:latest -c 'mkdir -m 0700 /run/spike/private && chown 10001:10001 /run/spike/private'
+docker run -d --name spike-engine --user 10001:10001 \
   -v spikesock:/run/spike -v /tmp/leanstage:/spike \
   --entrypoint /spike/transport-spike quantconnect/lean:latest \
-  serve --socket /run/spike/s.sock
+  serve --socket /run/spike/private/s.sock
 
-docker run --rm -v spikesock:/run/spike -v /tmp/leanstage:/spike \
+docker run --rm --user 10001:10001 -v spikesock:/run/spike -v /tmp/leanstage:/spike \
   --entrypoint /bin/bash quantconnect/lean:latest \
-  -lc 'cd /spike && python bench.py --socket /run/spike/s.sock --universe 1000'
+  -lc 'cd /spike && python bench.py --socket /run/spike/private/s.sock --universe 1000'
 ```
+
+The private directory must already have mode `0700` and the engine UID when
+pre-provisioned. A wide or foreign-owned directory is refused; do not solve a
+startup failure with `chmod 777`. Both containers must map UID `10001` to the
+same kernel identity. These are provisioning examples, not a paper-trading gate.
+See [ADR 0014's access amendment](../../../docs/adr/0014-lean-go-transport.md#amendment-socket-access-and-deployment-identity-2026-09-17).
 
 ### Under a real backtest
 
@@ -92,6 +101,9 @@ whose `main.py` is `algorithm.py` and which also contains `client.py`, then:
 lean backtest spike-transport \
   --extra-docker-config '{"volumes": {"spikesock": {"bind": "/run/spike", "mode": "rw"}}}'
 ```
+
+Configure the LEAN container to run under the same UID (`10001:10001` in the
+example) and provision its data/output mounts for that user as well.
 
 With the engine container running, the log shows one round trip per bar. With
 no engine, the algorithm calls `Quit()` in `Initialize` and LEAN stops before

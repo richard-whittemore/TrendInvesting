@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -73,6 +75,10 @@ type Server struct {
 
 // Listen binds a Unix-domain socket at path and prepares to serve.
 //
+// ADR 0014 requires a 0600 socket inside a 0700 directory owned by the engine
+// UID. The caller must keep its ancestors trusted and stable (including symlink
+// targets), and provision the adapter under that same dedicated UID.
+//
 // A socket file left behind by a killed process is removed if nothing is
 // listening on it. A socket that still answers is left alone and reported as
 // an error, because two decision engines answering the same adapter would
@@ -81,11 +87,17 @@ func Listen(path string, decide Decider, cfg ServerConfig) (*Server, error) {
 	if decide == nil {
 		return nil, errors.New("transport: a decider is required")
 	}
+	if path == "" || strings.HasPrefix(path, "@") || strings.ContainsRune(path, 0) {
+		return nil, errors.New("transport: socket requires a filesystem pathname")
+	}
 	if len(path) > MaxSocketPathBytes {
 		return nil, fmt.Errorf(
 			"transport: socket path is %d bytes, limit is %d: %s",
 			len(path), MaxSocketPathBytes, path,
 		)
+	}
+	if err := prepareSocketDirectory(filepath.Dir(path), os.Geteuid()); err != nil {
+		return nil, err
 	}
 	if err := clearStaleSocket(path); err != nil {
 		return nil, err
@@ -93,6 +105,10 @@ func Listen(path string, decide Decider, cfg ServerConfig) (*Server, error) {
 	listener, err := net.ListenUnix("unix", unixAddr(path))
 	if err != nil {
 		return nil, fmt.Errorf("transport: listen on %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("transport: restrict socket %s: %w", path, err)
 	}
 	lifetime, stop := context.WithCancel(context.Background())
 	return &Server{
@@ -104,6 +120,27 @@ func Listen(path string, decide Decider, cfg ServerConfig) (*Server, error) {
 		stop:     stop,
 		conns:    make(map[net.Conn]struct{}),
 	}, nil
+}
+
+// prepareSocketDirectory establishes the private parent before bind (ADR 0014).
+// Existing directories are validated, never repaired; the caller must keep the
+// ancestor path stable and inaccessible to replacement by untrusted users.
+func prepareSocketDirectory(dir string, uid int) error {
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("transport: create socket directory %s: %w", dir, err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("transport: inspect socket directory %s: %w", dir, err)
+	}
+	if info.Mode() != os.ModeDir|0o700 {
+		return fmt.Errorf("transport: socket directory %s must be a directory with mode 0700, got %s", dir, info.Mode())
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int64(stat.Uid) != int64(uid) {
+		return fmt.Errorf("transport: socket directory %s must have owner UID %d", dir, uid)
+	}
+	return nil
 }
 
 // unixAddr names a Unix-domain endpoint.
