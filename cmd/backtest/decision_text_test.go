@@ -210,3 +210,46 @@ func TestDecisionLogMixedGolden(t *testing.T) {
 		t.Fatal(&out)
 	}
 }
+
+func TestDecisionAccountAndHaltSentences(t *testing.T) {
+	at := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	// Account figures follow the event payload fixtures; the first Drawdown Step
+	// is Faith's inclusive boundary example (The Turtle Rules p.17).
+	tests := []struct {
+		kind    string
+		version uint32
+		payload any
+		want    string
+	}{
+		{event.DrawdownStepAppliedEventType, event.DrawdownStepAppliedSchemaVersion, event.DrawdownStepAppliedPayload{AsOf: at, Equity: 900000, Threshold: 900000, NotionalBefore: 1000000, NotionalAfter: 800000, StepNumber: 1, Rule: event.RuleNotionalAccountDrawdownStep, ADR: event.ADRNotionalAccountDrawdownStep}, "applied Drawdown Step 1, reducing Notional Account from 1e+06 to 800000 because actual equity 900000 was at or below threshold 900000"},
+		{event.NotionalAccountRecoveredEventType, event.NotionalAccountRecoveredSchemaVersion, event.NotionalAccountRecoveredPayload{AsOf: at, Equity: 1000000, StartingFigure: 1000000, NotionalBefore: 640000, StepsCleared: 2, Rule: event.RuleNotionalAccountRecovery, ADR: event.ADRNotionalAccountRecovery}, "restored Notional Account from 640000 to 1e+06 and cleared 2 Drawdown Steps because actual equity 1e+06 regained the yearly starting figure"},
+		{event.NotionalAccountRebasedEventType, event.NotionalAccountRebasedSchemaVersion, event.NotionalAccountRebasedPayload{AsOf: at, Equity: 950000, PreviousStartingFigure: 1000000, NewStartingFigure: 950000, Rule: event.RuleNotionalAccountRebase, ADR: event.ADRNotionalAccountRebase}, "rebased Notional Account to actual equity 950000 for the yearly re-basing; yearly starting figure changed from 1e+06 to 950000"},
+		{event.NotionalAccountCashAdjustedEventType, event.NotionalAccountCashAdjustedSchemaVersion, event.NotionalAccountCashAdjustedPayload{AsOf: at, Amount: 200000, EquityBefore: 890000, EquityAfter: 1090000, StartingFigureBefore: 1000000, StartingFigureAfter: 1224719.1011235956, NotionalBefore: 800000, NotionalAfter: 979775.2808988765, Rule: event.RuleNotionalAccountCashAdjustment, ADR: event.ADRNotionalAccountCashAdjustment}, "adjusted Notional Account from 800000 to 979775.2808988765 because cash movement 200000 changed actual equity from 890000 to 1.09e+06"},
+		{event.EngineStateEventType, event.EngineStateSchemaVersion, event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonCampaignWithoutProtectiveStop, Detail: "recorded detail\nsecond line"}, `engine became halted because campaign-without-protective-stop: "recorded detail\nsecond line"`},
+	}
+	_, records := readJournalFile(t, goldenJournal)
+	for _, tc := range tests {
+		t.Run(tc.kind, func(t *testing.T) {
+			raw, err := json.Marshal(tc.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := records[0].Envelope
+			e.Type = tc.kind
+			e.SchemaVersion = tc.version
+			e.Payload = raw
+			e.PayloadHash = event.HashPayload(raw)
+			got, err := decisionSentence(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %s\nwant %s", got, tc.want)
+			}
+			line, instrument, err := decisionLine(e)
+			if err != nil || instrument != "" || !strings.Contains(line, "account: "+tc.want) {
+				t.Fatalf("%s %s %v", line, instrument, err)
+			}
+		})
+	}
+}
