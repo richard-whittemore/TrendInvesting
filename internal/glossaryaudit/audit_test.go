@@ -60,12 +60,14 @@ var continuationPattern = regexp.MustCompile(`^[\s—\-,;]{0,10}(["'])([^"']+)['
 // when present, is stripped before the span is kept, since a citation
 // resolving means the definition says this, not the note warning readers off
 // a near-synonym does.
-func glossaryTerms(contextMD string) (headers map[string]bool, body string) {
+func glossaryTerms(contextMD string) (headers map[string]bool, defs map[string]string, body string) {
 	headers = make(map[string]bool)
+	defs = make(map[string]string)
 	locs := headerPattern.FindAllStringSubmatchIndex(contextMD, -1)
-	defs := make([]string, 0, len(locs))
+	spans := make([]string, 0, len(locs))
 	for i, loc := range locs {
-		headers[contextMD[loc[2]:loc[3]]] = true
+		term := contextMD[loc[2]:loc[3]]
+		headers[term] = true
 		start, end := loc[1], len(contextMD)
 		if i+1 < len(locs) {
 			end = locs[i+1][0]
@@ -74,9 +76,20 @@ func glossaryTerms(contextMD string) (headers map[string]bool, body string) {
 		if avoid := strings.Index(def, "_Avoid_"); avoid >= 0 {
 			def = def[:avoid]
 		}
-		defs = append(defs, def)
+		defs[term] = def
+		spans = append(spans, def)
 	}
-	return headers, strings.Join(defs, "\n")
+	return headers, defs, strings.Join(spans, "\n")
+}
+
+// citation is one quoted claim a source comment makes about CONTEXT.md.
+// term is the quoted text. entry is empty for the quotation that opens a
+// citation, and otherwise names the header that quotation gave — so a
+// chained quotation carries the entry it is attributed to, and can be
+// checked against that entry rather than against the whole file.
+type citation struct {
+	term  string
+	entry string
 }
 
 // citedTerms extracts every term a comment's text cites CONTEXT.md for,
@@ -87,28 +100,63 @@ func glossaryTerms(contextMD string) (headers map[string]bool, body string) {
 // otherwise read as two words neither side can resolve; collapsing all
 // whitespace to single spaces first reads it the way a person reading the
 // rendered comment would.
-func citedTerms(text string) []string {
+func citedTerms(text string) []citation {
 	flat := strings.Join(strings.Fields(text), " ")
-	var terms []string
+	var cites []citation
 	for _, m := range citationPattern.FindAllStringSubmatchIndex(flat, -1) {
-		terms = append(terms, flat[m[4]:m[5]])
+		head := flat[m[4]:m[5]]
+		cites = append(cites, citation{term: head})
 		pos := m[1]
 		for {
 			cont := continuationPattern.FindStringSubmatchIndex(flat[pos:])
 			if cont == nil {
 				break
 			}
-			terms = append(terms, flat[pos+cont[4]:pos+cont[5]])
+			cites = append(cites, citation{term: flat[pos+cont[4] : pos+cont[5]], entry: head})
 			pos += cont[1]
 		}
 	}
-	return terms
+	return cites
 }
 
-// resolves reports whether term is something CONTEXT.md actually defines:
-// one of its own glossary headers, or text quoted verbatim from its body.
-func resolves(term string, headers map[string]bool, body string) bool {
-	return headers[term] || strings.Contains(body, term)
+// resolves reports whether a citation is something CONTEXT.md actually
+// says. A citation's head quotation may be any glossary header or any text
+// quoted verbatim from a definition.
+//
+// A quotation chained onto that head is one of two things, and which one it
+// is decides what it must be checked against:
+//
+//   - Another glossary header, co-cited alongside the first. Comments cite
+//     a pair of related terms together all the time (the account snapshot
+//     names both the Notional Account and the Drawdown Step ladder), and
+//     that is a claim about the glossary's headings, not about either
+//     entry's prose.
+//   - Otherwise, prose attributed to the entry the head named — a narrower
+//     claim, that THAT entry says this — so it is checked against that
+//     entry's definition alone.
+//
+// The distinction matters because resolving attributed prose against the
+// whole file accepts a citation that names one entry and quotes a different
+// entry's definition. Every quotation in it is then genuine glossary text
+// and the citation is still false, since the entry it names does not say
+// what it is credited with saying. Only the scoped check separates the two.
+//
+// A head quotation that names no entry (it quoted prose rather than a
+// header) leaves its continuations nothing narrower to check against, so
+// they fall back to the whole body. The head's own failure is what reports
+// that citation, and reporting it twice would not tell a reader more.
+func resolves(c citation, headers map[string]bool, defs map[string]string, body string) bool {
+	if c.entry == "" {
+		return headers[c.term] || strings.Contains(body, c.term)
+	}
+	if headers[c.term] {
+		return true
+	}
+	def, named := defs[c.entry]
+	if !named {
+		return strings.Contains(body, c.term)
+	}
+	return strings.Contains(def, c.term)
 }
 
 // TestCitedTermsFindsOnlyGenuineCitations pins citedTerms's own behaviour
@@ -121,37 +169,37 @@ func TestCitedTermsFindsOnlyGenuineCitations(t *testing.T) {
 	tests := []struct {
 		name string
 		text string
-		want []string
+		want []citation
 	}{
 		{
 			name: "double-quoted term immediately after the colon",
 			text: `a wide bar shrinks its own Unit (CONTEXT.md: "Completed bar").`,
-			want: []string{"Completed bar"},
+			want: []citation{{term: "Completed bar"}},
 		},
 		{
 			name: "single-quoted term after a colon citation",
 			text: `bar-count warm-up (CONTEXT.md: 'Completed bar') is complete.`,
-			want: []string{"Completed bar"},
+			want: []citation{{term: "Completed bar"}},
 		},
 		{
 			name: "double-quoted term after a possessive citation",
 			text: `CONTEXT.md's "Notional Account" entry exists precisely because the two are not the same figure.`,
-			want: []string{"Notional Account"},
+			want: []citation{{term: "Notional Account"}},
 		},
 		{
 			name: "compound citation checks both the header and its quoted body prose",
 			text: `the Baseline has no partial exit (CONTEXT.md: "Campaign" — "not a Unit, is what gets entered, added to, stopped out, and exited").`,
-			want: []string{"Campaign", "not a Unit, is what gets entered, added to, stopped out, and exited"},
+			want: []citation{{term: "Campaign"}, {term: "not a Unit, is what gets entered, added to, stopped out, and exited", entry: "Campaign"}},
 		},
 		{
 			name: "term after intervening prose",
 			text: `a stop at or above entry is a legitimate break-even or profit-protecting level (CONTEXT.md: a Unit in that state is "risk-free"), not a corrupted one.`,
-			want: []string{"risk-free"},
+			want: []citation{{term: "risk-free"}},
 		},
 		{
 			name: "term cited then a separate, unrelated ADR quotation is ignored",
 			text: `a delisting is a Campaign's life ending (CONTEXT.md: "Delisting Exit"; ADR 0009: "a delisting is a forced exit at the last available price").`,
-			want: []string{"Delisting Exit"},
+			want: []citation{{term: "Delisting Exit"}},
 		},
 		{
 			name: "a bare mention of CONTEXT.md with no colon or possessive is not a citation",
@@ -185,15 +233,15 @@ func TestCitedTermsFindsOnlyGenuineCitations(t *testing.T) {
 func TestResolvesAcceptsHeadersAndVerbatimBody(t *testing.T) {
 	t.Parallel()
 	const fixture = "**Protective Stop**:\nThe price at which a Campaign's Units are exited to cap loss. Every open Campaign has one at all times.\n"
-	headers, body := glossaryTerms(fixture)
+	headers, defs, body := glossaryTerms(fixture)
 
-	if !resolves("Protective Stop", headers, body) {
+	if !resolves(citation{term: "Protective Stop"}, headers, defs, body) {
 		t.Error(`resolves("Protective Stop") = false, want true (a glossary header)`)
 	}
-	if !resolves("Every open Campaign has one at all times", headers, body) {
+	if !resolves(citation{term: "Every open Campaign has one at all times"}, headers, defs, body) {
 		t.Error(`resolves("Every open Campaign has one at all times") = false, want true (verbatim body text)`)
 	}
-	if resolves("risk-free", headers, body) {
+	if resolves(citation{term: "risk-free"}, headers, defs, body) {
 		t.Error(`resolves("risk-free") = true, want false (not defined anywhere in the fixture)`)
 	}
 }
@@ -211,18 +259,18 @@ func TestGlossaryTermsScopesBodyToDefinitionProse(t *testing.T) {
 		"The complete life of a position in one instrument.\n" +
 		"_Avoid_: trade, position (both ambiguous between a Unit and the whole Campaign).\n\n" +
 		"**Unit**:\nOne indivisible increment of a position.\n"
-	headers, body := glossaryTerms(fixture)
+	headers, defs, body := glossaryTerms(fixture)
 
-	if resolves("deliberately opinionated about strict definitions", headers, body) {
+	if resolves(citation{term: "deliberately opinionated about strict definitions"}, headers, defs, body) {
 		t.Error(`resolves(intro prose) = true, want false: the file's intro is not any term's own definition`)
 	}
-	if resolves("Positions", headers, body) {
+	if resolves(citation{term: "Positions"}, headers, defs, body) {
 		t.Error(`resolves(a section heading) = true, want false: a section heading is not a definition`)
 	}
-	if resolves("ambiguous between a Unit and the whole Campaign", headers, body) {
+	if resolves(citation{term: "ambiguous between a Unit and the whole Campaign"}, headers, defs, body) {
 		t.Error(`resolves(an _Avoid_ note) = true, want false: a synonym warning is not the definition itself`)
 	}
-	if !resolves("The complete life of a position in one instrument", headers, body) {
+	if !resolves(citation{term: "The complete life of a position in one instrument"}, headers, defs, body) {
 		t.Error(`resolves(Campaign's own definition) = false, want true`)
 	}
 }
@@ -237,15 +285,15 @@ func TestGlossaryTermsScopesBodyToDefinitionProse(t *testing.T) {
 func TestCompoundCitationCatchesAFabricatedSecondQuotation(t *testing.T) {
 	t.Parallel()
 	const fixture = "**Campaign**:\nThe complete life of a position in one instrument, from the first Unit's entry to the exit of the last. A Campaign, not a Unit, is what gets entered, added to, stopped out, and exited.\n"
-	headers, body := glossaryTerms(fixture)
+	headers, defs, body := glossaryTerms(fixture)
 
 	genuine := citedTerms(`the Baseline has no partial exit (CONTEXT.md: "Campaign" — "not a Unit, is what gets entered, added to, stopped out, and exited").`)
 	if len(genuine) != 2 {
 		t.Fatalf("citedTerms found %d terms in the genuine compound citation, want 2: %v", len(genuine), genuine)
 	}
-	for _, term := range genuine {
-		if !resolves(term, headers, body) {
-			t.Errorf("resolves(%q) = false, want true: both quotations in a genuine compound citation should resolve", term)
+	for _, cite := range genuine {
+		if !resolves(cite, headers, defs, body) {
+			t.Errorf("resolves(%q) = false, want true: both quotations in a genuine compound citation should resolve", cite.term)
 		}
 	}
 
@@ -256,11 +304,66 @@ func TestCompoundCitationCatchesAFabricatedSecondQuotation(t *testing.T) {
 	if len(fabricated) != 2 {
 		t.Fatalf("citedTerms found %d terms in the fabricated compound citation, want 2: %v", len(fabricated), fabricated)
 	}
-	if !resolves(fabricated[0], headers, body) {
-		t.Errorf("resolves(%q) = false, want true: the first quotation names a real header", fabricated[0])
+	if !resolves(fabricated[0], headers, defs, body) {
+		t.Errorf("resolves(%q) = false, want true: the first quotation names a real header", fabricated[0].term)
 	}
-	if resolves(fabricated[1], headers, body) {
-		t.Errorf("resolves(%q) = true, want false: this is the fabricated quotation a compound citation must still catch", fabricated[1])
+	if resolves(fabricated[1], headers, defs, body) {
+		t.Errorf("resolves(%q) = true, want false: this is the fabricated quotation a compound citation must still catch", fabricated[1].term)
+	}
+}
+
+// TestCompoundCitationIsScopedToTheEntryItNames closes the gap the previous
+// test left open. Checking every quotation is not enough on its own: if a
+// chained quotation resolves against the whole file, a citation can name one
+// entry and then quote a DIFFERENT entry's definition, and every quotation in
+// it is genuine CONTEXT.md text. The citation is still false — Campaign's
+// entry does not say what Unit's entry says — and only scoping the chained
+// quotation to the entry the citation named can tell the two apart.
+func TestCompoundCitationIsScopedToTheEntryItNames(t *testing.T) {
+	t.Parallel()
+	const fixture = "**Unit**:\nOne indivisible increment of a position.\n\n" +
+		"**Campaign**:\nThe complete life of a position in one instrument.\n"
+	headers, defs, body := glossaryTerms(fixture)
+
+	crossed := citedTerms(`a Campaign is (CONTEXT.md: "Campaign" — "One indivisible increment of a position").`)
+	if len(crossed) != 2 {
+		t.Fatalf("citedTerms found %d quotations, want 2: %v", len(crossed), crossed)
+	}
+	if crossed[1].entry != "Campaign" {
+		t.Fatalf("chained quotation carries entry %q, want %q", crossed[1].entry, "Campaign")
+	}
+	if !resolves(crossed[0], headers, defs, body) {
+		t.Errorf("resolves(%q) = false, want true: Campaign is a real header", crossed[0].term)
+	}
+	if resolves(crossed[1], headers, defs, body) {
+		t.Errorf("resolves(%q) = true, want false: that is Unit's definition, not Campaign's, "+
+			"and a citation naming Campaign may not quote it", crossed[1].term)
+	}
+
+	// The same quotation attributed to the entry that does say it still
+	// resolves, so the scoping refuses a false attribution rather than
+	// refusing chained quotations in general.
+	honest := citedTerms(`a Unit is (CONTEXT.md: "Unit" — "One indivisible increment of a position").`)
+	if len(honest) != 2 {
+		t.Fatalf("citedTerms found %d quotations, want 2: %v", len(honest), honest)
+	}
+	for _, cite := range honest {
+		if !resolves(cite, headers, defs, body) {
+			t.Errorf("resolves(%q) = false, want true: attributed to the entry that does define it", cite.term)
+		}
+	}
+
+	// A pair of headers cited together is the other shape a chained
+	// quotation takes, and it is not an attribution at all: neither entry
+	// is being credited with the other's prose. Scoping must not refuse it.
+	paired := citedTerms(`this drives both (CONTEXT.md: "Unit", "Campaign").`)
+	if len(paired) != 2 {
+		t.Fatalf("citedTerms found %d quotations, want 2: %v", len(paired), paired)
+	}
+	for _, cite := range paired {
+		if !resolves(cite, headers, defs, body) {
+			t.Errorf("resolves(%q) = false, want true: a co-cited glossary header, not attributed prose", cite.term)
+		}
 	}
 }
 
@@ -281,7 +384,7 @@ func TestEveryContextMDCitationNamesADefinedTerm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	headers, body := glossaryTerms(string(contextMD))
+	headers, defs, body := glossaryTerms(string(contextMD))
 	if len(headers) == 0 {
 		t.Fatal("found no glossary headers in CONTEXT.md; headerPattern is out of sync with the file's own format")
 	}
@@ -314,12 +417,17 @@ func TestEveryContextMDCitationNamesADefinedTerm(t *testing.T) {
 			return err
 		}
 		for _, group := range file.Comments {
-			for _, term := range citedTerms(group.Text()) {
-				if resolves(term, headers, body) {
+			for _, cite := range citedTerms(group.Text()) {
+				if resolves(cite, headers, defs, body) {
 					continue
 				}
 				pos := fset.Position(group.Pos())
-				t.Errorf("%s:%d: cites CONTEXT.md: %q, which CONTEXT.md does not define", rel, pos.Line, term)
+				if cite.entry != "" {
+					t.Errorf("%s:%d: cites CONTEXT.md: %q — %q, but %[3]q's own entry does not say that",
+						rel, pos.Line, cite.entry, cite.term)
+					continue
+				}
+				t.Errorf("%s:%d: cites CONTEXT.md: %q, which CONTEXT.md does not define", rel, pos.Line, cite.term)
 			}
 		}
 		return nil
