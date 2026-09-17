@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 )
 
 // A run's journal is composed in memory, so a run large enough either fits or
@@ -149,5 +151,103 @@ func TestTheDefaultBoundIsAtLeastOneRecord(t *testing.T) {
 
 	if journal.DefaultMaxRecords < 1 {
 		t.Fatalf("DefaultMaxRecords = %d; a recorder that can record nothing journals nothing", journal.DefaultMaxRecords)
+	}
+}
+
+// burstHandler emits count decisions for every input, and fails with err.
+// One input emitting a burst is the shape the record bound does not catch:
+// the bound is checked between inputs, so the burst lands whole.
+func burstHandler(count int, err error) replay.Handler {
+	return replay.HandlerFunc(func(_ context.Context, input event.Envelope) ([]event.Envelope, error) {
+		decisions := make([]event.Envelope, count)
+		for i := range decisions {
+			decisions[i] = decisionFor(input.Sequence, i)
+		}
+		return decisions, err
+	})
+}
+
+// TestARunStopsWhenOneInputEmitsMoreThanTheCeiling is what makes the record
+// bound's overshoot finite. The bound is checked at an input boundary, so a
+// run exceeds it by whatever the admitted input emits, and a reducer ending
+// the input stream emits one expiry per outstanding proposal across the
+// whole universe (ADR 0011). Without a ceiling on that burst the bound has
+// no stated size at all, against the exact failure it exists to prevent.
+func TestARunStopsWhenOneInputEmitsMoreThanTheCeiling(t *testing.T) {
+	t.Parallel()
+
+	recorder := journal.NewRecorder(burstHandler(journal.MaxEmissionsPerInput+1, nil))
+
+	_, err := recorder.Apply(context.Background(), testEnvelope(1))
+
+	var ceiling *journal.EmissionLimitError
+	if !errors.As(err, &ceiling) {
+		t.Fatalf("Recorder.Apply() error = %v, want a *journal.EmissionLimitError", err)
+	}
+	if ceiling.Limit != journal.MaxEmissionsPerInput {
+		t.Errorf("Limit = %d, want the %d one input may contribute", ceiling.Limit, journal.MaxEmissionsPerInput)
+	}
+	if ceiling.Emitted != journal.MaxEmissionsPerInput+1 {
+		t.Errorf("Emitted = %d, want the %d the handler emitted", ceiling.Emitted, journal.MaxEmissionsPerInput+1)
+	}
+	if entries := recorder.Entries(); len(entries) != 0 {
+		t.Errorf("recorded %d entries, want nothing of the input whose burst was refused", len(entries))
+	}
+}
+
+// TestAnInputEmittingExactlyTheCeilingIsRecorded pins the ceiling as the
+// largest burst a journal takes rather than the smallest it refuses, so
+// MaxEmissionsPerInput is the number the overshoot is stated in.
+func TestAnInputEmittingExactlyTheCeilingIsRecorded(t *testing.T) {
+	t.Parallel()
+
+	recorder := journal.NewRecorder(burstHandler(journal.MaxEmissionsPerInput, nil))
+
+	if _, err := recorder.Apply(context.Background(), testEnvelope(1)); err != nil {
+		t.Fatalf("Recorder.Apply() error = %v, want the ceiling itself admitted", err)
+	}
+	if got, want := len(recorder.Entries()), journal.MaxEmissionsPerInput+1; got != want {
+		t.Errorf("recorded %d entries, want the input and the %d decisions it caused", got, journal.MaxEmissionsPerInput)
+	}
+}
+
+// TestAnOverEmittingHandlerThatAlsoFailedClosedNamesBothFailures: a handler
+// may emit a final event explaining why it stopped, alongside its error
+// rather than instead of it (replay.Handler's contract). A burst too large
+// to journal must not swallow the error it arrived with.
+func TestAnOverEmittingHandlerThatAlsoFailedClosedNamesBothFailures(t *testing.T) {
+	t.Parallel()
+
+	handlerErr := errors.New("the reducer failed closed")
+	recorder := journal.NewRecorder(burstHandler(journal.MaxEmissionsPerInput+1, handlerErr))
+
+	_, err := recorder.Apply(context.Background(), testEnvelope(1))
+
+	if !errors.Is(err, handlerErr) {
+		t.Errorf("Recorder.Apply() error = %v, want the handler's own failure still in the chain", err)
+	}
+	var ceiling *journal.EmissionLimitError
+	if !errors.As(err, &ceiling) {
+		t.Errorf("Recorder.Apply() error = %v, want the emission ceiling named as well", err)
+	}
+}
+
+// TestTheEmissionCeilingErrorNamesWhatItRefused: the operator reads this
+// instead of an OOM, so it has to name the input, say the cost is memory,
+// and say that the input it refused left nothing behind.
+func TestTheEmissionCeilingErrorNamesWhatItRefused(t *testing.T) {
+	t.Parallel()
+
+	recorder := journal.NewRecorder(burstHandler(journal.MaxEmissionsPerInput+1, nil))
+
+	_, err := recorder.Apply(context.Background(), testEnvelope(1))
+	if err == nil {
+		t.Fatal("Recorder.Apply() error = nil, want the ceiling reached")
+	}
+
+	for _, want := range []string{"evt-1", "in memory", "nothing of this input is recorded"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to contain %q", err, want)
+		}
 	}
 }
