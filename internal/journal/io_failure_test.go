@@ -63,8 +63,11 @@ func TestWriteReportsAFailureOnTheHeaderLine(t *testing.T) {
 func TestWriteReportsAFailureOnARecordLine(t *testing.T) {
 	t.Parallel()
 
-	// The header fits in the buffer, so the first failure can only come from
-	// the records: enough of them to force a flush. testEntries numbers its
+	// Write returns an I/O failure rather than absorbing it, because a
+	// truncated journal is a valid chain as far as it goes: ADR 0017 records
+	// end-truncation as the gap tamper-evidence does not close. The header
+	// fits in the buffer, so the first failure can only come from the
+	// records: enough of them to force a flush. testEntries numbers its
 	// inputs oddly, so 64 of them span day 1 to day 63.
 	header := journal.NewHeader(testConfigurationHash, testStrategyVersion, at(1), at(63))
 	err := journal.Write(failingWriter{}, header, testEntries(64))
