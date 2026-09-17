@@ -75,6 +75,8 @@ Two further limits, stated rather than assumed away:
 
 **The span is now compared with the records, not taken on trust.** `journal.Write` refuses a header whose span its own input records deny, and `journal.CheckSpan` is the reader's half of the same rule: the span is exactly the first and last event time among the `input` records, and a file with no input among its records has no span it could state truthfully. `Recorder` derives its header through the function `Write` checks against, so the deriver and the checker cannot drift.
 
+`cmd/backtest` applies `CheckSpan` where it reads a journal as the record of a run — beside `CheckIdentity`, on the replay path — and not in `-verify`, which keeps answering "was this file edited" alone.
+
 This closes a hole the chain does not. The chain covers the span, so an edit to it is detectable — but only against a chain nobody repaired, and a run composing its own header was *trusted* to state the span honestly rather than checked. `Write` took a header and a slice of entries from any caller and compared them to nothing, so a journal could chain perfectly, pass `CheckIdentity` and still claim a period the run never reached. The claim is now falsifiable from the file alone, which is what any future streaming design would have to be checked by.
 
 The span speaks for the input stream and nothing else. A decision is attributed to the input that caused it, and `replay.Stamp` does not set a decision's event time, so a decision dated outside the span is not the span's business.
