@@ -28,11 +28,10 @@ func TestProductRoundsItsResult(t *testing.T) {
 	t.Parallel()
 
 	a, b := 1.4213-1.1, 42000.0
-	got := sizing.Product(a, b)
-	if want := a * b; got != want {
+	if got, want := sizing.Product(a, b), a*b; got != want {
 		t.Fatalf("Product(%v, %v) = %v, want %v", a, b, got, want)
 	}
-	if fused := math.FMA(a, b, 0); got == fused && a*b != fused {
+	if fused := math.FMA(a, b, 0); sizing.Product(a, b) == fused && a*b != fused {
 		t.Fatal("Product returned the fused result")
 	}
 }

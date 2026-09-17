@@ -65,7 +65,7 @@ func TestProfitProtectingCampaignStopReachesBothExitValidators(t *testing.T) {
 			cfg.StopMultiple = 0.1
 			n := breakoutFixtureN(t, cfg)
 			campaignID := testDecisionID("campaign", "AAPL", day(56))
-			addPrice := campaignFillPrice + 0.5*n
+			addPrice := campaignFillPrice + float64(0.5*n)
 			s := newStream(t, cfg).bars(breakoutBars("AAPL")).fill(openingFill("AAPL")).
 				bar(addOpportunityBar("AAPL", day(57), addPrice)).
 				fill(addFill("AAPL", campaignID, 2, day(57), "profit-protecting-add", addPrice, 133, day(57)))
@@ -142,7 +142,7 @@ func TestCampaignStopRaiseOverflowIsRefused(t *testing.T) {
 	n := breakoutFixtureN(t, validConfigurationPayload()) * 1e304
 	fill := openingFill("AAPL")
 	fill.Quantity = 1
-	fill.Price = math.MaxFloat64 - 0.75*n
+	fill.Price = math.MaxFloat64 - float64(0.75*n)
 	campaignID := testDecisionID("campaign", "AAPL", day(56))
 	newStream(t, cfg).bars(affineAuditBars(1e304, 0)).fill(fill).
 		bar(completedBar("AAPL", day(57), math.MaxFloat64, 1e306, 2e306)).
@@ -194,7 +194,7 @@ func affineAuditBars(scale, offset float64) []event.CompletedBarPayload {
 	bars := breakoutBars("AAPL")
 	for i := range bars {
 		view := bars[i].SplitAdjusted
-		bars[i] = completedBar("AAPL", bars[i].PeriodEnd, view.High*scale+offset, view.Low*scale+offset, view.Close*scale+offset)
+		bars[i] = completedBar("AAPL", bars[i].PeriodEnd, float64(view.High*scale)+offset, float64(view.Low*scale)+offset, float64(view.Close*scale)+offset)
 	}
 	return bars
 }

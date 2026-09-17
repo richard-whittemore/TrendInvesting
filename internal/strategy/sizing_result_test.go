@@ -41,7 +41,7 @@ func TestCampaignUnrepresentableResultHaltsAtTheFill(t *testing.T) {
 				unitIDs := []string{opening.FillID}
 				quantity := opening.Quantity
 				if figure == "realised result in unit n" {
-					rung := opening.Price + .5*opened.CampaignN
+					rung := opening.Price + float64(.5*opened.CampaignN)
 					s.bar(scaleBar(addOpportunityBar("AAPL", day(57), 300)))
 					s.fill(addFill("AAPL", opened.CampaignID, 2, day(57), "second", rung, opening.Quantity, day(57)))
 					s.mustRun()
