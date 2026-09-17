@@ -2375,24 +2375,25 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 
 // checkCampaignHasAProtectiveStop enforces, at the start of every completed
 // bar, the capital-safety invariant: every open Campaign has a
-// Protective Stop, positive, at all times (CONTEXT.md: "Protective Stop" —
-// "Every open Campaign has one at all times").
+// Protective Stop, positive and finite, at all times (CONTEXT.md: "Protective
+// Stop" — "Every open Campaign has one at all times").
 //
-// The check applies to every held Unit individually — each Unit's
-// OWN protectiveStop must be positive — rather than a single Campaign-level
+// The check applies to every held Unit individually — each Unit's OWN
+// protectiveStop must be usable — rather than a single Campaign-level
 // figure, since a multi-Unit Campaign has no single "the entry price" any
 // invariant could compare against. A single-Unit Campaign reduces to
-// exactly the original one-figure check.
-//
-// This check does NOT require a Unit's stop to sit strictly below its own
-// fill price: repeated half-N raises (the Stop Ladder) can legitimately
-// lift an earlier Unit's stop to or above its own entry under a Variant
-// with a narrow enough Stop Multiple (sizing.AggregateOpenRisk's own doc
-// comment works the arithmetic — the Baseline's own 2N stop and four-Unit
-// maximum never reach it, since the maximum raise is 1.5N). A stop at or
-// above entry is a risk-free position (CONTEXT.md), not a corrupted one, so
-// this invariant now checks only what a raise can never make false:
-// positive and finite.
+// exactly the original one-figure check. It calls sizing.ValidStopLevel
+// with sizing.StopKindRaised for every Unit, never StopKindInitial: this
+// invariant does not know whether a given Unit's CURRENT stop is still its
+// own first level or one the Stop Ladder has already raised, so it can only
+// enforce what holds regardless of which — positive and finite — the same
+// reason event.CampaignEvaluatedPayload.Validate makes the identical choice
+// per Unit. Repeated half-N raises (the Stop Ladder) can legitimately lift
+// an earlier Unit's stop to or above its own entry under a Variant with a
+// narrow enough Stop Multiple (sizing.AggregateOpenRisk's own doc comment
+// works the arithmetic — the Baseline's own 2N stop and four-Unit maximum
+// never reach it, since the maximum raise is 1.5N); a stop at or above entry
+// is a risk-free position (CONTEXT.md), not a corrupted one.
 //
 // This is deliberately a *runtime* check on top of a representation that
 // already makes the violation unreachable in practice: openCampaign and
@@ -2421,10 +2422,12 @@ func (r *Reducer) checkCampaignHasAProtectiveStop(state *instrumentState, bar ev
 		return event.Envelope{}, nil
 	}
 	var broken *unitState
+	var brokenErr error
 	for i := range campaign.units {
 		u := &campaign.units[i]
-		if !(u.protectiveStop > 0) {
+		if err := sizing.ValidStopLevel(u.fillPrice, u.protectiveStop, sizing.StopKindRaised); err != nil {
 			broken = u
+			brokenErr = err
 			break
 		}
 	}
@@ -2433,8 +2436,8 @@ func (r *Reducer) checkCampaignHasAProtectiveStop(state *instrumentState, bar ev
 	}
 
 	detail := fmt.Sprintf(
-		"campaign %q for instrument %q: unit %d has protective stop %v (fill price %v): every unit of an open campaign must have a protective stop, positive and finite, at all times",
-		campaign.campaignID, bar.InstrumentID, broken.index, broken.protectiveStop, broken.fillPrice)
+		"campaign %q for instrument %q: unit %d has protective stop %v (fill price %v): %s",
+		campaign.campaignID, bar.InstrumentID, broken.index, broken.protectiveStop, broken.fillPrice, brokenErr)
 
 	payload := event.EngineStatePayload{
 		State:  event.EngineStateHalted,
