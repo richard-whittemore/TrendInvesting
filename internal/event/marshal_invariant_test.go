@@ -35,6 +35,7 @@ func marshalPayloads() []validatedPayload {
 		validExitProposalExpired(), validAddProposalExpired(),
 		validNotionalAccountRebased(), validNotionalAccountRecovered(),
 		event.RunCompletedPayload{}, validSetupEvaluated(), validSignal(),
+		validCorporateAction(),
 		validProtectiveStopSet(), validProtectiveStopSetRaised(), validCampaignUnitsStopped(),
 	}
 }

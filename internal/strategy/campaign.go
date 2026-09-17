@@ -1235,14 +1235,16 @@ func checkBarConfirmsCampaignClosing(state *instrumentState, bar event.Completed
 //     different instruments is caught here, as a reconciliation failure,
 //     rather than being accepted twice because each instrument kept its own
 //     separate history.
-//  3. An instrument this reducer has never evaluated can have no proposal
+//  3. A delisted instrument has no order outstanding and cannot be traded
+//     again in this run (ADR 0009), so any new fill naming one is unmatched.
+//  4. An instrument this reducer has never evaluated can have no proposal
 //     outstanding, so any fill for it is unmatched.
-//  4. If a Campaign is already open, an entry-kind fill with a genuinely new
+//  5. If a Campaign is already open, an entry-kind fill with a genuinely new
 //     id is deliberately refused (see applyFillToOpenCampaign) — rule 2
 //     has already resolved every
 //     re-delivery by this point, so what remains here is always a second,
 //     different execution.
-//  5. Otherwise the fill must match the outstanding proposal: the same
+//  6. Otherwise the fill must match the outstanding proposal: the same
 //     proposal, the same direction, no more than the quantity that was sized,
 //     and a timestamp inside the window in which an order for it could have
 //     executed.
@@ -1331,6 +1333,27 @@ func (r *Reducer) applyFill(envelope event.Envelope) ([]event.Envelope, error) {
 		// The duplicate delivery of an execution already recorded: nothing
 		// to do, and nothing to complain about.
 		return nil, nil
+	}
+
+	// An execution naming a delisted instrument (ADR 0009; see r.delisted).
+	// Checked after the idempotency check above, so a re-delivery of a fill
+	// this reducer already accepted — including the very fill that opened the
+	// Campaign the delisting went on to close — stays idempotent rather than
+	// becoming an error the second time it arrives.
+	//
+	// An error rather than a silent skip, unlike applyCompletedBar's own
+	// treatment of a bar for the same instrument. Every proposal outstanding
+	// for the instrument was terminally resolved when the delisting arrived
+	// (applyDelisting), so there is no order left for this execution to
+	// answer, and a delisted instrument cannot be traded again in this run:
+	// the fill therefore reports either an execution this strategy is no
+	// longer offering or one in a market that has closed. Either way this
+	// reducer's position state and the producer's disagree, which is a
+	// reconciliation failure (docs/architecture.md), and absorbing it would
+	// hide exactly the disagreement it is this reducer's job to surface.
+	if delistedAt, delisted := r.delisted[fill.InstrumentID]; delisted {
+		return nil, fmt.Errorf("strategy: instrument %q: %s fill %q arrived after the instrument was delisted at %s; every proposal outstanding for it was terminally resolved then and a delisted instrument cannot be traded again in this run (ADR 0009), so an execution naming one is a reconciliation failure, not something to absorb (docs/architecture.md)",
+			fill.InstrumentID, fill.Kind, fill.FillID, delistedAt.Format(time.RFC3339))
 	}
 
 	// Deliberately a plain lookup rather than stateFor: an instrument the

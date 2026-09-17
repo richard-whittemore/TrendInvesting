@@ -38,7 +38,7 @@ func validFill() event.FillPayload {
 		Quantity:     133,
 		Price:        campaignEntryPrice,
 		FilledAt:     proposalPeriodEnd,
-		// #18: the level the order rested at, the slippage applied against
+		// The level the order rested at, the slippage applied against
 		// the trader, and the commission charged. Level here is the trade
 		// proposal's own entry level (200); the executed price sits above it
 		// by the slippage ADR 0013 requires on every fill.
@@ -62,8 +62,8 @@ func validStopFill() event.FillPayload {
 		Quantity:     133,
 		Price:        126.09441570423544,
 		FilledAt:     proposalPeriodEnd.AddDate(0, 0, 1),
-		// #18: a sell executes BELOW its level once slippage is applied
-		// against the trader, the mirror of validFill's buy.
+		// A sell executes BELOW its level once slippage is applied
+		// against the trader (ADR 0013), the mirror of validFill's buy.
 		Level:           126.14441570423544,
 		SlippageApplied: 0.05,
 		Commission:      1.00,
@@ -195,7 +195,20 @@ func TestFillPayloadValidate(t *testing.T) {
 			wantErr: "filled at",
 		},
 		{
-			// #15: UnitIDs is a stop-only field; an entry fill naming one is
+			// A non-zero FilledAt that cannot be written as RFC 3339 is
+			// refused here rather than accepted and left to fail downstream,
+			// where no Validate call remains to blame
+			// (docs/development.md principle 4, fail closed). The encoding
+			// rule is the standard library's own: time.Time.MarshalJSON
+			// refuses a year outside 0-9999 and a zone offset outside [0,23]
+			// hours, which is why Validate asks it rather than restating it.
+			name:    "filled at cannot be written as RFC 3339",
+			mutate:  func(f *event.FillPayload) { f.FilledAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC) },
+			wantErr: "filled at",
+		},
+		{
+			// UnitIDs is a stop-only field (FillPayload.UnitIDs, fill.go);
+			// an entry fill naming one is
 			// a producer defect, the same closed-shape rule every other
 			// kind-specific field in this payload already follows.
 			name:    "entry fill names unit ids",
@@ -253,10 +266,10 @@ func TestStopFillPayloadValidate(t *testing.T) {
 			wantErr: "proposal id",
 		},
 		{
-			// #15: a stop fill must name which units its own protective
-			// stop closed, because the gap case can leave units at
-			// different levels — "closes everything" is no longer a safe
-			// default.
+			// A stop fill must name which units its own protective
+			// stop closed (FillPayload.UnitIDs, fill.go), because the gap
+			// case leaves units at different levels (The Turtle Rules p.23)
+			// — "closes everything" is no longer a safe default.
 			name:    "missing unit ids",
 			mutate:  func(f *event.FillPayload) { f.UnitIDs = nil },
 			wantErr: "unit ids is required",

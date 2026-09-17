@@ -264,6 +264,12 @@ const CampaignExitedEventType = "strategy.campaign.exited"
 // int zero, which is not a legitimate Unit count (Validate requires it
 // positive), so a version-1 record is rejected outright rather than
 // silently read as a zero-Unit exit (ADR 0015's rule).
+//
+// ExitReasonDelisting is a new value of the already-required Reason field,
+// so it needed no version-3 bump: no earlier record ever wrote "delisting",
+// so there is nothing an older reader could mistake it for (the same
+// reasoning ExpiryReasonInputStreamEnded's own doc comment states for
+// ProposalExpiredPayload.Reason).
 const CampaignExitedSchemaVersion uint32 = 2
 
 // RuleCampaignExitedByStop names the rule for CampaignExitedPayload.Rule
@@ -287,16 +293,36 @@ const (
 	// ExitReasonExitChannel is declared in exit_proposal.go, next to
 	// ExitProposalPayload, which names the identical string: a fill said
 	// price fell below the Exit Channel low (The Turtle Rules p.26, ADR
-	// 0002). A Delisting Exit will add a further reason; adding it is a new
-	// enumerated value on this already-existing payload and event type, not
-	// a new one, since every exit is the same underlying fact — a
-	// Campaign's life ended, and why.
+	// 0002).
+	// ExitReasonDelisting is a new enumerated value on this already-existing
+	// payload and event type, not a new one — every exit is the same
+	// underlying fact, a Campaign's life ended, and why (CONTEXT.md:
+	// "Delisting Exit"; ADR 0009: "a delisting is a forced exit at the last
+	// available price, journaled as a distinct exit reason"). Unlike the two
+	// reasons above, this one is never a fill's own report: ADR 0009 forces
+	// the exit directly (see internal/strategy/delisting.go), so it is kept
+	// countable separately here precisely so a delisted outcome is never
+	// silently folded into either of the reasons an execution actually
+	// caused, hiding a survivorship effect the results would otherwise look
+	// better for.
+	ExitReasonDelisting = "delisting"
 )
 
 // RuleCampaignExitedByExitChannel names the rule for
 // CampaignExitedPayload.Rule when Reason is ExitReasonExitChannel: a
 // Campaign closes because a fill said price fell below the Exit Channel low.
 const RuleCampaignExitedByExitChannel = "campaign.exited.by-exit-channel"
+
+// RuleCampaignExitedByDelisting names the rule for CampaignExitedPayload.Rule
+// when Reason is ExitReasonDelisting: an instrument stopped trading, and ADR
+// 0009 forces its open Campaign closed rather than leaving it to hang.
+const RuleCampaignExitedByDelisting = "campaign.exited.by-delisting"
+
+// ADRDelistingForcesExit is the ADR CampaignExitedPayload.ADR cites when
+// Reason is ExitReasonDelisting: ADR 0009, which is what makes a delisting
+// the one exception to "losing eligibility never closes a Campaign" and
+// requires the forced exit to be journaled as its own reason.
+const ADRDelistingForcesExit = "0009"
 
 // CampaignExitedPayload records a Campaign's life ending: what was filled to
 // close it, and the realised result.
@@ -412,7 +438,13 @@ type CampaignExitedPayload struct {
 	CampaignID   string `json:"campaign_id"`
 	InstrumentID string `json:"instrument_id"`
 	// FillID is the closing fill's producer-assigned id (see the type's doc
-	// comment).
+	// comment) for Reason ExitReasonStop or ExitReasonExitChannel. For
+	// ExitReasonDelisting there is no fill to name — ADR 0009 forces the
+	// exit directly, with no execution to reconcile against — so this is the
+	// id of the corporate-action envelope
+	// (internal/event.MarketCorporateActionEventType) that forced the
+	// closure instead. Either way the field answers the same question, "what
+	// caused this Campaign to end", and lets a reviewer join back to it.
 	FillID string `json:"fill_id"`
 	// ExitedAt is the closing fill's timestamp: the Campaign's life ended
 	// when the fill did, matching CampaignOpenedPayload.OpenedAt's own
@@ -516,7 +548,7 @@ func (p CampaignExitedPayload) Validate() error {
 		errs = append(errs, errors.New("exited at cannot be written as RFC 3339"))
 	}
 	switch p.Reason {
-	case ExitReasonStop, ExitReasonExitChannel:
+	case ExitReasonStop, ExitReasonExitChannel, ExitReasonDelisting:
 		// recognised
 	default:
 		errs = append(errs, fmt.Errorf("reason %q is not a recognised exit reason", p.Reason))
