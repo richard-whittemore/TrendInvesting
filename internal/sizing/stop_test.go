@@ -529,6 +529,8 @@ func TestValidStopLevel(t *testing.T) {
 		{name: "zero entry price refused", entryPrice: 0, level: 90, kind: sizing.StopKindInitial, wantErr: "entry price must be positive"},
 		{name: "negative entry price refused", entryPrice: -1, level: 90, kind: sizing.StopKindInitial, wantErr: "entry price must be positive"},
 		{name: "non-finite entry price refused", entryPrice: math.NaN(), level: 90, kind: sizing.StopKindInitial, wantErr: "entry price must be finite"},
+		{name: "undeclared stop kind refused even though level is below entry", entryPrice: 100, level: 90, kind: sizing.StopKind(2), wantErr: "not a declared StopKind"},
+		{name: "undeclared stop kind refused even though level is at or above entry", entryPrice: 100, level: 110, kind: sizing.StopKind(2), wantErr: "not a declared StopKind"},
 	}
 
 	for _, tt := range tests {
