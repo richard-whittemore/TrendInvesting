@@ -499,6 +499,56 @@ func TestRaisedStopHandComputedCases(t *testing.T) {
 	}
 }
 
+// --- #78: one predicate for "is this Protective Stop valid" -------------
+
+// TestValidStopLevel is the table test the predicate's own doc comment
+// promises: the conditional rule #15 introduced (initial strictly below
+// entry, raised at or above accepted), plus the fail-closed cases every
+// sizing entry point shares.
+func TestValidStopLevel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		entryPrice float64
+		level      float64
+		kind       sizing.StopKind
+		wantErr    string
+	}{
+		{name: "initial stop below entry accepted", entryPrice: 100, level: 90, kind: sizing.StopKindInitial},
+		{name: "initial stop at entry refused", entryPrice: 100, level: 100, kind: sizing.StopKindInitial, wantErr: "must be below the entry price"},
+		{name: "initial stop above entry refused", entryPrice: 100, level: 110, kind: sizing.StopKindInitial, wantErr: "must be below the entry price"},
+		{name: "raised stop below entry accepted", entryPrice: 100, level: 90, kind: sizing.StopKindRaised},
+		{name: "raised stop at entry accepted", entryPrice: 100, level: 100, kind: sizing.StopKindRaised},
+		{name: "raised stop above entry accepted", entryPrice: 100, level: 110, kind: sizing.StopKindRaised},
+		{name: "zero level refused", entryPrice: 100, level: 0, kind: sizing.StopKindInitial, wantErr: "protective stop level must be positive"},
+		{name: "negative level refused", entryPrice: 100, level: -5, kind: sizing.StopKindInitial, wantErr: "protective stop level must be positive"},
+		{name: "non-finite level refused (NaN)", entryPrice: 100, level: math.NaN(), kind: sizing.StopKindInitial, wantErr: "protective stop level must be finite"},
+		{name: "non-finite level refused (+Inf)", entryPrice: 100, level: math.Inf(1), kind: sizing.StopKindRaised, wantErr: "protective stop level must be finite"},
+		{name: "non-finite level refused (-Inf)", entryPrice: 100, level: math.Inf(-1), kind: sizing.StopKindInitial, wantErr: "protective stop level must be finite"},
+		{name: "zero entry price refused", entryPrice: 0, level: 90, kind: sizing.StopKindInitial, wantErr: "entry price must be positive"},
+		{name: "negative entry price refused", entryPrice: -1, level: 90, kind: sizing.StopKindInitial, wantErr: "entry price must be positive"},
+		{name: "non-finite entry price refused", entryPrice: math.NaN(), level: 90, kind: sizing.StopKindInitial, wantErr: "entry price must be finite"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := sizing.ValidStopLevel(tt.entryPrice, tt.level, tt.kind)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidStopLevel(%v, %v, %v) error = %v, want nil", tt.entryPrice, tt.level, tt.kind, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("ValidStopLevel(%v, %v, %v) error = %v, want substring %q", tt.entryPrice, tt.level, tt.kind, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // TestRaisedStopFailsClosed covers every non-finite and non-positive input
 // .greptile/rules.md requires to fail closed.
 func TestRaisedStopFailsClosed(t *testing.T) {
