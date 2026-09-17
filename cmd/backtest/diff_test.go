@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"math"
 	"os"
@@ -19,8 +20,8 @@ import (
 // than a synthetic fixture.
 func TestTheCommandReportsNoDivergenceBetweenAJournalAndItself(t *testing.T) {
 	var out bytes.Buffer
-	if err := run([]string{"-diff-want", goldenJournal, "-diff-got", goldenJournal}, &out); err != nil {
-		t.Fatalf("run(-diff-want, -diff-got) error = %v", err)
+	if err := run(context.Background(), []string{"-diff-want", goldenJournal, "-diff-got", goldenJournal}, &out); err != nil {
+		t.Fatalf("run(context.Background(), -diff-want, -diff-got) error = %v", err)
 	}
 	if !strings.Contains(out.String(), "no divergence") {
 		t.Fatalf("diff reported:\n%s", out.String())
@@ -76,15 +77,15 @@ func TestTheCommandReportsAOneULPProtectiveStopDivergence(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := run([]string{"-diff-want", wantPath, "-diff-got", gotPath}, &out)
+	err := run(context.Background(), []string{"-diff-want", wantPath, "-diff-got", gotPath}, &out)
 	if err == nil {
-		t.Fatal("run(-diff-want, -diff-got) error = nil, want the divergence reported")
+		t.Fatal("run(context.Background(), -diff-want, -diff-got) error = nil, want the divergence reported")
 	}
 	if !strings.Contains(err.Error(), "level") {
-		t.Fatalf("run() error = %v, want it to name the level field", err)
+		t.Fatalf("run(context.Background(), ) error = %v, want it to name the level field", err)
 	}
 	if !strings.Contains(err.Error(), wantText) || !strings.Contains(err.Error(), gotText) {
-		t.Fatalf("run() error = %v, want both %q and %q distinguishable", err, wantText, gotText)
+		t.Fatalf("run(context.Background(), ) error = %v, want both %q and %q distinguishable", err, wantText, gotText)
 	}
 
 	// The machine-readable report on stdout must be able to make the same
@@ -127,15 +128,15 @@ func TestTheCommandReportsWhereALongerJournalDiverges(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	err := run([]string{"-diff-want", wantPath, "-diff-got", gotPath}, &out)
+	err := run(context.Background(), []string{"-diff-want", wantPath, "-diff-got", gotPath}, &out)
 	if err == nil {
-		t.Fatal("run(-diff-want, -diff-got) error = nil, want the length mismatch reported")
+		t.Fatal("run(context.Background(), -diff-want, -diff-got) error = nil, want the length mismatch reported")
 	}
 	if !strings.Contains(err.Error(), "ends") {
-		t.Fatalf("run() error = %v, want it to say a stream ended", err)
+		t.Fatalf("run(context.Background(), ) error = %v, want it to say a stream ended", err)
 	}
 	if !strings.Contains(err.Error(), duplicatedType) {
-		t.Fatalf("run() error = %v, want it to name the extra %s decision", err, duplicatedType)
+		t.Fatalf("run(context.Background(), ) error = %v, want it to name the extra %s decision", err, duplicatedType)
 	}
 }
 
@@ -151,12 +152,12 @@ func TestDiffWantAndDiffGotMustBeGivenTogether(t *testing.T) {
 	for _, args := range tests {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			var out bytes.Buffer
-			err := run(args, &out)
+			err := run(context.Background(), args, &out)
 			if err == nil {
-				t.Fatalf("run(%v) error = nil, want a refusal", args)
+				t.Fatalf("run(context.Background(), %v) error = nil, want a refusal", args)
 			}
 			if !strings.Contains(err.Error(), "-diff-want and -diff-got must be given together") {
-				t.Fatalf("run(%v) error = %v, want it to name the missing pair", args, err)
+				t.Fatalf("run(context.Background(), %v) error = %v, want it to name the missing pair", args, err)
 			}
 		})
 	}
@@ -168,15 +169,15 @@ func TestDiffIsMutuallyExclusiveWithOtherOperations(t *testing.T) {
 	_, path := runBacktestTo(t)
 
 	var out bytes.Buffer
-	err := run([]string{"-verify", path, "-diff-want", path, "-diff-got", path}, &out)
+	err := run(context.Background(), []string{"-verify", path, "-diff-want", path, "-diff-got", path}, &out)
 	if err == nil {
-		t.Fatal("run() error = nil, want a refusal naming two operations")
+		t.Fatal("run(context.Background(), ) error = nil, want a refusal naming two operations")
 	}
 	if !strings.Contains(err.Error(), "-verify") || !strings.Contains(err.Error(), "-diff-want and -diff-got") {
-		t.Fatalf("run() error = %v, want it to name both -verify and -diff-want and -diff-got", err)
+		t.Fatalf("run(context.Background(), ) error = %v, want it to name both -verify and -diff-want and -diff-got", err)
 	}
 	if out.Len() > 0 {
-		t.Fatalf("run() wrote a report before refusing:\n%s", out.String())
+		t.Fatalf("run(context.Background(), ) wrote a report before refusing:\n%s", out.String())
 	}
 }
 
@@ -186,12 +187,12 @@ func TestDiffRefusesAMissingJournal(t *testing.T) {
 	_, path := runBacktestTo(t)
 
 	var out bytes.Buffer
-	err := run([]string{"-diff-want", "testdata/does-not-exist.jsonl", "-diff-got", path}, &out)
+	err := run(context.Background(), []string{"-diff-want", "testdata/does-not-exist.jsonl", "-diff-got", path}, &out)
 	if err == nil {
-		t.Fatal("run(-diff-want, -diff-got) error = nil, want a refusal")
+		t.Fatal("run(context.Background(), -diff-want, -diff-got) error = nil, want a refusal")
 	}
 	if !strings.Contains(err.Error(), "does-not-exist.jsonl") {
-		t.Fatalf("run() error = %v, want it to name the missing file", err)
+		t.Fatalf("run(context.Background(), ) error = %v, want it to name the missing file", err)
 	}
 }
 
@@ -221,15 +222,15 @@ func TestDiffRefusesAJournalWhoseChainIsBroken(t *testing.T) {
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			var out bytes.Buffer
-			err := run(args, &out)
+			err := run(context.Background(), args, &out)
 			if err == nil {
-				t.Fatal("run(-diff-want, -diff-got) error = nil, want the broken chain refused")
+				t.Fatal("run(context.Background(), -diff-want, -diff-got) error = nil, want the broken chain refused")
 			}
 			if !strings.Contains(err.Error(), "chain") {
-				t.Fatalf("run() error = %v, want it to name the broken chain", err)
+				t.Fatalf("run(context.Background(), ) error = %v, want it to name the broken chain", err)
 			}
 			if out.Len() > 0 {
-				t.Fatalf("run() reported a divergence for evidence it never validated:\n%s", out.String())
+				t.Fatalf("run(context.Background(), ) reported a divergence for evidence it never validated:\n%s", out.String())
 			}
 		})
 	}
@@ -269,17 +270,17 @@ func TestDiffRefusesAJournalThatDescribesMoreThanOneRun(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err = run([]string{"-diff-want", otherPath, "-diff-got", gotPath}, &out)
+	err = run(context.Background(), []string{"-diff-want", otherPath, "-diff-got", gotPath}, &out)
 	if err == nil {
-		t.Fatal("run(-diff-want, -diff-got) error = nil, want the foreign record refused")
+		t.Fatal("run(context.Background(), -diff-want, -diff-got) error = nil, want the foreign record refused")
 	}
 	if strings.Contains(err.Error(), "chain") {
-		t.Fatalf("run() error = %v, want an identity refusal, not a chain one", err)
+		t.Fatalf("run(context.Background(), ) error = %v, want an identity refusal, not a chain one", err)
 	}
 	if !strings.Contains(err.Error(), foreign) {
-		t.Fatalf("run() error = %v, want it to name the foreign configuration hash %s", err, foreign)
+		t.Fatalf("run(context.Background(), ) error = %v, want it to name the foreign configuration hash %s", err, foreign)
 	}
 	if out.Len() > 0 {
-		t.Fatalf("run() reported a divergence for evidence it never validated:\n%s", out.String())
+		t.Fatalf("run(context.Background(), ) reported a divergence for evidence it never validated:\n%s", out.String())
 	}
 }
