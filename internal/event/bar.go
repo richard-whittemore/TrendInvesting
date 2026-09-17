@@ -120,21 +120,6 @@ func isFinite(f float64) bool {
 	return !math.IsNaN(f) && !math.IsInf(f, 0)
 }
 
-// writableTime reports whether t survives being written as RFC 3339, which
-// is how every timestamp field in this package's payloads is encoded. Shared
-// by every time.Time field whose payload is later marshalled by a producer
-// with no Validate call left to blame if it fails.
-//
-// It asks the encoder rather than restating its rules: encoding/json's
-// time.Time.MarshalJSON refuses a year outside 0-9999 and a zone offset
-// outside [0,23] hours. Restating those thresholds here would have to be
-// kept in lock-step with the standard library's own rules by hand; asking it
-// directly cannot drift out of agreement with itself.
-func writableTime(t time.Time) bool {
-	_, err := t.MarshalJSON()
-	return err == nil
-}
-
 // CompletedBarPayload carries a completed bar's OHLCV data in both required
 // price views (ADR 0004), for the instrument and period identified by
 // InstrumentID and PeriodEnd.

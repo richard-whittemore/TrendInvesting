@@ -74,8 +74,11 @@ func (p CorporateActionPayload) Validate() error {
 	default:
 		errs = append(errs, fmt.Errorf("kind %q is not a recognised corporate action kind", p.Kind))
 	}
-	if p.EffectiveAt.IsZero() {
+	switch {
+	case p.EffectiveAt.IsZero():
 		errs = append(errs, errors.New("effective at is required"))
+	case !writableTime(p.EffectiveAt):
+		errs = append(errs, errors.New("effective at cannot be written as RFC 3339"))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid corporate action payload: %w", err)
