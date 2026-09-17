@@ -58,6 +58,30 @@ func logText(s string) string {
 	return s
 }
 
+// exitCause names what ended the Campaign, reading
+// CampaignExitedPayload.FillID as that payload defines it for the recorded
+// Reason. A stop or Exit-Channel exit is a fill's own report, so the fill
+// confirms it. A Delisting Exit has no order and no execution behind it
+// (ADR 0009 forces the close at the last available price), so FillID is the
+// corporate-action envelope instead — and a log that called it a fill would
+// send a reconciliation hunting a broker record that never existed.
+func exitCause(p event.CampaignExitedPayload) string {
+	if p.Reason == event.ExitReasonDelisting {
+		return fmt.Sprintf("forced by corporate action %q; no fill was recorded for this exit", p.FillID)
+	}
+	return fmt.Sprintf("confirmed by fill %q", p.FillID)
+}
+
+// exitPriceLabel names CampaignExitedPayload.ExitPrice for the same reason:
+// it is what the closing fills averaged, except under ADR 0009, where it is
+// the last completed bar's close and no trade happened at it.
+func exitPriceLabel(reason string) string {
+	if reason == event.ExitReasonDelisting {
+		return "last available price"
+	}
+	return "average price"
+}
+
 func renderDecision[T interface{ Validate() error }](e event.Envelope, version uint32, render func(T) string) (string, error) {
 	if e.SchemaVersion != version {
 		return "", fmt.Errorf("%s schema %d is not supported; expected %d", e.Type, e.SchemaVersion, version)
@@ -106,7 +130,7 @@ func decisionSentence(e event.Envelope) (string, error) {
 		})
 	case event.CampaignExitedEventType:
 		return renderDecision(e, event.CampaignExitedSchemaVersion, func(p event.CampaignExitedPayload) string {
-			return fmt.Sprintf("exited Campaign %q because %s, confirmed by fill %q; %d Units and %d shares closed at average price %s; realised result %s", p.CampaignID, logText(p.Reason), p.FillID, p.Units, p.Quantity, decisionNumber(p.ExitPrice), decisionNumber(p.RealisedResult))
+			return fmt.Sprintf("exited Campaign %q because %s, %s; %d Units and %d shares closed at %s %s; realised result %s", p.CampaignID, logText(p.Reason), exitCause(p), p.Units, p.Quantity, exitPriceLabel(p.Reason), decisionNumber(p.ExitPrice), decisionNumber(p.RealisedResult))
 		})
 	case event.CampaignUnitsStoppedEventType:
 		return renderDecision(e, event.CampaignUnitsStoppedSchemaVersion, func(p event.CampaignUnitsStoppedPayload) string {
