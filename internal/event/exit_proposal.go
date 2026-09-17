@@ -71,8 +71,7 @@ const ExitReasonExitChannel = "exit-channel"
 //
 // Quantity is always the Campaign's full FilledQuantity: the Baseline has no
 // partial exit (CONTEXT.md: "Campaign" — "not a Unit, is what gets entered,
-// added to, stopped out, and exited"), so there is nothing here for a later
-// ticket to add a partial-quantity concept to.
+// added to, stopped out, and exited").
 //
 // Deliberately out of scope, so nothing here should be read as having
 // considered them:
