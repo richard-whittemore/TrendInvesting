@@ -6,8 +6,35 @@ import (
 	"io"
 	"time"
 
+	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 )
+
+// renderedDecision is one decision's explained line and the instrument it
+// names, kept together so the display filters never re-render anything.
+type renderedDecision struct {
+	line       string
+	instrument string
+}
+
+// decisionLines explains a whole stream, which is also what validates it:
+// decisionLine checks the envelope, the declared schema version and the
+// typed payload while it builds each sentence (ADR 0015). Candidate and
+// reference decisions are both evidence, so both pass through here before
+// any comparison rests on either; a stream that skipped it would have an
+// unsupported schema or an invalid payload reported as a disagreement
+// between the two runs rather than refused as evidence.
+func decisionLines(decisions []event.Envelope, role string) ([]renderedDecision, error) {
+	rendered := make([]renderedDecision, len(decisions))
+	for i, e := range decisions {
+		line, instrument, err := decisionLine(e)
+		if err != nil {
+			return nil, fmt.Errorf("backtest: %s %d: %w", role, e.Sequence, err)
+		}
+		rendered[i] = renderedDecision{line: line, instrument: instrument}
+	}
+	return rendered, nil
+}
 
 // doDecisions renders recorded evidence only, after the same unconditional
 // chain and identity checks as the journal diff (ADR 0017).
@@ -22,10 +49,17 @@ func doDecisions(path, date, instrument, reference string, out io.Writer) error 
 	if err != nil {
 		return err
 	}
+	rendered, err := decisionLines(decisions, "decision")
+	if err != nil {
+		return err
+	}
 	var report *replay.Report
 	if reference != "" {
 		want, err := decisionsFromJournal(reference)
 		if err != nil {
+			return err
+		}
+		if _, err := decisionLines(want, "reference decision"); err != nil {
 			return err
 		}
 		report, err = replay.Diff(want, decisions)
@@ -34,18 +68,14 @@ func doDecisions(path, date, instrument, reference string, out io.Writer) error 
 		}
 	}
 	var text bytes.Buffer
-	for _, e := range decisions {
-		line, id, err := decisionLine(e)
-		if err != nil {
-			return fmt.Errorf("backtest: decision %d: %w", e.Sequence, err)
-		}
+	for i, e := range decisions {
 		if date != "" && e.EventTime.UTC().Format(time.DateOnly) != date {
 			continue
 		}
-		if instrument != "" && id != instrument {
+		if instrument != "" && rendered[i].instrument != instrument {
 			continue
 		}
-		text.WriteString(line)
+		text.WriteString(rendered[i].line)
 		text.WriteByte('\n')
 	}
 	if reference != "" {
