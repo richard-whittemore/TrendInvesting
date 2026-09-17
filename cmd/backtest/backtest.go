@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,11 +10,13 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/fills"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/registry"
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
@@ -34,11 +37,19 @@ const sourceFixture = "fixture"
 // would assert which machine produced the journal rather than what the
 // platform decided, and would fail on every release build and every new
 // machine.
+//
+// registryPath, runID and variant describe how the run is recorded (ADR
+// 0012). An empty registryPath records nothing: pointing at a registry is the
+// operator's decision, which is why the zero-slippage refusal does not live
+// in the registry alone — see readConfiguration.
 type options struct {
-	configPath string
-	barsPath   string
-	outPath    string
-	build      string
+	configPath   string
+	barsPath     string
+	outPath      string
+	registryPath string
+	runID        string
+	variant      string
+	build        string
 }
 
 // backtest runs the configuration at opts.configPath over the bars at
@@ -50,7 +61,7 @@ type options struct {
 // simulator so that one component numbers the composed stream — a
 // configuration event applied around RunBar rather than through it would
 // leave a gap replay.Engine.Run refuses.
-func backtest(opts options, out io.Writer) error {
+func backtest(ctx context.Context, opts options, out io.Writer) error {
 	if opts.build == "" {
 		return errors.New("backtest: the running build must be identified; it is part of every envelope's strategy version (ADR 0016)")
 	}
@@ -66,48 +77,401 @@ func backtest(opts options, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	bars, err := readBars(opts.barsPath)
-	if err != nil {
-		return err
-	}
 
 	// Both derived from the configuration actually being run, never supplied
 	// as a string (ADR 0016); only the build identifier comes from outside.
+	// Composed here rather than after the bars are read, so that a run which
+	// fails before its first bar still has the strategy version every entry
+	// states.
 	configurationHash := event.ConfigurationHash(cfg)
 	strategyVersion := event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, opts.build)
 
+	result := perform(ctx, opts, cfg, configurationHash, strategyVersion)
+
+	// Recorded whatever became of the run, and before the failure is
+	// returned: the graveyard of failed and abandoned runs is the point of
+	// the registry (ADR 0012), and a run that is only registered when it went
+	// well is a curated record.
+	if err := registerRun(opts, cfg, strategyVersion, result); err != nil {
+		return errors.Join(result.failure(), err)
+	}
+	if !result.installed {
+		return result.failure()
+	}
+
+	report := fmt.Sprintf("wrote %s: %d record(s) over %s to %s\n",
+		opts.outPath, result.records,
+		result.header.SpanStart.UTC().Format(time.RFC3339), result.header.SpanEnd.UTC().Format(time.RFC3339))
+	if _, err := io.WriteString(out, report); err != nil {
+		return errors.Join(result.failure(), fmt.Errorf("backtest: report the run: %w", err))
+	}
+	return result.failure()
+}
+
+// outcome is what became of a run whose configuration this command accepted.
+//
+// installed answers a question nothing else can: whether the journal now
+// sitting at opts.outPath was written BY THIS PROCESS. It is not "journalErr
+// is nil" — the hard link that installs a journal is its commit point, and
+// the flush after it is a second fact, so a run can hold a journal it
+// installed and an error describing what happened next.
+type outcome struct {
+	header     journal.Header
+	records    int
+	runErr     error
+	journalErr error
+	installed  bool
+}
+
+// failure is everything that went wrong, as one error.
+func (o outcome) failure() error { return errors.Join(o.runErr, o.journalErr) }
+
+// status is what the registry records this run as (ADR 0012's vocabulary).
+//
+// A cancelled context is the operator's interrupt: a run deliberately not
+// carried through is abandoned, not failed. Otherwise the status describes
+// the RUN and not the bookkeeping around it — a run that reached the end of
+// its input stream and installed its journal is completed even when a later
+// step failed, because "failed" states that the run stopped before the end of
+// its input stream and it did not. Every failure is recorded in Detail
+// regardless, and still fails the command.
+func (o outcome) status() registry.Status {
+	switch {
+	case errors.Is(o.runErr, context.Canceled):
+		return registry.StatusAbandoned
+	case o.runErr != nil, !o.installed:
+		return registry.StatusFailed
+	default:
+		return registry.StatusCompleted
+	}
+}
+
+// perform runs the configuration this command has already accepted, and
+// reports what became of it rather than returning at the first failure.
+//
+// Every path out of here is a run that HAPPENED: the configuration was read
+// and accepted, so the operator asked for work and something was attempted,
+// even if the bar fixture turned out to be unreadable. Returning early from
+// any of them is what used to leave a valid configuration with an unreadable
+// bars file recorded nowhere at all.
+//
+// The line sits at the configuration, not earlier. A run refused before its
+// configuration was accepted produced nothing — the zero-slippage refusal
+// (ADR 0013), an unreadable or invalid configuration, an occupied journal
+// path — and an entry for it would assert that a run was performed.
+func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, configurationHash, strategyVersion string) outcome {
+	bars, err := readBars(opts.barsPath)
+	if err != nil {
+		return outcome{runErr: err}
+	}
 	reducer, err := strategy.NewReducer(strategyVersion, cfg)
 	if err != nil {
-		return fmt.Errorf("backtest: %w", err)
+		return outcome{runErr: fmt.Errorf("backtest: %w", err)}
 	}
 	simulator, err := fills.New(cfg, strategyVersion, configurationHash)
 	if err != nil {
-		return fmt.Errorf("backtest: %w", err)
+		return outcome{runErr: fmt.Errorf("backtest: %w", err)}
 	}
 	recorder := journal.NewRecorder(reducer)
 
-	runErr := drive(context.Background(), simulator, recorder, cfg, strategyVersion, bars)
+	result := outcome{runErr: drive(ctx, simulator, recorder, cfg, strategyVersion, bars)}
 
 	// The journal is written whether or not the run completed: a handler
 	// that failed closed may have emitted a final event explaining why, and
 	// that event is exactly the one a reviewer needs (replay.Handler's
-	// contract). A run that refused before its first input has nothing to
-	// record and is reported on its own.
-	header, headerErr := recorder.Header(configurationHash, strategyVersion)
-	if headerErr != nil {
-		return errors.Join(runErr, headerErr)
+	// contract). A run that stopped before its first input has nothing to
+	// write, and is recorded with no artefacts rather than not at all.
+	header, err := recorder.Header(configurationHash, strategyVersion)
+	if err != nil {
+		result.journalErr = err
+		return result
 	}
-	if err := writeJournal(opts.outPath, header, recorder.Entries()); err != nil {
-		return errors.Join(runErr, err)
+	result.header = header
+	result.records = len(recorder.Entries())
+	result.installed, result.journalErr = writeJournal(opts.outPath, header, recorder.Entries())
+	return result
+}
+
+// registerRun records the run in the registry opts names, if it names one.
+//
+// A run that went wrong is recorded rather than dropped: ADR 0012 retains
+// every result, adopted, rejected and failed, under its configuration hash,
+// and that graveyard is what stops a surviving Variant looking more special
+// than it is. Curating it afterwards is what ADR 0018 forbids.
+//
+// # The journal is only this run's evidence if this run installed it
+//
+// Artefacts are attached only when THIS PROCESS installed the journal at
+// opts.outPath (outcome.installed), never merely because no error was
+// returned.
+//
+// A journal is installed by hard link, so a run can lose that link to a
+// concurrent run and find a complete, valid, verifiable journal at its own
+// destination — another run's. Anchoring that journal's path, record count
+// and chain head to this run would produce a registry entry asserting that
+// this run produced evidence it did not produce. That is a corrupted audit
+// trail in the one artefact whose whole purpose is a trustworthy audit
+// trail, and it is strictly worse than recording no artefacts at all. The
+// journal header cannot settle it either: two runs of one configuration have
+// identical headers, and a header carries no run id.
+//
+// Where they are attached, the chain head is read back from the file that
+// actually landed rather than from what this process intended to write, so
+// the value anchored in git attests the evidence rather than the intention
+// (ADR 0017) — and a journal that this run installed and cannot then read
+// back fails the command, whatever became of the run itself.
+func registerRun(opts options, cfg event.ConfigurationPayload, strategyVersion string, result outcome) error {
+	if opts.registryPath == "" {
+		return nil
 	}
 
-	report := fmt.Sprintf("wrote %s: %d record(s) over %s to %s\n",
-		opts.outPath, len(recorder.Entries()),
-		header.SpanStart.UTC().Format(time.RFC3339), header.SpanEnd.UTC().Format(time.RFC3339))
-	if _, err := io.WriteString(out, report); err != nil {
-		return errors.Join(runErr, fmt.Errorf("backtest: report the run: %w", err))
+	run := registry.Run{
+		RunID:           opts.runID,
+		Variant:         opts.variant,
+		Status:          result.status(),
+		StrategyVersion: strategyVersion,
+		SpanStart:       result.header.SpanStart,
+		SpanEnd:         result.header.SpanEnd,
+		Configuration:   cfg,
 	}
-	return runErr
+	if failure := result.failure(); failure != nil {
+		run.Detail = failure.Error()
+	}
+
+	if result.installed {
+		artefacts, err := anchorJournal(opts.registryPath, opts.outPath)
+		if err != nil {
+			return err
+		}
+		run.Artefacts = artefacts
+	}
+
+	entry, err := registry.NewEntry(run)
+	if err != nil {
+		return fmt.Errorf("backtest: %w", err)
+	}
+	return installEntry(opts.registryPath, entry)
+}
+
+// anchorJournal is what the registry records about the journal this run just
+// installed: where it is, how many records it holds, and the chain head that
+// anchors it from outside itself (ADR 0017).
+//
+// The path is recorded RELATIVE to the registry root, and slash-separated. An
+// absolute path written into a git-committed registry names a location that
+// exists on exactly one machine, so the entry would stop meaning anything the
+// moment the repository was cloned. A journal and a registry root that cannot
+// be expressed relative to one another — one absolute and one relative, or
+// two volumes — are refused rather than recorded as an absolute path.
+func anchorJournal(root, journalPath string) (registry.Artefacts, error) {
+	relative, err := filepath.Rel(root, journalPath)
+	if err != nil {
+		return registry.Artefacts{}, fmt.Errorf("backtest: journal %s cannot be recorded relative to registry %s, so it would only mean anything on this machine; give both as absolute paths or both as paths relative to the same directory: %w", journalPath, root, err)
+	}
+
+	verification, err := verifyWritten(journalPath)
+	if err != nil {
+		return registry.Artefacts{}, fmt.Errorf("backtest: the journal this run wrote cannot be anchored in the registry: %w", err)
+	}
+	return registry.Artefacts{
+		JournalPath:     filepath.ToSlash(relative),
+		RecordCount:     verification.RecordCount,
+		FinalRecordHash: verification.FinalRecordHash,
+	}, nil
+}
+
+// verifyWritten reports what the journal at path says about itself.
+func verifyWritten(path string) (journal.Verification, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return journal.Verification{}, err
+	}
+	defer func() { _ = file.Close() }()
+	return journal.Verify(file)
+}
+
+// installEntry writes entry into the registry rooted at root.
+//
+// The same exclusive install the journal uses: the entry is written to a
+// temporary file in its own directory, flushed to disk, and HARD-LINKED into
+// place. link(2) fails with EEXIST atomically, so a run id the registry
+// already holds is refused rather than replaced, and two runs recorded at the
+// same instant can neither interleave nor overwrite one another. rename(2)
+// replaces a destination silently and must not be substituted for it.
+//
+// Two runs of different ids never contend at all: each writes a file of its
+// own, which is also what lets two branches that each recorded a run merge
+// without a conflict.
+//
+// The entry's CONTENT and its DIRECTORY ENTRY are both flushed. Syncing the
+// file alone leaves the link itself — and the configuration-hash directory
+// created to hold it — in the page cache, so a power loss just after a
+// command reported success could come back with the run reported as recorded
+// and nothing on disk to show for it. The registry is the durable record of
+// what was run, so "reported as recorded" and "recorded" have to be the same
+// thing.
+//
+// # The link commits, and the flush after it is a second fact
+//
+// That flush happens after the link, so a flush that fails leaves the entry
+// installed. Both facts are therefore reported, never merged into one
+// failure: the error says the entry IS recorded and where, because an
+// operator told only that registration failed would record the same run again
+// under another id, and two entries for one run is the corrupted audit trail
+// the registry exists to avoid.
+func installEntry(root string, entry registry.Entry) error {
+	relative, err := entry.Path()
+	if err != nil {
+		return fmt.Errorf("backtest: %w", err)
+	}
+	destination := filepath.Join(root, filepath.FromSlash(relative))
+	directory := filepath.Dir(destination)
+	// Noted before the directories exist: a name is durable once the
+	// directory HOLDING it is flushed, so the install has to know which
+	// names it is about to create.
+	creating := missingDirs(directory)
+	if err := os.MkdirAll(directory, 0o750); err != nil {
+		return fmt.Errorf("backtest: create the registry directory: %w", err)
+	}
+
+	// Encoded before it is written, so the bytes this install would put on
+	// disk are in hand to compare against whatever is already there.
+	var encoded bytes.Buffer
+	if err := registry.Encode(&encoded, entry); err != nil {
+		return err
+	}
+
+	file, err := os.CreateTemp(directory, ".run-*.partial")
+	if err != nil {
+		return fmt.Errorf("backtest: create the registry entry: %w", err)
+	}
+	temporary := file.Name()
+	// Every failure from here on removes the partial file, so the only way
+	// anything lands at the destination is the link below.
+	defer func() {
+		_ = file.Close()
+		_ = os.Remove(temporary)
+	}()
+
+	if _, err := file.Write(encoded.Bytes()); err != nil {
+		return fmt.Errorf("backtest: write the registry entry: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("backtest: flush the registry entry to disk: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("backtest: close the registry entry: %w", err)
+	}
+	switch err := os.Link(temporary, destination); {
+	case err == nil:
+	case errors.Is(err, os.ErrExist):
+		if err := alreadyRecorded(destination, encoded.Bytes(), entry.RunID); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("backtest: install the registry entry at %s: %w", destination, err)
+	}
+	for _, synced := range syncedAfter(directory, root, creating) {
+		if err := syncDir(synced); err != nil {
+			return fmt.Errorf("backtest: run %q is recorded at %s and can be read there now, but flushing the registry directory %s to disk failed, so the entry may not survive a power loss: the run is recorded and must not be recorded again under another id, and committing the registry to git is what makes the record durable (ADR 0017): %w", entry.RunID, destination, synced, err)
+		}
+	}
+	return nil
+}
+
+// alreadyRecorded says what an entry already occupying destination means for
+// the one being installed.
+//
+// Byte-identical content is the same record rather than a collision: nothing
+// is written, so the never-overwrite rule (ADR 0018) is untouched,
+// and an install that committed its link and then failed at a later step can
+// be repeated instead of being refused. Anything else is a different run
+// claiming a recorded id, and is refused.
+//
+// The comparison is on the bytes, never on a decode of each side: two entries
+// that decode alike can differ on disk, and the registry is committed to git
+// and read as a diff, so what is on disk is what "identical" has to mean.
+func alreadyRecorded(destination string, installing []byte, runID string) error {
+	recorded, err := os.ReadFile(destination)
+	if err != nil {
+		return fmt.Errorf("backtest: run %q is already recorded under this configuration, and the entry recorded at %s cannot be read to say whether it is this one: %w", runID, destination, err)
+	}
+	if !bytes.Equal(recorded, installing) {
+		return fmt.Errorf("backtest: run %q is already recorded under this configuration, and what is recorded is a different run: a recorded run is evidence and is never overwritten (ADR 0018); record this one under another id", runID)
+	}
+	return nil
+}
+
+// missingDirs lists the directories MkdirAll must create to reach dir,
+// innermost first: dir itself and every ancestor above it that is not there
+// yet. It is called before the creation, so what it reports is what this
+// command is about to become responsible for.
+func missingDirs(dir string) []string {
+	var missing []string
+	for {
+		if _, err := os.Stat(dir); err == nil {
+			return missing
+		}
+		missing = append(missing, dir)
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return missing
+		}
+		dir = parent
+	}
+}
+
+// syncedAfter is every directory whose OWN ENTRIES an install changed,
+// innermost first: the one the entry was linked into, the parent of every
+// directory that had to be created to reach it, and the registry root.
+//
+// A directory entry is what a name IS, so flushing the entry's content and
+// the directory holding it is not enough when this command also created that
+// directory: the new directory's own name lives one level up, and an
+// unflushed name there loses everything beneath it. MkdirAll creates as many
+// levels as the operator's -registry asks for, so the chain runs up to the
+// first ancestor that was already there and stops.
+//
+// The root is flushed whether or not this command created it, which is where
+// the walk stops by policy rather than by necessity: above it the directories
+// are the operator's and git's, not this command's.
+func syncedAfter(directory, root string, created []string) []string {
+	chain := make([]string, 0, len(created)+2)
+	chain = append(chain, directory)
+	for _, dir := range created {
+		chain = append(chain, filepath.Dir(dir))
+	}
+	chain = append(chain, root)
+
+	seen := make(map[string]bool, len(chain))
+	ordered := make([]string, 0, len(chain))
+	for _, dir := range chain {
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		ordered = append(ordered, dir)
+	}
+	return ordered
+}
+
+// syncDir flushes a directory's own entries to disk, so that a name created
+// in it survives a power loss rather than only the named file's contents
+// doing so.
+//
+// Windows cannot flush a directory handle at all, so the failure is tolerated
+// there rather than failing a command whose work is already done; on every
+// platform this project runs on it is a real flush.
+func syncDir(dir string) error {
+	file, err := os.Open(dir)
+	if err == nil {
+		err = file.Sync()
+		_ = file.Close()
+	}
+	if err != nil && runtime.GOOS == "windows" {
+		return nil
+	}
+	return err
 }
 
 // drive applies the run's inputs in order.
@@ -260,13 +624,13 @@ func checkJournalPathFree(path string) error {
 }
 
 func journalExistsError(path string) error {
-	return fmt.Errorf("backtest: %s already exists: a journal is recorded evidence and is never overwritten (AGENTS.md rule 6); move it aside or choose another path", path)
+	return fmt.Errorf("backtest: %s already exists: a journal is recorded evidence and is never overwritten (ADR 0018); move it aside or choose another path", path)
 }
 
 // writeJournal writes the run's journal to path, refusing to disturb
 // anything already there and leaving nothing behind if it fails.
 //
-// A journal is recorded evidence, and AGENTS.md rule 6 forbids rewriting or
+// A journal is recorded evidence, and ADR 0018 forbids rewriting or
 // deleting it: a path that already exists is refused outright rather than
 // truncated, so a rerun cannot destroy the previous run's evidence — least
 // of all before it has validated its own configuration. There is
@@ -279,10 +643,24 @@ func journalExistsError(path string) error {
 // leaves no partial journal that reads like a complete one and a run that
 // loses a race for the path loses it cleanly. The directory has to be the
 // destination's own: a hard link cannot cross filesystems.
-func writeJournal(path string, header journal.Header, entries []journal.Entry) error {
+//
+// It reports whether THIS CALL installed the journal at path, separately from
+// what went wrong, because the two are different facts: the link is the
+// commit point and the flush of the directory holding the new name is a step
+// after it. A caller that read "installed" off a nil error would refuse to
+// anchor a journal this run really did write.
+//
+// The directory's own entries are flushed after the link for the reason the
+// registry's are (ADR 0018): the journal's CONTENT is durable once the
+// temporary file is synced, and the NAME pointing at it is not until the
+// directory holding it is. A crash in between would leave the registry entry
+// anchoring a journal whose name did not survive — an anchor pointing at
+// nothing, in the record that exists so a chain head can be trusted from
+// outside the journal (ADR 0017).
+func writeJournal(path string, header journal.Header, entries []journal.Entry) (bool, error) {
 	file, err := os.CreateTemp(filepath.Dir(path), ".journal-*.partial")
 	if err != nil {
-		return fmt.Errorf("backtest: create the journal: %w", err)
+		return false, fmt.Errorf("backtest: create the journal: %w", err)
 	}
 	temporary := file.Name()
 	// Every failure from here on removes the partial file, so the only way
@@ -293,13 +671,13 @@ func writeJournal(path string, header journal.Header, entries []journal.Entry) e
 	}()
 
 	if err := journal.Write(file, header, entries); err != nil {
-		return err
+		return false, err
 	}
 	if err := file.Sync(); err != nil {
-		return fmt.Errorf("backtest: flush the journal to disk: %w", err)
+		return false, fmt.Errorf("backtest: flush the journal to disk: %w", err)
 	}
 	if err := file.Close(); err != nil {
-		return fmt.Errorf("backtest: close the journal: %w", err)
+		return false, fmt.Errorf("backtest: close the journal: %w", err)
 	}
 	// A HARD LINK, not a rename, and this must not be "simplified" back:
 	// rename(2) replaces an existing destination silently, so a journal
@@ -311,9 +689,13 @@ func writeJournal(path string, header journal.Header, entries []journal.Entry) e
 	// partial journal at the destination.
 	if err := os.Link(temporary, path); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return journalExistsError(path)
+			return false, journalExistsError(path)
 		}
-		return fmt.Errorf("backtest: install the journal at %s: %w", path, err)
+		return false, fmt.Errorf("backtest: install the journal at %s: %w", path, err)
 	}
-	return nil
+	directory := filepath.Dir(path)
+	if err := syncDir(directory); err != nil {
+		return true, fmt.Errorf("backtest: the journal is written at %s and can be read there now, but flushing the directory %s to disk failed, so its name may not survive a power loss; the run is recorded either way, and committing the journal and the registry to git is what makes the record durable (ADR 0017): %w", path, directory, err)
+	}
+	return true, nil
 }

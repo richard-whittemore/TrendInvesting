@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -53,7 +54,7 @@ func runBacktestAs(t *testing.T, build string) (written []byte, path string) {
 	opts := options{configPath: configurationFixture, barsPath: barsFixture, outPath: out, build: build}
 
 	var log bytes.Buffer
-	if err := backtest(opts, &log); err != nil {
+	if err := backtest(context.Background(), opts, &log); err != nil {
 		t.Fatalf("backtest(%+v) error = %v\n%s", opts, err, log.String())
 	}
 	written, err := os.ReadFile(out)
@@ -161,7 +162,7 @@ func TestTheCommandStampsTheRunningBuild(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "journal.jsonl")
 
 	var log bytes.Buffer
-	if err := run([]string{"-config", configurationFixture, "-bars", barsFixture, "-out", out}, &log); err != nil {
+	if err := run(context.Background(), []string{"-config", configurationFixture, "-bars", barsFixture, "-out", out}, &log); err != nil {
 		t.Fatalf("run() error = %v\n%s", err, log.String())
 	}
 	written, err := os.ReadFile(out)
@@ -196,7 +197,7 @@ func TestAZeroSlippageConfigurationIsRefused(t *testing.T) {
 	journalPath := filepath.Join(dir, "journal.jsonl")
 
 	var log bytes.Buffer
-	err = run([]string{"-config", configPath, "-bars", barsFixture, "-out", journalPath}, &log)
+	err = run(context.Background(), []string{"-config", configPath, "-bars", barsFixture, "-out", journalPath}, &log)
 	if err == nil {
 		t.Fatal("run() error = nil, want a refusal")
 	}
@@ -299,7 +300,7 @@ func TestTheJournalTheCommandWritesVerifies(t *testing.T) {
 	_, path := runBacktestTo(t)
 
 	var out bytes.Buffer
-	if err := run([]string{"-verify", path}, &out); err != nil {
+	if err := run(context.Background(), []string{"-verify", path}, &out); err != nil {
 		t.Fatalf("run(-verify) error = %v", err)
 	}
 	if !strings.Contains(out.String(), "verified") {
@@ -321,7 +322,7 @@ func TestVerifyRefusesAnEditedJournal(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	err := run([]string{"-verify", path}, &out)
+	err := run(context.Background(), []string{"-verify", path}, &out)
 	if err == nil {
 		t.Fatal("run(-verify) error = nil, want a refusal")
 	}
@@ -367,7 +368,7 @@ func TestTheRunEndsByExpiringTheProposalItWasStillHolding(t *testing.T) {
 }
 
 // TestTheCommandRefusesToOverwriteAnExistingJournal: a journal is recorded
-// evidence, and AGENTS.md rule 6 forbids rewriting or deleting it. A rerun
+// evidence, and ADR 0018 forbids rewriting or deleting it. A rerun
 // that pointed at an existing journal would destroy the earlier run's
 // evidence before it had even validated its own configuration.
 func TestTheCommandRefusesToOverwriteAnExistingJournal(t *testing.T) {
@@ -378,7 +379,7 @@ func TestTheCommandRefusesToOverwriteAnExistingJournal(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	err := backtest(options{configPath: configurationFixture, barsPath: barsFixture, outPath: out, build: testBuild}, &log)
+	err := backtest(context.Background(), options{configPath: configurationFixture, barsPath: barsFixture, outPath: out, build: testBuild}, &log)
 	if err == nil {
 		t.Fatal("backtest() error = nil, want a refusal to overwrite")
 	}
@@ -411,7 +412,7 @@ func TestTheWriteItselfRefusesADestinationThatAppearedLate(t *testing.T) {
 	header := journal.NewHeader("sha256:abc", "turtle-baseline/1.1.0+test", time.Unix(0, 0).UTC(), time.Unix(1, 0).UTC())
 	entries := []journal.Entry{{Kind: journal.KindInput, Envelope: validEnvelopeForWrite()}}
 
-	err := writeJournal(out, header, entries)
+	_, err := writeJournal(out, header, entries)
 	if err == nil {
 		t.Fatal("writeJournal() error = nil, want a refusal to replace the destination")
 	}
@@ -457,7 +458,7 @@ func TestConcurrentWritesLeaveExactlyOneJournal(t *testing.T) {
 			// A different configuration hash per writer, so the survivor
 			// names which run actually installed it.
 			header := journal.NewHeader(fmt.Sprintf("sha256:run-%d", i), "turtle-baseline/1.1.0+test", time.Unix(0, 0).UTC(), time.Unix(1, 0).UTC())
-			errs[i] = writeJournal(out, header, []journal.Entry{{Kind: journal.KindInput, Envelope: validEnvelopeForWrite()}})
+			_, errs[i] = writeJournal(out, header, []journal.Entry{{Kind: journal.KindInput, Envelope: validEnvelopeForWrite()}})
 		}(i)
 	}
 	wg.Wait()
@@ -530,7 +531,7 @@ func TestAFailedWriteLeavesNothingAtTheDestination(t *testing.T) {
 	broken := journal.NewHeader("", "", time.Time{}, time.Time{})
 	entries := []journal.Entry{{Kind: journal.KindInput, Envelope: event.Envelope{}}}
 
-	if err := writeJournal(out, broken, entries); err == nil {
+	if _, err := writeJournal(out, broken, entries); err == nil {
 		t.Fatal("writeJournal() error = nil, want the invalid header refused")
 	}
 
@@ -565,7 +566,7 @@ func TestTheCommandRefusesAnIncompleteInvocation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var out bytes.Buffer
-			err := run(tt.args, &out)
+			err := run(context.Background(), tt.args, &out)
 			if err == nil {
 				t.Fatalf("run(%v) error = nil, want one naming %q", tt.args, tt.want)
 			}
