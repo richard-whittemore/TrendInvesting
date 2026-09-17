@@ -14,6 +14,20 @@ import (
 // for, and a size the machines it runs on hold comfortably (ADR 0017).
 const DefaultMaxRecords = 2_000_000
 
+// MaxEmissionsPerInput is the most decisions a Recorder journals for one
+// input before it refuses the input entirely. It is what gives the record
+// bound a finite size: the bound is checked between inputs, so a run holds
+// at most DefaultMaxRecords + MaxEmissionsPerInput records (ADR 0017).
+//
+// The largest burst one input can cause is the end of the input stream,
+// which ends every proposal still outstanding: ADR 0011's three proposal
+// kinds, across every instrument the run holds state for. Every other input
+// decides for one instrument. This ceiling therefore covers a universe two
+// orders of magnitude larger than the hundred instruments ADR 0017 sizes the
+// platform's largest run at, while capping the overshoot at about a
+// thirtieth of the records the bound itself allows.
+const MaxEmissionsPerInput = 65_536
+
 // RecordLimitError reports a run stopped because recording another input
 // would take its journal past the records a Recorder holds in memory.
 //
@@ -26,6 +40,21 @@ type RecordLimitError struct {
 
 func (e *RecordLimitError) Error() string {
 	return fmt.Sprintf("journal: this run has recorded %d of the %d records a journal is composed from in memory, and stops here rather than dying on an allocation having written nothing; the records it took are journalled under the span they cover, so run a shorter span or a smaller universe, or raise the bound, which costs memory in proportion", e.Recorded, e.Limit)
+}
+
+// EmissionLimitError reports a run stopped because one input caused more
+// decisions than a journal held in memory takes from a single input.
+//
+// Nothing of that input is recorded. The records taken before it are a
+// journal, under a header stating the span they cover.
+type EmissionLimitError struct {
+	Input   string
+	Emitted int
+	Limit   int
+}
+
+func (e *EmissionLimitError) Error() string {
+	return fmt.Sprintf("journal: event %s caused %d decisions, more than the %d one input may contribute to a journal composed in memory; the record bound is checked between inputs, so this ceiling is what keeps a run's overshoot of it finite; nothing of this input is recorded, and what was recorded before it is journalled under the span it covers", e.Input, e.Emitted, e.Limit)
 }
 
 // Recorder is a replay.Handler that wraps another and records what passes
@@ -51,7 +80,10 @@ func (e *RecordLimitError) Error() string {
 // input's emissions would leave a journal claiming the reducer decided
 // nothing for its last input, which replay equivalence would then report as a
 // divergence in a faithful record. A run therefore overshoots its bound by at
-// most the decisions of the input that reached it.
+// most the decisions of the input that reached it, and MaxEmissionsPerInput
+// is what makes that overshoot finite: a run holds at most maxRecords +
+// MaxEmissionsPerInput records, and an input emitting more than the ceiling
+// is refused whole rather than recorded in part.
 type Recorder struct {
 	handler    replay.Handler
 	entries    []Entry
@@ -88,9 +120,23 @@ func (r *Recorder) Apply(ctx context.Context, input event.Envelope) ([]event.Env
 		return nil, &RecordLimitError{Recorded: len(r.entries), Limit: r.maxRecords}
 	}
 
+	decisions, applyErr := r.handler.Apply(ctx, input)
+	// Also before the input is recorded, so a run that trips the ceiling
+	// journals whole inputs only, and so the overshoot the input-boundary
+	// check permits has a size this package states rather than one the
+	// handler chooses.
+	if len(decisions) > MaxEmissionsPerInput {
+		ceiling := &EmissionLimitError{Input: input.ID, Emitted: len(decisions), Limit: MaxEmissionsPerInput}
+		if applyErr != nil {
+			// The handler's error first, so errors.Is still finds it: a
+			// burst too large to journal must not hide why it was emitted.
+			return decisions, fmt.Errorf("%w; %w", applyErr, ceiling)
+		}
+		return decisions, ceiling
+	}
+
 	r.entries = append(r.entries, Entry{Kind: KindInput, Envelope: input})
 
-	decisions, applyErr := r.handler.Apply(ctx, input)
 	for i, decision := range decisions {
 		r.outputSequence++
 		stamped := replay.Stamp(input, decision, r.outputSequence)
