@@ -415,6 +415,172 @@ func TestDiffTreatsIdenticalHugeIntegersAsEqualAndKeepsWalking(t *testing.T) {
 	}
 }
 
+// TestDiffDistinguishesDecimalLiteralsFloat64WouldCollapse is the decimal
+// counterpart to TestDiffDistinguishesIntegersFloat64WouldCollapse:
+// 9007199254740992.0 and 9007199254740993.0 are different valid JSON
+// literals, both within float64's exponent range, but the second is not
+// exactly representable and rounds to the first. Round 1 fixed this for
+// the bare-integer spelling of the same defect but treated every literal
+// containing "." or "e"/"E" as automatically float64-safe on the strength
+// of its shape alone, which this decimal spelling exposes as false: shape
+// was never the right test, a round trip through float64 is.
+func TestDiffDistinguishesDecimalLiteralsFloat64WouldCollapse(t *testing.T) {
+	t.Parallel()
+
+	const wantQuantity = "9007199254740992.0"
+	const gotQuantity = "9007199254740993.0"
+	wantAsFloat, err := strconv.ParseFloat(wantQuantity, 64)
+	if err != nil {
+		t.Fatalf("strconv.ParseFloat(%q) error = %v", wantQuantity, err)
+	}
+	gotAsFloat, err := strconv.ParseFloat(gotQuantity, 64)
+	if err != nil {
+		t.Fatalf("strconv.ParseFloat(%q) error = %v", gotQuantity, err)
+	}
+	if wantAsFloat != gotAsFloat {
+		t.Fatalf("test setup: %s and %s do not collide as float64 (%v vs %v); this test would prove nothing", wantQuantity, gotQuantity, wantAsFloat, gotAsFloat)
+	}
+
+	want := []event.Envelope{fieldEnvelope("d-1", 1, `{"quantity":`+wantQuantity+`}`)}
+	got := []event.Envelope{fieldEnvelope("d-1", 1, `{"quantity":`+gotQuantity+`}`)}
+
+	report, err := replay.Diff(want, got)
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
+	if report == nil {
+		t.Fatal("Diff() = nil, want a report: 9007199254740992.0 and 9007199254740993.0 are different decimal literals")
+	}
+	if report.FieldPath != "payload.quantity" {
+		t.Fatalf("FieldPath = %q, want %q (a reporter that collapsed the two through float64 would fall back to %q instead)", report.FieldPath, "payload.quantity", "payload")
+	}
+
+	wantNumber, ok := report.Want.(json.Number)
+	if !ok {
+		t.Fatalf("Want = %#v, want a json.Number", report.Want)
+	}
+	gotNumber, ok := report.Got.(json.Number)
+	if !ok {
+		t.Fatalf("Got = %#v, want a json.Number", report.Got)
+	}
+	if wantNumber.String() != wantQuantity || gotNumber.String() != gotQuantity {
+		t.Fatalf("Want/Got = %s/%s, want the exact literals %s/%s untouched", wantNumber, gotNumber, wantQuantity, gotQuantity)
+	}
+
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("json.Marshal(report) error = %v", err)
+	}
+	if !strings.Contains(string(encoded), wantQuantity) || !strings.Contains(string(encoded), gotQuantity) {
+		t.Fatalf("MarshalJSON = %s, want both %q and %q to appear distinguishably", encoded, wantQuantity, gotQuantity)
+	}
+}
+
+// TestDiffTreatsOrdinaryDecimalsAsFloat64 guards against the round-trip
+// check in numberIsFloat64Safe overcorrecting into treating every decimal
+// literal as unsafe. 118.2875 has no finite binary fraction equal to it —
+// no ordinary decimal does, in general — but it round-trips through
+// float64 and Go's own shortest formatting back to the same literal, which
+// is the property numberIsFloat64Safe actually needs, so it must still be
+// compared and reported as float64, not as a json.Number.
+func TestDiffTreatsOrdinaryDecimalsAsFloat64(t *testing.T) {
+	t.Parallel()
+
+	want := []event.Envelope{fieldEnvelope("d-1", 1, `{"level":118.2875}`)}
+	got := []event.Envelope{fieldEnvelope("d-1", 1, `{"level":118.29}`)}
+
+	report, err := replay.Diff(want, got)
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
+	if report == nil {
+		t.Fatal("Diff() = nil, want a report")
+	}
+	if _, ok := report.Want.(float64); !ok {
+		t.Fatalf("Want = %#v (%T), want a float64", report.Want, report.Want)
+	}
+	if _, ok := report.Got.(float64); !ok {
+		t.Fatalf("Got = %#v (%T), want a float64", report.Got, report.Got)
+	}
+}
+
+// TestDiffReportsOverflowingExponentLiteralExactly: 1e400 is syntactically
+// valid JSON (json.Valid checks syntax, not numeric range) but overflows
+// float64 to +Inf. numberIsFloat64Safe's round trip rejects it the same
+// way it rejects any other literal float64 cannot carry — Float64() itself
+// errors on it — so it is compared and reported as its exact digits, never
+// converted, and Report.MarshalJSON never has to encode a non-JSON +Inf.
+func TestDiffReportsOverflowingExponentLiteralExactly(t *testing.T) {
+	t.Parallel()
+
+	const overflow = "1e400"
+	want := []event.Envelope{fieldEnvelope("d-1", 1, `{"level":1}`)}
+	got := []event.Envelope{fieldEnvelope("d-1", 1, `{"extra":`+overflow+`,"level":1}`)}
+
+	report, err := replay.Diff(want, got)
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
+	if report == nil {
+		t.Fatal("Diff() = nil, want a report")
+	}
+	if report.FieldPath != "payload.extra" {
+		t.Fatalf("FieldPath = %q, want %q", report.FieldPath, "payload.extra")
+	}
+	gotNumber, ok := report.Got.(json.Number)
+	if !ok {
+		t.Fatalf("Got = %#v, want a json.Number carrying the literal, not a float64 +Inf", report.Got)
+	}
+	if gotNumber.String() != overflow {
+		t.Fatalf("Got = %s, want the exact literal %s", gotNumber, overflow)
+	}
+
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("json.Marshal(report) error = %v, want no error: a dropped Float64 error would have let +Inf reach canonicalJSON and fail here", err)
+	}
+	if !strings.Contains(string(encoded), overflow) {
+		t.Fatalf("MarshalJSON = %s, want it to contain the exact literal %s", encoded, overflow)
+	}
+}
+
+// TestDiffReportsUnderflowingExponentLiteralExactly: 1e-400 underflows
+// float64 to 0 without strconv.ParseFloat itself reporting an error — Go
+// treats underflow-to-zero as the correctly-rounded result, not a range
+// error — so a check that trusted Float64()'s error alone would miss it.
+// numberIsFloat64Safe's round trip catches it anyway: formatting 0 back
+// out does not reproduce "1e-400", which is the actual failure mode this
+// guards, not merely the failure mode of a discarded error.
+func TestDiffReportsUnderflowingExponentLiteralExactly(t *testing.T) {
+	t.Parallel()
+
+	const underflow = "1e-400"
+	if f, err := strconv.ParseFloat(underflow, 64); err != nil || f != 0 {
+		t.Fatalf("test setup: strconv.ParseFloat(%q) = %v, %v, want 0, nil (underflow-to-zero without an error)", underflow, f, err)
+	}
+
+	want := []event.Envelope{fieldEnvelope("d-1", 1, `{"level":1}`)}
+	got := []event.Envelope{fieldEnvelope("d-1", 1, `{"extra":`+underflow+`,"level":1}`)}
+
+	report, err := replay.Diff(want, got)
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
+	if report == nil {
+		t.Fatal("Diff() = nil, want a report")
+	}
+	if report.FieldPath != "payload.extra" {
+		t.Fatalf("FieldPath = %q, want %q", report.FieldPath, "payload.extra")
+	}
+	gotNumber, ok := report.Got.(json.Number)
+	if !ok {
+		t.Fatalf("Got = %#v, want a json.Number carrying the literal %s, not float64 0", report.Got, underflow)
+	}
+	if gotNumber.String() != underflow {
+		t.Fatalf("Got = %s, want the exact literal %s", gotNumber, underflow)
+	}
+}
+
 // TestDiffRefusesAPayloadWithTrailingDataAfterItsJSONValue: envelopeTree
 // decodes with a json.Decoder rather than json.Unmarshal (so it can call
 // UseNumber), and a Decoder, unlike Unmarshal, does not by itself refuse
