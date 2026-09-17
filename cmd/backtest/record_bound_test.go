@@ -86,6 +86,26 @@ func TestTheJournalOfARunStoppedAtTheBoundReplays(t *testing.T) {
 	}
 }
 
+// TestTheRecordBoundFlagReachesTheRun: the bound an operator names is the
+// bound the run records under, not one the command parses and drops.
+func TestTheRecordBoundFlagReachesTheRun(t *testing.T) {
+	var out bytes.Buffer
+	err := run(context.Background(), []string{
+		"-config", configurationFixture,
+		"-bars", barsFixture,
+		"-out", filepath.Join(t.TempDir(), "journal.jsonl"),
+		"-max-records", "6",
+	}, &out)
+
+	var limit *journal.RecordLimitError
+	if !errors.As(err, &limit) {
+		t.Fatalf("run() error = %v, want the run stopped at the bound the flag named", err)
+	}
+	if limit.Limit != 6 {
+		t.Errorf("Limit = %d, want the 6 the invocation named", limit.Limit)
+	}
+}
+
 func TestARecordBoundBelowOneIsRefused(t *testing.T) {
 	var out bytes.Buffer
 	err := run(context.Background(), []string{
