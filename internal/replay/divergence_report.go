@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"reflect"
 	"sort"
@@ -94,6 +95,16 @@ func Field(d *Divergence) (*FieldDivergence, error) {
 // above 2^53 to the same value and make them indistinguishable to the field
 // walk. diffNumber is what later decides, field by field, whether float64
 // is safe to report or whether the literal itself must be.
+//
+// A second Decode call, rather than Decoder.More, is what proves nothing
+// follows the payload's one value: More reports whether the decoder can
+// read another value, which is false the moment the next non-whitespace
+// byte is a bare "}" or "]" as well as at genuine end of input, so a
+// payload such as `{"a":1}}` would pass a More-based check while still
+// holding trailing data. Decode instead returns io.EOF only when nothing
+// but whitespace remains; anything else — a second value, or a decode
+// error on the leftover bytes — means the payload was not exactly one
+// JSON value.
 func envelopeTree(e event.Envelope) (map[string]any, error) {
 	decoder := json.NewDecoder(bytes.NewReader(e.Payload))
 	decoder.UseNumber()
@@ -101,7 +112,8 @@ func envelopeTree(e event.Envelope) (map[string]any, error) {
 	if err := decoder.Decode(&payload); err != nil {
 		return nil, err
 	}
-	if decoder.More() {
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nil, fmt.Errorf("replay: envelope %s: payload has trailing data after its JSON value", e.ID)
 	}
 	return map[string]any{
