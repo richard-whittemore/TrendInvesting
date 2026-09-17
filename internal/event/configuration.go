@@ -182,6 +182,12 @@ func (c ConfigurationPayload) Validate() error {
 		// mismatch that never happened — blaming the journal for a change in
 		// the engine. Rejecting the id here is what keeps that unreachable.
 		errs = append(errs, fmt.Errorf("strategy id %q must not contain any of %q, which separate the parts of a strategy version", c.StrategyID, StrategyVersionDelimiters))
+	case isPathAlias(c.StrategyID):
+		// "." and ".." match validIdentifierPattern but are the two directory
+		// names filepath.Join resolves specially: ".." escapes the root, "."
+		// aliases it. Stated as an equality test rather than by contorting the
+		// regex: the rule is "not exactly these two", not "no leading dot".
+		errs = append(errs, fmt.Errorf("strategy id %q is a path-traversal alias and cannot be used safely in a directory path", c.StrategyID))
 	case !validIdentifierPattern.MatchString(c.StrategyID):
 		errs = append(errs, fmt.Errorf("strategy id %q is not a valid identifier (must match %s)", c.StrategyID, validIdentifierPattern))
 	}

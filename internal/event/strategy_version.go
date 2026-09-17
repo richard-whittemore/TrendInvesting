@@ -14,6 +14,17 @@ const StrategyVersionDelimiters = "/+"
 // a StrategyID and a RulesVersion.
 var validIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+// isPathAlias reports whether s is one of the two special directory names
+// that filepath.Join resolves outside the expected tree. filepath.Join(root,
+// "..") escapes root; filepath.Join(root, ".") aliases root itself. Both
+// match validIdentifierPattern, so this check must be stated separately
+// rather than encoded in the regex: excluding exactly two literals from every
+// other dot-containing string is clearer as an equality test than as a
+// negative lookahead.
+func isPathAlias(s string) bool {
+	return s == "." || s == ".."
+}
+
 // ComposeStrategyVersion returns the Envelope.StrategyVersion this project
 // stamps on every emission: "<strategy-id>/<rules-version>+<build>" (ADR
 // 0016).
@@ -53,8 +64,14 @@ func DecomposeStrategyVersion(strategyVersion string) (strategyID, rulesVersion,
 	if !validIdentifierPattern.MatchString(id) {
 		return "", "", "", fmt.Errorf("event: strategy version %q decomposes to a strategy id %q that is not a valid identifier (must match %s)", strategyVersion, id, validIdentifierPattern)
 	}
+	if isPathAlias(id) {
+		return "", "", "", fmt.Errorf("event: strategy version %q decomposes to a strategy id %q that is a path-traversal alias and cannot be used safely in a directory path", strategyVersion, id)
+	}
 	if !validIdentifierPattern.MatchString(rules) {
 		return "", "", "", fmt.Errorf("event: strategy version %q decomposes to a rules version %q that is not a valid identifier (must match %s)", strategyVersion, rules, validIdentifierPattern)
+	}
+	if isPathAlias(rules) {
+		return "", "", "", fmt.Errorf("event: strategy version %q decomposes to a rules version %q that is a path-traversal alias and cannot be used safely in a directory path", strategyVersion, rules)
 	}
 	return id, rules, buildPart, nil
 }
