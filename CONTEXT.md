@@ -55,6 +55,10 @@ _Avoid_: stop-loss, trailing stop (the latter is a distinct Sublime exit variant
 **Stop Ladder**:
 The progression of Protective Stops as Units are added to a Campaign.
 
+**risk-free**:
+A held Unit whose current Protective Stop, after being raised by the Stop Ladder, sits at or above its own entry price — reachable only by raising, never by an initial stop, which must sit strictly below entry. Its contribution to a Campaign's aggregate open risk is exactly zero: `max(0, EntryPrice − ProtectiveStop)`, a per-share price distance, never a negative figure and never a validation failure — sizing.AggregateOpenRisk scales that distance by the Unit's Quantity and by DollarsPerPoint to reach the account-currency figure. A break-even or profit-protecting stop is a legitimate outcome of the Stop Ladder, not a corrupted one (The Turtle Rules p.23–24).
+_Avoid_: risk-free rate (the unrelated finance term).
+
 **Loaded**:
 Holding the maximum permitted number of Units for a given risk level — in one instrument, in a correlated group, or in one direction.
 

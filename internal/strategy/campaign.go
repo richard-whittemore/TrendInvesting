@@ -2393,7 +2393,7 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 // narrow enough Stop Multiple (sizing.AggregateOpenRisk's own doc comment
 // works the arithmetic — the Baseline's own 2N stop and four-Unit maximum
 // never reach it, since the maximum raise is 1.5N); a stop at or above entry
-// is a risk-free position (CONTEXT.md), not a corrupted one.
+// is a risk-free position (CONTEXT.md: "risk-free"), not a corrupted one.
 //
 // This is deliberately a *runtime* check on top of a representation that
 // already makes the violation unreachable in practice: openCampaign and

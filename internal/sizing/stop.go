@@ -171,7 +171,7 @@ func checkEntryPrice(v float64) error {
 
 // RaisedStop returns the level an EARLIER Unit's Protective Stop rises to
 // when a further Unit is added to the Campaign (CONTEXT.md: "Stop Ladder" —
-// "the progression of Protective Stops as Units are added"):
+// "The progression of Protective Stops as Units are added"):
 //
 //	level = previousStop + 0.5 x campaignN
 //
