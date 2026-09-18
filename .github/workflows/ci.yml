@@ -24,6 +24,57 @@ jobs:
           ARM64_RESULT: ${{ needs.go-arm64.result }}
         run: test "$AMD64_RESULT" = success && test "$ARM64_RESULT" = success
 
+  rule-surface-append-only:
+    # A pull request may append a rule surface for a new RulesVersion; it may
+    # not rewrite the one a released version already records. The Go test
+    # beside RuleSurfaceFingerprints compares today's source against today's
+    # row, which no checked-in value can do for its own history — so this
+    # compares against main instead. Runs only on a pull request, where a
+    # base to compare against exists.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The base branch must be fetchable; a shallow clone has no main to
+          # compare against.
+          fetch-depth: 0
+          # This job runs a script from the pull request's own branch, so the
+          # branch's author controls the code that runs here. Checkout would
+          # otherwise leave GITHUB_TOKEN in .git/config for that code to read.
+          # The repository is public, so the fetch below needs no credentials.
+          persist-credentials: false
+
+      - name: Refuse a rewritten rule surface
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_REF"
+
+          # Run the BASE branch's copy of the validator, never the branch's
+          # own. The working tree here belongs to the pull request, so a
+          # branch that edits a released row could also edit the script that
+          # refuses it and the guard would approve its own bypass. Only the
+          # file being judged comes from the pull request.
+          if ! git cat-file -e "FETCH_HEAD:scripts/rule-surface-append-only.sh" 2>/dev/null; then
+            # The base has no validator yet, so it also records no rule
+            # surface rows — there is nothing for a branch to rewrite, and
+            # nothing to run. Safe by the same fact, not by assumption.
+            if git cat-file -e "FETCH_HEAD:internal/strategy/rules_version.go" 2>/dev/null &&
+               git show "FETCH_HEAD:internal/strategy/rules_version.go" | grep -qE '^[[:space:]]*"[0-9][^"]*":[[:space:]]*"[0-9a-f]{64}"'; then
+              echo "The base records rule surface rows but carries no validator to check them against." >&2
+              exit 1
+            fi
+            echo "rule-surface-append-only: the base records no rule surface yet; nothing to protect."
+            exit 0
+          fi
+
+          git show "FETCH_HEAD:scripts/rule-surface-append-only.sh" > /tmp/rule-surface-append-only.sh
+          chmod +x /tmp/rule-surface-append-only.sh
+          /tmp/rule-surface-append-only.sh FETCH_HEAD
+
   go-arm64:
     runs-on: ubuntu-24.04-arm
     steps:

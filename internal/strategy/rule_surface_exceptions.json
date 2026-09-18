@@ -1,0 +1,10 @@
+{
+  "note": "Numeric constants rule_surface_fingerprint_test.go's sweep finds in internal/indicator, internal/sizing, or internal/strategy that are declared here to NOT be trading rules, each with the reason. Enforced by TestRuleSurfaceExceptionsAreCurrent, which fails an entry that no longer names a real, current, numeric candidate (renamed, removed, or no longer numeric-shaped), one with no reason, one listed twice, or one naming a Rule*/ADR* identifier — those are rules by construction and may never appear here.",
+  "exceptions": [
+    {
+      "package": "internal/strategy",
+      "name": "maxDrawdownStepsPerObservation",
+      "reason": "A bound on how many Drawdown Steps one account snapshot observation may apply — belt-and-braces against an unbounded loop if the ladder's own asymptote check or the drawdown fractions it depends on ever stop converging. It bounds an iteration count; it does not itself state a trading rule, so changing it (to widen or tighten the safety margin) is not a rules change (see its own doc comment in notional.go)."
+    }
+  ]
+}
