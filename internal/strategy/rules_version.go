@@ -41,24 +41,30 @@ const RulesVersion = "1.2.0"
 // RulesSurfaceFingerprint is a SHA-256 hash, hex-encoded, over the module's
 // declared rule surface: every Rule* and ADR* constant (naming a rule and
 // the ADR it cites, e.g. RuleEntryChannelBreakout, ADREntryChannelBreakout),
-// plus every declared numeric rule constant in internal/indicator,
+// plus every declared numeric-shaped constant in internal/indicator,
 // internal/sizing, and internal/strategy — the Wilder period
-// (indicator.DefaultPeriod) and the Drawdown Step fractions
+// (indicator.DefaultPeriod), the Drawdown Step fractions
 // (sizing.DrawdownStepRetainedFraction and this package's own drawdown
-// threshold) among them.
+// threshold), and sizing.StopKind's own iota values among them — except the
+// ones rule_surface_exceptions.json names.
 //
 // TestDeclaredRuleSurfaceMatchesItsPinnedFingerprint recomputes it from the
 // source and fails if it no longer matches, naming RulesVersion and ADR 0016
 // as the fix.
 //
-// The numeric sweep is deliberately over-inclusive: it takes every numeric
-// constant those packages declare, not a maintained list of the ones that
-// are rules, because a maintained list silently omits the next rule someone
-// adds and that omission is the whole defect this guards against. So a loop
-// bound or a buffer size in one of those packages trips it too. That is a
-// re-pin without a version bump, not a bump — the test's own failure says
-// so, and bumping for a change that leaves every journal replayable is
-// itself a defect.
+// The sweep itself takes every numeric-shaped constant those packages
+// declare, not a maintained list of the ones that are rules, because a
+// maintained list silently omits the next rule someone adds and that
+// omission is the whole defect this guards against. Some of what it finds is
+// not a trading rule at all — a loop bound, a buffer size —
+// and rule_surface_exceptions.json names those, each with its own reason,
+// the same shape internal/coverageaudit/exclusions.json uses.
+//
+// A maintained list is safe here in a way a maintained list of RULES would
+// not be: forgetting to list an exception is safe, because the guard simply
+// trips on the next change to that constant and a person looks; forgetting
+// to list a rule would not be, which is why there is no equivalent list of
+// rules to maintain and the sweep finds those on its own.
 //
 // It catches a changed CONSTANT: a rule renamed, re-cited, or given a
 // different numeric value with RulesVersion left where it was. It does not
@@ -66,4 +72,4 @@ const RulesVersion = "1.2.0"
 // no Rule*, ADR*, or numeric rule constant touched, which is exactly what
 // moved RulesVersion from 1.1.0 to 1.2.0 above. That gap is real and is not
 // closed here.
-const RulesSurfaceFingerprint = "593bcc1fe74331b46679b04adbacaa1c51feb09e9811a2c91e1edf3f51939178"
+const RulesSurfaceFingerprint = "97b7134f2e406f62eb4db56b5bd29d1cde664262a82ffba022553d7924219447"
