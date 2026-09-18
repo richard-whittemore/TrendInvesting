@@ -1,6 +1,7 @@
 package strategy_test
 
 import (
+	"encoding/json"
 	"math"
 	"testing"
 
@@ -54,9 +55,19 @@ func TestCampaignRiskFractionCanOverflowAfterARebase(t *testing.T) {
 }
 
 // A narrow declared variant's Stop Ladder can protect profit above the
-// Campaign's average entry (CONTEXT.md: "risk-free"); the exit validator's
-// strict below-entry requirement is therefore a reachable refusal.
-func TestProfitProtectingCampaignStopReachesBothExitValidators(t *testing.T) {
+// Campaign's average entry (CONTEXT.md: "risk-free"). This test was written
+// to demonstrate that the exit validators' strict below-entry requirement
+// was a REACHABLE refusal, not a theoretical one — a Variant with a narrow
+// enough Stop Multiple raises a stop to or above entry and the Campaign
+// then fails its own exit on a level the Stop Ladder was right to set.
+//
+// #134 removed that refusal: an exit records the stop that closed the
+// Campaign without saying whether it was that Unit's first level or one the
+// Ladder had raised, so it cannot hold it to the initial-stop shape. The
+// scenario is unchanged and the assertion is inverted — the same narrow
+// Variant that used to be refused now exits cleanly, through both the stop
+// and exit-channel paths.
+func TestProfitProtectingCampaignStopExitsCleanly(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []string{event.FillKindStop, event.FillKindExit} {
 		t.Run(kind, func(t *testing.T) {
@@ -77,7 +88,32 @@ func TestProfitProtectingCampaignStopReachesBothExitValidators(t *testing.T) {
 				fill = closingExitFill("AAPL", campaignID, 100, day(58), day(58))
 				fill.Quantity = 266
 			}
-			s.fill(fill).wantRunError("with an invalid exit", "must be below the entry price")
+			decisions, err := s.fill(fill).run()
+			if err != nil {
+				t.Fatalf("run() = %v, want nil: a Campaign whose Stop Ladder raised a stop to or above "+
+					"entry is risk-free, and exiting at that stop is not a validation failure", err)
+			}
+
+			// Assert the scenario actually produced the state it is about,
+			// so a future change that stops raising the stop above entry
+			// cannot leave this passing for the wrong reason.
+			var exited event.CampaignExitedPayload
+			for _, envelope := range decisions {
+				if envelope.Type != event.CampaignExitedEventType {
+					continue
+				}
+				if err := json.Unmarshal(envelope.Payload, &exited); err != nil {
+					t.Fatalf("unmarshalling the campaign-exited payload: %v", err)
+				}
+			}
+			if exited.CampaignID == "" {
+				t.Fatal("no campaign-exited decision was emitted; the scenario did not reach an exit")
+			}
+			if exited.ProtectiveStopLevel < exited.EntryPrice {
+				t.Errorf("protective stop level %v is below the entry price %v; this test is only meaningful "+
+					"while the Stop Ladder raises the stop to or above entry, which is the state #134 is about",
+					exited.ProtectiveStopLevel, exited.EntryPrice)
+			}
 		})
 	}
 }

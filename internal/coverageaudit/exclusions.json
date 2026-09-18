@@ -516,6 +516,20 @@
       "statement": "return \"\"",
       "category": "unreachable-by-invariant",
       "reason": "ConfigurationPayload.Validate accepts only event.SizingModeVolatilityNormalised and event.SizingModeFixedRiskAtStop, and a Reducer reads its mode from nowhere else. The guard is kept so that declaring a third Mode without extending the switch fails closed rather than sizing a position under an unknown principle (ADR 0003)."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyStopFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q would close campaign %q with an invalid exit: %w\", fill.InstrumentID, fill.FillID, campaign.campaignID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a CampaignExitedPayload this function assembled from figures that had already passed sizing's own guards or an accepted payload's Validate. Every field it range-checks is checked upstream, and the RealisedResult re-derivation is formed in the SAME expression order above, so the two agree bit for bit (docs/development.md's fusion rule). The two fields only this payload carries, AverageMoveInN and RealisedResultInUnitN, are quotients of those same figures: reaching a non-finite one needs an enormous numerator or a near-zero denominator, and both were tried against this seam. An exit price large enough to overflow is refused first by the units-stopped decision ('realised result must be finite'), and a DollarsPerPoint small enough to collapse the denominator is refused first by sizing's representability guard ('quantity ... exceeds the largest exactly representable whole quantity'), before any exit is assembled. Until #134 this branch was covered by the below-entry refusal, which was itself the defect: an exit cannot tell a Unit's first stop from a raised one, so it no longer applies the initial-stop shape. If any of this stops holding the guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyExitFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q would close campaign %q with an invalid exit: %w\", fill.InstrumentID, fill.FillID, campaign.campaignID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a CampaignExitedPayload this function assembled from figures that had already passed sizing's own guards or an accepted payload's Validate. Every field it range-checks is checked upstream, and the RealisedResult re-derivation is formed in the SAME expression order above, so the two agree bit for bit (docs/development.md's fusion rule). The two fields only this payload carries, AverageMoveInN and RealisedResultInUnitN, are quotients of those same figures: reaching a non-finite one needs an enormous numerator or a near-zero denominator, and both were tried against this seam. An exit price large enough to overflow is refused first by the units-stopped decision ('realised result must be finite'), and a DollarsPerPoint small enough to collapse the denominator is refused first by sizing's representability guard ('quantity ... exceeds the largest exactly representable whole quantity'), before any exit is assembled. Until #134 this branch was covered by the below-entry refusal, which was itself the defect: an exit cannot tell a Unit's first stop from a raised one, so it no longer applies the initial-stop shape. If any of this stops holding the guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
     }
   ]
 }
