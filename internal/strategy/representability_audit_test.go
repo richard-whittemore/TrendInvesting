@@ -61,12 +61,14 @@ func TestCampaignRiskFractionCanOverflowAfterARebase(t *testing.T) {
 // enough Stop Multiple raises a stop to or above entry and the Campaign
 // then fails its own exit on a level the Stop Ladder was right to set.
 //
-// #134 removed that refusal: an exit records the stop that closed the
-// Campaign without saying whether it was that Unit's first level or one the
-// Ladder had raised, so it cannot hold it to the initial-stop shape. The
-// scenario is unchanged and the assertion is inverted — the same narrow
-// Variant that used to be refused now exits cleanly, through both the stop
-// and exit-channel paths.
+// That refusal is gone, because it was the defect: an exit records the stop
+// that closed the Campaign without saying whether it was that Unit's first
+// level or one the Ladder had raised, so it cannot hold either to the
+// initial-stop shape. "A break-even or profit-protecting stop is a
+// legitimate outcome of the Stop Ladder, not a corrupted one"
+// (CONTEXT.md: "risk-free"). The scenario is unchanged and the assertion is
+// inverted — the same narrow Variant that used to be refused now exits
+// cleanly, through both the stop and exit-channel paths.
 func TestProfitProtectingCampaignStopExitsCleanly(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []string{event.FillKindStop, event.FillKindExit} {

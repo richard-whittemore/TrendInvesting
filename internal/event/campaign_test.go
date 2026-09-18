@@ -575,9 +575,12 @@ func TestCampaignExitedPayloadValidate(t *testing.T) {
 			wantErr: "protective stop level must be positive",
 		},
 		{
-			// Not a case of "at or above entry is invalid" — that rule was
-			// conditional from #15 on, and an exit cannot tell an initial
-			// stop from a raised one (see
+			// Not a case of "at or above entry is invalid". That relation
+			// holds of an initial stop only, and a raised one is
+			// "reachable only by raising, never by an initial stop, which
+			// must sit strictly below entry" (CONTEXT.md: "risk-free") —
+			// an exit cannot tell the two apart, so it holds neither to
+			// the initial shape (see
 			// TestCampaignExitedPayloadAcceptsARaisedRiskFreeStop). What a
 			// stop can never be, whichever kind it is, is non-positive.
 			name:    "protective stop level is negative",
@@ -1048,23 +1051,27 @@ func TestCampaignExitedPayloadJSONTags(t *testing.T) {
 	}
 }
 
-// TestCampaignExitedPayloadAcceptsARaisedRiskFreeStop pins the fifth seam
-// that stated the "stop below entry" rule on its own (#134, found by #78's
-// consolidation). The rule became conditional in #15: a Unit's INITIAL stop
-// must sit strictly below its entry, but the Stop Ladder may raise an
-// earlier Unit's stop to or above entry, at which point the Unit is
-// risk-free and contributes zero to aggregate open risk.
+// TestCampaignExitedPayloadAcceptsARaisedRiskFreeStop pins that an exit is
+// not held to the initial-stop shape. The below-entry relation belongs to a
+// Unit's FIRST Protective Stop: a raised one is "reachable only by raising,
+// never by an initial stop, which must sit strictly below entry"
+// (CONTEXT.md: "risk-free"), and once raised to or above entry the Unit
+// contributes exactly zero to the Campaign's aggregate open risk.
 //
 // A CampaignExitedPayload records the stop that closed the Campaign without
 // saying whether that level was the Unit's first or one the Ladder had
 // already raised, so this seam cannot tell them apart and must accept
 // either — the same choice campaign_evaluated.go and the reducer's
 // capital-safety invariant already make, for the same reason.
+// sizing.ValidStopLevel is the one place the rule is stated, and
+// StopKindRaised is the kind a seam uses when it cannot know.
 //
-// The Baseline never reaches this state (its maximum raise is 1.5N against
-// a 2N stop), so nothing observable breaks today. A Variant that raises
-// further does, and #75 is exactly that shape: the Campaign would exit at a
-// legitimate stop and then fail its own exit validator.
+// The Baseline never reaches this state, since its maximum raise is 1.5N
+// against a 2N stop. A declared Variant with a narrower Stop Multiple does,
+// and there the Campaign would exit at a level the Stop Ladder was right to
+// set and then fail its own exit validator — "a break-even or
+// profit-protecting stop is a legitimate outcome of the Stop Ladder, not a
+// corrupted one" (CONTEXT.md: "risk-free").
 func TestCampaignExitedPayloadAcceptsARaisedRiskFreeStop(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
