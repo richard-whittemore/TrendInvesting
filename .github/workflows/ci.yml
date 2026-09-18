@@ -40,6 +40,11 @@ jobs:
           # The base branch must be fetchable; a shallow clone has no main to
           # compare against.
           fetch-depth: 0
+          # This job runs a script from the pull request's own branch, so the
+          # branch's author controls the code that runs here. Checkout would
+          # otherwise leave GITHUB_TOKEN in .git/config for that code to read.
+          # The repository is public, so the fetch below needs no credentials.
+          persist-credentials: false
 
       - name: Refuse a rewritten rule surface
         env:
