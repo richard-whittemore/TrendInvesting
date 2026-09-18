@@ -396,7 +396,9 @@ func TestTheWriteItselfRefusesADestinationThatAppearedLate(t *testing.T) {
 		t.Fatalf("write the existing journal: %v", err)
 	}
 
-	header := journal.NewHeader("sha256:abc", "turtle-baseline/1.1.0+test", time.Unix(0, 0).UTC(), time.Unix(1, 0).UTC())
+	// The span is the one input's own event time: a header stating any other
+	// is refused before the destination is reached.
+	header := journal.NewHeader("sha256:abc", "turtle-baseline/1.1.0+test", time.Unix(0, 0).UTC(), time.Unix(0, 0).UTC())
 	entries := []journal.Entry{{Kind: journal.KindInput, Envelope: validEnvelopeForWrite()}}
 
 	_, err := writeJournal(out, header, entries)
@@ -442,7 +444,7 @@ func TestConcurrentWritesLeaveExactlyOneJournal(t *testing.T) {
 			defer wg.Done()
 			// A different configuration hash per writer, so the survivor
 			// names which run actually installed it.
-			header := journal.NewHeader(fmt.Sprintf("sha256:run-%d", i), "turtle-baseline/1.1.0+test", time.Unix(0, 0).UTC(), time.Unix(1, 0).UTC())
+			header := journal.NewHeader(fmt.Sprintf("sha256:run-%d", i), "turtle-baseline/1.1.0+test", time.Unix(0, 0).UTC(), time.Unix(0, 0).UTC())
 			_, errs[i] = writeJournal(out, header, []journal.Entry{{Kind: journal.KindInput, Envelope: validEnvelopeForWrite()}})
 		}(i)
 	}

@@ -30,6 +30,14 @@ func replayEquivalence(r io.Reader) (*replay.Divergence, error) {
 	if err := journal.CheckIdentity(header, records); err != nil {
 		return nil, err
 	}
+	// Neither of these is the chain's question. A journal whose chain was
+	// repaired after the fact verifies perfectly while its header describes
+	// more than one run, or claims a period the records it holds never
+	// reached; reading it as the record of a run is where that has to fail
+	// closed.
+	if err := journal.CheckSpan(header, records); err != nil {
+		return nil, err
+	}
 	inputs, decisions, err := journal.Split(records)
 	if err != nil {
 		return nil, err

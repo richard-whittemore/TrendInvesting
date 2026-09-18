@@ -50,6 +50,21 @@ type options struct {
 	runID        string
 	variant      string
 	build        string
+	// maxRecords bounds the records this run holds in memory before its
+	// journal is written. Zero is an invocation that named no bound.
+	maxRecords int
+}
+
+// recordBound bounds the records this run holds in memory before its journal
+// is written (ADR 0017), from the invocation or the default when it named
+// none. The bound is checked between inputs, so a run exceeds it by the
+// decisions of the input that reached it, and by no more than
+// journal.MaxEmissionsPerInput.
+func (o options) recordBound() int {
+	if o.maxRecords < 1 {
+		return journal.DefaultMaxRecords
+	}
+	return o.maxRecords
 }
 
 // backtest runs the configuration at opts.configPath over the bars at
@@ -172,9 +187,9 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 	if err != nil {
 		return outcome{runErr: fmt.Errorf("backtest: %w", err)}
 	}
-	recorder := journal.NewRecorder(reducer)
+	recorder := journal.NewBoundedRecorder(reducer, opts.recordBound())
 
-	result := outcome{runErr: drive(ctx, simulator, recorder, cfg, strategyVersion, bars)}
+	result := outcome{runErr: namingTheBoundFlag(drive(ctx, simulator, recorder, cfg, strategyVersion, bars))}
 
 	// The journal is written whether or not the run completed: a handler
 	// that failed closed may have emitted a final event explaining why, and
@@ -187,9 +202,23 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 		return result
 	}
 	result.header = header
-	result.records = len(recorder.Entries())
-	result.installed, result.journalErr = writeJournal(opts.outPath, header, recorder.Entries())
+	// Taken once: at the bound a second defensive copy would double the peak
+	// footprint at the moment it is tightest.
+	entries := recorder.Entries()
+	result.records = len(entries)
+	result.installed, result.journalErr = writeJournal(opts.outPath, header, entries)
 	return result
+}
+
+// namingTheBoundFlag adds the flag that raises the record bound, which
+// internal/journal cannot name: the bound belongs to the recorder and the
+// flag to this command.
+func namingTheBoundFlag(err error) error {
+	var limit *journal.RecordLimitError
+	if !errors.As(err, &limit) {
+		return err
+	}
+	return fmt.Errorf("%w; -max-records raises it for this command", err)
 }
 
 // registerRun records the run in the registry opts names, if it names one.
