@@ -34,7 +34,7 @@ var headerPattern = regexp.MustCompile(`(?m)^\*\*([^*]+)\*\*:`)
 // immediately — bounded to 40 characters, well past the longest existing
 // case and far short of a second, unrelated citation such as an ADR's own
 // quoted rule.
-var citationPattern = regexp.MustCompile(`CONTEXT\.md(?:'s|:)[^"'\n]{0,40}(["'])([^"']+)['"]`)
+var citationPattern = regexp.MustCompile(`CONTEXT\.md(?:'s|:)(?:'s|[^"'\n]){0,40}(?:"([^"\n]+)"|'([^'\n]+)')`)
 
 // continuationPattern matches a second (or later) quotation chained onto a
 // citation citationPattern already matched: a compound citation such as
@@ -48,7 +48,7 @@ var citationPattern = regexp.MustCompile(`CONTEXT\.md(?:'s|:)[^"'\n]{0,40}(["'])
 // genuinely new attribution (the "; ADR 0009: " that introduces an
 // unrelated ADR quotation) can never be mistaken for a continuation of this
 // citation: reaching a letter before a quote stops the chain.
-var continuationPattern = regexp.MustCompile(`^([\s—\-,;]{0,10})(["'])([^"']+)['"]`)
+var continuationPattern = regexp.MustCompile(`^([\s—\-,;]{0,10})(?:"([^"\n]+)"|'([^'\n]+)')`)
 
 // glossaryTerms returns CONTEXT.md's own header terms and the concatenated
 // prose of each entry's own definition — never the file's raw text, so a
@@ -76,10 +76,37 @@ func glossaryTerms(contextMD string) (headers map[string]bool, defs map[string]s
 		if avoid := strings.Index(def, "_Avoid_"); avoid >= 0 {
 			def = def[:avoid]
 		}
+		def = definitionProse(def)
 		defs[term] = def
 		spans = append(spans, def)
 	}
+	// Joined on newlines, which no normalised span contains, so a quotation
+	// can only ever match inside one entry.
 	return headers, defs, strings.Join(spans, "\n")
+}
+
+// definitionProse reduces one entry's span to the prose that entry states.
+//
+// A Markdown section heading sits between two entries, so it falls inside
+// the preceding entry's span and would otherwise read as part of that
+// definition: with "### Positions" between them, a comment could cite
+// CONTEXT.md for "Positions" and resolve against Breakout's entry. A
+// heading organises the file; it defines nothing.
+//
+// Whitespace is then collapsed the same way citedTerms collapses a comment's,
+// because CONTEXT.md wraps its definitions and a quotation is compared
+// against them as one line. Without this a citation quoting a sentence that
+// happens to cross a line break in CONTEXT.md fails an audit it should pass
+// — a false accusation of fabrication, which is worse here than a miss.
+func definitionProse(span string) string {
+	kept := make([]string, 0, 8)
+	for _, line := range strings.Split(span, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(strings.Fields(strings.Join(kept, " ")), " ")
 }
 
 // citation is one quoted claim a source comment makes about CONTEXT.md.
@@ -133,23 +160,44 @@ func citedTerms(text string) []citation {
 	flat := strings.Join(strings.Fields(text), " ")
 	var cites []citation
 	for _, m := range citationPattern.FindAllStringSubmatchIndex(flat, -1) {
-		head := flat[m[4]:m[5]]
-		cites = append(cites, citation{term: head})
+		// A term is attributed to the MOST RECENT term cited, not to the
+		// one that opened the citation. In "Unit", "Campaign" — "prose",
+		// the prose is Campaign's; reading it as Unit's would reject a
+		// perfectly good citation. Only a co-citation moves the target, so
+		// a second attribution still belongs to the same entry.
+		target := quoted(flat, m, 1, 2)
+		cites = append(cites, citation{term: target})
 		pos := m[1]
 		for {
 			cont := continuationPattern.FindStringSubmatchIndex(flat[pos:])
 			if cont == nil {
 				break
 			}
-			next := citation{term: flat[pos+cont[6] : pos+cont[7]]}
+			term := quoted(flat[pos:], cont, 2, 3)
 			if attributes(flat[pos+cont[2] : pos+cont[3]]) {
-				next.entry = head
+				cites = append(cites, citation{term: term, entry: target})
+			} else {
+				cites = append(cites, citation{term: term})
+				target = term
 			}
-			cites = append(cites, next)
 			pos += cont[1]
 		}
 	}
 	return cites
+}
+
+// quoted returns whichever of the given alternation groups matched. A
+// citation's term may be double- or single-quoted, and the two are separate
+// groups so that each delimiter must be closed by its own kind: accepting
+// any closing quote let an apostrophe inside a possessive open a quotation,
+// and "the Campaign's \"Unit\" rung" was read as citing a term named "s ".
+func quoted(s string, m []int, groups ...int) string {
+	for _, g := range groups {
+		if m[2*g] >= 0 {
+			return s[m[2*g]:m[2*g+1]]
+		}
+	}
+	return ""
 }
 
 // resolves reports whether a citation is something CONTEXT.md actually
@@ -220,6 +268,21 @@ func TestCitedTermsFindsOnlyGenuineCitations(t *testing.T) {
 			name: "term cited then a separate, unrelated ADR quotation is ignored",
 			text: `a delisting is a Campaign's life ending (CONTEXT.md: "Delisting Exit"; ADR 0009: "a delisting is a forced exit at the last available price").`,
 			want: []citation{{term: "Delisting Exit"}},
+		},
+		{
+			name: "possessive prose before the quoted term is not itself a quote",
+			text: `the rung is set (CONTEXT.md: the Campaign's "Unit" size) at entry.`,
+			want: []citation{{term: "Unit"}},
+		},
+		{
+			name: "a quotation whose delimiters do not match is not a citation",
+			text: `an unbalanced (CONTEXT.md: "Unit' rung) proves nothing.`,
+			want: nil,
+		},
+		{
+			name: "a term attributed after a co-citation belongs to the nearest term, not the first",
+			text: `both apply (CONTEXT.md: "Unit", "Campaign" — "The complete life of a position").`,
+			want: []citation{{term: "Unit"}, {term: "Campaign"}, {term: "The complete life of a position", entry: "Campaign"}},
 		},
 		{
 			name: "a bare mention of CONTEXT.md with no colon or possessive is not a citation",
@@ -490,5 +553,39 @@ func TestEveryContextMDCitationNamesADefinedTerm(t *testing.T) {
 	})
 	if walkErr != nil {
 		t.Fatal(walkErr)
+	}
+}
+
+// TestDefinitionProseIsWhatTheEntryStates pins the two ways a raw span is
+// not yet a definition. A Markdown section heading falls inside the
+// preceding entry's span, so without stripping it a comment could cite
+// CONTEXT.md for "Positions" and resolve against Breakout's entry. And
+// CONTEXT.md wraps its definitions, so a citation quoting a sentence that
+// crosses a line break would fail an audit it should pass — accusing a
+// correct citation of fabrication, which is the worse of the two errors
+// this package can make.
+func TestDefinitionProseIsWhatTheEntryStates(t *testing.T) {
+	t.Parallel()
+	const fixture = "**Breakout**:\nA price exceeding the channel.\n\n" +
+		"### Positions\n\n" +
+		"**Unit**:\nOne indivisible\nincrement of a position.\n"
+	headers, defs, body := glossaryTerms(fixture)
+
+	if got := defs["Breakout"]; got != "A price exceeding the channel." {
+		t.Errorf("Breakout's definition = %q, want the prose alone with no heading and no stray whitespace", got)
+	}
+	if resolves(citation{term: "### Positions"}, headers, defs, body) {
+		t.Error(`resolves("### Positions") = true, want false: a heading organises the file, it defines nothing`)
+	}
+	if resolves(citation{term: "Positions"}, headers, defs, body) {
+		t.Error(`resolves("Positions") = true, want false: it is a heading inside Breakout's span, not part of its definition`)
+	}
+	if !resolves(citation{term: "One indivisible increment of a position"}, headers, defs, body) {
+		t.Error("resolves(a definition wrapped across two lines) = false, want true: " +
+			"CONTEXT.md wraps its prose and a comment quotes it as one line")
+	}
+	if resolves(citation{term: "the channel. One indivisible"}, headers, defs, body) {
+		t.Error("resolves(text spanning two entries) = true, want false: entries are joined on a newline " +
+			"precisely so a quotation cannot straddle them")
 	}
 }
