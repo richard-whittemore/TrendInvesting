@@ -43,13 +43,20 @@ const sourceFixture = "fixture"
 // operator's decision, which is why the zero-slippage refusal does not live
 // in the registry alone — see readConfiguration.
 type options struct {
-	configPath   string
-	barsPath     string
-	outPath      string
-	registryPath string
-	runID        string
-	variant      string
-	build        string
+	configPath string
+	barsPath   string
+	// corporateActionsPath is a JSON array of event.CorporateActionPayload,
+	// the fixture-driven input path for a corporate action (CONTEXT.md:
+	// "Delisting Exit"). Empty names no fixture, and a run given none
+	// behaves exactly as one with no corporate-action input in its stream at
+	// all: this field, unset, is the zero value every existing caller of
+	// options already passes.
+	corporateActionsPath string
+	outPath              string
+	registryPath         string
+	runID                string
+	variant              string
+	build                string
 	// maxRecords bounds the records this run holds in memory before its
 	// journal is written. Zero is an invocation that named no bound.
 	maxRecords int
@@ -179,6 +186,10 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 	if err != nil {
 		return outcome{runErr: err}
 	}
+	corporateActions, err := readCorporateActions(opts.corporateActionsPath)
+	if err != nil {
+		return outcome{runErr: err}
+	}
 	reducer, err := strategy.NewReducer(strategyVersion, cfg)
 	if err != nil {
 		return outcome{runErr: fmt.Errorf("backtest: %w", err)}
@@ -189,7 +200,7 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 	}
 	recorder := journal.NewBoundedRecorder(reducer, opts.recordBound())
 
-	result := outcome{runErr: namingTheBoundFlag(drive(ctx, simulator, recorder, cfg, strategyVersion, bars))}
+	result := outcome{runErr: namingTheBoundFlag(drive(ctx, simulator, recorder, cfg, strategyVersion, bars, corporateActions))}
 
 	// The journal is written whether or not the run completed: a handler
 	// that failed closed may have emitted a final event explaining why, and
@@ -504,7 +515,20 @@ func syncDir(dir string) error {
 }
 
 // drive applies the run's inputs in order.
-func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, bars []event.CompletedBarPayload) error {
+//
+// actions is interleaved among bars by EffectiveAt (CONTEXT.md: "Delisting
+// Exit"): deliverDueCorporateActions below delivers every action still
+// outstanding whose EffectiveAt precedes a bar before that bar's own
+// decision runs, so a delisting reaches the reducer ahead of the bar
+// decision it forces closed. Nothing here judges whether a given action's
+// EffectiveAt is stale relative to what the reducer has already accepted for
+// its instrument — that is internal/strategy/delisting.go's applyDelisting
+// chronology check, on the reducer's own state, and this command does not
+// reimplement it. This also means actions is assumed given in ascending
+// EffectiveAt order, the same assumption readBars makes of bars: a fixture
+// that violates it is not corrected here, and whatever the resulting
+// delivery order produces is exactly what the reducer judges.
+func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, bars []event.CompletedBarPayload, actions []event.CorporateActionPayload) error {
 	// The configuration event's own time is the first bar's period end: the
 	// run's configuration is in force from the moment the run starts, and
 	// this command has no clock to consult (nor would a recorded time from
@@ -539,7 +563,15 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 		return fmt.Errorf("backtest: %w", err)
 	}
 
+	// actionCursor is the next not-yet-delivered action; deliverDueCorporateActions
+	// advances it, so a run given no fixture (actions is nil) never enters
+	// either loop body below and the bar loop that follows is byte-for-byte
+	// what it was before this flag existed.
+	actionCursor := 0
 	for _, bar := range bars {
+		if err := deliverDueCorporateActions(ctx, simulator, recorder, cfg, strategyVersion, actions, &actionCursor, bar.PeriodEnd, true); err != nil {
+			return err
+		}
 		envelope, err := inputEnvelope("bar:"+bar.InstrumentID+":"+bar.PeriodEnd.UTC().Format(time.RFC3339Nano),
 			event.CompletedBarEventType, event.CompletedBarSchemaVersion, bar.PeriodEnd, bar, cfg, strategyVersion)
 		if err != nil {
@@ -548,6 +580,12 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 		if _, err := fills.RunBar(ctx, simulator, recorder, envelope); err != nil {
 			return fmt.Errorf("backtest: %w", err)
 		}
+	}
+	// Whatever is left is not before any bar this run holds: an action
+	// effective at or after the last bar's own period end (a delisting
+	// stated to take effect at that bar's own close, or later).
+	if err := deliverDueCorporateActions(ctx, simulator, recorder, cfg, strategyVersion, actions, &actionCursor, time.Time{}, false); err != nil {
+		return err
 	}
 
 	// Outstanding proposals expire at the last input time when no next bar
@@ -561,6 +599,41 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 	}
 	if _, err := fills.Deliver(ctx, simulator, recorder, completed); err != nil {
 		return fmt.Errorf("backtest: %w", err)
+	}
+	return nil
+}
+
+// deliverDueCorporateActions delivers every action in actions, starting at
+// *cursor, that is due before the bar decision it precedes: when bounded,
+// every action whose EffectiveAt is strictly before boundary; when not
+// bounded, every action left (called once after the last bar, for an action
+// effective at or after that bar's own period end).
+//
+// *cursor only ever advances, so a run with no fixture (actions is nil)
+// leaves it at zero and this delivers nothing, on every call.
+//
+// It does not sort or otherwise correct actions: interleaving positions each
+// action against the bar stream in the order actions already gives them, the
+// same trust readBars places in a bars fixture's own order. Whether a
+// particular action's EffectiveAt is stale relative to what the reducer has
+// already accepted for its instrument is answered by the reducer's own
+// chronology check (internal/strategy/delisting.go's applyDelisting), not by
+// anything here.
+func deliverDueCorporateActions(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, cursor *int, boundary time.Time, bounded bool) error {
+	for *cursor < len(actions) {
+		action := actions[*cursor]
+		if bounded && !action.EffectiveAt.Before(boundary) {
+			return nil
+		}
+		envelope, err := inputEnvelope("corporate-action:"+action.InstrumentID+":"+action.EffectiveAt.UTC().Format(time.RFC3339Nano),
+			event.MarketCorporateActionEventType, event.MarketCorporateActionSchemaVersion, action.EffectiveAt, action, cfg, strategyVersion)
+		if err != nil {
+			return err
+		}
+		if _, err := fills.Deliver(ctx, simulator, recorder, envelope); err != nil {
+			return fmt.Errorf("backtest: %w", err)
+		}
+		*cursor++
 	}
 	return nil
 }
@@ -633,6 +706,37 @@ func readBars(path string) ([]event.CompletedBarPayload, error) {
 		}
 	}
 	return bars, nil
+}
+
+// readCorporateActions loads the corporate-action fixture named by path: a
+// JSON array of event.CorporateActionPayload (CONTEXT.md: "Delisting Exit"),
+// in ascending EffectiveAt order — the same event.MarketCorporateActionEventType
+// a live producer would eventually deliver instead, so the reducer never
+// learns which one sent it (event.MarketCorporateActionEventType's own doc
+// comment).
+//
+// An empty path names no fixture, which is not an error: it is a run that
+// declares no corporate action at all, and readBars' "there is nothing to
+// run" refusal for a bar fixture does not apply here, since a run naming
+// none is the ordinary case this flag did not exist to change.
+func readCorporateActions(path string) ([]event.CorporateActionPayload, error) {
+	if path == "" {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("backtest: read the corporate actions: %w", err)
+	}
+	var actions []event.CorporateActionPayload
+	if err := json.Unmarshal(raw, &actions); err != nil {
+		return nil, fmt.Errorf("backtest: decode the corporate actions in %s: %w", path, err)
+	}
+	for i, action := range actions {
+		if err := action.Validate(); err != nil {
+			return nil, fmt.Errorf("backtest: corporate action %d in %s: %w", i+1, path, err)
+		}
+	}
+	return actions, nil
 }
 
 // checkJournalPathFree reports whether anything already occupies path.
