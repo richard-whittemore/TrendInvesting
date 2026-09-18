@@ -145,3 +145,60 @@ go test ./cmd/backtest -run TestTheCommandTurnsABarFixtureIntoTheGoldenJournal -
 A diff in that file is a change in what this system decides, to be read before it is accepted.
 
 The golden run fixes the build identifier (`+test`) rather than taking `internal/buildinfo.Version`, which differs between machines and release builds: a journal asserted byte for byte must record what the platform decided, not which machine decided it. `main` passes the real build, and a separate test holds that wiring in place.
+
+## Reading the recorded decisions
+
+```sh
+go run ./cmd/backtest -decisions run.jsonl
+go run ./cmd/backtest -decisions run.jsonl -date 2026-01-22 -instrument AAPL
+go run ./cmd/backtest -decisions run.jsonl -reference reference.jsonl
+```
+
+`-decisions` describes what the journal recorded in sentences, in recording order,
+including declined and expired proposals. Each line identifies the decision's
+UTC event time and envelope sequence, the instrument (or account), the action,
+the recorded reason or supporting figures, and the payload's rule and ADR.
+A proposal is described as a proposal; only a recorded fill opens a Campaign.
+An exit is described by its recorded reason: a stop or an Exit-Channel exit
+names the fill that confirmed it, while a Delisting Exit names the
+corporate action that forced it and says no fill was recorded, because ADR
+0009 closes the Campaign at the last available price with no order behind it.
+Recorded text is escaped wherever it carries a rune that is not graphic, so
+nothing a journal holds can split a line or reverse the order it reads in.
+No strategy conditions are recomputed by this mode.
+
+`-date` selects a UTC **event** date (`YYYY-MM-DD`), not the recording date.
+`-instrument` matches the instrument ID exactly; account-wide decisions have no
+instrument and are excluded by that filter. Combined filters require both to
+match. An empty selection prints no decision lines. These options and
+`-reference` require `-decisions`, which joins `-verify`, `-replay`, `-runs`, and
+`-diff-want`/`-diff-got` in the one-operation check and rejects backtest run flags.
+The separate name keeps a readable record distinct from `-replay`'s test of
+whether this build reproduces it.
+
+Both journals pass the existing `journal.Verify`, `Read`, `CheckIdentity`, and
+`Split` path before output. Verification is unconditional: an audit log must not
+present edited evidence as a decision explanation. This is chain verification
+and run-identity checking, not replay equivalence or external registry anchoring.
+`journal.CheckSpan` is not present in this checkout; the log makes no additional
+span-validation claim. Both journals' decision envelopes and typed payloads are
+validated before anything is compared, filtered or written: a reference is
+evidence too, so an unknown decision type or an unsupported schema on either
+side is refused rather than reported as a divergence between the two runs.
+
+With `-reference`, `replay.Diff` compares the **complete** decision streams,
+independent of display filters. Its existing human-readable reporter supplies
+the first divergence, printed after the selected decisions and also returned as
+an error (nonzero exit). Equal streams end with `no divergence`. There is no
+second comparison implementation. Prices and levels use `event.CanonicalBytes`
+without rounding or a second float formatter, preserving adjacent float64 values.
+
+Some existing decision schemas do not carry `rule` or `adr`: Setup evaluations,
+Campaign evaluations, declined proposals, and engine-state changes. Their lines
+explicitly say `rule not recorded; ADR not recorded`. The log does not infer
+citations from current code or silently omit those decisions. This leaves the
+literal every-line citation requirement unresolved for those historical
+payloads; [the provenance follow-up](https://github.com/richard-whittemore/TrendInvesting/issues/126)
+tracks the schema decision. A log can explain only recorded evidence; it does
+not fabricate a rejection when the producer emitted none. No journal or event
+schema is changed by this mode.

@@ -1,12 +1,13 @@
 // Command backtest runs a declared configuration over a bar fixture and
 // writes the run's journal, verifies a journal it wrote earlier, checks one
 // for replay equivalence, or diffs two journals' decisions against each
-// other.
+// other, or reads a journal as human-readable decision sentences.
 //
 //	backtest -config <configuration.json> -bars <bars.json> -out <journal.jsonl>
 //	     [-registry <runs/> -run-id <id> [-variant <id>]]
 //	backtest -verify <journal.jsonl>
 //	backtest -replay <journal.jsonl>
+//	backtest -decisions <journal.jsonl> [-date YYYY-MM-DD] [-instrument ID] [-reference <journal.jsonl>]
 //	backtest -registry <runs/> -runs <configuration-hash>
 //	backtest -diff-want <journal.jsonl> -diff-got <journal.jsonl>
 //
@@ -83,8 +84,18 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	// that always carries a value cannot be checked against the operations
 	// that would ignore it.
 	maxRecords := flags.String("max-records", "", "bounds the records this run holds in memory before its journal is written, checked between inputs; defaults to 2000000")
+	decisionsPath := flags.String("decisions", "", "path of a journal to read as a human-readable decision log")
+	decisionDate := flags.String("date", "", "UTC event date to display with -decisions (YYYY-MM-DD)")
+	instrument := flags.String("instrument", "", "exact instrument ID to display with -decisions")
+	reference := flags.String("reference", "", "reference journal to compare in full with -decisions")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+
+	for _, option := range []named{{"-date", *decisionDate}, {"-instrument", *instrument}, {"-reference", *reference}} {
+		if option.value != "" && *decisionsPath == "" {
+			return fmt.Errorf("backtest: %s requires -decisions", option.flag)
+		}
 	}
 
 	// -diff-want and -diff-got name one operation between them, so either
@@ -111,10 +122,13 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	if *runsHash == "" {
 		runFlags = append(runFlags, named{"-registry", *registryPath})
 	}
-	if err := checkOneOperation([]named{{"-verify", *verifyPath}, {"-replay", *replayPath}, {"-runs", *runsHash}, {"-diff-want and -diff-got", *diffWantPath}}, runFlags); err != nil {
+	if err := checkOneOperation([]named{{"-decisions", *decisionsPath}, {"-verify", *verifyPath}, {"-replay", *replayPath}, {"-runs", *runsHash}, {"-diff-want and -diff-got", *diffWantPath}}, runFlags); err != nil {
 		return err
 	}
 
+	if *decisionsPath != "" {
+		return doDecisions(*decisionsPath, *decisionDate, *instrument, *reference, out)
+	}
 	if *verifyPath != "" {
 		return verify(*verifyPath, out)
 	}
