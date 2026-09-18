@@ -26,6 +26,10 @@ package strategy
 //
 // Bumped 1.1.0 -> 1.2.0 when a Campaign exiting at a Protective Stop the
 // Stop Ladder had raised to or above its entry price stopped being refused.
+// Such a stop leaves the Unit risk-free rather than corrupted — it is
+// "reachable only by raising, never by an initial stop, which must sit
+// strictly below entry" (CONTEXT.md: "risk-free"), and contributes exactly
+// zero to the Campaign's aggregate open risk.
 // The Baseline never reaches that state — its maximum raise is 1.5N against
 // a 2N stop — so no Baseline journal changes. A declared Variant with a
 // narrow enough Stop Multiple does reach it, and there the two builds
