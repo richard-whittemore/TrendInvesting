@@ -14,11 +14,14 @@ import (
 )
 
 const (
-	barsDelistingFixture             = "testdata/bars_delisting.json"
-	barsStaleFixture                 = "testdata/bars_stale.json"
-	corporateActionsDelistingFixture = "testdata/corporate_actions_delisting.json"
-	corporateActionsStaleFixture     = "testdata/corporate_actions_stale.json"
-	corporateActionsUntradedFixture  = "testdata/corporate_actions_untraded.json"
+	barsDelistingFixture                      = "testdata/bars_delisting.json"
+	barsGroupedInstrumentsFixture             = "testdata/bars_grouped_instruments.json"
+	corporateActionsDelistingFixture          = "testdata/corporate_actions_delisting.json"
+	corporateActionsUntradedFixture           = "testdata/corporate_actions_untraded.json"
+	corporateActionsGroupedInstrumentsFixture = "testdata/corporate_actions_grouped_instruments.json"
+	corporateActionsOutOfOrderFixture         = "testdata/corporate_actions_out_of_order.json"
+	corporateActionsNullFixture               = "testdata/corporate_actions_null.json"
+	corporateActionsEmptyFixture              = "testdata/corporate_actions_empty.json"
 )
 
 // decisionsOfType decodes every decision envelope of the given type from a
@@ -74,27 +77,130 @@ func TestADelistingClosesACampaignInTheJournal(t *testing.T) {
 	}
 }
 
-// TestAStaleDelistingNoticeIsRefused checks that the reducer's own
-// chronology check (internal/strategy/delisting.go's applyDelisting) is what
-// judges a stale notice, and that its refusal surfaces through the command
-// rather than being swallowed or reimplemented here.
-func TestAStaleDelistingNoticeIsRefused(t *testing.T) {
+// noDecisionFollowsCorporateActionInputs checks that every recorded
+// market.corporate-action input is immediately followed by no decision:
+// the shape applyDelisting's own doc comment describes for a no-op
+// (an already-delisted repeat, or a genuinely unknown instrument), and the
+// shape every corporate-action input in these fixtures is expected to take,
+// since none of them opens or closes a Campaign. It returns how many such
+// inputs it found.
+func noDecisionFollowsCorporateActionInputs(t *testing.T, written []byte) int {
+	t.Helper()
+	_, records, err := journal.Read(bytes.NewReader(written))
+	if err != nil {
+		t.Fatalf("journal.Read() error = %v", err)
+	}
+	count := 0
+	for i, record := range records {
+		if record.Kind != journal.KindInput || record.Envelope.Type != event.MarketCorporateActionEventType {
+			continue
+		}
+		count++
+		if i+1 < len(records) && records[i+1].Kind == journal.KindDecision {
+			t.Fatalf("the corporate-action input at record %d was followed by a decision, which this fixture's no-op case must never produce", i+1)
+		}
+	}
+	return count
+}
+
+// TestPerInstrumentInterleaveHandlesAnInstrumentGroupedBarFixture checks a
+// fixture shape readBars' own contract permits: it promises only "the order
+// the run delivers them", not global chronology, so a fixture that lists
+// every bar of one instrument before any bar of the next is well-formed.
+// Interleaving an action against a DIFFERENT instrument's bar would place it
+// at the wrong point in its own instrument's history; positioning it per
+// instrument (backtest.go's deliverActionsDueFor) must accept this exact
+// fixture shape without error.
+func TestPerInstrumentInterleaveHandlesAnInstrumentGroupedBarFixture(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "journal.jsonl")
 	opts := options{
 		configPath:           configurationFixture,
-		barsPath:             barsStaleFixture,
-		corporateActionsPath: corporateActionsStaleFixture,
+		barsPath:             barsGroupedInstrumentsFixture,
+		corporateActionsPath: corporateActionsGroupedInstrumentsFixture,
 		outPath:              out,
 		build:                testBuild,
 	}
 
 	var log bytes.Buffer
-	err := backtest(context.Background(), opts, &log)
-	if err == nil {
-		t.Fatal("backtest() error = nil, want the reducer's stale-notice refusal")
+	if err := backtest(context.Background(), opts, &log); err != nil {
+		t.Fatalf("backtest(%+v) error = %v\n%s", opts, err, log.String())
 	}
-	if !strings.Contains(err.Error(), "predates the last completed bar") {
-		t.Fatalf("backtest() error = %v, want it to surface the reducer's own chronology refusal", err)
+	written, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read the journal: %v", err)
+	}
+
+	// Neither instrument ever opens a Campaign in this fixture, so both
+	// actions — one for the instrument whose own bars come first in the
+	// file, one for the instrument whose bars come second — are legitimate
+	// no-ops, not errors.
+	if got := noDecisionFollowsCorporateActionInputs(t, written); got != 2 {
+		t.Fatalf("got %d corporate-action inputs recorded, want 2", got)
+	}
+}
+
+// TestAnOutOfOrderCorporateActionsFixtureIsRefused checks readCorporateActions'
+// own ordering guard: a fixture naming an earlier-effective action after a
+// later one (AAPL effective after MSFT despite appearing first) is refused
+// before interleaving ever sees it, naming both entries, rather than being
+// delivered in file order and left for the reducer to judge.
+func TestAnOutOfOrderCorporateActionsFixtureIsRefused(t *testing.T) {
+	_, err := readCorporateActions(corporateActionsOutOfOrderFixture)
+	if err == nil {
+		t.Fatal("readCorporateActions() error = nil, want the ordering refusal")
+	}
+	for _, want := range []string{"AAPL", "2026-01-03", "MSFT", "2026-01-02"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("readCorporateActions() error = %v, want it to name %q", err, want)
+		}
+	}
+}
+
+// TestANullCorporateActionsFixtureIsRefused checks that a file holding JSON
+// null — a nil slice once decoded — is refused rather than silently treated
+// as a run declaring no corporate action, unlike an empty array.
+func TestANullCorporateActionsFixtureIsRefused(t *testing.T) {
+	_, err := readCorporateActions(corporateActionsNullFixture)
+	if err == nil {
+		t.Fatal("readCorporateActions() error = nil, want the null-fixture refusal")
+	}
+}
+
+// TestAnEmptyCorporateActionsFixtureIsAcceptedAndChangesNothing checks that
+// "[]" — a deliberate declaration of zero corporate actions — is accepted,
+// and that a run given it is byte-for-byte the golden journal: the same
+// property a run given no fixture at all has.
+func TestAnEmptyCorporateActionsFixtureIsAcceptedAndChangesNothing(t *testing.T) {
+	actions, err := readCorporateActions(corporateActionsEmptyFixture)
+	if err != nil {
+		t.Fatalf("readCorporateActions() error = %v, want [] accepted", err)
+	}
+	if len(actions) != 0 {
+		t.Fatalf("readCorporateActions() = %v, want zero actions", actions)
+	}
+
+	out := filepath.Join(t.TempDir(), "journal.jsonl")
+	opts := options{
+		configPath:           configurationFixture,
+		barsPath:             barsFixture,
+		corporateActionsPath: corporateActionsEmptyFixture,
+		outPath:              out,
+		build:                testBuild,
+	}
+	var log bytes.Buffer
+	if err := backtest(context.Background(), opts, &log); err != nil {
+		t.Fatalf("backtest(%+v) error = %v\n%s", opts, err, log.String())
+	}
+	written, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read the journal: %v", err)
+	}
+	want, err := os.ReadFile(goldenJournal)
+	if err != nil {
+		t.Fatalf("read the golden journal: %v", err)
+	}
+	if !bytes.Equal(written, want) {
+		t.Fatal("a run given an empty corporate-action fixture differs from the golden journal, which was run with no fixture at all")
 	}
 }
 
@@ -131,25 +237,7 @@ func TestADelistingForAnUntradedInstrumentDoesNotHaltTheRun(t *testing.T) {
 	// The notice itself produced no decision: recorded, not journalled as an
 	// event, per applyDelisting's own doc comment on the unknown-instrument
 	// case.
-	corporateActionInputs := 0
-	_, records, err := journal.Read(bytes.NewReader(written))
-	if err != nil {
-		t.Fatalf("journal.Read() error = %v", err)
-	}
-	for i, record := range records {
-		if record.Kind == journal.KindInput && record.Envelope.Type == event.MarketCorporateActionEventType {
-			corporateActionInputs++
-			if i+1 < len(records) && records[i+1].Kind == journal.KindDecision {
-				// A decision immediately following the corporate-action
-				// input would have to be caused by something else in this
-				// fixture; nothing else runs between inputs, so this would
-				// mean the untraded notice produced a decision, which it
-				// must not.
-				t.Fatalf("the untraded-instrument notice at record %d was followed by a decision, which applyDelisting's unknown-instrument case must never produce", i+1)
-			}
-		}
-	}
-	if corporateActionInputs != 1 {
-		t.Fatalf("got %d corporate-action inputs recorded, want 1", corporateActionInputs)
+	if got := noDecisionFollowsCorporateActionInputs(t, written); got != 1 {
+		t.Fatalf("got %d corporate-action inputs recorded, want 1", got)
 	}
 }

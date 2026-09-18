@@ -516,18 +516,22 @@ func syncDir(dir string) error {
 
 // drive applies the run's inputs in order.
 //
-// actions is interleaved among bars by EffectiveAt (CONTEXT.md: "Delisting
-// Exit"): deliverDueCorporateActions below delivers every action still
-// outstanding whose EffectiveAt precedes a bar before that bar's own
-// decision runs, so a delisting reaches the reducer ahead of the bar
-// decision it forces closed. Nothing here judges whether a given action's
+// actions is interleaved among bars PER INSTRUMENT (CONTEXT.md: "Delisting
+// Exit"): before a bar's own decision runs, every not-yet-delivered action
+// naming that SAME instrument, whose EffectiveAt precedes the bar's own
+// PeriodEnd, is delivered first, so a delisting reaches the reducer ahead of
+// the bar decision it forces closed. Positioning is per instrument rather
+// than against the bar stream as a whole because readBars promises only
+// "the order the run delivers them", never global chronology: an
+// instrument-grouped fixture (every bar of one instrument, then every bar of
+// the next) is well-formed, and measuring an action against a bar of a
+// DIFFERENT instrument would place it at the wrong point in its own
+// instrument's history — a defect a single stream-wide cursor cannot avoid,
+// however it is positioned. Nothing here judges whether a given action's
 // EffectiveAt is stale relative to what the reducer has already accepted for
 // its instrument — that is internal/strategy/delisting.go's applyDelisting
 // chronology check, on the reducer's own state, and this command does not
-// reimplement it. This also means actions is assumed given in ascending
-// EffectiveAt order, the same assumption readBars makes of bars: a fixture
-// that violates it is not corrected here, and whatever the resulting
-// delivery order produces is exactly what the reducer judges.
+// reimplement it.
 func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, bars []event.CompletedBarPayload, actions []event.CorporateActionPayload) error {
 	// The configuration event's own time is the first bar's period end: the
 	// run's configuration is in force from the moment the run starts, and
@@ -563,13 +567,13 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 		return fmt.Errorf("backtest: %w", err)
 	}
 
-	// actionCursor is the next not-yet-delivered action; deliverDueCorporateActions
-	// advances it, so a run given no fixture (actions is nil) never enters
-	// either loop body below and the bar loop that follows is byte-for-byte
-	// what it was before this flag existed.
-	actionCursor := 0
+	// delivered tracks which of actions has already been delivered, index
+	// for index; a run given no fixture (actions is nil) leaves it empty, so
+	// both helpers below iterate zero times and the bar loop that follows is
+	// byte-for-byte what it was before this flag existed.
+	delivered := make([]bool, len(actions))
 	for _, bar := range bars {
-		if err := deliverDueCorporateActions(ctx, simulator, recorder, cfg, strategyVersion, actions, &actionCursor, bar.PeriodEnd, true); err != nil {
+		if err := deliverActionsDueFor(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, bar.InstrumentID, bar.PeriodEnd); err != nil {
 			return err
 		}
 		envelope, err := inputEnvelope("bar:"+bar.InstrumentID+":"+bar.PeriodEnd.UTC().Format(time.RFC3339Nano),
@@ -581,10 +585,10 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 			return fmt.Errorf("backtest: %w", err)
 		}
 	}
-	// Whatever is left is not before any bar this run holds: an action
-	// effective at or after the last bar's own period end (a delisting
-	// stated to take effect at that bar's own close, or later).
-	if err := deliverDueCorporateActions(ctx, simulator, recorder, cfg, strategyVersion, actions, &actionCursor, time.Time{}, false); err != nil {
+	// Whatever is left is not before any bar this run holds for its own
+	// instrument: an action effective at or after that instrument's own last
+	// bar, or naming an instrument this run holds no bar for at all.
+	if err := deliverRemainingActions(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered); err != nil {
 		return err
 	}
 
@@ -603,37 +607,60 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 	return nil
 }
 
-// deliverDueCorporateActions delivers every action in actions, starting at
-// *cursor, that is due before the bar decision it precedes: when bounded,
-// every action whose EffectiveAt is strictly before boundary; when not
-// bounded, every action left (called once after the last bar, for an action
-// effective at or after that bar's own period end).
+// deliverActionsDueFor delivers every not-yet-delivered action in actions
+// (per delivered, index-aligned with actions) that names instrumentID and
+// whose EffectiveAt is strictly before boundary — that instrument's own next
+// bar decision.
 //
-// *cursor only ever advances, so a run with no fixture (actions is nil)
-// leaves it at zero and this delivers nothing, on every call.
-//
-// It does not sort or otherwise correct actions: interleaving positions each
-// action against the bar stream in the order actions already gives them, the
-// same trust readBars places in a bars fixture's own order. Whether a
-// particular action's EffectiveAt is stale relative to what the reducer has
-// already accepted for its instrument is answered by the reducer's own
-// chronology check (internal/strategy/delisting.go's applyDelisting), not by
-// anything here.
-func deliverDueCorporateActions(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, cursor *int, boundary time.Time, bounded bool) error {
-	for *cursor < len(actions) {
-		action := actions[*cursor]
-		if bounded && !action.EffectiveAt.Before(boundary) {
-			return nil
+// It scans the whole list rather than following a single position in it,
+// because actions may interleave several instruments in any order the
+// fixture gives them: each instrument's own delivery point in the bar
+// stream depends only on ITS OWN bars, never on where another instrument's
+// bars or actions happen to sit in the file. readCorporateActions requires
+// actions non-decreasing by EffectiveAt, so the entries this finds for one
+// instrument are delivered here in ascending order too.
+func deliverActionsDueFor(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, instrumentID string, boundary time.Time) error {
+	for i, action := range actions {
+		if delivered[i] || action.InstrumentID != instrumentID || !action.EffectiveAt.Before(boundary) {
+			continue
 		}
-		envelope, err := inputEnvelope("corporate-action:"+action.InstrumentID+":"+action.EffectiveAt.UTC().Format(time.RFC3339Nano),
-			event.MarketCorporateActionEventType, event.MarketCorporateActionSchemaVersion, action.EffectiveAt, action, cfg, strategyVersion)
-		if err != nil {
+		if err := deliverCorporateAction(ctx, simulator, recorder, cfg, strategyVersion, action); err != nil {
 			return err
 		}
-		if _, err := fills.Deliver(ctx, simulator, recorder, envelope); err != nil {
-			return fmt.Errorf("backtest: %w", err)
+		delivered[i] = true
+	}
+	return nil
+}
+
+// deliverRemainingActions delivers whatever in actions is not yet delivered
+// (per delivered), in the order actions gives them: called once, after the
+// last bar, for an action effective at or after its own instrument's last
+// bar, or naming an instrument this run holds no bar for at all — the
+// unknown-instrument case internal/strategy/delisting.go's applyDelisting
+// records without error.
+func deliverRemainingActions(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool) error {
+	for i, action := range actions {
+		if delivered[i] {
+			continue
 		}
-		*cursor++
+		if err := deliverCorporateAction(ctx, simulator, recorder, cfg, strategyVersion, action); err != nil {
+			return err
+		}
+		delivered[i] = true
+	}
+	return nil
+}
+
+// deliverCorporateAction wraps action as an input envelope and delivers it
+// through the same path Deliver applies to any non-bar input.
+func deliverCorporateAction(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, action event.CorporateActionPayload) error {
+	envelope, err := inputEnvelope("corporate-action:"+action.InstrumentID+":"+action.EffectiveAt.UTC().Format(time.RFC3339Nano),
+		event.MarketCorporateActionEventType, event.MarketCorporateActionSchemaVersion, action.EffectiveAt, action, cfg, strategyVersion)
+	if err != nil {
+		return err
+	}
+	if _, err := fills.Deliver(ctx, simulator, recorder, envelope); err != nil {
+		return fmt.Errorf("backtest: %w", err)
 	}
 	return nil
 }
@@ -710,15 +737,27 @@ func readBars(path string) ([]event.CompletedBarPayload, error) {
 
 // readCorporateActions loads the corporate-action fixture named by path: a
 // JSON array of event.CorporateActionPayload (CONTEXT.md: "Delisting Exit"),
-// in ascending EffectiveAt order — the same event.MarketCorporateActionEventType
-// a live producer would eventually deliver instead, so the reducer never
-// learns which one sent it (event.MarketCorporateActionEventType's own doc
-// comment).
+// in non-decreasing EffectiveAt order — the same
+// event.MarketCorporateActionEventType a live producer would eventually
+// deliver instead, so the reducer never learns which one sent it
+// (event.MarketCorporateActionEventType's own doc comment).
 //
 // An empty path names no fixture, which is not an error: it is a run that
 // declares no corporate action at all, and readBars' "there is nothing to
 // run" refusal for a bar fixture does not apply here, since a run naming
-// none is the ordinary case this flag did not exist to change.
+// none is the ordinary case this flag did not exist to change. A path that
+// is given but decodes to a nil slice (the file holds JSON null) IS refused,
+// unlike an empty array: null names no fixture by accident — most likely a
+// producer that failed to write one — where "[]" states, deliberately, that
+// this run declares none.
+//
+// The ordering check is an operator-error guard, not a chronology judgement:
+// a fixture that names its actions out of their own effective order is
+// refused outright, before interleaving ever sees it, so drive's per-
+// instrument placement (backtest.go) always has a well-formed input to work
+// from. Whether a correctly-ordered action is itself stale relative to what
+// the reducer has already accepted for its instrument remains entirely
+// internal/strategy/delisting.go's applyDelisting's own question.
 func readCorporateActions(path string) ([]event.CorporateActionPayload, error) {
 	if path == "" {
 		return nil, nil
@@ -731,9 +770,17 @@ func readCorporateActions(path string) ([]event.CorporateActionPayload, error) {
 	if err := json.Unmarshal(raw, &actions); err != nil {
 		return nil, fmt.Errorf("backtest: decode the corporate actions in %s: %w", path, err)
 	}
+	if actions == nil {
+		return nil, fmt.Errorf("backtest: %s holds no corporate actions (JSON null); state an empty array to declare a run with none", path)
+	}
 	for i, action := range actions {
 		if err := action.Validate(); err != nil {
 			return nil, fmt.Errorf("backtest: corporate action %d in %s: %w", i+1, path, err)
+		}
+		if i > 0 && action.EffectiveAt.Before(actions[i-1].EffectiveAt) {
+			return nil, fmt.Errorf("backtest: corporate action %d in %s (instrument %q, effective at %s) is earlier than action %d (instrument %q, effective at %s); actions must be given in non-decreasing effective-time order",
+				i+1, path, action.InstrumentID, action.EffectiveAt.Format(time.RFC3339),
+				i, actions[i-1].InstrumentID, actions[i-1].EffectiveAt.Format(time.RFC3339))
 		}
 	}
 	return actions, nil
