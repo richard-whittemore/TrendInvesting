@@ -48,7 +48,7 @@ var citationPattern = regexp.MustCompile(`CONTEXT\.md(?:'s|:)[^"'\n]{0,40}(["'])
 // genuinely new attribution (the "; ADR 0009: " that introduces an
 // unrelated ADR quotation) can never be mistaken for a continuation of this
 // citation: reaching a letter before a quote stops the chain.
-var continuationPattern = regexp.MustCompile(`^[\s—\-,;]{0,10}(["'])([^"']+)['"]`)
+var continuationPattern = regexp.MustCompile(`^([\s—\-,;]{0,10})(["'])([^"']+)['"]`)
 
 // glossaryTerms returns CONTEXT.md's own header terms and the concatenated
 // prose of each entry's own definition — never the file's raw text, so a
@@ -83,13 +83,42 @@ func glossaryTerms(contextMD string) (headers map[string]bool, defs map[string]s
 }
 
 // citation is one quoted claim a source comment makes about CONTEXT.md.
-// term is the quoted text. entry is empty for the quotation that opens a
-// citation, and otherwise names the header that quotation gave — so a
-// chained quotation carries the entry it is attributed to, and can be
-// checked against that entry rather than against the whole file.
+// term is the quoted text. entry names the glossary entry the quotation is
+// attributed to, and is set only when the comment's own punctuation says it
+// is an attribution — a dash — rather than a term cited alongside another.
+//
+// Comments use two shapes that chain a second quotation, and the separator
+// is the only thing that tells them apart:
+//
+//	(CONTEXT.md: "Notional Account", "Drawdown Step")
+//	(CONTEXT.md: "Campaign" — "not a Unit, is what gets entered, added to, stopped out, and exited")
+//
+// The first cites two terms together. The second cites one term and then
+// quotes what that term's own entry says. (Both examples above are real
+// citations, and this audit checks them like any other: an illustration
+// that would not survive the rule it illustrates has no business being
+// here.)
+//
+// The first claims nothing about either entry's prose. The second claims
+// Campaign's entry says this, and that claim is what the audit must check
+// against Campaign's entry alone. Reading both alike and recovering the
+// difference from whether the quotation happens to name a header would
+// accept "Campaign" — "Unit" without ever asking whether Campaign's entry
+// mentions a Unit, so the separator is kept rather than inferred.
 type citation struct {
 	term  string
 	entry string
+}
+
+// attributes reports whether the punctuation between two chained
+// quotations makes the second an attribution to the first rather than a
+// term cited alongside it. A comma or semicolon separates items in a list;
+// a dash introduces what the preceding term's entry says. Whitespace alone
+// is read as an attribution, the stricter of the two, so a shape nobody has
+// written yet has to prove itself against a named entry rather than being
+// waved through on the chance that it was a list.
+func attributes(separator string) bool {
+	return !strings.ContainsAny(separator, ",;")
 }
 
 // citedTerms extracts every term a comment's text cites CONTEXT.md for,
@@ -112,7 +141,11 @@ func citedTerms(text string) []citation {
 			if cont == nil {
 				break
 			}
-			cites = append(cites, citation{term: flat[pos+cont[4] : pos+cont[5]], entry: head})
+			next := citation{term: flat[pos+cont[6] : pos+cont[7]]}
+			if attributes(flat[pos+cont[2] : pos+cont[3]]) {
+				next.entry = head
+			}
+			cites = append(cites, next)
 			pos += cont[1]
 		}
 	}
@@ -120,43 +153,30 @@ func citedTerms(text string) []citation {
 }
 
 // resolves reports whether a citation is something CONTEXT.md actually
-// says. A citation's head quotation may be any glossary header or any text
+// says.
+//
+// A quotation that is not an attribution — the one that opens a citation,
+// or a term cited alongside it — may be any glossary header or any text
 // quoted verbatim from a definition.
 //
-// A quotation chained onto that head is one of two things, and which one it
-// is decides what it must be checked against:
+// An attributed quotation is a narrower claim: that the entry named before
+// the dash says this. It is checked against that entry's definition alone,
+// because resolving it against the whole file accepts a citation that names
+// one entry and quotes a different entry's definition. Every quotation in
+// such a citation is genuine glossary text and the citation is still false,
+// since the entry it names does not say what it is credited with saying.
 //
-//   - Another glossary header, co-cited alongside the first. Comments cite
-//     a pair of related terms together all the time (the account snapshot
-//     names both the Notional Account and the Drawdown Step ladder), and
-//     that is a claim about the glossary's headings, not about either
-//     entry's prose.
-//   - Otherwise, prose attributed to the entry the head named — a narrower
-//     claim, that THAT entry says this — so it is checked against that
-//     entry's definition alone.
-//
-// The distinction matters because resolving attributed prose against the
-// whole file accepts a citation that names one entry and quotes a different
-// entry's definition. Every quotation in it is then genuine glossary text
-// and the citation is still false, since the entry it names does not say
-// what it is credited with saying. Only the scoped check separates the two.
-//
-// A head quotation that names no entry (it quoted prose rather than a
-// header) leaves its continuations nothing narrower to check against, so
-// they fall back to the whole body. The head's own failure is what reports
-// that citation, and reporting it twice would not tell a reader more.
+// An attribution whose named entry is not a glossary header at all — the
+// head quotation was itself prose — is refused outright. There is no entry
+// whose prose could confirm it, and falling back to the whole file would
+// restore exactly the hole this scoping closes, with a genuine prose head
+// resolving happily and raising no failure to report the citation by.
 func resolves(c citation, headers map[string]bool, defs map[string]string, body string) bool {
 	if c.entry == "" {
 		return headers[c.term] || strings.Contains(body, c.term)
 	}
-	if headers[c.term] {
-		return true
-	}
 	def, named := defs[c.entry]
-	if !named {
-		return strings.Contains(body, c.term)
-	}
-	return strings.Contains(def, c.term)
+	return named && strings.Contains(def, c.term)
 }
 
 // TestCitedTermsFindsOnlyGenuineCitations pins citedTerms's own behaviour
@@ -364,6 +384,42 @@ func TestCompoundCitationIsScopedToTheEntryItNames(t *testing.T) {
 		if !resolves(cite, headers, defs, body) {
 			t.Errorf("resolves(%q) = false, want true: a co-cited glossary header, not attributed prose", cite.term)
 		}
+	}
+
+	for _, cite := range paired {
+		if cite.entry != "" {
+			t.Errorf("co-cited %q carries entry %q, want none: a comma separates items in a list, "+
+				"it does not attribute one to the other", cite.term, cite.entry)
+		}
+	}
+
+	// The separator, not the shape of the quotation, is what decides. A
+	// term name after a dash is still an attribution, and must be something
+	// the named entry actually says — being a glossary header of its own
+	// does not excuse it from that.
+	namedTerm := citedTerms(`a Campaign is (CONTEXT.md: "Campaign" — "Unit").`)
+	if len(namedTerm) != 2 {
+		t.Fatalf("citedTerms found %d quotations, want 2: %v", len(namedTerm), namedTerm)
+	}
+	if resolves(namedTerm[1], headers, defs, body) {
+		t.Errorf(`resolves("Unit" attributed to Campaign) = true, want false: Campaign's entry in this ` +
+			"fixture does not mention a Unit, and Unit being a header elsewhere is not the claim made")
+	}
+
+	// An attribution whose head is prose rather than a header has no entry
+	// to check against. Refusing it is the point: the head resolves on its
+	// own, so nothing else would report the citation, and a whole-file
+	// fallback would let the chained quotation come from any entry at all.
+	proseHead := citedTerms(`(CONTEXT.md: "One indivisible increment of a position" — "The complete life of a position in one instrument").`)
+	if len(proseHead) != 2 {
+		t.Fatalf("citedTerms found %d quotations, want 2: %v", len(proseHead), proseHead)
+	}
+	if !resolves(proseHead[0], headers, defs, body) {
+		t.Errorf("resolves(%q) = false, want true: the head is genuine prose from Unit's entry", proseHead[0].term)
+	}
+	if resolves(proseHead[1], headers, defs, body) {
+		t.Errorf("resolves(%q) = true, want false: attributed to a head that names no entry, so nothing "+
+			"can confirm it — and the head itself resolves, so no other failure would report this citation", proseHead[1].term)
 	}
 }
 
