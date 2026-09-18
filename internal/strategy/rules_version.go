@@ -51,6 +51,15 @@ const RulesVersion = "1.2.0"
 // source and fails if it no longer matches, naming RulesVersion and ADR 0016
 // as the fix.
 //
+// The numeric sweep is deliberately over-inclusive: it takes every numeric
+// constant those packages declare, not a maintained list of the ones that
+// are rules, because a maintained list silently omits the next rule someone
+// adds and that omission is the whole defect this guards against. So a loop
+// bound or a buffer size in one of those packages trips it too. That is a
+// re-pin without a version bump, not a bump — the test's own failure says
+// so, and bumping for a change that leaves every journal replayable is
+// itself a defect.
+//
 // It catches a changed CONSTANT: a rule renamed, re-cited, or given a
 // different numeric value with RulesVersion left where it was. It does not
 // catch a changed PREDICATE — validation logic whose behaviour changes with

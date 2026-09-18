@@ -208,8 +208,15 @@ func TestDeclaredRuleSurfaceMatchesItsPinnedFingerprint(t *testing.T) {
 	if got != strategy.RulesSurfaceFingerprint {
 		t.Fatalf("the declared rule surface's fingerprint is %s, but strategy.RulesSurfaceFingerprint is "+
 			"pinned to %s: a Rule*, ADR*, or declared numeric rule constant's name or value changed. "+
-			"Revert that change, or, if the rule itself changed, bump strategy.RulesVersion and re-pin "+
-			"RulesSurfaceFingerprint to %s (ADR 0016).",
+			"Three answers, and only one of them is a version bump:\n"+
+			"  1. The change was unintended: revert it.\n"+
+			"  2. A RULE changed, so two builds no longer decide alike: bump strategy.RulesVersion and "+
+			"re-pin RulesSurfaceFingerprint to %s (ADR 0016).\n"+
+			"  3. The constant is not a trading rule — this sweep takes every numeric constant in its "+
+			"packages, so a loop bound or a buffer size trips it too: re-pin RulesSurfaceFingerprint to "+
+			"%[3]s and LEAVE RulesVersion alone, saying in the commit why the constant is not a rule. "+
+			"Bumping the version for a change that leaves every journal replayable is itself a defect "+
+			"(see RulesVersion's own doc comment).",
 			got, strategy.RulesSurfaceFingerprint, got)
 	}
 }
