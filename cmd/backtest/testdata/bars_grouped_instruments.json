@@ -1,0 +1,82 @@
+[
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-02T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 124.61,
+      "high": 125.11,
+      "low": 124.11,
+      "close": 124.61,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 124.61,
+      "high": 125.11,
+      "low": 124.11,
+      "close": 124.61,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-03T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 124.71,
+      "high": 125.21,
+      "low": 124.21,
+      "close": 124.71,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 124.71,
+      "high": 125.21,
+      "low": 124.21,
+      "close": 124.71,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "MSFT",
+    "period_end": "2026-01-02T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 124.61,
+      "high": 125.11,
+      "low": 124.11,
+      "close": 124.61,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 124.61,
+      "high": 125.11,
+      "low": 124.11,
+      "close": 124.61,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "MSFT",
+    "period_end": "2026-01-03T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 124.71,
+      "high": 125.21,
+      "low": 124.21,
+      "close": 124.71,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 124.71,
+      "high": 125.21,
+      "low": 124.21,
+      "close": 124.71,
+      "volume": 1000000
+    }
+  }
+]

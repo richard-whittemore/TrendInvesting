@@ -1,0 +1,12 @@
+[
+  {
+    "instrument_id": "AAPL",
+    "kind": "delisting",
+    "effective_at": "2026-01-03T00:00:00Z"
+  },
+  {
+    "instrument_id": "MSFT",
+    "kind": "delisting",
+    "effective_at": "2026-01-02T00:00:00Z"
+  }
+]
