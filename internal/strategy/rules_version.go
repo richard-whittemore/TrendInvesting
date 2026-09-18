@@ -36,9 +36,25 @@ package strategy
 // disagree outright: the older one fails the run where this one records the
 // exit. That is a decision the rules now make differently, which is what
 // this version names, so the two cannot share it.
-//
-// A future change should pin a fingerprint over the declared rule surface so
-// a rule change like this one fails a test if RulesVersion is not moved with
-// it; until then these are plain, hand-made bumps with this comment as their
-// record.
 const RulesVersion = "1.2.0"
+
+// RulesSurfaceFingerprint is a SHA-256 hash, hex-encoded, over the module's
+// declared rule surface: every Rule* and ADR* constant (naming a rule and
+// the ADR it cites, e.g. RuleEntryChannelBreakout, ADREntryChannelBreakout),
+// plus every declared numeric rule constant in internal/indicator,
+// internal/sizing, and internal/strategy — the Wilder period
+// (indicator.DefaultPeriod) and the Drawdown Step fractions
+// (sizing.DrawdownStepRetainedFraction and this package's own drawdown
+// threshold) among them.
+//
+// TestDeclaredRuleSurfaceMatchesItsPinnedFingerprint recomputes it from the
+// source and fails if it no longer matches, naming RulesVersion and ADR 0016
+// as the fix.
+//
+// It catches a changed CONSTANT: a rule renamed, re-cited, or given a
+// different numeric value with RulesVersion left where it was. It does not
+// catch a changed PREDICATE — validation logic whose behaviour changes with
+// no Rule*, ADR*, or numeric rule constant touched, which is exactly what
+// moved RulesVersion from 1.1.0 to 1.2.0 above. That gap is real and is not
+// closed here.
+const RulesSurfaceFingerprint = "593bcc1fe74331b46679b04adbacaa1c51feb09e9811a2c91e1edf3f51939178"
