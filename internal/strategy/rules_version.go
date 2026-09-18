@@ -38,19 +38,36 @@ package strategy
 // this version names, so the two cannot share it.
 const RulesVersion = "1.2.0"
 
-// RulesSurfaceFingerprint is a SHA-256 hash, hex-encoded, over the module's
-// declared rule surface: every Rule* and ADR* constant (naming a rule and
-// the ADR it cites, e.g. RuleEntryChannelBreakout, ADREntryChannelBreakout),
-// plus every declared numeric-shaped constant in internal/indicator,
-// internal/sizing, and internal/strategy — the Wilder period
-// (indicator.DefaultPeriod), the Drawdown Step fractions
+// RuleSurfaceFingerprints records, for every RulesVersion this package has
+// ever declared, a SHA-256 hash (hex-encoded) over the module's declared
+// rule surface at that version: every Rule* and ADR* constant (naming a
+// rule and the ADR it cites, e.g. RuleEntryChannelBreakout,
+// ADREntryChannelBreakout), plus every declared numeric-shaped constant in
+// internal/indicator, internal/sizing, and internal/strategy — the Wilder
+// period (indicator.DefaultPeriod), the Drawdown Step fractions
 // (sizing.DrawdownStepRetainedFraction and this package's own drawdown
 // threshold), and sizing.StopKind's own iota values among them — except the
 // ones rule_surface_exceptions.json names.
 //
-// TestDeclaredRuleSurfaceMatchesItsPinnedFingerprint recomputes it from the
-// source and fails if it no longer matches, naming RulesVersion and ADR 0016
-// as the fix.
+// TestDeclaredRuleSurfaceMatchesItsPinnedFingerprint recomputes the current
+// fingerprint from source and compares it against the row for the CURRENT
+// RulesVersion, failing if that version has no row at all. A row keyed by
+// version, rather than one value that gets replaced, is what closes the gap
+// a single pinned constant left open: changing a rule and then re-pinning,
+// with RulesVersion left untouched, used to still pass, because nothing
+// distinguished "the surface changed for THIS version" from "the surface
+// changed to a DIFFERENT version's". Now the current version's row is a
+// specific, named target, and a version with no row at all fails just as
+// loudly as one whose row no longer matches.
+//
+// This is not unforgeable. Nothing stops a commit from editing an existing
+// row instead of appending a new one, exactly as nothing stops a commit from
+// rewriting a journal or a registry entry (ADR 0017, ADR 0018) — no
+// checked-in value is. What it achieves instead is what those two do:
+// editing the row for a version already released is a visibly different act
+// from appending one for a new version — a diff that rewrites an old key
+// instead of adding one — in a repository whose evidence is never supposed
+// to be rewritten once recorded.
 //
 // The sweep itself takes every numeric-shaped constant those packages
 // declare, not a maintained list of the ones that are rules, because a
@@ -58,13 +75,12 @@ const RulesVersion = "1.2.0"
 // omission is the whole defect this guards against. Some of what it finds is
 // not a trading rule at all — a loop bound, a buffer size —
 // and rule_surface_exceptions.json names those, each with its own reason,
-// the same shape internal/coverageaudit/exclusions.json uses.
-//
-// A maintained list is safe here in a way a maintained list of RULES would
-// not be: forgetting to list an exception is safe, because the guard simply
-// trips on the next change to that constant and a person looks; forgetting
-// to list a rule would not be, which is why there is no equivalent list of
-// rules to maintain and the sweep finds those on its own.
+// the same shape internal/coverageaudit/exclusions.json uses. A maintained
+// list is safe here in a way a maintained list of RULES would not be:
+// forgetting to list an exception is safe, because the guard simply trips on
+// the next change to that constant and a person looks; forgetting to list a
+// rule would not be, which is why there is no equivalent list of rules to
+// maintain and the sweep finds those on its own.
 //
 // It catches a changed CONSTANT: a rule renamed, re-cited, or given a
 // different numeric value with RulesVersion left where it was. It does not
@@ -72,4 +88,12 @@ const RulesVersion = "1.2.0"
 // no Rule*, ADR*, or numeric rule constant touched, which is exactly what
 // moved RulesVersion from 1.1.0 to 1.2.0 above. That gap is real and is not
 // closed here.
-const RulesSurfaceFingerprint = "97b7134f2e406f62eb4db56b5bd29d1cde664262a82ffba022553d7924219447"
+//
+// Only 1.2.0 has a row: the surfaces 1.0.0 and 1.1.0 actually declared
+// cannot be recomputed from today's source, since the constants and rules
+// that made them up have since changed or been renamed, so no entry is
+// invented for either. This table starts where it can first be computed
+// honestly.
+var RuleSurfaceFingerprints = map[string]string{
+	"1.2.0": "655e43354aa890c64ae02fc078c73274157657cd792adfa24d12fdf9b6bab57b",
+}

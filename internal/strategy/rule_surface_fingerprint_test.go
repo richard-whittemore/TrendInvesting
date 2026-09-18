@@ -29,12 +29,15 @@ import (
 // else in the module is caught the same way, by the name it is given rather
 // than by a maintained list of where rules live.
 //
-// [A-Z0-9] after the prefix excludes RulesVersion and RulesSurfaceFingerprint
-// themselves (a lower-case letter follows "Rule" in both), which must not
-// feed the fingerprint they are pinned beside.
+// [A-Z0-9] after the prefix excludes RulesVersion itself (a lower-case
+// letter follows "Rule"), which must not feed the fingerprint it is compared
+// against. RuleSurfaceFingerprints, the table holding that fingerprint, is
+// never at risk of self-inclusion regardless of its own name: this pattern
+// only ever matches inside a CONST declaration, and RuleSurfaceFingerprints
+// is a var — a map has no const form.
 var ruleIdentifierPattern = regexp.MustCompile(`^(?:Rule|ADR)[A-Z0-9]`)
 
-// numericRuleConstantPackages are the packages RulesSurfaceFingerprint's own
+// numericRuleConstantPackages are the packages RuleSurfaceFingerprints' own
 // doc comment names as carrying a Baseline rule's numeric value rather than
 // its name: internal/indicator (the Wilder period), internal/sizing (the
 // Drawdown Step retained fraction and StopKind's own values), and
@@ -113,6 +116,46 @@ func isNumericExpr(e ast.Expr) bool {
 	default:
 		return false
 	}
+}
+
+// containsIota reports whether a constant's value expression involves iota
+// anywhere within it. iota's own numeric value is positional, not something
+// this expression's printed text carries: two ConstSpecs at different
+// positions within the same const block can print identically ("iota") while
+// meaning different numbers, which is exactly what happened when
+// sizing.StopKind's own two declarations were tried swapped and the
+// fingerprint did not move (see valueText).
+func containsIota(e ast.Expr) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if id, ok := n.(*ast.Ident); ok && id.Name == "iota" {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// valueText renders a constant's value expression as the text
+// ruleSurfaceFingerprint hashes. specIndex is the enclosing ConstSpec's own
+// position within its const block — exactly iota's value there, by the
+// language spec, regardless of whether that particular spec carries its own
+// expression list or inherits the preceding one. For an expression involving
+// iota, that ordinal is appended (Name=iota@0 vs Name=iota@1) so that two
+// declarations differing only in which one comes first — sizing.StopKind's
+// own shape — hash differently. This adds the ordinal without evaluating
+// iota into the number it actually resolves to: the position is read
+// directly from the AST, never computed.
+func valueText(fset *token.FileSet, value ast.Expr, specIndex int) string {
+	text := exprText(fset, value)
+	if containsIota(value) {
+		text = fmt.Sprintf("%s@%d", text, specIndex)
+	}
+	return text
 }
 
 // ruleConstant is one declared constant the rule surface sweep found,
@@ -201,8 +244,13 @@ func declaredRuleSurface(t *testing.T) []ruleConstant {
 			// included. lastValues carries that expression list forward so
 			// such a spec is not silently skipped for having none of its
 			// own.
+			//
+			// specIndex is each ConstSpec's own position within gen.Specs,
+			// which is exactly iota's value for that spec by the language
+			// spec (https://go.dev/ref/spec#Iota) — read directly from the
+			// AST's own ordering, never computed by evaluating iota.
 			var lastValues []ast.Expr
-			for _, spec := range gen.Specs {
+			for specIndex, spec := range gen.Specs {
 				vs, ok := spec.(*ast.ValueSpec)
 				if !ok {
 					continue
@@ -223,13 +271,13 @@ func declaredRuleSurface(t *testing.T) []ruleConstant {
 						constants = append(constants, ruleConstant{
 							Package: pkgDir,
 							Name:    name.Name,
-							Value:   exprText(fset, value),
+							Value:   valueText(fset, value, specIndex),
 						})
 					case numericRuleConstantPackages[pkgDir] && isNumericExpr(value):
 						constants = append(constants, ruleConstant{
 							Package: pkgDir,
 							Name:    name.Name,
-							Value:   exprText(fset, value),
+							Value:   valueText(fset, value, specIndex),
 							Numeric: true,
 						})
 					}
@@ -305,7 +353,7 @@ func readRuleSurfaceExceptions(t *testing.T) []ruleSurfaceException {
 }
 
 // withoutExceptions removes every candidate the exception list names from
-// the declared rule surface, leaving the remainder that RulesSurfaceFingerprint
+// the declared rule surface, leaving the remainder that ruleSurfaceFingerprint
 // hashes. It does not itself judge whether an exception is well-formed,
 // current, or aimed at a Rule*/ADR* identifier — TestRuleSurfaceExceptionsAreCurrent
 // is the check that a listed name is still a real, current, non-rule entry;
@@ -344,9 +392,16 @@ func ruleSurfaceFingerprint(t *testing.T) string {
 
 // TestDeclaredRuleSurfaceMatchesItsPinnedFingerprint is the invariant
 // strategy.RulesVersion's own doc comment has asked for since ADR 0016's
-// version bump before this one: a fingerprint pinned over the declared rule
-// surface, so that a rule change which moves a Rule*, ADR*, or declared
+// version bump before this one: a fingerprint recorded against the declared
+// rule surface, so that a rule change which moves a Rule*, ADR*, or declared
 // numeric rule constant fails this test unless RulesVersion moves with it.
+//
+// The comparison is against strategy.RuleSurfaceFingerprints' row for the
+// CURRENT RulesVersion, not a single pinned value: a version with no row at
+// all fails just as loudly as one whose row no longer matches, which is what
+// makes re-pinning without bumping RulesVersion a dead end rather than a
+// silent pass — the old design's gap. See RuleSurfaceFingerprints' own doc
+// comment for what recording one row per version does, and does not, achieve.
 //
 // It does not catch every way a rule can change. A validator's predicate
 // changing behaviour with no constant renamed or retyped — the case that
@@ -357,13 +412,21 @@ func ruleSurfaceFingerprint(t *testing.T) string {
 func TestDeclaredRuleSurfaceMatchesItsPinnedFingerprint(t *testing.T) {
 	t.Parallel()
 
+	want, recorded := strategy.RuleSurfaceFingerprints[strategy.RulesVersion]
+	if !recorded {
+		t.Fatalf("strategy.RuleSurfaceFingerprints has no row for strategy.RulesVersion %q: append one "+
+			"(see its own doc comment) before this version's rule surface can be trusted",
+			strategy.RulesVersion)
+	}
+
 	got := ruleSurfaceFingerprint(t)
-	if got != strategy.RulesSurfaceFingerprint {
-		t.Fatalf("the declared rule surface's fingerprint is %s, but strategy.RulesSurfaceFingerprint is "+
-			"pinned to %s: a Rule*, ADR*, or declared numeric rule constant's name or value changed. "+
-			"Revert that change, or, if a rule itself changed, bump strategy.RulesVersion and re-pin "+
-			"RulesSurfaceFingerprint to %s (ADR 0016).",
-			got, strategy.RulesSurfaceFingerprint, got)
+	if got != want {
+		t.Fatalf("the declared rule surface's fingerprint is %s, but strategy.RuleSurfaceFingerprints[%q] "+
+			"records %s: a Rule*, ADR*, or declared numeric rule constant's name or value changed. "+
+			"Revert that change, or, if a rule itself changed, bump strategy.RulesVersion and APPEND a new "+
+			"row %q: %q to strategy.RuleSurfaceFingerprints (ADR 0016) — never edit the row for a version "+
+			"already released.",
+			got, strategy.RulesVersion, want, strategy.RulesVersion, got)
 	}
 }
 
