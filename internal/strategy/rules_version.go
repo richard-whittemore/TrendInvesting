@@ -22,8 +22,23 @@ package strategy
 // Bumped 1.0.0 -> 1.1.0 when the entry level a trade proposal names changed
 // from the breakout bar's own high to the Entry Channel high, which changes
 // the price every entry fills at and so every journal the Baseline produces
-// from here on. A future change should pin a fingerprint over the declared
-// rule surface so a rule change like this one fails a test if RulesVersion is
-// not moved with it; until then this is a plain, hand-made bump with this
-// comment as its record.
-const RulesVersion = "1.1.0"
+// from here on.
+//
+// Bumped 1.1.0 -> 1.2.0 when a Campaign exiting at a Protective Stop the
+// Stop Ladder had raised to or above its entry price stopped being refused.
+// Such a stop leaves the Unit risk-free rather than corrupted — it is
+// "reachable only by raising, never by an initial stop, which must sit
+// strictly below entry" (CONTEXT.md: "risk-free"), and contributes exactly
+// zero to the Campaign's aggregate open risk.
+// The Baseline never reaches that state — its maximum raise is 1.5N against
+// a 2N stop — so no Baseline journal changes. A declared Variant with a
+// narrow enough Stop Multiple does reach it, and there the two builds
+// disagree outright: the older one fails the run where this one records the
+// exit. That is a decision the rules now make differently, which is what
+// this version names, so the two cannot share it.
+//
+// A future change should pin a fingerprint over the declared rule surface so
+// a rule change like this one fails a test if RulesVersion is not moved with
+// it; until then these are plain, hand-made bumps with this comment as their
+// record.
+const RulesVersion = "1.2.0"

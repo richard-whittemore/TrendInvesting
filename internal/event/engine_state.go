@@ -32,9 +32,18 @@ const EngineStateHalted = "halted"
 // journal must be groupable by it.
 const (
 	// EngineStateReasonCampaignWithoutProtectiveStop means an open Campaign
-	// was found, at the start of a completed bar, without a Protective Stop
-	// that is positive and below its entry price (CONTEXT.md: "Every open
-	// Campaign has one at all times"). This can only happen if memory was
+	// was found, at the start of a completed bar, without a Protective
+	// Stop it could use (CONTEXT.md: "Every open Campaign has one at all
+	// times"). What this reason requires is a FINITE, POSITIVE stop, and
+	// nothing about its relation to the entry price — not because a stop
+	// may sit anywhere, but because this invariant reads each Unit's
+	// current stop and cannot tell a first level from one the Stop Ladder
+	// has raised. It therefore enforces only what holds of either kind.
+	// The kind-dependent relation lives at the seams that DO know which
+	// one a level is: strictly below entry for an initial stop, no
+	// relation for a raised one (sizing.ValidStopLevel states both, and
+	// StopKindRaised is the kind this invariant uses).
+	// This can only happen if memory was
 	// corrupted after a Campaign opened — see
 	// internal/strategy/campaign.go's checkCampaignHasAProtectiveStop for
 	// why the Campaign struct cannot be built without a valid stop in the

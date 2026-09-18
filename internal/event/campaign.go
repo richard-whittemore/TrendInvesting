@@ -607,14 +607,23 @@ func (p CampaignExitedPayload) Validate() error {
 		errs = append(errs, errors.New("dollars per point must be positive"))
 	}
 
-	stopLevelFinite := isFinite(p.ProtectiveStopLevel)
-	switch {
-	case !stopLevelFinite:
-		errs = append(errs, errors.New("protective stop level must be finite"))
-	case p.ProtectiveStopLevel <= 0:
-		errs = append(errs, errors.New("protective stop level must be positive: a long position cannot be stopped out at or below zero"))
-	case entryPriceFinite && p.ProtectiveStopLevel >= p.EntryPrice:
-		errs = append(errs, fmt.Errorf("protective stop level %v must be below the entry price %v for a long position", p.ProtectiveStopLevel, p.EntryPrice))
+	// This payload records the stop that closed the Campaign without saying
+	// whether that level was the Unit's own FIRST stop or one the Stop
+	// Ladder had already raised, so it cannot tell them apart and calls
+	// sizing.ValidStopLevel with StopKindRaised — the permissive kind,
+	// imposing no relation to EntryPrice (see that function's own doc
+	// comment: a stop at or above entry is a legitimate risk-free level
+	// contributing zero to aggregate open risk, not a validation failure).
+	// Holding an exit to the stricter shape would fail a Campaign that
+	// exited at a perfectly good raised stop. Only a Unit's INITIAL stop is
+	// held to the strict shape, at the seams that know which one a level is
+	// — CampaignOpenedPayload above, and ProtectiveStopPayload for
+	// ProtectiveStopReasonInitial.
+	//
+	// The same choice, for the same reason, as CampaignEvaluatedPayload's
+	// per-Unit check and the reducer's capital-safety invariant.
+	if err := sizing.ValidStopLevel(p.EntryPrice, p.ProtectiveStopLevel, sizing.StopKindRaised); err != nil {
+		errs = append(errs, err)
 	}
 
 	realisedResultFinite := isFinite(p.RealisedResult)
