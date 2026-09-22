@@ -20,6 +20,7 @@ const (
 	corporateActionsUntradedFixture           = "testdata/corporate_actions_untraded.json"
 	corporateActionsGroupedInstrumentsFixture = "testdata/corporate_actions_grouped_instruments.json"
 	corporateActionsOutOfOrderFixture         = "testdata/corporate_actions_out_of_order.json"
+	corporateActionsCrossInstrumentFixture    = "testdata/corporate_actions_cross_instrument_order.json"
 	corporateActionsNullFixture               = "testdata/corporate_actions_null.json"
 	corporateActionsEmptyFixture              = "testdata/corporate_actions_empty.json"
 )
@@ -149,10 +150,31 @@ func TestAnOutOfOrderCorporateActionsFixtureIsRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("readCorporateActions() error = nil, want the ordering refusal")
 	}
-	for _, want := range []string{"AAPL", "2026-01-03", "MSFT", "2026-01-02"} {
+	for _, want := range []string{"AAPL", "2026-01-03", "2026-01-02"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("readCorporateActions() error = %v, want it to name %q", err, want)
 		}
+	}
+}
+
+// TestActionsForDifferentInstrumentsNeedNoOrderBetweenThem pins the other
+// half of the ordering rule. Each action is placed against its OWN
+// instrument's bars, so two naming different instruments have no order
+// relative to one another, and a fixture listing a later effective time
+// first is well formed. Refusing it would reject a run that would have been
+// correct — the fixture below is exactly that shape.
+func TestActionsForDifferentInstrumentsNeedNoOrderBetweenThem(t *testing.T) {
+	actions, err := readCorporateActions(corporateActionsCrossInstrumentFixture)
+	if err != nil {
+		t.Fatalf("readCorporateActions() error = %v, want nil: actions naming different instruments "+
+			"are each placed against their own instrument's bars and so need no order between them", err)
+	}
+	if len(actions) != 2 {
+		t.Fatalf("readCorporateActions() returned %d actions, want 2", len(actions))
+	}
+	if !actions[1].EffectiveAt.Before(actions[0].EffectiveAt) {
+		t.Fatal("the fixture no longer lists a later effective time before an earlier one, " +
+			"so this test no longer exercises what it claims")
 	}
 }
 
