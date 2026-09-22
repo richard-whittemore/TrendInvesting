@@ -50,9 +50,11 @@ So the reservation happens at **submission**, and this does not contradict "a pr
 
 The reservation resolves exactly once, by one of:
 
-- **Filled.** The reservation becomes a spend. A partial fill spends the filled portion and keeps the remainder reserved while the order is still live.
-- **Cancelled, rejected or expired.** The reservation is released in full, and the cash returns to the bar's ledger for a later order to use.
+- **Filled.** The reservation becomes a spend. A partial fill spends the filled portion and reduces the reservation by exactly that much, leaving the unfilled remainder reserved while the order is still live.
+- **Cancelled, rejected or expired.** Whatever is *still reserved* at that moment is released — never the original amount. An order that partially filled and was then cancelled releases only its unfilled remainder, because the filled portion is already a spend. Releasing the original would credit that cash twice and hand a later order money the account no longer holds.
 - **Unknown.** An order whose state this system cannot establish releases nothing. Cash that might already have been spent is not offered to another order on the strength of a guess — and an order stuck in that state is a reconciliation failure under ADR 0019, which halts rather than waits.
+
+Stated as one invariant: an order's reservation and its spends always sum to the cost it was placed at, and every event moves value between those two without changing the total. The ledger cannot gain or lose cash through an order's lifecycle, only through a fill, a credit at the close, or a released remainder.
 
 Releasing on cancellation is what keeps the rule from being merely restrictive: a bar that raises four Adds and fills two has the other two's cash back before the next bar's decisions, without waiting for a snapshot.
 
