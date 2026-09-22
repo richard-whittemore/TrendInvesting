@@ -36,7 +36,7 @@ A recorded `execution.fill` is an external fact. In live trading it means the br
 So the rule is:
 
 1. Each bar opens with the cash known at its previous close.
-2. A running ledger of that figure is carried **within the bar**, reduced by every entry or Add fill as it is applied.
+2. A running ledger of that figure is carried **within the bar**, reduced by every actual fill cost and by every hold still standing.
 3. Placing an order **reserves** its cost against that ledger, and the reservation stands until the order resolves. An order the remaining balance cannot fund is **not placed**. In a backtest `internal/fills` is the broker, so the order is never created and no fill exists to decline. In live the same check runs before submission, and the order is not sent.
 4. Exit proceeds **credit** only at the next previous close. Never same-day.
 
@@ -48,19 +48,27 @@ Checking at submission and debiting at the fill would leave a gap between them. 
 
 So the reservation happens at **submission**, and this does not contradict "a proposal is not a commitment". A proposal is a statement that a rule fired; a submitted order is an instruction to a broker to trade. The second is a commitment in every sense that matters to cash, and it is the point at which a broker's own buying power falls too.
 
-The reservation resolves exactly once, by one of:
+A reservation is a **hold on cash, sized from an estimate**, because the true cost is not knowable when the order is placed: ADR 0013 applies slippage of `SlippageN × N` against the trader on every fill and IB commissions on top, and a gap fill executes at the open rather than at the order's level. The hold must therefore be the estimated cost of the order's unfilled quantity **including** that slippage and commission, or it would be systematically too small and the check it feeds would be optimistic — the one direction this rule exists to rule out.
 
-- **Filled.** The reservation becomes a spend. A partial fill spends the filled portion and reduces the reservation by exactly that much, leaving the unfilled remainder reserved while the order is still live.
-- **Cancelled, rejected or expired.** Whatever is *still reserved* at that moment is released — never the original amount. An order that partially filled and was then cancelled releases only its unfilled remainder, because the filled portion is already a spend. Releasing the original would credit that cash twice and hand a later order money the account no longer holds.
-- **Unknown.** An order whose state this system cannot establish releases nothing. Cash that might already have been spent is not offered to another order on the strength of a guess — and an order stuck in that state is a reconciliation failure under ADR 0019, which halts rather than waits.
+What each lifecycle event does:
 
-Stated as one invariant, for every order at every moment of its life:
+- **Filled.** The ledger is debited the fill's **actual** cost, slippage and commission included, and the hold is resized to the estimated cost of whatever quantity remains unfilled. A fill that cost more than the hold set aside for it reduces the available cash by that much more, which is correct: the money left is the money left.
+- **Cancelled, rejected or expired.** The remaining hold is dropped. Nothing is credited — the cash was never spent, only held — and the hold simply stops reducing what is available.
+- **Unknown.** The hold stands. Cash that might already have been spent is not offered to another order on the strength of a guess, and an order stuck in that state is a reconciliation failure under ADR 0019, which halts rather than waits.
 
-> **reserved + spent + released = the cost the order was placed at.**
+A fill debits the ledger exactly once, at its actual cost. Nothing debits it a second time when the order later resolves, and nothing credits back a hold that a fill has already converted into a spend.
 
-Each lifecycle event moves value between those three and changes none of the total. A fill moves from *reserved* to *spent*; a cancellation moves whatever is left from *reserved* to *released*; an unknown state moves nothing. A $100 order that fills $40 and is then cancelled ends at reserved $0, spent $40, released $60 — which sums correctly, where the earlier two-term form did not.
+### The invariant
 
-Only *released* returns to the bar's available ledger; *spent* is gone. So the ledger cannot gain or lose cash through an order's lifecycle at all — it changes only through a spend, a release, or a credit at the next previous close.
+Conservation belongs to the **ledger**, not to the order, precisely because an order's estimate and its actual cost differ. Two statements, and only the first involves money:
+
+> **available = the previous close's figure − every actual fill cost this bar − every hold still standing.**
+>
+> **an order's unfilled quantity + its filled quantity + its cancelled quantity = the quantity it was placed for.**
+
+The second is exact because quantities are whole and no estimate enters it. The first needs no estimate to be correct either: holds are estimates while they stand, and each is replaced by a real number the moment a fill makes one available.
+
+This replaces an earlier two-term form that tried to conserve *money* across an order's lifecycle. It could not: a $100 order filling $40 and then cancelling left $40 against a $100 placement, and adding a third term for released cash would still have broken the moment a fill cost more than its share of the estimate.
 
 Releasing on cancellation is what keeps the rule from being merely restrictive: a bar that raises four Adds and fills two has the other two's cash back before the next bar's decisions, without waiting for a snapshot.
 
