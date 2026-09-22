@@ -37,10 +37,24 @@ So the rule is:
 
 1. Each bar opens with the cash known at its previous close.
 2. A running ledger of that figure is carried **within the bar**, reduced by every entry or Add fill as it is applied.
-3. An order the ledger cannot fund is **not placed**. In a backtest `internal/fills` is the broker, so the order is never created and no fill exists to decline. In live the same check runs before submission, and the order is not sent.
+3. Placing an order **reserves** its cost against that ledger, and the reservation stands until the order resolves. An order the remaining balance cannot fund is **not placed**. In a backtest `internal/fills` is the broker, so the order is never created and no fill exists to decline. In live the same check runs before submission, and the order is not sent.
 4. Exit proceeds **credit** only at the next previous close. Never same-day.
 
 Debit within the bar, credit at the close. A Unit that cannot be funded is skipped and declined with `insufficient-cash` (`event.DeclineReasonInsufficientCash`) exactly as one refused by the present check is: no partial Units, no borrowing, no deferred queue.
+
+### A submitted order reserves its cash; a proposal still reserves nothing
+
+Checking at submission and debiting at the fill would leave a gap between them. Two orders submitted before either fills would each pass against the same balance, and both could then fill — which is the overspend this ADR exists to close, moved rather than removed.
+
+So the reservation happens at **submission**, and this does not contradict "a proposal is not a commitment". A proposal is a statement that a rule fired; a submitted order is an instruction to a broker to trade. The second is a commitment in every sense that matters to cash, and it is the point at which a broker's own buying power falls too.
+
+The reservation resolves exactly once, by one of:
+
+- **Filled.** The reservation becomes a spend. A partial fill spends the filled portion and keeps the remainder reserved while the order is still live.
+- **Cancelled, rejected or expired.** The reservation is released in full, and the cash returns to the bar's ledger for a later order to use.
+- **Unknown.** An order whose state this system cannot establish releases nothing. Cash that might already have been spent is not offered to another order on the strength of a guess — and an order stuck in that state is a reconciliation failure under ADR 0019, which halts rather than waits.
+
+Releasing on cancellation is what keeps the rule from being merely restrictive: a bar that raises four Adds and fills two has the other two's cash back before the next bar's decisions, without waiting for a snapshot.
 
 ### A fill that arrives anyway is applied, and halts the run
 
@@ -54,7 +68,7 @@ The standing objection to a running ledger is that it makes the outcome depend o
 
 At the fill it does not apply, but not for the reason a first reading suggests. ADR 0010 orders **decisions** — exits, then Adds, then entries. It does not order **executions**: `internal/fills` applies its own pessimistic rules (every covered buy before any sell, competing sells worst-price-first, folded back into the book until nothing more fills), and a live venue reports in arrival order. The ledger does not ride ADR 0010's order and must not claim to.
 
-What makes it deterministic is narrower and stronger: **the ledger follows the recorded order of fills**, and the journal records that order. In a backtest that order is `fills.RunBar`'s, which is itself deterministic, so two runs of one fixture agree. In live it is the order the venue reported, which no rule governs — but replay reads it from the journal rather than recomputing it, so a recorded run reproduces byte for byte. That is the property #20 protects, and it holds for the same reason fill-driven position state does (ADR 0005): the system does not predict the order, it records it.
+What makes it deterministic is narrower and stronger: **the ledger follows the recorded order of order and fill events**, and the journal records that order. Replay does not recompute the balance from the previous-close snapshot alone — that figure is only the ledger's opening value, and the running state is derived by applying the recorded reservations, spends and releases in the sequence the journal holds. In a backtest that order is `fills.RunBar`'s, which is itself deterministic, so two runs of one fixture agree. In live it is the order the venue reported, which no rule governs — but replay reads it from the journal rather than recomputing it, so a recorded run reproduces byte for byte. That is the property #20 protects, and it holds for the same reason fill-driven position state does (ADR 0005): the system does not predict the order, it records it.
 
 ### What this amends in ADR 0010
 
@@ -64,7 +78,8 @@ The two readings must not be left side by side. ADR 0010 carries a pointer to th
 
 ## Consequences
 
-- The cumulative overspend closes in both shapes. Four Adds can no longer each pass against an unmoved figure, and two instruments' entries can no longer both be funded from the same dollars.
+- The cumulative overspend closes in both shapes, and in the concurrent shape too. Four Adds can no longer each pass against an unmoved figure; two instruments' entries can no longer both be funded from the same dollars; and two orders outstanding at once can no longer each pass against a balance neither has yet reduced.
+- **Order lifecycle events become cash-relevant.** Acknowledgement, cancellation, rejection and expiry each move the ledger, so they must be journalled inputs like fills rather than adapter-local state. `internal/fills` already learns the resting book from the reducer's own emissions, so the backtest side has the events; the live side needs them from the adapter (#29, #30).
 - The model stays conservative in the direction ADR 0010 cares about. Debits apply immediately because spending cash you have just spent is accurate rather than optimistic; credits wait because same-day proceeds depend on an ordering the bar cannot state.
 - **The available-cash figure becomes decision-relevant state carried within a bar**, where it was previously a constant for the whole bar. Replay must reproduce it exactly, and a run containing both a debit and a credit is the case to pin.
 - **`ProposalDeclinedPayload`'s cash fields change meaning.** `DeclineReasonInsufficientCash` documents `AvailableCash` as the cash available at the previous close, and the existing Add-decline tests assert that unchanged figure. Under this ADR the comparison is made against the balance remaining at the moment of the attempt, so `AvailableCash` must carry that and `RequiredCash` the cost compared against it. The two figures must still be the ones the comparison actually used — that is what makes a decline auditable — so this is a schema change with its own version bump, not a re-labelling.
