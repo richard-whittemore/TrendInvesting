@@ -54,7 +54,13 @@ The reservation resolves exactly once, by one of:
 - **Cancelled, rejected or expired.** Whatever is *still reserved* at that moment is released — never the original amount. An order that partially filled and was then cancelled releases only its unfilled remainder, because the filled portion is already a spend. Releasing the original would credit that cash twice and hand a later order money the account no longer holds.
 - **Unknown.** An order whose state this system cannot establish releases nothing. Cash that might already have been spent is not offered to another order on the strength of a guess — and an order stuck in that state is a reconciliation failure under ADR 0019, which halts rather than waits.
 
-Stated as one invariant: an order's reservation and its spends always sum to the cost it was placed at, and every event moves value between those two without changing the total. The ledger cannot gain or lose cash through an order's lifecycle, only through a fill, a credit at the close, or a released remainder.
+Stated as one invariant, for every order at every moment of its life:
+
+> **reserved + spent + released = the cost the order was placed at.**
+
+Each lifecycle event moves value between those three and changes none of the total. A fill moves from *reserved* to *spent*; a cancellation moves whatever is left from *reserved* to *released*; an unknown state moves nothing. A $100 order that fills $40 and is then cancelled ends at reserved $0, spent $40, released $60 — which sums correctly, where the earlier two-term form did not.
+
+Only *released* returns to the bar's available ledger; *spent* is gone. So the ledger cannot gain or lose cash through an order's lifecycle at all — it changes only through a spend, a release, or a credit at the next previous close.
 
 Releasing on cancellation is what keeps the rule from being merely restrictive: a bar that raises four Adds and fills two has the other two's cash back before the next bar's decisions, without waiting for a snapshot.
 
