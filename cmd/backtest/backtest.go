@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -620,11 +621,35 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 // actions non-decreasing by EffectiveAt, so the entries this finds for one
 // instrument are delivered here in ascending order too.
 func deliverActionsDueFor(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, instrumentID string, boundary time.Time) error {
+	var due []int
 	for i, action := range actions {
 		if delivered[i] || action.InstrumentID != instrumentID || !action.EffectiveAt.Before(boundary) {
 			continue
 		}
-		if err := deliverCorporateAction(ctx, simulator, recorder, cfg, strategyVersion, action); err != nil {
+		due = append(due, i)
+	}
+	return deliverInEffectiveOrder(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, due)
+}
+
+// deliverInEffectiveOrder delivers the given actions earliest first.
+//
+// Several actions for one instrument can fall before the same bar, and the
+// reducer treats the first delisting it accepts as terminal: a later notice
+// for the same instrument states no new fact and is ignored. Delivering in
+// the order the fixture happened to list them would therefore let the file's
+// order decide which effective time the Campaign's exit records, which is a
+// fact about the file rather than about the instrument.
+//
+// Sorting here rather than demanding a sorted fixture keeps the command's
+// output a function of what the actions say, not of how they were written
+// down. The sort is stable, so two actions effective at the same instant --
+// which no rule orders -- keep the order they were given.
+func deliverInEffectiveOrder(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, due []int) error {
+	sort.SliceStable(due, func(a, b int) bool {
+		return actions[due[a]].EffectiveAt.Before(actions[due[b]].EffectiveAt)
+	})
+	for _, i := range due {
+		if err := deliverCorporateAction(ctx, simulator, recorder, cfg, strategyVersion, actions[i]); err != nil {
 			return err
 		}
 		delivered[i] = true
@@ -639,16 +664,13 @@ func deliverActionsDueFor(ctx context.Context, simulator *fills.Simulator, recor
 // unknown-instrument case internal/strategy/delisting.go's applyDelisting
 // records without error.
 func deliverRemainingActions(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool) error {
-	for i, action := range actions {
-		if delivered[i] {
-			continue
+	var remaining []int
+	for i := range actions {
+		if !delivered[i] {
+			remaining = append(remaining, i)
 		}
-		if err := deliverCorporateAction(ctx, simulator, recorder, cfg, strategyVersion, action); err != nil {
-			return err
-		}
-		delivered[i] = true
 	}
-	return nil
+	return deliverInEffectiveOrder(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, remaining)
 }
 
 // deliverCorporateAction wraps action as an input envelope and delivers it

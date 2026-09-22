@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -149,22 +150,28 @@ func TestPerInstrumentInterleaveHandlesAnInstrumentGroupedBarFixture(t *testing.
 // guard demanding sorted input would have rejected the first to prevent
 // nothing.
 //
-// The property covers actions that land against a bar. One with no later
-// bar of its own is flushed after the run instead, and those are delivered
-// in the order given — which is why this fixture keeps both inside the bar
-// range rather than quietly relying on a case the property does not reach.
+// The fixture includes the case that makes this more than sorting: its last
+// two actions fall between the SAME pair of bars. The reducer treats the
+// first delisting it accepts as terminal and ignores a later notice for the
+// same instrument, so whichever of the two arrives first decides the
+// effective time the exit records. Delivering them in the order the file
+// happened to list them would make that a fact about the file.
 func TestFixtureOrderDoesNotChangeWhereAnActionLands(t *testing.T) {
 	unordered, err := readCorporateActions(corporateActionsUnorderedFixture)
 	if err != nil {
 		t.Fatalf("readCorporateActions() error = %v, want nil: fixture order is not a constraint", err)
 	}
-	if len(unordered) != 2 || !unordered[1].EffectiveAt.Before(unordered[0].EffectiveAt) {
+	if len(unordered) != 3 || !unordered[2].EffectiveAt.Before(unordered[1].EffectiveAt) {
 		t.Fatalf("the fixture no longer lists a later effective time first (%d actions), "+
 			"so this test no longer exercises what it claims", len(unordered))
 	}
+	if !unordered[1].EffectiveAt.Truncate(24 * time.Hour).Equal(unordered[2].EffectiveAt.Truncate(24 * time.Hour)) {
+		t.Fatal("the fixture's last two actions no longer fall between the same pair of daily bars, " +
+			"so the same-boundary case this test exists for is no longer covered")
+	}
 
 	sortedPath := filepath.Join(t.TempDir(), "sorted.json")
-	encoded, err := json.Marshal([]event.CorporateActionPayload{unordered[1], unordered[0]})
+	encoded, err := json.Marshal([]event.CorporateActionPayload{unordered[2], unordered[1], unordered[0]})
 	if err != nil {
 		t.Fatalf("encode the sorted fixture: %v", err)
 	}
