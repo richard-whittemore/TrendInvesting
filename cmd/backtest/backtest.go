@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -43,13 +44,20 @@ const sourceFixture = "fixture"
 // operator's decision, which is why the zero-slippage refusal does not live
 // in the registry alone — see readConfiguration.
 type options struct {
-	configPath   string
-	barsPath     string
-	outPath      string
-	registryPath string
-	runID        string
-	variant      string
-	build        string
+	configPath string
+	barsPath   string
+	// corporateActionsPath is a JSON array of event.CorporateActionPayload,
+	// the fixture-driven input path for a corporate action (CONTEXT.md:
+	// "Delisting Exit"). Empty names no fixture, and a run given none
+	// behaves exactly as one with no corporate-action input in its stream at
+	// all: this field, unset, is the zero value every existing caller of
+	// options already passes.
+	corporateActionsPath string
+	outPath              string
+	registryPath         string
+	runID                string
+	variant              string
+	build                string
 	// maxRecords bounds the records this run holds in memory before its
 	// journal is written. Zero is an invocation that named no bound.
 	maxRecords int
@@ -179,6 +187,10 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 	if err != nil {
 		return outcome{runErr: err}
 	}
+	corporateActions, err := readCorporateActions(opts.corporateActionsPath)
+	if err != nil {
+		return outcome{runErr: err}
+	}
 	reducer, err := strategy.NewReducer(strategyVersion, cfg)
 	if err != nil {
 		return outcome{runErr: fmt.Errorf("backtest: %w", err)}
@@ -189,7 +201,7 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 	}
 	recorder := journal.NewBoundedRecorder(reducer, opts.recordBound())
 
-	result := outcome{runErr: namingTheBoundFlag(drive(ctx, simulator, recorder, cfg, strategyVersion, bars))}
+	result := outcome{runErr: namingTheBoundFlag(drive(ctx, simulator, recorder, cfg, strategyVersion, bars, corporateActions))}
 
 	// The journal is written whether or not the run completed: a handler
 	// that failed closed may have emitted a final event explaining why, and
@@ -504,7 +516,24 @@ func syncDir(dir string) error {
 }
 
 // drive applies the run's inputs in order.
-func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, bars []event.CompletedBarPayload) error {
+//
+// actions is interleaved among bars PER INSTRUMENT (CONTEXT.md: "Delisting
+// Exit"): before a bar's own decision runs, every not-yet-delivered action
+// naming that SAME instrument, whose EffectiveAt precedes the bar's own
+// PeriodEnd, is delivered first, so a delisting reaches the reducer ahead of
+// the bar decision it forces closed. Positioning is per instrument rather
+// than against the bar stream as a whole because readBars promises only
+// "the order the run delivers them", never global chronology: an
+// instrument-grouped fixture (every bar of one instrument, then every bar of
+// the next) is well-formed, and measuring an action against a bar of a
+// DIFFERENT instrument would place it at the wrong point in its own
+// instrument's history — a defect a single stream-wide cursor cannot avoid,
+// however it is positioned. Nothing here judges whether a given action's
+// EffectiveAt is stale relative to what the reducer has already accepted for
+// its instrument — that is internal/strategy/delisting.go's applyDelisting
+// chronology check, on the reducer's own state, and this command does not
+// reimplement it.
+func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, bars []event.CompletedBarPayload, actions []event.CorporateActionPayload) error {
 	// The configuration event's own time is the first bar's period end: the
 	// run's configuration is in force from the moment the run starts, and
 	// this command has no clock to consult (nor would a recorded time from
@@ -539,7 +568,15 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 		return fmt.Errorf("backtest: %w", err)
 	}
 
+	// delivered tracks which of actions has already been delivered, index
+	// for index; a run given no fixture (actions is nil) leaves it empty, so
+	// both helpers below iterate zero times and the bar loop that follows is
+	// byte-for-byte what it was before this flag existed.
+	delivered := make([]bool, len(actions))
 	for _, bar := range bars {
+		if err := deliverActionsDueFor(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, bar.InstrumentID, bar.PeriodEnd); err != nil {
+			return err
+		}
 		envelope, err := inputEnvelope("bar:"+bar.InstrumentID+":"+bar.PeriodEnd.UTC().Format(time.RFC3339Nano),
 			event.CompletedBarEventType, event.CompletedBarSchemaVersion, bar.PeriodEnd, bar, cfg, strategyVersion)
 		if err != nil {
@@ -548,6 +585,12 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 		if _, err := fills.RunBar(ctx, simulator, recorder, envelope); err != nil {
 			return fmt.Errorf("backtest: %w", err)
 		}
+	}
+	// Whatever is left is not before any bar this run holds for its own
+	// instrument: an action effective at or after that instrument's own last
+	// bar, or naming an instrument this run holds no bar for at all.
+	if err := deliverRemainingActions(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered); err != nil {
+		return err
 	}
 
 	// Outstanding proposals expire at the last input time when no next bar
@@ -560,6 +603,96 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 		return err
 	}
 	if _, err := fills.Deliver(ctx, simulator, recorder, completed); err != nil {
+		return fmt.Errorf("backtest: %w", err)
+	}
+	return nil
+}
+
+// deliverActionsDueFor delivers every not-yet-delivered action in actions
+// (per delivered, index-aligned with actions) that names instrumentID and
+// whose EffectiveAt is strictly before boundary — that instrument's own next
+// bar decision.
+//
+// It scans the whole list rather than following a single position in it,
+// because actions may interleave several instruments in any order the
+// fixture gives them: each instrument's own delivery point in the bar
+// stream depends only on ITS OWN bars, never on where another instrument's
+// bars or actions happen to sit in the file. readCorporateActions requires
+// actions non-decreasing by EffectiveAt, so the entries this finds for one
+// instrument are delivered here in ascending order too.
+func deliverActionsDueFor(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, instrumentID string, boundary time.Time) error {
+	var due []int
+	for i, action := range actions {
+		if delivered[i] || action.InstrumentID != instrumentID || !action.EffectiveAt.Before(boundary) {
+			continue
+		}
+		due = append(due, i)
+	}
+	return deliverInEffectiveOrder(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, due)
+}
+
+// deliverInEffectiveOrder delivers the given actions earliest first.
+//
+// Several actions for one instrument can fall before the same bar, and the
+// reducer treats the first delisting it accepts as terminal: a later notice
+// for the same instrument states no new fact and is ignored. Delivering in
+// the order the fixture happened to list them would therefore let the file's
+// order decide which effective time the Campaign's exit records, which is a
+// fact about the file rather than about the instrument.
+//
+// Sorting here rather than demanding a sorted fixture keeps the command's
+// output a function of what the actions say, not of how they were written
+// down -- which only holds if the order is TOTAL. Effective time alone is
+// not: two actions sharing an instant would fall back on their position in
+// the file, and the journal would again describe the fixture rather than
+// the instruments. Instrument and kind break the tie, and since those three
+// fields are the whole of a CorporateActionPayload, two it cannot separate
+// are the same value, whose order nothing can observe.
+func deliverInEffectiveOrder(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, due []int) error {
+	sort.SliceStable(due, func(a, b int) bool {
+		left, right := actions[due[a]], actions[due[b]]
+		if !left.EffectiveAt.Equal(right.EffectiveAt) {
+			return left.EffectiveAt.Before(right.EffectiveAt)
+		}
+		if left.InstrumentID != right.InstrumentID {
+			return left.InstrumentID < right.InstrumentID
+		}
+		return left.Kind < right.Kind
+	})
+	for _, i := range due {
+		if err := deliverCorporateAction(ctx, simulator, recorder, cfg, strategyVersion, actions[i]); err != nil {
+			return err
+		}
+		delivered[i] = true
+	}
+	return nil
+}
+
+// deliverRemainingActions delivers whatever in actions is not yet delivered
+// (per delivered), in the order actions gives them: called once, after the
+// last bar, for an action effective at or after its own instrument's last
+// bar, or naming an instrument this run holds no bar for at all — the
+// unknown-instrument case internal/strategy/delisting.go's applyDelisting
+// records without error.
+func deliverRemainingActions(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool) error {
+	var remaining []int
+	for i := range actions {
+		if !delivered[i] {
+			remaining = append(remaining, i)
+		}
+	}
+	return deliverInEffectiveOrder(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, remaining)
+}
+
+// deliverCorporateAction wraps action as an input envelope and delivers it
+// through the same path Deliver applies to any non-bar input.
+func deliverCorporateAction(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, action event.CorporateActionPayload) error {
+	envelope, err := inputEnvelope("corporate-action:"+action.InstrumentID+":"+action.EffectiveAt.UTC().Format(time.RFC3339Nano),
+		event.MarketCorporateActionEventType, event.MarketCorporateActionSchemaVersion, action.EffectiveAt, action, cfg, strategyVersion)
+	if err != nil {
+		return err
+	}
+	if _, err := fills.Deliver(ctx, simulator, recorder, envelope); err != nil {
 		return fmt.Errorf("backtest: %w", err)
 	}
 	return nil
@@ -633,6 +766,59 @@ func readBars(path string) ([]event.CompletedBarPayload, error) {
 		}
 	}
 	return bars, nil
+}
+
+// readCorporateActions loads the corporate-action fixture named by path: a
+// JSON array of event.CorporateActionPayload (CONTEXT.md: "Delisting Exit"),
+// in any order — the same
+// event.MarketCorporateActionEventType a live producer would eventually
+// deliver instead, so the reducer never learns which one sent it
+// (event.MarketCorporateActionEventType's own doc comment).
+//
+// An empty path names no fixture, which is not an error: it is a run that
+// declares no corporate action at all, and readBars' "there is nothing to
+// run" refusal for a bar fixture does not apply here, since a run naming
+// none is the ordinary case this flag did not exist to change. A path that
+// is given but decodes to a nil slice (the file holds JSON null) IS refused,
+// unlike an empty array: null names no fixture by accident — most likely a
+// producer that failed to write one — where "[]" states, deliberately, that
+// this run declares none.
+//
+// The order actions are listed in does not matter, and nothing here
+// checks it. deliverActionsDueFor rescans the whole slice before every bar
+// and takes any not-yet-delivered action for that instrument whose
+// effective time the bar has reached, so where an action lands depends on
+// its own effective time and its own instrument's bars, never on its
+// position in the file. A fixture listing a later action first places
+// exactly as the same actions sorted would.
+//
+// That is why no ordering guard exists: one would reject fixtures this
+// command handles correctly, to catch a mistake that has no consequence.
+//
+// Whether an action is stale relative to what the reducer has already
+// accepted for its instrument remains entirely
+// internal/strategy/delisting.go's applyDelisting's own question.
+func readCorporateActions(path string) ([]event.CorporateActionPayload, error) {
+	if path == "" {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("backtest: read the corporate actions: %w", err)
+	}
+	var actions []event.CorporateActionPayload
+	if err := json.Unmarshal(raw, &actions); err != nil {
+		return nil, fmt.Errorf("backtest: decode the corporate actions in %s: %w", path, err)
+	}
+	if actions == nil {
+		return nil, fmt.Errorf("backtest: %s holds no corporate actions (JSON null); state an empty array to declare a run with none", path)
+	}
+	for i, action := range actions {
+		if err := action.Validate(); err != nil {
+			return nil, fmt.Errorf("backtest: corporate action %d in %s: %w", i+1, path, err)
+		}
+	}
+	return actions, nil
 }
 
 // checkJournalPathFree reports whether anything already occupies path.

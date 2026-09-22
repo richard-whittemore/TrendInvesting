@@ -4,6 +4,7 @@
 // other, or reads a journal as human-readable decision sentences.
 //
 //	backtest -config <configuration.json> -bars <bars.json> -out <journal.jsonl>
+//	     [-corporate-actions <corporate-actions.json>]
 //	     [-registry <runs/> -run-id <id> [-variant <id>]]
 //	backtest -verify <journal.jsonl>
 //	backtest -replay <journal.jsonl>
@@ -67,6 +68,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	flags.SetOutput(out)
 	configPath := flags.String("config", "", "path to the JSON strategy configuration to run")
 	barsPath := flags.String("bars", "", "path to the JSON array of completed bars to run over")
+	corporateActionsPath := flags.String("corporate-actions", "", "path to a JSON array of corporate actions (event.CorporateActionPayload) to interleave with the bars by effective time; omitted, a run carries none")
 	outPath := flags.String("out", "", "path to write the run's journal to")
 	verifyPath := flags.String("verify", "", "path of a journal to verify instead of running a backtest")
 	replayPath := flags.String("replay", "", "path of a journal to check for replay equivalence instead of running a backtest")
@@ -118,7 +120,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	// recorded, and where recorded runs are read from. It is therefore checked
 	// as a run flag only when the invocation is not asking to read the
 	// registry.
-	runFlags := []named{{"-config", *configPath}, {"-bars", *barsPath}, {"-out", *outPath}, {"-run-id", *runID}, {"-variant", *variant}, {"-max-records", *maxRecords}}
+	runFlags := []named{{"-config", *configPath}, {"-bars", *barsPath}, {"-corporate-actions", *corporateActionsPath}, {"-out", *outPath}, {"-run-id", *runID}, {"-variant", *variant}, {"-max-records", *maxRecords}}
 	if *runsHash == "" {
 		runFlags = append(runFlags, named{"-registry", *registryPath})
 	}
@@ -191,14 +193,15 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 
 	return backtest(ctx, options{
-		configPath:   *configPath,
-		barsPath:     *barsPath,
-		outPath:      *outPath,
-		registryPath: *registryPath,
-		runID:        *runID,
-		variant:      declaredVariant,
-		build:        buildinfo.Version,
-		maxRecords:   recordBound,
+		configPath:           *configPath,
+		barsPath:             *barsPath,
+		corporateActionsPath: *corporateActionsPath,
+		outPath:              *outPath,
+		registryPath:         *registryPath,
+		runID:                *runID,
+		variant:              declaredVariant,
+		build:                buildinfo.Version,
+		maxRecords:           recordBound,
 	}, out)
 }
 
