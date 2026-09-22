@@ -170,6 +170,18 @@ func TestFixtureOrderDoesNotChangeWhereAnActionLands(t *testing.T) {
 			"so the same-boundary case this test exists for is no longer covered")
 	}
 
+	// Two actions sharing an instant are the case effective time alone
+	// cannot order, so the comparison has to reach instrument and kind to
+	// stay total. Reversing them must still produce the same journal.
+	tied := []event.CorporateActionPayload{
+		{InstrumentID: "TSLA", Kind: event.CorporateActionKindDelisting, EffectiveAt: unordered[1].EffectiveAt},
+		{InstrumentID: "MSFT", Kind: event.CorporateActionKindDelisting, EffectiveAt: unordered[1].EffectiveAt},
+	}
+	if !bytes.Equal(journalFor(t, writeActions(t, tied)), journalFor(t, writeActions(t, []event.CorporateActionPayload{tied[1], tied[0]}))) {
+		t.Error("two actions effective at the same instant are delivered in fixture order; " +
+			"the comparison must reach instrument and kind so the order is total")
+	}
+
 	sortedPath := filepath.Join(t.TempDir(), "sorted.json")
 	encoded, err := json.Marshal([]event.CorporateActionPayload{unordered[2], unordered[1], unordered[0]})
 	if err != nil {
@@ -183,6 +195,20 @@ func TestFixtureOrderDoesNotChangeWhereAnActionLands(t *testing.T) {
 		t.Error("the journal differs when the same actions are listed in a different order; " +
 			"placement must depend on effective time and the instrument's own bars, not on file position")
 	}
+}
+
+// writeActions writes actions to a fixture file and returns its path.
+func writeActions(t *testing.T, actions []event.CorporateActionPayload) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "actions.json")
+	encoded, err := json.Marshal(actions)
+	if err != nil {
+		t.Fatalf("encode the fixture: %v", err)
+	}
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatalf("write the fixture: %v", err)
+	}
+	return path
 }
 
 // journalFor runs the delisting bar fixture with the corporate actions at

@@ -642,11 +642,22 @@ func deliverActionsDueFor(ctx context.Context, simulator *fills.Simulator, recor
 //
 // Sorting here rather than demanding a sorted fixture keeps the command's
 // output a function of what the actions say, not of how they were written
-// down. The sort is stable, so two actions effective at the same instant --
-// which no rule orders -- keep the order they were given.
+// down -- which only holds if the order is TOTAL. Effective time alone is
+// not: two actions sharing an instant would fall back on their position in
+// the file, and the journal would again describe the fixture rather than
+// the instruments. Instrument and kind break the tie, and since those three
+// fields are the whole of a CorporateActionPayload, two it cannot separate
+// are the same value, whose order nothing can observe.
 func deliverInEffectiveOrder(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, due []int) error {
 	sort.SliceStable(due, func(a, b int) bool {
-		return actions[due[a]].EffectiveAt.Before(actions[due[b]].EffectiveAt)
+		left, right := actions[due[a]], actions[due[b]]
+		if !left.EffectiveAt.Equal(right.EffectiveAt) {
+			return left.EffectiveAt.Before(right.EffectiveAt)
+		}
+		if left.InstrumentID != right.InstrumentID {
+			return left.InstrumentID < right.InstrumentID
+		}
+		return left.Kind < right.Kind
 	})
 	for _, i := range due {
 		if err := deliverCorporateAction(ctx, simulator, recorder, cfg, strategyVersion, actions[i]); err != nil {
