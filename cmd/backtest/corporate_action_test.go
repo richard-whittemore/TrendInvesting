@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -19,8 +18,7 @@ const (
 	corporateActionsDelistingFixture          = "testdata/corporate_actions_delisting.json"
 	corporateActionsUntradedFixture           = "testdata/corporate_actions_untraded.json"
 	corporateActionsGroupedInstrumentsFixture = "testdata/corporate_actions_grouped_instruments.json"
-	corporateActionsOutOfOrderFixture         = "testdata/corporate_actions_out_of_order.json"
-	corporateActionsCrossInstrumentFixture    = "testdata/corporate_actions_cross_instrument_order.json"
+	corporateActionsUnorderedFixture          = "testdata/corporate_actions_unordered.json"
 	corporateActionsNullFixture               = "testdata/corporate_actions_null.json"
 	corporateActionsEmptyFixture              = "testdata/corporate_actions_empty.json"
 )
@@ -140,42 +138,67 @@ func TestPerInstrumentInterleaveHandlesAnInstrumentGroupedBarFixture(t *testing.
 	}
 }
 
-// TestAnOutOfOrderCorporateActionsFixtureIsRefused checks readCorporateActions'
-// own ordering guard: a fixture naming an earlier-effective action after a
-// later one (AAPL effective after MSFT despite appearing first) is refused
-// before interleaving ever sees it, naming both entries, rather than being
-// delivered in file order and left for the reducer to judge.
-func TestAnOutOfOrderCorporateActionsFixtureIsRefused(t *testing.T) {
-	_, err := readCorporateActions(corporateActionsOutOfOrderFixture)
-	if err == nil {
-		t.Fatal("readCorporateActions() error = nil, want the ordering refusal")
+// TestFixtureOrderDoesNotChangeWhereAnActionLands pins the property that
+// makes an ordering guard unnecessary. deliverActionsDueFor rescans every
+// action before each bar and takes any whose effective time that bar has
+// reached, so an action lands by its own effective time and its own
+// instrument's bars — never by where it sits in the file.
+//
+// The fixture lists a January 20th action before a January 8th one. Running
+// it, and running the same two sorted, produce byte-identical journals. A
+// guard demanding sorted input would have rejected the first to prevent
+// nothing.
+//
+// The property covers actions that land against a bar. One with no later
+// bar of its own is flushed after the run instead, and those are delivered
+// in the order given — which is why this fixture keeps both inside the bar
+// range rather than quietly relying on a case the property does not reach.
+func TestFixtureOrderDoesNotChangeWhereAnActionLands(t *testing.T) {
+	unordered, err := readCorporateActions(corporateActionsUnorderedFixture)
+	if err != nil {
+		t.Fatalf("readCorporateActions() error = %v, want nil: fixture order is not a constraint", err)
 	}
-	for _, want := range []string{"AAPL", "2026-01-03", "2026-01-02"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("readCorporateActions() error = %v, want it to name %q", err, want)
-		}
+	if len(unordered) != 2 || !unordered[1].EffectiveAt.Before(unordered[0].EffectiveAt) {
+		t.Fatalf("the fixture no longer lists a later effective time first (%d actions), "+
+			"so this test no longer exercises what it claims", len(unordered))
+	}
+
+	sortedPath := filepath.Join(t.TempDir(), "sorted.json")
+	encoded, err := json.Marshal([]event.CorporateActionPayload{unordered[1], unordered[0]})
+	if err != nil {
+		t.Fatalf("encode the sorted fixture: %v", err)
+	}
+	if err := os.WriteFile(sortedPath, encoded, 0o600); err != nil {
+		t.Fatalf("write the sorted fixture: %v", err)
+	}
+
+	if got, want := journalFor(t, corporateActionsUnorderedFixture), journalFor(t, sortedPath); !bytes.Equal(got, want) {
+		t.Error("the journal differs when the same actions are listed in a different order; " +
+			"placement must depend on effective time and the instrument's own bars, not on file position")
 	}
 }
 
-// TestActionsForDifferentInstrumentsNeedNoOrderBetweenThem pins the other
-// half of the ordering rule. Each action is placed against its OWN
-// instrument's bars, so two naming different instruments have no order
-// relative to one another, and a fixture listing a later effective time
-// first is well formed. Refusing it would reject a run that would have been
-// correct — the fixture below is exactly that shape.
-func TestActionsForDifferentInstrumentsNeedNoOrderBetweenThem(t *testing.T) {
-	actions, err := readCorporateActions(corporateActionsCrossInstrumentFixture)
+// journalFor runs the delisting bar fixture with the corporate actions at
+// path and returns the journal written.
+func journalFor(t *testing.T, actionsPath string) []byte {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "journal.jsonl")
+	opts := options{
+		configPath:           configurationFixture,
+		barsPath:             barsDelistingFixture,
+		corporateActionsPath: actionsPath,
+		outPath:              out,
+		build:                testBuild,
+	}
+	var log bytes.Buffer
+	if err := backtest(context.Background(), opts, &log); err != nil {
+		t.Fatalf("backtest(%+v) error = %v\n%s", opts, err, log.String())
+	}
+	written, err := os.ReadFile(out)
 	if err != nil {
-		t.Fatalf("readCorporateActions() error = %v, want nil: actions naming different instruments "+
-			"are each placed against their own instrument's bars and so need no order between them", err)
+		t.Fatalf("read the journal: %v", err)
 	}
-	if len(actions) != 2 {
-		t.Fatalf("readCorporateActions() returned %d actions, want 2", len(actions))
-	}
-	if !actions[1].EffectiveAt.Before(actions[0].EffectiveAt) {
-		t.Fatal("the fixture no longer lists a later effective time before an earlier one, " +
-			"so this test no longer exercises what it claims")
-	}
+	return written
 }
 
 // TestANullCorporateActionsFixtureIsRefused checks that a file holding JSON

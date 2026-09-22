@@ -737,7 +737,7 @@ func readBars(path string) ([]event.CompletedBarPayload, error) {
 
 // readCorporateActions loads the corporate-action fixture named by path: a
 // JSON array of event.CorporateActionPayload (CONTEXT.md: "Delisting Exit"),
-// in non-decreasing EffectiveAt order — the same
+// in any order — the same
 // event.MarketCorporateActionEventType a live producer would eventually
 // deliver instead, so the reducer never learns which one sent it
 // (event.MarketCorporateActionEventType's own doc comment).
@@ -751,19 +751,19 @@ func readBars(path string) ([]event.CompletedBarPayload, error) {
 // producer that failed to write one — where "[]" states, deliberately, that
 // this run declares none.
 //
-// The ordering check is an operator-error guard, not a chronology judgement,
-// and it is made PER INSTRUMENT because that is the only order placement
-// depends on. Two actions naming different instruments have no order
-// relative to one another: each is placed against its own instrument's
-// bars, so a fixture listing AAPL's action effective on the 3rd before
-// MSFT's on the 2nd is well formed, and refusing it would reject a run that
-// would have been correct. Two actions naming the SAME instrument do have
-// an order, and one given out of it would be placed after the cursor for
-// that instrument had already passed — so it is refused outright, before
-// interleaving ever sees it.
+// The order actions are listed in does not matter, and nothing here
+// checks it. deliverActionsDueFor rescans the whole slice before every bar
+// and takes any not-yet-delivered action for that instrument whose
+// effective time the bar has reached, so where an action lands depends on
+// its own effective time and its own instrument's bars, never on its
+// position in the file. A fixture listing a later action first places
+// exactly as the same actions sorted would.
 //
-// Whether a correctly-ordered action is itself stale relative to what the
-// reducer has already accepted for its instrument remains entirely
+// That is why no ordering guard exists: one would reject fixtures this
+// command handles correctly, to catch a mistake that has no consequence.
+//
+// Whether an action is stale relative to what the reducer has already
+// accepted for its instrument remains entirely
 // internal/strategy/delisting.go's applyDelisting's own question.
 func readCorporateActions(path string) ([]event.CorporateActionPayload, error) {
 	if path == "" {
@@ -780,17 +780,10 @@ func readCorporateActions(path string) ([]event.CorporateActionPayload, error) {
 	if actions == nil {
 		return nil, fmt.Errorf("backtest: %s holds no corporate actions (JSON null); state an empty array to declare a run with none", path)
 	}
-	previous := make(map[string]int, len(actions))
 	for i, action := range actions {
 		if err := action.Validate(); err != nil {
 			return nil, fmt.Errorf("backtest: corporate action %d in %s: %w", i+1, path, err)
 		}
-		if before, seen := previous[action.InstrumentID]; seen && action.EffectiveAt.Before(actions[before].EffectiveAt) {
-			return nil, fmt.Errorf("backtest: corporate action %d in %s (instrument %q, effective at %s) is earlier than action %d, which names the same instrument and is effective at %s; actions for one instrument must be given in non-decreasing effective-time order, since each is placed against that instrument's own bars",
-				i+1, path, action.InstrumentID, action.EffectiveAt.Format(time.RFC3339),
-				before+1, actions[before].EffectiveAt.Format(time.RFC3339))
-		}
-		previous[action.InstrumentID] = i
 	}
 	return actions, nil
 }
