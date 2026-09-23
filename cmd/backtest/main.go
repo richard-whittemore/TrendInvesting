@@ -5,6 +5,7 @@
 //
 //	backtest -config <configuration.json> -bars <bars.json> -out <journal.jsonl>
 //	     [-corporate-actions <corporate-actions.json>]
+//	     [-available-cash <USD>]
 //	     [-registry <runs/> -run-id <id> [-variant <id>]]
 //	backtest -verify <journal.jsonl>
 //	backtest -replay <journal.jsonl>
@@ -69,6 +70,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	configPath := flags.String("config", "", "path to the JSON strategy configuration to run")
 	barsPath := flags.String("bars", "", "path to the JSON array of completed bars to run over")
 	corporateActionsPath := flags.String("corporate-actions", "", "path to a JSON array of corporate actions (event.CorporateActionPayload) to interleave with the bars by effective time; omitted, a run carries none")
+	availableCash := flags.String("available-cash", "", "opening available cash in USD; finite and nonnegative, including zero; omitted, defaults to starting equity; no subsequent cash updates")
 	outPath := flags.String("out", "", "path to write the run's journal to")
 	verifyPath := flags.String("verify", "", "path of a journal to verify instead of running a backtest")
 	replayPath := flags.String("replay", "", "path of a journal to check for replay equivalence instead of running a backtest")
@@ -93,6 +95,14 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	// Presence distinguishes an omitted cash figure from zero and from an
+	// explicitly empty, invalid value; audit modes must not ignore either.
+	var cashSet bool
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "available-cash" {
+			cashSet = true
+		}
+	})
 
 	for _, option := range []named{{"-date", *decisionDate}, {"-instrument", *instrument}, {"-reference", *reference}} {
 		if option.value != "" && *decisionsPath == "" {
@@ -121,6 +131,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	// as a run flag only when the invocation is not asking to read the
 	// registry.
 	runFlags := []named{{"-config", *configPath}, {"-bars", *barsPath}, {"-corporate-actions", *corporateActionsPath}, {"-out", *outPath}, {"-run-id", *runID}, {"-variant", *variant}, {"-max-records", *maxRecords}}
+	if cashSet {
+		runFlags = append(runFlags, named{"-available-cash", "set"})
+	}
 	if *runsHash == "" {
 		runFlags = append(runFlags, named{"-registry", *registryPath})
 	}
@@ -183,6 +196,14 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	var cash *float64
+	if cashSet {
+		value, err := strconv.ParseFloat(*availableCash, 64)
+		if err != nil {
+			return fmt.Errorf("backtest: -available-cash must state a cash figure: %w", err)
+		}
+		cash = &value
+	}
 
 	// The Baseline is what a run declares when it declares nothing, and it is
 	// applied here rather than as the flag's default so that the check above
@@ -196,6 +217,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		configPath:           *configPath,
 		barsPath:             *barsPath,
 		corporateActionsPath: *corporateActionsPath,
+		availableCash:        cash,
 		outPath:              *outPath,
 		registryPath:         *registryPath,
 		runID:                *runID,

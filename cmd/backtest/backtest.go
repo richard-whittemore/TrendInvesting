@@ -53,11 +53,17 @@ type options struct {
 	// all: this field, unset, is the zero value every existing caller of
 	// options already passes.
 	corporateActionsPath string
-	outPath              string
-	registryPath         string
-	runID                string
-	variant              string
-	build                string
+	// A scalar flag suffices because this input changes only the existing
+	// opening snapshot for ADR 0010's cash check. A fixture would imply a
+	// sequence of account updates this command does not model. Nil preserves
+	// the all-cash default; zero is explicit. ADR 0020's within-bar ledger
+	// and later previous-close snapshots remain separate work.
+	availableCash *float64
+	outPath       string
+	registryPath  string
+	runID         string
+	variant       string
+	build         string
 	// maxRecords bounds the records this run holds in memory before its
 	// journal is written. Zero is an invocation that named no bound.
 	maxRecords int
@@ -191,6 +197,18 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 	if err != nil {
 		return outcome{runErr: err}
 	}
+	openingAccount := event.AccountSnapshotPayload{
+		AsOf:          bars[0].PeriodEnd,
+		Equity:        cfg.NotionalAccount.StartingEquity,
+		AvailableCash: cfg.NotionalAccount.StartingEquity,
+		Currency:      "USD",
+	}
+	if opts.availableCash != nil {
+		openingAccount.AvailableCash = *opts.availableCash
+	}
+	if err := openingAccount.Validate(); err != nil {
+		return outcome{runErr: fmt.Errorf("backtest: -available-cash opening snapshot: %w", err)}
+	}
 	reducer, err := strategy.NewReducer(strategyVersion, cfg)
 	if err != nil {
 		return outcome{runErr: fmt.Errorf("backtest: %w", err)}
@@ -201,7 +219,7 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 	}
 	recorder := journal.NewBoundedRecorder(reducer, opts.recordBound())
 
-	result := outcome{runErr: namingTheBoundFlag(drive(ctx, simulator, recorder, cfg, strategyVersion, bars, corporateActions))}
+	result := outcome{runErr: namingTheBoundFlag(drive(ctx, simulator, recorder, cfg, strategyVersion, bars, corporateActions, openingAccount))}
 
 	// The journal is written whether or not the run completed: a handler
 	// that failed closed may have emitted a final event explaining why, and
@@ -533,7 +551,7 @@ func syncDir(dir string) error {
 // its instrument — that is internal/strategy/delisting.go's applyDelisting
 // chronology check, on the reducer's own state, and this command does not
 // reimplement it.
-func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, bars []event.CompletedBarPayload, actions []event.CorporateActionPayload) error {
+func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, bars []event.CompletedBarPayload, actions []event.CorporateActionPayload, openingAccount event.AccountSnapshotPayload) error {
 	// The configuration event's own time is the first bar's period end: the
 	// run's configuration is in force from the moment the run starts, and
 	// this command has no clock to consult (nor would a recorded time from
@@ -548,19 +566,13 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 	}
 
 	// ADR 0010's cash basis: the reducer sizes no Unit until an
-	// account.snapshot has supplied an available-cash figure. This command
-	// has no brokerage or LEAN feed to read one from, so a fixture-driven
-	// backtest starts the run fully in cash, at the configuration's own
-	// starting equity — the same assumption the Notional Account itself
-	// makes before any snapshot arrives (ADR 0007).
+	// account.snapshot has supplied an available-cash figure. Journal the
+	// stated opening cash so replay uses that same input (ADR 0017). Equity
+	// and timestamp retain their existing fixture values; absent a cash flag,
+	// the run still opens fully in cash at starting equity (ADR 0007).
 	startingCash, err := inputEnvelope("account-snapshot:starting",
 		event.AccountSnapshotEventType, event.AccountSnapshotSchemaVersion, bars[0].PeriodEnd,
-		event.AccountSnapshotPayload{
-			AsOf:          bars[0].PeriodEnd,
-			Equity:        cfg.NotionalAccount.StartingEquity,
-			AvailableCash: cfg.NotionalAccount.StartingEquity,
-			Currency:      "USD",
-		}, cfg, strategyVersion)
+		openingAccount, cfg, strategyVersion)
 	if err != nil {
 		return err
 	}
