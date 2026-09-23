@@ -110,28 +110,15 @@ func TestServerDecisionsMatchBacktestForTheSameBars(t *testing.T) {
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	engineJournal := filepath.Join(dir, "engine.journal.jsonl")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	out := newReadySignal()
-	runErr := make(chan error, 1)
-	go func() {
-		runErr <- run(ctx, options{
-			socketPath: socketPath,
-			configPath: testConfigPath,
-			outPath:    engineJournal,
-			// "dev" matches buildinfo.Version's own default (cmd/backtest was
-			// just invoked with no -ldflags override), so the two runs
-			// compose an identical StrategyVersion.
-			build: "dev",
-		}, out)
-	}()
-	select {
-	case <-out.ready:
-	case err := <-runErr:
-		t.Fatalf("run returned before it ever reported readiness: %v", err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for the engine to report it is listening")
-	}
+	stop := startEngine(t, options{
+		socketPath: socketPath,
+		configPath: testConfigPath,
+		outPath:    engineJournal,
+		// "dev" matches buildinfo.Version's own default (cmd/backtest was
+		// just invoked with no -ldflags override), so the two runs
+		// compose an identical StrategyVersion.
+		build: "dev",
+	})
 
 	client, err := transport.Dial(socketPath)
 	if err != nil {
@@ -149,14 +136,8 @@ func TestServerDecisionsMatchBacktestForTheSameBars(t *testing.T) {
 	if err := client.Close(); err != nil {
 		t.Fatalf("close client: %v", err)
 	}
-	cancel()
-	select {
-	case err := <-runErr:
-		if err != nil {
-			t.Fatalf("run returned an error: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for run to stop after the context was cancelled")
+	if err := stop(); err != nil {
+		t.Fatalf("run returned an error: %v", err)
 	}
 
 	want := comparableDecisions(t, backtestJournal)

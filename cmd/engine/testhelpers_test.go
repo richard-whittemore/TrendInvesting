@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,6 +101,71 @@ func shortSocketDir(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
+}
+
+// startEngine starts run in a background goroutine with opts, waits for it
+// to report readiness (failing the test if it exits or times out first),
+// and registers a t.Cleanup that stops it: cancels its context and waits
+// for run to actually return.
+//
+// Callers build opts — and so create the temp directories and socket path
+// it names, via t.TempDir()/shortSocketDir(t) — BEFORE calling startEngine,
+// so that those directories' own removal cleanups are registered first.
+// t.Cleanup runs registered functions in LIFO order, so startEngine's own
+// cleanup, registered after and so running first, always stops run and lets
+// it finish whatever it was doing — most pointedly, writeJournal — before
+// the directories it was reading or writing are removed out from under it.
+//
+// Without this, a test that fails an assertion partway through (t.Fatalf,
+// which unwinds straight to registered cleanup) left run's own goroutine —
+// and the socket file and journal directory it was still using — racing
+// the temp-directory cleanup that would otherwise run first: an unrelated
+// cleanup error masking the real failure, and a leaked goroutine besides.
+//
+// The returned stop function cancels run and waits for it to return,
+// reporting run's own error; call it explicitly whenever a test wants to
+// observe that error, which is most of them. It is idempotent — safe to
+// call from the test body and then again from the registered t.Cleanup, in
+// either order — and returns the same result every time.
+func startEngine(t *testing.T, opts options) (stop func() error) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	out := newReadySignal()
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- run(ctx, opts, out)
+	}()
+
+	var once sync.Once
+	var stopErr error
+	stopFn := func() error {
+		once.Do(func() {
+			cancel()
+			select {
+			case stopErr = <-runErr:
+			case <-time.After(5 * time.Second):
+				stopErr = errors.New("timed out waiting for run to stop after being asked to")
+			}
+		})
+		return stopErr
+	}
+	t.Cleanup(func() { _ = stopFn() })
+
+	select {
+	case <-out.ready:
+	case err := <-runErr:
+		// run already returned: hand stopFn that result directly rather
+		// than letting it try to read runErr a second time (nothing more
+		// will ever arrive on it), then fail as usual.
+		once.Do(func() { stopErr = err })
+		cancel()
+		t.Fatalf("run returned before it ever reported readiness: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the engine to report it is listening")
+	}
+
+	return stopFn
 }
 
 // assertJournalReplays is the check this whole ticket exists to make: that

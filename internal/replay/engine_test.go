@@ -411,6 +411,105 @@ func TestEngineApplyAdvancesBothCursorsWhenAPartialEmissionIsKept(t *testing.T) 
 	}
 }
 
+// The three tests below pin the exact cases round 4's review found the
+// "What advances together" doc comment disagreeing with the code on: each
+// one returns a nil decisions slice, and each one still advances both
+// cursors — proven not by inspecting the cursors directly (unexported) but
+// by the one externally observable consequence of them having moved: the
+// NEXT call is checked against the moved cursor, so a deliberately gapped
+// Sequence after it is refused. If either cursor had NOT moved, that
+// deliberately gapped call would instead be treated as this Engine's own
+// first-ever call, which accepts any starting Sequence, and would wrongly
+// succeed.
+
+// TestEngineApplyAdvancesBothCursorsWhenTheHandlerDecidesNothing is the
+// first case: a handler that legitimately decides nothing for this input.
+func TestEngineApplyAdvancesBothCursorsWhenTheHandlerDecidesNothing(t *testing.T) {
+	t.Parallel()
+
+	engine, err := replay.New(replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) { return nil, nil }))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	emitted, err := engine.Apply(context.Background(), envelope(1))
+	if err != nil {
+		t.Fatalf("Apply(1) error = %v", err)
+	}
+	if emitted != nil {
+		t.Fatalf("Apply(1) = %v, want nil", emitted)
+	}
+
+	if _, err := engine.Apply(context.Background(), envelope(3)); err == nil || !strings.Contains(err.Error(), "non-contiguous sequence") {
+		t.Fatalf("Apply(3) after a decide-nothing Apply(1) = %v, want non-contiguous sequence: the cursor must have moved to 1 despite the nil, nil return", err)
+	}
+}
+
+// TestEngineApplyAdvancesBothCursorsWhenTheHandlerErrorsWithNoEmissions is
+// the second case: a plain handler error with no emissions at all.
+func TestEngineApplyAdvancesBothCursorsWhenTheHandlerErrorsWithNoEmissions(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("rejected on business grounds")
+	engine, err := replay.New(replay.HandlerFunc(func(_ context.Context, item event.Envelope) ([]event.Envelope, error) {
+		if item.Sequence == 1 {
+			return nil, wantErr
+		}
+		return nil, nil
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	emitted, err := engine.Apply(context.Background(), envelope(1))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Apply(1) error = %v, want it to wrap %v", err, wantErr)
+	}
+	if emitted != nil {
+		t.Fatalf("Apply(1) = %v, want nil", emitted)
+	}
+
+	if _, err := engine.Apply(context.Background(), envelope(3)); err == nil || !strings.Contains(err.Error(), "non-contiguous sequence") {
+		t.Fatalf("Apply(3) after Apply(1)'s plain handler error = %v, want non-contiguous sequence: the cursor must have moved to 1 despite the nil, err return", err)
+	}
+}
+
+// TestEngineApplyAdvancesBothCursorsWhenTheOnlyEmissionIsInvalid is the
+// third case: a handler error whose SOLE emission is itself invalid, with
+// no valid siblings before it — the sub-case the round 3 doc comment
+// missed, describing only the invalid-with-valid-siblings case
+// (TestEngineApplyAdvancesBothCursorsWhenAPartialEmissionIsKept, above) and
+// leaving a reader to wrongly infer that a nil returned slice always meant
+// nothing was kept.
+func TestEngineApplyAdvancesBothCursorsWhenTheOnlyEmissionIsInvalid(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("handler failed closed")
+	engine, err := replay.New(replay.HandlerFunc(func(_ context.Context, item event.Envelope) ([]event.Envelope, error) {
+		if item.Sequence == 1 {
+			invalid := decision("x")
+			invalid.Source = "" // missing a required provenance field
+			return []event.Envelope{invalid}, wantErr
+		}
+		return nil, nil
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	emitted, err := engine.Apply(context.Background(), envelope(1))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Apply(1) error = %v, want it to wrap %v", err, wantErr)
+	}
+	if emitted != nil {
+		t.Fatalf("Apply(1) = %v, want nil (the sole emission was invalid, so nothing survives to be returned — but the cursor still moves)", emitted)
+	}
+
+	if _, err := engine.Apply(context.Background(), envelope(3)); err == nil || !strings.Contains(err.Error(), "non-contiguous sequence") {
+		t.Fatalf("Apply(3) after Apply(1)'s sole-invalid-emission error = %v, want non-contiguous sequence: the cursor must have moved to 1", err)
+	}
+}
+
 func TestNewRequiresHandler(t *testing.T) {
 	t.Parallel()
 

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -58,33 +57,17 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 	strategyVersion := event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "test-build")
 	configurationHash := event.ConfigurationHash(cfg)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	out := newReadySignal()
-	runErr := make(chan error, 1)
-	go func() {
-		runErr <- run(ctx, options{
-			socketPath: socketPath,
-			configPath: testConfigPath,
-			outPath:    outPath,
-			build:      "test-build",
-		}, out)
-	}()
-
-	select {
-	case <-out.ready:
-	case err := <-runErr:
-		t.Fatalf("run returned before it ever reported readiness: %v", err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for the engine to report it is listening")
-	}
+	stop := startEngine(t, options{
+		socketPath: socketPath,
+		configPath: testConfigPath,
+		outPath:    outPath,
+		build:      "test-build",
+	})
 
 	client, err := transport.Dial(socketPath)
 	if err != nil {
 		t.Fatalf("dial the engine: %v", err)
 	}
-
 	const instrument = "TEST"
 	const barCount = 25
 	for day := range barCount {
@@ -121,15 +104,8 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 	if err := client.Close(); err != nil {
 		t.Fatalf("close client: %v", err)
 	}
-	cancel()
-
-	select {
-	case err := <-runErr:
-		if err != nil {
-			t.Fatalf("run returned an error: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for run to stop after the context was cancelled")
+	if err := stop(); err != nil {
+		t.Fatalf("run returned an error: %v", err)
 	}
 
 	// journal.Verify accepts the journal the server wrote (brief's
@@ -210,26 +186,12 @@ func TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst(t *
 	strategyVersion := event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "test-build")
 	configurationHash := event.ConfigurationHash(cfg)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	out := newReadySignal()
-	runErr := make(chan error, 1)
-	go func() {
-		runErr <- run(ctx, options{
-			socketPath: socketPath,
-			configPath: testConfigPath,
-			outPath:    outPath,
-			build:      "test-build",
-		}, out)
-	}()
-	select {
-	case <-out.ready:
-	case err := <-runErr:
-		t.Fatalf("run returned before it ever reported readiness: %v", err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for the engine to report it is listening")
-	}
+	stop := startEngine(t, options{
+		socketPath: socketPath,
+		configPath: testConfigPath,
+		outPath:    outPath,
+		build:      "test-build",
+	})
 
 	// The engine's own configuration input occupies Sequence
 	// configurationSequence, so the first bar any connection may legitimately
@@ -276,14 +238,8 @@ func TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst(t *
 	if err := first.Close(); err != nil {
 		t.Fatalf("close the first connection: %v", err)
 	}
-	cancel()
-	select {
-	case err := <-runErr:
-		if err != nil {
-			t.Fatalf("run returned an error: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for run to stop after the context was cancelled")
+	if err := stop(); err != nil {
+		t.Fatalf("run returned an error: %v", err)
 	}
 }
 
@@ -351,46 +307,28 @@ func TestRunReportsAJournalWriteFailureRatherThanExitingClean(t *testing.T) {
 	}
 	outPath := filepath.Join(journalDir, "journal.jsonl")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Registered before startEngine, so LIFO order runs it AFTER
+	// startEngine's own stop-the-engine cleanup: permissions are restored
+	// only once run itself is no longer using the directory, and t.TempDir's
+	// own removal (registered before this) can still walk it afterwards.
+	t.Cleanup(func() { _ = os.Chmod(journalDir, 0o700) })
 
-	out := newReadySignal()
-	runErr := make(chan error, 1)
-	go func() {
-		runErr <- run(ctx, options{
-			socketPath: socketPath,
-			configPath: testConfigPath,
-			outPath:    outPath,
-			build:      "test-build",
-		}, out)
-	}()
-
-	select {
-	case <-out.ready:
-	case err := <-runErr:
-		t.Fatalf("run returned before it ever reported readiness: %v", err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for the engine to report it is listening")
-	}
+	stop := startEngine(t, options{
+		socketPath: socketPath,
+		configPath: testConfigPath,
+		outPath:    outPath,
+		build:      "test-build",
+	})
 
 	// Deny write+execute on the journal's own directory, so os.CreateTemp
 	// inside it fails at shutdown exactly as a full or permission-denied
-	// destination would in production. Restored in cleanup so t.TempDir's
-	// own removal can still walk it.
+	// destination would in production.
 	if err := os.Chmod(journalDir, 0o500); err != nil {
 		t.Fatalf("make the journal directory read-only: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(journalDir, 0o700) })
 
-	cancel()
-
-	select {
-	case err := <-runErr:
-		if err == nil {
-			t.Fatal("run reported success despite the journal directory being unwritable; a failed journal write must never exit clean")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for run to stop after the context was cancelled")
+	if err := stop(); err == nil {
+		t.Fatal("run reported success despite the journal directory being unwritable; a failed journal write must never exit clean")
 	}
 
 	if _, err := os.Stat(outPath); !errors.Is(err, os.ErrNotExist) {

@@ -157,35 +157,61 @@ func New(handler Handler) (*Engine, error) {
 //
 // # What advances together, and what stays put together
 //
-// previous (the input cursor) and outputSequence (the output counter) move
-// together, as one fact: whether this call is keeping anything at all. They
-// advance exactly when Apply is about to return a decisions slice that is
-// not nil, however that slice came to be — a fully successful call, a plain
-// handler error whose emissions all validated, or a handler error whose
-// emission was ALSO invalid but had valid siblings before it, kept under
-// Handler's own "may emit a final event explaining why" contract. In every
-// one of those, this envelope's Sequence is spent — a retry of the identical
-// envelope is a duplicate, not a retry — and outputSequence is left exactly
-// where the returned slice's own stamps end, never one further, so the very
-// next call's own first emission continues immediately after it with no gap.
+// previous (the input cursor) and outputSequence (the output counter) always
+// move together — but the fact that decides whether they do is "did Apply
+// return before or after invoking the handler, and if after, was there
+// truly nothing to keep". It is NOT "is the returned decisions slice nil":
+// a nil return happens on both sides of this rule, so a caller (or a reader
+// of this comment) checking nilness alone cannot tell "this input was
+// rejected, retry it unchanged" from "this input was accepted and its
+// Sequence is already spent".
 //
-// They stay exactly where they were, together, only when Apply is about to
-// return nil outright: a return before the handler is ever reached (ctx,
-// envelope shape, or contiguity itself), where this envelope was never
-// accepted as part of the stream at all, or a post-handler invalid emission
-// with NO accompanying handler error, which — unlike the case above — has
-// nothing worth keeping and discards the whole call. Only THAT case is a
-// genuine retry: this envelope's own Sequence is checked again, unchanged,
-// against unchanged output positions, exactly as if the call had never
-// happened, because nothing of it was kept anywhere.
+// Neither cursor moves in exactly two situations:
 //
-// outputSequence is therefore never incremented by an emission that ends up
-// discarded: a naive implementation that bumped it inside the validation
-// loop before knowing whether THIS call's result survives would burn output
-// positions on a call whose own decisions never reach a caller, leaving the
-// next kept decision to start after a gap — exactly the "contiguous output
-// stream" promise above would then not hold for a caller reading Apply's
-// return values across calls, however faithfully it held within one.
+//   - A return before the handler is ever invoked — ctx, envelope shape, or
+//     contiguity itself all fail closed here. This envelope was never
+//     accepted as part of the stream at all, so there is nothing for the
+//     next call to continue from; Apply returns nil.
+//   - A post-handler invalid emission with NO accompanying handler error
+//     (applyErr == nil). This is the one case where the handler ran but
+//     produced nothing worth keeping at all — even a VALID emission that
+//     happened to precede the invalid one is discarded along with it —
+//     so Apply returns nil here too.
+//
+// Both cursors advance on every OTHER return, once the handler has been
+// invoked — including three that also return a nil decisions slice, which
+// is exactly why nilness is not the signal to read:
+//
+//   - The handler legitimately decided nothing (Handler's own contract: "A
+//     handler that emits nothing returns (nil, nil); this is valid, not an
+//     error") — returns (nil, nil), and still advances.
+//   - The handler reported a plain error with no emissions at all — returns
+//     (nil, err), and still advances.
+//   - The handler reported an error whose SOLE emission was itself invalid,
+//     with no valid siblings before it to keep — returns (nil, a combined
+//     error naming both failures), and still advances: the handler did run
+//     and did report something, even though nothing it produced survives to
+//     be returned.
+//   - The handler reported an error whose emission was ALSO invalid but HAD
+//     valid siblings before it (kept under Handler's own "may emit a final
+//     event explaining why" contract) — returns the kept prefix and a
+//     combined error, and advances.
+//   - The call succeeded outright, with or without emissions — returns
+//     whatever was emitted (possibly nil, possibly not) with a nil error,
+//     and advances.
+//
+// In every advancing case, this envelope's Sequence is spent — a retry of
+// the identical envelope is now a duplicate, not a retry — and
+// outputSequence is left exactly where the kept decisions' own stamps end
+// (unchanged if there were none), so the very next call's own first emission
+// continues immediately after with no gap. outputSequence is therefore never
+// incremented by an emission that ends up discarded: a naive implementation
+// that bumped it inside the validation loop before knowing whether THIS
+// call's result survives would burn output positions on a call whose own
+// decisions never reach a caller, leaving the next kept decision to start
+// after a gap — exactly the "contiguous output stream" promise above would
+// then not hold for a caller reading Apply's return values across calls,
+// however faithfully it held within one.
 func (e *Engine) Apply(ctx context.Context, envelope event.Envelope) ([]event.Envelope, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
