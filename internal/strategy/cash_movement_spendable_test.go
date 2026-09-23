@@ -10,6 +10,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
@@ -170,5 +171,49 @@ func TestASnapshotAfterAWithdrawalReplacesRatherThanDeductsAgain(t *testing.T) {
 		}
 		t.Fatalf("proposals=%d declines=%d, want 1 and 0: the 30,000 snapshot already reflects the withdrawal, so deducting it again would leave 10,000 — %s",
 			len(proposals), len(declines), detail)
+	}
+}
+
+// TestAWithdrawalReducesTheCashAnAddIsCheckedAgainst is the Add-path
+// counterpart of the cases above, every one of which ends before a Campaign
+// opens and so only ever reaches the new-entry check. ADR 0020's
+// cash-movement amendment says both existing checks read the reduced
+// figure; this pins the second one. The snapshot covers Unit 2's rung with
+// 5,000 to spare, a 10,000 withdrawal lands after the Campaign opens, and
+// the rung is then declined against exactly what is left.
+func TestAWithdrawalReducesTheCashAnAddIsCheckedAgainst(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	campaignN := breakoutFixtureN(t, cfg)
+	rung2, err := sizing.NextAddLevel(campaignFillPrice, campaignN, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel(rung 2) error = %v", err)
+	}
+	cost2 := float64(cashSkipCampaignUnitQuantity) * rung2 * cfg.DollarsPerPoint
+	initialCash := cost2 + 5_000
+	const withdrawal = 10_000.0
+
+	emitted := newStream(t, cfg).
+		snapshot(cashSnapshot(cfg, day(0).Add(time.Hour), initialCash)).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		movement(cashMovementPayload(day(56).Add(time.Hour), -withdrawal, cfg.NotionalAccount.StartingEquity)).
+		bar(addOpportunityBar("AAPL", day(57), rung2+5)).
+		mustRun()
+
+	declines := envelopesOfType(emitted, event.ProposalDeclinedEventType)
+	if len(declines) != 1 {
+		t.Fatalf("got %d decline(s), want exactly 1: Unit 2's rung, unaffordable only because of the withdrawal", len(declines))
+	}
+	decline := decodeProposalDeclined(t, declines[0])
+	if decline.Kind != event.ProposalDeclinedKindAdd || decline.Reason != event.DeclineReasonInsufficientCash {
+		t.Fatalf("decline = %+v, want an insufficient-cash Add decline", decline)
+	}
+	if want := initialCash - withdrawal; decline.AvailableCash != want {
+		t.Errorf("AvailableCash = %v, want %v: the snapshot's %v less the %v withdrawal", decline.AvailableCash, want, initialCash, withdrawal)
+	}
+	if decline.RequiredCash != cost2 {
+		t.Errorf("RequiredCash = %v, want Unit 2's cost %v", decline.RequiredCash, cost2)
 	}
 }

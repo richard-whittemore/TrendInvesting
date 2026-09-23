@@ -60,13 +60,17 @@ A fill debits the ledger exactly once, at its actual cost. Nothing debits it a s
 
 ### The invariant
 
-Conservation belongs to the **ledger**, not to the order, precisely because an order's estimate and its actual cost differ. Two statements, and only the first involves money:
+Conservation belongs to the **ledger**, not to the order, precisely because an order's estimate and its actual cost differ. Two statements, and only the first involves money — which it states in two steps, because the zero floor from the cash-movement amendment below applies to one of them and not the other:
 
-> **available = the previous close's figure − every actual fill cost this bar − every hold still standing − withdrawals recorded since that figure.**
+> **basis = max(0, the previous close's figure − withdrawals recorded since that figure)**
+>
+> **available = basis − every actual fill cost this bar − every hold still standing.**
 >
 > **an order's unfilled quantity + its filled quantity + its cancelled quantity = the quantity it was placed for.**
 
-The second is exact because quantities are whole and no estimate enters it. The first needs no estimate to be correct either: holds are estimates while they stand, and each is replaced by a real number the moment a fill makes one available.
+The floor bounds the **basis** only, before any fill or hold is deducted. It is a statement about purchasing capacity: once withdrawals have consumed the known cash, no order may be placed against it. It is not a floor on `available`. An order is only placed when `available` covers its hold, so a placed order never drives it negative — but a fill the ledger cannot fund can still arrive (next section), is still recorded at its actual cost, and can leave `available` below zero. That negative remainder is the evidence the reconciliation failure is built on, and flooring it would hide exactly the discrepancy ADR 0019 requires to halt the run.
+
+The quantity statement is exact because quantities are whole and no estimate enters it. The money statement needs no estimate to be correct either: holds are estimates while they stand, and each is replaced by a real number the moment a fill makes one available.
 
 This replaces an earlier two-term form that tried to conserve *money* across an order's lifecycle. It could not: a $100 order filling $40 and then cancelling left $40 against a $100 placement, and adding a third term for released cash would still have broken the moment a fill cost more than its share of the estimate.
 
