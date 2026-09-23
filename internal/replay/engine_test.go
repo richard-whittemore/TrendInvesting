@@ -290,8 +290,9 @@ func TestEngineApplyNamesBothAnInvalidFinalEmissionAndTheHandlerError(t *testing
 	}
 }
 
-// TestEngineApplyLeavesNoGapInTheOutputStreamAfterADiscardedEmission is the
-// output half of the fix: a call whose own emission is invalid, with no
+// TestEngineApplyLeavesNoGapInTheOutputStreamAfterADiscardedEmission pins
+// the output counter's side of the same rule the cursor tests above pin for
+// the input side: a call whose own emission is invalid, with no
 // accompanying handler error, keeps NOTHING (Apply's own doc comment: this
 // is the one case that discards the whole call), so it must not have
 // consumed any of the shared output counter either — the next kept
