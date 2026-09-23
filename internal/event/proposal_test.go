@@ -758,8 +758,8 @@ func TestProposalDeclinedEventConstants(t *testing.T) {
 	if event.ProposalDeclinedEventType != "strategy.proposal.declined" {
 		t.Errorf("ProposalDeclinedEventType = %q, want %q", event.ProposalDeclinedEventType, "strategy.proposal.declined")
 	}
-	if event.ProposalDeclinedSchemaVersion != 2 {
-		t.Errorf("ProposalDeclinedSchemaVersion = %d, want 2", event.ProposalDeclinedSchemaVersion)
+	if event.ProposalDeclinedSchemaVersion != 3 {
+		t.Errorf("ProposalDeclinedSchemaVersion = %d, want 3", event.ProposalDeclinedSchemaVersion)
 	}
 	for _, reason := range []string{
 		event.DeclineReasonNNotReady,

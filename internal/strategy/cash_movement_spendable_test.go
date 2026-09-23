@@ -1,0 +1,134 @@
+package strategy_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/replay"
+	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
+)
+
+// ADR 0020's cash-movement amendment constrains spendable cash without
+// advancing the snapshot timestamp. These are synthetic boundary fixtures,
+// not source-derived strategy goldens; ADR 0007 still scales the Unit size.
+func TestCashMovementSpendable(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		cash         float64
+		amounts      []float64
+		wantCash     float64
+		wantProposal bool
+	}{
+		{"withdrawal-during-decision-bar", 21_000, []float64{-20_000}, 1_000, false},
+		{"deposit-during-decision-bar", 1_000, []float64{30_000}, 1_000, false},
+		{"cumulative-withdrawals", 21_000, []float64{-10_000, -10_000}, 1_000, false},
+		{"deposit-does-not-offset-withdrawal", 21_000, []float64{-20_000, 30_000}, 1_000, false},
+		{"withdrawal-exhausts-cash", 21_000, []float64{-21_000}, 0, false},
+		{"withdrawal-exceeds-cash", 21_000, []float64{-30_000}, 0, false},
+		{"affordable-withdrawal-does-not-invalidate-basis", 30_000, []float64{-100}, 29_900, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfigurationPayload()
+			bars := breakoutBars("AAPL")
+			s := newStream(t, cfg).snapshot(cashSnapshot(cfg, day(0).Add(time.Hour), tc.cash)).bars(bars[:len(bars)-1])
+			equity := cfg.NotionalAccount.StartingEquity
+			for i, amount := range tc.amounts {
+				s.movement(cashMovementPayload(day(55).Add(time.Duration(i+1)*time.Hour), amount, equity))
+				equity += amount
+			}
+			s.bar(bars[len(bars)-1])
+			emitted := s.mustRun()
+			proposals := envelopesOfType(emitted, event.TradeProposalEventType)
+			declines := envelopesOfType(emitted, event.ProposalDeclinedEventType)
+			if tc.wantProposal {
+				if len(proposals) != 1 || len(declines) != 0 {
+					t.Fatalf("proposals=%d declines=%d, want 1 and 0", len(proposals), len(declines))
+				}
+			} else {
+				if len(proposals) != 0 || len(declines) != 1 {
+					t.Fatalf("proposals=%d declines=%d, want 0 and 1", len(proposals), len(declines))
+				}
+				p := decodeProposalDeclined(t, declines[0])
+				if p.Reason != event.DeclineReasonInsufficientCash || p.AvailableCash != tc.wantCash || p.RequiredCash <= p.AvailableCash {
+					t.Fatalf("decline=%+v, want insufficient-cash with available=%v", p, tc.wantCash)
+				}
+				if declines[0].SchemaVersion != 3 {
+					t.Fatalf("decline schema=%d, want 3 for spendable cash", declines[0].SchemaVersion)
+				}
+			}
+			verifyMovementJournal(t, s, emitted)
+		})
+	}
+}
+
+func (s *stream) movement(p event.CashMovementPayload) *stream {
+	s.seq++
+	s.envelopes = append(s.envelopes, cashMovementEnvelopeFor(s.t, s.cfg, s.seq, p))
+	return s
+}
+
+// verifyMovementJournal writes and verifies ADR 0017's hash chain, then
+// replays the recorded inputs and compares canonical decision bytes.
+func verifyMovementJournal(t *testing.T, s *stream, emitted []event.Envelope) {
+	t.Helper()
+	var entries []journal.Entry
+	for _, input := range s.envelopes {
+		entries = append(entries, journal.Entry{Kind: journal.KindInput, Envelope: input})
+		for _, decision := range emitted {
+			if decision.CausationID == input.ID {
+				entries = append(entries, journal.Entry{Kind: journal.KindDecision, Envelope: decision})
+			}
+		}
+	}
+	var buf bytes.Buffer
+	first, last := s.envelopes[0], s.envelopes[len(s.envelopes)-1]
+	if err := journal.Write(&buf, journal.NewHeader(first.ConfigurationHash, first.StrategyVersion, first.EventTime, last.EventTime), entries); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.Verify(bytes.NewReader(buf.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	_, records, err := journal.Read(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inputs, decisions []event.Envelope
+	for _, record := range records {
+		if record.Kind == journal.KindInput {
+			inputs = append(inputs, record.Envelope)
+		} else {
+			decisions = append(decisions, record.Envelope)
+		}
+		if record.Envelope.Type == event.CashMovementEventType || record.Envelope.Type == event.ProposalDeclinedEventType {
+			raw, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("journal: %s", raw)
+		}
+	}
+	reducer, err := strategy.NewReducer(testStrategyVersion, s.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := engine.Run(context.Background(), inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := replay.Equivalent(emitted, decisions); d != nil {
+		t.Fatalf("journal omitted decisions: %+v", d)
+	}
+	if d := replay.Equivalent(decisions, got); d != nil {
+		t.Fatalf("replay divergence: %+v", d)
+	}
+	t.Log("journal chain verified; replay decisions byte-identical")
+}
