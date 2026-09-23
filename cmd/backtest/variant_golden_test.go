@@ -119,6 +119,10 @@ func TestDeclaredVariantGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	registryGolden := filepath.Join(fixture, "registry", entryPath)
+	log.Reset()
+	if err := doReplay(path, &log); err != nil {
+		t.Fatalf("Variant replay: %v", err)
+	}
 	if *updateGolden {
 		if err := os.MkdirAll(filepath.Dir(registryGolden), 0o755); err != nil {
 			t.Fatal(err)
@@ -138,9 +142,5 @@ func TestDeclaredVariantGolden(t *testing.T) {
 			t.Fatal("Variant registry fixture differs; review the declaration, outcome and journal anchor before accepting -update")
 		}
 		t.Log("Variant journal and registry reproduced byte-for-byte")
-	}
-	log.Reset()
-	if err := doReplay(path, &log); err != nil {
-		t.Fatalf("Variant replay: %v", err)
 	}
 }
