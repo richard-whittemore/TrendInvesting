@@ -212,10 +212,12 @@ func (p CampaignEvaluatedPayload) Validate() error {
 		}
 		unitStops = append(unitStops, u.ProtectiveStop)
 	}
-	// The Campaign's stop is derived by sizing.LowestProtectiveStop, the same
-	// function the reducer states it with, so the two cannot drift: this
-	// check is an equality against one derivation rather than a second
-	// derivation that happens to agree.
+	// A Campaign's Protective Stop is the level at which its protection is
+	// first breached, and "Every open Campaign has one at all times"
+	// (CONTEXT.md: "Protective Stop"). It is derived by
+	// sizing.LowestProtectiveStop, the same function the reducer states it
+	// with, so the two cannot drift: this check is an equality against one
+	// derivation rather than a second derivation that happens to agree.
 	//
 	// An error here means some Unit's own stop is not finite and positive,
 	// which the per-Unit sizing.ValidStopLevel above has already reported
