@@ -147,9 +147,18 @@ func flattenGroup(group *ast.CommentGroup) (flat string, owners []*ast.Comment, 
 
 // lineOf reports the source line a citation at offset within flat is written
 // on: the line of the last comment whose text begins at or before it.
-func lineOf(fset *token.FileSet, owners []*ast.Comment, starts []int, offset int) int {
+//
+// exact is false when that comment is a BLOCK comment spanning several lines.
+// One *ast.Comment then covers every line of the block, so the line returned
+// is where the block opens rather than where the citation sits, and a caller
+// that presented it as the citation's own line would be sending a reader to
+// the wrong place with no hint of it. This module uses no block comments at
+// all -- 15,668 comments, none of them a block -- so resolving lines within
+// one would be machinery for a shape nobody writes; saying the line is
+// approximate costs nothing and cannot mislead.
+func lineOf(fset *token.FileSet, owners []*ast.Comment, starts []int, offset int) (line int, exact bool) {
 	if len(owners) == 0 {
-		return 0
+		return 0, false
 	}
 	owner := owners[0]
 	for i, start := range starts {
@@ -158,7 +167,7 @@ func lineOf(fset *token.FileSet, owners []*ast.Comment, starts []int, offset int
 		}
 		owner = owners[i]
 	}
-	return fset.Position(owner.Pos()).Line
+	return fset.Position(owner.Pos()).Line, !strings.Contains(owner.Text, "\n")
 }
 
 // citation is one quoted claim a source comment makes about CONTEXT.md.
@@ -230,7 +239,7 @@ func citedTermsIn(flat string) []citation {
 		// perfectly good citation. Only a co-citation moves the target, so
 		// a second attribution still belongs to the same entry.
 		target := quoted(flat, m, 1, 2)
-		cites = append(cites, citation{term: target, at: m[0]})
+		cites = append(cites, citation{term: target, at: quotedAt(m, 1, 2)})
 		pos := m[1]
 		for {
 			cont := continuationPattern.FindStringSubmatchIndex(flat[pos:])
@@ -239,15 +248,33 @@ func citedTermsIn(flat string) []citation {
 			}
 			term := quoted(flat[pos:], cont, 2, 3)
 			if attributes(flat[pos+cont[2] : pos+cont[3]]) {
-				cites = append(cites, citation{term: term, entry: target, at: pos + cont[0]})
+				cites = append(cites, citation{term: term, entry: target, at: pos + quotedAt(cont, 2, 3)})
 			} else {
-				cites = append(cites, citation{term: term, at: pos + cont[0]})
+				cites = append(cites, citation{term: term, at: pos + quotedAt(cont, 2, 3)})
 				target = term
 			}
 			pos += cont[1]
 		}
 	}
 	return cites
+}
+
+// quotedAt is the offset where whichever of the given alternation groups
+// matched begins.
+//
+// A citation's offset must point at its QUOTATION, not at the token that
+// introduced it. The head match begins at "CONTEXT.md" and a continuation's
+// begins at its separator, and gofmt readily wraps a line between either and
+// the quotation that follows — so using the match's own start reports the
+// line the marker is on, which is the line above the citation a reader is
+// being sent to look at.
+func quotedAt(m []int, groups ...int) int {
+	for _, g := range groups {
+		if m[2*g] >= 0 {
+			return m[2*g]
+		}
+	}
+	return m[0]
 }
 
 // quoted returns whichever of the given alternation groups matched. A
@@ -609,13 +636,17 @@ func TestEveryContextMDCitationNamesADefinedTerm(t *testing.T) {
 				if resolves(cite, headers, defs, body) {
 					continue
 				}
-				line := lineOf(fset, owners, starts, cite.at)
+				line, exact := lineOf(fset, owners, starts, cite.at)
+				where := ""
+				if !exact {
+					where = " (somewhere in the block comment starting here)"
+				}
 				if cite.entry != "" {
-					t.Errorf("%s:%d: cites CONTEXT.md: %q — %q, but %[3]q's own entry does not say that",
-						rel, line, cite.entry, cite.term)
+					t.Errorf("%s:%d%s: cites CONTEXT.md: %q — %q, but %[4]q's own entry does not say that",
+						rel, line, where, cite.entry, cite.term)
 					continue
 				}
-				t.Errorf("%s:%d: cites CONTEXT.md: %q, which CONTEXT.md does not define", rel, line, cite.term)
+				t.Errorf("%s:%d%s: cites CONTEXT.md: %q, which CONTEXT.md does not define", rel, line, where, cite.term)
 			}
 		}
 		return nil
@@ -749,9 +780,9 @@ func f() {}
 		t.Fatalf("found %d citations, want 1: %v", len(cites), cites)
 	}
 	// The citation is on the fixture's line 8; the group starts on line 3.
-	if got, want := lineOf(fset, owners, starts, cites[0].at), 8; got != want {
-		t.Errorf("citation reported on line %d, want %d (the group starts on line %d, which is the bug)",
-			got, want, fset.Position(groups[0].Pos()).Line)
+	if got, _ := lineOf(fset, owners, starts, cites[0].at); got != 8 {
+		t.Errorf("citation reported on line %d, want 8 (the group starts on line %d, which is the bug)",
+			got, fset.Position(groups[0].Pos()).Line)
 	}
 }
 
@@ -778,7 +809,78 @@ func f() {}
 		t.Fatalf("the wrapped quotation extracted as %q; the flattening that joins it must survive the offsets", got)
 	}
 	// It is reported where it starts, on line 4, not where it ends.
-	if got, want := lineOf(fset, owners, starts, cites[1].at), 4; got != want {
-		t.Errorf("wrapped quotation reported on line %d, want %d (the line it starts on)", got, want)
+	if got, _ := lineOf(fset, owners, starts, cites[1].at); got != 4 {
+		t.Errorf("wrapped quotation reported on line %d, want 4 (the line it starts on)", got)
+	}
+}
+
+// TestACitationIsReportedWhereItsQuotationIsNotItsMarker pins the case the
+// first wrapped-quotation test missed, which it missed because its dash and
+// its opening quote sat on the same line.
+//
+// A citation's match begins at "CONTEXT.md", and a continuation's begins at
+// its separator. gofmt readily wraps a line between either and the quotation
+// that follows, so an offset taken from the match's own start reports the
+// line ABOVE the one a reader is being sent to look at — the same class of
+// wrong-line diagnostic this whole change exists to remove, one line smaller.
+func TestACitationIsReportedWhereItsQuotationIsNotItsMarker(t *testing.T) {
+	t.Parallel()
+	const src = `package probe
+
+// Something first, to push the group's own start line away.
+// The rule (CONTEXT.md: "Protective Stop" —
+// "a fabricated continuation") applies here.
+func f() {}
+`
+	fset, groups := parseComments(t, src)
+	flat, owners, starts := flattenGroup(groups[0])
+	cites := citedTermsIn(flat)
+	if len(cites) != 2 {
+		t.Fatalf("found %d citations, want 2: %v", len(cites), cites)
+	}
+	// The head's quotation is on line 4, where its marker also is.
+	if got, _ := lineOf(fset, owners, starts, cites[0].at); got != 4 {
+		t.Errorf("head citation reported on line %d, want 4", got)
+	}
+	// The continuation's separator is on line 4; its quotation is on line 5,
+	// and line 5 is where a reader must go to change it.
+	if got, _ := lineOf(fset, owners, starts, cites[1].at); got != 5 {
+		t.Errorf("continuation reported on line %d, want 5 — the line its quotation is written on, "+
+			"not the line its separator ends", got)
+	}
+}
+
+// TestABlockCommentsLineIsReportedAsApproximate pins the one shape this
+// mapping cannot resolve. A block comment is a single *ast.Comment covering
+// every line it spans, so a citation inside one can only be placed at the
+// line the block opens on.
+//
+// This module contains no block comments at all, so resolving lines within
+// one would be machinery for a shape nobody writes. What matters is that the
+// diagnostic does not claim a precision it does not have.
+func TestABlockCommentsLineIsReportedAsApproximate(t *testing.T) {
+	t.Parallel()
+	const src = `package probe
+
+/*
+Something first.
+
+A Campaign is (CONTEXT.md: "a fabricated term") here.
+*/
+func f() {}
+`
+	fset, groups := parseComments(t, src)
+	flat, owners, starts := flattenGroup(groups[0])
+	cites := citedTermsIn(flat)
+	if len(cites) != 1 {
+		t.Fatalf("found %d citations, want 1: %v", len(cites), cites)
+	}
+	line, exact := lineOf(fset, owners, starts, cites[0].at)
+	if exact {
+		t.Error("a citation inside a block comment reported an exact line; it cannot be exact, " +
+			"since one *ast.Comment covers every line of the block")
+	}
+	if line != 3 {
+		t.Errorf("block citation reported on line %d, want 3 (where the block opens)", line)
 	}
 }
