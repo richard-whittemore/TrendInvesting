@@ -648,3 +648,63 @@ func TestPathReportsTheBoundSocket(t *testing.T) {
 		t.Errorf("Path() = %q, want %q", server.Path(), path)
 	}
 }
+
+// TestMaxConnectionsRefusesASecondConnectionWhoseCallsDoNotOverlap is the
+// case a per-request guard inside a Decider cannot cover: the first
+// connection is idle — no call of its own in flight — when the second
+// dials, so nothing inside a Decider ever sees two calls overlap in time.
+// The refusal has to come from the server admitting connections, not from
+// anything a Decider could observe.
+func TestMaxConnectionsRefusesASecondConnectionWhoseCallsDoNotOverlap(t *testing.T) {
+	t.Parallel()
+	_, path := startServer(t, echoDecider, transport.ServerConfig{MaxConnections: 1})
+
+	first := dial(t, path, transport.ClientConfig{})
+	if _, err := first.Decide(bounded(t), newBar(t, "bar-1", 1)); err != nil {
+		t.Fatalf("first connection: decide: %v", err)
+	}
+	// first is now idle: no call of its own is in flight, and none will be
+	// until this test issues one, below.
+
+	second, err := transport.DialConfig(path, transport.ClientConfig{})
+	if err != nil {
+		t.Fatalf("dial the second connection: %v", err)
+	}
+	defer func() { _ = second.Close() }()
+	if _, err := second.Decide(bounded(t), newBar(t, "bar-2", 1)); err == nil {
+		t.Fatal("second connection: decide succeeded; want it refused while the first connection is still open, even though the two never overlapped a call in time")
+	}
+
+	// The first connection is unaffected by the second's refusal.
+	if _, err := first.Decide(bounded(t), newBar(t, "bar-3", 2)); err != nil {
+		t.Fatalf("first connection after the second was refused: decide: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close the first connection: %v", err)
+	}
+
+	// Once the first connection is gone, a new one is admitted normally: the
+	// bound is on how many connections are open AT ONCE, not on how many a
+	// server may ever serve. The server frees the slot from a goroutine of
+	// its own, asynchronously with this test's own call to first.Close()
+	// above, so admission is retried rather than asserted on the first
+	// attempt: a third connection dialled in the narrow window before the
+	// server has finished untracking the first is exactly as correctly
+	// refused as second was, for the identical reason, and is not this
+	// test's concern.
+	deadline := time.Now().Add(testTimeout)
+	for {
+		third, dialErr := transport.DialConfig(path, transport.ClientConfig{})
+		if dialErr == nil {
+			_, decideErr := third.Decide(bounded(t), newBar(t, "bar-4", 1))
+			_ = third.Close()
+			if decideErr == nil {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for a connection to be admitted after the first one closed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

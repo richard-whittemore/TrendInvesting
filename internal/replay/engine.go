@@ -62,8 +62,57 @@ func Stamp(input, emission event.Envelope, outputSequence uint64) event.Envelope
 }
 
 // Engine enforces event validation and contiguous processing order.
+//
+// Run and Apply (below) are two independent entry points onto the same
+// Handler, each scoped to what its own caller actually has in hand, and
+// neither shares state with the other on one Engine value:
+//
+//   - Run checks one BATCH's own sequence for internal contiguity, starting
+//     fresh every call — this is deliberate, pre-existing behaviour a
+//     caller may rely on: internal/strategy's own test suite constructs one
+//     Reducer/Engine and calls Run several times in stages, including
+//     retrying an identical, already-numbered batch after a failure, and
+//     documents that "replay.Engine.Run only requires each CALL's own input
+//     sequence to be internally contiguous... not contiguous against a
+//     PRIOR call" (internal/strategy/stop_ladder_test.go's own comment on
+//     TestPartialStopWithAnInvalidExpiryLeavesCampaignStateCompletelyUnchanged).
+//     That is the right contract for a caller replaying a whole recorded
+//     journal, or retrying one rejected batch, where "the next call" is a
+//     new, independently-numbered attempt, not a continuation of the same
+//     producer's stream.
+//   - Apply checks ONE envelope at a time against a cursor that persists on
+//     the Engine value itself, across as many separate calls as it is ever
+//     asked to make. That is the contract a genuinely continuous stream
+//     needs — an adapter's own bar-by-bar numbering, arriving one envelope
+//     per call over an indefinite lifetime, where "the next call" IS the
+//     same producer's very next message, and a gap between two SEPARATE
+//     calls is exactly as real a defect as a gap within one batch. Run's
+//     own per-batch semantics cannot serve this: calling Run with a
+//     one-element slice, repeatedly, would never check anything against the
+//     PREVIOUS call at all (each Run call is deliberately independent, per
+//     the point above), which is precisely how an earlier version of
+//     cmd/engine came to accept a duplicated or gapped bar over the socket.
+//
+// A caller uses one or the other, never both on one Engine value: nothing
+// here forbids constructing an Engine and calling both, but the two checks
+// would then be answering different questions about two differently-scoped
+// notions of "the stream", and mixing them has no tested meaning.
 type Engine struct {
 	handler Handler
+
+	// hasPrevious and previous are Apply's own contiguity state, entirely
+	// separate from Run's (each Run call uses its own local variables, as
+	// it always has): false, and so unconsulted, before this Engine's first
+	// call to Apply, and thereafter the Sequence of the last input Apply
+	// accepted.
+	hasPrevious bool
+	previous    uint64
+	// outputSequence numbers Apply's own emitted stream, independent of the
+	// input stream and shared across every call to Apply for the life of
+	// this Engine, for the identical reason previous is: two separate calls
+	// to Apply form one contiguous output stream, not two. Run keeps its
+	// own, separate output counter, exactly as it always has.
+	outputSequence uint64
 }
 
 // New returns an Engine using handler.
@@ -74,9 +123,150 @@ func New(handler Handler) (*Engine, error) {
 	return &Engine{handler: handler}, nil
 }
 
+// Apply validates envelope, checks it continues this Engine's own,
+// persistent input sequence (see Engine's own doc comment for how this
+// differs from, and does not share state with, Run), applies it to the
+// wrapped Handler, and returns every decision envelope the handler emitted
+// from it, in emission order.
+//
+// The first call an Engine ever receives accepts any starting Sequence;
+// every call after it — however many separate calls this Engine is ever
+// asked to make — must name the immediately preceding call's own Sequence +
+// 1, so a missing, duplicated, or reordered event fails closed across the
+// Engine's whole lifetime, not merely within whichever single call
+// encountered it.
+//
+// Emitted envelopes form their own contiguous output stream, independent of
+// the input stream: Apply assigns each one's Sequence from a counter shared
+// across every call this Engine makes, starting at 1, in emission order,
+// overwriting whatever the handler set. For each emission Apply also sets
+// CausationID to the input envelope's ID, and CorrelationID to the input's
+// CorrelationID if set, else the input's ID; a handler cannot override
+// either. Each emitted envelope is validated after stamping, so an invalid
+// emission fails closed, naming the input sequence and the emission index.
+//
+// When the handler's own Apply returns an error, its emissions (if any — see
+// Handler's doc comment on a handler's final explanatory event) are still
+// stamped, validated, and returned exactly like a successful call's,
+// alongside the error. A handler's error always wins the message: if the
+// call's own emission is ALSO invalid, both failures are named, with the
+// handler's original error first in the chain (errors.Is/As still finds it)
+// and the emission's invalidity appended, since an emission that cannot be
+// journalled is a failure in its own right and must not be silently dropped
+// behind the error that happened to arrive alongside it.
+//
+// # What advances together, and what stays put together
+//
+// previous (the input cursor) and outputSequence (the output counter) always
+// move together — but the fact that decides whether they do is "did Apply
+// return before or after invoking the handler, and if after, was there
+// truly nothing to keep". It is NOT "is the returned decisions slice nil":
+// a nil return happens on both sides of this rule, so a caller (or a reader
+// of this comment) checking nilness alone cannot tell "this input was
+// rejected, retry it unchanged" from "this input was accepted and its
+// Sequence is already spent".
+//
+// Neither cursor moves in exactly two situations:
+//
+//   - A return before the handler is ever invoked — ctx, envelope shape, or
+//     contiguity itself all fail closed here. This envelope was never
+//     accepted as part of the stream at all, so there is nothing for the
+//     next call to continue from; Apply returns nil.
+//   - A post-handler invalid emission with NO accompanying handler error
+//     (applyErr == nil). This is the one case where the handler ran but
+//     produced nothing worth keeping at all — even a VALID emission that
+//     happened to precede the invalid one is discarded along with it —
+//     so Apply returns nil here too.
+//
+// Both cursors advance on every OTHER return, once the handler has been
+// invoked — including three that also return a nil decisions slice, which
+// is exactly why nilness is not the signal to read:
+//
+//   - The handler legitimately decided nothing (Handler's own contract: "A
+//     handler that emits nothing returns (nil, nil); this is valid, not an
+//     error") — returns (nil, nil), and still advances.
+//   - The handler reported a plain error with no emissions at all — returns
+//     (nil, err), and still advances.
+//   - The handler reported an error whose SOLE emission was itself invalid,
+//     with no valid siblings before it to keep — returns (nil, a combined
+//     error naming both failures), and still advances: the handler did run
+//     and did report something, even though nothing it produced survives to
+//     be returned.
+//   - The handler reported an error whose emission was ALSO invalid but HAD
+//     valid siblings before it (kept under Handler's own "may emit a final
+//     event explaining why" contract) — returns the kept prefix and a
+//     combined error, and advances.
+//   - The call succeeded outright, with or without emissions — returns
+//     whatever was emitted (possibly nil, possibly not) with a nil error,
+//     and advances.
+//
+// In every advancing case, this envelope's Sequence is spent — a retry of
+// the identical envelope is now a duplicate, not a retry — and
+// outputSequence is left exactly where the kept decisions' own stamps end
+// (unchanged if there were none), so the very next call's own first emission
+// continues immediately after with no gap. outputSequence is therefore never
+// incremented by an emission that ends up discarded: a naive implementation
+// that bumped it inside the validation loop before knowing whether THIS
+// call's result survives would burn output positions on a call whose own
+// decisions never reach a caller, leaving the next kept decision to start
+// after a gap — exactly the "contiguous output stream" promise above would
+// then not hold for a caller reading Apply's return values across calls,
+// however faithfully it held within one.
+func (e *Engine) Apply(ctx context.Context, envelope event.Envelope) ([]event.Envelope, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := envelope.Validate(); err != nil {
+		return nil, fmt.Errorf("event %s at sequence %d: %w", envelope.ID, envelope.Sequence, err)
+	}
+	if e.hasPrevious && envelope.Sequence != e.previous+1 {
+		return nil, fmt.Errorf("non-contiguous sequence: got %d after %d", envelope.Sequence, e.previous)
+	}
+
+	decisions, applyErr := e.handler.Apply(ctx, envelope)
+
+	// entryOutputSequence is read once and never written until this call
+	// knows what it is keeping: every stamp below is computed from it plus
+	// how many decisions are in emitted so far, so emitted's own length is
+	// the single source of truth for both the next stamp to hand out and,
+	// at each return, how much of outputSequence's advance to commit.
+	entryOutputSequence := e.outputSequence
+	var emitted []event.Envelope
+	for emissionIndex, decision := range decisions {
+		decision = Stamp(envelope, decision, entryOutputSequence+uint64(len(emitted))+1)
+		if err := decision.Validate(); err != nil {
+			validationErr := fmt.Errorf("emit at input sequence %d, emission %d: %w", envelope.Sequence, emissionIndex, err)
+			if applyErr != nil {
+				e.outputSequence = entryOutputSequence + uint64(len(emitted))
+				e.hasPrevious = true
+				e.previous = envelope.Sequence
+				return emitted, fmt.Errorf("apply event %s at sequence %d: %w; its final emission is also invalid: %w", envelope.ID, envelope.Sequence, applyErr, validationErr)
+			}
+			// Nothing from this call is kept anywhere: neither cursor
+			// moves, so a retry of the identical envelope, at the
+			// identical Sequence, is checked exactly as this call was.
+			return nil, validationErr
+		}
+		emitted = append(emitted, decision)
+	}
+
+	e.outputSequence = entryOutputSequence + uint64(len(emitted))
+	e.hasPrevious = true
+	e.previous = envelope.Sequence
+
+	if applyErr != nil {
+		return emitted, fmt.Errorf("apply event %s at sequence %d: %w", envelope.ID, envelope.Sequence, applyErr)
+	}
+	return emitted, nil
+}
+
 // Run applies events in the supplied order and returns every decision
 // envelope the handler emitted, in emission order. Input sequences must be
-// contiguous so a missing, duplicated, or reordered event fails closed.
+// contiguous WITHIN THIS CALL so a missing, duplicated, or reordered event
+// fails closed; a later, separate call to Run (or to Apply) on the same
+// Engine checks its own sequence independently, starting fresh — see
+// Engine's own doc comment for why that is deliberate and tested, not an
+// oversight Apply needed to inherit.
 //
 // Emitted envelopes form their own contiguous output stream, independent of
 // the input stream: Engine assigns each one's Sequence from a counter

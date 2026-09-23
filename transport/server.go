@@ -42,6 +42,21 @@ type ServerConfig struct {
 	// DecisionTimeout bounds one call to the Decider. Zero means no bound,
 	// in which case a stuck Decider stalls its connection for ever.
 	DecisionTimeout time.Duration
+	// MaxConnections bounds how many connections may be open at once. Zero
+	// means unlimited, which is every existing caller's behaviour before
+	// this field existed.
+	//
+	// A connection beyond the bound is refused at accept time — its socket
+	// is closed immediately, before a single frame is read from it, so it
+	// never reaches the Decider at all — while the server keeps accepting:
+	// a server already at capacity does not stop serving the connection it
+	// already has over one that arrived too late to be admitted. This is
+	// the seam a Decider itself cannot provide, because a Decider is called
+	// per REQUEST with no connection identity of its own (Decider's own doc
+	// comment: it "turns a completed-bar envelope into a decision
+	// envelope", nothing more); admission is a fact about a CONNECTION, and
+	// only Server ever sees one of those.
+	MaxConnections int
 }
 
 func (c ServerConfig) maxFrameBytes() int {
@@ -49,6 +64,14 @@ func (c ServerConfig) maxFrameBytes() int {
 		return DefaultMaxFrameBytes
 	}
 	return c.MaxFrameBytes
+}
+
+// maxConnections reports the configured bound, or 0 for unlimited.
+func (c ServerConfig) maxConnections() int {
+	if c.MaxConnections <= 0 {
+		return 0
+	}
+	return c.MaxConnections
 }
 
 // Server answers bar envelopes with decision envelopes over a Unix-domain
@@ -206,6 +229,13 @@ func (s *Server) Path() string { return s.path }
 
 // Serve accepts connections until Close is called. It returns nil on an
 // orderly shutdown.
+//
+// A connection beyond ServerConfig.MaxConnections is refused and the loop
+// keeps running (below, admitted == false, closing == false): the server is
+// still open, just full, and the connection it already has is not ended by
+// one that arrived too late to be admitted. A connection arriving after
+// Close, by contrast, ends Serve itself (closing == true): the server is
+// gone, not merely full, and there is nothing left to keep accepting for.
 func (s *Server) Serve() error {
 	for {
 		conn, err := s.listener.Accept()
@@ -215,9 +245,14 @@ func (s *Server) Serve() error {
 			}
 			return fmt.Errorf("transport: accept: %w", err)
 		}
-		if !s.track(conn) {
+		admitted, closing := s.track(conn)
+		if closing {
 			_ = conn.Close()
 			return nil
+		}
+		if !admitted {
+			_ = conn.Close()
+			continue
 		}
 		go func() {
 			defer s.wg.Done()
@@ -262,8 +297,14 @@ func (s *Server) isClosed() bool {
 	return s.closed
 }
 
-// track registers conn and counts it, or reports false once the server is
-// closing.
+// track registers conn and counts it, unless the server is closing or
+// already holds ServerConfig.MaxConnections connections.
+//
+// admitted and closing are never both true, and the caller (Serve) must
+// check closing first: closing means the server itself is gone and Serve
+// must stop, while admitted false with closing false means only that THIS
+// connection lost a race for a full server's one remaining slot — every
+// other connection this server already holds continues exactly as before.
 //
 // The WaitGroup counter is incremented HERE, under the same lock that decides
 // whether the server is still open, and not by the caller afterwards. sync
@@ -271,15 +312,18 @@ func (s *Server) isClosed() bool {
 // concurrent Wait; doing it after track returned left a window in which Close
 // observed a zero counter, waited on nothing, and returned while a connection
 // goroutine was still being launched.
-func (s *Server) track(conn net.Conn) bool {
+func (s *Server) track(conn net.Conn) (admitted, closing bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return false
+		return false, true
+	}
+	if bound := s.cfg.maxConnections(); bound > 0 && len(s.conns) >= bound {
+		return false, false
 	}
 	s.conns[conn] = struct{}{}
 	s.wg.Add(1)
-	return true
+	return true, false
 }
 
 func (s *Server) untrack(conn net.Conn) {
