@@ -161,6 +161,29 @@ go test ./cmd/backtest -run TestTheCommandTurnsABarFixtureIntoTheGoldenJournal -
 
 A diff in that file is a change in what this system decides, to be read before it is accepted.
 
+The corpus also includes the declared
+[`profit-protecting-stop` Variant](../cmd/backtest/testdata/variants/profit-protecting-stop/README.md).
+It reuses the authored bars with a 0.1N Stop Multiple, records its Variant
+attribution in a registry fixture, and reaches a Stop Ladder Campaign exit
+above average entry. `TestDeclaredVariantGolden` compares the journal and
+registry byte-for-byte, verifies their chain anchor, and replays the journal.
+It reports a possible rules change and the first decision difference even
+when a validator aborts the run. This complements the rule-constant fingerprint
+with behavioral coverage of a predicate the original golden never reaches
+(ADR 0016); it does not fingerprint source or require a bump for a refactor.
+The declaration explains why this synthetic software test is not an ADR 0012
+performance experiment. Neither golden establishes coverage of every possible
+Variant predicate.
+
+```sh
+go test ./cmd/backtest -run '^TestDeclaredVariantGolden$' -count=1 -v
+```
+
+Use the same command with `-update` to regenerate only this Variant's golden
+journal and registry fixture, then read both. The existing golden must not
+move when adding Variant coverage. See the
+[predicate regression evidence](audits/variant-golden-corpus.md).
+
 The golden run fixes the build identifier (`+test`) rather than taking `internal/buildinfo.Version`, which differs between machines and release builds: a journal asserted byte for byte must record what the platform decided, not which machine decided it. `main` passes the real build, and a separate test holds that wiring in place.
 
 ## Reading the recorded decisions

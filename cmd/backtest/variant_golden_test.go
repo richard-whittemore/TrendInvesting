@@ -73,7 +73,8 @@ func TestDeclaredVariantGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var raised, exited bool
+	raised := make(map[string]bool)
+	var exited bool
 	for _, record := range records {
 		switch record.Envelope.Type {
 		case event.ProtectiveStopSetEventType:
@@ -81,21 +82,21 @@ func TestDeclaredVariantGolden(t *testing.T) {
 			if err := json.Unmarshal(record.Envelope.Payload, &stop); err != nil {
 				t.Fatal(err)
 			}
-			if stop.Reason == event.ProtectiveStopReasonAddLadder {
-				raised = true
+			if stop.Reason == event.ProtectiveStopReasonAddLadder && stop.Level >= stop.EntryPrice {
+				raised[stop.CampaignID] = true
 			}
 		case event.CampaignExitedEventType:
 			var exit event.CampaignExitedPayload
 			if err := json.Unmarshal(record.Envelope.Payload, &exit); err != nil {
 				t.Fatal(err)
 			}
-			if exit.Reason == event.ExitReasonStop && exit.ProtectiveStopLevel >= exit.EntryPrice {
+			if raised[exit.CampaignID] && exit.Reason == event.ExitReasonStop && exit.ProtectiveStopLevel >= exit.EntryPrice {
 				exited = true
 			}
 		}
 	}
-	if !raised || !exited {
-		t.Fatalf("Variant no longer reaches its declared scenario: Stop Ladder raised=%v, stop exit at or above entry=%v", raised, exited)
+	if !exited {
+		t.Fatal("Variant no longer reaches its declared scenario: a Campaign must raise a stop to or above Unit entry and then record a stop exit at or above average entry")
 	}
 	entries := runsUnder(t, root, cfg)
 	if len(entries) != 1 {
