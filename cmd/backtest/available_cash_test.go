@@ -14,7 +14,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 )
 
-func runWithCashFlags(t *testing.T, cashFlags ...string) ([]byte, string) {
+func runWithCashFlags(t *testing.T, cashFlags ...string) (written []byte, journalPath string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "journal.jsonl")
 	args := append([]string{"-config", configurationFixture, "-bars", barsFixture, "-out", path}, cashFlags...)
@@ -36,6 +36,9 @@ func TestAvailableCashReachesTheJournalAndDeclinesUnaffordableUnits(t *testing.T
 		t.Run(strconv.FormatFloat(cash, 'f', -1, 64), func(t *testing.T) {
 			flags := []string{"-available-cash", strconv.FormatFloat(cash, 'f', -1, 64)}
 			raw, path := runWithCashFlags(t, flags...)
+			if _, err := journal.Verify(bytes.NewReader(raw)); err != nil {
+				t.Fatalf("cash-constrained journal chain: %v", err)
+			}
 			_, records, err := journal.Read(bytes.NewReader(raw))
 			if err != nil {
 				t.Fatal(err)
