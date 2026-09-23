@@ -27,9 +27,11 @@ const decisionsSchemaVersion uint32 = 1
 // decisionsPayload is decisionsEventType's payload: the decisions
 // strategy.Reducer emitted for one accepted input, in emission order,
 // exactly as journal.Recorder.Apply returned them to this command's Decider
-// — UNSTAMPED, matching replay.Handler's own documented contract ("a
-// handler emitting nothing... is valid" and "a handler must not rely on
-// Sequence, CausationID, or CorrelationID it sets"). The stamped,
+// — UNSTAMPED, matching replay.Handler's own documented contract: a handler
+// "must not rely on Sequence, CausationID, or CorrelationID it sets on an
+// emitted envelope", because "Engine.Run stamps all three, overwriting
+// whatever the handler provided", and one that emits nothing at all
+// "returns (nil, nil); this is valid, not an error". The stamped,
 // causally-linked copy of these same decisions is what journal.Recorder
 // records internally (via replay.Stamp) into the journal this command
 // writes; this wire payload is a separate, unstamped view of the same
