@@ -119,22 +119,17 @@ type Reducer struct {
 	// require Currency non-empty, so the empty string is unambiguous as
 	// "not yet pinned".
 	accountCurrency string
-	// availableCash is ADR 0010's cash basis: the cash known at the previous
-	// close, available to fund every Add and new entry on the CURRENT bar.
-	// It is fed exclusively by event.AccountSnapshotEventType's
-	// AvailableCash (see applyAccountSnapshot, notional.go) and read as-is by
-	// sizeUnit and evaluateAdd — never a running balance this reducer
-	// decrements as it proposes, since a proposal is not a commitment (ADR
-	// 0010 measures every same-day decision against the identical
-	// previous-close figure, not against what other proposals the same bar
-	// already made).
+	// availableCash is snapshot-backed spendable cash: ADR 0010's cash
+	// basis less accepted withdrawals, floored at zero (ADR 0020's
+	// cash-movement amendment). Deposits do not credit it; a later snapshot
+	// replaces it outright. Both sizeUnit and evaluateAdd read it through
+	// cashAtPreviousClose. Proposals do not reserve or debit cash (ADR 0020).
 	//
-	// availableCashAsOf is when that figure was true, and hasAvailableCash is
-	// false until the first account.snapshot is accepted. Every read goes
-	// through cashAtPreviousClose, which fails closed on both an unset figure
-	// and one stamped later than the decision bar's previous close, rather
-	// than sizing a Unit as though cash were infinite or as though the
-	// current bar's own exits had already funded it.
+	// availableCashAsOf is the snapshot timestamp, unchanged by movements;
+	// hasAvailableCash remains false until the first snapshot is accepted.
+	// cashAtPreviousClose fails closed on an absent snapshot or one stamped
+	// later than the decision bar's previous close, so current-bar credits
+	// cannot fund that bar's decisions (ADR 0010).
 	availableCash     float64
 	availableCashAsOf time.Time
 	hasAvailableCash  bool
@@ -875,14 +870,14 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 		// operands in Detail, rather than stopping the run on a cost no
 		// payload can carry.
 		return r.decline(bar, input, signalID, event.DeclineReasonUnitCostNotRepresentable,
-			fmt.Sprintf("unit cost (%d shares x entry level %v x %v dollars per point) leaves the representable range, so it exceeds any cash that could fund it; the cash available at the previous close was %v",
+			fmt.Sprintf("unit cost (%d shares x entry level %v x %v dollars per point) leaves the representable range, so it exceeds any cash that could fund it; spendable cash at the attempt was %v",
 				unit.Quantity, entryLevel, r.dollarsPerPoint, availableCash), 0, 0)
 	}
 	if cost > availableCash {
 		// No partial Unit, ever: the whole Unit is skipped (ADR 0010), never
 		// resized down to what the available cash would cover.
 		return r.decline(bar, input, signalID, event.DeclineReasonInsufficientCash,
-			fmt.Sprintf("unit cost %v (%d shares x entry level %v x %v dollars per point) exceeds the cash available at the previous close %v",
+			fmt.Sprintf("unit cost %v (%d shares x entry level %v x %v dollars per point) exceeds spendable cash at the attempt %v",
 				cost, unit.Quantity, entryLevel, r.dollarsPerPoint, availableCash),
 			cost, availableCash)
 	}
@@ -958,10 +953,11 @@ func (r *Reducer) decline(bar event.CompletedBarPayload, input event.Envelope, s
 	), nil
 }
 
-// cashAtPreviousClose returns ADR 0010's cash basis for a decision on the bar
-// that opened at previousClose: the cash available to fund every Add and new
-// entry on that bar is the cash known at the PREVIOUS close, so that exits in
-// bar t free capital for bar t+1 and never for bar t.
+// cashAtPreviousClose returns snapshot-backed spendable cash for a decision
+// on the bar that opened at previousClose. ADR 0010 requires the snapshot to
+// be known at the previous close; ADR 0020's cash-movement amendment reduces
+// its cash by accepted withdrawals without advancing that timestamp. Exits
+// in bar t free capital for bar t+1 and never for bar t.
 //
 // It fails closed twice over, because either state would size a Unit against
 // cash the decision was not entitled to:

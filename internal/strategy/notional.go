@@ -577,9 +577,10 @@ func (r *Reducer) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelop
 
 	r.lastAccountEventAt = snapshot.AsOf
 	r.hasAccountEvent = true
-	// ADR 0010's cash basis. The figure stands until a later snapshot
-	// replaces it, and AsOf travels with it: whether it may be spent on a
-	// given bar is not decided here but at the decision itself, where the
+	// ADR 0010's cash basis, constrained by ADR 0020's cash-movement
+	// amendment. A snapshot replaces spendable cash outright, so prior
+	// withdrawals are not deducted again. AsOf travels with it: whether it
+	// may be spent on a given bar is decided at the decision itself, where the
 	// bar's previous close is known (Reducer.cashAtPreviousClose,
 	// reducer.go). A snapshot is accepted on its own account-timeline
 	// chronology alone; it is the spending that is bound to the bar.
@@ -674,7 +675,9 @@ func (r *Reducer) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelop
 // applyCashMovement handles event.CashMovementEventType: a deposit or
 // withdrawal scales the Notional Account per ADR 0007 (see
 // NotionalAccount.ApplyCashMovement) and is journalled as a
-// strategy.notional-account.cash-adjusted decision.
+// strategy.notional-account.cash-adjusted decision. Accepted withdrawals also
+// constrain snapshot-backed spendable cash under ADR 0020's cash-movement
+// amendment; deposits leave it unchanged.
 //
 // Like applyAccountSnapshot, it requires a configuration event first and
 // rejects a schema version other than event.CashMovementSchemaVersion before
@@ -720,6 +723,14 @@ func (r *Reducer) applyCashMovement(envelope event.Envelope) ([]event.Envelope, 
 
 	r.lastAccountEventAt = movement.AsOf
 	r.hasAccountEvent = true
+
+	// ADR 0020's cash-movement amendment: debit accepted withdrawals once,
+	// with a zero floor, after all movement checks and ADR 0007 scaling.
+	// Deposits cannot supply spendable cash; neither sign changes the
+	// snapshot's presence or timestamp used by cashAtPreviousClose.
+	if r.hasAvailableCash && movement.Amount < 0 {
+		r.availableCash = max(0, r.availableCash+movement.Amount)
+	}
 
 	payload := event.NotionalAccountCashAdjustedPayload{
 		AsOf:                 movement.AsOf,
