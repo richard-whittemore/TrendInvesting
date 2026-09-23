@@ -155,17 +155,37 @@ func New(handler Handler) (*Engine, error) {
 // journalled is a failure in its own right and must not be silently dropped
 // behind the error that happened to arrive alongside it.
 //
-// A handler error does not, on its own, stop this envelope's Sequence from
-// becoming the one the NEXT call is checked against: contiguity is a
-// property of the INPUT STREAM's own numbering (did the producer skip,
-// repeat, or reorder a message), which is unaffected by whether the handler
-// went on to accept what was, in stream terms, a perfectly ordered message.
-// The alternative — leaving previous unmoved on a handler error — would
-// reject the very next, legitimately-numbered event as a gap, for a stream
-// that never actually had one. Only a return before the handler is ever
-// reached (ctx, envelope shape, or contiguity itself) leaves previous
-// untouched, because in each of those cases this envelope was never
-// accepted as part of the stream at all.
+// # What advances together, and what stays put together
+//
+// previous (the input cursor) and outputSequence (the output counter) move
+// together, as one fact: whether this call is keeping anything at all. They
+// advance exactly when Apply is about to return a decisions slice that is
+// not nil, however that slice came to be — a fully successful call, a plain
+// handler error whose emissions all validated, or a handler error whose
+// emission was ALSO invalid but had valid siblings before it, kept under
+// Handler's own "may emit a final event explaining why" contract. In every
+// one of those, this envelope's Sequence is spent — a retry of the identical
+// envelope is a duplicate, not a retry — and outputSequence is left exactly
+// where the returned slice's own stamps end, never one further, so the very
+// next call's own first emission continues immediately after it with no gap.
+//
+// They stay exactly where they were, together, only when Apply is about to
+// return nil outright: a return before the handler is ever reached (ctx,
+// envelope shape, or contiguity itself), where this envelope was never
+// accepted as part of the stream at all, or a post-handler invalid emission
+// with NO accompanying handler error, which — unlike the case above — has
+// nothing worth keeping and discards the whole call. Only THAT case is a
+// genuine retry: this envelope's own Sequence is checked again, unchanged,
+// against unchanged output positions, exactly as if the call had never
+// happened, because nothing of it was kept anywhere.
+//
+// outputSequence is therefore never incremented by an emission that ends up
+// discarded: a naive implementation that bumped it inside the validation
+// loop before knowing whether THIS call's result survives would burn output
+// positions on a call whose own decisions never reach a caller, leaving the
+// next kept decision to start after a gap — exactly the "contiguous output
+// stream" promise above would then not hold for a caller reading Apply's
+// return values across calls, however faithfully it held within one.
 func (e *Engine) Apply(ctx context.Context, envelope event.Envelope) ([]event.Envelope, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -179,20 +199,32 @@ func (e *Engine) Apply(ctx context.Context, envelope event.Envelope) ([]event.En
 
 	decisions, applyErr := e.handler.Apply(ctx, envelope)
 
+	// entryOutputSequence is read once and never written until this call
+	// knows what it is keeping: every stamp below is computed from it plus
+	// how many decisions are in emitted so far, so emitted's own length is
+	// the single source of truth for both the next stamp to hand out and,
+	// at each return, how much of outputSequence's advance to commit.
+	entryOutputSequence := e.outputSequence
 	var emitted []event.Envelope
 	for emissionIndex, decision := range decisions {
-		e.outputSequence++
-		decision = Stamp(envelope, decision, e.outputSequence)
+		decision = Stamp(envelope, decision, entryOutputSequence+uint64(len(emitted))+1)
 		if err := decision.Validate(); err != nil {
 			validationErr := fmt.Errorf("emit at input sequence %d, emission %d: %w", envelope.Sequence, emissionIndex, err)
 			if applyErr != nil {
+				e.outputSequence = entryOutputSequence + uint64(len(emitted))
+				e.hasPrevious = true
+				e.previous = envelope.Sequence
 				return emitted, fmt.Errorf("apply event %s at sequence %d: %w; its final emission is also invalid: %w", envelope.ID, envelope.Sequence, applyErr, validationErr)
 			}
+			// Nothing from this call is kept anywhere: neither cursor
+			// moves, so a retry of the identical envelope, at the
+			// identical Sequence, is checked exactly as this call was.
 			return nil, validationErr
 		}
 		emitted = append(emitted, decision)
 	}
 
+	e.outputSequence = entryOutputSequence + uint64(len(emitted))
 	e.hasPrevious = true
 	e.previous = envelope.Sequence
 

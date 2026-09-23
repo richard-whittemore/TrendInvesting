@@ -290,6 +290,127 @@ func TestEngineApplyNamesBothAnInvalidFinalEmissionAndTheHandlerError(t *testing
 	}
 }
 
+// TestEngineApplyLeavesNoGapInTheOutputStreamAfterADiscardedEmission is the
+// output half of the fix: a call whose own emission is invalid, with no
+// accompanying handler error, keeps NOTHING (Apply's own doc comment: this
+// is the one case that discards the whole call), so it must not have
+// consumed any of the shared output counter either — the next kept
+// decision, from whatever input is accepted next (a genuine retry of this
+// same envelope, or a different one this Engine goes on to accept), picks
+// up immediately after the last one this Engine actually returned, with no
+// number skipped in between.
+func TestEngineApplyLeavesNoGapInTheOutputStreamAfterADiscardedEmission(t *testing.T) {
+	t.Parallel()
+
+	// attemptsAtTwo counts how many times sequence 2 has been delivered:
+	// invalid the first two times, valid the third — modelling an operator
+	// fixing whatever produced the invalid emission and redelivering the
+	// identical, unchanged Sequence, which is the only kind of "retry" a
+	// discarded call permits (Apply's own doc comment).
+	var attemptsAtTwo int
+	engine, err := replay.New(replay.HandlerFunc(func(_ context.Context, item event.Envelope) ([]event.Envelope, error) {
+		switch item.Sequence {
+		case 1:
+			return []event.Envelope{decision("a")}, nil
+		case 2:
+			attemptsAtTwo++
+			if attemptsAtTwo < 3 {
+				invalid := decision("bad")
+				invalid.Source = "" // missing a required provenance field
+				return []event.Envelope{invalid}, nil
+			}
+			return []event.Envelope{decision("b")}, nil
+		default:
+			t.Fatalf("unexpected input sequence %d", item.Sequence)
+			return nil, nil
+		}
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	first, err := engine.Apply(context.Background(), envelope(1))
+	if err != nil {
+		t.Fatalf("Apply(1) error = %v", err)
+	}
+	if len(first) != 1 || first[0].Sequence != 1 {
+		t.Fatalf("Apply(1) = %+v, want one envelope at output sequence 1", first)
+	}
+
+	if _, err := engine.Apply(context.Background(), envelope(2)); err == nil {
+		t.Fatal("Apply(2) (first attempt) succeeded against an invalid emission; want an error")
+	}
+
+	// A genuine retry: sequence 2 again, unchanged, because nothing from the
+	// failed call above was kept anywhere — this is checked as contiguous
+	// precisely because the input cursor never moved.
+	if _, err := engine.Apply(context.Background(), envelope(2)); err == nil {
+		t.Fatal("Apply(2) (second attempt) succeeded; want it still invalid")
+	}
+
+	// Third delivery of the identical Sequence, now valid: its output must
+	// start immediately after sequence 1's own output 1 — at 2, not 4 —
+	// because neither discarded attempt consumed an output position.
+	third, err := engine.Apply(context.Background(), envelope(2))
+	if err != nil {
+		t.Fatalf("Apply(2) (third attempt) error = %v", err)
+	}
+	if len(third) != 1 || third[0].Sequence != 2 {
+		t.Fatalf("Apply(2) (third attempt) = %+v, want one envelope at output sequence 2, with no gap left by the two discarded attempts", third)
+	}
+}
+
+// TestEngineApplyAdvancesBothCursorsWhenAPartialEmissionIsKept is the
+// counterpart: when a handler error's own valid emissions are kept
+// alongside an invalid final one (Handler's "may emit a final event
+// explaining why" contract), something real was returned, so — unlike the
+// fully-discarded case above — this envelope's Sequence is spent and the
+// next call is checked against it, not retried at the same value.
+func TestEngineApplyAdvancesBothCursorsWhenAPartialEmissionIsKept(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("handler failed closed")
+	engine, err := replay.New(replay.HandlerFunc(func(_ context.Context, item event.Envelope) ([]event.Envelope, error) {
+		switch item.Sequence {
+		case 1:
+			valid := decision("kept")
+			invalid := decision("dropped")
+			invalid.Source = "" // missing a required provenance field
+			return []event.Envelope{valid, invalid}, wantErr
+		case 2:
+			return []event.Envelope{decision("next")}, nil
+		default:
+			t.Fatalf("unexpected input sequence %d", item.Sequence)
+			return nil, nil
+		}
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	first, err := engine.Apply(context.Background(), envelope(1))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Apply(1) error = %v, want it to wrap %v", err, wantErr)
+	}
+	if len(first) != 1 || first[0].ID != "kept" || first[0].Sequence != 1 {
+		t.Fatalf("Apply(1) = %+v, want exactly the one valid emission kept, at output sequence 1", first)
+	}
+
+	// Sequence 1 is spent: retrying it is now a non-contiguous duplicate,
+	// not a retry.
+	if _, err := engine.Apply(context.Background(), envelope(1)); err == nil || !strings.Contains(err.Error(), "non-contiguous sequence") {
+		t.Fatalf("Apply(1) again = %v, want non-contiguous sequence: this input's Sequence was already spent by the partial keep above", err)
+	}
+
+	second, err := engine.Apply(context.Background(), envelope(2))
+	if err != nil {
+		t.Fatalf("Apply(2) error = %v", err)
+	}
+	if len(second) != 1 || second[0].Sequence != 2 {
+		t.Fatalf("Apply(2) = %+v, want one envelope at output sequence 2 (immediately after sequence 1's own kept output 1)", second)
+	}
+}
+
 func TestNewRequiresHandler(t *testing.T) {
 	t.Parallel()
 

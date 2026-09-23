@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,6 +9,9 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/replay"
+	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
 // testConfigPath is the fixture every test in this package runs against,
@@ -95,6 +99,62 @@ func shortSocketDir(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
+}
+
+// assertJournalReplays is the check this whole ticket exists to make: that
+// the journal a run of this command wrote is not merely well-formed
+// (journal.Verify's chain, CheckIdentity, CheckSpan — all structural, none
+// of them ever applies an input to anything) but actually REPLAYS — a fresh
+// reducer, built from the journal's own header and its own recorded
+// configuration input, fed the journal's own inputs through
+// replay.Engine.Run, must reproduce the journal's own recorded decisions
+// exactly. This mirrors cmd/backtest's own replay verification
+// (cmd/backtest/replay.go's replayJournalInputs and configurationPayloadFrom)
+// closely enough to exercise the identical rule — replay.Engine.Run's
+// contiguity check and replay.Stamp — but is written directly against this
+// package's own journal rather than importing cmd/backtest's unexported
+// pieces, since the two are separate main packages.
+//
+// Two rounds of this ticket passed review with an unreplayable journal
+// (the engine's own configuration input and the adapter's first bar both
+// claiming Sequence 1) precisely because nothing exercised this path:
+// journal.Verify, CheckIdentity, and Split all pass on a journal that
+// cannot be replayed at all, because none of them ever applies an input to
+// a reducer. This is the test that would have caught it.
+func assertJournalReplays(t *testing.T, header journal.Header, inputs, decisions []event.Envelope) {
+	t.Helper()
+
+	var cfg event.ConfigurationPayload
+	var found bool
+	for _, input := range inputs {
+		if input.Type != event.ConfigurationEventType {
+			continue
+		}
+		if err := json.Unmarshal(input.Payload, &cfg); err != nil {
+			t.Fatalf("decode the journal's own configuration payload: %v", err)
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Fatal("the journal records no configuration event; a reducer cannot be built to replay it")
+	}
+
+	reducer, err := strategy.NewReducer(header.StrategyVersion, cfg)
+	if err != nil {
+		t.Fatalf("construct a reducer from the journal's own header and configuration: %v", err)
+	}
+	engine, err := replay.New(reducer)
+	if err != nil {
+		t.Fatalf("replay.New: %v", err)
+	}
+	emitted, err := engine.Run(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("replay the journal's own inputs: %v", err)
+	}
+	if divergence := replay.Equivalent(decisions, emitted); divergence != nil {
+		t.Fatalf("the journal does not replay: recorded decision %d diverges from what a fresh reducer produces from the journal's own inputs: %+v", divergence.Index, divergence)
+	}
 }
 
 // writeBarsFixture marshals bars as the JSON array cmd/backtest's own -bars

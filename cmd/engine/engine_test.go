@@ -89,7 +89,12 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 	const barCount = 25
 	for day := range barCount {
 		bar := flatBar(instrument, day)
-		envelope := barEnvelope(t, bar, uint64(day+1), strategyVersion, configurationHash)
+		// This run's own configuration input occupies Sequence
+		// configurationSequence (see engine.go's package doc comment): the
+		// adapter's own numbering continues that stream rather than
+		// starting one of its own, so its first bar is
+		// configurationSequence+1.
+		envelope := barEnvelope(t, bar, configurationSequence+1+uint64(day), strategyVersion, configurationHash)
 
 		decision, err := client.Decide(context.Background(), envelope)
 		if err != nil {
@@ -180,6 +185,12 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 			t.Errorf("decision %d type = %q, want %q", i, decision.Type, event.SetupEvaluatedEventType)
 		}
 	}
+
+	// The check this whole ticket is about: the journal must replay, not
+	// merely verify structurally. See assertJournalReplays's own doc
+	// comment for why journal.Verify/CheckIdentity/CheckSpan/Split, above,
+	// are not sufficient on their own.
+	assertJournalReplays(t, header, inputs, decisions)
 }
 
 // TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst is
@@ -220,11 +231,14 @@ func TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst(t *
 		t.Fatal("timed out waiting for the engine to report it is listening")
 	}
 
+	// The engine's own configuration input occupies Sequence
+	// configurationSequence, so the first bar any connection may legitimately
+	// send is configurationSequence+1 — see engine.go's package doc comment.
 	first, err := transport.Dial(socketPath)
 	if err != nil {
 		t.Fatalf("dial the first connection: %v", err)
 	}
-	firstBar := barEnvelope(t, flatBar("TEST", 0), 1, strategyVersion, configurationHash)
+	firstBar := barEnvelope(t, flatBar("TEST", 0), configurationSequence+1, strategyVersion, configurationHash)
 	if _, err := first.Decide(context.Background(), firstBar); err != nil {
 		t.Fatalf("first connection: decide: %v", err)
 	}
@@ -237,13 +251,24 @@ func TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst(t *
 		t.Fatalf("dial the second connection: %v", err)
 	}
 	defer func() { _ = second.Close() }()
-	secondBar := barEnvelope(t, flatBar("OTHER", 0), 1, strategyVersion, configurationHash)
+	// secondBar carries the Sequence wireEngine's cursor would actually
+	// accept next (configurationSequence+2, immediately after firstBar's own
+	// configurationSequence+1) — not a value contiguity would refuse on its
+	// own — so that its refusal below can only be MaxConnections: if this
+	// carried a Sequence the engine would reject anyway (a duplicate of
+	// firstBar's, say), the assertion would still pass with MaxConnections
+	// removed entirely, proving nothing about the guard it names.
+	secondBar := barEnvelope(t, flatBar("OTHER", 0), configurationSequence+2, strategyVersion, configurationHash)
 	if _, err := second.Decide(context.Background(), secondBar); err == nil {
 		t.Fatal("second connection: decide succeeded; want it refused while the first connection is still open, even though the two never overlapped a call in time")
 	}
 
-	// The first connection is unaffected by the second's refusal.
-	nextBarForFirst := barEnvelope(t, flatBar("TEST", 1), 2, strategyVersion, configurationHash)
+	// The first connection is unaffected by the second's refusal: wireEngine's
+	// cursor is still exactly where firstBar left it, since the refused
+	// second connection never reached wireEngine at all, so the first
+	// connection's own next bar carries the identical Sequence secondBar
+	// used above.
+	nextBarForFirst := barEnvelope(t, flatBar("TEST", 1), configurationSequence+2, strategyVersion, configurationHash)
 	if _, err := first.Decide(context.Background(), nextBarForFirst); err != nil {
 		t.Fatalf("first connection after the second was refused: decide: %v", err)
 	}

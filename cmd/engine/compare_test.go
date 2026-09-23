@@ -138,7 +138,10 @@ func TestServerDecisionsMatchBacktestForTheSameBars(t *testing.T) {
 		t.Fatalf("dial the engine: %v", err)
 	}
 	for day, bar := range bars {
-		envelope := barEnvelope(t, bar, uint64(day+1), strategyVersion, configurationHash)
+		// The engine's own configuration input occupies Sequence
+		// configurationSequence; the adapter's numbering continues from
+		// there (engine.go's package doc comment).
+		envelope := barEnvelope(t, bar, configurationSequence+1+uint64(day), strategyVersion, configurationHash)
 		if _, err := client.Decide(context.Background(), envelope); err != nil {
 			t.Fatalf("bar %d: decide: %v", day, err)
 		}

@@ -8,6 +8,17 @@
 //
 //	engine -socket <path> -config <configuration.json> -out <journal.jsonl>
 //
+// # Wire contract: the adapter's first bar must carry Sequence 2
+//
+// This run's own configuration input is always delivered first, at Sequence
+// configurationSequence (1), before the socket opens. The adapter's own bar
+// stream continues that SAME sequence — it does not start a numbering of its
+// own — so the adapter's very first bar must carry Sequence
+// configurationSequence+1 (2), and each one after it the next integer. This
+// is not a convenience: the journal this run writes is read back as ONE
+// input stream (configuration included), and a stream in which two records
+// both claim Sequence 1 fails its own replay.
+//
 // The reducer's decisions are received over that socket and written to a
 // journal; that is the whole of this command's job. Four design decisions
 // this composition had to make, and why, are recorded beside the code that
@@ -108,17 +119,23 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	recorder := journal.NewRecorder(reducer)
 
 	// wireEngine is the ONE replay.Engine this run ever constructs, wrapping
-	// recorder, and it is what every bar arriving over the socket is
-	// applied through (see newDecider) rather than recorder directly: a
-	// *replay.Engine keeps its own contiguity cursor and output-sequence
-	// counter on the instance itself, persisted across every call it is
-	// asked to make — so constructing it once, here, and reusing it for the
-	// whole run is what gives the wire-driven input stream (an untrusted
-	// adapter's own numbering, unlike the single self-composed configuration
-	// input below) the identical missing/duplicated/reordered-input
-	// protection replay.Engine.Run already gave a whole batch, across as
-	// many separate connections as this run's socket ever serves — see
-	// decider.go's newDecider for the full reasoning.
+	// recorder, and it is what EVERY input this run ever applies — its own
+	// configuration input below, and every bar arriving over the socket
+	// after it (see newDecider) — is applied through, rather than recorder
+	// directly: a *replay.Engine keeps its own contiguity cursor and
+	// output-sequence counter on the instance itself, persisted across
+	// every call it is asked to make, so constructing it once, here, and
+	// reusing it for the whole run is what gives this run's WHOLE input
+	// stream — not just the wire-driven part of it — the identical
+	// missing/duplicated/reordered-input protection replay.Engine.Run
+	// already gave a whole batch, across as many separate connections as
+	// this run's socket ever serves. The journal this run writes is read
+	// back as exactly that one stream (cmd/backtest's own replay feeds
+	// every recorded input, configuration included, to a fresh
+	// replay.Engine.Run), so nothing in it may be exempted from this
+	// Engine's own numbering — see the configuration input's own delivery,
+	// below, for the defect that exempting it caused. See decider.go's
+	// newDecider for the wire-driven half of the reasoning.
 	wireEngine, err := replay.New(recorder)
 	if err != nil {
 		// Unreachable: New only refuses a nil handler, and recorder is
@@ -156,26 +173,38 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	// socket can ever reach it unconfigured — and a -config that cannot be
 	// read or does not validate stops this command here, before any socket
 	// binds, rather than accepting connections it cannot safely answer.
-	// Delivered through recorder directly, never through wireEngine: this
-	// envelope is composed by this process itself, once, and never carries
-	// a Sequence an external producer chose — there is nothing about it for
-	// a contiguity check to protect against, and routing it through
-	// wireEngine would only spend its very first accepted Sequence on a
-	// value this run picked for itself (1, below) rather than leaving
-	// wireEngine's first call free to accept whatever Sequence the
-	// adapter's own first bar actually carries.
+	//
+	// Delivered through wireEngine, not recorder directly. An earlier
+	// version of this command delivered it through recorder alone,
+	// reasoning that a self-composed envelope has nothing for a contiguity
+	// check to protect against — but the JOURNAL this run writes is read
+	// back, by cmd/backtest's own replay, as ONE input stream, configuration
+	// included: replayJournalInputs feeds every input record straight to a
+	// fresh replay.Engine.Run, which enforces contiguity across all of them.
+	// Bypassing wireEngine here left the configuration and the adapter's own
+	// first bar both claiming Sequence 1, and a journal recorded that way
+	// fails its own replay with "non-contiguous sequence: got 1 after 1" —
+	// the exact defect wireEngine exists to prevent, reintroduced by
+	// exempting this one input from it. Routing it through wireEngine instead
+	// seeds the persistent cursor at configurationSequence, so the adapter's
+	// own first bar must carry configurationSequence+1 to be accepted — see
+	// configurationSequence's own doc comment, and cmd/engine's package doc
+	// comment, for where that is stated to an adapter author.
 	configEnvelope, err := configurationEnvelope(cfg, strategyVersion, time.Now().UTC())
 	if err != nil {
 		return err
 	}
-	if _, err := recorder.Apply(ctx, configEnvelope); err != nil {
+	if _, err := wireEngine.Apply(ctx, configEnvelope); err != nil {
 		// Unreachable in practice: cfg has already passed Validate() above,
 		// and strategy.NewReducer computed configurationHash from the same
 		// cfg configEnvelope carries, so applyConfiguration's own checks
 		// (schema version, matching configuration hash, "reducer is already
-		// configured") cannot fail here. Guarded anyway, matching this
-		// project's fail-closed style (see internal/strategy/reducer.go's
-		// own such guards).
+		// configured") cannot fail here, wireEngine's own contiguity check
+		// cannot fail on the very first call it ever receives (any starting
+		// Sequence is accepted), and configurationEnvelope always builds a
+		// valid envelope. Guarded anyway, matching this project's
+		// fail-closed style (see internal/strategy/reducer.go's own such
+		// guards).
 		return fmt.Errorf("engine: apply the configuration input: %w", err)
 	}
 
@@ -316,9 +345,20 @@ func readConfiguration(path string) (event.ConfigurationPayload, error) {
 	return cfg, nil
 }
 
+// configurationSequence is the Sequence this command always stamps its own
+// configuration input with, and so the first Sequence value wireEngine's
+// persistent cursor (see run) ever accepts for this run. It is a named
+// constant, not a literal 1 inlined where it is used, because it is also
+// half of this engine's wire contract: the adapter's OWN first bar must
+// carry Sequence configurationSequence+1, continuing this run's one input
+// stream rather than starting a second one alongside it at the same value
+// — see run's own doc comment on why, and cmd/engine's package doc comment,
+// which is where an adapter author is expected to read this.
+const configurationSequence uint64 = 1
+
 // configurationEnvelope wraps cfg as the event.ConfigurationEventType input
 // this command delivers to the reducer before it opens its socket (decision
-// 2, above).
+// 2, above), at Sequence configurationSequence.
 //
 // EventTime and RecordedAt are the moment this process is composing the run,
 // read from the wall clock — unlike cmd/backtest's fixture convention (the
@@ -342,7 +382,7 @@ func configurationEnvelope(cfg event.ConfigurationPayload, strategyVersion strin
 		EnvelopeVersion:   event.CurrentEnvelopeVersion,
 		EventTime:         now,
 		RecordedAt:        now,
-		Sequence:          1,
+		Sequence:          configurationSequence,
 		Source:            sourceEngine,
 		StrategyVersion:   strategyVersion,
 		ConfigurationHash: hash,
