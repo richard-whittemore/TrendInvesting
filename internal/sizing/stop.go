@@ -3,6 +3,7 @@ package sizing
 import (
 	"errors"
 	"fmt"
+	"math"
 )
 
 // DirectionLong is the only Direction this package accepts today, mirroring
@@ -220,4 +221,44 @@ func RaisedStop(previousStop, campaignN float64) (float64, error) {
 		return 0, fmt.Errorf("sizing: cannot derive raised stop: %w", err)
 	}
 	return finiteResult("raised stop", previousStop+Product(0.5, campaignN))
+}
+
+// LowestProtectiveStop is a Campaign's Protective Stop: the lowest of the
+// Units' own stops, which is the level at which its protection is FIRST
+// breached (CONTEXT.md: "Protective Stop").
+//
+// It exists so that level is derived once. Three seams computed it from the
+// same figures — the Campaign's own reported stop, the level in force for
+// the Units a stop fill named, and the validator that re-checks the first
+// against the payload's Units — and they did not agree about the degenerate
+// cases. Two took a plain running minimum, and the third skipped stops that
+// were not finite and positive.
+//
+// A plain running minimum is not order-independent. NaN compares false
+// against everything, so it is ignored when it sits anywhere but first and
+// returned when it sits first: the same Units stored in a different order
+// gave different answers. A negative stop, meanwhile, was silently taken as
+// the lowest. Neither is a level anything should act on, and which one came
+// out depended on how the slice happened to be built.
+//
+// So this fails closed on any stop that is not finite and positive rather
+// than choosing between ignoring it and returning it. The reducer's own
+// per-bar invariant already refuses such a Unit (checkCampaignHasAProtectiveStop),
+// which is an argument for this never firing, not an argument for it being
+// absent: that invariant runs at the start of a bar, and a Unit added by a
+// fill within one is not covered until the next.
+func LowestProtectiveStop(stops []float64) (float64, error) {
+	if len(stops) == 0 {
+		return 0, errors.New("sizing: a campaign's protective stop needs at least one unit's own stop")
+	}
+	lowest := math.Inf(1)
+	for i, stop := range stops {
+		if !isFinite(stop) || stop <= 0 {
+			return 0, fmt.Errorf("sizing: unit %d has %v, which is not a usable protective stop: every unit's own stop must be finite and positive before the campaign's lowest can be stated", i, stop)
+		}
+		if stop < lowest {
+			lowest = stop
+		}
+	}
+	return lowest, nil
 }

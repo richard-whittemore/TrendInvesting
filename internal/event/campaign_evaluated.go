@@ -173,8 +173,7 @@ func (p CampaignEvaluatedPayload) Validate() error {
 		errs = append(errs, errors.New("units is required: an open campaign always holds at least unit 1"))
 	}
 	unitsUsable := len(p.Units) > 0
-	minStop := 0.0
-	haveMinStop := false
+	unitStops := make([]float64, 0, len(p.Units))
 	for i, u := range p.Units {
 		if i > 0 && p.Units[i-1].UnitIndex >= u.UnitIndex {
 			errs = append(errs, fmt.Errorf("units must have strictly ascending unit indexes with no duplicates, got %d at position %d after %d", u.UnitIndex, i, p.Units[i-1].UnitIndex))
@@ -203,7 +202,6 @@ func (p CampaignEvaluatedPayload) Validate() error {
 		// Only a Unit's INITIAL stop (event.ProtectiveStopReasonInitial) is
 		// held to the stricter shape, at the seam that knows which one a
 		// given level is.
-		stopFinite := isFinite(u.ProtectiveStop)
 		if err := sizing.ValidStopLevel(u.EntryPrice, u.ProtectiveStop, sizing.StopKindRaised); err != nil {
 			errs = append(errs, fmt.Errorf("units[%d]: %w", i, err))
 			unitsUsable = false
@@ -212,13 +210,24 @@ func (p CampaignEvaluatedPayload) Validate() error {
 			errs = append(errs, fmt.Errorf("units[%d]: quantity must be a positive whole number, got %d", i, u.Quantity))
 			unitsUsable = false
 		}
-		if stopFinite && u.ProtectiveStop > 0 && (!haveMinStop || u.ProtectiveStop < minStop) {
-			minStop = u.ProtectiveStop
-			haveMinStop = true
-		}
+		unitStops = append(unitStops, u.ProtectiveStop)
 	}
-	if haveMinStop && isFinite(p.ProtectiveStop) && p.ProtectiveStop != minStop {
-		errs = append(errs, fmt.Errorf("protective stop %v does not equal the minimum across units' own protective stops %v", p.ProtectiveStop, minStop))
+	// A Campaign's Protective Stop is the level at which its protection is
+	// first breached, and "Every open Campaign has one at all times"
+	// (CONTEXT.md: "Protective Stop"). It is derived by
+	// sizing.LowestProtectiveStop, the same function the reducer states it
+	// with, so the two cannot drift: this check is an equality against one
+	// derivation rather than a second derivation that happens to agree.
+	//
+	// An error here means some Unit's own stop is not finite and positive,
+	// which the per-Unit sizing.ValidStopLevel above has already reported
+	// against the Unit it belongs to. Reporting it again as a Campaign-level
+	// mismatch would name the wrong thing, so the equality is skipped and the
+	// Unit's own error stands.
+	if lowest, err := sizing.LowestProtectiveStop(unitStops); err == nil {
+		if isFinite(p.ProtectiveStop) && p.ProtectiveStop != lowest {
+			errs = append(errs, fmt.Errorf("protective stop %v does not equal the minimum across units' own protective stops %v", p.ProtectiveStop, lowest))
+		}
 	}
 
 	switch {

@@ -245,14 +245,18 @@ func (c *campaignState) lifeAggregate(thisQuantity int64, thisEntryWeightedSum, 
 // Unit's is the lower one. A comment claiming this returns Unit 1's own
 // would be wrong in the last bits; see
 // TestACampaignsProtectiveStopIsNotAlwaysTheFirstUnitsOwn.
-func (c *campaignState) protectiveStop() float64 {
-	stop := c.units[0].protectiveStop
-	for _, u := range c.units[1:] {
-		if u.protectiveStop < stop {
-			stop = u.protectiveStop
-		}
+func (c *campaignState) protectiveStop() (float64, error) {
+	return sizing.LowestProtectiveStop(c.unitStops(c.units))
+}
+
+// unitStops is the Units' own stops in the order they are held, the shape
+// sizing.LowestProtectiveStop takes.
+func (c *campaignState) unitStops(units []unitState) []float64 {
+	stops := make([]float64, len(units))
+	for i, u := range units {
+		stops[i] = u.protectiveStop
 	}
-	return stop
+	return stops
 }
 
 // openRiskUnits maps every currently-held Unit onto sizing.UnitOpenRisk, in
@@ -853,11 +857,15 @@ func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBa
 	}
 	notionalAccount := r.notionalAccount.Current()
 
+	campaignStop, err := campaign.protectiveStop()
+	if err != nil {
+		return nil, fmt.Errorf("strategy: instrument %q: campaign %q: %w", bar.InstrumentID, campaign.campaignID, err)
+	}
 	evaluatedPayload := event.CampaignEvaluatedPayload{
 		CampaignID:                campaign.campaignID,
 		InstrumentID:              bar.InstrumentID,
 		PeriodEnd:                 bar.PeriodEnd,
-		ProtectiveStop:            campaign.protectiveStop(),
+		ProtectiveStop:            campaignStop,
 		Units:                     units,
 		ExitChannelLow:            reportedExitChannelLow,
 		ExitChannelReady:          exitChannelReady,
@@ -1748,11 +1756,9 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 	// closed them: the minimum across the Units it actually names (never
 	// across the whole Campaign, which may hold other Units at other
 	// levels once the Stop Ladder has diverged — the gap case).
-	stopLevel := closingUnits[0].protectiveStop
-	for _, u := range closingUnits[1:] {
-		if u.protectiveStop < stopLevel {
-			stopLevel = u.protectiveStop
-		}
+	stopLevel, err := sizing.LowestProtectiveStop(campaign.unitStops(closingUnits))
+	if err != nil {
+		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q: %w", fill.InstrumentID, fill.FillID, err)
 	}
 
 	// This fill's OWN share: the quantity-weighted average entry of ONLY
@@ -2063,6 +2069,10 @@ func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, 
 		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q cannot compute the realised result in unit n: %w", fill.InstrumentID, fill.FillID, err)
 	}
 
+	exitStopLevel, err := campaign.protectiveStop()
+	if err != nil {
+		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q: %w", fill.InstrumentID, fill.FillID, err)
+	}
 	exitedPayload := event.CampaignExitedPayload{
 		CampaignID:            campaign.campaignID,
 		InstrumentID:          fill.InstrumentID,
@@ -2075,7 +2085,7 @@ func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, 
 		CampaignN:             campaign.campaignN,
 		DollarsPerPoint:       r.dollarsPerPoint,
 		UnitQuantity:          campaign.unitQuantity,
-		ProtectiveStopLevel:   campaign.protectiveStop(),
+		ProtectiveStopLevel:   exitStopLevel,
 		RealisedResult:        realisedResult,
 		AverageMoveInN:        averageMoveInN,
 		RealisedResultInUnitN: realisedResultInUnitN,
