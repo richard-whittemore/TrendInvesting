@@ -91,6 +91,205 @@ func TestEngineRunRejectsSequenceGap(t *testing.T) {
 	}
 }
 
+// TestEngineApplyEnforcesContiguityAcrossSeparateCalls is Apply's whole
+// reason for existing separately from Run: a caller that never has a batch
+// in hand — one event arriving at a time from a socket, not read from a
+// fixture — gets the identical contiguity guarantee across as many separate
+// calls as it makes, not only within one slice handed to Run in one call.
+func TestEngineApplyEnforcesContiguityAcrossSeparateCalls(t *testing.T) {
+	t.Parallel()
+
+	engine, err := replay.New(replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) { return nil, nil }))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := engine.Apply(context.Background(), envelope(1)); err != nil {
+		t.Fatalf("Apply(1) error = %v", err)
+	}
+	// A gap between two SEPARATE calls, not two elements of one slice.
+	_, err = engine.Apply(context.Background(), envelope(3))
+	if err == nil || !strings.Contains(err.Error(), "non-contiguous sequence") {
+		t.Fatalf("Apply(3) after Apply(1) error = %v, want non-contiguous sequence", err)
+	}
+}
+
+// TestEngineApplyAcceptsAnyStartingSequence mirrors Run's own index==0
+// exemption: the first call this Engine ever receives fixes where its
+// contiguity check starts counting from, whatever sequence it names.
+func TestEngineApplyAcceptsAnyStartingSequence(t *testing.T) {
+	t.Parallel()
+
+	engine, err := replay.New(replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) { return nil, nil }))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := engine.Apply(context.Background(), envelope(41)); err != nil {
+		t.Fatalf("Apply(41) error = %v", err)
+	}
+	if _, err := engine.Apply(context.Background(), envelope(42)); err != nil {
+		t.Fatalf("Apply(42) error = %v", err)
+	}
+}
+
+// TestEngineApplySharesTheOutputSequenceCounterAcrossCalls is the emitted
+// stream's own contiguity, checked the same way as the input stream's: two
+// separate calls to Apply on one Engine still number their combined
+// emissions 1, 2, 3..., never restarting at 1 on the second call the way two
+// separate Run calls (or, before this method existed, two separate Engines)
+// would.
+func TestEngineApplySharesTheOutputSequenceCounterAcrossCalls(t *testing.T) {
+	t.Parallel()
+
+	engine, err := replay.New(replay.HandlerFunc(func(_ context.Context, item event.Envelope) ([]event.Envelope, error) {
+		return []event.Envelope{decision(fmt.Sprintf("d%d", item.Sequence))}, nil
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	first, err := engine.Apply(context.Background(), envelope(1))
+	if err != nil {
+		t.Fatalf("Apply(1) error = %v", err)
+	}
+	second, err := engine.Apply(context.Background(), envelope(2))
+	if err != nil {
+		t.Fatalf("Apply(2) error = %v", err)
+	}
+	if len(first) != 1 || first[0].Sequence != 1 {
+		t.Fatalf("first call emitted %+v, want one envelope at output sequence 1", first)
+	}
+	if len(second) != 1 || second[0].Sequence != 2 {
+		t.Fatalf("second call emitted %+v, want one envelope at output sequence 2", second)
+	}
+}
+
+// TestEngineApplyAdvancesContiguityEvenWhenTheHandlerErrors proves the
+// distinction Apply's own doc comment draws: contiguity is a property of the
+// INPUT STREAM's numbering, not of whether the handler went on to accept
+// what it was given. A handler error for sequence 2 must not make sequence
+// 3 look like a gap on the very next call — that would reject an input the
+// producer numbered perfectly correctly, for a reason that has nothing to do
+// with its own numbering.
+func TestEngineApplyAdvancesContiguityEvenWhenTheHandlerErrors(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("rejected on business grounds, not a stream defect")
+	engine, err := replay.New(replay.HandlerFunc(func(_ context.Context, item event.Envelope) ([]event.Envelope, error) {
+		if item.Sequence == 2 {
+			return nil, wantErr
+		}
+		return nil, nil
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := engine.Apply(context.Background(), envelope(1)); err != nil {
+		t.Fatalf("Apply(1) error = %v", err)
+	}
+	if _, err := engine.Apply(context.Background(), envelope(2)); !errors.Is(err, wantErr) {
+		t.Fatalf("Apply(2) error = %v, want it to wrap %v", err, wantErr)
+	}
+	if _, err := engine.Apply(context.Background(), envelope(3)); err != nil {
+		t.Fatalf("Apply(3) error = %v, want sequence 3 accepted as contiguous after a REJECTED (not skipped) sequence 2", err)
+	}
+}
+
+func TestEngineApplyHonoursContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	engine, err := replay.New(replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) {
+		t.Fatal("handler must not be called once the context is cancelled")
+		return nil, nil
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := engine.Apply(ctx, envelope(1)); err == nil {
+		t.Fatal("Apply() error = nil, want context error")
+	}
+}
+
+func TestEngineApplyRejectsInvalidInputEnvelope(t *testing.T) {
+	t.Parallel()
+
+	engine, err := replay.New(replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) { return nil, nil }))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	invalid := envelope(1)
+	invalid.Source = "" // missing a required provenance field
+
+	if _, err := engine.Apply(context.Background(), invalid); err == nil {
+		t.Fatal("Apply() error = nil, want error")
+	}
+}
+
+func TestEngineApplyFailsClosedOnInvalidEmission(t *testing.T) {
+	t.Parallel()
+
+	engine, err := replay.New(replay.HandlerFunc(func(_ context.Context, item event.Envelope) ([]event.Envelope, error) {
+		valid := decision("b")
+		invalid := decision("c")
+		invalid.Source = "" // missing a required provenance field
+		return []event.Envelope{valid, invalid}, nil
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = engine.Apply(context.Background(), envelope(5))
+	if err == nil {
+		t.Fatal("Apply() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "sequence 5") {
+		t.Fatalf("Apply() error = %v, want it to name the input sequence (5)", err)
+	}
+	if !strings.Contains(err.Error(), "emission 1") {
+		t.Fatalf("Apply() error = %v, want it to name the emission index (1)", err)
+	}
+}
+
+// TestEngineApplyNamesBothAnInvalidFinalEmissionAndTheHandlerError is Apply's
+// own version of
+// TestEngineRunNamesBothAnInvalidFinalEmissionAndTheHandlerError: a handler
+// that fails closed AND returns an invalid explanatory emission must have
+// both failures named, the original handler error first in the chain.
+func TestEngineApplyNamesBothAnInvalidFinalEmissionAndTheHandlerError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("handler failed closed")
+	engine, err := replay.New(replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) {
+		invalid := decision("x")
+		invalid.Source = "" // missing a required provenance field
+		return []event.Envelope{invalid}, wantErr
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = engine.Apply(context.Background(), envelope(1))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Apply() error = %v, want it to wrap the original handler error %v", err, wantErr)
+	}
+	if !strings.Contains(err.Error(), "sequence 1") {
+		t.Errorf("Apply() error = %v, want it to name the input sequence (1)", err)
+	}
+	if !strings.Contains(err.Error(), "emission 0") {
+		t.Errorf("Apply() error = %v, want it to name the emission index (0)", err)
+	}
+	if !strings.Contains(err.Error(), "invalid") {
+		t.Errorf("Apply() error = %v, want it to name the emission as invalid", err)
+	}
+}
+
 func TestNewRequiresHandler(t *testing.T) {
 	t.Parallel()
 

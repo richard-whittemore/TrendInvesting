@@ -182,6 +182,86 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 	}
 }
 
+// TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst is
+// decision 4's own end-to-end proof, against the real composition run wires
+// (transport.ServerConfig.MaxConnections: 1), not just against wireGuard in
+// isolation: the first connection sends one bar and goes idle — no call of
+// its own is in flight — before the second connection ever dials. A guard
+// living only inside the Decider could never see this case at all, since
+// nothing inside a Decider call overlaps with anything; the refusal has to
+// come from the server refusing to admit the second connection in the first
+// place.
+func TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
+	outPath := filepath.Join(dir, "journal.jsonl")
+	cfg := testConfiguration(t)
+	strategyVersion := event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "test-build")
+	configurationHash := event.ConfigurationHash(cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	out := newReadySignal()
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- run(ctx, options{
+			socketPath: socketPath,
+			configPath: testConfigPath,
+			outPath:    outPath,
+			build:      "test-build",
+		}, out)
+	}()
+	select {
+	case <-out.ready:
+	case err := <-runErr:
+		t.Fatalf("run returned before it ever reported readiness: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the engine to report it is listening")
+	}
+
+	first, err := transport.Dial(socketPath)
+	if err != nil {
+		t.Fatalf("dial the first connection: %v", err)
+	}
+	firstBar := barEnvelope(t, flatBar("TEST", 0), 1, strategyVersion, configurationHash)
+	if _, err := first.Decide(context.Background(), firstBar); err != nil {
+		t.Fatalf("first connection: decide: %v", err)
+	}
+	// first is now idle: its exchange finished and it has sent nothing
+	// since. The second connection below arrives into that idle window, not
+	// into any overlapping call.
+
+	second, err := transport.Dial(socketPath)
+	if err != nil {
+		t.Fatalf("dial the second connection: %v", err)
+	}
+	defer func() { _ = second.Close() }()
+	secondBar := barEnvelope(t, flatBar("OTHER", 0), 1, strategyVersion, configurationHash)
+	if _, err := second.Decide(context.Background(), secondBar); err == nil {
+		t.Fatal("second connection: decide succeeded; want it refused while the first connection is still open, even though the two never overlapped a call in time")
+	}
+
+	// The first connection is unaffected by the second's refusal.
+	nextBarForFirst := barEnvelope(t, flatBar("TEST", 1), 2, strategyVersion, configurationHash)
+	if _, err := first.Decide(context.Background(), nextBarForFirst); err != nil {
+		t.Fatalf("first connection after the second was refused: decide: %v", err)
+	}
+
+	if err := first.Close(); err != nil {
+		t.Fatalf("close the first connection: %v", err)
+	}
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("run returned an error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for run to stop after the context was cancelled")
+	}
+}
+
 // TestRunRefusesToStartWithoutAValidConfiguration proves the "unconfigured
 // engine refuses inputs rather than sizing against nothing" fail-closed rule
 // (this ticket's brief) at its strongest point: a -config the reducer cannot
@@ -231,6 +311,13 @@ func TestRunRefusesToStartWithoutAValidConfiguration(t *testing.T) {
 // pre-flight "does a journal already exist here" check (which only reads,
 // never writes) passes but the actual install at shutdown cannot.
 func TestRunReportsAJournalWriteFailureRatherThanExitingClean(t *testing.T) {
+	if os.Geteuid() == 0 {
+		// A process running as root — routinely true inside a CI container
+		// — ignores the permission bits os.Chmod below sets: the write this
+		// test relies on being refused would instead succeed, and the test
+		// would be asserting nothing.
+		t.Skip("skipped when running as root: permission bits do not restrict root's own writes")
+	}
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	journalDir := filepath.Join(dir, "journals")

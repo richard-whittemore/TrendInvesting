@@ -8,14 +8,14 @@
 //
 //	engine -socket <path> -config <configuration.json> -out <journal.jsonl>
 //
-// #27 requires that "the reducer's decisions are received and written to a
-// journal"; this command is that wiring. The four decisions this ticket had
-// to make, and why, are recorded beside the code that makes them: decision 1
-// (a Decider returns one envelope, a reducer returns many) in decider.go's
-// newDecider; decision 2 (where the configuration comes from) and decision 3
-// (when the journal is written, and what a mid-stream disconnect means) in
-// run, below; decision 4 (only one active executor) also in decider.go's
-// newDecider.
+// The reducer's decisions are received over that socket and written to a
+// journal; that is the whole of this command's job. Four design decisions
+// this composition had to make, and why, are recorded beside the code that
+// makes them: decision 1 (a Decider returns one envelope, a reducer returns
+// many) in decider.go's newDecider; decision 2 (where the configuration
+// comes from) and decision 3 (when the journal is written, and what a
+// mid-stream disconnect means) in run, below; decision 4 (only one active
+// executor) also in decider.go's newDecider.
 package main
 
 import (
@@ -31,6 +31,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 	"github.com/richard-whittemore/TrendInvesting/transport"
 )
@@ -106,6 +107,26 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	}
 	recorder := journal.NewRecorder(reducer)
 
+	// wireEngine is the ONE replay.Engine this run ever constructs, wrapping
+	// recorder, and it is what every bar arriving over the socket is
+	// applied through (see newDecider) rather than recorder directly: a
+	// *replay.Engine keeps its own contiguity cursor and output-sequence
+	// counter on the instance itself, persisted across every call it is
+	// asked to make — so constructing it once, here, and reusing it for the
+	// whole run is what gives the wire-driven input stream (an untrusted
+	// adapter's own numbering, unlike the single self-composed configuration
+	// input below) the identical missing/duplicated/reordered-input
+	// protection replay.Engine.Run already gave a whole batch, across as
+	// many separate connections as this run's socket ever serves — see
+	// decider.go's newDecider for the full reasoning.
+	wireEngine, err := replay.New(recorder)
+	if err != nil {
+		// Unreachable: New only refuses a nil handler, and recorder is
+		// always non-nil here. Guarded anyway, matching this project's
+		// fail-closed style.
+		return fmt.Errorf("engine: %w", err)
+	}
+
 	// # Decision 2: where the configuration comes from
 	//
 	// The reducer needs a configuration before it can accept anything
@@ -128,13 +149,21 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	// hash and strategy version are always derived from a configuration
 	// event that was actually applied, not asserted from outside it).
 	//
-	// This is also decision 4's fail-closed half from the brief: "an
-	// unconfigured engine refuses inputs rather than sizing against
-	// nothing". By the time transport.Listen is called below, the reducer is
-	// already configured, so no bar arriving over the socket can ever reach
-	// it unconfigured — and a -config that cannot be read or does not
-	// validate stops this command here, before any socket binds, rather
-	// than accepting connections it cannot safely answer.
+	// This is also the other side of failing closed on an unconfigured
+	// engine: rather than sizing against nothing, it refuses to accept
+	// inputs at all until it has one. By the time transport.Listen is called
+	// below, the reducer is already configured, so no bar arriving over the
+	// socket can ever reach it unconfigured — and a -config that cannot be
+	// read or does not validate stops this command here, before any socket
+	// binds, rather than accepting connections it cannot safely answer.
+	// Delivered through recorder directly, never through wireEngine: this
+	// envelope is composed by this process itself, once, and never carries
+	// a Sequence an external producer chose — there is nothing about it for
+	// a contiguity check to protect against, and routing it through
+	// wireEngine would only spend its very first accepted Sequence on a
+	// value this run picked for itself (1, below) rather than leaving
+	// wireEngine's first call free to accept whatever Sequence the
+	// adapter's own first bar actually carries.
 	configEnvelope, err := configurationEnvelope(cfg, strategyVersion, time.Now().UTC())
 	if err != nil {
 		return err
@@ -150,9 +179,14 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 		return fmt.Errorf("engine: apply the configuration input: %w", err)
 	}
 
-	server, err := transport.Listen(opts.socketPath, newDecider(recorder, strategyVersion, configurationHash), transport.ServerConfig{
+	guard := &wireGuard{}
+	server, err := transport.Listen(opts.socketPath, newDecider(guard, wireEngine, strategyVersion, configurationHash), transport.ServerConfig{
 		MaxFrameBytes:   opts.maxFrameBytes,
 		DecisionTimeout: opts.decisionTimeout,
+		// Decision 4: at most one connection may be open at a time (see
+		// decider.go's newDecider for why this belongs here and not inside
+		// the Decider).
+		MaxConnections: 1,
 	})
 	if err != nil {
 		return fmt.Errorf("engine: %w", err)
@@ -182,22 +216,27 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	// So treating every dropped CONNECTION as the run's end — starting a
 	// fresh journal, and with it a fresh reducer with no open Campaign for
 	// any instrument and no Notional Account history (ADR 0006, ADR 0007)
-	// — is not something ADR 0014 asks for, and this ticket has no
-	// separate mandate to decide that a new socket connection means a new
-	// trading day. This is this ticket's own judgment call, made because
-	// the alternative is worse on the evidence this journal exists to be:
-	// fragmenting one trading day's decisions across several partial
-	// journals, none of which states the whole span a reviewer needs.
+	// — is not something ADR 0014 asks for, and nothing else decides that a
+	// new socket connection means a new trading day either. This choice is
+	// made here, deliberately, because the alternative is worse on the
+	// evidence this journal exists to be: fragmenting one trading day's
+	// decisions across several partial journals, none of which states the
+	// whole span a reviewer needs.
 	//
 	// So the run this journal records is this PROCESS's own lifetime: the
 	// journal accumulates across however many connections arrive — at most
 	// one at a time, decision 4 — and is written once, when this process is
 	// asked to stop (SIGINT/SIGTERM, wired in main.go; a cancelled ctx in a
-	// test). ServeContext returns only once every in-flight decision has
-	// finished or been abandoned (transport.Server.Close waits on its
-	// internal WaitGroup before returning), so by the time control reaches
-	// the code below, no goroutine can still be holding newDecider's mutex,
-	// and recorder.Entries()/Header() below cannot race a live Apply call.
+	// test). ServeContext waits for every accepted CONNECTION's own
+	// goroutine (transport.Server.Close waits on its internal WaitGroup
+	// before returning) — but NOT for a decision transport itself already
+	// gave up on: Server.decideWithTimeout races a Decider call against its
+	// own deadline in a goroutine Server.wg never tracks, so that goroutine
+	// can still be running, inside the reducer, after ServeContext returns
+	// control here. guard.awaitIdle(), immediately below, is this run's own
+	// wait for that goroutine — see decider.go's wireGuard doc comment for
+	// why this is necessary and what it costs — so recorder.Entries()/
+	// Header() cannot race a decision still writing to the recorder.
 	//
 	// A connection that stops mid-stream — the adapter's socket read fails,
 	// or it closes cleanly — costs this run nothing on its own:
@@ -220,6 +259,16 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	// write-ahead log, one record at a time, rather than one write at the
 	// end) would close it, and is future work, not attempted here.
 	serveErr := server.ServeContext(ctx)
+
+	// ServeContext waits for every accepted CONNECTION's own goroutine, but
+	// not for a decision transport itself gave up waiting on
+	// (decider.go's wireGuard doc comment: Server.decideWithTimeout spawns
+	// that goroutine without ever tracking it). awaitIdle is this run's own
+	// wait for that goroutine, whichever call currently holds guard's lock
+	// — so recorder.Header()/Entries() below can never read the recorder
+	// while a decision it does not know has finished is still writing to
+	// it.
+	guard.awaitIdle()
 
 	header, headerErr := recorder.Header(configurationHash, strategyVersion)
 	if headerErr != nil {
