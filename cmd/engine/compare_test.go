@@ -23,9 +23,10 @@ import (
 // delivers a starting account.snapshot and a closing replay.run.completed
 // (backtest.go's drive), neither of which this command's -config/-socket
 // composition sends at all (decision 2's own comment in engine.go). Two
-// engines agreeing on every field below, for the same bar, is exactly what
-// "same reducer, so they must [match]" (this ticket's brief) asserts;
-// disagreeing on Sequence would not be a finding about the reducer, only
+// engines agreeing on every field below, for the same bar, is the whole
+// claim this file makes: one reducer, so one decision per bar, whichever
+// command drove it. Disagreeing on Sequence would not be a finding about
+// the reducer, only
 // about how many OTHER inputs surrounded the bar in each run.
 type comparableDecision struct {
 	ID                string

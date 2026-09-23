@@ -243,9 +243,11 @@ func TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst(t *
 	}
 }
 
-// TestRunRefusesToStartWithoutAValidConfiguration proves the "unconfigured
-// engine refuses inputs rather than sizing against nothing" fail-closed rule
-// (this ticket's brief) at its strongest point: a -config the reducer cannot
+// TestRunRefusesToStartWithoutAValidConfiguration pins that an engine which
+// cannot build a reducer never accepts an input at all, rather than accepting
+// one and sizing against nothing — docs/development.md's "fail closed on
+// unknown schemas, missing sequences, stale data, or uncertain brokerage
+// state", at its strongest point: a -config the reducer cannot
 // be built from stops this command before transport.Listen is ever called,
 // so no socket is created for a bar to reach at all — a stronger guarantee
 // than merely rejecting the first bar it receives.
@@ -285,9 +287,12 @@ func TestRunRefusesToStartWithoutAValidConfiguration(t *testing.T) {
 	}
 }
 
-// TestRunReportsAJournalWriteFailureRatherThanExitingClean proves "if the
-// journal cannot be written, that is not a silent success" (this ticket's
-// brief): the run completes an ordinary exchange, then the destination
+// TestRunReportsAJournalWriteFailureRatherThanExitingClean pins that a
+// journal which cannot be written is reported, never swallowed — an engine
+// exiting zero having recorded nothing would leave a run with decisions
+// already sent across the boundary and no evidence of them, which is
+// docs/development.md's fail-closed principle applied to the artefact that
+// principle exists to protect. The run completes an ordinary exchange, then the destination
 // directory is made unwritable before the engine is asked to stop, so the
 // pre-flight "does a journal already exist here" check (which only reads,
 // never writes) passes but the actual install at shutdown cannot.

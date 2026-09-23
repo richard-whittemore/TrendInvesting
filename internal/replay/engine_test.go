@@ -411,9 +411,11 @@ func TestEngineApplyAdvancesBothCursorsWhenAPartialEmissionIsKept(t *testing.T) 
 	}
 }
 
-// The three tests below pin the exact cases round 4's review found the
-// "What advances together" doc comment disagreeing with the code on: each
-// one returns a nil decisions slice, and each one still advances both
+// The three tests below pin the cases where a nil decisions slice does NOT
+// mean the input was rejected — the reading a caller would otherwise take
+// from the nil alone, and the one a summarising rule in Apply's own doc
+// comment has repeatedly got wrong. Each one returns a nil slice, and each
+// one still advances both
 // cursors — proven not by inspecting the cursors directly (unexported) but
 // by the one externally observable consequence of them having moved: the
 // NEXT call is checked against the moved cursor, so a deliberately gapped
@@ -476,11 +478,12 @@ func TestEngineApplyAdvancesBothCursorsWhenTheHandlerErrorsWithNoEmissions(t *te
 
 // TestEngineApplyAdvancesBothCursorsWhenTheOnlyEmissionIsInvalid is the
 // third case: a handler error whose SOLE emission is itself invalid, with
-// no valid siblings before it — the sub-case the round 3 doc comment
-// missed, describing only the invalid-with-valid-siblings case
-// (TestEngineApplyAdvancesBothCursorsWhenAPartialEmissionIsKept, above) and
-// leaving a reader to wrongly infer that a nil returned slice always meant
-// nothing was kept.
+// no valid siblings before it. It is easily mistaken for the
+// invalid-with-valid-siblings case
+// (TestEngineApplyAdvancesBothCursorsWhenAPartialEmissionIsKept, above),
+// and a reader who conflates the two infers that a nil returned slice
+// always means nothing was kept, which is exactly wrong here: the cursors
+// have moved and this input's Sequence is spent.
 func TestEngineApplyAdvancesBothCursorsWhenTheOnlyEmissionIsInvalid(t *testing.T) {
 	t.Parallel()
 
