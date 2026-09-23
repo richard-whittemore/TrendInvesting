@@ -10,6 +10,7 @@
 package glossaryaudit
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -109,6 +110,66 @@ func definitionProse(span string) string {
 	return strings.Join(strings.Fields(strings.Join(kept, " ")), " ")
 }
 
+// flattenGroup renders a comment group the way citedTerms reads it, and
+// records which comment each part of the result came from.
+//
+// The rendering must match (*ast.CommentGroup).Text() exactly or the sweep
+// would stop finding citations it used to find, so it is built from each
+// comment's OWN Text() rather than from a reimplementation of go/ast's
+// marker stripping and directive dropping. That the two agree is not assumed:
+// TestFlattenGroupRendersWhatTheGroupItselfWould checks it over every comment
+// group in the module.
+//
+// owners[i] is the comment whose text begins at starts[i] in the flattened
+// string, so a citation's offset locates the comment it is written in --
+// and therefore the line, which fset.Position reports. Without this a
+// citation reports at its GROUP's first line: thirteen lines adrift in a
+// long doc comment, and always line 1 for a package comment.
+func flattenGroup(group *ast.CommentGroup) (flat string, owners []*ast.Comment, starts []int) {
+	var b strings.Builder
+	for _, comment := range group.List {
+		part := strings.Join(strings.Fields((&ast.CommentGroup{List: []*ast.Comment{comment}}).Text()), " ")
+		if part == "" {
+			// A directive or a bare marker contributes nothing, exactly as
+			// the group's own Text() drops it. It owns no offset because no
+			// citation can be found in text that is not there.
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		owners = append(owners, comment)
+		starts = append(starts, b.Len())
+		b.WriteString(part)
+	}
+	return b.String(), owners, starts
+}
+
+// lineOf reports the source line a citation at offset within flat is written
+// on: the line of the last comment whose text begins at or before it.
+//
+// exact is false when that comment is a BLOCK comment spanning several lines.
+// One *ast.Comment then covers every line of the block, so the line returned
+// is where the block opens rather than where the citation sits, and a caller
+// that presented it as the citation's own line would be sending a reader to
+// the wrong place with no hint of it. This module uses no block comments at
+// all -- 15,668 comments, none of them a block -- so resolving lines within
+// one would be machinery for a shape nobody writes; saying the line is
+// approximate costs nothing and cannot mislead.
+func lineOf(fset *token.FileSet, owners []*ast.Comment, starts []int, offset int) (line int, exact bool) {
+	if len(owners) == 0 {
+		return 0, false
+	}
+	owner := owners[0]
+	for i, start := range starts {
+		if start > offset {
+			break
+		}
+		owner = owners[i]
+	}
+	return fset.Position(owner.Pos()).Line, !strings.Contains(owner.Text, "\n")
+}
+
 // citation is one quoted claim a source comment makes about CONTEXT.md.
 // term is the quoted text. entry names the glossary entry the quotation is
 // attributed to, and is set only when the comment's own punctuation says it
@@ -135,6 +196,11 @@ func definitionProse(span string) string {
 type citation struct {
 	term  string
 	entry string
+	// at is the citation's byte offset within the flattened comment text it
+	// was found in. It exists so a failure can name the line the citation is
+	// written on rather than the line its comment group happens to start at
+	// -- a package doc comment made every citation in it report as line 1.
+	at int
 }
 
 // attributes reports whether the punctuation between two chained
@@ -157,7 +223,14 @@ func attributes(separator string) bool {
 // whitespace to single spaces first reads it the way a person reading the
 // rendered comment would.
 func citedTerms(text string) []citation {
-	flat := strings.Join(strings.Fields(text), " ")
+	return citedTermsIn(strings.Join(strings.Fields(text), " "))
+}
+
+// citedTermsIn is citedTerms over text that is ALREADY flattened, so a
+// caller that built the flattened text itself knows where each citation sits
+// in it. citation.at is that offset, and flattenGroup turns it back into the
+// comment line the citation is written on.
+func citedTermsIn(flat string) []citation {
 	var cites []citation
 	for _, m := range citationPattern.FindAllStringSubmatchIndex(flat, -1) {
 		// A term is attributed to the MOST RECENT term cited, not to the
@@ -166,7 +239,7 @@ func citedTerms(text string) []citation {
 		// perfectly good citation. Only a co-citation moves the target, so
 		// a second attribution still belongs to the same entry.
 		target := quoted(flat, m, 1, 2)
-		cites = append(cites, citation{term: target})
+		cites = append(cites, citation{term: target, at: quotedAt(m, 1, 2)})
 		pos := m[1]
 		for {
 			cont := continuationPattern.FindStringSubmatchIndex(flat[pos:])
@@ -175,15 +248,33 @@ func citedTerms(text string) []citation {
 			}
 			term := quoted(flat[pos:], cont, 2, 3)
 			if attributes(flat[pos+cont[2] : pos+cont[3]]) {
-				cites = append(cites, citation{term: term, entry: target})
+				cites = append(cites, citation{term: term, entry: target, at: pos + quotedAt(cont, 2, 3)})
 			} else {
-				cites = append(cites, citation{term: term})
+				cites = append(cites, citation{term: term, at: pos + quotedAt(cont, 2, 3)})
 				target = term
 			}
 			pos += cont[1]
 		}
 	}
 	return cites
+}
+
+// quotedAt is the offset where whichever of the given alternation groups
+// matched begins.
+//
+// A citation's offset must point at its QUOTATION, not at the token that
+// introduced it. The head match begins at "CONTEXT.md" and a continuation's
+// begins at its separator, and gofmt readily wraps a line between either and
+// the quotation that follows — so using the match's own start reports the
+// line the marker is on, which is the line above the citation a reader is
+// being sent to look at.
+func quotedAt(m []int, groups ...int) int {
+	for _, g := range groups {
+		if m[2*g] >= 0 {
+			return m[2*g]
+		}
+	}
+	return m[0]
 }
 
 // quoted returns whichever of the given alternation groups matched. A
@@ -303,7 +394,11 @@ func TestCitedTermsFindsOnlyGenuineCitations(t *testing.T) {
 				t.Fatalf("citedTerms(%q) = %v, want %v", tt.text, got, tt.want)
 			}
 			for i := range got {
-				if got[i] != tt.want[i] {
+				// Compared on what this table is about — which terms were
+				// extracted and what each is attributed to. A citation's
+				// offset is about where it sits in one particular comment,
+				// which these free-standing strings cannot state.
+				if got[i].term != tt.want[i].term || got[i].entry != tt.want[i].entry {
 					t.Fatalf("citedTerms(%q) = %v, want %v", tt.text, got, tt.want)
 				}
 			}
@@ -536,17 +631,22 @@ func TestEveryContextMDCitationNamesADefinedTerm(t *testing.T) {
 			return err
 		}
 		for _, group := range file.Comments {
-			for _, cite := range citedTerms(group.Text()) {
+			flat, owners, starts := flattenGroup(group)
+			for _, cite := range citedTermsIn(flat) {
 				if resolves(cite, headers, defs, body) {
 					continue
 				}
-				pos := fset.Position(group.Pos())
+				line, exact := lineOf(fset, owners, starts, cite.at)
+				where := ""
+				if !exact {
+					where = " (somewhere in the block comment starting here)"
+				}
 				if cite.entry != "" {
-					t.Errorf("%s:%d: cites CONTEXT.md: %q — %q, but %[3]q's own entry does not say that",
-						rel, pos.Line, cite.entry, cite.term)
+					t.Errorf("%s:%d%s: cites CONTEXT.md: %q — %q, but %[4]q's own entry does not say that",
+						rel, line, where, cite.entry, cite.term)
 					continue
 				}
-				t.Errorf("%s:%d: cites CONTEXT.md: %q, which CONTEXT.md does not define", rel, pos.Line, cite.term)
+				t.Errorf("%s:%d%s: cites CONTEXT.md: %q, which CONTEXT.md does not define", rel, line, where, cite.term)
 			}
 		}
 		return nil
@@ -587,5 +687,200 @@ func TestDefinitionProseIsWhatTheEntryStates(t *testing.T) {
 	if resolves(citation{term: "the channel. One indivisible"}, headers, defs, body) {
 		t.Error("resolves(text spanning two entries) = true, want false: entries are joined on a newline " +
 			"precisely so a quotation cannot straddle them")
+	}
+}
+
+// parseComments returns the comment groups of one source string, with the
+// FileSet that knows their lines.
+func parseComments(t *testing.T, src string) (*token.FileSet, []*ast.CommentGroup) {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "probe.go", src, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parsing the fixture: %v", err)
+	}
+	return fset, file.Comments
+}
+
+// TestFlattenGroupRendersWhatTheGroupItselfWould is the check flattenGroup's
+// correctness rests on, over every comment group in the module rather than a
+// fixture. flattenGroup builds its text from each comment's own Text() so it
+// can record where each one begins; that is only safe while the result is
+// what (*ast.CommentGroup).Text() would have produced, because the sweep
+// would otherwise quietly stop finding citations it used to find.
+func TestFlattenGroupRendersWhatTheGroupItselfWould(t *testing.T) {
+	t.Parallel()
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	var groups int
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "runs":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		for _, group := range file.Comments {
+			groups++
+			flat, _, _ := flattenGroup(group)
+			if want := strings.Join(strings.Fields(group.Text()), " "); flat != want {
+				t.Errorf("%s:%d: flattenGroup rendered %q, but the group's own Text() renders %q",
+					rel, fset.Position(group.Pos()).Line, flat, want)
+			}
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatal(walkErr)
+	}
+	if groups == 0 {
+		t.Fatal("found no comment groups to compare; the walk is not reaching the module's sources")
+	}
+}
+
+// TestACitationIsReportedOnTheLineItIsWrittenOn pins the two shapes that were
+// wrong. A citation used to be reported at its GROUP's first line, so one
+// late in a long doc comment was adrift by however long the comment was, and
+// one in a package doc comment always reported as line 1 — which is the worst
+// case, since that is exactly where the longest comments live.
+func TestACitationIsReportedOnTheLineItIsWrittenOn(t *testing.T) {
+	t.Parallel()
+	const src = `package probe
+
+// Something entirely unrelated, to give the group some length.
+//
+// More unrelated prose, so that the group's own first line is nowhere
+// near the citation below.
+//
+// A Campaign is what gets entered (CONTEXT.md: "Campaign").
+func f() {}
+`
+	fset, groups := parseComments(t, src)
+	if len(groups) != 1 {
+		t.Fatalf("fixture produced %d comment groups, want 1", len(groups))
+	}
+	flat, owners, starts := flattenGroup(groups[0])
+	cites := citedTermsIn(flat)
+	if len(cites) != 1 {
+		t.Fatalf("found %d citations, want 1: %v", len(cites), cites)
+	}
+	// The citation is on the fixture's line 8; the group starts on line 3.
+	if got, _ := lineOf(fset, owners, starts, cites[0].at); got != 8 {
+		t.Errorf("citation reported on line %d, want 8 (the group starts on line %d, which is the bug)",
+			got, fset.Position(groups[0].Pos()).Line)
+	}
+}
+
+// TestAWrappedQuotationSurvivesTheLineMapping is the regression that matters
+// most. citedTerms flattens a comment group precisely so a term gofmt wrapped
+// across two lines still reads as one term, and recording per-comment offsets
+// must not undo that. The term below is split mid-phrase, as gofmt would.
+func TestAWrappedQuotationSurvivesTheLineMapping(t *testing.T) {
+	t.Parallel()
+	const src = `package probe
+
+// The rule is that every open Campaign has a stop
+// (CONTEXT.md: "Protective Stop" — "Every open Campaign has one
+// at all times").
+func f() {}
+`
+	fset, groups := parseComments(t, src)
+	flat, owners, starts := flattenGroup(groups[0])
+	cites := citedTermsIn(flat)
+	if len(cites) != 2 {
+		t.Fatalf("found %d citations, want 2: %v", len(cites), cites)
+	}
+	if got := cites[1].term; got != "Every open Campaign has one at all times" {
+		t.Fatalf("the wrapped quotation extracted as %q; the flattening that joins it must survive the offsets", got)
+	}
+	// It is reported where it starts, on line 4, not where it ends.
+	if got, _ := lineOf(fset, owners, starts, cites[1].at); got != 4 {
+		t.Errorf("wrapped quotation reported on line %d, want 4 (the line it starts on)", got)
+	}
+}
+
+// TestACitationIsReportedWhereItsQuotationIsNotItsMarker pins the case the
+// first wrapped-quotation test missed, which it missed because its dash and
+// its opening quote sat on the same line.
+//
+// A citation's match begins at "CONTEXT.md", and a continuation's begins at
+// its separator. gofmt readily wraps a line between either and the quotation
+// that follows, so an offset taken from the match's own start reports the
+// line ABOVE the one a reader is being sent to look at — the same class of
+// wrong-line diagnostic this whole change exists to remove, one line smaller.
+func TestACitationIsReportedWhereItsQuotationIsNotItsMarker(t *testing.T) {
+	t.Parallel()
+	const src = `package probe
+
+// Something first, to push the group's own start line away.
+// The rule (CONTEXT.md: "Protective Stop" —
+// "a fabricated continuation") applies here.
+func f() {}
+`
+	fset, groups := parseComments(t, src)
+	flat, owners, starts := flattenGroup(groups[0])
+	cites := citedTermsIn(flat)
+	if len(cites) != 2 {
+		t.Fatalf("found %d citations, want 2: %v", len(cites), cites)
+	}
+	// The head's quotation is on line 4, where its marker also is.
+	if got, _ := lineOf(fset, owners, starts, cites[0].at); got != 4 {
+		t.Errorf("head citation reported on line %d, want 4", got)
+	}
+	// The continuation's separator is on line 4; its quotation is on line 5,
+	// and line 5 is where a reader must go to change it.
+	if got, _ := lineOf(fset, owners, starts, cites[1].at); got != 5 {
+		t.Errorf("continuation reported on line %d, want 5 — the line its quotation is written on, "+
+			"not the line its separator ends", got)
+	}
+}
+
+// TestABlockCommentsLineIsReportedAsApproximate pins the one shape this
+// mapping cannot resolve. A block comment is a single *ast.Comment covering
+// every line it spans, so a citation inside one can only be placed at the
+// line the block opens on.
+//
+// This module contains no block comments at all, so resolving lines within
+// one would be machinery for a shape nobody writes. What matters is that the
+// diagnostic does not claim a precision it does not have.
+func TestABlockCommentsLineIsReportedAsApproximate(t *testing.T) {
+	t.Parallel()
+	const src = `package probe
+
+/*
+Something first.
+
+A Campaign is (CONTEXT.md: "a fabricated term") here.
+*/
+func f() {}
+`
+	fset, groups := parseComments(t, src)
+	flat, owners, starts := flattenGroup(groups[0])
+	cites := citedTermsIn(flat)
+	if len(cites) != 1 {
+		t.Fatalf("found %d citations, want 1: %v", len(cites), cites)
+	}
+	line, exact := lineOf(fset, owners, starts, cites[0].at)
+	if exact {
+		t.Error("a citation inside a block comment reported an exact line; it cannot be exact, " +
+			"since one *ast.Comment covers every line of the block")
+	}
+	if line != 3 {
+		t.Errorf("block citation reported on line %d, want 3 (where the block opens)", line)
 	}
 }
