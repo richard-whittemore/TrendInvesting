@@ -132,3 +132,43 @@ func verifyMovementJournal(t *testing.T, s *stream, emitted []event.Envelope) {
 	}
 	t.Log("journal chain verified; replay decisions byte-identical")
 }
+
+// TestASnapshotAfterAWithdrawalReplacesRatherThanDeductsAgain pins the one
+// sentence of ADR 0020's cash-movement amendment that nothing else here
+// checks: "A subsequent snapshot replaces the constrained figure outright;
+// earlier withdrawals are already reflected in that balance and must not be
+// deducted again."
+//
+// The failure it rules out is double-counting, which is invisible in every
+// other case in this file because they all end with the withdrawal. Here a
+// 20,000 withdrawal is followed by a snapshot of 30,000 that already reflects
+// it. Deducting again would leave 10,000 — under the Unit's cost — and turn
+// an affordable entry into an insufficient-cash decline.
+func TestASnapshotAfterAWithdrawalReplacesRatherThanDeductsAgain(t *testing.T) {
+	cfg := validConfigurationPayload()
+	bars := breakoutBars("AAPL")
+	equity := cfg.NotionalAccount.StartingEquity
+
+	s := newStream(t, cfg).
+		snapshot(cashSnapshot(cfg, day(0).Add(time.Hour), 21_000)).
+		bars(bars[:len(bars)-1])
+	// Both account events are stamped before the decision bar's previous
+	// close (day 55, 00:00), so the replacing snapshot is eligible to be
+	// spent on that bar. A snapshot stamped later fails closed under ADR
+	// 0010 instead, which is a different rule and has its own tests.
+	s.movement(cashMovementPayload(day(54).Add(time.Hour), -20_000, equity))
+	s.snapshot(cashSnapshot(cfg, day(54).Add(2*time.Hour), 30_000))
+	s.bar(bars[len(bars)-1])
+
+	emitted := s.mustRun()
+	proposals := envelopesOfType(emitted, event.TradeProposalEventType)
+	declines := envelopesOfType(emitted, event.ProposalDeclinedEventType)
+	if len(proposals) != 1 || len(declines) != 0 {
+		detail := ""
+		if len(declines) == 1 {
+			detail = decodeProposalDeclined(t, declines[0]).Detail
+		}
+		t.Fatalf("proposals=%d declines=%d, want 1 and 0: the 30,000 snapshot already reflects the withdrawal, so deducting it again would leave 10,000 — %s",
+			len(proposals), len(declines), detail)
+	}
+}
