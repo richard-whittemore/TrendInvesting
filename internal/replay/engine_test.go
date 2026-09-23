@@ -414,20 +414,27 @@ func TestEngineApplyAdvancesBothCursorsWhenAPartialEmissionIsKept(t *testing.T) 
 
 // The three tests below pin the cases where a nil decisions slice does NOT
 // mean the input was rejected — the reading a caller would otherwise take
-// from the nil alone, and the one a summarising rule in Apply's own doc
-// comment has repeatedly got wrong. Each one returns a nil slice, and each
-// one still advances both
-// cursors — proven not by inspecting the cursors directly (unexported) but
-// by the one externally observable consequence of them having moved: the
-// NEXT call is checked against the moved cursor, so a deliberately gapped
-// Sequence after it is refused. If either cursor had NOT moved, that
-// deliberately gapped call would instead be treated as this Engine's own
-// first-ever call, which accepts any starting Sequence, and would wrongly
-// succeed.
+// from the nil alone. Each one returns a nil slice and still spends this
+// input's Sequence, so a retry of the identical envelope is a duplicate,
+// not a retry.
+//
+// Only the INPUT cursor moves in these three. Apply commits
+// outputSequence as "where the kept decisions' own stamps end (unchanged if
+// there were none)" (Apply's own doc comment), and none are kept here, so
+// outputSequence is exactly where it was. The output side of that same rule
+// has its own test:
+// TestEngineApplyLeavesNoGapInTheOutputStreamAfterADiscardedEmission.
+//
+// The input cursor's move is proven not by inspecting it directly (it is
+// unexported) but by the one externally observable consequence: the NEXT
+// call is checked against the moved cursor, so a deliberately gapped
+// Sequence after it is refused. Had the cursor NOT moved, that gapped call
+// would instead be this Engine's first-ever, which accepts any starting
+// Sequence, and would wrongly succeed.
 
-// TestEngineApplyAdvancesBothCursorsWhenTheHandlerDecidesNothing is the
+// TestEngineApplyAdvancesTheInputCursorWhenTheHandlerDecidesNothing is the
 // first case: a handler that legitimately decides nothing for this input.
-func TestEngineApplyAdvancesBothCursorsWhenTheHandlerDecidesNothing(t *testing.T) {
+func TestEngineApplyAdvancesTheInputCursorWhenTheHandlerDecidesNothing(t *testing.T) {
 	t.Parallel()
 
 	engine, err := replay.New(replay.HandlerFunc(func(context.Context, event.Envelope) ([]event.Envelope, error) { return nil, nil }))
@@ -448,9 +455,42 @@ func TestEngineApplyAdvancesBothCursorsWhenTheHandlerDecidesNothing(t *testing.T
 	}
 }
 
-// TestEngineApplyAdvancesBothCursorsWhenTheHandlerErrorsWithNoEmissions is
+// TestEngineApplyConsumesNoOutputPositionWhenNothingIsKept pins the other
+// half of what the three tests around it claim: a call that keeps nothing
+// moves the input cursor but leaves outputSequence exactly where it was, so
+// the next kept decision is output 1, not output 2. Without this, "only the
+// input cursor moves" would be prose with no test behind it, and an
+// implementation that bumped outputSequence per input rather than per kept
+// decision would pass every other test in this group.
+func TestEngineApplyConsumesNoOutputPositionWhenNothingIsKept(t *testing.T) {
+	t.Parallel()
+
+	engine, err := replay.New(replay.HandlerFunc(func(_ context.Context, item event.Envelope) ([]event.Envelope, error) {
+		if item.Sequence == 1 {
+			return nil, nil
+		}
+		return []event.Envelope{decision("first kept")}, nil
+	}))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := engine.Apply(context.Background(), envelope(1)); err != nil {
+		t.Fatalf("Apply(1) error = %v", err)
+	}
+
+	emitted, err := engine.Apply(context.Background(), envelope(2))
+	if err != nil {
+		t.Fatalf("Apply(2) error = %v", err)
+	}
+	if len(emitted) != 1 || emitted[0].Sequence != 1 {
+		t.Fatalf("Apply(2) = %+v, want one envelope at output sequence 1: Apply(1) kept nothing, so it consumed no output position", emitted)
+	}
+}
+
+// TestEngineApplyAdvancesTheInputCursorWhenTheHandlerErrorsWithNoEmissions is
 // the second case: a plain handler error with no emissions at all.
-func TestEngineApplyAdvancesBothCursorsWhenTheHandlerErrorsWithNoEmissions(t *testing.T) {
+func TestEngineApplyAdvancesTheInputCursorWhenTheHandlerErrorsWithNoEmissions(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("rejected on business grounds")
@@ -477,15 +517,18 @@ func TestEngineApplyAdvancesBothCursorsWhenTheHandlerErrorsWithNoEmissions(t *te
 	}
 }
 
-// TestEngineApplyAdvancesBothCursorsWhenTheOnlyEmissionIsInvalid is the
+// TestEngineApplyAdvancesTheInputCursorWhenTheOnlyEmissionIsInvalid is the
 // third case: a handler error whose SOLE emission is itself invalid, with
 // no valid siblings before it. It is easily mistaken for the
 // invalid-with-valid-siblings case
 // (TestEngineApplyAdvancesBothCursorsWhenAPartialEmissionIsKept, above),
-// and a reader who conflates the two infers that a nil returned slice
-// always means nothing was kept, which is exactly wrong here: the cursors
-// have moved and this input's Sequence is spent.
-func TestEngineApplyAdvancesBothCursorsWhenTheOnlyEmissionIsInvalid(t *testing.T) {
+// which does advance BOTH cursors because it keeps a prefix. Here nothing
+// is kept, so only the input cursor moves — but move it does, and this
+// input's Sequence is spent, which is what separates this case from the
+// invalid-emission-with-no-handler-error case
+// (TestEngineApplyFailsClosedOnInvalidEmission), where neither cursor
+// moves and the identical envelope may be retried.
+func TestEngineApplyAdvancesTheInputCursorWhenTheOnlyEmissionIsInvalid(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("handler failed closed")
