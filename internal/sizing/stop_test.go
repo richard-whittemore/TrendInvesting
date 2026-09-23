@@ -581,3 +581,71 @@ func TestRaisedStopFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// TestLowestProtectiveStopIsOneAnswerForEveryConsumer pins the function that
+// exists so a Campaign's Protective Stop is derived once rather than at each
+// consumer. Three seams took the minimum across Units' own stops from the
+// same figures, and they did not agree on the degenerate cases: two took a
+// plain minimum, which makes the answer depend on where a NaN sits in the
+// slice, and the third skipped non-finite and non-positive stops entirely.
+//
+// A level that decides when capital stops being at risk must not depend on
+// the order its inputs were stored in (CONTEXT.md: "Protective Stop").
+func TestLowestProtectiveStopIsOneAnswerForEveryConsumer(t *testing.T) {
+	t.Parallel()
+	nan := math.NaN()
+	for _, tc := range []struct {
+		name    string
+		stops   []float64
+		want    float64
+		wantErr string
+	}{
+		{name: "the lowest of several", stops: []float64{100, 90, 95}, want: 90},
+		{name: "a single unit", stops: []float64{90}, want: 90},
+		{name: "order does not change the answer", stops: []float64{95, 90, 100}, want: 90},
+		{name: "no units at all", stops: nil, wantErr: "at least one unit"},
+		{name: "a NaN first", stops: []float64{nan, 100, 90}, wantErr: "not a usable protective stop"},
+		{name: "a NaN last", stops: []float64{100, 90, nan}, wantErr: "not a usable protective stop"},
+		{name: "a non-positive stop", stops: []float64{100, -5, 90}, wantErr: "not a usable protective stop"},
+		{name: "a zero stop", stops: []float64{100, 0}, wantErr: "not a usable protective stop"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := sizing.LowestProtectiveStop(tc.stops)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("LowestProtectiveStop(%v) error = nil, want one naming %q", tc.stops, tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("LowestProtectiveStop(%v) error = %v, want it to name %q", tc.stops, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LowestProtectiveStop(%v) error = %v, want nil", tc.stops, err)
+			}
+			if got != tc.want {
+				t.Fatalf("LowestProtectiveStop(%v) = %v, want %v", tc.stops, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLowestProtectiveStopRefusesANaNWhereverItSits is the position
+// independence stated on its own, because that is the property the previous
+// per-consumer scans lacked: a plain minimum returns NaN when the NaN is
+// first and ignores it otherwise, so the same Units in a different order
+// gave different answers.
+func TestLowestProtectiveStopRefusesANaNWhereverItSits(t *testing.T) {
+	t.Parallel()
+	nan := math.NaN()
+	for i, stops := range [][]float64{
+		{nan, 100, 90},
+		{100, nan, 90},
+		{100, 90, nan},
+	} {
+		if _, err := sizing.LowestProtectiveStop(stops); err == nil {
+			t.Errorf("case %d: LowestProtectiveStop(%v) error = nil, want a refusal wherever the NaN sits", i, stops)
+		}
+	}
+}

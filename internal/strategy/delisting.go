@@ -328,6 +328,10 @@ func (r *Reducer) closeCampaignForDelisting(state *instrumentState, payload even
 		return event.Envelope{}, fmt.Errorf("strategy: instrument %q: delisting cannot compute the realised result in unit n: %w", payload.InstrumentID, err)
 	}
 
+	delistingStopLevel, err := campaign.protectiveStop()
+	if err != nil {
+		return event.Envelope{}, fmt.Errorf("strategy: instrument %q: delisting: %w", payload.InstrumentID, err)
+	}
 	exitedPayload := event.CampaignExitedPayload{
 		CampaignID:            campaign.campaignID,
 		InstrumentID:          payload.InstrumentID,
@@ -340,7 +344,7 @@ func (r *Reducer) closeCampaignForDelisting(state *instrumentState, payload even
 		CampaignN:             campaign.campaignN,
 		DollarsPerPoint:       r.dollarsPerPoint,
 		UnitQuantity:          campaign.unitQuantity,
-		ProtectiveStopLevel:   campaign.protectiveStop(),
+		ProtectiveStopLevel:   delistingStopLevel,
 		RealisedResult:        realisedResult,
 		AverageMoveInN:        averageMoveInN,
 		RealisedResultInUnitN: realisedResultInUnitN,

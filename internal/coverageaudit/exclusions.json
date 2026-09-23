@@ -530,6 +530,34 @@
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q would close campaign %q with an invalid exit: %w\", fill.InstrumentID, fill.FillID, campaign.campaignID, err)",
       "category": "unreachable-by-construction",
       "reason": "Validate on a CampaignExitedPayload this function assembled from figures that had already passed sizing's own guards or an accepted payload's Validate. Every field it range-checks is checked upstream, and the RealisedResult re-derivation is formed in the SAME expression order above, so the two agree bit for bit (docs/development.md's fusion rule). The two fields only this payload carries, AverageMoveInN and RealisedResultInUnitN, are quotients of those same figures: reaching a non-finite one needs an enormous numerator or a near-zero denominator, and both were tried against this seam. An exit price large enough to overflow is refused first by the units-stopped decision ('realised result must be finite'), and a DollarsPerPoint small enough to collapse the denominator is refused first by sizing's representability guard ('quantity ... exceeds the largest exactly representable whole quantity'), before any exit is assembled. Until #134 this branch was covered by the below-entry refusal, which was itself the defect: an exit cannot tell a Unit's first stop from a raised one, so it no longer applies the initial-stop shape. If any of this stops holding the guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).evaluateCampaign",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: campaign %q: %w\", bar.InstrumentID, campaign.campaignID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "sizing.LowestProtectiveStop refuses a stop that is not finite and positive, and no such stop can be stored on a held Unit. Every assignment to unitState.protectiveStop is preceded by a payload Validate that routes through sizing.ValidStopLevel: the Campaign open validates openedPayload and stopSetPayload before storing (campaign.go:1602), the Add validates before storing (the 'would add an invalid unit' refusal, campaign.go:2250), and the Stop Ladder validates raisedPayload before assigning (campaign.go:2329, assigned at 2346). All four sites were checked for this entry rather than assumed. This branch becomes reachable the moment any of those stores stops validating first, or a new store is added without one — at which point it fires, becomes covered, and the audit reports this entry as stale."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyStopFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q: %w\", fill.InstrumentID, fill.FillID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "sizing.LowestProtectiveStop refuses a stop that is not finite and positive, and no such stop can be stored on a held Unit. Every assignment to unitState.protectiveStop is preceded by a payload Validate that routes through sizing.ValidStopLevel: the Campaign open validates openedPayload and stopSetPayload before storing (campaign.go:1602), the Add validates before storing (the 'would add an invalid unit' refusal, campaign.go:2250), and the Stop Ladder validates raisedPayload before assigning (campaign.go:2329, assigned at 2346). All four sites were checked for this entry rather than assumed. This branch becomes reachable the moment any of those stores stops validating first, or a new store is added without one — at which point it fires, becomes covered, and the audit reports this entry as stale."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyExitFill",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q: %w\", fill.InstrumentID, fill.FillID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "sizing.LowestProtectiveStop refuses a stop that is not finite and positive, and no such stop can be stored on a held Unit. Every assignment to unitState.protectiveStop is preceded by a payload Validate that routes through sizing.ValidStopLevel: the Campaign open validates openedPayload and stopSetPayload before storing (campaign.go:1602), the Add validates before storing (the 'would add an invalid unit' refusal, campaign.go:2250), and the Stop Ladder validates raisedPayload before assigning (campaign.go:2329, assigned at 2346). All four sites were checked for this entry rather than assumed. This branch becomes reachable the moment any of those stores stops validating first, or a new store is added without one — at which point it fires, becomes covered, and the audit reports this entry as stale."
+    },
+    {
+      "file": "internal/strategy/delisting.go",
+      "function": "(*Reducer).closeCampaignForDelisting",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: instrument %q: delisting: %w\", payload.InstrumentID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "sizing.LowestProtectiveStop refuses a stop that is not finite and positive, and no such stop can be stored on a held Unit. Every assignment to unitState.protectiveStop is preceded by a payload Validate that routes through sizing.ValidStopLevel: the Campaign open validates openedPayload and stopSetPayload before storing (campaign.go:1602), the Add validates before storing (the 'would add an invalid unit' refusal, campaign.go:2250), and the Stop Ladder validates raisedPayload before assigning (campaign.go:2329, assigned at 2346). All four sites were checked for this entry rather than assumed. This branch becomes reachable the moment any of those stores stops validating first, or a new store is added without one — at which point it fires, becomes covered, and the audit reports this entry as stale."
     }
   ]
 }
