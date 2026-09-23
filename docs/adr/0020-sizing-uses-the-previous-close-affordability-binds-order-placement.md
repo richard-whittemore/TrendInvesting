@@ -60,13 +60,17 @@ A fill debits the ledger exactly once, at its actual cost. Nothing debits it a s
 
 ### The invariant
 
-Conservation belongs to the **ledger**, not to the order, precisely because an order's estimate and its actual cost differ. Two statements, and only the first involves money:
+Conservation belongs to the **ledger**, not to the order, precisely because an order's estimate and its actual cost differ. Two statements, and only the first involves money — which it states in two steps, because the zero floor from the cash-movement amendment below applies to one of them and not the other:
 
-> **available = the previous close's figure − every actual fill cost this bar − every hold still standing.**
+> **basis = max(0, the previous close's figure − withdrawals recorded since that figure)**
+>
+> **available = basis − every actual fill cost this bar − every hold still standing.**
 >
 > **an order's unfilled quantity + its filled quantity + its cancelled quantity = the quantity it was placed for.**
 
-The second is exact because quantities are whole and no estimate enters it. The first needs no estimate to be correct either: holds are estimates while they stand, and each is replaced by a real number the moment a fill makes one available.
+The floor bounds the **basis** only, before any fill or hold is deducted. It is a statement about purchasing capacity: once withdrawals have consumed the known cash, no order may be placed against it. It is not a floor on `available`. An order is only placed when `available` covers its hold, so a placed order never drives it negative — but a fill the ledger cannot fund can still arrive (next section), is still recorded at its actual cost, and can leave `available` below zero. That negative remainder is the evidence the reconciliation failure is built on, and flooring it would hide exactly the discrepancy ADR 0019 requires to halt the run.
+
+The quantity statement is exact because quantities are whole and no estimate enters it. The money statement needs no estimate to be correct either: holds are estimates while they stand, and each is replaced by a real number the moment a fill makes one available.
 
 This replaces an earlier two-term form that tried to conserve *money* across an order's lifecycle. It could not: a $100 order filling $40 and then cancelling left $40 against a $100 placement, and adding a third term for released cash would still have broken the moment a fill cost more than its share of the estimate.
 
@@ -100,7 +104,7 @@ The two readings must not be left side by side. ADR 0010 carries a pointer to th
 - **The available-cash figure becomes decision-relevant state carried within a bar**, where it was previously a constant for the whole bar. Replay must reproduce it exactly, and a run containing both a debit and a credit is the case to pin.
 - **`ProposalDeclinedPayload`'s cash fields change meaning.** `DeclineReasonInsufficientCash` documents `AvailableCash` as the cash available at the previous close, and the existing Add-decline tests assert that unchanged figure. Under this ADR the comparison is made against the balance remaining at the moment of the attempt, so `AvailableCash` must carry that and `RequiredCash` the cost compared against it. The two figures must still be the ones the comparison actually used — that is what makes a decline auditable — so this is a schema change with its own version bump, not a re-labelling.
 - **The check moves from the proposal path to order placement.** Today the decline is raised where a proposal is built (`internal/strategy/reducer.go` for entries, `campaign.go` for Adds). That is the right place for a decision and the wrong place for an affordability test, since nothing has been spent yet.
-- **#106 folds into this.** A withdrawal between snapshots still leaves the reducer optimistic until the next one arrives; the ledger does not fix that, because a movement is not a fill. Whether `account.cash-movement` should also adjust the figure is decided there, and this ADR does not pre-empt it — but the two now share one mechanism to adjust rather than needing separate ones.
+- **#106 folds into this.** A withdrawal between snapshots still leaves the reducer optimistic until the next one arrives; the ledger does not fix that, because a movement is not a fill. The cash-movement amendment below now settles that question; the eventual fill ledger must carry the same withdrawal debits rather than debit them twice.
 - `cmd/backtest` must model cash well enough to state a previous-close figure per day rather than once per run (#128). Until it does, the command's runs remain the weakest evidence this project produces about cash.
 - Live trading gains the shape it needs: the broker is authoritative at execution, and the backtest's per-fill ledger stands in for that query. Reconciliation (ADR 0019) continues to explain cash by enumerated causing events rather than adopting a balance, and this ledger is one such enumeration.
 
@@ -118,3 +122,59 @@ Which of two competing entries is funded when only one fits is settled by whiche
 So the multi-instrument case is deterministic for a single build and not yet governed by a stated rule. #32 and #34 close that, and it is the right place for it: an execution-level ordering is a decision about the whole daily loop, not about cash.
 
 The single-instrument sequential-Adds case — four rungs on one instrument in one bar — does not depend on any of it, is reachable today, and is what the implementation must fix first.
+
+## Amendment: cash movements constrain spendable cash (2026-09-23)
+
+A cash movement is not a fill and is not a replacement balance statement.
+The three alternatives in #106 were to apply both signs and advance the basis,
+invalidate the basis until a snapshot arrives, or require the producer to send
+one. None follows the asymmetry above as closely as applying only the debit:
+
+- **An accepted withdrawal immediately reduces snapshot-backed spendable cash.**
+  Subtract its magnitude once, in recorded account-event order, even if its
+  timestamp is inside the decision bar. Repeated withdrawals accumulate.
+- **A deposit adds nothing to spendable cash.** A later accepted snapshot may
+  include it, but that snapshot must still be no later than the decision bar's
+  previous close before its cash may be spent. Passage of a bar alone does not
+  promote deposits: a movement states a delta, not the account's balance.
+- Keep the snapshot's as-of timestamp and presence flag. Neither sign establishes
+  an unknown balance or makes a snapshot from inside the decision bar eligible.
+  With no snapshot, affordability continues to fail closed under ADR 0010.
+- A subsequent snapshot replaces the constrained figure outright; earlier
+  withdrawals are already reflected in that balance and must not be deducted
+  again. Shared, strictly increasing account-event chronology rejects duplicate
+  or out-of-order movements and snapshots before they can change cash.
+- Spendable cash has a floor of zero. If withdrawals consume or exceed the known
+  cash, no Unit can be funded until a later eligible snapshot supplies cash.
+  This floor represents purchasing capacity, not a claim that actual cash cannot
+  be negative. The full movement remains in the journal; deposits never offset
+  the floor, and ADR 0019's reconciliation obligations remain unchanged.
+- Apply the spendable adjustment only after the movement passes validation,
+  chronology, currency and ADR 0007's Notional Account scaling. Rejected
+  movements must not change spendable cash. ADR 0007's proportional scaling of
+  the Notional Account, yearly starting figure and measurement base is unchanged.
+
+This follows because a known withdrawal can only remove opportunities: it does
+not let a decision exploit an unknown intraday sequence to spend more. The
+converse credit could do exactly that. Keeping the snapshot timestamp preserves
+its eligibility test while the debit imposes an additional constraint; advancing
+it would instead halt all decisions after an ordinary movement, even those still
+fundable. Invalidation is safe but unnecessarily restrictive, and relying solely
+on an unenforced producer contract leaves the unsafe interval intact. Applying
+both signs would admit same-day deposits and violate the credit rule.
+
+This is a project cash-safety rule, not a Turtle rule from the primary sources.
+It changes affordability only; it does not amend any DISCLOSED strategy rule or
+blend Baseline and Variant settings. At this amendment's implementation point,
+the reducer still checks entry and Add proposals, and the broader order/fill
+ledger above remains work for #105. Both existing checks must use the reduced
+figure now; that does not claim cumulative fill affordability is implemented.
+
+`strategy.proposal.declined` advances to payload schema **3**: `AvailableCash`
+means spendable cash at the attempt after accepted withdrawal debits, and
+`RequiredCash` remains the Unit cost actually compared. Old schema-2 decisions
+must not silently acquire that meaning. There are no new fields and neither
+cash-movement nor account-snapshot input schemas change. The future fill ledger
+must account for its own cost/check changes when versioning this contract.
+Replay uses the journal's movement order, including the original full amounts,
+so neither the conservative floor nor deferred deposits discard audit evidence.

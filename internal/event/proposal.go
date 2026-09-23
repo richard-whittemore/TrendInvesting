@@ -33,7 +33,11 @@ const ProposalDeclinedEventType = "strategy.proposal.declined"
 //     version-1 record decodes Kind as the empty string, which is not a
 //     recognised value, so it is rejected outright — the same discipline
 //     ProposalExpiredSchemaVersion's own version-2 bump follows.
-const ProposalDeclinedSchemaVersion uint32 = 2
+//   - Version 3 makes AvailableCash the spendable cash at the attempt after
+//     accepted withdrawal debits (ADR 0020's cash-movement amendment).
+//     RequiredCash remains the Unit cost compared against it. Schema-2
+//     decisions must not silently acquire this meaning (ADR 0015).
+const ProposalDeclinedSchemaVersion uint32 = 3
 
 // The rule names for TradeProposalPayload.Rule, one per Sizing Mode.
 //
@@ -81,8 +85,9 @@ const (
 	// fraction.
 	DeclineReasonStopIntentNotPositive = "stop-intent-not-positive"
 	// DeclineReasonInsufficientCash means the Unit's cost — quantity x the
-	// order's resting level x dollars per point — exceeds the cash available
-	// at the previous close (ADR 0010). There is no partial Unit and no
+	// order's resting level x dollars per point — exceeds snapshot-backed
+	// spendable cash after accepted withdrawal debits (ADR 0010 and ADR
+	// 0020's cash-movement amendment). There is no partial Unit and no
 	// borrowing: the whole Unit is skipped, and RequiredCash/AvailableCash
 	// carry the two figures the comparison was made from.
 	DeclineReasonInsufficientCash = "insufficient-cash"
@@ -466,8 +471,9 @@ type ProposalDeclinedPayload struct {
 	// It is required: a reason without its figures cannot be checked.
 	Detail string `json:"detail"`
 	// RequiredCash and AvailableCash are the two figures
-	// DeclineReasonInsufficientCash was compared from (ADR 0010): the Unit's
-	// cost, and the cash available at the previous close. Required, finite,
+	// DeclineReasonInsufficientCash was compared from: the Unit's cost, and
+	// snapshot-backed spendable cash at the attempt after accepted withdrawal
+	// debits (ADR 0010 and ADR 0020's cash-movement amendment). Required, finite,
 	// not negative, and RequiredCash strictly greater than AvailableCash —
 	// exactly the comparison that makes the Unit unaffordable — when Reason
 	// is DeclineReasonInsufficientCash; both must be exactly zero for every

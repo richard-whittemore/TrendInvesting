@@ -36,7 +36,15 @@ package strategy
 // disagree outright: the older one fails the run where this one records the
 // exit. That is a decision the rules now make differently, which is what
 // this version names, so the two cannot share it.
-const RulesVersion = "1.2.0"
+//
+// Bumped 1.2.0 -> 1.3.0 when an accepted withdrawal began reducing the cash
+// an entry or Add is checked against, immediately and with a floor of zero,
+// while a deposit still waits for a snapshot (ADR 0020's cash-movement
+// amendment). Given the same inputs, a run containing a withdrawal can now
+// decline a Unit the older build proposed. A run with no cash movement
+// decides exactly as before, but the two builds no longer replay each
+// other's journals in general, so they cannot share a version.
+const RulesVersion = "1.3.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -96,4 +104,7 @@ const RulesVersion = "1.2.0"
 // honestly.
 var RuleSurfaceFingerprints = map[string]string{
 	"1.2.0": "655e43354aa890c64ae02fc078c73274157657cd792adfa24d12fdf9b6bab57b",
+	// Unchanged from 1.2.0: the 1.3.0 change is a changed predicate, not a
+	// changed constant — exactly the gap described above.
+	"1.3.0": "655e43354aa890c64ae02fc078c73274157657cd792adfa24d12fdf9b6bab57b",
 }

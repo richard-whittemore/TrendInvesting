@@ -11,7 +11,7 @@ Under the intraday fill model (ADR 0005) a daily bar cannot say whether a stop i
 
 Within a trading day, events are processed in the order **Protective Stops and Exit-Channel exits → Adds → new entries**. However, **the cash and Unit-cap headroom available to every Add and entry are those known at the previous close**. Exits in bar *t* free capital and headroom for bar *t+1*, never for bar *t*.
 
-> **Amended by [ADR 0020](0020-sizing-uses-the-previous-close-affordability-binds-order-placement.md) (2026-09-22), for cash only.** The previous close remains the basis for **sizing** and for **Unit-cap headroom**, unchanged. For **affordability**, the cash available to a Unit is the previous close's figure *less what this bar's earlier fills have already spent*, and the check binds whether an order is placed rather than whether a recorded fill is applied — because several Units checked independently against one unmoved figure can each pass while together overspending the account. Credits still wait for the next previous close, so the sentence above continues to hold in the direction it was written to protect.
+> **Amended by [ADR 0020](0020-sizing-uses-the-previous-close-affordability-binds-order-placement.md) (2026-09-22), for cash only.** The previous close remains the basis for **sizing** and for **Unit-cap headroom**, unchanged. For **affordability**, the cash available to a Unit is the previous close's figure *less what this bar's earlier fills have already spent*, and the check binds whether an order is placed rather than whether a recorded fill is applied — because several Units checked independently against one unmoved figure can each pass while together overspending the account. Credits still wait for the next previous close, so the sentence above continues to hold in the direction it was written to protect. ADR 0020’s 2026-09-23 cash-movement amendment also subtracts accepted withdrawals immediately, defers deposits until an eligible replacement snapshot, and preserves the original snapshot timestamp.
 
 When the next Unit costs more than the available cash, the Unit is **skipped** and the rejection is journaled with reason `insufficient-cash`; there are no partial Units, no borrowing, and no deferred queue.
 
@@ -19,7 +19,7 @@ Simultaneous signals are ranked by Faith's mechanical strength measure — **(cl
 
 ## Consequences
 
-- The day's decisions are reproducible from a single snapshot at the previous close.
+- The day's decisions are reproducible from the previous-close snapshot and the recorded debit/hold events specified by ADR 0020, including cash withdrawals.
 - The model is never optimistic about cash or caps.
 - A partial Unit would break the Unit-as-risk-measure invariant the caps depend on; skipping preserves it.
 - Sublime's sector-strength ranking is a declared Variant of the ranking rule.

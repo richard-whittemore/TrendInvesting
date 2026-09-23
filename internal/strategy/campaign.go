@@ -1013,9 +1013,9 @@ func (r *Reducer) evaluateAdd(state *instrumentState, input event.Envelope) ([]e
 
 	unitIndex := len(campaign.units) + 1
 
-	// ADR 0010's cash basis, the identical check sizeUnit (reducer.go)
-	// applies to a new entry, and measured at the same instant: the decision
-	// bar's previous close, which for a same-bar Add chain is
+	// ADR 0010's snapshot eligibility and ADR 0020's withdrawal-constrained
+	// spendable cash, the identical check sizeUnit applies to a new entry.
+	// The decision bar's previous close for a same-bar Add chain is
 	// state.lastBarEarliestFillAt — the moment the bar being decided opened.
 	// Read here, after the rung is confirmed reached (state.lastBarHigh >=
 	// rung, above) and before any proposal is built, so a decline carries the
@@ -1036,7 +1036,7 @@ func (r *Reducer) evaluateAdd(state *instrumentState, input event.Envelope) ([]e
 	case !costRepresentable:
 		declined, err := r.declineAdd(campaign, state.lastBarPeriodEnd, unitIndex, input,
 			event.DeclineReasonUnitCostNotRepresentable,
-			fmt.Sprintf("unit %d cost (%d shares x rung %v x %v dollars per point) leaves the representable range, so it exceeds any cash that could fund it; the cash available at the previous close was %v",
+			fmt.Sprintf("unit %d cost (%d shares x rung %v x %v dollars per point) leaves the representable range, so it exceeds any cash that could fund it; spendable cash at the attempt was %v",
 				unitIndex, campaign.unitQuantity, rung, r.dollarsPerPoint, availableCash),
 			0, 0)
 		if err != nil {
@@ -1047,7 +1047,7 @@ func (r *Reducer) evaluateAdd(state *instrumentState, input event.Envelope) ([]e
 		// No partial Unit, ever: the whole Unit is skipped (ADR 0010).
 		declined, err := r.declineAdd(campaign, state.lastBarPeriodEnd, unitIndex, input,
 			event.DeclineReasonInsufficientCash,
-			fmt.Sprintf("unit %d cost %v (%d shares x rung %v x %v dollars per point) exceeds the cash available at the previous close %v",
+			fmt.Sprintf("unit %d cost %v (%d shares x rung %v x %v dollars per point) exceeds spendable cash at the attempt %v",
 				unitIndex, cost, campaign.unitQuantity, rung, r.dollarsPerPoint, availableCash),
 			cost, availableCash)
 		if err != nil {
