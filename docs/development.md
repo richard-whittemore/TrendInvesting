@@ -169,6 +169,10 @@ exercises their encoding-error path, which must not be excluded from coverage.
 
 Neither guard reads a rule's own logic. The fingerprint sees a changed CONSTANT; the corpus sees a changed DECISION. Between them they catch a rule change that either renames/re-values a declared constant or alters the outcome of some recorded scenario — but a changed PREDICATE that no recorded scenario happens to exercise is invisible to both, honestly (see the corpus's own doc comment). This is why the fixture set matters: a scenario that never exercises the new behavior gives the corpus nothing to catch it with.
 
+The sharpest form of that gap is **a new rule arriving together with the tests that exercise it**. Those tests are new scenarios, and a new scenario is admitted by `-update-decision-corpus` with no bump, so the corpus stays green. The 1.2.0 -> 1.3.0 withdrawal rule has exactly that shape. Removing the withdrawal debit alone from the current tree changes the decisions of six scenarios — `TestCashMovementSpendable/*` and `TestAWithdrawalReducesTheCashAnAddIsCheckedAgainst` — and every one of them was added in the same change as the rule. No scenario that predates it exercises a withdrawal. (Replaying that change against a 1.2.0 corpus does trip five older cash-skip scenarios, but only because the same change also moved the decline payload to schema 3 and reworded its detail; the rule itself would have passed.)
+
+So when the corpus asks you to add scenarios, ask of each one whether the previous build would have decided the same thing. If not, the behaviour it pins is new, and that is a rule change needing a bump, not an add. No mechanical check answers that question; the failure message asks it so that a reviewer is not the only one who does.
+
 **What trips the corpus:**
 
 - A pinned scenario's hash differs from what this run recorded: the reducer decided something different under an unchanged `RulesVersion`. Per ADR 0016 this is a rule change, not a journal-replay divergence, and needs (1) a `RulesVersion` bump, (2) a new `testdata/decision-corpus/<new-version>.json`, and (3) a new row in `RuleSurfaceFingerprints`.

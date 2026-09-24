@@ -337,7 +337,10 @@ func decideDecisionCorpus(existing map[string]string, found bool, recorded map[s
 		} else {
 			problems = append(problems, fmt.Sprintf(
 				"decision corpus %s: %d scenario(s) were recorded but are not pinned (a new test) — rerun with "+
-					"-update-decision-corpus to ADD them (it never rewrites an existing entry). New scenario(s): %s",
+					"-update-decision-corpus to ADD them (it never rewrites an existing entry). Before you do: if any of "+
+					"these scenarios pins behaviour the previous build did not have, it is a new rule arriving with its "+
+					"own tests, which this corpus cannot tell from a new test of an old rule — that is a RulesVersion "+
+					"bump (ADR 0016), not an add. New scenario(s): %s",
 				path, len(added), strings.Join(added, ", ")))
 		}
 	}
