@@ -2,7 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
-from datetime import time
+from datetime import datetime, time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,7 +29,7 @@ class FakeAlgorithm:
         return types.SimpleNamespace(Symbol="AAPL")
     def SetWarmUp(self, count, resolution):
         self.warmup = (count, resolution)
-    def Log(self, message): pass
+    def Log(self, message): self.__dict__.setdefault("logs", []).append(message)
     def Quit(self, message): self.quit_reason = message
     # Every LEAN order entry point records its call, so a test can assert that
     # none was made rather than relying on the method being absent.
@@ -43,11 +43,18 @@ imports.QCAlgorithm = FakeAlgorithm
 imports.Resolution = types.SimpleNamespace(Daily="daily")
 imports.DataNormalizationMode = types.SimpleNamespace(SplitAdjusted="split", Raw="raw")
 imports.TimeZones = types.SimpleNamespace(NewYork="NY")
+imports.DelistingType = types.SimpleNamespace(Warning="warning", Delisted="delisted")
 imports.time = time
 sys.modules["AlgorithmImports"] = imports
 spec = importlib.util.spec_from_file_location("lean_algorithm", Path(__file__).parents[1] / "algorithm.py")
 algorithm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(algorithm)
+
+
+def slice_of(bars=None, delistings=None, changes=None):
+    """A LEAN data slice: LEAN always provides all three collections."""
+    return types.SimpleNamespace(Bars=bars or {}, Delistings=delistings or {},
+                                 SymbolChangedEvents=changes or {})
 
 
 class AlgorithmTests(unittest.TestCase):
@@ -74,7 +81,7 @@ class AlgorithmTests(unittest.TestCase):
             b = bar(day)
             algo.IsWarmingUp = warming
             algo.History = lambda *args, **kwargs: Frame(b.EndTime)
-            algo.OnData(types.SimpleNamespace(Bars={"AAPL": b}))
+            algo.OnData(slice_of({"AAPL": b}))
         # Every completed bar is published, warm-up included: the reducer
         # builds N and the Entry/Exit Channels from every bar it receives, so
         # withholding LEAN's warm-up bars would starve those figures rather
@@ -94,7 +101,7 @@ class AlgorithmTests(unittest.TestCase):
             b = bar(day)
             algo.IsWarmingUp = warming
             algo.History = lambda *args, **kwargs: Frame(b.EndTime)
-            algo.OnData(types.SimpleNamespace(Bars={"AAPL": b}))
+            algo.OnData(slice_of({"AAPL": b}))
         self.assertFalse(algo.failed)
         # The first bar carries Sequence 2 (continuing the engine's own
         # configuration input at Sequence 1), and warm-up bars share that
@@ -125,7 +132,7 @@ class AlgorithmTests(unittest.TestCase):
         algo.client.after_reply = update_portfolio
         algo.IsWarmingUp = True
         algo.History = lambda *args, **kwargs: Frame(bar(6).EndTime)
-        algo.OnData(types.SimpleNamespace(Bars={"AAPL": bar(6)}))
+        algo.OnData(slice_of({"AAPL": bar(6)}))
         self.assertFalse(algo.failed)
         self.assertEqual(algo.client.sent[-1]["payload"], {
             "as_of": "2014-06-06T20:00:00Z", "equity": 123456.75,
@@ -142,7 +149,7 @@ class AlgorithmTests(unittest.TestCase):
                 algo.client.reply_overrides = {"account.snapshot": {field: value}}
                 algo.IsWarmingUp = True
                 algo.History = lambda *args, **kwargs: Frame(bar(6).EndTime)
-                data = types.SimpleNamespace(Bars={"AAPL": bar(6)})
+                data = slice_of({"AAPL": bar(6)})
                 algo.OnData(data)
                 self.assertTrue(algo.failed)
                 self.assertTrue(algo.client.closed)
@@ -156,7 +163,7 @@ class AlgorithmTests(unittest.TestCase):
         algo.client.reply_overrides = {"market.bar.completed": {"sequence": 99}}
         algo.IsWarmingUp = True
         algo.History = lambda *args, **kwargs: Frame(bar(6).EndTime)
-        algo.OnData(types.SimpleNamespace(Bars={"AAPL": bar(6)}))
+        algo.OnData(slice_of({"AAPL": bar(6)}))
         self.assertTrue(algo.failed)
         self.assertEqual(len(algo.client.sent), 1)
 
@@ -164,7 +171,7 @@ class AlgorithmTests(unittest.TestCase):
         algo = self.init()
         algo.IsWarmingUp = False
         algo.History = lambda *args, **kwargs: None
-        data = types.SimpleNamespace(Bars={"AAPL": bar(9)})
+        data = slice_of({"AAPL": bar(9)})
         algo.OnData(data)
         self.assertTrue(algo.failed)
         self.assertEqual(algo.bar_count, 0)
@@ -198,7 +205,7 @@ class AlgorithmTests(unittest.TestCase):
             b = bar(day)
             algo.IsWarmingUp = True
             algo.History = lambda *args, **kwargs: Frame(b.EndTime)
-            algo.OnData(types.SimpleNamespace(Bars={"AAPL": b}))
+            algo.OnData(slice_of({"AAPL": b}))
         self.assertEqual(algo.warmup_seen, 3)
         self.assertFalse(algo.failed)
 
@@ -255,3 +262,72 @@ class CashSettingTests(unittest.TestCase):
                 algo = self.start(settings)
                 self.assertTrue(algo.failed)
                 self.assertFalse(hasattr(algo, "cash"))
+
+
+class DelistingTests(unittest.TestCase):
+    """LEAN's DELISTED stops the run; nothing about it is ever published.
+
+    LEAN reported GOOAV — a when-issued share that converted into GOOG — as
+    DELISTED on 2014-04-03, and its delisting carries no reason, so the
+    adapter cannot tell a real delisting from a conversion.
+    """
+
+    def start(self):
+        algo = AlgorithmTests.init(self)
+        algo.IsWarmingUp = False
+        return algo
+
+    def feed(self, algo, day, **kwargs):
+        b = bar(day)
+        algo.History = lambda *args, **kw: Frame(b.EndTime)
+        algo.OnData(slice_of({"AAPL": b}, **kwargs))
+
+    def notice(self, kind, day=9):
+        return types.SimpleNamespace(Type=kind, Time=datetime(2014, 6, day))
+
+    def test_delisted_with_a_bar_publishes_the_bar_then_stops(self):
+        algo = self.start()
+        self.feed(algo, 6)
+        self.feed(algo, 9, delistings={"AAPL": self.notice("delisted")})
+        # The day's real bar and its snapshot still reach the engine; the
+        # delisting itself is never published, and the run stops naming it.
+        self.assertEqual([e["type"] for e in algo.client.sent],
+                         ["market.bar.completed", "account.snapshot"] * 2)
+        self.assertTrue(algo.failed)
+        self.assertIn("AAPL DELISTED", algo.quit_reason)
+
+    def test_delisted_on_a_barless_slice_stops_and_publishes_nothing(self):
+        algo = self.start()
+        self.feed(algo, 6)
+        sent = len(algo.client.sent)
+        algo.OnData(slice_of({}, delistings={"AAPL": self.notice("delisted")}))
+        self.assertEqual(len(algo.client.sent), sent)
+        self.assertTrue(algo.failed)
+
+    def test_nothing_is_published_after_the_stop(self):
+        algo = self.start()
+        algo.OnData(slice_of({}, delistings={"AAPL": self.notice("delisted")}))
+        self.feed(algo, 10)
+        self.assertEqual(algo.client.sent, [])
+
+    def test_a_delisting_warning_is_logged_and_the_run_continues(self):
+        algo = self.start()
+        self.feed(algo, 6, delistings={"AAPL": self.notice("warning", 6)})
+        self.feed(algo, 9)
+        self.assertFalse(algo.failed)
+        self.assertEqual(len(algo.client.sent), 4)
+        self.assertTrue(any("delisting warning for AAPL" in m for m in algo.logs))
+
+    def test_another_instruments_delisting_is_ignored(self):
+        algo = self.start()
+        self.feed(algo, 6, delistings={"MSFT": self.notice("delisted", 6)})
+        self.assertFalse(algo.failed)
+
+    def test_a_symbol_change_is_logged_and_never_published(self):
+        algo = self.start()
+        change = types.SimpleNamespace(OldSymbol="GOOAV", NewSymbol="GOOG")
+        self.feed(algo, 6, changes={"AAPL": change})
+        self.assertFalse(algo.failed)
+        self.assertEqual([e["type"] for e in algo.client.sent],
+                         ["market.bar.completed", "account.snapshot"])
+        self.assertTrue(any("symbol changed GOOAV -> GOOG" in m for m in algo.logs))
