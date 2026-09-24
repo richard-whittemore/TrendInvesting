@@ -283,10 +283,12 @@ func checkOneOperation(modes, run []named) error {
 // because internal/ performs no I/O (docs/development.md).
 //
 // Directory listing goes through Readdirnames rather than os.ReadDir. Names
-// are all registry.Store asks for, and the file metadata os.ReadDir would
-// also return is what carries this toolchain's known os defect (GO-2026-4602,
-// fixed in go1.25.8), which govulncheck reports for any caller of it. Reading
-// names alone asks for less and is therefore unaffected.
+// are all registry.Store asks for; reading only that asks for less than the
+// file metadata os.ReadDir would also return, and stays unaffected by
+// whatever that wider surface carries next (it carried GO-2026-4602 on an
+// earlier pinned toolchain; the fix landed in go1.25.8). The seam is kept
+// regardless of whether a defect is currently live — least-privilege reads
+// need no vulnerability to justify them.
 type registryStore struct{ root string }
 
 func (s registryStore) ReadDir(dir string) ([]string, error) {
