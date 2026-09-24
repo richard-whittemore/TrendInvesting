@@ -3,6 +3,35 @@
 - Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery)
 - Date: 2026-09-17
 
+## In plain English
+
+*A summary for reading the rest of this ADR against. Where the two differ, the detailed text below governs.*
+
+**What this is about.** The system keeps its own record of what it holds: shares, cash and resting orders. The broker keeps the real one. They can drift apart: a fill report goes missing, a dividend posts, someone trades by hand, or the broker cancels an order. This ADR decides how the system notices, and what it does.
+
+**How it checks.** It regularly compares its records with the broker's: at startup, before each trading day, after every fill, before every order, and on a timer in between. A difference is fine **only if the system already has a recorded reason for it**, such as a logged dividend or a logged fill. It never copies the broker's numbers to make a difference go away, because then it would be trading positions it can't explain. Every difference counts, down to one share or one cent.
+
+**What it does when something doesn't add up.** There are three states:
+
+| State | When | What the system still does | What it stops doing |
+|---|---|---|---|
+| **Normal** | Everything matches or is explained | Everything | Nothing |
+| **Degraded** | A difference it can't explain, but it can say *which* cash or *which* stocks are affected | Keeps protecting every position: raises stops and takes exits on unaffected stocks, and **re-places a missing stop** on an affected stock at its last known level (once only) | Opens **no** new positions and adds to none. Leaves the affected stocks' orders alone, apart from that one stop repair |
+| **Halted** | It can't trust the broker's data at all, or can't tell what's affected | Nothing. Stops already resting at the broker keep working on their own | Changes no orders |
+
+The guiding rule: **a problem is a reason to stop taking on new risk, not a reason to stop protecting what you already hold.**
+
+**Safety rules that always apply.**
+- Every held Unit always has exactly **one** good-till-cancelled stop order at the broker. An exit **moves** that stop rather than placing a second sell order, so the system can never sell more than it owns and end up short.
+- If the broker shows more sell orders than shares held, for example because of an unknown order, the alert says **CONTAINMENT REQUIRED** and you fix that first.
+- If the broker holds a position the system knows nothing about, for example after a manual trade, the alert marks it **UNPROTECTED**. The system won't invent a stop for it. That's your call.
+
+**How you find out.** Any move out of Normal alerts you **immediately** on at least two channels (your choice: SMS plus push, pager-style), and **keeps repeating until you acknowledge it**. Separately, an outside service watches for the system's regular heartbeat, so if the system crashes and can't alert you itself, you still get paged. Each alert tells you what happened, which positions are affected, whether each has a stop, and what the system is and isn't still doing.
+
+**How it gets back to Normal.** Never on its own, even if the numbers later match, and not after a restart either. You follow the runbook (`docs/runbooks/reconciliation.md`): acknowledge the alert, find the cause in the broker's records, record the missing event (the fill, trade, dividend and so on), decide what to do with any affected order, then approve a restart. The restart must pass a fresh check before trading resumes.
+
+**Before any of this is live.** This is a design, not code yet. It also needs journal durability (#151), the alert and heartbeat services set up and priced, and timing limits you choose and we prove out in paper trading.
+
 ## Context
 
 Every sizing, risk and exit decision depends on believed holdings. Correct arithmetic over a position the broker has already liquidated is still wrong. [Issue #114](https://github.com/richard-whittemore/TrendInvesting/issues/114) identifies missed, late or malformed fill reports, incorrect partial-fill accounting, corporate actions, broker liquidations, manual trades, cash transfers, cancelled or expired orders, fees, interest and dividends as causes of divergence. Checking our holdings alone also misses a position present only at the broker.
