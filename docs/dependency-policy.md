@@ -17,13 +17,15 @@ Commit `go.mod` and `go.sum`. Do not use an unreviewed `replace` or `exclude` di
 
 ## Development tools
 
-Go-based tools must be tracked with Go 1.24 `tool` directives and invoked with `go tool`. Pin released, Go-1.24-compatible versions; do not install `@latest` in CI. The tools are:
+Go-based tools must be tracked with `tool` directives for the Go version this module currently declares and invoked with `go tool`. Pin released, compatible versions; do not install `@latest` in CI. The tools are:
 
-- Staticcheck for repeatable linting;
-- `govulncheck` for reachable known-vulnerability analysis; and
-- golangci-lint (**pinned to v2.8.0**) for correctness linting and for mechanically enforcing the architectural and determinism rules in `AGENTS.md` — see `.golangci.yml`.
+- Staticcheck (pinned to v0.6.1, unchanged since it only requires `go 1.23` — well under the current floor) for repeatable linting;
+- `govulncheck` (pinned to v1.1.4, unchanged since it only requires `go 1.22.0`) for reachable known-vulnerability analysis; and
+- golangci-lint (**pinned to v2.14.0**) for correctness linting and for mechanically enforcing the architectural and determinism rules in `AGENTS.md` — see `.golangci.yml`.
 
-> **Do not upgrade golangci-lint without checking its Go requirement.** Releases from v2.10.0 onward declare `go >= 1.25`, and v2.13 declares `go >= 1.26`. Adding one rewrites this module's `go` directive to match, which breaks `GOTOOLCHAIN=local` against the `1.24.4` pin in `.go-version` and silently reintroduces automatic toolchain downloads. v2.8.0 is the newest release compatible with Go 1.24. Moving past it is a deliberate toolchain upgrade: bump `.go-version`, `go.mod`, and the installed toolchain together, and record the decision.
+> **Do not upgrade golangci-lint without checking its Go requirement.** Every release states, in its own `go.mod`, the minimum Go version it needs; check that file (`go mod download` the candidate version and read its `go` directive) before bumping the pin, not the release notes alone. `go get` a newer golangci-lint pulls its own dependency versions along with it under minimum version selection — including a newer `honnef.co/go/tools` (the same module that backs the separate Staticcheck pin above) — so a routine bump can still change what a `go tool` command sees, even when this policy's own Staticcheck pin line is untouched.
+>
+> **History:** v2.8.0 was the newest release compatible with Go 1.24 (`go 1.24.0`). v2.10.0 onward requires `go >= 1.25`; v2.13 requires `go >= 1.26`. `os.ReadDir`, `os.DirFS`, and `fs.ReadDir` were reachable-vulnerable on 1.24.4 (GO-2026-4602, fixed in 1.25.8), which forced the floor to Go 1.27.1 and, with it, golangci-lint to v2.14.0 (`go 1.26.0`, the newest v2 release at the time and comfortably under the new floor). `.go-version`, `go.mod`'s `go` directive, and the installed toolchain moved together, as this policy requires; `GOTOOLCHAIN=local` was unaffected — it still refuses any toolchain the machine does not already have, it now just refuses anything short of 1.27.1.
 
 ## GitHub Actions
 

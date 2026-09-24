@@ -24,7 +24,7 @@ This initial foundation contains the event contract, deterministic replay sequen
 
 ## Quick start
 
-Requirements: Go 1.24 or newer.
+Requirements: Go 1.27.1 or newer (see `.go-version`; `GOTOOLCHAIN=local` means no other version is fetched automatically).
 
 ```sh
 make check
