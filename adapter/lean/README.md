@@ -153,9 +153,10 @@ levels.
   <id>: <reason>`: an instrument that isn't this run's symbol or isn't
   tradable, a quantity that isn't a positive whole number, a level that isn't
   a positive price, a direction other than long, a stale proposal, one already
-  submitted, an order LEAN itself refuses, an Exit-Order level older than the
-  one in force, and any new sell order that would take the working sell
-  quantity past the holding. The totals are logged at the end of the run.
+  submitted, an order LEAN itself refuses, and an Exit-Order level older than
+  the one in force. The totals are logged at the end of the run. A rejected
+  entry or Add is a proposal the engine re-issues on a later bar, not a
+  protection gap.
 - **An Exit Order amendment LEAN doesn't acknowledge leaves the previous level
   in force**, and is logged (ADR 0019's amendment).
 - **A decision answering a warm-up bar is never acted on**, and **nothing is
@@ -165,6 +166,14 @@ levels.
   version of one of these decision types, an Exit Order for a Campaign whose
   frozen N was never sent, or an Exit-Order level for a Unit whose LEAN order
   is no longer working or sells a different quantity.
+- **An Exit Order that would sell more than LEAN holds stops the run.** The
+  working sell quantity never exceeds the holding; if a Unit's new Exit Order
+  would take it past (including when LEAN holds nothing at all), LEAN's
+  holding and the engine's Exit Orders disagree. Refusing the order and
+  carrying on would leave that Unit silently without a stop, so the run stops
+  through the fail-closed path, with a reason naming the instrument, the
+  Campaign and Unit, the working sell quantity and the holding. Containment is
+  then a person's decision (ADR 0019's amendment), not the system's.
 
 **Costs (ADR 0013).** Every order's fill slips by `slippage_n` × the N the
 engine supplied with it: a trade proposal's `n`, an Add proposal's

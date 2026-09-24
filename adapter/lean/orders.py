@@ -305,8 +305,8 @@ class OrderDesk:
         own quantity, at the level the engine set. A later level for the same
         Unit amends that order and never adds a second, and an amendment LEAN
         does not acknowledge leaves the previous level in force (ADR 0019's
-        amendment). No new sell order may take the working sell quantity past
-        the holding.
+        amendment). A new sell order that would take the working sell
+        quantity past the holding stops the run.
         """
         tag = decision.get("id")
         reason = self._tradable_reason(payload)
@@ -346,9 +346,16 @@ class OrderDesk:
         holding = self.algorithm.Portfolio[self.symbol].Quantity
         working = self._working_sell_quantity()
         if working + quantity > holding:
-            self._reject(decision, "selling {} more would bring working sell orders to {}, past "
-                                   "the holding of {}".format(quantity, working + quantity, holding))
-            return
+            # LEAN's holding and the engine's Exit Orders disagree. Refusing
+            # the order and carrying on would leave this Unit silently without
+            # a stop, so the run stops instead: containment is a person's
+            # decision (ADR 0019's amendment), never the system's.
+            raise Uncertain("instrument {!r} campaign {!r} unit {}: its Exit Order {} for {} "
+                            "shares would bring working sell orders to {}, past the holding "
+                            "of {} (working sell quantity {}); the Unit cannot be protected "
+                            "as the engine believes".format(
+                                self.instrument, unit[0], unit[1], tag, quantity,
+                                working + quantity, holding, working))
         properties = self.lean.OrderProperties()
         properties.TimeInForce = self.lean.TimeInForce.GoodTilCanceled
         self.n_by_tag[tag] = n

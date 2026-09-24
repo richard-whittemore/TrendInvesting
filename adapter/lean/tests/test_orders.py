@@ -350,21 +350,35 @@ class ExitOrderTests(OrderTestCase):
         self.assertEqual(ticket.StopPrice, 22.1)
         self.assertTrue(any("not acknowledged" in m for m in algo.logs))
 
+    def assert_stopped_after(self, algo, sent_before_stop):
+        """The run stopped, and nothing further reaches LEAN or the engine."""
+        self.assertTrue(algo.failed)
+        orders = len(getattr(algo, "orders", []))
+        self.feed(algo, 10, [trade_proposal(10), exit_order_set(10, unit_index=3)])
+        self.assertEqual(len(getattr(algo, "orders", [])), orders)
+        self.assertEqual(len(algo.client.sent), sent_before_stop)
+
     def test_the_working_sell_quantity_never_exceeds_the_holding(self):
         algo = self.start()
         self.hold(algo, 100)
         refused = exit_order_set(9, unit_index=2, quantity=100)
-        self.feed(algo, 9, [campaign_opened(), exit_order_set(9, unit_index=1), refused])
+        # Unit 2's order would be placed before any later decision in the same
+        # reply; the entry after it must not be submitted either.
+        self.feed(algo, 9, [campaign_opened(), exit_order_set(9, unit_index=1), refused,
+                            trade_proposal(9)])
         self.assertEqual([t.Quantity for t in self.tickets(algo)], [-100])
-        [rejection] = self.rejections(algo)
-        self.assertIn(refused["id"], rejection)
-        self.assertIn("holding", rejection)
+        for fact in ("'AAPL'", "unit 2", refused["id"], "working sell quantity 100",
+                     "holding of 100"):
+            self.assertIn(fact, algo.quit_reason)
+        self.assert_stopped_after(algo, len(algo.client.sent))
 
-    def test_an_exit_order_with_no_holding_is_refused(self):
+    def test_an_exit_order_with_no_holding_stops_the_run(self):
         algo = self.start()
         self.feed(algo, 9, [campaign_opened(), exit_order_set(9)])
         self.assertEqual(self.tickets(algo), [])
-        self.assertIn("holding", self.rejections(algo)[0])
+        for fact in ("'AAPL'", "unit 1", "working sell quantity 0", "holding of 0"):
+            self.assertIn(fact, algo.quit_reason)
+        self.assert_stopped_after(algo, len(algo.client.sent))
 
     def test_an_exit_order_for_another_instrument_is_rejected(self):
         algo = self.start()
