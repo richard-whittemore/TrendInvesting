@@ -65,7 +65,7 @@ type Execution struct {
 	// reference price and so executed there rather than at its level — a gap
 	// through. The per-bar protocol uses it to order fills within a bar: an
 	// order that executed at the bar's open executed before anything that
-	// happened later in the bar. See RunBar.
+	// happened later in the bar. See RunSession.
 	AtReference bool
 }
 

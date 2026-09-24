@@ -139,8 +139,9 @@ func reconstructRun(cfg event.ConfigurationPayload, inputs []event.Envelope) (re
 				return facts, errors.New("backtest: rerun requires exactly one run.completed as the last input")
 			}
 			err = decodeRerunInput(input, event.RunCompletedSchemaVersion, &event.RunCompletedPayload{})
-		case event.FillEventType:
-			// Simulator output is compared later, never replayed into the pipeline.
+		case event.FillEventType, event.SessionClosedEventType:
+			// Simulator and driver output, derived from the bars: compared
+			// later, never replayed into the pipeline.
 		default:
 			return facts, fmt.Errorf("backtest: rerun cannot reconstruct unsupported input %q", input.Type)
 		}

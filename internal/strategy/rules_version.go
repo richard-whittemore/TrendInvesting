@@ -65,7 +65,17 @@ package strategy
 // the same reason a changed entry fill price moved 1.0.0 to 1.1.0. Rerunning
 // a 1.4.0 run's own inputs through this build therefore produces a
 // different journal, so the two cannot share a version.
-const RulesVersion = "1.5.0"
+//
+// Bumped 1.5.0 -> 1.6.0 when a day's Adds and entries began to be decided
+// when its Session closes rather than at each instrument's own bar (ADR
+// 0021): a completed bar still evaluates, signals and proposes exits, but
+// its entry and Add proposals are emitted in reply to the
+// market.session.closed that ends its Session, Adds before entries, entries
+// in ranked order. Each proposal's content is unchanged, but it is caused by
+// a different input, and every journal gains one input per Session, so no
+// 1.5.0 journal replays under this build: it has no session closes, and its
+// second Session fails closed.
+const RulesVersion = "1.6.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -144,4 +154,7 @@ var RuleSurfaceFingerprints = map[string]string{
 	// Unchanged from 1.4.0: the 1.5.0 change is in how the fill simulator
 	// fills the Exit Order, not in any constant this surface declares.
 	"1.5.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
+	// Unchanged from 1.5.0: the 1.6.0 change is when Adds and entries are
+	// decided, not any constant this surface declares.
+	"1.6.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
 }

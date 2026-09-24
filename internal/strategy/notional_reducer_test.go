@@ -108,7 +108,7 @@ func runReducerWithAccountSnapshotsThenHighsFrom(t *testing.T, instrumentID stri
 		seq++
 	}
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -152,7 +152,7 @@ func TestReducerEmitsDrawdownStepEventsForAccountSnapshots(t *testing.T) {
 		accountSnapshotEnvelope(t, 4, snap3, snap3.AsOf),
 	}
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -223,7 +223,7 @@ func TestReducerAppliesSeveralDrawdownStepsFromOneSnapshot(t *testing.T) {
 		accountSnapshotEnvelope(t, 2, snap, snap.AsOf),
 	}
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -367,7 +367,7 @@ func TestReducerRejectsAccountSnapshotWithWrongSchemaVersion(t *testing.T) {
 	wrongVersion.SchemaVersion = event.AccountSnapshotSchemaVersion + 1
 
 	envelopes := []event.Envelope{configEnvelope(t, 1, day(0)), wrongVersion}
-	_, err = engine.Run(context.Background(), envelopes)
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil {
 		t.Fatal("Run() error = nil, want error for an account snapshot payload at the wrong schema version")
 	}
@@ -394,7 +394,7 @@ func TestReducerRejectsInvalidAccountSnapshotPayload(t *testing.T) {
 	invalid := accountSnapshotEnvelope(t, 2, snap, snap.AsOf)
 
 	envelopes := []event.Envelope{configEnvelope(t, 1, day(0)), invalid}
-	_, err = engine.Run(context.Background(), envelopes)
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil || !strings.Contains(err.Error(), "invalid account snapshot payload") {
 		t.Fatalf("Run() error = %v, want it to name an invalid account snapshot payload", err)
 	}
@@ -429,7 +429,7 @@ func TestReducerRejectsUndecodableAccountSnapshotPayload(t *testing.T) {
 	}
 
 	envelopes := []event.Envelope{configEnvelope(t, 1, day(0)), undecodable}
-	_, err = engine.Run(context.Background(), envelopes)
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil || !strings.Contains(err.Error(), "decode account snapshot payload") {
 		t.Fatalf("Run() error = %v, want it to name a decode failure", err)
 	}
@@ -460,7 +460,7 @@ func TestReducerRejectsDuplicateAccountSnapshotAsOf(t *testing.T) {
 		accountSnapshotEnvelope(t, 3, duplicate, duplicate.AsOf),
 	}
 
-	_, err = engine.Run(context.Background(), envelopes)
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil {
 		t.Fatal("Run() error = nil, want error for a duplicate account snapshot as-of")
 	}
@@ -493,7 +493,7 @@ func TestReducerRejectsOutOfOrderAccountSnapshot(t *testing.T) {
 		accountSnapshotEnvelope(t, 3, earlier, earlier.AsOf),
 	}
 
-	_, err = engine.Run(context.Background(), envelopes)
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil {
 		t.Fatal("Run() error = nil, want error for an out-of-order account snapshot")
 	}
@@ -528,7 +528,7 @@ func TestReplayingAccountSnapshotFixtureTwiceYieldsByteIdenticalEmissions(t *tes
 		if err != nil {
 			t.Fatalf("replay.New() error = %v", err)
 		}
-		emitted, err := engine.Run(context.Background(), buildFixture(t))
+		emitted, err := engine.Run(context.Background(), withSessionCloses(t, buildFixture(t)))
 		if err != nil {
 			t.Fatalf("Run() error = %v", err)
 		}
@@ -574,7 +574,7 @@ func TestReducerSurfacesTheNotionalAccountAsymptoteError(t *testing.T) {
 		accountSnapshotEnvelope(t, 2, snap, snap.AsOf),
 	}
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil {
 		t.Fatal("Run() error = nil, want an error: equity at the Notional Account's 50% drawdown asymptote is undefined (ADR 0007)")
 	}
@@ -686,7 +686,7 @@ func TestReducerRebasesAcrossAYearBoundaryThenStepsAgainstTheNewFigure(t *testin
 		accountSnapshotEnvelope(t, 4, snap3, snap3.AsOf),
 	}
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -834,7 +834,7 @@ func TestReducerFullRecoveryClearsBothStepsAndEmitsRecoveredEvent(t *testing.T) 
 		accountSnapshotEnvelope(t, 4, snap3, snap3.AsOf),
 	}
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -906,7 +906,7 @@ func TestReducerCashMovementMidDrawdownEmitsCashAdjustedAndNoStep(t *testing.T) 
 		accountSnapshotEnvelope(t, 4, snap2, snap2.AsOf),
 	}
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -981,7 +981,7 @@ func TestReducerRejectsCashMovementWithWrongSchemaVersion(t *testing.T) {
 	wrongVersion.SchemaVersion = 2
 
 	envelopes := []event.Envelope{configEnvelope(t, 1, day(0)), wrongVersion}
-	_, err = engine.Run(context.Background(), envelopes)
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil {
 		t.Fatal("Run() error = nil, want error for a cash movement payload at the wrong schema version")
 	}
@@ -1008,7 +1008,7 @@ func TestReducerRejectsInvalidCashMovementPayload(t *testing.T) {
 	invalid := cashMovementEnvelope(t, 2, movement, movement.AsOf)
 
 	envelopes := []event.Envelope{configEnvelope(t, 1, day(0)), invalid}
-	_, err = engine.Run(context.Background(), envelopes)
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil || !strings.Contains(err.Error(), "invalid cash movement payload") {
 		t.Fatalf("Run() error = %v, want it to name an invalid cash movement payload", err)
 	}
@@ -1043,7 +1043,7 @@ func TestReducerRejectsUndecodableCashMovementPayload(t *testing.T) {
 	}
 
 	envelopes := []event.Envelope{configEnvelope(t, 1, day(0)), undecodable}
-	_, err = engine.Run(context.Background(), envelopes)
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil || !strings.Contains(err.Error(), "decode cash movement payload") {
 		t.Fatalf("Run() error = %v, want it to name a decode failure", err)
 	}
@@ -1075,7 +1075,7 @@ func TestReducerRejectsOutOfOrderAccountEventsAcrossTypes(t *testing.T) {
 			accountSnapshotEnvelope(t, 2, snap, snap.AsOf),
 			cashMovementEnvelope(t, 3, movement, movement.AsOf),
 		}
-		_, err = engine.Run(context.Background(), envelopes)
+		_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 		if err == nil || !strings.Contains(err.Error(), "duplicate or out-of-order cash movement") {
 			t.Fatalf("Run() error = %v, want it to name a duplicate or out-of-order cash movement", err)
 		}
@@ -1100,7 +1100,7 @@ func TestReducerRejectsOutOfOrderAccountEventsAcrossTypes(t *testing.T) {
 			cashMovementEnvelope(t, 2, movement, movement.AsOf),
 			accountSnapshotEnvelope(t, 3, snap, snap.AsOf),
 		}
-		_, err = engine.Run(context.Background(), envelopes)
+		_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 		if err == nil || !strings.Contains(err.Error(), "duplicate or out-of-order snapshot") {
 			t.Fatalf("Run() error = %v, want it to name a duplicate or out-of-order snapshot", err)
 		}
@@ -1125,7 +1125,7 @@ func TestReducerRejectsOutOfOrderAccountEventsAcrossTypes(t *testing.T) {
 			cashMovementEnvelope(t, 2, movement, movement.AsOf),
 			accountSnapshotEnvelope(t, 3, snap, snap.AsOf),
 		}
-		_, err = engine.Run(context.Background(), envelopes)
+		_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 		if err == nil || !strings.Contains(err.Error(), "duplicate or out-of-order snapshot") {
 			t.Fatalf("Run() error = %v, want it to name a duplicate or out-of-order snapshot", err)
 		}
@@ -1168,7 +1168,7 @@ func TestReplayingRebaseRecoveryCashMovementFixtureTwiceYieldsByteIdenticalEmiss
 		if err != nil {
 			t.Fatalf("replay.New() error = %v", err)
 		}
-		emitted, err := engine.Run(context.Background(), buildFixture(t))
+		emitted, err := engine.Run(context.Background(), withSessionCloses(t, buildFixture(t)))
 		if err != nil {
 			t.Fatalf("Run() error = %v", err)
 		}
@@ -1214,7 +1214,7 @@ func TestReducerPinsAccountCurrencyFromTheFirstAccountEvent(t *testing.T) {
 		accountSnapshotEnvelope(t, 2, snap, snap.AsOf),
 		cashMovementEnvelope(t, 3, movement, movement.AsOf),
 	}
-	if _, err := engine.Run(context.Background(), envelopes); err != nil {
+	if _, err := engine.Run(context.Background(), withSessionCloses(t, envelopes)); err != nil {
 		t.Fatalf("Run() error = %v, want the matching-currency cash movement to proceed", err)
 	}
 }
@@ -1246,7 +1246,7 @@ func TestReducerRejectsAccountEventWithMismatchedCurrency(t *testing.T) {
 			accountSnapshotEnvelope(t, 2, first, first.AsOf),
 			accountSnapshotEnvelope(t, 3, mismatched, mismatched.AsOf),
 		}
-		emitted, err := engine.Run(context.Background(), envelopes)
+		emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 		if err == nil || !strings.Contains(err.Error(), "does not match the account's pinned currency") {
 			t.Fatalf("Run() error = %v, want it to name a currency mismatch", err)
 		}
@@ -1277,7 +1277,7 @@ func TestReducerRejectsAccountEventWithMismatchedCurrency(t *testing.T) {
 			accountSnapshotEnvelope(t, 2, first, first.AsOf),
 			cashMovementEnvelope(t, 3, mismatched, mismatched.AsOf),
 		}
-		emitted, err := engine.Run(context.Background(), envelopes)
+		emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 		if err == nil || !strings.Contains(err.Error(), "does not match the account's pinned currency") {
 			t.Fatalf("Run() error = %v, want it to name a currency mismatch", err)
 		}
@@ -1308,7 +1308,7 @@ func TestReducerRejectsAccountEventWithMismatchedCurrency(t *testing.T) {
 			cashMovementEnvelope(t, 2, first, first.AsOf),
 			accountSnapshotEnvelope(t, 3, mismatched, mismatched.AsOf),
 		}
-		emitted, err := engine.Run(context.Background(), envelopes)
+		emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 		if err == nil || !strings.Contains(err.Error(), "does not match the account's pinned currency") {
 			t.Fatalf("Run() error = %v, want it to name a currency mismatch", err)
 		}
@@ -1348,7 +1348,7 @@ func TestReducerCurrencyPinSurvivesRebasing(t *testing.T) {
 		accountSnapshotEnvelope(t, 3, snap2, snap2.AsOf),
 		accountSnapshotEnvelope(t, 4, mismatched, mismatched.AsOf),
 	}
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil || !strings.Contains(err.Error(), "does not match the account's pinned currency") {
 		t.Fatalf("Run() error = %v, want it to name a currency mismatch even after a re-basing", err)
 	}

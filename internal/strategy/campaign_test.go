@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -212,9 +213,55 @@ func (s *stream) snapshot(payload event.AccountSnapshotPayload) *stream {
 	return s
 }
 
+// bar appends one completed bar as a Session of its own: the bar, then the
+// market.session.closed naming it (ADR 0021). A single-instrument fixture
+// needs nothing more; a fixture with several instruments per Session uses
+// session, and one about the Session boundary itself uses barOnly and
+// closeSession.
 func (s *stream) bar(bar event.CompletedBarPayload) *stream {
+	return s.barOnly(bar).closeSession(bar.PeriodEnd, bar.InstrumentID)
+}
+
+// barOnly appends one completed bar and leaves its Session open.
+func (s *stream) barOnly(bar event.CompletedBarPayload) *stream {
 	s.seq++
 	s.envelopes = append(s.envelopes, barEnvelope(s.t, s.seq, bar, bar.PeriodEnd))
+	return s
+}
+
+// session appends every bar in the order given, then one
+// market.session.closed naming them all, sorted as the payload requires.
+// Every bar must share one period end.
+func (s *stream) session(bars ...event.CompletedBarPayload) *stream {
+	ids := make([]string, 0, len(bars))
+	for _, b := range bars {
+		s.barOnly(b)
+		ids = append(ids, b.InstrumentID)
+	}
+	slices.Sort(ids)
+	return s.closeSession(bars[0].PeriodEnd, ids...)
+}
+
+// lockstep appends several instruments' bar series as shared Sessions: the
+// i-th bar of every series, in the order the series are given, then that
+// Session's close. Series of equal length and aligned period ends are what
+// every caller passes.
+func (s *stream) lockstep(series ...[]event.CompletedBarPayload) *stream {
+	for i := range series[0] {
+		session := make([]event.CompletedBarPayload, 0, len(series))
+		for _, bars := range series {
+			session = append(session, bars[i])
+		}
+		s.session(session...)
+	}
+	return s
+}
+
+// closeSession appends a market.session.closed for periodEnd naming ids
+// exactly as given, so a fixture can state a set the reducer must refuse.
+func (s *stream) closeSession(periodEnd time.Time, ids ...string) *stream {
+	s.seq++
+	s.envelopes = append(s.envelopes, sessionClosedEnvelope(s.t, s.seq, periodEnd, ids))
 	return s
 }
 
@@ -485,7 +532,7 @@ func TestFillOpensACampaignWithNAndUnitSizeFrozen(t *testing.T) {
 	}
 	// The engine stamps causation from the input that produced the emission:
 	// the fill, not the bar.
-	if campaignEnvelope.CausationID != fmt.Sprintf("fill-%d", len(breakoutBars("AAPL"))+3) {
+	if campaignEnvelope.CausationID != fmt.Sprintf("fill-%d", 2*len(breakoutBars("AAPL"))+3) {
 		t.Errorf("Campaign opened CausationID = %q, want the fill envelope's ID", campaignEnvelope.CausationID)
 	}
 
@@ -613,8 +660,7 @@ func TestOnlyAFillOpensACampaignNotTheProposalThatPrecededIt(t *testing.T) {
 	t.Parallel()
 
 	emitted := newStream(t, validConfigurationPayload()).
-		bars(breakoutBars("AAPL")).
-		bars(breakoutBars("MSFT")).
+		lockstep(breakoutBars("AAPL"), breakoutBars("MSFT")).
 		fill(openingFill("MSFT")).
 		bar(nextBreakoutBar("AAPL")).
 		mustRun()
@@ -1377,11 +1423,9 @@ func TestNoSignalOrProposalWhileACampaignIsOpen(t *testing.T) {
 func TestASecondInstrumentIsUnaffectedByAnothersCampaign(t *testing.T) {
 	t.Parallel()
 
-	emitted := newStream(t, validConfigurationPayload()).
-		bars(breakoutBars("AAPL")).
+	emitted := staggered(newStream(t, validConfigurationPayload()), breakoutBars("AAPL"), laggedBreakoutBars("MSFT")).
 		fill(openingFill("AAPL")).
-		bars(breakoutBars("MSFT")).
-		bar(nextBreakoutBar("AAPL")).
+		session(nextBreakoutBar("AAPL"), laggedBreakoutBars("MSFT")[55]).
 		mustRun()
 
 	if got := countFor(t, emitted, event.CampaignOpenedEventType, "AAPL"); got != 1 {
@@ -1486,7 +1530,7 @@ func TestStopFillClosesTheCampaignWithReasonStopAndRealisedResult(t *testing.T) 
 	if !exitEnvelope.EventTime.Equal(stopFilledAt) {
 		t.Errorf("Campaign exited EventTime = %v, want the stop fill's %v", exitEnvelope.EventTime, stopFilledAt)
 	}
-	if exitEnvelope.CausationID != fmt.Sprintf("fill-%d", len(breakoutBars("AAPL"))+4) {
+	if exitEnvelope.CausationID != fmt.Sprintf("fill-%d", 2*len(breakoutBars("AAPL"))+4) {
 		t.Errorf("Campaign exited CausationID = %q, want the stop fill envelope's ID", exitEnvelope.CausationID)
 	}
 
@@ -1838,10 +1882,9 @@ func TestASecondInstrumentIsUnaffectedByAnothersStopExit(t *testing.T) {
 	campaignN := breakoutFixtureN(t, cfg)
 	stop := closingStopFill("AAPL", campaignID, campaignN, day(57))
 
-	emitted := newStream(t, cfg).
-		bars(breakoutBars("AAPL")).
+	emitted := staggered(newStream(t, cfg), breakoutBars("AAPL"), laggedBreakoutBars("MSFT")).
 		fill(openingFill("AAPL")).
-		bars(breakoutBars("MSFT")).
+		bar(laggedBreakoutBars("MSFT")[55]).
 		fill(stop).
 		mustRun()
 
@@ -2131,8 +2174,7 @@ func TestFillIDReusedForADifferentInstrumentIsRejected(t *testing.T) {
 	confused.FillID = opensAAPL.FillID
 
 	newStream(t, cfg).
-		bars(breakoutBars("AAPL")).
-		bars(breakoutBars("MSFT")).
+		lockstep(breakoutBars("AAPL"), breakoutBars("MSFT")).
 		fill(opensAAPL).
 		fill(confused).
 		wantRunError(opensAAPL.FillID, "differ")

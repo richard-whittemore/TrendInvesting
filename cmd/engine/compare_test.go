@@ -129,9 +129,15 @@ func TestServerDecisionsMatchBacktestForTheSameBars(t *testing.T) {
 		// The engine's own configuration input occupies Sequence
 		// configurationSequence; the adapter's numbering continues from
 		// there (engine.go's package doc comment).
-		envelope := barEnvelope(t, bar, configurationSequence+1+uint64(day), strategyVersion, configurationHash)
+		// Each bar is followed by the close of its Session (ADR 0021), so
+		// every day occupies two sequence numbers.
+		sequence := configurationSequence + 1 + 2*uint64(day)
+		envelope := barEnvelope(t, bar, sequence, strategyVersion, configurationHash)
 		if _, err := client.Decide(context.Background(), envelope); err != nil {
 			t.Fatalf("bar %d: decide: %v", day, err)
+		}
+		if _, err := client.Decide(context.Background(), sessionClosedEnvelope(t, bar, sequence+1, strategyVersion, configurationHash)); err != nil {
+			t.Fatalf("bar %d: session close: %v", day, err)
 		}
 	}
 	if err := client.Close(); err != nil {

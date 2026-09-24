@@ -28,6 +28,16 @@ func runCompletedEnvelope(t *testing.T, at time.Time) event.Envelope {
 	return event.Envelope{ID: "run-completed", Type: event.RunCompletedEventType, SchemaVersion: event.RunCompletedSchemaVersion, EventTime: at, RecordedAt: at, Payload: payload}
 }
 
+// sessionClosedEnvelope ends the Session at periodEnd, naming ids (ADR 0021).
+func sessionClosedEnvelope(t *testing.T, periodEnd time.Time, ids ...string) event.Envelope {
+	t.Helper()
+	payload, err := json.Marshal(event.SessionClosedPayload{PeriodEnd: periodEnd, InstrumentIDs: ids})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return event.Envelope{ID: "session-closed", Type: event.SessionClosedEventType, SchemaVersion: event.SessionClosedSchemaVersion, EventTime: periodEnd, RecordedAt: periodEnd, Payload: payload}
+}
+
 // twoInstrumentFixture is transitionFixture's bar case plus an untouched,
 // warmed second instrument BBB.
 func twoInstrumentFixture(t *testing.T) (*Reducer, event.Envelope) {
@@ -196,6 +206,9 @@ func TestWholeUniversePassSeesInstrumentsCreatedInTheSameTransaction(t *testing.
 			if _, err := tx.apply(invariantTestBarEnvelope(t, 1, "NEWCO", day(5))); err != nil {
 				t.Fatal(err)
 			}
+			if _, err := tx.apply(sessionClosedEnvelope(t, day(5), "NEWCO")); err != nil {
+				t.Fatal(err)
+			}
 			return tx.apply(runCompletedEnvelope(t, day(4)))
 		})
 		if err == nil || !strings.Contains(err.Error(), "NEWCO") {
@@ -211,6 +224,9 @@ func TestWholeUniversePassSeesInstrumentsCreatedInTheSameTransaction(t *testing.
 		r := newConfiguredReducerForInvariantTest(t)
 		out, err := r.transact(func(tx *transition) ([]event.Envelope, error) {
 			if _, err := tx.apply(invariantTestBarEnvelope(t, 1, "NEWCO", day(5))); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.apply(sessionClosedEnvelope(t, day(5), "NEWCO")); err != nil {
 				t.Fatal(err)
 			}
 			state, _ := tx.instrument("NEWCO")
@@ -234,6 +250,9 @@ func TestLaterAccessInOneTransactionSeesEarlierMutation(t *testing.T) {
 	if _, err := r.Apply(context.Background(), invariantTestBarEnvelope(t, 1, "AAPL", day(1))); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := r.Apply(context.Background(), sessionClosedEnvelope(t, day(1), "AAPL")); err != nil {
+		t.Fatal(err)
+	}
 	next := invariantTestBarEnvelope(t, 2, "AAPL", day(2))
 	_, err := r.transact(func(tx *transition) ([]event.Envelope, error) {
 		if _, err := tx.apply(next); err != nil {
@@ -246,6 +265,41 @@ func TestLaterAccessInOneTransactionSeesEarlierMutation(t *testing.T) {
 	}
 	if got := r.instruments["AAPL"].lastPeriodEnd; !got.Equal(day(1)) {
 		t.Fatalf("published lastPeriodEnd = %v, want the rejected transaction discarded", got)
+	}
+}
+
+// A session close reads every instrument of its Session but copies only the
+// ones it proposes for; the rest stay published state, untouched
+// (docs/development.md: reducer transactions). Falsified by reaching the
+// ranking or Add pass through instrument rather than peekInstrument.
+func TestASessionCloseCopiesOnlyTheInstrumentsItProposesFor(t *testing.T) {
+	t.Parallel()
+
+	r := benchUniverse(t, 5)
+	periodEnd := day(benchWarmUpBars + 1)
+	ids := []string{"I0000", "I0001", "I0002", "I0003", "I0004"}
+	for _, id := range ids {
+		high := 101.0
+		if id == "I0003" {
+			high = 200
+		}
+		if _, err := r.Apply(context.Background(), benchBarEnvelopeAt(t, id, periodEnd, high)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var touched []string
+	out, err := r.transact(func(tx *transition) ([]event.Envelope, error) {
+		out, err := tx.apply(benchSessionClosedEnvelope(t, periodEnd, ids))
+		for id := range tx.touched {
+			touched = append(touched, id)
+		}
+		return out, err
+	})
+	if err != nil || len(out) != 1 || out[0].Type != event.TradeProposalEventType {
+		t.Fatalf("session close = %v, %v; want I0003's one trade proposal", out, err)
+	}
+	if !reflect.DeepEqual(touched, []string{"I0003"}) {
+		t.Fatalf("the session close copied %v, want only I0003", touched)
 	}
 }
 

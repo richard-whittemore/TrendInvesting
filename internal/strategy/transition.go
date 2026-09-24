@@ -53,8 +53,8 @@ func (r *Reducer) transact(build func(*transition) ([]event.Envelope, error)) ([
 
 // begin opens a transaction over r. Everything reachable from r that is not
 // behind the instrument or accepted-fill accessors is copied here; account
-// chronology, currency pinning, cash and the delisted map are small and
-// commit together with the instruments and fills (ADR 0007/0009).
+// chronology, currency pinning, cash, the delisted map and the open
+// Session's delisted bars are small and commit together with the instruments and fills (ADR 0007/0009).
 // time.Time locations are immutable and may be shared.
 func (r *Reducer) begin() *transition {
 	tx := &transition{
@@ -64,6 +64,7 @@ func (r *Reducer) begin() *transition {
 	}
 	tx.notionalAccount = copyValue(r.notionalAccount)
 	tx.delisted = maps.Clone(r.delisted)
+	tx.sessionDelistedBars = slices.Clone(r.sessionDelistedBars)
 	tx.instruments = nil
 	tx.acceptedFills = nil
 	return tx
@@ -154,12 +155,14 @@ func (tx *transition) recordAcceptedFill(fillID string, fill acceptedFillState) 
 }
 
 // clone deep-copies one instrument's state: indicator ring and seed buffers,
-// every pending proposal, and the Campaign with its Units.
+// the Signal awaiting its Session, every pending proposal, and the Campaign
+// with its Units.
 func (s *instrumentState) clone() *instrumentState {
 	cloned := *s
 	cloned.n = s.n.Clone()
 	cloned.entryChannel = s.entryChannel.Clone()
 	cloned.exitChannel = s.exitChannel.Clone()
+	cloned.pendingSignal = copyValue(s.pendingSignal)
 	cloned.pendingProposal = copyValue(s.pendingProposal)
 	cloned.pendingAddProposal = copyValue(s.pendingAddProposal)
 	cloned.pendingExitProposal = copyValue(s.pendingExitProposal)

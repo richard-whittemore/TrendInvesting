@@ -248,6 +248,27 @@ func propertyFixture(t *testing.T, recordedAt arrivalSchedule) (cfg event.Config
 
 	seq := uint64(3)
 	arrival := 1
+	// Each bar is a Session of its own, ended by market.session.closed
+	// before any later input (ADR 0021).
+	closeSession := func(periodEnd time.Time) {
+		payload := mustMarshalT(t, event.SessionClosedPayload{PeriodEnd: periodEnd, InstrumentIDs: []string{"AAPL"}})
+		envelopes = append(envelopes, event.Envelope{
+			ID:                fmt.Sprintf("session-%d", seq),
+			Type:              event.SessionClosedEventType,
+			SchemaVersion:     event.SessionClosedSchemaVersion,
+			EnvelopeVersion:   event.CurrentEnvelopeVersion,
+			EventTime:         periodEnd,
+			RecordedAt:        recordedAt(arrival, periodEnd),
+			Sequence:          seq,
+			Source:            "fixture",
+			StrategyVersion:   propertyFixtureStrategyVersion,
+			ConfigurationHash: event.ConfigurationHash(cfg),
+			PayloadHash:       event.HashPayload(payload),
+			Payload:           payload,
+		})
+		seq++
+		arrival++
+	}
 
 	for i := 0; i < 20; i++ {
 		high := 100 + float64(i+1) // 101..120: channel high after warm-up is 120
@@ -255,6 +276,7 @@ func propertyFixture(t *testing.T, recordedAt arrivalSchedule) (cfg event.Config
 		envelopes = append(envelopes, propertyBarEnvelope(t, seq, bar, cfg, recordedAt(arrival, bar.PeriodEnd)))
 		seq++
 		arrival++
+		closeSession(bar.PeriodEnd)
 	}
 
 	// Bar 21: high 121.5 exceeds the warmed-up channel high of 120 — a
@@ -266,6 +288,7 @@ func propertyFixture(t *testing.T, recordedAt arrivalSchedule) (cfg event.Config
 	envelopes = append(envelopes, propertyBarEnvelope(t, seq, breakout, cfg, recordedAt(arrival, breakout.PeriodEnd)))
 	seq++
 	arrival++
+	closeSession(breakout.PeriodEnd)
 
 	// Unlike the fixture this replaced, bar 21's proposal IS executed: a
 	// one-share partial fill (event.FillPayload's own partial-fill rule)
@@ -304,6 +327,7 @@ func propertyFixture(t *testing.T, recordedAt arrivalSchedule) (cfg event.Config
 	envelopes = append(envelopes, propertyBarEnvelope(t, seq, addBar, cfg, recordedAt(arrival, addBar.PeriodEnd)))
 	seq++
 	arrival++
+	closeSession(addBar.PeriodEnd)
 
 	addFillPrice := rung + 0.5
 
@@ -370,6 +394,7 @@ func propertyFixture(t *testing.T, recordedAt arrivalSchedule) (cfg event.Config
 	envelopes = append(envelopes, propertyBarEnvelope(t, seq, freshBreakout, cfg, recordedAt(arrival, freshBreakout.PeriodEnd)))
 	seq++
 	arrival++
+	closeSession(freshBreakout.PeriodEnd)
 
 	// Bar 24: high 250 does not exceed the channel high, now 300 (bar 23
 	// entered the window) — not a breakout, so the proposal bar 23 raised
@@ -378,6 +403,9 @@ func propertyFixture(t *testing.T, recordedAt arrivalSchedule) (cfg event.Config
 	// for it.
 	quiet := flatBar("AAPL", propertyDay(24), 250, 248)
 	envelopes = append(envelopes, propertyBarEnvelope(t, seq, quiet, cfg, recordedAt(arrival, quiet.PeriodEnd)))
+	seq++
+	arrival++
+	closeSession(quiet.PeriodEnd)
 
 	return cfg, envelopes
 }

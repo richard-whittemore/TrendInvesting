@@ -85,6 +85,33 @@ func barEnvelope(t *testing.T, bar event.CompletedBarPayload, sequence uint64, s
 	}
 }
 
+// sessionClosedEnvelope ends bar's Session (ADR 0021) in the shape the LEAN
+// adapter sends after each slice's bars: EventTime and RecordedAt are the
+// Session's period end, as cmd/backtest's own driver stamps its close, and
+// the payload names the one instrument this package's tests drive per
+// Session.
+func sessionClosedEnvelope(t *testing.T, bar event.CompletedBarPayload, sequence uint64, strategyVersion, configurationHash string) event.Envelope {
+	t.Helper()
+	encoded, err := json.Marshal(event.SessionClosedPayload{PeriodEnd: bar.PeriodEnd, InstrumentIDs: []string{bar.InstrumentID}})
+	if err != nil {
+		t.Fatalf("encode session closed payload: %v", err)
+	}
+	return event.Envelope{
+		ID:                "session-closed:" + bar.PeriodEnd.UTC().Format(time.RFC3339Nano),
+		Type:              event.SessionClosedEventType,
+		SchemaVersion:     event.SessionClosedSchemaVersion,
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
+		EventTime:         bar.PeriodEnd,
+		RecordedAt:        bar.PeriodEnd,
+		Sequence:          sequence,
+		Source:            "test-client",
+		StrategyVersion:   strategyVersion,
+		ConfigurationHash: configurationHash,
+		PayloadHash:       event.HashPayload(encoded),
+		Payload:           encoded,
+	}
+}
+
 // shortSocketDir returns a fresh, private directory suitable for a
 // Unix-domain socket: short enough that a socket inside it never
 // approaches transport.MaxSocketPathBytes (t.TempDir()'s own path is

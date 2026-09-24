@@ -185,8 +185,7 @@ func TestEndOfStreamExpiriesAreOrderedByInstrument(t *testing.T) {
 
 	cfg := validConfigurationPayload()
 	emitted := newStream(t, cfg).
-		bars(breakoutBars("ZZZZ")).
-		bars(breakoutBars("AAAA")).
+		lockstep(breakoutBars("ZZZZ"), breakoutBars("AAAA")).
 		endOfStream(day(56)).
 		mustRun()
 

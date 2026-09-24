@@ -3,7 +3,10 @@ package fills
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
+	"sort"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -47,8 +50,8 @@ func Deliver(ctx context.Context, sim *Simulator, handler replay.Handler, envelo
 	if sim == nil || handler == nil {
 		return Result{}, fmt.Errorf("fills: a simulator and a handler are both required")
 	}
-	if envelope.Type == event.CompletedBarEventType {
-		return Result{}, fmt.Errorf("fills: a %s envelope belongs to RunBar, which applies the per-bar protocol to it", event.CompletedBarEventType)
+	if envelope.Type == event.CompletedBarEventType || envelope.Type == event.SessionClosedEventType {
+		return Result{}, fmt.Errorf("fills: a %s envelope belongs to RunSession, which applies the per-bar protocol to it", envelope.Type)
 	}
 	var result Result
 	if err := sim.deliver(ctx, handler, envelope, reference{}, &result); err != nil {
@@ -58,9 +61,9 @@ func Deliver(ctx context.Context, sim *Simulator, handler replay.Handler, envelo
 }
 
 // RunBar is the per-bar protocol: ADR 0005's fill model and ADR 0010's
-// ordering, applied to one completed bar of one instrument. It is the
-// function the backtest loop calls, so the protocol is tested here once
-// rather than re-derived there.
+// ordering, applied to one completed bar of one instrument, as a Session of
+// its own (see RunSession, which the backtest loop calls; the protocol is
+// tested here once rather than re-derived there).
 //
 // # The protocol
 //
@@ -73,11 +76,13 @@ func Deliver(ctx context.Context, sim *Simulator, handler replay.Handler, envelo
 //     of that session, and journalling a Campaign-evaluated event for it, or
 //     adding a Unit to it later in the bar, would record something that
 //     cannot have happened.
-//  2. **The bar.** B is delivered to the reducer. It expires yesterday's
-//     proposals (ADR 0011), evaluates an open Campaign — the stop and Exit
-//     Channel levels in force, and on a breach the exit proposal — and then
-//     the Add; or, with no Campaign open, evaluates the Setup and, on a
-//     breakout, raises the trade proposal.
+//  2. **The bar, then its Session's close.** B is delivered to the reducer.
+//     It expires yesterday's proposals (ADR 0011) and evaluates an open
+//     Campaign — the stop and Exit Channel levels in force, and on a breach
+//     the exit proposal — or, with no Campaign open, evaluates the Setup and
+//     signals a breakout. Then market.session.closed ends B's Session, and
+//     the reducer decides the Add, or sizes the Signal into a trade proposal
+//     (ADR 0021).
 //  3. **The intrabar fixpoint.** Every order now resting is evaluated against
 //     B, repeatedly, until nothing more fills: every covered BUY first, then,
 //     when no buy is covered, the next covered SELL — a Unit's Exit Order at
@@ -157,51 +162,155 @@ func Deliver(ctx context.Context, sim *Simulator, handler replay.Handler, envelo
 // anything happened, and a timestamp that implied otherwise would be a claim
 // the data does not support.
 func RunBar(ctx context.Context, sim *Simulator, handler replay.Handler, barEnvelope event.Envelope) (Result, error) {
+	return RunSession(ctx, sim, handler, []event.Envelope{barEnvelope})
+}
+
+// RunSession is RunBar's protocol applied to a whole Session (CONTEXT.md:
+// "Session"): every completed bar sharing one period end, across the
+// universe. ADR 0021 moves a day's Adds and entries from each bar to the
+// Session's close, so the steps interleave around it:
+//
+//  1. For each bar, in the order given: its open-instant pass, then the bar
+//     itself. Each bar's exits are decided here.
+//  2. market.session.closed, naming every bar of the Session. The Session's
+//     Adds and entries are decided here, across instruments.
+//  3. For each instrument, in ascending instrument order: its intrabar
+//     fixpoint. The Adds and entries just proposed still rest and fill
+//     inside their own bar (ADR 0005), after they were proposed.
+//
+// Step 3's order never depends on the order the bars were given in, so
+// neither do the Session's fills. Fills never cross instruments, so the order
+// matters only to where each lands in the journal.
+//
+// The close is built here from the bars themselves, so it always names
+// exactly what was delivered, with their provenance: the first bar's source,
+// strategy version, configuration hash and recorded-at instant.
+func RunSession(ctx context.Context, sim *Simulator, handler replay.Handler, barEnvelopes []event.Envelope) (Result, error) {
 	var result Result
 	if sim == nil || handler == nil {
 		return result, fmt.Errorf("fills: a simulator and a handler are both required")
 	}
-	if barEnvelope.Type != event.CompletedBarEventType {
-		return result, fmt.Errorf("fills: RunBar requires a %s envelope, got %q", event.CompletedBarEventType, barEnvelope.Type)
-	}
-	var bar event.CompletedBarPayload
-	if err := json.Unmarshal(barEnvelope.Payload, &bar); err != nil {
-		return result, fmt.Errorf("fills: decode completed bar payload: %w", err)
-	}
-	if err := bar.Validate(); err != nil {
-		return result, fmt.Errorf("fills: %w", err)
-	}
-	// ADR 0004: every level this simulator fills against was computed by the
-	// reducer on the split-adjusted view, so the fill must be decided on it
-	// too. See the package doc comment.
-	view := bar.SplitAdjusted
-
-	// Every fill this call produces is a fact about THIS bar, whichever side
-	// of it the fill is delivered on, so this bar's provenance is fixed
-	// before a single order is priced — not inferred from whatever was
-	// delivered last. Step 1 below runs BEFORE the bar itself reaches the
-	// reducer, so a stamp taken from delivery order would date a gap fill,
-	// and every decision it causes, to the PREVIOUS bar: an execution
-	// recorded before the session that produced it.
-	sim.recordedAt = barEnvelope.RecordedAt
-
-	fillsThisBar := 0
-
-	// Step 1: the open-instant pass.
-	if err := sim.fillPass(ctx, handler, bar, view, true, &fillsThisBar, &result); err != nil {
+	session, err := sessionBars(barEnvelopes)
+	if err != nil {
 		return result, err
 	}
 
-	// Step 2: the bar itself.
-	if err := sim.deliver(ctx, handler, barEnvelope, reference{}, &result); err != nil {
+	for _, b := range session {
+		// Every fill this call produces is a fact about ITS bar, whichever
+		// side of the bar it is delivered on, so the bar's provenance is
+		// fixed before a single order is priced — not inferred from whatever
+		// was delivered last. The open-instant pass runs BEFORE the bar
+		// itself reaches the reducer, so a stamp taken from delivery order
+		// would date a gap fill, and every decision it causes, to the
+		// PREVIOUS bar: an execution recorded before the session that
+		// produced it.
+		sim.recordedAt = b.envelope.RecordedAt
+
+		// Step 1: the open-instant pass. ADR 0004: every level this
+		// simulator fills against was computed by the reducer on the
+		// split-adjusted view, so the fill must be decided on it too.
+		if err := sim.fillPass(ctx, handler, b.bar, b.bar.SplitAdjusted, true, &b.fills, &result); err != nil {
+			return result, err
+		}
+		// Step 2: the bar itself.
+		if err := sim.deliver(ctx, handler, b.envelope, reference{}, &result); err != nil {
+			return result, err
+		}
+	}
+
+	closed, err := sessionClosedFor(session)
+	if err != nil {
+		return result, err
+	}
+	if err := sim.deliver(ctx, handler, closed, reference{}, &result); err != nil {
 		return result, err
 	}
 
-	// Step 3: the intrabar fixpoint.
-	if err := sim.fillPass(ctx, handler, bar, view, false, &fillsThisBar, &result); err != nil {
-		return result, err
+	// Step 3: the intrabar fixpoint, per instrument in ascending order.
+	byInstrument := slices.Clone(session)
+	sort.Slice(byInstrument, func(a, b int) bool { return byInstrument[a].bar.InstrumentID < byInstrument[b].bar.InstrumentID })
+	for _, b := range byInstrument {
+		sim.recordedAt = b.envelope.RecordedAt
+		if err := sim.fillPass(ctx, handler, b.bar, b.bar.SplitAdjusted, false, &b.fills, &result); err != nil {
+			return result, err
+		}
 	}
 	return result, nil
+}
+
+// sessionBar is one bar of a Session: its envelope, its decoded payload, and
+// how many fills it has produced so far (maxFillsPerBar bounds it).
+type sessionBar struct {
+	envelope event.Envelope
+	bar      event.CompletedBarPayload
+	fills    int
+}
+
+// sessionBars decodes and validates a Session's bars: at least one, every
+// one a valid completed bar, all sharing one period end, no instrument
+// twice.
+func sessionBars(envelopes []event.Envelope) ([]*sessionBar, error) {
+	if len(envelopes) == 0 {
+		return nil, errors.New("fills: a Session holds at least one bar")
+	}
+	session := make([]*sessionBar, 0, len(envelopes))
+	seen := make(map[string]bool, len(envelopes))
+	for _, envelope := range envelopes {
+		if envelope.Type != event.CompletedBarEventType {
+			return nil, fmt.Errorf("fills: a Session requires %s envelopes, got %q", event.CompletedBarEventType, envelope.Type)
+		}
+		b := &sessionBar{envelope: envelope}
+		if err := json.Unmarshal(envelope.Payload, &b.bar); err != nil {
+			return nil, fmt.Errorf("fills: decode completed bar payload: %w", err)
+		}
+		if err := b.bar.Validate(); err != nil {
+			return nil, fmt.Errorf("fills: %w", err)
+		}
+		if len(session) > 0 && !b.bar.PeriodEnd.Equal(session[0].bar.PeriodEnd) {
+			return nil, fmt.Errorf("fills: a Session's bars share one period end; %s's %s is not %s",
+				b.bar.InstrumentID, b.bar.PeriodEnd.Format(time.RFC3339), session[0].bar.PeriodEnd.Format(time.RFC3339))
+		}
+		if seen[b.bar.InstrumentID] {
+			return nil, fmt.Errorf("fills: instrument %q appears twice in one Session", b.bar.InstrumentID)
+		}
+		seen[b.bar.InstrumentID] = true
+		session = append(session, b)
+	}
+	return session, nil
+}
+
+// sessionClosedFor builds the market.session.closed that ends session, with
+// its first bar's provenance.
+func sessionClosedFor(session []*sessionBar) (event.Envelope, error) {
+	ids := make([]string, 0, len(session))
+	for _, b := range session {
+		ids = append(ids, b.bar.InstrumentID)
+	}
+	sort.Strings(ids)
+	first := session[0].envelope
+	periodEnd := session[0].bar.PeriodEnd
+	payload := event.SessionClosedPayload{PeriodEnd: periodEnd, InstrumentIDs: ids}
+	if err := payload.Validate(); err != nil {
+		return event.Envelope{}, fmt.Errorf("fills: built an invalid session closed payload: %w", err)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		// validated-payload-json (docs/development.md).
+		return event.Envelope{}, fmt.Errorf("fills: marshal session closed payload: %w", err)
+	}
+	return event.Envelope{
+		ID:                "session-closed:" + periodEnd.UTC().Format(idTimeLayout),
+		Type:              event.SessionClosedEventType,
+		SchemaVersion:     event.SessionClosedSchemaVersion,
+		EnvelopeVersion:   event.CurrentEnvelopeVersion,
+		EventTime:         periodEnd,
+		RecordedAt:        first.RecordedAt,
+		Source:            first.Source,
+		StrategyVersion:   first.StrategyVersion,
+		ConfigurationHash: first.ConfigurationHash,
+		PayloadHash:       event.HashPayload(encoded),
+		Payload:           encoded,
+	}, nil
 }
 
 // fillPass repeatedly fills the first candidate the bar covers, delivering

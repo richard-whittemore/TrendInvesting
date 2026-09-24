@@ -30,13 +30,15 @@ const sourceReducer = "reducer"
 // emits one Setup-evaluated decision event per bar, reporting N, the Entry
 // Channel, the Setup's Tier, and its distance to entry in N; when the bar's
 // high exceeds the Entry Channel (a Breakout, Tier A), it additionally emits
-// a Signal and then the sizing outcome that Signal produced — either a trade
-// proposal or a recorded decline (see sizeUnit). The order within one Apply
-// return is always Setup-evaluated, Signal, sizing outcome. It requires a
+// a Signal, after the Setup-evaluated event. The sizing outcome that Signal
+// produced — either a trade proposal or a recorded decline (see sizeUnit) —
+// follows when the bar's Session closes, with every other Signal of that
+// Session and after its Adds (ADR 0010, ADR 0021; session.go). It requires a
 // configuration event before any bar and fails closed if a bar arrives first,
 // accepts exactly one configuration event per run (matching its constructor's
 // configuration hash — see applyConfiguration), and rejects a duplicate or
-// out-of-order bar for any one instrument (see applyCompletedBar).
+// out-of-order bar for any one instrument (see applyCompletedBar), and a bar
+// outside the open Session (see admitToSession).
 //
 // N and the Entry Channel are computed from the split-adjusted price view
 // only (ADR 0004): signal computation must never see raw prices, so a
@@ -165,6 +167,20 @@ type Reducer struct {
 	// longer being kept separately), and so a re-delivery stays idempotent
 	// no matter how much has happened since it was first accepted.
 	acceptedFills map[string]acceptedFillState
+
+	// The Session (CONTEXT.md: "Session"; ADR 0021). sessionOpen is true
+	// from a Session's first bar until its market.session.closed, and
+	// sessionPeriodEnd is that Session's period end. lastClosedSession is
+	// the period end of the last Session closed, valid once hasClosedSession
+	// is true: Sessions follow one another strictly, so no bar may arrive
+	// for it or any earlier period end. sessionDelistedBars names the open
+	// Session's bars for delisted instruments, which decide nothing but are
+	// still bars the close must name.
+	sessionOpen         bool
+	sessionPeriodEnd    time.Time
+	hasClosedSession    bool
+	lastClosedSession   time.Time
+	sessionDelistedBars []string
 }
 
 // instrumentState is one instrument's running True Range/N/Entry Channel
@@ -195,6 +211,14 @@ type instrumentState struct {
 	// recorded fill brought one into being.
 	pendingProposal *pendingProposalState
 	campaign        *campaignState
+	// pendingSignal is this Session's Signal, awaiting the Session's close to
+	// be sized (session.go), and addDue records that this Session's bar
+	// reached the open Campaign's next Add rung without proposing an exit.
+	// Both are set at the bar and consumed at the close: ADR 0010 decides a
+	// day's Adds and entries only after every exit, across instruments
+	// (ADR 0021).
+	pendingSignal *pendingSignalState
+	addDue        bool
 	// pendingExitProposal is defined and explained in
 	// campaign.go: an exit proposal (strategy.exit.proposed) emitted and not
 	// yet resolved, holding the same "not position state" property
@@ -275,6 +299,10 @@ func NewReducer(strategyVersion string, payload event.ConfigurationPayload) (*Re
 //   - event.CompletedBarEventType: updates that instrument's True Range/N
 //     and emits one event.SetupEvaluatedEventType decision.
 //
+//   - event.SessionClosedEventType: ends the open Session and decides its
+//     Adds, then its entries, across instruments (ADR 0021) — see
+//     session.go's applySessionClosed.
+//
 //   - event.FillEventType: the only input that may change position state
 //     (see campaign.go).
 //
@@ -321,6 +349,8 @@ func (r *transition) apply(envelope event.Envelope) ([]event.Envelope, error) {
 		return r.applyConfiguration(envelope)
 	case event.CompletedBarEventType:
 		return r.applyCompletedBar(envelope)
+	case event.SessionClosedEventType:
+		return r.applySessionClosed(envelope)
 	case event.FillEventType:
 		return r.applyFill(envelope)
 	case event.AccountSnapshotEventType:
@@ -482,8 +512,11 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 	// Nothing is hidden either way: the corporate action is itself an input
 	// envelope in the journal, so a reader can see why the instrument fell
 	// silent.
+	if err := r.admitToSession(bar); err != nil {
+		return nil, err
+	}
 	if _, delisted := r.delisted[bar.InstrumentID]; delisted {
-		return nil, nil
+		return nil, r.admitDelistedBar(bar)
 	}
 
 	state, err := r.stateFor(bar.InstrumentID)
@@ -654,15 +687,16 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 	//
 	// # The ADR 0010 ordering hook
 	//
-	// evaluateCampaign runs FIRST, so "exits are evaluated and journaled
-	// before Adds" (ADR 0010) holds by construction. The Add evaluation
-	// below runs SECOND, and only when this bar did not itself propose an
-	// exit — evaluateCampaign clears state.pendingExitProposal before it
-	// runs (the top-of-function expiry block above) and sets it again only
-	// if THIS bar breaches the Exit Channel, so checking it here after the
-	// call is exactly "did this bar propose an exit", with no separate
-	// return value needed: a bar that would both Add and exit results in the
-	// exit only.
+	// evaluateCampaign runs at the bar, so "exits are evaluated and
+	// journaled before Adds" (ADR 0010) holds by construction: the Add is
+	// decided only when the bar's Session closes, after every instrument's
+	// exits (ADR 0021). It is marked due only when this bar did not itself
+	// propose an exit — evaluateCampaign clears state.pendingExitProposal
+	// before it runs (the top-of-function expiry block above) and sets it
+	// again only if THIS bar breaches the Exit Channel, so checking it here
+	// after the call is exactly "did this bar propose an exit", with no
+	// separate return value needed: a bar that would both Add and exit
+	// results in the exit only.
 	if state.campaign != nil {
 		campaignEmissions, err := r.evaluateCampaign(state, bar, exitChannelLow, exitChannelReady, previousPeriodEnd, envelope)
 		if err != nil {
@@ -679,13 +713,9 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 		}
 		emissions = append(emissions, exitOrderEmissions...)
 
-		if state.pendingExitProposal == nil && len(state.campaign.units) < state.campaign.maxUnits {
-			addEmissions, err := r.evaluateAdd(state, envelope)
-			if err != nil {
-				return nil, err
-			}
-			emissions = append(emissions, addEmissions...)
-		}
+		// The Add itself is decided when the Session closes, after every
+		// instrument's exits (ADR 0010, ADR 0021; session.go).
+		state.addDue = state.pendingExitProposal == nil && len(state.campaign.units) < state.campaign.maxUnits
 
 		return emissions, nil
 	}
@@ -788,25 +818,23 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 		signal := r.stamp(signalID, event.SignalEventType, event.SignalSchemaVersion, bar.PeriodEnd, envelope, signalBytes)
 		emissions = append(emissions, signal)
 
-		// A Signal is sized into a trade proposal, emitted third and last of
-		// the bar. Exactly one emission always follows the Signal — a
-		// proposal, or a decline saying why there is none — so a Signal is
-		// never left with nothing after it (see sizeUnit).
+		// The Signal is sized into a trade proposal when its Session closes,
+		// ranked against the Session's other Signals and after its exits and
+		// Adds (ADR 0010, ADR 0021; session.go). Exactly one emission then
+		// follows the Signal — a proposal, or a decline saying why there is
+		// none — so a Signal is never left with nothing after it (see
+		// sizeUnit).
 		//
 		// The entry level is entryChannelHigh — the level a resting buy-stop
 		// actually sits at (ADR 0005) — not view.High, the breakout bar's
 		// own high. See sizeUnit's doc comment for why.
-		sized, err := r.sizeUnit(bar, envelope, signalID, entryChannelHigh, decisionN, nReady, previousPeriodEnd)
-		if err != nil {
-			return nil, err
-		}
-		emissions = append(emissions, sized)
-
-		// A proposal is remembered as outstanding so that a fill can be
-		// checked against it — and NOTHING about position state moves here.
-		// See transition.rememberPendingProposal.
-		if err := r.rememberPendingProposal(state, sized, previousPeriodEnd); err != nil {
-			return nil, err
+		state.pendingSignal = &pendingSignalState{
+			signalID:       signalID,
+			periodEnd:      bar.PeriodEnd,
+			entryLevel:     entryChannelHigh,
+			n:              decisionN,
+			nReady:         nReady,
+			earliestFillAt: previousPeriodEnd,
 		}
 	}
 
@@ -846,14 +874,14 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 // previousClose is the period end of the bar BEFORE the decision bar — the
 // moment the decision bar opened — and is what ADR 0010's cash basis is
 // measured at, not the decision bar's own close.
-func (r *transition) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, signalID string, entryLevel, n float64, nReady bool, previousClose time.Time) (event.Envelope, error) {
+func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input event.Envelope, signalID string, entryLevel, n float64, nReady bool, previousClose time.Time) (event.Envelope, error) {
 	// Unreachable from this reducer: Tier A requires a ready N, and a
 	// Signal is only emitted at Tier A. Guarded anyway — .greptile/rules.md
 	// requires a zero, negative or not-yet-warm volatility value to fail
 	// closed, and "it cannot happen here" is not a reason to divide by it if
 	// the Tier logic above ever changes.
 	if !nReady {
-		return r.decline(bar, input, signalID, event.DeclineReasonNNotReady,
+		return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonNNotReady,
 			fmt.Sprintf("n is not a usable volatility reading (n %v); no unit can be sized from it", n), 0, 0)
 	}
 
@@ -873,14 +901,14 @@ func (r *transition) sizeUnit(bar event.CompletedBarPayload, input event.Envelop
 		// and a defect stops the run rather than being journalled as a
 		// routine decline.
 		return event.Envelope{}, fmt.Errorf("strategy: instrument %q at %s: %w",
-			bar.InstrumentID, bar.PeriodEnd.Format(time.RFC3339), err)
+			instrumentID, periodEnd.Format(time.RFC3339), err)
 	}
 
 	if unit.Quantity <= 0 {
 		// The Turtle Rules p.15 names this outcome directly: small accounts
 		// lose diversification because truncation is coarse. It is a fact
 		// about the account, not an error.
-		return r.decline(bar, input, signalID, event.DeclineReasonQuantityBelowOneUnit,
+		return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonQuantityBelowOneUnit,
 			fmt.Sprintf("notional account %v under %s sizing, with n %v and dollars per point %v, sizes fewer than one whole unit",
 				r.notionalAccount.Current(), r.configuredSizingMode, n, r.dollarsPerPoint), 0, 0)
 	}
@@ -896,12 +924,12 @@ func (r *transition) sizeUnit(bar event.CompletedBarPayload, input event.Envelop
 		// than the derived fraction. Declining is the fail-closed answer, and
 		// journalling it is how the condition becomes visible instead of
 		// looking like a bar that simply did not signal.
-		return r.decline(bar, input, signalID, event.DeclineReasonStopIntentNotPositive,
+		return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonStopIntentNotPositive,
 			fmt.Sprintf("protective stop intent %v (entry level %v - stop multiple %v x n %v) is not a reachable price for a long position",
 				protectiveStopIntent, entryLevel, r.stopMultiple, n), 0, 0)
 	}
 
-	availableCash, err := r.cashAtPreviousClose(bar.InstrumentID, previousClose)
+	availableCash, err := r.cashAtPreviousClose(instrumentID, previousClose)
 	if err != nil {
 		return event.Envelope{}, err
 	}
@@ -911,22 +939,22 @@ func (r *transition) sizeUnit(bar event.CompletedBarPayload, input event.Envelop
 		// same rule an unaffordable one is (ADR 0010) — journalled, with the
 		// operands in Detail, rather than stopping the run on a cost no
 		// payload can carry.
-		return r.decline(bar, input, signalID, event.DeclineReasonUnitCostNotRepresentable,
+		return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonUnitCostNotRepresentable,
 			fmt.Sprintf("unit cost (%d shares x entry level %v x %v dollars per point) leaves the representable range, so it exceeds any cash that could fund it; spendable cash at the attempt was %v",
 				unit.Quantity, entryLevel, r.dollarsPerPoint, availableCash), 0, 0)
 	}
 	if cost > availableCash {
 		// No partial Unit, ever: the whole Unit is skipped (ADR 0010), never
 		// resized down to what the available cash would cover.
-		return r.decline(bar, input, signalID, event.DeclineReasonInsufficientCash,
+		return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonInsufficientCash,
 			fmt.Sprintf("unit cost %v (%d shares x entry level %v x %v dollars per point) exceeds spendable cash at the attempt %v",
 				cost, unit.Quantity, entryLevel, r.dollarsPerPoint, availableCash),
 			cost, availableCash)
 	}
 
 	proposal := event.TradeProposalPayload{
-		InstrumentID: bar.InstrumentID,
-		PeriodEnd:    bar.PeriodEnd,
+		InstrumentID: instrumentID,
+		PeriodEnd:    periodEnd,
 		SignalID:     signalID,
 		// Rule names what the sizing computes, per Sizing Mode, never the
 		// parameter values it ran with — the same reasoning the Signal's rule
@@ -956,9 +984,9 @@ func (r *transition) sizeUnit(bar event.CompletedBarPayload, input event.Envelop
 		return event.Envelope{}, fmt.Errorf("strategy: marshal trade proposal payload: %w", err)
 	}
 	return r.stamp(
-		decisionID("proposal", bar.InstrumentID, bar.PeriodEnd),
+		decisionID("proposal", instrumentID, periodEnd),
 		event.TradeProposalEventType, event.TradeProposalSchemaVersion,
-		bar.PeriodEnd, input, proposalBytes,
+		periodEnd, input, proposalBytes,
 	), nil
 }
 
@@ -970,10 +998,10 @@ func (r *transition) sizeUnit(bar event.CompletedBarPayload, input event.Envelop
 // event.DeclineReasonInsufficientCash; every other caller passes 0, 0
 // (ProposalDeclinedPayload.Validate rejects a non-zero value for any other
 // reason).
-func (r *transition) decline(bar event.CompletedBarPayload, input event.Envelope, signalID, reason, detail string, requiredCash, availableCash float64) (event.Envelope, error) {
+func (r *transition) decline(instrumentID string, periodEnd time.Time, input event.Envelope, signalID, reason, detail string, requiredCash, availableCash float64) (event.Envelope, error) {
 	payload := event.ProposalDeclinedPayload{
-		InstrumentID:  bar.InstrumentID,
-		PeriodEnd:     bar.PeriodEnd,
+		InstrumentID:  instrumentID,
+		PeriodEnd:     periodEnd,
 		Kind:          event.ProposalDeclinedKindEntry,
 		SignalID:      signalID,
 		Reason:        reason,
@@ -989,9 +1017,9 @@ func (r *transition) decline(bar event.CompletedBarPayload, input event.Envelope
 		return event.Envelope{}, fmt.Errorf("strategy: marshal proposal declined payload: %w", err)
 	}
 	return r.stamp(
-		decisionID("proposal-declined", bar.InstrumentID, bar.PeriodEnd),
+		decisionID("proposal-declined", instrumentID, periodEnd),
 		event.ProposalDeclinedEventType, event.ProposalDeclinedSchemaVersion,
-		bar.PeriodEnd, input, payloadBytes,
+		periodEnd, input, payloadBytes,
 	), nil
 }
 

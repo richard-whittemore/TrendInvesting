@@ -812,16 +812,24 @@ func TestRunBarRequiresACompletedBar(t *testing.T) {
 // the two entry points are not interchangeable, because only one of them
 // applies the per-bar protocol. A bar delivered through Deliver would reach
 // the reducer with no fills around it at all.
+//
+// A session close is refused for the same reason: the Session's fixpoints
+// run after it, so one delivered alone would propose entries that nothing
+// then fills inside their bar.
 func TestDeliverRefusesACompletedBar(t *testing.T) {
 	t.Parallel()
 
-	simulator, reducer := newComposed(t, baselineConfig())
-	_, err := fills.Deliver(context.Background(), simulator, reducer, barEnvelope(t, breakoutBar()))
-	if err == nil {
-		t.Fatal("Deliver() error = nil, want a refusal for a completed bar")
-	}
-	if !strings.Contains(err.Error(), "RunBar") {
-		t.Errorf("Deliver() error = %v, want it to name RunBar", err)
+	closed := envelope(t, "session", event.SessionClosedEventType, event.SessionClosedSchemaVersion, day(56),
+		event.SessionClosedPayload{PeriodEnd: day(56), InstrumentIDs: []string{testInstrument}})
+	for _, input := range []event.Envelope{barEnvelope(t, breakoutBar()), closed} {
+		simulator, reducer := newComposed(t, baselineConfig())
+		_, err := fills.Deliver(context.Background(), simulator, reducer, input)
+		if err == nil {
+			t.Fatalf("Deliver(%s) error = nil, want a refusal", input.Type)
+		}
+		if !strings.Contains(err.Error(), "RunSession") {
+			t.Errorf("Deliver(%s) error = %v, want it to name RunSession", input.Type, err)
+		}
 	}
 }
 

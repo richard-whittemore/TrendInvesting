@@ -27,9 +27,10 @@ import (
 // (docs/architecture.md).
 const sourceFixture = "fixture"
 
-// runBar composes ADR 0005's simulator protocol. Tests alone replace it to
-// demonstrate simulator drift independently of reducer replay.
-var runBar = fills.RunBar
+// runSession composes ADR 0005's simulator protocol over one Session (ADR
+// 0021). Tests alone replace it to demonstrate simulator drift independently
+// of reducer replay.
+var runSession = fills.RunSession
 
 // options is one invocation of the backtest.
 //
@@ -92,7 +93,7 @@ func (o options) recordBound() int {
 // bar through the per-bar protocol, then the end-of-stream event that
 // resolves whatever is still outstanding. Every input goes through the fill
 // simulator so that one component numbers the composed stream — a
-// configuration event applied around RunBar rather than through it would
+// configuration event applied around RunSession rather than through it would
 // leave a gap replay.Engine.Run refuses.
 func backtest(ctx context.Context, opts options, out io.Writer) error {
 	if opts.build == "" {
@@ -589,16 +590,26 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 	// both helpers below iterate zero times and the bar loop that follows is
 	// byte-for-byte what it was before this flag existed.
 	delivered := make([]bool, len(actions))
-	for _, bar := range bars {
-		if err := deliverActionsDueFor(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, bar.InstrumentID, bar.PeriodEnd); err != nil {
-			return err
+	for _, session := range sessionsOf(bars) {
+		// Every action due before any of the Session's bars is delivered
+		// before the Session opens: the reducer refuses a corporate action
+		// for an instrument whose bar the open Session already holds (ADR
+		// 0021).
+		for _, bar := range session {
+			if err := deliverActionsDueFor(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, bar.InstrumentID, bar.PeriodEnd); err != nil {
+				return err
+			}
 		}
-		envelope, err := inputEnvelope("bar:"+bar.InstrumentID+":"+bar.PeriodEnd.UTC().Format(time.RFC3339Nano),
-			event.CompletedBarEventType, event.CompletedBarSchemaVersion, bar.PeriodEnd, bar, cfg, strategyVersion)
-		if err != nil {
-			return err
+		envelopes := make([]event.Envelope, 0, len(session))
+		for _, bar := range session {
+			envelope, err := inputEnvelope("bar:"+bar.InstrumentID+":"+bar.PeriodEnd.UTC().Format(time.RFC3339Nano),
+				event.CompletedBarEventType, event.CompletedBarSchemaVersion, bar.PeriodEnd, bar, cfg, strategyVersion)
+			if err != nil {
+				return err
+			}
+			envelopes = append(envelopes, envelope)
 		}
-		if _, err := runBar(ctx, simulator, recorder, envelope); err != nil {
+		if _, err := runSession(ctx, simulator, recorder, envelopes); err != nil {
 			return fmt.Errorf("backtest: %w", err)
 		}
 	}
@@ -629,6 +640,31 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 		return fmt.Errorf("backtest: %w", err)
 	}
 	return nil
+}
+
+// sessionsOf groups bars into Sessions (CONTEXT.md: "Session"): one per
+// distinct period end, in ascending period-end order, each holding its bars
+// in the order the fixture lists them. readBars promises only "the order the
+// run delivers them", and an instrument-grouped fixture is well-formed, but
+// the reducer decides a day only once all of that day's bars have arrived
+// and never reopens a closed Session (ADR 0021), so the day, not the file,
+// orders the run.
+func sessionsOf(bars []event.CompletedBarPayload) [][]event.CompletedBarPayload {
+	byPeriodEnd := make(map[time.Time][]event.CompletedBarPayload)
+	var periodEnds []time.Time
+	for _, bar := range bars {
+		key := bar.PeriodEnd.UTC()
+		if _, seen := byPeriodEnd[key]; !seen {
+			periodEnds = append(periodEnds, key)
+		}
+		byPeriodEnd[key] = append(byPeriodEnd[key], bar)
+	}
+	sort.Slice(periodEnds, func(i, j int) bool { return periodEnds[i].Before(periodEnds[j]) })
+	sessions := make([][]event.CompletedBarPayload, len(periodEnds))
+	for i, periodEnd := range periodEnds {
+		sessions[i] = byPeriodEnd[periodEnd]
+	}
+	return sessions
 }
 
 // latestPeriodEnd returns the chronologically-latest PeriodEnd across every

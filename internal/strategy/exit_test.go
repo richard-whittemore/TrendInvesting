@@ -729,11 +729,9 @@ func TestASecondInstrumentIsUnaffectedByAnothersExitChannelExit(t *testing.T) {
 	breachAt := day(57)
 	exitFill := closingExitFill("AAPL", campaignID, 100, breachAt, day(58))
 
-	emitted := newStream(t, cfg).
-		bars(breakoutBars("AAPL")).
+	emitted := staggered(newStream(t, cfg), breakoutBars("AAPL"), laggedBreakoutBars("MSFT")).
 		fill(openingFill("AAPL")).
-		bars(breakoutBars("MSFT")).
-		bar(postEntryBar("AAPL", breachAt, 99)).
+		session(postEntryBar("AAPL", breachAt, 99), laggedBreakoutBars("MSFT")[55]).
 		fill(exitFill).
 		mustRun()
 

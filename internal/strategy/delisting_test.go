@@ -504,12 +504,13 @@ func TestDelistedOutcomesAreCountableSeparatelyInAJournal(t *testing.T) {
 	aaplExitFill := closingExitFill("AAPL", testDecisionID("campaign", "AAPL", day(56)), 100, breachAt, day(58))
 
 	emitted := newStream(t, cfg).
-		bars(breakoutBars("AAPL")).
-		bars(breakoutBars("MSFT")).
+		lockstep(breakoutBars("AAPL"), breakoutBars("MSFT")).
 		fill(openingFill("AAPL")).
 		fill(msftOpeningFill).
-		bar(postEntryBar("AAPL", breachAt, 99)).            // AAPL breaches the exit channel
-		bar(completedBar("MSFT", breachAt, 160, 150, 155)). // MSFT: an ordinary, non-breaching bar
+		session(
+			postEntryBar("AAPL", breachAt, 99),            // AAPL breaches the exit channel
+			completedBar("MSFT", breachAt, 160, 150, 155), // MSFT: an ordinary, non-breaching bar
+		).
 		fill(aaplExitFill).
 		corporateAction(delistingAction("MSFT", breachAt)).
 		mustRun()

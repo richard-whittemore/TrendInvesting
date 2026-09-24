@@ -23,17 +23,17 @@ func TestVerifyReportsRunCompleteness(t *testing.T) {
 			name = "incomplete"
 		}
 		t.Run(name, func(t *testing.T) {
-			original := runBar
-			t.Cleanup(func() { runBar = original })
+			original := runSession
+			t.Cleanup(func() { runSession = original })
 			failure := errors.New("simulator stopped on the second bar")
 			calls := 0
 			if !complete {
-				runBar = func(ctx context.Context, sim *fills.Simulator, handler replay.Handler, bar event.Envelope) (fills.Result, error) {
+				runSession = func(ctx context.Context, sim *fills.Simulator, handler replay.Handler, bars []event.Envelope) (fills.Result, error) {
 					calls++
 					if calls == 2 {
 						return fills.Result{}, failure
 					}
-					return original(ctx, sim, handler, bar)
+					return original(ctx, sim, handler, bars)
 				}
 			}
 			path := filepath.Join(t.TempDir(), "journal.jsonl")

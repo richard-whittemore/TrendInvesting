@@ -234,7 +234,7 @@ func runReducerOverAccountEvents(t *testing.T, cfg event.ConfigurationPayload, e
 		t.Fatalf("replay.New() error = %v", err)
 	}
 	envelopes := append([]event.Envelope{configEnvelopeFor(t, cfg, 1)}, events...)
-	return engine.Run(context.Background(), envelopes)
+	return engine.Run(context.Background(), withSessionCloses(t, envelopes))
 }
 
 func envelopeFor(t *testing.T, cfg event.ConfigurationPayload, id, eventType string, schemaVersion uint32, sequence uint64, at time.Time, payload any) event.Envelope {
