@@ -349,9 +349,9 @@ func journalOf(root string, entry registry.Entry) string {
 	return filepath.Join(root, filepath.FromSlash(entry.Artefacts.JournalPath))
 }
 
-// verify recomputes a journal's chain and reports what it found: whether the
-// file was edited after it was written, and the final record hash a run
-// registry anchors (ADR 0017).
+// verify validates a journal and reports its chain anchor (ADR 0017) and
+// whether its final input declares the run complete (event.RunCompletedEventType).
+// Incomplete runs remain valid evidence of failed runs (ADR 0012).
 func verify(path string, out io.Writer) error {
 	file, err := os.Open(path)
 	if err != nil {
@@ -364,6 +364,10 @@ func verify(path string, out io.Writer) error {
 		return fmt.Errorf("backtest: %s: %w", path, err)
 	}
 
+	completion := "INCOMPLETE — final input is not replay.run.completed; the run did not finish"
+	if verification.Complete {
+		completion = "complete"
+	}
 	report := fmt.Sprintf(`journal            %s
 configuration hash %s
 strategy version   %s
@@ -371,6 +375,7 @@ span               %s to %s
 records            %d
 final record hash  %s
 chain              verified
+run                %s
 `,
 		path,
 		verification.Header.ConfigurationHash,
@@ -378,7 +383,8 @@ chain              verified
 		verification.Header.SpanStart.UTC().Format(time.RFC3339),
 		verification.Header.SpanEnd.UTC().Format(time.RFC3339),
 		verification.RecordCount,
-		verification.FinalRecordHash)
+		verification.FinalRecordHash,
+		completion)
 	if _, err := io.WriteString(out, report); err != nil {
 		return fmt.Errorf("backtest: report the verification: %w", err)
 	}

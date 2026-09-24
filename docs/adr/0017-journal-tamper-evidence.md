@@ -101,6 +101,24 @@ Nor does a partial journal argue for streaming. Nothing is ever written at a jou
 
 An **incomplete temporary file** and an **incomplete run** are different things, and only the first is withheld. A run stopped by the record bound is not interrupted: it reaches the end of the inputs it took, and its journal is written, synced and linked like any other — complete, chain-valid, and stating the span it actually covered rather than the one it intended. What marks it is a non-zero exit, and — when the run was given a registry to record itself in — a `failed` status there naming the bound. Registration is all-or-nothing: `-registry` without `-run-id` is refused, `-run-id` without `-registry` is refused, and a run invoked with neither registers nothing anywhere, so in that mode the exit code carries the whole signal. Neither marker is a defect in the file. A reader who trusted the file alone would be reading an honest record of a shorter run, which is the outcome the bound exists to produce.
 
+### Valid content and run completeness
+
+*Amended 2026-09-24.* After checking the chain, `Verify` also applies the
+writer's header and envelope validators. An unrepaired chain break remains a
+`ChainBrokenError`; invalid content under an intact chain is a distinct error
+naming the header or first invalid record. `CheckIdentity` and `CheckSpan`
+remain separate: validation does not establish agreement between records and
+the header, and does not execute strategy rules.
+
+`Verification.Complete` and the `-verify` report now distinguish a finished
+input stream from retained incomplete-run evidence. Completeness means the
+final **input** is `event.RunCompletedEventType` (`replay.run.completed`), whose
+contract says no further input exists. Terminal decisions may follow it. An
+incomplete run with valid content and an intact chain still verifies
+successfully, preserving ADR 0012's failed-run evidence. The completion marker
+is a recorded claim, not proof of success or protection against a repaired
+chain. It supplements the exit code and registry status described above.
+
 ### Anchoring is the intended next step
 
 Before paper trading, each completed run's final `record_hash` — which `journal.Verify` returns for this purpose — together with its record count and span, should be recorded in the run registry and that registry committed to git. The git history then anchors the chain heads outside the system, turning "detectable if you kept the original" into "detectable, full stop", with no key management, and it closes the end-truncation gap above.

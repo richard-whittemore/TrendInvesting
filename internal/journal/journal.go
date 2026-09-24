@@ -481,6 +481,9 @@ type Verification struct {
 	Header          Header
 	RecordCount     uint64
 	FinalRecordHash string
+	// Complete means the final input is event.RunCompletedEventType: no
+	// further input exists for this run. Terminal decisions may follow it.
+	Complete bool
 }
 
 // Verify checks the chain (ADR 0017), then validates the header and envelopes
@@ -520,9 +523,13 @@ func Verify(r io.Reader) (Verification, error) {
 	if err := header.validate(); err != nil {
 		return Verification{}, err
 	}
+	var complete bool
 	for _, record := range records {
 		if err := record.Envelope.Validate(); err != nil {
 			return Verification{}, fmt.Errorf("journal: record %d: %w", record.Sequence, err)
+		}
+		if record.Kind == KindInput {
+			complete = record.Envelope.Type == event.RunCompletedEventType
 		}
 	}
 
@@ -530,5 +537,6 @@ func Verify(r io.Reader) (Verification, error) {
 		Header:          header,
 		RecordCount:     uint64(len(records)),
 		FinalRecordHash: final,
+		Complete:        complete,
 	}, nil
 }

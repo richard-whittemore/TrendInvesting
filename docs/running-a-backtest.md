@@ -47,9 +47,13 @@ The journal records `strategy.proposal.declined` with reason `insufficient-cash`
 go run ./cmd/backtest -verify run.jsonl
 ```
 
-This recomputes the chain and reports the run's identity, its record count, and its final record hash; it exits non-zero naming the first broken link if the file was edited after it was written.
+This recomputes the chain and reports the run's identity, its record count, and its final record hash; it exits non-zero naming the first broken link if the file was edited without repairing the chain. An intact chain also passes the same header and envelope validators used by the writer; invalid content is reported separately, naming the header or first invalid record.
 
-Verification answers one question only — **was this file edited** — and deliberately not the other. Whether this build still produces the recorded decisions is replay equivalence's question, asked by replaying the journal's input stream through a fresh reducer. A journal can fail either check independently, and the two failures mean different things (ADR 0017).
+The `run` line reports `complete` only when the final **input** record is `replay.run.completed`; terminal decisions may follow it. Otherwise it reports `INCOMPLETE — final input is not replay.run.completed; the run did not finish`. An incomplete run can still have a verified chain and exit successfully: failed runs are retained as evidence (ADR 0012). This status comes from the records, not the header's span, and does not prove the run succeeded or authenticate its producer.
+
+Verification does not execute the strategy. Whether this build still produces the recorded decisions is replay equivalence's question, asked by replaying the journal's input stream through a fresh reducer. A journal can fail either check independently, and the two failures mean different things (ADR 0017). Identity agreement and span agreement remain separate checks, not guarantees made by `-verify`.
+
+`-replay` compares only the recorded stream and can succeed for an incomplete run. `-decisions` displays recorded decisions and can compare their streams without establishing run completion. Neither command's success means the run finished; use `-verify` to inspect completeness. `-rerun` requires a final completion input and refuses an incomplete run because it cannot reconstruct how that run stopped.
 
 A hash chain is tamper-**evidence**, not tamper-**proofing**: whoever can rewrite one record can rewrite the file. Anchoring each run's final record hash in the git-committed run registry is what closes that.
 
@@ -220,7 +224,7 @@ Both journals pass the existing `journal.Verify`, `Read`, `CheckIdentity`, and
 `Split` path before output. Verification is unconditional: an audit log must not
 present edited evidence as a decision explanation. This is chain verification
 and run-identity checking, not replay equivalence or external registry anchoring.
-`journal.CheckSpan` is not present in this checkout; the log makes no additional
+`-decisions` does not call `journal.CheckSpan`; the log makes no additional
 span-validation claim. Both journals' decision envelopes and typed payloads are
 validated before anything is compared, filtered or written: a reference is
 evidence too, so an unknown decision type or an unsupported schema on either
