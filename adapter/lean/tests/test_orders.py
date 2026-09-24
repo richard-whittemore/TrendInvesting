@@ -104,10 +104,11 @@ class OrderTestCase(unittest.TestCase):
         algo.IsWarmingUp = False
         return algo
 
-    def feed(self, algo, day, decisions=(), snapshot_decisions=()):
-        """One completed bar whose bar and snapshot replies carry decisions."""
+    def feed(self, algo, day, decisions=(), snapshot_decisions=(), close_decisions=()):
+        """One completed bar whose bar, Session-close and snapshot replies carry decisions."""
         algo.client.reply_overrides = {
             "market.bar.completed": {"payload": {"decisions": list(decisions)}},
+            "market.session.closed": {"payload": {"decisions": list(close_decisions)}},
             "account.snapshot": {"payload": {"decisions": list(snapshot_decisions)}}}
         b = bar(day)
         algo.History = lambda *args, **kwargs: Frame(b.EndTime)
@@ -155,6 +156,17 @@ class EntryAndAddOrderTests(OrderTestCase):
                          ("AAPL", 100, 24.5, proposal["id"]))
         self.assertEqual(ticket.TimeInForce, "day")
         self.assertEqual(self.rejections(algo), [])
+
+    def test_a_proposal_in_the_session_close_reply_becomes_an_order(self):
+        # The engine decides entries and Adds when the Session closes (ADR
+        # 0021), so its proposals arrive in the reply to market.session.closed,
+        # not the bar's. They must be acted on exactly like the bar's.
+        algo = self.start()
+        entry, add = trade_proposal(9), add_proposal(9)
+        self.feed(algo, 9, close_decisions=[entry, add])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(sorted(t.Tag for t in self.tickets(algo)), sorted([entry["id"], add["id"]]))
+        self.assertTrue(all(t.TimeInForce == "day" for t in self.tickets(algo)))
 
     def test_a_valid_add_proposal_becomes_a_day_stop_market_order_at_its_rung(self):
         algo = self.start()
