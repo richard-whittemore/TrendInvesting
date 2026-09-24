@@ -38,7 +38,8 @@ const CampaignEvaluatedSchemaVersion uint32 = 2
 // others (the gap case, p.23), may genuinely differ from every other Unit's
 // own level. CampaignEvaluatedPayload also reports the Campaign-wide minimum
 // (ProtectiveStop, still carried below); this list is what lets a journal
-// reader see every level actually in force, not only the tightest one.
+// reader see every level actually in force, not only the lowest (worst-case)
+// protective stop across the Campaign's Units (sizing.LowestProtectiveStop).
 type CampaignEvaluatedUnit struct {
 	UnitIndex      int     `json:"unit_index"`
 	EntryPrice     float64 `json:"entry_price"`
