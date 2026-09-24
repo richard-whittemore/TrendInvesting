@@ -168,7 +168,9 @@ class OrderTestCase(unittest.TestCase):
         algo.client.reply_overrides = overrides
         self.at(algo, day)
         b = bar(day)
-        algo.History = lambda *args, **kwargs: Frame(b.EndTime)
+        # ratio: the bar's raw price over its split-adjusted one (Frame).
+        ratio = getattr(self, "ratio", 1)
+        algo.History = lambda *args, **kwargs: Frame(b.EndTime, ratio=ratio)
         algo.OnData(scaffold.slice_of({"AAPL": b}))
 
     def fill(self, algo, ticket, day, price, fee=1.0, quantity=None, status="filled"):
@@ -1113,6 +1115,202 @@ class StartupReportTests(OrderTestCase):
         self.assertNotIn("believed", text)
         # Logged at startup, before any bar reaches the engine.
         self.assertEqual(algo.client.sent, [])
+
+
+def ib_fee(quantity):
+    """LEAN's InteractiveBrokersFeeModel as observed on the pinned image, less
+    its cap: $0.005 per share, $1.00 minimum per order."""
+    return max(1.0, 0.005 * abs(quantity))
+
+
+class RawAccountingTests(OrderTestCase):
+    """ADR 0004: LEAN trades, holds and charges in raw shares and prices, while
+    the engine's levels, quantities and fills stay in the split-adjusted view.
+
+    AAPL in June 2014 before its 7-for-1: every raw price is 28 times its
+    split-adjusted one (ratio), and a split-adjusted share is 1/28 of a raw one.
+    """
+    ratio = 28
+
+    def entry(self, day=9, **changes):
+        # 0.875 split-adjusted is 24.5 raw; 2,800 split-adjusted shares are
+        # 100 raw ones; N of 0.05 split-adjusted is 1.4 raw.
+        fields = dict(entry_level=0.875, quantity=2800, n=0.05)
+        fields.update(changes)
+        return trade_proposal(day, **fields)
+
+    def entered(self, reply=(), fee=None, **changes):
+        """An entry placed after the 9th's bar and filled by LEAN on the 10th."""
+        algo = self.start()
+        proposal = self.entry(**changes)
+        self.feed(algo, 9, [proposal])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [ticket] = self.tickets(algo)
+        self.fill(algo, ticket, 10, 24.57, fee=ib_fee(ticket.Quantity) if fee is None else fee)
+        self.feed(algo, 10, replies={"execution.fill": {"payload": {"decisions": list(reply)}}})
+        return algo, proposal, ticket
+
+    def test_an_entry_is_ordered_in_raw_shares_at_the_raw_level(self):
+        algo = self.start()
+        proposal = self.entry()
+        self.feed(algo, 9, [proposal])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [ticket] = self.tickets(algo)
+        self.assertEqual((ticket.Quantity, ticket.StopPrice, ticket.Tag), (100, 24.5, proposal["id"]))
+
+    def test_an_add_is_ordered_in_raw_shares_at_the_raw_rung(self):
+        algo = self.start()
+        proposal = add_proposal(9, level=0.9, quantity=2800, campaign_n=0.05)
+        self.feed(algo, 9, [proposal])
+        [ticket] = self.tickets(algo)
+        self.assertEqual(ticket.Quantity, 100)
+        self.assertAlmostEqual(ticket.StopPrice, 25.2)
+
+    def test_a_unit_is_rounded_down_to_whole_raw_shares(self):
+        # A raw share is 28 split-adjusted ones, so 2,830 is 101 whole raw
+        # shares and a remainder. Rounding down never risks more than the
+        # Unit the engine sized (ADR 0003); the fill reports what executed.
+        algo = self.start()
+        self.feed(algo, 9, [self.entry(quantity=2830)])
+        [ticket] = self.tickets(algo)
+        self.assertEqual(ticket.Quantity, 101)
+
+    def test_a_unit_smaller_than_one_raw_share_is_rejected(self):
+        algo = self.start()
+        proposal = self.entry(quantity=27)
+        self.feed(algo, 9, [proposal])
+        self.assertEqual(self.tickets(algo), [])
+        [rejection] = self.rejections(algo)
+        self.assertIn(proposal["id"], rejection)
+        self.assertIn("less than one raw share", rejection)
+        self.assertFalse(algo.failed)
+
+    def test_slippage_is_charged_in_raw_prices(self):
+        # ADR 0013: slippage_n x N, where N is the engine's split-adjusted
+        # figure; LEAN prices the fill in raw, so the charge is 28 times it.
+        algo = self.start()
+        proposal = self.entry()
+        self.feed(algo, 9, [proposal])
+        slip = algo.security.slippage_model.GetSlippageApproximation(
+            algo.security, types.SimpleNamespace(Tag=proposal["id"]))
+        self.assertAlmostEqual(slip, 0.05 * 0.05 * 28)
+
+    def test_a_fill_is_returned_in_the_split_adjusted_view(self):
+        # ADR 0004's amendment: a Campaign's money is computed in the one
+        # view its fills are priced in, split-adjusted until a split can
+        # adjust a held position, so the engine hears the raw execution
+        # restated in that view: quantity x price is unchanged by it.
+        algo, proposal, ticket = self.entered()
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [fill] = [e["payload"] for e in self.sent(algo, "execution.fill")]
+        self.assertEqual(fill["quantity"], 2800)
+        self.assertAlmostEqual(fill["price"], 24.57 / 28)
+        self.assertAlmostEqual(fill["level"], 0.875)
+        self.assertAlmostEqual(fill["slippage_applied"], 0.05 * 0.05)
+        self.assertAlmostEqual(fill["quantity"] * fill["price"], 100 * 24.57)
+        self.assertTrue(any("100 raw shares @ 24.57" in m for m in algo.logs), algo.logs)
+
+    def test_a_partial_unit_fill_reports_the_whole_raw_shares_that_executed(self):
+        algo, _, ticket = self.entered(quantity=2830)
+        [fill] = [e["payload"] for e in self.sent(algo, "execution.fill")]
+        self.assertEqual((ticket.Quantity, fill["quantity"]), (101, 101 * 28))
+
+    def test_commission_is_leans_charge_on_raw_shares(self):
+        # 28,000 split-adjusted shares are 1,000 raw ones: $5.00 at $0.005 a
+        # share, where the same Unit in split-adjusted shares would be
+        # charged $140.00. The commission is cash, the same in either view,
+        # so it is returned exactly as LEAN charged it.
+        algo, _, ticket = self.entered(quantity=28000)
+        self.assertEqual(ticket.Quantity, 1000)
+        [fill] = [e["payload"] for e in self.sent(algo, "execution.fill")]
+        self.assertEqual(fill["commission"], 5.0)
+
+    def test_an_exit_order_rests_in_raw_shares_at_the_raw_level(self):
+        opened = campaign_opened(campaign_n=0.05)
+        placed = exit_order_set(10, level=0.7875, quantity=2800)
+        algo, _, _ = self.entered(reply=[opened, placed])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [sell] = self.sells(algo)
+        self.assertEqual((sell.Quantity, sell.Tag), (-100, placed["id"]))
+        self.assertAlmostEqual(sell.StopPrice, 22.05)
+        raised = exit_order_set(11, level=0.8, quantity=2800)
+        self.feed(algo, 11, [raised])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(sell.Quantity, -100)
+        self.assertAlmostEqual(sell.StopPrice, 22.4)
+
+    def test_an_exit_order_that_is_not_whole_raw_shares_stops_the_run(self):
+        # A Unit's quantity is what its fill reported, always whole raw
+        # shares; one that is not cannot be protected by a whole-share order.
+        opened = campaign_opened(campaign_n=0.05)
+        bad = exit_order_set(10, level=0.7875, quantity=2810)
+        algo, _, _ = self.entered(reply=[opened, bad])
+        self.assertEqual(self.sells(algo), [])
+        for fact in (bad["id"], "2810", "cannot be protected"):
+            self.assertIn(fact, algo.quit_reason)
+
+    def test_a_stop_fill_is_returned_in_the_split_adjusted_view(self):
+        opened = campaign_opened(campaign_n=0.05)
+        algo, _, _ = self.entered(reply=[opened, exit_order_set(10, level=0.7875, quantity=2800)])
+        [sell] = self.sells(algo)
+        self.fill(algo, sell, 11, 21.98, fee=ib_fee(sell.Quantity))
+        self.feed(algo, 11, replies={"execution.fill": {"payload": {"decisions": [
+            units_stopped(11, fill_id="lean:2:2"), campaign_exited(11)]}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        stop = self.sent(algo, "execution.fill")[-1]["payload"]
+        self.assertEqual((stop["kind"], stop["quantity"], stop["commission"]), ("stop", 2800, 1.0))
+        self.assertAlmostEqual(stop["price"], 21.98 / 28)
+        self.assertAlmostEqual(stop["level"], 0.7875)
+        self.assertAlmostEqual(stop["slippage_applied"], 0.05 * 0.05)
+
+    def test_order_changes_are_reported_as_lean_states_them_in_raw(self):
+        # event.OrderLifecyclePayload carries the order's figures as the venue
+        # stated them, which reconciliation compares with the broker's.
+        algo = self.start()
+        self.feed(algo, 9, [self.entry()])
+        [submitted] = [e["payload"] for e in self.sent(algo, "execution.order.lifecycle")]
+        self.assertEqual((submitted["quantity"], submitted["stop_price"]), (100, 24.5))
+
+    def test_every_input_is_valid_in_go(self):
+        opened = campaign_opened(campaign_n=0.05)
+        algo, _, _ = self.entered(reply=[opened, exit_order_set(10, level=0.7875, quantity=2800)])
+        [sell] = self.sells(algo)
+        self.fill(algo, sell, 11, 21.98)
+        self.feed(algo, 11)
+        inputs = [e for e in algo.client.sent
+                  if e["type"] in ("execution.fill", "execution.order.lifecycle")]
+        result = subprocess.run(
+            ["go", "run", "./adapter/lean/tests/testdata/execution_contract.go"],
+            cwd=Path(__file__).resolve().parents[3],
+            input=json.dumps(inputs, separators=(",", ":")), text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_bar_whose_views_are_not_a_whole_split_ratio_apart_stops_the_run(self):
+        # A raw price is the split-adjusted one times the product of every
+        # later split. A whole share of one view must be a whole number of
+        # shares of the other, or no fill could be stated in both.
+        for ratio in (1.5, 0.5, 27.9):
+            with self.subTest(ratio=ratio):
+                self.ratio = ratio
+                algo = self.start()
+                self.feed(algo, 9, [self.entry()])
+                self.assertTrue(algo.failed)
+                self.assertIn("split ratio", algo.quit_reason)
+                self.assertEqual(self.sent(algo, "market.bar.completed"), [])
+                self.assertEqual(self.tickets(algo), [])
+        del self.ratio
+
+    def test_leans_rounded_factor_file_ratio_is_a_whole_split_ratio(self):
+        # LEAN's factor file states AAPL's 1/56 as 0.0178571, so its raw and
+        # split-adjusted closes are 56.000134 apart (observed on the pinned
+        # image, 2005-02-22: 85.38 and 1.524639198).
+        self.ratio = 85.38 / 1.524639198
+        algo = self.start()
+        self.feed(algo, 9, [self.entry(quantity=5600)])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [ticket] = self.tickets(algo)
+        self.assertEqual((ticket.Quantity, ticket.StopPrice), (100, 0.875 * 56))
+        del self.ratio
 
 
 class FixtureContractTests(unittest.TestCase):

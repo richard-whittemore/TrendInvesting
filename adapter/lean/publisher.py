@@ -26,24 +26,29 @@ ORDER_LIFECYCLE_SCHEMA_VERSION = 1
 RUN_STOPPED_REASONS = frozenset({"delisted"})
 
 
-def raw_view(history, end_time):
-    """Require exactly the raw bar that ends with the subscription bar; never
-    substitute an earlier close.
+def split_adjusted_view(history, end_time):
+    """Require exactly the split-adjusted bar that ends with the subscription
+    bar; never substitute an earlier close.
 
-    LEAN's one-bar raw History can also hold the previous session's bar: on
-    an early-close session it returned both 2002-12-23 16:00 and 2002-12-24
-    13:00 (observed on the pinned image). The bar is chosen by its end time,
-    and anything other than exactly one bar ending then is refused.
+    The subscription is raw, because LEAN trades and accounts in whatever
+    view it is subscribed to and ADR 0004 requires that to be raw; the
+    split-adjusted view every signal reads is LEAN's own split-adjusted
+    History for the same bar, so the adapter does no adjustment arithmetic
+    of its own. LEAN's one-bar History can also hold the previous session's
+    bar: on an early-close session it returned both 2002-12-23 16:00 and
+    2002-12-24 13:00 (observed on the pinned image). The bar is chosen by its
+    end time, and anything other than exactly one bar ending then is refused.
     """
     if history is None or history.empty:
-        raise ValueError("raw History must contain the completed bar")
+        raise ValueError("split-adjusted History must contain the completed bar")
     matches = [i for i, key in enumerate(history.index) if key[-1] == end_time]
     if len(matches) != 1:
-        raise ValueError("raw History must contain exactly one bar ending with the subscription "
-                         "bar at {}; it holds {} such bar(s)".format(end_time, len(matches)))
+        raise ValueError("split-adjusted History must contain exactly one bar ending with the "
+                         "subscription bar at {}; it holds {} such bar(s)".format(
+                             end_time, len(matches)))
     row = history.iloc[matches[0]]
-    return dict(view="raw", **{key: float(row[key]) for key in
-                              ("open", "high", "low", "close", "volume")})
+    return dict(view="split-adjusted", **{key: float(row[key]) for key in
+                                         ("open", "high", "low", "close", "volume")})
 
 
 class Publisher:
@@ -65,15 +70,17 @@ class Publisher:
         self.session_end = None
         self.session_ids = []
 
-    def publish(self, instrument, bar, raw, period_end):
+    def publish(self, instrument, bar, split_adjusted, period_end):
+        """Send one market.bar.completed: bar is LEAN's raw subscription bar,
+        split_adjusted its split_adjusted_view (ADR 0004)."""
         if self.last_end is not None and bar.EndTime <= self.last_end:
             raise ValueError("duplicate or out-of-order completed bar")
         payload = {
             "instrument_id": instrument, "period_end": period_end,
-            "split_adjusted": dict(view="split-adjusted", **{
+            "split_adjusted": split_adjusted,
+            "raw": dict(view="raw", **{
                 key.lower(): float(getattr(bar, key)) for key in
                 ("Open", "High", "Low", "Close", "Volume")}),
-            "raw": raw,
         }
         if self.session_end is not None and period_end != self.session_end:
             raise ValueError("a bar for another period end while a session is open")
