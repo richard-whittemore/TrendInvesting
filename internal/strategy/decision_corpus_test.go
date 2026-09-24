@@ -362,7 +362,11 @@ func decideDecisionCorpus(existing map[string]string, found bool, recorded map[s
 	}
 
 	added := newScenarios(existing, recorded)
-	complete := fullRun && passed
+	// A run that recorded nothing is never complete, whatever flags produced
+	// it: dropping on its evidence would empty the corpus. This does not rely
+	// on every test flag that suppresses running (-list today, whatever Go
+	// adds tomorrow) having been enumerated in decisionCorpusFullRun.
+	complete := fullRun && passed && len(recorded) > 0
 	var missing []string
 	if complete {
 		missing = droppedScenarios(existing, recorded)
@@ -452,6 +456,10 @@ func TestMain(m *testing.M) {
 
 	if !decisionCorpusCountIsOne() {
 		fmt.Fprintln(os.Stderr, "decision corpus: not checked — -count is not 1, and repeated iterations cannot be told apart from repeated calls within one run")
+		os.Exit(code)
+	}
+	if f := flag.Lookup("test.list"); f != nil && f.Value.String() != "" {
+		// -list prints test names and runs none, so there is nothing to check.
 		os.Exit(code)
 	}
 
