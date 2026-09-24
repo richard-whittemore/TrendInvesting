@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -282,7 +283,7 @@ func TestDecisionTextExitConfirmationFollowsTheExitReason(t *testing.T) {
 		t.Fatal(err)
 	}
 	const campaign = `exited Campaign "campaign:AAPL:2026-01-22T00:00:00.000000000Z" because `
-	const closed = `; 1 Units and 5000 shares closed at `
+	const closed = `; 1 Unit and 5000 shares closed at `
 	const result = ` 128.75; realised result 8449.999999999989`
 	for _, tc := range []struct {
 		reason string
@@ -324,6 +325,71 @@ func TestDecisionTextExitConfirmationFollowsTheExitReason(t *testing.T) {
 				t.Fatalf("a Delisting Exit has no fill to confirm it: %s", got)
 			}
 		})
+	}
+}
+
+// A Unit count reads "1 Unit" and "n Units" in every decision that states
+// one, so a one-Unit Campaign's lines read as English.
+func TestDecisionTextCountsUnitsInTheSingularAndPlural(t *testing.T) {
+	_, records := readJournalFile(t, goldenJournal)
+	var exitedEnvelope, evaluatedEnvelope event.Envelope
+	for _, r := range records {
+		switch r.Envelope.Type {
+		case event.CampaignExitedEventType:
+			exitedEnvelope = r.Envelope
+		case event.CampaignEvaluatedEventType:
+			evaluatedEnvelope = r.Envelope
+		}
+	}
+	if exitedEnvelope.Type == "" || evaluatedEnvelope.Type == "" {
+		t.Fatal("missing Campaign exit or evaluation")
+	}
+	sentence := func(base event.Envelope, payload any) string {
+		t.Helper()
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := base
+		e.Payload, e.PayloadHash = raw, event.HashPayload(raw)
+		got, err := decisionSentence(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	var exited event.CampaignExitedPayload
+	if err := json.Unmarshal(exitedEnvelope.Payload, &exited); err != nil {
+		t.Fatal(err)
+	}
+	var evaluated event.CampaignEvaluatedPayload
+	if err := json.Unmarshal(evaluatedEnvelope.Payload, &evaluated); err != nil {
+		t.Fatal(err)
+	}
+	if len(evaluated.Units) != 1 {
+		t.Fatalf("the golden's Campaign is evaluated with %d Units, want 1", len(evaluated.Units))
+	}
+	plural := evaluated
+	second := evaluated.Units[0]
+	second.UnitIndex++
+	plural.Units = append(slices.Clone(evaluated.Units), second)
+	plural.AggregateOpenRisk *= 2
+	plural.AggregateOpenRiskFraction *= 2
+
+	for _, tc := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"exited one", sentence(exitedEnvelope, exited), "; 1 Unit and 5000 shares closed"},
+		{"exited four", sentence(exitedEnvelope, func() event.CampaignExitedPayload { p := exited; p.Units = 4; return p }()), "; 4 Units and 5000 shares closed"},
+		{"evaluated one", sentence(evaluatedEnvelope, evaluated), " with 1 Unit; "},
+		{"evaluated two", sentence(evaluatedEnvelope, plural), " with 2 Units; "},
+	} {
+		if !strings.Contains(tc.got, tc.want) {
+			t.Errorf("%s: %s\nwant it to contain %q", tc.name, tc.got, tc.want)
+		}
 	}
 }
 

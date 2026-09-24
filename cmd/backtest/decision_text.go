@@ -124,7 +124,7 @@ func decisionSentence(e event.Envelope) (string, error) {
 		})
 	case event.CampaignUnitAddedEventType:
 		return renderDecision(e, event.CampaignUnitAddedSchemaVersion, func(p event.CampaignUnitAddedPayload) string {
-			return fmt.Sprintf("completed Add of Unit %d to Campaign %q: %d shares at %s because fill %q was recorded; now %d Units with the added Unit's Protective Stop at %s", p.UnitIndex, p.CampaignID, p.Quantity, decisionNumber(p.FillPrice), p.FillID, p.Units, decisionNumber(p.ProtectiveStop))
+			return fmt.Sprintf("completed Add of Unit %d to Campaign %q: %d shares at %s because fill %q was recorded; now %s with the added Unit's Protective Stop at %s", p.UnitIndex, p.CampaignID, p.Quantity, decisionNumber(p.FillPrice), p.FillID, unitCount(p.Units), decisionNumber(p.ProtectiveStop))
 		})
 	case event.ProtectiveStopSetEventType:
 		return renderDecision(e, event.ProtectiveStopSetSchemaVersion, func(p event.ProtectiveStopSetPayload) string {
@@ -144,11 +144,11 @@ func decisionSentence(e event.Envelope) (string, error) {
 		})
 	case event.CampaignExitedEventType:
 		return renderDecision(e, event.CampaignExitedSchemaVersion, func(p event.CampaignExitedPayload) string {
-			return fmt.Sprintf("exited Campaign %q because %s, %s; %d Units and %d shares closed at %s %s; realised result %s", p.CampaignID, logText(p.Reason), exitCause(p), p.Units, p.Quantity, exitPriceLabel(p.Reason), decisionNumber(p.ExitPrice), decisionNumber(p.RealisedResult))
+			return fmt.Sprintf("exited Campaign %q because %s, %s; %s and %d shares closed at %s %s; realised result %s", p.CampaignID, logText(p.Reason), exitCause(p), unitCount(p.Units), p.Quantity, exitPriceLabel(p.Reason), decisionNumber(p.ExitPrice), decisionNumber(p.RealisedResult))
 		})
 	case event.CampaignUnitsStoppedEventType:
 		return renderDecision(e, event.CampaignUnitsStoppedSchemaVersion, func(p event.CampaignUnitsStoppedPayload) string {
-			return fmt.Sprintf("Protective Stop closed Units %v of Campaign %q: %d shares at %s because fill %q was recorded; %d Units remain; realised result %s", p.UnitIndexes, p.CampaignID, p.QuantityClosed, decisionNumber(p.FillPrice), p.FillID, p.RemainingUnits, decisionNumber(p.RealisedResult))
+			return fmt.Sprintf("Protective Stop closed Units %v of Campaign %q: %d shares at %s because fill %q was recorded; %s remain; realised result %s", p.UnitIndexes, p.CampaignID, p.QuantityClosed, decisionNumber(p.FillPrice), p.FillID, unitCount(p.RemainingUnits), decisionNumber(p.RealisedResult))
 		})
 	case event.ProposalExpiredEventType:
 		return renderDecision(e, event.ProposalExpiredSchemaVersion, func(p event.ProposalExpiredPayload) string {
@@ -184,7 +184,7 @@ func decisionSentence(e event.Envelope) (string, error) {
 			if p.ExitChannelReady {
 				exit = fmt.Sprintf("Exit Channel %s; exit condition met: %t", decisionNumber(p.ExitChannelLow), p.ExitConditionMet)
 			}
-			return fmt.Sprintf("evaluated Campaign %q with %d Units; %s; aggregate open risk %s against Notional Account %s", p.CampaignID, len(p.Units), exit, decisionNumber(p.AggregateOpenRisk), decisionNumber(p.NotionalAccount))
+			return fmt.Sprintf("evaluated Campaign %q with %s; %s; aggregate open risk %s against Notional Account %s", p.CampaignID, unitCount(len(p.Units)), exit, decisionNumber(p.AggregateOpenRisk), decisionNumber(p.NotionalAccount))
 		})
 	case event.DrawdownStepAppliedEventType:
 		return renderDecision(e, event.DrawdownStepAppliedSchemaVersion, func(p event.DrawdownStepAppliedPayload) string {
@@ -209,4 +209,13 @@ func decisionSentence(e event.Envelope) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported decision type %q", e.Type)
 	}
+}
+
+// unitCount states a number of Units in English: "1 Unit", otherwise
+// "n Units".
+func unitCount(n int) string {
+	if n == 1 {
+		return "1 Unit"
+	}
+	return fmt.Sprintf("%d Units", n)
 }
