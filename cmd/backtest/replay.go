@@ -46,11 +46,23 @@ func replayEquivalence(ctx context.Context, r io.Reader) (*replay.Divergence, er
 	if err != nil {
 		return nil, err
 	}
-	divergence := replay.Equivalent(decisions, emitted)
+	return settleReplay(ctx, replay.Equivalent(decisions, emitted))
+}
+
+// settleReplay decides what a finished comparison reports. An established
+// divergence is the audit's finding and is returned even if the invocation
+// has since been cancelled: the reducer finished, so the difference is real,
+// and an interrupt must never hide it. Only a clean comparison is subject to
+// the final cancellation check, so a cancelled invocation is never reported
+// as a success.
+func settleReplay(ctx context.Context, divergence *replay.Divergence) (*replay.Divergence, error) {
+	if divergence != nil {
+		return divergence, nil
+	}
 	if err := stoppedBy(ctx); err != nil {
 		return nil, err
 	}
-	return divergence, nil
+	return nil, nil
 }
 
 // contextReader stops a journal scan as soon as the invocation is cancelled,
