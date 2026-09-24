@@ -38,6 +38,7 @@ func marshalPayloads() []validatedPayload {
 		event.RunCompletedPayload{}, validSetupEvaluated(), validSignal(),
 		validCorporateAction(),
 		validProtectiveStopSet(), validProtectiveStopSetRaised(), validCampaignUnitsStopped(),
+		validExitOrderSet(), validExitOrderSetAtExitChannel(),
 	}
 }
 

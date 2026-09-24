@@ -63,6 +63,13 @@ func (r *Reducer) applyRunCompleted(envelope event.Envelope) ([]event.Envelope, 
 			return nil, err
 		}
 		emitted = append(emitted, expiries...)
+		// An exit proposal expired here no longer governs a Unit it was
+		// above, so that Unit's Exit Order returns to its stop (exit_order.go).
+		exitOrders, err := r.emitExitOrderChanges(r.instruments[instrumentID], completedAt, "end-of-stream", envelope)
+		if err != nil {
+			return nil, err
+		}
+		emitted = append(emitted, exitOrders...)
 	}
 	return emitted, nil
 }

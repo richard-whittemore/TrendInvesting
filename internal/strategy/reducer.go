@@ -638,6 +638,15 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 		}
 		emissions = append(emissions, campaignEmissions...)
 
+		// Every held Unit's Exit Order moved by this bar — by the exit
+		// proposal it raised, or by the expiry of the previous bar's — after
+		// the Campaign's own evaluation and before the Add (exit_order.go).
+		exitOrderEmissions, err := r.emitExitOrderChanges(state, bar.PeriodEnd, "bar", envelope)
+		if err != nil {
+			return nil, err
+		}
+		emissions = append(emissions, exitOrderEmissions...)
+
 		if state.pendingExitProposal == nil && len(state.campaign.units) < state.campaign.maxUnits {
 			addEmissions, err := r.evaluateAdd(state, envelope)
 			if err != nil {

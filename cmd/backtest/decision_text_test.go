@@ -198,7 +198,7 @@ func TestDecisionLogMixedGolden(t *testing.T) {
 	}
 	const want = `2026-01-22T00:00:00Z [decision 22] AAPL: Signal long because high 129.01 exceeded Entry Channel 127.01; N was 1 (rule entry.channel.breakout; ADR 0002).
 2026-01-22T00:00:00Z [decision 23] MSFT: declined entry proposal because insufficient-cash: one Unit cannot be funded; Signal "signal:MSFT"; required cash 20615 exceeded available cash 20614.99 (rule not recorded; ADR not recorded).
-2026-02-02T00:00:00Z [decision 58] AAPL: expired exit proposal "exit-proposal:AAPL:2026-02-02T00:00:00.000000000Z" for 20000 shares at 128.8 because input-stream-ended; no fill was recorded for this proposal (rule exit-proposal.expires.with-its-bar; ADR 0011).
+2026-02-02T00:00:00Z [decision 72] AAPL: expired exit proposal "exit-proposal:AAPL:2026-02-02T00:00:00.000000000Z" for 20000 shares at 128.8 because input-stream-ended; no fill was recorded for this proposal (rule exit-proposal.expires.with-its-bar; ADR 0011).
 `
 	if out.String() != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", &out, want)
@@ -359,6 +359,50 @@ func TestDecisionTextEscapesRunesThatReshapeTheLine(t *testing.T) {
 			}
 			if strings.ContainsFunc(line, func(r rune) bool { return !unicode.IsGraphic(r) }) {
 				t.Fatalf("a non-graphic rune survived into %q", line)
+			}
+		})
+	}
+}
+
+// An Exit Order names the Unit, its own quantity, the level it rests at, and
+// which of the two restated levels governs it — so the log line alone says
+// why the order sits where it does.
+func TestDecisionTextExitOrderSentences(t *testing.T) {
+	at := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
+	const campaign = "campaign:AAPL:2026-01-22T00:00:00.000000000Z"
+	for _, tc := range []struct {
+		name    string
+		payload event.ExitOrderSetPayload
+		want    string
+	}{
+		{
+			name:    "protective stop governs",
+			payload: event.ExitOrderSetPayload{CampaignID: campaign, InstrumentID: "AAPL", UnitIndex: 2, Level: 124.5, Quantity: 5000, Source: event.ExitOrderSourceProtectiveStop, ProtectiveStop: 124.5, AsOf: at, Rule: event.RuleExitOrderHigherOfStopAndExitChannel, ADR: event.ADRExitOrderRestsAtTheLevel},
+			want:    `set Exit Order for Unit 2 of Campaign "` + campaign + `" to 5000 shares at 124.5 because protective-stop governs; Protective Stop 124.5, no Exit-Channel exit proposed`,
+		},
+		{
+			name:    "exit channel governs",
+			payload: event.ExitOrderSetPayload{CampaignID: campaign, InstrumentID: "AAPL", UnitIndex: 1, Level: 128.8, Quantity: 5000, Source: event.ExitOrderSourceExitChannel, ProtectiveStop: 124.5, ExitChannelLevel: 128.8, AsOf: at, Rule: event.RuleExitOrderHigherOfStopAndExitChannel, ADR: event.ADRExitOrderRestsAtTheLevel},
+			want:    `set Exit Order for Unit 1 of Campaign "` + campaign + `" to 5000 shares at 128.8 because exit-channel governs; Protective Stop 124.5, Exit Channel level 128.8`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(tc.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, records := readJournalFile(t, goldenJournal)
+			e := records[0].Envelope
+			e.Type = event.ExitOrderSetEventType
+			e.SchemaVersion = event.ExitOrderSetSchemaVersion
+			e.Payload = raw
+			e.PayloadHash = event.HashPayload(raw)
+			got, err := decisionSentence(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("got  %s\nwant %s", got, tc.want)
 			}
 		})
 	}

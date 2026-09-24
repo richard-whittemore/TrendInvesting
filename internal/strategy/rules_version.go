@@ -44,7 +44,15 @@ package strategy
 // decline a Unit the older build proposed. A run with no cash movement
 // decides exactly as before, but the two builds no longer replay each
 // other's journals in general, so they cannot share a version.
-const RulesVersion = "1.3.0"
+//
+// Bumped 1.3.0 -> 1.4.0 when the reducer began recording each held Unit's
+// Exit Order (CONTEXT.md: "Exit Order"): a strategy.exit-order.set decision
+// whenever the level at which that Unit's one sell order rests changes — the
+// higher of its Protective Stop and, while an Exit-Channel exit is proposed,
+// that exit's level (ADR 0005). No existing decision changes and no fill
+// changes, but every journal with a Campaign gains decisions, so the two
+// builds no longer replay each other's journals byte-identically.
+const RulesVersion = "1.4.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -116,4 +124,8 @@ var RuleSurfaceFingerprints = map[string]string{
 	// Unchanged from 1.2.0: the 1.3.0 change is a changed predicate, not a
 	// changed constant — exactly the gap described above.
 	"1.3.0": "655e43354aa890c64ae02fc078c73274157657cd792adfa24d12fdf9b6bab57b",
+	// Changed from 1.3.0 by the Exit Order's own rule and its ADR citation
+	// (event.RuleExitOrderHigherOfStopAndExitChannel,
+	// event.ADRExitOrderRestsAtTheLevel).
+	"1.4.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
 }

@@ -343,6 +343,7 @@ func (s *Simulator) observe(envelope event.Envelope, ref reference) error {
 		event.SignalEventType,                      // a Signal fired; the proposal that follows is the order
 		event.ProposalDeclinedEventType,            // a Signal produced no position, so no order
 		event.CampaignEvaluatedEventType,           // the levels in force, already known from the stop-set events
+		event.ExitOrderSetEventType,                // the stop and exit levels combined per Unit; this book keeps them as separate orders
 		event.EngineStateEventType,                 // a halt; the run stops, so the book is moot
 		event.DrawdownStepAppliedEventType,         // ADR 0007's ladder; affects sizing, not resting orders
 		event.NotionalAccountRebasedEventType,      // likewise
