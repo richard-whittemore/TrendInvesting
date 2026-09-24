@@ -709,9 +709,16 @@ func TestProposalDeclinedPayloadValidateInsufficientCash(t *testing.T) {
 			wantErr: "available cash must be finite",
 		},
 		{
-			name:    "negative available cash",
-			mutate:  func(p *event.ProposalDeclinedPayload) { p.AvailableCash = -1 },
-			wantErr: "available cash must not be negative",
+			// ADR 0020 floors the basis, never the fills taken from it, so
+			// the balance left after a fill the basis could not fund is
+			// recorded as it is.
+			name:   "negative available cash",
+			mutate: func(p *event.ProposalDeclinedPayload) { p.AvailableCash = -1 },
+		},
+		{
+			name:    "infinite available cash",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.AvailableCash = math.Inf(-1) },
+			wantErr: "available cash must be finite",
 		},
 		{
 			// Reject an insufficient-cash claim at the affordable boundary:
@@ -758,8 +765,8 @@ func TestProposalDeclinedEventConstants(t *testing.T) {
 	if event.ProposalDeclinedEventType != "strategy.proposal.declined" {
 		t.Errorf("ProposalDeclinedEventType = %q, want %q", event.ProposalDeclinedEventType, "strategy.proposal.declined")
 	}
-	if event.ProposalDeclinedSchemaVersion != 3 {
-		t.Errorf("ProposalDeclinedSchemaVersion = %d, want 3", event.ProposalDeclinedSchemaVersion)
+	if event.ProposalDeclinedSchemaVersion != 4 {
+		t.Errorf("ProposalDeclinedSchemaVersion = %d, want 4", event.ProposalDeclinedSchemaVersion)
 	}
 	for _, reason := range []string{
 		event.DeclineReasonNNotReady,

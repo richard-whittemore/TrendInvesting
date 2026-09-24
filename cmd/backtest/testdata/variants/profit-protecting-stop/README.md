@@ -15,7 +15,13 @@ source-fixed Baseline 55/20 channels. All other parameters, including half-N
 Adds and the four-Unit limit, retain their existing behavior.
 
 The inputs are the repository-authored synthetic `../../bars.json`, spanning
-2026-01-02 through 2026-02-02. No third-party market data is included. These
+2026-01-02 through 2026-02-02, with an opening available cash of 3,000,000.
+Each of this fixture's Units costs about 64 % of the 1,000,000 starting
+equity, and ADR 0020 debits every entry and Add fill from the cash the next
+Unit is checked against, so at the default cash (the starting equity) the
+Campaign takes one Unit and has no Add whose stop raise the scenario needs.
+Cash is an account input, not a configuration change, so the configuration
+and its hash are unchanged. No third-party market data is included. These
 invented bars exercise engine behavior; they are not a source-derived trading
 performance scenario. There is no fit, regime evaluation, or opening of ADR
 0012's 2016-01-01 out-of-sample window. The research ablation order and adoption

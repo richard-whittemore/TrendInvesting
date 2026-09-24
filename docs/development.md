@@ -90,7 +90,7 @@ Three things to know:
 
 Round in the producer *and* in any `event` payload validator that re-derives the same value, or the two will disagree.
 
-It cost a real defect to learn, twice over. `internal/strategy`'s whole-life exit price fused on arm64, and the committed golden journal — the first artifact in this repository that has to be byte-identical across machines — failed in CI on amd64 while passing locally. The first sweep then missed every `+=` site, because the walk that found the others only looked at expressions and not at assignments; the golden passed anyway, because that fixture's numbers happened not to differ at those sites. The fixture now has four Units whose products need more than 53 bits, and `cmd/backtest`'s fusion tests hold that sensitivity in place.
+It cost a real defect to learn, twice over. `internal/strategy`'s whole-life exit price fused on arm64, and the committed golden journal — the first artifact in this repository that has to be byte-identical across machines — failed in CI on amd64 while passing locally. The first sweep then missed every `+=` site, because the walk that found the others only looked at expressions and not at assignments; the golden passed anyway, because that fixture's numbers happened not to differ at those sites. The fixture's bars, given enough opening cash, buy four Units whose products need more than 53 bits; `cmd/backtest`'s fusion tests run that Campaign and hold the sensitivity in place, and the declared Variant's golden commits it.
 
 `internal/floatingpointaudit` enforces the local `+`, `-`, `+=` and `-=` shapes
 in production and test Go files throughout the module, using `go/types` to exempt integer

@@ -53,7 +53,7 @@ func (r *Reducer) transact(build func(*transition) ([]event.Envelope, error)) ([
 
 // begin opens a transaction over r. Everything reachable from r that is not
 // behind the instrument or accepted-fill accessors is copied here; account
-// chronology, currency pinning, cash, the delisted map and the open
+// chronology, currency pinning, cash and its fill debits, the delisted map and the open
 // Session's delisted bars are small and commit together with the instruments and fills (ADR 0007/0009).
 // time.Time locations are immutable and may be shared.
 func (r *Reducer) begin() *transition {
@@ -64,6 +64,7 @@ func (r *Reducer) begin() *transition {
 	}
 	tx.notionalAccount = copyValue(r.notionalAccount)
 	tx.delisted = maps.Clone(r.delisted)
+	tx.fillDebits = slices.Clone(r.fillDebits)
 	tx.sessionDelistedBars = slices.Clone(r.sessionDelistedBars)
 	tx.instruments = nil
 	tx.acceptedFills = nil

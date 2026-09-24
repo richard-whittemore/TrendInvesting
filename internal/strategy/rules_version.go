@@ -75,7 +75,18 @@ package strategy
 // a different input, and every journal gains one input per Session, so no
 // 1.5.0 journal replays under this build: it has no session closes, and its
 // second Session fails closed.
-const RulesVersion = "1.6.0"
+//
+// Bumped 1.6.0 -> 1.7.0 when every entry and Add fill began to be debited,
+// at its actual cost, from the cash the next entry or Add is checked against,
+// until a snapshot stated as of the fill or later reflects it (ADR 0020:
+// "available = basis - every actual fill cost"). Before, each Unit was
+// compared with the snapshot's unmoved figure, so a Campaign's Units could
+// each pass while together costing several times the cash the account held.
+// Given the same inputs, a run whose Units together outspend its cash now
+// declines, with insufficient-cash, a Unit the older build proposed, and
+// strategy.proposal.declined advances to payload schema 4, so the two builds
+// no longer replay each other's journals.
+const RulesVersion = "1.7.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -157,4 +168,7 @@ var RuleSurfaceFingerprints = map[string]string{
 	// Unchanged from 1.5.0: the 1.6.0 change is when Adds and entries are
 	// decided, not any constant this surface declares.
 	"1.6.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
+	// Unchanged from 1.6.0: the 1.7.0 change is a changed predicate, the
+	// cash a Unit is checked against, not any constant this surface declares.
+	"1.7.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
 }

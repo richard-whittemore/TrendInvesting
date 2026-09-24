@@ -12,12 +12,27 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
 
-// The golden fixture's Campaign resolves every proposal it raises: its
-// entry and all three Adds fill on the breakout bar, and the exit its last
-// bar proposes rests above every Unit's stop, so each Unit's Exit Order
-// moves up to it and it fills in that same bar. A run that ends while a
+// With enough cash, the golden fixture's Campaign resolves every proposal it
+// raises: its entry and all three Adds fill on the breakout bar, and the exit
+// its last bar proposes rests above every Unit's stop, so each Unit's Exit
+// Order moves up to it and it fills in that same bar. A run that ends while a
 // proposal is still outstanding needs a fixture of its own, and these
 // helpers derive it from the golden bars rather than inventing a new series.
+
+// fourUnitCash is opening cash that funds the fixture's whole Add Ladder.
+// Each of its Units costs about 64 % of the 1,000,000 starting equity, so
+// the default run, whose cash is that equity, takes Unit 1 and declines
+// Unit 2 for insufficient cash (ADR 0020). A test whose subject needs all
+// four Units states this figure rather than relying on cash the account
+// does not hold; four Units cost about 2,558,000 with commissions.
+const fourUnitCash = 3_000_000.0
+
+// withFourUnitCash returns opts with fourUnitCash as its opening cash.
+func withFourUnitCash(opts options) options {
+	cash := fourUnitCash
+	opts.availableCash = &cash
+	return opts
+}
 
 // outstandingExitBar is the bar after the golden fixture's breakout.
 var outstandingExitBar = time.Date(2026, 1, 23, 0, 0, 0, 0, time.UTC)
@@ -68,11 +83,12 @@ func writeBars(t *testing.T, bars []event.CompletedBarPayload) string {
 }
 
 // runBacktestOnBars runs the fixture configuration over the bars at
-// barsPath and returns the journal written, with its path.
+// barsPath, with fourUnitCash, and returns the journal written, with its
+// path.
 func runBacktestOnBars(t *testing.T, barsPath string) (written []byte, path string) {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "journal.jsonl")
-	opts := options{configPath: configurationFixture, barsPath: barsPath, outPath: out, build: testBuild}
+	opts := withFourUnitCash(options{configPath: configurationFixture, barsPath: barsPath, outPath: out, build: testBuild})
 	var log bytes.Buffer
 	if err := backtest(context.Background(), opts, &log); err != nil {
 		t.Fatalf("backtest(%+v) error = %v\n%s", opts, err, log.String())

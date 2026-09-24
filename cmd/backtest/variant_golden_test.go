@@ -37,10 +37,12 @@ func TestDeclaredVariantGolden(t *testing.T) {
 	path := filepath.Join(dir, "journal.golden.jsonl")
 	root := filepath.Join(dir, "registry")
 	var log bytes.Buffer
-	runErr := backtest(context.Background(), options{
+	// The scenario needs the Add Ladder's stop raises, so the run opens with
+	// the cash that funds all four Units (README.md; ADR 0020).
+	runErr := backtest(context.Background(), withFourUnitCash(options{
 		configPath: filepath.Join(fixture, "configuration.json"), barsPath: barsFixture,
 		outPath: path, registryPath: root, runID: "golden", variant: narrowStopVariant, build: testBuild,
-	}, &log)
+	}), &log)
 	written, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("Variant run produced no readable journal: %v; run error: %v", err, runErr)

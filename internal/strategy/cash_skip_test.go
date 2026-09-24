@@ -236,16 +236,18 @@ func runCashSkipLadderFixture(t *testing.T) []event.Envelope {
 	cost3 := float64(cashSkipCampaignUnitQuantity) * rung3 * cfg.DollarsPerPoint
 	cost4 := float64(cashSkipCampaignUnitQuantity) * rung4 * cfg.DollarsPerPoint
 
-	// Short by exactly one cent of Unit 3's cost — comfortably above the
-	// entry's own cost (20,615) and Unit 2's, so only Unit 3's rung is ever
-	// declined.
-	initialCash := cost3 - 0.01
-	// Recovers to comfortably clear of Unit 4's own cost, so nothing later
-	// in this fixture is gated by cash again.
-	recoveredCash := cost4 + 10_000
-
 	bar57 := addOpportunityBar("AAPL", day(57), rung2+5)
 	fill2 := addFill("AAPL", campaignID, 2, day(57), "sim-fill-add-2", rung2, cashSkipCampaignUnitQuantity, day(57))
+
+	// ADR 0020 debits every fill, so the cash is stated as what the opening
+	// fill and Unit 2's fill leave: short by exactly one cent of Unit 3's
+	// cost, and so only Unit 3's rung is ever declined.
+	initialCash := fillCost(cfg, openingFill("AAPL")) + fillCost(cfg, fill2) + cost3 - 0.01
+	// Recovers, in a snapshot that already reflects Units 1 and 2, to fund
+	// Unit 3 and then comfortably Unit 4, so nothing later in this fixture
+	// is gated by cash again.
+	recoveredCash := cost3 + cost4 + 10_000
+
 	bar58 := addOpportunityBar("AAPL", day(58), rung3+5) // reaches rung 3: declined
 	bar59 := addOpportunityBar("AAPL", day(59), rung3+5) // the SAME rung, re-evaluated on its own merits
 	fill3 := addFill("AAPL", campaignID, 3, day(59), "sim-fill-add-3", rung3, cashSkipCampaignUnitQuantity, day(59))
@@ -542,53 +544,45 @@ func TestEntryCostBeyondTheRepresentableRangeIsSkippedNotHalted(t *testing.T) {
 func TestAddCostBeyondTheRepresentableRangeIsSkippedNotHalted(t *testing.T) {
 	t.Parallel()
 
-	// The entry is affordable at the Entry Channel high, but the ladder is
-	// measured from the ACTUAL fill (The Turtle Rules p.19), and this Unit
-	// fills ten orders of magnitude above the level it rested at — slippage
-	// no rule caps. Rung 2 therefore lands where the same frozen quantity
-	// costs more than float64 can state, while the entry's own cost was a
-	// perfectly ordinary number.
-	cfg := cashSkipOverflowConfiguration()
-	cfg.NotionalAccount.StartingEquity = 2e297
-	cfg.DollarsPerPoint = 1e280
+	// The entry is affordable at the Entry Channel high, and its fill's own
+	// cost is a finite figure ADR 0020 can debit (a fill whose own cost
+	// overflows fails closed: TestAFillWhoseCostCannotBeStatedFailsClosed).
+	// But the ladder is measured from the ACTUAL fill (The Turtle Rules
+	// p.19), and at this multiplier one share at the fill's 155 costs 88 % of
+	// the float64 range, so the same frozen quantity at rung 2, half an N
+	// higher, costs more than float64 can state. The breakout bar's own high
+	// of 200 covers that rung, so the Add is decided in the fill's own chain.
+	cfg := validConfigurationPayload()
+	cfg.NotionalAccount.StartingEquity = 1.7e308
+	cfg.UnitVolatilityFraction = 0.25
+	cfg.DollarsPerPoint = math.MaxFloat64 / 165
 
 	campaignID := testDecisionID("campaign", "AAPL", day(56))
-	quantity, err := sizing.UnitQuantity(cfg.NotionalAccount.StartingEquity, cfg.UnitVolatilityFraction, overflowTrueRange, cfg.DollarsPerPoint)
+	n := breakoutFixtureN(t, cfg)
+	quantity, err := sizing.UnitQuantity(cfg.NotionalAccount.StartingEquity, cfg.UnitVolatilityFraction, n, cfg.DollarsPerPoint)
 	if err != nil {
 		t.Fatalf("sizing.UnitQuantity() error = %v", err)
 	}
-	if entryCost := float64(quantity) * overflowChannelHigh * cfg.DollarsPerPoint; math.IsInf(entryCost, 0) {
-		t.Fatalf("fixture is wrong: the ENTRY cost overflowed too, so this test would prove nothing about the Add path")
-	}
-
-	const fillPrice = 1e21
-	rung2, err := sizing.NextAddLevel(fillPrice, overflowTrueRange, sizing.DirectionLong)
+	const fillPrice = 155.0
+	rung2, err := sizing.NextAddLevel(fillPrice, n, sizing.DirectionLong)
 	if err != nil {
 		t.Fatalf("NextAddLevel(rung 2) error = %v", err)
 	}
-
-	opening := event.FillPayload{
-		InstrumentID: "AAPL",
-		Kind:         event.FillKindEntry,
-		ProposalID:   testDecisionID("proposal", "AAPL", day(56)),
-		FillID:       "sim-fill-0001",
-		Direction:    event.DirectionLong,
-		Quantity:     quantity,
-		Price:        fillPrice,
-		FilledAt:     day(56),
+	if cost := float64(quantity) * fillPrice * cfg.DollarsPerPoint; math.IsInf(cost, 0) {
+		t.Fatalf("fixture is wrong: the fill's own cost overflowed, so this test would prove nothing about the Add path")
+	}
+	if cost := float64(quantity) * rung2 * cfg.DollarsPerPoint; !math.IsInf(cost, 0) {
+		t.Fatalf("fixture is wrong: rung 2 costs %v, which is representable", cost)
 	}
 
-	envelopes := []event.Envelope{accountSnapshotEnvelopeFor(t, cfg, 2, cashSnapshot(cfg, day(0), math.MaxFloat64))}
-	seq := uint64(3)
-	for _, bar := range cashSkipOverflowBars("AAPL") {
-		envelopes = append(envelopes, barEnvelopeFor(t, cfg, seq, bar))
-		seq++
-	}
-	envelopes = append(envelopes, fillEnvelopeFor(t, cfg, seq, opening))
-	seq++
-	envelopes = append(envelopes, barEnvelopeFor(t, cfg, seq, completedBar("AAPL", day(57), rung2, fillPrice-overflowTrueRange, fillPrice-overflowTrueRange)))
+	opening := openingFill("AAPL")
+	opening.Quantity, opening.Price = quantity, fillPrice
 
-	emitted, err := runReducerOverAccountEvents(t, cfg, envelopes)
+	emitted, err := newStream(t, cfg).
+		snapshot(cashSnapshot(cfg, day(0).Add(time.Hour), math.MaxFloat64)).
+		bars(breakoutBars("AAPL")).
+		fill(opening).
+		run()
 	if err != nil {
 		t.Fatalf("Run() error = %v, want the unaffordable rung journalled as a skip", err)
 	}

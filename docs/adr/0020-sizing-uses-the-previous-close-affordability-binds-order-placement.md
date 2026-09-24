@@ -182,6 +182,24 @@ Replay uses the journal's movement order, including the original full amounts,
 so neither the conservative floor nor deferred deposits discard audit evidence.
 
 
+> **Implementation note (2026-09-24, RulesVersion 1.7.0).** The fill half of
+> the ledger is implemented; holds are not. Every entry and Add fill is
+> debited, once, at its actual cost (quantity x price x dollars per point,
+> plus commission) from the basis, and both existing checks (`sizeUnit`,
+> `evaluateAdd`) compare against `basis - fill debits`, which may be
+> negative. A snapshot replaces the basis and drops only the debits of fills
+> at or before its own as-of, because those it already reflects; a fill
+> after its as-of stays debited even when the snapshot arrives after it,
+> which is the order the producer amendment below delivers them in. Sells
+> are never credited by a fill: their proceeds return only through a later
+> snapshot. `strategy.proposal.declined` advances to payload schema **4**:
+> `AvailableCash` is the figure after those fill debits and may be negative.
+> Not yet implemented: reservations at submission (holds and their
+> lifecycle), and the halt when a fill drives `available` below zero, which
+> is still recorded and declines every later Unit rather than stopping the
+> run. `cmd/backtest` still states one opening snapshot, so in its runs exit
+> proceeds never return (Consequences, above).
+
 ## Amendment: the adapter produces LEAN portfolio snapshots (2026-09-24)
 
 The LEAN adapter is the producer of `account.snapshot` for a running

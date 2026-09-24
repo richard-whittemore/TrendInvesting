@@ -190,6 +190,56 @@ class EndToEndTests(OrderTestCase):
         self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
         self.assertIn("replays byte-identically", replay.stdout)
 
+    def test_an_add_the_cash_cannot_fund_is_declined_and_never_placed(self):
+        """ADR 0010 and ADR 0020: a Unit that costs more than the cash left
+        once earlier fills are debited is declined with insufficient-cash,
+        and no order is placed for it.
+
+        The account holds 100,000 of cash, enough for the entry (about 71,000)
+        but not for the entry and Unit 2 (about 73,600) together; equity is
+        left at 1,000,000 so the Notional Account and the Unit size are those
+        of the other test. The entry's fill chains Unit 2 against the breakout
+        bar, whose snapshot predates the fill, so only the fill's debit can
+        decline it; later rungs are checked against snapshots that already
+        show the spend.
+        """
+        engine = self.serve()
+        algo = self.start_against(engine)
+        algo.Portfolio.Cash = 100000.0
+        self.run_backtest(algo)
+        engine.send_signal(signal.SIGINT)
+        out, err = engine.communicate(timeout=60)
+        self.assertEqual(engine.returncode, 0, out + err)
+
+        with open(self.journal) as journal:
+            records = [json.loads(line) for line in journal.read().splitlines()[1:]]
+        inputs = [r["envelope"] for r in records if r["kind"] == "input"]
+        decisions = [r["envelope"] for r in records if r["kind"] == "decision"]
+        kinds = [e["payload"]["kind"] for e in inputs if e["type"] == "execution.fill"]
+        self.assertIn("entry", kinds)
+        self.assertNotIn("add", kinds)
+
+        declines = [d["payload"] for d in decisions if d["type"] == "strategy.proposal.declined"
+                    and d["payload"]["kind"] == "add"]
+        self.assertTrue(declines, "no Add was declined")
+        for decline in declines:
+            self.assertEqual(decline["reason"], "insufficient-cash")
+            self.assertLess(decline["available_cash"], decline["required_cash"])
+        chained = [d for d in decisions if d["type"] == "strategy.proposal.declined"
+                   and d["causation_id"].split(":")[-2] == "fill"]
+        self.assertTrue(chained, "the Add chained from the entry fill was not declined")
+        self.assertFalse([d for d in decisions if d["type"] == "strategy.add.proposed"])
+
+        add_tags = [t.Tag for t in algo.Transactions.tickets if t.Tag.startswith("add-proposal")]
+        self.assertEqual(add_tags, [])
+        add_lifecycle = [e["payload"] for e in inputs if e["type"] == "execution.order.lifecycle"
+                         and e["payload"]["tag"].startswith("add-proposal")]
+        self.assertEqual(add_lifecycle, [])
+
+        replay = subprocess.run([self.backtest, "-replay", self.journal],
+                                capture_output=True, text=True)
+        self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

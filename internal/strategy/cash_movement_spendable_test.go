@@ -58,8 +58,8 @@ func TestCashMovementSpendable(t *testing.T) {
 				if p.Reason != event.DeclineReasonInsufficientCash || p.AvailableCash != tc.wantCash || p.RequiredCash <= p.AvailableCash {
 					t.Fatalf("decline=%+v, want insufficient-cash with available=%v", p, tc.wantCash)
 				}
-				if declines[0].SchemaVersion != 3 {
-					t.Fatalf("decline schema=%d, want 3 for spendable cash", declines[0].SchemaVersion)
+				if declines[0].SchemaVersion != 4 {
+					t.Fatalf("decline schema=%d, want 4 for spendable cash", declines[0].SchemaVersion)
 				}
 			}
 			verifyMovementJournal(t, s, emitted)
@@ -178,9 +178,10 @@ func TestASnapshotAfterAWithdrawalReplacesRatherThanDeductsAgain(t *testing.T) {
 // counterpart of the cases above, every one of which ends before a Campaign
 // opens and so only ever reaches the new-entry check. ADR 0020's
 // cash-movement amendment says both existing checks read the reduced
-// figure; this pins the second one. The snapshot covers Unit 2's rung with
-// 5,000 to spare, a 10,000 withdrawal lands after the Campaign opens, and
-// the rung is then declined against exactly what is left.
+// figure; this pins the second one. After the opening fill's debit (ADR
+// 0020) the snapshot covers Unit 2's rung with 5,000 to spare, a 10,000
+// withdrawal lands after the Campaign opens, and the rung is then declined
+// against exactly what is left.
 func TestAWithdrawalReducesTheCashAnAddIsCheckedAgainst(t *testing.T) {
 	t.Parallel()
 
@@ -191,7 +192,8 @@ func TestAWithdrawalReducesTheCashAnAddIsCheckedAgainst(t *testing.T) {
 		t.Fatalf("NextAddLevel(rung 2) error = %v", err)
 	}
 	cost2 := float64(cashSkipCampaignUnitQuantity) * rung2 * cfg.DollarsPerPoint
-	initialCash := cost2 + 5_000
+	openingCost := fillCost(cfg, openingFill("AAPL"))
+	initialCash := openingCost + cost2 + 5_000
 	const withdrawal = 10_000.0
 
 	emitted := newStream(t, cfg).
@@ -210,8 +212,8 @@ func TestAWithdrawalReducesTheCashAnAddIsCheckedAgainst(t *testing.T) {
 	if decline.Kind != event.ProposalDeclinedKindAdd || decline.Reason != event.DeclineReasonInsufficientCash {
 		t.Fatalf("decline = %+v, want an insufficient-cash Add decline", decline)
 	}
-	if want := initialCash - withdrawal; decline.AvailableCash != want {
-		t.Errorf("AvailableCash = %v, want %v: the snapshot's %v less the %v withdrawal", decline.AvailableCash, want, initialCash, withdrawal)
+	if want := initialCash - withdrawal - openingCost; decline.AvailableCash != want {
+		t.Errorf("AvailableCash = %v, want %v: the snapshot's %v less the %v withdrawal and the %v opening fill", decline.AvailableCash, want, initialCash, withdrawal, openingCost)
 	}
 	if decline.RequiredCash != cost2 {
 		t.Errorf("RequiredCash = %v, want Unit 2's cost %v", decline.RequiredCash, cost2)

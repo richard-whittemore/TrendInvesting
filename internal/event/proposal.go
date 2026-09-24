@@ -37,7 +37,13 @@ const ProposalDeclinedEventType = "strategy.proposal.declined"
 //     accepted withdrawal debits (ADR 0020's cash-movement amendment).
 //     RequiredCash remains the Unit cost compared against it. Schema-2
 //     decisions must not silently acquire this meaning (ADR 0015).
-const ProposalDeclinedSchemaVersion uint32 = 3
+//   - Version 4 makes AvailableCash the spendable cash at the attempt after
+//     withdrawal debits AND after the actual cost of every entry and Add fill
+//     the snapshot does not yet reflect (ADR 0020: "available = basis -
+//     every actual fill cost"). It may therefore be negative: ADR 0020 floors
+//     the basis, never the fills taken from it. Schema-3 decisions must not
+//     silently acquire this meaning (ADR 0015).
+const ProposalDeclinedSchemaVersion uint32 = 4
 
 // The rule names for TradeProposalPayload.Rule, one per Sizing Mode.
 //
@@ -86,8 +92,8 @@ const (
 	DeclineReasonStopIntentNotPositive = "stop-intent-not-positive"
 	// DeclineReasonInsufficientCash means the Unit's cost — quantity x the
 	// order's resting level x dollars per point — exceeds snapshot-backed
-	// spendable cash after accepted withdrawal debits (ADR 0010 and ADR
-	// 0020's cash-movement amendment). There is no partial Unit and no
+	// spendable cash after accepted withdrawal debits and the fills the
+	// snapshot does not yet reflect (ADR 0010 and ADR 0020). There is no partial Unit and no
 	// borrowing: the whole Unit is skipped, and RequiredCash/AvailableCash
 	// carry the two figures the comparison was made from.
 	DeclineReasonInsufficientCash = "insufficient-cash"
@@ -473,12 +479,15 @@ type ProposalDeclinedPayload struct {
 	// RequiredCash and AvailableCash are the two figures
 	// DeclineReasonInsufficientCash was compared from: the Unit's cost, and
 	// snapshot-backed spendable cash at the attempt after accepted withdrawal
-	// debits (ADR 0010 and ADR 0020's cash-movement amendment). Required, finite,
-	// not negative, and RequiredCash strictly greater than AvailableCash —
-	// exactly the comparison that makes the Unit unaffordable — when Reason
-	// is DeclineReasonInsufficientCash; both must be exactly zero for every
-	// other reason, so a field that means nothing for that reason cannot
-	// carry a stray number.
+	// debits and the fills the snapshot does not yet reflect (ADR 0010 and
+	// ADR 0020). Required and finite when Reason is
+	// DeclineReasonInsufficientCash, with RequiredCash not negative and
+	// strictly greater than AvailableCash — exactly the comparison that makes
+	// the Unit unaffordable. AvailableCash may be negative: a fill the basis
+	// could not fund is recorded at its actual cost, and ADR 0020 forbids
+	// flooring the remainder. Both must be exactly zero for every other
+	// reason, so a field that means nothing for that reason cannot carry a
+	// stray number.
 	RequiredCash  float64 `json:"required_cash"`
 	AvailableCash float64 `json:"available_cash"`
 }
@@ -539,11 +548,8 @@ func (p ProposalDeclinedPayload) Validate() error {
 		case p.RequiredCash < 0:
 			errs = append(errs, errors.New("required cash must not be negative"))
 		}
-		switch {
-		case !availableCashFinite:
+		if !availableCashFinite {
 			errs = append(errs, errors.New("available cash must be finite"))
-		case p.AvailableCash < 0:
-			errs = append(errs, errors.New("available cash must not be negative"))
 		}
 		if requiredCashFinite && availableCashFinite && p.RequiredCash <= p.AvailableCash {
 			errs = append(errs, fmt.Errorf(

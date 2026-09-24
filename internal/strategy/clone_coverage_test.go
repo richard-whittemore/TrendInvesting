@@ -41,6 +41,7 @@ func TestCloneCoversEveryReferenceTypedField(t *testing.T) {
 		"Reducer.acceptedFills (map)":                            overlay,
 		"Reducer.acceptedFills[v].unitIDs (slice)":               immutable,
 		"Reducer.delisted (map)":                                 eager,
+		"Reducer.fillDebits (slice)":                             eager,
 		"Reducer.instruments (map)":                              overlay,
 		"Reducer.instruments[v] (pointer)":                       firstAccess,
 		"Reducer.instruments[v]->.campaign (pointer)":            firstAccess,
@@ -86,10 +87,17 @@ func TestCloneCoversEveryReferenceTypedField(t *testing.T) {
 
 	// The eager paths are fresh in every transaction.
 	r.sessionDelistedBars = []string{"DELISTED"}
+	r.fillDebits = []fillDebit{{cost: 1}}
 	tx := r.begin()
 	if tx.notionalAccount == r.notionalAccount || reflect.ValueOf(tx.delisted).Pointer() == reflect.ValueOf(r.delisted).Pointer() ||
 		reflect.ValueOf(tx.sessionDelistedBars).Pointer() == reflect.ValueOf(r.sessionDelistedBars).Pointer() {
 		t.Fatal("Reducer.begin shares an eagerly copied field with published state")
+	}
+	// A shared backing array would let a rejected transaction's change to a
+	// debit reach the published ledger (ADR 0020).
+	tx.fillDebits[0].cost = 2
+	if r.fillDebits[0].cost != 1 {
+		t.Fatal("Reducer.begin shares fillDebits' backing array with published state")
 	}
 	if tx.instruments != nil || tx.acceptedFills != nil {
 		t.Fatal("a transition exposes the published instruments or accepted fills directly; handlers must use the accessors")

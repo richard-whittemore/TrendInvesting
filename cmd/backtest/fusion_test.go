@@ -19,12 +19,16 @@ import (
 // the other. Treat that as a property of a toolchain and target, not of
 // arm64, and re-establish it rather than assume it if either changes.
 //
-// These four Units use quantity-price products needing more than 53 bits, so
-// the weighted entry price, the weighted exit price and the aggregate open
-// risk diverge when a product is left fusible; making all products exact
-// would let the golden pass even with fusible arithmetic.
+// The golden bars, run with fourUnitCash, buy four Units whose
+// quantity-price products need more than 53 bits, so the weighted entry
+// price, the weighted exit price and the aggregate open risk diverge when a
+// product is left fusible; making all products exact would let a journal
+// pass even with fusible arithmetic. At the default cash the main golden
+// holds one Unit (ADR 0020 debits Unit 1's fill before Unit 2 is checked),
+// so these tests run the four-Unit Campaign themselves, and the declared
+// Variant's golden, which opens with fourUnitCash, commits one.
 //
-// The main golden closes all four Units in one exit fill: every Unit's Exit
+// That Campaign closes all four Units in one exit fill: every Unit's Exit
 // Order rests at the Exit Channel (ADR 0005, as amended), so its exit side
 // is a single product with nothing to accumulate and cannot tell a fused
 // build from an unfused one. exitSensitiveFills below derives, from the
@@ -99,12 +103,14 @@ func fillsFrom(t *testing.T, written []byte) (entries, exits []fill) {
 	return entries, exits
 }
 
-// goldenFills returns the fills the main golden fixture's Campaign entered
-// with and the fill it was closed with.
+// goldenFills returns the fills the golden bar fixture's Campaign entered
+// with and the fill it was closed with, run with fourUnitCash so that all
+// four Units are bought: at the default cash the Campaign holds one Unit and
+// its entry side has nothing to accumulate.
 func goldenFills(t *testing.T) (entries, exits []fill) {
 	t.Helper()
 
-	written, _ := runBacktestTo(t)
+	written, _ := runBacktestOnBars(t, barsFixture)
 	return fillsFrom(t, written)
 }
 
@@ -171,7 +177,7 @@ func assertSensitive(t *testing.T, side string, fills []fill) {
 // TestTheGoldenFixtureIsSensitiveToFusedMultiplyAdd: accumulating a
 // Campaign's own fills with the product fused gives a different answer from
 // accumulating them with the product rounded, on both sides of the
-// Campaign -- goldenFills' entry side (the main golden's four Units added
+// Campaign -- goldenFills' entry side (the golden bars' four Units added
 // at different prices) and exitSensitiveFills' exit side (four Units
 // stopped out at different levels). That difference is what a golden
 // journal detects.
@@ -185,10 +191,10 @@ func TestTheGoldenFixtureIsSensitiveToFusedMultiplyAdd(t *testing.T) {
 
 // TestTheRecordedCampaignUsesTheRoundedAccumulation is the other half: each
 // fixture is sensitive, and what its journal actually recorded is the
-// rounded answer rather than the fused one -- the main golden's EntryPrice,
-// and exitSensitiveFills' own Campaign's ExitPrice.
+// rounded answer rather than the fused one -- the four-Unit Campaign's
+// EntryPrice, and exitSensitiveFills' own Campaign's ExitPrice.
 func TestTheRecordedCampaignUsesTheRoundedAccumulation(t *testing.T) {
-	entryWritten, _ := runBacktestTo(t)
+	entryWritten, _ := runBacktestOnBars(t, barsFixture)
 	entries, _ := fillsFrom(t, entryWritten)
 	assertRoundedAccumulation(t, "entry price", entries, campaignExited(t, entryWritten).EntryPrice)
 

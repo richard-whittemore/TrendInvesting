@@ -35,7 +35,7 @@ import (
 //	Slippage                    0.05 N                  (ADR 0013)
 //	Dollars per point           1                       (a share, not a contract)
 //	Notional Account            8,400                   (ADR 0007, configured)
-//	Available cash              2,517.99                (ADR 0010, observed)
+//	Available cash              5,016.99                (ADR 0010, observed)
 //
 // # The bars, and why they are these bars
 //
@@ -80,10 +80,11 @@ import (
 // the breakout bar.
 //
 // **Bars 57 and 58 — the skipped rung.** Both bars reach rung 2 (158 and
-// 158.5 are each above 157.375), so on each the cash check runs:
+// 158.5 are each above 157.375), so on each the cash check runs against the
+// snapshot less the entry fill's actual cost (ADR 0020):
 //
-//	rung 2 cost = 16 x 157.375 x 1 = 2,518.00
-//	cash        =                    2,517.99
+//	rung 2 cost = 16 x 157.375 x 1           = 2,518.00
+//	cash        = 5,016.99 - (2,498.00 + 1.00) = 2,517.99
 //
 // One cent short, so the whole Unit is skipped — no partial Unit, no
 // borrowing, no deferred queue (ADR 0010) — and the rejection is journalled
@@ -106,13 +107,14 @@ import (
 //     a quotient that rounded the same either way would test nothing.
 //   - **A multiplier of one.** At Faith's 42,000 the same account sizes 0.0004
 //     of a contract and the Signal produces a decline, not a position.
-//   - **2,517.99 of cash.** It sits in the window (2,498, 2,518]. Costing the
-//     Add from the entry level (16 x 156 = 2,496) or from the previous fill
-//     (16 x 156.125 = 2,498) rather than from the rung would make the Unit
-//     affordable and no skip would happen; so would reading the 8,400
-//     Notional Account as the cash basis instead of the snapshot's observed
-//     figure. A cash figure comfortably clear of the rung distinguishes none
-//     of those.
+//   - **2,517.99 of cash after the entry.** It sits in the window (2,498,
+//     2,518]. Costing the Add from the entry level (16 x 156 = 2,496) or from
+//     the previous fill (16 x 156.125 = 2,498) rather than from the rung would
+//     make the Unit affordable and no skip would happen; so would reading the
+//     8,400 Notional Account as the cash basis instead of the snapshot's
+//     observed figure, or the snapshot's 5,016.99 without the entry fill's
+//     debit (ADR 0020). A cash figure comfortably clear of the rung
+//     distinguishes none of those.
 //   - **156, not 157.** Entering at the breakout bar's own high instead of the
 //     Entry Channel high would fill at 157.125, put rung 2 at 158.375, and
 //     bar 57's high of 158 would no longer reach it.
@@ -128,9 +130,13 @@ const (
 	equityGoldenN = 2.5
 	// equityGoldenNotionalAccount is ADR 0007's configured figure.
 	equityGoldenNotionalAccount = 8_400.0
-	// equityGoldenAvailableCash is ADR 0010's cash basis: an OBSERVED figure
+	// equityGoldenOpeningCash is ADR 0010's cash basis: an OBSERVED figure
 	// from an account.snapshot, deliberately different from the Notional
 	// Account above so that a fixture reading one for the other fails.
+	equityGoldenOpeningCash = 5_016.99
+	// equityGoldenAvailableCash is what the Add is checked against: the
+	// opening cash less the entry fill's actual cost, 16 x 156.125 plus the
+	// 1.00 commission (ADR 0020).
 	equityGoldenAvailableCash = 2_517.99
 
 	// equityGoldenEntryChannelHigh is bar 55's high, the level a resting
@@ -279,7 +285,7 @@ func equityGoldenRun(t *testing.T) composed {
 		event.AccountSnapshotPayload{
 			AsOf:          day(0),
 			Equity:        equityGoldenNotionalAccount,
-			AvailableCash: equityGoldenAvailableCash,
+			AvailableCash: equityGoldenOpeningCash,
 			Currency:      "USD",
 		}))
 
@@ -409,8 +415,8 @@ func TestEquityGoldenScenarioFillsTheRestingOrderAndFreezesTheCampaign(t *testin
 }
 
 // TestEquityGoldenScenarioSkipsTheRungItCannotAfford is ADR 0010's cash-skip
-// rule: the Unit costs 2,518.00 at its rung and the account holds 2,517.99,
-// so the whole Unit is skipped and the rejection carries both figures. It is
+// rule: the Unit costs 2,518.00 at its rung and the account holds 2,517.99
+// once the entry fill is debited (ADR 0020), so the whole Unit is skipped and the rejection carries both figures. It is
 // skipped on each of the two bars that reach the rung — a skip does not
 // poison the ladder.
 func TestEquityGoldenScenarioSkipsTheRungItCannotAfford(t *testing.T) {
@@ -466,6 +472,9 @@ func TestEquityGoldenScenarioSkipsTheRungItCannotAfford(t *testing.T) {
 			t.Errorf("costing the Add from %s gives %v, already above the %v available: this fixture's cash no longer distinguishes that basis from the rung",
 				wrong.name, cost, equityGoldenAvailableCash)
 		}
+	}
+	if cost := equityGoldenRungTwoCost; cost > equityGoldenOpeningCash {
+		t.Errorf("the rung's cost %v is above the opening cash %v: this fixture's cash no longer distinguishes the entry fill's debit from none", cost, equityGoldenOpeningCash)
 	}
 	if cost := float64(equityGoldenUnitQuantity) * equityGoldenRungTwo; !closeTo(cost, equityGoldenRungTwoCost) {
 		t.Fatalf("the fixture's own arithmetic is wrong: 16 x %v = %v, not %v", equityGoldenRungTwo, cost, equityGoldenRungTwoCost)
