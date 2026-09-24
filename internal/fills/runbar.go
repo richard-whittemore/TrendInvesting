@@ -279,15 +279,26 @@ func sessionBars(envelopes []event.Envelope) ([]*sessionBar, error) {
 	return session, nil
 }
 
-// sessionClosedFor builds the market.session.closed that ends session, with
-// its first bar's provenance.
+// sessionClosedFor builds the market.session.closed that ends session. Its
+// provenance never depends on the order the bars arrived in (ADR 0021:
+// order-independence), because the reducer stamps it onto every proposal
+// the close makes. The close is known only once every bar has been
+// recorded, so RecordedAt is the latest bar's. The other provenance is the
+// lowest instrument ID's bar's.
 func sessionClosedFor(session []*sessionBar) (event.Envelope, error) {
 	ids := make([]string, 0, len(session))
+	first, lowest := session[0].envelope, session[0].bar.InstrumentID
+	recordedAt := first.RecordedAt
 	for _, b := range session {
 		ids = append(ids, b.bar.InstrumentID)
+		if b.bar.InstrumentID < lowest {
+			first, lowest = b.envelope, b.bar.InstrumentID
+		}
+		if b.envelope.RecordedAt.After(recordedAt) {
+			recordedAt = b.envelope.RecordedAt
+		}
 	}
 	sort.Strings(ids)
-	first := session[0].envelope
 	periodEnd := session[0].bar.PeriodEnd
 	payload := event.SessionClosedPayload{PeriodEnd: periodEnd, InstrumentIDs: ids}
 	if err := payload.Validate(); err != nil {
@@ -304,7 +315,7 @@ func sessionClosedFor(session []*sessionBar) (event.Envelope, error) {
 		SchemaVersion:     event.SessionClosedSchemaVersion,
 		EnvelopeVersion:   event.CurrentEnvelopeVersion,
 		EventTime:         periodEnd,
-		RecordedAt:        first.RecordedAt,
+		RecordedAt:        recordedAt,
 		Source:            first.Source,
 		StrategyVersion:   first.StrategyVersion,
 		ConfigurationHash: first.ConfigurationHash,

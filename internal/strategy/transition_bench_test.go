@@ -28,11 +28,18 @@ func benchBarEnvelope(tb testing.TB, instrumentID string, periodEnd time.Time) e
 // bar's high is 101, so any higher one is a breakout.
 func benchBarEnvelopeAt(tb testing.TB, instrumentID string, periodEnd time.Time, high float64) event.Envelope {
 	tb.Helper()
+	// The whole bar moves with its high, so a breakout's True Range, and
+	// with it N and the Protective Stop, stays bounded however many
+	// Sessions the benchmark runs.
+	low, closing := high-2, high-1
+	if high <= 101 {
+		low, closing = 99, 100
+	}
 	bar := event.CompletedBarPayload{
 		InstrumentID:  instrumentID,
 		PeriodEnd:     periodEnd,
-		SplitAdjusted: event.PriceView{View: event.ViewSplitAdjusted, Open: 100, High: high, Low: 99, Close: 100, Volume: 1_000_000},
-		Raw:           event.PriceView{View: event.ViewRaw, Open: 100, High: high, Low: 99, Close: 100, Volume: 1_000_000},
+		SplitAdjusted: event.PriceView{View: event.ViewSplitAdjusted, Open: closing, High: high, Low: low, Close: closing, Volume: 1_000_000},
+		Raw:           event.PriceView{View: event.ViewRaw, Open: closing, High: high, Low: low, Close: closing, Volume: 1_000_000},
 	}
 	return benchEnvelope(tb, "bench-bar-"+instrumentID+"-"+periodEnd.Format(time.RFC3339), event.CompletedBarEventType, event.CompletedBarSchemaVersion, periodEnd, bar)
 }
@@ -190,6 +197,11 @@ func BenchmarkApplySessionCloseWideUniverse(b *testing.B) {
 				}
 				if len(proposed) != signals {
 					b.Fatalf("the session close emitted %d decisions, want one per Signal (%d)", len(proposed), signals)
+				}
+				for _, d := range proposed {
+					if d.Type != event.TradeProposalEventType {
+						b.Fatalf("the session close emitted %s, want only trade proposals: the benchmark must measure the proposal path", d.Type)
+					}
 				}
 			}
 		})

@@ -1,11 +1,13 @@
 package fills_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/fills"
@@ -164,5 +166,49 @@ func TestRunSessionRefusesWhatIsNotOneSession(t *testing.T) {
 	}
 	if _, err := fills.RunSession(context.Background(), nil, nil, []event.Envelope{barEnvelope(t, other)}); err == nil {
 		t.Fatal("RunSession() without a simulator and handler succeeded")
+	}
+}
+
+// TestTheSessionCloseDoesNotDependOnBarArrivalOrder: the close is known only
+// once every bar of the Session has been recorded, so it takes the latest
+// bar's RecordedAt, and its other provenance from the lowest instrument ID,
+// never from whichever bar happened to arrive first. The reducer stamps the
+// close's provenance onto every proposal it makes, so an arrival-dependent
+// close would make the same bars yield different proposal bytes (ADR 0021:
+// order-independence).
+func TestTheSessionCloseDoesNotDependOnBarArrivalOrder(t *testing.T) {
+	t.Parallel()
+
+	aapl, msft := barEnvelope(t, as("AAPL", warmUpBars()[:1])[0]), barEnvelope(t, as("MSFT", warmUpBars()[:1])[0])
+	aapl.ID += ":AAPL"
+	msft.ID += ":MSFT"
+	later := msft.RecordedAt.Add(90 * time.Second)
+	msft.RecordedAt = later
+
+	closeOf := func(session []event.Envelope) []byte {
+		t.Helper()
+		simulator, _ := newComposed(t, baselineConfig())
+		var closed event.Envelope
+		handler := replay.HandlerFunc(func(_ context.Context, in event.Envelope) ([]event.Envelope, error) {
+			if in.Type == event.SessionClosedEventType {
+				closed = in
+			}
+			return nil, nil
+		})
+		if _, err := fills.RunSession(context.Background(), simulator, handler, session); err != nil {
+			t.Fatalf("RunSession() error = %v", err)
+		}
+		if !closed.RecordedAt.Equal(later) {
+			t.Errorf("close RecordedAt = %s, want the latest bar's %s", closed.RecordedAt, later)
+		}
+		encoded, err := json.Marshal(closed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return encoded
+	}
+
+	if a, b := closeOf([]event.Envelope{aapl, msft}), closeOf([]event.Envelope{msft, aapl}); !bytes.Equal(a, b) {
+		t.Fatalf("the close depends on bar arrival order:\n%s\n%s", a, b)
 	}
 }
