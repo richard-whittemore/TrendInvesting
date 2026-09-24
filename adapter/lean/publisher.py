@@ -8,6 +8,13 @@ from math import isfinite
 ACCOUNT_SNAPSHOT_SCHEMA_VERSION = 2
 # event.RunCompletedSchemaVersion (internal/event/run_completed.go); ADR 0015.
 RUN_COMPLETED_SCHEMA_VERSION = 1
+# event.AdapterRunStoppedSchemaVersion (internal/event/run_stopped.go); ADR 0015.
+RUN_STOPPED_SCHEMA_VERSION = 1
+# event.AdapterRunStoppedReason* (internal/event/run_stopped.go): the closed
+# set of reasons this adapter may report, mirrored here so an unrecognised
+# reason fails at the source rather than reaching the engine, which would
+# reject it anyway (event.AdapterRunStoppedPayload.Validate).
+RUN_STOPPED_REASONS = frozenset({"delisted"})
 
 
 def raw_view(history, end_time):
@@ -72,6 +79,32 @@ class Publisher:
                                   "snapshot", payload, period_end)
         self.last_as_of = as_of
         return decisions
+
+    def publish_run_stopped(self, reason, detail, instrument_id=None):
+        """Send adapter.run.stopped immediately BEFORE replay.run.completed.
+
+        Records that the adapter deliberately stopped this run, so the
+        journal can tell it apart from one that simply reached its last bar
+        (ADR 0012; internal/event/run_stopped.go). Only called on a
+        deliberate stop already in progress (algorithm.py's
+        handle_delisting) — a clean end sends no event of this kind, and a
+        startup failure before the first exchange with the engine cannot
+        send anything at all (README.md).
+        """
+        if reason not in RUN_STOPPED_REASONS:
+            raise ValueError("unrecognised run stop reason: {!r}".format(reason))
+        if not detail:
+            raise ValueError("detail is required")
+        # Matches event.AdapterRunStoppedPayload.Validate's own per-reason
+        # requirement: today's one reason, "delisted", always names an
+        # instrument.
+        if reason == "delisted" and not instrument_id:
+            raise ValueError('instrument id is required for reason "delisted"')
+        if self.last_event_time is None:
+            raise ValueError("a run with no inputs has nothing to stop")
+        payload = {"reason": reason, "instrument_id": instrument_id or "", "detail": detail}
+        return self._publish("adapter.run.stopped", RUN_STOPPED_SCHEMA_VERSION,
+                              "run-stopped", payload, self.last_event_time)
 
     def publish_run_completed(self):
         """End the input stream the way cmd/backtest ends a run.

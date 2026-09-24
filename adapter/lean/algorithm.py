@@ -134,14 +134,34 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         reason = ("LEAN reports {} DELISTED at {}; its delisting signal carries no reason and "
                   "also fires for conversions, so the run stops rather than publish a delisting "
                   "that may be false (adapter/lean/README.md)".format(self.instrument, notice.Time))
-        # End the stream cleanly first, so every outstanding proposal reaches
-        # its terminal event in the journal rather than being left open.
+        # Record the deliberate stop BEFORE ending the stream, so the journal
+        # can tell this run apart from one that simply reached its last bar
+        # (ADR 0012; internal/event/run_stopped.go).
+        self.publish_run_stopped("delisted", reason, self.instrument)
+        # End the stream cleanly, so every outstanding proposal reaches its
+        # terminal event in the journal rather than being left open.
         self.complete_run()
-        # A failed completion has already stopped the run with its own
-        # reason; keep it, since it is the one that says the journal may lack
-        # its terminal event.
+        # A failed stop notice or completion has already stopped the run
+        # with its own reason; keep it, since it is the one that says the
+        # journal may lack its terminal event.
         if not self.failed:
             self.stop(reason)
+
+    def publish_run_stopped(self, reason, detail, instrument_id):
+        """Send adapter.run.stopped, if the stream is intact and not empty.
+
+        Mirrors complete_run's own guard, for the same two reasons: after a
+        transport or reply failure the stream is no longer in step with the
+        engine, so nothing further is sent and the run's own failure is the
+        record; and a run with no inputs yet has nothing to report a stop
+        against either.
+        """
+        if self.failed or self.client is None or self.publisher.last_event_time is None:
+            return
+        try:
+            self.decision_count += len(self.publisher.publish_run_stopped(reason, detail, instrument_id))
+        except Exception as err:
+            self.stop("run stop notice failed: {}".format(err))
 
     def complete_run(self):
         """Send replay.run.completed once, if the stream is intact and not empty.
