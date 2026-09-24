@@ -236,18 +236,16 @@ func TestAddLadderOneRungPerBarUpToFourUnitsThenNoFifth(t *testing.T) {
 	}
 }
 
-// --- The same-bar chain starting from the entry fill itself (#79 review round) ---
+// --- The entry fill can start the same-bar Add chain ---------------------
 //
-// PR #85 review: before #79, the entry always filled at the breakout bar's
-// own high, so Unit 1's rung (fill + 1/2N) sat structurally above that bar's
-// own high and could never be covered by it — the same-bar chain below only
-// ever needed to start from applyAddFill (TestFourUnitsAddedWithinOneBarVia
-// TheSameBarChain, further down). #79 moves the entry to the Entry Channel
-// high, which removes that accidental guarantee: the bar that OPENS a
-// Campaign can now also cover Unit 2's rung, and openCampaign must propose
-// and fill it rather than silently skipping the opportunity (The Turtle
-// Rules p.19-20: "all four could be added in one day" — evaluateAdd's own
-// doc comment, call site 2).
+// TestAddWithinTheBreakoutBarItself rejects skipping Unit 2 when the bar
+// that opens the Campaign also covers its rung. An entry at the Entry
+// Channel high need not fill at the breakout bar's own high: assuming it
+// does would put the next rung (fill + 1/2N) above that bar and hide this
+// opportunity. openCampaign must propose the Add from the entry fill;
+// TestFourUnitsAddedWithinOneBarViaTheSameBarChain separately exercises
+// continuing the chain from an Add fill (ADR 0005's resting-order model;
+// The Turtle Rules p.19–20: "all four could be added in one day").
 
 // breakoutBarsWithBar56High is breakoutBars, with the breakout bar's own high
 // (day 56) replaced by high instead of breakoutFixtureHighs' fixed 200. Bars
@@ -756,11 +754,11 @@ func TestMultiUnitCampaignExitsViaExitChannelWithAggregatedQuantityAndResult(t *
 	if exited.RealisedResult != wantRealisedResult {
 		t.Errorf("RealisedResult = %v, want exactly %v", exited.RealisedResult, wantRealisedResult)
 	}
-	// PR #74 review ("N Result Ignores Units"): AverageMoveInN is the
-	// per-share average (which understates a multi-Unit Campaign's real N
-	// result if misread as the aggregate); RealisedResultInUnitN is the
-	// aggregate Faith actually uses. Both are asserted against sizing's own
-	// functions — the same ones the producer calls — for bit-exactness.
+	// Reject substituting the per-share AverageMoveInN for the aggregate
+	// RealisedResultInUnitN: the former understates this multi-Unit
+	// Campaign's result if misread as the latter. Both are asserted against
+	// sizing's own functions — the same ones the producer calls — for
+	// bit-exactness.
 	wantAverageMoveInN, err := sizing.AverageMoveInN(exitFill.Price, wantEntryPrice, campaignN)
 	if err != nil {
 		t.Fatalf("sizing.AverageMoveInN() error = %v", err)
@@ -776,8 +774,8 @@ func TestMultiUnitCampaignExitsViaExitChannelWithAggregatedQuantityAndResult(t *
 		t.Errorf("RealisedResultInUnitN = %v, want exactly %v", exited.RealisedResultInUnitN, wantResultInUnitN)
 	}
 	// Distinct fields, distinct readings: the two must NOT coincide for a
-	// genuinely multi-Unit Campaign (unlike the single-Unit case) — the
-	// exact confusion the review finding named.
+	// genuinely multi-Unit Campaign (unlike the single-Unit case), so a
+	// producer assigning the average to both fields cannot pass.
 	if wantAverageMoveInN == wantResultInUnitN {
 		t.Fatalf("average move in n (%v) coincidentally equals realised result in unit n (%v); this fixture must keep the two genuinely different", wantAverageMoveInN, wantResultInUnitN)
 	}
@@ -1296,18 +1294,18 @@ func TestBarPredatingAnAddFillFailsClosed(t *testing.T) {
 	s.bar(completedBar("AAPL", day(58), 200, 150, 150)).wantRunError("AAPL", "predates")
 }
 
-// --- Chained fills cannot reverse Unit order (PR #74 review finding) -----
+// --- Chained fills cannot reverse Unit order ----------------------------
 
-// TestChainedAddFillWithEarlierTimestampThanPreviousUnitIsRejected is a PR
-// #74 review finding (Greptile, "Chained Fills Allow Time Reversal"): a
-// same-bar Add proposal (the chain — see applyAddFill) is raised only AFTER
+// TestChainedAddFillWithEarlierTimestampThanPreviousUnitIsRejected rejects
+// time reversal in the same-bar chain: an Add proposal (see applyAddFill)
+// is raised only AFTER
 // the preceding Unit's fill was accepted, so a later Unit's fill claiming a
 // timestamp EARLIER than the Unit immediately before it records causally
 // impossible ordering, and must be rejected — naming both times.
 //
 // The equal-timestamps case ("all four could be added in one day", The
 // Turtle Rules p.19) is deliberately NOT re-tested here:
-// TestFourUnitsAddedWithinOneBarViaTheSameBarChain (unchanged by this fix)
+// TestFourUnitsAddedWithinOneBarViaTheSameBarChain
 // already delivers all three chained fills at the identical instant and
 // asserts all three succeed, which is exactly the boundary this rejection
 // must not cross.

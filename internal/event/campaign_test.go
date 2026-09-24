@@ -878,21 +878,20 @@ func TestCampaignExitedPayloadValidateAcceptsDelistingReason(t *testing.T) {
 	}
 }
 
-// TestCampaignExitedPayloadMultiUnitAggregationMatchesPerUnitSum is #14's
-// own headline case for the "Multi-Unit aggregation" design decision
-// recorded on the type's doc comment: EntryPrice as the quantity-weighted
-// average fill price, together with RealisedResult's UNCHANGED
+// TestCampaignExitedPayloadMultiUnitAggregationMatchesPerUnitSum rejects
+// an aggregate result that differs from the sum of the Units' results:
+// The quantity-weighted EntryPrice, together with RealisedResult's
 // Quantity x (ExitPrice - EntryPrice) x DollarsPerPoint formula, must equal
 // the sum of what each Unit realised on its own — proving the aggregate
 // formula was not a simplification that silently changed the number.
 //
-// It also covers the PR #74 review finding ("N Result Ignores Units") this
-// fixture was extended to catch: RealisedResultInUnitN, not AverageMoveInN,
+// It also rejects reporting a per-share average as the Campaign's aggregate
+// N result: RealisedResultInUnitN, not AverageMoveInN,
 // is what sums to each Unit's own QUANTITY-WEIGHTED N contribution — a Unit
 // filled for only a fraction of the frozen Unit size contributes that same
 // fraction of its own N move, exactly mirroring how a partial Unit already
 // contributes only its own fraction to the dollar RealisedResult above. The
-// distinction the finding named — several Units each moving a real amount
+// distinction under test — several Units each moving a real amount
 // of N must not be reported as if only one Unit had — is what separates
 // this from AverageMoveInN, which is a plain per-share average with no
 // quantity weighting of its own beyond the entry price average.

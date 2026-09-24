@@ -2,8 +2,8 @@ package event
 
 // This file is deliberately `package event`, not `event_test`: it exercises
 // canonicalJSON directly, the unexported helper behind the single exported
-// function this ticket adds (ConfigurationHash). #50's "one exported
-// function" constrains the derivation's public surface, not what a
+// derivation function (ConfigurationHash). ADR 0016's public-surface rule
+// constrains the derivation's exported API, not what a
 // white-box test may reach to prove the canonical encoder's own properties —
 // that its object encoding does not depend on Go struct field declaration
 // order or map insertion order, and that the schema version genuinely

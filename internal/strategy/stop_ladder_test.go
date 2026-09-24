@@ -796,10 +796,11 @@ func TestReplayingTheGapFixtureTwiceYieldsByteIdenticalEmissions(t *testing.T) {
 	}
 }
 
-// --- Review round: four further fixes -------------------------------------
+// --- Partial stops preserve results, proposal validity, and chronology ---
 //
-// The four tests below cover a second Greptile review round on PR #76,
-// each pinned to the specific gap the finding named.
+// The four tests below reject omitting earlier stopouts from the final
+// result, retaining an Add after a partial stop, reversing stop timestamps,
+// and rejecting a raised stop above its Unit's entry.
 
 // TestExitFillAfterAPartialStopAggregatesTheWholeLife is "Exit Omits
 // Earlier Stopouts": a partial stop closes Unit 4 alone, and the Exit
@@ -912,8 +913,8 @@ func TestPendingAddIsCancelledByAPartialStopAndItsFillIsRejected(t *testing.T) {
 	partialStop := stopFillForUnits("AAPL", campaignID, "sim-fill-stop-1", []string{"sim-fill-0001"}, unit1RaisedStop-0.10, 133, day(59))
 
 	// The now-stale Add fill for Unit 3, naming the SAME proposal bar58
-	// raised — arriving anyway, "before the next bar" per the ticket's own
-	// framing.
+	// raised — arriving after the partial stop with no intervening bar.
+	// The stop must invalidate the proposal immediately, not on the next bar.
 	staleAddFill := addFill("AAPL", campaignID, 3, day(58), "sim-fill-add-3", rung3, 133, day(60))
 
 	s := newStream(t, cfg).
@@ -1096,14 +1097,15 @@ func TestStopMultipleOneRaisesUnitOneAboveItsEntry(t *testing.T) {
 	}
 }
 
-// --- Review round 2: validate-then-mutate for the stop-superseded expiry --
+// --- Invalid stop-superseded expiry must leave Campaign state unchanged --
 
 // buildPendingAddScenario returns a stream builder positioned right after a
 // 2-Unit Campaign (unit1 via openingFill, unit2 via one Add) has an
-// outstanding Add proposal for Unit 3 (raised on bar58, whose own
-// EarliestFillAt — the bar BEFORE it, bar57's own period end, day(57) — a
-// partial stop's own timestamp is checked against, #15 review round "Stop
-// Expiry Commits Partial State"), plus every figure a test needs.
+// outstanding Add proposal for Unit 3, raised on bar58, plus the figures
+// needed by TestPartialStopInsideTheAddProposalsOwnBarCancelsItWithAValidExpiry
+// and TestPartialStopWithAnInvalidExpiryLeavesCampaignStateCompletelyUnchanged.
+// The proposal's EarliestFillAt is bar57's period end, day(57); a partial
+// stop must be strictly after that bound to produce a valid expiry.
 func buildPendingAddScenario(t *testing.T) (s *stream, campaignID string, unit1RaisedStop float64) {
 	t.Helper()
 
@@ -1147,8 +1149,8 @@ func buildPendingAddScenario(t *testing.T) (s *stream, campaignID string, unit1R
 	return s, campaignID, unit1RaisedStop
 }
 
-// TestPartialStopInsideTheAddProposalsOwnBarCancelsItWithAValidExpiry is the
-// review round's own required positive: a partial stop filling INSIDE the
+// TestPartialStopInsideTheAddProposalsOwnBarCancelsItWithAValidExpiry rejects
+// requiring an expiry to follow the proposal bar: a partial stop INSIDE the
 // bar that proposed the pending Add (ADR 0005: a resting stop can fill in
 // the same bar) produces a legitimate expiry — ExpiredAt equal to that
 // bar's own PeriodEnd, not after it — and both units-stopped and the expiry
@@ -1194,10 +1196,9 @@ func TestPartialStopInsideTheAddProposalsOwnBarCancelsItWithAValidExpiry(t *test
 }
 
 // TestPartialStopWithAnInvalidExpiryLeavesCampaignStateCompletelyUnchanged
-// is the review round's own required regression test: a partial stop fill
-// whose OWN timestamp predates the pending Add proposal's EarliestFillAt
-// bound produces an expiry that fails Validate — and, per the
-// validate-then-mutate discipline this fixes, the run must fail with NO
+// rejects committing a partial stop before its expiry validates. A stop
+// timestamp at or before the pending Add proposal's exclusive EarliestFillAt
+// bound produces an expiry that fails Validate, and the run must fail with NO
 // state moved at all: no units-stopped or expiry event journaled, the
 // Campaign's Units and their stops untouched, and the fill's own id NOT
 // recorded as accepted — so a retry of the identical fill fails again,

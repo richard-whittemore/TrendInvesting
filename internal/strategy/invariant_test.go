@@ -209,28 +209,24 @@ func buildCorruptedCampaignState(t *testing.T, r *Reducer, protectiveStop float6
 	return instrumentID
 }
 
-// TestCampaignWithoutAProtectiveStopHaltsTheEngine is #12's required
-// invariant test: a Campaign found, at the start of a completed bar, without
+// TestCampaignWithoutAProtectiveStopHaltsTheEngine enforces CONTEXT.md's
+// Protective Stop invariant: a Campaign found at the start of a bar without
 // a Protective Stop that is positive, halts the engine — emitting
 // event.EngineStateEventType and failing the run — rather than being
 // silently tolerated or continuing to trade the instrument.
 //
 // Covers every way the invariant can fail except a positive but infinite
 // stop, which TestCampaignWithAPositiveInfiniteProtectiveStopHaltsTheEngine
-// covers on its own (#78's finding: this invariant's own comparison,
-// `protectiveStop > 0`, does not reject +Inf, unlike the other three seams
-// that assert this same rule). Not reachable from any valid input stream
+// covers on its own (checking only `protectiveStop > 0` would fail to
+// reject +Inf). Not reachable from any valid input stream
 // (see this file's package doc comment); constructed directly through
 // buildCorruptedCampaignState.
 //
-// #15's review round removed "and below its entry price" from the
-// invariant: a stop RAISED by the Stop Ladder can legitimately reach or
-// exceed its own Unit's entry under a narrow enough Stop Multiple (a
-// break-even or profit-protecting level, CONTEXT.md's "risk-free"), so a
-// stop at or above entry is no longer treated as corruption — see
-// TestCampaignWithAStopAtOrAboveEntryDoesNotHalt just below, which is what
-// this table used to include as its OWN two "must halt" cases before that
-// finding.
+// Requiring a held stop to remain below entry would reject CONTEXT.md's
+// risk-free Unit: a stop RAISED by the Stop Ladder can legitimately reach
+// or exceed its Unit's entry under a narrow enough Stop Multiple. Those
+// break-even or profit-protecting levels must not halt the engine — see
+// TestCampaignWithAStopAtOrAboveEntryDoesNotHalt below.
 func TestCampaignWithoutAProtectiveStopHaltsTheEngine(t *testing.T) {
 	t.Parallel()
 
@@ -301,18 +297,13 @@ func TestCampaignWithoutAProtectiveStopHaltsTheEngine(t *testing.T) {
 	}
 }
 
-// TestCampaignWithAPositiveInfiniteProtectiveStopHaltsTheEngine is #78's
-// finding: checkCampaignHasAProtectiveStop's own comparison, `protectiveStop
-// > 0`, is true for positive infinity, so a corrupted Unit whose stop is
-// +Inf passed this invariant undetected — unlike
-// event.CampaignEvaluatedPayload.Validate, event.CampaignOpenedPayload.Validate
-// and event.ProtectiveStopSetPayload.Validate, which each reject a
-// non-finite level explicitly and already did so before this ticket. A stop
-// of +Inf can never trigger, which is the opposite of "protected": the
-// Campaign this invariant exists to catch would look fine on every read
-// while being unstoppable in fact. Consolidating onto sizing.ValidStopLevel
-// closes this gap by construction, since every other seam already refused
-// it.
+// TestCampaignWithAPositiveInfiniteProtectiveStopHaltsTheEngine rejects
+// checking only `protectiveStop > 0`, which accepts positive infinity.
+// The invariant uses sizing.ValidStopLevel to require a finite, positive
+// stop, matching event.CampaignEvaluatedPayload.Validate,
+// event.CampaignOpenedPayload.Validate and event.ProtectiveStopSetPayload.Validate.
+// A +Inf stop is not a usable protective level and must halt the engine
+// rather than pass the capital-safety check.
 func TestCampaignWithAPositiveInfiniteProtectiveStopHaltsTheEngine(t *testing.T) {
 	t.Parallel()
 
@@ -380,8 +371,8 @@ func TestCampaignWithAValidProtectiveStopDoesNotHalt(t *testing.T) {
 	}
 }
 
-// TestCampaignWithAStopAtOrAboveEntryDoesNotHalt is #15's review-round
-// counterpart to TestCampaignWithAValidProtectiveStopDoesNotHalt: a stop AT
+// TestCampaignWithAStopAtOrAboveEntryDoesNotHalt rejects treating a risk-free
+// Unit (CONTEXT.md) as corrupt: a stop AT
 // or ABOVE its own Unit's entry — reachable in practice only via the Stop
 // Ladder's repeated raises under a narrow enough Stop Multiple (Variant
 // territory; the Baseline's own 2N/four-Unit configuration never reaches
@@ -435,20 +426,13 @@ func TestCampaignWithAStopAtOrAboveEntryDoesNotHalt(t *testing.T) {
 }
 
 // TestCampaignWithoutAProtectiveStopHaltsTheEngineThroughReplayEngineRun
-// covers the review-round requirement that the halt is observable at the
-// seam that actually matters: the journal replay.Engine.Run produces, not
-// merely the Handler seam TestCampaignWithoutAProtectiveStopHaltsTheEngine
-// exercises directly.
-//
-// Before this ticket's review round, internal/replay.Engine.Run discarded
-// every emission a handler returned whenever Apply also returned an error,
-// so the engine-state halt this package emits would never reach a caller of
-// Run at all — the run would fail closed SILENTLY. The engine's contract
-// was changed (internal/replay/engine_test.go's
-// TestEngineRunJournalsPriorAndFinalEmissionsAlongsideHandlerError) so that
-// a handler's final emission on failure is stamped, validated, and
-// returned alongside the error; this test is the corresponding assertion
-// from #12's own side of that seam.
+// rejects discarding the halt emission when Apply also returns an error:
+// replay.Engine.Run must return the engine-state halt alongside that error,
+// not merely fail closed without journal evidence. This complements the
+// direct Handler check in TestCampaignWithoutAProtectiveStopHaltsTheEngine
+// and the engine contract pinned by internal/replay's
+// TestEngineRunJournalsPriorAndFinalEmissionsAlongsideHandlerError: final
+// emissions on failure are stamped, validated, and returned to the caller.
 func TestCampaignWithoutAProtectiveStopHaltsTheEngineThroughReplayEngineRun(t *testing.T) {
 	t.Parallel()
 

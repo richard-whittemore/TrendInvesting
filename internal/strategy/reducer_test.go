@@ -267,7 +267,7 @@ type referenceStep struct {
 // against, in place of hand-deriving many bars' worth of Tier/distance
 // arithmetic by hand.
 //
-// Both inputs are read BEFORE the bar is folded into them (PR #64 review):
+// Both inputs are read BEFORE the bar is folded into them (CONTEXT.md: "Completed bar"):
 // the decision N and the channel high are the values standing after the
 // PRECEDING bars, and this bar's True Range and high are added afterwards,
 // for the next bar to see. This mirrors the reducer's own evaluate-then-add
@@ -439,7 +439,7 @@ func TestReducerEmitsOneSetupEvaluatedPerBarWithExpectedNAndReadiness(t *testing
 		t.Fatalf("len(emitted) = %d, want %d (one per bar, none for the configuration event)", len(emitted), len(trs))
 	}
 
-	// Evaluate-then-add (PR #64 review): the N a bar is decided against is
+	// Evaluate-then-add (CONTEXT.md: "Completed bar"): the N a bar is decided against is
 	// the N standing after the bars BEFORE it, so the 20-bar seed first
 	// appears on bar 21's decision, not bar 20's. Bar 20 is the bar that
 	// completes the seed; it does not get to use it. The values themselves
@@ -525,7 +525,7 @@ func TestReducerUsesSplitAdjustedViewOnly(t *testing.T) {
 	seq := uint64(2)
 	// Twenty-one bars, not twenty: evaluate-then-add means the twentieth bar
 	// completes the seed and the twenty-first is the first bar decided
-	// against it (PR #64 review).
+	// against it (CONTEXT.md: "Completed bar").
 	const bars = 21
 	for i := 0; i < bars; i++ {
 		periodEnd := day(i + 1)
@@ -905,10 +905,10 @@ func TestReducerRejectsUndecodableCompletedBarPayload(t *testing.T) {
 	}
 }
 
-// TestReducerRejectsConfigurationWithWrongSchemaVersion is a Greptile PR #62
-// finding (P1): a configuration envelope's SchemaVersion must equal
+// TestReducerRejectsConfigurationWithWrongSchemaVersion pins ADR 0015's
+// fail-closed schema rule: a configuration envelope's SchemaVersion must equal
 // event.ConfigurationSchemaVersion before the payload is even decoded. A
-// schema-1 configuration (recorded before #9 added TierBDistanceInN) would
+// schema-1 configuration (which lacks TierBDistanceInN) would
 // otherwise decode cleanly with TierBDistanceInN defaulting to the float64
 // zero value, which ConfigurationPayload.Validate accepts as legitimately
 // "no Tier B window" — silently changing what Tier B means for that run
@@ -979,10 +979,10 @@ func TestReducerRejectsCompletedBarWithWrongSchemaVersion(t *testing.T) {
 	}
 }
 
-// --- Greptile PR #60 findings ---
+// --- Reject misattributed configurations and repeated bars; keep zero N unready ---
 
-// TestReducerRejectsConfigurationWithMismatchedHash is Greptile finding 1
-// (P1, applyConfiguration): a configuration envelope whose ConfigurationHash
+// TestReducerRejectsConfigurationWithMismatchedHash rejects misattributed
+// decisions: a configuration envelope whose ConfigurationHash
 // differs from the hash passed to NewReducer must be rejected, naming both
 // hashes, rather than silently accepted while every later decision is
 // stamped with the constructor's hash (an audit-attribution defect).
@@ -1034,7 +1034,7 @@ func TestReducerAcceptsConfigurationWithMatchingHash(t *testing.T) {
 	}
 }
 
-// TestReducerRejectsSecondConfigurationEvent is the other half of finding 1:
+// TestReducerRejectsSecondConfigurationEvent prevents mid-run replacement:
 // the reducer is configured once per run. ADR 0006 freezes a Campaign's
 // configuration at entry; a mid-stream reconfiguration is not something this
 // reducer supports, so a second configuration event — even one with a
@@ -1063,8 +1063,8 @@ func TestReducerRejectsSecondConfigurationEvent(t *testing.T) {
 	}
 }
 
-// TestReducerRejectsDuplicateBarPeriodEnd is Greptile finding 2 (P1,
-// applyCompletedBar): an exact duplicate bar (same instrument, same
+// TestReducerRejectsDuplicateBarPeriodEnd prevents counting a bar twice:
+// an exact duplicate bar (same instrument, same
 // PeriodEnd) must be rejected, naming the instrument, the last recorded
 // period end, and the offending one, rather than silently advancing the
 // accumulator and overwriting previousClose a second time for the same bar.
@@ -1100,8 +1100,8 @@ func TestReducerRejectsDuplicateBarPeriodEnd(t *testing.T) {
 	}
 }
 
-// TestReducerRejectsOutOfOrderBarPeriodEnd is the other half of finding 2: a
-// bar whose PeriodEnd is earlier than the last one recorded for the same
+// TestReducerRejectsOutOfOrderBarPeriodEnd prevents rewinding an instrument's
+// history: a bar whose PeriodEnd is earlier than the last one recorded for the same
 // instrument must be rejected the same way a duplicate is.
 func TestReducerRejectsOutOfOrderBarPeriodEnd(t *testing.T) {
 	t.Parallel()
@@ -1170,12 +1170,12 @@ func TestReducerAcceptsEarlierPeriodEndForDifferentInstrument(t *testing.T) {
 	}
 }
 
-// TestReducerFlatInstrumentStaysNotReadyUntilNonZeroTrueRange is Greptile
-// finding 3 (P2, event.SetupEvaluatedPayload.Validate): twenty flat bars
+// TestReducerFlatInstrumentStaysNotReadyUntilNonZeroTrueRange rejects
+// treating zero volatility as usable N: twenty flat bars
 // (high == low == close) legitimately warm up in bar count but produce
 // N == 0, which is not a usable volatility reading. The reducer must report
-// NReady = false for those (not error out), and readiness must return the
-// moment True Range is non-zero again.
+// NReady = false for those (not error out), and readiness returns on the
+// decision after a non-zero True Range enters N (CONTEXT.md: "Completed bar").
 func TestReducerFlatInstrumentStaysNotReadyUntilNonZeroTrueRange(t *testing.T) {
 	t.Parallel()
 
@@ -1195,7 +1195,7 @@ func TestReducerFlatInstrumentStaysNotReadyUntilNonZeroTrueRange(t *testing.T) {
 		envelopes = append(envelopes, barEnvelope(t, seq, bar, day(i+1)))
 		seq++
 	}
-	// Two ranged bars, not one: under evaluate-then-add (PR #64 review) bar
+	// Two ranged bars, not one: under CONTEXT.md's "Completed bar" rule, bar
 	// 21 is still decided against the all-zero seed, and bar 22 is the first
 	// bar that can see bar 21's non-zero True Range.
 	for i := 21; i <= 22; i++ {
@@ -1576,8 +1576,8 @@ func TestReducerNoSignalWhileNNotReady(t *testing.T) {
 	}
 }
 
-// TestReducerSignalCarriesTheConfiguredEntryChannelLength is a Greptile PR
-// #62 finding: a Signal's Rule must never hard-code a channel length, or a
+// TestReducerSignalCarriesTheConfiguredEntryChannelLength rejects a
+// mislabelled Variant: a Signal's Rule must never hard-code a channel length, or a
 // Faith system label, that a Variant could configure differently — System 1
 // is a 20-day channel and System 2 a 55-day one (ADR 0002), so naming the
 // rule after either system would misdescribe a Variant configured with the
@@ -1995,8 +1995,9 @@ func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 	if proposal.DollarsPerPoint != cfg.DollarsPerPoint {
 		t.Errorf("Proposal DollarsPerPoint = %v, want %v", proposal.DollarsPerPoint, cfg.DollarsPerPoint)
 	}
-	// The Notional Account used this ticket is the configured starting
-	// equity. Drawdown Steps and yearly re-basing (ADR 0007) are #16/#17.
+	// runReducerOverHighs supplies one account snapshot, whose Equity equals
+	// the configured starting figure; ADR 0007's Notional Account therefore
+	// stays at configured starting equity for the proposal.
 	if proposal.NotionalAccount != cfg.NotionalAccount.StartingEquity {
 		t.Errorf("Proposal NotionalAccount = %v, want the configured starting equity %v", proposal.NotionalAccount, cfg.NotionalAccount.StartingEquity)
 	}
@@ -2007,7 +2008,8 @@ func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 	}
 	// The declared budget above is what the strategy set out to risk; the
 	// realised figure below is what the whole-share quantity actually risks,
-	// and the gap between them is the truncation (PR #64 review).
+	// and the gap between them is whole-share truncation (sizing's truncate,
+	// internal/sizing/sizing.go).
 	wantRealised := 133 * (cfg.StopMultiple * wantN * cfg.DollarsPerPoint) / cfg.NotionalAccount.StartingEquity
 	if proposal.RealisedRiskAtStop != wantRealised {
 		t.Errorf("Proposal RealisedRiskAtStop = %v, want exactly %v", proposal.RealisedRiskAtStop, wantRealised)
@@ -2302,7 +2304,7 @@ func envelopesOfType(envelopes []event.Envelope, eventType string) []event.Envel
 	return matched
 }
 
-// --- PR #64 review: the decision bar is never an input to its own decision ---
+// --- CONTEXT.md: "Completed bar" excludes the decision bar from its own inputs ---
 
 // runReducerOverBars replays a configuration event followed by the given
 // bars, in order, and returns every envelope the engine emitted. Unlike
@@ -2359,9 +2361,9 @@ func breakoutBarsWithFinalRange(instrumentID string, finalLow, finalClose float6
 	return append(bars, completedBar(instrumentID, day(56), 200, finalLow, finalClose))
 }
 
-// TestReducerSizesFromNThroughThePrecedingBarNotTheSignalBar is the headline
-// invariant this review round exists to pin (Greptile P1 on PR #64, and the
-// same class of defect as the prototype's look-ahead Donchian read).
+// TestReducerSizesFromNThroughThePrecedingBarNotTheSignalBar rejects
+// look-ahead in sizing: CONTEXT.md's "Completed bar" excludes the signal
+// bar's own True Range from the N used to size its order.
 //
 // Two fixtures differ in exactly one respect: the breakout bar's True Range.
 // One is a narrow bar (True Range 100, driven entirely by the gap from the

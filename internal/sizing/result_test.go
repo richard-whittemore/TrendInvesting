@@ -8,9 +8,10 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
-// TestAverageMoveInNCrudeGolden is the single-Unit case, where
-// AverageMoveInN and RealisedResultInUnitN must coincide (PR #74 review
-// response): entry 28.30, exit 31.30, N 1.20 -> a move of 3.00, or 2.5N.
+// TestAverageMoveInNCrudeGolden pins the per-share N move: entry 28.30,
+// exit 31.30, N 1.20 -> a move of 3.00, or 2.5N. For a single full Unit this
+// equals RealisedResultInUnitN, as checked by
+// TestRealisedResultInUnitNCoincidesWithAverageMoveInNForASingleFullUnit.
 func TestAverageMoveInNCrudeGolden(t *testing.T) {
 	t.Parallel()
 

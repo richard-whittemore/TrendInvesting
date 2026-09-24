@@ -890,8 +890,8 @@ func TestEngineRunHonoursContextCancellation(t *testing.T) {
 }
 
 // TestEngineRunJournalsPriorAndFinalEmissionsAlongsideHandlerError covers the
-// engine contract change #12's review round required: a handler that fails
-// closed may still emit a final event explaining why (Handler's doc
+// regression where returning a handler error discards audit evidence. A
+// handler that fails closed may still emit a final event explaining why (Handler's doc
 // comment), and the engine must stamp, validate, and return it — the prior
 // emissions from earlier, successful Apply calls, PLUS the failing call's
 // own emission — rather than discarding everything the moment Apply returns

@@ -325,7 +325,7 @@ func TestExitFillClosesCampaignWithReasonExitChannel(t *testing.T) {
 	}
 	// A single-Unit Campaign: AverageMoveInN (the per-share average) and
 	// RealisedResultInUnitN (the aggregate Unit-N result) coincide
-	// NUMERICALLY (PR #74 review response to "N Result Ignores Units"), but
+	// mathematically, but copying one field to the other is not sufficient:
 	// each is asserted against sizing's own function — the same one the
 	// producer calls — since the two formulas are not guaranteed to agree
 	// bit-for-bit in float64 (they multiply and divide in a different
@@ -629,13 +629,12 @@ func TestExitFillReusingAFillIDWithDifferentContentsIsRejected(t *testing.T) {
 
 // --- Stop and exit racing for the same Campaign ----------------------------
 
-// TestStopFillThenExitFillForSameCampaignSecondFails is the ticket's
-// "stop and exit in the same bar" requirement, at the seam this ticket
-// actually owns: the reducer processes fills in the sequence it is handed
-// them (ADR 0005 leaves resolving which one the SIMULATOR sends first to
-// #18), and whichever closing fill arrives first closes the Campaign — a
-// second closing fill for an already-closed Campaign fails closed, exactly
-// as #12 already established for two stop fills.
+// TestStopFillThenExitFillForSameCampaignSecondFails rejects closing a
+// Campaign twice: the reducer processes fills in the sequence it receives,
+// so the first closing fill closes the Campaign and a second, distinct
+// closing fill fails closed. The fixture delivers a stop and then an exit;
+// it checks reducer reconciliation, not the simulator's ordering of fills
+// under ADR 0005.
 func TestStopFillThenExitFillForSameCampaignSecondFails(t *testing.T) {
 	t.Parallel()
 
@@ -792,11 +791,11 @@ func TestReplayingTheExitChannelFixtureTwiceYieldsByteIdenticalEmissions(t *test
 	}
 }
 
-// --- The look-ahead negative (this ticket's headline) ----------------------
+// --- Including the decision bar hides an Exit-Channel breach ------------
 
-// TestLookAheadExitChannelWouldMissTheBreach is #13's headline negative
-// test, mirroring #9's TestLookAheadEntryChannelWouldMissTheBreakout on the
-// exit side: a fixture where the decision bar's own low IS the new 20-bar
+// TestLookAheadExitChannelWouldMissTheBreach rejects a channel that includes
+// the decision bar, mirroring TestLookAheadEntryChannelWouldMissTheBreakout
+// on the exit side: a fixture where the decision bar's own low IS the new 20-bar
 // minimum. A correct implementation (the channel excludes the decision bar)
 // proposes the exit. A look-ahead implementation (the channel includes the
 // decision bar) computes the channel low AS the bar's own low, sees "not
@@ -878,7 +877,7 @@ func TestLookAheadExitChannelWouldMissTheBreach(t *testing.T) {
 	}
 }
 
-// --- The exit fill's own execution window (PR #73 review round) ----------
+// --- Exit fills obey ADR 0005's window relative to the breach bar --------
 //
 // The entry-fill path bounds a fill's timestamp to
 // (the period end of the bar before the decision bar, the period end of the

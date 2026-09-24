@@ -8,7 +8,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
 
-// TestConfigurationHashStability pins the Baseline fixture's hash (#50, ADR
+// TestConfigurationHashStability pins the Baseline fixture's hash (ADR
 // 0016). Changing this pin is a deliberate act: either ConfigurationSchemaVersion
 // bumped, or the canonical encoding changed, and either should be visible as
 // a diff to this literal, not silently absorbed. ADR 0012 requires "the same
@@ -18,14 +18,13 @@ func TestConfigurationHashStability(t *testing.T) {
 	t.Parallel()
 
 	got := event.ConfigurationHash(validConfiguration())
-	// Re-pinned for #18 (merged to main as PR #82, 8b36714): ConfigurationSchemaVersion
-	// bumped 3 -> 4 and ConfigurationPayload gained the Commission fields
-	// (PerShare, MinimumPerOrder, MaximumFractionOfTradeValue). Both feed
-	// this hash by design (ADR 0016: the schema version is inside the hashed
-	// prefix, and the new fields are inside the canonical bytes), so this
-	// pin moving is the first live demonstration of "a schema bump changes
-	// every hash" -- not a regression. The previous pin, for schema version
-	// 3 with no Commission field, was
+	// This pin includes ConfigurationSchemaVersion 4 and the Commission
+	// fields (PerShare, MinimumPerOrder, MaximumFractionOfTradeValue).
+	// ADR 0016 requires both to feed the hash: the schema version is inside
+	// the hashed prefix, and the fields are inside the canonical bytes.
+	// This prevents a schema or commission-field change from being silently
+	// omitted from configuration identity. The previous pin, for schema
+	// version 3 with no Commission field, was
 	// sha256:9b74eadaa35438307bf91513f3a685008aeb1f1878b1daf9a4822ff8d72c89d1.
 	const want = "sha256:acdf9cc9f6b45ea4658373abff96306af35539d68ad2a1e0eedee4a014fbb386"
 	if got != want {
