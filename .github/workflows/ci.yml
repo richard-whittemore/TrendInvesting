@@ -14,15 +14,31 @@ env:
 
 jobs:
   go:
+    # The one check the main-branch ruleset requires, so every gating job
+    # must feed it: a job outside `needs` can fail without blocking a merge.
+    # rule-surface-append-only runs only on a pull request and is skipped on
+    # a push to main, where there is no base to compare against.
     if: always()
-    needs: [go-amd64, go-arm64]
+    needs: [go-amd64, go-arm64, workflow-and-shell-lint, rule-surface-append-only]
     runs-on: ubuntu-latest
     steps:
-      - name: Require both architectures
+      - name: Require every gating job
         env:
           AMD64_RESULT: ${{ needs.go-amd64.result }}
           ARM64_RESULT: ${{ needs.go-arm64.result }}
-        run: test "$AMD64_RESULT" = success && test "$ARM64_RESULT" = success
+          LINT_RESULT: ${{ needs.workflow-and-shell-lint.result }}
+          RULE_SURFACE_RESULT: ${{ needs.rule-surface-append-only.result }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -eu
+          test "$AMD64_RESULT" = success
+          test "$ARM64_RESULT" = success
+          test "$LINT_RESULT" = success
+          if test "$EVENT_NAME" = pull_request; then
+            test "$RULE_SURFACE_RESULT" = success
+          else
+            test "$RULE_SURFACE_RESULT" = skipped
+          fi
 
   rule-surface-append-only:
     # A pull request may append a rule surface for a new RulesVersion; it may
