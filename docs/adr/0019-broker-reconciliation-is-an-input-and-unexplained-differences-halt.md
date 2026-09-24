@@ -129,12 +129,16 @@ Only `unverifiable` evidence, or a discrepancy the evidence cannot bound, still 
 
 **Risk-reducing management** means only actions that cannot increase exposure: raising a Protective Stop under the Stop Ladder, an Exit-Channel exit, and a Delisting Exit where supported. Nothing that opens or adds to a position is allowed while not Normal.
 
+**One working exit order per position.** A resting good-till-cancelled Protective Stop and a separately submitted exit order could both fill, and together sell more than is held. So the two are never separate orders. For a long position, the Protective Stop and the Exit-Channel exit are both "sell if price falls to *X*". They are held as **one** working sell-stop at the higher of the two levels, and "taking the exit" or "raising the stop" means **amending that one order**, never adding another. An amendment the broker has not acknowledged leaves the previous level in force: the position keeps exactly one stop throughout. This is the order model #29 must implement in every state, not only while Degraded.
+
 **Frozen** means the system changes no order for that instrument. Its Protective Stop keeps working at the broker, because under the order-lifetime decision recorded on #29 it is good-till-cancelled. There is one exception. If the discrepancy **is** a missing or cancelled Protective Stop **on a position the journal holds a Protective Stop for**, the system **restores** it at that last journalled level. Restoring protection reduces risk; leaving a position unprotected while waiting for a human does not.
 
 - **Restoration is single-owner and idempotent.** The restored order's client identifier derives deterministically from the missing stop's own journalled identifier, so a retried restoration can't place a second stop. The alert reports the outcome: restored, with the order identifier, or failed. A person places a stop by hand only when the alert says restoration failed or was not attempted, never alongside an attempt in progress.
 - **No journalled stop, no automatic restoration.** A broker-held position the journal has no Campaign for, such as a manual trade, has no level the system could restore. Its alert marks it **UNPROTECTED** with no system-held level, and the runbook directs the decision to a person. The system never invents a level.
 
 **Exits and restored stops are sized from the broker-reported quantity of the most recent reconciliation,** never from the believed quantity, and never from the reconciliation that *entered* the state, since a later stop fill may have reduced the holding since then. ADR 0019 already requires a reconciliation immediately before each order submission and after every accepted fill. The order is sized from that one, and those checks don't themselves leave Degraded. When the discrepancy *is* the quantity, the current broker figure is the only one that can't sell shares not held and so accidentally open a short.
+
+**An affected order freezes its instrument.** A discrepancy that names an order, such as an unknown order or a cancelled stop, freezes that order's instrument as if the instrument were named, so no management runs against an instrument whose order state is unresolved.
 
 **A cash-only discrepancy names no instrument.** It blocks entries and Adds, because sizing depends on cash, and leaves every position under normal management.
 

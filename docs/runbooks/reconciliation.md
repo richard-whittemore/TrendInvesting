@@ -10,10 +10,14 @@ This is the procedure for when the system alerts that it has left **Normal**, un
 2. **Read the state:**
    - **Degraded:** no new positions and no Adds. Positions the alert does not name are still managed: stops are raised and exits taken. Named positions are frozen, but keep their stop at the broker.
    - **Halted:** no order changes at all. Every position keeps its good-till-cancelled stop at the broker, and those stops still fill if price reaches them.
-3. **Check every position has exactly one stop at the broker.** Look at the broker's own screen, not ours. The alert says, for each affected position, whether the system **restored** its stop (with the order id), **failed** to, or has **none** to restore (UNPROTECTED).
+3. **Check every position has exactly one working stop at the broker.** Use the broker's own order list, not ours. The alert says, for each affected position, whether the system **restored** its stop (with the order id), **failed** to, or has **none** to restore (UNPROTECTED, meaning no *journalled* stop).
    - **Restored:** don't place another. Two stops would both fill and sell more than you hold.
-   - **Failed, or Halted** (the system doesn't restore while Halted): place one by hand at the journalled level the alert states.
-   - **UNPROTECTED** (no journalled stop, e.g. a manual trade): the system has no level. Decide one yourself, and place it.
+   - **Before placing any stop by hand**, look at the broker's working orders for that instrument:
+     - If **any** sell-stop is working (a restoration the system submitted, or one placed earlier by hand), **don't add another.** Verify its level and quantity, and record it.
+     - If a restoration order is **pending** (submitted but not yet working or rejected), **cancel it and wait for the broker to confirm the cancellation** before placing your own.
+     - Place a stop by hand **only when the broker shows no working or pending sell-stop** for the position.
+   - **Failed, or Halted** (the system doesn't restore while Halted): once the broker shows none, place one at the journalled level the alert states.
+   - **UNPROTECTED:** there's no journalled level. If the broker shows no stop, decide a level yourself and place it.
 
    Then record anything placed by hand (step 3 of the recovery below).
 4. **Do not "fix" the account by editing numbers anywhere.** The system never adopts a balance (ADR 0019). Every repair is a recorded event.
