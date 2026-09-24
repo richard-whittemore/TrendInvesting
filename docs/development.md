@@ -161,6 +161,8 @@ A coverage percentage cannot detect a branch that has become unreachable: dead c
 
 "Nobody has got round to it" is not a category. A missing test is a missing test.
 
+Each entry identifies one block by file, enclosing function, statement text and starting byte offset. Identical guards have separate entries, so exchanging which guard is covered fails the audit even when the total uncovered count is unchanged. Moving a block changes its identity: regenerate the dump and review the affected reasons after source edits. The dump lists each occurrence separately; it does not supply reasons for you.
+
 The audit fails in both directions: an unlisted statement that becomes uncovered, and a listed one that becomes covered or no longer exists. It generates its own coverage profile, so `go test ./...` enforces it. Prefer this default whenever inputs have changed.
 
 `COVERAGE_AUDIT_PROFILE` accepts an existing profile only under a caller-maintained freshness contract: use it immediately after a successful, complete test run against the same checkout, test options, toolchain, environment and external inputs. The audit rejects profiles older than any repository Go source (including tests), `go.mod`, `go.sum`, or file under `testdata/`. This catches a new test even when the production source spans did not move.

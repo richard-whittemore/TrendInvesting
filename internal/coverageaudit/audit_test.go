@@ -61,22 +61,19 @@ var categories = map[string]string{
 	"unreachable-by-invariant": "a named domain invariant makes the tested state impossible",
 }
 
-// block is one uncovered coverage block, identified by something more stable
-// than a line number: the file, the function that encloses it, and the
-// source text of the block itself. A line number moves whenever anything
-// above it is edited, which would make the list rot within a week; this key
-// survives everything but a rename or a rewrite of the block, both of which
-// are exactly the changes that should force the reason to be re-read.
+// block identifies an uncovered span by file, function, text and byte offset.
+// TestIdenticalGuardsCannotExchangeCoverage requires the offset: text alone
+// lets a newly uncovered guard consume an unrelated guard's exclusion. Edits
+// that move a block require re-authoring and reviewing its exclusion.
 type block struct {
 	File      string `json:"file"`
 	Function  string `json:"function"`
 	Statement string `json:"statement"`
+	Offset    int    `json:"offset"`
 	Category  string `json:"category,omitempty"`
 	Reason    string `json:"reason,omitempty"`
-	// Count is how many identical blocks the entry accounts for. Several
-	// guards in one function are often word-for-word the same statement —
-	// eight `return nil, err` propagations in applyCompletedBar, say — and
-	// they share one reason. Absent means one.
+	// Count defaults to one. A position identifies a single block, so a count
+	// greater than one cannot account for guards at different positions.
 	Count int `json:"count,omitempty"`
 
 	// line is for the failure message only, and is deliberately not part of
@@ -92,11 +89,11 @@ func (b block) count() int {
 }
 
 func (b block) key() string {
-	return b.File + "\x00" + b.Function + "\x00" + b.Statement
+	return b.File + "\x00" + b.Function + "\x00" + b.Statement + "\x00" + strconv.Itoa(b.Offset)
 }
 
 func (b block) where() string {
-	return fmt.Sprintf("%s:%d (%s)", b.File, b.line, b.Function)
+	return fmt.Sprintf("%s:%d (%s, byte %d)", b.File, b.line, b.Function, b.Offset)
 }
 
 type exclusionList struct {
@@ -128,8 +125,11 @@ func TestEveryUncoveredStatementIsExcludedWithANamedReason(t *testing.T) {
 		writeDump(t, dump, uncovered)
 	}
 
-	listed := readExclusions(t)
+	checkExclusions(t, uncovered, readExclusions(t))
+}
 
+func checkExclusions(t *testing.T, uncovered, listed []block) {
+	t.Helper()
 	remaining := make(map[string][]block, len(uncovered))
 	for _, b := range uncovered {
 		remaining[b.key()] = append(remaining[b.key()], b)
@@ -179,8 +179,8 @@ func TestEveryUncoveredStatementIsExcludedWithANamedReason(t *testing.T) {
 	}
 
 	for _, s := range stale {
-		t.Errorf("%s (%s) is listed in %s %d time(s) but fewer blocks than that are uncovered: it is now covered, or no longer exists. Correct the count or remove the entry — a reason nobody has re-checked is worse than none.\n      %s",
-			s.File, s.Function, exclusionsFile, s.count(), s.Statement)
+		t.Errorf("%s is listed in %s %d time(s) but fewer blocks than that are uncovered: it is now covered, moved, or no longer exists. Recheck the reason and update or remove the entry.\n      %s",
+			s.where(), exclusionsFile, s.count(), s.Statement)
 	}
 }
 
@@ -278,7 +278,7 @@ func checkProfileFreshness(t *testing.T, root, path string) {
 }
 
 // uncoveredBlocks parses a coverage profile and returns every block with a
-// zero execution count, keyed by file, enclosing function and source text.
+// zero execution count, keyed by file, enclosing function, source text and offset.
 func uncoveredBlocks(t *testing.T, root, path string) []block {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -327,6 +327,7 @@ func uncoveredBlocks(t *testing.T, root, path string) []block {
 			File:      rel,
 			Function:  src.enclosing(start),
 			Statement: normalise(text),
+			Offset:    start,
 			line:      startLine,
 		})
 	}
@@ -443,8 +444,8 @@ func (s *sourceFile) slice(startLine, startCol, endLine, endCol int) (string, bo
 }
 
 // enclosing names the top-level function a byte offset falls inside. A
-// function literal reports its enclosing declaration, which together with the
-// block's own text is enough to tell any two blocks apart.
+// function literal reports its enclosing declaration; the block's offset
+// distinguishes identical guards within that declaration.
 func (s *sourceFile) enclosing(at int) string {
 	for _, fn := range s.funcs {
 		if at >= fn.start && at < fn.end {
@@ -456,8 +457,8 @@ func (s *sourceFile) enclosing(at int) string {
 
 // normalise reduces a block's source text to the part that identifies it:
 // its statements, with comments, indentation and the enclosing braces
-// removed, so that reformatting or rewording a comment does not invalidate
-// the list.
+// removed. Reformatting preserves this text identity; the separately keyed
+// byte offset still changes when an edit moves the block.
 func normalise(text string) string {
 	var kept []string
 	for _, line := range strings.Split(text, "\n") {
@@ -535,17 +536,6 @@ func writeDump(t *testing.T, path string, blocks []block) {
 		}
 		return sorted[i].line < sorted[j].line
 	})
-	grouped := make([]block, 0, len(sorted))
-	seen := map[string]int{}
-	for _, b := range sorted {
-		if at, ok := seen[b.key()]; ok {
-			grouped[at].Count = grouped[at].count() + 1
-			continue
-		}
-		seen[b.key()] = len(grouped)
-		grouped = append(grouped, b)
-	}
-	sorted = grouped
 	encoded, err := json.MarshalIndent(exclusionList{
 		Note:       "generated by COVERAGE_AUDIT_DUMP; every entry still needs a category and a reason",
 		Categories: sortedCategories(),

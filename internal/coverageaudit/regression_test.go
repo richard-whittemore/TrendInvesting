@@ -1,6 +1,7 @@
 package coverageaudit
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -82,6 +83,40 @@ func freshnessFixture(t *testing.T, name string, newer bool) (root, path string)
 	return root, path
 }
 
+func identicalGuards(t *testing.T, firstCount, secondCount int) []block {
+	t.Helper()
+	root := t.TempDir()
+	writeAuditFixture(t, root, "internal/sample/sample.go", "package sample\nfunc f(first, second bool) error {\n if first { return nil }\n if second { return nil }\n return nil\n}\n")
+	path := writeAuditFixture(t, root, "coverage.out", fmt.Sprintf("mode: count\n%sinternal/sample/sample.go:3.11,3.25 1 %d\n%sinternal/sample/sample.go:4.12,4.26 1 %d\n", modulePath, firstCount, modulePath, secondCount))
+	return uncoveredBlocks(t, root, path)
+}
+
+func TestIdenticalGuardsCannotExchangeCoverage(t *testing.T) {
+	requireAuditFailure(t, "swapped-guards", "1 statement(s) in internal/ are executed by no test and are not in exclusions.json")
+}
+
+func TestIdenticalGuardsDumpSeparately(t *testing.T) {
+	blocks := identicalGuards(t, 0, 0)
+	path := filepath.Join(t.TempDir(), "dump.json")
+	writeDump(t, path, blocks)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list exclusionList
+	if err := json.Unmarshal(raw, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Exclusions) != 2 || list.Exclusions[0].key() == list.Exclusions[1].key() {
+		t.Fatalf("dump must name both guards separately; got %s", raw)
+	}
+	for _, e := range list.Exclusions {
+		if e.count() != 1 {
+			t.Fatalf("dump grouped guards: %+v", e)
+		}
+	}
+}
+
 func requireAuditFailure(t *testing.T, scenario, want string) {
 	t.Helper()
 	executable, err := os.Executable()
@@ -100,6 +135,13 @@ func requireAuditFailure(t *testing.T, scenario, want string) {
 func TestCoverageAuditFailure(t *testing.T) {
 	scenario := os.Getenv("COVERAGE_AUDIT_FAILURE")
 	if scenario == "" {
+		return
+	}
+	if scenario == "swapped-guards" {
+		listed := identicalGuards(t, 0, 1)
+		listed[0].Category = "unreachable-by-invariant"
+		listed[0].Reason = "synthetic first guard invariant"
+		checkExclusions(t, identicalGuards(t, 1, 0), listed)
 		return
 	}
 	if name, ok := strings.CutPrefix(scenario, "stale-profile:"); ok {
