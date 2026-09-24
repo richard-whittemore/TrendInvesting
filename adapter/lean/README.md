@@ -89,8 +89,9 @@ bars. The snapshot after bar 1 therefore arrives before any sizing is possible.
 Under ADRs 0010 and 0020, a snapshot is eligible when its `as_of` is no later
 than the decision bar's previous close, so bar t's close supplies the basis
 for bar t+1. Warm-up follows exactly the same protocol. The adapter remains
-backtest-only and submits no orders; LEAN end-to-end acceptance is separate.
-See ADR 0020's 2026-09-24 producer amendment (#158).
+backtest-only; the orders it places are described under **Orders** below.
+LEAN end-to-end acceptance is separate. See ADR 0020's 2026-09-24 producer
+amendment (#158).
 
 **Delistings stop the run; they are never published.** LEAN reports a
 delisting as the end of a ticker's map file, and its `Delisting` carries no
@@ -124,19 +125,94 @@ this event to belong to. That path is unchanged: it still just stops the
 algorithm and logs, with nothing recorded in any journal, because there is no
 journal yet to record it in.
 
+**Orders.** `orders.py`'s `OrderDesk` turns the engine's decisions into LEAN orders once
+both of a bar's exchanges (the bar and its snapshot) have been answered. It
+validates each decision against LEAN's current state and places, amends or
+cancels the one order the decision names. The engine decides every level,
+quantity and N; the adapter computes none of them and never combines two
+levels.
+
+| Decision | LEAN order |
+| --- | --- |
+| `strategy.trade.proposed` | buy stop-market, **DAY**, at `entry_level`, for `quantity` |
+| `strategy.add.proposed` | buy stop-market, **DAY**, at `level`, for `quantity` |
+| `strategy.proposal.expired` (kind `entry` or `add`) | cancel that proposal's order if it is still working |
+| `strategy.campaign.opened` | none: its frozen `campaign_n` is kept for its Exit Orders' slippage |
+| `strategy.exit-order.set` | the Unit's one **good-till-cancelled** sell stop-market, at `level`, for the Unit's `quantity`; a later level for the same Unit **amends** that order and never adds a second |
+
+- **The order tag is the decision id**: the trade or Add proposal's id, or, for
+  an Exit Order, the id of the `strategy.exit-order.set` now in force (an
+  amendment updates the tag with the level). A decision whose id is already
+  on an order in LEAN's own order book, in any state, is not submitted again,
+  so redelivering a proposal never opens a second position.
+- **A proposal is valid only for the bar after the one that produced it**
+  (ADR 0005's window; `EarliestFillAt`): its `period_end` must be the bar
+  just published. Entries and Adds are DAY orders, so each is live for that
+  one session. Anything else is rejected as stale.
+- **Every rejection is logged with its reason** as `adapter: REJECTED <type>
+  <id>: <reason>`: an instrument that isn't this run's symbol or isn't
+  tradable, a quantity that isn't a positive whole number, a level that isn't
+  a positive price, a direction other than long, a stale proposal, one already
+  submitted, an order LEAN itself refuses, an Exit-Order level older than the
+  one in force, and any new sell order that would take the working sell
+  quantity past the holding. The totals are logged at the end of the run.
+- **An Exit Order amendment LEAN doesn't acknowledge leaves the previous level
+  in force**, and is logged (ADR 0019's amendment).
+- **A decision answering a warm-up bar is never acted on**, and **nothing is
+  submitted when Go is unreachable**: a failed exchange stops the run through
+  the existing fail-closed path before any of that bar's decisions are read.
+  State the adapter can't reconcile also stops the run: an unknown schema
+  version of one of these decision types, an Exit Order for a Campaign whose
+  frozen N was never sent, or an Exit-Order level for a Unit whose LEAN order
+  is no longer working or sells a different quantity.
+
+**Costs (ADR 0013).** Every order's fill slips by `slippage_n` × the N the
+engine supplied with it: a trade proposal's `n`, an Add proposal's
+`campaign_n`, and the Campaign's frozen `campaign_n` (from
+`strategy.campaign.opened`) for an Exit Order, looked up by the order's tag.
+An order with no supplied N raises rather than slipping by zero.
+`slippage_n` is the run's own required setting in `run.json`, never
+defaulted; set it to the configuration's `slippage_n` (0.05 in the Baseline),
+as `cash` must equal `notional_account.starting_equity`. Commission uses
+LEAN's `InteractiveBrokersFeeModel`; IBKR Pro Fixed is the working assumption
+(#81).
+
+**The startup fill-model report.** In a LEAN run LEAN's fills are the
+evidence; `cmd/backtest` remains the reference implementation of ADR 0005, and
+the two are compared rather than forced to agree. At startup the adapter logs
+`adapter: fill model: ...` lines stating every respect in which LEAN's fills
+depart from ADR 0005 and ADR 0013: gap-at-open behaviour, exact touches,
+same-bar ambiguity, intrabar ordering, DAY-order lifetime, LEAN's default
+equity slippage and the commission schedule. LEAN's source is not available
+to the adapter, so the statements about LEAN's own behaviour are marked
+unconfirmed; the LEAN acceptance run against the pinned image is what
+confirms them.
+
+**What works end to end now, and what waits for #30.** Returning fills and
+order lifecycle to Go is #30. Until it lands:
+
+- works now in a LEAN run: entries and Adds are placed as DAY stop orders
+  from the engine's proposals, cancelled when their proposal expires,
+  deduplicated from LEAN's order book, and filled by LEAN with the slippage
+  and commission above;
+- waits for #30: the engine never learns of a LEAN fill, so it never opens a
+  Campaign, never emits `strategy.campaign.opened` or
+  `strategy.exit-order.set`, and never proposes an Add. **No Exit Order is
+  placed in a LEAN run yet**, so a LEAN position has no Protective Stop at
+  the broker. The Exit-Order mirroring is built and unit-tested against
+  fixture decisions only.
+
 The adapter will still need to:
 
 - send `account.cash-movement` events into the same input sequence (outside #158);
 - normalize universe changes, corporate actions, connection changes, and brokerage events into versioned messages;
-- validate returned trade proposals against current LEAN state;
-- submit approved orders through LEAN, but never act on a decision that answers a warm-up bar — `OnData` already computes `warming = self.IsWarmingUp` once per bar, at exactly the point an order-submission step would sit, for #29 to check before acting on that bar's decision;
-- return acknowledgements, rejections, cancellations, updates, and fills to Go; and
-- enter safe mode and submit no new orders when Go is unavailable or state is uncertain.
+- return acknowledgements, rejections, cancellations, updates, and fills to Go (#30); and
+- reconcile its orders and holdings with the broker (ADR 0019).
 
 It contains no methodology, position-sizing, pyramid, drawdown, or portfolio-risk rules — those stay in Go.
 
-Unit tests (Python 3.9, plus the repository's Go toolchain for the snapshot
-contract check):
+Unit tests (Python 3.9, plus the repository's Go toolchain for the contract
+checks):
 
 ```sh
 cd adapter/lean && python3 -m unittest discover -s tests
@@ -145,3 +221,7 @@ cd adapter/lean && python3 -m unittest discover -s tests
 The snapshot test feeds the emitted wire JSON to Go's actual envelope and
 `AccountSnapshotPayload.Validate` checks and compares its type/schema with
 the Go constants; it does not duplicate the Go contract in a Python validator.
+The order tests (`tests/test_orders.py`) drive the algorithm with fixture
+decisions and assert on the orders that reach LEAN's order book; their
+fixtures are checked against the Go payload types' fields and schema versions
+by `tests/testdata/order_decisions_contract.go`.
