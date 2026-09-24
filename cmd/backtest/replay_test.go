@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,7 +26,7 @@ func replayJournalFile(t *testing.T, path string) (*replay.Divergence, error) {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	return replayEquivalence(bytes.NewReader(raw))
+	return replayEquivalence(context.Background(), bytes.NewReader(raw))
 }
 
 // rewriteJournal writes an altered header and history to a new file with
@@ -583,5 +584,26 @@ func TestTheCommandRefusesToReplayAMissingFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "absent.jsonl") {
 		t.Fatalf("run(-replay) error = %v, want it to name the file", err)
+	}
+}
+
+// TestReplayStopsWhenItsInvocationIsCancelled pins that -replay honours the
+// command's own interrupt handling: main cancels the invocation context on
+// SIGINT or SIGTERM, and a replay must stop on it rather than absorb the
+// signal and keep running the reducer. A cancelled replay is reported as the
+// cancellation, never as a divergence of a journal that is in fact valid.
+func TestReplayStopsWhenItsInvocationIsCancelled(t *testing.T) {
+	raw, err := os.ReadFile(goldenJournal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	divergence, err := replayEquivalence(ctx, bytes.NewReader(raw))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("replayEquivalence(cancelled) error = %v, want it to wrap context.Canceled", err)
+	}
+	if divergence != nil {
+		t.Fatalf("replayEquivalence(cancelled) divergence = %+v, want none reported for a valid journal", divergence)
 	}
 }

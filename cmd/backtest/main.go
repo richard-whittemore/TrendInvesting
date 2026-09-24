@@ -153,7 +153,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return doRerun(ctx, *rerunPath, out)
 	}
 	if *replayPath != "" {
-		return doReplay(*replayPath, out)
+		return doReplay(ctx, *replayPath, out)
 	}
 	if *runsHash != "" {
 		if *registryPath == "" {
