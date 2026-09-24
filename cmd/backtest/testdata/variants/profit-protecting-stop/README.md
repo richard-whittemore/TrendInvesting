@@ -14,16 +14,21 @@ channels are the existing fixture's shortened warmup, not a change to the
 source-fixed Baseline 55/20 channels. All other parameters, including half-N
 Adds and the four-Unit limit, retain their existing behavior.
 
-The inputs are the repository-authored synthetic `../../bars.json`, spanning
-2026-01-02 through 2026-02-02, with an opening available cash of 3,000,000.
-Each of this fixture's Units costs about 64 % of the 1,000,000 starting
-equity, and ADR 0020 debits every entry and Add fill from the cash the next
-Unit is checked against, so at the default cash (the starting equity) the
-Campaign takes one Unit and has no Add whose stop raise the scenario needs.
-Cash is an account input, not a configuration change, so the configuration
-and its hash are unchanged. No third-party market data is included. These
-invented bars exercise engine behavior; they are not a source-derived trading
-performance scenario. There is no fit, regime evaluation, or opening of ADR
+The inputs are `../../bars_four_units.json`: the repository-authored
+synthetic `../../bars.json`, spanning 2026-01-02 through 2026-02-02, with
+every price 90.00 lower and nothing else changed
+(`TestTheFourUnitBarsAreTheGoldenBarsLowered` pins that). The account is the
+default one: 1,000,000 of cash, the starting equity, so its cash and equity
+agree and its Notional Account is its own equity (ADR 0007). Over
+`../../bars.json` itself each Unit costs about 64 % of that account, and ADR
+0020 debits every entry and Add fill from the cash the next Unit is checked
+against, so the Campaign would take one Unit and have no Add whose stop raise
+the scenario needs. Lowering every price by one amount leaves every range,
+channel, N, rung and stop distance, and so every decision, as it was, while a
+Unit costs about 19 % of the account and all four are funded. The inputs
+change and the configuration and its hash do not. No third-party market data
+is included. These invented bars exercise engine behavior; they are not a
+source-derived trading performance scenario. There is no fit, regime evaluation, or opening of ADR
 0012's 2016-01-01 out-of-sample window. The research ablation order and adoption
 criteria remain unchanged.
 
@@ -47,6 +52,20 @@ Regenerate only after reviewing why decisions changed:
 ```sh
 go test ./cmd/backtest -run '^TestDeclaredVariantGolden$' -count=1 -update -v
 ```
+
+Every Session's close is stated by the simulated account in an
+`account.snapshot`, so exit proceeds return before the next Session's
+entries (ADR 0010, ADR 0020): after the first Campaign's four Units are
+stopped out above their average entry, each of the ten later Signals is
+funded, filled and stopped out by the 0.1N stop.
+
+Before RulesVersion 1.8.0 this golden ran `../../bars.json` with 3,000,000
+of opening cash against 1,000,000 of equity, and a single opening snapshot
+starved the ten later entries. Its four-Unit Campaign then also served as
+the one committed fused-multiply-add guard (`../../../fusion_test.go`); at
+prices this low no four-Unit Campaign of these bars is sensitive, so that
+guard is carried by the fusion tests alone, which run `../../bars.json` in a
+3,000,000 account.
 
 Read both the journal's inputs/decisions and the registry diff before accepting
 an update. The existing `../../journal.golden.jsonl` must remain unchanged.
