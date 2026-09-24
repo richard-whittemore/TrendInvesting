@@ -273,7 +273,7 @@ func pick(candidates []candidate, onlyGapped bool) (candidate, bool) {
 // is when the execution happened. Both being the bar's own is a property of
 // backtest fixtures, not a rule.
 func (s *Simulator) fillEnvelopeFor(bar event.CompletedBarPayload, c candidate, n int) (event.Envelope, error) {
-	commission, err := s.commission.Charge(c.quantity, c.price, s.dollarsPerPoint)
+	commission, err := s.chargeFor(c)
 	if err != nil {
 		return event.Envelope{}, err
 	}
@@ -357,4 +357,21 @@ func (s *Simulator) deliver(ctx context.Context, handler replay.Handler, envelop
 		}
 	}
 	return nil
+}
+
+// chargeFor is the commission on candidate c: ADR 0013's charge on each
+// broker order the fill journals, summed in the orders' recorded order.
+func (s *Simulator) chargeFor(c candidate) (float64, error) {
+	if len(c.orderQuantities) == 0 {
+		return s.commission.Charge(c.quantity, c.price, s.dollarsPerPoint)
+	}
+	var total float64
+	for _, q := range c.orderQuantities {
+		charge, err := s.commission.Charge(q, c.price, s.dollarsPerPoint)
+		if err != nil {
+			return 0, err
+		}
+		total += charge
+	}
+	return total, nil
 }

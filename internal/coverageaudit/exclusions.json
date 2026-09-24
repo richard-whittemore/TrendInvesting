@@ -706,6 +706,20 @@
       "statement": "return nil, err",
       "category": "unreachable-by-construction",
       "reason": "Propagates exitOrderChanges' error (internal/strategy/exit_order.go), whose two failure paths are themselves unreachable by construction (their entries in this list)."
+    },
+    {
+      "file": "internal/fills/fills.go",
+      "function": "(*Simulator).observeExitOrderSet",
+      "statement": "return fmt.Errorf(\"fills: instrument %q: exit-order-set for unit %d of campaign %q names source %q, which is not a recognised exit order source\", payload.InstrumentID, payload.UnitIndex, payload.CampaignID, payload.Source)",
+      "category": "unreachable-by-construction",
+      "reason": "event.ExitOrderSetPayload.Validate, called above, admits only ExitOrderSourceProtectiveStop and ExitOrderSourceExitChannel, the switch's two cases; the default stays as a fail-closed guard should the closed source set grow. The unknown-source case is exercised through Validate by TestAnExitOrderTheBookCannotPlaceFailsClosed."
+    },
+    {
+      "file": "internal/fills/runbar.go",
+      "function": "(*Simulator).chargeFor",
+      "statement": "return 0, err",
+      "category": "unreachable-by-construction",
+      "reason": "CommissionModel.Charge fails only on a non-positive quantity, a non-positive or non-finite price or dollars per point, or an invalid model. New validates the model and DollarsPerPoint, price is a covered fill's positive finite execution price, and each order quantity is a Unit quantity the book accepted as positive when its exit-order-set was observed."
     }
   ]
 }

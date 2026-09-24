@@ -534,6 +534,12 @@ func (s *Simulator) observeExitOrderSet(envelope event.Envelope, ref reference) 
 	if err := decodePayload(envelope, &payload); err != nil {
 		return err
 	}
+	// The payload's own contract (ADR 0015): a zero, negative or non-finite
+	// level would otherwise be stored and then skipped as "no order",
+	// silently leaving the Unit unprotected.
+	if err := payload.Validate(); err != nil {
+		return fmt.Errorf("fills: instrument %q: invalid exit-order-set payload: %w", payload.InstrumentID, err)
+	}
 	b := s.bookFor(payload.InstrumentID)
 	if b.campaign == nil || b.campaign.id != payload.CampaignID {
 		return fmt.Errorf("fills: instrument %q: exit-order-set names campaign %q, which this simulator has no open campaign for", payload.InstrumentID, payload.CampaignID)
@@ -699,6 +705,12 @@ type candidate struct {
 	unitIDs     []string
 	price       float64
 	atReference bool
+	// orderQuantities lists, when this fill journals several broker orders
+	// together, each order's own quantity. ADR 0013's commission minimum and
+	// ceiling apply per order, so the fill's commission is the sum of each
+	// order's charge, never one charge on the combined quantity. Empty means
+	// the fill is one order of quantity.
+	orderQuantities []int64
 }
 
 // covered prices every resting order for instrumentID against this bar and
@@ -836,6 +848,7 @@ func (s *Simulator) exitAtChannel(c *campaign, proposal *exitProposal, atExit []
 	}
 	r := atExit[0].ref.rangeFor(periodEnd, view)
 	var quantity int64
+	var orderQuantities []int64
 	for _, u := range atExit {
 		// Exact comparison: each level is a copy of the one proposed level,
 		// never a derived price.
@@ -844,6 +857,7 @@ func (s *Simulator) exitAtChannel(c *campaign, proposal *exitProposal, atExit []
 				c.instrumentID, u.index, c.id, u.exitLevel, proposal.proposalID, proposal.level)
 		}
 		quantity += u.quantity
+		orderQuantities = append(orderQuantities, u.quantity)
 	}
 	cand, filled, err := s.price(event.FillKindExit, SideSell, proposal.level, c.n, quantity, r)
 	if err != nil || !filled {
@@ -855,6 +869,7 @@ func (s *Simulator) exitAtChannel(c *campaign, proposal *exitProposal, atExit []
 	}
 	cand.proposalID = proposal.proposalID
 	cand.campaignID = c.id
+	cand.orderQuantities = orderQuantities
 	return cand, true, nil
 }
 

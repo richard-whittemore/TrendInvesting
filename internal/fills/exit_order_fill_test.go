@@ -374,7 +374,7 @@ func TestRestingReportsEachUnitsExitOrder(t *testing.T) {
 			t.Errorf("resting[%d] = %s %s for proposal %q, want a sell %s for %q", i, got.Side, got.Kind, got.ProposalID, want.kind, want.proposalID)
 		}
 		assertPrice(t, "resting level", got.Level, want.level)
-		if got.Quantity != fixtureUnitQuantity || len(got.UnitIDs) != 1 || got.UnitIDs[0] != want.unitID || got.UnitIndexes[0] != i+1 {
+		if got.Quantity != fixtureUnitQuantity || len(got.UnitIDs) != 1 || len(got.UnitIndexes) != 1 || got.UnitIDs[0] != want.unitID || got.UnitIndexes[0] != i+1 {
 			t.Errorf("resting[%d] = %d shares of units %v %v, want %d of Unit %d (%s)", i, got.Quantity, got.UnitIndexes, got.UnitIDs, fixtureUnitQuantity, i+1, want.unitID)
 		}
 	}
@@ -405,6 +405,7 @@ func TestAnExitOrderTheBookCannotPlaceFailsClosed(t *testing.T) {
 	strayUnit := exitOrderSet(t, 3, event.ExitOrderSourceProtectiveStop, 153, 0, fixtureUnitQuantity)
 	strayCampaignOrder := exitOrderSet(t, 1, event.ExitOrderSourceProtectiveStop, 153, 0, fixtureUnitQuantity)
 	strayCampaignOrder = rewritePayload(t, strayCampaignOrder, func(p *event.ExitOrderSetPayload) { p.CampaignID = strayCampaign })
+	zeroLevel := rewritePayload(t, exitOrderSet(t, 1, event.ExitOrderSourceProtectiveStop, 153, 0, fixtureUnitQuantity), func(p *event.ExitOrderSetPayload) { p.Level, p.ProtectiveStop = 0, 0 })
 	unknownSource := rewritePayload(t, exitOrderSet(t, 1, event.ExitOrderSourceProtectiveStop, 153, 0, fixtureUnitQuantity), func(p *event.ExitOrderSetPayload) { p.Source = "somewhere-else" })
 
 	tests := []struct {
@@ -416,6 +417,7 @@ func TestAnExitOrderTheBookCannotPlaceFailsClosed(t *testing.T) {
 		{"unit it does not hold", []event.Envelope{opened(t), strayUnit}, "unit 3"},
 		{"quantity the unit does not hold", []event.Envelope{opened(t), exitOrderSet(t, 1, event.ExitOrderSourceProtectiveStop, 153, 0, fixtureUnitQuantity+1)}, "quantity"},
 		{"unrecognised source", []event.Envelope{opened(t), unknownSource}, "somewhere-else"},
+		{"level that is not a price", []event.Envelope{opened(t), zeroLevel}, "invalid exit-order-set payload"},
 		{"exit channel with no exit proposed", []event.Envelope{opened(t), exitOrderSet(t, 1, event.ExitOrderSourceExitChannel, 153, 155, fixtureUnitQuantity)}, "no exit proposal"},
 		{"exit channel at another level", []event.Envelope{opened(t), exitProposal(t, "exit-proposal:AAPL:day-56", 154), exitOrderSet(t, 1, event.ExitOrderSourceExitChannel, 153, 155, fixtureUnitQuantity)}, "154"},
 		{"undecodable", []event.Envelope{malformed(t, event.ExitOrderSetEventType, event.ExitOrderSetSchemaVersion)}, "decode " + event.ExitOrderSetEventType + " payload"},
@@ -669,4 +671,40 @@ func TestAnExitFillMustCloseEverythingTheCampaignHolds(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "only 1 rest at the exit") {
 		t.Fatalf("RunBar() error = %v, want an exit that cannot close the whole Campaign to fail closed", err)
 	}
+}
+
+// TestAnExitFillChargesCommissionPerExitOrder: the Units resting at the Exit
+// Channel are separate orders at the broker, one per Unit, and ADR 0013's
+// minimum applies per order. Journalling them as one exit fill must not
+// collapse two minimums into one. With a 100 minimum binding on each
+// 3333-share order (3333 × 0.005 = 16.665 < 100), the exit costs 2 × 100,
+// not the 100 one combined 6666-share order would.
+func TestAnExitFillChargesCommissionPerExitOrder(t *testing.T) {
+	t.Parallel()
+
+	cfg := baselineConfig()
+	cfg.Commission.MinimumPerOrder = 100
+	simulator, err := fills.New(cfg, testStrategyVersion, testConfigurationHash)
+	if err != nil {
+		t.Fatalf("fills.New() error = %v", err)
+	}
+	if err := observeDecisions(t, simulator,
+		campaignOpened(t, exitOrderCampaign, 160, fixtureN),
+		unitAdded(t, 2, "sim-fill-0002"),
+		exitProposal(t, "exit-proposal:AAPL:day-56", 155),
+		exitOrderSet(t, 1, event.ExitOrderSourceExitChannel, 153, 155, fixtureUnitQuantity),
+		exitOrderSet(t, 2, event.ExitOrderSourceExitChannel, 154, 155, fixtureUnitQuantity),
+	); err != nil {
+		t.Fatalf("observing the fixture's decisions: %v", err)
+	}
+
+	result, err := fills.RunBar(context.Background(), simulator, closingOnFill(t), barEnvelope(t, bar(day(57), 158, 158.5, 150, 151)))
+	if err != nil {
+		t.Fatalf("RunBar() error = %v", err)
+	}
+	got := fillPayloads(t, result.Inputs)
+	if len(got) != 1 || got[0].Kind != event.FillKindExit {
+		t.Fatalf("got %d fill(s), want one exit fill%s", len(got), describe(result.Inputs))
+	}
+	assertPrice(t, "exit fill commission", got[0].Commission, 200)
 }
