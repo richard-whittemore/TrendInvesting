@@ -11,7 +11,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
-// This file holds #169's tests: an adapter's own record of a deliberate stop
+// This file holds the tests for an adapter's own record of a deliberate stop
 // (event.AdapterRunStoppedEventType), distinguishing a run the adapter chose
 // to end from one that simply ran out of bars (ADR 0012).
 
@@ -63,7 +63,7 @@ func (s *stream) stopMutated(at time.Time, mutate func(*event.Envelope)) *stream
 	return s
 }
 
-// TestAdapterRunStoppedIsRecordedWithNoDecision is #169's central claim:
+// TestAdapterRunStoppedIsRecordedWithNoDecision is the central claim:
 // "record, no decision". A run that stops and then completes emits exactly
 // what the identical run would have emitted with no stop at all — the stop
 // itself contributes nothing to the decision stream.
@@ -99,7 +99,7 @@ func TestAdapterRunStoppedThenRunCompletedReplaysByteIdentically(t *testing.T) {
 	verifyMovementJournal(t, s, emitted)
 }
 
-// TestNothingButRunCompletedMayFollowAStop is the ordering rule #169 asks
+// TestNothingButRunCompletedMayFollowAStop is the ordering rule a stop needs
 // for: a stop that some further input then contradicted cannot be recorded,
 // because it would leave a run claiming to have deliberately ended while
 // still receiving input.
@@ -199,4 +199,17 @@ func TestAnInvalidAdapterRunStoppedPayloadFailsClosed(t *testing.T) {
 			})
 		}).
 		wantRunError("not a recognised run stop reason")
+}
+
+// TestAStopDatedBeforeAProcessedBarFailsClosed: a stop states when the run
+// ended, so one dated before a bar the run already consumed would record a
+// run that stopped before data it processed. Like replay.run.completed
+// (applyRunCompleted), it must not precede any instrument's last completed
+// bar.
+func TestAStopDatedBeforeAProcessedBarFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	newStream(t, validConfigurationPayload()).bars(breakoutBars("AAPL")).
+		stop(validRunStoppedPayload(), day(1)).
+		wantRunError("precedes the last completed bar")
 }

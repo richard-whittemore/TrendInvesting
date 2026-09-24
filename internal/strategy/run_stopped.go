@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
@@ -35,6 +36,16 @@ func (r *Reducer) applyAdapterRunStopped(envelope event.Envelope) ([]event.Envel
 	}
 	if err := payload.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: %w", err)
+	}
+	// A stop states when the run ended, so, like the end of the stream
+	// (applyRunCompleted), it may not precede data the run already
+	// consumed.
+	for _, instrumentID := range r.instrumentIDs() {
+		last := r.instruments[instrumentID].lastPeriodEnd
+		if envelope.EventTime.Before(last) {
+			return nil, fmt.Errorf("strategy: the run is declared stopped at %s, which precedes the last completed bar for %s (%s)",
+				envelope.EventTime.Format(time.RFC3339), instrumentID, last.Format(time.RFC3339))
+		}
 	}
 	r.runStopped = true
 	return nil, nil

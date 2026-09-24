@@ -9,7 +9,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
 
-// This file holds the tests for AdapterRunStoppedEventType (#169): the
+// This file holds the tests for AdapterRunStoppedEventType: the
 // adapter's own record of a deliberate stop, distinguishing it from
 // RunCompletedEventType's silent "the stream ended".
 

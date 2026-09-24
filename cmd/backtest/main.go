@@ -370,6 +370,11 @@ func verify(path string, out io.Writer) error {
 
 	completion := "INCOMPLETE — final input is not replay.run.completed; the run did not finish"
 	switch {
+	case verification.Stopped && !verification.Complete:
+		// The engine accepted the stop, but the completion that should
+		// follow it never arrived, so outstanding proposals were never
+		// expired. Both facts stay visible (ADR 0012).
+		completion = fmt.Sprintf("INCOMPLETE — stopped: %s %s, but the final input is not replay.run.completed; the run did not finish", verification.StopReason, verification.StopInstrumentID)
 	case verification.Stopped:
 		// Distinct from plain "complete": an adapter deliberately stopped
 		// this run (ADR 0012, event.AdapterRunStoppedEventType), so a

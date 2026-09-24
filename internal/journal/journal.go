@@ -545,6 +545,16 @@ func Verify(r io.Reader) (Verification, error) {
 				if err := json.Unmarshal(record.Envelope.Payload, &payload); err != nil {
 					return Verification{}, fmt.Errorf("journal: record %d: decode adapter run stopped payload: %w", record.Sequence, err)
 				}
+				// A well-chained record is evidence of a stop only if it
+				// meets the stop's own contract at the schema version this
+				// build reads (ADR 0015); anything else is refused here, as
+				// the reducer refuses it, never reported as a verified stop.
+				if record.Envelope.SchemaVersion != event.AdapterRunStoppedSchemaVersion {
+					return Verification{}, fmt.Errorf("journal: record %d: adapter run stopped schema version %d is not the version %d this build reads", record.Sequence, record.Envelope.SchemaVersion, event.AdapterRunStoppedSchemaVersion)
+				}
+				if err := payload.Validate(); err != nil {
+					return Verification{}, fmt.Errorf("journal: record %d: %w", record.Sequence, err)
+				}
 				stopped = true
 				stopReason = payload.Reason
 				stopInstrumentID = payload.InstrumentID

@@ -11,7 +11,7 @@ import (
 )
 
 // stopPayloadJSON is a valid event.AdapterRunStoppedPayload, encoded for a
-// hand-built record (#169).
+// hand-built record.
 func stopPayloadJSON(t *testing.T) []byte {
 	t.Helper()
 	encoded, err := json.Marshal(event.AdapterRunStoppedPayload{
@@ -51,7 +51,7 @@ func verifyRecords(t *testing.T, kinds, types []string, payloads map[int][]byte)
 	return got
 }
 
-// TestVerificationStoppedNamesTheReasonAndInstrument is #169's own claim on
+// TestVerificationStoppedNamesTheReasonAndInstrument is the claim on
 // journal.Verify: a run an adapter deliberately stopped is reported as such,
 // with the reason and instrument its own payload named, not merely as
 // "complete" like a run that reached its last bar.
@@ -122,5 +122,46 @@ func TestVerifyRejectsAnUndecodableAdapterRunStoppedPayload(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "decode adapter run stopped payload") {
 		t.Fatalf("Verify() error = %v, want it to name the decode failure", err)
+	}
+}
+
+// TestVerifyRejectsAStopTheDomainContractRefuses: a well-chained record is
+// not evidence of a stop unless its payload satisfies the stop's own
+// contract (event.AdapterRunStoppedPayload.Validate) at the schema version
+// this build reads (ADR 0015). Otherwise -verify would report a "verified"
+// stop with no reason or instrument, one the reducer itself rejects.
+func TestVerifyRejectsAStopTheDomainContractRefuses(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		payload       []byte
+		schemaVersion uint32
+		want          string
+	}{
+		{"empty payload", []byte(`{}`), event.AdapterRunStoppedSchemaVersion, "adapter run stopped"},
+		{"unknown reason", []byte(`{"reason":"bored","instrument_id":"AAPL","detail":"x"}`), event.AdapterRunStoppedSchemaVersion, "adapter run stopped"},
+		{"newer schema", stopPayloadJSON(t), event.AdapterRunStoppedSchemaVersion + 1, "schema version"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			header := journal.NewHeader(testConfigurationHash, testStrategyVersion, at(1), at(1))
+			chain := journal.NewChain(header)
+			envelope := testEnvelope(1)
+			envelope.Type = event.AdapterRunStoppedEventType
+			envelope.SchemaVersion = tc.schemaVersion
+			envelope.Payload = tc.payload
+			envelope.PayloadHash = event.HashPayload(envelope.Payload)
+			records := []journal.Record{
+				{Sequence: 1, Kind: journal.KindInput, Envelope: envelope, RecordHash: chain.Next(journal.KindInput, envelope)},
+			}
+			_, err := journal.Verify(bytes.NewReader(writeVerbatim(t, header, records)))
+			if err == nil {
+				t.Fatal("Verify() error = nil, want a refusal")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Verify() error = %v, want it to mention %q", err, tc.want)
+			}
+		})
 	}
 }

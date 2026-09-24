@@ -368,7 +368,7 @@ class DelistingTests(unittest.TestCase):
         self.feed(algo, 9, delistings={"AAPL": self.notice("delisted")})
         # The day's real bar and its snapshot still reach the engine; the
         # delisting itself is never published. adapter.run.stopped records
-        # the deliberate stop (#169), immediately before the stream's own
+        # the deliberate stop, immediately before the stream's own
         # completion, which expires anything outstanding; the run then stops.
         self.assertEqual([e["type"] for e in algo.client.sent],
                          ["market.bar.completed", "account.snapshot"] * 2
@@ -390,7 +390,7 @@ class DelistingTests(unittest.TestCase):
         self.assertTrue(algo.failed)
 
     def test_delisted_sends_stop_then_completed_in_order_with_sequence_numbers(self):
-        """#169's own claim: the stop is sent, then the completion, in that
+        """The stop is sent, then the completion, in that
         order, continuing the one input sequence — never the other way
         round and never with a gap or a repeat."""
         algo = self.start()
@@ -415,7 +415,7 @@ class DelistingTests(unittest.TestCase):
 
     def test_a_clean_end_sends_no_stop(self):
         """A run that simply reaches its last bar sends no adapter.run.stopped
-        at all: the event exists only for a DELIBERATE stop (#169)."""
+        at all: the event exists only for a DELIBERATE stop."""
         algo = self.start()
         self.feed(algo, 6)
         self.feed(algo, 9)
