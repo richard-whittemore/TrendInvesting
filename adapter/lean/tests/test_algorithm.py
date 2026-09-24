@@ -22,25 +22,126 @@ from client import Unavailable
 VALID_LEAN_IMAGE = "quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d"
 
 
+class FakePortfolio:
+    """LEAN's Portfolio: account figures, and each security's holding by symbol."""
+    def __init__(self, cash):
+        self.TotalPortfolioValue = cash
+        self.Cash = cash
+        self.holdings = {}
+
+    def __getitem__(self, symbol):
+        return types.SimpleNamespace(Quantity=self.holdings.get(symbol, 0))
+
+
+class FakeResponse:
+    def __init__(self, success):
+        self.IsSuccess = success
+
+
+# The LEAN OrderStatus values in which an order is no longer working; a
+# ticket in any other state still is.
+CLOSED_STATUSES = ("filled", "canceled", "invalid")
+
+
+class FakeTicket:
+    """A LEAN OrderTicket for a stop-market order, held in FakeTransactions."""
+    def __init__(self, book, order_id, symbol, quantity, stop_price, tag, properties):
+        self.book = book
+        self.OrderId = order_id
+        self.Symbol = symbol
+        self.Quantity = quantity
+        self.QuantityFilled = 0
+        self.StopPrice = stop_price
+        self.Tag = tag
+        self.TimeInForce = properties.TimeInForce
+        self.Status = book.submit_status
+
+    def Update(self, fields):
+        self.book.updates.append((self.OrderId, fields.StopPrice, fields.Tag))
+        if not self.book.acknowledge_updates:
+            return FakeResponse(False)
+        if fields.StopPrice is not None:
+            self.StopPrice = fields.StopPrice
+        if fields.Tag is not None:
+            self.Tag = fields.Tag
+        return FakeResponse(True)
+
+    def Cancel(self, tag=None):
+        self.book.cancellations.append((self.OrderId, tag))
+        self.Status = "canceled"
+        return FakeResponse(True)
+
+
+class FakeTransactions:
+    """LEAN's order book: every ticket ever submitted, in any state."""
+    def __init__(self):
+        self.tickets = []
+        self.updates = []
+        self.cancellations = []
+        self.acknowledge_updates = True
+        self.submit_status = "submitted"
+
+    def GetOrderTickets(self, predicate=None):
+        return [t for t in self.tickets if predicate is None or predicate(t)]
+
+    def GetOpenOrderTickets(self, symbol=None):
+        return [t for t in self.tickets if t.Status not in CLOSED_STATUSES
+                and (symbol is None or t.Symbol == symbol)]
+
+
+class FakeSecurity:
+    Symbol = "AAPL"
+    def SetSlippageModel(self, model): self.slippage_model = model
+    def SetFeeModel(self, model): self.fee_model = model
+
+
 class FakeAlgorithm:
     LiveMode = False
     def SetStartDate(self, *args): pass
     def SetEndDate(self, *args): pass
     def SetCash(self, cash):
-        self.Portfolio = types.SimpleNamespace(TotalPortfolioValue=cash, Cash=cash)
+        self.Portfolio = FakePortfolio(cash)
     def SetTimeZone(self, *args): pass
     def AddEquity(self, ticker, resolution, **kwargs):
         self.subscription = kwargs
-        return types.SimpleNamespace(Symbol="AAPL")
+        self.security = FakeSecurity()
+        return self.security
     def SetWarmUp(self, count, resolution):
         self.warmup = (count, resolution)
     def Log(self, message): self.__dict__.setdefault("logs", []).append(message)
     def Quit(self, message): self.quit_reason = message
+    @property
+    def Transactions(self):
+        return self.__dict__.setdefault("_transactions", FakeTransactions())
+    @property
+    def Securities(self):
+        return self.__dict__.setdefault(
+            "_securities", {"AAPL": types.SimpleNamespace(IsTradable=True)})
     # Every LEAN order entry point records its call, so a test can assert that
     # none was made rather than relying on the method being absent.
     def _order(self, *args, **kwargs):
         self.__dict__.setdefault("orders", []).append((args, kwargs))
-    MarketOrder = LimitOrder = StopMarketOrder = StopLimitOrder = MarketOnOpenOrder = _order
+    MarketOrder = LimitOrder = StopLimitOrder = MarketOnOpenOrder = _order
+    def StopMarketOrder(self, symbol, quantity, stop_price, tag, properties):
+        self._order(symbol, quantity, stop_price, tag, properties)
+        book = self.Transactions
+        ticket = FakeTicket(book, len(book.tickets) + 1, symbol, quantity,
+                            stop_price, tag, properties)
+        book.tickets.append(ticket)
+        return ticket
+
+
+class OrderProperties:
+    TimeInForce = None
+
+
+class UpdateOrderFields:
+    StopPrice = None
+    Tag = None
+
+
+class InteractiveBrokersFeeModel:
+    pass
 
 
 imports = types.ModuleType("AlgorithmImports")
@@ -50,6 +151,11 @@ imports.DataNormalizationMode = types.SimpleNamespace(SplitAdjusted="split", Raw
 imports.TimeZones = types.SimpleNamespace(NewYork="NY")
 imports.DelistingType = types.SimpleNamespace(Warning="warning", Delisted="delisted")
 imports.time = time
+imports.OrderProperties = OrderProperties
+imports.UpdateOrderFields = UpdateOrderFields
+imports.InteractiveBrokersFeeModel = InteractiveBrokersFeeModel
+imports.TimeInForce = types.SimpleNamespace(Day="day", GoodTilCanceled="gtc")
+imports.OrderStatus = types.SimpleNamespace(Filled="filled", Canceled="canceled", Invalid="invalid")
 sys.modules["AlgorithmImports"] = imports
 spec = importlib.util.spec_from_file_location("lean_algorithm", Path(__file__).parents[1] / "algorithm.py")
 algorithm = importlib.util.module_from_spec(spec)
@@ -67,7 +173,8 @@ class AlgorithmTests(unittest.TestCase):
         settings = {"socket": "unused", "configuration_hash": "hash",
                     "strategy_version": "version", "run_id": "test",
                     "symbol": "AAPL", "start": "2014-06-09", "end": "2014-06-10",
-                    "warmup_bars": 3, "cash": 1000000, "lean_image": VALID_LEAN_IMAGE}
+                    "warmup_bars": 3, "cash": 1000000, "lean_image": VALID_LEAN_IMAGE,
+                    "slippage_n": 0.05}
         algo = algorithm.CompletedBarsAlgorithm()
         with patch.object(algorithm, "load_settings", return_value=settings), \
                 patch.object(algorithm, "Client", return_value=FakeEngineClient()):
@@ -187,7 +294,8 @@ class AlgorithmTests(unittest.TestCase):
         settings = {"socket": "unused", "configuration_hash": "hash",
                     "strategy_version": "version", "run_id": "test",
                     "symbol": "AAPL", "start": "2014-06-09", "end": "2014-06-10",
-                    "warmup_bars": 3, "cash": 1000000, "lean_image": VALID_LEAN_IMAGE}
+                    "warmup_bars": 3, "cash": 1000000, "lean_image": VALID_LEAN_IMAGE,
+                    "slippage_n": 0.05}
         with patch.object(algorithm, "load_settings", return_value=settings), \
                 patch.object(algorithm, "Client", side_effect=Unavailable("no engine on the socket")):
             algo = algorithm.CompletedBarsAlgorithm()
@@ -244,7 +352,7 @@ class CashSettingTests(unittest.TestCase):
     base = {"socket": "unused", "configuration_hash": "hash",
             "strategy_version": "version", "run_id": "test", "symbol": "AAPL",
             "start": "2014-06-09", "end": "2014-06-10", "warmup_bars": 3,
-            "lean_image": VALID_LEAN_IMAGE}
+            "lean_image": VALID_LEAN_IMAGE, "slippage_n": 0.05}
 
     def start(self, settings):
         algo = algorithm.CompletedBarsAlgorithm()
@@ -316,7 +424,7 @@ class LeanImageSettingTests(unittest.TestCase):
     base = {"socket": "unused", "configuration_hash": "hash",
             "strategy_version": "version", "run_id": "test", "symbol": "AAPL",
             "start": "2014-06-09", "end": "2014-06-10", "warmup_bars": 3,
-            "cash": 1000000}
+            "cash": 1000000, "slippage_n": 0.05}
 
     def start(self, settings):
         algo = algorithm.CompletedBarsAlgorithm()
