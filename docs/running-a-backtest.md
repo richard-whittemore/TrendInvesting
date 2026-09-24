@@ -41,6 +41,8 @@ go run ./cmd/backtest -replay low-cash.jsonl
 
 The journal records `strategy.proposal.declined` with reason `insufficient-cash`, including the available and required cash used by the comparison. Cash is an account input, not a strategy configuration change: it changes the recorded inputs and journal chain without changing the configuration hash or event schemas.
 
+Every entry and Add fill is debited at its actual cost from that opening figure (ADR 0020), and the command states no later snapshot, so exit proceeds never return within a run. In the committed fixture each Unit costs about 64 % of the 1,000,000 starting equity: at the default cash the Campaign takes Unit 1 and declines Unit 2 for insufficient cash on every bar that reaches its rung. `-available-cash 3000000` funds all four Units.
+
 ## How to verify a journal
 
 ```sh
