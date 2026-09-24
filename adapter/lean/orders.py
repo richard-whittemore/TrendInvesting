@@ -324,8 +324,13 @@ class OrderDesk:
             except ValueError as err:
                 reason = "as_of unreadable: {}".format(err)
         if reason is not None:
-            self._reject(decision, reason)
-            return
+            # Unlike an entry or Add, which the engine re-issues next bar, an
+            # Exit Order the adapter cannot place leaves its Unit without a
+            # stop, so the run stops rather than carrying on unprotected
+            # (ADR 0019's amendment).
+            raise Uncertain("exit order {} for campaign {!r} unit {}: {}; the Unit cannot be "
+                            "protected as the engine believes".format(
+                                tag, payload.get("campaign_id"), payload.get("unit_index"), reason))
         if self._already_submitted(tag):
             self.algorithm.Log("adapter: {} {} is already the order in force; nothing to do".format(
                 decision["type"], tag))

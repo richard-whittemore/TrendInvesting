@@ -380,12 +380,26 @@ class ExitOrderTests(OrderTestCase):
             self.assertIn(fact, algo.quit_reason)
         self.assert_stopped_after(algo, len(algo.client.sent))
 
-    def test_an_exit_order_for_another_instrument_is_rejected(self):
-        algo = self.start()
-        self.hold(algo, 100)
-        self.feed(algo, 9, [campaign_opened(), exit_order_set(9, instrument_id="MSFT")])
-        self.assertEqual(self.tickets(algo), [])
-        self.assertEqual(len(self.rejections(algo)), 1)
+    def test_a_malformed_exit_order_stops_the_run(self):
+        # An Exit Order the adapter cannot place leaves its Unit without a
+        # stop, so, unlike an entry or Add the engine re-issues next bar, it
+        # stops the run rather than being rejected and forgotten.
+        for name, changes in (("another instrument", {"instrument_id": "MSFT"}),
+                              ("zero quantity", {"quantity": 0}),
+                              ("fractional quantity", {"quantity": 100.5}),
+                              ("non-positive level", {"level": 0}),
+                              ("unreadable as_of", {"as_of": "not a time"})):
+            with self.subTest(name):
+                algo = self.start()
+                self.hold(algo, 100)
+                bad = exit_order_set(9)
+                bad["payload"].update(changes)
+                self.feed(algo, 9, [campaign_opened(), bad, trade_proposal(9)])
+                self.assertEqual(self.tickets(algo), [])
+                self.assertEqual(self.rejections(algo), [])
+                self.assertIn("cannot be protected", algo.quit_reason)
+                self.assertIn(bad["id"], algo.quit_reason)
+                self.assert_stopped_after(algo, len(algo.client.sent))
 
     def test_an_exit_order_without_its_campaigns_n_stops_the_run(self):
         algo = self.start()

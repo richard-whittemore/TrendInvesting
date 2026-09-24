@@ -174,6 +174,10 @@ levels.
   through the fail-closed path, with a reason naming the instrument, the
   Campaign and Unit, the working sell quantity and the holding. Containment is
   then a person's decision (ADR 0019's amendment), not the system's.
+- **An Exit Order the adapter can't place also stops the run:** another
+  instrument, a quantity that isn't a positive whole number, a level that isn't
+  a positive price, or an unreadable `as_of`. Unlike an entry or Add, it isn't
+  re-issued, and it would leave its Unit without a stop.
 
 **Costs (ADR 0013).** Every order's fill slips by `slippage_n` × the N the
 engine supplied with it: a trade proposal's `n`, an Add proposal's
