@@ -150,7 +150,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return verify(*verifyPath, out)
 	}
 	if *rerunPath != "" {
-		return doRerun(*rerunPath, out)
+		return doRerun(ctx, *rerunPath, out)
 	}
 	if *replayPath != "" {
 		return doReplay(*replayPath, out)

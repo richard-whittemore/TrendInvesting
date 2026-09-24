@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -87,7 +88,7 @@ func TestRerunGoldens(t *testing.T) {
 func TestRerunReconstructsIndependentInputs(t *testing.T) {
 	for _, cash := range []string{"0", "1000", "100000"} {
 		_, path := runWithCashFlags(t, "-available-cash", cash)
-		if err := doRerun(path, io.Discard); err != nil {
+		if err := doRerun(context.Background(), path, io.Discard); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -102,7 +103,7 @@ func TestRerunReconstructsIndependentInputs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := doRerun(path, io.Discard); err != nil {
+		if err := doRerun(context.Background(), path, io.Discard); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -122,7 +123,7 @@ func TestRerunMissingInputsFailClosed(t *testing.T) {
 				}
 				return kept
 			})
-			err := doRerun(path, io.Discard)
+			err := doRerun(context.Background(), path, io.Discard)
 			if err == nil {
 				t.Fatalf("accepted missing %s", missing)
 			}
@@ -200,7 +201,7 @@ func TestRerunIdentityRefusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			header, records := readJournalFile(t, goldenJournal)
 			tc.mutate(&header, records)
-			err := pipelineEquivalence(bytes.NewReader(encodeRerunEvidence(t, header, records)))
+			err := pipelineEquivalence(context.Background(), bytes.NewReader(encodeRerunEvidence(t, header, records)))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("want %q, got %v", tc.want, err)
 			}
@@ -306,13 +307,13 @@ func TestRerunCLIRefusals(t *testing.T) {
 			t.Fatalf("accepted incompatible arguments %v", args)
 		}
 	}
-	if err := doRerun(filepath.Join(t.TempDir(), "absent"), io.Discard); err == nil {
+	if err := doRerun(context.Background(), filepath.Join(t.TempDir(), "absent"), io.Discard); err == nil {
 		t.Fatal("accepted absent file")
 	}
-	if err := pipelineEquivalence(strings.NewReader("bad")); err == nil {
+	if err := pipelineEquivalence(context.Background(), strings.NewReader("bad")); err == nil {
 		t.Fatal("accepted malformed journal")
 	}
-	if err := doRerun(goldenJournal, rerunFailedWriter{}); err == nil || !strings.Contains(err.Error(), "report the pipeline rerun") {
+	if err := doRerun(context.Background(), goldenJournal, rerunFailedWriter{}); err == nil || !strings.Contains(err.Error(), "report the pipeline rerun") {
 		t.Fatalf("writer failure: %v", err)
 	}
 	// Reads preserve the original evidence and never create outputs.
@@ -320,7 +321,7 @@ func TestRerunCLIRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := doRerun(goldenJournal, io.Discard); err != nil {
+	if err := doRerun(context.Background(), goldenJournal, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(goldenJournal)
@@ -341,7 +342,7 @@ func (rerunFailedWriter) Write([]byte) (int, error) { return 0, fmt.Errorf("outp
 func TestRerunComparesTheGeneratedHeaderBeforeItsRecords(t *testing.T) {
 	header, records := readJournalFile(t, goldenJournal)
 	header.ChainAlgorithm = "changed algorithm"
-	err := pipelineEquivalence(bytes.NewReader(encodeRerunEvidence(t, header, records)))
+	err := pipelineEquivalence(context.Background(), bytes.NewReader(encodeRerunEvidence(t, header, records)))
 	if err == nil || !strings.Contains(err.Error(), "pipeline divergence in journal header") {
 		t.Fatalf("want header divergence first, got %v", err)
 	}
@@ -357,7 +358,7 @@ func TestRerunNormalizesEnvelopeTimeZones(t *testing.T) {
 		e := &records[i].Envelope
 		e.EventTime, e.RecordedAt = e.EventTime.In(zone), e.RecordedAt.In(zone)
 	}
-	if err := pipelineEquivalence(bytes.NewReader(encodeRerunEvidence(t, header, records))); err != nil {
+	if err := pipelineEquivalence(context.Background(), bytes.NewReader(encodeRerunEvidence(t, header, records))); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -370,8 +371,24 @@ func TestRerunReportsTheFirstMissingRecordWhenThePipelineStops(t *testing.T) {
 	runBar = func(context.Context, *fills.Simulator, replay.Handler, event.Envelope) (fills.Result, error) {
 		return fills.Result{}, fmt.Errorf("simulator stopped")
 	}
-	err := doRerun(goldenJournal, io.Discard)
+	err := doRerun(context.Background(), goldenJournal, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "pipeline divergence at record 3") || !strings.Contains(err.Error(), "regenerated nothing") || !strings.Contains(err.Error(), "simulator stopped") {
 		t.Fatalf("first missing record: %v", err)
+	}
+}
+
+// TestRerunStopsWhenItsInvocationIsCancelled pins that -rerun honours the
+// command's own interrupt handling: main cancels the invocation context on
+// SIGINT or SIGTERM, and a re-run over a long journal must stop on it rather
+// than absorb the signal and keep regenerating fills.
+func TestRerunStopsWhenItsInvocationIsCancelled(t *testing.T) {
+	journalBytes, err := os.ReadFile(goldenJournal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := pipelineEquivalence(ctx, bytes.NewReader(journalBytes)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pipelineEquivalence(cancelled) error = %v, want it to wrap context.Canceled", err)
 	}
 }

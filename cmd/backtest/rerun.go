@@ -38,7 +38,7 @@ type rerunInputs struct {
 // for fills already recorded, and their stopping condition is not journalled.
 // The regenerated recorder is bounded at the recorded length plus one input
 // boundary, enough to expose extra output without guessing the original limit.
-func pipelineEquivalence(r io.Reader) error {
+func pipelineEquivalence(ctx context.Context, r io.Reader) error {
 	header, records, err := journal.Read(r)
 	if err != nil {
 		return err
@@ -70,7 +70,7 @@ func pipelineEquivalence(r io.Reader) error {
 		return err
 	}
 	recorder := journal.NewBoundedRecorder(reducer, len(records)+1)
-	runErr := drive(context.Background(), simulator, recorder, facts.cfg, header.StrategyVersion, facts.bars, facts.actions, facts.account)
+	runErr := drive(ctx, simulator, recorder, facts.cfg, header.StrategyVersion, facts.bars, facts.actions, facts.account)
 	entries := recorder.Entries()
 	if runErr != nil {
 		// A failed new pipeline may have a shorter span. Compare its prefix
@@ -194,13 +194,13 @@ func comparePipelineRecords(header journal.Header, want []journal.Record, got []
 
 // doRerun reports whole-pipeline equivalence separately from chain verification
 // and reducer replay (ADR 0005, ADR 0017); it never installs new evidence.
-func doRerun(path string, out io.Writer) error {
+func doRerun(ctx context.Context, path string, out io.Writer) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("backtest: open the journal to rerun: %w", err)
 	}
 	defer func() { _ = file.Close() }()
-	if err := pipelineEquivalence(file); err != nil {
+	if err := pipelineEquivalence(ctx, file); err != nil {
 		return fmt.Errorf("backtest: %s: %w", path, err)
 	}
 	if _, err := fmt.Fprintf(out, "journal %s reruns with no pipeline divergence (all records byte-identical under canonical comparison)\n", path); err != nil {
