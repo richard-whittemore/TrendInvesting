@@ -331,3 +331,93 @@ func TestAFillWhoseCostCannotBeStatedFailsClosed(t *testing.T) {
 			wantRunError(`fill "sim-fill-add-2"`, "leaves the representable range of spendable cash", "0020")
 	})
 }
+
+// reflectedFillStream opens two Campaigns from one Session's breakouts, at a
+// multiplier large enough that each fill costs about 1e308. A snapshot as of
+// the Session's close then arrives; AAPL's fill after it is debited, and
+// MSFT's fill at the close itself, which the snapshot already reflects, is
+// not (ADR 0020). msftPrice sets MSFT's fill price.
+func reflectedFillStream(t *testing.T, msftPrice float64) (s *stream, cfg event.ConfigurationPayload, aapl event.FillPayload) {
+	t.Helper()
+	cfg = validConfigurationPayload()
+	cfg.NotionalAccount.StartingEquity = 1.7e308
+	cfg.DollarsPerPoint = 1e304
+
+	aapl = openingFill("AAPL")
+	aapl.Quantity, aapl.Price, aapl.FilledAt = 2, 5000, day(56).Add(time.Hour)
+	msft := openingFill("MSFT")
+	msft.FillID = "sim-fill-msft"
+	msft.Quantity, msft.Price, msft.FilledAt = 2, msftPrice, day(56)
+
+	s = newStream(t, cfg).
+		snapshot(cashSnapshot(cfg, day(0).Add(time.Hour), math.MaxFloat64)).
+		lockstep(breakoutBars("AAPL"), breakoutBars("MSFT")).
+		snapshot(cashSnapshot(cfg, day(56), math.MaxFloat64)).
+		fill(aapl).
+		fill(msft)
+	return s, cfg, aapl
+}
+
+// TestAFillTheSnapshotReflectsIsNeverDebitedWhateverIsOutstanding: a fill at
+// or before the snapshot's as-of is already in the basis, so it is accepted
+// and not debited even when adding its cost to the debits outstanding would
+// leave the float64 range. The next Adds are then checked against the
+// snapshot less AAPL's fill alone.
+func TestAFillTheSnapshotReflectsIsNeverDebitedWhateverIsOutstanding(t *testing.T) {
+	t.Parallel()
+
+	s, cfg, aapl := reflectedFillStream(t, 5000)
+	emitted := s.session(
+		completedBar("AAPL", day(57), 5100, 4990, 4990),
+		completedBar("MSFT", day(57), 5100, 4990, 4990),
+	).mustRun()
+
+	if opened := envelopesOfType(emitted, event.CampaignOpenedEventType); len(opened) != 2 {
+		t.Fatalf("got %d campaign(s) opened, want 2: the reflected fill must be accepted", len(opened))
+	}
+	declines := envelopesOfType(emitted, event.ProposalDeclinedEventType)
+	if len(declines) != 2 {
+		t.Fatalf("got %d decline(s), want both Adds declined", len(declines))
+	}
+	want := math.MaxFloat64 - fillCost(cfg, aapl)
+	for _, d := range declines {
+		if got := decodeProposalDeclined(t, d).AvailableCash; got != want {
+			t.Errorf("AvailableCash = %v, want %v: only AAPL's fill is outstanding", got, want)
+		}
+	}
+}
+
+// TestAReflectedFillWhoseOwnCostCannotBeStatedFailsClosed: a fill's own cost
+// is validated whether or not it is debited, because a fact this system
+// cannot state is not accepted on the strength of a snapshot's timestamp.
+func TestAReflectedFillWhoseOwnCostCannotBeStatedFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	s, _, _ := reflectedFillStream(t, 1e10)
+	s.wantRunError(`fill "sim-fill-msft"`, "leaves the representable range", "0020")
+}
+
+// TestDebitsWhoseTotalCannotBeStatedFailClosed: two fills the snapshot does
+// not reflect, each with a finite cost, whose debits together leave the
+// float64 range. Spendable cash could no longer be stated, so the run stops
+// at the second fill.
+func TestDebitsWhoseTotalCannotBeStatedFailClosed(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	cfg.NotionalAccount.StartingEquity = 1.7e308
+	cfg.DollarsPerPoint = 1e304
+	aapl := openingFill("AAPL")
+	aapl.Quantity, aapl.Price, aapl.FilledAt = 2, 5000, day(56).Add(time.Hour)
+	msft := openingFill("MSFT")
+	msft.FillID = "sim-fill-msft"
+	msft.Quantity, msft.Price, msft.FilledAt = 2, 5000, day(56).Add(2*time.Hour)
+
+	newStream(t, cfg).
+		snapshot(cashSnapshot(cfg, day(0).Add(time.Hour), math.MaxFloat64)).
+		lockstep(breakoutBars("AAPL"), breakoutBars("MSFT")).
+		snapshot(cashSnapshot(cfg, day(56), math.MaxFloat64)).
+		fill(aapl).
+		fill(msft).
+		wantRunError(`fill "sim-fill-msft"`, "leaves the representable range", "0020")
+}

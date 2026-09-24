@@ -271,19 +271,6 @@ func cashMovementEnvelopeFor(t *testing.T, cfg event.ConfigurationPayload, seque
 	return envelopeFor(t, cfg, fmt.Sprintf("cash-movement-%d", sequence), event.CashMovementEventType, event.CashMovementSchemaVersion, sequence, payload.AsOf, payload)
 }
 
-// fillEnvelopeFor is fillEnvelope (campaign_test.go) stamped with cfg's own
-// configuration hash, for a fixture replaying a configuration other than the
-// Baseline one.
-func fillEnvelopeFor(t *testing.T, cfg event.ConfigurationPayload, sequence uint64, fill event.FillPayload) event.Envelope {
-	t.Helper()
-	fill = withCostFields(fill)
-	envelope := envelopeFor(t, cfg, fmt.Sprintf("fill-%d", sequence), event.FillEventType, event.FillSchemaVersion, sequence, fill.FilledAt, fill)
-	// A fill is an external fact this system did not produce; the reducer
-	// must never be the source of one.
-	envelope.Source = "fill-simulator"
-	return envelope
-}
-
 func barEnvelopeFor(t *testing.T, cfg event.ConfigurationPayload, sequence uint64, payload event.CompletedBarPayload) event.Envelope {
 	t.Helper()
 	return envelopeFor(t, cfg, fmt.Sprintf("bar-%d", sequence), event.CompletedBarEventType, event.CompletedBarSchemaVersion, sequence, payload.PeriodEnd, payload)

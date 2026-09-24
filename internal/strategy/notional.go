@@ -832,19 +832,35 @@ type fillDebit struct {
 // is the order a LEAN run sends them in (ADR 0020's producer amendment: the
 // previous close's snapshot follows the next Session's fills).
 //
-// It fails closed when the cost, or the total the basis must be reduced by,
-// leaves the float64 range: spendable cash could no longer be stated.
+// It fails closed when the fill's own cost leaves the float64 range, whether
+// or not the fill is debited, and when the total the basis must be reduced
+// by would: spendable cash could no longer be stated. The total is checked
+// only for a fill that is debited, so outstanding debits never refuse a fill
+// the snapshot already reflects.
 func (r *transition) debitFill(fill event.FillPayload) error {
+	cost := float64(float64(fill.Quantity)*fill.Price*r.dollarsPerPoint) + fill.Commission
+	if !isRepresentable(cost) {
+		return unrepresentableFillCost(fill, r.dollarsPerPoint)
+	}
 	if r.hasAvailableCash && !fill.FilledAt.After(r.availableCashAsOf) {
 		return nil
 	}
-	cost := float64(float64(fill.Quantity)*fill.Price*r.dollarsPerPoint) + fill.Commission
-	if total := r.fillDebitTotal() + cost; math.IsInf(total, 0) || math.IsNaN(total) {
-		return fmt.Errorf("strategy: instrument %q: fill %q costs %d shares x %v x %v dollars per point plus commission %v, which leaves the representable range of spendable cash; failing closed rather than stating an unknowable balance (ADR 0020)",
-			fill.InstrumentID, fill.FillID, fill.Quantity, fill.Price, r.dollarsPerPoint, fill.Commission)
+	if !isRepresentable(r.fillDebitTotal() + cost) {
+		return unrepresentableFillCost(fill, r.dollarsPerPoint)
 	}
 	r.fillDebits = append(r.fillDebits, fillDebit{filledAt: fill.FilledAt, cost: cost})
 	return nil
+}
+
+// isRepresentable reports whether x is a finite float64.
+func isRepresentable(x float64) bool {
+	return !math.IsInf(x, 0) && !math.IsNaN(x)
+}
+
+// unrepresentableFillCost is debitFill's fail-closed error.
+func unrepresentableFillCost(fill event.FillPayload, dollarsPerPoint float64) error {
+	return fmt.Errorf("strategy: instrument %q: fill %q costs %d shares x %v x %v dollars per point plus commission %v, which leaves the representable range of spendable cash; failing closed rather than stating an unknowable balance (ADR 0020)",
+		fill.InstrumentID, fill.FillID, fill.Quantity, fill.Price, dollarsPerPoint, fill.Commission)
 }
 
 // dropReflectedFillDebits keeps only the debits of fills after the new
