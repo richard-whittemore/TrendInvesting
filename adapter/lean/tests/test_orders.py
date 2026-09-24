@@ -1336,32 +1336,63 @@ class SplitTests(OrderTestCase):
     """
     ratio = 56
 
-    def split(self, algo, day, factor=HALF, lean_applies=True):
-        """LEAN's split slice before day's bar: LEAN splits the holding and the
-        open orders, raises OnData with the split and no bar, and reports the
-        orders' changes after that slice."""
+    def split(self, algo, day, factor=HALF, orders_split=True, before_data=None, meddle=None,
+              checked=True):
+        """The split's time step before day's session, as observed on the pinned
+        image. LEAN splits the holding; raises OnData with the split and no bar
+        (the tickets not yet adjusted); splits each open order and reports it
+        through OnOrderEvent; then the adapter's 00:01 scheduled check runs,
+        before the session's fills. before_data and meddle change LEAN's state
+        before OnData and after the orders' adjustment; checked=False leaves
+        the scheduled check out, as though it had not run."""
         self.at(algo, day)
-        if lean_applies:
-            algo.Transactions.split("AAPL", factor)
+        book = algo.Transactions
+        book.split_holding("AAPL", factor)
+        if before_data is not None:
+            before_data()
         algo.OnData(scaffold.slice_of(splits={"AAPL": types.SimpleNamespace(
             Type="split-occurred", SplitFactor=factor, Time=datetime(2014, 6, day))}))
-        algo.Transactions.settle()
+        if orders_split:
+            book.split_orders("AAPL", factor)
+        if meddle is not None:
+            meddle()
+        if checked:
+            self.scheduled_check(algo)
 
-    def held(self):
-        """One Unit of 5,600 split-adjusted shares (100 raw), entered at 0.875
-        (49.00 raw), with its Exit Order at 0.8 (44.80 raw)."""
+    def scheduled_check(self, algo):
+        """LEAN fires the adapter's 00:01 event: after a split's time step, and
+        before the session's fills (observed on the pinned image)."""
+        [callback] = [c for _, rule, c in algo.scheduled if rule == ("at", 0, 1)]
+        callback()
+
+    def held(self, ratio=56, level=0.8, quantity=5600, entry_level=0.875):
+        """One Unit of 5,600 split-adjusted shares (100 raw at 56), entered at
+        0.875 (49.00 raw), with its Exit Order at 0.8 (44.80 raw)."""
+        self.ratio = ratio
         algo = self.start()
-        self.feed(algo, 9, [trade_proposal(9, entry_level=0.875, quantity=5600, n=0.05)])
+        self.feed(algo, 9, [trade_proposal(9, entry_level=entry_level, quantity=quantity, n=0.05)])
         [entry] = self.tickets(algo)
-        self.fill(algo, entry, 10, 49.1)
-        placed = exit_order_set(10, level=0.8, quantity=5600)
+        self.fill(algo, entry, 10, entry.StopPrice + 0.1)
+        placed = exit_order_set(10, level=level, quantity=quantity)
         self.feed(algo, 10, replies={"execution.fill": {"payload": {"decisions": [
             campaign_opened(campaign_n=0.05), placed]}}})
         self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
         [sell] = self.sells(algo)
-        self.assertEqual(sell.Quantity, -100)
-        self.assertAlmostEqual(sell.StopPrice, 44.8)
+        self.assertEqual(sell.Quantity, -(quantity // ratio))
+        self.assertAlmostEqual(sell.StopPrice, level * ratio)
         return algo, sell
+
+    def assert_stopped_before_the_session(self, algo, *facts):
+        """The run stopped inside the split's time step, before LEAN could fill
+        anything in the next session and before its bar reached the engine."""
+        self.assertTrue(algo.failed)
+        for fact in facts:
+            self.assertIn(fact, algo.quit_reason)
+        self.assertNotIn(period_end(11), [e["event_time"] for e in algo.client.sent])
+
+    def test_the_split_check_is_scheduled_before_every_session(self):
+        algo = self.start()
+        self.assertIn((("every-day", "AAPL"), ("at", 0, 1), algo.verify_split), algo.scheduled)
 
     def test_a_held_unit_and_its_exit_order_carry_across_a_split(self):
         algo, sell = self.held()
@@ -1412,32 +1443,67 @@ class SplitTests(OrderTestCase):
         self.assertEqual(sell.Quantity, -200)
         self.assertAlmostEqual(sell.StopPrice, 0.8 * 28)
 
-    def test_a_split_lean_did_not_apply_to_a_working_order_stops_the_run(self):
+    def test_a_split_lean_did_not_apply_to_a_working_order_stops_before_the_session(self):
         algo, sell = self.held()
-        self.split(algo, 11, lean_applies=False)
-        algo.Portfolio.holdings["AAPL"] = 200
+        self.split(algo, 11, orders_split=False)
+        self.assert_stopped_before_the_session(
+            algo, "split", "order {}".format(sell.OrderId), "-100", "-200")
+
+    def test_a_split_lean_applied_to_the_holding_differently_stops_before_the_session(self):
+        algo, _ = self.held()
+        self.split(algo, 11, meddle=lambda: algo.Portfolio.holdings.update(AAPL=201))
+        self.assert_stopped_before_the_session(algo, "split", "holds 201", "200")
+
+    def test_a_split_holding_already_wrong_in_the_splits_slice_stops_there(self):
+        # LEAN splits the holding before the slice reaches OnData, so a wrong
+        # one is caught in the split's own slice.
+        algo, sell = self.held()
+        self.split(algo, 11, before_data=lambda: algo.Portfolio.holdings.update(AAPL=201),
+                   checked=False)
+        self.assert_stopped_before_the_session(algo, "split", "holds 201", "200")
+
+    def test_a_split_that_moved_a_stop_off_the_engines_level_stops_before_the_session(self):
+        # LEAN rounds the split stop to the tick; anything further from the
+        # engine's level at the new ratio is not the Unit's Exit Order.
+        algo, sell = self.held()
+        self.split(algo, 11, meddle=lambda: setattr(sell, "StopPrice", 22.0))
+        self.assert_stopped_before_the_session(
+            algo, "split", "order {}".format(sell.OrderId), "22.0", "22.4")
+
+    def test_an_exit_order_lean_dropped_in_the_split_stops_before_the_session(self):
+        # The holding still matches the engine's Units, so only checking each
+        # stored Exit Order finds the Unit left without a stop.
+        for status in ("canceled", "invalid"):
+            with self.subTest(status=status):
+                algo, sell = self.held()
+                self.split(algo, 11, meddle=lambda: setattr(sell, "Status", status))
+                self.assert_stopped_before_the_session(
+                    algo, "split", "order {}".format(sell.OrderId), "not working", status)
+
+    def test_an_exit_order_gone_before_the_splits_slice_stops_there(self):
+        algo, sell = self.held()
+        self.split(algo, 11, before_data=lambda: setattr(sell, "Status", "canceled"),
+                   checked=False)
+        self.assert_stopped_before_the_session(
+            algo, "split", "order {}".format(sell.OrderId), "not working")
+
+    def test_the_next_slice_checks_the_split_again(self):
+        # The second line: had the scheduled check not run, the next slice
+        # still refuses LEAN's unadjusted order before its bar is sent.
+        algo, sell = self.held()
+        self.split(algo, 11, orders_split=False, checked=False)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
         sent = len(algo.client.sent)
         self.ratio = 28
         self.feed(algo, 11)
         for fact in ("split", "order {}".format(sell.OrderId), "-100", "-200"):
             self.assertIn(fact, algo.quit_reason)
-        # Stopped before the split's first bar reached the engine.
         self.assertNotIn("market.bar.completed", self.types_sent(algo, sent))
 
-    def test_a_split_lean_applied_to_the_holding_differently_stops_the_run(self):
-        algo, _ = self.held()
-        self.split(algo, 11)
-        algo.Portfolio.holdings["AAPL"] = 201
-        self.ratio = 28
-        self.feed(algo, 11)
-        for fact in ("split", "holds 201", "200"):
-            self.assertIn(fact, algo.quit_reason)
-
-    def test_a_split_that_moved_a_stop_off_the_engines_level_stops_the_run(self):
-        # LEAN rounds the split stop to the tick; anything further from the
-        # engine's level at the new ratio is not the Unit's Exit Order.
+    def test_the_next_slice_checks_the_split_even_after_the_scheduled_check_passed(self):
         algo, sell = self.held()
         self.split(algo, 11)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
         sell.StopPrice = 22.0
         self.ratio = 28
         self.feed(algo, 11)
@@ -1448,8 +1514,28 @@ class SplitTests(OrderTestCase):
         # A 3-for-2 of a position held at 56 split-adjusted shares a raw share
         # would leave 37.33: no whole raw share is a whole number of them.
         algo, _ = self.held()
-        self.split(algo, 11, factor=2 / 3)
-        self.assertIn("split ratio", algo.quit_reason)
+        self.split(algo, 11, factor=2 / 3, checked=False)
+        self.assert_stopped_before_the_session(algo, "3-for-2")
+
+    def test_a_3_for_2_split_with_a_held_unit_stops_the_run_though_it_divides(self):
+        # From 3 split-adjusted shares a raw share to 2: whole ratios either
+        # side, and 100 raw shares become exactly 150, but a split that is not
+        # n-for-1 is not supported (README.md: Price views and raw
+        # accounting), so the run stops rather than carry the Unit across.
+        algo, _ = self.held(ratio=3, level=7.0, quantity=300, entry_level=8.0)
+        self.split(algo, 11, factor=2 / 3, checked=False)
+        self.assert_stopped_before_the_session(algo, "3-for-2", "n-for-1")
+
+    def test_a_2_for_1_split_that_does_not_divide_the_ratio_stops_the_run(self):
+        # At 3 split-adjusted shares a raw share, a 2-for-1 would leave 1.5.
+        algo, _ = self.held(ratio=3, level=7.0, quantity=300, entry_level=8.0)
+        self.split(algo, 11, checked=False)
+        self.assert_stopped_before_the_session(algo, "2-for-1", "n-for-1", "divides")
+
+    def test_a_reverse_split_stops_the_run(self):
+        algo, _ = self.held()
+        self.split(algo, 11, factor=2.0, checked=False)
+        self.assert_stopped_before_the_session(algo, "n-for-1")
 
     def test_a_split_while_flat_only_changes_the_ratio(self):
         algo = self.start()

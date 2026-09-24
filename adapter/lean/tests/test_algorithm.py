@@ -155,21 +155,27 @@ class FakeTransactions:
                 ticket.Status = "canceled"
             self.emit(ticket, status)
 
-    def split(self, symbol, factor, tick=0.01):
-        """LEAN's own handling of a split under Raw normalisation, as observed on
-        the pinned image (AAPL's 2-for-1 of 2005-02-28, factor 0.4999986):
-        the holding is divided by the factor, truncated to whole shares with
-        the remainder paid as cash; every open order's quantity is divided by
-        it and its stop price multiplied by it and rounded to the tick; each
-        order's change is reported as UpdateSubmitted after the slice."""
+    def split_holding(self, symbol, factor):
+        """LEAN's split of the holding under Raw normalisation, as observed on the
+        pinned image (AAPL's 2-for-1 of 2005-02-28, factor 0.4999986): done
+        before the split's slice reaches OnSplits and OnData, dividing the
+        holding by the factor, truncated to whole shares with the remainder
+        paid as cash."""
         portfolio = self.algorithm.Portfolio
         held = portfolio.holdings.get(symbol, 0)
         if held:
             portfolio.holdings[symbol] = int(held / factor)
+
+    def split_orders(self, symbol, factor, tick=0.01):
+        """LEAN's split of the open orders, as observed on the pinned image: done
+        after the split's slice's OnData returns, in the same time step, each
+        order's quantity divided by the factor and its stop multiplied by it
+        and rounded to the tick, each reported through OnOrderEvent as
+        UpdateSubmitted with its ticket already changed."""
         for ticket in self.GetOpenOrderTickets(symbol):
             ticket.Quantity = round(ticket.Quantity / factor)
             ticket.StopPrice = round(round(ticket.StopPrice * factor / tick) * tick, 10)
-            self.deferred.append((ticket, "update-submitted"))
+            self.emit(ticket, "update-submitted")
 
     def GetOrderTickets(self, predicate=None):
         return Enumerable(t for t in self.tickets if predicate is None or predicate(t))
@@ -200,6 +206,17 @@ class FakeAlgorithm:
         return self.security
     def SetWarmUp(self, count, resolution):
         self.warmup = (count, resolution)
+    # LEAN's scheduling API: each rule is recorded as what it was built from,
+    # and every scheduled callback is kept, so a test can assert on the
+    # schedule and play the callback at the time LEAN would.
+    DateRules = types.SimpleNamespace(EveryDay=lambda symbol: ("every-day", symbol))
+    TimeRules = types.SimpleNamespace(At=lambda hour, minute: ("at", hour, minute))
+    @property
+    def Schedule(self):
+        scheduled = self.__dict__.setdefault("scheduled", [])
+        return types.SimpleNamespace(
+            On=lambda date_rule, time_rule, callback: scheduled.append(
+                (date_rule, time_rule, callback)))
     def Log(self, message): self.__dict__.setdefault("logs", []).append(message)
     def Quit(self, message): self.quit_reason = message
     @property

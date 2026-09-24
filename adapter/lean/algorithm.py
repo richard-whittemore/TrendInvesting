@@ -117,6 +117,13 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             security.SetSlippageModel(NSlippageModel(slippage_n, self.desk.n_for_tag,
                                                      self.desk.record_slippage))
             security.SetFeeModel(InteractiveBrokersFeeModel())
+            # ADR 0004: a split's changes to open orders are checked before
+            # the next session can fill them. LEAN makes them after the
+            # split's slice's OnData, in the same time step, and fires a
+            # 00:01 event after that step and before the session's fills
+            # (observed on the pinned image), so the check runs then.
+            self.Schedule.On(self.DateRules.EveryDay(self.symbol), self.TimeRules.At(0, 1),
+                             self.verify_split)
             # docs/architecture.md: reconcile before any executor submits.
             self.desk.require_flat("at startup")
             self.SetWarmUp(warmup, Resolution.Daily)
@@ -147,9 +154,9 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             return
         try:
             self.desk.require_cancels_confirmed("before the next session's bar")
-            # LEAN reports a split's changes to open orders after the split's
-            # slice, so they have been drained by now (OrderDesk.apply_split).
-            self.desk.require_split_applied("before the next session's bar")
+            # The second line behind verify_split: the split's changes to open
+            # orders are checked again, final, before the next bar is sent.
+            self.desk.require_split_applied("before the next session's bar", final=True)
             split = data.Splits.get(self.symbol)
             if split is not None and split.Type == SplitType.SplitOccurred:
                 self.desk.apply_split(float(split.SplitFactor), split.Time)
@@ -170,6 +177,19 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.publish_completed_bar(bar)
         if notice is not None and not self.failed:
             self.handle_delisting(notice)
+
+    def verify_split(self):
+        """The 00:01 scheduled check: after a split, LEAN's position and orders,
+        read from its order book, are exactly the engine's before the next
+        session can fill anything (OrderDesk.require_split_applied). Sends
+        nothing; a failure stops the run there (observed on the pinned image:
+        Quit at 00:01 prevents that session's fills)."""
+        if self.failed or getattr(self, "desk", None) is None:
+            return
+        try:
+            self.desk.require_split_applied("before the split's first session", final=False)
+        except Exception as err:
+            self.stop("order state uncertain: {}".format(err))
 
     def OnOrderEvent(self, order_event):
         """Record what LEAN reports about an order; never send from here.

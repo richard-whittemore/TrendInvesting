@@ -57,8 +57,8 @@ counts go the other way. LEAN's factor files round the cumulative split factor
 (AAPL's 1/56 is `0.0178571`), so the two closes are 56.000134 apart; a ratio
 within 1e-4 of a whole number of at least 1 is taken as that number, and any
 other stops the run, since no whole share of one view would then be a whole
-number of shares of the other (a future 3-for-2, or a reverse split, is not
-yet supported). An entry or Add is **rounded down to whole raw shares**, never
+number of shares of the other (so an instrument with a 3-for-2 or a reverse
+split after the bar cannot be run yet). An entry or Add is **rounded down to whole raw shares**, never
 up, so it never risks more than the Unit the engine sized (ADR 0003); one
 smaller than a raw share is rejected. Its fill reports what executed, which the
 reducer accepts as a Unit of at most the proposal's quantity: up to one raw
@@ -67,22 +67,43 @@ not whole raw shares stops the run. Every bar's ratio must equal the one in
 force; a different one with no split reported is taken only while LEAN holds
 nothing and works no order, and otherwise stops the run.
 
-**A split while holding or with orders working** is carried across. The
-engine's split-adjusted view is adjusted for every split, later ones included,
-so a split changes none of its levels, quantities or N — only the split ratio,
-which falls by the split factor (0.5 for a 2-for-1). LEAN, under Raw
-normalisation, applies the split itself: it divides the holding and every open
-order's quantity by the factor, multiplies each stop price by it and rounds it
-to the cent, pays any fractional share as cash, and reports each order's
-change as `UpdateSubmitted` after the split's slice. On LEAN's
-`SplitOccurred` the adapter takes the new ratio from the factor, and at the
-start of the next slice, once those changes have been drained (as `updated`
-lifecycle inputs), it requires LEAN's raw holding to be exactly the sum of the
-engine's Units and every working order to be its split-adjusted quantity at
-the new ratio, resting within one cent of its split-adjusted level at it.
-Anything else stops the run before the next bar reaches the engine: no
+**Which splits are carried across.** Only an **n-for-1 split**, n a whole
+number of at least 2 that divides the split ratio in force, is carried across
+a run: every raw share becomes exactly n, and the ratio falls to ratio ÷ n,
+still whole. Any other split reported during the run — a 3-for-2 (for
+example from 3 split-adjusted shares a raw share to 2), a reverse split, or
+an n that does not divide the ratio — stops the run in the split's own slice,
+whether or not LEAN holds anything, and even where the quantities happen to
+divide. The engine's split-adjusted view is adjusted for every split, later
+ones included, so a supported split changes none of its levels, quantities or
+N, only the split ratio. A split while flat only changes the ratio.
+
+**A split while holding or with orders working** is carried across, and
+checked before the next session can fill anything. LEAN, under Raw
+normalisation, applies the split itself, in the split's own time step
+(observed on the pinned image for AAPL's 2-for-1 of 2005-02-28):
+
+1. it splits the holding (and pays any fractional share as cash) before the
+   split's slice reaches `OnData`, whose tickets are still unadjusted;
+2. after `OnData` returns, it divides each open order's quantity by the
+   factor, multiplies its stop by it and rounds it to the cent, and reports
+   each through `OnOrderEvent` as `UpdateSubmitted`, its ticket already
+   changed;
+3. it then fires the adapter's scheduled event at 00:01, before that
+   session's fills at its close.
+
+So the adapter checks in three places. In the split's slice (`OnData`), it
+takes the new ratio and requires LEAN's split holding to be exactly the sum
+of the engine's Units and every stored Exit Order to be still working. At the
+00:01 scheduled check (`verify_split`), reading each ticket from LEAN's order
+book, it requires the same, and every working order to be its split-adjusted
+quantity at the new ratio, resting within one cent of its split-adjusted
+level at it. At the next slice's start, it repeats that check as a second line.
+Any failure stops the run: in the first two places before LEAN can fill
+anything in the next session (a `Quit` at 00:01 was observed to prevent that
+session's fills), and always before the next bar reaches the engine. No
 corporate-action contract exists yet (ADR 0004's amendment) to carry any
-other outcome. A split while flat only changes the ratio. This rests on the
+other outcome. This rests on the
 split-adjusted view being adjusted for splits after the run's end, which a
 backtest's factor file provides and a live run cannot; live trading needs the
 corporate-action contract first.
@@ -402,7 +423,7 @@ the acceptance run below):
 | Early closes | LEAN's one-bar `History` returned two rows on 2002-12-24 (13:00 close); `split_adjusted_view` takes the row ending with the bar. |
 | Both views from one run | With a Raw subscription, a one-bar `History(..., dataNormalizationMode=SplitAdjusted)` returns the split-adjusted bar: AAPL on 2005-02-22 closed at 85.38 raw and 1.524639198 split-adjusted, 56.000134 apart, the factor file's rounded 1/56. |
 | Tick | LEAN rounds every raw stop price to the cent, including a split's adjustment of an open stop, logging "To meet brokerage precision requirements, order StopPrice was rounded to 15.30 from 15.29996328" for the first only: all 193 order changes in the raw run are at whole cents. |
-| A split under Raw normalisation | For AAPL's 2-for-1 of 2005-02-28 (factor 0.4999986): `SplitType.Warning` in a bar-less slice on the 25th, then `SplitOccurred` in a bar-less slice at midnight on the 28th, when the holding has already doubled (1,000 → 2,000, the average price halved, and a fractional share paid as cash: $0.25 on 1,000 shares). Each open stop's quantity doubles and its price halves, rounded to the cent (62.23 → 31.11 for a sell, 115.57 → 57.78 for a buy), and each is reported as `UpdateSubmitted` after that slice. In the raw run 4 Units (11,056 raw shares) and their 4 Exit Orders were carried across it: 22,112 shares, each stop at half its level, and $2.75 of fractional-share cash. |
+| A split under Raw normalisation | For AAPL's 2-for-1 of 2005-02-28 (factor 0.4999986): `SplitType.Warning` in a bar-less slice on the 25th, then `SplitOccurred` in a bar-less slice at midnight on the 28th, when the holding has already doubled (1,000 → 2,000, the average price halved, and a fractional share paid as cash: $0.25 on 1,000 shares). Each open stop's quantity doubles and its price halves, rounded to the cent (62.23 → 31.11 for a sell, 115.57 → 57.78 for a buy), but only after that slice's `OnData` returns, whose tickets are still unadjusted; each is then reported through `OnOrderEvent` as `UpdateSubmitted` with its ticket already changed, still at midnight. A scheduled event at 00:01 then fires with every ticket adjusted, before the session's fills at 16:00, and a `Quit` there prevents those fills (a sell stop that filled that session did not). `OnEndOfTimeStep` is never called for a Python algorithm. In the raw run 4 Units (11,056 raw shares) and their 4 Exit Orders were carried across it: 22,112 shares, each stop at half its level, and $2.75 of fractional-share cash. |
 
 **The acceptance run.** A one-instrument backtest on the pinned image, with
 the engine in its own container on a shared named volume (ADR 0014). It uses
