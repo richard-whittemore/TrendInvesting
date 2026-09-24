@@ -75,8 +75,9 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         # strategy gets to see is itself a methodology decision, which this
         # adapter does not make (adapter/lean/README.md). warming is recorded
         # for the log and stays available on the reply below for a future
-        # order-submission path (#29) to decide never to act on a decision
-        # answering a warm-up bar; nothing here acts on decisions at all yet.
+        # order-submission path, which must never act on a decision answering
+        # a warm-up bar (adapter/lean/README.md); nothing here acts on
+        # decisions at all yet.
         warming = self.IsWarmingUp
         try:
             started = perf_counter()
