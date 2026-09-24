@@ -117,6 +117,20 @@ func TestIdenticalGuardsDumpSeparately(t *testing.T) {
 	}
 }
 
+func TestNegativeExclusionCountFailsWithoutPanic(t *testing.T) {
+	requireAuditFailure(t, "negative-count", "internal/sample/sample.go:0 (f, byte 60): count -1 is negative")
+}
+
+func TestDefaultAndExplicitSingleCountsMatch(t *testing.T) {
+	for _, count := range []int{0, 1} {
+		t.Run(fmt.Sprintf("count_%d", count), func(t *testing.T) {
+			b := block{File: "internal/sample/sample.go", Function: "f", Statement: "return nil", Offset: 60,
+				Category: "unreachable-by-invariant", Reason: "synthetic first guard invariant", Count: count}
+			checkExclusions(t, []block{b}, []block{b})
+		})
+	}
+}
+
 func requireAuditFailure(t *testing.T, scenario, want string) {
 	t.Helper()
 	executable, err := os.Executable()
@@ -135,6 +149,12 @@ func requireAuditFailure(t *testing.T, scenario, want string) {
 func TestCoverageAuditFailure(t *testing.T) {
 	scenario := os.Getenv("COVERAGE_AUDIT_FAILURE")
 	if scenario == "" {
+		return
+	}
+	if scenario == "negative-count" {
+		b := block{File: "internal/sample/sample.go", Function: "f", Statement: "return nil", Offset: 60,
+			Category: "unreachable-by-invariant", Reason: "synthetic first guard invariant", Count: -1}
+		checkExclusions(t, []block{b}, []block{b})
 		return
 	}
 	if scenario == "swapped-guards" {

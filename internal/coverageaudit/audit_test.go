@@ -137,6 +137,10 @@ func checkExclusions(t *testing.T, uncovered, listed []block) {
 
 	var stale []block
 	for _, e := range listed {
+		if e.Count < 0 {
+			t.Errorf("%s: count %d is negative", e.where(), e.Count)
+			continue
+		}
 		if _, ok := categories[e.Category]; !ok {
 			t.Errorf("%s: category %q is not one of the two dispositions this audit recognises", e.where(), e.Category)
 		}
