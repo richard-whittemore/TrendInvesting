@@ -66,7 +66,9 @@ type DrawdownStepAppliedPayload struct {
 	NotionalBefore float64 `json:"notional_before"`
 	NotionalAfter  float64 `json:"notional_after"`
 	// StepNumber is this step's 1-based position among every Drawdown Step
-	// applied so far in the run (yearly re-basing resets this count). A
+	// applied since the last yearly re-basing or recovery (or the run's start).
+	// Both reset this count in strategy.Reducer.applyAccountSnapshot's rebase
+	// and recovery paths (internal/strategy/notional.go; ADR 0007). A
 	// single account snapshot with a large enough drop can
 	// apply several steps, each with its own StepNumber, in the order
 	// applied.
