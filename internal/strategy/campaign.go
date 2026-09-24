@@ -956,9 +956,10 @@ func (r *transition) evaluateCampaign(state *instrumentState, bar event.Complete
 //
 // This is called from three places:
 //
-//  1. applyCompletedBar, once per completed bar, AFTER the exit evaluation
-//     (ADR 0010: exits before Adds) and only when this SAME bar did not
-//     itself propose an exit (exit takes precedence, ADR 0010's other
+//  1. applySessionClosed, once per completed bar, when the bar's Session
+//     closes: after every exit of that Session, across instruments (ADR
+//     0010: exits before Adds; ADR 0021), and only when this SAME bar did
+//     not itself propose an exit (exit takes precedence, ADR 0010's other
 //     ordering rule). Only reachable for a Campaign already open when
 //     the bar arrives.
 //  2. openCampaign, immediately after a new Campaign's first Unit fills:
@@ -999,7 +1000,7 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 		// has been stopped out, this Campaign continues with whatever
 		// Units remain until its own exit or full stop — never a further
 		// Add. Checked here, the one place both call sites (this
-		// function's own two: applyCompletedBar's per-bar evaluation, and
+		// function's own two: applySessionClosed's per-bar evaluation, and
 		// the same-bar chain from applyAddFill) funnel through, rather
 		// than at each call site separately.
 		return nil, nil
@@ -1035,7 +1036,7 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 	// below skips the whole Unit and remembers no pendingAddProposal —
 	// nothing was proposed, so there is nothing for a later bar to expire —
 	// and the NEXT bar re-evaluates this same rung on its own merits
-	// (evaluateAdd is re-entered from applyCompletedBar with no memory of
+	// (evaluateAdd is re-entered from applySessionClosed with no memory of
 	// this decline): a skip does not poison the ladder.
 	cost, costRepresentable := unitCost(campaign.unitQuantity, rung, r.dollarsPerPoint)
 	switch {

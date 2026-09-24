@@ -54,7 +54,9 @@ func TestCloneCoversEveryReferenceTypedField(t *testing.T) {
 		"Reducer.instruments[v]->.pendingAddProposal (pointer)":  firstAccess,
 		"Reducer.instruments[v]->.pendingExitProposal (pointer)": firstAccess,
 		"Reducer.instruments[v]->.pendingProposal (pointer)":     firstAccess,
+		"Reducer.instruments[v]->.pendingSignal (pointer)":       firstAccess,
 		"Reducer.notionalAccount (pointer)":                      eager,
+		"Reducer.sessionDelistedBars (slice)":                    eager,
 	}
 	want := slices.Sorted(maps.Keys(isolation))
 	if !slices.Equal(got, want) {
@@ -74,6 +76,7 @@ func TestCloneCoversEveryReferenceTypedField(t *testing.T) {
 	s := r.instruments["AAPL"]
 	s.pendingProposal = &pendingProposalState{proposalID: "entry"}
 	s.pendingExitProposal = &pendingExitProposalState{proposalID: "exit"}
+	s.pendingSignal = &pendingSignalState{signalID: "signal"}
 	var checked []string
 	assertNoSharedReferences(t, reflect.ValueOf(s).Elem(), reflect.ValueOf(s.clone()).Elem(), "", &checked)
 	slices.Sort(checked)
@@ -82,8 +85,10 @@ func TestCloneCoversEveryReferenceTypedField(t *testing.T) {
 	}
 
 	// The eager paths are fresh in every transaction.
+	r.sessionDelistedBars = []string{"DELISTED"}
 	tx := r.begin()
-	if tx.notionalAccount == r.notionalAccount || reflect.ValueOf(tx.delisted).Pointer() == reflect.ValueOf(r.delisted).Pointer() {
+	if tx.notionalAccount == r.notionalAccount || reflect.ValueOf(tx.delisted).Pointer() == reflect.ValueOf(r.delisted).Pointer() ||
+		reflect.ValueOf(tx.sessionDelistedBars).Pointer() == reflect.ValueOf(r.sessionDelistedBars).Pointer() {
 		t.Fatal("Reducer.begin shares an eagerly copied field with published state")
 	}
 	if tx.instruments != nil || tx.acceptedFills != nil {

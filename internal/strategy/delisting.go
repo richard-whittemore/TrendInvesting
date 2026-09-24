@@ -53,6 +53,13 @@ func (r *transition) applyCorporateAction(envelope event.Envelope) ([]event.Enve
 		return nil, fmt.Errorf("strategy: invalid corporate action payload: %w", err)
 	}
 
+	// The open Session has not yet decided this instrument's Add or entry
+	// (ADR 0021), so a fact about its listing cannot be ordered against that
+	// decision. A producer states such a fact between Sessions.
+	if r.barReceivedInOpenSession(payload.InstrumentID) {
+		return nil, fmt.Errorf("strategy: instrument %q: a corporate action arrived after its bar in the Session ending %s and before the Session closes; state it between Sessions (ADR 0021)",
+			payload.InstrumentID, r.sessionPeriodEnd.Format(time.RFC3339))
+	}
 	switch payload.Kind {
 	case event.CorporateActionKindDelisting:
 		return r.applyDelisting(payload, envelope)

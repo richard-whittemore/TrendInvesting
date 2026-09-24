@@ -11,12 +11,13 @@
 // # Wire contract: the adapter's first bar must carry Sequence 2
 //
 // This run's own configuration input is always delivered first, at Sequence
-// configurationSequence (1), before the socket opens. The adapter's bars and
-// account snapshots continue that SAME sequence — it does not start a
-// numbering of its own — so its very first bar must carry Sequence
-// configurationSequence+1 (2). Each account.snapshot follows its bar after
-// that bar's decisions have been received, continuing the single input
-// sequence: bar 2, snapshot 3, bar 4, snapshot 5, including warm-up. This
+// configurationSequence (1), before the socket opens. The adapter's bars,
+// session closes and account snapshots continue that SAME sequence — it does
+// not start a numbering of its own — so its very first bar must carry
+// Sequence configurationSequence+1 (2). Each slice's bars are one Session,
+// ended by market.session.closed (ADR 0021); its account.snapshot follows
+// the close's decisions, continuing the single input sequence: bar 2,
+// session close 3, snapshot 4, bar 5, including warm-up. This
 // is not a convenience: the journal this run writes is read back as ONE
 // input stream (configuration included), and a stream in which two records
 // both claim Sequence 1 fails its own replay.

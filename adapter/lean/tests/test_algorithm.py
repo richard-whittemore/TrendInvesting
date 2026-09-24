@@ -204,6 +204,7 @@ class AlgorithmTests(unittest.TestCase):
         self.assertFalse(algo.subscription["fillForward"])
         seen = []
         algo.publisher = types.SimpleNamespace(sequence=2, publish=lambda *args: seen.append(args) or [],
+                                               publish_session_closed=lambda *args: [],
                                                publish_snapshot=lambda *args: [])
         for day, warming in ((4, True), (5, True), (6, True), (9, False)):
             b = bar(day)
@@ -234,17 +235,19 @@ class AlgorithmTests(unittest.TestCase):
         # The first bar carries Sequence 2 (continuing the engine's own
         # configuration input at Sequence 1), and warm-up bars share that
         # same numbering with the bars that follow warm-up, contiguously.
-        self.assertEqual([e["sequence"] for e in client.sent], list(range(2, 10)))
+        self.assertEqual([e["sequence"] for e in client.sent], list(range(2, 14)))
         self.assertEqual(algo.warmup_seen, 3)
         self.assertEqual(algo.bar_count, 4)
         # FakeEngineClient answers every input with zero decisions; all four
-        # bars and their snapshots reach the engine in one sequence.
+        # bars, the closes of their Sessions and their snapshots reach the
+        # engine in one sequence (ADR 0021: the close before the snapshot).
         self.assertEqual(algo.decision_count, 0)
         self.assertEqual([e["type"] for e in client.sent],
-                         ["market.bar.completed", "account.snapshot"] * 4)
+                         ["market.bar.completed", "market.session.closed", "account.snapshot"] * 4)
         ends = []
-        for completed, snapshot in zip(client.sent[::2], client.sent[1::2]):
+        for completed, closed, snapshot in zip(client.sent[::3], client.sent[1::3], client.sent[2::3]):
             end = completed["payload"]["period_end"]
+            self.assertEqual(closed["payload"], {"period_end": end, "instrument_ids": ["AAPL"]})
             self.assertEqual(snapshot["payload"]["as_of"], end)
             self.assertEqual(snapshot["recorded_at"], end)
             ends.append(end)
@@ -281,10 +284,20 @@ class AlgorithmTests(unittest.TestCase):
                 algo.OnData(data)
                 self.assertTrue(algo.failed)
                 self.assertTrue(algo.client.closed)
-                self.assertEqual(len(algo.client.sent), 2)
-                self.assertEqual(algo.publisher.sequence, 2)
+                self.assertEqual(len(algo.client.sent), 3)
+                self.assertEqual(algo.publisher.sequence, 3)
                 algo.OnData(data)
-                self.assertEqual(len(algo.client.sent), 2)
+                self.assertEqual(len(algo.client.sent), 3)
+
+    def test_bad_session_close_reply_sends_no_snapshot(self):
+        algo = self.init()
+        algo.client.reply_overrides = {"market.session.closed": {"sequence": 99}}
+        algo.IsWarmingUp = True
+        algo.History = lambda *args, **kwargs: Frame(bar(6).EndTime)
+        algo.OnData(slice_of({"AAPL": bar(6)}))
+        self.assertTrue(algo.failed)
+        self.assertEqual([e["type"] for e in algo.client.sent],
+                         ["market.bar.completed", "market.session.closed"])
 
     def test_bad_bar_reply_sends_no_snapshot(self):
         algo = self.init()
@@ -329,6 +342,7 @@ class AlgorithmTests(unittest.TestCase):
         self.assertIs(type(count), int)
         self.assertEqual((count, resolution), (3, "daily"))
         algo.publisher = types.SimpleNamespace(sequence=2, publish=lambda *args: [],
+                                               publish_session_closed=lambda *args: [],
                                                publish_snapshot=lambda *args: [])
         for day in (6, 9, 10):
             b = bar(day)
@@ -498,7 +512,7 @@ class DelistingTests(unittest.TestCase):
         # the deliberate stop, immediately before the stream's own
         # completion, which expires anything outstanding; the run then stops.
         self.assertEqual([e["type"] for e in algo.client.sent],
-                         ["market.bar.completed", "account.snapshot"] * 2
+                         ["market.bar.completed", "market.session.closed", "account.snapshot"] * 2
                          + ["adapter.run.stopped", "replay.run.completed"])
         self.assertTrue(algo.failed)
         self.assertIn("AAPL DELISTED", algo.quit_reason)
@@ -535,8 +549,8 @@ class DelistingTests(unittest.TestCase):
         self.assertEqual(completed["type"], "replay.run.completed")
 
         # Sequences continue the one contiguous stream with no gap: two
-        # bar/snapshot pairs, then the stop, then the completion.
-        self.assertEqual([e["sequence"] for e in algo.client.sent], list(range(2, 8)))
+        # bar/close/snapshot triples, then the stop, then the completion.
+        self.assertEqual([e["sequence"] for e in algo.client.sent], list(range(2, 10)))
         self.assertEqual(stop["sequence"] + 1, completed["sequence"])
         self.assertEqual(stop["event_time"], completed["event_time"])
 
@@ -560,7 +574,7 @@ class DelistingTests(unittest.TestCase):
         self.feed(algo, 6, delistings={"AAPL": self.notice("warning", 6)})
         self.feed(algo, 9)
         self.assertFalse(algo.failed)
-        self.assertEqual(len(algo.client.sent), 4)
+        self.assertEqual(len(algo.client.sent), 6)
         self.assertTrue(any("delisting warning for AAPL" in m for m in algo.logs))
 
     def test_another_instruments_delisting_is_ignored(self):
@@ -574,7 +588,7 @@ class DelistingTests(unittest.TestCase):
         self.feed(algo, 6, changes={"AAPL": change})
         self.assertFalse(algo.failed)
         self.assertEqual([e["type"] for e in algo.client.sent],
-                         ["market.bar.completed", "account.snapshot"])
+                         ["market.bar.completed", "market.session.closed", "account.snapshot"])
         self.assertTrue(any("symbol changed GOOAV -> GOOG" in m for m in algo.logs))
 
 
@@ -605,7 +619,7 @@ class RunCompletionTests(unittest.TestCase):
         self.assertEqual(last["type"], "replay.run.completed")
         self.assertEqual(last["event_time"], "2014-06-09T20:00:00Z")
         self.assertEqual(last["payload"], {})
-        self.assertEqual([e["sequence"] for e in algo.client.sent], list(range(2, 7)))
+        self.assertEqual([e["sequence"] for e in algo.client.sent], list(range(2, 9)))
 
     def test_completion_is_sent_once_even_after_a_deliberate_stop(self):
         algo = self.start()

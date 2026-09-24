@@ -49,11 +49,11 @@ func (p perturbFill) Apply(ctx context.Context, e event.Envelope) ([]event.Envel
 // TestRerunDetectsSimulatorDriftThatReplayCannot proves ADR 0017 reducer
 // replay can pass while regeneration of ADR 0005 simulator output diverges.
 func TestRerunDetectsSimulatorDriftThatReplayCannot(t *testing.T) {
-	original := runBar
-	t.Cleanup(func() { runBar = original })
+	original := runSession
+	t.Cleanup(func() { runSession = original })
 	changed := false
-	runBar = func(ctx context.Context, sim *fills.Simulator, handler replay.Handler, bar event.Envelope) (fills.Result, error) {
-		return original(ctx, sim, perturbFill{handler: handler, changed: &changed, t: t}, bar)
+	runSession = func(ctx context.Context, sim *fills.Simulator, handler replay.Handler, bars []event.Envelope) (fills.Result, error) {
+		return original(ctx, sim, perturbFill{handler: handler, changed: &changed, t: t}, bars)
 	}
 	var out bytes.Buffer
 	err := run(context.Background(), []string{"-rerun", goldenJournal}, &out)
@@ -366,9 +366,9 @@ func TestRerunNormalizesEnvelopeTimeZones(t *testing.T) {
 // TestRerunReportsTheFirstMissingRecordWhenThePipelineStops checks that a
 // new simulator failure cannot hide the changed output prefix (ADR 0017).
 func TestRerunReportsTheFirstMissingRecordWhenThePipelineStops(t *testing.T) {
-	original := runBar
-	t.Cleanup(func() { runBar = original })
-	runBar = func(context.Context, *fills.Simulator, replay.Handler, event.Envelope) (fills.Result, error) {
+	original := runSession
+	t.Cleanup(func() { runSession = original })
+	runSession = func(context.Context, *fills.Simulator, replay.Handler, []event.Envelope) (fills.Result, error) {
 		return fills.Result{}, fmt.Errorf("simulator stopped")
 	}
 	err := doRerun(context.Background(), goldenJournal, io.Discard)
@@ -411,9 +411,9 @@ func TestRerunStillReportsAPipelineFailureThatCoincidesWithCancellation(t *testi
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	failure := errors.New("simulator failed independently")
-	original := runBar
-	t.Cleanup(func() { runBar = original })
-	runBar = func(context.Context, *fills.Simulator, replay.Handler, event.Envelope) (fills.Result, error) {
+	original := runSession
+	t.Cleanup(func() { runSession = original })
+	runSession = func(context.Context, *fills.Simulator, replay.Handler, []event.Envelope) (fills.Result, error) {
 		cancel()
 		return fills.Result{}, failure
 	}

@@ -77,7 +77,10 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 		// adapter's own numbering continues that stream rather than
 		// starting one of its own, so its first bar is
 		// configurationSequence+1.
-		envelope := barEnvelope(t, bar, configurationSequence+1+uint64(day), strategyVersion, configurationHash)
+		// Each bar is followed by the close of its Session (ADR 0021),
+		// below, so every day occupies two sequence numbers.
+		sequence := configurationSequence + 1 + 2*uint64(day)
+		envelope := barEnvelope(t, bar, sequence, strategyVersion, configurationHash)
 
 		decision, err := client.Decide(context.Background(), envelope)
 		if err != nil {
@@ -98,6 +101,19 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 		}
 		if payload.Decisions[0].Type != event.SetupEvaluatedEventType {
 			t.Fatalf("bar %d: decision[0] type = %q, want %q", day, payload.Decisions[0].Type, event.SetupEvaluatedEventType)
+		}
+
+		closed := sessionClosedEnvelope(t, bar, sequence+1, strategyVersion, configurationHash)
+		reply, err := client.Decide(context.Background(), closed)
+		if err != nil {
+			t.Fatalf("bar %d: session close: %v", day, err)
+		}
+		var closeDecisions decisionsPayload
+		if err := json.Unmarshal(reply.Payload, &closeDecisions); err != nil {
+			t.Fatalf("bar %d: decode session-close decisions: %v", day, err)
+		}
+		if reply.CausationID != closed.ID || len(closeDecisions.Decisions) != 0 {
+			t.Fatalf("bar %d: session close answered %q with %d decisions, want its own causation and none (a flat bar never signals)", day, reply.CausationID, len(closeDecisions.Decisions))
 		}
 	}
 
@@ -143,9 +159,10 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("journal.Split: %v", err)
 	}
-	// One configuration input plus one bar input per bar sent.
-	if want := 1 + barCount; len(inputs) != want {
-		t.Errorf("journal holds %d input(s), want %d (1 configuration + %d bars)", len(inputs), want, barCount)
+	// One configuration input plus, per bar sent, the bar and its Session's
+	// close (ADR 0021).
+	if want := 1 + 2*barCount; len(inputs) != want {
+		t.Errorf("journal holds %d input(s), want %d (1 configuration + %d bars and their session closes)", len(inputs), want, barCount)
 	}
 	if inputs[0].Type != event.ConfigurationEventType {
 		t.Errorf("journal's first input is %q, want %q", inputs[0].Type, event.ConfigurationEventType)
@@ -228,9 +245,9 @@ func TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst(t *
 	// The first connection is unaffected by the second's refusal: wireEngine's
 	// cursor is still exactly where firstBar left it, since the refused
 	// second connection never reached wireEngine at all, so the first
-	// connection's own next bar carries the identical Sequence secondBar
-	// used above.
-	nextBarForFirst := barEnvelope(t, flatBar("TEST", 1), configurationSequence+2, strategyVersion, configurationHash)
+	// connection's own next input — the close of firstBar's Session (ADR
+	// 0021) — carries the identical Sequence secondBar used above.
+	nextBarForFirst := sessionClosedEnvelope(t, flatBar("TEST", 0), configurationSequence+2, strategyVersion, configurationHash)
 	if _, err := first.Decide(context.Background(), nextBarForFirst); err != nil {
 		t.Fatalf("first connection after the second was refused: decide: %v", err)
 	}

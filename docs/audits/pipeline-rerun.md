@@ -38,7 +38,7 @@ changed/missing record together with its underlying execution error.
 The test-only handler changes the first simulated fill's price with
 `math.Nextafter(price, +Inf)` and refreshes its payload hash **before** either
 recorder or reducer consumes it. It does not mutate the reference journal.
-Only tests replace `runBar`; production always delegates to `fills.RunBar`.
+Only tests replace `runSession`; production always delegates to `fills.RunSession` (formerly `runBar` and `fills.RunBar`, before ADR 0021).
 
 ## Acceptance (a): both committed goldens
 

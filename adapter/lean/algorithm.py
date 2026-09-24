@@ -233,6 +233,9 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             end = bar.EndTime.replace(tzinfo=ZoneInfo("America/New_York"))
             period_end = end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             decisions = self.publisher.publish(self.instrument, bar, raw, period_end)
+            # ADR 0021: the slice's bars are its Session; closing it lets the
+            # engine decide the day's Adds and entries.
+            decisions += self.publisher.publish_session_closed(period_end)
             # ADR 0020: this close becomes the next bar's previous-close
             # basis only after the current bar's decisions have arrived.
             snapshot_decisions = self.publisher.publish_snapshot(self.Portfolio, period_end)

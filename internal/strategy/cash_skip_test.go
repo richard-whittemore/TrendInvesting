@@ -182,7 +182,7 @@ func TestNoAccountSnapshotEverSuppliedFailsClosedOnEntry(t *testing.T) {
 		seq++
 	}
 
-	_, err = engine.Run(context.Background(), envelopes)
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil {
 		t.Fatal("Run() error = nil, want a fail-closed error: no account.snapshot was ever delivered")
 	}

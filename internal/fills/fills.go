@@ -83,7 +83,7 @@ const Source = "simulator"
 // randomness is involved (.golangci.yml forbids both in internal/).
 const idTimeLayout = "2006-01-02T15:04:05.000000000Z"
 
-// maxFillsPerBar bounds the per-bar fixpoint in RunBar.
+// maxFillsPerBar bounds the per-bar fixpoint in RunSession.
 //
 // Termination does not depend on it: every pass either fills an order —
 // removing it, or removing the Units it closed — or stops, and new orders
@@ -109,18 +109,20 @@ type Simulator struct {
 	// sequence numbers the COMPOSED input stream — bars and the fills
 	// interleaved between them. It lives here, rather than being taken from
 	// the bar producer, because only the loop knows the running order once
-	// fills are interleaved; see RunBar.
+	// fills are interleaved; see RunSession.
 	sequence uint64
 
 	books map[string]*book
 
-	// recordedAt is the RecordedAt of the bar RunBar is currently working,
+	// recordedAt is the RecordedAt of the bar RunSession is currently working,
 	// which is what every fill decided from that bar inherits: the simulator
 	// observes the same recording moment as the data that produced it, and
 	// has no clock of its own (.golangci.yml forbids time.Now in internal/).
 	//
-	// RunBar sets it from the bar envelope at the top of the call, BEFORE the
-	// open-instant pass — deliberately, and not as a side effect of
+	// RunSession sets it from each bar's envelope BEFORE that bar's
+	// open-instant pass, and again before its intrabar fixpoint, which runs
+	// after the Session's close (ADR 0021) — deliberately, and not as a side
+	// effect of
 	// delivering the bar, because that pass delivers its fills before the bar
 	// itself. A stamp that followed delivery order would date those fills to
 	// the previous bar.
@@ -327,7 +329,7 @@ func (s *Simulator) Observe(envelope event.Envelope) error {
 }
 
 // observe is Observe with the reference to attach to any order the envelope
-// creates. RunBar passes the price of the fill that caused the emission; a
+// creates. RunSession passes the price of the fill that caused the emission; a
 // caller with no such context (Observe itself) passes the zero reference,
 // which means "the bar's open".
 func (s *Simulator) observe(envelope event.Envelope, ref reference) error {
@@ -367,7 +369,8 @@ func (s *Simulator) observe(envelope event.Envelope, ref reference) error {
 		event.NotionalAccountRecoveredEventType,    // likewise
 		event.NotionalAccountCashAdjustedEventType, // likewise
 		event.ConfigurationEventType,               // an input, carried at construction
-		event.CompletedBarEventType,                // an input, handled by RunBar itself
+		event.CompletedBarEventType,                // an input, handled by RunSession itself
+		event.SessionClosedEventType,               // likewise
 		event.FillEventType,                        // this package's own output
 		event.AccountSnapshotEventType,             // an input; no resting-order consequence
 		event.CashMovementEventType:                // likewise

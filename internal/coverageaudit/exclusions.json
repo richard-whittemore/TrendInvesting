@@ -479,16 +479,17 @@
       "file": "internal/strategy/reducer.go",
       "function": "(*transition).applyCompletedBar",
       "statement": "return nil, err",
+      "occurrence": 2,
       "category": "unreachable-by-construction",
-      "reason": "Five of this function's eleven identical error propagations remain unreachable: stateFor (occurrence 1), the three proposal-expiry builders (4, 5, 6), and rememberPendingProposal (11), whose failing branches are themselves excluded. Occurrence 8, emitExitOrderChanges, is now exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology, sizing, Campaign risk and Add cash guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
+      "reason": "Four of this function's nine identical error propagations remain unreachable: stateFor (occurrence 2) and the three proposal-expiry builders (5, 6, 7), whose failing branches are themselves excluded. Occurrence 1, admitToSession, is covered by the Session tests (ADR 0021). Occurrence 9, emitExitOrderChanges, is exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology and Campaign risk guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
     },
     {
       "file": "internal/strategy/reducer.go",
       "function": "(*transition).applyCompletedBar",
       "statement": "return nil, err",
-      "occurrence": 4,
+      "occurrence": 7,
       "category": "unreachable-by-construction",
-      "reason": "Five of this function's eleven identical error propagations remain unreachable: stateFor (occurrence 1), the three proposal-expiry builders (4, 5, 6), and rememberPendingProposal (11), whose failing branches are themselves excluded. Occurrence 8, emitExitOrderChanges, is now exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology, sizing, Campaign risk and Add cash guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
+      "reason": "Four of this function's nine identical error propagations remain unreachable: stateFor (occurrence 2) and the three proposal-expiry builders (5, 6, 7), whose failing branches are themselves excluded. Occurrence 1, admitToSession, is covered by the Session tests (ADR 0021). Occurrence 9, emitExitOrderChanges, is exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology and Campaign risk guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -496,7 +497,7 @@
       "statement": "return nil, err",
       "occurrence": 5,
       "category": "unreachable-by-construction",
-      "reason": "Five of this function's eleven identical error propagations remain unreachable: stateFor (occurrence 1), the three proposal-expiry builders (4, 5, 6), and rememberPendingProposal (11), whose failing branches are themselves excluded. Occurrence 8, emitExitOrderChanges, is now exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology, sizing, Campaign risk and Add cash guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
+      "reason": "Four of this function's nine identical error propagations remain unreachable: stateFor (occurrence 2) and the three proposal-expiry builders (5, 6, 7), whose failing branches are themselves excluded. Occurrence 1, admitToSession, is covered by the Session tests (ADR 0021). Occurrence 9, emitExitOrderChanges, is exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology and Campaign risk guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -504,15 +505,7 @@
       "statement": "return nil, err",
       "occurrence": 6,
       "category": "unreachable-by-construction",
-      "reason": "Five of this function's eleven identical error propagations remain unreachable: stateFor (occurrence 1), the three proposal-expiry builders (4, 5, 6), and rememberPendingProposal (11), whose failing branches are themselves excluded. Occurrence 8, emitExitOrderChanges, is now exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology, sizing, Campaign risk and Add cash guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
-    },
-    {
-      "file": "internal/strategy/reducer.go",
-      "function": "(*transition).applyCompletedBar",
-      "statement": "return nil, err",
-      "occurrence": 11,
-      "category": "unreachable-by-construction",
-      "reason": "Five of this function's eleven identical error propagations remain unreachable: stateFor (occurrence 1), the three proposal-expiry builders (4, 5, 6), and rememberPendingProposal (11), whose failing branches are themselves excluded. Occurrence 8, emitExitOrderChanges, is now exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology, sizing, Campaign risk and Add cash guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
+      "reason": "Four of this function's nine identical error propagations remain unreachable: stateFor (occurrence 2) and the three proposal-expiry builders (5, 6, 7), whose failing branches are themselves excluded. Occurrence 1, admitToSession, is covered by the Session tests (ADR 0021). Occurrence 9, emitExitOrderChanges, is exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology and Campaign risk guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -566,9 +559,9 @@
     {
       "file": "internal/strategy/reducer.go",
       "function": "(*transition).sizeUnit",
-      "statement": "return r.decline(bar, input, signalID, event.DeclineReasonNNotReady, fmt.Sprintf(\"n is not a usable volatility reading (n %v); no unit can be sized from it\", n), 0, 0)",
+      "statement": "return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonNNotReady, fmt.Sprintf(\"n is not a usable volatility reading (n %v); no unit can be sized from it\", n), 0, 0)",
       "category": "unreachable-by-invariant",
-      "reason": "sizeUnit has one call site, inside the branch guarded by `ready := nReady && entryChannelReady`, so nReady is always true here. The guard stays because it is what stops a division by an unusable N if that Tier gate ever changes, and 'it cannot happen here' is not a reason to divide by it."
+      "reason": "sizeUnit has one call site, applySessionClosed, which sizes only a pendingSignalState recorded by applyCompletedBar inside the branch guarded by `ready := nReady && entryChannelReady`, so nReady is always true here. The guard stays because it is what stops a division by an unusable N if that Tier gate ever changes, and 'it cannot happen here' is not a reason to divide by it."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -676,6 +669,36 @@
       "statement": "return 0, err",
       "category": "unreachable-by-construction",
       "reason": "CommissionModel.Charge fails only on a non-positive quantity, a non-positive or non-finite price or dollars per point, or an invalid model. New validates the model and DollarsPerPoint, price is a covered fill's positive finite execution price, and each order quantity is a Unit quantity the book accepted as positive when its exit-order-set was observed."
+    },
+    {
+      "file": "internal/fills/runbar.go",
+      "function": "RunSession",
+      "statement": "return result, err",
+      "occurrence": 4,
+      "category": "unreachable-by-construction",
+      "reason": "Propagates sessionClosedFor, whose only failures are its own excluded Validate and Marshal branches: the payload is built from bars sessionBars has already validated, all sharing one period end and naming distinct instruments, sorted here."
+    },
+    {
+      "file": "internal/fills/runbar.go",
+      "function": "sessionClosedFor",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"fills: built an invalid session closed payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "SessionClosedPayload.Validate on a payload built from sessionBars' output: at least one bar, each passing CompletedBarPayload.Validate (so a non-empty instrument ID and a non-zero, writable period end), no instrument twice, sorted immediately before."
+    },
+    {
+      "file": "internal/fills/runbar.go",
+      "function": "sessionClosedFor",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"fills: marshal session closed payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
+    },
+    {
+      "file": "internal/strategy/session.go",
+      "function": "(*transition).applySessionClosed",
+      "statement": "return nil, err",
+      "occurrence": 4,
+      "category": "unreachable-by-construction",
+      "reason": "Propagates rememberPendingProposal, whose only failure is its own excluded decode of the trade proposal sizeUnit marshalled from a validated payload a statement earlier."
     }
   ]
 }

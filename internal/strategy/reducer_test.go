@@ -235,7 +235,7 @@ func runReducerOverHighs(t *testing.T, instrumentID string, highs []float64, cfg
 		seq++
 	}
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -431,7 +431,7 @@ func TestReducerEmitsOneSetupEvaluatedPerBarWithExpectedNAndReadiness(t *testing
 		seq++
 	}
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -542,7 +542,7 @@ func TestReducerUsesSplitAdjustedViewOnly(t *testing.T) {
 		seq++
 	}
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -589,7 +589,7 @@ func TestReducerKeepsSeparateStatePerInstrument(t *testing.T) {
 	msftBar := syntheticBar("MSFT", day(aaplBars+1), 1.0)
 	envelopes = append(envelopes, barEnvelope(t, seq, msftBar, day(aaplBars+1)))
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -643,7 +643,7 @@ func TestReducerBarCountWarmupIgnoresCalendarSpacing(t *testing.T) {
 		seq++
 	}
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -716,8 +716,11 @@ func TestReplayingSameFixtureTwiceYieldsByteIdenticalEmissions(t *testing.T) {
 			envelopes = append(envelopes, barEnvelope(t, seq, bar, day(i+1)))
 			seq++
 		}
-		msftBar := syntheticBar("MSFT", day(1), 3.0)
-		envelopes = append(envelopes, barEnvelope(t, seq, msftBar, day(1)))
+		// MSFT's first bar shares AAPL's last Session (ADR 0021: a closed
+		// Session is never reopened), and is still MSFT's first bar.
+		last := day(len(syntheticTrueRanges()))
+		msftBar := syntheticBar("MSFT", last, 3.0)
+		envelopes = append(envelopes, barEnvelope(t, seq, msftBar, last))
 		return envelopes
 	}
 
@@ -731,7 +734,7 @@ func TestReplayingSameFixtureTwiceYieldsByteIdenticalEmissions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("replay.New() error = %v", err)
 		}
-		emitted, err := engine.Run(context.Background(), buildFixture(t))
+		emitted, err := engine.Run(context.Background(), withSessionCloses(t, buildFixture(t)))
 		if err != nil {
 			t.Fatalf("Run() error = %v", err)
 		}
@@ -861,7 +864,7 @@ func TestReducerRejectsInvalidCompletedBarPayload(t *testing.T) {
 	invalid.Sequence = 2
 	envelopes = append(envelopes, invalid)
 
-	_, err = engine.Run(context.Background(), envelopes)
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil || !strings.Contains(err.Error(), "invalid completed bar payload") {
 		t.Fatalf("Run() error = %v, want it to name an invalid completed bar payload", err)
 	}
@@ -899,7 +902,7 @@ func TestReducerRejectsUndecodableCompletedBarPayload(t *testing.T) {
 
 	envelopes := []event.Envelope{configEnvelope(t, 1, day(0)), undecodable}
 
-	_, err = engine.Run(context.Background(), envelopes)
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil || !strings.Contains(err.Error(), "decode completed bar payload") {
 		t.Fatalf("Run() error = %v, want it to name a decode failure", err)
 	}
@@ -968,7 +971,7 @@ func TestReducerRejectsCompletedBarWithWrongSchemaVersion(t *testing.T) {
 
 	envelopes := []event.Envelope{configEnvelope(t, 1, day(0)), wrongVersion}
 
-	_, err = engine.Run(context.Background(), envelopes)
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil {
 		t.Fatal("Run() error = nil, want error for a completed bar payload at the wrong schema version")
 	}
@@ -1089,7 +1092,7 @@ func TestReducerRejectsDuplicateBarPeriodEnd(t *testing.T) {
 		barEnvelope(t, 3, duplicate, day(1)),
 	}
 
-	_, err = engine.Run(context.Background(), envelopes)
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil {
 		t.Fatal("Run() error = nil, want error for a duplicate bar period end")
 	}
@@ -1124,7 +1127,7 @@ func TestReducerRejectsOutOfOrderBarPeriodEnd(t *testing.T) {
 		barEnvelope(t, 3, earlier, day(5)), // envelope's own RecordedAt is irrelevant here
 	}
 
-	_, err = engine.Run(context.Background(), envelopes)
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err == nil {
 		t.Fatal("Run() error = nil, want error for an out-of-order bar period end")
 	}
@@ -1135,12 +1138,11 @@ func TestReducerRejectsOutOfOrderBarPeriodEnd(t *testing.T) {
 	}
 }
 
-// TestReducerAcceptsEarlierPeriodEndForDifferentInstrument confirms
-// chronology is tracked per instrument, not globally: the replay.Engine's
-// input Sequence — not PeriodEnd — is what orders the stream across
-// different instruments, so a second instrument's earlier-dated bar must
-// still be accepted.
-func TestReducerAcceptsEarlierPeriodEndForDifferentInstrument(t *testing.T) {
+// TestReducerRefusesAnEarlierPeriodEndForADifferentInstrument: bar
+// chronology is per instrument, but Sessions follow one another strictly
+// (ADR 0021), so once AAPL's day(5) Session has closed, MSFT's day(1) bar
+// would reopen a day already decided, and fails closed.
+func TestReducerRefusesAnEarlierPeriodEndForADifferentInstrument(t *testing.T) {
 	t.Parallel()
 
 	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
@@ -1161,12 +1163,9 @@ func TestReducerAcceptsEarlierPeriodEndForDifferentInstrument(t *testing.T) {
 		barEnvelope(t, 3, msft, day(1)),
 	}
 
-	emitted, err := engine.Run(context.Background(), envelopes)
-	if err != nil {
-		t.Fatalf("Run() error = %v, want a different instrument's earlier bar to be accepted", err)
-	}
-	if len(emitted) != 2 {
-		t.Fatalf("len(emitted) = %d, want 2", len(emitted))
+	_, err = engine.Run(context.Background(), withSessionCloses(t, envelopes))
+	if err == nil || !strings.Contains(err.Error(), "is not after the last closed Session") {
+		t.Fatalf("Run() error = %v, want the earlier Session refused", err)
 	}
 }
 
@@ -1204,7 +1203,7 @@ func TestReducerFlatInstrumentStaysNotReadyUntilNonZeroTrueRange(t *testing.T) {
 		seq++
 	}
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -1735,7 +1734,7 @@ func TestReducerKeepsSeparateEntryChannelPerInstrument(t *testing.T) {
 	msftBar := syntheticBar("MSFT", day(57), 900)
 	envelopes = append(envelopes, barEnvelope(t, seq, msftBar, day(57)))
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -2335,7 +2334,7 @@ func runReducerOverBars(t *testing.T, cfg event.ConfigurationPayload, bars []eve
 		seq++
 	}
 
-	emitted, err := engine.Run(context.Background(), envelopes)
+	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}

@@ -40,6 +40,13 @@ func (r *transition) applyRunCompleted(envelope event.Envelope) ([]event.Envelop
 	if err := payload.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: %w", err)
 	}
+	// A Session still open has Signals and Adds nobody has decided: ending
+	// the stream here would leave them with no proposal, no decline and no
+	// expiry (ADR 0021).
+	if r.sessionOpen {
+		return nil, fmt.Errorf("strategy: the input stream ended while the Session ending %s is still open; its Adds and entries were never decided (ADR 0021)",
+			r.sessionPeriodEnd.Format(time.RFC3339))
+	}
 	completedAt := envelope.EventTime
 
 	// Every expiry below is stamped with this instant, so a stream that

@@ -39,7 +39,7 @@ func marshalPayloads() []validatedPayload {
 		validCorporateAction(),
 		validProtectiveStopSet(), validProtectiveStopSetRaised(), validCampaignUnitsStopped(),
 		validExitOrderSet(), validExitOrderSetAtExitChannel(),
-		validAdapterRunStopped(),
+		validAdapterRunStopped(), validSessionClosed(),
 	}
 }
 
