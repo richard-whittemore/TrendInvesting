@@ -83,16 +83,52 @@ func freshnessFixture(t *testing.T, name string, newer bool) (root, path string)
 	return root, path
 }
 
-func identicalGuards(t *testing.T, firstCount, secondCount int) []block {
+func identicalGuards(t *testing.T, counts ...int) []block {
 	t.Helper()
 	root := t.TempDir()
-	writeAuditFixture(t, root, "internal/sample/sample.go", "package sample\nfunc f(first, second bool) error {\n if first { return nil }\n if second { return nil }\n return nil\n}\n")
-	path := writeAuditFixture(t, root, "coverage.out", fmt.Sprintf("mode: count\n%sinternal/sample/sample.go:3.11,3.25 1 %d\n%sinternal/sample/sample.go:4.12,4.26 1 %d\n", modulePath, firstCount, modulePath, secondCount))
+	source := "package sample\nfunc f(guard bool) error {\n"
+	profile := "mode: count\n"
+	for i, count := range counts {
+		source += " if guard { return nil }\n"
+		// Reverse profile order to require source-order ordinals.
+		profile = strings.Replace(profile, "mode: count\n", fmt.Sprintf("mode: count\n%sinternal/sample/sample.go:%d.11,%d.25 1 %d\n", modulePath, i+3, i+3, count), 1)
+	}
+	source += " return nil\n}\n"
+	writeAuditFixture(t, root, "internal/sample/sample.go", source)
+	path := writeAuditFixture(t, root, "coverage.out", profile)
 	return uncoveredBlocks(t, root, path)
 }
 
 func TestIdenticalGuardsCannotExchangeCoverage(t *testing.T) {
 	requireAuditFailure(t, "swapped-guards", "1 statement(s) in internal/ are executed by no test and are not in exclusions.json")
+}
+
+func TestEditsAboveExcludedGuardPreserveExclusion(t *testing.T) {
+	for _, edit := range []struct {
+		name, beforeFunction, beforeGuard string
+	}{
+		{name: "outside_function", beforeFunction: "// An unrelated comment.\n\nfunc other() { return }\n"},
+		{name: "inside_function", beforeGuard: "// An unrelated comment.\n _ = 1\n"},
+	} {
+		t.Run(edit.name, func(t *testing.T) {
+			root := t.TempDir()
+			blocks := func(beforeFunction, beforeGuard string) []block {
+				source := "package sample\n" + beforeFunction + "func f() {\n" + beforeGuard + " panic(\"unreachable\")\n}\n"
+				writeAuditFixture(t, root, "internal/sample/sample.go", source)
+				line := 3 + strings.Count(beforeFunction+beforeGuard, "\n")
+				path := writeAuditFixture(t, root, "coverage.out", fmt.Sprintf("mode: count\n%sinternal/sample/sample.go:%d.2,%d.22 1 0\n", modulePath, line, line))
+				return uncoveredBlocks(t, root, path)
+			}
+			listed := blocks("", "")
+			listed[0].Category = "unreachable-by-invariant"
+			listed[0].Reason = "synthetic guard invariant"
+			checkExclusions(t, blocks(edit.beforeFunction, edit.beforeGuard), listed)
+		})
+	}
+}
+
+func TestGroupedExclusionCountIsRejected(t *testing.T) {
+	requireAuditFailure(t, "grouped-count", "count 2 groups blocks; list each occurrence separately")
 }
 
 func TestIdenticalGuardsDumpSeparately(t *testing.T) {
@@ -118,17 +154,28 @@ func TestIdenticalGuardsDumpSeparately(t *testing.T) {
 }
 
 func TestNegativeExclusionCountFailsWithoutPanic(t *testing.T) {
-	requireAuditFailure(t, "negative-count", "internal/sample/sample.go:0 (f, byte 60): count -1 is negative")
+	requireAuditFailure(t, "negative-count", "internal/sample/sample.go:0 (f, occurrence 1): count -1 is negative")
 }
 
 func TestDefaultAndExplicitSingleCountsMatch(t *testing.T) {
 	for _, count := range []int{0, 1} {
 		t.Run(fmt.Sprintf("count_%d", count), func(t *testing.T) {
-			b := block{File: "internal/sample/sample.go", Function: "f", Statement: "return nil", Offset: 60,
+			b := block{File: "internal/sample/sample.go", Function: "f", Statement: "return nil", Occurrence: 1,
 				Category: "unreachable-by-invariant", Reason: "synthetic first guard invariant", Count: count}
 			checkExclusions(t, []block{b}, []block{b})
 		})
 	}
+}
+
+func TestDefaultAndExplicitFirstOccurrencesMatch(t *testing.T) {
+	var listed block
+	if err := json.Unmarshal([]byte(`{"file":"internal/sample/sample.go","function":"f","statement":"return nil","category":"unreachable-by-invariant","reason":"synthetic guard invariant"}`), &listed); err != nil {
+		t.Fatal(err)
+	}
+	uncovered := listed
+	uncovered.Occurrence = 1
+	checkExclusions(t, []block{uncovered}, []block{listed})
+	checkExclusions(t, []block{listed}, []block{uncovered})
 }
 
 func requireAuditFailure(t *testing.T, scenario, want string) {
@@ -152,16 +199,24 @@ func TestCoverageAuditFailure(t *testing.T) {
 		return
 	}
 	if scenario == "negative-count" {
-		b := block{File: "internal/sample/sample.go", Function: "f", Statement: "return nil", Offset: 60,
+		b := block{File: "internal/sample/sample.go", Function: "f", Statement: "return nil", Occurrence: 1,
 			Category: "unreachable-by-invariant", Reason: "synthetic first guard invariant", Count: -1}
 		checkExclusions(t, []block{b}, []block{b})
 		return
 	}
+	if scenario == "grouped-count" {
+		b := block{File: "internal/sample/sample.go", Function: "f", Statement: "return nil",
+			Category: "unreachable-by-invariant", Reason: "synthetic guard invariant", Count: 2}
+		checkExclusions(t, []block{b, b}, []block{b})
+		return
+	}
 	if scenario == "swapped-guards" {
-		listed := identicalGuards(t, 0, 1)
-		listed[0].Category = "unreachable-by-invariant"
-		listed[0].Reason = "synthetic first guard invariant"
-		checkExclusions(t, identicalGuards(t, 1, 0), listed)
+		listed := identicalGuards(t, 0, 0, 1)
+		for i := range listed {
+			listed[i].Category = "unreachable-by-invariant"
+			listed[i].Reason = "synthetic guard invariant"
+		}
+		checkExclusions(t, identicalGuards(t, 0, 1, 0), listed)
 		return
 	}
 	if name, ok := strings.CutPrefix(scenario, "stale-profile:"); ok {

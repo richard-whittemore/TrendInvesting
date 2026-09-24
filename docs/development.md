@@ -161,7 +161,7 @@ A coverage percentage cannot detect a branch that has become unreachable: dead c
 
 "Nobody has got round to it" is not a category. A missing test is a missing test.
 
-Each entry identifies one block by file, enclosing function, statement text and starting byte offset. Identical guards have separate entries, so exchanging which guard is covered fails the audit even when the total uncovered count is unchanged. Moving a block changes its identity: regenerate the dump and review the affected reasons after source edits. The dump lists each occurrence separately; it does not supply reasons for you.
+Each entry identifies one block by file, enclosing function, statement text and occurrence: its 1-based ordinal among all blocks with identical text in that function, including covered blocks, in source order. An omitted occurrence defaults to 1. The key survives edits outside the function and edits inside it that do not add, remove or reorder identical statements. `TestIdenticalGuardsCannotExchangeCoverage` ensures exchanging which identical guard is covered fails the audit even when the total uncovered count is unchanged; `TestEditsAboveExcludedGuardPreserveExclusion` ensures unrelated edits above a guard preserve its exclusion. The dump lists each occurrence separately and omits the default occurrence; it does not supply reasons for you. Legacy counts of zero (the default) or one remain accepted, but grouped counts are rejected.
 
 The audit fails in both directions: an unlisted statement that becomes uncovered, and a listed one that becomes covered or no longer exists. It generates its own coverage profile, so `go test ./...` enforces it. Prefer this default whenever inputs have changed.
 
