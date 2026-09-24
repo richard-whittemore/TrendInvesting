@@ -341,6 +341,14 @@ func decideDecisionCorpus(existing map[string]string, found bool, recorded map[s
 		return decisionCorpusOutcome{problems: []string{msg}}
 	}
 
+	// complete is the one definition both generating a new file and dropping
+	// pinned entries depend on. A run that recorded nothing is never
+	// complete, whatever flags produced it: generating or dropping on its
+	// evidence would pin nothing or empty the corpus. That does not rely on
+	// every test flag that suppresses running (-list today, whatever Go adds
+	// tomorrow) having been enumerated in decisionCorpusFullRun.
+	complete := fullRun && passed && len(recorded) > 0
+
 	if update && !passed {
 		return decisionCorpusOutcome{problems: []string{fmt.Sprintf(
 			"decision corpus: refusing to update %s from a run with failing tests — a corpus records what the "+
@@ -353,20 +361,16 @@ func decideDecisionCorpus(existing map[string]string, found bool, recorded map[s
 				"decision corpus: no pinned file %s for strategy.RulesVersion %q — run the whole package with "+
 					"-update-decision-corpus to generate it", path, version)}}
 		}
-		if !fullRun {
+		if !complete {
 			return decisionCorpusOutcome{problems: []string{fmt.Sprintf(
-				"decision corpus: refusing to generate %s from a filtered run (-run, -skip or -short excludes some "+
-					"scenarios) — rerun the whole package, unfiltered, with -update-decision-corpus", path)}}
+				"decision corpus: refusing to generate %s from an incomplete run (filtered by -run, -skip or -short, "+
+					"or one that recorded no scenario at all) — rerun the whole package, unfiltered, with "+
+					"-update-decision-corpus", path)}}
 		}
 		return decisionCorpusOutcome{write: recorded}
 	}
 
 	added := newScenarios(existing, recorded)
-	// A run that recorded nothing is never complete, whatever flags produced
-	// it: dropping on its evidence would empty the corpus. This does not rely
-	// on every test flag that suppresses running (-list today, whatever Go
-	// adds tomorrow) having been enumerated in decisionCorpusFullRun.
-	complete := fullRun && passed && len(recorded) > 0
 	var missing []string
 	if complete {
 		missing = droppedScenarios(existing, recorded)

@@ -221,6 +221,9 @@ func TestDecideDecisionCorpus(t *testing.T) {
 			recorded: pinned, fullRun: true, passed: true, wantProblem: "no pinned file"},
 		{name: "no file with update on a filtered run refuses",
 			recorded: pinned, passed: true, update: true, wantProblem: "refusing to generate"},
+		{name: "no file with update refuses to generate from a run that recorded nothing",
+			recorded: map[string]string{}, fullRun: true, passed: true, update: true,
+			wantProblem: "refusing to generate"},
 		{name: "no file with update on a passing full run generates it",
 			recorded: pinned, fullRun: true, passed: true, update: true, wantWrite: pinned},
 	} {
