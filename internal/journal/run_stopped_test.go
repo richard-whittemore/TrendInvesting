@@ -165,3 +165,49 @@ func TestVerifyRejectsAStopTheDomainContractRefuses(t *testing.T) {
 		})
 	}
 }
+
+// TestVerifyRejectsAnInputAfterAStopOtherThanCompletion mirrors the
+// reducer's ordering rule (strategy.Reducer.Apply): once a run is
+// deliberately stopped, only replay.run.completed may follow it. A journal
+// with anything else after the stop, including a second stop, records a run
+// the reducer would have refused, so Verify refuses it too rather than
+// reporting it as stopped.
+func TestVerifyRejectsAnInputAfterAStopOtherThanCompletion(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		types []string
+	}{
+		{"an ordinary input", []string{event.AdapterRunStoppedEventType, "test.event", event.RunCompletedEventType}},
+		{"a second stop", []string{event.AdapterRunStoppedEventType, event.AdapterRunStoppedEventType, event.RunCompletedEventType}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			header := journal.NewHeader(testConfigurationHash, testStrategyVersion, at(1), at(1))
+			chain := journal.NewChain(header)
+			var records []journal.Record
+			for i, typ := range tc.types {
+				envelope := testEnvelope(uint64(i + 1))
+				envelope.Type = typ
+				switch typ {
+				case event.AdapterRunStoppedEventType:
+					envelope.Payload = stopPayloadJSON(t)
+				case event.RunCompletedEventType:
+					envelope.Payload = []byte(`{}`)
+				}
+				envelope.PayloadHash = event.HashPayload(envelope.Payload)
+				records = append(records, journal.Record{
+					Sequence: uint64(i + 1), Kind: journal.KindInput, Envelope: envelope, RecordHash: chain.Next(journal.KindInput, envelope),
+				})
+			}
+			_, err := journal.Verify(bytes.NewReader(writeVerbatim(t, header, records)))
+			if err == nil {
+				t.Fatal("Verify() error = nil, want a refusal")
+			}
+			if !strings.Contains(err.Error(), "only "+event.RunCompletedEventType+" may follow a stop") {
+				t.Fatalf("Verify() error = %v, want it to name the ordering rule", err)
+			}
+		})
+	}
+}

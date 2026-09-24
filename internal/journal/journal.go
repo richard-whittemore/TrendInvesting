@@ -539,6 +539,13 @@ func Verify(r io.Reader) (Verification, error) {
 			return Verification{}, fmt.Errorf("journal: record %d: %w", record.Sequence, err)
 		}
 		if record.Kind == KindInput {
+			// The reducer's ordering rule (strategy.Reducer.Apply): once a
+			// run is deliberately stopped, only replay.run.completed may
+			// follow. A journal breaking it records a run the reducer would
+			// have refused, so it is not evidence of a stop.
+			if stopped && record.Envelope.Type != event.RunCompletedEventType {
+				return Verification{}, fmt.Errorf("journal: record %d: %q follows a deliberate stop; only %s may follow a stop", record.Sequence, record.Envelope.Type, event.RunCompletedEventType)
+			}
 			complete = record.Envelope.Type == event.RunCompletedEventType
 			if record.Envelope.Type == event.AdapterRunStoppedEventType {
 				var payload event.AdapterRunStoppedPayload
