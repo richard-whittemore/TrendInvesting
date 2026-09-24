@@ -16,6 +16,11 @@ from test_publisher import Client as FakeEngineClient, Frame, bar
 
 from client import Unavailable
 
+# The digest currently pinned in adapter/lean/README.md; any syntactically
+# valid digest would do for these tests, but reusing the real one keeps the
+# fixture honest.
+VALID_LEAN_IMAGE = "quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d"
+
 
 class FakeAlgorithm:
     LiveMode = False
@@ -62,7 +67,7 @@ class AlgorithmTests(unittest.TestCase):
         settings = {"socket": "unused", "configuration_hash": "hash",
                     "strategy_version": "version", "run_id": "test",
                     "symbol": "AAPL", "start": "2014-06-09", "end": "2014-06-10",
-                    "warmup_bars": 3, "cash": 1000000}
+                    "warmup_bars": 3, "cash": 1000000, "lean_image": VALID_LEAN_IMAGE}
         algo = algorithm.CompletedBarsAlgorithm()
         with patch.object(algorithm, "load_settings", return_value=settings), \
                 patch.object(algorithm, "Client", return_value=FakeEngineClient()):
@@ -182,7 +187,7 @@ class AlgorithmTests(unittest.TestCase):
         settings = {"socket": "unused", "configuration_hash": "hash",
                     "strategy_version": "version", "run_id": "test",
                     "symbol": "AAPL", "start": "2014-06-09", "end": "2014-06-10",
-                    "warmup_bars": 3, "cash": 1000000}
+                    "warmup_bars": 3, "cash": 1000000, "lean_image": VALID_LEAN_IMAGE}
         with patch.object(algorithm, "load_settings", return_value=settings), \
                 patch.object(algorithm, "Client", side_effect=Unavailable("no engine on the socket")):
             algo = algorithm.CompletedBarsAlgorithm()
@@ -238,7 +243,8 @@ class CashSettingTests(unittest.TestCase):
     """Starting cash comes from the run's settings, never a built-in default."""
     base = {"socket": "unused", "configuration_hash": "hash",
             "strategy_version": "version", "run_id": "test", "symbol": "AAPL",
-            "start": "2014-06-09", "end": "2014-06-10", "warmup_bars": 3}
+            "start": "2014-06-09", "end": "2014-06-10", "warmup_bars": 3,
+            "lean_image": VALID_LEAN_IMAGE}
 
     def start(self, settings):
         algo = algorithm.CompletedBarsAlgorithm()
@@ -262,6 +268,77 @@ class CashSettingTests(unittest.TestCase):
                 algo = self.start(settings)
                 self.assertTrue(algo.failed)
                 self.assertFalse(hasattr(algo, "cash"))
+
+
+class LeanImageValidationTests(unittest.TestCase):
+    """validate_lean_image is a pure function: no LEAN state is needed to test it.
+
+    A LEAN run is evidence (ADR 0012, ADR 0017); only the digest form ties a
+    run to the exact engine that produced it, so a moving tag is rejected
+    alongside anything malformed.
+    """
+
+    def test_a_valid_digest_is_accepted(self):
+        self.assertEqual(algorithm.validate_lean_image(VALID_LEAN_IMAGE), VALID_LEAN_IMAGE)
+
+    def test_a_missing_image_is_rejected(self):
+        with self.assertRaises(ValueError):
+            algorithm.validate_lean_image(None)
+
+    def test_a_moving_tag_is_rejected(self):
+        with self.assertRaises(ValueError):
+            algorithm.validate_lean_image("quantconnect/lean:latest")
+
+    def test_a_numeric_moving_tag_is_rejected(self):
+        with self.assertRaises(ValueError):
+            algorithm.validate_lean_image("quantconnect/lean:17490")
+
+    def test_uppercase_hex_is_rejected(self):
+        with self.assertRaises(ValueError):
+            algorithm.validate_lean_image("quantconnect/lean@sha256:" + "A" * 64)
+
+    def test_63_hex_characters_is_rejected(self):
+        with self.assertRaises(ValueError):
+            algorithm.validate_lean_image("quantconnect/lean@sha256:" + "a" * 63)
+
+    def test_a_wrong_repository_is_rejected(self):
+        with self.assertRaises(ValueError):
+            algorithm.validate_lean_image("quantconnect/lean-cli@sha256:" + "a" * 64)
+
+
+class LeanImageSettingTests(unittest.TestCase):
+    """The engine image comes from the run's own settings, never a default.
+
+    A LEAN run is evidence (ADR 0012, ADR 0017): pinning by digest, and
+    logging that digest at startup, is what ties a run to the exact engine
+    that produced it.
+    """
+    base = {"socket": "unused", "configuration_hash": "hash",
+            "strategy_version": "version", "run_id": "test", "symbol": "AAPL",
+            "start": "2014-06-09", "end": "2014-06-10", "warmup_bars": 3,
+            "cash": 1000000}
+
+    def start(self, settings):
+        algo = algorithm.CompletedBarsAlgorithm()
+        with patch.object(algorithm, "load_settings", return_value=settings), \
+                patch.object(algorithm, "Client"):
+            algo.Initialize()
+        return algo
+
+    def test_a_valid_image_is_accepted_and_logged_at_startup(self):
+        algo = self.start(dict(self.base, lean_image=VALID_LEAN_IMAGE))
+        self.assertFalse(algo.failed)
+        self.assertIn("adapter: lean_image=" + VALID_LEAN_IMAGE, algo.logs)
+
+    def test_missing_lean_image_fails_closed(self):
+        algo = self.start(dict(self.base))
+        self.assertTrue(algo.failed)
+        self.assertIn("lean_image", algo.quit_reason)
+
+    def test_a_moving_tag_fails_closed(self):
+        algo = self.start(dict(self.base, lean_image="quantconnect/lean:latest"))
+        self.assertTrue(algo.failed)
+        self.assertIn("lean_image", algo.quit_reason)
 
 
 class DelistingTests(unittest.TestCase):
