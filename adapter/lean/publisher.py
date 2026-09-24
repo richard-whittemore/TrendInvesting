@@ -6,6 +6,8 @@ from math import isfinite
 
 # event.AccountSnapshotSchemaVersion (internal/event/account.go); ADR 0015.
 ACCOUNT_SNAPSHOT_SCHEMA_VERSION = 2
+# event.SessionClosedSchemaVersion (internal/event/session.go); ADR 0015.
+SESSION_CLOSED_SCHEMA_VERSION = 1
 # event.RunCompletedSchemaVersion (internal/event/run_completed.go); ADR 0015.
 RUN_COMPLETED_SCHEMA_VERSION = 1
 # event.AdapterRunStoppedSchemaVersion (internal/event/run_stopped.go); ADR 0015.
@@ -42,6 +44,10 @@ class Publisher:
         self.last_as_of = None
         self.last_event_time = None
         self.completed = False
+        # The open Session's period end and the instruments whose bars it
+        # holds (ADR 0021); None and empty between Sessions.
+        self.session_end = None
+        self.session_ids = []
 
     def publish(self, instrument, bar, raw, period_end):
         if self.last_end is not None and bar.EndTime <= self.last_end:
@@ -53,8 +59,29 @@ class Publisher:
                 ("Open", "High", "Low", "Close", "Volume")}),
             "raw": raw,
         }
+        if self.session_end is not None and period_end != self.session_end:
+            raise ValueError("a bar for another period end while a session is open")
         decisions = self._publish("market.bar.completed", 1, "bar", payload, period_end)
         self.last_end = bar.EndTime
+        self.session_end = period_end
+        self.session_ids.append(instrument)
+        return decisions
+
+    def publish_session_closed(self, period_end):
+        """End the slice's Session after its bars (ADR 0021).
+
+        Names every instrument whose bar this Session published, sorted, so the
+        engine can check it received exactly those bars before it decides the
+        day's Adds and entries. Sent before the snapshot: a snapshot as of this
+        close is not cash known at the Session's previous close (ADR 0010).
+        """
+        if self.session_end != period_end:
+            raise ValueError("no open session ends at {}".format(period_end))
+        payload = {"period_end": period_end, "instrument_ids": sorted(self.session_ids)}
+        decisions = self._publish("market.session.closed", SESSION_CLOSED_SCHEMA_VERSION,
+                                  "session-closed", payload, period_end)
+        self.session_end = None
+        self.session_ids = []
         return decisions
 
     def publish_snapshot(self, portfolio, period_end):

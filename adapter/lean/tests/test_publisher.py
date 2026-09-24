@@ -72,6 +72,7 @@ class PublisherTests(unittest.TestCase):
             end = "2014-06-{:02d}T20:00:00Z".format(day)
             b = bar(day)
             pub.publish("AAPL", b, raw_view(Frame(b.EndTime), b.EndTime), end)
+            pub.publish_session_closed(end)
             pub.publish_snapshot(SimpleNamespace(TotalPortfolioValue=123456.75, Cash=cash), end)
             envelope = client.sent[-1]
             self.assertEqual(envelope["payload"], {
@@ -84,6 +85,49 @@ class PublisherTests(unittest.TestCase):
                 input=json.dumps(envelope, separators=(",", ":")),
                 text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_session_closed_payload_matches_go_contract(self):
+        """ADR 0021: the close names the Session's bars, after them and
+        before the snapshot, continuing the one sequence."""
+        client = Client()
+        pub = Publisher(client, "hash", "version", "test")
+        for day in (6, 9):
+            end = "2014-06-{:02d}T20:00:00Z".format(day)
+            b = bar(day)
+            pub.publish("AAPL", b, raw_view(Frame(b.EndTime), b.EndTime), end)
+            pub.publish_session_closed(end)
+            envelope = client.sent[-1]
+            self.assertEqual(envelope["type"], "market.session.closed")
+            self.assertEqual(envelope["schema_version"], 1)
+            self.assertEqual(envelope["payload"], {"period_end": end, "instrument_ids": ["AAPL"]})
+            self.assertEqual(envelope["event_time"], end)
+            self.assertEqual(envelope["recorded_at"], end)
+            self.assertEqual(envelope["sequence"], client.sent[-2]["sequence"] + 1)
+            result = subprocess.run(
+                ["go", "run", "./adapter/lean/tests/testdata/session_contract.go"],
+                cwd=Path(__file__).resolve().parents[3],
+                input=json.dumps(envelope, separators=(",", ":")),
+                text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_session_close_requires_its_open_session(self):
+        client = Client()
+        pub = Publisher(client, "hash", "version", "test")
+        with self.assertRaises(ValueError):
+            pub.publish_session_closed("2014-06-09T20:00:00Z")
+        b = bar(9)
+        pub.publish("AAPL", b, raw_view(Frame(b.EndTime), b.EndTime), "2014-06-09T20:00:00Z")
+        with self.assertRaises(ValueError):
+            pub.publish_session_closed("2014-06-10T20:00:00Z")
+        # The next day's bar cannot open a Session while this one is open.
+        with self.assertRaises(ValueError):
+            later = bar(10)
+            pub.publish("AAPL", later, raw_view(Frame(later.EndTime), later.EndTime), "2014-06-10T20:00:00Z")
+        self.assertEqual([e["type"] for e in client.sent], ["market.bar.completed"])
+        pub.publish_session_closed("2014-06-09T20:00:00Z")
+        with self.assertRaises(ValueError):
+            pub.publish_session_closed("2014-06-09T20:00:00Z")
+        self.assertEqual(pub.sequence, 3)
 
     def test_snapshot_rejects_duplicate_or_decreasing_as_of(self):
         client = Client()
@@ -131,8 +175,9 @@ class PublisherTests(unittest.TestCase):
             b = bar(day)
             raw = raw_view(Frame(b.EndTime), b.EndTime)
             pub.publish("AAPL", b, raw, "2014-06-{:02d}T20:00:00Z".format(day))
-        self.assertEqual([e["sequence"] for e in client.sent], [2, 3])
-        for e in client.sent:
+            pub.publish_session_closed("2014-06-{:02d}T20:00:00Z".format(day))
+        self.assertEqual([e["sequence"] for e in client.sent], [2, 3, 4, 5])
+        for e in client.sent[::2]:
             self.assertEqual(e["type"], "market.bar.completed")
             self.assertEqual(e["payload"]["split_adjusted"]["view"], "split-adjusted")
             self.assertEqual(e["payload"]["raw"]["view"], "raw")

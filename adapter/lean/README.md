@@ -7,10 +7,12 @@ Built so far: `algorithm.py` is a `QCAlgorithm` that publishes one
 included — carrying both the split-adjusted and raw price views (ADR 0004),
 continuing the Go engine's own input sequence (`cmd/engine/engine.go`'s
 package doc, "Wire contract: the adapter's first bar must carry Sequence 2").
-Account snapshots continue that same single sequence after the bar they
-follow: configuration 1, bar 2, snapshot 3, bar 4, snapshot 5, including
-warm-up. Both input types use the same reply validation for run identity,
-sequence, causation, correlation and the hash of the exact payload bytes.
+Each slice's bars are a Session (ADR 0021): after them the adapter sends
+`market.session.closed`, naming those bars' instruments, and only then the
+account snapshot, all in that same single sequence: configuration 1, bar 2,
+session close 3, snapshot 4, bar 5, and so on, including warm-up. Every input
+type uses the same reply validation for run identity, sequence, causation,
+correlation and the hash of the exact payload bytes.
 Warm-up is counted in bars, not calendar days, but every warm-up bar is still
 sent: the reducer builds N and the Entry/Exit Channels from every completed
 bar it receives (`internal/strategy/reducer.go`), so withholding LEAN's
