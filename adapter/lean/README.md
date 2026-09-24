@@ -28,6 +28,14 @@ increase. The payload uses `event.AccountSnapshotSchemaVersion` (2), with
 all four fields required by `event.AccountSnapshotPayload`. Invalid figures
 or a failed bar or snapshot exchange stop the run.
 
+LEAN's starting cash is the run's own `cash` setting in `run.json`, required
+and never defaulted. Set it to the configuration's
+`notional_account.starting_equity`. The first snapshot reports LEAN's equity
+as the account's actual equity, and the engine's Notional Account measures
+drawdown against the configured starting figure (ADR 0007). A run whose cash is
+half the configured figure or less reads as a drawdown past the rule's 50%
+asymptote on that first snapshot, and the engine halts, correctly.
+
 There is no opening snapshot: warm-up bars precede StartDate, and the reducer
 cannot size a Unit on its first bar because N and the channels use preceding
 bars. The snapshot after bar 1 therefore arrives before any sizing is possible.

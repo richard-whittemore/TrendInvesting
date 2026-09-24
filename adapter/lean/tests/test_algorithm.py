@@ -55,7 +55,7 @@ class AlgorithmTests(unittest.TestCase):
         settings = {"socket": "unused", "configuration_hash": "hash",
                     "strategy_version": "version", "run_id": "test",
                     "symbol": "AAPL", "start": "2014-06-09", "end": "2014-06-10",
-                    "warmup_bars": 3}
+                    "warmup_bars": 3, "cash": 1000000}
         algo = algorithm.CompletedBarsAlgorithm()
         with patch.object(algorithm, "load_settings", return_value=settings), \
                 patch.object(algorithm, "Client", return_value=FakeEngineClient()):
@@ -175,7 +175,7 @@ class AlgorithmTests(unittest.TestCase):
         settings = {"socket": "unused", "configuration_hash": "hash",
                     "strategy_version": "version", "run_id": "test",
                     "symbol": "AAPL", "start": "2014-06-09", "end": "2014-06-10",
-                    "warmup_bars": 3}
+                    "warmup_bars": 3, "cash": 1000000}
         with patch.object(algorithm, "load_settings", return_value=settings), \
                 patch.object(algorithm, "Client", side_effect=Unavailable("no engine on the socket")):
             algo = algorithm.CompletedBarsAlgorithm()
@@ -225,3 +225,33 @@ class AlgorithmTests(unittest.TestCase):
         self.assertTrue(algo.failed)
         self.assertIn("backtest-only", algo.quit_reason)
 
+
+
+class CashSettingTests(unittest.TestCase):
+    """Starting cash comes from the run's settings, never a built-in default."""
+    base = {"socket": "unused", "configuration_hash": "hash",
+            "strategy_version": "version", "run_id": "test", "symbol": "AAPL",
+            "start": "2014-06-09", "end": "2014-06-10", "warmup_bars": 3}
+
+    def start(self, settings):
+        algo = algorithm.CompletedBarsAlgorithm()
+        algo.SetCash = lambda value: setattr(algo, "cash", value)
+        with patch.object(algorithm, "load_settings", return_value=settings), \
+                patch.object(algorithm, "Client"):
+            algo.Initialize()
+        return algo
+
+    def test_cash_is_the_runs_own_figure(self):
+        algo = self.start(dict(self.base, cash=1000000))
+        self.assertFalse(algo.failed)
+        self.assertEqual(algo.cash, 1000000)
+
+    def test_missing_or_invalid_cash_fails_closed(self):
+        for bad in (None, 0, -1, "1000000", float("inf"), float("nan"), True):
+            with self.subTest(cash=bad):
+                settings = dict(self.base)
+                if bad is not None:
+                    settings["cash"] = bad
+                algo = self.start(settings)
+                self.assertTrue(algo.failed)
+                self.assertFalse(hasattr(algo, "cash"))

@@ -4,6 +4,7 @@ from AlgorithmImports import *  # noqa: F401,F403
 # Bind stdlib names after AlgorithmImports: its datetime.time shadows time.
 from datetime import datetime, timezone
 from json import load
+from math import isfinite
 from os import environ
 from os.path import abspath, dirname, join
 from sys import path
@@ -40,7 +41,15 @@ class CompletedBarsAlgorithm(QCAlgorithm):
                 raise ValueError("warmup_bars must be a nonnegative integer")
             self.SetStartDate(*map(int, settings["start"].split("-")))
             self.SetEndDate(*map(int, settings["end"].split("-")))
-            self.SetCash(100000)
+            # The run's own starting cash, never a default: the first
+            # account.snapshot reports it as actual equity, and the engine's
+            # Notional Account measures drawdown against the configuration's
+            # starting figure (ADR 0007). A mismatched pair reads as a deep
+            # drawdown on the first snapshot and halts the run.
+            cash = settings["cash"]
+            if type(cash) not in (int, float) or not isfinite(cash) or cash <= 0:
+                raise ValueError("cash must be a finite positive number")
+            self.SetCash(cash)
             self.SetTimeZone(TimeZones.NewYork)
             self.instrument = settings["symbol"]
             self.symbol = self.AddEquity(
