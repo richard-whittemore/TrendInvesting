@@ -1,6 +1,6 @@
 # ADR 0019: Broker reconciliation is an input, and unexplained differences halt
 
-- Status: Proposed
+- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery)
 - Date: 2026-09-17
 
 ## Context
@@ -90,3 +90,71 @@ A halt is terminal for that run, as the existing engine contract provides. No au
 - The owner must approve the opening-baseline/recovery procedure and timing bounds. Broker accounting documentation and recorded integration fixtures must establish balance basis, precision, effective-time handling, complete activity coverage and coherent cutoffs. A separate rule must settle intraday cash reductions against ADR 0010. These are explicit prerequisites to live readiness, not guesses embedded in this ADR.
 - The implementation ticket must first test one-share discrepancies in both directions, broker-only holdings/orders, supported journalled delisting and dividend bridges, a residual of one smallest supported monetary unit in either direction, offsetting missing cash activities, duplicate or unapplied explanations, stale/incomplete snapshots, cancelled protective orders, and no proposal after an unresolved discrepancy. Recorded success and failure runs must replay byte-identically, including terminal decisions. This design-only ADR adds no implementation or tests.
 - Reconciliation policy, opening evidence, successful checks, halts and recovery links are retained under the run's provenance (ADRs 0012, 0017 and 0018). Failure is evidence, never a record to replace with a later successful check.
+
+## Amendment (2026-09-24): a graduated response, alerting, and a recovery procedure
+
+Approved by the owner on 2026-09-24.
+
+### Why
+
+As written above, an `unexplained` or `unverifiable` result halts the whole engine, and a halt stops everything. That treats every discrepancy alike. A cash difference of a few dollars would stop the management of every open position, and a share-count mismatch in one instrument would stop the management of every other. Worse, it stops **risk-reducing** actions: raising a Protective Stop, or taking an Exit-Channel exit. So a halt during a fast market becomes a risk of its own. The owner's concern was exactly this: that stopping the system could itself cause harm, because it would no longer be acting on open positions.
+
+The principle this amendment adopts: **a discrepancy is a reason to stop adding risk, not a reason to stop managing risk already held.**
+
+### Engine states
+
+This replaces "Both latter classifications halt the whole engine" in *Explain changes by causing events* above, and the first sentence of the paragraph beginning "A halt is terminal for that run".
+
+| State | Entered when | New entries and Adds | Instruments the discrepancy does not name | Instruments it names |
+|---|---|---|---|---|
+| **Normal** | every check `matched` or `explained` | allowed | managed normally | — |
+| **Degraded** | `unexplained`, with a scope the evidence bounds: named cash components and/or named instruments or orders | **blocked everywhere** | **risk-reducing management continues** (below) | **frozen**, except restoring a missing Protective Stop (below) |
+| **Halted** | `unverifiable`, or `unexplained` with a scope the evidence cannot bound | blocked | no order changes | no order changes |
+
+**Risk-reducing management** means only actions that cannot increase exposure: raising a Protective Stop under the Stop Ladder, an Exit-Channel exit, and a Delisting Exit where supported. Nothing that opens or adds to a position is allowed while not Normal.
+
+**Frozen** means the system changes no order for that instrument. Its Protective Stop keeps working at the broker, because under the order-lifetime decision recorded on #29 it is good-till-cancelled. There is one exception. If the discrepancy **is** a missing or cancelled Protective Stop, the system **restores** it at the last journalled level for the broker-reported quantity. Restoring protection reduces risk; leaving a position unprotected while waiting for a human does not.
+
+**Exits and restored stops are sized from the broker-reported quantity** in the reconciliation that caused the state, never from the believed quantity. When the discrepancy *is* the quantity, that is the only number that cannot sell shares not held and so accidentally open a short.
+
+**A cash-only discrepancy names no instrument.** It blocks entries and Adds, because sizing depends on cash, and leaves every position under normal management.
+
+**Degraded and Halted are decisions, not side effects.** The reducer derives the state and its scope from the recorded reconciliation input. It emits them through `strategy.engine.state`, whose closed state set gains `degraded`, and whose payload names the affected instruments, orders and cash components. It does this without broker calls or wall-clock reads, so replay reproduces the state, its scope and every order change made under it, byte for byte.
+
+**Leaving Degraded or Halted is never automatic.** A later matching reconciliation does not restore Normal on its own. Only the recovery procedure below does, with the owner's approval. This keeps the original rule that the system never quietly resumes after something it could not explain.
+
+### Alerting
+
+An alert is the only way a person learns the system has stopped adding risk, so it is a safety requirement, not a convenience.
+
+- **Every transition out of Normal alerts immediately**, as does every transition between Degraded and Halted. While the state persists, the alert repeats at a fixed interval until the owner acknowledges it. Acknowledgement is recorded.
+- **At least two independent channels**, chosen by the owner. A failed delivery is itself recorded and retried on the other channel.
+- **A heartbeat, checked from outside the system.** A crashed or wedged system cannot send its own alert, so the system emits a regular heartbeat and an external monitor alerts when it stops. This dead-man's switch is what catches the failure the system cannot report itself.
+- **Every alert states:** the state and when it began; what triggered it (reconciliation ID, classification and reasons); the affected instruments, orders and cash components; what the system is **still doing**; what it has **stopped doing**; and a link to the recovery procedure.
+- **The alert interval, the heartbeat interval and the heartbeat timeout** are operational configuration, set with the timing bounds this ADR already leaves to the owner, and validated in paper trading.
+
+### Recovery
+
+`docs/runbooks/reconciliation.md` is the procedure, with one path per discrepancy class. In outline, recovery always:
+
+1. **acknowledges** the alert;
+2. **identifies the cause** from the broker's own activity records, not from our state;
+3. **records the missing causing event(s)** through a supported input: a recovered fill report, a manual trade, a corporate action, or a cash movement. It never adopts a balance and never edits history;
+4. **decides the disposition** of any affected order, and records it;
+5. **approves a restart:** a linked recovery run rebuilds state from the journal plus the recorded events, and must pass a fresh reconciliation before returning to Normal.
+
+The failed run stays intact as evidence, as above.
+
+### Consequences of this amendment
+
+- `docs/architecture.md`'s "safe mode" means **Degraded or Halted** as defined here.
+- Positions stay protected in every state: each has a good-till-cancelled stop at the broker, and a missing one is restored while Degraded.
+- More behaviour to build and test than a single halt. The implementation ticket must add tests for:
+  - a cash-only discrepancy leaving positions managed;
+  - an instrument-scoped discrepancy freezing only that instrument;
+  - a restored Protective Stop sized from the broker quantity;
+  - an exit never exceeding the broker-reported holding;
+  - no entry or Add while Degraded;
+  - no automatic return to Normal;
+  - byte-identical replay of every state transition and every order change made while Degraded.
+- Alerting and the heartbeat monitor are live-readiness prerequisites, alongside the timing bounds. The alert channels are the owner's choice.
