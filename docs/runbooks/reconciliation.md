@@ -46,7 +46,7 @@ Compare the broker's **activity statement** (trades, order history, cash activit
    - **corporate action:** record it through the corporate-action path. If that kind is not yet supported (#38, #113), the instrument stays frozen until it is;
    - **cash difference:** record the dividend, fee, interest or transfer as its own cash event.
 2. **Decide what happens to each affected order,** such as cancelling a stray order or keeping a stop, and record the decision.
-3. **Record anything done by hand at the broker,** such as a stop you placed in step 3 of *First*. Whatever the broker holds must be explainable by recorded events, or the next reconciliation fails again.
+3. **Record anything done by hand at the broker,** such as a stop you placed or an order you cancelled in steps 3–4 of *First*. Whatever the broker holds must be explainable by recorded events, or the next reconciliation fails again.
 4. **Approve the restart.** A recovery run rebuilds state from the journal plus the events just recorded, then runs a fresh reconciliation. **Only a passing reconciliation returns the system to Normal.** If it fails, the new alert names what is still unexplained; go back to *Find the cause*. *(Command to confirm.)*
 5. **Keep the failed run.** It is evidence, and it is never deleted or overwritten (ADRs 0012, 0017, 0018).
 
