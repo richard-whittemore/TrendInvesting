@@ -200,10 +200,15 @@ func TestCampaignAggregateRiskOverflowIsRefused(t *testing.T) {
 	fill.Quantity = 1
 	fill.Price = 155.5
 	campaignID := testDecisionID("campaign", "AAPL", day(56))
+	// Two Units whose risks overflow together also cost more together than
+	// any cash can state, so ADR 0020's debit of the first leaves too little
+	// for the second until a snapshot as of its fill restates the cash.
 	newStream(t, cfg).snapshot(cashSnapshot(cfg, day(1), math.MaxFloat64)).
 		bars(breakoutBars("AAPL")).fill(fill).
-		fill(addFill("AAPL", campaignID, 2, day(56), "large-risk-add", 175, 1, day(56))).
+		snapshot(cashSnapshot(cfg, day(56), math.MaxFloat64)).
 		bar(addOpportunityBar("AAPL", day(57), 200)).
+		fill(addFill("AAPL", campaignID, 2, day(57), "large-risk-add", 175, 1, day(57))).
+		bar(addOpportunityBar("AAPL", day(58), 200)).
 		wantRunError("cannot compute aggregate open risk", "not representable")
 }
 
@@ -211,18 +216,25 @@ func TestRemainingCampaignRiskOverflowIsRefusedAtAPartialStop(t *testing.T) {
 	t.Parallel()
 	cfg := validConfigurationPayload()
 	cfg.NotionalAccount.StartingEquity = 1.7e308
-	cfg.UnitVolatilityFraction = 0.02
+	cfg.UnitVolatilityFraction = 0.015
 	cfg.StopMultiple = 50
-	cfg.DollarsPerPoint = 7e304
+	cfg.DollarsPerPoint = 2e304
+	// Unit 1 fills one share of its three-share Unit and Units 2 and 3 fill
+	// all three. The remaining risk of Units 2 and 3 overflows, while Units
+	// 1 and 2 together, which Session 57's bar evaluates, do not; and each
+	// Unit's cost fits the cash ADR 0020 leaves it, with a snapshot as of
+	// Unit 2's fill restating the cash before Unit 3 is decided.
 	fill := openingFill("AAPL")
 	fill.Quantity = 1
 	fill.Price = 2155.5
 	campaignID := testDecisionID("campaign", "AAPL", day(56))
 	newStream(t, cfg).snapshot(cashSnapshot(cfg, day(1), math.MaxFloat64)).
 		bars(affineAuditBars(1, 2000)).fill(fill).
-		fill(addFill("AAPL", campaignID, 2, day(56), "large-risk-2", 2175, 1, day(56))).
-		fill(addFill("AAPL", campaignID, 3, day(56), "large-risk-3", 2195, 1, day(56))).
-		fill(stopFillForUnits("AAPL", campaignID, "partial-large-risk-stop", []string{fill.FillID}, 2100, 1, day(57))).
+		fill(addFill("AAPL", campaignID, 2, day(56), "large-risk-2", 2175, 3, day(56))).
+		snapshot(cashSnapshot(cfg, day(56), math.MaxFloat64)).
+		bar(completedBar("AAPL", day(57), 2200, 2150, 2150)).
+		fill(addFill("AAPL", campaignID, 3, day(57), "large-risk-3", 2195, 3, day(57))).
+		fill(stopFillForUnits("AAPL", campaignID, "partial-large-risk-stop", []string{fill.FillID}, 2100, 1, day(58))).
 		wantRunError("cannot compute the remaining aggregate open risk", "not representable")
 }
 

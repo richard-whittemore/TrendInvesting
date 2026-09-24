@@ -41,6 +41,7 @@ func TestCloneCoversEveryReferenceTypedField(t *testing.T) {
 		"Reducer.acceptedFills (map)":                            overlay,
 		"Reducer.acceptedFills[v].unitIDs (slice)":               immutable,
 		"Reducer.delisted (map)":                                 eager,
+		"Reducer.fillDebits (slice)":                             eager,
 		"Reducer.instruments (map)":                              overlay,
 		"Reducer.instruments[v] (pointer)":                       firstAccess,
 		"Reducer.instruments[v]->.campaign (pointer)":            firstAccess,

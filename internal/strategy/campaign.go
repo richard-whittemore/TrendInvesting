@@ -1626,6 +1626,11 @@ func (r *transition) openCampaign(state *instrumentState, pending *pendingPropos
 	// arrives and however much has happened to the instrument since (see
 	// acceptedFillState's doc comment).
 	r.recordAcceptedFill(fill.FillID, acceptedFillFromPayload(fill))
+	// ADR 0020: the fill's actual cost is spent now, before the chained Add
+	// below is checked against what remains.
+	if err := r.debitFill(fill); err != nil {
+		return nil, err
+	}
 
 	// EventTime is the fill's timestamp on both: the Campaign, and its stop,
 	// came into being when the fill did, not when the Signal fired. Order is
@@ -2394,6 +2399,11 @@ func (r *transition) applyAddFill(state *instrumentState, fill event.FillPayload
 	recordExitOrders(campaign, state.pendingExitProposal)
 	state.pendingAddProposal = nil
 	r.recordAcceptedFill(fill.FillID, acceptedFillFromPayload(fill))
+	// ADR 0020: the fill's actual cost is spent now, before the chained Add
+	// below is checked against what remains.
+	if err := r.debitFill(fill); err != nil {
+		return nil, err
+	}
 
 	emissions := []event.Envelope{
 		r.stamp(decisionID(fmt.Sprintf("unit-added-%d", unitIndex), fill.InstrumentID, fill.FilledAt), event.CampaignUnitAddedEventType, event.CampaignUnitAddedSchemaVersion, fill.FilledAt, input, unitAddedBytes),

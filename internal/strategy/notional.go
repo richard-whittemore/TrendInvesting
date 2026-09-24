@@ -587,6 +587,7 @@ func (r *transition) applyAccountSnapshot(envelope event.Envelope) ([]event.Enve
 	r.availableCash = snapshot.AvailableCash
 	r.availableCashAsOf = snapshot.AsOf
 	r.hasAvailableCash = true
+	r.dropReflectedFillDebits()
 
 	var emissions []event.Envelope
 
@@ -810,4 +811,62 @@ func scaleAccountFigure(name string, before, equityBefore, equityAfter float64) 
 		return 0, fmt.Errorf("strategy: cannot apply a cash movement: %s must be positive", name)
 	}
 	return result, nil
+}
+
+// fillDebit is one entry or Add fill's actual cost, debited from spendable
+// cash until a snapshot reflects it (ADR 0020).
+type fillDebit struct {
+	filledAt time.Time
+	cost     float64
+}
+
+// debitFill records a buy fill's actual cost against spendable cash, as
+// ADR 0020 requires: "the ledger is debited the fill's actual cost, slippage
+// and commission included". Price already carries the slippage (ADR 0013),
+// so the cost is quantity x price x dollars per point, plus commission. A
+// fill is debited exactly once, when it is accepted.
+//
+// A fill the basis already reflects is not debited: a snapshot as of the
+// fill's own time or later states a balance that includes it. A snapshot
+// stated earlier does not, even when it is delivered after the fill, which
+// is the order a LEAN run sends them in (ADR 0020's producer amendment: the
+// previous close's snapshot follows the next Session's fills).
+//
+// It fails closed when the cost, or the total the basis must be reduced by,
+// leaves the float64 range: spendable cash could no longer be stated.
+func (r *transition) debitFill(fill event.FillPayload) error {
+	if r.hasAvailableCash && !fill.FilledAt.After(r.availableCashAsOf) {
+		return nil
+	}
+	cost := float64(float64(fill.Quantity)*fill.Price*r.dollarsPerPoint) + fill.Commission
+	if total := r.fillDebitTotal() + cost; math.IsInf(total, 0) || math.IsNaN(total) {
+		return fmt.Errorf("strategy: instrument %q: fill %q costs %d shares x %v x %v dollars per point plus commission %v, which leaves the representable range of spendable cash; failing closed rather than stating an unknowable balance (ADR 0020)",
+			fill.InstrumentID, fill.FillID, fill.Quantity, fill.Price, r.dollarsPerPoint, fill.Commission)
+	}
+	r.fillDebits = append(r.fillDebits, fillDebit{filledAt: fill.FilledAt, cost: cost})
+	return nil
+}
+
+// dropReflectedFillDebits keeps only the debits of fills after the new
+// snapshot's as-of. The snapshot replaces the basis outright, and a fill at
+// or before its as-of is already in it, so debiting it again would count the
+// same spend twice (ADR 0020: "A fill debits the ledger exactly once").
+func (r *transition) dropReflectedFillDebits() {
+	var kept []fillDebit
+	for _, debit := range r.fillDebits {
+		if debit.filledAt.After(r.availableCashAsOf) {
+			kept = append(kept, debit)
+		}
+	}
+	r.fillDebits = kept
+}
+
+// fillDebitTotal is the sum of every standing fill debit, in recorded order
+// so the sum is the same on every replay.
+func (r *Reducer) fillDebitTotal() float64 {
+	total := 0.0
+	for _, debit := range r.fillDebits {
+		total += debit.cost
+	}
+	return total
 }

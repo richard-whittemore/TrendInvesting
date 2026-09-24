@@ -50,12 +50,12 @@ func TestRunCompletedIsStampedWithTheLatestPeriodEndAcrossEveryInstrument(t *tes
 	}
 
 	out := filepath.Join(t.TempDir(), "journal.jsonl")
-	opts := options{
+	opts := withFourUnitCash(options{
 		configPath: configurationFixture,
 		barsPath:   writeBars(t, bars),
 		outPath:    out,
 		build:      testBuild,
-	}
+	})
 
 	var log bytes.Buffer
 	if err := backtest(context.Background(), opts, &log); err != nil {

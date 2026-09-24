@@ -282,8 +282,8 @@ func TestDecisionTextExitConfirmationFollowsTheExitReason(t *testing.T) {
 		t.Fatal(err)
 	}
 	const campaign = `exited Campaign "campaign:AAPL:2026-01-22T00:00:00.000000000Z" because `
-	const closed = `; 4 Units and 20000 shares closed at `
-	const result = ` 128.75; realised result 17299.999999999898`
+	const closed = `; 1 Units and 5000 shares closed at `
+	const result = ` 128.75; realised result 8449.999999999989`
 	for _, tc := range []struct {
 		reason string
 		rule   string

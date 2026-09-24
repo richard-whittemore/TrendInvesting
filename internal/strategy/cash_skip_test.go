@@ -236,16 +236,18 @@ func runCashSkipLadderFixture(t *testing.T) []event.Envelope {
 	cost3 := float64(cashSkipCampaignUnitQuantity) * rung3 * cfg.DollarsPerPoint
 	cost4 := float64(cashSkipCampaignUnitQuantity) * rung4 * cfg.DollarsPerPoint
 
-	// Short by exactly one cent of Unit 3's cost — comfortably above the
-	// entry's own cost (20,615) and Unit 2's, so only Unit 3's rung is ever
-	// declined.
-	initialCash := cost3 - 0.01
-	// Recovers to comfortably clear of Unit 4's own cost, so nothing later
-	// in this fixture is gated by cash again.
-	recoveredCash := cost4 + 10_000
-
 	bar57 := addOpportunityBar("AAPL", day(57), rung2+5)
 	fill2 := addFill("AAPL", campaignID, 2, day(57), "sim-fill-add-2", rung2, cashSkipCampaignUnitQuantity, day(57))
+
+	// ADR 0020 debits every fill, so the cash is stated as what the opening
+	// fill and Unit 2's fill leave: short by exactly one cent of Unit 3's
+	// cost, and so only Unit 3's rung is ever declined.
+	initialCash := fillCost(cfg, openingFill("AAPL")) + fillCost(cfg, fill2) + cost3 - 0.01
+	// Recovers, in a snapshot that already reflects Units 1 and 2, to fund
+	// Unit 3 and then comfortably Unit 4, so nothing later in this fixture
+	// is gated by cash again.
+	recoveredCash := cost3 + cost4 + 10_000
+
 	bar58 := addOpportunityBar("AAPL", day(58), rung3+5) // reaches rung 3: declined
 	bar59 := addOpportunityBar("AAPL", day(59), rung3+5) // the SAME rung, re-evaluated on its own merits
 	fill3 := addFill("AAPL", campaignID, 3, day(59), "sim-fill-add-3", rung3, cashSkipCampaignUnitQuantity, day(59))
@@ -578,12 +580,18 @@ func TestAddCostBeyondTheRepresentableRangeIsSkippedNotHalted(t *testing.T) {
 		FilledAt:     day(56),
 	}
 
+	// The fill's own cost leaves the float64 range too, so ADR 0020's debit
+	// of it could not be stated (TestAFillWhoseCostCannotBeStatedFailsClosed).
+	// A snapshot as of the fill's own time already reflects it, and restates
+	// the cash the rung is then checked against.
 	envelopes := []event.Envelope{accountSnapshotEnvelopeFor(t, cfg, 2, cashSnapshot(cfg, day(0), math.MaxFloat64))}
 	seq := uint64(3)
 	for _, bar := range cashSkipOverflowBars("AAPL") {
 		envelopes = append(envelopes, barEnvelopeFor(t, cfg, seq, bar))
 		seq++
 	}
+	envelopes = append(envelopes, accountSnapshotEnvelopeFor(t, cfg, seq, cashSnapshot(cfg, day(56), math.MaxFloat64)))
+	seq++
 	envelopes = append(envelopes, fillEnvelopeFor(t, cfg, seq, opening))
 	seq++
 	envelopes = append(envelopes, barEnvelopeFor(t, cfg, seq, completedBar("AAPL", day(57), rung2, fillPrice-overflowTrueRange, fillPrice-overflowTrueRange)))

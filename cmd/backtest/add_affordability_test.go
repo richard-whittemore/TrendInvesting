@@ -38,7 +38,7 @@ func TestTheBacktestNeverBuysMoreThanItsCashAndDeclinesTheAddItCannotFund(t *tes
 				t.Fatal(err)
 			}
 			if fill.Kind == event.FillKindEntry || fill.Kind == event.FillKindAdd {
-				spent += float64(fill.Quantity)*fill.Price + fill.Commission
+				spent += float64(float64(fill.Quantity)*fill.Price) + fill.Commission
 			}
 		case event.ProposalDeclinedEventType:
 			var decline event.ProposalDeclinedPayload

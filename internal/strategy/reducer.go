@@ -127,11 +127,12 @@ type Reducer struct {
 	// require Currency non-empty, so the empty string is unambiguous as
 	// "not yet pinned".
 	accountCurrency string
-	// availableCash is snapshot-backed spendable cash: ADR 0010's cash
-	// basis less accepted withdrawals, floored at zero (ADR 0020's
-	// cash-movement amendment). Deposits do not credit it; a later snapshot
-	// replaces it outright. Both sizeUnit and evaluateAdd read it through
-	// cashAtPreviousClose. Proposals do not reserve or debit cash (ADR 0020).
+	// availableCash is ADR 0020's basis: the snapshot's available cash less
+	// accepted withdrawals, floored at zero (ADR 0020's cash-movement
+	// amendment). Deposits do not credit it; a later snapshot replaces it
+	// outright. Both sizeUnit and evaluateAdd read it, less fillDebits,
+	// through cashAtPreviousClose. Proposals do not reserve or debit cash
+	// (ADR 0020).
 	//
 	// availableCashAsOf is the snapshot timestamp, unchanged by movements;
 	// hasAvailableCash remains false until the first snapshot is accepted.
@@ -141,6 +142,12 @@ type Reducer struct {
 	availableCash     float64
 	availableCashAsOf time.Time
 	hasAvailableCash  bool
+	// fillDebits holds the actual cost of every entry and Add fill the
+	// basis cannot yet reflect, in recorded order: ADR 0020's "available =
+	// basis - every actual fill cost". A snapshot drops the ones it can
+	// reflect (applyAccountSnapshot). Reducer.begin copies it, since it is
+	// small: a snapshot empties it of everything up to its own as-of.
+	fillDebits []fillDebit
 
 	instruments map[string]*instrumentState
 	// delisted records, per instrument, the EffectiveAt of the delisting that
@@ -1031,11 +1038,17 @@ func (r *transition) decline(instrumentID string, periodEnd time.Time, input eve
 	), nil
 }
 
-// cashAtPreviousClose returns snapshot-backed spendable cash for a decision
-// on the bar that opened at previousClose. ADR 0010 requires the snapshot to
-// be known at the previous close; ADR 0020's cash-movement amendment reduces
-// its cash by accepted withdrawals without advancing that timestamp. Exits
-// in bar t free capital for bar t+1 and never for bar t.
+// cashAtPreviousClose returns spendable cash for a decision on the bar that
+// opened at previousClose. ADR 0010 requires the snapshot to be known at the
+// previous close; ADR 0020's cash-movement amendment reduces its cash by
+// accepted withdrawals without advancing that timestamp; and ADR 0020 takes
+// from it every entry and Add fill the snapshot cannot reflect: "available =
+// basis - every actual fill cost". Exits in bar t free capital for bar t+1
+// and never for bar t.
+//
+// The result can be negative. The zero floor bounds the basis only, and a
+// fill the basis could not fund is recorded at its actual cost (ADR 0020,
+// "The invariant"); no Unit can then be funded.
 //
 // It fails closed twice over, because either state would size a Unit against
 // cash the decision was not entitled to:
@@ -1063,7 +1076,7 @@ func (r *transition) cashAtPreviousClose(instrumentID string, previousClose time
 			"strategy: instrument %q: the available-cash figure as of %s is not cash known at the previous close %s; refusing to size a unit against cash the decision bar had not yet earned (ADR 0010)",
 			instrumentID, r.availableCashAsOf.Format(time.RFC3339), previousClose.Format(time.RFC3339))
 	}
-	return r.availableCash, nil
+	return r.availableCash - r.fillDebitTotal(), nil
 }
 
 // unitCost is what one whole Unit costs to put on under ADR 0010: its

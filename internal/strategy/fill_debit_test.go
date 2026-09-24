@@ -1,6 +1,7 @@
 package strategy_test
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -24,7 +25,7 @@ import (
 // fillCost is a fill's actual cost as ADR 0020 debits it: quantity x the
 // executed price x dollars per point, plus the commission charged.
 func fillCost(cfg event.ConfigurationPayload, fill event.FillPayload) float64 {
-	return float64(fill.Quantity)*fill.Price*cfg.DollarsPerPoint + fill.Commission
+	return float64(float64(fill.Quantity)*fill.Price*cfg.DollarsPerPoint) + fill.Commission
 }
 
 // addRungs returns the Add Ladder's rungs 2, 3 and 4 for the breakout
@@ -273,4 +274,60 @@ func TestAWithdrawalFloorsTheBasisNotTheFillDebit(t *testing.T) {
 	if want := -fillCost(cfg, opening); decline.AvailableCash != want {
 		t.Errorf("AvailableCash = %v, want exactly %v (a zero basis less the opening fill)", decline.AvailableCash, want)
 	}
+}
+
+// TestAFillWhoseCostCannotBeStatedFailsClosed: a fill's actual cost that
+// leaves the float64 range cannot be debited, and a balance ADR 0020 cannot
+// state must not be read as any figure at all, so the run stops at the fill.
+// Each order rests affordably at its level; its fill reports a price ten
+// orders of magnitude above it. Both buy paths are covered, the entry fill
+// and the Add fill.
+func TestAFillWhoseCostCannotBeStatedFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	cfg := cashSkipOverflowConfiguration()
+	cfg.NotionalAccount.StartingEquity = 2e297
+	cfg.DollarsPerPoint = 1e280
+	quantity, err := sizing.UnitQuantity(cfg.NotionalAccount.StartingEquity, cfg.UnitVolatilityFraction, overflowTrueRange, cfg.DollarsPerPoint)
+	if err != nil {
+		t.Fatalf("sizing.UnitQuantity() error = %v", err)
+	}
+	opening := event.FillPayload{
+		InstrumentID: "AAPL",
+		Kind:         event.FillKindEntry,
+		ProposalID:   testDecisionID("proposal", "AAPL", day(56)),
+		FillID:       "sim-fill-0001",
+		Direction:    event.DirectionLong,
+		Quantity:     quantity,
+		Price:        1e21,
+		FilledAt:     day(56),
+	}
+
+	t.Run("entry", func(t *testing.T) {
+		t.Parallel()
+		newStream(t, cfg).
+			snapshot(cashSnapshot(cfg, day(0).Add(time.Hour), math.MaxFloat64)).
+			bars(cashSkipOverflowBars("AAPL")).
+			fill(opening).
+			wantRunError(`fill "sim-fill-0001"`, "leaves the representable range of spendable cash", "0020")
+	})
+
+	t.Run("add", func(t *testing.T) {
+		t.Parallel()
+		affordable := opening
+		affordable.Price = overflowChannelHigh
+		rung2, err := sizing.NextAddLevel(affordable.Price, overflowTrueRange, sizing.DirectionLong)
+		if err != nil {
+			t.Fatalf("NextAddLevel(rung 2) error = %v", err)
+		}
+		low := overflowChannelHigh - overflowTrueRange
+		campaignID := testDecisionID("campaign", "AAPL", day(56))
+		newStream(t, cfg).
+			snapshot(cashSnapshot(cfg, day(0).Add(time.Hour), math.MaxFloat64)).
+			bars(cashSkipOverflowBars("AAPL")).
+			fill(affordable).
+			bar(completedBar("AAPL", day(57), rung2, low, low)).
+			fill(addFill("AAPL", campaignID, 2, day(57), "sim-fill-add-2", 1e21, quantity, day(57))).
+			wantRunError(`fill "sim-fill-add-2"`, "leaves the representable range of spendable cash", "0020")
+	})
 }
