@@ -256,14 +256,17 @@ func uncoveredBlocks(t *testing.T, root, path string) []block {
 		if err != nil {
 			t.Fatalf("coverage profile line %q: %v", line, err)
 		}
-		if count > 0 {
-			continue
-		}
 		name, span, ok := strings.Cut(fields[0], ":")
 		if !ok {
 			t.Fatalf("coverage profile line %q has no span", line)
 		}
-		rel := strings.TrimPrefix(name, modulePath)
+		rel, ok := strings.CutPrefix(name, modulePath)
+		if !ok {
+			t.Fatalf("coverage profile line %q names %s, which is outside module %s", line, name, strings.TrimSuffix(modulePath, "/"))
+		}
+		if !strings.HasPrefix(rel, "internal/") || count > 0 {
+			continue
+		}
 		src, ok := sources[rel]
 		if !ok {
 			src = readSource(t, filepath.Join(root, filepath.FromSlash(rel)))

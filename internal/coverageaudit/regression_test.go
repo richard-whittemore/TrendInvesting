@@ -1,0 +1,76 @@
+package coverageaudit
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func writeAuditFixture(t *testing.T, root, name, contents string) string {
+	t.Helper()
+	path := filepath.Join(root, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestSuppliedProfileIgnoresPackagesOutsideAuditScope(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeAuditFixture(t, root, "internal/sample/sample.go", "package sample\nfunc f() {\n panic(\"unreachable\")\n}\n")
+	path := writeAuditFixture(t, root, "coverage.out", "mode: atomic\n"+
+		modulePath+"internal/sample/sample.go:3.2,3.22 1 0\n"+
+		modulePath+"cmd/fabricated/main.go:1.1,1.2 1 0\n"+
+		modulePath+"transport/fabricated.go:1.1,1.2 1 0\n"+
+		modulePath+"internalish/fabricated.go:1.1,1.2 1 0\n")
+	got := uncoveredBlocks(t, root, path)
+	if len(got) != 1 || got[0].File != "internal/sample/sample.go" || got[0].Statement != `panic("unreachable")` {
+		t.Fatalf("uncovered blocks = %+v, want only internal/sample/sample.go's panic", got)
+	}
+}
+
+func TestSuppliedProfileRejectsPathsOutsideModule(t *testing.T) {
+	t.Parallel()
+	for _, count := range []string{"0", "1"} {
+		t.Run("execution_count_"+count, func(t *testing.T) {
+			t.Parallel()
+			requireAuditFailure(t, "foreign-profile-"+count, "outside module github.com/richard-whittemore/TrendInvesting")
+		})
+	}
+}
+
+func requireAuditFailure(t *testing.T, scenario, want string) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(executable, "-test.run=^TestCoverageAuditFailure$", "-test.v")
+	cmd.Env = append(os.Environ(), "COVERAGE_AUDIT_FAILURE="+scenario)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), want) || strings.Contains(string(out), "panic:") {
+		t.Fatalf("audit failure = %v; want clean failure containing %q; output:\n%s", err, want, out)
+	}
+	t.Logf("expected audit failure:\n%s", out)
+}
+
+func TestCoverageAuditFailure(t *testing.T) {
+	scenario := os.Getenv("COVERAGE_AUDIT_FAILURE")
+	if scenario == "" {
+		return
+	}
+	if count, ok := strings.CutPrefix(scenario, "foreign-profile-"); ok {
+		root := t.TempDir()
+		path := writeAuditFixture(t, root, "coverage.out", fmt.Sprintf("mode: count\nexample.com/foreign/internal/file.go:1.1,1.2 1 %s\n", count))
+		uncoveredBlocks(t, root, path)
+		return
+	}
+	t.Fatalf("unknown failure scenario %q", scenario)
+}

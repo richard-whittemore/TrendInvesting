@@ -167,7 +167,7 @@ The audit fails in both directions: an unlisted statement that becomes uncovered
 COVERAGE_AUDIT_DUMP=/tmp/uncovered.json go test ./internal/coverageaudit/
 ```
 
-The audit covers `internal/`, where every strategy, risk and reconciliation rule lives. `cmd/` is composition and is held to its own tests — except the paths that decide whether a failed run still leaves evidence, which are held to the same bar as the domain.
+The audit covers only `internal/`, where every strategy, risk and reconciliation rule lives. A supplied `./...` profile is filtered to that same scope; entries outside this module are rejected. `cmd/` and `transport/` are held to their own tests. Evidence-retention paths must meet the same testing standard, but are not matched against this exclusion list.
 
 ### validated-payload-json
 
