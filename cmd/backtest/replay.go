@@ -56,23 +56,9 @@ func replayEquivalence(r io.Reader) (*replay.Divergence, error) {
 // These identity failures are refusals, not decision divergences: changed
 // engine rules do not establish that a journal is wrong.
 func replayJournalInputs(header journal.Header, inputs []event.Envelope) ([]event.Envelope, error) {
-	strategyID, rulesVersion, _, err := event.DecomposeStrategyVersion(header.StrategyVersion)
-	if err != nil {
-		return nil, fmt.Errorf("backtest: %w", err)
-	}
-	if rulesVersion != strategy.RulesVersion {
-		return nil, fmt.Errorf("backtest: the journal's strategy version %q states rules version %q, but this build's rules version is %q: replay compares on the rules version alone (ADR 0016), and a mismatch means the engine has moved on, not that the journal is wrong", header.StrategyVersion, rulesVersion, strategy.RulesVersion)
-	}
-
-	payload, err := configurationPayloadFrom(inputs)
+	payload, err := journalConfiguration(header, inputs)
 	if err != nil {
 		return nil, err
-	}
-	if strategyID != payload.StrategyID {
-		return nil, fmt.Errorf("backtest: the journal's header names strategy %q, but the configuration it records declares %q", strategyID, payload.StrategyID)
-	}
-	if recomputed := event.ConfigurationHash(payload); recomputed != header.ConfigurationHash {
-		return nil, fmt.Errorf("backtest: the journal's header claims configuration %q, but the configuration its own input stream records hashes to %q", header.ConfigurationHash, recomputed)
 	}
 	reducer, err := strategy.NewReducer(header.StrategyVersion, payload)
 	if err != nil {
@@ -87,6 +73,30 @@ func replayJournalInputs(header journal.Header, inputs []event.Envelope) ([]even
 		return nil, fmt.Errorf("backtest: replay the journal's inputs: %w", err)
 	}
 	return emitted, nil
+}
+
+// journalConfiguration enforces the shared replay and pipeline identity
+// refusals (ADR 0012, ADR 0016), without applying recorded simulator output.
+func journalConfiguration(header journal.Header, inputs []event.Envelope) (event.ConfigurationPayload, error) {
+	strategyID, rulesVersion, _, err := event.DecomposeStrategyVersion(header.StrategyVersion)
+	if err != nil {
+		return event.ConfigurationPayload{}, fmt.Errorf("backtest: %w", err)
+	}
+	if rulesVersion != strategy.RulesVersion {
+		return event.ConfigurationPayload{}, fmt.Errorf("backtest: the journal's strategy version %q states rules version %q, but this build's rules version is %q: replay compares on the rules version alone (ADR 0016), and a mismatch means the engine has moved on, not that the journal is wrong", header.StrategyVersion, rulesVersion, strategy.RulesVersion)
+	}
+
+	payload, err := configurationPayloadFrom(inputs)
+	if err != nil {
+		return event.ConfigurationPayload{}, err
+	}
+	if strategyID != payload.StrategyID {
+		return event.ConfigurationPayload{}, fmt.Errorf("backtest: the journal's header names strategy %q, but the configuration it records declares %q", strategyID, payload.StrategyID)
+	}
+	if recomputed := event.ConfigurationHash(payload); recomputed != header.ConfigurationHash {
+		return event.ConfigurationPayload{}, fmt.Errorf("backtest: the journal's header claims configuration %q, but the configuration its own input stream records hashes to %q", header.ConfigurationHash, recomputed)
+	}
+	return payload, nil
 }
 
 // configurationPayloadFrom finds the run's configuration event among the
