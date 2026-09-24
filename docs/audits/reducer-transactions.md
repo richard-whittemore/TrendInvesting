@@ -5,13 +5,15 @@ on `f02e3156afde576e3068a0c816845f348b02b413`, RulesVersion **1.5.0**.
 
 ## Boundary and routing
 
-`Reducer.Apply` always calls `transact`, which deep-copies the complete owned
-state, runs the private `transition` handler, and swaps state only on success.
-Candidate mutations may feed later payloads. No ordinary emission or accepted
-fill survives a rejected transition. Every owned map, slice and mutable pointer
-is copied, including indicator ring/seed buffers and accepted-fill UnitIDs.
-The complete snapshot avoids a per-event write-set list, at a copying cost
-proportional to instrument state and retained fill history.
+`Reducer.Apply` always calls `transact`, which opens a copy-on-write candidate,
+runs the private `transition` handler, and publishes the candidate only on
+success. Candidate mutations may feed later payloads. No ordinary emission or
+accepted fill survives a rejected transition. Scalars, the Notional Account and
+the delisted map are copied for every input. An instrument is deep-copied,
+including its indicator ring and seed buffers, the first time the transaction
+accesses it. New accepted fills are buffered until commit. See
+[Copy-on-write](#copy-on-write) for the access-site routing and the measured
+cost.
 
 Routed paths:
 
@@ -28,7 +30,7 @@ Routed paths:
 - `applyConfiguration` also uses the common boundary; it emits no payloads.
 - `applyAdapterRunStopped` (added on `main` after this branch was cut, and routed on rebase) uses the same boundary. It emits no payloads, but its `runStopped` flag commits only on success.
 
-`TestCloneCoversEveryReferenceTypedField` lists every reference-typed path reachable from `Reducer`, so a new map, slice or pointer fails until `clone` deep-copies it.
+`TestCloneCoversEveryReferenceTypedField` names the mechanism that isolates every reference-typed path reachable from `Reducer`: eager copy, overlay, copy on first access, or immutable once recorded. A new map, slice or pointer fails until one of them handles it, and `instrumentState.clone` is checked against a real copy.
 
 No reducer input transition is left out. Pure arithmetic and payload helpers
 run inside the enclosing transition without nested commits. Independently
@@ -65,7 +67,7 @@ changes, and finally removes the fault to verify successful commitment.
 | `TestCashMovementRejectedLeavesAccountUnscaled` | Account figures, cash and chronology rollback |
 | `TestPartialStopRejectedExpiryLeavesStateAndAcceptedFillsUnchanged` | Partial stop and final Add-expiry rejection |
 | `TestTransitionRejectsFinalPayload` | Eight cases: entry/openCampaign, Add, full stop, exit, bar Exit Order, snapshot, delisting, stream end |
-| `TestTransitionDeepCopyHasNoAliases` | Mutates candidate Campaign Units, all three proposals, indicators, account, maps and accepted-fill UnitIDs; original unchanged |
+| `TestTransitionDeepCopyHasNoAliases` | Mutates candidate Campaign Units, all three proposals, indicators, account and delisted map through the accessors, buffers fills and a new instrument; original unchanged |
 | `TestClonesOwnTheirBuffers` | Entry/Exit channel ring storage and Wilder seed storage, including nil receivers |
 | `TestApplyRejectsInvalidFinalPayloadWithoutCommitting` | Six real builder failures through Apply: entry/Add final proposal, partial-stop expiry, bar/end Exit Order, snapshot final drawdown step |
 
@@ -169,5 +171,89 @@ Removed blocks:
 The remaining bar-propagation reasons now identify five excluded occurrences
 out of eleven, with the newly covered occurrence 8 removed.
 
-Open questions: none. Whole-state snapshot allocation cost is documented above;
-this change prioritizes complete isolation and makes no performance claim.
+## Copy-on-write
+
+The first implementation deep-copied the whole reducer for every input: every
+instrument's state, the delisted map and the whole accepted-fill history. At
+the planned 1,000-instrument universe, that meant copying the whole universe
+for every bar. The transaction is now copy-on-write, and the commit contract is
+unchanged.
+
+Access-site routing:
+
+| Site | Access | Route |
+| --- | --- | --- |
+| `applyFill` (instrument lookup) | mutates | `instrument` |
+| `applyFill` (duplicate detection) | reads | `acceptedFill`: the transaction's own fills, then the published history |
+| `openCampaign`, `applyStopFill`, `applyExitFill`, `applyAddFill` (acceptance) | writes | `recordAcceptedFill` |
+| `applyDelisting` | mutates | `instrument` |
+| `stateFor` (from `applyCompletedBar`) | mutates or creates | `instrument`, else `addInstrument` |
+| `applyRunCompleted` (chronology loop) | reads | `peekInstrument` over `instrumentIDs` |
+| `applyRunCompleted` (expiry and Exit Order loop) | mutates | `instrument`, passed to `expireOutstandingProposals` and `emitExitOrderChanges` |
+| `applyAdapterRunStopped` (chronology loop) | reads | `peekInstrument` over `instrumentIDs` |
+| `instrumentIDs` | reads | published and overlay-only instruments together, sorted |
+
+No handler deletes an instrument or an accepted fill. `acceptedFillState` is
+never mutated after it is created. Its UnitIDs come from the fill's own decoded
+payload and are only compared with `slices.Equal`. The embedded `instruments`
+and `acceptedFills` maps are nil during a transaction, so any direct index that
+was missed would fail loudly instead of writing through.
+`TestTransitionDeepCopyHasNoAliases` now mutates through the accessors. It
+dropped its two direct operations on published maps, the in-place UnitIDs write
+and the instrument delete, because the design forbids both.
+
+Only the end-of-stream expiry loop still copies every instrument, and it runs
+once per run.
+
+### Benchmark
+
+`BenchmarkApplyBarWideUniverse` (`internal/strategy/transition_bench_test.go`)
+applies one completed bar for one instrument to a reducer holding 1,000
+instruments, each warmed with 80 bars, and 3,000 accepted fills. It was run
+with `go test ./internal/strategy -run '^$' -bench BenchmarkApplyBarWideUniverse -benchmem -count 5`
+on Go 1.27.1, darwin/arm64, Apple M2. Measured medians of five runs:
+
+| Transaction | ns/op | B/op | allocs/op |
+| --- | --- | --- | --- |
+| Eager whole-reducer copy (commit `df22454`) | 479,001 | 1,672,828 | 12,041 |
+| Copy-on-write (this change) | 3,054 | 2,736 | 25 |
+
+### Tests and falsification
+
+| Test | Pins |
+| --- | --- |
+| `TestRejectedTransitionLeavesTouchedAndUntouchedInstrumentsUnchanged` | A rejected bar for AAPL leaves AAPL and untouched BBB equal and pointer-identical. A committed bar republishes AAPL and leaves BBB's pointer unchanged, because BBB is never copied. |
+| `TestRejectedFillIsNotRememberedAndItsRetryFailsAgain` | A fill accepted in a rejected transaction is absent afterwards. The retry is processed in full, not absorbed as a duplicate, and fails again. |
+| `TestCommittedTransitionPublishesNewInstrumentAndFill` | A new instrument, a new fill and the Campaign it opened are visible after commit. |
+| `TestDuplicateDetectionSeesEveryFillAcceptedEarlierInTheRun` | A re-delivery in a later input is a no-op, and a reused id with changed contents is rejected. A second delivery in the same transaction is a no-op. |
+| `TestLaterAccessInOneTransactionSeesEarlierMutation` | Two bars for one period in one transaction: the second sees the first and is rejected. |
+| `TestWholeUniversePassSeesInstrumentsCreatedInTheSameTransaction` | The end-of-stream chronology check and expiry both see an instrument created earlier in the same transaction. |
+
+Each temporary mutation of `transition.go` was restored afterwards:
+
+| Mutation | Result |
+| --- | --- |
+| `instrument` hands out published state (write-through) | Exit 1: rejected-transition, rejected-fill and later-access tests fail |
+| `acceptedFill` skips the overlay | Exit 1: same-transaction duplicate and rejected-fill tests fail |
+| `acceptedFill` skips the published history | Exit 1: earlier-input duplicate test fails |
+| `recordAcceptedFill` writes through to the published history | Exit 1: rejected-fill test fails |
+| Shallow `instrumentState.clone` | Exit 1: rejected-transition test fails |
+| `commit` drops both overlays | Exit 1: commit, later-access, rejected-transition and whole-universe tests fail |
+| Eager whole-universe copy restored | Exit 1: rejected-transition test fails on BBB's pointer |
+| `instrumentIDs` ignores overlay-only instruments | Exit 1: both whole-universe cases fail |
+| `peekInstrument` ignores the overlay | Exit 1: whole-universe test fails (nil dereference) |
+| `instrument` re-copies published state instead of reusing its overlay entry | Exit 1: later-access test fails |
+
+`TestCloneCoversEveryReferenceTypedField` was re-falsified. Each of these fails
+it: adding an unhandled `[]int` field to `instrumentState`, dropping the
+`exitChannel` copy from `instrumentState.clone`, dropping the Campaign Units
+copy, sharing `delisted` in `begin`, and exposing the published instruments map
+to the transaction.
+
+After the change,
+`git diff --exit-code origin/main -- internal/strategy/testdata/decision-corpus internal/strategy/rules_version.go cmd/backtest/testdata`
+produced no output and exited 0. RulesVersion is unchanged. `make check`
+passes at **95.1%** total coverage, and `internal/coverageaudit/exclusions.json`
+needed no change: every new branch is covered.
+
+Open questions: none.

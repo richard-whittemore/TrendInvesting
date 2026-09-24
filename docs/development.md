@@ -10,22 +10,45 @@
 
 ## Reducer transactions
 
-`Reducer.Apply` uses one copy-and-swap boundary, `transact`. Every input handler
-and emission builder is a method of the private `transition` type, which owns a
-deep copy of the reducer. They may mutate that candidate while deriving later
+`Reducer.Apply` uses one transaction boundary, `transact`. Every input handler
+and emission builder is a method of the private `transition` type, which owns
+the candidate state. They may mutate that candidate while deriving later
 payloads, but every payload must validate and marshal before the builder returns
 success. Only then are the candidate and its emission stream published. On any
 error the candidate and ordinary emissions are discarded, including fill
 acceptance: retrying a rejected fill must fail again, never become a duplicate.
 
-The snapshot includes every instrument's indicator buffers, Campaign and Units,
-entry/Add/exit proposals, the accepted-fills map and its UnitID slices, delistings,
-the Notional Account, and all scalar cash/chronology/currency state. All owned
-maps, slices and mutable pointers are independent; immutable `time.Time` location
-metadata may be shared. Adding mutable state requires extending the copy and
-no-aliasing tests. A complete snapshot is intentionally used rather than a
-manually maintained per-event write set; its copying cost grows with instrument
-state and retained fill history.
+The candidate is copy-on-write, so a transaction's cost follows what the input
+touches rather than the size of the universe or the length of the run:
+
+- `Reducer.begin` copies scalars, the Notional Account and the `delisted` map
+  eagerly for every transaction.
+- Instrument state is copied on first access. `transition.instrument(id)`
+  returns the transaction's own copy of that instrument, deep-copying the
+  published state (indicator buffers, all three proposals, the Campaign and its
+  Units) with `instrumentState.clone` the first time. `addInstrument` records
+  an instrument the transaction creates. `peekInstrument` reads without copying,
+  and only for a read that never mutates; `instrumentIDs` lists published and
+  newly created instruments together.
+- Accepted fills are buffered. `acceptedFill` checks the transaction's own
+  fills, then the whole run's history; `recordAcceptedFill` buffers a new one.
+  A recorded `acceptedFillState`, including its UnitIDs, is never mutated
+  afterwards, which is why the published history is shared rather than copied.
+- `commit` writes both overlays into the published maps. A rejection drops
+  them, so nothing reaches published state.
+
+Extension rules:
+
+- Never index `r.instruments` or `r.acceptedFills` directly in a handler. Both
+  are nil for the whole transaction, so a direct write panics and a direct read
+  finds nothing. Use the accessors.
+- Add new reducer-level state to `Reducer.begin` if it is small, or behind an
+  accessor with an overlay if it grows with the universe or the run. Add new
+  instrument state to `instrumentState.clone`.
+- Record the new path's mechanism in `TestCloneCoversEveryReferenceTypedField`,
+  which fails on any reference-typed path it does not name and checks
+  `instrumentState.clone` against a real copy. Immutable `time.Time` location
+  metadata may be shared.
 
 This covers configuration, all fill kinds and `openCampaign` (including chained
 Adds and Exit Orders), snapshots and cash movements, completed bars (including
