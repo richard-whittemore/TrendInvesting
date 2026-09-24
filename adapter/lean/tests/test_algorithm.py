@@ -290,9 +290,10 @@ class DelistingTests(unittest.TestCase):
         self.feed(algo, 6)
         self.feed(algo, 9, delistings={"AAPL": self.notice("delisted")})
         # The day's real bar and its snapshot still reach the engine; the
-        # delisting itself is never published, and the run stops naming it.
+        # delisting itself is never published. The stream is then completed,
+        # so the reducer expires anything outstanding, and the run stops.
         self.assertEqual([e["type"] for e in algo.client.sent],
-                         ["market.bar.completed", "account.snapshot"] * 2)
+                         ["market.bar.completed", "account.snapshot"] * 2 + ["replay.run.completed"])
         self.assertTrue(algo.failed)
         self.assertIn("AAPL DELISTED", algo.quit_reason)
 
@@ -301,7 +302,9 @@ class DelistingTests(unittest.TestCase):
         self.feed(algo, 6)
         sent = len(algo.client.sent)
         algo.OnData(slice_of({}, delistings={"AAPL": self.notice("delisted")}))
-        self.assertEqual(len(algo.client.sent), sent)
+        # Only the stream's completion follows, stamped at the last bar.
+        self.assertEqual([e["type"] for e in algo.client.sent[sent:]], ["replay.run.completed"])
+        self.assertEqual(algo.client.sent[-1]["event_time"], "2014-06-06T20:00:00Z")
         self.assertTrue(algo.failed)
 
     def test_nothing_is_published_after_the_stop(self):
@@ -331,3 +334,56 @@ class DelistingTests(unittest.TestCase):
         self.assertEqual([e["type"] for e in algo.client.sent],
                          ["market.bar.completed", "account.snapshot"])
         self.assertTrue(any("symbol changed GOOAV -> GOOG" in m for m in algo.logs))
+
+
+class RunCompletionTests(unittest.TestCase):
+    """replay.run.completed ends every cleanly finished stream exactly once.
+
+    Without it the reducer never expires the last bar's proposal, so the
+    journal ends with a proposal that never reaches a terminal event
+    (event.RunCompletedEventType).
+    """
+
+    def start(self):
+        algo = AlgorithmTests.init(self)
+        algo.IsWarmingUp = False
+        return algo
+
+    def feed(self, algo, day):
+        b = bar(day)
+        algo.History = lambda *args, **kw: Frame(b.EndTime)
+        algo.OnData(slice_of({"AAPL": b}))
+
+    def test_the_normal_end_completes_the_stream_at_the_last_bar(self):
+        algo = self.start()
+        self.feed(algo, 6)
+        self.feed(algo, 9)
+        algo.OnEndOfAlgorithm()
+        last = algo.client.sent[-1]
+        self.assertEqual(last["type"], "replay.run.completed")
+        self.assertEqual(last["event_time"], "2014-06-09T20:00:00Z")
+        self.assertEqual(last["payload"], {})
+        self.assertEqual([e["sequence"] for e in algo.client.sent], list(range(2, 7)))
+
+    def test_completion_is_sent_once_even_after_a_deliberate_stop(self):
+        algo = self.start()
+        self.feed(algo, 6)
+        algo.OnData(slice_of({}, delistings={"AAPL": types.SimpleNamespace(
+            Type="delisted", Time=datetime(2014, 6, 9))}))
+        algo.OnEndOfAlgorithm()
+        self.assertEqual([e["type"] for e in algo.client.sent].count("replay.run.completed"), 1)
+
+    def test_an_empty_run_sends_no_completion(self):
+        algo = self.start()
+        algo.OnEndOfAlgorithm()
+        self.assertEqual(algo.client.sent, [])
+
+    def test_a_broken_stream_sends_no_completion(self):
+        """After a failure the stream may be out of step with the engine."""
+        algo = self.start()
+        self.feed(algo, 6)
+        algo.History = lambda *args, **kw: None  # the raw view is missing: the bar fails
+        algo.OnData(slice_of({"AAPL": bar(9)}))
+        self.assertTrue(algo.failed)
+        algo.OnEndOfAlgorithm()
+        self.assertNotIn("replay.run.completed", [e["type"] for e in algo.client.sent])

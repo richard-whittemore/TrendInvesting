@@ -103,9 +103,29 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.Log("adapter: LEAN delisting warning for {} at {}; nothing published".format(
                 self.instrument, notice.Time))
             return
-        self.stop("LEAN reports {} DELISTED at {}; its delisting signal carries no reason and "
+        reason = ("LEAN reports {} DELISTED at {}; its delisting signal carries no reason and "
                   "also fires for conversions, so the run stops rather than publish a delisting "
                   "that may be false (adapter/lean/README.md)".format(self.instrument, notice.Time))
+        # End the stream cleanly first, so every outstanding proposal reaches
+        # its terminal event in the journal rather than being left open.
+        self.complete_run()
+        self.stop(reason)
+
+    def complete_run(self):
+        """Send replay.run.completed once, if the stream is intact and not empty.
+
+        Called at the normal end of the algorithm and before a deliberate
+        stop. After a transport or reply failure the stream is no longer in
+        step with the engine, so nothing further is sent; the run's own
+        failure is the record.
+        """
+        if self.failed or self.client is None or self.publisher.completed \
+                or self.publisher.last_event_time is None:
+            return
+        try:
+            self.decision_count += len(self.publisher.publish_run_completed())
+        except Exception as err:
+            self.stop("run completion failed: {}".format(err))
 
     def publish_completed_bar(self, bar):
         # Warm-up bars are published exactly like any other bar. The reducer
@@ -143,6 +163,7 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.stop("completed bar failed: {}".format(err))
 
     def OnEndOfAlgorithm(self):
+        self.complete_run()
         if self.client is not None:
             self.client.close()
         self.Log("adapter: bars={} warmup_bars={} decisions={} failed={}".format(
