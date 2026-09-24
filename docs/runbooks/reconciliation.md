@@ -10,7 +10,12 @@ This is the procedure for when the system alerts that it has left **Normal**, un
 2. **Read the state:**
    - **Degraded:** no new positions and no Adds. Positions the alert does not name are still managed: stops are raised and exits taken. Named positions are frozen, but keep their stop at the broker.
    - **Halted:** no order changes at all. Every position keeps its good-till-cancelled stop at the broker, and those stops still fill if price reaches them.
-3. **Check every position has a stop at the broker.** Look at the broker's own screen, not ours. While Degraded, the system restores a missing stop itself; while Halted, it does not. **If any position has no stop, place one by hand at the level the alert or the last journalled stop states, then record it** (step 3 of the recovery below).
+3. **Check every position has exactly one stop at the broker.** Look at the broker's own screen, not ours. The alert says, for each affected position, whether the system **restored** its stop (with the order id), **failed** to, or has **none** to restore (UNPROTECTED).
+   - **Restored:** don't place another. Two stops would both fill and sell more than you hold.
+   - **Failed, or Halted** (the system doesn't restore while Halted): place one by hand at the journalled level the alert states.
+   - **UNPROTECTED** (no journalled stop, e.g. a manual trade): the system has no level. Decide one yourself, and place it.
+
+   Then record anything placed by hand (step 3 of the recovery below).
 4. **Do not "fix" the account by editing numbers anywhere.** The system never adopts a balance (ADR 0019). Every repair is a recorded event.
 
 ## Find the cause
@@ -44,7 +49,7 @@ Compare the broker's **activity statement** (trades, order history, cash activit
 If the **heartbeat alert** fires, the system is down or wedged and cannot report its own state. The stops at the broker are still working.
 
 1. Check every position has a stop, on the broker's own screen.
-2. Restart through the normal startup path. Startup reconciliation runs before any decision, and it will alert if anything changed while the system was down.
+2. Restart through the normal startup path. The system comes back **in the state it was in**. If it was Degraded or Halted before it went down, it stays so, and a passing startup reconciliation doesn't return it to Normal; only the recovery above does. Startup reconciliation runs before any decision, and it alerts if anything changed while the system was down.
 
 ## Before live money
 
