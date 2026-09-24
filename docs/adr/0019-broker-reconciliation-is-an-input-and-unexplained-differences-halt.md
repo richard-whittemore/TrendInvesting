@@ -129,7 +129,12 @@ Only `unverifiable` evidence, or a discrepancy the evidence cannot bound, still 
 
 **Risk-reducing management** means only actions that cannot increase exposure: raising a Protective Stop under the Stop Ladder, an Exit-Channel exit, and a Delisting Exit where supported. Nothing that opens or adds to a position is allowed while not Normal.
 
-**One working exit order per position.** A resting good-till-cancelled Protective Stop and a separately submitted exit order could both fill, and together sell more than is held. So the two are never separate orders. For a long position, the Protective Stop and the Exit-Channel exit are both "sell if price falls to *X*". They are held as **one** working sell-stop at the higher of the two levels, and "taking the exit" or "raising the stop" means **amending that one order**, never adding another. An amendment the broker has not acknowledged leaves the previous level in force: the position keeps exactly one stop throughout. This is the order model #29 must implement in every state, not only while Degraded.
+**Exits never add sell quantity.** A resting good-till-cancelled Protective Stop and a separately submitted exit order could both fill, and together sell more than is held. So an exit is never a separate order. Protective Stops are per Unit: each Unit has its own level (the Stop Ladder raises earlier Units' stops separately), and a partial stop-out is a real outcome. So each Unit holds **one** good-till-cancelled sell-stop for **that Unit's quantity**, and the total working sell quantity always equals the holding.
+- **Taking an Exit-Channel exit** means **amending** each Unit's stop to the Exit Channel level wherever that level is higher, never submitting a second order.
+- **Raising a stop** likewise amends that Unit's order.
+- **An amendment the broker has not acknowledged** leaves the previous level in force, so every Unit keeps exactly one stop throughout.
+
+This is the order model #29 must implement in every state, not only while Degraded.
 
 **Frozen** means the system changes no order for that instrument. Its Protective Stop keeps working at the broker, because under the order-lifetime decision recorded on #29 it is good-till-cancelled. There is one exception. If the discrepancy **is** a missing or cancelled Protective Stop **on a position the journal holds a Protective Stop for**, the system **restores** it at that last journalled level. Restoring protection reduces risk; leaving a position unprotected while waiting for a human does not.
 
