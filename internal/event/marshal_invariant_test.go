@@ -48,7 +48,7 @@ func TestMarshalInvariantIncludesEveryPayload(t *testing.T) {
 	for _, p := range marshalPayloads() {
 		registered[reflect.TypeOf(p).Name()] = true
 	}
-	for _, file := range nonTestPackageFiles(t, ".") {
+	for _, file := range nonTestPackageFiles(t, ".", "event") {
 		for _, decl := range file.Decls {
 			gen, ok := decl.(*ast.GenDecl)
 			if !ok || gen.Tok != token.TYPE {
@@ -70,14 +70,18 @@ func TestMarshalInvariantIncludesEveryPayload(t *testing.T) {
 	}
 }
 
-// nonTestPackageFiles parses every non-test .go file in dir and returns their
-// ASTs, for tests that walk declarations rather than type-check them.
+// nonTestPackageFiles parses every non-test .go file in dir that declares
+// package pkg and returns their ASTs, for tests that walk declarations rather
+// than type-check them.
 // go/parser.ParseDir would do this in one call, but it has been deprecated
 // since Go 1.25 in favour of golang.org/x/tools/go/packages, which loads and
 // type-checks — work this test has no use for and a dependency it need not
 // take on. Parsing each file directly keeps the same declaration-only scope
-// ParseDir had.
-func nonTestPackageFiles(t *testing.T, dir string) []*ast.File {
+// ParseDir had, and filtering on the package clause keeps its per-package
+// grouping: a file from another package in the same directory must not join
+// the inventory. Finding no file of pkg fails, since an inventory checked
+// against nothing would pass vacuously.
+func nonTestPackageFiles(t *testing.T, dir, pkg string) []*ast.File {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -94,7 +98,13 @@ func nonTestPackageFiles(t *testing.T, dir string) []*ast.File {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if file.Name.Name != pkg {
+			continue
+		}
 		files = append(files, file)
+	}
+	if len(files) == 0 {
+		t.Fatalf("no non-test file in %s declares package %s; the inventory cannot be checked against nothing", dir, pkg)
 	}
 	return files
 }
