@@ -383,3 +383,11 @@ Go payload types' fields and schema versions by
 `tests/testdata/order_decisions_contract.go`, and every fill and lifecycle
 input the adapter builds is checked against Go's own validators by
 `tests/testdata/execution_contract.go`.
+
+`tests/test_end_to_end.py` runs the algorithm against the real `cmd/engine`
+over a real socket, with the fake order book filling orders under ADR 0005's
+rules against a synthetic (non-market) series: an entry, Adds including one
+the engine chains from a fill, and an Exit-Channel exit of every Unit as one
+fill. It then runs `cmd/backtest -verify` and `-replay` on the engine's
+journal and requires a complete, verified run that replays byte-identically.
+It needs the Go toolchain and nothing else: no LEAN, docker or network.
