@@ -72,12 +72,14 @@ func pipelineEquivalence(ctx context.Context, r io.Reader) error {
 	recorder := journal.NewBoundedRecorder(reducer, len(records)+1)
 	runErr := drive(ctx, simulator, recorder, facts.cfg, header.StrategyVersion, facts.bars, facts.actions, facts.account)
 	entries := recorder.Entries()
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		// A cancelled re-run stops short of the journal by the operator's own
-		// choice. Comparing that partial output would report a divergence the
-		// pipeline never made, sending the operator after a defect that does
-		// not exist.
-		return fmt.Errorf("backtest: rerun stopped before completing: %w", ctxErr)
+	if ctxErr := ctx.Err(); runErr != nil && ctxErr != nil && errors.Is(runErr, ctxErr) {
+		// A re-run stopped by the operator's own cancellation ends short of
+		// the journal. Comparing that partial output would report a
+		// divergence the pipeline never made. Only a failure that IS the
+		// cancellation is treated this way: an independent pipeline failure
+		// that happens to coincide with it still falls through below, so the
+		// audit never hides the defect it exists to find.
+		return fmt.Errorf("backtest: rerun stopped before completing: %w", runErr)
 	}
 	if runErr != nil {
 		// A failed new pipeline may have a shorter span. Compare its prefix

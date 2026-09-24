@@ -398,3 +398,30 @@ func TestRerunStopsWhenItsInvocationIsCancelled(t *testing.T) {
 		t.Fatalf("pipelineEquivalence(cancelled) error = %v, want no divergence reported for a valid journal", err)
 	}
 }
+
+// TestRerunStillReportsAPipelineFailureThatCoincidesWithCancellation pins the
+// other side of the cancellation rule: only a failure that IS the
+// cancellation is reported as a stopped re-run. A simulator failure that
+// happens while the context is also cancelled is still the audit's finding.
+func TestRerunStillReportsAPipelineFailureThatCoincidesWithCancellation(t *testing.T) {
+	journalBytes, err := os.ReadFile(goldenJournal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	failure := errors.New("simulator failed independently")
+	original := runBar
+	t.Cleanup(func() { runBar = original })
+	runBar = func(context.Context, *fills.Simulator, replay.Handler, event.Envelope) (fills.Result, error) {
+		cancel()
+		return fills.Result{}, failure
+	}
+	err = pipelineEquivalence(ctx, bytes.NewReader(journalBytes))
+	if !errors.Is(err, failure) {
+		t.Fatalf("pipelineEquivalence error = %v, want it to report the independent simulator failure", err)
+	}
+	if strings.Contains(err.Error(), "rerun stopped before completing") {
+		t.Fatalf("pipelineEquivalence error = %v, want the failure reported, not a cancellation", err)
+	}
+}
