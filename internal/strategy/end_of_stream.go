@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -27,7 +26,7 @@ import (
 // because no bar superseded them. That instant is the envelope's own
 // EventTime, and the payload states none of its own: see
 // event.RunCompletedPayload.
-func (r *Reducer) applyRunCompleted(envelope event.Envelope) ([]event.Envelope, error) {
+func (r *transition) applyRunCompleted(envelope event.Envelope) ([]event.Envelope, error) {
 	if !r.configured {
 		return nil, errors.New("strategy: received an end-of-stream event before a configuration event; failing closed")
 	}
@@ -47,7 +46,8 @@ func (r *Reducer) applyRunCompleted(envelope event.Envelope) ([]event.Envelope, 
 	// claims to have ended before data it already delivered would record an
 	// expiry predating its own bar.
 	for _, instrumentID := range r.instrumentIDs() {
-		last := r.instruments[instrumentID].lastPeriodEnd
+		// A read, so the published state is not copied.
+		last := r.peekInstrument(instrumentID).lastPeriodEnd
 		if completedAt.Before(last) {
 			return nil, fmt.Errorf("strategy: the input stream is declared to have ended at %s, which precedes the last completed bar for %s (%s)",
 				completedAt.Format(time.RFC3339), instrumentID, last.Format(time.RFC3339))
@@ -58,14 +58,15 @@ func (r *Reducer) applyRunCompleted(envelope event.Envelope) ([]event.Envelope, 
 
 	var emitted []event.Envelope
 	for _, instrumentID := range r.instrumentIDs() {
-		expiries, err := r.expireOutstandingProposals(instrumentID, completedAt, envelope)
+		state, _ := r.instrument(instrumentID)
+		expiries, err := r.expireOutstandingProposals(state, instrumentID, completedAt, envelope)
 		if err != nil {
 			return nil, err
 		}
 		emitted = append(emitted, expiries...)
 		// An exit proposal expired here no longer governs a Unit it was
 		// above, so that Unit's Exit Order returns to its stop (exit_order.go).
-		exitOrders, err := r.emitExitOrderChanges(r.instruments[instrumentID], completedAt, "end-of-stream", envelope)
+		exitOrders, err := r.emitExitOrderChanges(state, completedAt, "end-of-stream", envelope)
 		if err != nil {
 			return nil, err
 		}
@@ -74,25 +75,11 @@ func (r *Reducer) applyRunCompleted(envelope event.Envelope) ([]event.Envelope, 
 	return emitted, nil
 }
 
-// instrumentIDs returns the instruments this reducer holds state for, in
-// ascending order. The state is held in a map, and a journal's decision order
-// must not depend on Go's map iteration order (.greptile/rules.md:
-// determinism).
-func (r *Reducer) instrumentIDs() []string {
-	ids := make([]string, 0, len(r.instruments))
-	for id := range r.instruments {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
-}
-
 // expireOutstandingProposals ends whatever one instrument still has pending,
 // in ADR 0010's decision order: exits before Adds before entries. At most one
 // of the three can be outstanding at a time in practice, so the order is a
 // statement rather than a behaviour any test can observe on one instrument.
-func (r *Reducer) expireOutstandingProposals(instrumentID string, completedAt time.Time, input event.Envelope) ([]event.Envelope, error) {
-	state := r.instruments[instrumentID]
+func (r *transition) expireOutstandingProposals(state *instrumentState, instrumentID string, completedAt time.Time, input event.Envelope) ([]event.Envelope, error) {
 	var emitted []event.Envelope
 
 	if pending := state.pendingExitProposal; pending != nil {
@@ -172,7 +159,7 @@ type endOfStreamExpiry struct {
 	level          float64
 }
 
-func (r *Reducer) emitEndOfStreamExpiry(expiry endOfStreamExpiry, completedAt time.Time, input event.Envelope) (event.Envelope, error) {
+func (r *transition) emitEndOfStreamExpiry(expiry endOfStreamExpiry, completedAt time.Time, input event.Envelope) (event.Envelope, error) {
 	payload := event.ProposalExpiredPayload{
 		InstrumentID:   expiry.instrumentID,
 		Kind:           expiry.kind,

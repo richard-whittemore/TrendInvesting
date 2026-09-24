@@ -23,7 +23,7 @@ import (
 // contradicted would leave a run claiming to have deliberately ended while
 // still receiving market data, which is not a fact this journal can state
 // truthfully.
-func (r *Reducer) applyAdapterRunStopped(envelope event.Envelope) ([]event.Envelope, error) {
+func (r *transition) applyAdapterRunStopped(envelope event.Envelope) ([]event.Envelope, error) {
 	if !r.configured {
 		return nil, errors.New("strategy: received a run stop before a configuration event; failing closed")
 	}
@@ -41,7 +41,8 @@ func (r *Reducer) applyAdapterRunStopped(envelope event.Envelope) ([]event.Envel
 	// (applyRunCompleted), it may not precede data the run already
 	// consumed.
 	for _, instrumentID := range r.instrumentIDs() {
-		last := r.instruments[instrumentID].lastPeriodEnd
+		// A read, so the published state is not copied.
+		last := r.peekInstrument(instrumentID).lastPeriodEnd
 		if envelope.EventTime.Before(last) {
 			return nil, fmt.Errorf("strategy: the run is declared stopped at %s, which precedes the last completed bar for %s (%s)",
 				envelope.EventTime.Format(time.RFC3339), instrumentID, last.Format(time.RFC3339))

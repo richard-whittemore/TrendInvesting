@@ -8,6 +8,69 @@
 4. Fail closed on unknown schemas, missing sequences, stale data, or uncertain brokerage state.
 5. Prefer table-driven tests and replay fixtures over behavior hidden inside LEAN callbacks.
 
+## Reducer transactions
+
+`Reducer.Apply` uses one transaction boundary, `transact`. Every input handler
+and emission builder is a method of the private `transition` type, which owns
+the candidate state. They may mutate that candidate while deriving later
+payloads, but every payload must validate and marshal before the builder returns
+success. Only then are the candidate and its emission stream published. On any
+error the candidate and ordinary emissions are discarded, including fill
+acceptance: retrying a rejected fill must fail again, never become a duplicate.
+
+The candidate is copy-on-write, so a transaction's cost follows what the input
+touches rather than the size of the universe or the length of the run:
+
+- `Reducer.begin` copies scalars, the Notional Account and the `delisted` map
+  eagerly for every transaction.
+- Instrument state is copied on first access. `transition.instrument(id)`
+  returns the transaction's own copy of that instrument, deep-copying the
+  published state (indicator buffers, all three proposals, the Campaign and its
+  Units) with `instrumentState.clone` the first time. `addInstrument` records
+  an instrument the transaction creates. `peekInstrument` reads without copying,
+  and only for a read that never mutates; `instrumentIDs` lists published and
+  newly created instruments together.
+- Accepted fills are buffered. `acceptedFill` checks the transaction's own
+  fills, then the whole run's history; `recordAcceptedFill` buffers a new one.
+  A recorded `acceptedFillState`, including its UnitIDs, is never mutated
+  afterwards, which is why the published history is shared rather than copied.
+- `commit` writes both overlays into the published maps. A rejection drops
+  them, so nothing reaches published state.
+
+Extension rules:
+
+- Never index `r.instruments` or `r.acceptedFills` directly in a handler. Both
+  are nil for the whole transaction, so a direct write panics and a direct read
+  finds nothing. Use the accessors.
+- Add new reducer-level state to `Reducer.begin` if it is small, or behind an
+  accessor with an overlay if it grows with the universe or the run. Add new
+  instrument state to `instrumentState.clone`.
+- Record the new path's mechanism in `TestCloneCoversEveryReferenceTypedField`,
+  which fails on any reference-typed path it does not name and checks
+  `instrumentState.clone` against a real copy. Immutable `time.Time` location
+  metadata may be shared.
+
+This covers configuration, all fill kinds and `openCampaign` (including chained
+Adds and Exit Orders), snapshots and cash movements, completed bars (including
+indicator advancement and proposal expiries), delistings, and whole-stream
+completion across instruments. Pure arithmetic and payload builders need no
+separate nested transaction: they execute inside the same candidate. The public
+Notional Account arithmetic object is independently usable; reducer-owned calls
+always operate on the candidate account.
+
+One existing failure diagnostic is deliberately preserved: finding a Campaign
+without a valid Protective Stop emits an engine-state halt while leaving state
+unchanged (the safety invariants in `docs/architecture.md`). Only that explicit
+halt channel survives rejection; partial business decisions do not.
+
+Transaction tests use the private build callback as their only fault seam. They
+run the real handler, invalidate its last payload's required Rule, and reject it
+with the real payload validator before returning from the callback. This tests
+otherwise construction-unreachable final failures without adding a production
+validator override. Separate tests trigger actual builder failures through Apply.
+These mechanics do not change strategy rules, decision order or payload bytes
+(ADR 0016); the decision corpus and journal/registry goldens stay unchanged.
+
 ## Floating-point determinism: never leave a multiply-add fusible
 
 Go permits an implementation to fuse `a + b*c` into a single fused multiply-add, "possibly across statements", and arm64 does while amd64 does not. The fused form keeps the full-precision product, so the two architectures produce results that differ in the last bits — and a platform whose journal must be byte-identical for replay equivalence (ADR 0017) cannot afford that. This is the determinism rule in `.greptile/rules.md` applied to the arithmetic itself: same inputs, same configuration, same code version, same decisions — on any machine.

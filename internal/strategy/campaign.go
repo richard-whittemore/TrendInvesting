@@ -322,10 +322,9 @@ func (c *campaignState) resolveUnits(ids []string) (found []unitState, missing [
 }
 
 // removeUnits deletes every Unit named in toRemove (by openingFillID) from
-// c.units, preserving the ascending order of whatever remains. Called only
-// after every payload a stop fill will be journalled as has already been
-// validated (openCampaign's own discipline, applied here): a Unit that
-// could not be recorded as closed must not disappear from state either.
+// c.units, preserving the ascending order of whatever remains (CONTEXT.md: "Unit").
+// It operates on candidate state: transact prevents a Unit whose closing
+// payload was rejected from disappearing from committed holdings.
 func (c *campaignState) removeUnits(toRemove []unitState) {
 	remove := make(map[string]bool, len(toRemove))
 	for _, u := range toRemove {
@@ -457,7 +456,7 @@ func (a acceptedFillState) matches(fill event.FillPayload) bool {
 //
 // It lives for one bar. ADR 0011 gives a Signal the lifetime of its bar, and
 // the proposal a Signal produced inherits it: the next completed bar for the
-// instrument supersedes the proposal (see Reducer.expireProposal).
+// instrument supersedes the proposal (see transition.expireProposal).
 type pendingProposalState struct {
 	proposalID string
 	signalID   string
@@ -497,7 +496,7 @@ type pendingProposalState struct {
 //
 // earliestFillAt must be the period end of the bar preceding the decision bar,
 // read before applyCompletedBar's advance block overwrites it.
-func (r *Reducer) rememberPendingProposal(state *instrumentState, emitted event.Envelope, earliestFillAt time.Time) error {
+func (r *transition) rememberPendingProposal(state *instrumentState, emitted event.Envelope, earliestFillAt time.Time) error {
 	if emitted.Type != event.TradeProposalEventType {
 		// A decline proposes nothing, so there is nothing to fill and
 		// nothing to expire.
@@ -546,7 +545,7 @@ func (r *Reducer) rememberPendingProposal(state *instrumentState, emitted event.
 // This exact payload and event type is reused for an outstanding EXIT
 // proposal too (expireExitProposal, below), naming the difference with
 // Kind rather than minting a second event.
-func (r *Reducer) expireEntryProposal(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
+func (r *transition) expireEntryProposal(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
 	pending := state.pendingProposal
 	state.pendingProposal = nil
 
@@ -596,10 +595,10 @@ func (r *Reducer) expireEntryProposal(state *instrumentState, bar event.Complete
 //
 // It lives for one bar, the identical lifetime ADR 0011 gives every proposal
 // in this system: the next completed bar for the instrument supersedes it
-// (see Reducer.expireExitProposal).
+// (see transition.expireExitProposal).
 //
 // earliestFillAt is the exit-side twin of pendingProposalState's own field of
-// the same name (see Reducer.applyFill's doc comment, "The window a fill's
+// the same name (see transition.applyFill's doc comment, "The window a fill's
 // timestamp must lie in"): the period end of the bar BEFORE the breach bar —
 // the moment the breach bar opened, and so the earliest instant at which an
 // order for this exit proposal could have executed. It degrades correctly at
@@ -627,7 +626,7 @@ type pendingExitProposalState struct {
 // second event type (see that payload's own doc comment). Unlike an
 // entry-kind expiry, SignalID is left empty: an exit proposal is not sized
 // from a Signal at all (event.ExitProposalPayload's doc comment).
-func (r *Reducer) expireExitProposal(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
+func (r *transition) expireExitProposal(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
 	pending := state.pendingExitProposal
 	state.pendingExitProposal = nil
 
@@ -676,7 +675,7 @@ func (r *Reducer) expireExitProposal(state *instrumentState, bar event.Completed
 //
 // It lives for one bar, the identical lifetime ADR 0011 gives every
 // proposal in this system: the next completed bar for the instrument
-// supersedes it (see Reducer.expireAddProposal) — including a proposal
+// supersedes it (see transition.expireAddProposal) — including a proposal
 // raised by the SAME-BAR Add chain (see applyAddFill), since that proposal
 // is still attributed to the bar that produced the opportunity for it, not
 // to the fill that happened to trigger the next rung's evaluation.
@@ -708,7 +707,7 @@ type pendingAddProposalState struct {
 // event type. Like an exit-kind expiry, SignalID is left empty: an Add
 // proposal is not sized from a Signal (event.AddProposalPayload's doc
 // comment).
-func (r *Reducer) expireAddProposal(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
+func (r *transition) expireAddProposal(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
 	pending := state.pendingAddProposal
 	state.pendingAddProposal = nil
 
@@ -764,16 +763,10 @@ func (r *Reducer) expireAddProposal(state *instrumentState, bar event.CompletedB
 // further, independent line of defence, belt and braces alongside
 // cancelling the proposal outright here.
 //
-// **Deliberately does NOT mutate state.pendingAddProposal.** Building and
-// validating this payload can fail — genuinely, not merely defensively —
-// when the closing fill's own timestamp predates the proposal's own
-// EarliestFillAt bound, and openCampaign's own discipline applies here
-// exactly as everywhere else in this file: nothing may be committed to
-// memory before every payload for the transition has validated. The caller
-// (applyStopFill) clears state.pendingAddProposal itself, only after this
-// envelope — and every other payload the same stop fill produces — has
-// validated successfully.
-func (r *Reducer) expireAddProposalForStop(state *instrumentState, fill event.FillPayload, input event.Envelope) (event.Envelope, error) {
+// This builder leaves state.pendingAddProposal to its caller. Validation can
+// fail when the closing fill predates the proposal's EarliestFillAt bound;
+// transact discards both the candidate holdings and fill acceptance on error.
+func (r *transition) expireAddProposalForStop(state *instrumentState, fill event.FillPayload, input event.Envelope) (event.Envelope, error) {
 	pending := state.pendingAddProposal
 
 	payload := event.ProposalExpiredPayload{
@@ -836,7 +829,7 @@ func (r *Reducer) expireAddProposalForStop(state *instrumentState, fill event.Fi
 // through here so a freshly raised exit proposal can record it as
 // pendingExitProposalState.earliestFillAt (see that field's doc comment and
 // applyExitFill's window check).
-func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBarPayload, exitChannelLow float64, exitChannelReady bool, previousPeriodEnd time.Time, input event.Envelope) ([]event.Envelope, error) {
+func (r *transition) evaluateCampaign(state *instrumentState, bar event.CompletedBarPayload, exitChannelLow float64, exitChannelReady bool, previousPeriodEnd time.Time, input event.Envelope) ([]event.Envelope, error) {
 	campaign := state.campaign
 	view := bar.SplitAdjusted
 
@@ -997,7 +990,7 @@ func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBa
 // A campaign already at its configured maximum Units proposes nothing —
 // silently, since a fully-Loaded Campaign is an ordinary state, not an
 // error.
-func (r *Reducer) evaluateAdd(state *instrumentState, input event.Envelope) ([]event.Envelope, error) {
+func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) ([]event.Envelope, error) {
 	campaign := state.campaign
 	if campaign.partiallyStopped {
 		// The Turtle Rules p.23-24 describes a Whipsaw variant in
@@ -1120,14 +1113,14 @@ func (r *Reducer) evaluateAdd(state *instrumentState, input event.Envelope) ([]e
 
 // declineAdd builds the strategy.proposal.declined emission for an open
 // Campaign's Add Ladder rung that was reached but not taken (ADR 0010) — the
-// Add-kind counterpart of Reducer.decline (reducer.go), which builds the
+// Add-kind counterpart of transition.decline (reducer.go), which builds the
 // entry-kind emission.
 //
 // requiredCash and availableCash are only meaningful for reason
 // event.DeclineReasonInsufficientCash; every other caller passes 0, 0
 // (ProposalDeclinedPayload.Validate rejects a non-zero value for any other
 // reason).
-func (r *Reducer) declineAdd(campaign *campaignState, periodEnd time.Time, unitIndex int, input event.Envelope, reason, detail string, requiredCash, availableCash float64) (event.Envelope, error) {
+func (r *transition) declineAdd(campaign *campaignState, periodEnd time.Time, unitIndex int, input event.Envelope, reason, detail string, requiredCash, availableCash float64) (event.Envelope, error) {
 	payload := event.ProposalDeclinedPayload{
 		InstrumentID:  campaign.instrumentID,
 		PeriodEnd:     periodEnd,
@@ -1321,7 +1314,7 @@ func checkBarConfirmsCampaignClosing(state *instrumentState, bar event.Completed
 // improve on a level, and this reducer's job is to record the fact it was
 // handed, not to police the producer's model. The recorded price is what every
 // later ladder is measured from either way.
-func (r *Reducer) applyFill(envelope event.Envelope) ([]event.Envelope, error) {
+func (r *transition) applyFill(envelope event.Envelope) ([]event.Envelope, error) {
 	if !r.configured {
 		return nil, errors.New("strategy: received a fill before a configuration event; failing closed")
 	}
@@ -1344,7 +1337,7 @@ func (r *Reducer) applyFill(envelope event.Envelope) ([]event.Envelope, error) {
 	// different instrument entirely is therefore caught here, as a
 	// reconciliation failure, rather than by an instrument-scoped check that
 	// would never see it.
-	if recorded, seen := r.acceptedFills[fill.FillID]; seen {
+	if recorded, seen := r.acceptedFill(fill.FillID); seen {
 		if !recorded.matches(fill) {
 			return nil, fmt.Errorf("strategy: fill %q was already recorded (instrument %q, kind %s, proposal %q, campaign %q, %d at %v %s on %s), but this delivery differs (instrument %q, kind %s, proposal %q, campaign %q, %d at %v %s on %s); a reused fill identifier carrying different contents is a reconciliation failure, not a duplicate delivery",
 				fill.FillID,
@@ -1380,7 +1373,7 @@ func (r *Reducer) applyFill(envelope event.Envelope) ([]event.Envelope, error) {
 	// Deliberately a plain lookup rather than stateFor: an instrument the
 	// reducer has never seen a bar for cannot have been proposed for, and
 	// creating state here would make the reducer look as though it had.
-	state, known := r.instruments[fill.InstrumentID]
+	state, known := r.instrument(fill.InstrumentID)
 	if !known {
 		if fill.Kind == event.FillKindStop || fill.Kind == event.FillKindExit || fill.Kind == event.FillKindAdd {
 			return nil, fmt.Errorf("strategy: %s fill %q names campaign %q for instrument %q, which this reducer has never evaluated; a fill for a campaign this strategy has no history for is a reconciliation failure, not something to absorb (docs/architecture.md)",
@@ -1517,7 +1510,7 @@ func applyFillToOpenCampaign(campaign *campaignState, fill event.FillPayload) ([
 // decision (event.ProtectiveStopSetEventType) immediately after
 // Campaign-opened, in the same Apply return, so the two are never observed
 // apart in the journal.
-func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalState, fill event.FillPayload, input event.Envelope) ([]event.Envelope, error) {
+func (r *transition) openCampaign(state *instrumentState, pending *pendingProposalState, fill event.FillPayload, input event.Envelope) ([]event.Envelope, error) {
 	// The Campaign's identity is the instrument plus the moment it came into
 	// being, which is the opening fill's timestamp. Deterministic, so replay
 	// reconstructs the same identity with no randomness or wall-clock read;
@@ -1605,13 +1598,10 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 		return nil, err
 	}
 
-	// The state moves only now, after every payload it will be journalled as
-	// has been validated: a Campaign that could not be recorded, complete
-	// with its stop, must not exist in memory either. This is what makes
-	// "an open Campaign without a Protective Stop" unrepresentable by
-	// construction: there is no assignment to state.campaign anywhere else
-	// in this package, and this one never runs without a validated,
-	// positive, below-entry stop already in hand.
+	// Construct the candidate Campaign with its validated, positive,
+	// below-entry stop (ADR 0006). No unprotected Campaign can be constructed
+	// here. The chained Add below still reads this new state and can fail;
+	// transact publishes the Campaign only after that also succeeds.
 	state.campaign = &campaignState{
 		campaignID:   campaignID,
 		instrumentID: fill.InstrumentID,
@@ -1634,7 +1624,7 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 	// idempotent no-op for the rest of this run, however much later it
 	// arrives and however much has happened to the instrument since (see
 	// acceptedFillState's doc comment).
-	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
+	r.recordAcceptedFill(fill.FillID, acceptedFillFromPayload(fill))
 
 	// EventTime is the fill's timestamp on both: the Campaign, and its stop,
 	// came into being when the fill did, not when the Signal fired. Order is
@@ -1723,7 +1713,7 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 // recent Campaign or an earlier one entirely — before dispatch ever reaches
 // here (see acceptedFillState's doc comment). What is left is genuinely
 // unknown.
-func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, input event.Envelope) ([]event.Envelope, error) {
+func (r *transition) applyStopFill(state *instrumentState, fill event.FillPayload, input event.Envelope) ([]event.Envelope, error) {
 	campaign := state.campaign
 	if campaign == nil {
 		return nil, fmt.Errorf("strategy: instrument %q: stop fill %q names campaign %q, but there is no open campaign for it; a stop fill for an unknown or already-closed campaign is a reconciliation failure (docs/architecture.md)",
@@ -1922,14 +1912,14 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 		addExpiryEnvelope = &envelope
 	}
 
-	// The state moves only now, after every payload it will be journalled as
-	// has been validated — identical discipline to openCampaign's own.
+	// Update candidate state; transact commits holdings and fill acceptance
+	// together only after the whole transition succeeds.
 	campaign.closedQuantity += closingQuantity
 	campaign.closedEntryWeightedSum += thisEntryWeightedSum
 	campaign.closedExitWeightedSum += sizing.Product(float64(closingQuantity), fill.Price)
 	campaign.lastCloseFillAt = fill.FilledAt
 	campaign.removeUnits(closingUnits)
-	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
+	r.recordAcceptedFill(fill.FillID, acceptedFillFromPayload(fill))
 
 	emissions := []event.Envelope{r.stamp(
 		decisionID(fmt.Sprintf("units-stopped-%s", fill.FillID), fill.InstrumentID, fill.FilledAt),
@@ -2002,7 +1992,7 @@ func (r *Reducer) applyStopFill(state *instrumentState, fill event.FillPayload, 
 // acceptedFillState's doc comment), so what is left is genuinely a second,
 // different execution racing the first — and it fails closed, exactly as two
 // stop fills racing each other already would.
-func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, input event.Envelope) ([]event.Envelope, error) {
+func (r *transition) applyExitFill(state *instrumentState, fill event.FillPayload, input event.Envelope) ([]event.Envelope, error) {
 	campaign := state.campaign
 	if campaign == nil {
 		return nil, fmt.Errorf("strategy: instrument %q: exit fill %q names campaign %q, but there is no open campaign for it; a closing fill for an unknown or already-closed campaign is a reconciliation failure (docs/architecture.md)",
@@ -2130,9 +2120,9 @@ func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, 
 	exitID := decisionID("campaign-exited", fill.InstrumentID, fill.FilledAt)
 	exitEnvelope := r.stamp(exitID, event.CampaignExitedEventType, event.CampaignExitedSchemaVersion, fill.FilledAt, input, exitedPayloadBytes)
 
-	// The state moves only now, after the payload it will be journalled as
-	// has been validated — identical discipline to applyStopFill's own.
-	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
+	// Update candidate state; transact commits the closing fill and holdings
+	// together (CONTEXT.md: "Campaign").
+	r.recordAcceptedFill(fill.FillID, acceptedFillFromPayload(fill))
 	// The instrument is a Setup again (CONTEXT.md), the same consequence
 	// applyStopFill's own closing has; and the exit proposal this fill
 	// executed is resolved, so a later bar does not try to expire it again.
@@ -2171,7 +2161,7 @@ func (r *Reducer) applyExitFill(state *instrumentState, fill event.FillPayload, 
 // reaches here (see acceptedFillState's doc comment), so what remains is
 // genuinely unmatched — an Add fill arriving anyway fails closed for a
 // Campaign that is never proposed a fifth Unit.
-func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, input event.Envelope) ([]event.Envelope, error) {
+func (r *transition) applyAddFill(state *instrumentState, fill event.FillPayload, input event.Envelope) ([]event.Envelope, error) {
 	campaign := state.campaign
 	if campaign == nil {
 		return nil, fmt.Errorf("strategy: instrument %q: add fill %q names campaign %q, but there is no open campaign for it; a fill for an unknown or already-closed campaign is a reconciliation failure (docs/architecture.md)",
@@ -2318,9 +2308,8 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 	// paraphrase "set every stop to 2N below the newest fill" — see
 	// sizing.RaisedStop's own doc comment for why the two readings diverge
 	// there. Every raised payload is built and validated here, alongside
-	// the two above, before ANY of them mutate campaign state (openCampaign's
-	// own discipline: a Campaign, or a Unit's stop, that could not be
-	// recorded must not exist in memory either).
+	// the two above. Candidate stops may move before the chained Add is
+	// built; transact keeps them private until all payloads validate.
 	type raise struct {
 		unitIndex int
 		newStop   float64
@@ -2384,8 +2373,8 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 		return nil, err
 	}
 
-	// The state moves only now, after every payload it will be journalled as
-	// has been validated — identical discipline to openCampaign's own.
+	// Update candidate state; transact commits holdings and fill acceptance
+	// together only after the whole transition succeeds.
 	// Earlier Units' stops are raised in place, in ascending index order,
 	// before the new Unit is appended, so the same-bar chain re-evaluation
 	// below reads the fully-updated Campaign.
@@ -2403,7 +2392,7 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 	campaign.unitsOpened++
 	recordExitOrders(campaign, state.pendingExitProposal)
 	state.pendingAddProposal = nil
-	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
+	r.recordAcceptedFill(fill.FillID, acceptedFillFromPayload(fill))
 
 	emissions := []event.Envelope{
 		r.stamp(decisionID(fmt.Sprintf("unit-added-%d", unitIndex), fill.InstrumentID, fill.FilledAt), event.CampaignUnitAddedEventType, event.CampaignUnitAddedSchemaVersion, fill.FilledAt, input, unitAddedBytes),
@@ -2471,13 +2460,11 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 // invariants exist to prevent ("material reconciliation differences force
 // safe mode").
 //
-// Returns the halt envelope alongside the error (rather than only the
-// error) so a caller that does not discard emissions on error — the
-// test-only path in invariant_test.go calls Reducer.Apply directly rather
-// than through replay.Engine.Run, which DOES discard a handler's emissions
-// whenever it returns an error — can still see what was about to be
-// journalled.
-func (r *Reducer) checkCampaignHasAProtectiveStop(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
+// Returns the halt envelope alongside the error so applyCompletedBar can
+// preserve it through transact's explicit failure-emission channel. The
+// replay.Handler contract journals this diagnostic even though the input
+// fails; committed state and ordinary business emissions remain unchanged.
+func (r *transition) checkCampaignHasAProtectiveStop(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
 	campaign := state.campaign
 	if campaign == nil {
 		return event.Envelope{}, nil

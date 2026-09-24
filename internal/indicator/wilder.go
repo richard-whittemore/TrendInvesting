@@ -1,6 +1,9 @@
 package indicator
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // DefaultPeriod is the lookback length for N, counted in completed bars
 // (CONTEXT.md: "Completed bar"), never calendar days.
@@ -66,7 +69,7 @@ func WilderNext(previousN, tr float64, period int) float64 {
 // shrinks its own Unit and tightens its own Protective Stop (CONTEXT.md:
 // "Completed bar" — the decision bar is never an input to its own decision).
 // This type cannot enforce that, since Value and Add are legitimately
-// independent operations; internal/strategy.Reducer.applyCompletedBar is the
+// independent operations; internal/strategy.transition.applyCompletedBar is the
 // one call site, and its evaluate and advance blocks are laid out so the
 // order is visible at a glance.
 type WilderAverage struct {
@@ -115,4 +118,16 @@ func (w *WilderAverage) Ready() bool {
 // value (0) and must not be used for a decision.
 func (w *WilderAverage) Value() float64 {
 	return w.value
+}
+
+// Clone returns an independent accumulator, including its buffered bars.
+// Reducer transactions must not advance committed completed-bar inputs on
+// rejection (CONTEXT.md: "Completed bar"). A nil receiver stays nil.
+func (c *WilderAverage) Clone() *WilderAverage {
+	if c == nil {
+		return nil
+	}
+	cloned := *c
+	cloned.seed = slices.Clone(c.seed)
+	return &cloned
 }

@@ -37,7 +37,7 @@ import (
 // payload version which recognises a SECOND kind before this reducer
 // implements it fails closed here rather than silently doing nothing with a
 // corporate action it does not understand (docs/development.md principle 4).
-func (r *Reducer) applyCorporateAction(envelope event.Envelope) ([]event.Envelope, error) {
+func (r *transition) applyCorporateAction(envelope event.Envelope) ([]event.Envelope, error) {
 	if !r.configured {
 		return nil, errors.New("strategy: received a corporate action before a configuration event; failing closed")
 	}
@@ -131,12 +131,12 @@ func (r *Reducer) applyCorporateAction(envelope event.Envelope) ([]event.Envelop
 // never in a Campaign for (never eligible, already exited on its own, or
 // simply never signalled). A repeated or late-arriving notice states no new
 // fact either, since the first one was terminal.
-func (r *Reducer) applyDelisting(payload event.CorporateActionPayload, input event.Envelope) ([]event.Envelope, error) {
+func (r *transition) applyDelisting(payload event.CorporateActionPayload, input event.Envelope) ([]event.Envelope, error) {
 	if _, alreadyDelisted := r.delisted[payload.InstrumentID]; alreadyDelisted {
 		return nil, nil
 	}
 
-	state, known := r.instruments[payload.InstrumentID]
+	state, known := r.instrument(payload.InstrumentID)
 	if !known {
 		// Genuinely unknown: no completed bar has ever been accepted for the
 		// instrument, so there is no last completed bar for the chronology
@@ -285,7 +285,7 @@ func (s *instrumentState) hasOutstandingBusiness() bool {
 // comment for which price that is and why the payload carries none of its
 // own). It moves no state: the caller commits, once every payload for the
 // transition has validated.
-func (r *Reducer) closeCampaignForDelisting(state *instrumentState, payload event.CorporateActionPayload, input event.Envelope) (event.Envelope, error) {
+func (r *transition) closeCampaignForDelisting(state *instrumentState, payload event.CorporateActionPayload, input event.Envelope) (event.Envelope, error) {
 	campaign := state.campaign
 
 	if payload.EffectiveAt.Before(campaign.openedAt) {
@@ -400,7 +400,7 @@ type delistingExpiry struct {
 // It moves no state, for the same reason expireAddProposalForStop does not:
 // the caller clears the proposal only once every payload the transition
 // produces has validated.
-func (r *Reducer) emitDelistingExpiry(expiry delistingExpiry, action event.CorporateActionPayload, input event.Envelope) (event.Envelope, error) {
+func (r *transition) emitDelistingExpiry(expiry delistingExpiry, action event.CorporateActionPayload, input event.Envelope) (event.Envelope, error) {
 	payload := event.ProposalExpiredPayload{
 		InstrumentID:   action.InstrumentID,
 		Kind:           expiry.kind,
