@@ -538,40 +538,52 @@ func Verify(r io.Reader) (Verification, error) {
 	if err := header.validate(); err != nil {
 		return Verification{}, err
 	}
-	var complete, stopped bool
+	var complete, stopped, completedAfterStop bool
 	var stopReason, stopInstrumentID, inputAfterStop string
 	for _, record := range records {
 		if err := record.Envelope.Validate(); err != nil {
 			return Verification{}, fmt.Errorf("journal: record %d: %w", record.Sequence, err)
 		}
-		if record.Kind == KindInput {
-			// The reducer's ordering rule (strategy.Reducer.Apply): once a
-			// run is deliberately stopped, only replay.run.completed may
-			// follow. An input breaking it was refused, so the run failed:
-			// it is reported (InputAfterStop) and never Complete.
-			if stopped && inputAfterStop == "" && record.Envelope.Type != event.RunCompletedEventType {
-				inputAfterStop = record.Envelope.Type
+		if record.Kind != KindInput {
+			continue
+		}
+		if stopped {
+			// The reducer's ordering rule (strategy.Reducer.Apply): after a
+			// deliberate stop, exactly one replay.run.completed may follow,
+			// and nothing else. Any other input, including a second stop or
+			// a second completion, was refused, but the recorder keeps it as
+			// evidence of the failed run. So it is reported, not validated,
+			// never overwrites the accepted stop, and the run is never
+			// Complete.
+			if inputAfterStop == "" {
+				if record.Envelope.Type == event.RunCompletedEventType && !completedAfterStop {
+					completedAfterStop = true
+				} else {
+					inputAfterStop = record.Envelope.Type
+				}
 			}
 			complete = inputAfterStop == "" && record.Envelope.Type == event.RunCompletedEventType
-			if record.Envelope.Type == event.AdapterRunStoppedEventType {
-				var payload event.AdapterRunStoppedPayload
-				if err := json.Unmarshal(record.Envelope.Payload, &payload); err != nil {
-					return Verification{}, fmt.Errorf("journal: record %d: decode adapter run stopped payload: %w", record.Sequence, err)
-				}
-				// A well-chained record is evidence of a stop only if it
-				// meets the stop's own contract at the schema version this
-				// build reads (ADR 0015); anything else is refused here, as
-				// the reducer refuses it, never reported as a verified stop.
-				if record.Envelope.SchemaVersion != event.AdapterRunStoppedSchemaVersion {
-					return Verification{}, fmt.Errorf("journal: record %d: adapter run stopped schema version %d is not the version %d this build reads", record.Sequence, record.Envelope.SchemaVersion, event.AdapterRunStoppedSchemaVersion)
-				}
-				if err := payload.Validate(); err != nil {
-					return Verification{}, fmt.Errorf("journal: record %d: %w", record.Sequence, err)
-				}
-				stopped = true
-				stopReason = payload.Reason
-				stopInstrumentID = payload.InstrumentID
+			continue
+		}
+		complete = record.Envelope.Type == event.RunCompletedEventType
+		if record.Envelope.Type == event.AdapterRunStoppedEventType {
+			var payload event.AdapterRunStoppedPayload
+			if err := json.Unmarshal(record.Envelope.Payload, &payload); err != nil {
+				return Verification{}, fmt.Errorf("journal: record %d: decode adapter run stopped payload: %w", record.Sequence, err)
 			}
+			// A well-chained record is evidence of the stop only if it meets
+			// the stop's own contract at the schema version this build reads
+			// (ADR 0015); the reducer refuses anything else, so it is never
+			// reported as a verified stop.
+			if record.Envelope.SchemaVersion != event.AdapterRunStoppedSchemaVersion {
+				return Verification{}, fmt.Errorf("journal: record %d: adapter run stopped schema version %d is not the version %d this build reads", record.Sequence, record.Envelope.SchemaVersion, event.AdapterRunStoppedSchemaVersion)
+			}
+			if err := payload.Validate(); err != nil {
+				return Verification{}, fmt.Errorf("journal: record %d: %w", record.Sequence, err)
+			}
+			stopped = true
+			stopReason = payload.Reason
+			stopInstrumentID = payload.InstrumentID
 		}
 	}
 

@@ -183,6 +183,7 @@ func TestVerifyReportsAnInputAfterAStopAsAFailedRun(t *testing.T) {
 		{"an ordinary input, then completion", []string{event.AdapterRunStoppedEventType, "test.event", event.RunCompletedEventType}, "test.event"},
 		{"a second stop", []string{event.AdapterRunStoppedEventType, event.AdapterRunStoppedEventType}, event.AdapterRunStoppedEventType},
 		{"an ordinary input, last", []string{event.AdapterRunStoppedEventType, "test.event"}, "test.event"},
+		{"a second completion", []string{event.AdapterRunStoppedEventType, event.RunCompletedEventType, event.RunCompletedEventType}, event.RunCompletedEventType},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -203,6 +204,36 @@ func TestVerifyReportsAnInputAfterAStopAsAFailedRun(t *testing.T) {
 			}
 			if got.Complete {
 				t.Error("Complete = true, want false: an input after a stop means the run failed")
+			}
+		})
+	}
+}
+
+// TestVerifyKeepsTheAcceptedStopWhenARefusedStopFollows: a second stop is an
+// input the reducer refused, so it is reported as the input after the stop,
+// even with a payload the stop's contract rejects. It is never validated as
+// stop evidence and never replaces the accepted stop's reason or instrument.
+func TestVerifyKeepsTheAcceptedStopWhenARefusedStopFollows(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		second []byte
+	}{
+		{"a valid second stop naming another instrument", []byte(`{"reason":"delisted","instrument_id":"MSFT","detail":"later"}`)},
+		{"an invalid second stop", []byte(`{}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := verifyRecords(t,
+				[]string{journal.KindInput, journal.KindInput},
+				[]string{event.AdapterRunStoppedEventType, event.AdapterRunStoppedEventType},
+				map[int][]byte{0: stopPayloadJSON(t), 1: tc.second})
+			if got.StopInstrumentID != "AAPL" || got.StopReason != event.AdapterRunStoppedReasonDelisted {
+				t.Errorf("stop = %q %q, want the accepted first stop, delisted AAPL", got.StopReason, got.StopInstrumentID)
+			}
+			if got.InputAfterStop != event.AdapterRunStoppedEventType || got.Complete {
+				t.Errorf("InputAfterStop = %q, Complete = %v; want the second stop reported and the run not complete", got.InputAfterStop, got.Complete)
 			}
 		})
 	}
