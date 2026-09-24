@@ -291,6 +291,7 @@ func NewReducer(strategyVersion string, payload event.ConfigurationPayload) (*Re
 //     Delisting Exit (CONTEXT.md; ADR 0009), which forces an open Campaign
 //     closed at the last available price — see delisting.go's
 //     applyCorporateAction.
+//
 //   - event.AdapterRunStoppedEventType: record, no decision — an adapter's
 //     own report that it deliberately stopped this run (ADR 0012), the same
 //     rule applyConfiguration follows for the event that opens one. Only

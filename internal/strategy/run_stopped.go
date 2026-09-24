@@ -23,7 +23,7 @@ import (
 // contradicted would leave a run claiming to have deliberately ended while
 // still receiving market data, which is not a fact this journal can state
 // truthfully.
-func (r *Reducer) applyAdapterRunStopped(envelope event.Envelope) ([]event.Envelope, error) {
+func (r *transition) applyAdapterRunStopped(envelope event.Envelope) ([]event.Envelope, error) {
 	if !r.configured {
 		return nil, errors.New("strategy: received a run stop before a configuration event; failing closed")
 	}
