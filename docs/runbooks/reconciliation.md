@@ -14,11 +14,13 @@ This is the procedure for when the system alerts that it has left **Normal**, un
 4. **Check every position's Units each have exactly one working stop at the broker, for the right quantity.** Use the broker's own order list, not ours. The alert says, for each affected position, whether the system **restored** its stop (with the order id), **failed** to, or has **none** to restore (UNPROTECTED, meaning no *journalled* stop).
    - **The right quantity:** each Unit's stop covers that Unit's shares, and the stops together cover exactly the number of shares the broker says you hold now, including any partial fills. Fewer leaves shares unprotected; more would sell shares you don't have. If they don't add up, amend the stops. Don't add another one.
    - **Restored:** don't place another. Two stops would both fill and sell more than you hold.
-   - **Before placing any stop by hand**, look at the broker's working orders for that instrument:
-     - If **any** sell-stop is working (a restoration the system submitted, or one placed earlier by hand), **don't add another.** Verify its level and quantity, and record it.
-     - If a restoration order is **pending** (submitted but not yet working or rejected), **cancel it and wait for the broker to confirm the cancellation** before placing your own.
-     - Place a stop by hand **only when the broker shows no working or pending sell-stop** for the position.
-   - **Failed, or Halted** (the system doesn't restore while Halted): once the broker shows none, place one at the journalled level the alert states, for the held quantity. The system attempts restoration only once per incident, so it won't place another over yours. Record your stop straight away (step 3 of *Recover*).
+   - **Work Unit by Unit, never by instrument.** Each Unit's stop covers only that Unit's shares, so a working stop on one Unit does **not** protect another. Match each working sell-stop to its Unit by level and quantity (the alert gives each Unit's journalled level and shares).
+   - **Before placing a stop by hand for a Unit**, look at the broker's working orders for that instrument:
+     - If a sell-stop is already working **for that Unit** (a restoration the system submitted, or one placed earlier by hand, at its level for its quantity), **don't add another.** Verify it and record it.
+     - If a restoration order for that Unit is **pending** (submitted but not yet working or rejected), **cancel it and wait for the broker to confirm the cancellation** before placing your own.
+     - Place a stop by hand **only for a Unit with no working or pending sell-stop of its own**, even if other Units of the same position still have theirs.
+     - Afterwards, check again that all the stops together cover exactly the holding (the quantity rule above).
+   - **Failed, or Halted** (the system doesn't restore while Halted): for each Unit the broker shows without a stop, place one at that Unit's journalled level (from the alert), for that Unit's quantity. The system attempts restoration only once per incident, so it won't place another over yours. Record each stop straight away (step 3 of *Recover*).
    - **UNPROTECTED:** there's no journalled level. If the broker shows no stop, decide a level yourself and place it.
 
    Then record anything placed or cancelled by hand (step 3 of the recovery below).
