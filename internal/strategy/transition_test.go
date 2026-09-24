@@ -38,7 +38,7 @@ func transitionFixture(t *testing.T, kind string) (*Reducer, event.Envelope) {
 	r.acceptedFills["old-stop"] = acceptedFillState{unitIDs: []string{"old-unit"}}
 	r.delisted["OLD"] = day(1)
 	s.pendingAddProposal = &pendingAddProposalState{proposalID: "add", periodEnd: day(2), earliestFillAt: day(1), unitIndex: 2, quantity: 1, level: 100.5, previousUnitFill: 100}
-	fill := event.FillPayload{InstrumentID: "AAPL", Kind: event.FillKindAdd, CampaignID: c.campaignID, ProposalID: "add", FillID: "new-fill", Direction: event.DirectionLong, Quantity: 1, Price: 100.5, FilledAt: day(2)}
+	fill := event.FillPayload{InstrumentID: "AAPL", Kind: event.FillKindAdd, CampaignID: c.campaignID, ProposalID: "add", FillID: "new-fill", Direction: event.DirectionLong, Quantity: 1, Price: 100.5, Level: 100, FilledAt: day(2)}
 	var payload any = fill
 	typ, schema := event.FillEventType, event.FillSchemaVersion
 	switch kind {
