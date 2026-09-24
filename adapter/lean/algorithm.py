@@ -18,8 +18,9 @@ for candidate in ("/LeanCLI", dirname(abspath(__file__))):
         path.insert(0, candidate)
 
 from client import Client
-from orders import NSlippageModel, OrderDesk, fill_model_report, validate_slippage_n
-from publisher import Publisher, raw_view
+from orders import (NSlippageModel, OrderDesk, fill_model_report, validate_slippage_n,
+                    whole_split_ratio)
+from publisher import Publisher, split_adjusted_view
 
 # quantconnect/lean@sha256:<64 lowercase hex>; never a tag such as :latest
 # or a version tag, which both float (see validate_lean_image).
@@ -98,18 +99,31 @@ class CompletedBarsAlgorithm(QCAlgorithm):
                 self.Log("adapter: fill model: " + line)
             self.SetTimeZone(TimeZones.NewYork)
             self.instrument = settings["symbol"]
+            # ADR 0004: order pricing, fills and portfolio accounting are raw.
+            # LEAN trades, holds and charges commission in whatever view the
+            # subscription is in, so the subscription is raw; the
+            # split-adjusted view the engine's signals read comes from
+            # History (publish_completed_bar).
             security = self.AddEquity(
                 self.instrument, Resolution.Daily, fillForward=False,
-                dataNormalizationMode=DataNormalizationMode.SplitAdjusted)
+                dataNormalizationMode=DataNormalizationMode.Raw)
             self.symbol = security.Symbol
             self.desk = OrderDesk(self, self.symbol, self.instrument, SimpleNamespace(
                 OrderProperties=OrderProperties, TimeInForce=TimeInForce,
-                UpdateOrderFields=UpdateOrderFields, OrderStatus=OrderStatus))
+                UpdateOrderFields=UpdateOrderFields, OrderStatus=OrderStatus,
+                OrderField=OrderField))
             # ADR 0013: slippage_n x the N the engine supplied with each
             # order's decision, and Interactive Brokers commissions.
             security.SetSlippageModel(NSlippageModel(slippage_n, self.desk.n_for_tag,
                                                      self.desk.record_slippage))
             security.SetFeeModel(InteractiveBrokersFeeModel())
+            # ADR 0004: a split's changes to open orders are checked before
+            # the next session can fill them. LEAN makes them after the
+            # split's slice's OnData, in the same time step, and fires a
+            # 00:01 event after that step and before the session's fills
+            # (observed on the pinned image), so the check runs then.
+            self.Schedule.On(self.DateRules.EveryDay(self.symbol), self.TimeRules.At(0, 1),
+                             self.verify_split)
             # docs/architecture.md: reconcile before any executor submits.
             self.desk.require_flat("at startup")
             self.SetWarmUp(warmup, Resolution.Daily)
@@ -140,6 +154,12 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             return
         try:
             self.desk.require_cancels_confirmed("before the next session's bar")
+            # The second line behind verify_split: the split's changes to open
+            # orders are checked again, final, before the next bar is sent.
+            self.desk.require_split_applied("before the next session's bar", final=True)
+            split = data.Splits.get(self.symbol)
+            if split is not None and split.Type == SplitType.SplitOccurred:
+                self.desk.apply_split(float(split.SplitFactor), split.Time)
         except Exception as err:
             self.stop("order state uncertain: {}".format(err))
             return
@@ -157,6 +177,19 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.publish_completed_bar(bar)
         if notice is not None and not self.failed:
             self.handle_delisting(notice)
+
+    def verify_split(self):
+        """The 00:01 scheduled check: after a split, LEAN's position and orders,
+        read from its order book, are exactly the engine's before the next
+        session can fill anything (OrderDesk.require_split_applied). Sends
+        nothing; a failure stops the run there (observed on the pinned image:
+        Quit at 00:01 prevents that session's fills)."""
+        if self.failed or getattr(self, "desk", None) is None:
+            return
+        try:
+            self.desk.require_split_applied("before the split's first session", final=False)
+        except Exception as err:
+            self.stop("order state uncertain: {}".format(err))
 
     def OnOrderEvent(self, order_event):
         """Record what LEAN reports about an order; never send from here.
@@ -314,12 +347,17 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         try:
             started = perf_counter()
             history = self.History([self.symbol], 1, Resolution.Daily,
-                                   dataNormalizationMode=DataNormalizationMode.Raw)
+                                   dataNormalizationMode=DataNormalizationMode.SplitAdjusted)
             self.history_ms.append((perf_counter() - started) * 1000)
-            raw = raw_view(history, bar.EndTime)
+            adjusted = split_adjusted_view(history, bar.EndTime)
             end = bar.EndTime.replace(tzinfo=ZoneInfo("America/New_York"))
             period_end = end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            decisions = self.publisher.publish(self.instrument, bar, raw, period_end)
+            # ADR 0004: the ratio the desk converts the engine's
+            # split-adjusted figures to LEAN's raw ones by, checked before
+            # the bar reaches the engine.
+            self.desk.observe_ratio(whole_split_ratio(float(bar.Close) / adjusted["close"]),
+                                    period_end)
+            decisions = self.publisher.publish(self.instrument, bar, adjusted, period_end)
             # ADR 0021: the slice's bars are its Session; closing it lets the
             # engine decide the day's Adds and entries.
             decisions += self.publisher.publish_session_closed(period_end)
@@ -331,9 +369,10 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.bar_count += 1
             self.warmup_seen += int(warming)
             self.decision_count += len(decisions)
-            self.Log("adapter: seq={} end={} warmup={} raw={} split-adjusted={} decisions={}".format(
-                self.publisher.sequence, period_end, warming, raw["close"], float(bar.Close),
-                len(decisions)))
+            self.Log("adapter: seq={} end={} warmup={} raw={} split-adjusted={} ratio={} "
+                     "decisions={}".format(self.publisher.sequence, period_end, warming,
+                                           float(bar.Close), adjusted["close"], self.desk.ratio,
+                                           len(decisions)))
             # Only once both of this bar's exchanges have succeeded: a failed
             # exchange leaves the stream out of step with the engine, and the
             # run then stops with nothing submitted (README.md: safe mode).

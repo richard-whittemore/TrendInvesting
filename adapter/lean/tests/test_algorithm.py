@@ -86,6 +86,12 @@ class FakeTicket:
         self.Status = book.submit_status
         self.event_ids = 0
 
+    def Get(self, field):
+        """LEAN's OrderTicket.Get(OrderField): the order's current figure."""
+        if field != "stop-price":
+            raise ValueError("this fake knows only OrderField.StopPrice")
+        return self.StopPrice
+
     def Update(self, fields):
         """LEAN's amendment: acknowledged at once, reported after the slice."""
         self.book.updates.append((self.OrderId, fields.StopPrice, fields.Tag))
@@ -149,6 +155,28 @@ class FakeTransactions:
                 ticket.Status = "canceled"
             self.emit(ticket, status)
 
+    def split_holding(self, symbol, factor):
+        """LEAN's split of the holding under Raw normalisation, as observed on the
+        pinned image (AAPL's 2-for-1 of 2005-02-28, factor 0.4999986): done
+        before the split's slice reaches OnSplits and OnData, dividing the
+        holding by the factor, truncated to whole shares with the remainder
+        paid as cash."""
+        portfolio = self.algorithm.Portfolio
+        held = portfolio.holdings.get(symbol, 0)
+        if held:
+            portfolio.holdings[symbol] = int(held / factor)
+
+    def split_orders(self, symbol, factor, tick=0.01):
+        """LEAN's split of the open orders, as observed on the pinned image: done
+        after the split's slice's OnData returns, in the same time step, each
+        order's quantity divided by the factor and its stop multiplied by it
+        and rounded to the tick, each reported through OnOrderEvent as
+        UpdateSubmitted with its ticket already changed."""
+        for ticket in self.GetOpenOrderTickets(symbol):
+            ticket.Quantity = round(ticket.Quantity / factor)
+            ticket.StopPrice = round(round(ticket.StopPrice * factor / tick) * tick, 10)
+            self.emit(ticket, "update-submitted")
+
     def GetOrderTickets(self, predicate=None):
         return Enumerable(t for t in self.tickets if predicate is None or predicate(t))
 
@@ -178,6 +206,17 @@ class FakeAlgorithm:
         return self.security
     def SetWarmUp(self, count, resolution):
         self.warmup = (count, resolution)
+    # LEAN's scheduling API: each rule is recorded as what it was built from,
+    # and every scheduled callback is kept, so a test can assert on the
+    # schedule and play the callback at the time LEAN would.
+    DateRules = types.SimpleNamespace(EveryDay=lambda symbol: ("every-day", symbol))
+    TimeRules = types.SimpleNamespace(At=lambda hour, minute: ("at", hour, minute))
+    @property
+    def Schedule(self):
+        scheduled = self.__dict__.setdefault("scheduled", [])
+        return types.SimpleNamespace(
+            On=lambda date_rule, time_rule, callback: scheduled.append(
+                (date_rule, time_rule, callback)))
     def Log(self, message): self.__dict__.setdefault("logs", []).append(message)
     def Quit(self, message): self.quit_reason = message
     @property
@@ -186,7 +225,9 @@ class FakeAlgorithm:
     @property
     def Securities(self):
         return self.__dict__.setdefault(
-            "_securities", {"AAPL": types.SimpleNamespace(IsTradable=True)})
+            "_securities", {"AAPL": types.SimpleNamespace(
+                IsTradable=True,
+                SymbolProperties=types.SimpleNamespace(MinimumPriceVariation=0.01))})
     # Every LEAN order entry point records its call, so a test can assert that
     # none was made rather than relying on the method being absent.
     def _order(self, *args, **kwargs):
@@ -228,6 +269,8 @@ imports.Resolution = types.SimpleNamespace(Daily="daily")
 imports.DataNormalizationMode = types.SimpleNamespace(SplitAdjusted="split", Raw="raw")
 imports.TimeZones = types.SimpleNamespace(NewYork="NY")
 imports.DelistingType = types.SimpleNamespace(Warning="warning", Delisted="delisted")
+imports.SplitType = types.SimpleNamespace(Warning="split-warning", SplitOccurred="split-occurred")
+imports.OrderField = types.SimpleNamespace(StopPrice="stop-price")
 imports.time = time
 imports.OrderProperties = OrderProperties
 imports.UpdateOrderFields = UpdateOrderFields
@@ -243,10 +286,10 @@ algorithm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(algorithm)
 
 
-def slice_of(bars=None, delistings=None, changes=None):
-    """A LEAN data slice: LEAN always provides all three collections."""
+def slice_of(bars=None, delistings=None, changes=None, splits=None):
+    """A LEAN data slice: LEAN always provides all four collections."""
     return types.SimpleNamespace(Bars=bars or {}, Delistings=delistings or {},
-                                 SymbolChangedEvents=changes or {})
+                                 SymbolChangedEvents=changes or {}, Splits=splits or {})
 
 
 class AlgorithmTests(unittest.TestCase):
@@ -265,7 +308,8 @@ class AlgorithmTests(unittest.TestCase):
     def test_warmup_is_three_bars_across_weekend_and_not_three_days(self):
         algo = self.init()
         self.assertEqual(algo.warmup, (3, "daily"))
-        self.assertEqual(algo.subscription["dataNormalizationMode"], "split")
+        # ADR 0004: LEAN trades and accounts in raw prices and shares.
+        self.assertEqual(algo.subscription["dataNormalizationMode"], "raw")
         self.assertFalse(algo.subscription["fillForward"])
         seen = []
         algo.publisher = types.SimpleNamespace(sequence=2, publish=lambda *args: seen.append(args) or [],
@@ -323,6 +367,30 @@ class AlgorithmTests(unittest.TestCase):
             ends.append(end)
         self.assertTrue(all(a < b for a, b in zip(ends, ends[1:])))
         self.assertEqual(ends[-1], "2014-06-09T20:00:00Z")
+
+    def test_a_bar_carries_leans_raw_bar_and_its_split_adjusted_history(self):
+        """ADR 0004: LEAN trades raw, so its subscription bar is the raw view,
+        and the split-adjusted view every signal reads is LEAN's own
+        split-adjusted History for the same bar, never arithmetic here."""
+        algo = self.init()
+        requests = []
+        b = bar(6)
+
+        def history(symbols, count, resolution, **kwargs):
+            requests.append((symbols, count, resolution, kwargs))
+            return Frame(b.EndTime, ratio=28)
+        algo.History = history
+        algo.IsWarmingUp = True
+        algo.OnData(slice_of({"AAPL": b}))
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(requests, [(["AAPL"], 1, "daily", {"dataNormalizationMode": "split"})])
+        [completed] = [e for e in algo.client.sent if e["type"] == "market.bar.completed"]
+        self.assertEqual(completed["payload"]["raw"], {
+            "view": "raw", "open": 23.0, "high": 24.0, "low": 22.0, "close": 23.056,
+            "volume": 2800.0})
+        self.assertEqual(completed["payload"]["split_adjusted"], {
+            "view": "split-adjusted", "open": 23 / 28, "high": 24 / 28, "low": 22 / 28,
+            "close": 23.056 / 28, "volume": 2800.0 * 28})
 
     def test_portfolio_is_read_after_bar_reply(self):
         algo = self.init()
@@ -386,7 +454,7 @@ class AlgorithmTests(unittest.TestCase):
         self.assertTrue(algo.failed)
         self.assertEqual(len(algo.client.sent), 1)
 
-    def test_missing_raw_stops_stream_without_reusing_connection(self):
+    def test_missing_split_adjusted_history_stops_stream_without_reusing_connection(self):
         algo = self.init()
         algo.IsWarmingUp = False
         algo.History = lambda *args, **kwargs: None
@@ -718,7 +786,7 @@ class RunCompletionTests(unittest.TestCase):
         """After a failure the stream may be out of step with the engine."""
         algo = self.start()
         self.feed(algo, 6)
-        algo.History = lambda *args, **kw: None  # the raw view is missing: the bar fails
+        algo.History = lambda *args, **kw: None  # the split-adjusted view is missing: the bar fails
         algo.OnData(slice_of({"AAPL": bar(9)}))
         self.assertTrue(algo.failed)
         algo.OnEndOfAlgorithm()

@@ -13,7 +13,7 @@ if adapter_dir not in sys.path:
     sys.path.insert(0, adapter_dir)
 
 from client import Client as WireClient
-from publisher import Publisher, raw_view
+from publisher import Publisher, split_adjusted_view
 
 
 class Client:
@@ -52,17 +52,27 @@ class Client:
         return result
 
 
+# LEAN's subscription bar. The adapter subscribes with Raw normalisation, so
+# these are raw prices (ADR 0004).
+RAW_BAR = {"Open": 23, "High": 24, "Low": 22, "Close": 23.056, "Volume": 2800}
+
+
 def bar(day):
-    return SimpleNamespace(EndTime=datetime(2014, 6, day, 16),
-                           Open=23, High=24, Low=22, Close=23.056, Volume=2800)
+    return SimpleNamespace(EndTime=datetime(2014, 6, day, 16), **RAW_BAR)
 
 
 class Frame:
+    """LEAN's one-bar split-adjusted History for the raw bar ending at end.
+
+    ratio is the raw price over the split-adjusted one: 1 for an instrument
+    with no split after the bar, 28 for AAPL in June 2014, whose 7-for-1 of
+    2014-06-09 and 4-for-1 of 2020-08-31 were both still to come.
+    """
     empty = False
-    def __init__(self, end):
+    def __init__(self, end, ratio=1):
         self.index = [("AAPL", end)]
-        self.iloc = [{"open": 644, "high": 646, "low": 640,
-                      "close": 645.57, "volume": 100}]
+        self.iloc = [{key.lower(): value / ratio for key, value in RAW_BAR.items()}]
+        self.iloc[0]["volume"] = RAW_BAR["Volume"] * ratio
     def __len__(self):
         return len(self.index)
 
@@ -74,7 +84,7 @@ class PublisherTests(unittest.TestCase):
         for day, cash in ((6, 75000.25), (9, 0)):
             end = "2014-06-{:02d}T20:00:00Z".format(day)
             b = bar(day)
-            pub.publish("AAPL", b, raw_view(Frame(b.EndTime), b.EndTime), end)
+            pub.publish("AAPL", b, split_adjusted_view(Frame(b.EndTime), b.EndTime), end)
             pub.publish_session_closed(end)
             pub.publish_snapshot(SimpleNamespace(TotalPortfolioValue=123456.75, Cash=cash), end)
             envelope = client.sent[-1]
@@ -97,7 +107,7 @@ class PublisherTests(unittest.TestCase):
         for day in (6, 9):
             end = "2014-06-{:02d}T20:00:00Z".format(day)
             b = bar(day)
-            pub.publish("AAPL", b, raw_view(Frame(b.EndTime), b.EndTime), end)
+            pub.publish("AAPL", b, split_adjusted_view(Frame(b.EndTime), b.EndTime), end)
             pub.publish_session_closed(end)
             envelope = client.sent[-1]
             self.assertEqual(envelope["type"], "market.session.closed")
@@ -119,13 +129,13 @@ class PublisherTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             pub.publish_session_closed("2014-06-09T20:00:00Z")
         b = bar(9)
-        pub.publish("AAPL", b, raw_view(Frame(b.EndTime), b.EndTime), "2014-06-09T20:00:00Z")
+        pub.publish("AAPL", b, split_adjusted_view(Frame(b.EndTime), b.EndTime), "2014-06-09T20:00:00Z")
         with self.assertRaises(ValueError):
             pub.publish_session_closed("2014-06-10T20:00:00Z")
         # The next day's bar cannot open a Session while this one is open.
         with self.assertRaises(ValueError):
             later = bar(10)
-            pub.publish("AAPL", later, raw_view(Frame(later.EndTime), later.EndTime), "2014-06-10T20:00:00Z")
+            pub.publish("AAPL", later, split_adjusted_view(Frame(later.EndTime), later.EndTime), "2014-06-10T20:00:00Z")
         self.assertEqual([e["type"] for e in client.sent], ["market.bar.completed"])
         pub.publish_session_closed("2014-06-09T20:00:00Z")
         with self.assertRaises(ValueError):
@@ -160,7 +170,7 @@ class PublisherTests(unittest.TestCase):
         """Two runs over the same bars write the same input envelopes."""
         client = Client()
         Publisher(client, "hash", "version", "test").publish(
-            "AAPL", bar(9), raw_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
+            "AAPL", bar(9), split_adjusted_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
         self.assertEqual(client.sent[0]["recorded_at"], "2014-06-09T20:00:00Z")
 
     def test_reply_with_another_runs_correlation_id_is_rejected(self):
@@ -169,51 +179,56 @@ class PublisherTests(unittest.TestCase):
         client.decide = lambda e: dict(answer(e), correlation_id="another-run")
         with self.assertRaises(ValueError):
             Publisher(client, "hash", "version", "test").publish(
-                "AAPL", bar(9), raw_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
+                "AAPL", bar(9), split_adjusted_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
 
     def test_configuration_then_bars_and_labelled_views(self):
         client = Client()
         pub = Publisher(client, "hash", "version", "run")
         for day in (6, 9):
             b = bar(day)
-            raw = raw_view(Frame(b.EndTime), b.EndTime)
-            pub.publish("AAPL", b, raw, "2014-06-{:02d}T20:00:00Z".format(day))
+            adjusted = split_adjusted_view(Frame(b.EndTime, ratio=28), b.EndTime)
+            pub.publish("AAPL", b, adjusted, "2014-06-{:02d}T20:00:00Z".format(day))
             pub.publish_session_closed("2014-06-{:02d}T20:00:00Z".format(day))
         self.assertEqual([e["sequence"] for e in client.sent], [2, 3, 4, 5])
         for e in client.sent[::2]:
             self.assertEqual(e["type"], "market.bar.completed")
-            self.assertEqual(e["payload"]["split_adjusted"]["view"], "split-adjusted")
-            self.assertEqual(e["payload"]["raw"]["view"], "raw")
-            self.assertNotEqual(e["payload"]["raw"]["close"],
-                                e["payload"]["split_adjusted"]["close"])
+            # ADR 0004: the raw view is LEAN's own bar, which it trades and
+            # accounts in; the split-adjusted view, which every signal reads,
+            # is LEAN's split-adjusted History for the same bar.
+            self.assertEqual(e["payload"]["raw"], {
+                "view": "raw", "open": 23.0, "high": 24.0, "low": 22.0, "close": 23.056,
+                "volume": 2800.0})
+            self.assertEqual(e["payload"]["split_adjusted"], {
+                "view": "split-adjusted", "open": 23 / 28, "high": 24 / 28, "low": 22 / 28,
+                "close": 23.056 / 28, "volume": 2800.0 * 28})
             encoded = json.dumps(e["payload"], separators=(",", ":"), allow_nan=False).encode()
             self.assertEqual(e["payload_hash"], hashlib.sha256(encoded).hexdigest())
             self.assertEqual(e["event_time"], e["payload"]["period_end"])
 
-    def test_raw_must_match_completed_period_exactly(self):
+    def test_split_adjusted_must_match_completed_period_exactly(self):
         end = bar(9).EndTime
         for frame in (None, Frame(end - timedelta(days=3))):
             with self.assertRaises(ValueError):
-                raw_view(frame, end)
+                split_adjusted_view(frame, end)
         frame = Frame(end)
         frame.index.append(("AAPL", end))
         with self.assertRaises(ValueError):
-            raw_view(frame, end)
+            split_adjusted_view(frame, end)
 
-    def test_an_earlier_session_in_raw_history_is_passed_over(self):
+    def test_an_earlier_session_in_the_history_is_passed_over(self):
         # On an early-close session LEAN's one-bar History also returned the
         # previous session's bar (2002-12-23 16:00 and 2002-12-24 13:00).
         end = datetime(2002, 12, 24, 13)
-        frame = Frame(end)
+        frame = Frame(end, ratio=28)
         frame.index.insert(0, ("AAPL", datetime(2002, 12, 23, 16)))
         frame.iloc.insert(0, {"open": 1, "high": 1, "low": 1, "close": 1, "volume": 1})
-        self.assertEqual(raw_view(frame, end)["close"], 645.57)
+        self.assertEqual(split_adjusted_view(frame, end)["close"], 23.056 / 28)
 
     def test_run_stopped_payload_matches_go_contract(self):
         client = Client()
         pub = Publisher(client, "hash", "version", "test")
         b = bar(9)
-        pub.publish("AAPL", b, raw_view(Frame(b.EndTime), b.EndTime), "2014-06-09T20:00:00Z")
+        pub.publish("AAPL", b, split_adjusted_view(Frame(b.EndTime), b.EndTime), "2014-06-09T20:00:00Z")
         pub.publish_run_stopped("delisted", "LEAN reports AAPL DELISTED", "AAPL")
         envelope = client.sent[-1]
         self.assertEqual(envelope["type"], "adapter.run.stopped")
@@ -230,7 +245,7 @@ class PublisherTests(unittest.TestCase):
         client = Client()
         pub = Publisher(client, "hash", "version", "test")
         b = bar(9)
-        pub.publish("AAPL", b, raw_view(Frame(b.EndTime), b.EndTime), "2014-06-09T20:00:00Z")
+        pub.publish("AAPL", b, split_adjusted_view(Frame(b.EndTime), b.EndTime), "2014-06-09T20:00:00Z")
         pub.publish_run_stopped("delisted", "reason", "AAPL")
         pub.publish_run_completed()
         stop, completed = client.sent[-2], client.sent[-1]
@@ -242,7 +257,7 @@ class PublisherTests(unittest.TestCase):
     def test_run_stopped_rejects_an_unrecognised_reason(self):
         client = Client()
         pub = Publisher(client, "hash", "version", "test")
-        pub.publish("AAPL", bar(9), raw_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
+        pub.publish("AAPL", bar(9), split_adjusted_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
         with self.assertRaises(ValueError):
             pub.publish_run_stopped("invalid-startup", "reason", "AAPL")
         self.assertEqual(len(client.sent), 1)
@@ -250,7 +265,7 @@ class PublisherTests(unittest.TestCase):
     def test_run_stopped_requires_detail(self):
         client = Client()
         pub = Publisher(client, "hash", "version", "test")
-        pub.publish("AAPL", bar(9), raw_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
+        pub.publish("AAPL", bar(9), split_adjusted_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
         with self.assertRaises(ValueError):
             pub.publish_run_stopped("delisted", "", "AAPL")
         self.assertEqual(len(client.sent), 1)
@@ -258,7 +273,7 @@ class PublisherTests(unittest.TestCase):
     def test_run_stopped_requires_an_instrument_for_delisted(self):
         client = Client()
         pub = Publisher(client, "hash", "version", "test")
-        pub.publish("AAPL", bar(9), raw_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
+        pub.publish("AAPL", bar(9), split_adjusted_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
         with self.assertRaises(ValueError):
             pub.publish_run_stopped("delisted", "reason", None)
         self.assertEqual(len(client.sent), 1)
@@ -273,7 +288,7 @@ class PublisherTests(unittest.TestCase):
     def test_nothing_may_follow_completion_including_a_stop(self):
         client = Client()
         pub = Publisher(client, "hash", "version", "test")
-        pub.publish("AAPL", bar(9), raw_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
+        pub.publish("AAPL", bar(9), split_adjusted_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
         pub.publish_run_completed()
         with self.assertRaises(ValueError):
             pub.publish_run_stopped("delisted", "reason", "AAPL")
@@ -282,14 +297,14 @@ class PublisherTests(unittest.TestCase):
         client = Client()
         pub = Publisher(client, "hash", "version", "run")
         b = bar(6)
-        raw = raw_view(Frame(b.EndTime), b.EndTime)
-        pub.publish("AAPL", b, raw, "2014-06-06T20:00:00Z")
+        adjusted = split_adjusted_view(Frame(b.EndTime), b.EndTime)
+        pub.publish("AAPL", b, adjusted, "2014-06-06T20:00:00Z")
         with self.assertRaises(ValueError):
-            pub.publish("AAPL", b, raw, "2014-06-06T20:00:00Z")
+            pub.publish("AAPL", b, adjusted, "2014-06-06T20:00:00Z")
         self.assertEqual(len(client.sent), 1)
         pub = Publisher(client, "other", "version", "run")
         with self.assertRaises(ValueError):
-            pub.publish("AAPL", b, raw, "2014-06-06T20:00:00Z")
+            pub.publish("AAPL", b, adjusted, "2014-06-06T20:00:00Z")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ exactly as the reducer expects for that order's kind, and every other change
 of an order becomes one execution.order.lifecycle.
 """
 from datetime import datetime, timezone
+from fractions import Fraction
 from math import isfinite
 from re import fullmatch
 
@@ -54,6 +55,34 @@ class Uncertain(Exception):
     """LEAN's state and the engine's disagree; the run must stop (fail closed)."""
 
 
+# How far a raw price over its split-adjusted one may miss a whole number and
+# still be read as that whole split ratio. LEAN's factor files state each
+# cumulative split factor to about seven significant digits (AAPL's 1/56 is
+# 0.0178571), so the two closes of one bar were observed 56.000134 apart on
+# the pinned image; a ratio that is not a product of whole-number splits (a
+# 3-for-2's 1.5) misses by far more than this.
+_SPLIT_RATIO_TOLERANCE = 1e-4
+
+
+def whole_split_ratio(ratio):
+    """The whole number of split-adjusted shares one raw share is (ADR 0004).
+
+    A split-adjusted price is the raw one divided by the product of every
+    split after it, and a split-adjusted share count is the raw one times
+    it, so quantity x price is the same in both views. The engine sizes and
+    fills in whole split-adjusted shares and LEAN trades whole raw ones, so
+    only a whole ratio of at least one lets every fill be stated in both
+    views; anything else raises Uncertain, for the run to stop.
+    """
+    whole = round(ratio) if isfinite(ratio) else 0
+    if whole < 1 or abs(ratio - whole) > _SPLIT_RATIO_TOLERANCE * whole:
+        raise Uncertain("a raw price is {!r} times its split-adjusted one, which is not a whole "
+                        "split ratio of at least 1; a whole share in one view would not be a "
+                        "whole number of shares in the other, so no order or fill could be "
+                        "stated in both (ADR 0004)".format(ratio))
+    return whole
+
+
 class NSlippageModel:
     """ADR 0013: every fill slips slippage_n x N against the trader.
 
@@ -96,18 +125,36 @@ def fill_model_report(slippage_n):
     backtest on the pinned image (README.md, "Observed LEAN behaviour").
     """
     return [
+        "price views (ADR 0004): LEAN trades, holds and charges commission in raw shares at "
+        "raw prices; the engine's levels, quantities and N are in the split-adjusted view, "
+        "and each fill is returned to it in that view. The adapter converts at LEAN's "
+        "boundary by the whole number of split-adjusted shares a raw share is (the raw close "
+        "over the split-adjusted one), so quantity x price is the same in both. A Unit is "
+        "rounded down to whole raw shares, so it can fill up to one raw share short of the "
+        "engine's quantity (cmd/backtest fills the whole of it). Only an n-for-1 split is "
+        "carried across a run; any other stops it. LEAN applies a split to the holding and "
+        "every open order itself, and the run stops, before the next session can fill "
+        "anything, unless the result is exactly the engine's position and orders at the new "
+        "ratio.",
         "slippage is {} x N per fill (ADR 0013), charged by the adapter's NSlippageModel "
         "from the N the engine sent: a trade proposal's n, an Add proposal's campaign_n, "
-        "and the Campaign's frozen campaign_n for an Exit Order. The Baseline declares "
+        "and the Campaign's frozen campaign_n for an Exit Order, each at the raw ratio in "
+        "force when LEAN fills the order. The Baseline declares "
         "0.05 x N. LEAN's default equity slippage is zero (NullSlippageModel; observed: a "
         "gapped buy with no slippage model filled exactly at the open), and applies to no "
         "order here.".format(slippage_n),
+        "tick: LEAN rounds every raw stop price to the cent, the equity's minimum price "
+        "variation, including a split's adjustment of an open stop, and logs only the first "
+        "such rounding. The fill's level is LEAN's rounded stop, so it can differ from the "
+        "engine's level by up to half a cent raw, and by up to a cent after a split. "
+        "cmd/backtest fills at the engine's "
+        "unrounded level.",
         "gap at the open (ADR 0005 rule 1): observed to match. A stop the bar opens beyond "
         "fills at the open, less slippage for a sell and plus it for a buy, and LEAN says so "
         "in the fill's message ('Due to an unfavorable gap ... filled using the open price'). "
-        "In the acceptance run every one of 119 fills, 55 of them gaps, was priced at ADR "
+        "In the raw acceptance run every one of 68 fills, 33 of them gaps, was priced at ADR "
         "0005's max(level, open) for a buy or min(level, open) for a sell, plus or minus "
-        "slippage.",
+        "slippage, in raw prices.",
         "touch (ADR 0005): observed to match. A bar whose high exactly equals a buy stop, or "
         "whose low exactly equals a sell stop, fills at the level (plus or minus slippage). "
         "Observed in a probe of the pinned image; the acceptance run had no exact touch.",
@@ -141,7 +188,9 @@ def fill_model_report(slippage_n):
         "capped at 0.5% of the order's value at LEAN's market price, not IBKR Pro Fixed's 1% "
         "of trade value that internal/fills applies. The minimum wins over the cap (1 share "
         "at $12.01 was charged $1.00, not a capped $0.06), where internal/fills lets the cap "
-        "win. In the acceptance run the 0.5% cap bound on 42 of 119 fills. Neither model "
+        "win. LEAN charges it on the raw shares it trades (ADR 0004); internal/fills charges "
+        "the split-adjusted shares it fills, which for AAPL in 2003 are 56 times as many. In "
+        "the raw acceptance run the cap bound on none of 68 fills. Neither model "
         "charges exchange, clearing or regulatory pass-through fees. Pro Fixed is the "
         "working assumption, not a settled choice.",
         "partial fills: a partial fill stops the run. The engine accepts one fill per order "
@@ -206,6 +255,18 @@ class OrderDesk:
     Exit Order and at which source it rests, each Unit's opening fill id, and
     each Campaign's outstanding exit proposal. That memory lives for this run
     only; recovering it after a restart is not solved here.
+
+    Two views (ADR 0004). LEAN trades, holds and charges commission in raw
+    shares at raw prices. Every level, quantity and N the engine sends is in
+    the split-adjusted view its signals and sizing read, and ADR 0004's
+    amendment keeps a Campaign's money in the one view its fills are priced
+    in, which is split-adjusted until a split can adjust a held position. So
+    this desk converts at LEAN's boundary with one figure, ratio: the whole
+    number of split-adjusted shares one raw share is, equal to a raw price
+    over its split-adjusted one (whole_split_ratio). A level or N is
+    multiplied by it on the way into LEAN and a fill price divided by it on
+    the way out; a share count the other way round. quantity x price, and
+    so every cash amount and the commission, is the same in both views.
     """
 
     def __init__(self, algorithm, symbol, instrument, lean):
@@ -237,6 +298,12 @@ class OrderDesk:
         self.submitted = 0
         self.rejected = 0
         self.first_order_placed = False
+        # Split-adjusted shares per raw share (see the class doc); None until
+        # the first bar states it (observe_ratio).
+        self.ratio = None
+        # When a split LEAN applied to a position or order is still to be
+        # checked (require_split_applied); None otherwise.
+        self.split_to_check = None
 
     def _closed(self):
         """The LEAN order statuses in which an order no longer works at the broker."""
@@ -266,15 +333,164 @@ class OrderDesk:
                             "trades only from a flat start (docs/architecture.md)".format(
                                 when, holding, self.instrument, working))
 
+    def _require_ratio(self):
+        if self.ratio is None:
+            raise Uncertain("no bar has yet stated how a raw share relates to a split-adjusted "
+                            "one, so no engine figure can be placed in LEAN (ADR 0004)")
+        return self.ratio
+
+    def _flat(self):
+        return self.algorithm.Portfolio[self.symbol].Quantity == 0 and not self._open_tickets()
+
+    def observe_ratio(self, ratio, period_end):
+        """Take the bar's own split ratio (whole_split_ratio of its two closes).
+
+        Between splits every bar states the same ratio. A different one with
+        no split reported (apply_split) is taken only while LEAN holds nothing
+        and works no order, since no raw figure then depends on the old one;
+        otherwise LEAN's raw shares and the engine's split-adjusted ones no
+        longer agree, and the run stops.
+        """
+        if ratio == self.ratio:
+            return
+        if self.ratio is not None and not self._flat():
+            raise Uncertain("the bar ending {} states {} split-adjusted shares per raw share where "
+                            "the last stated {}, with no split reported, while LEAN holds {} "
+                            "shares of {!r} or works an order for it; its raw position and the "
+                            "engine's split-adjusted one no longer agree".format(
+                                period_end, ratio, self.ratio,
+                                self.algorithm.Portfolio[self.symbol].Quantity, self.instrument))
+        if self.ratio is not None:
+            self.algorithm.Log("adapter: split ratio {} -> {} at the bar ending {}, while flat".format(
+                self.ratio, ratio, period_end))
+        self.ratio = ratio
+
+    def apply_split(self, split_factor, when):
+        """Take the new ratio from a split LEAN reports as having occurred.
+
+        The engine's split-adjusted view is adjusted for every split, later
+        ones included, so a split changes none of its levels, quantities or
+        N: only how many split-adjusted shares a raw share is. Only an n-for-1
+        split, n a whole number of at least 2 that divides the current ratio,
+        is carried across: every raw share becomes exactly n, and the ratio
+        falls to ratio / n, still whole. Any other split (a 3-for-2, a reverse
+        split) stops the run, whether or not LEAN holds anything, even where
+        its quantities happen to divide.
+
+        LEAN, under Raw normalisation, applies the split itself (observed on
+        the pinned image). It has split the holding before this slice's
+        OnData, but not the open orders: it divides each order's quantity by
+        the factor, multiplies its stop by it rounded to the tick, and reports
+        it as UpdateSubmitted after OnData, in the same time step. So the
+        holding, and that every stored Exit Order is still working, are
+        checked now; the orders' new figures once LEAN has made them
+        (require_split_applied), before the next session can fill anything.
+        """
+        if self.ratio is None:
+            return
+        per_share = 1 / split_factor
+        n = round(per_share) if isfinite(per_share) else 0
+        if n < 2 or abs(per_share - n) > _SPLIT_RATIO_TOLERANCE * n or self.ratio % n:
+            shares = Fraction(per_share).limit_denominator(1000) if isfinite(per_share) else None
+            raise Uncertain("a {} split of {} at {} (factor {}), at {} split-adjusted shares per "
+                            "raw share: only an n-for-1 split, n a whole number of at least 2 "
+                            "that divides that ratio, is carried across (ADR 0004); any other "
+                            "needs a corporate-action contract that does not exist yet".format(
+                                "{}-for-{}".format(shares.numerator, shares.denominator)
+                                if shares else "non-finite", self.instrument, when, split_factor,
+                                self.ratio))
+        ratio = self.ratio // n
+        self.algorithm.Log("adapter: split of {} at {} (factor {}): split ratio {} -> {}".format(
+            self.instrument, when, split_factor, self.ratio, ratio))
+        self.ratio = ratio
+        if self._flat():
+            return
+        self.split_to_check = when
+        problems = self._holding_problems() + self._exit_orders_not_working()
+        if problems:
+            raise Uncertain("in the split of {} at {}, at {} split-adjusted shares per raw "
+                            "share: {}".format(self.instrument, when, ratio, "; ".join(problems)))
+
+    def _holding_problems(self):
+        """Every held Unit rests one Exit Order (ADR 0005's amendment), so LEAN's
+        raw holding is the sum of their quantities at the ratio in force."""
+        protected = sum(order["quantity"] for order in self.exit_orders.values()) // self.ratio
+        holding = self.algorithm.Portfolio[self.symbol].Quantity
+        if holding != protected:
+            return ["LEAN holds {} raw shares, but the engine's Units are {} raw shares".format(
+                holding, protected)]
+        return []
+
+    def _exit_orders_not_working(self):
+        """Each stored Exit Order whose LEAN order no longer works: its Unit has
+        no stop, whatever the holding says."""
+        problems = []
+        for unit, order in sorted(self.exit_orders.items(), key=lambda item: str(item[0])):
+            tickets = self._tickets(lambda t, oid=order["order_id"]: t.OrderId == oid)
+            status = tickets[0].Status if tickets else "absent"
+            if not tickets or status in self._closed():
+                problems.append("LEAN order {} carrying campaign {!r} unit {}'s Exit Order is not "
+                                "working (status {})".format(order["order_id"], unit[0], unit[1],
+                                                             status))
+        return problems
+
+    def require_split_applied(self, when, final=True):
+        """After a split, LEAN's raw position and orders are exactly the engine's.
+
+        The holding is the sum of the Units at the new ratio; every stored
+        Exit Order is still working; and each working order is for its
+        split-adjusted quantity at the new ratio, resting within one tick of
+        its split-adjusted level at it, since LEAN rounds a split stop to the
+        tick. Anything else means the position or a stop is not what the
+        engine believes, and the run stops: a split that needs anything more
+        than LEAN's own adjustment has no corporate-action contract to carry
+        it yet. Run first by the adapter's scheduled check, after the split's
+        time step and before the next session's fills; then again, final, at
+        the next slice's start, as a second line.
+        """
+        split_at = self.split_to_check
+        if split_at is None:
+            return
+        if final:
+            self.split_to_check = None
+        ratio = self.ratio
+        tick = float(self.algorithm.Securities[self.symbol].SymbolProperties.MinimumPriceVariation)
+        problems = self._holding_problems() + self._exit_orders_not_working()
+        holding = self.algorithm.Portfolio[self.symbol].Quantity
+        for ticket in self._open_tickets():
+            placed = self.orders.get(ticket.OrderId)
+            if placed is None:
+                problems.append("LEAN works order {}, which this adapter did not place".format(
+                    ticket.OrderId))
+                continue
+            quantity, level = placed["quantity"] // ratio, placed["level"] * ratio
+            stop = float(ticket.Get(self.lean.OrderField.StopPrice))
+            if ticket.Quantity != quantity or abs(stop - level) > tick + 1e-9:
+                problems.append("LEAN order {} (tag={}) is for {} raw shares at {:.4f}, but the "
+                                "engine's {} split-adjusted shares at {} are {} raw shares at "
+                                "{:.4f}".format(ticket.OrderId, ticket.Tag, ticket.Quantity, stop,
+                                                placed["quantity"], placed["level"], quantity,
+                                                level))
+        if problems:
+            raise Uncertain("after the split of {} at {}, at {} split-adjusted shares per raw "
+                            "share, {}: {}".format(self.instrument, split_at, ratio, when,
+                                                   "; ".join(problems)))
+        self.algorithm.Log("adapter: split at {} reconciled {}: LEAN holds {} raw shares and "
+                           "works {} order(s), as the engine's figures are at split ratio {}".format(
+                               split_at, when, holding, len(self._open_tickets()), ratio))
+
     def n_for_tag(self, tag):
+        """The raw N LEAN slips the tagged order by: the engine's split-adjusted
+        N (ADR 0013) at the ratio in force when LEAN fills it."""
         n = self.n_by_tag.get(tag)
         if n is None:
             raise ValueError("no N was supplied for order tag {!r}; refusing to slip "
                              "it by zero (ADR 0013)".format(tag))
-        return n
+        return n * self._require_ratio()
 
     def record_slippage(self, order_id, slippage):
-        self.slippage_applied[order_id] = slippage
+        """Record the raw slippage LEAN charged, restated in the split-adjusted view."""
+        self.slippage_applied[order_id] = slippage / self._require_ratio()
 
     def act(self, decisions, period_end, warming):
         """Act on one input's decisions, in the order the engine sent them.
@@ -385,22 +601,33 @@ class OrderDesk:
             existing = self._already_submitted(tag)
             if existing:
                 reason = "already submitted as LEAN order {}".format(existing[0].OrderId)
+        ratio = self._require_ratio()
+        # Whole raw shares, rounded down: never more than the Unit the engine
+        # sized (ADR 0003). The fill reports what executed, which the engine
+        # accepts as a Unit of at most the proposal's quantity.
+        raw_quantity = payload["quantity"] // ratio if reason is None else 0
+        if reason is None and raw_quantity == 0:
+            reason = ("quantity {} split-adjusted shares is less than one raw share at {} "
+                      "split-adjusted shares per raw share".format(payload["quantity"], ratio))
         if reason is not None:
             self._reject(decision, reason)
             return
         properties = self.lean.OrderProperties()
         properties.TimeInForce = self.lean.TimeInForce.GoodTilCanceled
         self.n_by_tag[tag] = n
-        ticket = self._submit(payload["quantity"], level, tag, properties)
+        ticket = self._submit(raw_quantity, level * ratio, tag, properties)
         if ticket.Status == self.lean.OrderStatus.Invalid:
             self._reject(decision, "LEAN refused the order (status {})".format(ticket.Status))
             return
+        # level and quantity in the engine's split-adjusted view; quantity is
+        # what the raw order is, which may be less than the proposal's.
         self.orders[ticket.OrderId] = {"kind": KIND_ENTRY if entry else KIND_ADD, "tag": tag,
                                        "campaign_id": payload.get("campaign_id", ""),
-                                       "level": level}
+                                       "level": level, "quantity": raw_quantity * ratio}
 
     def _submit(self, quantity, level, tag, properties):
-        """Submit one stop-market order, reconciling first if it is the run's first.
+        """Submit one stop-market order, in raw shares at a raw level,
+        reconciling first if it is the run's first.
 
         LEAN's signature is (symbol, quantity, stop_price, asynchronous, tag,
         order_properties): the tag is the fifth argument, never the fourth.
@@ -412,8 +639,9 @@ class OrderDesk:
         if ticket.Status == self.lean.OrderStatus.Invalid:
             return ticket
         self.submitted += 1
-        self.algorithm.Log("adapter: order {} {} {} @ {} tag={}".format(
-            ticket.OrderId, "buy" if quantity > 0 else "sell", abs(quantity), level, tag))
+        self.algorithm.Log("adapter: order {} {} {} raw shares @ {} raw (split ratio {}) "
+                           "tag={}".format(ticket.OrderId, "buy" if quantity > 0 else "sell",
+                                           abs(quantity), level, self.ratio, tag))
         return ticket
 
     def _expire(self, payload):
@@ -515,6 +743,11 @@ class OrderDesk:
                 as_of = parse_time(payload.get("as_of"))
             except ValueError as err:
                 reason = "as_of unreadable: {}".format(err)
+        if reason is None and quantity % self._require_ratio():
+            # A Unit's quantity is its fill's, always whole raw shares, so
+            # this can only be a disagreement about the Unit.
+            reason = ("quantity {} split-adjusted shares is not a whole number of raw shares at "
+                      "{} split-adjusted shares per raw share".format(quantity, self.ratio))
         if reason is not None:
             # Unlike an entry or Add, which the engine re-issues next bar, an
             # Exit Order the adapter cannot place leaves its Unit without a
@@ -551,32 +784,36 @@ class OrderDesk:
                                    payload.get("source"))
 
     def _place_exit_order(self, decision, unit, quantity, level, tag, n, as_of, source):
+        """quantity and level are the engine's split-adjusted figures; LEAN's
+        holding and working orders, and the order placed, are raw."""
+        raw_quantity = quantity // self.ratio
         holding = self.algorithm.Portfolio[self.symbol].Quantity
         working = self._working_sell_quantity()
-        if working + quantity > holding:
+        if working + raw_quantity > holding:
             # LEAN's holding and the engine's Exit Orders disagree. Refusing
             # the order and carrying on would leave this Unit silently without
             # a stop, so the run stops instead: containment is a person's
             # decision (ADR 0019's amendment), never the system's.
             raise Uncertain("instrument {!r} campaign {!r} unit {}: its Exit Order {} for {} "
-                            "shares would bring working sell orders to {}, past the holding "
+                            "raw shares would bring working sell orders to {}, past the holding "
                             "of {} (working sell quantity {}); the Unit cannot be protected "
                             "as the engine believes".format(
-                                self.instrument, unit[0], unit[1], tag, quantity,
-                                working + quantity, holding, working))
+                                self.instrument, unit[0], unit[1], tag, raw_quantity,
+                                working + raw_quantity, holding, working))
         properties = self.lean.OrderProperties()
         properties.TimeInForce = self.lean.TimeInForce.GoodTilCanceled
         self.n_by_tag[tag] = n
-        ticket = self._submit(-quantity, level, tag, properties)
+        ticket = self._submit(-raw_quantity, level * self.ratio, tag, properties)
         if ticket.Status == self.lean.OrderStatus.Invalid:
             # A refused Exit Order leaves its Unit without a stop.
             raise Uncertain("LEAN refused exit order {} for campaign {!r} unit {} (status {}); "
                             "the Unit cannot be protected as the engine believes".format(
                                 tag, unit[0], unit[1], ticket.Status))
+        # level and quantity in the engine's split-adjusted view.
         self.exit_orders[unit] = {"order_id": ticket.OrderId, "as_of": as_of, "source": source,
-                                  "level": level}
+                                  "level": level, "quantity": quantity}
         self.orders[ticket.OrderId] = {"kind": KIND_STOP, "tag": tag, "campaign_id": unit[0],
-                                       "unit": unit, "level": level}
+                                       "unit": unit, "level": level, "quantity": -quantity}
 
     def _amend_exit_order(self, decision, unit, in_force, quantity, level, tag, n, as_of, source):
         tickets = self._tickets(lambda t: t.OrderId == in_force["order_id"])
@@ -594,16 +831,18 @@ class OrderDesk:
                             "but the engine still sets its level".format(
                                 unit[0], unit[1], in_force["order_id"]))
         ticket = tickets[0]
-        if -ticket.Quantity != quantity:
-            raise Uncertain("campaign {!r} unit {}'s exit order {} sells {}, but the engine says "
-                            "the Unit holds {}".format(unit[0], unit[1], ticket.OrderId,
-                                                       -ticket.Quantity, quantity))
+        if -ticket.Quantity != quantity // self.ratio:
+            raise Uncertain("campaign {!r} unit {}'s exit order {} sells {} raw shares, but the "
+                            "engine says the Unit holds {} split-adjusted shares, which is {} raw "
+                            "at {} per raw share".format(unit[0], unit[1], ticket.OrderId,
+                                                         -ticket.Quantity, quantity,
+                                                         quantity // self.ratio, self.ratio))
         if as_of < in_force["as_of"]:
             self._reject(decision, "older than the level in force for campaign {!r} unit {}".format(
                 unit[0], unit[1]))
             return
         fields = self.lean.UpdateOrderFields()
-        fields.StopPrice = level
+        fields.StopPrice = level * self.ratio
         fields.Tag = tag
         self.n_by_tag[tag] = n
         response = ticket.Update(fields)
@@ -613,7 +852,8 @@ class OrderDesk:
             return
         in_force.update(as_of=as_of, source=source, level=level)
         self.orders[ticket.OrderId].update(tag=tag, level=level)
-        self.algorithm.Log("adapter: amended order {} to {} tag={}".format(ticket.OrderId, level, tag))
+        self.algorithm.Log("adapter: amended order {} to {} raw (split ratio {}) tag={}".format(
+            ticket.OrderId, level * self.ratio, self.ratio, tag))
 
     def observe(self, order_event):
         """What LEAN reported about one order, read once, when it reported it.
@@ -657,7 +897,12 @@ class OrderDesk:
         return record["status"] == status.Filled
 
     def lifecycle(self, record):
-        """One order change that is not an execution, as event.OrderLifecyclePayload."""
+        """One order change that is not an execution, as event.OrderLifecyclePayload.
+
+        Its quantity and stop price are the order's own, as LEAN states them:
+        raw, like the broker's order book that reconciliation compares them
+        with (ADR 0019). The engine decides nothing from them.
+        """
         status = self.lean.OrderStatus
         names = {status.Submitted: "submitted", status.UpdateSubmitted: "updated",
                  status.CancelPending: "cancel-pending", status.Canceled: "canceled",
@@ -668,8 +913,9 @@ class OrderDesk:
                             "cannot state as an order lifecycle change".format(
                                 record["order_id"], record["tag"], record["status"]))
         stop_price = record["stop_price"]
-        if stop_price is None:
-            stop_price = (self.orders.get(record["order_id"]) or {}).get("level")
+        level = (self.orders.get(record["order_id"]) or {}).get("level")
+        if stop_price is None and level is not None:
+            stop_price = level * self._require_ratio()
         quantity = _whole(record["quantity"])
         if not quantity or not _positive_price(stop_price):
             raise Uncertain("LEAN reports order {} (tag={}) {} with quantity {} and stop price {}; "
@@ -695,6 +941,12 @@ class OrderDesk:
         Buys come first, then stop fills worst price first, then the exit. The
         kind of every Exit Order is the source the engine last set for it;
         nothing here compares a price with a level.
+
+        LEAN's raw execution is restated in the engine's split-adjusted view
+        (ADR 0004's amendment: a Campaign's money stays in the one view its
+        fills are priced in): quantity x ratio, and price, level and slippage
+        / ratio. The commission is cash, the same in both views, and is LEAN's
+        charge on the raw shares it traded.
 
         Returns [(payload, [order ids])]; the order ids are marked undelivered
         until the caller has sent their fill.
@@ -725,6 +977,10 @@ class OrderDesk:
                 raise Uncertain("LEAN reports order {} (tag={}) filled {} shares, but it is the "
                                 "adapter's {} order".format(record["order_id"], record["tag"],
                                                             quantity, placed["kind"]))
+            self.algorithm.Log("adapter: LEAN filled order {} (tag={}): {} raw shares @ {} raw, "
+                               "commission {} {} (split ratio {})".format(
+                                   record["order_id"], record["tag"], quantity, price, fee,
+                                   record["fee_currency"], self._require_ratio()))
             fill = {"record": record, "placed": placed, "quantity": abs(quantity),
                     "price": price, "fee": fee}
             if buy:
@@ -748,8 +1004,12 @@ class OrderDesk:
         self.undelivered.difference_update(order_ids)
 
     def _costs(self, fills):
+        """The fill's price, level, slippage and commission, in the split-adjusted view."""
         record = fills[0]["record"]
-        levels = {f["record"]["stop_price"] if f["record"]["stop_price"] is not None
+        ratio = self._require_ratio()
+        # The level LEAN rested the order at, raw; the engine's own level only
+        # if LEAN's event states none.
+        levels = {f["record"]["stop_price"] / ratio if f["record"]["stop_price"] is not None
                   else f["placed"]["level"] for f in fills}
         slippages = {self.slippage_applied.get(f["record"]["order_id"], 0.0) for f in fills}
         if len(levels) != 1 or len(slippages) != 1 or len({f["price"] for f in fills}) != 1 \
@@ -758,14 +1018,14 @@ class OrderDesk:
                             "price, slippage or time (orders {}); one exit fill cannot state "
                             "them".format(sorted(f["record"]["order_id"] for f in fills)))
         return {"instrument_id": self.instrument, "direction": _LONG,
-                "price": fills[0]["price"], "filled_at": format_time(record["time"]),
+                "price": fills[0]["price"] / ratio, "filled_at": format_time(record["time"]),
                 "level": levels.pop(), "slippage_applied": slippages.pop(),
                 "commission": sum(f["fee"] for f in fills)}
 
     def _single(self, fill):
         record, placed = fill["record"], fill["placed"]
         payload = self._costs([fill])
-        payload.update(kind=placed["kind"], quantity=fill["quantity"], unit_ids=[],
+        payload.update(kind=placed["kind"], quantity=fill["quantity"] * self.ratio, unit_ids=[],
                        fill_id="lean:{}:{}".format(record["order_id"], record["event_id"]))
         if placed["kind"] == KIND_ENTRY:
             payload.update(proposal_id=placed["tag"], campaign_id="")
@@ -804,7 +1064,7 @@ class OrderDesk:
         fills = sorted(fills, key=lambda f: f["placed"]["unit"][1])
         payload = self._costs(fills)
         payload.update(kind=KIND_EXIT, proposal_id=proposal_id, campaign_id=campaign_id,
-                       unit_ids=[], quantity=sum(f["quantity"] for f in fills),
+                       unit_ids=[], quantity=sum(f["quantity"] for f in fills) * self.ratio,
                        fill_id="lean:" + "+".join("{}:{}".format(f["record"]["order_id"],
                                                                  f["record"]["event_id"])
                                                   for f in fills))

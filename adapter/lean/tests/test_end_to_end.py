@@ -61,8 +61,8 @@ def synthetic_series():
     return bars
 
 
-class RawHistory:
-    """LEAN's one-bar raw History for bar: the same prices, no split."""
+class AdjustedHistory:
+    """LEAN's one-bar split-adjusted History for bar: the same prices, no split after it."""
     empty = False
 
     def __init__(self, bar):
@@ -150,7 +150,7 @@ class EndToEndTests(OrderTestCase):
             book.now = bar.EndTime.replace(tzinfo=ZoneInfo("America/New_York")).astimezone(timezone.utc)
             self.lean_fills(algo, bar)
             algo.IsWarmingUp = i < 21
-            algo.History = lambda *args, _bar=bar, **kwargs: RawHistory(_bar)
+            algo.History = lambda *args, _bar=bar, **kwargs: AdjustedHistory(_bar)
             algo.OnData(scaffold.slice_of({"AAPL": bar}))
             self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
         algo.Transactions.settle()
