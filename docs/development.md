@@ -186,7 +186,8 @@ Three separate journal checks answer different questions:
   fills**, through a fresh reducer and compares decisions. It checks reducer
   equivalence, so it cannot detect changes in the simulator that produced fills.
 - `backtest -rerun <journal>` reconstructs configuration, completed bars,
-  corporate actions and the opening account snapshot, then runs the same
+  corporate actions and the opening cash (the first account snapshot, which
+  precedes every fill; the simulated account states the rest), then runs the same
   `drive` pipeline as a backtest, regenerating fills (ADR 0005) and decisions.
   It compares every ordered record, including sequence, kind, chain hash and
   canonical envelope bytes, plus every header field. It reports the first

@@ -90,6 +90,46 @@ The snapshot must come after the session close. A snapshot stamped at this Sessi
 
 A proposal emitted by a fill, not by the session-close pass, follows its fill. That covers the next Add rung after an Add fill, and Unit 2's rung after an opening fill (`campaign.go`, `evaluateAdd` call sites 2 and 3). ADR 0010 orders **decisions made from a Session's bars**. ADR 0020 already records that it does not order **executions**, and a rung that depends on an earlier rung's actual fill price is a consequence of an execution. These proposals keep their present behaviour, their per-instrument cap check, and the cash check in force when they are made.
 
+### Amendment: `cmd/backtest` states each Session's close (2026-09-24)
+
+§6's `cmd/backtest` producer gains the account snapshot a LEAN run already
+sends, stated by the simulated account (ADR 0020's RulesVersion 1.8.0
+implementation note). `fills.RunSession` now delivers a Session as:
+
+1. every bar's open-instant pass, in the order the bars are given;
+2. the previous Session's `account.snapshot`, as of that Session's period end;
+3. every bar;
+4. `market.session.closed`;
+5. each instrument's intrabar fixpoint, in ascending instrument order.
+
+After the last Session, `fills.StateLastClose` delivers its snapshot, before
+any remaining corporate action and `replay.run.completed`. Corporate actions
+due before a Session still precede it, and so precede the previous Session's
+snapshot, which was taken at that close and is unaffected by them. There is
+no opening snapshot: the first Session cannot size a Unit, because N and the
+channels are computed from preceding bars, so the snapshot delivered in the
+second Session arrives before any sizing is possible.
+
+This is the LEAN adapter's order: a slice's fills, then the previous close's
+snapshot, then its bars and close. Each position has a reason:
+
+- **After the Session's open-instant fills.** A fill can propose the next
+  rung at once (§7), and that proposal is checked against the cash known at
+  its signalling bar's previous close, one Session earlier than this
+  snapshot. Arriving first, the snapshot would replace the only eligible
+  figure, and `cashAtPreviousClose` would stop the run.
+- **Before the bars and the close.** The close decides the Session's Adds and
+  entries against this snapshot, its previous-close basis (ADR 0010).
+- **Taken at the previous close, delivered now.** By delivery the
+  open-instant fills have moved the account; they happened after the close,
+  are stamped after the snapshot's as-of, and stay debited on top of it (ADR
+  0020).
+
+Step 1 used to interleave with step 3: each bar's open-instant pass, then
+that bar. The passes now all come first so the snapshot can follow every one
+of them. A single-instrument Session is delivered exactly as before, apart
+from the snapshot.
+
 ## Alternatives rejected
 
 - **One batched input carrying a whole Session's bars.** It would make completeness trivial, because the batch is the Session. But it replaces the bar input the whole codebase is built around, and its journal records, replay tooling, fill simulator and adapter protocol. The journal would then hold one very large input per day, in place of one small input per instrument. And the adapter would have to buffer a whole universe's slice before sending anything. A terminating event keeps every existing bar record as it is, and adds one small record per Session.
