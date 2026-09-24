@@ -23,7 +23,7 @@ import (
 // reducer Setup evaluation, sizing and Add/stop/exit decisions, but cannot
 // prove that the simulator would reproduce those fills from bars alone.
 func replayEquivalence(ctx context.Context, r io.Reader) (*replay.Divergence, error) {
-	header, records, err := journal.Read(r)
+	header, records, err := journal.Read(contextReader{ctx, r})
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +46,38 @@ func replayEquivalence(ctx context.Context, r io.Reader) (*replay.Divergence, er
 	if err != nil {
 		return nil, err
 	}
-	return replay.Equivalent(decisions, emitted), nil
+	divergence := replay.Equivalent(decisions, emitted)
+	if err := stoppedBy(ctx); err != nil {
+		return nil, err
+	}
+	return divergence, nil
+}
+
+// contextReader stops a journal scan as soon as the invocation is cancelled,
+// so reading a large journal honours the same interrupt handling main
+// installs for every other phase.
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c contextReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
+// stoppedBy reports a cancellation that arrived after a phase had already
+// finished its own work — after the last input was applied, or during the
+// comparison — so a cancelled invocation is never reported as a success.
+// A phase that saw the cancellation itself reports it directly; this closes
+// the gap between phases.
+func stoppedBy(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("backtest: stopped before completing: %w", err)
+	}
+	return nil
 }
 
 // replayJournalInputs constructs the journal's declared reducer and returns

@@ -39,7 +39,7 @@ type rerunInputs struct {
 // The regenerated recorder is bounded at the recorded length plus one input
 // boundary, enough to expose extra output without guessing the original limit.
 func pipelineEquivalence(ctx context.Context, r io.Reader) error {
-	header, records, err := journal.Read(r)
+	header, records, err := journal.Read(contextReader{ctx, r})
 	if err != nil {
 		return err
 	}
@@ -96,7 +96,10 @@ func pipelineEquivalence(ctx context.Context, r io.Reader) error {
 	if header != regenerated {
 		return fmt.Errorf("backtest: pipeline divergence in journal header: recorded %+v, regenerated %+v", header, regenerated)
 	}
-	return comparePipelineRecords(regenerated, records, entries)
+	if err := comparePipelineRecords(regenerated, records, entries); err != nil {
+		return err
+	}
+	return stoppedBy(ctx)
 }
 
 // reconstructRun refuses missing, repeated and unsupported independent inputs

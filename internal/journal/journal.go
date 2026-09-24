@@ -298,6 +298,13 @@ func Read(r io.Reader) (Header, []Record, error) {
 	}
 	var header Header
 	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
+		// bufio.Scanner hands back the partial line it holds when the reader
+		// fails mid-line, so a read failure first surfaces here as malformed
+		// JSON. Report the read failure itself: it is the cause, and a caller
+		// deciding what happened (a cancellation, an I/O error) needs it.
+		if readErr := scanner.Err(); readErr != nil {
+			return Header{}, nil, fmt.Errorf("journal: read header: %w", readErr)
+		}
 		return Header{}, nil, fmt.Errorf("journal: decode header: %w", err)
 	}
 	if err := checkFormatVersion(header.JournalVersion); err != nil {
@@ -311,6 +318,9 @@ func Read(r io.Reader) (Header, []Record, error) {
 		}
 		var record Record
 		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			if readErr := scanner.Err(); readErr != nil {
+				return header, nil, fmt.Errorf("journal: read the record on line %d: %w", line, readErr)
+			}
 			return header, nil, fmt.Errorf("journal: decode the record on line %d: %w", line, err)
 		}
 		records = append(records, record)

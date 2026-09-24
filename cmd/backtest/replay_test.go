@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -605,5 +606,62 @@ func TestReplayStopsWhenItsInvocationIsCancelled(t *testing.T) {
 	}
 	if divergence != nil {
 		t.Fatalf("replayEquivalence(cancelled) divergence = %+v, want none reported for a valid journal", divergence)
+	}
+}
+
+// cancellingReader cancels its context after delivering its first chunk, so a
+// test can cancel an invocation part-way through reading a journal.
+type cancellingReader struct {
+	r      io.Reader
+	cancel context.CancelFunc
+	read   bool
+}
+
+func (c *cancellingReader) Read(p []byte) (int, error) {
+	if c.read {
+		c.cancel()
+	}
+	c.read = true
+	if len(p) > 64 {
+		p = p[:64]
+	}
+	return c.r.Read(p)
+}
+
+// TestReplayAndRerunStopWhenCancelledPartWayThroughReadingTheJournal pins
+// that the journal scan itself honours cancellation, for both operations.
+// The invocation is cancelled after the first 64 bytes of a valid journal;
+// neither may report success or a divergence.
+func TestReplayAndRerunStopWhenCancelledPartWayThroughReadingTheJournal(t *testing.T) {
+	raw, err := os.ReadFile(goldenJournal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	divergence, err := replayEquivalence(ctx, &cancellingReader{r: bytes.NewReader(raw), cancel: cancel})
+	// "journal: read" names the phase: the scan itself stopped, rather than
+	// reading the whole file and leaving a later phase to notice.
+	if !errors.Is(err, context.Canceled) || divergence != nil || !strings.Contains(err.Error(), "journal: read") {
+		t.Fatalf("replayEquivalence = %+v, %v; want no divergence and the journal scan stopped with context.Canceled", divergence, err)
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	err = pipelineEquivalence(ctx, &cancellingReader{r: bytes.NewReader(raw), cancel: cancel})
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "journal: read") {
+		t.Fatalf("pipelineEquivalence error = %v, want the journal scan stopped with context.Canceled", err)
+	}
+}
+
+// TestStoppedByReportsACancellationThatArrivesBetweenPhases pins the check
+// that closes the gap after the last input is applied or during the
+// comparison: a phase can finish its own work successfully while the
+// invocation has since been cancelled, and that must not read as success.
+func TestStoppedByReportsACancellationThatArrivesBetweenPhases(t *testing.T) {
+	if err := stoppedBy(context.Background()); err != nil {
+		t.Fatalf("stoppedBy(live) = %v, want nil", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := stoppedBy(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stoppedBy(cancelled) = %v, want it to wrap context.Canceled", err)
 	}
 }
