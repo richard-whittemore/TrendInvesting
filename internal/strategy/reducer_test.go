@@ -1995,8 +1995,9 @@ func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 	if proposal.DollarsPerPoint != cfg.DollarsPerPoint {
 		t.Errorf("Proposal DollarsPerPoint = %v, want %v", proposal.DollarsPerPoint, cfg.DollarsPerPoint)
 	}
-	// This fixture supplies no account events, so ADR 0007's Notional
-	// Account stays at configured starting equity for the proposal.
+	// runReducerOverHighs supplies one account snapshot, whose Equity equals
+	// the configured starting figure; ADR 0007's Notional Account therefore
+	// stays at configured starting equity for the proposal.
 	if proposal.NotionalAccount != cfg.NotionalAccount.StartingEquity {
 		t.Errorf("Proposal NotionalAccount = %v, want the configured starting equity %v", proposal.NotionalAccount, cfg.NotionalAccount.StartingEquity)
 	}
