@@ -54,6 +54,13 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         self.bar_count = 0
         self.warmup_seen = 0
         self.decision_count = 0
+        self.fill_count = 0
+        self.lifecycle_count = 0
+        # What LEAN reported about this run's orders, not yet sent to the
+        # engine (drain_order_events).
+        self.order_events = []
+        # The last Session's close, read but not yet sent (flush_snapshot).
+        self.pending_snapshot = None
         self.history_ms = []
         try:
             settings = load_settings()
@@ -100,7 +107,8 @@ class CompletedBarsAlgorithm(QCAlgorithm):
                 UpdateOrderFields=UpdateOrderFields, OrderStatus=OrderStatus))
             # ADR 0013: slippage_n x the N the engine supplied with each
             # order's decision, and Interactive Brokers commissions.
-            security.SetSlippageModel(NSlippageModel(slippage_n, self.desk.n_for_tag))
+            security.SetSlippageModel(NSlippageModel(slippage_n, self.desk.n_for_tag,
+                                                     self.desk.record_slippage))
             security.SetFeeModel(InteractiveBrokersFeeModel())
             # docs/architecture.md: reconcile before any executor submits.
             self.desk.require_flat("at startup")
@@ -121,6 +129,20 @@ class CompletedBarsAlgorithm(QCAlgorithm):
     def OnData(self, data):
         if self.failed or self.client is None:
             return
+        # LEAN reports a session's fills before it delivers that session's
+        # bar, and the engine must hear of them in the same order: a proposal
+        # stays outstanding only until the instrument's next bar expires it
+        # (ADR 0011), so a fill delivered after that bar would name a proposal
+        # the engine no longer offers (drain_order_events).
+        self.drain_order_events()
+        self.flush_snapshot()
+        if self.failed:
+            return
+        try:
+            self.desk.require_cancels_confirmed("before the next session's bar")
+        except Exception as err:
+            self.stop("order state uncertain: {}".format(err))
+            return
         changed = data.SymbolChangedEvents.get(self.symbol)
         if changed is not None:
             # A rename changes nothing for one instrument whose instrument_id
@@ -137,17 +159,80 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.handle_delisting(notice)
 
     def OnOrderEvent(self, order_event):
-        """Stop the run at LEAN's first fill: it cannot yet be returned to the engine.
+        """Record what LEAN reports about an order; never send from here.
 
-        An engine that never learns of a fill goes on believing it is flat, so
-        it would place no Exit Order for the holding and could propose more
-        entries (OrderDesk.fill_reason). Failing closed here keeps the two
-        states from diverging silently (docs/development.md principle 4).
+        LEAN raises this in the middle of placing, amending or cancelling an
+        order (a submission is reported before StopMarketOrder returns), and
+        before OnData for a session's fills. Sending from here would
+        interleave an input with the exchange in progress, so the report is
+        queued and sent at the next point where an input may be:
+        drain_order_events.
         """
-        if self.failed or getattr(self, "desk", None) is None:
+        publisher = getattr(self, "publisher", None)
+        if self.failed or getattr(self, "desk", None) is None or publisher is None \
+                or publisher.completed:
             return
-        if order_event.Status in (OrderStatus.Filled, OrderStatus.PartiallyFilled):
-            self.stop(self.desk.fill_reason(order_event))
+        try:
+            self.order_events.append(self.desk.observe(order_event))
+        except Exception as err:
+            self.stop("order event unreadable: {}".format(err))
+
+    def drain_order_events(self):
+        """Send every queued order report to the engine, and act on its replies.
+
+        Called before a slice's bar, after the slice's decisions have been
+        acted on, and before the stream ends. The order is:
+
+        - reports in the order LEAN made them, except that
+        - every fill LEAN reported at one instant is sent together, at the
+          place of the first, in ADR 0005's order (OrderDesk.fills): an Exit
+          Channel exit is one fill for all its Units, so the group must be
+          whole before any of it is sent.
+
+        Acting on a fill's decisions can place or amend orders, and LEAN
+        reports those too, so the queue is drained until it is empty. A fill
+        is sent as execution.fill and every other change as
+        execution.order.lifecycle. Any failure stops the run.
+        """
+        try:
+            while self.order_events and not self.failed:
+                pending, self.order_events = self.order_events, []
+                while pending and not self.failed:
+                    record = pending.pop(0)
+                    if not self.desk.is_execution(record):
+                        self.publish_order_lifecycle(record)
+                        continue
+                    group = [record] + [r for r in pending
+                                        if r["time"] == record["time"] and self.desk.is_execution(r)]
+                    pending = [r for r in pending if all(r is not g for g in group)]
+                    self.publish_fills(group)
+        except Exception as err:
+            self.stop("order event failed: {}".format(err))
+
+    def publish_order_lifecycle(self, record):
+        decisions = self.publisher.publish_order_lifecycle(self.desk.lifecycle(record))
+        self.lifecycle_count += 1
+        self.decision_count += len(decisions)
+
+    def publish_fills(self, records):
+        for record in records:
+            if record["message"]:
+                # LEAN's own account of how it priced the fill, such as a gap
+                # filled at the open: evidence for the fill-model report.
+                self.Log("adapter: LEAN on order {}: {}".format(record["order_id"], record["message"]))
+        for payload, order_ids in self.desk.fills(records):
+            decisions = self.publisher.publish_fill(payload)
+            self.desk.delivered(order_ids)
+            self.fill_count += 1
+            self.decision_count += len(decisions)
+            self.Log("adapter: fill {} {} {} @ {} at {} level={} slippage={} commission={} "
+                     "decisions={}".format(payload["fill_id"], payload["kind"], payload["quantity"],
+                                           payload["price"], payload["filled_at"], payload["level"],
+                                           payload["slippage_applied"], payload["commission"],
+                                           len(decisions)))
+            # The fill's decisions answer the session it executed in, so a
+            # proposal they carry for an earlier bar is stale (OrderDesk._propose).
+            self.desk.act(decisions, payload["filled_at"], self.IsWarmingUp)
 
     def handle_delisting(self, notice):
         """Stop on LEAN's DELISTED rather than publish it as a fact.
@@ -168,6 +253,8 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         reason = ("LEAN reports {} DELISTED at {}; its delisting signal carries no reason and "
                   "also fires for conversions, so the run stops rather than publish a delisting "
                   "that may be false (adapter/lean/README.md)".format(self.instrument, notice.Time))
+        # The Session's own close is still reported, before the stop.
+        self.flush_snapshot()
         # Record the deliberate stop BEFORE ending the stream, so the journal
         # can tell this run apart from one that simply reached its last bar
         # (ADR 0012; internal/event/run_stopped.go).
@@ -236,28 +323,67 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             # ADR 0021: the slice's bars are its Session; closing it lets the
             # engine decide the day's Adds and entries.
             decisions += self.publisher.publish_session_closed(period_end)
-            # ADR 0020: this close becomes the next bar's previous-close
-            # basis only after the current bar's decisions have arrived.
-            snapshot_decisions = self.publisher.publish_snapshot(self.Portfolio, period_end)
+            # ADR 0020: LEAN's close, read before this slice's decisions move
+            # anything, and sent by flush_snapshot before the next bar.
+            self.pending_snapshot = (SimpleNamespace(
+                TotalPortfolioValue=float(self.Portfolio.TotalPortfolioValue),
+                Cash=float(self.Portfolio.Cash)), period_end, warming)
             self.bar_count += 1
             self.warmup_seen += int(warming)
-            self.decision_count += len(decisions) + len(snapshot_decisions)
-            self.Log("adapter: seq={} end={} warmup={} raw={} split-adjusted={} decisions={} snapshot_decisions={}".format(
+            self.decision_count += len(decisions)
+            self.Log("adapter: seq={} end={} warmup={} raw={} split-adjusted={} decisions={}".format(
                 self.publisher.sequence, period_end, warming, raw["close"], float(bar.Close),
-                len(decisions), len(snapshot_decisions)))
-            # Only once both exchanges for this bar have succeeded: a failed
+                len(decisions)))
+            # Only once both of this bar's exchanges have succeeded: a failed
             # exchange leaves the stream out of step with the engine, and the
             # run then stops with nothing submitted (README.md: safe mode).
-            self.desk.act(decisions + snapshot_decisions, period_end, warming)
+            self.desk.act(decisions, period_end, warming)
         except Exception as err:
             self.stop("completed bar failed: {}".format(err))
+            return
+        # What LEAN reported while those decisions were acted on.
+        self.drain_order_events()
+
+    def flush_snapshot(self):
+        """Send the last Session's account.snapshot, once, before anything later.
+
+        The snapshot states LEAN's close and is the next Session's
+        previous-close basis (ADR 0010, ADR 0020), so it must reach the engine
+        before the next bar. It is sent only after the fills of the orders
+        that Session's close placed, which LEAN reports at the start of the
+        next slice. The engine attributes a fill's follow-on Add to the bar
+        that signalled it and checks it against cash known at that bar's
+        previous close (ADR 0021, section 7; evaluateAdd), so a snapshot sent
+        between that bar and the fill would leave the Add no eligible cash
+        basis and stop the run. Its figures were read at the close, so what
+        it says is unchanged by when it is sent.
+        """
+        pending = getattr(self, "pending_snapshot", None)
+        if pending is None or self.failed or self.client is None:
+            return
+        self.pending_snapshot = None
+        portfolio, period_end, warming = pending
+        try:
+            decisions = self.publisher.publish_snapshot(portfolio, period_end)
+            self.decision_count += len(decisions)
+            self.desk.act(decisions, period_end, warming)
+        except Exception as err:
+            self.stop("account snapshot failed: {}".format(err))
 
     def OnEndOfAlgorithm(self):
+        if not self.failed and self.client is not None:
+            self.drain_order_events()
+            if self.desk.pending_cancels:
+                # No session follows in which the order could fill.
+                self.Log("adapter: cancellation of order(s) {} unconfirmed at the end of the "
+                         "run".format(sorted(self.desk.pending_cancels)))
+            self.flush_snapshot()
         self.complete_run()
         if self.client is not None:
             self.client.close()
-        self.Log("adapter: bars={} warmup_bars={} decisions={} failed={}".format(
-            self.bar_count, self.warmup_seen, self.decision_count, self.failed))
+        self.Log("adapter: bars={} warmup_bars={} fills={} order_changes={} decisions={} "
+                 "failed={}".format(self.bar_count, self.warmup_seen, self.fill_count,
+                                    self.lifecycle_count, self.decision_count, self.failed))
         desk = getattr(self, "desk", None)
         if desk is not None:
             self.Log("adapter: orders submitted={} decisions rejected={}".format(

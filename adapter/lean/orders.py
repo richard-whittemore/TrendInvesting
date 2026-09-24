@@ -1,9 +1,13 @@
-"""Mirror the engine's order decisions into LEAN's order book (ADRs 0005, 0013).
+"""Mirror the engine's order decisions into LEAN's order book, and report LEAN's
+executions and order changes back to the engine (ADRs 0005, 0013, 0019).
 
 The engine decides every level, quantity and N; this module only validates a
 decision against LEAN's current state and places, amends or cancels the one
 order it names. It computes no level, combines no two levels, and sizes
-nothing (README.md: no methodology in the adapter).
+nothing (README.md: no methodology in the adapter). What LEAN then does with
+those orders it reports as facts: a fill becomes one execution.fill shaped
+exactly as the reducer expects for that order's kind, and every other change
+of an order becomes one execution.order.lifecycle.
 """
 from datetime import datetime, timezone
 from math import isfinite
@@ -17,18 +21,33 @@ ADD_PROPOSED = "strategy.add.proposed"
 PROPOSAL_EXPIRED = "strategy.proposal.expired"
 CAMPAIGN_OPENED = "strategy.campaign.opened"
 EXIT_ORDER_SET = "strategy.exit-order.set"
+EXIT_PROPOSED = "strategy.exit.proposed"
+UNIT_ADDED = "strategy.campaign.unit-added"
+UNITS_STOPPED = "strategy.campaign.units-stopped"
+CAMPAIGN_EXITED = "strategy.campaign.exited"
 SCHEMA_VERSIONS = {TRADE_PROPOSED: 1, ADD_PROPOSED: 1, PROPOSAL_EXPIRED: 3,
-                   CAMPAIGN_OPENED: 1, EXIT_ORDER_SET: 1}
+                   CAMPAIGN_OPENED: 1, EXIT_ORDER_SET: 1, EXIT_PROPOSED: 1,
+                   UNIT_ADDED: 1, UNITS_STOPPED: 1, CAMPAIGN_EXITED: 2}
+
+# event.FillKind* (internal/event/fill.go).
+KIND_ENTRY, KIND_ADD, KIND_STOP, KIND_EXIT = "entry", "add", "stop", "exit"
+
+# event.ExitOrderSource* (internal/event/exit_order.go).
+SOURCE_EXIT_CHANNEL = "exit-channel"
 
 # event.ProposalKind* (internal/event/proposal.go): the expiry kinds that name
-# a day order of their own. An exit-kind expiry names an exit proposal, which
+# a buy order of their own. An exit-kind expiry names an exit proposal, which
 # is never an order: its level reaches the broker only through
 # strategy.exit-order.set (ADR 0005's amendment).
-_KINDS_WITH_A_DAY_ORDER = frozenset({"entry", "add"})
+_KINDS_WITH_AN_ORDER = frozenset({"entry", "add"})
 
 # sizing.DirectionLong: the only direction this adapter knows how to place,
 # as a buy stop above the market.
 _LONG = "long"
+
+# The only currency this adapter reports: account.snapshot's, and the one
+# event.FillPayload.Commission is stated in.
+_USD = "USD"
 
 
 class Uncertain(Exception):
@@ -41,15 +60,20 @@ class NSlippageModel:
     N is the figure the engine sent with the order's own decision, looked up
     by the order's tag; the adapter never computes one. An order with no
     supplied N raises rather than slipping by zero, which ADR 0013 declares
-    invalid by construction.
+    invalid by construction. What was charged is recorded per LEAN order, so
+    the fill reports the slippage LEAN actually applied.
     """
 
-    def __init__(self, slippage_n, n_for_tag):
+    def __init__(self, slippage_n, n_for_tag, record=None):
         self.slippage_n = slippage_n
         self.n_for_tag = n_for_tag
+        self.record = record
 
     def GetSlippageApproximation(self, asset, order):
-        return self.slippage_n * self.n_for_tag(order.Tag)
+        slippage = self.slippage_n * self.n_for_tag(order.Tag)
+        if self.record is not None:
+            self.record(getattr(order, "Id", None), slippage)
+        return slippage
 
     get_slippage_approximation = GetSlippageApproximation
 
@@ -68,45 +92,60 @@ def fill_model_report(slippage_n):
     In a LEAN run LEAN's fills are the evidence, and cmd/backtest remains the
     reference implementation of ADR 0005; the two are compared, never forced
     to agree. So each departure is stated at startup rather than silently
-    accepted. Where a statement about LEAN's behaviour could not be checked
-    against LEAN's source it says so: only the pinned image's own behaviour,
-    measured by an acceptance run, confirms it.
+    accepted. Each statement about LEAN's own behaviour was observed in a
+    backtest on the pinned image (README.md, "Observed LEAN behaviour").
     """
     return [
         "slippage is {} x N per fill (ADR 0013), charged by the adapter's NSlippageModel "
         "from the N the engine sent: a trade proposal's n, an Add proposal's campaign_n, "
         "and the Campaign's frozen campaign_n for an Exit Order. The Baseline declares "
-        "0.05 x N. LEAN's default equity slippage is believed to be zero (NullSlippageModel); "
-        "unconfirmed, as LEAN's source is not available to this adapter, and it applies to "
-        "no order here.".format(slippage_n),
-        "gap at the open (ADR 0005 rule 1): LEAN's equity fill model is believed to fill a "
-        "stop that the bar opens beyond at the open, as ADR 0005 does; unconfirmed. Older "
-        "LEAN fill models priced a daily-bar stop fill from the bar's close instead, so the "
-        "acceptance run must compare gap fills with cmd/backtest.",
-        "touch (ADR 0005): LEAN is believed to trigger a stop only when the bar trades "
-        "strictly through the level; ADR 0005 fills in the bar whose range reaches it. A bar "
-        "that exactly touches a level may fill in cmd/backtest and not in LEAN; unconfirmed.",
+        "0.05 x N. LEAN's default equity slippage is zero (NullSlippageModel; observed: a "
+        "gapped buy with no slippage model filled exactly at the open), and applies to no "
+        "order here.".format(slippage_n),
+        "gap at the open (ADR 0005 rule 1): observed to match. A stop the bar opens beyond "
+        "fills at the open, less slippage for a sell and plus it for a buy, and LEAN says so "
+        "in the fill's message ('Due to an unfavorable gap ... filled using the open price'). "
+        "In the acceptance run every one of 119 fills, 55 of them gaps, was priced at ADR "
+        "0005's max(level, open) for a buy or min(level, open) for a sell, plus or minus "
+        "slippage.",
+        "touch (ADR 0005): observed to match. A bar whose high exactly equals a buy stop, or "
+        "whose low exactly equals a sell stop, fills at the level (plus or minus slippage). "
+        "Observed in a probe of the pinned image; the acceptance run had no exact touch.",
         "same-bar ambiguity (ADR 0005 rule 3): a Unit's Exit Order is placed only after the "
-        "engine learns of the Unit's fill and answers with strategy.exit-order.set, so LEAN "
-        "can never stop a Unit out in the bar that filled it. ADR 0005 assumes that bar "
-        "enters and then stops out; a LEAN run omits those losses and flatters whipsaw bars. "
-        "Until fills are returned to the engine, no Exit Order is placed in a LEAN run at all.",
+        "engine learns of the Unit's fill and answers with strategy.exit-order.set, and LEAN "
+        "never fills a new order against the bar it was placed after, so a LEAN run cannot "
+        "stop a Unit out in the bar that filled it. ADR 0005 assumes that bar enters and then "
+        "stops out; a LEAN run omits those losses and flatters whipsaw bars.",
+        "amendments: LEAN evaluates an amended order against the bar it was amended after "
+        "(observed: a sell stop raised above that bar's low filled at the new level in the "
+        "same slice). So an Exit Order moved to an Exit Channel the bar breached, or a stop "
+        "the Stop Ladder raised after an Add filled, can fill in that same bar, as it does "
+        "in cmd/backtest.",
         "intrabar ordering (ADR 0005's amendment): LEAN resolves each working order against "
-        "the daily bar independently, with no model of which price came first. ADR 0005 "
-        "orders a bar's fills — an entry or Add before any Exit Order, and stop fills before "
-        "the exit. Each LEAN fill still follows its own order's level, but the order in "
-        "which a bar's fills are reported may differ from cmd/backtest's.",
-        "order lifetime: entries and Adds are DAY stop-market orders placed after the "
-        "decision bar's close, live for the next session only (ADR 0005's one-bar window); "
-        "Exit Orders are good-till-cancelled. Whether LEAN evaluates a daily-resolution fill "
-        "for that session before it expires the DAY order is unconfirmed; if it expires "
-        "first, no entry or Add fills in a LEAN run, and the acceptance run must show fills.",
-        "commission (ADR 0013): LEAN's InteractiveBrokersFeeModel. The Baseline's schedule "
-        "is IBKR Pro Fixed — $0.005 per share, $1.00 minimum per order, capped at 1% of "
-        "trade value (internal/fills; the configuration's commission block). LEAN's model is "
-        "believed to charge the same US-equity fixed tier; unconfirmed. Neither charges "
-        "exchange, clearing or regulatory pass-through fees. Pro Fixed is the working "
-        "assumption, not a settled choice.",
+        "the daily bar independently, with no model of which price came first. The adapter "
+        "reports a slice's fills in ADR 0005's order - buys, then each Unit's stop fill, "
+        "worst price first, then the Units resting at the Exit Channel as one exit fill - "
+        "but LEAN's prices do not depend on that order.",
+        "entry timing: the engine proposes an entry or Add at a Session's close, and LEAN "
+        "can fill it only in the next session. cmd/backtest fills it inside the bar that "
+        "signalled it, so a LEAN run enters one bar later.",
+        "order lifetime: entries and Adds are good-till-cancelled stop-market orders that "
+        "the adapter cancels when the engine expires their proposal at the next bar (ADR "
+        "0011), so each works for exactly one session. LEAN's DAY orders are not used: at "
+        "daily resolution LEAN expires a DAY order before it evaluates the session's fill "
+        "(observed: DAY orders whose next bar crossed their level expired unfilled). Exit "
+        "Orders are good-till-cancelled. A cancellation is confirmed asynchronously: LEAN "
+        "answers CancelPending and reports Canceled after the slice, before the next one.",
+        "commission (ADR 0013): LEAN's InteractiveBrokersFeeModel, observed to charge $0.005 "
+        "per share with a $1.00 minimum per order (500 shares: $2.50; 50 shares: $1.00), "
+        "capped at 0.5% of the order's value at LEAN's market price, not IBKR Pro Fixed's 1% "
+        "of trade value that internal/fills applies. The minimum wins over the cap (1 share "
+        "at $12.01 was charged $1.00, not a capped $0.06), where internal/fills lets the cap "
+        "win. In the acceptance run the 0.5% cap bound on 42 of 119 fills. Neither model "
+        "charges exchange, clearing or regulatory pass-through fees. Pro Fixed is the "
+        "working assumption, not a settled choice.",
+        "partial fills: a partial fill stops the run. The engine accepts one fill per order "
+        "and does not accumulate partial fills into one Unit yet.",
     ]
 
 
@@ -127,6 +166,19 @@ def parse_time(text):
     return datetime.fromisoformat("{}.{}{}".format(whole, micro, zone)).astimezone(timezone.utc)
 
 
+def format_time(moment):
+    """Write LEAN's UtcTime as the RFC 3339 UTC text Go reads.
+
+    LEAN's UtcTime is UTC by definition, so a naive value is read as UTC.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    moment = moment.astimezone(timezone.utc)
+    if moment.microsecond:
+        return moment.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _positive_price(value):
     return type(value) in (int, float) and isfinite(value) and value > 0
 
@@ -135,16 +187,25 @@ def _positive_quantity(value):
     return type(value) is int and value > 0
 
 
+def _whole(value):
+    """A LEAN quantity (a decimal, read as a float) as an exact int, or None."""
+    number = float(value)
+    return int(number) if isfinite(number) and number == int(number) else None
+
+
 class OrderDesk:
-    """Place, amend and cancel LEAN orders exactly as the engine's decisions say.
+    """Place, amend and cancel LEAN orders exactly as the engine's decisions say,
+    and turn what LEAN reports about them into the engine's inputs.
 
     LEAN's order book is the record of what has been submitted: every order's
     tag is the id of the decision that placed it (or, for an Exit Order, the
     decision now in force), so a redelivered decision is recognised from the
     book, never from this object's memory. What this object does remember is
     only what the engine sent and LEAN cannot hold: each tag's N for the
-    slippage model, each Campaign's frozen N, and which LEAN order is each
-    Unit's Exit Order.
+    slippage model, each Campaign's frozen N, which LEAN order is each Unit's
+    Exit Order and at which source it rests, each Unit's opening fill id, and
+    each Campaign's outstanding exit proposal. That memory lives for this run
+    only; recovering it after a restart is not solved here.
     """
 
     def __init__(self, algorithm, symbol, instrument, lean):
@@ -157,6 +218,22 @@ class OrderDesk:
         self.n_by_tag = {}
         self.campaign_n = {}
         self.exit_orders = {}
+        # LEAN order id -> what this adapter placed it for.
+        self.orders = {}
+        # (campaign_id, unit_index) -> the fill id that opened the Unit, which
+        # a stop fill names (event.FillPayload.UnitIDs).
+        self.unit_fill_ids = {}
+        # campaign_id -> the outstanding strategy.exit.proposed id, which an
+        # exit fill names (event.FillPayload.ProposalID).
+        self.exit_proposals = {}
+        # LEAN order id -> slippage LEAN charged on it (NSlippageModel).
+        self.slippage_applied = {}
+        # LEAN order id -> proposal id, for a cancellation LEAN has not yet
+        # confirmed.
+        self.pending_cancels = {}
+        # LEAN order ids whose fill LEAN has reported but the engine has not
+        # yet been told of.
+        self.undelivered = set()
         self.submitted = 0
         self.rejected = 0
         self.first_order_placed = False
@@ -165,6 +242,13 @@ class OrderDesk:
         """The LEAN order statuses in which an order no longer works at the broker."""
         return (self.lean.OrderStatus.Filled, self.lean.OrderStatus.Canceled,
                 self.lean.OrderStatus.Invalid)
+
+    def _tickets(self, predicate):
+        # LEAN returns an enumerable that supports neither len nor indexing.
+        return list(self.algorithm.Transactions.GetOrderTickets(predicate))
+
+    def _open_tickets(self):
+        return list(self.algorithm.Transactions.GetOpenOrderTickets(self.symbol))
 
     def require_flat(self, when):
         """Reconcile before trading: LEAN holds nothing and works no order for the instrument.
@@ -175,28 +259,12 @@ class OrderDesk:
         engine's state and LEAN's disagree, and the run must not trade on it.
         """
         holding = self.algorithm.Portfolio[self.symbol].Quantity
-        working = len(self.algorithm.Transactions.GetOpenOrderTickets(self.symbol))
+        working = len(self._open_tickets())
         if holding != 0 or working:
             raise Uncertain("reconciliation {}: LEAN holds {} shares of {!r} and has {} open "
                             "order(s) for it, but the engine starts from nothing; the adapter "
                             "trades only from a flat start (docs/architecture.md)".format(
                                 when, holding, self.instrument, working))
-
-    def fill_reason(self, order_event):
-        """Why a LEAN fill stops the run: it cannot yet be returned to the engine.
-
-        Until fills are returned, the engine never learns of one, so it would
-        go on believing it is flat: it would place no Exit Order for the new
-        holding and could propose further entries. The first fill therefore
-        stops the run rather than let the two states diverge.
-        """
-        tickets = self.algorithm.Transactions.GetOrderTickets(
-            lambda t: t.OrderId == order_event.OrderId)
-        tag = tickets[0].Tag if tickets else None
-        return ("LEAN reports order {} (tag={}) {}: {} @ {}, but a fill cannot yet be returned "
-                "to the engine (#30), so the engine's state would diverge from LEAN's; the run "
-                "stops at the first fill".format(order_event.OrderId, tag, order_event.Status,
-                                                 order_event.FillQuantity, order_event.FillPrice))
 
     def n_for_tag(self, tag):
         n = self.n_by_tag.get(tag)
@@ -205,11 +273,16 @@ class OrderDesk:
                              "it by zero (ADR 0013)".format(tag))
         return n
 
-    def act(self, decisions, period_end, warming):
-        """Act on one completed bar's decisions, in the order the engine sent them.
+    def record_slippage(self, order_id, slippage):
+        self.slippage_applied[order_id] = slippage
 
-        A decision answering a warm-up bar is never acted on: LEAN's warm-up
-        exists to build history, not to trade (README.md).
+    def act(self, decisions, period_end, warming):
+        """Act on one input's decisions, in the order the engine sent them.
+
+        period_end is the session the decisions answer: a bar's period end, or
+        the time of the fill that caused them. A decision answering a warm-up
+        bar is never acted on: LEAN's warm-up exists to build history, not to
+        trade (README.md).
         """
         actionable = [d for d in decisions if d.get("type") in SCHEMA_VERSIONS]
         for decision in actionable:
@@ -236,6 +309,16 @@ class OrderDesk:
                 self._expire(payload)
             elif kind == CAMPAIGN_OPENED:
                 self._campaign_opened(decision, payload)
+            elif kind == EXIT_PROPOSED:
+                self.exit_proposals[payload.get("campaign_id")] = decision.get("id")
+            elif kind == UNIT_ADDED:
+                self.unit_fill_ids[(payload.get("campaign_id"), payload.get("unit_index"))] = \
+                    payload.get("fill_id")
+            elif kind == UNITS_STOPPED:
+                for index in payload.get("unit_indexes") or ():
+                    self.exit_orders.pop((payload.get("campaign_id"), index), None)
+            elif kind == CAMPAIGN_EXITED:
+                self._campaign_exited(payload.get("campaign_id"))
             else:
                 self._exit_order(decision, payload)
 
@@ -254,16 +337,18 @@ class OrderDesk:
         return None
 
     def _already_submitted(self, tag):
-        return self.algorithm.Transactions.GetOrderTickets(lambda t: t.Tag == tag)
+        return self._tickets(lambda t: t.Tag == tag)
 
     def _propose(self, decision, payload, bar_end, level, n, entry):
-        """An entry or Add: a buy stop-market DAY order at the proposal's level.
+        """An entry or Add: a good-till-cancelled buy stop-market order at the proposal's level.
 
-        Valid only for the bar after the one that produced it — ADR 0005's
+        Valid only for the session after the bar that produced it — ADR 0005's
         one-bar window, the same one event.ProposalExpiredPayload's
-        EarliestFillAt bounds — so it must answer the bar just published.
-        A rejected proposal is logged and dropped: the engine re-issues it on
-        a later bar if its setup still holds.
+        EarliestFillAt bounds — so it must answer the bar just published. The
+        engine expires it at the next bar (ADR 0011) and the adapter then
+        cancels it, so it works for exactly that one session. A rejected
+        proposal is logged and dropped: the engine re-issues it on a later bar
+        if its setup still holds.
         """
         tag = decision.get("id")
         reason = self._tradable_reason(payload)
@@ -291,8 +376,8 @@ class OrderDesk:
             except ValueError as err:
                 produced, reason = None, "period_end unreadable: {}".format(err)
             if produced is not None and produced != bar_end:
-                reason = ("stale: produced by the bar ending {}, but valid only for the bar "
-                          "after it and this is the bar ending {} (ADR 0005)".format(
+                reason = ("stale: produced by the bar ending {}, but valid only for the session "
+                          "after it and this answers {} (ADR 0005)".format(
                               payload.get("period_end"), bar_end.strftime("%Y-%m-%dT%H:%M:%SZ")))
         if reason is None and not tag:
             reason = "no decision id to tag the order with"
@@ -304,17 +389,25 @@ class OrderDesk:
             self._reject(decision, reason)
             return
         properties = self.lean.OrderProperties()
-        properties.TimeInForce = self.lean.TimeInForce.Day
+        properties.TimeInForce = self.lean.TimeInForce.GoodTilCanceled
         self.n_by_tag[tag] = n
         ticket = self._submit(payload["quantity"], level, tag, properties)
         if ticket.Status == self.lean.OrderStatus.Invalid:
             self._reject(decision, "LEAN refused the order (status {})".format(ticket.Status))
+            return
+        self.orders[ticket.OrderId] = {"kind": KIND_ENTRY if entry else KIND_ADD, "tag": tag,
+                                       "campaign_id": payload.get("campaign_id", ""),
+                                       "level": level}
 
     def _submit(self, quantity, level, tag, properties):
-        """Submit one stop-market order, reconciling first if it is the run's first."""
+        """Submit one stop-market order, reconciling first if it is the run's first.
+
+        LEAN's signature is (symbol, quantity, stop_price, asynchronous, tag,
+        order_properties): the tag is the fifth argument, never the fourth.
+        """
         if not self.first_order_placed:
             self.require_flat("before the first order")
-        ticket = self.algorithm.StopMarketOrder(self.symbol, quantity, level, tag, properties)
+        ticket = self.algorithm.StopMarketOrder(self.symbol, quantity, level, False, tag, properties)
         self.first_order_placed = True
         if ticket.Status == self.lean.OrderStatus.Invalid:
             return ticket
@@ -324,25 +417,59 @@ class OrderDesk:
         return ticket
 
     def _expire(self, payload):
-        """Cancel a still-working day order whose proposal the engine expired (ADR 0011)."""
-        if payload.get("kind") not in _KINDS_WITH_A_DAY_ORDER:
+        """Cancel a still-working buy order whose proposal the engine expired (ADR 0011).
+
+        LEAN answers a cancellation with CancelPending and confirms it with a
+        Canceled event after the slice (README.md, "Observed LEAN behaviour"),
+        so the request is remembered until that event arrives; a request LEAN
+        refuses outright stops the run.
+        """
+        if payload.get("kind") not in _KINDS_WITH_AN_ORDER:
+            if payload.get("kind") == "exit":
+                for campaign, proposal in list(self.exit_proposals.items()):
+                    if proposal == payload.get("proposal_id"):
+                        del self.exit_proposals[campaign]
             return
         proposal_id = payload.get("proposal_id")
-        for ticket in self.algorithm.Transactions.GetOpenOrderTickets(self.symbol):
+        for ticket in self._open_tickets():
             if ticket.Tag != proposal_id:
                 continue
-            response = ticket.Cancel("proposal expired: {}".format(payload.get("reason")))
-            if not response.IsSuccess or ticket.Status != self.lean.OrderStatus.Canceled:
+            response = ticket.Cancel()
+            if not response.IsSuccess or ticket.Status not in (
+                    self.lean.OrderStatus.CancelPending, self.lean.OrderStatus.Canceled):
                 # An order the engine expired that is still working could fill
                 # into a holding the engine does not expect.
                 raise Uncertain("LEAN did not confirm cancelling order {} (tag={}) after its "
                                 "proposal expired: response success={}, status {}".format(
                                     ticket.OrderId, proposal_id, response.IsSuccess, ticket.Status))
-            self.algorithm.Log("adapter: cancelled order {} tag={}: its proposal expired".format(
-                ticket.OrderId, proposal_id))
+            if ticket.Status == self.lean.OrderStatus.Canceled:
+                self._cancel_confirmed(ticket.OrderId, proposal_id)
+            else:
+                self.pending_cancels[ticket.OrderId] = proposal_id
+                self.algorithm.Log("adapter: cancel requested for order {} tag={}: its proposal "
+                                   "expired".format(ticket.OrderId, proposal_id))
+
+    def _cancel_confirmed(self, order_id, proposal_id):
+        self.pending_cancels.pop(order_id, None)
+        self.algorithm.Log("adapter: cancelled order {} tag={}: its proposal expired".format(
+            order_id, proposal_id))
+
+    def require_cancels_confirmed(self, when):
+        """Every cancellation requested in an earlier slice has been confirmed.
+
+        LEAN confirms a cancellation after the slice it was requested in; one
+        still unconfirmed when the next slice starts is an order that could
+        fill into a holding the engine does not expect.
+        """
+        if self.pending_cancels:
+            raise Uncertain("LEAN did not confirm cancelling order(s) {} {}; their proposals "
+                            "expired, so a fill would be one the engine does not expect".format(
+                                ", ".join("{} (tag={})".format(o, t) for o, t in
+                                          sorted(self.pending_cancels.items())), when))
 
     def _campaign_opened(self, decision, payload):
-        """Remember the Campaign's frozen N (ADR 0006), for its Exit Orders' slippage."""
+        """Remember the Campaign's frozen N (ADR 0006), for its Exit Orders' slippage,
+        and Unit 1's opening fill id, which a stop fill names."""
         reason = None
         if payload.get("instrument_id") != self.instrument:
             reason = "instrument {!r} is not this run's {!r}".format(
@@ -353,11 +480,15 @@ class OrderDesk:
             self._reject(decision, reason)
             return
         self.campaign_n[payload["campaign_id"]] = payload["campaign_n"]
+        self.unit_fill_ids[(payload["campaign_id"], 1)] = payload.get("fill_id")
+
+    def _campaign_exited(self, campaign_id):
+        for unit in [u for u in self.exit_orders if u[0] == campaign_id]:
+            del self.exit_orders[unit]
+        self.exit_proposals.pop(campaign_id, None)
 
     def _working_sell_quantity(self):
-        return sum(-(t.Quantity - t.QuantityFilled)
-                   for t in self.algorithm.Transactions.GetOpenOrderTickets(self.symbol)
-                   if t.Quantity < 0)
+        return sum(-(t.Quantity - t.QuantityFilled) for t in self._open_tickets() if t.Quantity < 0)
 
     def _exit_order(self, decision, payload):
         """Mirror one Unit's Exit Order (CONTEXT.md: "Exit Order"; ADR 0005's amendment).
@@ -414,11 +545,12 @@ class OrderDesk:
         unit = (campaign_id, payload.get("unit_index"))
         in_force = self.exit_orders.get(unit)
         if in_force is None:
-            self._place_exit_order(decision, unit, quantity, level, tag, n, as_of)
+            self._place_exit_order(decision, unit, quantity, level, tag, n, as_of, payload.get("source"))
         else:
-            self._amend_exit_order(decision, unit, in_force, quantity, level, tag, n, as_of)
+            self._amend_exit_order(decision, unit, in_force, quantity, level, tag, n, as_of,
+                                   payload.get("source"))
 
-    def _place_exit_order(self, decision, unit, quantity, level, tag, n, as_of):
+    def _place_exit_order(self, decision, unit, quantity, level, tag, n, as_of, source):
         holding = self.algorithm.Portfolio[self.symbol].Quantity
         working = self._working_sell_quantity()
         if working + quantity > holding:
@@ -441,11 +573,22 @@ class OrderDesk:
             raise Uncertain("LEAN refused exit order {} for campaign {!r} unit {} (status {}); "
                             "the Unit cannot be protected as the engine believes".format(
                                 tag, unit[0], unit[1], ticket.Status))
-        self.exit_orders[unit] = {"order_id": ticket.OrderId, "as_of": as_of}
+        self.exit_orders[unit] = {"order_id": ticket.OrderId, "as_of": as_of, "source": source,
+                                  "level": level}
+        self.orders[ticket.OrderId] = {"kind": KIND_STOP, "tag": tag, "campaign_id": unit[0],
+                                       "unit": unit, "level": level}
 
-    def _amend_exit_order(self, decision, unit, in_force, quantity, level, tag, n, as_of):
-        tickets = self.algorithm.Transactions.GetOrderTickets(
-            lambda t: t.OrderId == in_force["order_id"])
+    def _amend_exit_order(self, decision, unit, in_force, quantity, level, tag, n, as_of, source):
+        tickets = self._tickets(lambda t: t.OrderId == in_force["order_id"])
+        if len(tickets) == 1 and in_force["order_id"] in self.undelivered:
+            # LEAN has already filled this Unit's order in the slice being
+            # reported, and that fill is still to reach the engine: it states
+            # what executed, so there is nothing left to amend (ADR 0005 rule 3:
+            # a bar that fills an Add and a stop enters, then stops).
+            self.algorithm.Log("adapter: {} {} for campaign {!r} unit {} not applied: its order "
+                               "{} has already filled and that fill is reported next".format(
+                                   decision["type"], tag, unit[0], unit[1], in_force["order_id"]))
+            return
         if len(tickets) != 1 or tickets[0].Status in self._closed():
             raise Uncertain("campaign {!r} unit {}'s exit order {} is no longer working in LEAN, "
                             "but the engine still sets its level".format(
@@ -468,5 +611,201 @@ class OrderDesk:
             self.algorithm.Log("adapter: amendment of order {} to {} (tag={}) not acknowledged; "
                                "the previous level stays in force".format(ticket.OrderId, level, tag))
             return
-        in_force["as_of"] = as_of
+        in_force.update(as_of=as_of, source=source, level=level)
+        self.orders[ticket.OrderId].update(tag=tag, level=level)
         self.algorithm.Log("adapter: amended order {} to {} tag={}".format(ticket.OrderId, level, tag))
+
+    def observe(self, order_event):
+        """What LEAN reported about one order, read once, when it reported it.
+
+        OnOrderEvent can fire in the middle of placing an order, so nothing is
+        sent from it; the record waits in the algorithm's queue until the
+        adapter reaches a point where an input may be sent (algorithm.py,
+        drain_order_events).
+        """
+        tickets = self._tickets(lambda t: t.OrderId == order_event.OrderId)
+        fee = order_event.OrderFee.Value
+        stop_price = order_event.StopPrice
+        return {
+            "order_id": order_event.OrderId,
+            "event_id": order_event.Id,
+            "status": order_event.Status,
+            "time": order_event.UtcTime,
+            "tag": tickets[0].Tag if tickets else None,
+            "quantity": order_event.Quantity,
+            "fill_quantity": order_event.FillQuantity,
+            "fill_price": order_event.FillPrice,
+            "fee": fee.Amount,
+            "fee_currency": fee.Currency,
+            "stop_price": None if stop_price is None else float(stop_price),
+            "message": order_event.Message or "",
+        }
+
+    def is_execution(self, record):
+        status = self.lean.OrderStatus
+        if record["status"] == status.PartiallyFilled:
+            # The engine accepts one fill per order: a second partial of the
+            # same entry is refused, and a partial stop or exit cannot close
+            # its Units. Until successive partial fills accumulate into one
+            # Unit, a partial fill stops the run rather than invent position
+            # logic here (internal/strategy, applyFillToOpenCampaign).
+            raise Uncertain("LEAN reports order {} (tag={}) partially filled: {} of {} at {}; "
+                            "partial fills are not yet accumulated into one Unit (#67), so the "
+                            "run stops".format(record["order_id"], record["tag"],
+                                               record["fill_quantity"], record["quantity"],
+                                               record["fill_price"]))
+        return record["status"] == status.Filled
+
+    def lifecycle(self, record):
+        """One order change that is not an execution, as event.OrderLifecyclePayload."""
+        status = self.lean.OrderStatus
+        names = {status.Submitted: "submitted", status.UpdateSubmitted: "updated",
+                 status.CancelPending: "cancel-pending", status.Canceled: "canceled",
+                 status.Invalid: "invalid"}
+        name = names.get(record["status"])
+        if name is None:
+            raise Uncertain("LEAN reports order {} (tag={}) in status {}, which this adapter "
+                            "cannot state as an order lifecycle change".format(
+                                record["order_id"], record["tag"], record["status"]))
+        stop_price = record["stop_price"]
+        if stop_price is None:
+            stop_price = (self.orders.get(record["order_id"]) or {}).get("level")
+        quantity = _whole(record["quantity"])
+        if not quantity or not _positive_price(stop_price):
+            raise Uncertain("LEAN reports order {} (tag={}) {} with quantity {} and stop price {}; "
+                            "an order change needs both to be stated".format(
+                                record["order_id"], record["tag"], name, record["quantity"],
+                                stop_price))
+        if name == "canceled" and record["order_id"] in self.pending_cancels:
+            self._cancel_confirmed(record["order_id"], self.pending_cancels[record["order_id"]])
+        return {"instrument_id": self.instrument, "order_id": str(record["order_id"]),
+                "tag": record["tag"] or "", "status": name, "quantity": quantity,
+                "stop_price": stop_price, "occurred_at": format_time(record["time"]),
+                "message": record["message"]}
+
+    def fills(self, records):
+        """One slice's fills as the engine's fill inputs, in ADR 0005's order.
+
+        records are every fill LEAN reported at one instant. Each becomes the
+        FillPayload the reducer expects for its order's kind, mirroring
+        internal/fills: an entry or Add names its proposal; an Exit Order
+        resting at its own stop is a stop fill naming its one Unit; and the
+        Exit Orders resting at the Exit Channel together are one exit fill for
+        the exit proposal, since an exit closes the whole remaining holding.
+        Buys come first, then stop fills worst price first, then the exit. The
+        kind of every Exit Order is the source the engine last set for it;
+        nothing here compares a price with a level.
+
+        Returns [(payload, [order ids])]; the order ids are marked undelivered
+        until the caller has sent their fill.
+        """
+        buys, stops, exits = [], [], []
+        for record in records:
+            placed = self.orders.get(record["order_id"])
+            if placed is None:
+                raise Uncertain("LEAN reports a fill of order {} (tag={}), which this adapter did "
+                                "not place".format(record["order_id"], record["tag"]))
+            quantity = _whole(record["fill_quantity"])
+            ordered = _whole(record["quantity"])
+            if quantity is None or ordered is None or quantity == 0 or quantity != ordered:
+                raise Uncertain("LEAN reports order {} (tag={}) filled {} of {}; only a complete "
+                                "fill of a whole number of shares can be returned to the engine "
+                                "(#67)".format(record["order_id"], record["tag"],
+                                               record["fill_quantity"], record["quantity"]))
+            price = float(record["fill_price"])
+            fee = float(record["fee"])
+            if not _positive_price(price) or not isfinite(fee) or fee < 0 \
+                    or record["fee_currency"] != _USD:
+                raise Uncertain("LEAN reports order {} (tag={}) filled at {} for a fee of {} {}; "
+                                "a fill needs a positive price and a finite, non-negative USD "
+                                "fee".format(record["order_id"], record["tag"], price, fee,
+                                             record["fee_currency"]))
+            buy = placed["kind"] in (KIND_ENTRY, KIND_ADD)
+            if buy != (quantity > 0):
+                raise Uncertain("LEAN reports order {} (tag={}) filled {} shares, but it is the "
+                                "adapter's {} order".format(record["order_id"], record["tag"],
+                                                            quantity, placed["kind"]))
+            fill = {"record": record, "placed": placed, "quantity": abs(quantity),
+                    "price": price, "fee": fee}
+            if buy:
+                buys.append(fill)
+            elif self.exit_orders.get(placed["unit"], {}).get("source") == SOURCE_EXIT_CHANNEL:
+                exits.append(fill)
+            else:
+                stops.append(fill)
+        if len(buys) > 1:
+            raise Uncertain("LEAN reports {} buy fills at one instant; the engine has at most one "
+                            "entry or Add outstanding".format(len(buys)))
+        stops.sort(key=lambda f: (f["price"], f["placed"]["unit"][1]))
+        out = [self._single(f) for f in buys + stops]
+        if exits:
+            out.append(self._exit(exits))
+        for _, order_ids in out:
+            self.undelivered.update(order_ids)
+        return out
+
+    def delivered(self, order_ids):
+        self.undelivered.difference_update(order_ids)
+
+    def _costs(self, fills):
+        record = fills[0]["record"]
+        levels = {f["record"]["stop_price"] if f["record"]["stop_price"] is not None
+                  else f["placed"]["level"] for f in fills}
+        slippages = {self.slippage_applied.get(f["record"]["order_id"], 0.0) for f in fills}
+        if len(levels) != 1 or len(slippages) != 1 or len({f["price"] for f in fills}) != 1 \
+                or len({f["record"]["time"] for f in fills}) != 1:
+            raise Uncertain("LEAN filled the Exit Orders of one exit at more than one level, "
+                            "price, slippage or time (orders {}); one exit fill cannot state "
+                            "them".format(sorted(f["record"]["order_id"] for f in fills)))
+        return {"instrument_id": self.instrument, "direction": _LONG,
+                "price": fills[0]["price"], "filled_at": format_time(record["time"]),
+                "level": levels.pop(), "slippage_applied": slippages.pop(),
+                "commission": sum(f["fee"] for f in fills)}
+
+    def _single(self, fill):
+        record, placed = fill["record"], fill["placed"]
+        payload = self._costs([fill])
+        payload.update(kind=placed["kind"], quantity=fill["quantity"], unit_ids=[],
+                       fill_id="lean:{}:{}".format(record["order_id"], record["event_id"]))
+        if placed["kind"] == KIND_ENTRY:
+            payload.update(proposal_id=placed["tag"], campaign_id="")
+        elif placed["kind"] == KIND_ADD:
+            payload.update(proposal_id=placed["tag"], campaign_id=placed["campaign_id"])
+        else:
+            unit_fill = self.unit_fill_ids.get(placed["unit"])
+            if not unit_fill:
+                raise Uncertain("LEAN filled order {} for campaign {!r} unit {}, whose opening "
+                                "fill the engine never named; a stop fill must name the Unit it "
+                                "closes".format(record["order_id"], *placed["unit"]))
+            payload.update(proposal_id="", campaign_id=placed["campaign_id"], unit_ids=[unit_fill])
+        return payload, [record["order_id"]]
+
+    def _exit(self, fills):
+        campaigns = {f["placed"]["campaign_id"] for f in fills}
+        campaign_id = campaigns.pop()
+        if campaigns:
+            raise Uncertain("LEAN filled Exit Orders of more than one Campaign at the Exit Channel "
+                            "at one instant")
+        resting = {u for u, order in self.exit_orders.items()
+                   if u[0] == campaign_id and order["source"] == SOURCE_EXIT_CHANNEL}
+        filled = {f["placed"]["unit"] for f in fills}
+        if resting != filled:
+            # An exit fill closes everything the Campaign still holds
+            # (CONTEXT.md: "Campaign"), so it cannot describe a slice in which
+            # only some of the Units resting at the exit level filled.
+            raise Uncertain("campaign {!r}: LEAN filled the Exit Orders of unit(s) {} at the Exit "
+                            "Channel, but unit(s) {} rest there; one exit fill cannot state "
+                            "that".format(campaign_id, sorted(u[1] for u in filled),
+                                          sorted(u[1] for u in resting)))
+        proposal_id = self.exit_proposals.get(campaign_id)
+        if not proposal_id:
+            raise Uncertain("campaign {!r}: LEAN filled its Exit Orders at the Exit Channel, but "
+                            "the engine has no exit proposal outstanding for it".format(campaign_id))
+        fills = sorted(fills, key=lambda f: f["placed"]["unit"][1])
+        payload = self._costs(fills)
+        payload.update(kind=KIND_EXIT, proposal_id=proposal_id, campaign_id=campaign_id,
+                       unit_ids=[], quantity=sum(f["quantity"] for f in fills),
+                       fill_id="lean:" + "+".join("{}:{}".format(f["record"]["order_id"],
+                                                                 f["record"]["event_id"])
+                                                  for f in fills))
+        return payload, [f["record"]["order_id"] for f in fills]

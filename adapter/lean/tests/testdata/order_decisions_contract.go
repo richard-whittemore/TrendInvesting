@@ -51,6 +51,14 @@ func contract(eventType string) (uint32, any, bool) {
 		return event.CampaignOpenedSchemaVersion, &event.CampaignOpenedPayload{}, true
 	case event.ExitOrderSetEventType:
 		return event.ExitOrderSetSchemaVersion, &event.ExitOrderSetPayload{}, true
+	case event.ExitProposalEventType:
+		return event.ExitProposalSchemaVersion, &event.ExitProposalPayload{}, true
+	case event.CampaignUnitAddedEventType:
+		return event.CampaignUnitAddedSchemaVersion, &event.CampaignUnitAddedPayload{}, true
+	case event.CampaignUnitsStoppedEventType:
+		return event.CampaignUnitsStoppedSchemaVersion, &event.CampaignUnitsStoppedPayload{}, true
+	case event.CampaignExitedEventType:
+		return event.CampaignExitedSchemaVersion, &event.CampaignExitedPayload{}, true
 	}
 	return 0, nil, false
 }

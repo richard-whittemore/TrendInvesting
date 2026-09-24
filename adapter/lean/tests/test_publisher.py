@@ -33,7 +33,10 @@ class Client:
                 "causation_id": envelope["id"], "correlation_id": envelope["correlation_id"],
                 "configuration_hash": "hash",
                 "strategy_version": "version", "payload": {"decisions": []}}
-        reply.update(self.reply_overrides.get(envelope["type"], {}))
+        override = self.reply_overrides.get(envelope["type"], {})
+        # A callable answers each envelope of its type on its own terms, so a
+        # test can reply differently to two fills.
+        reply.update(override(envelope) if callable(override) else override)
         encoded = json.dumps(reply["payload"], separators=(",", ":")).encode()
         reply.setdefault("payload_hash", hashlib.sha256(encoded).hexdigest())
         # Exercise the production client's exact-byte hash check with the

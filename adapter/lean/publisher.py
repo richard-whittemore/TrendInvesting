@@ -12,6 +12,13 @@ SESSION_CLOSED_SCHEMA_VERSION = 1
 RUN_COMPLETED_SCHEMA_VERSION = 1
 # event.AdapterRunStoppedSchemaVersion (internal/event/run_stopped.go); ADR 0015.
 RUN_STOPPED_SCHEMA_VERSION = 1
+# event.FillEventType / FillSchemaVersion (internal/event/fill.go); ADR 0015.
+FILL_EVENT_TYPE = "execution.fill"
+FILL_SCHEMA_VERSION = 4
+# event.OrderLifecycleEventType / OrderLifecycleSchemaVersion
+# (internal/event/order_lifecycle.go); ADR 0015.
+ORDER_LIFECYCLE_EVENT_TYPE = "execution.order.lifecycle"
+ORDER_LIFECYCLE_SCHEMA_VERSION = 1
 # event.AdapterRunStoppedReason* (internal/event/run_stopped.go): the closed
 # set of reasons this adapter may report, mirrored here so an unrecognised
 # reason fails at the source rather than reaching the engine, which would
@@ -115,6 +122,22 @@ class Publisher:
                                   "snapshot", payload, period_end)
         self.last_as_of = as_of
         return decisions
+
+    def publish_fill(self, payload):
+        """Report one LEAN execution as execution.fill (event.FillPayload).
+
+        Stamped at the fill's own time: a fact about when LEAN executed the
+        order, delivered before the bar of the session it executed in
+        (algorithm.py, drain_order_events).
+        """
+        return self._publish(FILL_EVENT_TYPE, FILL_SCHEMA_VERSION, "fill", payload,
+                             payload["filled_at"])
+
+    def publish_order_lifecycle(self, payload):
+        """Report one LEAN order change that is not an execution
+        (event.OrderLifecyclePayload), stamped when LEAN reported it."""
+        return self._publish(ORDER_LIFECYCLE_EVENT_TYPE, ORDER_LIFECYCLE_SCHEMA_VERSION, "order",
+                             payload, payload["occurred_at"])
 
     def publish_run_stopped(self, reason, detail, instrument_id=None):
         """Send adapter.run.stopped immediately BEFORE replay.run.completed.
