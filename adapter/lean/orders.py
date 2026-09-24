@@ -136,6 +136,15 @@ def fill_model_report(slippage_n):
         "every open order itself, and the run stops, before the next session can fill "
         "anything, unless the result is exactly the engine's position and orders at the new "
         "ratio.",
+        "account (ADR 0010): no partial Units, no borrowing. LEAN runs on a cash account "
+        "(AccountType.Cash via InteractiveBrokersBrokerageModel), so LEAN itself refuses an "
+        "order it cannot fund at submission: status Invalid, rejected and logged, the same "
+        "path as any other order LEAN refuses. A gap that fills above the level can still cost "
+        "more than the cash on hand, in which case LEAN fills it anyway and cash goes negative; "
+        "account.snapshot refuses a negative figure and the run stops, as it must, since the "
+        "adapter reports what LEAN actually holds rather than clamping it. ADR 0020's running "
+        "debit at order placement is what actually bounds an order's affordability against a "
+        "sized estimate; it narrows this gap but a large enough one can still exceed the hold.",
         "slippage is {} x N per fill (ADR 0013), charged by the adapter's NSlippageModel "
         "from the N the engine sent: a trade proposal's n, an Add proposal's campaign_n, "
         "and the Campaign's frozen campaign_n for an Exit Order, each at the raw ratio in "

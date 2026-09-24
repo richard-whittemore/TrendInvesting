@@ -112,6 +112,23 @@ class CompletedBarsAlgorithm(QCAlgorithm):
                 OrderProperties=OrderProperties, TimeInForce=TimeInForce,
                 UpdateOrderFields=UpdateOrderFields, OrderStatus=OrderStatus,
                 OrderField=OrderField))
+            # ADR 0010: no partial Units, no borrowing. LEAN's default equity
+            # account is margin, which let a gap fill cost more than the
+            # cash held; a cash account makes LEAN itself refuse an order it
+            # cannot fund at submission. Must precede the explicit fee and
+            # slippage sets below: setting the brokerage model here was
+            # observed to reset the security's slippage model back to
+            # LEAN's own default (adapter/lean/README.md, "Observed LEAN
+            # behaviour").
+            # ADR 0010: no partial Units, no borrowing. LEAN's default equity
+            # account is margin, which let a gap fill cost more than the
+            # cash held; a cash account makes LEAN itself refuse an order it
+            # cannot fund at submission. Must precede the explicit fee and
+            # slippage sets below: setting the brokerage model here was
+            # observed to reset the security's slippage model back to
+            # LEAN's own default (adapter/lean/README.md, "Observed LEAN
+            # behaviour").
+            self.SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage, AccountType.Cash)
             # ADR 0013: slippage_n x the N the engine supplied with each
             # order's decision, and Interactive Brokers commissions.
             security.SetSlippageModel(NSlippageModel(slippage_n, self.desk.n_for_tag,

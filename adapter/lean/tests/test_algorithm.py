@@ -187,8 +187,16 @@ class FakeTransactions:
 
 class FakeSecurity:
     Symbol = "AAPL"
-    def SetSlippageModel(self, model): self.slippage_model = model
-    def SetFeeModel(self, model): self.fee_model = model
+    def __init__(self, algorithm=None):
+        self.algorithm = algorithm
+    def SetSlippageModel(self, model):
+        self.slippage_model = model
+        if self.algorithm is not None:
+            self.algorithm.model_calls.append(("SetSlippageModel", model))
+    def SetFeeModel(self, model):
+        self.fee_model = model
+        if self.algorithm is not None:
+            self.algorithm.model_calls.append(("SetFeeModel", model))
 
 
 class FakeAlgorithm:
@@ -200,9 +208,20 @@ class FakeAlgorithm:
         # A test may give LEAN a holding before Initialize runs.
         self.Portfolio.holdings.update(getattr(self, "initial_holdings", {}))
     def SetTimeZone(self, *args): pass
+    @property
+    def model_calls(self):
+        # Every SetBrokerageModel/SetSlippageModel/SetFeeModel call, in the
+        # order Initialize made them: a test falsifies the order by asserting
+        # on this list, since LEAN itself was observed to reset a security's
+        # slippage model when SetBrokerageModel is called after it
+        # (adapter/lean/README.md, "Observed LEAN behaviour").
+        return self.__dict__.setdefault("_model_calls", [])
+    def SetBrokerageModel(self, brokerage, account_type):
+        self.brokerage_model = (brokerage, account_type)
+        self.model_calls.append(("SetBrokerageModel", brokerage, account_type))
     def AddEquity(self, ticker, resolution, **kwargs):
         self.subscription = kwargs
-        self.security = FakeSecurity()
+        self.security = FakeSecurity(self)
         return self.security
     def SetWarmUp(self, count, resolution):
         self.warmup = (count, resolution)
@@ -267,6 +286,8 @@ imports = types.ModuleType("AlgorithmImports")
 imports.QCAlgorithm = FakeAlgorithm
 imports.Resolution = types.SimpleNamespace(Daily="daily")
 imports.DataNormalizationMode = types.SimpleNamespace(SplitAdjusted="split", Raw="raw")
+imports.BrokerageName = types.SimpleNamespace(InteractiveBrokersBrokerage="interactive-brokers")
+imports.AccountType = types.SimpleNamespace(Cash="cash", Margin="margin")
 imports.TimeZones = types.SimpleNamespace(NewYork="NY")
 imports.DelistingType = types.SimpleNamespace(Warning="warning", Delisted="delisted")
 imports.SplitType = types.SimpleNamespace(Warning="split-warning", SplitOccurred="split-occurred")
@@ -521,6 +542,35 @@ class AlgorithmTests(unittest.TestCase):
         self.assertTrue(algo.failed)
         self.assertIn("backtest-only", algo.quit_reason)
 
+
+class BrokerageModelTests(unittest.TestCase):
+    """ADR 0010: no partial Units, no borrowing. LEAN runs on a cash account,
+    so LEAN itself refuses an order it cannot fund, and the adapter's own
+    fee and slippage models still apply once that account type is set."""
+
+    def test_the_brokerage_model_is_set_with_a_cash_account(self):
+        algo = AlgorithmTests.init(self)
+        self.assertEqual(algo.brokerage_model,
+                         (algorithm.BrokerageName.InteractiveBrokersBrokerage,
+                          algorithm.AccountType.Cash))
+
+    def test_the_fee_and_slippage_models_are_still_the_adapters_own(self):
+        algo = AlgorithmTests.init(self)
+        self.assertIsInstance(algo.security.slippage_model, algorithm.NSlippageModel)
+        self.assertIsInstance(algo.security.fee_model, InteractiveBrokersFeeModel)
+
+    def test_the_brokerage_model_is_set_before_the_fee_and_slippage_models(self):
+        """LEAN was observed to reset a security's slippage model back to its
+        own default when SetBrokerageModel is called after the security's own
+        model is set (README.md, "Observed LEAN behaviour"), so Initialize
+        must set the brokerage model first."""
+        algo = AlgorithmTests.init(self)
+        kinds = [call[0] for call in algo.model_calls]
+        self.assertIn("SetBrokerageModel", kinds)
+        brokerage_index = kinds.index("SetBrokerageModel")
+        for kind in ("SetSlippageModel", "SetFeeModel"):
+            self.assertGreater(kinds.index(kind), brokerage_index,
+                               "{} must be set after SetBrokerageModel".format(kind))
 
 
 class CashSettingTests(unittest.TestCase):
