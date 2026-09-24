@@ -218,7 +218,9 @@ func TestTransitionDeepCopyHasNoAliases(t *testing.T) {
 	r.instruments["ADD"] = add.instruments["AAPL"]
 	before.instruments["ADD"] = expectedAdd.instruments["AAPL"]
 	_, err := r.transact(func(tx *transition) ([]event.Envelope, error) {
-		s := tx.instruments["AAPL"]
+		// Every access goes through the transaction's accessors, as a
+		// handler's must (docs/development.md: reducer transactions).
+		s, _ := tx.instrument("AAPL")
 		s.pendingProposal.quantity++
 		s.n.Add(77)
 		s.entryChannel.Add(999)
@@ -227,14 +229,18 @@ func TestTransitionDeepCopyHasNoAliases(t *testing.T) {
 		for range 20 {
 			s.n.Add(88)
 		}
-		tx.instruments["OTHER"].campaign.units[0].quantity++
-		tx.instruments["OTHER"].pendingExitProposal.quantity++
-		tx.instruments["ADD"].pendingAddProposal.quantity++
+		other, _ := tx.instrument("OTHER")
+		other.campaign.units[0].quantity++
+		other.pendingExitProposal.quantity++
+		add, _ := tx.instrument("ADD")
+		add.pendingAddProposal.quantity++
 		tx.notionalAccount.current++
-		tx.acceptedFills["old-stop"].unitIDs[0] = "changed"
-		delete(tx.acceptedFills, "old-stop")
+		// Published accepted fills are immutable; a transaction can only
+		// buffer a record, here one reusing a published id.
+		tx.recordAcceptedFill("old-stop", acceptedFillState{unitIDs: []string{"changed"}})
+		tx.recordAcceptedFill("new-fill", acceptedFillState{unitIDs: []string{"new"}})
+		tx.addInstrument("NEW", &instrumentState{})
 		delete(tx.delisted, "OLD")
-		delete(tx.instruments, "OTHER")
 		tx.availableCash++
 		return nil, errors.New("discard modified copy")
 	})

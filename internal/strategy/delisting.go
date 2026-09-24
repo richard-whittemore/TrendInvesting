@@ -136,7 +136,7 @@ func (r *transition) applyDelisting(payload event.CorporateActionPayload, input 
 		return nil, nil
 	}
 
-	state, known := r.instruments[payload.InstrumentID]
+	state, known := r.instrument(payload.InstrumentID)
 	if !known {
 		// Genuinely unknown: no completed bar has ever been accepted for the
 		// instrument, so there is no last completed bar for the chronology

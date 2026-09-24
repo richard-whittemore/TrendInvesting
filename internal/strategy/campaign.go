@@ -1337,7 +1337,7 @@ func (r *transition) applyFill(envelope event.Envelope) ([]event.Envelope, error
 	// different instrument entirely is therefore caught here, as a
 	// reconciliation failure, rather than by an instrument-scoped check that
 	// would never see it.
-	if recorded, seen := r.acceptedFills[fill.FillID]; seen {
+	if recorded, seen := r.acceptedFill(fill.FillID); seen {
 		if !recorded.matches(fill) {
 			return nil, fmt.Errorf("strategy: fill %q was already recorded (instrument %q, kind %s, proposal %q, campaign %q, %d at %v %s on %s), but this delivery differs (instrument %q, kind %s, proposal %q, campaign %q, %d at %v %s on %s); a reused fill identifier carrying different contents is a reconciliation failure, not a duplicate delivery",
 				fill.FillID,
@@ -1373,7 +1373,7 @@ func (r *transition) applyFill(envelope event.Envelope) ([]event.Envelope, error
 	// Deliberately a plain lookup rather than stateFor: an instrument the
 	// reducer has never seen a bar for cannot have been proposed for, and
 	// creating state here would make the reducer look as though it had.
-	state, known := r.instruments[fill.InstrumentID]
+	state, known := r.instrument(fill.InstrumentID)
 	if !known {
 		if fill.Kind == event.FillKindStop || fill.Kind == event.FillKindExit || fill.Kind == event.FillKindAdd {
 			return nil, fmt.Errorf("strategy: %s fill %q names campaign %q for instrument %q, which this reducer has never evaluated; a fill for a campaign this strategy has no history for is a reconciliation failure, not something to absorb (docs/architecture.md)",
@@ -1624,7 +1624,7 @@ func (r *transition) openCampaign(state *instrumentState, pending *pendingPropos
 	// idempotent no-op for the rest of this run, however much later it
 	// arrives and however much has happened to the instrument since (see
 	// acceptedFillState's doc comment).
-	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
+	r.recordAcceptedFill(fill.FillID, acceptedFillFromPayload(fill))
 
 	// EventTime is the fill's timestamp on both: the Campaign, and its stop,
 	// came into being when the fill did, not when the Signal fired. Order is
@@ -1919,7 +1919,7 @@ func (r *transition) applyStopFill(state *instrumentState, fill event.FillPayloa
 	campaign.closedExitWeightedSum += sizing.Product(float64(closingQuantity), fill.Price)
 	campaign.lastCloseFillAt = fill.FilledAt
 	campaign.removeUnits(closingUnits)
-	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
+	r.recordAcceptedFill(fill.FillID, acceptedFillFromPayload(fill))
 
 	emissions := []event.Envelope{r.stamp(
 		decisionID(fmt.Sprintf("units-stopped-%s", fill.FillID), fill.InstrumentID, fill.FilledAt),
@@ -2122,7 +2122,7 @@ func (r *transition) applyExitFill(state *instrumentState, fill event.FillPayloa
 
 	// Update candidate state; transact commits the closing fill and holdings
 	// together (CONTEXT.md: "Campaign").
-	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
+	r.recordAcceptedFill(fill.FillID, acceptedFillFromPayload(fill))
 	// The instrument is a Setup again (CONTEXT.md), the same consequence
 	// applyStopFill's own closing has; and the exit proposal this fill
 	// executed is resolved, so a later bar does not try to expire it again.
@@ -2392,7 +2392,7 @@ func (r *transition) applyAddFill(state *instrumentState, fill event.FillPayload
 	campaign.unitsOpened++
 	recordExitOrders(campaign, state.pendingExitProposal)
 	state.pendingAddProposal = nil
-	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
+	r.recordAcceptedFill(fill.FillID, acceptedFillFromPayload(fill))
 
 	emissions := []event.Envelope{
 		r.stamp(decisionID(fmt.Sprintf("unit-added-%d", unitIndex), fill.InstrumentID, fill.FilledAt), event.CampaignUnitAddedEventType, event.CampaignUnitAddedSchemaVersion, fill.FilledAt, input, unitAddedBytes),

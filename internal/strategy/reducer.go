@@ -1107,7 +1107,7 @@ func (r *transition) stamp(id, eventType string, schemaVersion uint32, periodEnd
 }
 
 func (r *transition) stateFor(instrumentID string) (*instrumentState, error) {
-	if state, ok := r.instruments[instrumentID]; ok {
+	if state, ok := r.instrument(instrumentID); ok {
 		return state, nil
 	}
 	n, err := indicator.NewWilderAverage(indicator.DefaultPeriod)
@@ -1138,6 +1138,6 @@ func (r *transition) stateFor(instrumentID string) (*instrumentState, error) {
 		return nil, fmt.Errorf("strategy: %w", err)
 	}
 	state := &instrumentState{n: n, entryChannel: entryChannel, exitChannel: exitChannel}
-	r.instruments[instrumentID] = state
+	r.addInstrument(instrumentID, state)
 	return state, nil
 }
