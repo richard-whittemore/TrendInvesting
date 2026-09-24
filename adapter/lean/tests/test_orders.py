@@ -116,6 +116,30 @@ class OrderTestCase(unittest.TestCase):
     def tickets(self, algo):
         return algo.Transactions.tickets
 
+    def sells(self, algo):
+        return [t for t in algo.Transactions.tickets if t.Quantity < 0]
+
+    def hold(self, algo, shares):
+        """LEAN holds shares from an entry order this adapter placed and LEAN filled.
+
+        The fill is applied to the fake book directly, as a returned fill
+        would leave it; OnOrderEvent is not raised, since today a fill stops
+        the run (FillStopsTheRunTests).
+        """
+        self.feed(algo, 6, [trade_proposal(6, quantity=shares)])
+        [entry] = self.tickets(algo)
+        entry.Status = "filled"
+        entry.QuantityFilled = shares
+        algo.Portfolio.holdings["AAPL"] = shares
+
+    def assert_stopped_after(self, algo, sent_before_stop):
+        """The run stopped, and nothing further reaches LEAN or the engine."""
+        self.assertTrue(algo.failed)
+        orders = len(getattr(algo, "orders", []))
+        self.feed(algo, 10, [trade_proposal(10), exit_order_set(10, unit_index=3)])
+        self.assertEqual(len(getattr(algo, "orders", [])), orders)
+        self.assertEqual(len(algo.client.sent), sent_before_stop)
+
     def rejections(self, algo):
         return [m for m in getattr(algo, "logs", []) if "REJECTED" in m]
 
@@ -276,6 +300,49 @@ class EntryAndAddOrderTests(OrderTestCase):
         self.feed(algo, 10, [proposal_expired(proposal, 10, kind="add")])
         self.assertEqual(len(algo.Transactions.cancellations), 1)
 
+    def test_an_unconfirmed_cancellation_stops_the_run(self):
+        # An order the engine expired that LEAN has not confirmed cancelled
+        # could still fill into a holding the engine does not expect.
+        for outcome in ("refused", "pending"):
+            with self.subTest(outcome):
+                algo = self.start()
+                proposal = trade_proposal(9)
+                self.feed(algo, 9, [proposal])
+                algo.Transactions.cancel_outcome = outcome
+                self.feed(algo, 10, [proposal_expired(proposal, 10), add_proposal(10)])
+                self.assertIn("did not confirm", algo.quit_reason)
+                self.assertIn(proposal["id"], algo.quit_reason)
+                self.assertFalse(any("adapter: cancelled order" in m for m in algo.logs))
+                self.assertEqual(len(self.tickets(algo)), 1)
+                self.assert_stopped_after(algo, len(algo.client.sent))
+
+    def test_a_confirmed_cancellation_is_logged(self):
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        self.feed(algo, 10, [proposal_expired(proposal, 10)])
+        self.assertFalse(algo.failed)
+        self.assertTrue(any("adapter: cancelled order 1" in m for m in algo.logs))
+
+    def test_a_trade_proposal_while_lean_holds_the_instrument_stops_the_run(self):
+        # The engine proposes an entry only when it believes it is flat, so a
+        # holding in LEAN means the two disagree.
+        algo = self.start()
+        self.hold(algo, 100)
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        self.assertEqual(len(self.tickets(algo)), 1)
+        for fact in (proposal["id"], "'AAPL'", "holds 100"):
+            self.assertIn(fact, algo.quit_reason)
+        self.assert_stopped_after(algo, len(algo.client.sent))
+
+    def test_an_add_proposal_while_lean_holds_the_instrument_is_placed(self):
+        algo = self.start()
+        self.hold(algo, 100)
+        self.feed(algo, 9, [add_proposal(9)])
+        self.assertFalse(algo.failed)
+        self.assertEqual([t.Quantity for t in self.tickets(algo)], [100, 100])
+
     def test_an_expiry_leaves_a_filled_order_alone(self):
         algo = self.start()
         proposal = trade_proposal(9)
@@ -297,9 +364,6 @@ class EntryAndAddOrderTests(OrderTestCase):
 class ExitOrderTests(OrderTestCase):
     """Each held Unit rests one GTC sell stop at the level the engine sets (ADR 0005's amendment)."""
 
-    def hold(self, algo, shares):
-        algo.Portfolio.holdings["AAPL"] = shares
-
     def test_exit_order_set_places_one_gtc_stop_per_unit_for_its_quantity(self):
         algo = self.start()
         self.hold(algo, 250)
@@ -308,7 +372,7 @@ class ExitOrderTests(OrderTestCase):
         self.feed(algo, 9, [campaign_opened(), first, second])
         self.assertFalse(algo.failed)
         self.assertEqual(
-            [(t.Quantity, t.StopPrice, t.Tag, t.TimeInForce) for t in self.tickets(algo)],
+            [(t.Quantity, t.StopPrice, t.Tag, t.TimeInForce) for t in self.sells(algo)],
             [(-100, 22.1, first["id"], "gtc"), (-150, 22.7, second["id"], "gtc")])
 
     def test_a_second_exit_order_set_amends_the_units_order(self):
@@ -317,7 +381,7 @@ class ExitOrderTests(OrderTestCase):
         self.feed(algo, 9, [campaign_opened(), exit_order_set(9, level=22.1)])
         raised = exit_order_set(10, level=23.4, source="exit-channel", exit_channel_level=23.4)
         self.feed(algo, 10, [raised])
-        [ticket] = self.tickets(algo)
+        [ticket] = self.sells(algo)
         self.assertEqual(algo.Transactions.updates, [(ticket.OrderId, 23.4, raised["id"])])
         self.assertEqual((ticket.Quantity, ticket.StopPrice, ticket.Tag), (-100, 23.4, raised["id"]))
 
@@ -326,7 +390,7 @@ class ExitOrderTests(OrderTestCase):
         self.hold(algo, 100)
         placed = exit_order_set(9)
         self.feed(algo, 9, [campaign_opened(), placed, placed])
-        self.assertEqual(len(self.tickets(algo)), 1)
+        self.assertEqual(len(self.sells(algo)), 1)
         self.assertEqual(algo.Transactions.updates, [])
 
     def test_an_older_exit_order_set_does_not_lower_the_level_in_force(self):
@@ -335,7 +399,7 @@ class ExitOrderTests(OrderTestCase):
         self.feed(algo, 9, [campaign_opened(), exit_order_set(9, level=22.1)])
         self.feed(algo, 10, [exit_order_set(10, level=23.4)])
         self.feed(algo, 11, [exit_order_set(9, level=22.5, cause="late")])
-        [ticket] = self.tickets(algo)
+        [ticket] = self.sells(algo)
         self.assertEqual(ticket.StopPrice, 23.4)
         self.assertEqual(len(algo.Transactions.updates), 1)
         self.assertTrue(any("older" in m for m in self.rejections(algo)))
@@ -346,17 +410,9 @@ class ExitOrderTests(OrderTestCase):
         self.feed(algo, 9, [campaign_opened(), exit_order_set(9, level=22.1)])
         algo.Transactions.acknowledge_updates = False
         self.feed(algo, 10, [exit_order_set(10, level=23.4)])
-        [ticket] = self.tickets(algo)
+        [ticket] = self.sells(algo)
         self.assertEqual(ticket.StopPrice, 22.1)
         self.assertTrue(any("not acknowledged" in m for m in algo.logs))
-
-    def assert_stopped_after(self, algo, sent_before_stop):
-        """The run stopped, and nothing further reaches LEAN or the engine."""
-        self.assertTrue(algo.failed)
-        orders = len(getattr(algo, "orders", []))
-        self.feed(algo, 10, [trade_proposal(10), exit_order_set(10, unit_index=3)])
-        self.assertEqual(len(getattr(algo, "orders", [])), orders)
-        self.assertEqual(len(algo.client.sent), sent_before_stop)
 
     def test_the_working_sell_quantity_never_exceeds_the_holding(self):
         algo = self.start()
@@ -366,7 +422,7 @@ class ExitOrderTests(OrderTestCase):
         # reply; the entry after it must not be submitted either.
         self.feed(algo, 9, [campaign_opened(), exit_order_set(9, unit_index=1), refused,
                             trade_proposal(9)])
-        self.assertEqual([t.Quantity for t in self.tickets(algo)], [-100])
+        self.assertEqual([t.Quantity for t in self.sells(algo)], [-100])
         for fact in ("'AAPL'", "unit 2", refused["id"], "working sell quantity 100",
                      "holding of 100"):
             self.assertIn(fact, algo.quit_reason)
@@ -375,10 +431,40 @@ class ExitOrderTests(OrderTestCase):
     def test_an_exit_order_with_no_holding_stops_the_run(self):
         algo = self.start()
         self.feed(algo, 9, [campaign_opened(), exit_order_set(9)])
-        self.assertEqual(self.tickets(algo), [])
+        self.assertEqual(self.sells(algo), [])
         for fact in ("'AAPL'", "unit 1", "working sell quantity 0", "holding of 0"):
             self.assertIn(fact, algo.quit_reason)
         self.assert_stopped_after(algo, len(algo.client.sent))
+
+    def test_an_exit_order_lean_refuses_stops_the_run(self):
+        algo = self.start()
+        self.hold(algo, 100)
+        algo.Transactions.submit_status = "invalid"
+        placed = exit_order_set(9)
+        self.feed(algo, 9, [campaign_opened(), placed, add_proposal(9)])
+        self.assertIn("LEAN refused", algo.quit_reason)
+        self.assertIn(placed["id"], algo.quit_reason)
+        self.assertEqual([t.Status for t in self.sells(algo)], ["invalid"])
+        self.assertEqual(len(self.tickets(algo)), 2)
+        self.assert_stopped_after(algo, len(algo.client.sent))
+
+    def test_a_redelivered_exit_order_whose_order_is_closed_stops_the_run(self):
+        # The engine still sets this level, but no working order protects the
+        # Unit: redelivery must not be read as "already in force".
+        for status in ("filled", "canceled", "invalid"):
+            with self.subTest(status):
+                algo = self.start()
+                self.hold(algo, 100)
+                placed = exit_order_set(9)
+                self.feed(algo, 9, [campaign_opened(), placed])
+                [ticket] = self.sells(algo)
+                ticket.Status = status
+                self.feed(algo, 10, [placed])
+                self.assertIn("no longer working", algo.quit_reason)
+                self.assertIn(placed["id"], algo.quit_reason)
+                self.assertEqual(self.sells(algo), [ticket])
+                self.assertEqual(algo.Transactions.updates, [])
+                self.assert_stopped_after(algo, len(algo.client.sent))
 
     def test_a_malformed_exit_order_stops_the_run(self):
         # An Exit Order the adapter cannot place leaves its Unit without a
@@ -395,7 +481,7 @@ class ExitOrderTests(OrderTestCase):
                 bad = exit_order_set(9)
                 bad["payload"].update(changes)
                 self.feed(algo, 9, [campaign_opened(), bad, trade_proposal(9)])
-                self.assertEqual(self.tickets(algo), [])
+                self.assertEqual(self.sells(algo), [])
                 self.assertEqual(self.rejections(algo), [])
                 self.assertIn("cannot be protected", algo.quit_reason)
                 self.assertIn(bad["id"], algo.quit_reason)
@@ -406,16 +492,16 @@ class ExitOrderTests(OrderTestCase):
         self.hold(algo, 100)
         self.feed(algo, 9, [exit_order_set(9)])
         self.assertTrue(algo.failed)
-        self.assertEqual(self.tickets(algo), [])
+        self.assertEqual(self.sells(algo), [])
 
     def test_a_unit_whose_order_is_no_longer_working_stops_the_run(self):
         algo = self.start()
         self.hold(algo, 100)
         self.feed(algo, 9, [campaign_opened(), exit_order_set(9)])
-        self.tickets(algo)[0].Status = "filled"
+        self.sells(algo)[0].Status = "filled"
         self.feed(algo, 10, [exit_order_set(10, level=23.4)])
         self.assertTrue(algo.failed)
-        self.assertEqual(len(self.tickets(algo)), 1)
+        self.assertEqual(len(self.sells(algo)), 1)
         self.assertEqual(algo.Transactions.updates, [])
 
 
@@ -440,7 +526,7 @@ class SlippageTests(OrderTestCase):
 
     def test_an_exit_order_slips_by_the_campaigns_frozen_n_after_amendment_too(self):
         algo = self.start()
-        algo.Portfolio.holdings["AAPL"] = 100
+        self.hold(algo, 100)
         placed = exit_order_set(9)
         self.feed(algo, 9, [campaign_opened(campaign_n=2.5), placed])
         raised = exit_order_set(10, level=23.4)
@@ -473,6 +559,101 @@ class SlippageTests(OrderTestCase):
                     algo.Initialize()
                 self.assertTrue(algo.failed)
                 self.assertIn("slippage_n", algo.quit_reason)
+
+
+class FillStopsTheRunTests(OrderTestCase):
+    """A LEAN fill cannot yet be returned to the engine, so the first one stops the run.
+
+    Otherwise the engine would still believe it was flat: it would place no
+    Exit Order for the new holding and could propose further entries.
+    """
+
+    def event(self, status, order_id=1):
+        return types.SimpleNamespace(OrderId=order_id, Status=status, Symbol="AAPL",
+                                     FillQuantity=100, FillPrice=24.6)
+
+    def test_the_first_fill_stops_the_run(self):
+        for status in ("filled", "partially-filled"):
+            with self.subTest(status):
+                algo = self.start()
+                proposal = trade_proposal(9)
+                self.feed(algo, 9, [proposal])
+                sent = len(algo.client.sent)
+                algo.OnOrderEvent(self.event(status))
+                self.assertIn("cannot yet be returned to the engine", algo.quit_reason)
+                self.assertIn("order 1", algo.quit_reason)
+                self.assertIn(proposal["id"], algo.quit_reason)
+                self.assert_stopped_after(algo, sent)
+
+    def test_order_events_other_than_fills_do_not_stop_the_run(self):
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9)])
+        for status in ("submitted", "canceled", "cancel-pending", "invalid"):
+            algo.OnOrderEvent(self.event(status))
+        self.assertFalse(algo.failed)
+
+
+class StartupReconciliationTests(OrderTestCase):
+    """LEAN must hold nothing and work no order for the instrument before the adapter trades.
+
+    docs/architecture.md: reconcile before any executor submits. A backtest
+    starts flat, so this always passes there; it is checked anyway.
+    """
+
+    def start_with(self, prepare):
+        settings = {"socket": "unused", "configuration_hash": "hash",
+                    "strategy_version": "version", "run_id": "test",
+                    "symbol": "AAPL", "start": "2014-06-09", "end": "2014-06-10",
+                    "warmup_bars": 3, "cash": 1000000,
+                    "lean_image": scaffold.VALID_LEAN_IMAGE, "slippage_n": 0.05}
+        algo = algorithm.CompletedBarsAlgorithm()
+        prepare(algo)
+        with scaffold.patch.object(algorithm, "load_settings", return_value=settings), \
+                scaffold.patch.object(algorithm, "Client",
+                                      return_value=scaffold.FakeEngineClient()):
+            algo.Initialize()
+        return algo
+
+    def foreign_order(self, algo):
+        props = scaffold.OrderProperties()
+        props.TimeInForce = "gtc"
+        ticket = scaffold.FakeTicket(algo.Transactions, 99, "AAPL", -50, 20.0,
+                                     "not placed by this adapter", props)
+        algo.Transactions.tickets.append(ticket)
+        return ticket
+
+    def test_a_holding_at_startup_stops_the_run(self):
+        algo = self.start_with(lambda a: setattr(a, "initial_holdings", {"AAPL": 100}))
+        self.assertTrue(algo.failed)
+        self.assertIn("holds 100", algo.quit_reason)
+        self.assertIn("at startup", algo.quit_reason)
+
+    def test_an_open_order_at_startup_stops_the_run(self):
+        algo = self.start_with(self.foreign_order)
+        self.assertTrue(algo.failed)
+        self.assertIn("1 open order", algo.quit_reason)
+        self.assertIn("at startup", algo.quit_reason)
+
+    def test_a_flat_start_passes(self):
+        algo = self.start_with(lambda a: None)
+        self.assertFalse(algo.failed)
+
+    def test_an_open_order_before_the_first_order_stops_the_run(self):
+        algo = self.start()
+        self.foreign_order(algo)
+        self.feed(algo, 9, [trade_proposal(9)])
+        self.assertIn("before the first order", algo.quit_reason)
+        self.assertIn("1 open order", algo.quit_reason)
+        self.assertEqual(len(self.tickets(algo)), 1)
+        self.assert_stopped_after(algo, len(algo.client.sent))
+
+    def test_a_holding_before_the_first_order_stops_the_run(self):
+        algo = self.start()
+        algo.Portfolio.holdings["AAPL"] = 100
+        self.feed(algo, 9, [add_proposal(9)])
+        self.assertIn("before the first order", algo.quit_reason)
+        self.assertIn("holds 100", algo.quit_reason)
+        self.assertEqual(self.tickets(algo), [])
 
 
 class StartupReportTests(OrderTestCase):

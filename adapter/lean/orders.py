@@ -159,6 +159,44 @@ class OrderDesk:
         self.exit_orders = {}
         self.submitted = 0
         self.rejected = 0
+        self.first_order_placed = False
+
+    def _closed(self):
+        """The LEAN order statuses in which an order no longer works at the broker."""
+        return (self.lean.OrderStatus.Filled, self.lean.OrderStatus.Canceled,
+                self.lean.OrderStatus.Invalid)
+
+    def require_flat(self, when):
+        """Reconcile before trading: LEAN holds nothing and works no order for the instrument.
+
+        docs/architecture.md: reconciliation precedes any executor's first
+        submission. This adapter can mirror only positions and orders the
+        engine produced in this run, so anything already present means the
+        engine's state and LEAN's disagree, and the run must not trade on it.
+        """
+        holding = self.algorithm.Portfolio[self.symbol].Quantity
+        working = len(self.algorithm.Transactions.GetOpenOrderTickets(self.symbol))
+        if holding != 0 or working:
+            raise Uncertain("reconciliation {}: LEAN holds {} shares of {!r} and has {} open "
+                            "order(s) for it, but the engine starts from nothing; the adapter "
+                            "trades only from a flat start (docs/architecture.md)".format(
+                                when, holding, self.instrument, working))
+
+    def fill_reason(self, order_event):
+        """Why a LEAN fill stops the run: it cannot yet be returned to the engine.
+
+        Until fills are returned, the engine never learns of one, so it would
+        go on believing it is flat: it would place no Exit Order for the new
+        holding and could propose further entries. The first fill therefore
+        stops the run rather than let the two states diverge.
+        """
+        tickets = self.algorithm.Transactions.GetOrderTickets(
+            lambda t: t.OrderId == order_event.OrderId)
+        tag = tickets[0].Tag if tickets else None
+        return ("LEAN reports order {} (tag={}) {}: {} @ {}, but a fill cannot yet be returned "
+                "to the engine (#30), so the engine's state would diverge from LEAN's; the run "
+                "stops at the first fill".format(order_event.OrderId, tag, order_event.Status,
+                                                 order_event.FillQuantity, order_event.FillPrice))
 
     def n_for_tag(self, tag):
         n = self.n_by_tag.get(tag)
@@ -190,10 +228,10 @@ class OrderDesk:
             kind, payload = decision["type"], decision.get("payload") or {}
             if kind == TRADE_PROPOSED:
                 self._propose(decision, payload, bar_end, payload.get("entry_level"),
-                              payload.get("n"), require_long=True)
+                              payload.get("n"), entry=True)
             elif kind == ADD_PROPOSED:
                 self._propose(decision, payload, bar_end, payload.get("level"),
-                              payload.get("campaign_n"), require_long=False)
+                              payload.get("campaign_n"), entry=False)
             elif kind == PROPOSAL_EXPIRED:
                 self._expire(payload)
             elif kind == CAMPAIGN_OPENED:
@@ -218,15 +256,26 @@ class OrderDesk:
     def _already_submitted(self, tag):
         return self.algorithm.Transactions.GetOrderTickets(lambda t: t.Tag == tag)
 
-    def _propose(self, decision, payload, bar_end, level, n, require_long):
+    def _propose(self, decision, payload, bar_end, level, n, entry):
         """An entry or Add: a buy stop-market DAY order at the proposal's level.
 
         Valid only for the bar after the one that produced it — ADR 0005's
         one-bar window, the same one event.ProposalExpiredPayload's
         EarliestFillAt bounds — so it must answer the bar just published.
+        A rejected proposal is logged and dropped: the engine re-issues it on
+        a later bar if its setup still holds.
         """
         tag = decision.get("id")
         reason = self._tradable_reason(payload)
+        if reason is None and entry:
+            # The engine proposes an entry only for an instrument it holds no
+            # Campaign in (CONTEXT.md: "Campaign"), so a holding in LEAN means
+            # the two disagree about the position.
+            holding = self.algorithm.Portfolio[self.symbol].Quantity
+            if holding != 0:
+                raise Uncertain("trade proposal {} for {!r} arrived while LEAN holds {} shares "
+                                "of it; the engine believes it holds no Campaign there".format(
+                                    tag, self.instrument, holding))
         if reason is None and not _positive_quantity(payload.get("quantity")):
             reason = "quantity {!r} is not a positive whole number of shares".format(
                 payload.get("quantity"))
@@ -234,7 +283,7 @@ class OrderDesk:
             reason = "level {!r} is not a positive price".format(level)
         if reason is None and not _positive_price(n):
             reason = "N {!r} is not a positive figure to slip by (ADR 0013)".format(n)
-        if reason is None and require_long and payload.get("direction") != _LONG:
+        if reason is None and entry and payload.get("direction") != _LONG:
             reason = "direction {!r} is not {!r}".format(payload.get("direction"), _LONG)
         if reason is None:
             try:
@@ -257,13 +306,18 @@ class OrderDesk:
         properties = self.lean.OrderProperties()
         properties.TimeInForce = self.lean.TimeInForce.Day
         self.n_by_tag[tag] = n
-        self._submit(decision, payload["quantity"], level, tag, properties)
-
-    def _submit(self, decision, quantity, level, tag, properties):
-        ticket = self.algorithm.StopMarketOrder(self.symbol, quantity, level, tag, properties)
+        ticket = self._submit(payload["quantity"], level, tag, properties)
         if ticket.Status == self.lean.OrderStatus.Invalid:
             self._reject(decision, "LEAN refused the order (status {})".format(ticket.Status))
-            return None
+
+    def _submit(self, quantity, level, tag, properties):
+        """Submit one stop-market order, reconciling first if it is the run's first."""
+        if not self.first_order_placed:
+            self.require_flat("before the first order")
+        ticket = self.algorithm.StopMarketOrder(self.symbol, quantity, level, tag, properties)
+        self.first_order_placed = True
+        if ticket.Status == self.lean.OrderStatus.Invalid:
+            return ticket
         self.submitted += 1
         self.algorithm.Log("adapter: order {} {} {} @ {} tag={}".format(
             ticket.OrderId, "buy" if quantity > 0 else "sell", abs(quantity), level, tag))
@@ -275,10 +329,17 @@ class OrderDesk:
             return
         proposal_id = payload.get("proposal_id")
         for ticket in self.algorithm.Transactions.GetOpenOrderTickets(self.symbol):
-            if ticket.Tag == proposal_id:
-                ticket.Cancel("proposal expired: {}".format(payload.get("reason")))
-                self.algorithm.Log("adapter: cancelled order {} tag={}: its proposal expired".format(
-                    ticket.OrderId, proposal_id))
+            if ticket.Tag != proposal_id:
+                continue
+            response = ticket.Cancel("proposal expired: {}".format(payload.get("reason")))
+            if not response.IsSuccess or ticket.Status != self.lean.OrderStatus.Canceled:
+                # An order the engine expired that is still working could fill
+                # into a holding the engine does not expect.
+                raise Uncertain("LEAN did not confirm cancelling order {} (tag={}) after its "
+                                "proposal expired: response success={}, status {}".format(
+                                    ticket.OrderId, proposal_id, response.IsSuccess, ticket.Status))
+            self.algorithm.Log("adapter: cancelled order {} tag={}: its proposal expired".format(
+                ticket.OrderId, proposal_id))
 
     def _campaign_opened(self, decision, payload):
         """Remember the Campaign's frozen N (ADR 0006), for its Exit Orders' slippage."""
@@ -331,7 +392,17 @@ class OrderDesk:
             raise Uncertain("exit order {} for campaign {!r} unit {}: {}; the Unit cannot be "
                             "protected as the engine believes".format(
                                 tag, payload.get("campaign_id"), payload.get("unit_index"), reason))
-        if self._already_submitted(tag):
+        existing = self._already_submitted(tag)
+        if existing:
+            working = [t for t in existing if t.Status not in self._closed()]
+            if not working:
+                # The engine still sets this level, but no working order
+                # carries it: the Unit is unprotected.
+                raise Uncertain("exit order {} for campaign {!r} unit {}: LEAN order {} carrying "
+                                "it is no longer working (status {}), but the engine still sets "
+                                "this level".format(tag, payload.get("campaign_id"),
+                                                    payload.get("unit_index"),
+                                                    existing[0].OrderId, existing[0].Status))
             self.algorithm.Log("adapter: {} {} is already the order in force; nothing to do".format(
                 decision["type"], tag))
             return
@@ -364,16 +435,18 @@ class OrderDesk:
         properties = self.lean.OrderProperties()
         properties.TimeInForce = self.lean.TimeInForce.GoodTilCanceled
         self.n_by_tag[tag] = n
-        ticket = self._submit(decision, -quantity, level, tag, properties)
-        if ticket is not None:
-            self.exit_orders[unit] = {"order_id": ticket.OrderId, "as_of": as_of}
+        ticket = self._submit(-quantity, level, tag, properties)
+        if ticket.Status == self.lean.OrderStatus.Invalid:
+            # A refused Exit Order leaves its Unit without a stop.
+            raise Uncertain("LEAN refused exit order {} for campaign {!r} unit {} (status {}); "
+                            "the Unit cannot be protected as the engine believes".format(
+                                tag, unit[0], unit[1], ticket.Status))
+        self.exit_orders[unit] = {"order_id": ticket.OrderId, "as_of": as_of}
 
     def _amend_exit_order(self, decision, unit, in_force, quantity, level, tag, n, as_of):
         tickets = self.algorithm.Transactions.GetOrderTickets(
             lambda t: t.OrderId == in_force["order_id"])
-        closed = (self.lean.OrderStatus.Filled, self.lean.OrderStatus.Canceled,
-                  self.lean.OrderStatus.Invalid)
-        if len(tickets) != 1 or tickets[0].Status in closed:
+        if len(tickets) != 1 or tickets[0].Status in self._closed():
             raise Uncertain("campaign {!r} unit {}'s exit order {} is no longer working in LEAN, "
                             "but the engine still sets its level".format(
                                 unit[0], unit[1], in_force["order_id"]))

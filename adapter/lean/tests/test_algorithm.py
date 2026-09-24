@@ -67,7 +67,18 @@ class FakeTicket:
         return FakeResponse(True)
 
     def Cancel(self, tag=None):
+        """LEAN's cancel: the book's cancel_outcome decides what LEAN answers.
+
+        "confirmed" cancels the order; "refused" answers with a failed
+        response and leaves the order working; "pending" answers success but
+        leaves the order not yet cancelled.
+        """
         self.book.cancellations.append((self.OrderId, tag))
+        if self.book.cancel_outcome == "refused":
+            return FakeResponse(False)
+        if self.book.cancel_outcome == "pending":
+            self.Status = "cancel-pending"
+            return FakeResponse(True)
         self.Status = "canceled"
         return FakeResponse(True)
 
@@ -79,6 +90,7 @@ class FakeTransactions:
         self.updates = []
         self.cancellations = []
         self.acknowledge_updates = True
+        self.cancel_outcome = "confirmed"
         self.submit_status = "submitted"
 
     def GetOrderTickets(self, predicate=None):
@@ -101,6 +113,8 @@ class FakeAlgorithm:
     def SetEndDate(self, *args): pass
     def SetCash(self, cash):
         self.Portfolio = FakePortfolio(cash)
+        # A test may give LEAN a holding before Initialize runs.
+        self.Portfolio.holdings.update(getattr(self, "initial_holdings", {}))
     def SetTimeZone(self, *args): pass
     def AddEquity(self, ticker, resolution, **kwargs):
         self.subscription = kwargs
@@ -155,7 +169,9 @@ imports.OrderProperties = OrderProperties
 imports.UpdateOrderFields = UpdateOrderFields
 imports.InteractiveBrokersFeeModel = InteractiveBrokersFeeModel
 imports.TimeInForce = types.SimpleNamespace(Day="day", GoodTilCanceled="gtc")
-imports.OrderStatus = types.SimpleNamespace(Filled="filled", Canceled="canceled", Invalid="invalid")
+imports.OrderStatus = types.SimpleNamespace(
+    Submitted="submitted", PartiallyFilled="partially-filled", Filled="filled",
+    Canceled="canceled", CancelPending="cancel-pending", Invalid="invalid")
 sys.modules["AlgorithmImports"] = imports
 spec = importlib.util.spec_from_file_location("lean_algorithm", Path(__file__).parents[1] / "algorithm.py")
 algorithm = importlib.util.module_from_spec(spec)
@@ -356,7 +372,10 @@ class CashSettingTests(unittest.TestCase):
 
     def start(self, settings):
         algo = algorithm.CompletedBarsAlgorithm()
-        algo.SetCash = lambda value: setattr(algo, "cash", value)
+        def set_cash(value):
+            algo.cash = value
+            FakeAlgorithm.SetCash(algo, value)
+        algo.SetCash = set_cash
         with patch.object(algorithm, "load_settings", return_value=settings), \
                 patch.object(algorithm, "Client"):
             algo.Initialize()

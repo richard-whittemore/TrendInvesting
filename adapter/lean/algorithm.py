@@ -102,6 +102,8 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             # order's decision, and Interactive Brokers commissions.
             security.SetSlippageModel(NSlippageModel(slippage_n, self.desk.n_for_tag))
             security.SetFeeModel(InteractiveBrokersFeeModel())
+            # docs/architecture.md: reconcile before any executor submits.
+            self.desk.require_flat("at startup")
             self.SetWarmUp(warmup, Resolution.Daily)
             self.client = Client(settings["socket"], timeout=5)
             self.publisher = Publisher(self.client, settings["configuration_hash"],
@@ -133,6 +135,19 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.publish_completed_bar(bar)
         if notice is not None and not self.failed:
             self.handle_delisting(notice)
+
+    def OnOrderEvent(self, order_event):
+        """Stop the run at LEAN's first fill: it cannot yet be returned to the engine.
+
+        An engine that never learns of a fill goes on believing it is flat, so
+        it would place no Exit Order for the holding and could propose more
+        entries (OrderDesk.fill_reason). Failing closed here keeps the two
+        states from diverging silently (docs/development.md principle 4).
+        """
+        if self.failed or getattr(self, "desk", None) is None:
+            return
+        if order_event.Status in (OrderStatus.Filled, OrderStatus.PartiallyFilled):
+            self.stop(self.desk.fill_reason(order_event))
 
     def handle_delisting(self, notice):
         """Stop on LEAN's DELISTED rather than publish it as a fact.
