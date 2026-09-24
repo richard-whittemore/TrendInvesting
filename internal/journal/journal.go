@@ -273,11 +273,15 @@ func Write(w io.Writer, header Header, entries []Entry) error {
 }
 
 func writeLine(w *bufio.Writer, v any) error {
-	encoded, err := json.Marshal(v)
-	if err != nil {
+	// ADR 0017 hashes the payload bytes as supplied. Validate requires
+	// compact JSON; disabling HTML escaping preserves the remaining bytes.
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(v); err != nil {
 		return fmt.Errorf("journal: encode line: %w", err)
 	}
-	if _, err := w.Write(append(encoded, '\n')); err != nil {
+	if _, err := w.Write(encoded.Bytes()); err != nil {
 		return fmt.Errorf("journal: write line: %w", err)
 	}
 	return nil

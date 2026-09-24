@@ -3,6 +3,7 @@
 package event
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -122,8 +123,14 @@ func (e Envelope) Validate() error {
 		// reported above, and complaining twice about one gap obscures it.
 		errs = append(errs, errors.New("payload hash does not match payload"))
 	}
-	if len(e.Payload) == 0 || !json.Valid(e.Payload) {
+	// ADR 0017 attests the original payload bytes. JSON encoders compact
+	// RawMessage, so reject whitespace here, before an input can be accepted
+	// into a run whose journal is only written at shutdown.
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, e.Payload); err != nil {
 		errs = append(errs, errors.New("payload must contain valid JSON"))
+	} else if !bytes.Equal(compact.Bytes(), e.Payload) {
+		errs = append(errs, errors.New("payload must contain compact JSON"))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid event envelope: %w", err)
