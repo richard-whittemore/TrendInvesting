@@ -160,6 +160,36 @@ participate in the same property test. The invariant applies to payloads, not
 envelopes or journal headers: `journal.TestWriteReturnsTimestampEncodingErrors`
 exercises their encoding-error path, which must not be excluded from coverage.
 
+## The decision corpus: a rule change without a RulesVersion bump
+
+`internal/strategy.RulesVersion` is hand-bumped (ADR 0016). Two guards check that a bump actually happened:
+
+- `RuleSurfaceFingerprints` (`rules_version.go`) hashes every declared `Rule*`/`ADR*` and numeric rule constant. It catches a renamed or re-valued constant.
+- `internal/strategy/testdata/decision-corpus/<RulesVersion>.json` pins `{scenario name: hash}` for every scenario `stream.run()` (`campaign_test.go`) drives the reducer through, hashing its emitted decisions and any run error, with `strategy_version` excluded so relabelling a build never trips it. `TestMain` (`decision_corpus_test.go`) compares the current run against the pinned file for the CURRENT `RulesVersion` once every test has finished.
+
+Neither guard reads a rule's own logic. The fingerprint sees a changed CONSTANT; the corpus sees a changed DECISION. Between them they catch a rule change that either renames/re-values a declared constant or alters the outcome of some recorded scenario — but a changed PREDICATE that no recorded scenario happens to exercise is invisible to both, honestly (see the corpus's own doc comment). This is why the fixture set matters: a scenario that never exercises the new behavior gives the corpus nothing to catch it with.
+
+The sharpest form of that gap is **a new rule arriving together with the tests that exercise it**. Those tests are new scenarios, and a new scenario is admitted by `-update-decision-corpus` with no bump, so the corpus stays green. The 1.2.0 -> 1.3.0 withdrawal rule has exactly that shape. Removing the withdrawal debit alone from the current tree changes the decisions of six scenarios — `TestCashMovementSpendable/*` and `TestAWithdrawalReducesTheCashAnAddIsCheckedAgainst` — and every one of them was added in the same change as the rule. No scenario that predates it exercises a withdrawal. (Replaying that change against a 1.2.0 corpus does trip five older cash-skip scenarios, but only because the same change also moved the decline payload to schema 3 and reworded its detail; the rule itself would have passed.)
+
+So when the corpus asks you to add scenarios, ask of each one whether the previous build would have decided the same thing. If not, the behaviour it pins is new, and that is a rule change needing a bump, not an add. No mechanical check answers that question; the failure message asks it so that a reviewer is not the only one who does.
+
+**What trips the corpus:**
+
+- A pinned scenario's hash differs from what this run recorded: the reducer decided something different under an unchanged `RulesVersion`. Per ADR 0016 this is a rule change, not a journal-replay divergence, and needs (1) a `RulesVersion` bump, (2) a new `testdata/decision-corpus/<new-version>.json`, and (3) a new row in `RuleSurfaceFingerprints`.
+- A scenario recorded but not pinned (a new test) fails, asking for `-update-decision-corpus` (adds only).
+- On an unfiltered run (no `-run`, `-skip` or `-short`) **whose tests all passed**, a pinned scenario that was not recorded at all (a renamed or deleted test) fails, asking for `-update-decision-corpus` to drop it. A filtered run never enforces this, since it recorded only a subset. Neither does a failing run: a test that failed, or that `-failfast` stopped before it ran, may never have reached `stream.run()`.
+
+`-update-decision-corpus` writes nothing from a run with failing tests, since the corpus records what the reducer decides when its tests pass. A run with `-count` other than 1 skips the corpus check entirely: repeated iterations can't be told apart from repeated calls within one test, so checking would only report false new scenarios. `make check` runs with neither.
+
+**After a deliberate rule change:**
+
+1. Bump `internal/strategy.RulesVersion` and append its row to `RuleSurfaceFingerprints` (or record that the fingerprint is unchanged, as the 1.2.0 -> 1.3.0 predicate changes did — see that map's comments).
+2. Run `go test ./internal/strategy/... -update-decision-corpus` unfiltered. Because the new version has no pinned file yet, this generates `testdata/decision-corpus/<new-version>.json` from the current tree in full.
+3. Review the generated file's diff against the previous version's like any other evidence: it is what the reducer now decides for every scenario in the suite.
+4. Never edit a previous version's corpus file — it is append-only history, exactly like `RuleSurfaceFingerprints`.
+
+`-update-decision-corpus` never overwrites a changed hash for the CURRENT version, flag or no flag: that refusal is the tripwire itself. If it fired unexpectedly, the change was not the refactor it looked like; find out what state it changes before touching `RulesVersion`.
+
 ## Package boundaries
 
 - `cmd/` contains executable composition only.
