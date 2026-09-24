@@ -12,20 +12,36 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
 
-// With enough cash, the golden fixture's Campaign resolves every proposal it
-// raises: its entry and all three Adds fill on the breakout bar, and the exit
-// its last bar proposes rests above every Unit's stop, so each Unit's Exit
-// Order moves up to it and it fills in that same bar. A run that ends while a
-// proposal is still outstanding needs a fixture of its own, and these
-// helpers derive it from the golden bars rather than inventing a new series.
+// When its account funds them, the golden fixture's Campaign resolves every
+// proposal it raises: its entry and all three Adds fill on the breakout bar,
+// and the exit its last bar proposes rests above every Unit's stop, so each
+// Unit's Exit Order moves up to it and it fills in that same bar. A run that
+// ends while a proposal is still outstanding needs a fixture of its own, and
+// these helpers derive it from the golden bars rather than inventing a new
+// series.
 
-// fourUnitCash is opening cash that funds the fixture's whole Add Ladder.
-// Each of its Units costs about 64 % of the 1,000,000 starting equity, so
-// the default run, whose cash is that equity, takes Unit 1 and declines
-// Unit 2 for insufficient cash (ADR 0020). A test whose subject needs all
-// four Units states this figure rather than relying on cash the account
-// does not hold; four Units cost about 2,558,000 with commissions.
+// fourUnitCash is an account that funds the golden bars' whole Add Ladder:
+// four Units cost about 2,558,000 with commissions, and each costs about
+// 64 % of the 1,000,000 Notional Account the configuration sizes from, so a
+// 1,000,000 account takes Unit 1 and declines Unit 2 (ADR 0020). This is a
+// 3,000,000 account, all cash, trading a 1,000,000 Notional Account. That
+// holds only while no snapshot crosses a re-basing date, which re-bases the
+// Notional Account to the account's equity (ADR 0007); the golden bars all
+// fall in January 2026. The fused-multiply-add guards need these bars at
+// these prices (fusion_test.go), which is why they are run this way rather
+// than lowered as fourUnitBarsFixture is.
 const fourUnitCash = 3_000_000.0
+
+// fourUnitBarsFixture is the golden bars with every price 90.00 lower, and
+// nothing else changed. Lowering every price by one amount leaves every
+// range, channel, N, rung and stop distance, and so every decision, as it
+// was, while a Unit costs about 19 % of the Notional Account rather than 64
+// %: an account holding the 1,000,000 starting equity in cash funds all four
+// Units. TestTheFourUnitBarsAreTheGoldenBarsLowered pins the derivation.
+const fourUnitBarsFixture = "testdata/bars_four_units.json"
+
+// fourUnitShift is how far fourUnitBarsFixture lowers the golden bars.
+const fourUnitShift = 90.0
 
 // withFourUnitCash returns opts with fourUnitCash as its opening cash.
 func withFourUnitCash(opts options) options {
@@ -46,7 +62,14 @@ var outstandingExitBar = time.Date(2026, 1, 23, 0, 0, 0, 0, time.UTC)
 // ends.
 func barsEndingWithAnOutstandingExit(t *testing.T) []event.CompletedBarPayload {
 	t.Helper()
-	all, err := readBars(barsFixture)
+	return barsCutWithAnOutstandingExit(t, barsFixture, 0)
+}
+
+// barsCutWithAnOutstandingExit is barsEndingWithAnOutstandingExit over the
+// golden bars lowered by shift, at path.
+func barsCutWithAnOutstandingExit(t *testing.T, path string, shift float64) []event.CompletedBarPayload {
+	t.Helper()
+	all, err := readBars(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +80,7 @@ func barsEndingWithAnOutstandingExit(t *testing.T) []event.CompletedBarPayload {
 		}
 		if bar.PeriodEnd.Equal(outstandingExitBar) {
 			for _, view := range []*event.PriceView{&bar.SplitAdjusted, &bar.Raw} {
-				view.Low, view.Close = 125.0, 125.5
+				view.Low, view.Close = 125.0-shift, 125.5-shift
 			}
 		}
 		bars = append(bars, bar)
@@ -124,5 +147,44 @@ func TestAnExitBelowEveryStopLeavesTheStopsToCloseTheCampaign(t *testing.T) {
 	}
 	if stops != 4 || exits != 0 {
 		t.Fatalf("the bar filled %d stop(s) and %d exit(s), want the four Units' own stops and no exit", stops, exits)
+	}
+}
+
+// TestTheFourUnitBarsAreTheGoldenBarsLowered pins fourUnitBarsFixture's
+// derivation: the golden bars, every price fourUnitShift lower, to the cent,
+// and every other field unchanged.
+func TestTheFourUnitBarsAreTheGoldenBarsLowered(t *testing.T) {
+	golden, err := readBars(barsFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lowered, err := readBars(fourUnitBarsFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lowered) != len(golden) {
+		t.Fatalf("%d lowered bars for %d golden ones", len(lowered), len(golden))
+	}
+	for i, bar := range golden {
+		want := bar
+		for _, view := range []*event.PriceView{&want.SplitAdjusted, &want.Raw} {
+			view.Open, view.High, view.Low, view.Close = view.Open-fourUnitShift, view.High-fourUnitShift, view.Low-fourUnitShift, view.Close-fourUnitShift
+		}
+		got := lowered[i]
+		for _, pair := range [][2]event.PriceView{{got.SplitAdjusted, want.SplitAdjusted}, {got.Raw, want.Raw}} {
+			g, w := pair[0], pair[1]
+			for _, diff := range []float64{g.Open - w.Open, g.High - w.High, g.Low - w.Low, g.Close - w.Close} {
+				if diff > 0.001 || diff < -0.001 {
+					t.Fatalf("bar %d: %+v, want the golden bar lowered by %v: %+v", i+1, got, fourUnitShift, want)
+				}
+			}
+			g.Open, g.High, g.Low, g.Close = w.Open, w.High, w.Low, w.Close
+			if g != w {
+				t.Fatalf("bar %d: %+v differs from the golden bar in more than its prices", i+1, got)
+			}
+		}
+		if got.InstrumentID != bar.InstrumentID || !got.PeriodEnd.Equal(bar.PeriodEnd) {
+			t.Fatalf("bar %d is %s at %s, want %s at %s", i+1, got.InstrumentID, got.PeriodEnd, bar.InstrumentID, bar.PeriodEnd)
+		}
 	}
 }

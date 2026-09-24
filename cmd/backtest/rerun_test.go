@@ -214,15 +214,27 @@ func TestRerunRefusesUnsupportedIndependentInputs(t *testing.T) {
 		name, want string
 		mutate     func([]event.Envelope) []event.Envelope
 	}{
-		{"later account", "later account updates", func(es []event.Envelope) []event.Envelope { return append(es[:len(es)-1], es[1], es[len(es)-1]) }},
+		{"opening cash after a fill", "follows a fill", func(es []event.Envelope) []event.Envelope {
+			fill, snapshot := firstOfType(t, es, event.FillEventType), firstOfType(t, es, event.AccountSnapshotEventType)
+			moved := append([]event.Envelope{}, es[:snapshot]...)
+			moved = append(moved, es[fill])
+			return append(moved, es[snapshot:]...)
+		}},
 		{"duplicate configuration", "exactly one configuration", func(es []event.Envelope) []event.Envelope { return append(es[:len(es)-1], es[0], es[len(es)-1]) }},
 		{"early completion", "run.completed as the last", func(es []event.Envelope) []event.Envelope { return append(es, es[len(es)-1]) }},
 		{"unknown input", "unsupported input", func(es []event.Envelope) []event.Envelope { es[2].Type = "unknown"; return es }},
-		{"old schema", "schema 1", func(es []event.Envelope) []event.Envelope { es[1].SchemaVersion = 1; return es }},
-		{"invalid envelope", "payload hash", func(es []event.Envelope) []event.Envelope { es[1].PayloadHash = "wrong"; return es }},
+		{"old schema", "schema 1", func(es []event.Envelope) []event.Envelope {
+			es[firstOfType(t, es, event.AccountSnapshotEventType)].SchemaVersion = 1
+			return es
+		}},
+		{"invalid envelope", "payload hash", func(es []event.Envelope) []event.Envelope {
+			es[firstOfType(t, es, event.AccountSnapshotEventType)].PayloadHash = "wrong"
+			return es
+		}},
 		{"missing available cash", "available cash is required", func(es []event.Envelope) []event.Envelope {
 			var fields map[string]json.RawMessage
-			if err := json.Unmarshal(es[1].Payload, &fields); err != nil {
+			opening := firstOfType(t, es, event.AccountSnapshotEventType)
+			if err := json.Unmarshal(es[opening].Payload, &fields); err != nil {
 				t.Fatal(err)
 			}
 			delete(fields, "available_cash")
@@ -230,18 +242,20 @@ func TestRerunRefusesUnsupportedIndependentInputs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			es[1].Payload = p
-			es[1].PayloadHash = event.HashPayload(p)
+			es[opening].Payload = p
+			es[opening].PayloadHash = event.HashPayload(p)
 			return es
 		}},
 		{"malformed bar", "decode market.bar.completed", func(es []event.Envelope) []event.Envelope {
-			es[2].Payload = []byte(`"wrong"`)
-			es[2].PayloadHash = event.HashPayload(es[2].Payload)
+			bar := firstOfType(t, es, event.CompletedBarEventType)
+			es[bar].Payload = []byte(`"wrong"`)
+			es[bar].PayloadHash = event.HashPayload(es[bar].Payload)
 			return es
 		}},
 		{"invalid bar", "invalid market.bar.completed", func(es []event.Envelope) []event.Envelope {
-			es[2].Payload = []byte(`{}`)
-			es[2].PayloadHash = event.HashPayload(es[2].Payload)
+			bar := firstOfType(t, es, event.CompletedBarEventType)
+			es[bar].Payload = []byte(`{}`)
+			es[bar].PayloadHash = event.HashPayload(es[bar].Payload)
 			return es
 		}},
 	} {
@@ -271,7 +285,7 @@ func TestRerunComparesEveryRecordField(t *testing.T) {
 		mutate     func([]journal.Record) []journal.Record
 	}{
 		{"sequence", "record 3: recorded sequence", func(rs []journal.Record) []journal.Record { rs[2].Sequence++; return rs }},
-		{"kind", "record 3: recorded kind", func(rs []journal.Record) []journal.Record { rs[2].Kind = journal.KindDecision; return rs }},
+		{"kind", "record 2: recorded kind", func(rs []journal.Record) []journal.Record { rs[1].Kind = journal.KindDecision; return rs }},
 		{"chain", "record 3: recorded record_hash", func(rs []journal.Record) []journal.Record { rs[2].RecordHash = "wrong"; return rs }},
 		{"envelope", "record 3: recorded", func(rs []journal.Record) []journal.Record {
 			rs[2].Envelope.RecordedAt = rs[2].Envelope.RecordedAt.AddDate(0, 0, 1)
@@ -372,7 +386,7 @@ func TestRerunReportsTheFirstMissingRecordWhenThePipelineStops(t *testing.T) {
 		return fills.Result{}, fmt.Errorf("simulator stopped")
 	}
 	err := doRerun(context.Background(), goldenJournal, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "pipeline divergence at record 3") || !strings.Contains(err.Error(), "regenerated nothing") || !strings.Contains(err.Error(), "simulator stopped") {
+	if err == nil || !strings.Contains(err.Error(), "pipeline divergence at record 2") || !strings.Contains(err.Error(), "regenerated nothing") || !strings.Contains(err.Error(), "simulator stopped") {
 		t.Fatalf("first missing record: %v", err)
 	}
 }
@@ -424,4 +438,16 @@ func TestRerunStillReportsAPipelineFailureThatCoincidesWithCancellation(t *testi
 	if strings.Contains(err.Error(), "rerun stopped before completing") {
 		t.Fatalf("pipelineEquivalence error = %v, want the failure reported, not a cancellation", err)
 	}
+}
+
+// firstOfType is the index of the first envelope of eventType in es.
+func firstOfType(t *testing.T, es []event.Envelope, eventType string) int {
+	t.Helper()
+	for i, e := range es {
+		if e.Type == eventType {
+			return i
+		}
+	}
+	t.Fatalf("no %s input", eventType)
+	return -1
 }

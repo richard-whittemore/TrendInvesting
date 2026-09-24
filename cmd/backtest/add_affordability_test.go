@@ -10,20 +10,31 @@ import (
 )
 
 // ADR 0020: the cash available to a Unit is the previous close's figure less
-// what earlier fills have already spent, and a Unit that cannot be funded is
-// declined with insufficient-cash (ADR 0010: no borrowing). The command's own
-// fixture opens with $1,000,000 and sizes each Unit at about $640,000, so
-// Unit 1 fits and Unit 2 does not once Unit 1 has filled. Every buy the run
-// fills must be funded by the opening snapshot, which is the only cash
-// figure this command states.
+// what fills since that close have already spent, and a Unit that cannot be
+// funded is declined with insufficient-cash (ADR 0010: no borrowing). The
+// command's own fixture opens with $1,000,000 and sizes each Unit at about
+// $640,000, so Unit 1 fits and Unit 2 does not once Unit 1 has filled.
+//
+// Each Session's snapshot states that close's balance, which already
+// reflects every fill up to it, so a fill is debited until the snapshot of
+// its own close arrives and never after (ADR 0020: "A fill debits the ledger
+// exactly once"). Every decline therefore carries exactly the latest
+// snapshot's cash less the fills stamped after it: on 2026-01-22 the entry's
+// fill, and on every later Session nothing. Falsified by a snapshot that does
+// not drop the debits it reflects (the later declines would carry the entry
+// twice), and by a single opening snapshot (they would carry it once, from a
+// basis that never moves).
 func TestTheBacktestNeverBuysMoreThanItsCashAndDeclinesTheAddItCannotFund(t *testing.T) {
 	raw, _ := runWithCashFlags(t)
 	_, records, err := journal.Read(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cash, spent float64
-	addDeclines := 0
+	opening := fixtureConfiguration(t).NotionalAccount.StartingEquity
+	var basis event.AccountSnapshotPayload
+	var spent float64
+	var sinceBasis []event.FillPayload
+	addDeclines, laterDeclines := 0, 0
 	// A declined Unit is skipped before any proposal is built (ADR 0010), so
 	// no Add is proposed for the Campaign and bar a decline answers.
 	type rung struct {
@@ -40,11 +51,16 @@ func TestTheBacktestNeverBuysMoreThanItsCashAndDeclinesTheAddItCannotFund(t *tes
 			}
 			proposed[rung{add.CampaignID, add.PeriodEnd.UTC().String()}] = true
 		case event.AccountSnapshotEventType:
-			var snapshot event.AccountSnapshotPayload
-			if err := json.Unmarshal(record.Envelope.Payload, &snapshot); err != nil {
+			if err := json.Unmarshal(record.Envelope.Payload, &basis); err != nil {
 				t.Fatal(err)
 			}
-			cash = snapshot.AvailableCash
+			var kept []event.FillPayload
+			for _, fill := range sinceBasis {
+				if fill.FilledAt.After(basis.AsOf) {
+					kept = append(kept, fill)
+				}
+			}
+			sinceBasis = kept
 		case event.FillEventType:
 			var fill event.FillPayload
 			if err := json.Unmarshal(record.Envelope.Payload, &fill); err != nil {
@@ -52,6 +68,7 @@ func TestTheBacktestNeverBuysMoreThanItsCashAndDeclinesTheAddItCannotFund(t *tes
 			}
 			if fill.Kind == event.FillKindEntry || fill.Kind == event.FillKindAdd {
 				spent += float64(float64(fill.Quantity)*fill.Price) + fill.Commission
+				sinceBasis = append(sinceBasis, fill)
 			}
 		case event.ProposalDeclinedEventType:
 			var decline event.ProposalDeclinedPayload
@@ -61,17 +78,24 @@ func TestTheBacktestNeverBuysMoreThanItsCashAndDeclinesTheAddItCannotFund(t *tes
 			if decline.Kind == event.ProposalDeclinedKindAdd && decline.Reason == event.DeclineReasonInsufficientCash {
 				addDeclines++
 				declined[rung{decline.CampaignID, decline.PeriodEnd.UTC().String()}] = true
-				if decline.AvailableCash >= decline.RequiredCash || decline.AvailableCash >= cash {
-					t.Errorf("decline = %+v, want the balance left after earlier fills, below both the Unit's cost and the opening %v", decline, cash)
+				want := basis.AvailableCash
+				for _, fill := range sinceBasis {
+					want -= float64(float64(fill.Quantity)*fill.Price) + fill.Commission
+				}
+				if decline.AvailableCash != want || decline.AvailableCash >= decline.RequiredCash {
+					t.Errorf("decline = %+v, want the snapshot's %v less the fills since it, %v, below the Unit's cost", decline, basis.AvailableCash, want)
+				}
+				if len(sinceBasis) == 0 {
+					laterDeclines++
 				}
 			}
 		}
 	}
-	if spent == 0 || spent > cash {
-		t.Errorf("buy fills cost %v against opening cash %v; want at least one fill and none unfunded", spent, cash)
+	if spent == 0 || spent > opening {
+		t.Errorf("buy fills cost %v against opening cash %v; want at least one fill and none unfunded", spent, opening)
 	}
-	if addDeclines == 0 {
-		t.Error("no Add was declined for insufficient cash; want Unit 2 declined once Unit 1 has spent the cash")
+	if addDeclines == 0 || laterDeclines == 0 {
+		t.Errorf("%d Add(s) declined for insufficient cash, %d of them against a snapshot that reflects Unit 1; want both", addDeclines, laterDeclines)
 	}
 	for r := range declined {
 		if proposed[r] {

@@ -86,7 +86,23 @@ package strategy
 // declines, with insufficient-cash, a Unit the older build proposed, and
 // strategy.proposal.declined advances to payload schema 4, so the two builds
 // no longer replay each other's journals.
-const RulesVersion = "1.7.0"
+//
+// Bumped 1.7.0 -> 1.8.0 when a backtest's simulated account began stating
+// every Session's close in an account.snapshot: the opening cash, less every
+// buy's cost and commission, plus every sell's proceeds less commission,
+// with holdings marked at the split-adjusted close (ADR 0020's Consequences;
+// ADR 0021, as amended). Before, a backtest stated one opening snapshot, so
+// exit proceeds never returned to the cash later Units are checked against,
+// and every Campaign after the first could be declined for cash the account
+// in fact held. No decision this package makes from a given input changes,
+// so a 1.7.0 journal still replays byte-identically under this build, as a
+// 1.4.0 journal did under 1.5.0. But the snapshots are part of what a
+// backtest feeds this package: every journal gains one per Session, the
+// opening one moves to after the first Session, and a run whose Campaign
+// exits now funds entries and Adds the older build declined. Rerunning a
+// 1.7.0 run's own inputs through this build produces a different journal,
+// so the two cannot share a version.
+const RulesVersion = "1.8.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -171,4 +187,7 @@ var RuleSurfaceFingerprints = map[string]string{
 	// Unchanged from 1.6.0: the 1.7.0 change is a changed predicate, the
 	// cash a Unit is checked against, not any constant this surface declares.
 	"1.7.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
+	// Unchanged from 1.7.0: the 1.8.0 change is in the account a backtest
+	// states, not any constant this surface declares.
+	"1.8.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
 }

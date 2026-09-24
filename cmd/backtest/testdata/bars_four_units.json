@@ -1,0 +1,642 @@
+[
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-02T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 34.61,
+      "high": 35.11,
+      "low": 34.11,
+      "close": 34.61,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 34.61,
+      "high": 35.11,
+      "low": 34.11,
+      "close": 34.61,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-03T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 34.71,
+      "high": 35.21,
+      "low": 34.21,
+      "close": 34.71,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 34.71,
+      "high": 35.21,
+      "low": 34.21,
+      "close": 34.71,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-04T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 34.81,
+      "high": 35.31,
+      "low": 34.31,
+      "close": 34.81,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 34.81,
+      "high": 35.31,
+      "low": 34.31,
+      "close": 34.81,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-05T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 34.91,
+      "high": 35.41,
+      "low": 34.41,
+      "close": 34.91,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 34.91,
+      "high": 35.41,
+      "low": 34.41,
+      "close": 34.91,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-06T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 35.01,
+      "high": 35.51,
+      "low": 34.51,
+      "close": 35.01,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 35.01,
+      "high": 35.51,
+      "low": 34.51,
+      "close": 35.01,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-07T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 35.11,
+      "high": 35.61,
+      "low": 34.61,
+      "close": 35.11,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 35.11,
+      "high": 35.61,
+      "low": 34.61,
+      "close": 35.11,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-08T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 35.21,
+      "high": 35.71,
+      "low": 34.71,
+      "close": 35.21,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 35.21,
+      "high": 35.71,
+      "low": 34.71,
+      "close": 35.21,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-09T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 35.31,
+      "high": 35.81,
+      "low": 34.81,
+      "close": 35.31,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 35.31,
+      "high": 35.81,
+      "low": 34.81,
+      "close": 35.31,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-10T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 35.41,
+      "high": 35.91,
+      "low": 34.91,
+      "close": 35.41,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 35.41,
+      "high": 35.91,
+      "low": 34.91,
+      "close": 35.41,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-11T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 35.51,
+      "high": 36.01,
+      "low": 35.01,
+      "close": 35.51,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 35.51,
+      "high": 36.01,
+      "low": 35.01,
+      "close": 35.51,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-12T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 35.61,
+      "high": 36.11,
+      "low": 35.11,
+      "close": 35.61,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 35.61,
+      "high": 36.11,
+      "low": 35.11,
+      "close": 35.61,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-13T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 35.71,
+      "high": 36.21,
+      "low": 35.21,
+      "close": 35.71,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 35.71,
+      "high": 36.21,
+      "low": 35.21,
+      "close": 35.71,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-14T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 35.81,
+      "high": 36.31,
+      "low": 35.31,
+      "close": 35.81,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 35.81,
+      "high": 36.31,
+      "low": 35.31,
+      "close": 35.81,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-15T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 35.91,
+      "high": 36.41,
+      "low": 35.41,
+      "close": 35.91,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 35.91,
+      "high": 36.41,
+      "low": 35.41,
+      "close": 35.91,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-16T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 36.01,
+      "high": 36.51,
+      "low": 35.51,
+      "close": 36.01,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 36.01,
+      "high": 36.51,
+      "low": 35.51,
+      "close": 36.01,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-17T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 36.11,
+      "high": 36.61,
+      "low": 35.61,
+      "close": 36.11,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 36.11,
+      "high": 36.61,
+      "low": 35.61,
+      "close": 36.11,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-18T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 36.21,
+      "high": 36.71,
+      "low": 35.71,
+      "close": 36.21,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 36.21,
+      "high": 36.71,
+      "low": 35.71,
+      "close": 36.21,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-19T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 36.31,
+      "high": 36.81,
+      "low": 35.81,
+      "close": 36.31,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 36.31,
+      "high": 36.81,
+      "low": 35.81,
+      "close": 36.31,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-20T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 36.41,
+      "high": 36.91,
+      "low": 35.91,
+      "close": 36.41,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 36.41,
+      "high": 36.91,
+      "low": 35.91,
+      "close": 36.41,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-21T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 36.51,
+      "high": 37.01,
+      "low": 36.01,
+      "close": 36.51,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 36.51,
+      "high": 37.01,
+      "low": 36.01,
+      "close": 36.51,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-22T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 37.01,
+      "high": 39.01,
+      "low": 36.9,
+      "close": 38.81,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 37.01,
+      "high": 39.01,
+      "low": 36.9,
+      "close": 38.81,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-23T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 39.0,
+      "high": 39.3,
+      "low": 38.8,
+      "close": 39.1,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 39.0,
+      "high": 39.3,
+      "low": 38.8,
+      "close": 39.1,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-24T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 39.1,
+      "high": 39.4,
+      "low": 38.9,
+      "close": 39.2,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 39.1,
+      "high": 39.4,
+      "low": 38.9,
+      "close": 39.2,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-25T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 39.2,
+      "high": 39.5,
+      "low": 39.0,
+      "close": 39.3,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 39.2,
+      "high": 39.5,
+      "low": 39.0,
+      "close": 39.3,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-26T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 39.3,
+      "high": 39.6,
+      "low": 39.1,
+      "close": 39.4,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 39.3,
+      "high": 39.6,
+      "low": 39.1,
+      "close": 39.4,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-27T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 39.4,
+      "high": 39.7,
+      "low": 39.2,
+      "close": 39.5,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 39.4,
+      "high": 39.7,
+      "low": 39.2,
+      "close": 39.5,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-28T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 39.5,
+      "high": 39.8,
+      "low": 39.3,
+      "close": 39.6,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 39.5,
+      "high": 39.8,
+      "low": 39.3,
+      "close": 39.6,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-29T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 39.6,
+      "high": 39.9,
+      "low": 39.4,
+      "close": 39.7,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 39.6,
+      "high": 39.9,
+      "low": 39.4,
+      "close": 39.7,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-30T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 39.7,
+      "high": 40.0,
+      "low": 39.5,
+      "close": 39.8,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 39.7,
+      "high": 40.0,
+      "low": 39.5,
+      "close": 39.8,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-01-31T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 39.8,
+      "high": 40.1,
+      "low": 39.6,
+      "close": 39.9,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 39.8,
+      "high": 40.1,
+      "low": 39.6,
+      "close": 39.9,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-02-01T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 39.9,
+      "high": 40.2,
+      "low": 39.7,
+      "close": 40.0,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 39.9,
+      "high": 40.2,
+      "low": 39.7,
+      "close": 40.0,
+      "volume": 1000000
+    }
+  },
+  {
+    "instrument_id": "AAPL",
+    "period_end": "2026-02-02T00:00:00Z",
+    "split_adjusted": {
+      "view": "split-adjusted",
+      "open": 39.8,
+      "high": 39.9,
+      "low": 36.0,
+      "close": 36.2,
+      "volume": 1000000
+    },
+    "raw": {
+      "view": "raw",
+      "open": 39.8,
+      "high": 39.9,
+      "low": 36.0,
+      "close": 36.2,
+      "volume": 1000000
+    }
+  }
+]
