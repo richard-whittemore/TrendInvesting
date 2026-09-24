@@ -245,3 +245,57 @@ func TestTransitionDeepCopyHasNoAliases(t *testing.T) {
 		t.Fatal("mutating the copy changed the original")
 	}
 }
+
+// Real builder failures exercise Apply itself, including the same-bar Add
+// dependency and the stop-expiry chronology rule (ADR 0006 and ADR 0011).
+func TestApplyRejectsInvalidFinalPayloadWithoutCommitting(t *testing.T) {
+	for _, kind := range []string{"entry", "add", "partial-stop", "bar", "snapshot", "end"} {
+		t.Run(kind, func(t *testing.T) {
+			setup := func() (*Reducer, event.Envelope, string) {
+				r, input := transitionFixture(t, kind)
+				s := r.instruments["AAPL"]
+				var want string
+				switch kind {
+				case "entry", "add":
+					s.lastBarPeriodEnd = day(0).AddDate(-3000, 0, 0)
+					want = "built invalid add proposal payload"
+				case "partial-stop":
+					s.pendingAddProposal.earliestFillAt = day(2)
+					want = "built invalid proposal expired payload"
+				case "bar":
+					s.campaign.instrumentID = ""
+					want = "built invalid exit order payload"
+				case "snapshot":
+					// Two Drawdown Steps: the first is representable, the second
+					// overflows the step number and fails its payload validator.
+					r.drawdownStepsSeen = int(^uint(0)>>1) - 1
+					want = "built invalid drawdown step applied payload"
+				case "end":
+					s.campaign.instrumentID = ""
+					want = "built invalid exit order payload"
+				}
+				return r, input, want
+			}
+			r, input, want := setup()
+			before, _, _ := setup()
+			var first string
+			for attempt := 0; attempt < 2; attempt++ {
+				out, err := r.Apply(context.Background(), input)
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("attempt %d: %v, want %s", attempt, err, want)
+				}
+				if attempt == 0 {
+					first = err.Error()
+				} else if err.Error() != first {
+					t.Errorf("retry changed error: %v", err)
+				}
+				if len(out) != 0 {
+					t.Errorf("failed input emitted %v", out)
+				}
+				if !reflect.DeepEqual(r, before) {
+					t.Errorf("attempt %d changed state or accepted fills", attempt)
+				}
+			}
+		})
+	}
+}

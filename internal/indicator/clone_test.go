@@ -12,11 +12,11 @@ func TestClonesOwnTheirBuffers(t *testing.T) {
 	t.Run("entry", func(t *testing.T) {
 		original := &EntryChannel{length: 2, values: []float64{100, 101}, count: 2}
 		want := &EntryChannel{length: 2, values: []float64{100, 101}, count: 2}
-		copy := original.Clone()
-		if !reflect.DeepEqual(copy, original) {
+		cloned := original.Clone()
+		if !reflect.DeepEqual(cloned, original) {
 			t.Fatal("copy changed state")
 		}
-		copy.Add(200)
+		cloned.Add(200)
 		if !reflect.DeepEqual(original, want) {
 			t.Fatal("copy aliases original")
 		}
@@ -27,11 +27,11 @@ func TestClonesOwnTheirBuffers(t *testing.T) {
 	t.Run("exit", func(t *testing.T) {
 		original := &ExitChannel{length: 2, values: []float64{100, 101}, count: 2}
 		want := &ExitChannel{length: 2, values: []float64{100, 101}, count: 2}
-		copy := original.Clone()
-		if !reflect.DeepEqual(copy, original) {
+		cloned := original.Clone()
+		if !reflect.DeepEqual(cloned, original) {
 			t.Fatal("copy changed state")
 		}
-		copy.Add(50)
+		cloned.Add(50)
 		if !reflect.DeepEqual(original, want) {
 			t.Fatal("copy aliases original")
 		}
@@ -42,12 +42,12 @@ func TestClonesOwnTheirBuffers(t *testing.T) {
 	t.Run("wilder", func(t *testing.T) {
 		original := &WilderAverage{period: 20, seed: []float64{1, 2}, count: 2}
 		want := &WilderAverage{period: 20, seed: []float64{1, 2}, count: 2}
-		copy := original.Clone()
-		if !reflect.DeepEqual(copy, original) {
+		cloned := original.Clone()
+		if !reflect.DeepEqual(cloned, original) {
 			t.Fatal("copy changed state")
 		}
-		copy.seed[0] = 99
-		copy.Add(7)
+		cloned.seed[0] = 99
+		cloned.Add(7)
 		if !reflect.DeepEqual(original, want) {
 			t.Fatal("copy aliases original")
 		}
