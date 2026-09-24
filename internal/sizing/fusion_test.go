@@ -31,8 +31,18 @@ func TestProductRoundsItsResult(t *testing.T) {
 	if got, want := sizing.Product(a, b), a*b; got != want {
 		t.Fatalf("Product(%v, %v) = %v, want %v", a, b, got, want)
 	}
-	if fused := math.FMA(a, b, 0); sizing.Product(a, b) == fused && a*b != fused {
-		t.Fatal("Product returned the fused result")
+	// (1 + 2^-27) * (1 - 2^-27) rounds to 1 before subtracting 1;
+	// a fused operation instead retains the exact residual, -2^-54.
+	// Ldexp supplies runtime operands so constant folding cannot hide fusion.
+	epsilon := math.Ldexp(1, -27)
+	a, b, c := 1+epsilon, 1-epsilon, -1.0
+	rounded := 0.0
+	fused := math.FMA(a, b, c)
+	if rounded == fused {
+		t.Fatalf("these inputs give %v either way; the test cannot distinguish fused and rounded products", rounded)
+	}
+	if got := sizing.Product(a, b) + c; got != rounded {
+		t.Fatalf("Product(%v, %v) + %v = %v, want %v (round before adding; fused result is %v)", a, b, c, got, rounded, fused)
 	}
 }
 

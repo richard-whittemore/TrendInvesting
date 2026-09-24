@@ -785,8 +785,9 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 // The Notional Account is read from r.notionalAccount.Current() (ADR 0007):
 // its configured starting value until an account.snapshot applies a
 // Drawdown Step, never actual account equity. Yearly re-basing and recovery
-// are handled separately (notional.go). No cap of any kind is checked — this
-// is one Unit, and ADR 0008's four caps are applied elsewhere.
+// are handled separately (notional.go). This function sizes one Unit without
+// checking caps. campaign.go enforces ADR 0008's per-instrument Unit cap;
+// the ADR's industry, sector and total-long caps are not implemented.
 //
 // entryLevel is the Entry Channel high the breakout exceeded — the level a
 // resting buy-stop actually sits at under ADR 0005, not the breakout bar's
