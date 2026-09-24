@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,7 +29,7 @@ const auditedPackages = "./internal/..."
 // never executed, each with the reason it cannot be.
 const exclusionsFile = "exclusions.json"
 
-// profileEnv supplies an already-generated count-mode profile, so a caller
+// profileEnv supplies an already-generated coverage profile, so a caller
 // that has one (a CI job, or a developer iterating) does not pay for a
 // second test run. When it is unset the test generates its own.
 const profileEnv = "COVERAGE_AUDIT_PROFILE"
@@ -60,22 +61,22 @@ var categories = map[string]string{
 	"unreachable-by-invariant": "a named domain invariant makes the tested state impossible",
 }
 
-// block is one uncovered coverage block, identified by something more stable
-// than a line number: the file, the function that encloses it, and the
-// source text of the block itself. A line number moves whenever anything
-// above it is edited, which would make the list rot within a week; this key
-// survives everything but a rename or a rewrite of the block, both of which
-// are exactly the changes that should force the reason to be re-read.
+// block identifies a span by file, enclosing function, text and occurrence.
+// Occurrence is its 1-based ordinal among all blocks with identical text in
+// that function, including covered blocks, in source order. The key survives
+// edits outside the function and edits inside it that do not add, remove or
+// reorder identical statements. TestIdenticalGuardsCannotExchangeCoverage
+// requires the ordinal: text alone lets a newly uncovered guard consume an
+// unrelated guard's exclusion.
 type block struct {
-	File      string `json:"file"`
-	Function  string `json:"function"`
-	Statement string `json:"statement"`
-	Category  string `json:"category,omitempty"`
-	Reason    string `json:"reason,omitempty"`
-	// Count is how many identical blocks the entry accounts for. Several
-	// guards in one function are often word-for-word the same statement —
-	// eight `return nil, err` propagations in applyCompletedBar, say — and
-	// they share one reason. Absent means one.
+	File       string `json:"file"`
+	Function   string `json:"function"`
+	Statement  string `json:"statement"`
+	Occurrence int    `json:"occurrence,omitempty"`
+	Category   string `json:"category,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	// Count accepts only the legacy default or one; grouping distinct
+	// occurrences is rejected. Negative values fail without panicking.
 	Count int `json:"count,omitempty"`
 
 	// line is for the failure message only, and is deliberately not part of
@@ -90,12 +91,19 @@ func (b block) count() int {
 	return b.Count
 }
 
+func (b block) occurrence() int {
+	if b.Occurrence == 0 {
+		return 1
+	}
+	return b.Occurrence
+}
+
 func (b block) key() string {
-	return b.File + "\x00" + b.Function + "\x00" + b.Statement
+	return b.File + "\x00" + b.Function + "\x00" + b.Statement + "\x00" + strconv.Itoa(b.occurrence())
 }
 
 func (b block) where() string {
-	return fmt.Sprintf("%s:%d (%s)", b.File, b.line, b.Function)
+	return fmt.Sprintf("%s:%d (%s, occurrence %d)", b.File, b.line, b.Function, b.occurrence())
 }
 
 type exclusionList struct {
@@ -127,8 +135,11 @@ func TestEveryUncoveredStatementIsExcludedWithANamedReason(t *testing.T) {
 		writeDump(t, dump, uncovered)
 	}
 
-	listed := readExclusions(t)
+	checkExclusions(t, uncovered, readExclusions(t))
+}
 
+func checkExclusions(t *testing.T, uncovered, listed []block) {
+	t.Helper()
 	remaining := make(map[string][]block, len(uncovered))
 	for _, b := range uncovered {
 		remaining[b.key()] = append(remaining[b.key()], b)
@@ -136,6 +147,18 @@ func TestEveryUncoveredStatementIsExcludedWithANamedReason(t *testing.T) {
 
 	var stale []block
 	for _, e := range listed {
+		if e.Count < 0 {
+			t.Errorf("%s: count %d is negative", e.where(), e.Count)
+			continue
+		}
+		if e.Count > 1 {
+			t.Errorf("%s: count %d groups blocks; list each occurrence separately", e.where(), e.Count)
+			continue
+		}
+		if e.Occurrence < 0 {
+			t.Errorf("%s: occurrence must be positive", e.where())
+			continue
+		}
 		if _, ok := categories[e.Category]; !ok {
 			t.Errorf("%s: category %q is not one of the two dispositions this audit recognises", e.where(), e.Category)
 		}
@@ -178,8 +201,8 @@ func TestEveryUncoveredStatementIsExcludedWithANamedReason(t *testing.T) {
 	}
 
 	for _, s := range stale {
-		t.Errorf("%s (%s) is listed in %s %d time(s) but fewer blocks than that are uncovered: it is now covered, or no longer exists. Correct the count or remove the entry — a reason nobody has re-checked is worse than none.\n      %s",
-			s.File, s.Function, exclusionsFile, s.count(), s.Statement)
+		t.Errorf("%s is listed in %s %d time(s) but fewer blocks than that are uncovered: it is now covered, changed, or no longer exists. Recheck the reason and update or remove the entry.\n      %s",
+			s.where(), exclusionsFile, s.count(), s.Statement)
 	}
 }
 
@@ -220,7 +243,9 @@ func resolveProfile(root, path string) string {
 func profile(t *testing.T, root string) string {
 	t.Helper()
 	if path := os.Getenv(profileEnv); path != "" {
-		return resolveProfile(root, path)
+		path = resolveProfile(root, path)
+		checkProfileFreshness(t, root, path)
+		return path
 	}
 	path := filepath.Join(t.TempDir(), "audit.out")
 	cmd := exec.Command("go", "test", "-covermode=count", "-coverprofile="+path, auditedPackages)
@@ -232,8 +257,51 @@ func profile(t *testing.T, root string) string {
 	return path
 }
 
+// checkProfileFreshness rejects repository inputs newer than a reused profile.
+// TestSuppliedProfileRejectsNewerCoverageInputs covers test-only changes, whose
+// spans still match. Timestamps cannot prove freshness: the reuse contract in
+// docs/development.md also requires unchanged external inputs and test options.
+func checkProfileFreshness(t *testing.T, root, path string) {
+	t.Helper()
+	profileInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat coverage profile %s: %v", path, err)
+	}
+	err = filepath.WalkDir(root, func(name string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if entry.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, name)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if !strings.HasSuffix(rel, ".go") && entry.Name() != "go.mod" && entry.Name() != "go.sum" && !strings.Contains("/"+rel, "/testdata/") {
+			return nil
+		}
+		info, err := os.Stat(name)
+		if err != nil {
+			return err
+		}
+		if info.ModTime().After(profileInfo.ModTime()) {
+			return fmt.Errorf("coverage profile is older than %s; regenerate it", rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("cannot reuse %s: %v", path, err)
+	}
+}
+
 // uncoveredBlocks parses a coverage profile and returns every block with a
-// zero execution count, keyed by file, enclosing function and source text.
+// zero execution count, keyed by file, enclosing function, source text and
+// occurrence among all matching blocks, including those executed by tests.
 func uncoveredBlocks(t *testing.T, root, path string) []block {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -246,7 +314,12 @@ func uncoveredBlocks(t *testing.T, root, path string) []block {
 	}
 
 	sources := map[string]*sourceFile{}
-	var blocks []block
+	type profileBlock struct {
+		block
+		start   int
+		covered bool
+	}
+	var all []profileBlock
 	for _, line := range lines[1:] {
 		fields := strings.Fields(line)
 		if len(fields) != 3 {
@@ -256,14 +329,25 @@ func uncoveredBlocks(t *testing.T, root, path string) []block {
 		if err != nil {
 			t.Fatalf("coverage profile line %q: %v", line, err)
 		}
-		if count > 0 {
-			continue
-		}
 		name, span, ok := strings.Cut(fields[0], ":")
 		if !ok {
 			t.Fatalf("coverage profile line %q has no span", line)
 		}
-		rel := strings.TrimPrefix(name, modulePath)
+		rel, ok := strings.CutPrefix(name, modulePath)
+		if !ok {
+			t.Fatalf("coverage profile line %q names %s, which is outside module %s", line, name, strings.TrimSuffix(modulePath, "/"))
+		}
+		// Go writes clean, module-relative paths into a coverage profile, so a
+		// path that is not already canonical ("..", ".", "//") is malformed or
+		// forged. Rejecting it outright, rather than cleaning it, keeps a path
+		// such as internal/../cmd/main.go from passing the internal/ scope check
+		// and then being read from outside it.
+		if clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel))); clean != rel || rel == "" || strings.HasPrefix(clean, "../") || filepath.IsAbs(clean) {
+			t.Fatalf("coverage profile line %q names %s, which is not a canonical module-relative path", line, name)
+		}
+		if !strings.HasPrefix(rel, "internal/") {
+			continue
+		}
 		src, ok := sources[rel]
 		if !ok {
 			src = readSource(t, filepath.Join(root, filepath.FromSlash(rel)))
@@ -275,12 +359,32 @@ func uncoveredBlocks(t *testing.T, root, path string) []block {
 			t.Fatalf("%s reports a block at %s:%s that does not lie inside the file as it stands; the profile was taken against different source — regenerate it", path, rel, span)
 		}
 		start, _ := src.offset(startLine, startCol)
-		blocks = append(blocks, block{
-			File:      rel,
-			Function:  src.enclosing(start),
-			Statement: normalise(text),
-			line:      startLine,
+		all = append(all, profileBlock{
+			block: block{
+				File:      rel,
+				Function:  src.enclosing(start),
+				Statement: normalise(text),
+				line:      startLine,
+			},
+			start:   start,
+			covered: count > 0,
 		})
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].File != all[j].File {
+			return all[i].File < all[j].File
+		}
+		return all[i].start < all[j].start
+	})
+	occurrences := make(map[string]int)
+	var blocks []block
+	for _, entry := range all {
+		textKey := entry.key()
+		occurrences[textKey]++
+		entry.Occurrence = occurrences[textKey]
+		if !entry.covered {
+			blocks = append(blocks, entry.block)
+		}
 	}
 	return blocks
 }
@@ -395,8 +499,8 @@ func (s *sourceFile) slice(startLine, startCol, endLine, endCol int) (string, bo
 }
 
 // enclosing names the top-level function a byte offset falls inside. A
-// function literal reports its enclosing declaration, which together with the
-// block's own text is enough to tell any two blocks apart.
+// function literal reports its enclosing declaration; the block's occurrence
+// distinguishes identical guards within that declaration.
 func (s *sourceFile) enclosing(at int) string {
 	for _, fn := range s.funcs {
 		if at >= fn.start && at < fn.end {
@@ -408,8 +512,8 @@ func (s *sourceFile) enclosing(at int) string {
 
 // normalise reduces a block's source text to the part that identifies it:
 // its statements, with comments, indentation and the enclosing braces
-// removed, so that reformatting or rewording a comment does not invalidate
-// the list.
+// removed. Reformatting preserves this text identity; the separately keyed
+// occurrence distinguishes identical text within a function.
 func normalise(text string) string {
 	var kept []string
 	for _, line := range strings.Split(text, "\n") {
@@ -487,17 +591,11 @@ func writeDump(t *testing.T, path string, blocks []block) {
 		}
 		return sorted[i].line < sorted[j].line
 	})
-	grouped := make([]block, 0, len(sorted))
-	seen := map[string]int{}
-	for _, b := range sorted {
-		if at, ok := seen[b.key()]; ok {
-			grouped[at].Count = grouped[at].count() + 1
-			continue
+	for i := range sorted {
+		if sorted[i].Occurrence == 1 {
+			sorted[i].Occurrence = 0
 		}
-		seen[b.key()] = len(grouped)
-		grouped = append(grouped, b)
 	}
-	sorted = grouped
 	encoded, err := json.MarshalIndent(exclusionList{
 		Note:       "generated by COVERAGE_AUDIT_DUMP; every entry still needs a category and a reason",
 		Categories: sortedCategories(),

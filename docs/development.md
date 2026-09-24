@@ -161,13 +161,26 @@ A coverage percentage cannot detect a branch that has become unreachable: dead c
 
 "Nobody has got round to it" is not a category. A missing test is a missing test.
 
-The audit fails in both directions: an unlisted statement that becomes uncovered, and a listed one that becomes covered or no longer exists. It generates its own coverage profile, so `go test ./...` enforces it; set `COVERAGE_AUDIT_PROFILE` to reuse one you already have. After a refactor renames a function, re-author the list wholesale rather than by hand:
+Each entry identifies one block by file, enclosing function, statement text and occurrence: its 1-based ordinal among all blocks with identical text in that function, including covered blocks, in source order. An omitted occurrence defaults to 1. The key survives edits outside the function and edits inside it that do not add, remove or reorder identical statements. `TestIdenticalGuardsCannotExchangeCoverage` ensures exchanging which identical guard is covered fails the audit even when the total uncovered count is unchanged; `TestEditsAboveExcludedGuardPreserveExclusion` ensures unrelated edits above a guard preserve its exclusion. The dump lists each occurrence separately and omits the default occurrence; it does not supply reasons for you. Legacy counts of zero (the default) or one remain accepted, but grouped counts are rejected.
+
+The audit fails in both directions: an unlisted statement that becomes uncovered, and a listed one that becomes covered or no longer exists. It generates its own coverage profile, so `go test ./...` enforces it. Prefer this default whenever inputs have changed.
+
+`COVERAGE_AUDIT_PROFILE` accepts an existing profile only under a caller-maintained freshness contract: use it immediately after a successful, complete test run against the same checkout, test options, toolchain, environment and external inputs. The audit rejects profiles older than any repository Go source (including tests), `go.mod`, `go.sum`, or file under `testdata/`. This catches a new test even when the production source spans did not move.
+
+That timestamp check is a tripwire, **not proof of freshness**. Deleted files, preserved or coarse timestamps, a checkout restored from an archive, and changed external inputs can leave an old profile looking current. Regenerate after such changes. A stale profile can still report an excluded block as uncovered even though a fresh run would cover it; reuse is not safe unless the caller can uphold the contract. To generate and immediately audit a repository-wide profile from the module root:
+
+```sh
+COVERAGE_AUDIT_CHILD=1 go test -race -covermode=atomic -coverprofile=coverage.out ./... &&
+COVERAGE_AUDIT_PROFILE=coverage.out go test -count=1 ./internal/coverageaudit/
+```
+
+The child marker skips the audit only during profile generation; the second command enforces it. After a refactor renames a function, re-author the list wholesale rather than by hand:
 
 ```sh
 COVERAGE_AUDIT_DUMP=/tmp/uncovered.json go test ./internal/coverageaudit/
 ```
 
-The audit covers `internal/`, where every strategy, risk and reconciliation rule lives. `cmd/` is composition and is held to its own tests — except the paths that decide whether a failed run still leaves evidence, which are held to the same bar as the domain.
+The audit covers only `internal/`, where every strategy, risk and reconciliation rule lives. A supplied `./...` profile is filtered to that same scope; entries outside this module are rejected. `cmd/` and `transport/` are held to their own tests. Evidence-retention paths must meet the same testing standard, but are not matched against this exclusion list.
 
 ### validated-payload-json
 
