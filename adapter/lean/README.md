@@ -121,6 +121,40 @@ before its bar (`flush_snapshot`); the reason is under **Fills and order
 changes**. The last snapshot is sent before the end of the stream, or before
 a deliberate stop.
 
+**Account type (ADR 0010).** The Baseline never borrows: "no partial Units,
+no borrowing". LEAN's default equity account is margin, which lets a fill
+cost more than the cash held — observed on a 2003–2014 AAPL run, where a gap
+fill on 2011-07-20 drove cash negative and the run stopped, because
+`account.snapshot` refuses a negative figure. So `Initialize` calls
+`SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage,
+AccountType.Cash)`, which must precede the explicit `SetSlippageModel` and
+`SetFeeModel` calls: calling it after was observed to reset the security's
+slippage model back to LEAN's own default (`NullSlippageModel`; see
+**Observed LEAN behaviour** below), and the adapter's `InteractiveBrokersFeeModel`
+and `NSlippageModel` must survive it. Two cases, both observed on the pinned
+image with a deliberately undersized cash balance:
+
+- **At submission,** an order the cash account cannot fund at its own level
+  is refused outright: LEAN reports it `Invalid` with a message naming the
+  required and free margin ("Insufficient buying power to complete orders").
+  This is the same path as any other order LEAN refuses (`_propose`'s
+  `ticket.Status == Invalid` branch): rejected and logged, not stopped — the
+  engine's next proposal for the same instrument still reaches LEAN.
+- **At fill, on a gap above the level,** the cash account does **not**
+  refuse the fill and does **not** clamp the cost to what is held: an order
+  affordable at its own level when submitted (2 shares at 490, cash 1000)
+  filled anyway at a gapped-open price costing more than the account held (2
+  x 547.95 = 1095.90), leaving `Portfolio.Cash` **negative** (-96.90). A cash
+  account therefore narrows the failure (an order LEAN can already see is
+  unaffordable at its own level is refused before it can ever fill) but does
+  not remove it: a large enough gap still leaves cash negative, and the run
+  must still stop, exactly as it does today, because `account.snapshot`
+  refuses to report a negative figure. #105's running debit at order
+  placement (ADR 0020) is what actually bounds an order's affordability
+  against a sized estimate that includes slippage and commission; it is what
+  narrows this further, not the account type, and even it cannot promise a
+  gap can never exceed the hold it reserved.
+
 LEAN's starting cash is the run's own `cash` setting in `run.json`, required
 and never defaulted. Set it to the configuration's
 `notional_account.starting_equity`. The first snapshot reports LEAN's equity
@@ -399,11 +433,12 @@ evidence; `cmd/backtest` remains the reference implementation of ADR 0005, and
 the two are compared rather than forced to agree. At startup the adapter logs
 `adapter: fill model: ...` lines stating every respect in which LEAN's fills
 depart from ADR 0005 and ADR 0013: the two price views and the rounding of a
-Unit to raw shares, gap-at-open behaviour, the cent tick, exact touches,
-same-bar ambiguity, amendments, intrabar ordering, entry timing, order
-lifetime, LEAN's default equity slippage, the commission schedule and partial
-fills. Each statement about LEAN's own behaviour was observed on the pinned
-image, as follows.
+Unit to raw shares, the cash account (ADR 0010) and what it does and does not
+prevent, gap-at-open behaviour, the cent tick, exact touches, same-bar
+ambiguity, amendments, intrabar ordering, entry timing, order lifetime,
+LEAN's default equity slippage, the commission schedule and partial fills.
+Each statement about LEAN's own behaviour was observed on the pinned image,
+as follows.
 
 **Observed LEAN behaviour** (image
 `quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d`;
@@ -416,6 +451,9 @@ the acceptance run below):
 | Gap at the open | Matches ADR 0005: a buy stop at 500.00 filled at the 547.95 open plus slippage; a sell stop at 540.00 filled at the 537.15 open less slippage, each with LEAN's "unfavorable gap" message. In the split-adjusted acceptance run all 119 fills, 55 of them gaps, were priced at max/min(level, open) ± slippage to within 2e-15; in the raw one all 68, 33 of them gaps, in raw prices to within 1.5e-14. |
 | An exact touch | Fills: a buy stop at 549.66, that bar's exact high, filled at 549.76; a sell stop at 525.83, that bar's exact low, filled at 525.73 (0.10 slippage). The acceptance run had no exact touch. |
 | Is a cancel synchronous? | **No.** `Cancel()` returns success with the order `CancelPending`; `Canceled` is reported after `OnData` returns, before the next slice. In the acceptance run all 15 cancellations were confirmed that way. |
+| Does `SetBrokerageModel` reset a security's own models? | **Yes, if called after them.** A security whose slippage model was set, then had `SetBrokerageModel(InteractiveBrokersBrokerage, AccountType.Cash)` called, had its slippage model reset to `NullSlippageModel`; calling `SetBrokerageModel` first and the explicit `SetSlippageModel`/`SetFeeModel` after left both as set. |
+| Cash account at submission | An order the account cannot fund at its own level is refused outright: 1,000 AAPL shares at a stop of 274.52 with $1,000 cash was reported `Invalid` ("Insufficient buying power to complete orders (Value:[274520]) ... Initial Margin: 274520, Free Margin: 1000"), the same path as any other order LEAN refuses. |
+| Cash account at a gap fill | **LEAN fills it anyway and leaves cash negative; it does not refuse the fill or clamp its cost.** 2 AAPL shares at a stop of 490 (affordable at submission: 2 × 490 = 980 ≤ $1,000) filled at the next session's gapped-open price of 547.95 (2 × 547.95 = 1,095.90, more than the account held); `Portfolio.Cash` went to **-96.90** after the fill and commission. |
 | LEAN's default equity slippage | Zero (`NullSlippageModel`): a gapped SPY buy with no slippage model filled exactly at the 145.99 open. |
 | IB fee tier | $0.005 per share, $1.00 minimum (500 shares: $2.50; 50 shares: $1.00), capped at 0.5% of the order's value at LEAN's market price, not Pro Fixed's 1%; the minimum wins over the cap (1 BAC share at $12.01: $1.00). It is charged on the shares LEAN trades: the cap bound on 42 of the split-adjusted acceptance run's 119 fills, whose share counts were up to 56 times raw, and on none of the raw run's 68, every one of which was charged exactly $0.005 × its raw shares (10,998 shares: $54.99). |
 | Amendments | An amended order is evaluated against the bar it was amended after: a sell stop raised to 530.00 after a bar whose low was 525.83 filled at 529.90 in that same slice. A new order never fills against the bar it was placed after. |

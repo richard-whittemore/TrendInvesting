@@ -338,6 +338,10 @@ class EntryAndAddOrderTests(OrderTestCase):
         self.assertIn("direction", self.rejections(algo)[0])
 
     def test_an_order_lean_refuses_is_recorded(self):
+        """An entry LEAN itself refuses at submission (status Invalid, as a
+        cash account does for an unaffordable order: ADR 0010) is rejected
+        and logged, not stopped: the run continues and the engine's later
+        proposal for the same instrument still reaches LEAN's order book."""
         algo = self.start()
         algo.Transactions.submit_status = "invalid"
         proposal = trade_proposal(9)
@@ -345,6 +349,15 @@ class EntryAndAddOrderTests(OrderTestCase):
         [rejection] = self.rejections(algo)
         self.assertIn(proposal["id"], rejection)
         self.assertIn("LEAN refused", rejection)
+        self.assertFalse(algo.failed)
+        # Not stopped: the engine's re-issued proposal on a later bar still
+        # reaches LEAN, once it stops refusing orders.
+        algo.Transactions.submit_status = "submitted"
+        later = trade_proposal(10)
+        self.feed(algo, 10, [later])
+        self.assertFalse(algo.failed)
+        [ticket] = [t for t in self.tickets(algo) if t.Tag == later["id"]]
+        self.assertEqual(ticket.Status, "submitted")
 
     def test_go_unreachable_means_nothing_is_submitted(self):
         algo = self.start()
