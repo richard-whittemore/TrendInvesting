@@ -60,5 +60,7 @@ If the **heartbeat alert** fires, the system is down or wedged and cannot report
 ## Before live money
 
 - Choose the alert channels (at least two, independent) and the alert, heartbeat and timeout intervals.
+- **Provision the external heartbeat monitor** (outside the system and its host), and prove in paper trading that it pages: stop the process, then wedge it (alive but not processing), and confirm each triggers the heartbeat alert on both channels within the configured timeout.
+- Prove every alert **repeats until acknowledged**, and that a failed delivery on one channel is retried on the other.
 - Fill in every *(to confirm)* above.
 - **Rehearse each row of the cause table in paper trading**, by deliberately creating that discrepancy, and time the recovery.
