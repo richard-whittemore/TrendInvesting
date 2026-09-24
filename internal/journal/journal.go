@@ -484,6 +484,15 @@ type Verification struct {
 	// Complete means the final input is event.RunCompletedEventType: no
 	// further input exists for this run. Terminal decisions may follow it.
 	Complete bool
+	// Stopped means an event.AdapterRunStoppedEventType input is present:
+	// this run was deliberately stopped by an adapter (ADR 0012), rather
+	// than reaching the natural end of its own input stream. StopReason and
+	// StopInstrumentID restate that event's own payload, decoded here so a
+	// caller (cmd/backtest's -verify) can report a stopped run distinctly
+	// without re-reading records itself.
+	Stopped          bool
+	StopReason       string
+	StopInstrumentID string
 }
 
 // Verify checks the chain (ADR 0017), then validates the header and envelopes
@@ -523,20 +532,33 @@ func Verify(r io.Reader) (Verification, error) {
 	if err := header.validate(); err != nil {
 		return Verification{}, err
 	}
-	var complete bool
+	var complete, stopped bool
+	var stopReason, stopInstrumentID string
 	for _, record := range records {
 		if err := record.Envelope.Validate(); err != nil {
 			return Verification{}, fmt.Errorf("journal: record %d: %w", record.Sequence, err)
 		}
 		if record.Kind == KindInput {
 			complete = record.Envelope.Type == event.RunCompletedEventType
+			if record.Envelope.Type == event.AdapterRunStoppedEventType {
+				var payload event.AdapterRunStoppedPayload
+				if err := json.Unmarshal(record.Envelope.Payload, &payload); err != nil {
+					return Verification{}, fmt.Errorf("journal: record %d: decode adapter run stopped payload: %w", record.Sequence, err)
+				}
+				stopped = true
+				stopReason = payload.Reason
+				stopInstrumentID = payload.InstrumentID
+			}
 		}
 	}
 
 	return Verification{
-		Header:          header,
-		RecordCount:     uint64(len(records)),
-		FinalRecordHash: final,
-		Complete:        complete,
+		Header:           header,
+		RecordCount:      uint64(len(records)),
+		FinalRecordHash:  final,
+		Complete:         complete,
+		Stopped:          stopped,
+		StopReason:       stopReason,
+		StopInstrumentID: stopInstrumentID,
 	}, nil
 }
