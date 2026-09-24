@@ -66,15 +66,18 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         bar = data.Bars.get(self.symbol)
         if bar is None:
             return
-        # Warm-up bars are counted but never sent to the engine: the engine
-        # has no notion of priming, so the only way to guarantee it decides
-        # nothing during warm-up is to never ask it to. This also keeps the
-        # wire sequence trivially contiguous: the run's first published bar
-        # is always the first bar sent, full stop, and carries Sequence 2.
-        if self.IsWarmingUp:
-            self.bar_count += 1
-            self.warmup_seen += 1
-            return
+        # Warm-up bars are published exactly like any other bar. The reducer
+        # owns readiness: it builds N and the Entry/Exit Channels from every
+        # completed bar it is given (internal/strategy/reducer.go), so
+        # withholding LEAN's warm-up bars would starve those figures of
+        # exactly the history they need and make the engine start its own
+        # warm-up from scratch after LEAN's already ended — and which bars a
+        # strategy gets to see is itself a methodology decision, which this
+        # adapter does not make (adapter/lean/README.md). warming is recorded
+        # for the log and stays available on the reply below for a future
+        # order-submission path (#29) to decide never to act on a decision
+        # answering a warm-up bar; nothing here acts on decisions at all yet.
+        warming = self.IsWarmingUp
         try:
             started = perf_counter()
             history = self.History([self.symbol], 1, Resolution.Daily,
@@ -85,9 +88,10 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             period_end = end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             decisions = self.publisher.publish(self.instrument, bar, raw, period_end)
             self.bar_count += 1
+            self.warmup_seen += int(warming)
             self.decision_count += len(decisions)
-            self.Log("adapter: seq={} end={} raw={} split-adjusted={} decisions={}".format(
-                self.publisher.sequence, period_end, raw["close"], float(bar.Close), len(decisions)))
+            self.Log("adapter: seq={} end={} warmup={} raw={} split-adjusted={} decisions={}".format(
+                self.publisher.sequence, period_end, warming, raw["close"], float(bar.Close), len(decisions)))
         except Exception as err:
             self.stop("completed bar failed: {}".format(err))
 

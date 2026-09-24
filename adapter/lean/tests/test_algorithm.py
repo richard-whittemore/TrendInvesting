@@ -12,7 +12,9 @@ for p in (tests_dir, adapter_dir):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from test_publisher import Frame, bar
+from test_publisher import Client as FakeEngineClient, Frame, bar
+
+from publisher import Publisher
 
 
 class FakeAlgorithm:
@@ -66,30 +68,38 @@ class AlgorithmTests(unittest.TestCase):
             algo.IsWarmingUp = warming
             algo.History = lambda *args, **kwargs: Frame(b.EndTime)
             algo.OnData(types.SimpleNamespace(Bars={"AAPL": b}))
-        # Warm-up bars are counted but never sent to the engine: the engine
-        # has no notion of priming, so this is the only way to guarantee it
-        # decides nothing during warm-up (only day 9, past warm-up, reaches
-        # publish()).
-        self.assertEqual(len(seen), 1)
+        # Every completed bar is published, warm-up included: the reducer
+        # builds N and the Entry/Exit Channels from every bar it receives, so
+        # withholding LEAN's warm-up bars would starve those figures rather
+        # than suppress any decision.
+        self.assertEqual(len(seen), 4)
         self.assertEqual(algo.warmup_seen, 3)
         self.assertEqual(algo.bar_count, 4)
         self.assertEqual(seen[-1][-1], "2014-06-09T20:00:00Z")
         self.assertFalse(hasattr(algo, "MarketOrder"))
 
-    def test_no_engine_exchange_while_warming_up(self):
-        """publishes no decisions during warm-up (no bar is even sent)."""
+    def test_warmup_bars_are_published_and_numbered_contiguously(self):
+        """publishes every completed bar, warm-up included, in one contiguous sequence."""
         algo = self.init()
-        calls = []
-        algo.publisher = types.SimpleNamespace(
-            sequence=2, publish=lambda *a: calls.append(a) or [])
-        algo.History = lambda *a, **k: (_ for _ in ()).throw(
-            AssertionError("History must not be called during warm-up"))
-        algo.IsWarmingUp = True
-        for day in (4, 5, 6):
-            algo.OnData(types.SimpleNamespace(Bars={"AAPL": bar(day)}))
-        self.assertEqual(calls, [])
+        client = FakeEngineClient()
+        algo.publisher = Publisher(client, "hash", "version", "test")
+        for day, warming in ((4, True), (5, True), (6, True), (9, False)):
+            b = bar(day)
+            algo.IsWarmingUp = warming
+            algo.History = lambda *args, **kwargs: Frame(b.EndTime)
+            algo.OnData(types.SimpleNamespace(Bars={"AAPL": b}))
         self.assertFalse(algo.failed)
+        # The first bar carries Sequence 2 (continuing the engine's own
+        # configuration input at Sequence 1), and warm-up bars share that
+        # same numbering with the bars that follow warm-up, contiguously.
+        self.assertEqual([e["sequence"] for e in client.sent], [2, 3, 4, 5])
+        self.assertEqual(algo.warmup_seen, 3)
+        self.assertEqual(algo.bar_count, 4)
+        # FakeEngineClient answers every bar with zero decisions; what this
+        # test pins is that all four bars — warm-up included — reach the
+        # engine at all, contiguously numbered.
         self.assertEqual(algo.decision_count, 0)
+        self.assertEqual(client.sent[-1]["payload"]["period_end"], "2014-06-09T20:00:00Z")
 
     def test_missing_raw_stops_stream_without_reusing_connection(self):
         algo = self.init()
