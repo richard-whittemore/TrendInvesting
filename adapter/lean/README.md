@@ -36,6 +36,53 @@ drawdown against the configured starting figure (ADR 0007). A run whose cash is
 half the configured figure or less reads as a drawdown past the rule's 50%
 asymptote on that first snapshot, and the engine halts, correctly.
 
+The engine image is the run's own `lean_image` setting in `run.json`,
+required and never defaulted: `quantconnect/lean@sha256:` followed by 64
+lowercase hex characters, never a tag such as `:latest` or a dated build
+tag. A LEAN run is evidence (ADR 0012, ADR 0017) — a moving tag lets
+QuantConnect change the engine between one run and the next with no
+recorded cause, including its fill modelling, its data-normalisation
+implementation and its Python version, so a later divergence (including one
+against `cmd/backtest`) could not be attributed. `algorithm.py`'s
+`validate_lean_image` rejects anything else and stops the run at startup;
+the accepted digest is logged as `adapter: lean_image=...` so every run's
+own log records the engine that produced it.
+
+**The launch command must use the same image the run declares.** `run.json`
+only states which digest the run claims; nothing in the adapter can compel
+`lean backtest` to actually launch that image, so the two must be kept in
+step by hand. With the `lean` CLI, pass the digest to `--image`:
+
+```sh
+lean backtest <project> --image quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d
+```
+
+With a raw `docker run`, use the digest reference directly rather than a
+tag, so Docker cannot silently resolve a different image locally:
+
+```sh
+docker run quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d ...
+```
+
+The current pinned digest is
+`quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d`
+(image created 2026-09-21; it is the one on this development machine).
+
+**Upgrading LEAN is a deliberate change**, never an implicit one from a
+moving tag:
+
+1. Choose the tag to upgrade to and pull it: `docker pull
+   quantconnect/lean:<tag>` (for example `latest`).
+2. Read the digest of **that same tag**: `docker image inspect --format
+   '{{json .RepoDigests}}' quantconnect/lean:<tag>`, and take its
+   `quantconnect/lean@sha256:...` entry. Inspecting any other tag records,
+   and then tests, a different image from the one chosen.
+3. Update `run.json`'s `lean_image`, the launch command above, and this
+   README to the new digest and its image-creation date.
+4. Re-run the acceptance backtests against the new digest.
+5. Record the result — pass/fail and any behavioural difference from the
+   prior digest — in the pull request that bumps the digest.
+
 There is no opening snapshot: warm-up bars precede StartDate, and the reducer
 cannot size a Unit on its first bar because N and the channels use preceding
 bars. The snapshot after bar 1 therefore arrives before any sizing is possible.

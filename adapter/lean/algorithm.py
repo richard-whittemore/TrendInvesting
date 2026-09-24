@@ -7,6 +7,7 @@ from json import load
 from math import isfinite
 from os import environ
 from os.path import abspath, dirname, join
+from re import fullmatch
 from sys import path
 from time import perf_counter
 from zoneinfo import ZoneInfo
@@ -17,6 +18,26 @@ for candidate in ("/LeanCLI", dirname(abspath(__file__))):
 
 from client import Client
 from publisher import Publisher, raw_view
+
+# quantconnect/lean@sha256:<64 lowercase hex>; never a tag such as :latest
+# or a version tag, which both float (see validate_lean_image).
+_LEAN_IMAGE_DIGEST = r"quantconnect/lean@sha256:[0-9a-f]{64}"
+
+
+def validate_lean_image(image):
+    """Require the run's LEAN engine image, pinned by digest, never a tag.
+
+    A LEAN run is evidence (ADR 0012, ADR 0017): the moving `:latest` tag
+    lets the engine that produces a run change silently between one run and
+    the next, so a later divergence — including one against cmd/backtest —
+    cannot be attributed to anything. Returns the image on success; raises
+    ValueError naming the defect otherwise, for the caller to fail closed.
+    """
+    if type(image) is not str or fullmatch(_LEAN_IMAGE_DIGEST, image) is None:
+        raise ValueError(
+            "lean_image must be 'quantconnect/lean@sha256:' followed by 64 lowercase hex "
+            "characters (a moving tag such as ':latest' is not accepted); got {!r}".format(image))
+    return image
 
 
 def load_settings():
@@ -50,6 +71,13 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             if type(cash) not in (int, float) or not isfinite(cash) or cash <= 0:
                 raise ValueError("cash must be a finite positive number")
             self.SetCash(cash)
+            # The exact engine image the run was executed under, never a
+            # default: pinning by digest is what makes a run evidence (ADR
+            # 0012, ADR 0017) rather than a result tied to whichever image
+            # happened to be `latest` that day. Logged so every run's own
+            # log records which engine produced it.
+            lean_image = validate_lean_image(settings.get("lean_image"))
+            self.Log("adapter: lean_image={}".format(lean_image))
             self.SetTimeZone(TimeZones.NewYork)
             self.instrument = settings["symbol"]
             self.symbol = self.AddEquity(
