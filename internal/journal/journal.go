@@ -484,6 +484,21 @@ type Verification struct {
 	// Complete means the final input is event.RunCompletedEventType: no
 	// further input exists for this run. Terminal decisions may follow it.
 	Complete bool
+	// Stopped means an event.AdapterRunStoppedEventType input is present:
+	// this run was deliberately stopped by an adapter (ADR 0012), rather
+	// than reaching the natural end of its own input stream. StopReason and
+	// StopInstrumentID restate that event's own payload, decoded here so a
+	// caller (cmd/backtest's -verify) can report a stopped run distinctly
+	// without re-reading records itself.
+	Stopped          bool
+	StopReason       string
+	StopInstrumentID string
+	// InputAfterStop names the first input recorded after the stop that
+	// was not replay.run.completed, or is empty. The reducer refuses any
+	// such input (strategy.Reducer.Apply), but the recorder keeps it as
+	// evidence of the failed run, so Verify reports it rather than refusing
+	// the journal, and such a run is never Complete.
+	InputAfterStop string
 }
 
 // Verify checks the chain (ADR 0017), then validates the header and envelopes
@@ -523,20 +538,63 @@ func Verify(r io.Reader) (Verification, error) {
 	if err := header.validate(); err != nil {
 		return Verification{}, err
 	}
-	var complete bool
+	var complete, stopped, completedAfterStop bool
+	var stopReason, stopInstrumentID, inputAfterStop string
 	for _, record := range records {
 		if err := record.Envelope.Validate(); err != nil {
 			return Verification{}, fmt.Errorf("journal: record %d: %w", record.Sequence, err)
 		}
-		if record.Kind == KindInput {
-			complete = record.Envelope.Type == event.RunCompletedEventType
+		if record.Kind != KindInput {
+			continue
+		}
+		if stopped {
+			// The reducer's ordering rule (strategy.Reducer.Apply): after a
+			// deliberate stop, exactly one replay.run.completed may follow,
+			// and nothing else. Any other input, including a second stop or
+			// a second completion, was refused, but the recorder keeps it as
+			// evidence of the failed run. So it is reported, not validated,
+			// never overwrites the accepted stop, and the run is never
+			// Complete.
+			if inputAfterStop == "" {
+				if record.Envelope.Type == event.RunCompletedEventType && !completedAfterStop {
+					completedAfterStop = true
+				} else {
+					inputAfterStop = record.Envelope.Type
+				}
+			}
+			complete = inputAfterStop == "" && record.Envelope.Type == event.RunCompletedEventType
+			continue
+		}
+		complete = record.Envelope.Type == event.RunCompletedEventType
+		if record.Envelope.Type == event.AdapterRunStoppedEventType {
+			var payload event.AdapterRunStoppedPayload
+			if err := json.Unmarshal(record.Envelope.Payload, &payload); err != nil {
+				return Verification{}, fmt.Errorf("journal: record %d: decode adapter run stopped payload: %w", record.Sequence, err)
+			}
+			// A well-chained record is evidence of the stop only if it meets
+			// the stop's own contract at the schema version this build reads
+			// (ADR 0015); the reducer refuses anything else, so it is never
+			// reported as a verified stop.
+			if record.Envelope.SchemaVersion != event.AdapterRunStoppedSchemaVersion {
+				return Verification{}, fmt.Errorf("journal: record %d: adapter run stopped schema version %d is not the version %d this build reads", record.Sequence, record.Envelope.SchemaVersion, event.AdapterRunStoppedSchemaVersion)
+			}
+			if err := payload.Validate(); err != nil {
+				return Verification{}, fmt.Errorf("journal: record %d: %w", record.Sequence, err)
+			}
+			stopped = true
+			stopReason = payload.Reason
+			stopInstrumentID = payload.InstrumentID
 		}
 	}
 
 	return Verification{
-		Header:          header,
-		RecordCount:     uint64(len(records)),
-		FinalRecordHash: final,
-		Complete:        complete,
+		Header:           header,
+		RecordCount:      uint64(len(records)),
+		FinalRecordHash:  final,
+		Complete:         complete,
+		Stopped:          stopped,
+		StopReason:       stopReason,
+		StopInstrumentID: stopInstrumentID,
+		InputAfterStop:   inputAfterStop,
 	}, nil
 }

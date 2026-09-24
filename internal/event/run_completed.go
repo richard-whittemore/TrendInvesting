@@ -26,6 +26,12 @@ const RunCompletedSchemaVersion uint32 = 1
 // EventTime states when, which is what every expiry the event causes is
 // stamped with.
 //
+// It states no REASON either, deliberately: every run's stream ends this
+// way, whether it ran to its last bar or was cut short. A reason belongs to
+// AdapterRunStoppedEventType instead, sent immediately before this one only
+// when an adapter deliberately stopped the run (ADR 0012) — its absence is
+// itself the fact that the run ended cleanly.
+//
 // It carried a CompletedAt of its own until a review observed the obvious
 // hazard: two instants that must always be equal are two instants that will
 // eventually disagree, and a disagreement here would stamp the expiries at

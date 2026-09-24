@@ -351,7 +351,11 @@ func journalOf(root string, entry registry.Entry) string {
 
 // verify validates a journal and reports its chain anchor (ADR 0017) and
 // whether its final input declares the run complete (event.RunCompletedEventType).
-// Incomplete runs remain valid evidence of failed runs (ADR 0012).
+// Incomplete runs remain valid evidence of failed runs (ADR 0012). A run an
+// adapter deliberately stopped (event.AdapterRunStoppedEventType) is reported
+// distinctly from a plain "complete", naming the reason and instrument,
+// rather than being indistinguishable from a run that simply reached its
+// last bar (ADR 0012).
 func verify(path string, out io.Writer) error {
 	file, err := os.Open(path)
 	if err != nil {
@@ -365,7 +369,21 @@ func verify(path string, out io.Writer) error {
 	}
 
 	completion := "INCOMPLETE — final input is not replay.run.completed; the run did not finish"
-	if verification.Complete {
+	switch {
+	case verification.InputAfterStop != "":
+		completion = fmt.Sprintf("INCOMPLETE — stopped: %s %s, then received %s, which may not follow a stop; the run failed", verification.StopReason, verification.StopInstrumentID, verification.InputAfterStop)
+	case verification.Stopped && !verification.Complete:
+		// The engine accepted the stop, but the completion that should
+		// follow it never arrived, so outstanding proposals were never
+		// expired. Both facts stay visible (ADR 0012).
+		completion = fmt.Sprintf("INCOMPLETE — stopped: %s %s, but the final input is not replay.run.completed; the run did not finish", verification.StopReason, verification.StopInstrumentID)
+	case verification.Stopped:
+		// Distinct from plain "complete": an adapter deliberately stopped
+		// this run (ADR 0012, event.AdapterRunStoppedEventType), so a
+		// reviewer reading this line never mistakes it for one that simply
+		// reached its last bar.
+		completion = fmt.Sprintf("stopped: %s %s", verification.StopReason, verification.StopInstrumentID)
+	case verification.Complete:
 		completion = "complete"
 	}
 	report := fmt.Sprintf(`journal            %s

@@ -152,6 +152,75 @@ class PublisherTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             raw_view(frame, end)
 
+    def test_run_stopped_payload_matches_go_contract(self):
+        client = Client()
+        pub = Publisher(client, "hash", "version", "test")
+        b = bar(9)
+        pub.publish("AAPL", b, raw_view(Frame(b.EndTime), b.EndTime), "2014-06-09T20:00:00Z")
+        pub.publish_run_stopped("delisted", "LEAN reports AAPL DELISTED", "AAPL")
+        envelope = client.sent[-1]
+        self.assertEqual(envelope["type"], "adapter.run.stopped")
+        self.assertEqual(envelope["payload"], {
+            "reason": "delisted", "instrument_id": "AAPL", "detail": "LEAN reports AAPL DELISTED"})
+        result = subprocess.run(
+            ["go", "run", "./adapter/lean/tests/testdata/run_stopped_contract.go"],
+            cwd=Path(__file__).resolve().parents[3],
+            input=json.dumps(envelope, separators=(",", ":")),
+            text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_run_stopped_is_sent_immediately_before_completion(self):
+        client = Client()
+        pub = Publisher(client, "hash", "version", "test")
+        b = bar(9)
+        pub.publish("AAPL", b, raw_view(Frame(b.EndTime), b.EndTime), "2014-06-09T20:00:00Z")
+        pub.publish_run_stopped("delisted", "reason", "AAPL")
+        pub.publish_run_completed()
+        stop, completed = client.sent[-2], client.sent[-1]
+        self.assertEqual(stop["type"], "adapter.run.stopped")
+        self.assertEqual(completed["type"], "replay.run.completed")
+        self.assertEqual(stop["sequence"] + 1, completed["sequence"])
+        self.assertEqual(stop["event_time"], "2014-06-09T20:00:00Z")
+
+    def test_run_stopped_rejects_an_unrecognised_reason(self):
+        client = Client()
+        pub = Publisher(client, "hash", "version", "test")
+        pub.publish("AAPL", bar(9), raw_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
+        with self.assertRaises(ValueError):
+            pub.publish_run_stopped("invalid-startup", "reason", "AAPL")
+        self.assertEqual(len(client.sent), 1)
+
+    def test_run_stopped_requires_detail(self):
+        client = Client()
+        pub = Publisher(client, "hash", "version", "test")
+        pub.publish("AAPL", bar(9), raw_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
+        with self.assertRaises(ValueError):
+            pub.publish_run_stopped("delisted", "", "AAPL")
+        self.assertEqual(len(client.sent), 1)
+
+    def test_run_stopped_requires_an_instrument_for_delisted(self):
+        client = Client()
+        pub = Publisher(client, "hash", "version", "test")
+        pub.publish("AAPL", bar(9), raw_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
+        with self.assertRaises(ValueError):
+            pub.publish_run_stopped("delisted", "reason", None)
+        self.assertEqual(len(client.sent), 1)
+
+    def test_run_stopped_with_no_prior_input_raises(self):
+        client = Client()
+        pub = Publisher(client, "hash", "version", "test")
+        with self.assertRaises(ValueError):
+            pub.publish_run_stopped("delisted", "reason", "AAPL")
+        self.assertEqual(client.sent, [])
+
+    def test_nothing_may_follow_completion_including_a_stop(self):
+        client = Client()
+        pub = Publisher(client, "hash", "version", "test")
+        pub.publish("AAPL", bar(9), raw_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
+        pub.publish_run_completed()
+        with self.assertRaises(ValueError):
+            pub.publish_run_stopped("delisted", "reason", "AAPL")
+
     def test_fail_closed_on_duplicate_bar_or_wrong_engine_identity(self):
         client = Client()
         pub = Publisher(client, "hash", "version", "run")

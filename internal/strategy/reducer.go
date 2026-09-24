@@ -62,7 +62,13 @@ type Reducer struct {
 	// A run ends once, and an input arriving after it contradicts the fact
 	// that event states, so Apply fails closed rather than absorbing it (see
 	// applyRunCompleted).
-	streamEnded        bool
+	streamEnded bool
+	// runStopped records that event.AdapterRunStoppedEventType has been
+	// applied: the adapter deliberately stopped this run (ADR 0012). Only
+	// event.RunCompletedEventType may follow it (see Apply), so a stop that
+	// some further bar or fill then contradicted — market data arriving
+	// after the run claimed to have deliberately ended — cannot be recorded.
+	runStopped         bool
 	entryChannelLength int
 	// exitChannelLength is event.ConfigurationPayload.ExitChannelLength
 	// (20 in the Baseline, The Turtle Rules p.26, ADR 0002), captured once
@@ -280,12 +286,20 @@ func NewReducer(strategyVersion string, payload event.ConfigurationPayload) (*Re
 //     Delisting Exit (CONTEXT.md; ADR 0009), which forces an open Campaign
 //     closed at the last available price — see delisting.go's
 //     applyCorporateAction.
+//   - event.AdapterRunStoppedEventType: record, no decision — an adapter's
+//     own report that it deliberately stopped this run (ADR 0012), the same
+//     rule applyConfiguration follows for the event that opens one. Only
+//     event.RunCompletedEventType may follow it (checked below) — see
+//     applyAdapterRunStopped.
 //
 // Any other event type fails closed rather than being silently ignored
 // (docs/development.md principle 4: "Fail closed on unknown schemas").
 func (r *Reducer) Apply(_ context.Context, envelope event.Envelope) ([]event.Envelope, error) {
 	if r.streamEnded {
 		return nil, fmt.Errorf("strategy: the input stream has already ended, so %q at sequence %d cannot exist; a run ends once (see applyRunCompleted)", envelope.Type, envelope.Sequence)
+	}
+	if r.runStopped && envelope.Type != event.RunCompletedEventType {
+		return nil, fmt.Errorf("strategy: the run was deliberately stopped, so %q at sequence %d cannot exist; only %s may follow a stop (see applyAdapterRunStopped)", envelope.Type, envelope.Sequence, event.RunCompletedEventType)
 	}
 	switch envelope.Type {
 	case event.ConfigurationEventType:
@@ -302,6 +316,8 @@ func (r *Reducer) Apply(_ context.Context, envelope event.Envelope) ([]event.Env
 		return r.applyCorporateAction(envelope)
 	case event.RunCompletedEventType:
 		return r.applyRunCompleted(envelope)
+	case event.AdapterRunStoppedEventType:
+		return r.applyAdapterRunStopped(envelope)
 	default:
 		return nil, fmt.Errorf("strategy: unrecognized event type %q", envelope.Type)
 	}

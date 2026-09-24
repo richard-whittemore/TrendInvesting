@@ -367,10 +367,12 @@ class DelistingTests(unittest.TestCase):
         self.feed(algo, 6)
         self.feed(algo, 9, delistings={"AAPL": self.notice("delisted")})
         # The day's real bar and its snapshot still reach the engine; the
-        # delisting itself is never published. The stream is then completed,
-        # so the reducer expires anything outstanding, and the run stops.
+        # delisting itself is never published. adapter.run.stopped records
+        # the deliberate stop, immediately before the stream's own
+        # completion, which expires anything outstanding; the run then stops.
         self.assertEqual([e["type"] for e in algo.client.sent],
-                         ["market.bar.completed", "account.snapshot"] * 2 + ["replay.run.completed"])
+                         ["market.bar.completed", "account.snapshot"] * 2
+                         + ["adapter.run.stopped", "replay.run.completed"])
         self.assertTrue(algo.failed)
         self.assertIn("AAPL DELISTED", algo.quit_reason)
 
@@ -379,10 +381,46 @@ class DelistingTests(unittest.TestCase):
         self.feed(algo, 6)
         sent = len(algo.client.sent)
         algo.OnData(slice_of({}, delistings={"AAPL": self.notice("delisted")}))
-        # Only the stream's completion follows, stamped at the last bar.
-        self.assertEqual([e["type"] for e in algo.client.sent[sent:]], ["replay.run.completed"])
-        self.assertEqual(algo.client.sent[-1]["event_time"], "2014-06-06T20:00:00Z")
+        # The stop and then the stream's completion follow, both stamped at
+        # the last bar this run actually received.
+        self.assertEqual([e["type"] for e in algo.client.sent[sent:]],
+                         ["adapter.run.stopped", "replay.run.completed"])
+        for envelope in algo.client.sent[sent:]:
+            self.assertEqual(envelope["event_time"], "2014-06-06T20:00:00Z")
         self.assertTrue(algo.failed)
+
+    def test_delisted_sends_stop_then_completed_in_order_with_sequence_numbers(self):
+        """The stop is sent, then the completion, in that
+        order, continuing the one input sequence — never the other way
+        round and never with a gap or a repeat."""
+        algo = self.start()
+        self.feed(algo, 6)
+        self.feed(algo, 9, delistings={"AAPL": self.notice("delisted")})
+        stop, completed = algo.client.sent[-2], algo.client.sent[-1]
+
+        self.assertEqual(stop["type"], "adapter.run.stopped")
+        self.assertEqual(stop["schema_version"], 1)
+        self.assertEqual(stop["payload"], {
+            "reason": "delisted", "instrument_id": "AAPL",
+            "detail": stop["payload"]["detail"]})
+        self.assertIn("AAPL DELISTED", stop["payload"]["detail"])
+
+        self.assertEqual(completed["type"], "replay.run.completed")
+
+        # Sequences continue the one contiguous stream with no gap: two
+        # bar/snapshot pairs, then the stop, then the completion.
+        self.assertEqual([e["sequence"] for e in algo.client.sent], list(range(2, 8)))
+        self.assertEqual(stop["sequence"] + 1, completed["sequence"])
+        self.assertEqual(stop["event_time"], completed["event_time"])
+
+    def test_a_clean_end_sends_no_stop(self):
+        """A run that simply reaches its last bar sends no adapter.run.stopped
+        at all: the event exists only for a DELIBERATE stop."""
+        algo = self.start()
+        self.feed(algo, 6)
+        self.feed(algo, 9)
+        algo.OnEndOfAlgorithm()
+        self.assertNotIn("adapter.run.stopped", [e["type"] for e in algo.client.sent])
 
     def test_nothing_is_published_after_the_stop(self):
         algo = self.start()

@@ -102,14 +102,27 @@ afterwards. So publishing an untrustworthy one could record a Delisting Exit
 that never happened.
 
 On `DELISTED` for its instrument, the adapter publishes that slice's bar and
-snapshot, if the slice has one, and then stops the run, naming the instrument.
-A delisting warning is logged, and the run continues. A ticker change
-(`SymbolChangedEvents`) is logged and never published; the adapter holds
-`instrument_id` constant, so a rename changes nothing for one instrument. This
-is a backtest rule. In live trading the broker processes a delisting and the
-system learns of it through reconciliation (ADR 0019, #113). Publishing
-delistings needs a corporate-actions source that states *why* a security
-stopped trading (#41, #112).
+snapshot, if the slice has one, then sends `adapter.run.stopped` (reason
+`delisted`, naming the instrument; `event.AdapterRunStoppedEventType`,
+`internal/event/run_stopped.go`) immediately before `replay.run.completed`,
+and finally stops the run. This is what lets a journal tell a run the adapter
+deliberately stopped apart from one that simply reached its last bar (ADR
+0012) — before this event existed, both cases ended a journal identically,
+at a plain `replay.run.completed`. A delisting warning is logged, and the run
+continues. A ticker change (`SymbolChangedEvents`) is logged and never
+published; the adapter holds `instrument_id` constant, so a rename changes
+nothing for one instrument. This is a backtest rule. In live trading the
+broker processes a delisting and the system learns of it through
+reconciliation (ADR 0019, #113). Publishing delistings needs a
+corporate-actions source that states *why* a security stopped trading (#41,
+#112).
+
+**A startup failure sends no `adapter.run.stopped` event.** `Initialize`'s
+own `except` block (`self.stop(...)`) can fire before `self.client` or
+`self.publisher` exist at all — no connection, no sequence, and no run for
+this event to belong to. That path is unchanged: it still just stops the
+algorithm and logs, with nothing recorded in any journal, because there is no
+journal yet to record it in.
 
 The adapter will still need to:
 
