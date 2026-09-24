@@ -280,6 +280,9 @@ class OrderDesk:
         # Split-adjusted shares per raw share (see the class doc); None until
         # the first bar states it (observe_ratio).
         self.ratio = None
+        # When a split LEAN applied to a position or order is still to be
+        # checked (require_split_applied); None otherwise.
+        self.split_to_check = None
 
     def _closed(self):
         """The LEAN order statuses in which an order no longer works at the broker."""
@@ -340,6 +343,74 @@ class OrderDesk:
             self.algorithm.Log("adapter: split ratio {} -> {} at the bar ending {}, while flat".format(
                 self.ratio, ratio, period_end))
         self.ratio = ratio
+
+    def apply_split(self, split_factor, when):
+        """Take the new ratio from a split LEAN reports as having occurred.
+
+        The engine's split-adjusted view is adjusted for every split, later
+        ones included, so a split changes none of its levels, quantities or
+        N: only how many split-adjusted shares a raw share is, which falls by
+        the split factor (0.5 for a 2-for-1). LEAN, under Raw normalisation,
+        applies the split itself: it divides the holding and each open
+        order's quantity by the factor and multiplies each stop price by it,
+        rounded to the tick (observed on the pinned image). It reports the
+        orders' changes after this slice, so whether it did so exactly is
+        checked at the start of the next (require_split_applied).
+        """
+        if self.ratio is None:
+            return
+        ratio = whole_split_ratio(self.ratio * split_factor)
+        self.algorithm.Log("adapter: split of {} at {} (factor {}): split ratio {} -> {}".format(
+            self.instrument, when, split_factor, self.ratio, ratio))
+        self.ratio = ratio
+        if not self._flat():
+            self.split_to_check = when
+
+    def require_split_applied(self, when):
+        """After a split, LEAN's raw position and orders are exactly the engine's.
+
+        Every held Unit rests one Exit Order (ADR 0005's amendment), so the
+        holding is the sum of their quantities at the new ratio. Each working
+        order is for its split-adjusted quantity at the new ratio, and rests
+        within one tick of its split-adjusted level at it, since LEAN rounds a
+        split stop to the tick. Anything else means the position or a stop
+        is not what the engine believes, and the run stops: a split that
+        needs anything more than LEAN's own adjustment has no corporate-action
+        contract to carry it yet.
+        """
+        split_at = self.split_to_check
+        if split_at is None:
+            return
+        self.split_to_check = None
+        ratio = self.ratio
+        tick = float(self.algorithm.Securities[self.symbol].SymbolProperties.MinimumPriceVariation)
+        problems = []
+        protected = sum(order["quantity"] for order in self.exit_orders.values()) // ratio
+        holding = self.algorithm.Portfolio[self.symbol].Quantity
+        if holding != protected:
+            problems.append("LEAN holds {} raw shares, but the engine's Units are {} raw "
+                            "shares".format(holding, protected))
+        for ticket in self._open_tickets():
+            placed = self.orders.get(ticket.OrderId)
+            if placed is None:
+                problems.append("LEAN works order {}, which this adapter did not place".format(
+                    ticket.OrderId))
+                continue
+            quantity, level = placed["quantity"] // ratio, placed["level"] * ratio
+            stop = float(ticket.Get(self.lean.OrderField.StopPrice))
+            if ticket.Quantity != quantity or abs(stop - level) > tick + 1e-9:
+                problems.append("LEAN order {} (tag={}) is for {} raw shares at {:.4f}, but the "
+                                "engine's {} split-adjusted shares at {} are {} raw shares at "
+                                "{:.4f}".format(ticket.OrderId, ticket.Tag, ticket.Quantity, stop,
+                                                placed["quantity"], placed["level"], quantity,
+                                                level))
+        if problems:
+            raise Uncertain("after the split of {} at {}, at {} split-adjusted shares per raw "
+                            "share, {}: {}".format(self.instrument, split_at, ratio, when,
+                                                   "; ".join(problems)))
+        self.algorithm.Log("adapter: split at {} reconciled {}: LEAN holds {} raw shares and "
+                           "works {} order(s), as the engine's figures are at split ratio {}".format(
+                               split_at, when, holding, len(self._open_tickets()), ratio))
 
     def n_for_tag(self, tag):
         """The raw N LEAN slips the tagged order by: the engine's split-adjusted

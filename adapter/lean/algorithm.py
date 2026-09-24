@@ -110,7 +110,8 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.symbol = security.Symbol
             self.desk = OrderDesk(self, self.symbol, self.instrument, SimpleNamespace(
                 OrderProperties=OrderProperties, TimeInForce=TimeInForce,
-                UpdateOrderFields=UpdateOrderFields, OrderStatus=OrderStatus))
+                UpdateOrderFields=UpdateOrderFields, OrderStatus=OrderStatus,
+                OrderField=OrderField))
             # ADR 0013: slippage_n x the N the engine supplied with each
             # order's decision, and Interactive Brokers commissions.
             security.SetSlippageModel(NSlippageModel(slippage_n, self.desk.n_for_tag,
@@ -146,6 +147,12 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             return
         try:
             self.desk.require_cancels_confirmed("before the next session's bar")
+            # LEAN reports a split's changes to open orders after the split's
+            # slice, so they have been drained by now (OrderDesk.apply_split).
+            self.desk.require_split_applied("before the next session's bar")
+            split = data.Splits.get(self.symbol)
+            if split is not None and split.Type == SplitType.SplitOccurred:
+                self.desk.apply_split(float(split.SplitFactor), split.Time)
         except Exception as err:
             self.stop("order state uncertain: {}".format(err))
             return
