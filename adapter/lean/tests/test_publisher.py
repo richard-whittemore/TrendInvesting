@@ -1,8 +1,14 @@
 import hashlib
 import json
+import sys
 import unittest
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
+
+adapter_dir = str(Path(__file__).resolve().parents[1])
+if adapter_dir not in sys.path:
+    sys.path.insert(0, adapter_dir)
 
 from publisher import Publisher, raw_view
 
