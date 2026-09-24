@@ -1,10 +1,30 @@
 """Sequential Unix-socket transport reused from the measured ADR 0014 spike."""
+import hashlib
 import json
 import socket
 
 DEFAULT_MAX_FRAME_BYTES = 1 << 20
 CODE_UNAVAILABLE = "unavailable"
 _SEPARATORS = (",", ":")
+_PAYLOAD_KEY = b'"payload":'
+
+
+def raw_payload(line):
+    """Return the exact bytes of the decision envelope's own payload.
+
+    event.HashPayload hashes the payload's raw bytes, so the check must see
+    those bytes, not a re-serialisation: Python's JSON encoder does not
+    reproduce Go's float formatting or HTML escaping. The first unescaped
+    '"payload":' in the reply is the envelope's own key — "payload_hash"
+    does not match it, a quote inside a string value is always escaped, and
+    every nested decision's payload lies inside this one, after it.
+    """
+    at = line.find(_PAYLOAD_KEY)
+    if at < 0:
+        raise Unavailable("decision envelope carries no payload")
+    text = line[at + len(_PAYLOAD_KEY):].decode("utf-8").lstrip(" \t\r\n")
+    _, end = json.JSONDecoder().raw_decode(text)
+    return text[:end].encode("utf-8")
 
 class Unavailable(Exception):
     """The engine cannot safely answer this stream."""
@@ -102,6 +122,10 @@ class Client:
             raise OutOfOrder(
                 "decision cites {}, sent {}".format(decision.get("causation_id"), bar["id"])
             )
+        # The envelope's own integrity field (event.Envelope.Validate's
+        # PayloadHash rule), checked before any decision inside it is used.
+        if hashlib.sha256(raw_payload(line)).hexdigest() != decision.get("payload_hash"):
+            raise Unavailable("decision payload does not match its payload_hash")
         return decision
 
     def _read_line(self):

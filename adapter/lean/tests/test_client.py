@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import socket
@@ -45,27 +46,43 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(Unavailable):
             Client(self.sock_path, timeout=1.0)
 
-    def test_decide_round_trip_success(self):
-        def handler(conn):
-            line = conn.recv(4096).decode()
-            req = json.loads(line)
-            reply = {
-                "envelope": {
-                    "id": "decisions:" + req["id"],
-                    "type": "engine.decisions",
-                    "causation_id": req["id"],
-                    "sequence": req["sequence"],
-                    "payload": {"decisions": []},
-                }
-            }
-            conn.sendall(json.dumps(reply).encode() + b"\n")
+    def _reply_line(self, req, payload_bytes, payload_hash=None):
+        """Build a reply the way cmd/engine does: payload_hash over the exact
+        payload bytes placed on the wire."""
+        if payload_hash is None:
+            payload_hash = hashlib.sha256(payload_bytes).hexdigest()
+        head = json.dumps({"id": "decisions:" + req["id"], "type": "engine.decisions",
+                           "causation_id": req["id"], "sequence": req["sequence"],
+                           "payload_hash": payload_hash}, separators=(",", ":"))
+        return b'{"envelope":' + head[:-1].encode() + b',"payload":' + payload_bytes + b"}}\n"
 
+    def _round_trip(self, payload_bytes, payload_hash=None):
+        def handler(conn):
+            req = json.loads(conn.recv(4096).decode())
+            conn.sendall(self._reply_line(req, payload_bytes, payload_hash))
         th = self._serve_one(handler)
-        with Client(self.sock_path, timeout=2.0) as client:
-            bar = {"id": "bar-2", "sequence": 2}
-            decision = client.decide(bar)
-            self.assertEqual(decision["causation_id"], "bar-2")
-        th.join()
+        try:
+            with Client(self.sock_path, timeout=2.0) as client:
+                return client.decide({"id": "bar-2", "sequence": 2})
+        finally:
+            th.join()
+
+    def test_decide_round_trip_success(self):
+        decision = self._round_trip(b'{"decisions":[]}')
+        self.assertEqual(decision["causation_id"], "bar-2")
+
+    def test_payload_hash_is_checked_over_the_bytes_received(self):
+        """Go's encoder escapes '<' as \\u003c; a Python re-serialisation would
+        write '<' and hash different bytes. The nested decision's own
+        "payload" key must not be mistaken for the envelope's."""
+        payload = b'{"decisions":[{"id":"d1","payload":{"note":"a\\u003cb","x":1e-07}}]}'
+        self.assertNotEqual(json.dumps(json.loads(payload), separators=(",", ":")).encode(), payload)
+        decision = self._round_trip(payload)
+        self.assertEqual(decision["payload"]["decisions"][0]["payload"]["note"], "a<b")
+
+    def test_payload_that_does_not_match_its_hash_is_refused(self):
+        with self.assertRaises(Unavailable):
+            self._round_trip(b'{"decisions":[]}', payload_hash=hashlib.sha256(b"other").hexdigest())
 
     def test_decide_rejected_preserves_connection_state(self):
         def handler(conn):

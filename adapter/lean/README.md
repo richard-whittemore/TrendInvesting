@@ -16,8 +16,19 @@ does not make. `client.py` is the transport, reused from the measured ADR
 0014 spike (`spike/`); `publisher.py` maps a LEAN bar and its raw counterpart
 to the wire payload without any methodology.
 
+Nothing yet sends `account.snapshot` into the engine. The reducer refuses to
+size a Unit without a snapshot-backed cash figure (ADR 0010), so the first bar
+on which it finds a breakout — during LEAN's warm-up or after it — stops the
+run, fail-closed, with "no account.snapshot has ever supplied an
+available-cash figure". Warm-up is not a special case here: readiness and
+sizing are both the reducer's, and the adapter does not mark or filter bars to
+avoid them. Supplying account events to a live engine session is tracked in
+#158; until it lands, this adapter can only run over windows, or with
+configurations, in which no breakout occurs.
+
 The adapter will still need to:
 
+- send `account.snapshot` and `account.cash-movement` events into the same input sequence (#158);
 - normalize universe changes, corporate actions, connection changes, and brokerage events into versioned messages;
 - validate returned trade proposals against current LEAN state;
 - submit approved orders through LEAN, but never act on a decision that answers a warm-up bar — `OnData` already computes `warming = self.IsWarmingUp` once per bar, at exactly the point an order-submission step would sit, for #29 to check before acting on that bar's decision;

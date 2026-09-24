@@ -14,6 +14,7 @@ for p in (tests_dir, adapter_dir):
 
 from test_publisher import Client as FakeEngineClient, Frame, bar
 
+from client import Unavailable
 from publisher import Publisher
 
 
@@ -30,6 +31,11 @@ class FakeAlgorithm:
         self.warmup = (count, resolution)
     def Log(self, message): pass
     def Quit(self, message): self.quit_reason = message
+    # Every LEAN order entry point records its call, so a test can assert that
+    # none was made rather than relying on the method being absent.
+    def _order(self, *args, **kwargs):
+        self.__dict__.setdefault("orders", []).append((args, kwargs))
+    MarketOrder = LimitOrder = StopMarketOrder = StopLimitOrder = MarketOnOpenOrder = _order
 
 
 imports = types.ModuleType("AlgorithmImports")
@@ -76,7 +82,7 @@ class AlgorithmTests(unittest.TestCase):
         self.assertEqual(algo.warmup_seen, 3)
         self.assertEqual(algo.bar_count, 4)
         self.assertEqual(seen[-1][-1], "2014-06-09T20:00:00Z")
-        self.assertFalse(hasattr(algo, "MarketOrder"))
+        self.assertEqual(getattr(algo, "orders", []), [])
 
     def test_warmup_bars_are_published_and_numbered_contiguously(self):
         """publishes every completed bar, warm-up included, in one contiguous sequence."""
@@ -113,28 +119,34 @@ class AlgorithmTests(unittest.TestCase):
         self.assertEqual(algo.bar_count, 0)
 
     def test_absent_engine_quits_at_startup(self):
-        with patch.object(algorithm, "load_settings", side_effect=OSError("absent")):
+        settings = {"socket": "unused", "configuration_hash": "hash",
+                    "strategy_version": "version", "run_id": "test",
+                    "symbol": "AAPL", "start": "2014-06-09", "end": "2014-06-10",
+                    "warmup_bars": 3}
+        with patch.object(algorithm, "load_settings", return_value=settings), \
+                patch.object(algorithm, "Client", side_effect=Unavailable("no engine on the socket")):
             algo = algorithm.CompletedBarsAlgorithm()
             algo.Initialize()
+        self.assertIsNone(algo.client)
         self.assertTrue(algo.failed)
-        self.assertIn("unavailable", algo.quit_reason)
+        self.assertIn("no engine on the socket", algo.quit_reason)
 
-    def test_calendar_day_warmup_reading_fails_bar_count(self):
-        """Warm-up counts completed bars, never calendar days.
-
-        Starting Friday 2014-06-06, 3 calendar days ends on Monday 2014-06-09.
-        A calendar-day reading would conclude warm-up having seen only 1
-        completed trading bar (Friday). The adapter configures SetWarmUp with
-        bar count at daily resolution so all 3 trading bars are observed.
-        """
-        start = datetime(2014, 6, 6)
-        warmup_target = 3
-        calendar_bars = [
-            b for b in (datetime(2014, 6, 6), datetime(2014, 6, 9), datetime(2014, 6, 10))
-            if (b - start).days < warmup_target
-        ]
-        self.assertEqual(len(calendar_bars), 1)
-        self.assertNotEqual(len(calendar_bars), warmup_target)
+    def test_warmup_is_requested_in_bars_not_as_a_calendar_span(self):
+        """LEAN counts a SetWarmUp(int, Resolution) in bars; a timedelta would
+        be read as calendar time. Driven over Friday, Monday and Tuesday, the
+        three warm-up bars span five calendar days and are all counted."""
+        algo = self.init()
+        count, resolution = algo.warmup
+        self.assertIs(type(count), int)
+        self.assertEqual((count, resolution), (3, "daily"))
+        algo.publisher = types.SimpleNamespace(sequence=2, publish=lambda *args: [])
+        for day in (6, 9, 10):
+            b = bar(day)
+            algo.IsWarmingUp = True
+            algo.History = lambda *args, **kwargs: Frame(b.EndTime)
+            algo.OnData(types.SimpleNamespace(Bars={"AAPL": b}))
+        self.assertEqual(algo.warmup_seen, 3)
+        self.assertFalse(algo.failed)
 
     def test_invalid_warmup_bars_fails_closed(self):
         for bad_warmup in (-1, "3", 3.5, None):

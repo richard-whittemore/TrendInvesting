@@ -1,7 +1,6 @@
 """Map LEAN bars to the event contract without strategy arithmetic (ADR 0004)."""
 import hashlib
 import json
-from datetime import datetime, timezone
 
 
 def raw_view(history, end_time):
@@ -43,7 +42,11 @@ class Publisher:
             "id": "{}:bar:{}".format(self.run_id, sequence),
             "type": "market.bar.completed", "envelope_version": 1,
             "schema_version": 1, "event_time": period_end,
-            "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            # A backtest learns of a bar the moment it ends, exactly as
+            # cmd/backtest's inputEnvelope records it, so two runs over the
+            # same bars write the same inputs. This adapter refuses LiveMode;
+            # a live producer records when it actually received the data.
+            "recorded_at": period_end,
             "sequence": sequence, "correlation_id": self.run_id,
             "source": "lean-adapter", "strategy_version": self.strategy_version,
             "configuration_hash": self.configuration_hash,
@@ -53,6 +56,7 @@ class Publisher:
         expected = {"type": "engine.decisions", "envelope_version": 1,
                     "schema_version": 1, "sequence": sequence,
                     "causation_id": envelope["id"],
+                    "correlation_id": self.run_id,
                     "configuration_hash": self.configuration_hash,
                     "strategy_version": self.strategy_version}
         if any(reply.get(k) != v for k, v in expected.items()):

@@ -21,7 +21,8 @@ class Client:
         self.sent.append(envelope)
         return {"type": "engine.decisions", "envelope_version": 1,
                 "schema_version": 1, "sequence": envelope["sequence"],
-                "causation_id": envelope["id"], "configuration_hash": "hash",
+                "causation_id": envelope["id"], "correlation_id": envelope["correlation_id"],
+                "configuration_hash": "hash",
                 "strategy_version": "version", "payload": {"decisions": []}}
 
 
@@ -41,6 +42,21 @@ class Frame:
 
 
 class PublisherTests(unittest.TestCase):
+    def test_recorded_at_is_the_bars_own_period_end(self):
+        """Two runs over the same bars write the same input envelopes."""
+        client = Client()
+        Publisher(client, "hash", "version", "test").publish(
+            "AAPL", bar(9), raw_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
+        self.assertEqual(client.sent[0]["recorded_at"], "2014-06-09T20:00:00Z")
+
+    def test_reply_with_another_runs_correlation_id_is_rejected(self):
+        client = Client()
+        answer = client.decide
+        client.decide = lambda e: dict(answer(e), correlation_id="another-run")
+        with self.assertRaises(ValueError):
+            Publisher(client, "hash", "version", "test").publish(
+                "AAPL", bar(9), raw_view(Frame(bar(9).EndTime), bar(9).EndTime), "2014-06-09T20:00:00Z")
+
     def test_configuration_then_bars_and_labelled_views(self):
         client = Client()
         pub = Publisher(client, "hash", "version", "run")
