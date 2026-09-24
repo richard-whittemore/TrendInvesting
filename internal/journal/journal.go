@@ -493,6 +493,12 @@ type Verification struct {
 	Stopped          bool
 	StopReason       string
 	StopInstrumentID string
+	// InputAfterStop names the first input recorded after the stop that
+	// was not replay.run.completed, or is empty. The reducer refuses any
+	// such input (strategy.Reducer.Apply), but the recorder keeps it as
+	// evidence of the failed run, so Verify reports it rather than refusing
+	// the journal, and such a run is never Complete.
+	InputAfterStop string
 }
 
 // Verify checks the chain (ADR 0017), then validates the header and envelopes
@@ -533,7 +539,7 @@ func Verify(r io.Reader) (Verification, error) {
 		return Verification{}, err
 	}
 	var complete, stopped bool
-	var stopReason, stopInstrumentID string
+	var stopReason, stopInstrumentID, inputAfterStop string
 	for _, record := range records {
 		if err := record.Envelope.Validate(); err != nil {
 			return Verification{}, fmt.Errorf("journal: record %d: %w", record.Sequence, err)
@@ -541,12 +547,12 @@ func Verify(r io.Reader) (Verification, error) {
 		if record.Kind == KindInput {
 			// The reducer's ordering rule (strategy.Reducer.Apply): once a
 			// run is deliberately stopped, only replay.run.completed may
-			// follow. A journal breaking it records a run the reducer would
-			// have refused, so it is not evidence of a stop.
-			if stopped && record.Envelope.Type != event.RunCompletedEventType {
-				return Verification{}, fmt.Errorf("journal: record %d: %q follows a deliberate stop; only %s may follow a stop", record.Sequence, record.Envelope.Type, event.RunCompletedEventType)
+			// follow. An input breaking it was refused, so the run failed:
+			// it is reported (InputAfterStop) and never Complete.
+			if stopped && inputAfterStop == "" && record.Envelope.Type != event.RunCompletedEventType {
+				inputAfterStop = record.Envelope.Type
 			}
-			complete = record.Envelope.Type == event.RunCompletedEventType
+			complete = inputAfterStop == "" && record.Envelope.Type == event.RunCompletedEventType
 			if record.Envelope.Type == event.AdapterRunStoppedEventType {
 				var payload event.AdapterRunStoppedPayload
 				if err := json.Unmarshal(record.Envelope.Payload, &payload); err != nil {
@@ -577,5 +583,6 @@ func Verify(r io.Reader) (Verification, error) {
 		Stopped:          stopped,
 		StopReason:       stopReason,
 		StopInstrumentID: stopInstrumentID,
+		InputAfterStop:   inputAfterStop,
 	}, nil
 }

@@ -370,6 +370,8 @@ func verify(path string, out io.Writer) error {
 
 	completion := "INCOMPLETE — final input is not replay.run.completed; the run did not finish"
 	switch {
+	case verification.InputAfterStop != "":
+		completion = fmt.Sprintf("INCOMPLETE — stopped: %s %s, then received %s, which may not follow a stop; the run failed", verification.StopReason, verification.StopInstrumentID, verification.InputAfterStop)
 	case verification.Stopped && !verification.Complete:
 		// The engine accepted the stop, but the completion that should
 		// follow it never arrived, so outstanding proposals were never

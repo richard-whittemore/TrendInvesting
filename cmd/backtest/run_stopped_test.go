@@ -146,3 +146,49 @@ func TestVerifyReportsAStopWithoutCompletionAsIncomplete(t *testing.T) {
 		}
 	}
 }
+
+// TestVerifyReportsAnInputAfterAStopAsAFailedRun: the recorder keeps an
+// input the reducer refused after a stop, as evidence of the failed run.
+// -verify must still verify that journal, name the offending input, and
+// report INCOMPLETE, never "stopped" alone.
+func TestVerifyReportsAnInputAfterAStopAsAFailedRun(t *testing.T) {
+	_, path := runBacktestTo(t)
+	stopped := stoppedJournal(t, path, event.AdapterRunStoppedReasonDelisted, "AAPL", "LEAN reports AAPL DELISTED")
+
+	// Duplicate the stop: a second stop is an input the reducer refuses
+	// after the first.
+	header, records := readJournalFile(t, stopped)
+	var entries []journal.Entry
+	for _, r := range records {
+		entries = append(entries, journal.Entry{Kind: r.Kind, Envelope: r.Envelope})
+		if r.Kind == journal.KindInput && r.Envelope.Type == event.AdapterRunStoppedEventType {
+			second := r.Envelope
+			second.ID = "run-stopped-again"
+			entries = append(entries, journal.Entry{Kind: journal.KindInput, Envelope: second})
+		}
+	}
+	for i := range entries {
+		entries[i].Envelope.Sequence = uint64(i + 1)
+	}
+	out := filepath.Join(t.TempDir(), "stopped-twice.jsonl")
+	file, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Write(file, header, entries); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var report bytes.Buffer
+	if err := run(context.Background(), []string{"-verify", out}, &report); err != nil {
+		t.Fatalf("run(-verify): %v", err)
+	}
+	for _, want := range []string{"INCOMPLETE", "stopped: delisted AAPL", "then received " + event.AdapterRunStoppedEventType} {
+		if !strings.Contains(report.String(), want) {
+			t.Errorf("verify report = %q, want it to contain %q", report.String(), want)
+		}
+	}
+}
