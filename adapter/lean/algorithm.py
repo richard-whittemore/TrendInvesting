@@ -10,6 +10,7 @@ from os.path import abspath, dirname, join
 from re import fullmatch
 from sys import path
 from time import perf_counter
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 for candidate in ("/LeanCLI", dirname(abspath(__file__))):
@@ -17,6 +18,7 @@ for candidate in ("/LeanCLI", dirname(abspath(__file__))):
         path.insert(0, candidate)
 
 from client import Client
+from orders import NSlippageModel, OrderDesk, fill_model_report, validate_slippage_n
 from publisher import Publisher, raw_view
 
 # quantconnect/lean@sha256:<64 lowercase hex>; never a tag such as :latest
@@ -78,11 +80,28 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             # log records which engine produced it.
             lean_image = validate_lean_image(settings.get("lean_image"))
             self.Log("adapter: lean_image={}".format(lean_image))
+            # The run's own slippage fraction, never a default: it must equal
+            # the configuration's slippage_n (ADR 0013; 0.05 in the Baseline),
+            # which this adapter cannot read, exactly as cash must equal its
+            # notional_account.starting_equity.
+            slippage_n = validate_slippage_n(settings.get("slippage_n"))
+            # Every way this run's LEAN fills depart from ADR 0005 and ADR
+            # 0013, stated before the first bar rather than silently accepted.
+            for line in fill_model_report(slippage_n):
+                self.Log("adapter: fill model: " + line)
             self.SetTimeZone(TimeZones.NewYork)
             self.instrument = settings["symbol"]
-            self.symbol = self.AddEquity(
+            security = self.AddEquity(
                 self.instrument, Resolution.Daily, fillForward=False,
-                dataNormalizationMode=DataNormalizationMode.SplitAdjusted).Symbol
+                dataNormalizationMode=DataNormalizationMode.SplitAdjusted)
+            self.symbol = security.Symbol
+            self.desk = OrderDesk(self, self.symbol, self.instrument, SimpleNamespace(
+                OrderProperties=OrderProperties, TimeInForce=TimeInForce,
+                UpdateOrderFields=UpdateOrderFields, OrderStatus=OrderStatus))
+            # ADR 0013: slippage_n x the N the engine supplied with each
+            # order's decision, and Interactive Brokers commissions.
+            security.SetSlippageModel(NSlippageModel(slippage_n, self.desk.n_for_tag))
+            security.SetFeeModel(InteractiveBrokersFeeModel())
             self.SetWarmUp(warmup, Resolution.Daily)
             self.client = Client(settings["socket"], timeout=5)
             self.publisher = Publisher(self.client, settings["configuration_hash"],
@@ -187,11 +206,8 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         # exactly the history they need and make the engine start its own
         # warm-up from scratch after LEAN's already ended — and which bars a
         # strategy gets to see is itself a methodology decision, which this
-        # adapter does not make (adapter/lean/README.md). warming is recorded
-        # for the log and stays available on the reply below for a future
-        # order-submission path, which must never act on a decision answering
-        # a warm-up bar (adapter/lean/README.md); nothing here acts on
-        # decisions at all yet.
+        # adapter does not make (adapter/lean/README.md). A decision answering
+        # a warm-up bar is never acted on (OrderDesk.act).
         warming = self.IsWarmingUp
         try:
             started = perf_counter()
@@ -211,6 +227,10 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.Log("adapter: seq={} end={} warmup={} raw={} split-adjusted={} decisions={} snapshot_decisions={}".format(
                 self.publisher.sequence, period_end, warming, raw["close"], float(bar.Close),
                 len(decisions), len(snapshot_decisions)))
+            # Only once both exchanges for this bar have succeeded: a failed
+            # exchange leaves the stream out of step with the engine, and the
+            # run then stops with nothing submitted (README.md: safe mode).
+            self.desk.act(decisions + snapshot_decisions, period_end, warming)
         except Exception as err:
             self.stop("completed bar failed: {}".format(err))
 
@@ -220,6 +240,10 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.client.close()
         self.Log("adapter: bars={} warmup_bars={} decisions={} failed={}".format(
             self.bar_count, self.warmup_seen, self.decision_count, self.failed))
+        desk = getattr(self, "desk", None)
+        if desk is not None:
+            self.Log("adapter: orders submitted={} decisions rejected={}".format(
+                desk.submitted, desk.rejected))
         if self.history_ms:
             ordered = sorted(self.history_ms)
             self.Log("adapter: History n={} min={:.3f}ms median={:.3f}ms mean={:.3f}ms max={:.3f}ms".format(
