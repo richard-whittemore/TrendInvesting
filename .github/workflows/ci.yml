@@ -14,15 +14,31 @@ env:
 
 jobs:
   go:
+    # The one check the main-branch ruleset requires, so every gating job
+    # must feed it: a job outside `needs` can fail without blocking a merge.
+    # rule-surface-append-only runs only on a pull request and is skipped on
+    # a push to main, where there is no base to compare against.
     if: always()
-    needs: [go-amd64, go-arm64]
+    needs: [go-amd64, go-arm64, workflow-and-shell-lint, rule-surface-append-only]
     runs-on: ubuntu-latest
     steps:
-      - name: Require both architectures
+      - name: Require every gating job
         env:
           AMD64_RESULT: ${{ needs.go-amd64.result }}
           ARM64_RESULT: ${{ needs.go-arm64.result }}
-        run: test "$AMD64_RESULT" = success && test "$ARM64_RESULT" = success
+          LINT_RESULT: ${{ needs.workflow-and-shell-lint.result }}
+          RULE_SURFACE_RESULT: ${{ needs.rule-surface-append-only.result }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -eu
+          test "$AMD64_RESULT" = success
+          test "$ARM64_RESULT" = success
+          test "$LINT_RESULT" = success
+          if test "$EVENT_NAME" = pull_request; then
+            test "$RULE_SURFACE_RESULT" = success
+          else
+            test "$RULE_SURFACE_RESULT" = skipped
+          fi
 
   rule-surface-append-only:
     # A pull request may append a rule surface for a new RulesVersion; it may
@@ -74,6 +90,46 @@ jobs:
           git show "FETCH_HEAD:scripts/rule-surface-append-only.sh" > /tmp/rule-surface-append-only.sh
           chmod +x /tmp/rule-surface-append-only.sh
           /tmp/rule-surface-append-only.sh FETCH_HEAD
+
+  workflow-and-shell-lint:
+    # actionlint and shellcheck are pinned release binaries verified by
+    # SHA-256, not `tool` directives: actionlint's YAML dependency cannot
+    # share this module's graph with golangci-lint's (see
+    # docs/dependency-policy.md). actionlint runs shellcheck over every
+    # workflow `run:` block when shellcheck is on PATH, so it is installed
+    # first.
+    runs-on: ubuntu-24.04
+    env:
+      ACTIONLINT_VERSION: "1.7.12"
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      SHELLCHECK_VERSION: "0.11.0"
+      SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned linters
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -fsSLo shellcheck.tar.xz "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz
+          mv "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" bin/
+          curl -fsSLo actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          mv actionlint bin/
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Lint shell scripts
+        run: git ls-files -z '*.sh' | xargs -0 --no-run-if-empty shellcheck
+
+      - name: Lint workflows
+        run: actionlint
 
   go-arm64:
     runs-on: ubuntu-24.04-arm

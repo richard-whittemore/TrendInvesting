@@ -27,6 +27,15 @@ Go-based tools must be tracked with `tool` directives for the Go version this mo
 >
 > **History:** v2.8.0 was the newest release compatible with Go 1.24 (`go 1.24.0`). v2.10.0 onward requires `go >= 1.25`; v2.13 requires `go >= 1.26`. `os.ReadDir`, `os.DirFS`, and `fs.ReadDir` were reachable-vulnerable on 1.24.4 (GO-2026-4602, fixed in 1.25.8), which forced the floor to Go 1.27.1 and, with it, golangci-lint to v2.14.0 (`go 1.26.0`, the newest v2 release at the time and comfortably under the new floor). `.go-version`, `go.mod`'s `go` directive, and the installed toolchain moved together, as this policy requires; `GOTOOLCHAIN=local` was unaffected — it still refuses any toolchain the machine does not already have, it now just refuses anything short of 1.27.1.
 
+### CI-only linters: pinned binaries, not `tool` directives
+
+`actionlint` (workflow linting) and `shellcheck` (shell-script linting) run only in CI's `workflow-and-shell-lint` job, as release binaries pinned by version **and** SHA-256 in `.github/workflows/ci.yml`. The job fails if a download doesn't match its checksum. They aren't part of `make check`, so no contributor or agent machine needs them installed.
+
+- **shellcheck v0.11.0** is a Haskell binary with no Go module, so a `tool` directive isn't possible. Its release publishes no checksum file, so the pinned SHA-256 was computed from the release asset when it was pinned. Re-derive it the same way on a bump.
+- **actionlint v1.7.12** is written in Go, but it can't be a `tool` directive here. It needs `go.yaml.in/yaml/v4 v4.0.0-rc.3`, and golangci-lint's dependencies select rc.6, whose API removed types actionlint uses. A shared module graph resolves to one version, and actionlint then fails to compile. Pin its SHA-256 from the release's `actionlint_<version>_checksums.txt`.
+
+Dependabot doesn't see these pins. Bump them by hand, re-deriving both checksums.
+
 ## GitHub Actions
 
 Third-party Actions must use immutable commit SHAs with the release version recorded in a comment. Grant the workflow only the permissions it needs.
