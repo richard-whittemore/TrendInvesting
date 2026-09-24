@@ -43,6 +43,35 @@ class FakeResponse:
 CLOSED_STATUSES = ("filled", "canceled", "invalid")
 
 
+class Enumerable:
+    """LEAN's order-ticket collections: iterable, but with no len or indexing.
+
+    Observed on the pinned image: Transactions.GetOrderTickets returns a
+    MemoizingEnumerable that is 'not subscriptable'. Truth-testing one is
+    refused here too, since a .NET object is always truthy and so says
+    nothing about whether any ticket matched.
+    """
+    def __init__(self, items):
+        self._items = list(items)
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __bool__(self):
+        raise TypeError("a LEAN enumerable has no truth value; convert it with list() first")
+
+
+def order_event(ticket, status, when, fill_quantity=0, fill_price=0.0, fee=0.0,
+                currency="USD", message=""):
+    """A LEAN OrderEvent for ticket, as LEAN's OnOrderEvent receives it."""
+    ticket.event_ids += 1
+    return types.SimpleNamespace(
+        OrderId=ticket.OrderId, Id=ticket.event_ids, Symbol=ticket.Symbol, Status=status,
+        UtcTime=when, FillQuantity=fill_quantity, FillPrice=fill_price,
+        OrderFee=types.SimpleNamespace(Value=types.SimpleNamespace(Amount=fee, Currency=currency)),
+        StopPrice=ticket.StopPrice, Quantity=ticket.Quantity, Message=message)
+
+
 class FakeTicket:
     """A LEAN OrderTicket for a stop-market order, held in FakeTransactions."""
     def __init__(self, book, order_id, symbol, quantity, stop_price, tag, properties):
@@ -55,8 +84,10 @@ class FakeTicket:
         self.Tag = tag
         self.TimeInForce = properties.TimeInForce
         self.Status = book.submit_status
+        self.event_ids = 0
 
     def Update(self, fields):
+        """LEAN's amendment: acknowledged at once, reported after the slice."""
         self.book.updates.append((self.OrderId, fields.StopPrice, fields.Tag))
         if not self.book.acknowledge_updates:
             return FakeResponse(False)
@@ -64,41 +95,66 @@ class FakeTicket:
             self.StopPrice = fields.StopPrice
         if fields.Tag is not None:
             self.Tag = fields.Tag
+        self.book.deferred.append((self, "update-submitted"))
         return FakeResponse(True)
 
     def Cancel(self, tag=None):
         """LEAN's cancel: the book's cancel_outcome decides what LEAN answers.
 
-        "confirmed" cancels the order; "refused" answers with a failed
-        response and leaves the order working; "pending" answers success but
-        leaves the order not yet cancelled.
+        "pending" is what LEAN was observed to do: it answers success, reports
+        CancelPending at once, and reports Canceled after the slice (settle).
+        "never" answers the same but never confirms. "confirmed" cancels at
+        once; "refused" answers with a failed response
+        and leaves the order working. A tag, which LEAN would write over the
+        order's own, is recorded so a test can refuse it.
         """
         self.book.cancellations.append((self.OrderId, tag))
         if self.book.cancel_outcome == "refused":
             return FakeResponse(False)
-        if self.book.cancel_outcome == "pending":
+        if self.book.cancel_outcome in ("pending", "never"):
             self.Status = "cancel-pending"
+            self.book.emit(self, "cancel-pending")
+            self.book.deferred.append((self, "canceled"))
             return FakeResponse(True)
         self.Status = "canceled"
+        self.book.emit(self, "canceled")
         return FakeResponse(True)
 
 
 class FakeTransactions:
     """LEAN's order book: every ticket ever submitted, in any state."""
-    def __init__(self):
+    def __init__(self, algorithm=None):
+        self.algorithm = algorithm
         self.tickets = []
         self.updates = []
         self.cancellations = []
+        self.deferred = []
         self.acknowledge_updates = True
-        self.cancel_outcome = "confirmed"
+        self.cancel_outcome = "pending"
         self.submit_status = "submitted"
+        self.now = None
+
+    def emit(self, ticket, status, **fill):
+        """Raise OnOrderEvent on the algorithm, as LEAN does, at the book's clock."""
+        if self.algorithm is not None and hasattr(self.algorithm, "OnOrderEvent"):
+            self.algorithm.OnOrderEvent(order_event(ticket, status, self.now, **fill))
+
+    def settle(self):
+        """The end of LEAN's time step: confirm cancellations and amendments."""
+        deferred, self.deferred = self.deferred, []
+        for ticket, status in deferred:
+            if status == "canceled":
+                if ticket.Status != "cancel-pending" or self.cancel_outcome == "never":
+                    continue
+                ticket.Status = "canceled"
+            self.emit(ticket, status)
 
     def GetOrderTickets(self, predicate=None):
-        return [t for t in self.tickets if predicate is None or predicate(t)]
+        return Enumerable(t for t in self.tickets if predicate is None or predicate(t))
 
     def GetOpenOrderTickets(self, symbol=None):
-        return [t for t in self.tickets if t.Status not in CLOSED_STATUSES
-                and (symbol is None or t.Symbol == symbol)]
+        return Enumerable(t for t in self.tickets if t.Status not in CLOSED_STATUSES
+                          and (symbol is None or t.Symbol == symbol))
 
 
 class FakeSecurity:
@@ -126,7 +182,7 @@ class FakeAlgorithm:
     def Quit(self, message): self.quit_reason = message
     @property
     def Transactions(self):
-        return self.__dict__.setdefault("_transactions", FakeTransactions())
+        return self.__dict__.setdefault("_transactions", FakeTransactions(self))
     @property
     def Securities(self):
         return self.__dict__.setdefault(
@@ -136,12 +192,20 @@ class FakeAlgorithm:
     def _order(self, *args, **kwargs):
         self.__dict__.setdefault("orders", []).append((args, kwargs))
     MarketOrder = LimitOrder = StopLimitOrder = MarketOnOpenOrder = _order
-    def StopMarketOrder(self, symbol, quantity, stop_price, tag, properties):
-        self._order(symbol, quantity, stop_price, tag, properties)
+    def StopMarketOrder(self, symbol, quantity, stop_price, asynchronous=False, tag="",
+                        order_properties=None):
+        """LEAN's signature, observed on the pinned image: the fourth argument is
+        the bool 'asynchronous', and LEAN refuses anything else there."""
+        if type(asynchronous) is not bool:
+            raise TypeError("stop_market_order: argument 4 ('asynchronous') expected bool, "
+                            "got {}".format(type(asynchronous).__name__))
+        self._order(symbol, quantity, stop_price, tag, order_properties)
         book = self.Transactions
         ticket = FakeTicket(book, len(book.tickets) + 1, symbol, quantity,
-                            stop_price, tag, properties)
+                            stop_price, tag, order_properties)
         book.tickets.append(ticket)
+        # LEAN reports the submission before StopMarketOrder returns.
+        book.emit(ticket, "invalid" if ticket.Status == "invalid" else "submitted")
         return ticket
 
 
@@ -170,8 +234,9 @@ imports.UpdateOrderFields = UpdateOrderFields
 imports.InteractiveBrokersFeeModel = InteractiveBrokersFeeModel
 imports.TimeInForce = types.SimpleNamespace(Day="day", GoodTilCanceled="gtc")
 imports.OrderStatus = types.SimpleNamespace(
-    Submitted="submitted", PartiallyFilled="partially-filled", Filled="filled",
-    Canceled="canceled", CancelPending="cancel-pending", Invalid="invalid")
+    New="new", Submitted="submitted", PartiallyFilled="partially-filled", Filled="filled",
+    Canceled="canceled", CancelPending="cancel-pending", UpdateSubmitted="update-submitted",
+    Invalid="invalid")
 sys.modules["AlgorithmImports"] = imports
 spec = importlib.util.spec_from_file_location("lean_algorithm", Path(__file__).parents[1] / "algorithm.py")
 algorithm = importlib.util.module_from_spec(spec)
@@ -235,17 +300,22 @@ class AlgorithmTests(unittest.TestCase):
         # The first bar carries Sequence 2 (continuing the engine's own
         # configuration input at Sequence 1), and warm-up bars share that
         # same numbering with the bars that follow warm-up, contiguously.
-        self.assertEqual([e["sequence"] for e in client.sent], list(range(2, 14)))
+        algo.OnEndOfAlgorithm()
+        self.assertEqual([e["sequence"] for e in client.sent], list(range(2, 15)))
         self.assertEqual(algo.warmup_seen, 3)
         self.assertEqual(algo.bar_count, 4)
         # FakeEngineClient answers every input with zero decisions; all four
         # bars, the closes of their Sessions and their snapshots reach the
         # engine in one sequence (ADR 0021: the close before the snapshot).
+        # Each snapshot is sent before the next bar, after anything LEAN
+        # reported in between (flush_snapshot); the last one before the end
+        # of the stream.
         self.assertEqual(algo.decision_count, 0)
         self.assertEqual([e["type"] for e in client.sent],
-                         ["market.bar.completed", "market.session.closed", "account.snapshot"] * 4)
+                         ["market.bar.completed", "market.session.closed", "account.snapshot"] * 4
+                         + ["replay.run.completed"])
         ends = []
-        for completed, closed, snapshot in zip(client.sent[::3], client.sent[1::3], client.sent[2::3]):
+        for completed, closed, snapshot in zip(client.sent[:-1:3], client.sent[1::3], client.sent[2::3]):
             end = completed["payload"]["period_end"]
             self.assertEqual(closed["payload"], {"period_end": end, "instrument_ids": ["AAPL"]})
             self.assertEqual(snapshot["payload"]["as_of"], end)
@@ -264,8 +334,10 @@ class AlgorithmTests(unittest.TestCase):
         algo.IsWarmingUp = True
         algo.History = lambda *args, **kwargs: Frame(bar(6).EndTime)
         algo.OnData(slice_of({"AAPL": bar(6)}))
+        algo.OnEndOfAlgorithm()
         self.assertFalse(algo.failed)
-        self.assertEqual(algo.client.sent[-1]["payload"], {
+        [snapshot] = [e for e in algo.client.sent if e["type"] == "account.snapshot"]
+        self.assertEqual(snapshot["payload"], {
             "as_of": "2014-06-06T20:00:00Z", "equity": 123456.75,
             "available_cash": 54321.25, "currency": "USD"})
 
@@ -280,11 +352,17 @@ class AlgorithmTests(unittest.TestCase):
                 algo.client.reply_overrides = {"account.snapshot": {field: value}}
                 algo.IsWarmingUp = True
                 algo.History = lambda *args, **kwargs: Frame(bar(6).EndTime)
-                data = slice_of({"AAPL": bar(6)})
+                algo.OnData(slice_of({"AAPL": bar(6)}))
+                self.assertFalse(algo.failed)
+                # The 6th's close is sent before the next bar, and its bad
+                # reply stops the run before that bar is sent.
+                algo.History = lambda *args, **kwargs: Frame(bar(9).EndTime)
+                data = slice_of({"AAPL": bar(9)})
                 algo.OnData(data)
                 self.assertTrue(algo.failed)
                 self.assertTrue(algo.client.closed)
                 self.assertEqual(len(algo.client.sent), 3)
+                self.assertEqual(algo.client.sent[-1]["type"], "account.snapshot")
                 self.assertEqual(algo.publisher.sequence, 3)
                 algo.OnData(data)
                 self.assertEqual(len(algo.client.sent), 3)
@@ -522,10 +600,10 @@ class DelistingTests(unittest.TestCase):
         self.feed(algo, 6)
         sent = len(algo.client.sent)
         algo.OnData(slice_of({}, delistings={"AAPL": self.notice("delisted")}))
-        # The stop and then the stream's completion follow, both stamped at
-        # the last bar this run actually received.
+        # The 6th's close, then the stop and the stream's completion, all
+        # stamped at the last bar this run actually received.
         self.assertEqual([e["type"] for e in algo.client.sent[sent:]],
-                         ["adapter.run.stopped", "replay.run.completed"])
+                         ["account.snapshot", "adapter.run.stopped", "replay.run.completed"])
         for envelope in algo.client.sent[sent:]:
             self.assertEqual(envelope["event_time"], "2014-06-06T20:00:00Z")
         self.assertTrue(algo.failed)
@@ -574,7 +652,9 @@ class DelistingTests(unittest.TestCase):
         self.feed(algo, 6, delistings={"AAPL": self.notice("warning", 6)})
         self.feed(algo, 9)
         self.assertFalse(algo.failed)
-        self.assertEqual(len(algo.client.sent), 6)
+        # bar, close, the 6th's snapshot, bar, close: the 9th's snapshot
+        # waits for the next slice (flush_snapshot).
+        self.assertEqual(len(algo.client.sent), 5)
         self.assertTrue(any("delisting warning for AAPL" in m for m in algo.logs))
 
     def test_another_instruments_delisting_is_ignored(self):
@@ -588,7 +668,7 @@ class DelistingTests(unittest.TestCase):
         self.feed(algo, 6, changes={"AAPL": change})
         self.assertFalse(algo.failed)
         self.assertEqual([e["type"] for e in algo.client.sent],
-                         ["market.bar.completed", "market.session.closed", "account.snapshot"])
+                         ["market.bar.completed", "market.session.closed"])
         self.assertTrue(any("symbol changed GOOAV -> GOOG" in m for m in algo.logs))
 
 

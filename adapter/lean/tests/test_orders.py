@@ -11,6 +11,7 @@ import subprocess
 import sys
 import types
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 tests_dir = str(Path(__file__).resolve().parent)
@@ -27,6 +28,11 @@ algorithm = scaffold.algorithm
 
 def period_end(day):
     return "2014-06-{:02d}T20:00:00Z".format(day)
+
+
+def utc(day):
+    """LEAN's UtcTime at day's close: the instant its daily bar ends."""
+    return datetime(2014, 6, day, 20, tzinfo=timezone.utc)
 
 
 def decision_id(kind, day):
@@ -73,16 +79,55 @@ def proposal_expired(proposal, day, kind="entry"):
     return envelope("strategy.proposal.expired", 3, decision_id("proposal-expired", day), payload)
 
 
-def campaign_opened(day=6, campaign_n=1.2):
+def campaign_opened(day=6, campaign_n=1.2, fill_id="lean:1:2"):
     campaign_id = decision_id("campaign", day)
     payload = {"campaign_id": campaign_id, "instrument_id": "AAPL",
                "proposal_id": decision_id("proposal", day - 1),
-               "signal_id": decision_id("signal", day - 1), "fill_id": "fill-1",
+               "signal_id": decision_id("signal", day - 1), "fill_id": fill_id,
                "rule": "campaign.opened.from-fill", "adr": "0006", "direction": "long",
                "campaign_n": campaign_n, "unit_quantity": 100, "filled_quantity": 100,
                "entry_price": 24.5, "stop_multiple": 2, "protective_stop": 22.1,
                "units": 1, "opened_at": period_end(day)}
     return envelope("strategy.campaign.opened", 1, campaign_id, payload)
+
+
+def exit_proposed(day, level=23.4, campaign_day=6):
+    payload = {"campaign_id": decision_id("campaign", campaign_day), "instrument_id": "AAPL",
+               "period_end": period_end(day), "reason": "exit-channel-breached", "level": level,
+               "quantity": 100, "rule": "exit.channel.breached", "adr": "0005"}
+    return envelope("strategy.exit.proposed", 1, decision_id("exit-proposal", day), payload)
+
+
+def unit_added(day, unit_index=2, fill_id="lean:2:2", quantity=100):
+    payload = {"campaign_id": decision_id("campaign", 6), "instrument_id": "AAPL",
+               "unit_index": unit_index, "fill_id": fill_id, "fill_price": 25.2,
+               "quantity": quantity, "campaign_n": 1.2, "stop_multiple": 2,
+               "protective_stop": 22.8, "units": unit_index, "added_at": period_end(day),
+               "rule": "add.ladder.half-n", "adr": "0006"}
+    return envelope("strategy.campaign.unit-added", 1,
+                    decision_id("unit-added-{}".format(unit_index), day), payload)
+
+
+def units_stopped(day, unit_indexes=(1,), fill_id="lean:3:2", remaining=0):
+    payload = {"campaign_id": decision_id("campaign", 6), "instrument_id": "AAPL",
+               "fill_id": fill_id, "unit_indexes": list(unit_indexes), "fill_price": 22.0,
+               "quantity_closed": 100, "entry_price": 24.56, "campaign_n": 1.2,
+               "dollars_per_point": 1, "realised_result": -256, "stopped_at": period_end(day),
+               "remaining_units": remaining, "aggregate_open_risk_after": 0,
+               "rule": "campaign.units-stopped.by-stop", "adr": "0005"}
+    return envelope("strategy.campaign.units-stopped", 1,
+                    decision_id("units-stopped-{}".format(fill_id), day), payload)
+
+
+def campaign_exited(day, reason="stop"):
+    payload = {"campaign_id": decision_id("campaign", 6), "instrument_id": "AAPL",
+               "fill_id": "lean:3:2", "exited_at": period_end(day), "reason": reason,
+               "entry_price": 24.56, "exit_price": 22.0, "quantity": 100, "campaign_n": 1.2,
+               "dollars_per_point": 1, "unit_quantity": 100, "protective_stop_level": 22.1,
+               "realised_result": -256, "average_move_in_n": -2.1,
+               "realised_result_in_unit_n": -2.1, "units": 1,
+               "rule": "campaign.exited.by-stop", "adr": "0005"}
+    return envelope("strategy.campaign.exited", 2, decision_id("campaign-exited", day), payload)
 
 
 def exit_order_set(day, unit_index=1, level=22.1, quantity=100, cause="bar", **changes):
@@ -104,15 +149,46 @@ class OrderTestCase(unittest.TestCase):
         algo.IsWarmingUp = False
         return algo
 
-    def feed(self, algo, day, decisions=(), snapshot_decisions=(), close_decisions=()):
-        """One completed bar whose bar, Session-close and snapshot replies carry decisions."""
-        algo.client.reply_overrides = {
+    def at(self, algo, day):
+        """LEAN's clock reaches day's close: the previous step's deferred
+        reports (confirmed cancellations and amendments) arrive first."""
+        book = algo.Transactions
+        if book.now != utc(day):
+            book.settle()
+            book.now = utc(day)
+
+    def feed(self, algo, day, decisions=(), snapshot_decisions=(), close_decisions=(), replies=None):
+        """One completed bar whose bar, Session-close and snapshot replies carry
+        decisions; replies adds answers for other input types."""
+        overrides = {
             "market.bar.completed": {"payload": {"decisions": list(decisions)}},
             "market.session.closed": {"payload": {"decisions": list(close_decisions)}},
             "account.snapshot": {"payload": {"decisions": list(snapshot_decisions)}}}
+        overrides.update(replies or {})
+        algo.client.reply_overrides = overrides
+        self.at(algo, day)
         b = bar(day)
         algo.History = lambda *args, **kwargs: Frame(b.EndTime)
         algo.OnData(scaffold.slice_of({"AAPL": b}))
+
+    def fill(self, algo, ticket, day, price, fee=1.0, quantity=None, status="filled"):
+        """LEAN fills ticket during day's session, before that day's OnData.
+
+        As observed on the pinned image: the holding moves, the slippage model
+        is asked for its charge, and OnOrderEvent reports the fill at the
+        session's close.
+        """
+        self.at(algo, day)
+        quantity = ticket.Quantity if quantity is None else quantity
+        ticket.QuantityFilled += quantity
+        ticket.Status = status
+        algo.Portfolio.holdings["AAPL"] = algo.Portfolio.holdings.get("AAPL", 0) + quantity
+        if ticket.Tag in algo.desk.n_by_tag:
+            # Only an order this adapter placed has an N to slip by.
+            algo.security.slippage_model.GetSlippageApproximation(
+                algo.security, types.SimpleNamespace(Tag=ticket.Tag, Id=ticket.OrderId))
+        algo.Transactions.emit(ticket, status, fill_quantity=float(quantity),
+                               fill_price=price, fee=fee)
 
     def tickets(self, algo):
         return algo.Transactions.tickets
@@ -120,18 +196,22 @@ class OrderTestCase(unittest.TestCase):
     def sells(self, algo):
         return [t for t in algo.Transactions.tickets if t.Quantity < 0]
 
+    def sent(self, algo, event_type):
+        return [e for e in algo.client.sent if e["type"] == event_type]
+
+    def types_sent(self, algo, since=0):
+        return [e["type"] for e in algo.client.sent[since:]]
+
     def hold(self, algo, shares):
         """LEAN holds shares from an entry order this adapter placed and LEAN filled.
 
-        The fill is applied to the fake book directly, as a returned fill
-        would leave it; OnOrderEvent is not raised, since today a fill stops
-        the run (FillStopsTheRunTests).
+        The order is placed after the 6th's bar and LEAN fills it in the
+        session ending on the 9th, before the 9th's bar reaches the adapter;
+        the fill is reported to the engine at the start of the next feed.
         """
         self.feed(algo, 6, [trade_proposal(6, quantity=shares)])
         [entry] = self.tickets(algo)
-        entry.Status = "filled"
-        entry.QuantityFilled = shares
-        algo.Portfolio.holdings["AAPL"] = shares
+        self.fill(algo, entry, 9, 24.56)
 
     def assert_stopped_after(self, algo, sent_before_stop):
         """The run stopped, and nothing further reaches LEAN or the engine."""
@@ -146,7 +226,10 @@ class OrderTestCase(unittest.TestCase):
 
 
 class EntryAndAddOrderTests(OrderTestCase):
-    def test_a_valid_proposal_becomes_a_day_stop_market_order_at_its_level(self):
+    def test_a_valid_proposal_becomes_a_gtc_stop_market_order_at_its_level(self):
+        # Good-till-cancelled, never DAY: at daily resolution LEAN expires a
+        # DAY order before it evaluates the next session's fill (observed on
+        # the pinned image), so a DAY entry could never fill.
         algo = self.start()
         proposal = trade_proposal(9)
         self.feed(algo, 9, [proposal])
@@ -154,7 +237,7 @@ class EntryAndAddOrderTests(OrderTestCase):
         [ticket] = self.tickets(algo)
         self.assertEqual((ticket.Symbol, ticket.Quantity, ticket.StopPrice, ticket.Tag),
                          ("AAPL", 100, 24.5, proposal["id"]))
-        self.assertEqual(ticket.TimeInForce, "day")
+        self.assertEqual(ticket.TimeInForce, "gtc")
         self.assertEqual(self.rejections(algo), [])
 
     def test_a_proposal_in_the_session_close_reply_becomes_an_order(self):
@@ -166,15 +249,15 @@ class EntryAndAddOrderTests(OrderTestCase):
         self.feed(algo, 9, close_decisions=[entry, add])
         self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
         self.assertEqual(sorted(t.Tag for t in self.tickets(algo)), sorted([entry["id"], add["id"]]))
-        self.assertTrue(all(t.TimeInForce == "day" for t in self.tickets(algo)))
+        self.assertTrue(all(t.TimeInForce == "gtc" for t in self.tickets(algo)))
 
-    def test_a_valid_add_proposal_becomes_a_day_stop_market_order_at_its_rung(self):
+    def test_a_valid_add_proposal_becomes_a_gtc_stop_market_order_at_its_rung(self):
         algo = self.start()
         proposal = add_proposal(9)
         self.feed(algo, 9, [proposal])
         [ticket] = self.tickets(algo)
         self.assertEqual((ticket.Quantity, ticket.StopPrice, ticket.Tag, ticket.TimeInForce),
-                         (100, 25.1, proposal["id"], "day"))
+                         (100, 25.1, proposal["id"], "gtc"))
 
     def test_a_redelivered_proposal_creates_no_second_order(self):
         algo = self.start()
@@ -192,7 +275,7 @@ class EntryAndAddOrderTests(OrderTestCase):
         # filled, so not even working — although this adapter instance never
         # submitted it.
         props = scaffold.OrderProperties()
-        props.TimeInForce = "day"
+        props.TimeInForce = "gtc"
         existing = scaffold.FakeTicket(algo.Transactions, 1, "AAPL", 100, 24.5,
                                        proposal["id"], props)
         existing.Status = "filled"
@@ -267,12 +350,13 @@ class EntryAndAddOrderTests(OrderTestCase):
         answer = engine.decide
 
         def decide(input_envelope):
-            if input_envelope["type"] == "account.snapshot":
+            if input_envelope["type"] == "market.session.closed":
                 raise Unavailable("engine closed the connection mid-exchange")
             return answer(input_envelope)
         engine.decide = decide
-        # The bar's reply carried a proposal, but the exchange that follows it
-        # fails: the stream is out of step, so nothing from it is acted on.
+        # The bar's reply carried a proposal, but the Session close that
+        # follows it fails: the stream is out of step, so nothing from it is
+        # acted on.
         self.feed(algo, 9, [trade_proposal(9)])
         self.assertTrue(algo.failed)
         self.assertEqual(self.tickets(algo), [])
@@ -294,45 +378,73 @@ class EntryAndAddOrderTests(OrderTestCase):
         self.assertEqual(getattr(algo, "orders", []), [])
         self.assertTrue(any("warm-up" in m and "not acted on" in m for m in algo.logs))
 
-    def test_a_proposal_expiry_cancels_its_unfilled_day_order(self):
+    def test_a_proposal_expiry_cancels_its_unfilled_order(self):
         algo = self.start()
         proposal = trade_proposal(9)
         self.feed(algo, 9, [proposal])
         [ticket] = self.tickets(algo)
         self.feed(algo, 10, [proposal_expired(proposal, 10)])
-        self.assertEqual([order_id for order_id, _ in algo.Transactions.cancellations],
-                         [ticket.OrderId])
+        # LEAN answers CancelPending; Canceled follows after the slice.
+        self.assertEqual(algo.Transactions.cancellations, [(ticket.OrderId, None)])
+        self.assertEqual(ticket.Status, "cancel-pending")
+        self.feed(algo, 11)
         self.assertEqual(ticket.Status, "canceled")
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
         self.assertEqual(len(self.tickets(algo)), 1)
 
-    def test_an_add_proposal_expiry_cancels_its_unfilled_day_order(self):
+    def test_a_cancellation_never_overwrites_the_orders_tag(self):
+        # LEAN's Cancel(tag) replaces the order's tag (observed), and the tag
+        # is the decision id every duplicate check reads.
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        self.feed(algo, 10, [proposal_expired(proposal, 10)])
+        self.assertEqual([tag for _, tag in algo.Transactions.cancellations], [None])
+        self.assertEqual(self.tickets(algo)[0].Tag, proposal["id"])
+
+    def test_an_add_proposal_expiry_cancels_its_unfilled_order(self):
         algo = self.start()
         proposal = add_proposal(9)
         self.feed(algo, 9, [proposal])
         self.feed(algo, 10, [proposal_expired(proposal, 10, kind="add")])
         self.assertEqual(len(algo.Transactions.cancellations), 1)
 
-    def test_an_unconfirmed_cancellation_stops_the_run(self):
-        # An order the engine expired that LEAN has not confirmed cancelled
-        # could still fill into a holding the engine does not expect.
-        for outcome in ("refused", "pending"):
-            with self.subTest(outcome):
-                algo = self.start()
-                proposal = trade_proposal(9)
-                self.feed(algo, 9, [proposal])
-                algo.Transactions.cancel_outcome = outcome
-                self.feed(algo, 10, [proposal_expired(proposal, 10), add_proposal(10)])
-                self.assertIn("did not confirm", algo.quit_reason)
-                self.assertIn(proposal["id"], algo.quit_reason)
-                self.assertFalse(any("adapter: cancelled order" in m for m in algo.logs))
-                self.assertEqual(len(self.tickets(algo)), 1)
-                self.assert_stopped_after(algo, len(algo.client.sent))
+    def test_a_refused_cancellation_stops_the_run(self):
+        # An order the engine expired that LEAN will not cancel could still
+        # fill into a holding the engine does not expect.
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        algo.Transactions.cancel_outcome = "refused"
+        self.feed(algo, 10, [proposal_expired(proposal, 10), add_proposal(10)])
+        self.assertIn("did not confirm", algo.quit_reason)
+        self.assertIn(proposal["id"], algo.quit_reason)
+        self.assertFalse(any("adapter: cancelled order" in m for m in algo.logs))
+        self.assertEqual(len(self.tickets(algo)), 1)
+        self.assert_stopped_after(algo, len(algo.client.sent))
+
+    def test_a_cancellation_unconfirmed_by_the_next_session_stops_the_run(self):
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        algo.Transactions.cancel_outcome = "never"
+        self.feed(algo, 10, [proposal_expired(proposal, 10)])
+        self.assertFalse(algo.failed)
+        sent = len(algo.client.sent)
+        self.feed(algo, 11, [trade_proposal(11)])
+        self.assertIn("did not confirm cancelling order(s) 1 (tag={})".format(proposal["id"]),
+                      algo.quit_reason)
+        # Stopped before the next bar reached the engine.
+        self.assertNotIn("market.bar.completed", self.types_sent(algo, sent))
+        self.assertEqual(len(self.tickets(algo)), 1)
 
     def test_a_confirmed_cancellation_is_logged(self):
         algo = self.start()
         proposal = trade_proposal(9)
         self.feed(algo, 9, [proposal])
         self.feed(algo, 10, [proposal_expired(proposal, 10)])
+        self.assertTrue(any("adapter: cancel requested for order 1" in m for m in algo.logs))
+        self.feed(algo, 11)
         self.assertFalse(algo.failed)
         self.assertTrue(any("adapter: cancelled order 1" in m for m in algo.logs))
 
@@ -573,36 +685,353 @@ class SlippageTests(OrderTestCase):
                 self.assertIn("slippage_n", algo.quit_reason)
 
 
-class FillStopsTheRunTests(OrderTestCase):
-    """A LEAN fill cannot yet be returned to the engine, so the first one stops the run.
+class FillReturnTests(OrderTestCase):
+    """LEAN's fills reach the engine as execution.fill, shaped for each order's kind.
 
-    Otherwise the engine would still believe it was flat: it would place no
-    Exit Order for the new holding and could propose further entries.
+    Every payload mirrors internal/fills' own FillPayload for the same kind,
+    and the adapter acts on the engine's reply with the same OrderDesk.
     """
 
-    def event(self, status, order_id=1):
-        return types.SimpleNamespace(OrderId=order_id, Status=status, Symbol="AAPL",
-                                     FillQuantity=100, FillPrice=24.6)
+    def entered(self, algo, shares=100, reply=()):
+        """An entry placed after the 9th's bar and filled by LEAN on the 10th."""
+        proposal = trade_proposal(9, quantity=shares)
+        self.feed(algo, 9, [proposal])
+        [entry] = self.tickets(algo)
+        self.fill(algo, entry, 10, 24.56, fee=1.0)
+        self.feed(algo, 10, replies={"execution.fill": {"payload": {"decisions": list(reply)}}})
+        return proposal, entry
 
-    def test_the_first_fill_stops_the_run(self):
-        for status in ("filled", "partially-filled"):
-            with self.subTest(status):
-                algo = self.start()
-                proposal = trade_proposal(9)
-                self.feed(algo, 9, [proposal])
-                sent = len(algo.client.sent)
-                algo.OnOrderEvent(self.event(status))
-                self.assertIn("cannot yet be returned to the engine", algo.quit_reason)
-                self.assertIn("order 1", algo.quit_reason)
-                self.assertIn(proposal["id"], algo.quit_reason)
-                self.assert_stopped_after(algo, sent)
+    def test_an_entry_fill_is_the_trade_proposals_fill(self):
+        algo = self.start()
+        proposal, entry = self.entered(algo)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [fill] = self.sent(algo, "execution.fill")
+        self.assertEqual(fill["schema_version"], 4)
+        self.assertEqual(fill["event_time"], period_end(10))
+        self.assertEqual(fill["payload"], {
+            "instrument_id": "AAPL", "kind": "entry", "proposal_id": proposal["id"],
+            "campaign_id": "", "fill_id": "lean:1:2", "unit_ids": [], "direction": "long",
+            "quantity": 100, "price": 24.56, "filled_at": period_end(10), "level": 24.5,
+            # What LEAN's slippage model charged: 0.05 x the proposal's n.
+            "slippage_applied": 0.05 * 1.2, "commission": 1.0})
 
-    def test_order_events_other_than_fills_do_not_stop_the_run(self):
+    def test_the_exit_order_the_engine_sets_on_an_entry_fill_is_placed_before_the_bar(self):
+        algo = self.start()
+        opened, placed = campaign_opened(), exit_order_set(10, level=22.1)
+        self.entered(algo, reply=[opened, placed])
+        [sell] = self.sells(algo)
+        self.assertEqual((sell.Quantity, sell.StopPrice, sell.Tag, sell.TimeInForce),
+                         (-100, 22.1, placed["id"], "gtc"))
+        # The Exit Order is placed from the fill's reply, and LEAN's report of
+        # its submission reaches the engine before the session's bar does.
+        types_ = self.types_sent(algo)
+        fill_at = types_.index("execution.fill")
+        self.assertEqual(types_[fill_at:fill_at + 4],
+                         ["execution.fill", "execution.order.lifecycle", "account.snapshot",
+                          "market.bar.completed"])
+        submitted = self.sent(algo, "execution.order.lifecycle")[-1]["payload"]
+        self.assertEqual((submitted["status"], submitted["tag"], submitted["quantity"]),
+                         ("submitted", placed["id"], -100))
+
+    def test_an_add_fill_is_the_add_proposals_fill(self):
+        algo = self.start()
+        self.entered(algo, reply=[campaign_opened(), exit_order_set(10)])
+        proposal = add_proposal(11)
+        self.feed(algo, 11, close_decisions=[proposal])
+        [_, add] = [t for t in self.tickets(algo) if t.Quantity > 0]
+        self.fill(algo, add, 12, 25.2, fee=1.0)
+        self.feed(algo, 12)
+        fill = self.sent(algo, "execution.fill")[-1]["payload"]
+        self.assertEqual((fill["kind"], fill["proposal_id"], fill["campaign_id"], fill["unit_ids"],
+                          fill["quantity"], fill["level"], fill["fill_id"]),
+                         ("add", proposal["id"], decision_id("campaign", 6), [], 100, 25.1,
+                          "lean:{}:2".format(add.OrderId)))
+        self.assertAlmostEqual(fill["slippage_applied"], 0.05 * 1.2)
+
+    def test_a_stop_fill_names_the_unit_its_exit_order_protects(self):
+        algo = self.start()
+        opened = campaign_opened()
+        self.entered(algo, reply=[opened, exit_order_set(10, level=22.1)])
+        [sell] = self.sells(algo)
+        self.fill(algo, sell, 11, 22.0, fee=1.0)
+        self.feed(algo, 11, replies={"execution.fill": {"payload": {"decisions": [
+            units_stopped(11, fill_id="lean:2:2"), campaign_exited(11)]}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        fill = self.sent(algo, "execution.fill")[-1]["payload"]
+        self.assertEqual((fill["kind"], fill["proposal_id"], fill["campaign_id"], fill["unit_ids"],
+                          fill["quantity"], fill["price"], fill["level"]),
+                         ("stop", "", opened["payload"]["campaign_id"],
+                          [opened["payload"]["fill_id"]], 100, 22.0, 22.1))
+        self.assertAlmostEqual(fill["slippage_applied"], 0.05 * 1.2)
+
+    def two_units_at_the_exit_channel(self, algo, unit2_source="exit-channel", unit2_level=23.4):
+        """A Campaign of two Units, then an exit proposed at 23.4 on the 12th's bar."""
+        self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1)])
+        self.feed(algo, 11, close_decisions=[add_proposal(11)])
+        add = self.tickets(algo)[-1]
+        self.fill(algo, add, 12, 25.2)
+        self.feed(algo, 12, replies={"execution.fill": {"payload": {"decisions": [
+            unit_added(12, fill_id="lean:{}:2".format(add.OrderId)),
+            exit_order_set(12, unit_index=2, level=22.8, cause="add"),
+            exit_order_set(12, unit_index=1, level=22.7, cause="add")]}}})
+        proposal = exit_proposed(13)
+        self.feed(algo, 13, [proposal,
+                             exit_order_set(13, unit_index=1, level=23.4, source="exit-channel",
+                                            exit_channel_level=23.4),
+                             exit_order_set(13, unit_index=2, level=unit2_level, source=unit2_source,
+                                            exit_channel_level=23.4)])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        return proposal, self.sells(algo)
+
+    def test_the_units_at_the_exit_channel_fill_as_one_exit(self):
+        algo = self.start()
+        proposal, [first, second] = self.two_units_at_the_exit_channel(algo)
+        self.fill(algo, first, 14, 23.3, fee=1.0)
+        self.fill(algo, second, 14, 23.3, fee=1.25)
+        self.feed(algo, 14)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        fill = self.sent(algo, "execution.fill")[-1]["payload"]
+        self.assertEqual((fill["kind"], fill["proposal_id"], fill["campaign_id"], fill["unit_ids"],
+                          fill["quantity"], fill["price"], fill["level"], fill["commission"],
+                          fill["fill_id"]),
+                         ("exit", proposal["id"], decision_id("campaign", 6), [], 200, 23.3, 23.4,
+                          2.25, "lean:{}:{}+{}:{}".format(first.OrderId, first.event_ids,
+                                                          second.OrderId, second.event_ids)))
+        # One exit fill, never one per Unit: the reducer accepts an exit fill
+        # only for the whole remaining holding.
+        self.assertEqual(len(self.sent(algo, "execution.fill")), 3)
+
+    def test_a_unit_at_its_own_stop_fills_before_the_exit(self):
+        algo = self.start()
+        proposal, [first, second] = self.two_units_at_the_exit_channel(
+            algo, unit2_source="protective-stop", unit2_level=23.6)
+        # LEAN reports the exit-channel Unit first; the stop is still sent first.
+        self.fill(algo, first, 14, 23.3)
+        self.fill(algo, second, 14, 23.5)
+        self.feed(algo, 14)
+        stop, exit_ = [e["payload"] for e in self.sent(algo, "execution.fill")[-2:]]
+        self.assertEqual((stop["kind"], stop["unit_ids"], stop["quantity"]),
+                         ("stop", ["lean:{}:2".format(self.tickets(algo)[2].OrderId)], 100))
+        self.assertEqual((exit_["kind"], exit_["proposal_id"], exit_["quantity"]),
+                         ("exit", proposal["id"], 100))
+
+    def test_stop_fills_in_one_slice_are_sent_worst_price_first(self):
+        # ADR 0005 rule 3, as internal/fills orders them: whatever order LEAN
+        # reported them in.
+        algo = self.start()
+        self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1)])
+        self.feed(algo, 11, close_decisions=[add_proposal(11)])
+        add = self.tickets(algo)[-1]
+        self.fill(algo, add, 12, 25.2)
+        self.feed(algo, 12, replies={"execution.fill": {"payload": {"decisions": [
+            unit_added(12, fill_id="lean:{}:2".format(add.OrderId)),
+            exit_order_set(12, unit_index=2, level=22.8, cause="add"),
+            exit_order_set(12, unit_index=1, level=22.7, cause="add")]}}})
+        unit1, unit2 = self.sells(algo)
+        self.fill(algo, unit2, 13, 22.75)
+        self.fill(algo, unit1, 13, 22.6)
+        self.feed(algo, 13)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        stops = [e["payload"] for e in self.sent(algo, "execution.fill")[-2:]]
+        self.assertEqual([(s["kind"], s["price"], s["unit_ids"]) for s in stops],
+                         [("stop", 22.6, ["lean:1:2"]),
+                          ("stop", 22.75, ["lean:{}:2".format(add.OrderId)])])
+
+    def test_only_some_units_at_the_exit_channel_filling_stops_the_run(self):
+        algo = self.start()
+        _, [first, _] = self.two_units_at_the_exit_channel(algo)
+        sent = len(algo.client.sent)
+        self.fill(algo, first, 14, 23.3)
+        self.feed(algo, 14)
+        self.assertIn("one exit fill cannot state that", algo.quit_reason)
+        self.assertNotIn("execution.fill", self.types_sent(algo, sent))
+
+    def test_an_add_and_a_stop_in_one_slice_enter_then_stop(self):
+        # ADR 0005 rule 3: a bar that fills an Add and a stop entered first.
+        # The Add's reply raises Unit 1's stop, but LEAN has already filled
+        # Unit 1's order, so the amendment is skipped and its fill is sent.
+        algo = self.start()
+        self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1)])
+        self.feed(algo, 11, close_decisions=[add_proposal(11)])
+        entry, unit1, add = self.tickets(algo)
+        self.fill(algo, unit1, 12, 22.0)
+        self.fill(algo, add, 12, 25.2)
+        self.feed(algo, 12, replies={"execution.fill": lambda e: {"payload": {"decisions": [
+            unit_added(12, fill_id="lean:{}:2".format(add.OrderId)),
+            exit_order_set(12, unit_index=2, level=22.8, cause="add"),
+            exit_order_set(12, unit_index=1, level=22.7, cause="add")]
+            if e["payload"]["kind"] == "add" else []}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        kinds = [e["payload"]["kind"] for e in self.sent(algo, "execution.fill")]
+        self.assertEqual(kinds, ["entry", "add", "stop"])
+        self.assertEqual(algo.Transactions.updates, [])
+        self.assertTrue(any("has already filled and that fill is reported next" in m
+                            for m in algo.logs))
+
+    def test_a_chained_add_proposal_in_a_fill_reply_is_stale(self):
+        # The engine measures the next rung from the fill against the bar
+        # that signalled the entry; that session has already traded in LEAN.
+        algo = self.start()
+        self.entered(algo, reply=[campaign_opened(), exit_order_set(10), add_proposal(9)])
+        self.assertEqual([t.Quantity for t in self.tickets(algo)], [100, -100])
+        [rejection] = self.rejections(algo)
+        self.assertIn("stale", rejection)
+
+    def test_a_partial_fill_stops_the_run(self):
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        [entry] = self.tickets(algo)
+        sent = len(algo.client.sent)
+        self.fill(algo, entry, 10, 24.56, quantity=40, status="partially-filled")
+        self.feed(algo, 10)
+        for fact in ("partially filled", "40", "#67", proposal["id"]):
+            self.assertIn(fact, algo.quit_reason)
+        self.assertEqual(self.types_sent(algo, sent), [])
+        self.assert_stopped_after(algo, sent)
+
+    def test_a_fill_of_an_order_the_adapter_did_not_place_stops_the_run(self):
+        algo = self.start()
+        props = scaffold.OrderProperties()
+        props.TimeInForce = "gtc"
+        foreign = scaffold.FakeTicket(algo.Transactions, 99, "AAPL", 10, 20.0, "manual", props)
+        algo.Transactions.tickets.append(foreign)
+        self.fill(algo, foreign, 10, 20.1)
+        self.feed(algo, 10)
+        self.assertIn("did not place", algo.quit_reason)
+        self.assertEqual(self.sent(algo, "execution.fill"), [])
+
+    def test_a_fill_after_the_stream_completed_is_not_sent(self):
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        algo.OnEndOfAlgorithm()
+        sent = len(algo.client.sent)
+        self.fill(algo, self.tickets(algo)[0], 10, 24.56)
+        self.assertEqual(algo.order_events, [])
+        self.assertEqual(len(algo.client.sent), sent)
+
+
+class LifecycleTests(OrderTestCase):
+    """Every LEAN order change that is not an execution reaches the engine as
+    execution.order.lifecycle, in the order LEAN reported it."""
+
+    def lifecycles(self, algo):
+        return [e["payload"] for e in self.sent(algo, "execution.order.lifecycle")]
+
+    def test_each_transition_maps_to_its_status(self):
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        [entry] = self.tickets(algo)
+        self.feed(algo, 10, [proposal_expired(proposal, 10)])
+        self.feed(algo, 11)
+        self.assertEqual([(p["status"], p["tag"]) for p in self.lifecycles(algo)],
+                         [("submitted", proposal["id"]), ("cancel-pending", proposal["id"]),
+                          ("canceled", proposal["id"])])
+        self.assertEqual(self.lifecycles(algo)[0], {
+            "instrument_id": "AAPL", "order_id": "1", "tag": proposal["id"], "status": "submitted",
+            "quantity": 100, "stop_price": 24.5, "occurred_at": period_end(9), "message": ""})
+        self.assertEqual(self.lifecycles(algo)[2]["occurred_at"], period_end(10))
+
+    def test_an_amendment_is_reported_as_updated(self):
+        algo = self.start()
+        self.hold(algo, 100)
+        self.feed(algo, 9, [campaign_opened(), exit_order_set(9, level=22.1)])
+        raised = exit_order_set(10, level=23.4)
+        self.feed(algo, 10, [raised])
+        self.feed(algo, 11)
+        updated = self.lifecycles(algo)[-1]
+        self.assertEqual((updated["status"], updated["tag"], updated["stop_price"],
+                          updated["quantity"]), ("updated", raised["id"], 23.4, -100))
+
+    def test_an_order_lean_refuses_is_reported_as_invalid(self):
+        algo = self.start()
+        algo.Transactions.submit_status = "invalid"
+        self.feed(algo, 9, [trade_proposal(9)])
+        self.assertEqual([p["status"] for p in self.lifecycles(algo)], ["invalid"])
+
+    def test_a_status_with_no_lifecycle_meaning_stops_the_run(self):
         algo = self.start()
         self.feed(algo, 9, [trade_proposal(9)])
-        for status in ("submitted", "canceled", "cancel-pending", "invalid"):
-            algo.OnOrderEvent(self.event(status))
-        self.assertFalse(algo.failed)
+        [entry] = self.tickets(algo)
+        self.at(algo, 10)
+        algo.Transactions.emit(entry, "new")
+        self.feed(algo, 10)
+        self.assertIn("cannot state as an order lifecycle change", algo.quit_reason)
+
+
+class OrderingTests(OrderTestCase):
+    """Where each report falls against a slice's bar, Session close and snapshot."""
+
+    def test_a_slice_is_reports_then_fills_then_bar_close_snapshot_then_new_orders(self):
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        self.assertEqual(self.types_sent(algo), [
+            "market.bar.completed", "market.session.closed",
+            # The order placed from those decisions. The Session's snapshot
+            # waits for the next slice (algorithm.py, flush_snapshot).
+            "execution.order.lifecycle"])
+        [entry] = self.tickets(algo)
+        sent = len(algo.client.sent)
+        self.fill(algo, entry, 10, 24.56)
+        self.feed(algo, 10, [add_proposal(10)])
+        # The session's fill precedes its bar: the proposal it executes is
+        # still outstanding until that bar expires it (ADR 0011). The previous
+        # Session's snapshot follows the fill, so an Add the engine chains
+        # from the fill is still sized against the cash its own bar was
+        # entitled to (flush_snapshot), and precedes the bar it is the basis
+        # for.
+        self.assertEqual(self.types_sent(algo, sent), [
+            "execution.fill", "account.snapshot", "market.bar.completed",
+            "market.session.closed", "execution.order.lifecycle"])
+        fill, snapshot, bar_ = algo.client.sent[sent:sent + 3]
+        self.assertEqual(fill["event_time"], bar_["event_time"])
+        self.assertEqual(snapshot["payload"]["as_of"], period_end(9))
+        self.assertEqual([e["sequence"] for e in algo.client.sent], list(range(2, len(algo.client.sent) + 2)))
+
+    def test_a_cancellation_confirmed_after_the_slice_is_sent_before_the_next_fills(self):
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal, add_proposal(9)])
+        entry, add = self.tickets(algo)
+        self.feed(algo, 10, [proposal_expired(proposal, 10)])
+        sent = len(algo.client.sent)
+        self.fill(algo, add, 11, 25.2)
+        self.feed(algo, 11)
+        self.assertEqual(self.types_sent(algo, sent)[:2],
+                         ["execution.order.lifecycle", "execution.fill"])
+        self.assertEqual(algo.client.sent[sent]["payload"]["status"], "canceled")
+
+    def test_fills_are_sent_before_the_end_of_the_stream(self):
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9)])
+        self.fill(algo, self.tickets(algo)[0], 10, 24.56)
+        algo.OnEndOfAlgorithm()
+        self.assertEqual(self.types_sent(algo)[-3:],
+                         ["execution.fill", "account.snapshot", "replay.run.completed"])
+
+
+class InputContractTests(OrderTestCase):
+    """The fill and lifecycle inputs the adapter sends pass Go's own validators."""
+
+    def test_every_input_the_adapter_builds_is_valid_in_go(self):
+        algo = self.start()
+        opened = campaign_opened()
+        proposal, entry = FillReturnTests.entered(self, algo, reply=[opened, exit_order_set(10)])
+        [sell] = self.sells(algo)
+        self.fill(algo, sell, 11, 22.0)
+        self.feed(algo, 11)
+        inputs = [e for e in algo.client.sent
+                  if e["type"] in ("execution.fill", "execution.order.lifecycle")]
+        self.assertEqual({e["type"] for e in inputs},
+                         {"execution.fill", "execution.order.lifecycle"})
+        result = subprocess.run(
+            ["go", "run", "./adapter/lean/tests/testdata/execution_contract.go"],
+            cwd=Path(__file__).resolve().parents[3],
+            input=json.dumps(inputs, separators=(",", ":")), text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class StartupReconciliationTests(OrderTestCase):
@@ -675,8 +1104,13 @@ class StartupReportTests(OrderTestCase):
         text = "\n".join(report)
         for topic in ("gap", "same-bar", "intrabar", "touch", "DAY", "slippage",
                       "0.05 x N", "LEAN's default equity slippage", "commission",
-                      "InteractiveBrokersFeeModel", "$0.005"):
+                      "InteractiveBrokersFeeModel", "$0.005", "0.5%", "amended", "partial",
+                      "one bar later", "CancelPending"):
             self.assertIn(topic, text)
+        # Every statement about LEAN's own behaviour was settled by a run on
+        # the pinned image; none is left as belief.
+        self.assertNotIn("unconfirmed", text)
+        self.assertNotIn("believed", text)
         # Logged at startup, before any bar reaches the engine.
         self.assertEqual(algo.client.sent, [])
 
@@ -687,7 +1121,8 @@ class FixtureContractTests(unittest.TestCase):
     def test_fixture_fields_and_schema_versions_match_the_go_payloads(self):
         proposal = trade_proposal(9)
         fixtures = [proposal, add_proposal(9), proposal_expired(proposal, 10),
-                    campaign_opened(), exit_order_set(9)]
+                    campaign_opened(), exit_order_set(9), exit_proposed(9), unit_added(9),
+                    units_stopped(9), campaign_exited(9)]
         result = subprocess.run(
             ["go", "run", "./adapter/lean/tests/testdata/order_decisions_contract.go"],
             cwd=Path(__file__).resolve().parents[3],

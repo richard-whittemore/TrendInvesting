@@ -10,9 +10,11 @@ package doc, "Wire contract: the adapter's first bar must carry Sequence 2").
 Each slice's bars are a Session (ADR 0021): after them the adapter sends
 `market.session.closed`, naming those bars' instruments, and only then the
 account snapshot, all in that same single sequence: configuration 1, bar 2,
-session close 3, snapshot 4, bar 5, and so on, including warm-up. Every input
-type uses the same reply validation for run identity, sequence, causation,
-correlation and the hash of the exact payload bytes.
+session close 3, snapshot 4, bar 5, and so on, including warm-up. Once orders
+are working, LEAN's fills and order changes join the same sequence (see
+**Fills and order changes** below). Every input type uses the same reply
+validation for run identity, sequence, causation, correlation and the hash of
+the exact payload bytes.
 Warm-up is counted in bars, not calendar days, but every warm-up bar is still
 sent: the reducer builds N and the Entry/Exit Channels from every completed
 bar it receives (`internal/strategy/reducer.go`), so withholding LEAN's
@@ -22,13 +24,18 @@ does not make. `client.py` is the transport, reused from the measured ADR
 0014 spike (`spike/`); `publisher.py` maps a LEAN bar and its raw counterpart
 to the wire payload and reports LEAN's portfolio without any methodology.
 
-After each bar's decisions have been received, the adapter sends one
+After each bar's decisions have been received, the adapter reads one
 `account.snapshot` from `Portfolio.TotalPortfolioValue` (equity) and
 `Portfolio.Cash` (available cash), in USD. Its `as_of`, `event_time` and
 `recorded_at` equal that bar's own UTC `period_end`; snapshot times strictly
 increase. The payload uses `event.AccountSnapshotSchemaVersion` (2), with
 all four fields required by `event.AccountSnapshotPayload`. Invalid figures
-or a failed bar or snapshot exchange stop the run.
+or a failed bar or snapshot exchange stop the run. The figures are read at
+the close, before that slice's decisions act, but the snapshot is **sent** at
+the start of the next slice, after LEAN's reports of that slice's fills and
+before its bar (`flush_snapshot`); the reason is under **Fills and order
+changes**. The last snapshot is sent before the end of the stream, or before
+a deliberate stop.
 
 LEAN's starting cash is the run's own `cash` setting in `run.json`, required
 and never defaulted. Set it to the configuration's
@@ -127,38 +134,50 @@ this event to belong to. That path is unchanged: it still just stops the
 algorithm and logs, with nothing recorded in any journal, because there is no
 journal yet to record it in.
 
-**Orders.** `orders.py`'s `OrderDesk` turns the engine's decisions into LEAN orders once
-both of a bar's exchanges (the bar and its snapshot) have been answered. It
-validates each decision against LEAN's current state and places, amends or
-cancels the one order the decision names. The engine decides every level,
-quantity and N; the adapter computes none of them and never combines two
-levels.
+**Orders.** `orders.py`'s `OrderDesk` turns the engine's decisions into LEAN
+orders once the bar's exchanges (the bar and its Session close), or a fill's,
+have been answered. It validates each decision against LEAN's current state
+and places, amends or cancels the one order the decision names. The engine
+decides every level, quantity and N; the adapter computes none of them and
+never combines two levels.
 
 | Decision | LEAN order |
 | --- | --- |
-| `strategy.trade.proposed` | buy stop-market, **DAY**, at `entry_level`, for `quantity` |
-| `strategy.add.proposed` | buy stop-market, **DAY**, at `level`, for `quantity` |
+| `strategy.trade.proposed` | buy stop-market, **good-till-cancelled**, at `entry_level`, for `quantity` |
+| `strategy.add.proposed` | buy stop-market, **good-till-cancelled**, at `level`, for `quantity` |
 | `strategy.proposal.expired` (kind `entry` or `add`) | cancel that proposal's order if it is still working |
-| `strategy.campaign.opened` | none: its frozen `campaign_n` is kept for its Exit Orders' slippage |
+| `strategy.campaign.opened` | none: its frozen `campaign_n` is kept for its Exit Orders' slippage, and its `fill_id` as Unit 1's opening fill |
+| `strategy.campaign.unit-added` | none: its `fill_id` is kept as that Unit's opening fill |
+| `strategy.exit.proposed` | none: its id is kept as the Campaign's outstanding exit proposal |
 | `strategy.exit-order.set` | the Unit's one **good-till-cancelled** sell stop-market, at `level`, for the Unit's `quantity`; a later level for the same Unit **amends** that order and never adds a second |
+| `strategy.campaign.units-stopped`, `strategy.campaign.exited` | none: the closed Units' Exit Orders, and the Campaign's exit proposal, are forgotten |
 
+- **Entries and Adds are good-till-cancelled, never DAY.** At daily
+  resolution LEAN expires a DAY order before it evaluates the next session's
+  fill: DAY buy stops whose next bar crossed their level expired unfilled
+  (see **Observed LEAN behaviour**). The engine expires an unfilled proposal
+  at the instrument's next bar (ADR 0011) and the adapter then cancels its
+  order, so each still works for exactly one session.
 - **The order tag is the decision id**: the trade or Add proposal's id, or, for
   an Exit Order, the id of the `strategy.exit-order.set` now in force (an
   amendment updates the tag with the level). A decision whose id is already
   on an order in LEAN's own order book, in any state, is not submitted again,
-  so redelivering a proposal never opens a second position.
-- **A proposal is valid only for the bar after the one that produced it**
-  (ADR 0005's window; `EarliestFillAt`): its `period_end` must be the bar
-  just published. Entries and Adds are DAY orders, so each is live for that
-  one session. Anything else is rejected as stale.
+  so redelivering a proposal never opens a second position. A cancellation
+  passes no tag, because LEAN's `Cancel(tag)` overwrites the order's own.
+- **A proposal is valid only for the session after the bar that produced
+  it** (ADR 0005's window; `EarliestFillAt`): its `period_end` must be the
+  bar the decisions answer. A proposal in a fill's reply answers the session
+  the fill executed in, so an Add the engine chains from a fill, measured
+  against the bar that signalled the entry, is stale: that session has
+  already traded in LEAN. Anything stale is rejected.
 - **Every rejection is logged with its reason** as `adapter: REJECTED <type>
   <id>: <reason>`: an instrument that isn't this run's symbol or isn't
   tradable, a quantity that isn't a positive whole number, a level that isn't
   a positive price, a direction other than long, a stale proposal, one already
   submitted, an entry or Add order LEAN itself refuses, and an Exit-Order
-  level older than the one in force. The totals are logged at the end of the run. A rejected
-  entry or Add is a proposal the engine re-issues on a later bar, not a
-  protection gap.
+  level older than the one in force. The totals are logged at the end of the
+  run. A rejected entry or Add is a proposal the engine re-issues on a later
+  bar, not a protection gap.
 - **An Exit Order amendment LEAN doesn't acknowledge leaves the previous level
   in force**, and is logged (ADR 0019's amendment).
 - **A decision answering a warm-up bar is never acted on**, and **nothing is
@@ -170,11 +189,17 @@ levels.
   - an Exit-Order level for a Unit whose LEAN order is no longer working or
     sells a different quantity — including a redelivered level whose tagged
     order is filled, cancelled or invalid, since the engine still sets it but
-    no working order protects the Unit;
+    no working order protects the Unit. The one exception is an order LEAN
+    has already filled in the slice being reported, whose fill is still to be
+    sent: that fill states what executed, so the amendment is skipped and
+    logged (ADR 0005 rule 3: a bar that fills an Add and a stop enters, then
+    stops);
   - an Exit Order LEAN refuses (status `Invalid`);
-  - a cancellation LEAN doesn't confirm when a proposal expires, since the
-    order could still fill into a holding the engine doesn't expect (a
-    cancellation is logged only once LEAN confirms it);
+  - a cancellation LEAN refuses when a proposal expires, or one it has not
+    confirmed by the start of the next slice, since the order could still
+    fill into a holding the engine doesn't expect. LEAN answers a cancel with
+    `CancelPending` and reports `Canceled` after the slice; the cancellation
+    is logged as requested, then as done once LEAN confirms it;
   - a trade proposal arriving while LEAN already holds the instrument: the
     engine proposes an entry only when it holds no Campaign there.
 - **Reconciliation before trading** (`docs/architecture.md`: reconcile before
@@ -194,6 +219,74 @@ levels.
   instrument, a quantity that isn't a positive whole number, a level that isn't
   a positive price, or an unreadable `as_of`. Unlike an entry or Add, it isn't
   re-issued, and it would leave its Unit without a stop.
+- **LEAN's own API, as the pinned image has it.** `StopMarketOrder`'s fourth
+  argument is the bool `asynchronous`, so the tag and order properties are
+  the fifth and sixth; the order-ticket collections are enumerables with no
+  length or indexing, so they are read with `list()`.
+
+**Fills and order changes.** `OnOrderEvent` sends nothing: LEAN raises it in
+the middle of placing an order (a submission is reported before
+`StopMarketOrder` returns) and before `OnData` for a session's fills, so each
+report is read once (`OrderDesk.observe`) and queued. `drain_order_events`
+sends the queue at three points: at the start of each slice, before anything
+else; after the slice's decisions have been acted on; and before the stream
+ends or a deliberate stop. Acting on a fill's decisions places or amends
+orders, and LEAN reports those too, so the queue is drained until it is
+empty.
+
+- **A fill becomes one `execution.fill`**, shaped exactly as the reducer
+  expects for its order's kind, mirroring `internal/fills`:
+
+  | LEAN order filled | `kind` | `proposal_id` | `campaign_id` | `unit_ids` |
+  | --- | --- | --- | --- | --- |
+  | an entry | `entry` | the trade proposal | empty | empty |
+  | an Add | `add` | the Add proposal | the proposal's Campaign | empty |
+  | an Exit Order the engine last set at its protective stop | `stop` | empty | the Unit's Campaign | the Unit's opening fill |
+  | every Exit Order the engine last set at the Exit Channel, filled at one instant | `exit`, **one fill for them all** | the Campaign's exit proposal | the Campaign | empty |
+
+  The kind of an Exit Order is the `source` of the `strategy.exit-order.set`
+  in force; nothing compares a price with a level. An exit closes the whole
+  remaining holding (`applyExitFill`), so every Unit resting at the Exit
+  Channel must have filled at the same instant, level, price and slippage, or
+  the run stops. `price` and `quantity` are LEAN's, `filled_at` is the
+  event's `UtcTime`, `level` the order's stop price, `slippage_applied` what
+  the adapter's slippage model charged that order, and `commission` LEAN's
+  `OrderFee` (summed for an exit). `fill_id` is `lean:<order id>:<event id>`,
+  joined with `+` for an exit. One instant's fills are sent in ADR 0005's
+  order: the buy first, then stop fills worst price first, then the exit.
+- **Every other change becomes one `execution.order.lifecycle`**
+  (`internal/event/order_lifecycle.go`), in the order LEAN reported it:
+  `Submitted` (LEAN's acknowledgement) as `submitted`, `UpdateSubmitted` as
+  `updated`, `CancelPending` as `cancel-pending`, `Canceled` (by the adapter,
+  or LEAN's own expiry) as `canceled`, and `Invalid` (LEAN refused it) as
+  `invalid`, each with the order's id, tag, signed quantity, stop price, time
+  and LEAN's message. The engine records them and decides nothing from them;
+  they are journalled for reconciliation (ADR 0019). Any other status stops
+  the run.
+- **A partial fill stops the run.** The reducer accepts one fill per order: a
+  second partial of an entry is refused, and a partial stop or exit cannot
+  close its Units. Until successive partial fills accumulate into one Unit
+  (#67), the adapter invents no position logic; a `PartiallyFilled` event, or
+  a `Filled` one for less than the order, stops the run with the order, tag,
+  quantities and price in the reason.
+- **Where each input falls.** A slice is: reports LEAN made after the last
+  slice (confirmed cancellations and amendments); this session's fills, and
+  what acting on them placed; the previous Session's `account.snapshot`; this
+  Session's bar and `market.session.closed`; then reports of what acting on
+  those decisions placed or cancelled. So:
+  - **a session's fills precede its bar.** A proposal stays outstanding until
+    the instrument's next bar expires it (ADR 0011); a fill sent after that
+    bar would name a proposal the engine no longer offers, and the engine
+    refuses it (`TestAFillFromTheNextSessionPrecedesThatSessionsBar`);
+  - **the previous Session's snapshot follows those fills.** The engine
+    attributes an Add it chains from a fill to the bar that signalled the
+    entry, and checks it against cash known at that bar's previous close
+    (ADR 0021, section 7). A snapshot sent before the fill is later than that
+    close, so the engine would find no eligible cash basis and stop; this
+    happened on the first entry of the first acceptance attempt. The
+    snapshot's figures are read at its own close, so they are unchanged by
+    when it is sent, and it still precedes the bar whose sizing it is the
+    basis for (ADR 0020).
 
 **Costs (ADR 0013).** Every order's fill slips by `slippage_n` × the N the
 engine supplied with it: a trade proposal's `n`, an Add proposal's
@@ -204,41 +297,71 @@ An order with no supplied N raises rather than slipping by zero.
 defaulted; set it to the configuration's `slippage_n` (0.05 in the Baseline),
 as `cash` must equal `notional_account.starting_equity`. Commission uses
 LEAN's `InteractiveBrokersFeeModel`; IBKR Pro Fixed is the working assumption
-(#81).
+(#81), and LEAN's model differs from it (see below).
 
 **The startup fill-model report.** In a LEAN run LEAN's fills are the
 evidence; `cmd/backtest` remains the reference implementation of ADR 0005, and
 the two are compared rather than forced to agree. At startup the adapter logs
 `adapter: fill model: ...` lines stating every respect in which LEAN's fills
 depart from ADR 0005 and ADR 0013: gap-at-open behaviour, exact touches,
-same-bar ambiguity, intrabar ordering, DAY-order lifetime, LEAN's default
-equity slippage and the commission schedule. LEAN's source is not available
-to the adapter, so the statements about LEAN's own behaviour are marked
-unconfirmed; the LEAN acceptance run against the pinned image is what
-confirms them.
+same-bar ambiguity, amendments, intrabar ordering, entry timing, order
+lifetime, LEAN's default equity slippage, the commission schedule and partial
+fills. Each statement about LEAN's own behaviour was observed on the pinned
+image, as follows.
 
-**What works end to end now, and what waits for #30.** Returning fills and
-order lifecycle to Go is #30. Until it lands:
+**Observed LEAN behaviour** (image
+`quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d`;
+a probe algorithm on AAPL, BAC and SPY daily bars for 2–11 January 2013, and
+the acceptance run below):
 
-- works now in a LEAN run: entries are placed as DAY stop orders from the
-  engine's proposals, cancelled when their proposal expires, deduplicated
-  from LEAN's order book, and priced with the slippage and commission above;
-- **a LEAN run currently stops at its first fill.** `OnOrderEvent` stops the
-  run on the first `Filled` or `PartiallyFilled` event, with a reason naming
-  the order and its tag: a fill can't yet be returned to the engine, so the
-  engine would go on believing it is flat, place no Exit Order for the
-  holding, and could propose further entries;
-- waits for #30: returning that fill to the engine, which then opens the
-  Campaign and emits `strategy.campaign.opened` and
-  `strategy.exit-order.set`, and later Adds. **No Exit Order is placed in a
-  LEAN run yet.** The Exit-Order mirroring is built and unit-tested against
-  fixture decisions only.
+| Question | Observed |
+| --- | --- |
+| Does a DAY order fill in the next session at daily resolution? | **No.** LEAN expires it first: DAY buy stops at 549.66 and 500.00 placed after the 2 January bar were `Canceled` ("The order has expired.") at the 3 January close, though that bar's high was 549.66 and its open 547.95. The same orders good-till-cancelled filled. |
+| Gap at the open | Matches ADR 0005: a buy stop at 500.00 filled at the 547.95 open plus slippage; a sell stop at 540.00 filled at the 537.15 open less slippage, each with LEAN's "unfavorable gap" message. In the acceptance run all 119 fills, 55 of them gaps, were priced at max/min(level, open) ± slippage to within 2e-15. |
+| An exact touch | Fills: a buy stop at 549.66, that bar's exact high, filled at 549.76; a sell stop at 525.83, that bar's exact low, filled at 525.73 (0.10 slippage). The acceptance run had no exact touch. |
+| Is a cancel synchronous? | **No.** `Cancel()` returns success with the order `CancelPending`; `Canceled` is reported after `OnData` returns, before the next slice. In the acceptance run all 15 cancellations were confirmed that way. |
+| LEAN's default equity slippage | Zero (`NullSlippageModel`): a gapped SPY buy with no slippage model filled exactly at the 145.99 open. |
+| IB fee tier | $0.005 per share, $1.00 minimum (500 shares: $2.50; 50 shares: $1.00), capped at 0.5% of the order's value at LEAN's market price, not Pro Fixed's 1%; the minimum wins over the cap (1 BAC share at $12.01: $1.00). The cap bound on 42 of the acceptance run's 119 fills. |
+| Amendments | An amended order is evaluated against the bar it was amended after: a sell stop raised to 530.00 after a bar whose low was 525.83 filled at 529.90 in that same slice. A new order never fills against the bar it was placed after. |
+| When are fills reported? | Before `OnData` for the session they executed in, stamped at its close (`UtcTime` = the bar's end), with the holding already moved. |
+| Early closes | LEAN's one-bar raw `History` returned two rows on 2002-12-24 (13:00 close); `raw_view` takes the row ending with the bar. |
+
+**The acceptance run.** A one-instrument backtest on the pinned image, with
+the engine in its own container on a shared named volume (ADR 0014). It uses
+only the LEAN data already on the machine and pulls nothing. From a LEAN
+workspace whose `data/` holds US equity daily data, with a project directory
+holding `algorithm.py` as `main.py`, `client.py`, `orders.py`,
+`publisher.py` and a `run.json` naming `/run/adapter/private/s.sock`:
+
+```sh
+# Build for the Docker server's own architecture (arm64 or amd64), so the LEAN
+# image runs the engine natively.
+GOOS=linux GOARCH="$(docker version --format '{{.Server.Arch}}')" CGO_ENABLED=0 go build -o <stage>/engine ./cmd/engine
+docker volume create trend30sock
+docker run -d --name trend30-engine -v trend30sock:/run/adapter -v <stage>:/stage \
+  --entrypoint /stage/engine quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d \
+  -socket /run/adapter/private/s.sock -config /stage/configuration.json -out /stage/journal.jsonl
+lean backtest <project> --image quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d \
+  --no-update --extra-docker-config '{"volumes": {"trend30sock": {"bind": "/run/adapter", "mode": "rw"}}}'
+docker stop trend30-engine   # the engine writes the journal on SIGTERM
+go run ./cmd/backtest -verify <stage>/journal.jsonl
+go run ./cmd/backtest -replay <stage>/journal.jsonl
+```
+
+`run.json`'s `configuration_hash` and `strategy_version` must be the
+engine's own for that configuration and build. The journal and the market
+data are never committed. The evidence for the run that closed this work is
+recorded on its pull request: AAPL, 2003-01-01 to 2010-12-31 with 60 warm-up
+bars, the Baseline's 55/20 channels; 119 fills (26 entries, 48 Adds, 32 stops,
+13 exits) and 325 order changes; 9,520 records, a complete run, a verified
+chain and a byte-identical replay.
 
 The adapter will still need to:
 
 - send `account.cash-movement` events into the same input sequence (outside #158);
 - normalize universe changes, corporate actions, connection changes, and brokerage events into versioned messages;
-- return acknowledgements, rejections, cancellations, updates, and fills to Go (#30); and
+- accumulate partial fills into one Unit (#67), rather than stopping on one;
+- recover which LEAN order is each Unit's Exit Order after a restart (#207); and
 - reconcile its orders and holdings with the broker (ADR 0019).
 
 It contains no methodology, position-sizing, pyramid, drawdown, or portfolio-risk rules — those stay in Go.
@@ -254,6 +377,19 @@ The snapshot test feeds the emitted wire JSON to Go's actual envelope and
 `AccountSnapshotPayload.Validate` checks and compares its type/schema with
 the Go constants; it does not duplicate the Go contract in a Python validator.
 The order tests (`tests/test_orders.py`) drive the algorithm with fixture
-decisions and assert on the orders that reach LEAN's order book; their
-fixtures are checked against the Go payload types' fields and schema versions
-by `tests/testdata/order_decisions_contract.go`.
+decisions and a fake of LEAN's order book that behaves as the pinned image was
+observed to (the order-event timing, `CancelPending`, the enumerables and
+`StopMarketOrder`'s signature), and assert on the orders that reach it and the
+inputs that reach the engine. Their decision fixtures are checked against the
+Go payload types' fields and schema versions by
+`tests/testdata/order_decisions_contract.go`, and every fill and lifecycle
+input the adapter builds is checked against Go's own validators by
+`tests/testdata/execution_contract.go`.
+
+`tests/test_end_to_end.py` runs the algorithm against the real `cmd/engine`
+over a real socket, with the fake order book filling orders under ADR 0005's
+rules against a synthetic (non-market) series: an entry, Adds including one
+the engine chains from a fill, and an Exit-Channel exit of every Unit as one
+fill. It then runs `cmd/backtest -verify` and `-replay` on the engine's
+journal and requires a complete, verified run that replays byte-identically.
+It needs the Go toolchain and nothing else: no LEAN, docker or network.

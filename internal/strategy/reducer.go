@@ -326,6 +326,12 @@ func NewReducer(strategyVersion string, payload event.ConfigurationPayload) (*Re
 //     event.RunCompletedEventType may follow it (checked below) — see
 //     applyAdapterRunStopped.
 //
+//   - event.OrderLifecycleEventType: record, no decision — a venue's report
+//     that an order was acknowledged, amended, cancelled or refused, which
+//     moves no position (docs/architecture.md) and is journalled for
+//     reconciliation (ADR 0019) — see order_lifecycle.go's
+//     applyOrderLifecycle.
+//
 //   - event.RunCompletedEventType: expires outstanding proposals across the
 //     whole universe and records resulting Exit Order changes (ADR 0011).
 //
@@ -363,6 +369,8 @@ func (r *transition) apply(envelope event.Envelope) ([]event.Envelope, error) {
 		return r.applyRunCompleted(envelope)
 	case event.AdapterRunStoppedEventType:
 		return r.applyAdapterRunStopped(envelope)
+	case event.OrderLifecycleEventType:
+		return r.applyOrderLifecycle(envelope)
 	default:
 		return nil, fmt.Errorf("strategy: unrecognized event type %q", envelope.Type)
 	}
