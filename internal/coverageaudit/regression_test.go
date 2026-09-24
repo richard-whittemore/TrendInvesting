@@ -48,6 +48,19 @@ func TestSuppliedProfileRejectsPathsOutsideModule(t *testing.T) {
 	}
 }
 
+// TestSuppliedProfileRejectsNonCanonicalPaths pins that a supplied profile
+// cannot reach outside internal/ through path traversal: a path that passes
+// the internal/ prefix check but resolves elsewhere is refused, not read.
+func TestSuppliedProfileRejectsNonCanonicalPaths(t *testing.T) {
+	t.Parallel()
+	for _, p := range []string{"internal/../cmd/main.go", "internal/../../outside.go", "internal/./sample/sample.go", "internal//sample/sample.go"} {
+		t.Run(p, func(t *testing.T) {
+			t.Parallel()
+			requireAuditFailure(t, "noncanonical-profile:"+p, "not a canonical module-relative path")
+		})
+	}
+}
+
 func TestSuppliedProfileRejectsNewerCoverageInputs(t *testing.T) {
 	for _, name := range []string{"internal/sample/sample_test.go", "internal/sample/sample.go", "go.mod", "go.sum", "internal/sample/testdata/input.json"} {
 		t.Run(name, func(t *testing.T) {
@@ -223,6 +236,12 @@ func TestCoverageAuditFailure(t *testing.T) {
 		root, path := freshnessFixture(t, name, true)
 		t.Setenv(profileEnv, path)
 		profile(t, root)
+		return
+	}
+	if rel, ok := strings.CutPrefix(scenario, "noncanonical-profile:"); ok {
+		root := t.TempDir()
+		path := writeAuditFixture(t, root, "coverage.out", "mode: atomic\n"+modulePath+rel+":1.1,1.2 1 0\n")
+		uncoveredBlocks(t, root, path)
 		return
 	}
 	if count, ok := strings.CutPrefix(scenario, "foreign-profile-"); ok {

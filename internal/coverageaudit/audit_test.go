@@ -337,6 +337,14 @@ func uncoveredBlocks(t *testing.T, root, path string) []block {
 		if !ok {
 			t.Fatalf("coverage profile line %q names %s, which is outside module %s", line, name, strings.TrimSuffix(modulePath, "/"))
 		}
+		// Go writes clean, module-relative paths into a coverage profile, so a
+		// path that is not already canonical ("..", ".", "//") is malformed or
+		// forged. Rejecting it outright, rather than cleaning it, keeps a path
+		// such as internal/../cmd/main.go from passing the internal/ scope check
+		// and then being read from outside it.
+		if clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel))); clean != rel || rel == "" || strings.HasPrefix(clean, "../") || filepath.IsAbs(clean) {
+			t.Fatalf("coverage profile line %q names %s, which is not a canonical module-relative path", line, name)
+		}
 		if !strings.HasPrefix(rel, "internal/") {
 			continue
 		}

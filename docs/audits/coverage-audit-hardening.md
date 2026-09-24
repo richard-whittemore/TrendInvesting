@@ -282,9 +282,9 @@ Falsification restored the pre-fix audit implementation with tests retained, the
 
 ## #181 — identical guards
 
-Verified that exchanging coverage between two identical guards passed the old matcher. Block keys and diagnostics now include the starting byte offset; dumps retain separate occurrences. Extracted the unchanged matching loop into `checkExclusions` so synthetic profiles exercise the actual audit. The regression checks both the swap failure and separate JSON dump identities.
+Verified that exchanging coverage between two identical guards passed the old matcher. Block keys and diagnostics first included the starting byte offset; **superseded** by occurrence keys (see `docs/audits/coverage-occurrence-keys.md`): a block is keyed by its 1-based ordinal among identical statements in its function, which survives edits elsewhere in the file. Extracted the unchanged matching loop into `checkExclusions` so synthetic profiles exercise the actual audit. The regression checks both the swap failure and separate JSON dump identities.
 
-Migrated 78 aggregate entries into 91 position-specific entries. Compared the old counts to the new per-key multiplicities before writing; every category and reason was preserved verbatim. Existing entry ordering is retained, with formerly grouped entries expanded in source order. Byte offsets deliberately require renewed review when preceding source text moves; the guide documents that tradeoff. No domain files or decision rules changed.
+Migrated 78 aggregate entries into 91 per-block entries (first keyed by byte offset, then re-keyed by occurrence). Compared the old counts to the new per-key multiplicities before writing; every category and reason was preserved verbatim. Existing entry ordering is retained, with formerly grouped entries expanded in source order. The byte-offset key required re-review whenever preceding source moved; the occurrence key that superseded it does not, and `TestEditsAboveExcludedGuardPreserveExclusion` pins that. No domain files or decision rules changed.
 
 ### red
 
@@ -387,7 +387,7 @@ ok  	github.com/richard-whittemore/TrendInvesting/internal/coverageaudit	19.904s
 
 ## #182 — negative exclusion counts
 
-Verified the matcher panicked on an in-memory exclusion with `Count: -1`. It now reports the file, function, byte offset and negative count with `t.Errorf`, then skips that invalid entry before slicing. The subprocess regression requires failure with that diagnostic and rejects panic output. Separate cases retain omitted/zero and explicit-one count behavior.
+Verified the matcher panicked on an in-memory exclusion with `Count: -1`. It now reports the file, function, occurrence and negative count with `t.Errorf`, then skips that invalid entry before slicing. The subprocess regression requires failure with that diagnostic and rejects panic output. Separate cases retain omitted/zero and explicit-one count behavior.
 
 ### red
 
