@@ -8,129 +8,8 @@ import (
 )
 
 // This file covers the resting-order book itself: what Observe puts in it and
-// takes out of it, what Resting reports, and the one ordering case among
-// competing sells that the full-life fixtures cannot reach on their own.
-
-// TestWhenABarReachesBothTheStopsAndTheExitChannelTheStopsFillFirst is the
-// enumerated case RunBar's doc comment names "stop (sell) + Exit-Channel exit
-// (sell)".
-//
-// Both orders close the same Campaign and only one of them can close all of
-// it, so the bar's range cannot say which happened; worst-price-first is the
-// pessimistic tie-break. Here the four Units' own stops sit around 154.9 and
-// the Exit Channel at 159.3 (#79 moves the entry and Add fills down by 1 N,
-// which moves every stop with them; the Exit Channel is computed from bars
-// 60-79's own OHLC, not from any fill, so it is unaffected), so the stops are
-// the worse close and take the Campaign off one Unit at a time. The exit
-// proposal is then cancelled — its Campaign no longer exists — and never
-// fills.
-//
-// It also pins the per-Unit shape of a stop fill: every Unit's stop is its
-// own resting order at its own level, so four Units produce four fills, each
-// naming exactly one Unit.
-func TestWhenABarReachesBothTheStopsAndTheExitChannelTheStopsFillFirst(t *testing.T) {
-	t.Parallel()
-
-	bars := campaignLifeBars()
-	// The same bar as the full-life fixture's last, but reaching 150 instead
-	// of 157: deep enough to take out every Protective Stop on the way to
-	// breaking the Exit Channel.
-	bars[len(bars)-1] = bar(day(80), 163.0, 163.1, 150, 152)
-	run := runComposed(t, baselineConfig(), bars)
-
-	got := fillPayloads(t, run.Inputs)
-	if len(got) != 8 {
-		t.Fatalf("got %d fill(s), want 8 (entry, three Adds, four stops)%s", len(got), describe(envelopesOfType(run.Inputs, event.FillEventType)))
-	}
-	stops := got[4:]
-
-	// Worst price first, one Unit at a time: Unit 1's stop is the lowest
-	// (it has risen by half N three times from the lowest fill), Unit 4's
-	// the highest.
-	wantPrices := []float64{154.75, 154.825, 154.9, 154.975}
-	wantUnits := []string{got[0].FillID, got[1].FillID, got[2].FillID, got[3].FillID}
-	for i, stop := range stops {
-		if stop.Kind != event.FillKindStop {
-			t.Fatalf("fill %d Kind = %q, want %q", 4+i, stop.Kind, event.FillKindStop)
-		}
-		assertPrice(t, "stop fill price", stop.Price, wantPrices[i])
-		if stop.Quantity != fixtureUnitQuantity {
-			t.Errorf("stop fill %d quantity = %d, want one Unit (%d)", i, stop.Quantity, fixtureUnitQuantity)
-		}
-		if len(stop.UnitIDs) != 1 || stop.UnitIDs[0] != wantUnits[i] {
-			t.Errorf("stop fill %d names units %v, want exactly [%s]", i, stop.UnitIDs, wantUnits[i])
-		}
-	}
-	for i := 1; i < len(stops); i++ {
-		if stops[i].Price < stops[i-1].Price {
-			t.Errorf("stop fill %d executed at %v, below the one before it at %v: sells are ordered worst price first", i, stops[i].Price, stops[i-1].Price)
-		}
-	}
-
-	// The exit was proposed — the bar did break the channel — and never
-	// filled, because the stops had already emptied the Campaign.
-	if got := envelopesOfType(run.Decisions, event.ExitProposalEventType); len(got) != 1 {
-		t.Fatalf("got %d exit proposal(s), want 1: the bar did break the Exit Channel", len(got))
-	}
-	for _, fill := range got {
-		if fill.Kind == event.FillKindExit {
-			t.Error("an exit fill was produced for a Campaign the stops had already closed")
-		}
-	}
-
-	var exited event.CampaignExitedPayload
-	decodeInto(t, onlyOfType(t, run.Decisions, event.CampaignExitedEventType), &exited)
-	if exited.Reason != event.ExitReasonStop {
-		t.Errorf("exited.Reason = %q, want %q", exited.Reason, event.ExitReasonStop)
-	}
-	if exited.Units != 4 {
-		t.Errorf("exited.Units = %d, want 4 over the Campaign's whole life", exited.Units)
-	}
-}
-
-// TestWhenTheExitChannelIsTheWorseCloseItFillsAndTheStopsAreCancelled is the
-// other half of the same enumerated case.
-//
-// Early in a Campaign the Exit Channel sits well BELOW every Protective Stop,
-// so a bar deep enough to break the channel has already passed every stop on
-// the way down — and selling everything at the channel is worse than stopping
-// out above it. Worst-price-first therefore fills the exit, which closes the
-// whole Campaign and cancels the stops.
-func TestWhenTheExitChannelIsTheWorseCloseItFillsAndTheStopsAreCancelled(t *testing.T) {
-	t.Parallel()
-
-	bars := campaignLifeBars()[:59] // through day(59): four Units, stops ~154.8-155.05 (#79)
-	// The Exit Channel over bars 40..59 stands at 139, far below every stop.
-	bars = append(bars, bar(day(60), 159, 159.2, 138, 140))
-	run := runComposed(t, baselineConfig(), bars)
-
-	got := fillPayloads(t, run.Inputs)
-	if len(got) != 5 {
-		t.Fatalf("got %d fill(s), want 5 (entry, three Adds, the exit)%s", len(got), describe(envelopesOfType(run.Inputs, event.FillEventType)))
-	}
-	exit := got[4]
-	if exit.Kind != event.FillKindExit {
-		t.Fatalf("final fill Kind = %q, want %q: the exit is the worse close, so it happened first", exit.Kind, event.FillKindExit)
-	}
-	assertPrice(t, "exit fill level", exit.Level, 139)
-	// min(139, open 159) - 0.075: the bar traded down through the channel.
-	assertPrice(t, "exit fill price", exit.Price, 138.925)
-	if want := 4 * fixtureUnitQuantity; exit.Quantity != want {
-		t.Errorf("exit fill quantity = %d, want %d", exit.Quantity, want)
-	}
-
-	if stopped := envelopesOfType(run.Decisions, event.CampaignUnitsStoppedEventType); len(stopped) != 0 {
-		t.Errorf("got %d units-stopped event(s), want none: the exit closed the Campaign first", len(stopped))
-	}
-	var exited event.CampaignExitedPayload
-	decodeInto(t, onlyOfType(t, run.Decisions, event.CampaignExitedEventType), &exited)
-	if exited.Reason != event.ExitReasonExitChannel {
-		t.Errorf("exited.Reason = %q, want %q", exited.Reason, event.ExitReasonExitChannel)
-	}
-	if exited.RealisedResult >= 0 {
-		t.Errorf("exited.RealisedResult = %v, want a loss: exiting at 138.925 is far below the average entry", exited.RealisedResult)
-	}
-}
+// takes out of it, and what Resting reports. The sell side — each Unit's one
+// Exit Order — has its own file, exit_order_fill_test.go.
 
 // TestRestingReportsEveryOrderInForce: the book, read back. #19's driver
 // needs it to report what was left outstanding when a run ended, and a test
@@ -146,7 +25,7 @@ func TestRestingReportsEveryOrderInForce(t *testing.T) {
 
 	resting := simulator.Resting(testInstrument)
 	if len(resting) != 2 {
-		t.Fatalf("got %d resting order(s), want 2 (one Protective Stop per held Unit)%v", len(resting), resting)
+		t.Fatalf("got %d resting order(s), want 2 (one Exit Order per held Unit, each at its Protective Stop)%v", len(resting), resting)
 	}
 	for i, want := range []struct {
 		level    float64
@@ -257,7 +136,6 @@ func TestObserveIgnoresTheEmissionsThatCreateNoOrder(t *testing.T) {
 		event.SignalEventType,
 		event.ProposalDeclinedEventType,
 		event.CampaignEvaluatedEventType,
-		event.ExitOrderSetEventType,
 		event.EngineStateEventType,
 		event.DrawdownStepAppliedEventType,
 		event.NotionalAccountRebasedEventType,

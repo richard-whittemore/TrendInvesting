@@ -13,10 +13,11 @@ import (
 // It adds to, and replaces nothing in, the two events it is derived from.
 // ProtectiveStopSetEventType still records every Unit's own stop, and
 // ExitProposalEventType still records an Exit-Channel exit for the whole
-// Campaign; the fill simulator and the reducer's own logic read those two.
-// This event is their per-Unit combination — the one level at which that
-// Unit's single sell order should rest — so that a consumer mirroring
-// orders never has to combine two strategy levels itself.
+// Campaign; the reducer's own logic reads those two. This event is their
+// per-Unit combination — the one level at which that Unit's single sell
+// order rests — and it is what a consumer mirroring orders reads, the fill
+// simulator included, so that none ever combines two strategy levels
+// itself.
 const ExitOrderSetEventType = "strategy.exit-order.set"
 
 // ExitOrderSetSchemaVersion is the current schema version of

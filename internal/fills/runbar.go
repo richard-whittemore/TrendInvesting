@@ -80,7 +80,9 @@ func Deliver(ctx context.Context, sim *Simulator, handler replay.Handler, envelo
 //     breakout, raises the trade proposal.
 //  3. **The intrabar fixpoint.** Every order now resting is evaluated against
 //     B, repeatedly, until nothing more fills: every covered BUY first, then,
-//     when no buy is covered, the single worst-priced covered SELL. Each fill
+//     when no buy is covered, the next covered SELL — a Unit's Exit Order at
+//     its own stop, worst price first, and once none is left, the Exit
+//     Orders at the Exit Channel as one exit. Each fill
 //     is delivered to the reducer as it is decided, and whatever that
 //     delivery causes — a Unit, its own Protective Stop, the next rung, a
 //     cancelled Add, a closed Campaign — is folded back into the book before
@@ -96,6 +98,12 @@ func Deliver(ctx context.Context, sim *Simulator, handler replay.Handler, envelo
 // worst for the trader among the orderings the bar's range permits", and for
 // a long-only Baseline that is: buys first, then sells.
 //
+// Every sell is a Unit's one Exit Order (CONTEXT.md: "Exit Order"), resting
+// at the higher of its Protective Stop and any proposed Exit-Channel exit's
+// level (ADR 0005, as amended). A stop and an exit therefore never rest as
+// two orders for the same shares, and no two sells compete: each fills at
+// its own level on ADR 0005's own terms whichever is delivered first.
+//
 // ADR 0010's "exits before Adds before entries" is not in tension with this.
 // That ordering governs DECISIONS within a day — which is why step 2 above
 // delivers the bar to the reducer, whose evaluateCampaign runs before
@@ -109,24 +117,25 @@ func Deliver(ctx context.Context, sim *Simulator, handler replay.Handler, envelo
 //	    Entered, then stopped: a realised loss. The favourable ordering would
 //	    have the stop taken out first, so the entry never happens and the loss
 //	    never appears. ADR 0005 rule 3's own named case.
-//	Add (buy) + existing stops (sell)
+//	Add (buy) + existing Exit Orders (sell)
 //	    Unit added, then the whole Campaign stopped: a bigger position taken
 //	    off at the stop. Stopping first would cancel the Add and lose less.
-//	Add (buy) + Exit-Channel exit (sell)
+//	Add (buy) + Exit Orders at an Exit-Channel exit (sell)
 //	    Cannot arise from one bar — the reducer only evaluates an Add when
 //	    that same bar did not propose an exit (ADR 0010) — but the ordering
-//	    holds if it ever does: add, then exit everything at the lower level.
-//	entry (buy) + exit or stop of an EARLIER Campaign (sell)
+//	    holds if it ever does: add, then exit everything.
+//	entry (buy) + Exit Order of an EARLIER Campaign (sell)
 //	    Cannot arise: an entry is proposed only when no Campaign is open.
-//	stop (sell) + Exit-Channel exit (sell)
-//	    Both close the same Campaign and at most one can close all of it.
-//	    Worst-price-first decides: the lower of the two fill prices happened
-//	    first, and if it empties the Campaign the other is cancelled. Where
-//	    the stop closes only SOME Units (The Turtle Rules p.23's gap case),
-//	    the exit follows for whatever remains.
-//	two stops at different levels (sell + sell)
-//	    Also the gap case. Each is its own resting order and each fills on its
-//	    own terms, worst price first; Units sharing a level share one fill.
+//	Exit Orders at different Units' own stops (sell + sell)
+//	    The gap case (The Turtle Rules p.22-23). Each Unit's order fills on
+//	    its own terms, one fill per Unit, delivered worst price first.
+//	Exit Orders at a stop + Exit Orders at the Exit Channel (sell + sell)
+//	    The exit level lies between Units' stops: the Units whose stop is
+//	    higher rest there, the rest at the exit level. Any bar reaching the
+//	    exit level has reached those higher stops too, so every Unit sells at
+//	    its own order's level: the stops first, as stop fills, then one exit
+//	    fill for whatever the Campaign still holds — the only exit fill the
+//	    reducer accepts (every Unit exits together; CONTEXT.md: "Campaign").
 //
 // The one thing that overrides the ordering is knowledge. An order that
 // gapped through its level executed at the open, and the open precedes
@@ -264,7 +273,7 @@ func pick(candidates []candidate, onlyGapped bool) (candidate, bool) {
 // is when the execution happened. Both being the bar's own is a property of
 // backtest fixtures, not a rule.
 func (s *Simulator) fillEnvelopeFor(bar event.CompletedBarPayload, c candidate, n int) (event.Envelope, error) {
-	commission, err := s.commission.Charge(c.quantity, c.price, s.dollarsPerPoint)
+	commission, err := s.chargeFor(c)
 	if err != nil {
 		return event.Envelope{}, err
 	}
@@ -348,4 +357,21 @@ func (s *Simulator) deliver(ctx context.Context, handler replay.Handler, envelop
 		}
 	}
 	return nil
+}
+
+// chargeFor is the commission on candidate c: ADR 0013's charge on each
+// broker order the fill journals, summed in the orders' recorded order.
+func (s *Simulator) chargeFor(c candidate) (float64, error) {
+	if len(c.orderQuantities) == 0 {
+		return s.commission.Charge(c.quantity, c.price, s.dollarsPerPoint)
+	}
+	var total float64
+	for _, q := range c.orderQuantities {
+		charge, err := s.commission.Charge(q, c.price, s.dollarsPerPoint)
+		if err != nil {
+			return 0, err
+		}
+		total += charge
+	}
+	return total, nil
 }

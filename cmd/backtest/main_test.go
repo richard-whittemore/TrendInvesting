@@ -322,10 +322,11 @@ func TestVerifyRefusesAnEditedJournal(t *testing.T) {
 
 // TestTheRunEndsByExpiringTheProposalItWasStillHolding checks the terminal
 // event for ADR 0011's one-bar proposal lifetime when no next bar arrives.
-// The fixture ends with an unfilled breakout; its expiry and causing
-// end-of-stream input must both be journalled for replay (ADR 0017).
+// The fixture ends holding an exit proposal its stops pre-empted; its expiry
+// and causing end-of-stream input must both be journalled for replay (ADR
+// 0017).
 func TestTheRunEndsByExpiringTheProposalItWasStillHolding(t *testing.T) {
-	written, _ := runBacktestTo(t)
+	written, _ := runBacktestOnBars(t, writeBars(t, barsEndingWithAnOutstandingExit(t)))
 
 	_, records, err := journal.Read(bytes.NewReader(written))
 	if err != nil {
@@ -340,8 +341,8 @@ func TestTheRunEndsByExpiringTheProposalItWasStillHolding(t *testing.T) {
 	if err := json.Unmarshal(final.Payload, &expiry); err != nil {
 		t.Fatalf("decode the final expiry: %v", err)
 	}
-	if expiry.Reason != event.ExpiryReasonInputStreamEnded {
-		t.Fatalf("the final expiry's reason is %q, want %q", expiry.Reason, event.ExpiryReasonInputStreamEnded)
+	if expiry.Reason != event.ExpiryReasonInputStreamEnded || expiry.Kind != event.ProposalKindExit {
+		t.Fatalf("the final expiry is a %q proposal for %q, want the outstanding %q proposal for %q", expiry.Kind, expiry.Reason, event.ProposalKindExit, event.ExpiryReasonInputStreamEnded)
 	}
 
 	var sawRunCompleted bool

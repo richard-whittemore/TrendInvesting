@@ -52,7 +52,20 @@ package strategy
 // that exit's level (ADR 0005). No existing decision changes and no fill
 // changes, but every journal with a Campaign gains decisions, so the two
 // builds no longer replay each other's journals byte-identically.
-const RulesVersion = "1.4.0"
+//
+// Bumped 1.4.0 -> 1.5.0 when a backtest began filling each Unit's Exit
+// Order as the one sell order it is (ADR 0005's 2026-09-24 amendment),
+// rather than its Protective Stop and a proposed Exit-Channel exit as two
+// competing orders filled worst price first. No decision this package makes
+// from a given input changes, so a journal still replays byte-identically
+// under either build. But the fills a backtest feeds this package are part
+// of what a Baseline run produces: wherever a bar reaches an exit level
+// above a Unit's stop, that Unit now sells at the exit level rather than at
+// its stop, and every decision downstream of that fill changes with it —
+// the same reason a changed entry fill price moved 1.0.0 to 1.1.0. Rerunning
+// a 1.4.0 run's own inputs through this build therefore produces a
+// different journal, so the two cannot share a version.
+const RulesVersion = "1.5.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -128,4 +141,7 @@ var RuleSurfaceFingerprints = map[string]string{
 	// (event.RuleExitOrderHigherOfStopAndExitChannel,
 	// event.ADRExitOrderRestsAtTheLevel).
 	"1.4.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
+	// Unchanged from 1.4.0: the 1.5.0 change is in how the fill simulator
+	// fills the Exit Order, not in any constant this surface declares.
+	"1.5.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
 }

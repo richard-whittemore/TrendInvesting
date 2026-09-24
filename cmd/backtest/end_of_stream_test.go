@@ -33,11 +33,26 @@ const barsMultiInstrumentOutOfOrderFixture = "testdata/bars_multi_instrument_out
 // it errors if the declared completion instant precedes any instrument's
 // own last bar (AAPL's, in this fixture). A run that used the correct
 // maximum never trips that check.
+//
+// AAPL's bars are the golden fixture's cut the day after its breakout
+// (barsEndingWithAnOutstandingExit), so AAPL still holds an exit proposal
+// when the stream ends and the run has something to resolve.
 func TestRunCompletedIsStampedWithTheLatestPeriodEndAcrossEveryInstrument(t *testing.T) {
+	fixture, err := readBars(barsMultiInstrumentOutOfOrderFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bars := barsEndingWithAnOutstandingExit(t)
+	for _, bar := range fixture {
+		if bar.InstrumentID != "AAPL" {
+			bars = append(bars, bar)
+		}
+	}
+
 	out := filepath.Join(t.TempDir(), "journal.jsonl")
 	opts := options{
 		configPath: configurationFixture,
-		barsPath:   barsMultiInstrumentOutOfOrderFixture,
+		barsPath:   writeBars(t, bars),
 		outPath:    out,
 		build:      testBuild,
 	}
@@ -56,10 +71,10 @@ func TestRunCompletedIsStampedWithTheLatestPeriodEndAcrossEveryInstrument(t *tes
 		t.Fatalf("journal.Read() error = %v", err)
 	}
 
-	// AAPL's last bar (2026-02-02) is the true latest PeriodEnd across both
+	// AAPL's last bar (2026-01-23) is the true latest PeriodEnd across both
 	// instruments; MSFT's last bar (2025-12-02), the fixture's last array
 	// element, is not.
-	wantCompletedAt := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
+	wantCompletedAt := outstandingExitBar
 
 	var sawRunCompleted bool
 	for _, record := range records {
@@ -76,8 +91,8 @@ func TestRunCompletedIsStampedWithTheLatestPeriodEndAcrossEveryInstrument(t *tes
 		t.Fatalf("the journal records no %s event", event.RunCompletedEventType)
 	}
 
-	// AAPL's outstanding breakout proposal (same fixture as the golden
-	// journal's) must still reach its end-of-stream terminal event: the fix
+	// AAPL's outstanding exit proposal must still reach its end-of-stream
+	// terminal event: the fix
 	// must not merely avoid the error, it must let the run actually
 	// complete and resolve what it was holding (#174's acceptance
 	// criteria).
@@ -93,7 +108,7 @@ func TestRunCompletedIsStampedWithTheLatestPeriodEndAcrossEveryInstrument(t *tes
 		expired = append(expired, payload)
 	}
 	if len(expired) != 1 {
-		t.Fatalf("got %d %s decisions, want 1 (AAPL's outstanding breakout proposal)", len(expired), event.ProposalExpiredEventType)
+		t.Fatalf("got %d %s decisions, want 1 (AAPL's outstanding exit proposal)", len(expired), event.ProposalExpiredEventType)
 	}
 	if expired[0].InstrumentID != "AAPL" {
 		t.Fatalf("the expired proposal names instrument %q, want %q", expired[0].InstrumentID, "AAPL")

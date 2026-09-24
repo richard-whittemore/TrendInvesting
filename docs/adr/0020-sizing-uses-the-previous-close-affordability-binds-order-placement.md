@@ -88,6 +88,8 @@ The standing objection to a running ledger is that it makes the outcome depend o
 
 At the fill it does not apply, but not for the reason a first reading suggests. ADR 0010 orders **decisions** — exits, then Adds, then entries. It does not order **executions**: `internal/fills` applies its own pessimistic rules (every covered buy before any sell, competing sells worst-price-first, folded back into the book until nothing more fills), and a live venue reports in arrival order. The ledger does not ride ADR 0010's order and must not claim to.
 
+> **Note (2026-09-24):** since the ADR 0005 amendment of 2026-09-24, sells no longer compete. Each Unit rests one Exit Order, at the higher of its stop and a proposed Exit-Channel level. Worst-price-first now orders only Units that fill at their own stops. The conclusion of this paragraph is unchanged.
+
 What makes it deterministic is narrower and stronger: **the ledger follows the recorded order of order and fill events**, and the journal records that order. Replay does not recompute the balance from the previous-close snapshot alone — that figure is only the ledger's opening value, and the running state is derived by applying the recorded reservations, spends and releases in the sequence the journal holds. In a backtest that order is `fills.RunBar`'s, which is itself deterministic, so two runs of one fixture agree. In live it is the order the venue reported, which no rule governs — but replay reads it from the journal rather than recomputing it, so a recorded run reproduces byte for byte. That is the property #20 protects, and it holds for the same reason fill-driven position state does (ADR 0005): the system does not predict the order, it records it.
 
 ### What this amends in ADR 0010
