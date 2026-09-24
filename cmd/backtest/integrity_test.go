@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -30,7 +31,7 @@ func splitJournal(t *testing.T, records []journal.Record) (inputs, decisions []e
 func replayInputs(t *testing.T, header journal.Header, inputs []event.Envelope) []event.Envelope {
 	t.Helper()
 
-	emitted, err := replayJournalInputs(header, inputs)
+	emitted, err := replayJournalInputs(context.Background(), header, inputs)
 	if err != nil {
 		t.Fatalf("replayJournalInputs() error = %v", err)
 	}

@@ -22,8 +22,8 @@ import (
 // Recorded fills are simulator outputs (ADR 0005). Replaying them checks
 // reducer Setup evaluation, sizing and Add/stop/exit decisions, but cannot
 // prove that the simulator would reproduce those fills from bars alone.
-func replayEquivalence(r io.Reader) (*replay.Divergence, error) {
-	header, records, err := journal.Read(r)
+func replayEquivalence(ctx context.Context, r io.Reader) (*replay.Divergence, error) {
+	header, records, err := journal.Read(contextReader{ctx, r})
 	if err != nil {
 		return nil, err
 	}
@@ -42,11 +42,54 @@ func replayEquivalence(r io.Reader) (*replay.Divergence, error) {
 	if err != nil {
 		return nil, err
 	}
-	emitted, err := replayJournalInputs(header, inputs)
+	emitted, err := replayJournalInputs(ctx, header, inputs)
 	if err != nil {
 		return nil, err
 	}
-	return replay.Equivalent(decisions, emitted), nil
+	return settleReplay(ctx, replay.Equivalent(decisions, emitted))
+}
+
+// settleReplay decides what a finished comparison reports. An established
+// divergence is the audit's finding and is returned even if the invocation
+// has since been cancelled: the reducer finished, so the difference is real,
+// and an interrupt must never hide it. Only a clean comparison is subject to
+// the final cancellation check, so a cancelled invocation is never reported
+// as a success.
+func settleReplay(ctx context.Context, divergence *replay.Divergence) (*replay.Divergence, error) {
+	if divergence != nil {
+		return divergence, nil
+	}
+	if err := stoppedBy(ctx); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// contextReader stops a journal scan as soon as the invocation is cancelled,
+// so reading a large journal honours the same interrupt handling main
+// installs for every other phase.
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c contextReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
+// stoppedBy reports a cancellation that arrived after a phase had already
+// finished its own work — after the last input was applied, or during the
+// comparison — so a cancelled invocation is never reported as a success.
+// A phase that saw the cancellation itself reports it directly; this closes
+// the gap between phases.
+func stoppedBy(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("backtest: stopped before completing: %w", err)
+	}
+	return nil
 }
 
 // replayJournalInputs constructs the journal's declared reducer and returns
@@ -55,7 +98,7 @@ func replayEquivalence(r io.Reader) (*replay.Divergence, error) {
 // match strategy.RulesVersion (ADR 0016). The build suffix is traceability only.
 // These identity failures are refusals, not decision divergences: changed
 // engine rules do not establish that a journal is wrong.
-func replayJournalInputs(header journal.Header, inputs []event.Envelope) ([]event.Envelope, error) {
+func replayJournalInputs(ctx context.Context, header journal.Header, inputs []event.Envelope) ([]event.Envelope, error) {
 	payload, err := journalConfiguration(header, inputs)
 	if err != nil {
 		return nil, err
@@ -68,7 +111,7 @@ func replayJournalInputs(header journal.Header, inputs []event.Envelope) ([]even
 	if err != nil {
 		return nil, fmt.Errorf("backtest: %w", err)
 	}
-	emitted, err := engine.Run(context.Background(), inputs)
+	emitted, err := engine.Run(ctx, inputs)
 	if err != nil {
 		return nil, fmt.Errorf("backtest: replay the journal's inputs: %w", err)
 	}
@@ -118,14 +161,14 @@ func configurationPayloadFrom(inputs []event.Envelope) (event.ConfigurationPaylo
 
 // doReplay opens the journal at path and reports replay equivalence: either
 // that it holds, or the first divergence.
-func doReplay(path string, out io.Writer) error {
+func doReplay(ctx context.Context, path string, out io.Writer) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("backtest: open the journal to replay: %w", err)
 	}
 	defer func() { _ = file.Close() }()
 
-	divergence, err := replayEquivalence(file)
+	divergence, err := replayEquivalence(ctx, file)
 	if err != nil {
 		return fmt.Errorf("backtest: %s: %w", path, err)
 	}

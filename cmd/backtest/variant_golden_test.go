@@ -120,7 +120,7 @@ func TestDeclaredVariantGolden(t *testing.T) {
 	}
 	registryGolden := filepath.Join(fixture, "registry", entryPath)
 	log.Reset()
-	if err := doReplay(path, &log); err != nil {
+	if err := doReplay(context.Background(), path, &log); err != nil {
 		t.Fatalf("Variant replay: %v", err)
 	}
 	if *updateGolden {

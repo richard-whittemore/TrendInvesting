@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +27,7 @@ func replayJournalFile(t *testing.T, path string) (*replay.Divergence, error) {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	return replayEquivalence(bytes.NewReader(raw))
+	return replayEquivalence(context.Background(), bytes.NewReader(raw))
 }
 
 // rewriteJournal writes an altered header and history to a new file with
@@ -583,5 +585,131 @@ func TestTheCommandRefusesToReplayAMissingFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "absent.jsonl") {
 		t.Fatalf("run(-replay) error = %v, want it to name the file", err)
+	}
+}
+
+// TestReplayStopsWhenItsInvocationIsCancelled pins that -replay honours the
+// command's own interrupt handling: main cancels the invocation context on
+// SIGINT or SIGTERM, and a replay must stop on it rather than absorb the
+// signal and keep running the reducer. A cancelled replay is reported as the
+// cancellation, never as a divergence of a journal that is in fact valid.
+func TestReplayStopsWhenItsInvocationIsCancelled(t *testing.T) {
+	raw, err := os.ReadFile(goldenJournal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	divergence, err := replayEquivalence(ctx, bytes.NewReader(raw))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("replayEquivalence(cancelled) error = %v, want it to wrap context.Canceled", err)
+	}
+	if divergence != nil {
+		t.Fatalf("replayEquivalence(cancelled) divergence = %+v, want none reported for a valid journal", divergence)
+	}
+}
+
+// cancellingReader cancels its context after delivering its first chunk, so a
+// test can cancel an invocation part-way through reading a journal.
+type cancellingReader struct {
+	r      io.Reader
+	cancel context.CancelFunc
+	read   bool
+}
+
+func (c *cancellingReader) Read(p []byte) (int, error) {
+	if c.read {
+		c.cancel()
+	}
+	c.read = true
+	if len(p) > 64 {
+		p = p[:64]
+	}
+	return c.r.Read(p)
+}
+
+// TestReplayAndRerunStopWhenCancelledPartWayThroughReadingTheJournal pins
+// that the journal scan itself honours cancellation, for both operations.
+// The invocation is cancelled after the first 64 bytes of a valid journal;
+// neither may report success or a divergence.
+func TestReplayAndRerunStopWhenCancelledPartWayThroughReadingTheJournal(t *testing.T) {
+	raw, err := os.ReadFile(goldenJournal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	divergence, err := replayEquivalence(ctx, &cancellingReader{r: bytes.NewReader(raw), cancel: cancel})
+	// "journal: read" names the phase: the scan itself stopped, rather than
+	// reading the whole file and leaving a later phase to notice.
+	if !errors.Is(err, context.Canceled) || divergence != nil || !strings.Contains(err.Error(), "journal: read") {
+		t.Fatalf("replayEquivalence = %+v, %v; want no divergence and the journal scan stopped with context.Canceled", divergence, err)
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	err = pipelineEquivalence(ctx, &cancellingReader{r: bytes.NewReader(raw), cancel: cancel})
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "journal: read") {
+		t.Fatalf("pipelineEquivalence error = %v, want the journal scan stopped with context.Canceled", err)
+	}
+}
+
+// TestStoppedByReportsACancellationThatArrivesBetweenPhases pins the check
+// that closes the gap after the last input is applied or during the
+// comparison: a phase can finish its own work successfully while the
+// invocation has since been cancelled, and that must not read as success.
+func TestStoppedByReportsACancellationThatArrivesBetweenPhases(t *testing.T) {
+	if err := stoppedBy(context.Background()); err != nil {
+		t.Fatalf("stoppedBy(live) = %v, want nil", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := stoppedBy(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stoppedBy(cancelled) = %v, want it to wrap context.Canceled", err)
+	}
+}
+
+// TestReplayCancelledAfterTheReducerFinishesIsNotReportedAsSuccess pins the
+// final check at the caller: a valid journal whose invocation is cancelled
+// after the replay has run, and before the result is returned, must not come
+// back as a clean (nil, nil). replay.Equivalent has no context hook, so this
+// cancels at the last point the context is consulted rather than inside the
+// comparison.
+//
+// The threshold is calibrated rather than hard-coded: a first, uncancelled
+// run counts how often the context is consulted, and the second run cancels
+// on only the last of those — the final check itself.
+func TestReplayCancelledAfterTheReducerFinishesIsNotReportedAsSuccess(t *testing.T) {
+	raw, err := os.ReadFile(goldenJournal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var total int
+	if divergence, err := replayEquivalence(stopAfter{Context: context.Background(), consulted: &total, n: 1 << 30}, bytes.NewReader(raw)); err != nil || divergence != nil {
+		t.Fatalf("calibration replay = %+v, %v; want a clean replay of the golden journal", divergence, err)
+	}
+	var consulted int
+	divergence, err := replayEquivalence(stopAfter{Context: context.Background(), consulted: &consulted, n: total - 1}, bytes.NewReader(raw))
+	// "stopped before completing" is stoppedBy's own wording: the
+	// cancellation must be caught by the final check, not by an earlier phase
+	// that a shorter calibration would otherwise land on.
+	if divergence != nil || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "stopped before completing") {
+		t.Fatalf("replayEquivalence = %+v, %v; want no divergence and the final check reporting context.Canceled", divergence, err)
+	}
+}
+
+// TestSettleReplayReportsAnEstablishedDivergenceEvenWhenCancelled pins that an
+// interrupt never hides a finding: once the comparison has found a
+// divergence, a cancellation must not replace it. A clean comparison under a
+// cancelled invocation, by contrast, reports the cancellation.
+func TestSettleReplayReportsAnEstablishedDivergenceEvenWhenCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	found := &replay.Divergence{}
+	if got, err := settleReplay(ctx, found); got != found || err != nil {
+		t.Fatalf("settleReplay(cancelled, divergence) = %+v, %v; want the divergence and no error", got, err)
+	}
+	if got, err := settleReplay(ctx, nil); got != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("settleReplay(cancelled, nil) = %+v, %v; want no divergence and an error wrapping context.Canceled", got, err)
+	}
+	if got, err := settleReplay(context.Background(), nil); got != nil || err != nil {
+		t.Fatalf("settleReplay(live, nil) = %+v, %v; want a clean result", got, err)
 	}
 }
