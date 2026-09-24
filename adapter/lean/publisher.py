@@ -20,12 +20,21 @@ RUN_STOPPED_REASONS = frozenset({"delisted"})
 
 
 def raw_view(history, end_time):
-    """Require exactly the matching raw bar; never substitute an earlier close."""
-    if history is None or history.empty or len(history) != 1:
-        raise ValueError("raw History must contain exactly one completed bar")
-    if history.index[0][-1] != end_time:
-        raise ValueError("raw History period does not match subscription bar")
-    row = history.iloc[0]
+    """Require exactly the raw bar that ends with the subscription bar; never
+    substitute an earlier close.
+
+    LEAN's one-bar raw History can also hold the previous session's bar: on
+    an early-close session it returned both 2002-12-23 16:00 and 2002-12-24
+    13:00 (observed on the pinned image). The bar is chosen by its end time,
+    and anything other than exactly one bar ending then is refused.
+    """
+    if history is None or history.empty:
+        raise ValueError("raw History must contain the completed bar")
+    matches = [i for i, key in enumerate(history.index) if key[-1] == end_time]
+    if len(matches) != 1:
+        raise ValueError("raw History must contain exactly one bar ending with the subscription "
+                         "bar at {}; it holds {} such bar(s)".format(end_time, len(matches)))
+    row = history.iloc[matches[0]]
     return dict(view="raw", **{key: float(row[key]) for key in
                               ("open", "high", "low", "close", "volume")})
 

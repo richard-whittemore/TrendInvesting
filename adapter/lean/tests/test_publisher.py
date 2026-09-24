@@ -197,6 +197,15 @@ class PublisherTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             raw_view(frame, end)
 
+    def test_an_earlier_session_in_raw_history_is_passed_over(self):
+        # On an early-close session LEAN's one-bar History also returned the
+        # previous session's bar (2002-12-23 16:00 and 2002-12-24 13:00).
+        end = datetime(2002, 12, 24, 13)
+        frame = Frame(end)
+        frame.index.insert(0, ("AAPL", datetime(2002, 12, 23, 16)))
+        frame.iloc.insert(0, {"open": 1, "high": 1, "low": 1, "close": 1, "volume": 1})
+        self.assertEqual(raw_view(frame, end)["close"], 645.57)
+
     def test_run_stopped_payload_matches_go_contract(self):
         client = Client()
         pub = Publisher(client, "hash", "version", "test")
