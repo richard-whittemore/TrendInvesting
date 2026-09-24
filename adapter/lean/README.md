@@ -153,8 +153,8 @@ levels.
   <id>: <reason>`: an instrument that isn't this run's symbol or isn't
   tradable, a quantity that isn't a positive whole number, a level that isn't
   a positive price, a direction other than long, a stale proposal, one already
-  submitted, an order LEAN itself refuses, and an Exit-Order level older than
-  the one in force. The totals are logged at the end of the run. A rejected
+  submitted, an entry or Add order LEAN itself refuses, and an Exit-Order
+  level older than the one in force. The totals are logged at the end of the run. A rejected
   entry or Add is a proposal the engine re-issues on a later bar, not a
   protection gap.
 - **An Exit Order amendment LEAN doesn't acknowledge leaves the previous level
@@ -162,10 +162,24 @@ levels.
 - **A decision answering a warm-up bar is never acted on**, and **nothing is
   submitted when Go is unreachable**: a failed exchange stops the run through
   the existing fail-closed path before any of that bar's decisions are read.
-  State the adapter can't reconcile also stops the run: an unknown schema
-  version of one of these decision types, an Exit Order for a Campaign whose
-  frozen N was never sent, or an Exit-Order level for a Unit whose LEAN order
-  is no longer working or sells a different quantity.
+  State the adapter can't reconcile also stops the run:
+  - an unknown schema version of one of these decision types;
+  - an Exit Order for a Campaign whose frozen N was never sent;
+  - an Exit-Order level for a Unit whose LEAN order is no longer working or
+    sells a different quantity — including a redelivered level whose tagged
+    order is filled, cancelled or invalid, since the engine still sets it but
+    no working order protects the Unit;
+  - an Exit Order LEAN refuses (status `Invalid`);
+  - a cancellation LEAN doesn't confirm when a proposal expires, since the
+    order could still fill into a holding the engine doesn't expect (a
+    cancellation is logged only once LEAN confirms it);
+  - a trade proposal arriving while LEAN already holds the instrument: the
+    engine proposes an entry only when it holds no Campaign there.
+- **Reconciliation before trading** (`docs/architecture.md`: reconcile before
+  any executor submits). At startup, and again immediately before the run's
+  first order, LEAN must hold no position and have no open order for the
+  run's instrument; otherwise the run stops with a reason stating both. A
+  backtest starts flat, so this passes there; it is checked anyway.
 - **An Exit Order that would sell more than LEAN holds stops the run.** The
   working sell quantity never exceeds the holding; if a Unit's new Exit Order
   would take it past (including when LEAN holds nothing at all), LEAN's
@@ -204,15 +218,18 @@ confirms them.
 **What works end to end now, and what waits for #30.** Returning fills and
 order lifecycle to Go is #30. Until it lands:
 
-- works now in a LEAN run: entries and Adds are placed as DAY stop orders
-  from the engine's proposals, cancelled when their proposal expires,
-  deduplicated from LEAN's order book, and filled by LEAN with the slippage
-  and commission above;
-- waits for #30: the engine never learns of a LEAN fill, so it never opens a
-  Campaign, never emits `strategy.campaign.opened` or
-  `strategy.exit-order.set`, and never proposes an Add. **No Exit Order is
-  placed in a LEAN run yet**, so a LEAN position has no Protective Stop at
-  the broker. The Exit-Order mirroring is built and unit-tested against
+- works now in a LEAN run: entries are placed as DAY stop orders from the
+  engine's proposals, cancelled when their proposal expires, deduplicated
+  from LEAN's order book, and priced with the slippage and commission above;
+- **a LEAN run currently stops at its first fill.** `OnOrderEvent` stops the
+  run on the first `Filled` or `PartiallyFilled` event, with a reason naming
+  the order and its tag: a fill can't yet be returned to the engine, so the
+  engine would go on believing it is flat, place no Exit Order for the
+  holding, and could propose further entries;
+- waits for #30: returning that fill to the engine, which then opens the
+  Campaign and emits `strategy.campaign.opened` and
+  `strategy.exit-order.set`, and later Adds. **No Exit Order is placed in a
+  LEAN run yet.** The Exit-Order mirroring is built and unit-tested against
   fixture decisions only.
 
 The adapter will still need to:
