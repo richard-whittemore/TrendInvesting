@@ -66,21 +66,21 @@ func TestAProposalOutstandingWhenTheStreamEndsReachesATerminalEvent(t *testing.T
 
 	tests := []struct {
 		name        string
-		build       func() *stream
+		build       func(t *testing.T) *stream
 		completedAt time.Time
 		wantKind    string
 		wantRule    string
 	}{
 		{
 			name:        "an entry proposal raised by the last bar",
-			build:       func() *stream { return newStream(t, cfg).bars(breakoutBars("AAPL")) },
+			build:       func(t *testing.T) *stream { return newStream(t, cfg).bars(breakoutBars("AAPL")) },
 			completedAt: day(56),
 			wantKind:    event.ProposalKindEntry,
 			wantRule:    event.RuleSignalExpiresWithItsBar,
 		},
 		{
 			name: "an add proposal raised by the last bar",
-			build: func() *stream {
+			build: func(t *testing.T) *stream {
 				return newStream(t, cfg).
 					bars(breakoutBars("AAPL")).
 					fill(openingFill("AAPL")).
@@ -92,7 +92,7 @@ func TestAProposalOutstandingWhenTheStreamEndsReachesATerminalEvent(t *testing.T
 		},
 		{
 			name: "an exit proposal raised by the last bar",
-			build: func() *stream {
+			build: func(t *testing.T) *stream {
 				return newStream(t, cfg).
 					bars(breakoutBars("AAPL")).
 					fill(openingFill("AAPL")).
@@ -108,7 +108,13 @@ func TestAProposalOutstandingWhenTheStreamEndsReachesATerminalEvent(t *testing.T
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			emitted := tt.build().endOfStream(tt.completedAt).mustRun()
+			// build takes THIS subtest's own *testing.T (#100's decision
+			// corpus surfaced that this table used to close over the
+			// parent's, so every row's stream carried the parent's
+			// t.Name() and any assertion failure inside stream's own
+			// t.Fatalf/t.Helper calls would have been attributed to the
+			// parent rather than the failing row).
+			emitted := tt.build(t).endOfStream(tt.completedAt).mustRun()
 
 			final := lastEmission(t, emitted)
 			if final.Type != event.ProposalExpiredEventType {

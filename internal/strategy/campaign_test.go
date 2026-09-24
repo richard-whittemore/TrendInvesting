@@ -242,6 +242,10 @@ func (s *stream) fillAtSchema(fill event.FillPayload, schemaVersion uint32) *str
 	return s
 }
 
+// run is the harness every scenario in this package's test suite drives the
+// reducer through. Every call is recorded into the decision corpus
+// (recordDecision, decision_corpus_test.go; #100) before returning, so a
+// test's own pass/fail is never what decides whether that run entered it.
 func (s *stream) run() ([]event.Envelope, error) {
 	s.t.Helper()
 	reducer, err := strategy.NewReducer(testStrategyVersion, s.cfg)
@@ -252,7 +256,9 @@ func (s *stream) run() ([]event.Envelope, error) {
 	if err != nil {
 		s.t.Fatalf("replay.New() error = %v", err)
 	}
-	return engine.Run(context.Background(), s.envelopes)
+	emitted, runErr := engine.Run(context.Background(), s.envelopes)
+	recordDecision(s.t, emitted, runErr)
+	return emitted, runErr
 }
 
 func (s *stream) mustRun() []event.Envelope {

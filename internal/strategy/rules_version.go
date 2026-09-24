@@ -97,6 +97,15 @@ const RulesVersion = "1.3.0"
 // moved RulesVersion from 1.1.0 to 1.2.0 above. That gap is real and is not
 // closed here.
 //
+// internal/strategy/testdata/decision-corpus (decision_corpus_test.go, #100)
+// narrows that gap from the other side: it pins what the reducer actually
+// DECIDES for every scenario the test suite drives it through, rather than
+// what constants it declares, and fails when a decision changes under an
+// unchanged RulesVersion — including a changed predicate, which is what
+// moved RulesVersion from 1.2.0 to 1.3.0. It has its own, differently honest
+// limit: it only catches a predicate change that some recorded scenario
+// actually exercises (see its own doc comment).
+//
 // Only 1.2.0 has a row: the surfaces 1.0.0 and 1.1.0 actually declared
 // cannot be recomputed from today's source, since the constants and rules
 // that made them up have since changed or been renamed, so no entry is
