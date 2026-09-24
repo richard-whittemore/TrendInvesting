@@ -1,7 +1,36 @@
 # ADR 0019: Broker reconciliation is an input, and unexplained differences halt
 
-- Status: Proposed
+- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery)
 - Date: 2026-09-17
+
+## In plain English
+
+*A summary for reading the rest of this ADR against. Where the two differ, the detailed text below governs.*
+
+**What this is about.** The system keeps its own record of what it holds: shares, cash and resting orders. The broker keeps the real one. They can drift apart: a fill report goes missing, a dividend posts, someone trades by hand, or the broker cancels an order. This ADR decides how the system notices, and what it does.
+
+**How it checks.** It regularly compares its records with the broker's: at startup, before each trading day, after every fill, before every order, and on a timer in between. A difference is fine **only if the system already has a recorded reason for it**, such as a logged dividend or a logged fill. It never copies the broker's numbers to make a difference go away, because then it would be trading positions it can't explain. Every difference counts, down to one share or one cent.
+
+**What it does when something doesn't add up.** There are three states:
+
+| State | When | What the system still does | What it stops doing |
+|---|---|---|---|
+| **Normal** | Everything matches or is explained | Everything | Nothing |
+| **Degraded** | A difference it can't explain, but it can say *which* cash or *which* stocks are affected | Keeps protecting every position: raises stops and takes exits on unaffected stocks, and **re-places a missing stop** on an affected stock at its last known level (once only) | Opens **no** new positions and adds to none. Leaves the affected stocks' orders alone, apart from that one stop repair |
+| **Halted** | It can't trust the broker's data at all, or can't tell what's affected | Nothing. Stops already resting at the broker keep working on their own | Changes no orders |
+
+The guiding rule: **a problem is a reason to stop taking on new risk, not a reason to stop protecting what you already hold.**
+
+**Safety rules that always apply.**
+- Every held Unit always has exactly **one** good-till-cancelled stop order at the broker. An exit **moves** that stop rather than placing a second sell order, so the system can never sell more than it owns and end up short.
+- If the broker shows more sell orders than shares held, for example because of an unknown order, the alert says **CONTAINMENT REQUIRED** and you fix that first.
+- If the broker holds a position the system knows nothing about, for example after a manual trade, the alert marks it **UNPROTECTED**. The system won't invent a stop for it. That's your call.
+
+**How you find out.** Any move out of Normal alerts you **immediately** on at least two channels (your choice: SMS plus push, pager-style), and **keeps repeating until you acknowledge it**. Separately, an outside service watches for the system's regular heartbeat, so if the system crashes and can't alert you itself, you still get paged. Each alert tells you what happened, which positions are affected, whether each has a stop, and what the system is and isn't still doing.
+
+**How it gets back to Normal.** Never on its own, even if the numbers later match, and not after a restart either. You follow the runbook (`docs/runbooks/reconciliation.md`): acknowledge the alert, find the cause in the broker's records, record the missing event (the fill, trade, dividend and so on), decide what to do with any affected order, then approve a restart. The restart must pass a fresh check before trading resumes.
+
+**Before any of this is live.** This is a design, not code yet. It also needs journal durability (#151), the alert and heartbeat services set up and priced, and timing limits you choose and we prove out in paper trading.
 
 ## Context
 
@@ -19,6 +48,8 @@ The existing halt from #12 emits `strategy.engine.state` with `state = halted` a
 
 Compare complete positions, cash and open orders for the same account, accounting basis and effective cutoff. A successful comparison is classified as `matched` if nothing changed since the verified anchor, or `explained` if already-journalled events account for the changes exactly. Any unexplained residual is `unexplained`; incomplete, stale, inconsistent or unavailable evidence is `unverifiable`. Both latter classifications halt the whole engine. Success advances reconciliation evidence, never overwrites Campaigns, fills, cash or orders from the snapshot.
 
+> **Amended 2026-09-24** (see *Amendment: a graduated response* below): an `unexplained` result whose scope the evidence bounds enters **Degraded**, not a halt. Only `unverifiable` evidence, or a discrepancy that cannot be bounded, enters **Halted**.
+
 **Explained means all of the following hold:**
 
 1. The starting anchor is a previously verified reconciliation, or an explicitly approved and journalled opening account baseline. The observation being checked cannot serve as its own anchor. An existing holding cannot be seeded as a Campaign merely by approving a balance: its causing history and required Campaign state must be reconstructed, or trading remains blocked.
@@ -33,7 +64,11 @@ This does **not** authorise inventing fills for splits, spin-offs, mergers or de
 
 Compare the **union of both position sets**, including instruments outside the trading universe and instruments in the bridge. An absent row means zero only when that side explicitly declares a complete snapshot. Aggregate broker lots by stable instrument identity and preserve the contributing rows; a symbol rename must not merge unrelated instruments. A broker-only position, an unexpected short or a fractional holding outside the whole-share contract halts rather than being omitted, netted away or rounded.
 
+> **Amended 2026-09-24** (see *Amendment: a graduated response* below): an `unexplained` result whose scope the evidence bounds enters **Degraded**, not a halt. Only `unverifiable` evidence, or a discrepancy that cannot be bounded, enters **Halted**.
+
 Apply the same two-set rule to open orders. Compare stable order identity, instrument, side, type, original/filled/remaining quantity, limit and stop prices, time-in-force and lifecycle state. Expected broker orders come from journalled acknowledgements and lifecycle events, not unsubmitted proposals. An unknown order, a missing protective order, or an unexplained cancellation or expiry halts even if positions and cash match. An acknowledged, journalled lifecycle transition can explain the change. Client construction, executor election, order fencing and venue-specific mechanics remain out of scope.
+
+> **Amended 2026-09-24** (see *Amendment: a graduated response* below): an `unexplained` result whose scope the evidence bounds enters **Degraded**, not a halt. Only `unverifiable` evidence, or a discrepancy that cannot be bounded, enters **Halted**.
 
 ### Quantities and unexplained cash residuals both have zero tolerance
 
@@ -69,9 +104,13 @@ The input contract contains:
 
 The domain recomputes the classification from this recorded evidence and its reconstructed state, without broker calls or wall-clock reads. A false claimed success fails closed. It emits a reconciliation-result decision with the validated classification, reasons, evidence reference and action (`continue` or `halt`). An unexplained or unverifiable result additionally reuses `strategy.engine.state` and `EngineStatePayload`, extending its closed reason set for reconciliation divergence or unverifiable evidence; `Detail` identifies the disagreement and `CausationID` points to the input. Return the halt alongside the error, following the existing engine contract. Both decisions are journalled before the run terminates; the input never claims an action was performed before the reducer performed it.
 
+> **Amended 2026-09-24** (see *Amendment: a graduated response* below): an `unexplained` result whose scope the evidence bounds enters **Degraded**, not a halt. Only `unverifiable` evidence, or a discrepancy that cannot be bounded, enters **Halted**.
+
 Replay feeds these same inputs and earlier causing events, reproduces the comparison/result and halt byte for byte, and stops at the same boundary. Stable ordering by instrument, currency/component and order identity, explicit event identities and recorded times make that possible. Unknown schemas fail closed. No snapshot lookup, “latest” policy or current broker status participates in replay.
 
 A halt is terminal for that run, as the existing engine contract provides. No automatic resume follows a later matching snapshot, and callers must not continue using the halted reducer. Human resolution records the recovered or corrected causing events, the disposition of affected orders and approval to restart; a linked recovery run reconstructs state and passes fresh reconciliation before any trading decision. The old failed run remains intact. Durable retention of the input and terminal decisions before further live action is required; the existing end-of-run journal writer alone does not establish live crash durability (ADRs 0017 and 0018).
+
+> **Amended 2026-09-24** (see *Amendment: a graduated response* below): an `unexplained` result whose scope the evidence bounds enters **Degraded**, not a halt. Only `unverifiable` evidence, or a discrepancy that cannot be bounded, enters **Halted**.
 
 ### Alternatives rejected
 
@@ -90,3 +129,95 @@ A halt is terminal for that run, as the existing engine contract provides. No au
 - The owner must approve the opening-baseline/recovery procedure and timing bounds. Broker accounting documentation and recorded integration fixtures must establish balance basis, precision, effective-time handling, complete activity coverage and coherent cutoffs. A separate rule must settle intraday cash reductions against ADR 0010. These are explicit prerequisites to live readiness, not guesses embedded in this ADR.
 - The implementation ticket must first test one-share discrepancies in both directions, broker-only holdings/orders, supported journalled delisting and dividend bridges, a residual of one smallest supported monetary unit in either direction, offsetting missing cash activities, duplicate or unapplied explanations, stale/incomplete snapshots, cancelled protective orders, and no proposal after an unresolved discrepancy. Recorded success and failure runs must replay byte-identically, including terminal decisions. This design-only ADR adds no implementation or tests.
 - Reconciliation policy, opening evidence, successful checks, halts and recovery links are retained under the run's provenance (ADRs 0012, 0017 and 0018). Failure is evidence, never a record to replace with a later successful check.
+
+## Amendment (2026-09-24): a graduated response, alerting, and a recovery procedure
+
+Approved by the owner on 2026-09-24.
+
+### Why
+
+As written above, an `unexplained` or `unverifiable` result halts the whole engine, and a halt stops everything. That treats every discrepancy alike. A cash difference of a few dollars would stop the management of every open position, and a share-count mismatch in one instrument would stop the management of every other. Worse, it stops **risk-reducing** actions: raising a Protective Stop, or taking an Exit-Channel exit. So a halt during a fast market becomes a risk of its own. The owner's concern was exactly this: that stopping the system could itself cause harm, because it would no longer be acting on open positions.
+
+The principle this amendment adopts: **a discrepancy is a reason to stop adding risk, not a reason to stop managing risk already held.**
+
+### Engine states
+
+This supersedes every earlier clause that halts on an `unexplained` result, and each carries a pointer to this section:
+- "Both latter classifications halt the whole engine" (*Explain changes by causing events*);
+- the halts for a broker-only position and for a missing Protective Stop (the two-set comparisons of positions and of orders);
+- the `continue`/`halt` action set of the reconciliation-result decision, which becomes **`continue`, `degrade` or `halt`**;
+- the first sentence of the paragraph beginning "A halt is terminal for that run".
+
+Only `unverifiable` evidence, or a discrepancy the evidence cannot bound, still halts.
+
+| State | Entered when | New entries and Adds | Instruments the discrepancy does not name | Instruments it names |
+|---|---|---|---|---|
+| **Normal** | stays Normal while every check is `matched` or `explained`; returns only through recovery (below) | allowed | managed normally | — |
+| **Degraded** | `unexplained`, with a scope the evidence bounds: named cash components and/or named instruments or orders | **blocked everywhere** | **risk-reducing management continues** (below) | **frozen**, except restoring a missing Protective Stop (below) |
+| **Halted** | `unverifiable`, or `unexplained` with a scope the evidence cannot bound | blocked | no order changes | no order changes |
+
+**Risk-reducing management** means only actions that cannot increase exposure: raising a Protective Stop under the Stop Ladder, an Exit-Channel exit, and a Delisting Exit where supported. Nothing that opens or adds to a position is allowed while not Normal.
+
+**Exits never add sell quantity.** A resting good-till-cancelled Protective Stop and a separately submitted exit order could both fill, and together sell more than is held. So an exit is never a separate order. Protective Stops are per Unit: each Unit has its own level (the Stop Ladder raises earlier Units' stops separately), and a partial stop-out is a real outcome. So each Unit holds **one** good-till-cancelled sell-stop for **that Unit's quantity**, and the total working sell quantity always equals the holding.
+- **Taking an Exit-Channel exit** means **amending** each Unit's stop to the Exit Channel level wherever that level is higher, never submitting a second order.
+- **Raising a stop** likewise amends that Unit's order.
+- **An amendment the broker has not acknowledged** leaves the previous level in force, so every Unit keeps exactly one stop throughout.
+
+This is the order model #29 must implement in every state, not only while Degraded.
+
+**Frozen** means the system changes no order for that instrument. Its Protective Stop keeps working at the broker, because under the order-lifetime decision recorded on #29 it is good-till-cancelled. There is one exception. If the discrepancy **is** a missing or cancelled Protective Stop **on a position the journal holds a Protective Stop for**, the system **restores** it at that last journalled level. Restoring protection reduces risk; leaving a position unprotected while waiting for a human does not.
+
+- **Restoration is single-owner, idempotent and attempted once.** The restored order's client identifier derives deterministically from the missing stop's own journalled identifier, so a retry can't place a second stop. And the system attempts restoration **once per incident**. A restoration that fails, is rejected, or is cancelled by a person is never retried automatically, so a stop placed by hand can't be duplicated by a later attempt. Only recovery re-enables it. The alert reports the outcome: restored, with the order identifier, or failed. A person places a stop by hand only when the alert says restoration failed or was not attempted, never alongside an attempt in progress.
+- **No journalled stop, no automatic restoration.** A broker-held position the journal has no Campaign for, such as a manual trade, has no level the system could restore. Its alert marks it **UNPROTECTED** with no system-held level, and the runbook directs the decision to a person. The system never invents a level.
+
+**Exits and restored stops are sized from the broker-reported quantity of the most recent reconciliation,** never from the believed quantity, and never from the reconciliation that *entered* the state, since a later stop fill may have reduced the holding since then. ADR 0019 already requires a reconciliation immediately before each order submission and after every accepted fill. The order is sized from that one, and those checks don't themselves leave Degraded. When the discrepancy *is* the quantity, the current broker figure is the only one that can't sell shares not held and so accidentally open a short.
+
+**Working sell quantity never exceeds the holding.** Every reconciliation also compares, per instrument, the total quantity of working and pending sell orders at the broker (ours and any unknown ones) against the broker-held quantity. If it exceeds the holding, for example an unknown sell order alongside our stop, both could fill and open a short. The alert marks it **CONTAINMENT REQUIRED**, and the runbook's first step is to bring it back to exactly one stop covering the holding, before any recovery. The system doesn't cancel an order it doesn't recognise; containment is a person's decision, made immediately rather than at recovery.
+
+**An affected order freezes its instrument.** A discrepancy that names an order, such as an unknown order or a cancelled stop, freezes that order's instrument as if the instrument were named, so no management runs against an instrument whose order state is unresolved.
+
+**A cash-only discrepancy names no instrument.** It blocks entries and Adds, because sizing depends on cash, and leaves every position under normal management.
+
+**Degraded and Halted are decisions, not side effects.** The reducer derives the state and its scope from the recorded reconciliation input, and emits them through `strategy.engine.state`. It does this without broker calls or wall-clock reads, so replay reproduces the state, its scope and every order change made under it, byte for byte.
+
+**The schema change (ADR 0015).** `EngineStatePayload` moves to schema version 2, which adds the state `degraded` and fields naming the affected instruments, orders and cash components. Version-1 records stay valid under the version-1 rules: `halted`, with no scope, meaning the whole engine. A version-2 `degraded` record with no scope is invalid. Scope is never inferred from absence.
+
+**Leaving Degraded or Halted is never automatic.** A later matching reconciliation doesn't restore Normal on its own; only the recovery procedure below does, with the owner's approval. This keeps the original rule that the system never quietly resumes after something it couldn't explain.
+
+**The state survives a restart.** A crash or restart while Degraded or Halted resumes in that same state and scope, read back from the run's durable record, and a passing startup reconciliation doesn't return it to Normal. This requires the state to be durably recorded when it's entered, not only in an end-of-run journal. #151 (engine journal durability) is therefore a prerequisite of this amendment going live.
+
+### Alerting
+
+An alert is the only way a person learns the system has stopped adding risk, so it is a safety requirement, not a convenience.
+
+- **Every transition out of Normal alerts immediately**, as does every transition between Degraded and Halted. While the state persists, the alert repeats at a fixed interval until the owner acknowledges it. Acknowledgement is recorded.
+- **At least two independent channels**, chosen by the owner. A failed delivery is itself recorded and retried on the other channel.
+- **A heartbeat, checked from outside the system.** A crashed or wedged system cannot send its own alert, so the system emits a regular heartbeat and an external monitor alerts when it stops. This dead-man's switch is what catches the failure the system cannot report itself.
+- **Every alert states:** the state and when it began; what triggered it (reconciliation ID, classification and reasons); the affected instruments, orders and cash components; for each affected position, **each Unit's** journalled stop level and quantity and whether the system restored that Unit's stop (with the order identifier), failed to, or has none to restore (**UNPROTECTED**); what the system is **still doing**; what it has **stopped doing**; and a link to the recovery procedure.
+- **The alert interval, the heartbeat interval and the heartbeat timeout** are operational configuration, set with the timing bounds this ADR already leaves to the owner, and validated in paper trading.
+
+### Recovery
+
+`docs/runbooks/reconciliation.md` is the procedure, with one path per discrepancy class. In outline, recovery always:
+
+1. **acknowledges** the alert;
+2. **identifies the cause** from the broker's own activity records, not from our state;
+3. **records the missing causing event(s)** through a supported input: a recovered fill report, a manual trade, a corporate action, or a cash movement. It never adopts a balance and never edits history;
+4. **decides the disposition** of any affected order, and records it;
+5. **approves a restart:** a linked recovery run rebuilds state from the journal plus the recorded events, and must pass a fresh reconciliation before returning to Normal.
+
+The failed run stays intact as evidence, as above.
+
+### Consequences of this amendment
+
+- `docs/architecture.md`'s "safe mode" means **Degraded or Halted** as defined here.
+- Positions stay protected in every state: each has a good-till-cancelled stop at the broker, and a missing one is restored while Degraded.
+- More behaviour to build and test than a single halt. The implementation ticket must add tests for:
+  - a cash-only discrepancy leaving positions managed;
+  - an instrument-scoped discrepancy freezing only that instrument;
+  - a restored Protective Stop sized from the broker quantity;
+  - an exit never exceeding the broker-reported holding;
+  - no entry or Add while Degraded;
+  - no automatic return to Normal;
+  - byte-identical replay of every state transition and every order change made while Degraded.
+- Alerting and the heartbeat monitor are live-readiness prerequisites, alongside the timing bounds. The alert channels are the owner's choice.
