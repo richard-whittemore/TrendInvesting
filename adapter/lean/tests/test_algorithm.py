@@ -387,3 +387,23 @@ class RunCompletionTests(unittest.TestCase):
         self.assertTrue(algo.failed)
         algo.OnEndOfAlgorithm()
         self.assertNotIn("replay.run.completed", [e["type"] for e in algo.client.sent])
+
+
+class CompletionFailureTests(unittest.TestCase):
+    def test_a_failed_completion_keeps_its_own_stop_reason(self):
+        """If completing the stream fails during a delisting stop, the quit
+        reason is the completion failure, not the delisting."""
+        algo = AlgorithmTests.init(self)
+        algo.IsWarmingUp = False
+        b = bar(6)
+        algo.History = lambda *args, **kw: Frame(b.EndTime)
+        algo.OnData(slice_of({"AAPL": b}))
+
+        def refuse():
+            raise ValueError("engine refused the completion")
+        algo.publisher.publish_run_completed = refuse
+        algo.OnData(slice_of({}, delistings={"AAPL": types.SimpleNamespace(
+            Type="delisted", Time=datetime(2014, 6, 9))}))
+        self.assertTrue(algo.failed)
+        self.assertIn("run completion failed", algo.quit_reason)
+        self.assertNotIn("DELISTED", algo.quit_reason)

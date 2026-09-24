@@ -109,7 +109,11 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         # End the stream cleanly first, so every outstanding proposal reaches
         # its terminal event in the journal rather than being left open.
         self.complete_run()
-        self.stop(reason)
+        # A failed completion has already stopped the run with its own
+        # reason; keep it, since it is the one that says the journal may lack
+        # its terminal event.
+        if not self.failed:
+            self.stop(reason)
 
     def complete_run(self):
         """Send replay.run.completed once, if the stream is intact and not empty.
