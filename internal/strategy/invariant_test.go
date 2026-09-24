@@ -202,6 +202,11 @@ func buildCorruptedCampaignState(t *testing.T, r *Reducer, protectiveStop float6
 					quantity:       1,
 					protectiveStop: protectiveStop,
 					filledAt:       day(1),
+					// Recorded as every Unit's Exit Order is in the Apply
+					// that sets its stop (exit_order.go), so a bar that
+					// moves no level emits none here either.
+					exitOrderLevel:  protectiveStop,
+					exitOrderSource: event.ExitOrderSourceProtectiveStop,
 				}},
 			},
 		},

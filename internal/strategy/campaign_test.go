@@ -418,10 +418,10 @@ func TestFillOpensACampaignWithNAndUnitSizeFrozen(t *testing.T) {
 		mustRun()
 
 	// 55 warm-up bars emit one Setup-evaluated each; the breakout bar emits
-	// three (Setup-evaluated, Signal, Proposal); the fill emits two
-	// (Campaign-opened, then Protective-Stop-set).
-	if len(emitted) != 60 {
-		t.Fatalf("len(emitted) = %d, want 60 (55 x 1, the breakout bar's 3, and the fill's 2)", len(emitted))
+	// three (Setup-evaluated, Signal, Proposal); the fill emits three
+	// (Campaign-opened, Protective-Stop-set, then Unit 1's Exit Order).
+	if len(emitted) != 61 {
+		t.Fatalf("len(emitted) = %d, want 61 (55 x 1, the breakout bar's 3, and the fill's 3)", len(emitted))
 	}
 
 	proposalEnvelope := onlyEnvelopeOfType(t, emitted, event.TradeProposalEventType)
@@ -436,15 +436,15 @@ func TestFillOpensACampaignWithNAndUnitSizeFrozen(t *testing.T) {
 	}
 
 	campaignEnvelope := onlyEnvelopeOfType(t, emitted, event.CampaignOpenedEventType)
-	// Second-to-last: the Protective-Stop-set emission follows it, per the
-	// ticket's required emission order.
-	if campaignEnvelope.Sequence != uint64(len(emitted)-1) {
-		t.Errorf("Campaign opened Sequence = %d, want %d (second-to-last: Protective-Stop-set follows it)", campaignEnvelope.Sequence, len(emitted)-1)
+	// Third-to-last: the Protective-Stop-set emission follows it, per the
+	// ticket's required emission order, and Unit 1's Exit Order follows that.
+	if campaignEnvelope.Sequence != uint64(len(emitted)-2) {
+		t.Errorf("Campaign opened Sequence = %d, want %d (third-to-last: Protective-Stop-set follows it)", campaignEnvelope.Sequence, len(emitted)-2)
 	}
 
 	stopSetEnvelope := onlyEnvelopeOfType(t, emitted, event.ProtectiveStopSetEventType)
-	if stopSetEnvelope.Sequence != uint64(len(emitted)) {
-		t.Errorf("Protective-Stop-set Sequence = %d, want %d (it is the last emission)", stopSetEnvelope.Sequence, len(emitted))
+	if stopSetEnvelope.Sequence != uint64(len(emitted)-1) {
+		t.Errorf("Protective-Stop-set Sequence = %d, want %d (second-to-last: Unit 1's Exit Order follows it)", stopSetEnvelope.Sequence, len(emitted)-1)
 	}
 	if stopSetEnvelope.CausationID != campaignEnvelope.CausationID {
 		t.Errorf("Protective-Stop-set CausationID = %q, want the same fill %q that caused the Campaign", stopSetEnvelope.CausationID, campaignEnvelope.CausationID)
@@ -833,11 +833,11 @@ func TestDuplicateFillIsAnIdempotentNoOp(t *testing.T) {
 		t.Fatalf("got %d Campaign(s), want exactly 1 despite the duplicate delivery", got)
 	}
 	// The second delivery must emit nothing at all, not merely nothing new:
-	// the emission count is identical to the single-delivery run (60: the
-	// warm-up and breakout bars' 58, plus the opening fill's Campaign-opened
-	// and Protective-Stop-set).
-	if len(emitted) != 60 {
-		t.Errorf("len(emitted) = %d, want 60 (the duplicate fill emits nothing)", len(emitted))
+	// the emission count is identical to the single-delivery run (61: the
+	// warm-up and breakout bars' 58, plus the opening fill's Campaign-opened,
+	// Protective-Stop-set and Exit Order).
+	if len(emitted) != 61 {
+		t.Errorf("len(emitted) = %d, want 61 (the duplicate fill emits nothing)", len(emitted))
 	}
 }
 
@@ -1250,8 +1250,8 @@ func TestFillAfterTheDecisionBarButBeforeTheNextIsAccepted(t *testing.T) {
 	// The bar that follows is applied without error — the instrument is now
 	// in a Campaign, so it produces no Setup/Signal/proposal, only its own
 	// Campaign-evaluated event (#13).
-	if len(emitted) != 61 {
-		t.Errorf("len(emitted) = %d, want 61 (the bar after the fill adds its own Campaign-evaluated event, #13)", len(emitted))
+	if len(emitted) != 62 {
+		t.Errorf("len(emitted) = %d, want 62 (the bar after the fill adds its own Campaign-evaluated event, #13)", len(emitted))
 	}
 }
 
@@ -1367,8 +1367,8 @@ func TestNoSignalOrProposalWhileACampaignIsOpen(t *testing.T) {
 	if last := withCampaign[len(withCampaign)-1]; last.Type != event.CampaignEvaluatedEventType {
 		t.Errorf("last emission is %q, want the Campaign-evaluated event bar 57 produces (#13)", last.Type)
 	}
-	if len(withCampaign) != 61 {
-		t.Errorf("len(emitted) = %d, want 61: the bar arriving during a Campaign now adds its own Campaign-evaluated event (#13)", len(withCampaign))
+	if len(withCampaign) != 62 {
+		t.Errorf("len(emitted) = %d, want 62: the bar arriving during a Campaign now adds its own Campaign-evaluated event (#13)", len(withCampaign))
 	}
 }
 
@@ -1633,10 +1633,11 @@ func TestDuplicateStopFillIsAnIdempotentNoOp(t *testing.T) {
 	if got := len(envelopesOfType(emitted, event.CampaignExitedEventType)); got != 1 {
 		t.Fatalf("got %d Campaign-exited event(s), want exactly 1 despite the duplicate delivery", got)
 	}
-	// 55 x 1, the breakout bar's 3, the opening fill's 2, the stop fill's 1:
+	// 55 x 1, the breakout bar's 3, the opening fill's 3, the stop fill's 2
+	// (units-stopped, Campaign-exited):
 	// the duplicate delivery emits nothing at all, not merely nothing new.
-	if len(emitted) != 62 {
-		t.Errorf("len(emitted) = %d, want 62 (the duplicate stop fill emits nothing)", len(emitted))
+	if len(emitted) != 63 {
+		t.Errorf("len(emitted) = %d, want 63 (the duplicate stop fill emits nothing)", len(emitted))
 	}
 }
 
@@ -1993,11 +1994,11 @@ func TestOpeningFillRedeliveredAfterTheCampaignClosedIsANoOp(t *testing.T) {
 		t.Fatalf("got %d Campaign-exited event(s), want exactly 1", got)
 	}
 	// The redelivered opening fill must emit nothing at all, not merely
-	// nothing new: 55 warm-up + the breakout bar's 3 + the opening fill's 2
-	// (Campaign-opened, Protective-Stop-set) + the stop fill's 1
-	// (Campaign-exited).
-	if len(emitted) != 62 {
-		t.Errorf("len(emitted) = %d, want 62 (the redelivered opening fill emits nothing)", len(emitted))
+	// nothing new: 55 warm-up + the breakout bar's 3 + the opening fill's 3
+	// (Campaign-opened, Protective-Stop-set, Exit Order) + the stop fill's 2
+	// (units-stopped, Campaign-exited).
+	if len(emitted) != 63 {
+		t.Errorf("len(emitted) = %d, want 63 (the redelivered opening fill emits nothing)", len(emitted))
 	}
 }
 

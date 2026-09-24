@@ -86,6 +86,13 @@
     },
     {
       "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).applyAddFill",
+      "statement": "return nil, err",
+      "category": "unreachable-by-construction",
+      "reason": "Propagates exitOrderChanges' error (internal/strategy/exit_order.go), whose two failure paths are themselves unreachable by construction (their entries in this list)."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).applyExitFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)\", fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)",
       "category": "unreachable-by-invariant",
@@ -247,6 +254,13 @@
     },
     {
       "file": "internal/strategy/campaign.go",
+      "function": "(*Reducer).openCampaign",
+      "statement": "return nil, err",
+      "category": "unreachable-by-construction",
+      "reason": "Propagates exitOrderChanges' error (internal/strategy/exit_order.go), whose two failure paths are themselves unreachable by construction (their entries in this list)."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
       "function": "(*Reducer).rememberPendingProposal",
       "statement": "return fmt.Errorf(\"strategy: decode the trade proposal just emitted: %w\", err)",
       "category": "unreachable-by-construction",
@@ -370,6 +384,14 @@
     },
     {
       "file": "internal/strategy/end_of_stream.go",
+      "function": "(*Reducer).applyRunCompleted",
+      "statement": "return nil, err",
+      "occurrence": 2,
+      "category": "unreachable-by-construction",
+      "reason": "Propagates emitExitOrderChanges' error (internal/strategy/exit_order.go), whose only failure path is exitOrderChanges', itself unreachable by construction (its entries in this list)."
+    },
+    {
+      "file": "internal/strategy/end_of_stream.go",
       "function": "(*Reducer).emitEndOfStreamExpiry",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
@@ -480,7 +502,7 @@
       "function": "(*Reducer).applyCompletedBar",
       "statement": "return nil, err",
       "category": "unreachable-by-construction",
-      "reason": "Five of this function's ten identical error propagations; the other five are reachable and covered, and each entry's occurrence keeps the two sets apart, so a guard that becomes reachable is reported here rather than absorbed. Excluded: the propagations from stateFor, from each of the three expire*Proposal calls, and from rememberPendingProposal — every failure path in all five of those functions is itself in this list. Covered: checkBarConfirmsCampaignOpening's and checkBarConfirmsCampaignClosing's (TestBarPredatingTheCampaignsOpeningFillFailsClosed, TestBarPredatingTheCampaignsClosingFillFailsClosed); sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun); evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd); and evaluateCampaign's, which was listed here until #110 showed it reachable — sizing.AggregateOpenRisk refuses a Campaign whose open risk leaves the float64 range, and the risk fraction it feeds can overflow after a rebase, even though every Unit's own figures are finite (TestCampaignAggregateRiskOverflowIsRefused, TestCampaignRiskFractionCanOverflowAfterARebase)."
+      "reason": "Six of this function's eleven identical error propagations; the other five are reachable and covered, and each entry's occurrence keeps the two sets apart, so a guard that becomes reachable is reported here rather than absorbed. Excluded: the propagations from stateFor, from each of the three expire*Proposal calls, from emitExitOrderChanges, and from rememberPendingProposal — every failure path in all six of those functions is itself in this list. Covered: checkBarConfirmsCampaignOpening's and checkBarConfirmsCampaignClosing's (TestBarPredatingTheCampaignsOpeningFillFailsClosed, TestBarPredatingTheCampaignsClosingFillFailsClosed); sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun); evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd); and evaluateCampaign's, which was listed here until #110 showed it reachable — sizing.AggregateOpenRisk refuses a Campaign whose open risk leaves the float64 range, and the risk fraction it feeds can overflow after a rebase, even though every Unit's own figures are finite (TestCampaignAggregateRiskOverflowIsRefused, TestCampaignRiskFractionCanOverflowAfterARebase)."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -488,7 +510,7 @@
       "statement": "return nil, err",
       "occurrence": 4,
       "category": "unreachable-by-construction",
-      "reason": "Five of this function's ten identical error propagations; the other five are reachable and covered, and each entry's occurrence keeps the two sets apart, so a guard that becomes reachable is reported here rather than absorbed. Excluded: the propagations from stateFor, from each of the three expire*Proposal calls, and from rememberPendingProposal — every failure path in all five of those functions is itself in this list. Covered: checkBarConfirmsCampaignOpening's and checkBarConfirmsCampaignClosing's (TestBarPredatingTheCampaignsOpeningFillFailsClosed, TestBarPredatingTheCampaignsClosingFillFailsClosed); sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun); evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd); and evaluateCampaign's, which was listed here until #110 showed it reachable — sizing.AggregateOpenRisk refuses a Campaign whose open risk leaves the float64 range, and the risk fraction it feeds can overflow after a rebase, even though every Unit's own figures are finite (TestCampaignAggregateRiskOverflowIsRefused, TestCampaignRiskFractionCanOverflowAfterARebase)."
+      "reason": "Six of this function's eleven identical error propagations; the other five are reachable and covered, and each entry's occurrence keeps the two sets apart, so a guard that becomes reachable is reported here rather than absorbed. Excluded: the propagations from stateFor, from each of the three expire*Proposal calls, from emitExitOrderChanges, and from rememberPendingProposal — every failure path in all six of those functions is itself in this list. Covered: checkBarConfirmsCampaignOpening's and checkBarConfirmsCampaignClosing's (TestBarPredatingTheCampaignsOpeningFillFailsClosed, TestBarPredatingTheCampaignsClosingFillFailsClosed); sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun); evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd); and evaluateCampaign's, which was listed here until #110 showed it reachable — sizing.AggregateOpenRisk refuses a Campaign whose open risk leaves the float64 range, and the risk fraction it feeds can overflow after a rebase, even though every Unit's own figures are finite (TestCampaignAggregateRiskOverflowIsRefused, TestCampaignRiskFractionCanOverflowAfterARebase)."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -496,7 +518,7 @@
       "statement": "return nil, err",
       "occurrence": 5,
       "category": "unreachable-by-construction",
-      "reason": "Five of this function's ten identical error propagations; the other five are reachable and covered, and each entry's occurrence keeps the two sets apart, so a guard that becomes reachable is reported here rather than absorbed. Excluded: the propagations from stateFor, from each of the three expire*Proposal calls, and from rememberPendingProposal — every failure path in all five of those functions is itself in this list. Covered: checkBarConfirmsCampaignOpening's and checkBarConfirmsCampaignClosing's (TestBarPredatingTheCampaignsOpeningFillFailsClosed, TestBarPredatingTheCampaignsClosingFillFailsClosed); sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun); evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd); and evaluateCampaign's, which was listed here until #110 showed it reachable — sizing.AggregateOpenRisk refuses a Campaign whose open risk leaves the float64 range, and the risk fraction it feeds can overflow after a rebase, even though every Unit's own figures are finite (TestCampaignAggregateRiskOverflowIsRefused, TestCampaignRiskFractionCanOverflowAfterARebase)."
+      "reason": "Six of this function's eleven identical error propagations; the other five are reachable and covered, and each entry's occurrence keeps the two sets apart, so a guard that becomes reachable is reported here rather than absorbed. Excluded: the propagations from stateFor, from each of the three expire*Proposal calls, from emitExitOrderChanges, and from rememberPendingProposal — every failure path in all six of those functions is itself in this list. Covered: checkBarConfirmsCampaignOpening's and checkBarConfirmsCampaignClosing's (TestBarPredatingTheCampaignsOpeningFillFailsClosed, TestBarPredatingTheCampaignsClosingFillFailsClosed); sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun); evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd); and evaluateCampaign's, which was listed here until #110 showed it reachable — sizing.AggregateOpenRisk refuses a Campaign whose open risk leaves the float64 range, and the risk fraction it feeds can overflow after a rebase, even though every Unit's own figures are finite (TestCampaignAggregateRiskOverflowIsRefused, TestCampaignRiskFractionCanOverflowAfterARebase)."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -504,15 +526,23 @@
       "statement": "return nil, err",
       "occurrence": 6,
       "category": "unreachable-by-construction",
-      "reason": "Five of this function's ten identical error propagations; the other five are reachable and covered, and each entry's occurrence keeps the two sets apart, so a guard that becomes reachable is reported here rather than absorbed. Excluded: the propagations from stateFor, from each of the three expire*Proposal calls, and from rememberPendingProposal — every failure path in all five of those functions is itself in this list. Covered: checkBarConfirmsCampaignOpening's and checkBarConfirmsCampaignClosing's (TestBarPredatingTheCampaignsOpeningFillFailsClosed, TestBarPredatingTheCampaignsClosingFillFailsClosed); sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun); evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd); and evaluateCampaign's, which was listed here until #110 showed it reachable — sizing.AggregateOpenRisk refuses a Campaign whose open risk leaves the float64 range, and the risk fraction it feeds can overflow after a rebase, even though every Unit's own figures are finite (TestCampaignAggregateRiskOverflowIsRefused, TestCampaignRiskFractionCanOverflowAfterARebase)."
+      "reason": "Six of this function's eleven identical error propagations; the other five are reachable and covered, and each entry's occurrence keeps the two sets apart, so a guard that becomes reachable is reported here rather than absorbed. Excluded: the propagations from stateFor, from each of the three expire*Proposal calls, from emitExitOrderChanges, and from rememberPendingProposal — every failure path in all six of those functions is itself in this list. Covered: checkBarConfirmsCampaignOpening's and checkBarConfirmsCampaignClosing's (TestBarPredatingTheCampaignsOpeningFillFailsClosed, TestBarPredatingTheCampaignsClosingFillFailsClosed); sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun); evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd); and evaluateCampaign's, which was listed here until #110 showed it reachable — sizing.AggregateOpenRisk refuses a Campaign whose open risk leaves the float64 range, and the risk fraction it feeds can overflow after a rebase, even though every Unit's own figures are finite (TestCampaignAggregateRiskOverflowIsRefused, TestCampaignRiskFractionCanOverflowAfterARebase)."
     },
     {
       "file": "internal/strategy/reducer.go",
       "function": "(*Reducer).applyCompletedBar",
       "statement": "return nil, err",
-      "occurrence": 10,
+      "occurrence": 8,
       "category": "unreachable-by-construction",
-      "reason": "Five of this function's ten identical error propagations; the other five are reachable and covered, and each entry's occurrence keeps the two sets apart, so a guard that becomes reachable is reported here rather than absorbed. Excluded: the propagations from stateFor, from each of the three expire*Proposal calls, and from rememberPendingProposal — every failure path in all five of those functions is itself in this list. Covered: checkBarConfirmsCampaignOpening's and checkBarConfirmsCampaignClosing's (TestBarPredatingTheCampaignsOpeningFillFailsClosed, TestBarPredatingTheCampaignsClosingFillFailsClosed); sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun); evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd); and evaluateCampaign's, which was listed here until #110 showed it reachable — sizing.AggregateOpenRisk refuses a Campaign whose open risk leaves the float64 range, and the risk fraction it feeds can overflow after a rebase, even though every Unit's own figures are finite (TestCampaignAggregateRiskOverflowIsRefused, TestCampaignRiskFractionCanOverflowAfterARebase)."
+      "reason": "Six of this function's eleven identical error propagations; the other five are reachable and covered, and each entry's occurrence keeps the two sets apart, so a guard that becomes reachable is reported here rather than absorbed. Excluded: the propagations from stateFor, from each of the three expire*Proposal calls, from emitExitOrderChanges, and from rememberPendingProposal — every failure path in all six of those functions is itself in this list. Covered: checkBarConfirmsCampaignOpening's and checkBarConfirmsCampaignClosing's (TestBarPredatingTheCampaignsOpeningFillFailsClosed, TestBarPredatingTheCampaignsClosingFillFailsClosed); sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun); evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd); and evaluateCampaign's, which was listed here until #110 showed it reachable — sizing.AggregateOpenRisk refuses a Campaign whose open risk leaves the float64 range, and the risk fraction it feeds can overflow after a rebase, even though every Unit's own figures are finite (TestCampaignAggregateRiskOverflowIsRefused, TestCampaignRiskFractionCanOverflowAfterARebase)."
+    },
+    {
+      "file": "internal/strategy/reducer.go",
+      "function": "(*Reducer).applyCompletedBar",
+      "statement": "return nil, err",
+      "occurrence": 11,
+      "category": "unreachable-by-construction",
+      "reason": "Six of this function's eleven identical error propagations; the other five are reachable and covered, and each entry's occurrence keeps the two sets apart, so a guard that becomes reachable is reported here rather than absorbed. Excluded: the propagations from stateFor, from each of the three expire*Proposal calls, from emitExitOrderChanges, and from rememberPendingProposal — every failure path in all six of those functions is itself in this list. Covered: checkBarConfirmsCampaignOpening's and checkBarConfirmsCampaignClosing's (TestBarPredatingTheCampaignsOpeningFillFailsClosed, TestBarPredatingTheCampaignsClosingFillFailsClosed); sizeUnit's, since sizing.SizeUnit refuses a quantity at or above 2^53 and no rule caps the Notional Account (TestABreakoutSizingBeyondTheExactlyRepresentableRangeStopsTheRun); evaluateAdd's, since cashAtPreviousClose refuses a snapshot stamped after the decision bar's previous close (TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd); and evaluateCampaign's, which was listed here until #110 showed it reachable — sizing.AggregateOpenRisk refuses a Campaign whose open risk leaves the float64 range, and the risk fraction it feeds can overflow after a rebase, even though every Unit's own figures are finite (TestCampaignAggregateRiskOverflowIsRefused, TestCampaignRiskFractionCanOverflowAfterARebase)."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -655,6 +685,27 @@
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: instrument %q: delisting: %w\", payload.InstrumentID, err)",
       "category": "unreachable-by-construction",
       "reason": "sizing.LowestProtectiveStop refuses a stop that is not finite and positive, and no such stop can be stored on a held Unit. Every assignment to unitState.protectiveStop is preceded by a payload Validate that routes through sizing.ValidStopLevel: the Campaign open validates openedPayload and stopSetPayload before storing (campaign.go:1602), the Add validates before storing (the 'would add an invalid unit' refusal, campaign.go:2250), and the Stop Ladder validates raisedPayload before assigning (campaign.go:2329, assigned at 2346). All four sites were checked for this entry rather than assumed. This branch becomes reachable the moment any of those stores stops validating first, or a new store is added without one — at which point it fires, becomes covered, and the audit reports this entry as stale. LowestProtectiveStop also refuses an EMPTY slice, which is unreachable here for a separate reason worth stating rather than folding into the one above. The three sites reading campaign.units hold a Campaign, and a Campaign exists only while it holds Units: the Add appends one, and the close that empties it removes the Campaign rather than leaving it holding none. applyStopFill reads the Units a fill names, and reaches this call only after FillPayload.Validate has required UnitIDs to be non-empty and after resolveUnits has reported no missing one -- a fill naming an unknown or already-closed Unit is refused as a reconciliation failure before any stop is read."
+    },
+    {
+      "file": "internal/strategy/exit_order.go",
+      "function": "(*Reducer).exitOrderChanges",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: campaign %q: built invalid exit order payload for unit %d: %w\", campaign.instrumentID, campaign.campaignID, u.index, err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a payload this function assembled from a held Unit's own figures — a Protective Stop already positive and finite (sizing.ProtectiveStopLevel, sizing.RaisedStop, and each payload's own Validate), a quantity already positive (FillPayload.Validate) — and a pending exit proposal's level, already positive and finite (ExitProposalPayload.Validate), with AsOf an already-validated fill, bar or end-of-stream time. Level and Source are chosen by exitOrderFor with the same strict comparison Validate re-derives, and choosing the higher of two levels involves no arithmetic, so the two agree exactly. If that ever stops holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
+    },
+    {
+      "file": "internal/strategy/exit_order.go",
+      "function": "(*Reducer).exitOrderChanges",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal exit order payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
+    },
+    {
+      "file": "internal/strategy/exit_order.go",
+      "function": "(*Reducer).emitExitOrderChanges",
+      "statement": "return nil, err",
+      "category": "unreachable-by-construction",
+      "reason": "Propagates exitOrderChanges' error (internal/strategy/exit_order.go), whose two failure paths are themselves unreachable by construction (their entries in this list)."
     }
   ]
 }

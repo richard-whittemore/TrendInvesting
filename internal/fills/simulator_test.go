@@ -257,6 +257,7 @@ func TestObserveIgnoresTheEmissionsThatCreateNoOrder(t *testing.T) {
 		event.SignalEventType,
 		event.ProposalDeclinedEventType,
 		event.CampaignEvaluatedEventType,
+		event.ExitOrderSetEventType,
 		event.EngineStateEventType,
 		event.DrawdownStepAppliedEventType,
 		event.NotionalAccountRebasedEventType,

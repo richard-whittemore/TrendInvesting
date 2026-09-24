@@ -55,6 +55,10 @@ _Avoid_: stop-loss, trailing stop (the latter is a distinct Sublime exit variant
 **Stop Ladder**:
 The progression of Protective Stops as Units are added to a Campaign.
 
+**Exit Order**:
+The one sell order a held Unit rests, for that Unit's own shares: at its **Protective Stop**, or, while an Exit-Channel exit is proposed for the Campaign, at the Exit Channel level if that is higher (a tie names the stop). A Campaign's Exit Orders together cover exactly its holding, so a stop and an exit can never both sell the same shares. The engine decides the level and records each change; a consumer mirroring orders never combines the two levels itself.
+_Avoid_: exit proposal (the Campaign-level decision to exit, one of the two inputs), stop order.
+
 **risk-free**:
 A held Unit whose current Protective Stop, after being raised by the Stop Ladder, sits at or above its own entry price — reachable only by raising, never by an initial stop, which must sit strictly below entry. Its contribution to a Campaign's aggregate open risk is exactly zero: `max(0, EntryPrice − ProtectiveStop)`, a per-share price distance, never a negative figure and never a validation failure — sizing.AggregateOpenRisk scales that distance by the Unit's Quantity and by DollarsPerPoint to reach the account-currency figure. A break-even or profit-protecting stop is a legitimate outcome of the Stop Ladder, not a corrupted one (The Turtle Rules p.23–24).
 _Avoid_: risk-free rate (the unrelated finance term).

@@ -55,6 +55,14 @@ type unitState struct {
 	// ones are added).
 	protectiveStop float64
 	filledAt       time.Time
+	// exitOrderLevel and exitOrderSource are the Exit Order last recorded
+	// for this Unit by a strategy.exit-order.set decision (see exit_order.go),
+	// so a change can be told from a repeat. Zero and empty until the first
+	// one is recorded, which happens in the same Apply that set the Unit's
+	// first stop; a Protective Stop is always positive, so a zero level is
+	// unambiguous as "none yet".
+	exitOrderLevel  float64
+	exitOrderSource string
 }
 
 // campaignState is one instrument's open Campaign (CONTEXT.md: "Campaign" —
@@ -601,7 +609,11 @@ func (r *Reducer) expireEntryProposal(state *instrumentState, bar event.Complete
 // a breach bar in practice, but the zero time needs no special case either
 // way, since every real timestamp is after it.
 type pendingExitProposalState struct {
-	proposalID     string
+	proposalID string
+	// campaignID is the Campaign this exit proposal would close: an Exit
+	// Order combines a Unit's stop with an exit proposal only for its own
+	// Campaign (exit_order.go's exitOrderFor).
+	campaignID     string
 	periodEnd      time.Time
 	quantity       int64
 	level          float64
@@ -929,6 +941,7 @@ func (r *Reducer) evaluateCampaign(state *instrumentState, bar event.CompletedBa
 	// applyExitFill, reading a recorded fill.
 	state.pendingExitProposal = &pendingExitProposalState{
 		proposalID:     proposalEnvelope.ID,
+		campaignID:     campaign.campaignID,
 		periodEnd:      bar.PeriodEnd,
 		quantity:       campaign.filledQuantity(),
 		level:          exitChannelLow,
@@ -1576,8 +1589,24 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 		return nil, fmt.Errorf("strategy: marshal protective stop set payload: %w", err)
 	}
 
-	// The state moves only now, after BOTH payloads it will be journalled as
-	// have been validated: a Campaign that could not be recorded, complete
+	// Unit 1's Exit Order, built and validated before any state moves, like
+	// the two payloads above (exit_order.go). A new Campaign has no exit
+	// proposal of its own, so this is its Protective Stop.
+	unit1 := unitState{
+		index:          1,
+		openingFillID:  fill.FillID,
+		fillPrice:      fill.Price,
+		quantity:       fill.Quantity,
+		protectiveStop: protectiveStop,
+		filledAt:       fill.FilledAt,
+	}
+	exitOrderEmissions, err := r.exitOrderChanges(&campaignState{campaignID: campaignID, instrumentID: fill.InstrumentID}, []unitState{unit1}, nil, fill.FilledAt, fill.FillID, input)
+	if err != nil {
+		return nil, err
+	}
+
+	// The state moves only now, after every payload it will be journalled as
+	// has been validated: a Campaign that could not be recorded, complete
 	// with its stop, must not exist in memory either. This is what makes
 	// "an open Campaign without a Protective Stop" unrepresentable by
 	// construction: there is no assignment to state.campaign anywhere else
@@ -1594,16 +1623,10 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 		stopMultiple: pending.stopMultiple,
 		maxUnits:     r.maxUnits,
 		openedAt:     fill.FilledAt,
-		units: []unitState{{
-			index:          1,
-			openingFillID:  fill.FillID,
-			fillPrice:      fill.Price,
-			quantity:       fill.Quantity,
-			protectiveStop: protectiveStop,
-			filledAt:       fill.FilledAt,
-		}},
-		unitsOpened: 1,
+		units:        []unitState{unit1},
+		unitsOpened:  1,
 	}
+	recordExitOrders(state.campaign, nil)
 	// The proposal has been executed, so it is no longer outstanding and must
 	// not later be expired as though it had never filled.
 	state.pendingProposal = nil
@@ -1620,6 +1643,8 @@ func (r *Reducer) openCampaign(state *instrumentState, pending *pendingProposalS
 		r.stamp(campaignID, event.CampaignOpenedEventType, event.CampaignOpenedSchemaVersion, fill.FilledAt, input, openedPayloadBytes),
 		r.stamp(decisionID("protective-stop-set", fill.InstrumentID, fill.FilledAt), event.ProtectiveStopSetEventType, event.ProtectiveStopSetSchemaVersion, fill.FilledAt, input, stopSetPayloadBytes),
 	}
+	// Then the Exit Order the stop sets, before any Add the same bar chains.
+	emissions = append(emissions, exitOrderEmissions...)
 
 	// If the entry filled at the breakout bar's own high, Unit 1's rung
 	// (fill + 1/2N) would always sit ABOVE that bar's own high and could
@@ -2337,6 +2362,28 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 		raises = append(raises, raise{unitIndex: earlier.index, newStop: newStop, payload: raisedPayload, bytes: raisedBytes})
 	}
 
+	// Every held Unit's Exit Order after this Add — the new Unit's first, then
+	// each earlier Unit's at its raised stop — built and validated before any
+	// state moves (exit_order.go). An Add is never proposed on a bar that
+	// proposed an exit (ADR 0010), so in practice each is its stop.
+	afterAdd := make([]unitState, 0, len(campaign.units)+1)
+	afterAdd = append(afterAdd, unitState{
+		index:          unitIndex,
+		openingFillID:  fill.FillID,
+		fillPrice:      fill.Price,
+		quantity:       fill.Quantity,
+		protectiveStop: protectiveStop,
+		filledAt:       fill.FilledAt,
+	})
+	for i, earlier := range campaign.units {
+		earlier.protectiveStop = raises[i].newStop
+		afterAdd = append(afterAdd, earlier)
+	}
+	exitOrderEmissions, err := r.exitOrderChanges(campaign, afterAdd, state.pendingExitProposal, fill.FilledAt, fill.FillID, input)
+	if err != nil {
+		return nil, err
+	}
+
 	// The state moves only now, after every payload it will be journalled as
 	// has been validated — identical discipline to openCampaign's own.
 	// Earlier Units' stops are raised in place, in ascending index order,
@@ -2354,6 +2401,7 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 		filledAt:       fill.FilledAt,
 	})
 	campaign.unitsOpened++
+	recordExitOrders(campaign, state.pendingExitProposal)
 	state.pendingAddProposal = nil
 	r.acceptedFills[fill.FillID] = acceptedFillFromPayload(fill)
 
@@ -2367,6 +2415,9 @@ func (r *Reducer) applyAddFill(state *instrumentState, fill event.FillPayload, i
 			event.ProtectiveStopSetEventType, event.ProtectiveStopSetSchemaVersion, fill.FilledAt, input, r2.bytes,
 		))
 	}
+	// Then the Exit Orders those stops set, before the next rung the chain
+	// may propose.
+	emissions = append(emissions, exitOrderEmissions...)
 
 	// The same-bar Add chain: re-evaluate immediately for the NEXT rung,
 	// still measured against the bar that produced the opportunity for this

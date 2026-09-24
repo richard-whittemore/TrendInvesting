@@ -130,6 +130,14 @@ func decisionSentence(e event.Envelope) (string, error) {
 		return renderDecision(e, event.ProtectiveStopSetSchemaVersion, func(p event.ProtectiveStopSetPayload) string {
 			return fmt.Sprintf("set Protective Stop for Unit %d of Campaign %q to %s because %s; previous level %s, entry price %s, Campaign N %s", p.UnitIndex, p.CampaignID, decisionNumber(p.Level), logText(p.Reason), decisionNumber(p.PreviousLevel), decisionNumber(p.EntryPrice), decisionNumber(p.CampaignN))
 		})
+	case event.ExitOrderSetEventType:
+		return renderDecision(e, event.ExitOrderSetSchemaVersion, func(p event.ExitOrderSetPayload) string {
+			exit := "no Exit-Channel exit proposed"
+			if p.ExitChannelLevel > 0 {
+				exit = "Exit Channel level " + decisionNumber(p.ExitChannelLevel)
+			}
+			return fmt.Sprintf("set Exit Order for Unit %d of Campaign %q to %d shares at %s because %s governs; Protective Stop %s, %s", p.UnitIndex, p.CampaignID, p.Quantity, decisionNumber(p.Level), logText(p.Source), decisionNumber(p.ProtectiveStop), exit)
+		})
 	case event.ExitProposalEventType:
 		return renderDecision(e, event.ExitProposalSchemaVersion, func(p event.ExitProposalPayload) string {
 			return fmt.Sprintf("proposed exit of Campaign %q: %d shares at %s because %s", p.CampaignID, p.Quantity, decisionNumber(p.Level), logText(p.Reason))
