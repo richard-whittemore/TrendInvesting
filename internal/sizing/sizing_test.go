@@ -655,11 +655,12 @@ func TestSizeUnitMatchesTheStandaloneArithmetic(t *testing.T) {
 }
 
 // TestSizeUnitRealisedRiskAtStopShowsWhatTruncationLeftBehind covers the
-// distinction a reviewer of PR #64 asked for.
+// distinction between the declared risk budget and risk after truncation;
+// recording the budget alone would overstate the whole-share Unit's risk.
 //
 // RiskAtStop is the *declared budget* — the parameter the Sizing Mode is
 // keyed to, and under volatility-normalised it must stay exactly Unit
-// Volatility Fraction x Stop Multiple (ADR 0003; #10's acceptance criteria).
+// Volatility Fraction x Stop Multiple (ADR 0003).
 // It is what the strategy set out to risk. RealisedRiskAtStop is what the
 // whole-share quantity that came out of the truncation actually risks. The
 // gap between the two is the truncation, and it always points the same way:

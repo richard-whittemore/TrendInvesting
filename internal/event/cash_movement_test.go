@@ -84,9 +84,9 @@ func TestCashMovementPayloadValidate(t *testing.T) {
 			wantErr: "currency is required",
 		},
 		{
-			// Greptile PR #71 finding: EquityBefore and Amount are both
-			// finite, but their sum overflows to +Inf, which the old "<= 0"
-			// check let through silently.
+			// Reject a non-finite resulting equity even when EquityBefore
+			// and Amount are both finite: their sum overflows to +Inf,
+			// which a "<= 0" check alone cannot reject.
 			name: "equity before plus amount overflows to infinity",
 			mutate: func(p *event.CashMovementPayload) {
 				p.EquityBefore = math.MaxFloat64

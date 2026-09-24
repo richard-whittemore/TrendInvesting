@@ -168,8 +168,8 @@ func startEngine(t *testing.T, opts options) (stop func() error) {
 	return stopFn
 }
 
-// assertJournalReplays is the check this whole ticket exists to make: that
-// the journal a run of this command wrote is not merely well-formed
+// assertJournalReplays checks ADR 0017's replay equivalence: the journal a
+// run of this command wrote must not merely be well-formed
 // (journal.Verify's chain, CheckIdentity, CheckSpan — all structural, none
 // of them ever applies an input to anything) but actually REPLAYS — a fresh
 // reducer, built from the journal's own header and its own recorded
@@ -182,12 +182,11 @@ func startEngine(t *testing.T, opts options) (stop func() error) {
 // package's own journal rather than importing cmd/backtest's unexported
 // pieces, since the two are separate main packages.
 //
-// Two rounds of this ticket passed review with an unreplayable journal
-// (the engine's own configuration input and the adapter's first bar both
-// claiming Sequence 1) precisely because nothing exercised this path:
-// journal.Verify, CheckIdentity, and Split all pass on a journal that
-// cannot be replayed at all, because none of them ever applies an input to
-// a reducer. This is the test that would have caught it.
+// TestRunEndToEndOverASocket uses this helper to reject an unreplayable
+// journal whose configuration input and first adapter bar both claim
+// Sequence 1. journal.Verify, CheckIdentity, and Split can all pass such a
+// journal because none applies its inputs to a reducer; Engine.Run must
+// reject the duplicate sequence even when those structural checks pass.
 func assertJournalReplays(t *testing.T, header journal.Header, inputs, decisions []event.Envelope) {
 	t.Helper()
 

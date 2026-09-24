@@ -70,9 +70,9 @@ func TestSetupEvaluatedPayloadValidate(t *testing.T) {
 			wantErr: "n must not be negative",
 		},
 		{
-			// Greptile PR #60 finding 3: twenty flat bars (high==low==close)
-			// legitimately complete bar-count warm-up with N==0, which is not
-			// a usable volatility reading. NReady means "N is usable", not
+			// Reject mistaking completed warm-up for usable volatility:
+			// twenty flat bars (high==low==close) can finish warm-up with
+			// N==0, which is not usable. NReady means "N is usable", not
 			// merely "warm-up complete", so this combination must be
 			// rejected rather than handed to a downstream sizing step that
 			// would divide by it.

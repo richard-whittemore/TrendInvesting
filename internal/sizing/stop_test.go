@@ -274,11 +274,11 @@ func TestProtectiveStopLevelDirectionLongMatchesTheEventContract(t *testing.T) {
 	}
 }
 
-// --- #15: the Stop Ladder's arithmetic seam --------------------------------
+// --- The Stop Ladder's arithmetic seam -------------------------------------
 //
 // The Turtle Rules p.22-23, Crude Oil, N = 1.20, Stop Multiple 2, transcribed
-// exactly (see internal/strategy/campaign.go's applyAddFill and
-// docs referencing this ticket for the citation):
+// exactly; TestRaisedStopReproducesFaithsCrudeTablesRowByRow below checks
+// every row, including the gap case where earlier stops stay at 27.70:
 //
 //	One Unit:    First 28.30  Stop 25.90
 //	Two Units:   First 28.30  Stop 26.50   Second 28.90  Stop 26.50

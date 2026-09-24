@@ -15,12 +15,11 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 )
 
-// --- #11 fixtures and helpers -------------------------------------------
+// --- Campaign fixtures and helpers --------------------------------------
 //
 // Every test in this file drives the reducer through replay.Engine.Run — the
-// event seam — because that is where the invariant this ticket encodes is
-// observable: a Campaign exists only if a Campaign-opened event was emitted,
-// and that only ever happens on a recorded fill.
+// event seam — to observe CONTEXT.md's Campaign rule: a Campaign begins only
+// on a recorded fill, and that transition emits a Campaign-opened event.
 
 // campaignFillPrice is what the fixtures below actually fill at. It is
 // deliberately different from the breakout fixture's entry level of 155 (#79:
@@ -794,12 +793,11 @@ func TestPartialFillOpensACampaignSizedToTheFilledQuantity(t *testing.T) {
 	}
 }
 
-// TestSecondPartialFillWithADifferentFillIDIsRejected pins the deliberate
-// limitation this ticket ships with: accumulating successive partial fills
-// into one Campaign is deferred to its own issue, and until it lands a second
-// partial fails the run rather than silently opening a second Campaign for the
-// same instrument (which would double the position and halve nothing about the
-// risk).
+// TestSecondPartialFillWithADifferentFillIDIsRejected pins the limitation
+// that successive partial entry fills are not accumulated into one Campaign:
+// a second partial with a distinct FillID fails the run. Accepting it as a
+// second Campaign for the same instrument would duplicate the position and
+// its risk rather than reconcile the existing Campaign.
 func TestSecondPartialFillWithADifferentFillIDIsRejected(t *testing.T) {
 	t.Parallel()
 
@@ -1103,17 +1101,16 @@ func TestReducerRejectsUndecodableFillPayload(t *testing.T) {
 	}
 }
 
-// --- When a fill could have executed (PR #69 review) --------------------
+// --- Fill timestamps must respect ADR 0005's resting-order window --------
 
-// TestFillInsideTheDecisionBarOpensTheCampaignAtThatIntrabarTime is ADR 0005's
-// case, and the reason this review finding could not be fixed the way it was
-// literally written.
+// TestFillInsideTheDecisionBarOpensTheCampaignAtThatIntrabarTime rejects
+// treating the decision bar's period end as the earliest legal fill time
+// under ADR 0005's resting-order model.
 //
 // The entry is a **resting order that fills inside the breakout bar** — that
 // is the whole fill model — so a fill timestamped earlier than the decision
 // bar's period end is the normal backtest case, not an anomaly. Rejecting
-// `FilledAt < PeriodEnd` would reject every legitimate fill #18's simulator
-// will ever produce.
+// `FilledAt < PeriodEnd` would incorrectly reject legitimate intrabar fills.
 //
 // The Campaign therefore carries the intrabar time as its own: its `OpenedAt`,
 // its envelope `EventTime` and its deterministic id are all the moment the
@@ -1173,8 +1170,8 @@ func TestFillAtTheDecisionBarsPeriodEndIsAccepted(t *testing.T) {
 	}
 }
 
-// TestFillPredatingTheBarTheOrderCouldHaveExecutedInIsRejected is the half of
-// the review finding that was real, correctly bounded.
+// TestFillPredatingTheBarTheOrderCouldHaveExecutedInIsRejected rejects fills
+// at or before the exclusive lower bound of the execution window.
 //
 // A fill cannot have executed before the bar it executed *inside* began. The
 // bound is therefore the period end of the bar **preceding** the decision bar
@@ -1279,8 +1276,8 @@ func TestFillAtTheNextBarsPeriodEndIsAccepted(t *testing.T) {
 }
 
 // TestBarPredatingTheCampaignsOpeningFillFailsClosed is the upper bound of the
-// window, enforced at the earliest point the reducer can know it (a second PR
-// #69 review finding).
+// window: the next bar must reject an accepted fill whose timestamp is
+// later than that bar's period end.
 //
 // A fill timestamped after a bar that has not yet completed cannot have
 // happened: the execution claims a moment the stream has not reached. But the
@@ -1546,10 +1543,10 @@ func TestStopFillClosesTheCampaignWithReasonStopAndRealisedResult(t *testing.T) 
 	if !(exited.RealisedResult < 0) {
 		t.Errorf("RealisedResult = %v, want negative (the fixture stops out at a loss)", exited.RealisedResult)
 	}
-	// PR #74 review response to "N Result Ignores Units": each field is
-	// asserted against sizing's own function, the same one the producer
-	// calls, since the two are not guaranteed to agree bit-for-bit in
-	// float64 even though they coincide numerically for a single,
+	// Reject conflating AverageMoveInN with RealisedResultInUnitN: each
+	// field is asserted against sizing's own function, the same one the
+	// producer calls. The two are not guaranteed to agree bit-for-bit in
+	// float64 even though they coincide mathematically for a single,
 	// fully-filled unit.
 	wantMoveInN, err := sizing.AverageMoveInN(stop.Price, campaignFillPrice, campaignN)
 	if err != nil {
@@ -1960,7 +1957,7 @@ func TestReplayingTheEntryThenStopFixtureTwiceYieldsByteIdenticalEmissions(t *te
 	}
 }
 
-// --- Idempotency across a Campaign's whole life (PR #72 review round) -----
+// --- Re-delivered fills remain idempotent after Campaign closure --------
 //
 // docs/architecture.md requires duplicate decision and order identifiers to
 // be idempotent WITHOUT qualification — not "idempotent while the fact it
@@ -1970,13 +1967,10 @@ func TestReplayingTheEntryThenStopFixtureTwiceYieldsByteIdenticalEmissions(t *te
 // instrument, which is exactly the shape the single-slot closedStopFillState
 // design could not answer correctly.
 
-// TestOpeningFillRedeliveredAfterTheCampaignClosedIsANoOp covers the first
-// gap: a re-delivery of the ENTRY fill arriving after its own Campaign has
-// already closed. Before this round, nothing remembered the opening fill
-// once state.campaign was cleared (only pendingProposalState did, and that
-// was already consumed at open), so this fixture used to be rejected as "no
-// pending trade proposal" — the wrong reason, and the wrong outcome for a
-// duplicate delivery.
+// TestOpeningFillRedeliveredAfterTheCampaignClosedIsANoOp rejects forgetting
+// an accepted ENTRY fill when its Campaign closes. Clearing Campaign or
+// pending-proposal state must not make a duplicate delivery fail for lack
+// of a pending trade proposal; it must emit nothing and succeed.
 func TestOpeningFillRedeliveredAfterTheCampaignClosedIsANoOp(t *testing.T) {
 	t.Parallel()
 
@@ -2008,12 +2002,10 @@ func TestOpeningFillRedeliveredAfterTheCampaignClosedIsANoOp(t *testing.T) {
 }
 
 // TestStopFillRedeliveredAfterASecondCampaignHasOpenedAndClosedIsANoOp
-// covers the second gap: a re-delivery of a CLOSING stop fill arriving after
-// a SECOND Campaign, in the same instrument, has itself already opened and
-// closed. Before this round, closedStopFillState held only the single most
-// recently closed fill, so the second Campaign's closure overwrote the
-// first's record and this exact re-delivery was rejected as "no open
-// campaign for it" instead of recognised as the duplicate it is.
+// rejects remembering only the most recent closing fill: a CLOSING stop
+// fill re-delivered after a SECOND Campaign in the same instrument has
+// opened and closed is still a duplicate. Overwriting the first Campaign's
+// fill record would incorrectly reject it for lack of an open Campaign.
 func TestStopFillRedeliveredAfterASecondCampaignHasOpenedAndClosedIsANoOp(t *testing.T) {
 	t.Parallel()
 
@@ -2118,8 +2110,9 @@ func TestFillHistoryIsRememberedAcrossAnInstrumentsWholeLife(t *testing.T) {
 		wantRunError(stop1.FillID, "differ")
 }
 
-// TestFillIDReusedForADifferentInstrumentIsRejected covers PR #72's third
-// review finding: the idempotency store keys purely by FillID for the whole
+// TestFillIDReusedForADifferentInstrumentIsRejected rejects treating the
+// same FillID as independent executions on different instruments. The
+// idempotency store keys purely by FillID for the whole
 // run, not per instrument (a producer's fill ids are not guaranteed
 // instrument-scoped), so reusing one instrument's fill id for a genuinely
 // different instrument's execution must be rejected as a reconciliation

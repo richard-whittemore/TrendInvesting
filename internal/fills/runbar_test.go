@@ -100,7 +100,8 @@ func TestGapUpBreakoutBarFillsAtTheOpenPlusSlippage(t *testing.T) {
 	// makes it a Signal at all (strictly exceeding 155.5, The Turtle Rules
 	// p.19's "exceeds"), while staying below 157.325 — the Unit 2 rung half
 	// an N above the 156.575 gapped entry fill — so this bar produces the
-	// entry alone rather than also chaining an Add (PR #85 review round).
+	// entry alone. TestBreakoutBarThatDoesNotReachTheFirstRungAddsNoUnit
+	// in internal/strategy/add_test.go pins this same-bar Add boundary.
 	gapUp := bar(day(56), 156.5, 157.2, 156, 157.0)
 	bars := append(warmUpBars(), gapUp)
 	run := runComposed(t, baselineConfig(), bars)
@@ -253,13 +254,15 @@ func TestExitChannelBreachFillsAtTheLevelLessSlippageAndClosesTheCampaign(t *tes
 func TestBarCoveringBothEntryAndStopEntersThenStops(t *testing.T) {
 	t.Parallel()
 
-	// #79: the entry level is now the Entry Channel high (155.5), not this
+	// The entry level is the Entry Channel high (155.5; strategy.RulesVersion's
+	// 1.1.0 note), not this
 	// bar's own high, so the entry fills at 155.5 + slippage regardless of
 	// the bar's own range — this bar's open (152.0) and low (151.5) exist
 	// only to pin the same-bar-ambiguity and Range.Reference rules below. The
 	// high (156.0) stays below 156.325 — the Unit 2 rung half an N above the
 	// 155.575 entry fill — so this bar produces the entry and stop alone
-	// (PR #85 review round: a higher high would also chain an Add here).
+	// (TestBreakoutBarThatDoesNotReachTheFirstRungAddsNoUnit in
+	// internal/strategy/add_test.go pins this same-bar Add boundary).
 	bars := append(warmUpBars(), bar(day(56), 152.0, 156.0, 151.5, 153.0))
 	run := runComposed(t, baselineConfig(), bars)
 

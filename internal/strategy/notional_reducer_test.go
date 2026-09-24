@@ -547,11 +547,12 @@ func TestReplayingAccountSnapshotFixtureTwiceYieldsByteIdenticalEmissions(t *tes
 
 // TestReducerSurfacesTheNotionalAccountAsymptoteError is the event-seam
 // counterpart of notional_test.go's
-// TestNotionalAccountEquityAtTheAsymptoteErrors (Greptile PR #66 finding): an
-// account.snapshot at or below the Drawdown Step ladder's 50%-drawdown
-// asymptote makes NotionalAccount.Observe fail closed, and the reducer must
-// not swallow that — replay.Engine.Run surfaces it as a run error, and since
-// Run returns nil on any error, nothing is emitted for the whole run.
+// TestNotionalAccountEquityAtTheAsymptoteErrors: an account.snapshot at or
+// below the Drawdown Step ladder's 50%-drawdown asymptote makes
+// NotionalAccount.Observe fail closed, and the reducer must surface that
+// error through replay.Engine.Run. This fixture emits nothing before the
+// rejected snapshot, so the returned emissions are nil; it must not be
+// mistaken for a rule that errors discard prior emissions.
 func TestReducerSurfacesTheNotionalAccountAsymptoteError(t *testing.T) {
 	t.Parallel()
 
@@ -1184,9 +1185,11 @@ func TestReplayingRebaseRecoveryCashMovementFixtureTwiceYieldsByteIdenticalEmiss
 	}
 }
 
-// --- Greptile PR #71 finding: the account's currency is pinned, not
-// merely validated for presence and discarded. Multi-currency accounts are
-// out of scope (issue #17 Findings). ---
+// The currency tests below reject treating Currency as a presence-only
+// field: the first account event pins it, later events must match it, and
+// re-basing must preserve that pin. See
+// TestReducerRejectsAccountEventWithMismatchedCurrency and
+// TestReducerCurrencyPinSurvivesRebasing.
 
 // TestReducerPinsAccountCurrencyFromTheFirstAccountEvent: the first account
 // event of a run (here, a snapshot) pins the account's currency, and a
@@ -1218,8 +1221,9 @@ func TestReducerPinsAccountCurrencyFromTheFirstAccountEvent(t *testing.T) {
 
 // TestReducerRejectsAccountEventWithMismatchedCurrency covers a later
 // event, of either type, stating a currency different from the pin: it
-// fails closed, names both currencies, and the engine emits nothing for the
-// whole run (replay.Engine.Run's own contract on any error).
+// fails closed and names both currencies. The snapshot-pin cases have no
+// prior emissions; the cash-movement-pin case must retain its earlier
+// cash-adjusted decision alongside the error.
 func TestReducerRejectsAccountEventWithMismatchedCurrency(t *testing.T) {
 	t.Parallel()
 
@@ -1308,12 +1312,11 @@ func TestReducerRejectsAccountEventWithMismatchedCurrency(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "does not match the account's pinned currency") {
 			t.Fatalf("Run() error = %v, want it to name a currency mismatch", err)
 		}
-		// #12's review round changed replay.Engine.Run's contract: emissions
-		// from calls that succeeded BEFORE the failing one are now returned
-		// alongside the error, rather than discarded (docs/architecture.md's
-		// Replay engine section). The pinning cash movement itself emits a
-		// cash-adjusted decision, so that one emission — and only that one —
-		// must survive the later snapshot's rejection.
+		// A later currency mismatch must not erase a successful cash movement's
+		// cash-adjusted decision. Run returns prior emissions alongside the
+		// error, as pinned by internal/replay's
+		// TestEngineRunJournalsPriorAndFinalEmissionsAlongsideHandlerError. Here
+		// exactly the pinning cash movement's one emission must survive.
 		if len(emitted) != 1 || emitted[0].Type != event.NotionalAccountCashAdjustedEventType {
 			t.Fatalf("emitted = %v, want exactly the pinning cash movement's %q event (prior emissions are journalled even when a later call fails closed)", emitted, event.NotionalAccountCashAdjustedEventType)
 		}
@@ -1349,12 +1352,10 @@ func TestReducerCurrencyPinSurvivesRebasing(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "does not match the account's pinned currency") {
 		t.Fatalf("Run() error = %v, want it to name a currency mismatch even after a re-basing", err)
 	}
-	// #12's review round changed replay.Engine.Run's contract: emissions
-	// from calls that succeeded BEFORE the failing one are now returned
-	// alongside the error (docs/architecture.md's Replay engine section).
-	// snap2's re-basing itself emits a rebased decision, so that one
-	// emission — and only that one — must survive the later snapshot's
-	// rejection.
+	// A later currency mismatch must not erase snap2's rebased decision.
+	// Run returns prior emissions alongside the error, as pinned by
+	// internal/replay's TestEngineRunJournalsPriorAndFinalEmissionsAlongsideHandlerError.
+	// Exactly that one re-basing emission must survive the rejection.
 	if len(emitted) != 1 || emitted[0].Type != event.NotionalAccountRebasedEventType {
 		t.Fatalf("emitted = %v, want exactly the re-basing's %q event (prior emissions are journalled even when a later call fails closed)", emitted, event.NotionalAccountRebasedEventType)
 	}

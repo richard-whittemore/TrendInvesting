@@ -137,18 +137,12 @@ func TestNotionalAccountExactBoundaryTriggersAndOneCentAboveDoesNot(t *testing.T
 // TestNotionalAccountSingleObservationAppliesSeveralStepsInOrder is the
 // "a single large drop can trigger several steps in one snapshot" case.
 //
-// It uses 750,000, not the 700,000 the orchestrating session's brief
-// sketched for this fixture. Applying ADR 0007's rule exactly, 700,000 in a
-// single observation from a 1,000,000 start crosses a FOURTH threshold too:
-// after the third step the account is 512,000 and the base is 756,000, so
-// the fourth threshold is 756,000 - 10%*512,000 = 704,800, and
-// 700,000 <= 704,800 — a fourth step, not a third. 750,000 sits strictly
-// between the third threshold (756,000, which it must cross) and the fourth
-// (704,800, which it must not), so it is the corrected fixture for "exactly
-// three steps in one observation, at thresholds 900,000/820,000/756,000" —
-// reported as a discrepancy in the brief rather than invented silently or
-// followed into a wrong test (see the PR's Findings and this ticket's
-// comment thread).
+// Applying ADR 0007's rule, 750,000 from a 1,000,000 start crosses exactly
+// three thresholds: 900,000, 820,000, and 756,000. After the third step the
+// account is 512,000 and the base is 756,000, so the fourth threshold is
+// 756,000 - 10%*512,000 = 704,800. The fixture must remain above that fourth
+// threshold: substituting 700,000 would require a fourth step and make a
+// three-step expectation wrong.
 func TestNotionalAccountSingleObservationAppliesSeveralStepsInOrder(t *testing.T) {
 	t.Parallel()
 
@@ -191,10 +185,10 @@ func TestNotionalAccountSingleObservationAppliesSeveralStepsInOrder(t *testing.T
 	}
 }
 
-// TestNotionalAccountPartialRecoveryDoesNotRestore: a rise in equity, even
-// one that recovers most of the way back to the starting figure, must never
-// move the measurement base upward or restore the account. Recovery, which
-// requires regaining the full yearly starting figure, is #17.
+// TestNotionalAccountPartialRecoveryDoesNotRestore: Observe must not move
+// the measurement base upward or restore the account on a partial recovery
+// (ADR 0007). Recovery at the full yearly starting figure is handled by
+// ObserveSnapshot, not by the drawdown-only Observe call exercised here.
 func TestNotionalAccountPartialRecoveryDoesNotRestore(t *testing.T) {
 	t.Parallel()
 
@@ -206,10 +200,10 @@ func TestNotionalAccountPartialRecoveryDoesNotRestore(t *testing.T) {
 		t.Fatalf("Observe(900000) error = %v", err)
 	}
 
-	// 950,000 is well above the yearly starting figure #17 would require for
-	// full recovery, and above the current threshold too (900,000 - 10% of
-	// 800,000 = 820,000): a rise must never itself trigger a step, and must
-	// never restore the account (ADR 0007: not a high-water mark).
+	// 950,000 is below the 1,000,000 yearly starting figure required for
+	// full recovery, but above the next drawdown threshold (900,000 - 10%
+	// of 800,000 = 820,000). This partial recovery must neither trigger a
+	// step nor restore the account (ADR 0007: not a high-water mark).
 	steps, err := account.Observe(950_000)
 	if err != nil {
 		t.Fatalf("Observe(950000) error = %v", err)
@@ -321,9 +315,10 @@ func (h *highWaterMarkAccount) observe(equity float64) bool {
 	return true
 }
 
-// TestNotionalAccountEquityAtTheAsymptoteErrors is Greptile PR #66's finding
-// on this file: the Drawdown Step ladder's thresholds are a geometric
-// series (see notionalAccountUndefinedDrawdownFraction's doc comment) that
+// TestNotionalAccountEquityAtTheAsymptoteErrors rejects an equity reading
+// for which the Drawdown Step ladder cannot terminate. Its thresholds form
+// a geometric series (see notionalAccountUndefinedDrawdownFraction's doc
+// comment) that
 // converges to, but never reaches, base - 50%*current — 500,000 for a
 // 1,000,000 account. Equity at or below that figure would leave every
 // future threshold still above it, so a literal application of the rule
@@ -796,11 +791,11 @@ func TestNotionalAccountApplyCashMovementRejectsNonFiniteOrZeroAmount(t *testing
 	}
 }
 
-// TestNotionalAccountApplyCashMovementRejectsOverflowingEquityAfter is
-// Greptile PR #71's finding: equityBefore and amount can both be finite
-// while equityBefore+amount overflows to +Inf, which the original "<= 0"
-// check let through silently (+Inf is not <= 0). The account must be left
-// completely unchanged by a rejected cash movement — no partial scaling.
+// TestNotionalAccountApplyCashMovementRejectsOverflowingEquityAfter guards
+// against accepting a non-finite sum merely because both inputs are finite:
+// equityBefore+amount can overflow to +Inf, and a "<= 0" check alone would
+// accept it. Rejection must leave the account completely unchanged, with
+// no partial scaling.
 func TestNotionalAccountApplyCashMovementRejectsOverflowingEquityAfter(t *testing.T) {
 	t.Parallel()
 
@@ -822,15 +817,12 @@ func TestNotionalAccountApplyCashMovementRejectsOverflowingEquityAfter(t *testin
 	}
 }
 
-// TestNotionalAccountApplyCashMovementRejectsAnOverflowingScaledFigure is
-// the OTHER half of Greptile PR #71's finding: even when equityBefore+amount
-// is itself finite, the ratio it forms can still overflow a figure that was
-// already extreme when multiplied by it. This is what the fix's "compute
-// every scaled figure into a local and validate before mutating" ordering
-// exists to catch — reachable only if the account itself starts at an
-// astronomical figure, which a real account never does, but the ladder
-// makes no such assumption and must fail closed rather than silently commit
-// an infinite Notional Account.
+// TestNotionalAccountApplyCashMovementRejectsAnOverflowingScaledFigure guards
+// against validating only equityBefore+amount: even when that sum is finite,
+// its scaling ratio can overflow an already extreme account figure. Every
+// scaled figure must be validated before any account state is mutated, so
+// rejection leaves the entire account unchanged instead of committing an
+// infinite Notional Account.
 func TestNotionalAccountApplyCashMovementRejectsAnOverflowingScaledFigure(t *testing.T) {
 	t.Parallel()
 

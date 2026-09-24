@@ -134,8 +134,8 @@ func TestUnaffordableUnitIsDeclinedWithBothCashFigures(t *testing.T) {
 	}
 }
 
-// TestCostExactlyEqualToAvailableCashIsAffordable pins the boundary reading
-// this ticket settles explicitly: you can spend exactly what you have. A
+// TestCostExactlyEqualToAvailableCashIsAffordable rejects declining at
+// equality: cost equal to available cash is affordable. A
 // fixture whose cash sits comfortably clear of the Unit's cost could not
 // fail under the opposite reading (declining when cost >= available); this
 // one is built to fail under it.
@@ -158,8 +158,8 @@ func TestCostExactlyEqualToAvailableCashIsAffordable(t *testing.T) {
 	}
 }
 
-// TestNoAccountSnapshotEverSuppliedFailsClosedOnEntry is the failure this
-// ticket exists to prevent: a run that never delivers an account.snapshot
+// TestNoAccountSnapshotEverSuppliedFailsClosedOnEntry rejects treating
+// missing cash data as unlimited cash: a run without an account.snapshot
 // must not size a Unit as though cash were infinite. Built without
 // newStream, which always injects one.
 func TestNoAccountSnapshotEverSuppliedFailsClosedOnEntry(t *testing.T) {

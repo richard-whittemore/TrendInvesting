@@ -56,7 +56,8 @@ const (
 var testConfigurationHash = event.ConfigurationHash(baselineConfig())
 
 // baselineConfig is the Baseline (ADRs 0002/0003/0005/0007/0008/0013) with
-// the Interactive Brokers commission schedule this ticket declares.
+// Interactive Brokers commission parameters exercised by
+// TestCommissionModelCharge: 0.005 per share, a 1.00 minimum, and a 1% cap.
 func baselineConfig() event.ConfigurationPayload {
 	return event.ConfigurationPayload{
 		StrategyID:             "turtle-baseline",
@@ -123,17 +124,16 @@ func warmUpBars() []event.CompletedBarPayload {
 
 // breakoutBar is bar 56 in every fixture except the entered-then-stopped one:
 // a clean breakout above the 155.5 Entry Channel whose own low (155) stays
-// well clear of the Protective Stop the entry fill will set at 152.575 (#79:
-// the entry rests at the 155.5 channel high, not this bar's own high).
+// well clear of the Protective Stop the entry fill will set at 152.575:
+// the entry rests at the 155.5 Entry Channel high, not this bar's own high
+// (strategy.RulesVersion's 1.1.0 note, internal/strategy/rules_version.go).
 //
 // The high is deliberately kept BELOW 156.325 — the Unit 2 rung half an N
 // above the 155.575 entry fill — so this bar produces the entry alone. A bar
-// whose own high also cleared that rung would, via the same-bar Add chain
-// (PR #85 review round: openCampaign now calls evaluateAdd, matching
-// applyAddFill), add Unit 2 immediately too, which is correct behaviour but
-// not what the tests that merely reuse this bar as "a breakout happened" are
-// about; TestAddWithinTheBreakoutBarItself and its neighbours in
-// internal/strategy/add_test.go exercise that chain directly instead.
+// whose own high also cleared that rung would add Unit 2 immediately too:
+// openCampaign and applyAddFill both call evaluateAdd. This fixture isolates
+// the entry; TestAddWithinTheBreakoutBarItself in internal/strategy/add_test.go
+// pins the same-bar chain starting from an entry fill.
 func breakoutBar() event.CompletedBarPayload {
 	return bar(day(56), 155.5, 156.2, 155, 156.0)
 }

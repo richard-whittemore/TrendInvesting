@@ -265,15 +265,15 @@ func TestDiffReportsTheFirstDisagreeingSequenceWhenOrderDiffers(t *testing.T) {
 	}
 }
 
-// TestDiffReportsAOneULPFloatDivergenceDistinguishably is the ticket's
-// single most important case: 118.2875 and 118.28750000000001 are one bit
+// TestDiffReportsAOneULPFloatDivergenceDistinguishably rejects rounding away
+// a replay mismatch: 118.2875 and 118.28750000000001 are one bit
 // apart (verified below) and must both survive rendering distinguishably —
 // in the FieldDivergence value itself, in the human-readable String(), and
 // in the machine-readable MarshalJSON() output. A reporter that rendered
 // floats with, say, "%.4f" or a fixed-precision %g would print "118.2875"
 // for both and hide the exact defect class (a fused multiply-add differing
-// in the last bits across architectures, docs/development.md) this ticket
-// exists to catch.
+// in the last bits across architectures, docs/development.md's
+// floating-point determinism rule).
 func TestDiffReportsAOneULPFloatDivergenceDistinguishably(t *testing.T) {
 	t.Parallel()
 
@@ -419,11 +419,10 @@ func TestDiffTreatsIdenticalHugeIntegersAsEqualAndKeepsWalking(t *testing.T) {
 // counterpart to TestDiffDistinguishesIntegersFloat64WouldCollapse:
 // 9007199254740992.0 and 9007199254740993.0 are different valid JSON
 // literals, both within float64's exponent range, but the second is not
-// exactly representable and rounds to the first. Round 1 fixed this for
-// the bare-integer spelling of the same defect but treated every literal
-// containing "." or "e"/"E" as automatically float64-safe on the strength
-// of its shape alone, which this decimal spelling exposes as false: shape
-// was never the right test, a round trip through float64 is.
+// exactly representable and rounds to the first. Treating every literal
+// containing "." or "e"/"E" as automatically float64-safe would collapse
+// this pair too. A round trip must preserve the value regardless of its
+// spelling; preserving only bare integers would still hide this mismatch.
 func TestDiffDistinguishesDecimalLiteralsFloat64WouldCollapse(t *testing.T) {
 	t.Parallel()
 

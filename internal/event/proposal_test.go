@@ -714,10 +714,10 @@ func TestProposalDeclinedPayloadValidateInsufficientCash(t *testing.T) {
 			wantErr: "available cash must not be negative",
 		},
 		{
-			// The boundary this ticket cares most about: cost exactly equal
-			// to available cash is AFFORDABLE (the reducer never declines
-			// it), so a decline that claims insufficient-cash at that exact
-			// figure is internally inconsistent and must be rejected.
+			// Reject an insufficient-cash claim at the affordable boundary:
+			// cost exactly equal to available cash is AFFORDABLE, so a
+			// decline claiming insufficient-cash at that figure is internally
+			// inconsistent and must be rejected.
 			name:    "required cash equal to available cash",
 			mutate:  func(p *event.ProposalDeclinedPayload) { p.RequiredCash = p.AvailableCash },
 			wantErr: "does not exceed available cash",
@@ -935,7 +935,7 @@ func TestProposalExpiredPayloadValidate(t *testing.T) {
 			wantErr: "period end",
 		},
 		{
-			// #15 review round ("Stop Expiry Commits Partial State"):
+			// Reject expiry at the execution window's excluded lower bound:
 			// ExpiredAt must be strictly after EarliestFillAt for EVERY
 			// Reason, including the ordinary next-bar one.
 			name:    "expired at at the earliest fill at",
@@ -960,9 +960,8 @@ func TestProposalExpiredPayloadValidate(t *testing.T) {
 			wantErr: "a proposal is superseded by a later bar",
 		},
 		{
-			// #15 review round: superseded-by-stop only ever applies to an
-			// Add proposal — an entry (or exit) proposal has no analogous
-			// interaction with a stop fill.
+			// Reject a stop-superseded entry expiry: superseded-by-stop
+			// applies only to an Add proposal, not an entry or exit proposal.
 			name:    "superseded-by-stop reason on an entry-kind expiry",
 			mutate:  func(p *event.ProposalExpiredPayload) { p.Reason = event.ExpiryReasonSupersededByStop },
 			wantErr: "only valid for kind",
@@ -1167,9 +1166,9 @@ func TestAddProposalExpiredPayloadValidate(t *testing.T) {
 			wantErr: "signal id",
 		},
 		{
-			// #15 review round ("Pending Adds Survive Stopouts"): an Add
-			// proposal cancelled by a stop fill partially closing the same
-			// Campaign, not by the next bar.
+			// Accept an Add expiry caused by a partial stop fill: an Add
+			// proposal can be cancelled while its Campaign remains open,
+			// without waiting for the next bar.
 			name: "add-kind expiry superseded by a partial stop is legitimate",
 			mutate: func(p *event.ProposalExpiredPayload) {
 				p.Reason = event.ExpiryReasonSupersededByStop
@@ -1177,10 +1176,10 @@ func TestAddProposalExpiredPayloadValidate(t *testing.T) {
 			},
 		},
 		{
-			// #15 review round ("Stop Expiry Commits Partial State"): a
-			// resting stop can fill INSIDE the same bar that proposed the
-			// Add it cancels (ADR 0005) — ExpiredAt EQUAL to PeriodEnd is
-			// legitimate for this Reason, unlike the next-bar one.
+			// Do not apply the next-bar expiry's strict PeriodEnd bound to
+			// a stop expiry: a resting stop can fill INSIDE the bar that
+			// proposed the Add it cancels (ADR 0005) — ExpiredAt EQUAL to
+			// PeriodEnd is legitimate for this Reason, unlike the next-bar one.
 			name: "stop-superseded expiry at the period end is legitimate",
 			mutate: func(p *event.ProposalExpiredPayload) {
 				p.Reason = event.ExpiryReasonSupersededByStop
@@ -1268,12 +1267,12 @@ func TestProposalExpiredEventConstants(t *testing.T) {
 	if event.ProposalExpiredEventType != "strategy.proposal.expired" {
 		t.Errorf("ProposalExpiredEventType = %q, want %q", event.ProposalExpiredEventType, "strategy.proposal.expired")
 	}
-	// Bumped 1 -> 2 for #13: Kind was added (entry|exit), reusing this one
-	// expiry mechanism for an outstanding exit proposal rather than minting a
-	// second event type. #14 added a third value (add) without a further
-	// bump (see ProposalExpiredSchemaVersion's own doc comment).
-	// Bumped 2 -> 3 for #15's review round: EarliestFillAt was added (see
-	// ProposalExpiredSchemaVersion's own doc comment).
+	// ADR 0015 requires explicit schema versions for incompatible payloads.
+	// Version 2 added required Kind (entry|exit), reusing this expiry
+	// mechanism for exit proposals; add is another recognised Kind value
+	// and needed no further bump. Version 3 added EarliestFillAt: accepting
+	// a version-2 record's absent bound as zero would silently weaken the
+	// chronology check (see ProposalExpiredSchemaVersion's doc comment).
 	if event.ProposalExpiredSchemaVersion != 3 {
 		t.Errorf("ProposalExpiredSchemaVersion = %d, want 3", event.ProposalExpiredSchemaVersion)
 	}

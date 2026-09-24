@@ -221,11 +221,10 @@ func diffNumber(path string, want, got json.Number) (foundPath string, wantVal, 
 //
 // This is a question about n's value, not about how its literal happens to
 // be spelled — an integer, a decimal, and an exponent form all go through
-// the identical check, because round 1 of this reporter fixed the
-// bare-integer case and left every literal containing "." or "e"/"E"
-// trusted on the strength of its shape alone, which let a decimal literal
-// with the same excess precision (9007199254740993.0, spelling 2^53+1)
-// reach exactly the collision the integer fix was meant to close.
+// the identical check. TestDiffDistinguishesDecimalLiteralsFloat64WouldCollapse
+// pins this rule: trusting a literal containing "." or "e"/"E" on shape
+// alone would let excess precision (9007199254740993.0, spelling 2^53+1)
+// collide with a different value just as a lossy integer conversion does.
 //
 // A magnitude float64 cannot represent at all — an exponent large enough
 // to overflow to +Inf, or small enough to underflow to 0 without

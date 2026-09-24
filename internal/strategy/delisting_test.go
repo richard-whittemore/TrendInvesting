@@ -477,13 +477,14 @@ func TestDelistingCancelsAPendingAddProposal(t *testing.T) {
 	}
 }
 
-// --- Countable separately (the fourth acceptance criterion) ---------------
+// --- Delisting and Exit-Channel outcomes remain distinct ----------------
 
 // TestDelistedOutcomesAreCountableSeparatelyInAJournal runs two independent
 // campaigns to two different terminal reasons within ONE journal (one
 // engine.Run): AAPL exits via the Exit Channel, MSFT is delisted. Grouping
 // the resulting campaign-exited events by Reason must separate the two
-// cleanly — the acceptance criterion this ticket names directly.
+// cleanly, preserving CONTEXT.md's distinction between Delisting and an
+// Exit-Channel exit.
 func TestDelistedOutcomesAreCountableSeparatelyInAJournal(t *testing.T) {
 	t.Parallel()
 
