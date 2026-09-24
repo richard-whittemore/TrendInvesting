@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeAuditFixture(t *testing.T, root, name, contents string) string {
@@ -46,6 +47,41 @@ func TestSuppliedProfileRejectsPathsOutsideModule(t *testing.T) {
 	}
 }
 
+func TestSuppliedProfileRejectsNewerCoverageInputs(t *testing.T) {
+	for _, name := range []string{"internal/sample/sample_test.go", "internal/sample/sample.go", "go.mod", "go.sum", "internal/sample/testdata/input.json"} {
+		t.Run(name, func(t *testing.T) {
+			requireAuditFailure(t, "stale-profile:"+name, "coverage profile is older than "+name+"; regenerate it")
+		})
+	}
+}
+
+func TestSuppliedProfileAcceptsFreshInputs(t *testing.T) {
+	root, path := freshnessFixture(t, "internal/sample/sample_test.go", false)
+	t.Setenv(profileEnv, path)
+	if got := profile(t, root); got != path {
+		t.Fatalf("profile = %q, want %q", got, path)
+	}
+}
+
+func freshnessFixture(t *testing.T, name string, newer bool) (root, path string) {
+	t.Helper()
+	root = t.TempDir()
+	path = writeAuditFixture(t, root, "coverage.out", "mode: count\n"+modulePath+"internal/sample/sample.go:3.2,3.12 1 0\n")
+	input := writeAuditFixture(t, root, name, "package sample\nfunc TestNowCoversPreviouslyExcludedGuard() {}\n")
+	old := time.Unix(1000, 0)
+	recent := old.Add(time.Hour)
+	inputTime, profileTime := old, recent
+	if newer {
+		inputTime, profileTime = recent, old
+	}
+	for file, stamp := range map[string]time.Time{input: inputTime, path: profileTime} {
+		if err := os.Chtimes(file, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root, path
+}
+
 func requireAuditFailure(t *testing.T, scenario, want string) {
 	t.Helper()
 	executable, err := os.Executable()
@@ -64,6 +100,12 @@ func requireAuditFailure(t *testing.T, scenario, want string) {
 func TestCoverageAuditFailure(t *testing.T) {
 	scenario := os.Getenv("COVERAGE_AUDIT_FAILURE")
 	if scenario == "" {
+		return
+	}
+	if name, ok := strings.CutPrefix(scenario, "stale-profile:"); ok {
+		root, path := freshnessFixture(t, name, true)
+		t.Setenv(profileEnv, path)
+		profile(t, root)
 		return
 	}
 	if count, ok := strings.CutPrefix(scenario, "foreign-profile-"); ok {

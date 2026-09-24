@@ -135,3 +135,147 @@ Falsification restored the entire pre-fix audit implementation while retaining t
 PASS
 ok  	github.com/richard-whittemore/TrendInvesting/internal/coverageaudit	(cached)
 ```
+
+## #180 — stale supplied profiles
+
+Verified that profile reuse checked neither timestamps nor test changes. Supplied profiles now fail cleanly when repository Go source/tests, module files, or testdata files are newer. Regression fixtures keep the zero-count profile unchanged and make each input newer; fresh inputs remain accepted. No wall clock assumptions: fixtures use explicit timestamps.
+
+The development guide now requires immediate reuse after a successful full run with identical inputs and explicitly describes the timestamp check's limits (including deletions and preserved timestamps). This is not a content attestation; those cases require regeneration.
+
+### red
+
+`go test ./internal/coverageaudit -run '^TestSuppliedProfile(RejectsNewerCoverageInputs|AcceptsFreshInputs)$' -v`
+
+```text
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/sample_test.go
+    regression_test.go:53: audit failure = <nil>; want clean failure containing "coverage profile is older than internal/sample/sample_test.go; regenerate it"; output:
+        === RUN   TestCoverageAuditFailure
+        --- PASS: TestCoverageAuditFailure (0.00s)
+        PASS
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/sample.go
+    regression_test.go:53: audit failure = <nil>; want clean failure containing "coverage profile is older than internal/sample/sample.go; regenerate it"; output:
+        === RUN   TestCoverageAuditFailure
+        --- PASS: TestCoverageAuditFailure (0.00s)
+        PASS
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/go.mod
+    regression_test.go:53: audit failure = <nil>; want clean failure containing "coverage profile is older than go.mod; regenerate it"; output:
+        === RUN   TestCoverageAuditFailure
+        --- PASS: TestCoverageAuditFailure (0.00s)
+        PASS
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/go.sum
+    regression_test.go:53: audit failure = <nil>; want clean failure containing "coverage profile is older than go.sum; regenerate it"; output:
+        === RUN   TestCoverageAuditFailure
+        --- PASS: TestCoverageAuditFailure (0.00s)
+        PASS
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/testdata/input.json
+    regression_test.go:53: audit failure = <nil>; want clean failure containing "coverage profile is older than internal/sample/testdata/input.json; regenerate it"; output:
+        === RUN   TestCoverageAuditFailure
+        --- PASS: TestCoverageAuditFailure (0.00s)
+        PASS
+--- FAIL: TestSuppliedProfileRejectsNewerCoverageInputs (0.04s)
+    --- FAIL: TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/sample_test.go (0.01s)
+    --- FAIL: TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/sample.go (0.01s)
+    --- FAIL: TestSuppliedProfileRejectsNewerCoverageInputs/go.mod (0.01s)
+    --- FAIL: TestSuppliedProfileRejectsNewerCoverageInputs/go.sum (0.01s)
+    --- FAIL: TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/testdata/input.json (0.01s)
+=== RUN   TestSuppliedProfileAcceptsFreshInputs
+--- PASS: TestSuppliedProfileAcceptsFreshInputs (0.00s)
+FAIL
+FAIL	github.com/richard-whittemore/TrendInvesting/internal/coverageaudit	0.299s
+FAIL
+```
+
+### green
+
+`go test ./internal/coverageaudit -run '^TestSuppliedProfile(RejectsNewerCoverageInputs|AcceptsFreshInputs)$' -v`
+
+```text
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/sample_test.go
+    regression_test.go:53: expected audit failure:
+        === RUN   TestCoverageAuditFailure
+            regression_test.go:108: cannot reuse /var/folders/wg/63d7lf093s5gnkj6gp_l3h8c0000gn/T/TestCoverageAuditFailure200666165/001/coverage.out: coverage profile is older than internal/sample/sample_test.go; regenerate it
+        --- FAIL: TestCoverageAuditFailure (0.00s)
+        FAIL
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/sample.go
+    regression_test.go:53: expected audit failure:
+        === RUN   TestCoverageAuditFailure
+            regression_test.go:108: cannot reuse /var/folders/wg/63d7lf093s5gnkj6gp_l3h8c0000gn/T/TestCoverageAuditFailure2084381498/001/coverage.out: coverage profile is older than internal/sample/sample.go; regenerate it
+        --- FAIL: TestCoverageAuditFailure (0.00s)
+        FAIL
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/go.mod
+    regression_test.go:53: expected audit failure:
+        === RUN   TestCoverageAuditFailure
+            regression_test.go:108: cannot reuse /var/folders/wg/63d7lf093s5gnkj6gp_l3h8c0000gn/T/TestCoverageAuditFailure3867126781/001/coverage.out: coverage profile is older than go.mod; regenerate it
+        --- FAIL: TestCoverageAuditFailure (0.00s)
+        FAIL
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/go.sum
+    regression_test.go:53: expected audit failure:
+        === RUN   TestCoverageAuditFailure
+            regression_test.go:108: cannot reuse /var/folders/wg/63d7lf093s5gnkj6gp_l3h8c0000gn/T/TestCoverageAuditFailure2017744329/001/coverage.out: coverage profile is older than go.sum; regenerate it
+        --- FAIL: TestCoverageAuditFailure (0.00s)
+        FAIL
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/testdata/input.json
+    regression_test.go:53: expected audit failure:
+        === RUN   TestCoverageAuditFailure
+            regression_test.go:108: cannot reuse /var/folders/wg/63d7lf093s5gnkj6gp_l3h8c0000gn/T/TestCoverageAuditFailure2475179571/001/coverage.out: coverage profile is older than internal/sample/testdata/input.json; regenerate it
+        --- FAIL: TestCoverageAuditFailure (0.00s)
+        FAIL
+--- PASS: TestSuppliedProfileRejectsNewerCoverageInputs (0.03s)
+    --- PASS: TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/sample_test.go (0.01s)
+    --- PASS: TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/sample.go (0.01s)
+    --- PASS: TestSuppliedProfileRejectsNewerCoverageInputs/go.mod (0.01s)
+    --- PASS: TestSuppliedProfileRejectsNewerCoverageInputs/go.sum (0.01s)
+    --- PASS: TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/testdata/input.json (0.01s)
+=== RUN   TestSuppliedProfileAcceptsFreshInputs
+--- PASS: TestSuppliedProfileAcceptsFreshInputs (0.00s)
+PASS
+ok  	github.com/richard-whittemore/TrendInvesting/internal/coverageaudit	0.252s
+```
+
+### falsification
+
+`go test ./internal/coverageaudit -run '^TestSuppliedProfile(RejectsNewerCoverageInputs|AcceptsFreshInputs)$' -v`
+
+```text
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/sample_test.go
+    regression_test.go:53: audit failure = <nil>; want clean failure containing "coverage profile is older than internal/sample/sample_test.go; regenerate it"; output:
+        === RUN   TestCoverageAuditFailure
+        --- PASS: TestCoverageAuditFailure (0.00s)
+        PASS
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/sample.go
+    regression_test.go:53: audit failure = <nil>; want clean failure containing "coverage profile is older than internal/sample/sample.go; regenerate it"; output:
+        === RUN   TestCoverageAuditFailure
+        --- PASS: TestCoverageAuditFailure (0.00s)
+        PASS
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/go.mod
+    regression_test.go:53: audit failure = <nil>; want clean failure containing "coverage profile is older than go.mod; regenerate it"; output:
+        === RUN   TestCoverageAuditFailure
+        --- PASS: TestCoverageAuditFailure (0.00s)
+        PASS
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/go.sum
+    regression_test.go:53: audit failure = <nil>; want clean failure containing "coverage profile is older than go.sum; regenerate it"; output:
+        === RUN   TestCoverageAuditFailure
+        --- PASS: TestCoverageAuditFailure (0.00s)
+        PASS
+=== RUN   TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/testdata/input.json
+    regression_test.go:53: audit failure = <nil>; want clean failure containing "coverage profile is older than internal/sample/testdata/input.json; regenerate it"; output:
+        === RUN   TestCoverageAuditFailure
+        --- PASS: TestCoverageAuditFailure (0.00s)
+        PASS
+--- FAIL: TestSuppliedProfileRejectsNewerCoverageInputs (0.03s)
+    --- FAIL: TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/sample_test.go (0.01s)
+    --- FAIL: TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/sample.go (0.01s)
+    --- FAIL: TestSuppliedProfileRejectsNewerCoverageInputs/go.mod (0.01s)
+    --- FAIL: TestSuppliedProfileRejectsNewerCoverageInputs/go.sum (0.01s)
+    --- FAIL: TestSuppliedProfileRejectsNewerCoverageInputs/internal/sample/testdata/input.json (0.01s)
+=== RUN   TestSuppliedProfileAcceptsFreshInputs
+--- PASS: TestSuppliedProfileAcceptsFreshInputs (0.00s)
+FAIL
+FAIL	github.com/richard-whittemore/TrendInvesting/internal/coverageaudit	0.144s
+FAIL
+```
+
+Falsification restored the pre-fix audit implementation with tests retained, then restored the fix.

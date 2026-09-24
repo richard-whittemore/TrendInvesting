@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,7 +29,7 @@ const auditedPackages = "./internal/..."
 // never executed, each with the reason it cannot be.
 const exclusionsFile = "exclusions.json"
 
-// profileEnv supplies an already-generated count-mode profile, so a caller
+// profileEnv supplies an already-generated coverage profile, so a caller
 // that has one (a CI job, or a developer iterating) does not pay for a
 // second test run. When it is unset the test generates its own.
 const profileEnv = "COVERAGE_AUDIT_PROFILE"
@@ -220,7 +221,9 @@ func resolveProfile(root, path string) string {
 func profile(t *testing.T, root string) string {
 	t.Helper()
 	if path := os.Getenv(profileEnv); path != "" {
-		return resolveProfile(root, path)
+		path = resolveProfile(root, path)
+		checkProfileFreshness(t, root, path)
+		return path
 	}
 	path := filepath.Join(t.TempDir(), "audit.out")
 	cmd := exec.Command("go", "test", "-covermode=count", "-coverprofile="+path, auditedPackages)
@@ -230,6 +233,48 @@ func profile(t *testing.T, root string) string {
 		t.Fatalf("generating a coverage profile failed; the audit cannot run without one:\n%s\n%v", out, err)
 	}
 	return path
+}
+
+// checkProfileFreshness rejects repository inputs newer than a reused profile.
+// TestSuppliedProfileRejectsNewerCoverageInputs covers test-only changes, whose
+// spans still match. Timestamps cannot prove freshness: the reuse contract in
+// docs/development.md also requires unchanged external inputs and test options.
+func checkProfileFreshness(t *testing.T, root, path string) {
+	t.Helper()
+	profileInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat coverage profile %s: %v", path, err)
+	}
+	err = filepath.WalkDir(root, func(name string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if entry.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, name)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if !strings.HasSuffix(rel, ".go") && entry.Name() != "go.mod" && entry.Name() != "go.sum" && !strings.Contains("/"+rel, "/testdata/") {
+			return nil
+		}
+		info, err := os.Stat(name)
+		if err != nil {
+			return err
+		}
+		if info.ModTime().After(profileInfo.ModTime()) {
+			return fmt.Errorf("coverage profile is older than %s; regenerate it", rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("cannot reuse %s: %v", path, err)
+	}
 }
 
 // uncoveredBlocks parses a coverage profile and returns every block with a
