@@ -151,7 +151,7 @@ A registry root that does not exist is reported rather than read as an empty one
 
 ## The committed fixture
 
-`cmd/backtest/testdata/` holds a one-instrument fixture and the golden journal it produces: a 32-bar run under a deliberately small test configuration (a 20-bar Entry Channel, a 10-bar Exit Channel, two Units) that opens a Campaign, adds its second Unit inside the breakout bar, and is finally stopped out on a bar that also breached the Exit Channel — leaving the exit proposal for the end-of-stream event to expire.
+`cmd/backtest/testdata/` holds a one-instrument fixture and the golden journal it produces: a 32-bar run under a deliberately small test configuration (a 20-bar Entry Channel, a 10-bar Exit Channel, a maximum of four Units). It opens a Campaign with Unit 1 and adds Units 2–4 inside the same breakout bar on 2026-01-22, recording three `strategy.campaign.unit-added` events. On 2026-02-02, a bar that also breached the Exit Channel stops out all four Units, recording four `strategy.campaign.units-stopped` events. The end-of-stream event expires the exit proposal, recording one `strategy.proposal.expired` event on that same date.
 
 The golden journal is asserted byte for byte. Regenerate it only deliberately:
 
