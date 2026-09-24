@@ -115,6 +115,39 @@ make check
 
 To run a backtest and verify the journal it writes, see `docs/running-a-backtest.md`.
 
+Three separate journal checks answer different questions:
+
+- `backtest -verify <journal>` checks the hash chain (ADR 0017): was recorded
+  evidence altered without repairing the chain? It does not execute the strategy.
+- `backtest -replay <journal>` feeds all recorded inputs, **including recorded
+  fills**, through a fresh reducer and compares decisions. It checks reducer
+  equivalence, so it cannot detect changes in the simulator that produced fills.
+- `backtest -rerun <journal>` reconstructs configuration, completed bars,
+  corporate actions and the opening account snapshot, then runs the same
+  `drive` pipeline as a backtest, regenerating fills (ADR 0005) and decisions.
+  It compares every ordered record, including sequence, kind, chain hash and
+  canonical envelope bytes, plus every header field. It reports the first
+  record divergence as a **pipeline divergence**. JSON layout and equivalent
+  timestamp zones are normalized; payload bytes are exact. No run-specific
+  field is dropped: timestamps derive from events and the original build suffix
+  is retained after checking the rules version. This is canonical record
+  equivalence, not literal file-byte equality.
+
+A changed simulator can fail `-rerun` while `-replay` passes. Since `-rerun`
+compares record hashes too, it also detects chain differences; `-verify` remains
+useful on its own and does not require a reproducible run. All checks leave the
+original evidence untouched. Re-run shares replay's strategy, configuration
+hash, rules-version, identity and span refusals. Missing inputs, unsupported
+schemas or input types, repeated configurations/accounts, and a missing final
+completion marker fail closed. Incomplete runs may lack the bar that caused an
+already-recorded fill, and their interruption/record limit is not journalled;
+re-run therefore refuses to guess how they stopped. It bounds regenerated
+records at the recorded count plus one input boundary to detect extra output.
+The `-variant` registry label is not recorded in the journal and does not affect
+execution; all Variant trading settings and strategy identity are reconstructed
+from the recorded configuration (ADR 0012). Re-run needs no registry or original
+fixture files.
+
 Go code must be formatted with `gofmt`. New behavior should include focused tests, including failure cases and invariant checks.
 
 ## The uncovered-branch audit

@@ -1,6 +1,6 @@
 // Command backtest runs a declared configuration over a bar fixture and
 // writes the run's journal, verifies a journal it wrote earlier, checks one
-// for replay equivalence, or diffs two journals' decisions against each
+// for reducer replay or whole-pipeline equivalence, or diffs decisions against each
 // other, or reads a journal as human-readable decision sentences.
 //
 //	backtest -config <configuration.json> -bars <bars.json> -out <journal.jsonl>
@@ -9,6 +9,7 @@
 //	     [-registry <runs/> -run-id <id> [-variant <id>]]
 //	backtest -verify <journal.jsonl>
 //	backtest -replay <journal.jsonl>
+//	backtest -rerun <journal.jsonl>
 //	backtest -decisions <journal.jsonl> [-date YYYY-MM-DD] [-instrument ID] [-reference <journal.jsonl>]
 //	backtest -registry <runs/> -runs <configuration-hash>
 //	backtest -diff-want <journal.jsonl> -diff-got <journal.jsonl>
@@ -74,6 +75,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	outPath := flags.String("out", "", "path to write the run's journal to")
 	verifyPath := flags.String("verify", "", "path of a journal to verify instead of running a backtest")
 	replayPath := flags.String("replay", "", "path of a journal to check for replay equivalence instead of running a backtest")
+	rerunPath := flags.String("rerun", "", "path of a journal to rerun from its independent inputs")
 	registryPath := flags.String("registry", "", "path of the run registry to record this run in, or to read recorded runs from")
 	runID := flags.String("run-id", "", "the identifier this run is recorded under in the registry")
 	// Defaulted to empty rather than to registry.Baseline so that "the
@@ -137,7 +139,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	if *runsHash == "" {
 		runFlags = append(runFlags, named{"-registry", *registryPath})
 	}
-	if err := checkOneOperation([]named{{"-decisions", *decisionsPath}, {"-verify", *verifyPath}, {"-replay", *replayPath}, {"-runs", *runsHash}, {"-diff-want and -diff-got", *diffWantPath}}, runFlags); err != nil {
+	if err := checkOneOperation([]named{{"-decisions", *decisionsPath}, {"-verify", *verifyPath}, {"-replay", *replayPath}, {"-rerun", *rerunPath}, {"-runs", *runsHash}, {"-diff-want and -diff-got", *diffWantPath}}, runFlags); err != nil {
 		return err
 	}
 
@@ -146,6 +148,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 	if *verifyPath != "" {
 		return verify(*verifyPath, out)
+	}
+	if *rerunPath != "" {
+		return doRerun(ctx, *rerunPath, out)
 	}
 	if *replayPath != "" {
 		return doReplay(*replayPath, out)

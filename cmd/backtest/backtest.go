@@ -27,6 +27,10 @@ import (
 // (docs/architecture.md).
 const sourceFixture = "fixture"
 
+// runBar composes ADR 0005's simulator protocol. Tests alone replace it to
+// demonstrate simulator drift independently of reducer replay.
+var runBar = fills.RunBar
+
 // options is one invocation of the backtest.
 //
 // build identifies the running build and is the only part of a run's
@@ -594,7 +598,7 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 		if err != nil {
 			return err
 		}
-		if _, err := fills.RunBar(ctx, simulator, recorder, envelope); err != nil {
+		if _, err := runBar(ctx, simulator, recorder, envelope); err != nil {
 			return fmt.Errorf("backtest: %w", err)
 		}
 	}
