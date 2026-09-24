@@ -611,7 +611,14 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 
 	// Outstanding proposals expire at the last input time when no next bar
 	// can end their one-bar lifetime (ADR 0011; event.RunCompletedEventType).
-	completedAt := bars[len(bars)-1].PeriodEnd
+	// event.RunCompletedEventType's own doc comment requires this to be at
+	// the instant the stream ended — at or after every bar the run
+	// delivered — so it is the latest PeriodEnd across every instrument,
+	// never just the last array element: readBars' contract promises only
+	// "the order the run delivers them", not global chronology, and
+	// applyRunCompleted (internal/strategy/end_of_stream.go) fails closed if
+	// the stamped instant precedes any instrument's own last bar.
+	completedAt := latestPeriodEnd(bars)
 	completed, err := inputEnvelope("run-completed:"+completedAt.UTC().Format(time.RFC3339Nano),
 		event.RunCompletedEventType, event.RunCompletedSchemaVersion, completedAt,
 		event.RunCompletedPayload{}, cfg, strategyVersion)
@@ -622,6 +629,22 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 		return fmt.Errorf("backtest: %w", err)
 	}
 	return nil
+}
+
+// latestPeriodEnd returns the chronologically-latest PeriodEnd across every
+// bar in bars, regardless of instrument or file position: readBars' own doc
+// comment promises only "the order the run delivers them", so a
+// multi-instrument fixture's array order need not end on the instrument
+// whose own bars run latest. bars is never empty here — readBars refuses an
+// empty fixture before this point is reached.
+func latestPeriodEnd(bars []event.CompletedBarPayload) time.Time {
+	latest := bars[0].PeriodEnd
+	for _, bar := range bars[1:] {
+		if bar.PeriodEnd.After(latest) {
+			latest = bar.PeriodEnd
+		}
+	}
+	return latest
 }
 
 // deliverActionsDueFor delivers every not-yet-delivered action in actions
