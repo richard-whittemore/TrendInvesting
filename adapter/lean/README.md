@@ -71,10 +71,12 @@ The current pinned digest is
 **Upgrading LEAN is a deliberate change**, never an implicit one from a
 moving tag:
 
-1. Pull the new image (`docker pull quantconnect/lean:latest` or the
-   desired tag).
-2. Read its digest: `docker image inspect --format '{{json .RepoDigests}}'
-   quantconnect/lean:latest`.
+1. Choose the tag to upgrade to and pull it: `docker pull
+   quantconnect/lean:<tag>` (for example `latest`).
+2. Read the digest of **that same tag**: `docker image inspect --format
+   '{{json .RepoDigests}}' quantconnect/lean:<tag>`, and take its
+   `quantconnect/lean@sha256:...` entry. Inspecting any other tag records,
+   and then tests, a different image from the one chosen.
 3. Update `run.json`'s `lean_image`, the launch command above, and this
    README to the new digest and its image-creation date.
 4. Re-run the acceptance backtests against the new digest.
