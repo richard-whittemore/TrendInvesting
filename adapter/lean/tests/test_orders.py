@@ -1107,7 +1107,9 @@ class StartupReportTests(OrderTestCase):
         for topic in ("gap", "same-bar", "intrabar", "touch", "DAY", "slippage",
                       "0.05 x N", "LEAN's default equity slippage", "commission",
                       "InteractiveBrokersFeeModel", "$0.005", "0.5%", "amended", "partial",
-                      "one bar later", "CancelPending"):
+                      "one bar later", "CancelPending", "price views", "raw shares",
+                      "split-adjusted view",
+                      "rounded down", "to the cent", "split"):
             self.assertIn(topic, text)
         # Every statement about LEAN's own behaviour was settled by a run on
         # the pinned image; none is left as belief.

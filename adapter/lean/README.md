@@ -4,8 +4,8 @@ The deliberately thin Python boundary to QuantConnect LEAN.
 
 Built so far: `algorithm.py` is a `QCAlgorithm` that publishes one
 `market.bar.completed` envelope per completed daily bar — warm-up bars
-included — carrying both the split-adjusted and raw price views (ADR 0004),
-continuing the Go engine's own input sequence (`cmd/engine/engine.go`'s
+included — carrying both the split-adjusted and raw price views (ADR 0004;
+see **Price views and raw accounting** below), continuing the Go engine's own input sequence (`cmd/engine/engine.go`'s
 package doc, "Wire contract: the adapter's first bar must carry Sequence 2").
 Each slice's bars are a Session (ADR 0021): after them the adapter sends
 `market.session.closed`, naming those bars' instruments, and only then the
@@ -21,8 +21,71 @@ bar it receives (`internal/strategy/reducer.go`), so withholding LEAN's
 warm-up bars would starve those figures rather than suppress a decision, and
 which bars a strategy gets to see is itself a methodology choice this adapter
 does not make. `client.py` is the transport, reused from the measured ADR
-0014 spike (`spike/`); `publisher.py` maps a LEAN bar and its raw counterpart
-to the wire payload and reports LEAN's portfolio without any methodology.
+0014 spike (`spike/`); `publisher.py` maps LEAN's raw bar and its
+split-adjusted counterpart to the wire payload and reports LEAN's portfolio
+without any methodology.
+
+**Price views and raw accounting (ADR 0004).** LEAN trades, holds, prices
+fills and charges commission in whatever view its subscription is in, so the
+subscription is `DataNormalizationMode.Raw`: every LEAN order, fill, holding,
+cash figure and commission is raw, as a broker's would be. The engine's
+signals and sizing read the split-adjusted view, and ADR 0004's amendment
+keeps a Campaign's money in the one view its fills are priced in, which is
+split-adjusted until a split corporate action can adjust a held position. So
+each figure crossing the boundary is in exactly one view:
+
+| Figure | View |
+| --- | --- |
+| `market.bar.completed`'s `raw` | raw: LEAN's subscription bar |
+| `market.bar.completed`'s `split_adjusted` | split-adjusted: LEAN's one-bar split-adjusted `History` for the same bar, never arithmetic in the adapter |
+| a proposal's `entry_level` or `level`, and its `n` or `campaign_n` | split-adjusted: computed by the reducer from split-adjusted bars |
+| a proposal's `quantity` | split-adjusted shares: sized from split-adjusted N and the split-adjusted previous close (ADRs 0003, 0020) |
+| a `strategy.exit-order.set`'s `level` and `quantity` | split-adjusted: a Unit's quantity is its fill's |
+| a LEAN order's quantity and stop price, and LEAN's holding and cash | raw |
+| `execution.fill`'s `price`, `quantity`, `level` and `slippage_applied` | split-adjusted: LEAN's raw execution restated, so `quantity × price` is unchanged |
+| `execution.fill`'s `commission`, and `account.snapshot` | cash: the same in both views; the commission is LEAN's charge on the raw shares it traded |
+| `execution.order.lifecycle`'s `quantity` and `stop_price` | raw: the order as the venue states it, which reconciliation compares with the broker's book (ADR 0019) |
+
+`internal/fills`, `cmd/backtest`'s reference, fills and prices everything in
+the split-adjusted view, including its per-share commission.
+
+The adapter converts with one figure, the **split ratio**: the whole number of
+split-adjusted shares one raw share is, equal to the bar's raw close over its
+split-adjusted close. A level or N is multiplied by it on the way into LEAN; a
+fill's price, level and slippage are divided by it on the way out; share
+counts go the other way. LEAN's factor files round the cumulative split factor
+(AAPL's 1/56 is `0.0178571`), so the two closes are 56.000134 apart; a ratio
+within 1e-4 of a whole number of at least 1 is taken as that number, and any
+other stops the run, since no whole share of one view would then be a whole
+number of shares of the other (a future 3-for-2, or a reverse split, is not
+yet supported). An entry or Add is **rounded down to whole raw shares**, never
+up, so it never risks more than the Unit the engine sized (ADR 0003); one
+smaller than a raw share is rejected. Its fill reports what executed, which the
+reducer accepts as a Unit of at most the proposal's quantity: up to one raw
+share short of what `cmd/backtest` would fill. An Exit Order whose quantity is
+not whole raw shares stops the run. Every bar's ratio must equal the one in
+force; a different one with no split reported is taken only while LEAN holds
+nothing and works no order, and otherwise stops the run.
+
+**A split while holding or with orders working** is carried across. The
+engine's split-adjusted view is adjusted for every split, later ones included,
+so a split changes none of its levels, quantities or N — only the split ratio,
+which falls by the split factor (0.5 for a 2-for-1). LEAN, under Raw
+normalisation, applies the split itself: it divides the holding and every open
+order's quantity by the factor, multiplies each stop price by it and rounds it
+to the cent, pays any fractional share as cash, and reports each order's
+change as `UpdateSubmitted` after the split's slice. On LEAN's
+`SplitOccurred` the adapter takes the new ratio from the factor, and at the
+start of the next slice, once those changes have been drained (as `updated`
+lifecycle inputs), it requires LEAN's raw holding to be exactly the sum of the
+engine's Units and every working order to be its split-adjusted quantity at
+the new ratio, resting within one cent of its split-adjusted level at it.
+Anything else stops the run before the next bar reaches the engine: no
+corporate-action contract exists yet (ADR 0004's amendment) to carry any
+other outcome. A split while flat only changes the ratio. This rests on the
+split-adjusted view being adjusted for splits after the run's end, which a
+backtest's factor file provides and a live run cannot; live trading needs the
+corporate-action contract first.
 
 After each bar's decisions have been received, the adapter reads one
 `account.snapshot` from `Portfolio.TotalPortfolioValue` (equity) and
@@ -143,13 +206,13 @@ never combines two levels.
 
 | Decision | LEAN order |
 | --- | --- |
-| `strategy.trade.proposed` | buy stop-market, **good-till-cancelled**, at `entry_level`, for `quantity` |
-| `strategy.add.proposed` | buy stop-market, **good-till-cancelled**, at `level`, for `quantity` |
+| `strategy.trade.proposed` | buy stop-market, **good-till-cancelled**, at `entry_level`, for `quantity`, each converted to raw (**Price views and raw accounting**) |
+| `strategy.add.proposed` | buy stop-market, **good-till-cancelled**, at `level`, for `quantity`, each converted to raw |
 | `strategy.proposal.expired` (kind `entry` or `add`) | cancel that proposal's order if it is still working |
 | `strategy.campaign.opened` | none: its frozen `campaign_n` is kept for its Exit Orders' slippage, and its `fill_id` as Unit 1's opening fill |
 | `strategy.campaign.unit-added` | none: its `fill_id` is kept as that Unit's opening fill |
 | `strategy.exit.proposed` | none: its id is kept as the Campaign's outstanding exit proposal |
-| `strategy.exit-order.set` | the Unit's one **good-till-cancelled** sell stop-market, at `level`, for the Unit's `quantity`; a later level for the same Unit **amends** that order and never adds a second |
+| `strategy.exit-order.set` | the Unit's one **good-till-cancelled** sell stop-market, at `level`, for the Unit's `quantity`, each converted to raw; a later level for the same Unit **amends** that order and never adds a second |
 | `strategy.campaign.units-stopped`, `strategy.campaign.exited` | none: the closed Units' Exit Orders, and the Campaign's exit proposal, are forgotten |
 
 - **Entries and Adds are good-till-cancelled, never DAY.** At daily
@@ -172,8 +235,9 @@ never combines two levels.
   already traded in LEAN. Anything stale is rejected.
 - **Every rejection is logged with its reason** as `adapter: REJECTED <type>
   <id>: <reason>`: an instrument that isn't this run's symbol or isn't
-  tradable, a quantity that isn't a positive whole number, a level that isn't
-  a positive price, a direction other than long, a stale proposal, one already
+  tradable, a quantity that isn't a positive whole number or is under one raw
+  share, a level that isn't a positive price, a direction other than long, a
+  stale proposal, one already
   submitted, an entry or Add order LEAN itself refuses, and an Exit-Order
   level older than the one in force. The totals are logged at the end of the
   run. A rejected entry or Add is a proposal the engine re-issues on a later
@@ -216,9 +280,13 @@ never combines two levels.
   Campaign and Unit, the working sell quantity and the holding. Containment is
   then a person's decision (ADR 0019's amendment), not the system's.
 - **An Exit Order the adapter can't place also stops the run:** another
-  instrument, a quantity that isn't a positive whole number, a level that isn't
-  a positive price, or an unreadable `as_of`. Unlike an entry or Add, it isn't
-  re-issued, and it would leave its Unit without a stop.
+  instrument, a quantity that isn't a positive whole number of raw shares, a
+  level that isn't a positive price, or an unreadable `as_of`. Unlike an entry
+  or Add, it isn't re-issued, and it would leave its Unit without a stop.
+- **A split ratio the adapter can't trust stops the run**: one that isn't
+  whole, one that changes with no split while LEAN holds or works an order,
+  and a split that leaves LEAN's position or orders other than the engine's
+  (see **Price views and raw accounting**).
 - **LEAN's own API, as the pinned image has it.** `StopMarketOrder`'s fourth
   argument is the bool `asynchronous`, so the tag and order properties are
   the fifth and sixth; the order-ticket collections are enumerables with no
@@ -248,10 +316,14 @@ empty.
   in force; nothing compares a price with a level. An exit closes the whole
   remaining holding (`applyExitFill`), so every Unit resting at the Exit
   Channel must have filled at the same instant, level, price and slippage, or
-  the run stops. `price` and `quantity` are LEAN's, `filled_at` is the
-  event's `UtcTime`, `level` the order's stop price, `slippage_applied` what
-  the adapter's slippage model charged that order, and `commission` LEAN's
-  `OrderFee` (summed for an exit). `fill_id` is `lean:<order id>:<event id>`,
+  the run stops. `price` and `quantity` are LEAN's raw execution restated in
+  the split-adjusted view (price ÷ the split ratio, quantity ×), `filled_at`
+  is the event's `UtcTime`, `level` the order's raw stop price ÷ the ratio,
+  `slippage_applied` what the adapter's slippage model charged that order ÷
+  the ratio, and `commission` LEAN's `OrderFee` on the raw shares, unchanged
+  (summed for an exit). Each is logged raw first, as `adapter: LEAN filled
+  order <id> ...: <n> raw shares @ <price> raw, commission <fee> USD (split
+  ratio <k>)`. `fill_id` is `lean:<order id>:<event id>`,
   joined with `+` for an exit. One instant's fills are sent in ADR 0005's
   order: the buy first, then stop fills worst price first, then the exit.
 - **Every other change becomes one `execution.order.lifecycle`**
@@ -259,8 +331,8 @@ empty.
   `Submitted` (LEAN's acknowledgement) as `submitted`, `UpdateSubmitted` as
   `updated`, `CancelPending` as `cancel-pending`, `Canceled` (by the adapter,
   or LEAN's own expiry) as `canceled`, and `Invalid` (LEAN refused it) as
-  `invalid`, each with the order's id, tag, signed quantity, stop price, time
-  and LEAN's message. The engine records them and decides nothing from them;
+  `invalid`, each with the order's id, tag, signed quantity and stop price as
+  LEAN states them (raw), time and LEAN's message. The engine records them and decides nothing from them;
   they are journalled for reconciliation (ADR 0019). Any other status stops
   the run.
 - **A partial fill stops the run.** The reducer accepts one fill per order: a
@@ -292,7 +364,9 @@ empty.
 engine supplied with it: a trade proposal's `n`, an Add proposal's
 `campaign_n`, and the Campaign's frozen `campaign_n` (from
 `strategy.campaign.opened`) for an Exit Order, looked up by the order's tag.
-An order with no supplied N raises rather than slipping by zero.
+LEAN prices the fill in raw, so it slips by that N × the split ratio in force
+when LEAN fills the order. An order with no supplied N raises rather than
+slipping by zero.
 `slippage_n` is the run's own required setting in `run.json`, never
 defaulted; set it to the configuration's `slippage_n` (0.05 in the Baseline),
 as `cash` must equal `notional_account.starting_equity`. Commission uses
@@ -303,7 +377,8 @@ LEAN's `InteractiveBrokersFeeModel`; IBKR Pro Fixed is the working assumption
 evidence; `cmd/backtest` remains the reference implementation of ADR 0005, and
 the two are compared rather than forced to agree. At startup the adapter logs
 `adapter: fill model: ...` lines stating every respect in which LEAN's fills
-depart from ADR 0005 and ADR 0013: gap-at-open behaviour, exact touches,
+depart from ADR 0005 and ADR 0013: the two price views and the rounding of a
+Unit to raw shares, gap-at-open behaviour, the cent tick, exact touches,
 same-bar ambiguity, amendments, intrabar ordering, entry timing, order
 lifetime, LEAN's default equity slippage, the commission schedule and partial
 fills. Each statement about LEAN's own behaviour was observed on the pinned
@@ -317,14 +392,17 @@ the acceptance run below):
 | Question | Observed |
 | --- | --- |
 | Does a DAY order fill in the next session at daily resolution? | **No.** LEAN expires it first: DAY buy stops at 549.66 and 500.00 placed after the 2 January bar were `Canceled` ("The order has expired.") at the 3 January close, though that bar's high was 549.66 and its open 547.95. The same orders good-till-cancelled filled. |
-| Gap at the open | Matches ADR 0005: a buy stop at 500.00 filled at the 547.95 open plus slippage; a sell stop at 540.00 filled at the 537.15 open less slippage, each with LEAN's "unfavorable gap" message. In the acceptance run all 119 fills, 55 of them gaps, were priced at max/min(level, open) ± slippage to within 2e-15. |
+| Gap at the open | Matches ADR 0005: a buy stop at 500.00 filled at the 547.95 open plus slippage; a sell stop at 540.00 filled at the 537.15 open less slippage, each with LEAN's "unfavorable gap" message. In the split-adjusted acceptance run all 119 fills, 55 of them gaps, were priced at max/min(level, open) ± slippage to within 2e-15; in the raw one all 68, 33 of them gaps, in raw prices to within 1.5e-14. |
 | An exact touch | Fills: a buy stop at 549.66, that bar's exact high, filled at 549.76; a sell stop at 525.83, that bar's exact low, filled at 525.73 (0.10 slippage). The acceptance run had no exact touch. |
 | Is a cancel synchronous? | **No.** `Cancel()` returns success with the order `CancelPending`; `Canceled` is reported after `OnData` returns, before the next slice. In the acceptance run all 15 cancellations were confirmed that way. |
 | LEAN's default equity slippage | Zero (`NullSlippageModel`): a gapped SPY buy with no slippage model filled exactly at the 145.99 open. |
-| IB fee tier | $0.005 per share, $1.00 minimum (500 shares: $2.50; 50 shares: $1.00), capped at 0.5% of the order's value at LEAN's market price, not Pro Fixed's 1%; the minimum wins over the cap (1 BAC share at $12.01: $1.00). The cap bound on 42 of the acceptance run's 119 fills. |
+| IB fee tier | $0.005 per share, $1.00 minimum (500 shares: $2.50; 50 shares: $1.00), capped at 0.5% of the order's value at LEAN's market price, not Pro Fixed's 1%; the minimum wins over the cap (1 BAC share at $12.01: $1.00). It is charged on the shares LEAN trades: the cap bound on 42 of the split-adjusted acceptance run's 119 fills, whose share counts were up to 56 times raw, and on none of the raw run's 68, every one of which was charged exactly $0.005 × its raw shares (10,998 shares: $54.99). |
 | Amendments | An amended order is evaluated against the bar it was amended after: a sell stop raised to 530.00 after a bar whose low was 525.83 filled at 529.90 in that same slice. A new order never fills against the bar it was placed after. |
 | When are fills reported? | Before `OnData` for the session they executed in, stamped at its close (`UtcTime` = the bar's end), with the holding already moved. |
-| Early closes | LEAN's one-bar raw `History` returned two rows on 2002-12-24 (13:00 close); `raw_view` takes the row ending with the bar. |
+| Early closes | LEAN's one-bar `History` returned two rows on 2002-12-24 (13:00 close); `split_adjusted_view` takes the row ending with the bar. |
+| Both views from one run | With a Raw subscription, a one-bar `History(..., dataNormalizationMode=SplitAdjusted)` returns the split-adjusted bar: AAPL on 2005-02-22 closed at 85.38 raw and 1.524639198 split-adjusted, 56.000134 apart, the factor file's rounded 1/56. |
+| Tick | LEAN rounds every raw stop price to the cent, including a split's adjustment of an open stop, logging "To meet brokerage precision requirements, order StopPrice was rounded to 15.30 from 15.29996328" for the first only: all 193 order changes in the raw run are at whole cents. |
+| A split under Raw normalisation | For AAPL's 2-for-1 of 2005-02-28 (factor 0.4999986): `SplitType.Warning` in a bar-less slice on the 25th, then `SplitOccurred` in a bar-less slice at midnight on the 28th, when the holding has already doubled (1,000 → 2,000, the average price halved, and a fractional share paid as cash: $0.25 on 1,000 shares). Each open stop's quantity doubles and its price halves, rounded to the cent (62.23 → 31.11 for a sell, 115.57 → 57.78 for a buy), and each is reported as `UpdateSubmitted` after that slice. In the raw run 4 Units (11,056 raw shares) and their 4 Exit Orders were carried across it: 22,112 shares, each stop at half its level, and $2.75 of fractional-share cash. |
 
 **The acceptance run.** A one-instrument backtest on the pinned image, with
 the engine in its own container on a shared named volume (ADR 0014). It uses
@@ -350,11 +428,26 @@ go run ./cmd/backtest -replay <stage>/journal.jsonl
 
 `run.json`'s `configuration_hash` and `strategy_version` must be the
 engine's own for that configuration and build. The journal and the market
-data are never committed. The evidence for the run that closed this work is
-recorded on its pull request: AAPL, 2003-01-01 to 2010-12-31 with 60 warm-up
-bars, the Baseline's 55/20 channels; 119 fills (26 entries, 48 Adds, 32 stops,
-13 exits) and 325 order changes; 9,520 records, a complete run, a verified
-chain and a byte-identical replay.
+data are never committed. The first acceptance run, under the earlier
+split-adjusted subscription, is recorded on its pull request: AAPL, 2003-01-01
+to 2010-12-31 with 60 warm-up bars, the Baseline's 55/20 channels; 119 fills
+(26 entries, 48 Adds, 32 stops, 13 exits) and 325 order changes; 9,520
+records, a complete run, a verified chain and a byte-identical replay.
+
+The raw acceptance run: AAPL, 2003-01-01 to 2006-12-31 with 60 warm-up bars,
+55/20 channels, a 0.5% Unit and $1,000,000, across the 2-for-1 of 2005-02-28
+with four Units held. 1,067 bars; 68 fills (13 entries, 29 Adds, 18 stops, 8
+exits) and 193 order changes; 4,931 records, a complete run, a verified chain
+and a byte-identical replay. Every fill's raw quantity × the split ratio is
+the journal's quantity, and its raw price ÷ the ratio the journal's price, so
+the two differ in money by at most 6e-11; every raw price is ADR 0005's
+max/min(level, open) ± slippage against the raw bar; every commission is
+$0.005 × raw shares with the $1.00 minimum, $2,453.56 in all, where the same
+orders in split-adjusted shares would have been charged $116,726.68 before
+the cap. Each Unit is up to one raw share short of the engine's quantity (a
+2003 proposal of 615,898 split-adjusted shares filled as 10,998 raw, 615,888).
+The ten rejected decisions are all Adds chained from a fill, which are stale
+in LEAN.
 
 The adapter will still need to:
 

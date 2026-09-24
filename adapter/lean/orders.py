@@ -124,18 +124,34 @@ def fill_model_report(slippage_n):
     backtest on the pinned image (README.md, "Observed LEAN behaviour").
     """
     return [
+        "price views (ADR 0004): LEAN trades, holds and charges commission in raw shares at "
+        "raw prices; the engine's levels, quantities and N are in the split-adjusted view, "
+        "and each fill is returned to it in that view. The adapter converts at LEAN's "
+        "boundary by the whole number of split-adjusted shares a raw share is (the raw close "
+        "over the split-adjusted one), so quantity x price is the same in both. A Unit is "
+        "rounded down to whole raw shares, so it can fill up to one raw share short of the "
+        "engine's quantity (cmd/backtest fills the whole of it). A split while holding is "
+        "applied by LEAN to the holding and every open order, and the run stops unless the "
+        "result is exactly the engine's position and orders at the new ratio.",
         "slippage is {} x N per fill (ADR 0013), charged by the adapter's NSlippageModel "
         "from the N the engine sent: a trade proposal's n, an Add proposal's campaign_n, "
-        "and the Campaign's frozen campaign_n for an Exit Order. The Baseline declares "
+        "and the Campaign's frozen campaign_n for an Exit Order, each at the raw ratio in "
+        "force when LEAN fills the order. The Baseline declares "
         "0.05 x N. LEAN's default equity slippage is zero (NullSlippageModel; observed: a "
         "gapped buy with no slippage model filled exactly at the open), and applies to no "
         "order here.".format(slippage_n),
+        "tick: LEAN rounds every raw stop price to the cent, the equity's minimum price "
+        "variation, including a split's adjustment of an open stop, and logs only the first "
+        "such rounding. The fill's level is LEAN's rounded stop, so it can differ from the "
+        "engine's level by up to half a cent raw, and by up to a cent after a split. "
+        "cmd/backtest fills at the engine's "
+        "unrounded level.",
         "gap at the open (ADR 0005 rule 1): observed to match. A stop the bar opens beyond "
         "fills at the open, less slippage for a sell and plus it for a buy, and LEAN says so "
         "in the fill's message ('Due to an unfavorable gap ... filled using the open price'). "
-        "In the acceptance run every one of 119 fills, 55 of them gaps, was priced at ADR "
+        "In the raw acceptance run every one of 68 fills, 33 of them gaps, was priced at ADR "
         "0005's max(level, open) for a buy or min(level, open) for a sell, plus or minus "
-        "slippage.",
+        "slippage, in raw prices.",
         "touch (ADR 0005): observed to match. A bar whose high exactly equals a buy stop, or "
         "whose low exactly equals a sell stop, fills at the level (plus or minus slippage). "
         "Observed in a probe of the pinned image; the acceptance run had no exact touch.",
@@ -169,7 +185,9 @@ def fill_model_report(slippage_n):
         "capped at 0.5% of the order's value at LEAN's market price, not IBKR Pro Fixed's 1% "
         "of trade value that internal/fills applies. The minimum wins over the cap (1 share "
         "at $12.01 was charged $1.00, not a capped $0.06), where internal/fills lets the cap "
-        "win. In the acceptance run the 0.5% cap bound on 42 of 119 fills. Neither model "
+        "win. LEAN charges it on the raw shares it trades (ADR 0004); internal/fills charges "
+        "the split-adjusted shares it fills, which for AAPL in 2003 are 56 times as many. In "
+        "the raw acceptance run the cap bound on none of 68 fills. Neither model "
         "charges exchange, clearing or regulatory pass-through fees. Pro Fixed is the "
         "working assumption, not a settled choice.",
         "partial fills: a partial fill stops the run. The engine accepts one fill per order "
