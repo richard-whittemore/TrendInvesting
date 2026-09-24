@@ -334,7 +334,9 @@ holding `algorithm.py` as `main.py`, `client.py`, `orders.py`,
 `publisher.py` and a `run.json` naming `/run/adapter/private/s.sock`:
 
 ```sh
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o <stage>/engine ./cmd/engine
+# Build for the Docker server's own architecture (arm64 or amd64), so the LEAN
+# image runs the engine natively.
+GOOS=linux GOARCH="$(docker version --format '{{.Server.Arch}}')" CGO_ENABLED=0 go build -o <stage>/engine ./cmd/engine
 docker volume create trend30sock
 docker run -d --name trend30-engine -v trend30sock:/run/adapter -v <stage>:/stage \
   --entrypoint /stage/engine quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d \
