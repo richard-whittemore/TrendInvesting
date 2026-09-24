@@ -205,6 +205,7 @@ func TestAnUndecodablePayloadFromAProducerFailsClosed(t *testing.T) {
 		{"campaign opened", event.CampaignOpenedEventType, event.CampaignOpenedSchemaVersion},
 		{"unit added", event.CampaignUnitAddedEventType, event.CampaignUnitAddedSchemaVersion},
 		{"protective stop set", event.ProtectiveStopSetEventType, event.ProtectiveStopSetSchemaVersion},
+		{"exit order set", event.ExitOrderSetEventType, event.ExitOrderSetSchemaVersion},
 		{"units stopped", event.CampaignUnitsStoppedEventType, event.CampaignUnitsStoppedSchemaVersion},
 		{"campaign exited", event.CampaignExitedEventType, event.CampaignExitedSchemaVersion},
 		{"proposal expired", event.ProposalExpiredEventType, event.ProposalExpiredSchemaVersion},
@@ -459,6 +460,7 @@ func TestAnOrderCarryingAnUnusableNFailsClosed(t *testing.T) {
 				return []event.Envelope{
 					campaignOpened(t, campaignID, 156, 0),
 					protectiveStopSet(t, campaignID, 1, 153),
+					exitOrderSet(t, 1, event.ExitOrderSourceProtectiveStop, 153, 0, fixtureUnitQuantity),
 				}
 			},
 			wantKind: event.FillKindStop,
@@ -479,6 +481,7 @@ func TestAnOrderCarryingAnUnusableNFailsClosed(t *testing.T) {
 						Rule:         event.RuleExitChannelBreach,
 						ADR:          event.ADRExitChannelBreach,
 					}),
+					exitOrderSet(t, 1, event.ExitOrderSourceExitChannel, 148, 150, fixtureUnitQuantity),
 				}
 			},
 			wantKind: event.FillKindExit,

@@ -25,3 +25,11 @@ Next-open execution is retained as a declared Variant so the effect of the fill 
 - Any bar that fills both an entry and a stop is recorded as a loss; this understates performance in whipsaw conditions, deliberately.
 - The slippage parameter must appear in every run's configuration and in the decision journal.
 - The adapter must expose enough of each bar (open, high, low, close) for the domain to apply these rules; a close-only feed is insufficient.
+
+## Amendment: a Protective Stop and an Exit-Channel exit rest as one order per Unit (2026-09-24)
+
+The Decision above lists Protective Stops and Exit-Channel exits as resting orders under one fill model. It does not say they are *separate* orders, and they are not. Each held Unit rests exactly one sell order for its own shares — its **Exit Order** (CONTEXT.md) — at the higher of its own Protective Stop and, while an Exit-Channel exit is proposed for its Campaign, the Exit Channel level; a tie names the stop. A long Unit sold at the higher of two sell levels is sold at the first one price reaches, and one order per Unit can never sell the same shares twice. The reducer records that level with `strategy.exit-order.set`, and the backtest's fill simulator fills that order rather than the two levels separately, so a backtest holds the same single order per Unit a live account would.
+
+The three rules apply to the Exit Order unchanged: a gap fills at `min(level, open)`, slippage applies to every fill, and a bar covering both an entry or Add and a Unit's Exit Order enters first and then sells. What changes is that a bar reaching both a stop and the exit level no longer poses an ordering question between two orders for the same Campaign: each Unit sells at its own order's level. Before this amendment the simulator held the stops and the exit as competing orders and filled the lower-priced one first, which sold every Unit at its stop even when the exit level above it had been reached first.
+
+A Unit resting at its own stop fills as a stop naming that Unit. The Units resting at the Exit Channel all rest at the one proposed level and fill together as the exit, after any stop fills in that bar, because an exit closes whatever the Campaign still holds. Any bar that reaches the exit level has also reached every stop above it, so by then the Units still held are exactly those resting at the exit.

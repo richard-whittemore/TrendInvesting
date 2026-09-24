@@ -163,8 +163,19 @@ func TestDecisionLogFullFixtureAndMissingProvenance(t *testing.T) {
 	if !strings.Contains(out.String(), "rule not recorded; ADR not recorded") {
 		t.Fatal("missing provenance was concealed")
 	}
-	if !strings.Contains(out.String(), "because input-stream-ended; no fill was recorded for this proposal") {
-		t.Fatal("expiry reason missing")
+}
+
+// TestDecisionLogExplainsAProposalTheRunEndedHolding renders the end-of-stream
+// expiry of a proposal no fill ever answered.
+func TestDecisionLogExplainsAProposalTheRunEndedHolding(t *testing.T) {
+	_, path := runBacktestOnBars(t, writeBars(t, barsEndingWithAnOutstandingExit(t)))
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"-decisions", path, "-date", "2026-01-23"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	const want = `AAPL: expired exit proposal "exit-proposal:AAPL:2026-01-23T00:00:00.000000000Z" for 20000 shares at 125.21 because input-stream-ended; no fill was recorded for this proposal (rule exit-proposal.expires.with-its-bar; ADR 0011).`
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("got:\n%s\nwant a line ending:\n%s", &out, want)
 	}
 }
 
@@ -172,7 +183,7 @@ func TestDecisionLogMixedGolden(t *testing.T) {
 	path := rewriteJournal(t, goldenJournal, func(_ *journal.Header, entries []journal.Entry) []journal.Entry {
 		var selected []journal.Entry
 		for _, e := range entries {
-			if e.Kind == journal.KindInput || e.Envelope.Type == event.SignalEventType || e.Envelope.Type == event.ProposalExpiredEventType {
+			if e.Kind == journal.KindInput || e.Envelope.Type == event.SignalEventType {
 				selected = append(selected, e)
 			}
 			if e.Envelope.Type == event.SignalEventType {
@@ -198,7 +209,6 @@ func TestDecisionLogMixedGolden(t *testing.T) {
 	}
 	const want = `2026-01-22T00:00:00Z [decision 22] AAPL: Signal long because high 129.01 exceeded Entry Channel 127.01; N was 1 (rule entry.channel.breakout; ADR 0002).
 2026-01-22T00:00:00Z [decision 23] MSFT: declined entry proposal because insufficient-cash: one Unit cannot be funded; Signal "signal:MSFT"; required cash 20615 exceeded available cash 20614.99 (rule not recorded; ADR not recorded).
-2026-02-02T00:00:00Z [decision 72] AAPL: expired exit proposal "exit-proposal:AAPL:2026-02-02T00:00:00.000000000Z" for 20000 shares at 128.8 because input-stream-ended; no fill was recorded for this proposal (rule exit-proposal.expires.with-its-bar; ADR 0011).
 `
 	if out.String() != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", &out, want)
@@ -273,7 +283,7 @@ func TestDecisionTextExitConfirmationFollowsTheExitReason(t *testing.T) {
 	}
 	const campaign = `exited Campaign "campaign:AAPL:2026-01-22T00:00:00.000000000Z" because `
 	const closed = `; 4 Units and 20000 shares closed at `
-	const result = ` 126.585; realised result -26000.000000000226`
+	const result = ` 128.75; realised result 17299.999999999898`
 	for _, tc := range []struct {
 		reason string
 		rule   string
@@ -282,9 +292,9 @@ func TestDecisionTextExitConfirmationFollowsTheExitReason(t *testing.T) {
 		want   string
 	}{
 		{event.ExitReasonStop, event.RuleCampaignExitedByStop, event.ADRCampaignExitRecordsTheFill, exited.FillID,
-			campaign + `stop, confirmed by fill "fill:AAPL:2026-02-02T00:00:00.000000000Z:4"` + closed + `average price` + result},
+			campaign + `stop, confirmed by fill "fill:AAPL:2026-02-02T00:00:00.000000000Z:1"` + closed + `average price` + result},
 		{event.ExitReasonExitChannel, event.RuleCampaignExitedByExitChannel, event.ADRCampaignExitRecordsTheFill, exited.FillID,
-			campaign + `exit-channel, confirmed by fill "fill:AAPL:2026-02-02T00:00:00.000000000Z:4"` + closed + `average price` + result},
+			campaign + `exit-channel, confirmed by fill "fill:AAPL:2026-02-02T00:00:00.000000000Z:1"` + closed + `average price` + result},
 		// ADR 0009 forces a Delisting Exit directly, so its FillID names the
 		// corporate-action envelope and there is no execution to reconcile.
 		{event.ExitReasonDelisting, event.RuleCampaignExitedByDelisting, event.ADRDelistingForcesExit, "corp-action-42",

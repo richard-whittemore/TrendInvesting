@@ -20,35 +20,53 @@ import (
 // re-establish it rather than assume it if either changes.
 //
 // These four Units use quantity-price products needing more than 53 bits, so
-// weighted entry/exit prices and aggregate open risk diverge when a product is
+// the weighted entry price and aggregate open risk diverge when a product is
 // left fusible; making all products exact would let the golden pass even with
-// fusible arithmetic.
+// fusible arithmetic. The Campaign closes in one exit fill for all four Units
+// (each Unit's Exit Order rests at the Exit Channel; ADR 0005, as amended),
+// so its exit side is a single product with nothing to accumulate: the entry
+// side is what this fixture's sensitivity rests on, and the exit side is
+// checked only for recording the rounded product.
+
+// fill is one execution's quantity and price.
+type fill struct {
+	quantity, price float64
+}
 
 // fusedSum accumulates quantity x price the way a fusing build would if the
 // product were not rounded first: one operation, one rounding, the
 // full-precision product kept. math.FMA states that shape explicitly rather
 // than relying on any target to produce it.
-func fusedSum(quantity float64, prices []float64) float64 {
+func fusedSum(fills []fill) float64 {
 	var sum float64
-	for _, price := range prices {
-		sum = math.FMA(quantity, price, sum)
+	for _, f := range fills {
+		sum = math.FMA(f.quantity, f.price, sum)
 	}
 	return sum
 }
 
 // roundedSum is the same accumulation with each product rounded to float64
 // before it is added, which is what sizing.Product guarantees.
-func roundedSum(quantity float64, prices []float64) float64 {
+func roundedSum(fills []fill) float64 {
 	var sum float64
-	for _, price := range prices {
-		sum += float64(quantity * price)
+	for _, f := range fills {
+		sum += float64(f.quantity * f.price)
 	}
 	return sum
 }
 
-// goldenFills returns the quantity every Unit of the fixture's Campaign was
-// filled in, the prices it entered at, and the prices it was closed at.
-func goldenFills(t *testing.T) (quantity float64, entries, exits []float64) {
+// quantityOf is the shares fills executed.
+func quantityOf(fills []fill) float64 {
+	var total float64
+	for _, f := range fills {
+		total += f.quantity
+	}
+	return total
+}
+
+// goldenFills returns the fills the fixture's Campaign entered with and the
+// fills it was closed with.
+func goldenFills(t *testing.T) (entries, exits []fill) {
 	t.Helper()
 
 	written, _ := runBacktestTo(t)
@@ -61,49 +79,34 @@ func goldenFills(t *testing.T) (quantity float64, entries, exits []float64) {
 		if record.Envelope.Type != event.FillEventType {
 			continue
 		}
-		var fill event.FillPayload
-		if err := json.Unmarshal(record.Envelope.Payload, &fill); err != nil {
+		var payload event.FillPayload
+		if err := json.Unmarshal(record.Envelope.Payload, &payload); err != nil {
 			t.Fatalf("decode fill %s: %v", record.Envelope.ID, err)
 		}
-		if quantity == 0 {
-			quantity = float64(fill.Quantity)
-		}
-		if float64(fill.Quantity) != quantity {
-			t.Fatalf("fill %s is for %d shares, the first was for %v: these tests assume one Unit size", record.Envelope.ID, fill.Quantity, quantity)
-		}
-		switch fill.Kind {
+		executed := fill{quantity: float64(payload.Quantity), price: payload.Price}
+		switch payload.Kind {
 		case event.FillKindEntry, event.FillKindAdd:
-			entries = append(entries, fill.Price)
+			entries = append(entries, executed)
 		default:
-			exits = append(exits, fill.Price)
+			exits = append(exits, executed)
 		}
 	}
-	return quantity, entries, exits
+	return entries, exits
 }
 
-// TestTheGoldenFixtureIsSensitiveToFusedMultiplyAdd: on both sides of the
-// Campaign, accumulating the fixture's own fills with the product fused
-// gives a different answer from accumulating it with the product rounded.
-// That difference is what the golden journal detects.
+// TestTheGoldenFixtureIsSensitiveToFusedMultiplyAdd: accumulating the
+// Campaign's own entry fills with the product fused gives a different answer
+// from accumulating them with the product rounded. That difference is what
+// the golden journal detects.
 func TestTheGoldenFixtureIsSensitiveToFusedMultiplyAdd(t *testing.T) {
-	quantity, entries, exits := goldenFills(t)
+	entries, _ := goldenFills(t)
 
-	if len(entries) < 2 || len(exits) < 2 {
-		t.Fatalf("the fixture fills %d Unit(s) in and %d out; an accumulator needs at least two terms to diverge", len(entries), len(exits))
+	if len(entries) < 2 {
+		t.Fatalf("the fixture fills %d Unit(s) in; an accumulator needs at least two terms to diverge", len(entries))
 	}
-
-	for _, side := range []struct {
-		name   string
-		prices []float64
-	}{
-		{"the weighted entry price", entries},
-		{"the weighted exit price", exits},
-	} {
-		rounded, fused := roundedSum(quantity, side.prices), fusedSum(quantity, side.prices)
-		if rounded == fused {
-			t.Errorf("%s accumulates to %v either way: the fixture's prices no longer tell a fused build from an unfused one, and the golden journal no longer guards against one",
-				side.name, rounded)
-		}
+	if rounded, fused := roundedSum(entries), fusedSum(entries); rounded == fused {
+		t.Errorf("the weighted entry price accumulates to %v either way: the fixture's prices no longer tell a fused build from an unfused one, and the golden journal no longer guards against one",
+			rounded)
 	}
 }
 
@@ -111,7 +114,7 @@ func TestTheGoldenFixtureIsSensitiveToFusedMultiplyAdd(t *testing.T) {
 // fixture is sensitive, and what the journal actually recorded is the
 // rounded answer rather than the fused one.
 func TestTheRecordedCampaignUsesTheRoundedAccumulation(t *testing.T) {
-	quantity, entries, exits := goldenFills(t)
+	entries, exits := goldenFills(t)
 
 	written, _ := runBacktestTo(t)
 	_, records, err := journal.Read(bytes.NewReader(written))
@@ -134,17 +137,17 @@ func TestTheRecordedCampaignUsesTheRoundedAccumulation(t *testing.T) {
 		t.Fatal("the fixture records no campaign exit to check the accumulation against")
 	}
 
-	total := quantity * float64(len(entries))
 	for _, side := range []struct {
-		name   string
-		prices []float64
-		got    float64
+		name  string
+		fills []fill
+		got   float64
 	}{
 		{"entry price", entries, exited.EntryPrice},
 		{"exit price", exits, exited.ExitPrice},
 	} {
-		want := roundedSum(quantity, side.prices) / total
-		fused := fusedSum(quantity, side.prices) / total
+		total := quantityOf(side.fills)
+		want := roundedSum(side.fills) / total
+		fused := fusedSum(side.fills) / total
 		if side.got != want {
 			t.Errorf("recorded %s = %v, want %v (the rounded accumulation; the fused one gives %v)", side.name, side.got, want, fused)
 		}

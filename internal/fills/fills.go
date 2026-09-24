@@ -136,16 +136,21 @@ type Simulator struct {
 // precedence) — so each is a single slot rather than a list, and a second one
 // arriving would be a reducer defect this package would rather notice than
 // absorb.
+//
+// The two buys, entry and add, are orders in their own right. The sells are
+// not held here: each held Unit rests exactly one, its Exit Order, on the
+// Unit itself (see unit). exit is the outstanding Exit-Channel exit proposal,
+// which is not an order of its own — it is one of the two levels a Unit's
+// Exit Order is derived from — and is kept so that a Unit whose Exit Order
+// rests at the exit level is reported as filling that proposal.
 type book struct {
 	campaign *campaign
 	entry    *order
 	add      *order
-	exit     *order
+	exit     *exitProposal
 }
 
-// order is one resting order other than a Protective Stop. A stop is held on
-// its own Unit instead (see unit), because a stop belongs to a Unit and is
-// raised and closed with it.
+// order is one resting buy: an entry or an Add.
 type order struct {
 	kind       string // event.FillKind*
 	side       string
@@ -155,9 +160,18 @@ type order struct {
 	quantity   int64
 	// n is the N this order's slippage is measured in: the decision N the
 	// Signal was sized under for an entry (ADR 0003), the Campaign's frozen N
-	// for an Add or an exit (ADR 0006).
+	// for an Add (ADR 0006).
 	n   float64
 	ref reference
+}
+
+// exitProposal is the outstanding Exit-Channel exit proposal for an open
+// Campaign: the proposal an exit fill reports, and the level a Unit's Exit
+// Order must rest at when it names the Exit Channel as its source.
+type exitProposal struct {
+	proposalID string
+	campaignID string
+	level      float64
 }
 
 // reference is the price an order was resting from, and the bar that price
@@ -183,7 +197,7 @@ func (r reference) rangeFor(periodEnd time.Time, view event.PriceView) Range {
 }
 
 // campaign is the minimum this package needs to know about an open Campaign:
-// which Units it still holds, each with its own current Protective Stop.
+// which Units it still holds, each with its own current Exit Order.
 //
 // It is deliberately not position state. internal/strategy owns that, and
 // every field here is a copy of something the reducer journalled; nothing in
@@ -193,23 +207,33 @@ type campaign struct {
 	id           string
 	instrumentID string
 	direction    string
-	n            float64
+	// n is the Campaign's frozen N (ADR 0006), which the slippage on every
+	// Exit Order is measured in.
+	n float64
 	// units is every Unit still open, in ascending index order. Held as a
 	// slice rather than a map so iteration order is the index order, never
 	// Go's map order (.greptile/rules.md's determinism rule).
 	units []*unit
 }
 
-// unit is one held Unit and the Protective Stop resting for it.
+// unit is one held Unit and the one sell order resting for it: its Exit
+// Order (CONTEXT.md: "Exit Order"), at the higher of its own Protective Stop
+// and, while an Exit-Channel exit is proposed, that exit's level. The level
+// is the reducer's, read from strategy.exit-order.set; this package never
+// combines the two levels itself.
 type unit struct {
 	index         int
 	openingFillID string
 	quantity      int64
-	// stop is this Unit's own current level. Zero until the
-	// strategy.protective-stop.set event for it arrives, which the reducer
-	// always emits in the same Apply return as the Unit itself.
-	stop float64
-	ref  reference
+	// exitLevel is where this Unit's Exit Order rests. Zero until the first
+	// strategy.exit-order.set for it arrives — which the reducer emits in the
+	// same Apply return as the Unit itself — and until then nothing rests
+	// for it.
+	exitLevel float64
+	// exitSource is the event.ExitOrderSource* governing exitLevel, which
+	// decides whether a fill of the order is reported as a stop or an exit.
+	exitSource string
+	ref        reference
 }
 
 func (c *campaign) unitAt(index int) *unit {
@@ -219,16 +243,6 @@ func (c *campaign) unitAt(index int) *unit {
 		}
 	}
 	return nil
-}
-
-// quantity is every held Unit's quantity: what an exit order closes, since
-// every Unit exits together (CONTEXT.md: "Campaign").
-func (c *campaign) quantity() int64 {
-	var total int64
-	for _, u := range c.units {
-		total += u.quantity
-	}
-	return total
 }
 
 func (c *campaign) removeUnits(indexes []int) {
@@ -292,11 +306,13 @@ func New(cfg event.ConfigurationPayload, strategyVersion, configurationHash stri
 
 // Observe folds one envelope into the resting-order book.
 //
-// The whole book is learned from the reducer's own emissions: a trade, Add or
-// exit proposal creates a resting order; a Campaign-opened, Unit-added or
-// Protective-Stop-set event creates or moves a Unit's own stop; a
-// proposal-expired, units-stopped or Campaign-exited event removes what is no
-// longer in force. Nothing here is inferred from bars or invented.
+// The whole book is learned from the reducer's own emissions: a trade or Add
+// proposal creates a resting buy; a Campaign-opened or Unit-added event
+// introduces a Unit, and an Exit-Order-set event places or moves that Unit's
+// one sell order; an exit proposal records the proposal an Exit Order at the
+// Exit Channel fills; a proposal-expired, units-stopped or Campaign-exited
+// event removes what is no longer in force. Nothing here is inferred from
+// bars or invented.
 //
 // An event type it does not recognise fails closed rather than being ignored.
 // That is deliberate and is the opposite of what a "just ignore what you do
@@ -321,13 +337,15 @@ func (s *Simulator) observe(envelope event.Envelope, ref reference) error {
 	case event.AddProposalEventType:
 		return s.observeAddProposal(envelope, ref)
 	case event.ExitProposalEventType:
-		return s.observeExitProposal(envelope, ref)
+		return s.observeExitProposal(envelope)
 	case event.CampaignOpenedEventType:
 		return s.observeCampaignOpened(envelope)
 	case event.CampaignUnitAddedEventType:
 		return s.observeUnitAdded(envelope)
 	case event.ProtectiveStopSetEventType:
-		return s.observeProtectiveStopSet(envelope, ref)
+		return s.observeProtectiveStopSet(envelope)
+	case event.ExitOrderSetEventType:
+		return s.observeExitOrderSet(envelope, ref)
 	case event.CampaignUnitsStoppedEventType:
 		return s.observeUnitsStopped(envelope)
 	case event.CampaignExitedEventType:
@@ -342,8 +360,7 @@ func (s *Simulator) observe(envelope event.Envelope, ref reference) error {
 	case event.SetupEvaluatedEventType, // a Setup was evaluated; no order
 		event.SignalEventType,                      // a Signal fired; the proposal that follows is the order
 		event.ProposalDeclinedEventType,            // a Signal produced no position, so no order
-		event.CampaignEvaluatedEventType,           // the levels in force, already known from the stop-set events
-		event.ExitOrderSetEventType,                // the stop and exit levels combined per Unit; this book keeps them as separate orders
+		event.CampaignEvaluatedEventType,           // the levels in force; the orders come from the exit-order-set events
 		event.EngineStateEventType,                 // a halt; the run stops, so the book is moot
 		event.DrawdownStepAppliedEventType,         // ADR 0007's ladder; affects sizing, not resting orders
 		event.NotionalAccountRebasedEventType,      // likewise
@@ -413,13 +430,13 @@ func (s *Simulator) observeAddProposal(envelope event.Envelope, ref reference) e
 	return nil
 }
 
-// observeExitProposal takes the N its slippage is measured in from the
-// Campaign rather than from the payload: an exit proposal carries no sizing
-// of its own (event.ExitProposalPayload's doc comment), and the N in force is
-// the Campaign's frozen one (ADR 0006). A proposal for a Campaign this
-// package has never seen open fails closed rather than being priced from a
-// guess.
-func (s *Simulator) observeExitProposal(envelope event.Envelope, ref reference) error {
+// observeExitProposal records the outstanding exit proposal. It places no
+// order: each Unit's Exit Order moves to the exit level only when the
+// reducer's strategy.exit-order.set says so, because the exit level governs a
+// Unit only where it is above that Unit's own Protective Stop. A proposal for
+// a Campaign this package has never seen open fails closed: an exit fill is
+// priced with that Campaign's frozen N (ADR 0006), and there is none to use.
+func (s *Simulator) observeExitProposal(envelope event.Envelope) error {
 	var payload event.ExitProposalPayload
 	if err := decodePayload(envelope, &payload); err != nil {
 		return err
@@ -429,15 +446,10 @@ func (s *Simulator) observeExitProposal(envelope event.Envelope, ref reference) 
 		return fmt.Errorf("fills: instrument %q: exit proposal %q names campaign %q, which this simulator has no open campaign for; the slippage on an exit is measured in that campaign's frozen n (ADR 0006) and cannot be derived without it",
 			payload.InstrumentID, envelope.ID, payload.CampaignID)
 	}
-	b.exit = &order{
-		kind:       event.FillKindExit,
-		side:       SideSell,
+	b.exit = &exitProposal{
 		proposalID: envelope.ID,
 		campaignID: payload.CampaignID,
 		level:      payload.Level,
-		quantity:   payload.Quantity,
-		n:          b.campaign.n,
-		ref:        ref,
 	}
 	return nil
 }
@@ -484,11 +496,14 @@ func (s *Simulator) observeUnitAdded(envelope event.Envelope) error {
 	return nil
 }
 
-// observeProtectiveStopSet is where a Protective Stop becomes a resting
-// order, and where a Stop Ladder raise moves one. One event type serves
-// both — the reducer discriminates with Reason — and so does this, because
-// the effect on the book is identical: the Unit's own stop is now at Level.
-func (s *Simulator) observeProtectiveStopSet(envelope event.Envelope, ref reference) error {
+// observeProtectiveStopSet checks that a Protective Stop set or raised by
+// the reducer belongs to a Unit this book holds, and places no order: the
+// stop is one of the two levels a Unit's Exit Order is derived from, and the
+// reducer records the order itself, at the level the stop and any proposed
+// exit together decide, with strategy.exit-order.set (observeExitOrderSet).
+// A stop for a Campaign or Unit the book does not hold still fails closed,
+// because the Exit Order that follows it would have nothing to rest on.
+func (s *Simulator) observeProtectiveStopSet(envelope event.Envelope) error {
 	var payload event.ProtectiveStopSetPayload
 	if err := decodePayload(envelope, &payload); err != nil {
 		return err
@@ -497,11 +512,60 @@ func (s *Simulator) observeProtectiveStopSet(envelope event.Envelope, ref refere
 	if b.campaign == nil || b.campaign.id != payload.CampaignID {
 		return fmt.Errorf("fills: instrument %q: protective-stop-set names campaign %q, which this simulator has no open campaign for", payload.InstrumentID, payload.CampaignID)
 	}
-	u := b.campaign.unitAt(payload.UnitIndex)
-	if u == nil {
+	if b.campaign.unitAt(payload.UnitIndex) == nil {
 		return fmt.Errorf("fills: instrument %q: protective-stop-set names unit %d of campaign %q, which this simulator does not hold", payload.InstrumentID, payload.UnitIndex, payload.CampaignID)
 	}
-	u.stop = payload.Level
+	return nil
+}
+
+// observeExitOrderSet places or moves one Unit's Exit Order (CONTEXT.md:
+// "Exit Order"): the one sell order that Unit rests, for its own shares, at
+// the level the reducer recorded — the higher of its Protective Stop and,
+// while an Exit-Channel exit is proposed, that exit's level (ADR 0005, as
+// amended). It is the only event that puts a sell order in this book.
+//
+// Every disagreement with the rest of what the producer has said fails
+// closed: an order for a Unit the book does not hold, for other than that
+// Unit's own shares, or naming the Exit Channel when no exit is proposed at
+// that level. Placing it anyway would sell shares the Unit does not hold, or
+// report an exit fill for a proposal that is not the one outstanding.
+func (s *Simulator) observeExitOrderSet(envelope event.Envelope, ref reference) error {
+	var payload event.ExitOrderSetPayload
+	if err := decodePayload(envelope, &payload); err != nil {
+		return err
+	}
+	b := s.bookFor(payload.InstrumentID)
+	if b.campaign == nil || b.campaign.id != payload.CampaignID {
+		return fmt.Errorf("fills: instrument %q: exit-order-set names campaign %q, which this simulator has no open campaign for", payload.InstrumentID, payload.CampaignID)
+	}
+	u := b.campaign.unitAt(payload.UnitIndex)
+	if u == nil {
+		return fmt.Errorf("fills: instrument %q: exit-order-set names unit %d of campaign %q, which this simulator does not hold", payload.InstrumentID, payload.UnitIndex, payload.CampaignID)
+	}
+	if payload.Quantity != u.quantity {
+		return fmt.Errorf("fills: instrument %q: exit-order-set rests unit %d of campaign %q for quantity %d, but the unit holds %d; a Unit's Exit Order covers exactly its own shares",
+			payload.InstrumentID, payload.UnitIndex, payload.CampaignID, payload.Quantity, u.quantity)
+	}
+	switch payload.Source {
+	case event.ExitOrderSourceProtectiveStop:
+		// The Unit's own stop governs; nothing else to reconcile.
+	case event.ExitOrderSourceExitChannel:
+		if b.exit == nil || b.exit.campaignID != payload.CampaignID {
+			return fmt.Errorf("fills: instrument %q: exit-order-set rests unit %d of campaign %q at the exit channel, but there is no exit proposal outstanding for that campaign",
+				payload.InstrumentID, payload.UnitIndex, payload.CampaignID)
+		}
+		// Exact comparison: the reducer copies the proposed level into the
+		// Exit Order unchanged (event.ExitOrderSetPayload's doc comment).
+		if payload.Level != b.exit.level {
+			return fmt.Errorf("fills: instrument %q: exit-order-set rests unit %d of campaign %q at the exit channel level %v, but the outstanding exit proposal %q is at %v",
+				payload.InstrumentID, payload.UnitIndex, payload.CampaignID, payload.Level, b.exit.proposalID, b.exit.level)
+		}
+	default:
+		return fmt.Errorf("fills: instrument %q: exit-order-set for unit %d of campaign %q names source %q, which is not a recognised exit order source",
+			payload.InstrumentID, payload.UnitIndex, payload.CampaignID, payload.Source)
+	}
+	u.exitLevel = payload.Level
+	u.exitSource = payload.Source
 	u.ref = ref
 	return nil
 }
@@ -553,26 +617,31 @@ func (s *Simulator) observeProposalExpired(envelope event.Envelope) error {
 		return err
 	}
 	b := s.bookFor(payload.InstrumentID)
-	for _, slot := range []**order{&b.entry, &b.add, &b.exit} {
+	for _, slot := range []**order{&b.entry, &b.add} {
 		if *slot != nil && (*slot).proposalID == payload.ProposalID {
 			*slot = nil
 		}
+	}
+	if b.exit != nil && b.exit.proposalID == payload.ProposalID {
+		b.exit = nil
 	}
 	return nil
 }
 
 // Resting returns the orders in force for instrumentID, in a deterministic
-// order: the entry, Add and exit proposals first, then one entry per held
-// Unit's Protective Stop in ascending Unit order. It exists for inspection —
-// by a test, or by a driver reporting what was left outstanding when a
-// run ended — and never to be mutated.
+// order: the entry and Add orders first, then one Exit Order per held Unit
+// that has one, in ascending Unit order — Kind event.FillKindExit, naming
+// the exit proposal, where the Unit's Exit Order rests at the Exit Channel,
+// and event.FillKindStop where it rests at its own Protective Stop. It
+// exists for inspection — by a test, or by a driver reporting what was left
+// outstanding when a run ended — and never to be mutated.
 func (s *Simulator) Resting(instrumentID string) []Order {
 	b, ok := s.books[instrumentID]
 	if !ok {
 		return nil
 	}
 	var out []Order
-	for _, o := range []*order{b.entry, b.add, b.exit} {
+	for _, o := range []*order{b.entry, b.add} {
 		if o == nil {
 			continue
 		}
@@ -584,13 +653,17 @@ func (s *Simulator) Resting(instrumentID string) []Order {
 	}
 	if b.campaign != nil {
 		for _, u := range b.campaign.units {
-			if u.stop <= 0 {
+			if u.exitLevel <= 0 {
 				continue
 			}
+			kind, proposalID := event.FillKindStop, ""
+			if u.exitSource == event.ExitOrderSourceExitChannel && b.exit != nil {
+				kind, proposalID = event.FillKindExit, b.exit.proposalID
+			}
 			out = append(out, Order{
-				Kind: event.FillKindStop, Side: SideSell, InstrumentID: instrumentID,
-				CampaignID: b.campaign.id,
-				Level:      u.stop, Quantity: u.quantity, N: b.campaign.n,
+				Kind: kind, Side: SideSell, InstrumentID: instrumentID,
+				CampaignID: b.campaign.id, ProposalID: proposalID,
+				Level: u.exitLevel, Quantity: u.quantity, N: b.campaign.n,
 				UnitIndexes: []int{u.index}, UnitIDs: []string{u.openingFillID},
 			})
 		}
@@ -629,15 +702,17 @@ type candidate struct {
 }
 
 // covered prices every resting order for instrumentID against this bar and
-// returns the ones it reached, in the order ADR 0005 rule 3 requires them to
-// be filled: buys first, then sells worst-price-first. See RunBar's doc
-// comment for the enumeration behind that ordering.
+// returns the ones it reached, in the order they are to be filled: buys
+// first (ADR 0005 rule 3), then every covered Exit Order resting at a Unit's
+// own Protective Stop, worst price first, and only once none of those is
+// left, the Exit Orders resting at the Exit Channel, as one exit fill. See
+// RunBar's doc comment for the enumeration behind that ordering.
 func (s *Simulator) covered(instrumentID string, periodEnd time.Time, view event.PriceView) ([]candidate, error) {
 	b, ok := s.books[instrumentID]
 	if !ok {
 		return nil, nil
 	}
-	var buys, sells []candidate
+	var buys []candidate
 
 	for _, o := range []*order{b.entry, b.add} {
 		if o == nil {
@@ -655,83 +730,132 @@ func (s *Simulator) covered(instrumentID string, periodEnd time.Time, view event
 		buys = append(buys, c)
 	}
 
-	if b.campaign != nil {
-		// One resting order per Unit, and so one fill per Unit — never one
-		// fill covering several of them.
-		//
-		// That is what the source describes: a stop belongs to a Unit, the
-		// Stop Ladder moves each one individually, and a Unit that filled
-		// further away keeps its own level (The Turtle Rules p.22-23's Crude
-		// example, where the fourth Unit's stop sits at 28.40 while Units 1-3
-		// stay at 27.70). It is also the only shape that can be right here,
-		// because under this system's rules two Units NEVER share a level:
-		// Unit k+1's stop is its own fill less 2 N, Unit k's has risen by
-		// half N, and the two coincide only if the later Unit filled exactly
-		// half an N above the earlier one — which slippage, strictly positive
-		// by ADR 0013, always prevents. Grouping Units into one fill would
-		// therefore be code that never ran, and it would have had to compare
-		// two derived prices for equality to decide.
-		//
-		// event.FillPayload.UnitIDs stays plural: the contract permits a
-		// producer that genuinely closes several Units at one level (a
-		// Variant that set every stop from the newest fill would), and this
-		// producer simply always names exactly one.
-		for _, u := range b.campaign.units {
-			if u.stop <= 0 {
-				// A Unit whose stop-set event has not arrived yet cannot be
-				// filled against. The reducer emits the two in the same Apply
-				// return, so this is unreachable in practice; skipping rather
-				// than erroring keeps the ordering of two emissions from
-				// becoming load-bearing here.
-				continue
-			}
-			c, filled, err := s.price(event.FillKindStop, SideSell, u.stop, b.campaign.n, u.quantity, u.ref.rangeFor(periodEnd, view))
-			if err != nil {
-				return nil, err
-			}
-			if !filled {
-				continue
-			}
-			c.campaignID = b.campaign.id
-			c.unitIndexes = []int{u.index}
-			c.unitIDs = []string{u.openingFillID}
-			sells = append(sells, c)
-		}
-
-		if b.exit != nil {
-			// The quantity is the Campaign's CURRENT holding, not the
-			// proposal's own: an earlier partial stop in this same bar may
-			// already have closed some Units, and the reducer checks an exit
-			// fill against what the Campaign still holds.
-			c, filled, err := s.price(b.exit.kind, b.exit.side, b.exit.level, b.exit.n, b.campaign.quantity(), b.exit.ref.rangeFor(periodEnd, view))
-			if err != nil {
-				return nil, err
-			}
-			if filled && c.quantity > 0 {
-				c.proposalID = b.exit.proposalID
-				c.campaignID = b.exit.campaignID
-				sells = append(sells, c)
-			}
-		}
-	}
-
 	// Buys in ascending level: a lower buy-stop is reached on the way up
 	// before a higher one, and the Add chain depends on that order anyway
 	// (rung n+1 is measured from rung n's fill, so it cannot be evaluated
 	// first). At most one buy is ever outstanding for an instrument in
 	// practice; the sort makes the order stated rather than incidental.
 	sortStable(buys, func(a, b candidate) bool { return a.level < b.level })
-	// Sells worst-price-first: the lowest price a long seller could have got
-	// is the pessimistic assumption, and it also decides which of two
-	// competing closes happened when both cannot (a stop that empties the
-	// Campaign cancels the exit, and vice versa). The sort is stable and the
-	// comparison is price alone, so two sells at the same price keep the
-	// order they were collected in — ascending Unit index, with the exit
-	// last — rather than needing a tie-break that would never run: no two
-	// orders here can share a price, since each Unit's stop stands at its own
-	// level (see the loop above).
-	sortStable(sells, func(a, b candidate) bool { return a.price < b.price })
+
+	if b.campaign == nil {
+		return buys, nil
+	}
+	sells, err := s.coveredExitOrders(b.campaign, b.exit, periodEnd, view)
+	if err != nil {
+		return nil, err
+	}
 	return append(buys, sells...), nil
+}
+
+// coveredExitOrders prices every held Unit's Exit Order against this bar and
+// returns the ones it reached, in fill order.
+//
+// # One order per Unit, and so no competing sells
+//
+// Each Unit rests exactly one sell order, for its own shares, at the level
+// the reducer's strategy.exit-order.set last recorded for it (CONTEXT.md:
+// "Exit Order"; ADR 0005, as amended). No two orders ever sell the same
+// shares, so every covered order fills at its own level on ADR 0005's own
+// terms — min(level, reference) less slippage — whatever order they are
+// delivered in, and the total sold can never exceed what the Campaign holds.
+// A Unit with no Exit Order recorded yet has nothing resting and is skipped:
+// the reducer emits a Unit's first Exit Order in the same Apply return as
+// the Unit itself, so this is unreachable in the composed loop, and skipping
+// rather than erroring keeps the order of those emissions from becoming
+// load-bearing here.
+//
+// # How each fill is reported
+//
+// A Unit whose Exit Order rests at its own Protective Stop fills as an
+// event.FillKindStop naming that one Unit, which the reducer applies as a
+// stop — and so as a partial close when other Units remain. Units never
+// share a stop level under this system's rules: Unit k+1's stop is its own
+// fill less 2 N, Unit k's has risen by half N, and the two coincide only if
+// the later Unit filled exactly half an N above the earlier one, which
+// slippage, strictly positive by ADR 0013, always prevents. So there is one
+// stop fill per Unit (The Turtle Rules p.22-23's Crude example keeps each
+// Unit's stop at its own level).
+//
+// Units whose Exit Orders rest at the Exit Channel all rest at the one
+// proposed exit level, and fill as a single event.FillKindExit for the exit
+// proposal. The reducer accepts an exit fill only for everything the
+// Campaign still holds (every Unit exits together; CONTEXT.md: "Campaign"),
+// so it is offered only once no stop fill is left to deliver: a Unit resting
+// at its own stop does so because that stop is at or above the exit level,
+// so any bar that reaches the exit level has reached it too, and by the time
+// the exit is offered those Units are closed. Should a held Unit nonetheless
+// remain outside the exit — an order the bar did not reach, or none at all —
+// the exit fill cannot describe what happened and this fails closed.
+//
+// Stop fills keep ADR 0005 rule 3's worst-price-first order among
+// themselves. Since no two sells compete for the same shares, that order
+// changes no price; it only fixes the order in which they are journalled.
+func (s *Simulator) coveredExitOrders(c *campaign, proposal *exitProposal, periodEnd time.Time, view event.PriceView) ([]candidate, error) {
+	var stops []candidate
+	var atExit []*unit
+	for _, u := range c.units {
+		if u.exitLevel <= 0 {
+			continue
+		}
+		if u.exitSource == event.ExitOrderSourceExitChannel {
+			atExit = append(atExit, u)
+			continue
+		}
+		cand, filled, err := s.price(event.FillKindStop, SideSell, u.exitLevel, c.n, u.quantity, u.ref.rangeFor(periodEnd, view))
+		if err != nil {
+			return nil, err
+		}
+		if !filled {
+			continue
+		}
+		cand.campaignID = c.id
+		cand.unitIndexes = []int{u.index}
+		cand.unitIDs = []string{u.openingFillID}
+		stops = append(stops, cand)
+	}
+	// Worst price first. The sort is stable and compares price alone, so two
+	// stops at one price would keep ascending Unit order — a tie-break that
+	// never runs, since no two Units share a stop (see above).
+	sortStable(stops, func(a, b candidate) bool { return a.price < b.price })
+	if len(stops) > 0 || len(atExit) == 0 {
+		return stops, nil
+	}
+
+	exit, filled, err := s.exitAtChannel(c, proposal, atExit, periodEnd, view)
+	if err != nil || !filled {
+		return nil, err
+	}
+	return []candidate{exit}, nil
+}
+
+// exitAtChannel prices the Exit Orders resting at the Exit Channel as the
+// one exit fill of proposal. See coveredExitOrders.
+func (s *Simulator) exitAtChannel(c *campaign, proposal *exitProposal, atExit []*unit, periodEnd time.Time, view event.PriceView) (candidate, bool, error) {
+	if proposal == nil || proposal.campaignID != c.id {
+		return candidate{}, false, fmt.Errorf("fills: instrument %q: unit %d of campaign %q rests at the exit channel, but no exit proposal is outstanding for that campaign", c.instrumentID, atExit[0].index, c.id)
+	}
+	r := atExit[0].ref.rangeFor(periodEnd, view)
+	var quantity int64
+	for _, u := range atExit {
+		// Exact comparison: each level is a copy of the one proposed level,
+		// never a derived price.
+		if u.exitLevel != proposal.level || u.ref.rangeFor(periodEnd, view) != r {
+			return candidate{}, false, fmt.Errorf("fills: instrument %q: unit %d of campaign %q rests at the exit channel at %v, which is not the one order at the level of exit proposal %q (%v) the other units rest at",
+				c.instrumentID, u.index, c.id, u.exitLevel, proposal.proposalID, proposal.level)
+		}
+		quantity += u.quantity
+	}
+	cand, filled, err := s.price(event.FillKindExit, SideSell, proposal.level, c.n, quantity, r)
+	if err != nil || !filled {
+		return candidate{}, false, err
+	}
+	if len(atExit) != len(c.units) {
+		return candidate{}, false, fmt.Errorf("fills: instrument %q: the exit at %v for campaign %q was reached, but the campaign holds %d unit(s) and only %d rest at the exit; an exit fill closes everything the campaign still holds, so it cannot describe this bar",
+			c.instrumentID, proposal.level, c.id, len(c.units), len(atExit))
+	}
+	cand.proposalID = proposal.proposalID
+	cand.campaignID = c.id
+	return cand, true, nil
 }
 
 // sortStable is an insertion sort, used rather than sort.SliceStable because
