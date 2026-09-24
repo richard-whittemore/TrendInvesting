@@ -24,8 +24,21 @@ func TestTheBacktestNeverBuysMoreThanItsCashAndDeclinesTheAddItCannotFund(t *tes
 	}
 	var cash, spent float64
 	addDeclines := 0
+	// A declined Unit is skipped before any proposal is built (ADR 0010), so
+	// no Add is proposed for the Campaign and bar a decline answers.
+	type rung struct {
+		campaignID string
+		periodEnd  string
+	}
+	proposed, declined := map[rung]bool{}, map[rung]bool{}
 	for _, record := range records {
 		switch record.Envelope.Type {
+		case event.AddProposalEventType:
+			var add event.AddProposalPayload
+			if err := json.Unmarshal(record.Envelope.Payload, &add); err != nil {
+				t.Fatal(err)
+			}
+			proposed[rung{add.CampaignID, add.PeriodEnd.UTC().String()}] = true
 		case event.AccountSnapshotEventType:
 			var snapshot event.AccountSnapshotPayload
 			if err := json.Unmarshal(record.Envelope.Payload, &snapshot); err != nil {
@@ -47,6 +60,7 @@ func TestTheBacktestNeverBuysMoreThanItsCashAndDeclinesTheAddItCannotFund(t *tes
 			}
 			if decline.Kind == event.ProposalDeclinedKindAdd && decline.Reason == event.DeclineReasonInsufficientCash {
 				addDeclines++
+				declined[rung{decline.CampaignID, decline.PeriodEnd.UTC().String()}] = true
 				if decline.AvailableCash >= decline.RequiredCash || decline.AvailableCash >= cash {
 					t.Errorf("decline = %+v, want the balance left after earlier fills, below both the Unit's cost and the opening %v", decline, cash)
 				}
@@ -58,5 +72,10 @@ func TestTheBacktestNeverBuysMoreThanItsCashAndDeclinesTheAddItCannotFund(t *tes
 	}
 	if addDeclines == 0 {
 		t.Error("no Add was declined for insufficient cash; want Unit 2 declined once Unit 1 has spent the cash")
+	}
+	for r := range declined {
+		if proposed[r] {
+			t.Errorf("Campaign %q was both declined for insufficient cash and proposed an Add on the bar ending %s", r.campaignID, r.periodEnd)
+		}
 	}
 }
