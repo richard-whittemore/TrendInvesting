@@ -58,13 +58,13 @@ func exitOrderFor(u unitState, campaignID string, pending *pendingExitProposalSt
 // (unitState.exitOrderLevel/exitOrderSource), in the order units holds them.
 // A Unit never recorded — one whose stop has just been set — always
 // differs. Nothing is mutated here: the caller records the new levels with
-// recordExitOrders only once every decision of its transition has validated,
-// the discipline openCampaign states.
+// recordExitOrders on candidate state. transact publishes the recorded levels
+// only after every decision of the input has validated.
 //
 // cause distinguishes the decision's id from any other change to the same
 // Unit at the same instant: the fill's id for a fill, "bar" for a completed
 // bar, "end-of-stream" for the end of the input stream.
-func (r *Reducer) exitOrderChanges(campaign *campaignState, units []unitState, pending *pendingExitProposalState, asOf time.Time, cause string, input event.Envelope) ([]event.Envelope, error) {
+func (r *transition) exitOrderChanges(campaign *campaignState, units []unitState, pending *pendingExitProposalState, asOf time.Time, cause string, input event.Envelope) ([]event.Envelope, error) {
 	var emissions []event.Envelope
 	for _, u := range units {
 		order := exitOrderFor(u, campaign.campaignID, pending)
@@ -116,7 +116,7 @@ func recordExitOrders(campaign *campaignState, pending *pendingExitProposalState
 // Units followed at once by recordExitOrders, for a caller whose state has
 // already moved: a completed bar, after its exit proposal was raised or
 // expired, and the end of the input stream, after its expiries.
-func (r *Reducer) emitExitOrderChanges(state *instrumentState, asOf time.Time, cause string, input event.Envelope) ([]event.Envelope, error) {
+func (r *transition) emitExitOrderChanges(state *instrumentState, asOf time.Time, cause string, input event.Envelope) ([]event.Envelope, error) {
 	campaign := state.campaign
 	if campaign == nil {
 		return nil, nil

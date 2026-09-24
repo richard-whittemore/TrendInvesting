@@ -1,6 +1,9 @@
 package indicator
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // ExitChannel is a rolling window that reports the LOWEST low among the last
 // Length completed bars Added to it (CONTEXT.md: "Exit Channel"). The Turtle
@@ -24,7 +27,7 @@ import "fmt"
 //
 // This type's two-method shape (Extreme, then Add) makes the correct order
 // the only one that reads naturally at the call site — see
-// internal/strategy.Reducer.applyCompletedBar, which calls Extreme before Add
+// internal/strategy.transition.applyCompletedBar, which calls Extreme before Add
 // on every bar, whether or not the instrument is currently in a Campaign (the
 // window must already be warm the moment a Campaign opens).
 //
@@ -88,4 +91,16 @@ func (c *ExitChannel) Extreme() (value float64, ready bool) {
 func (c *ExitChannel) Add(low float64) {
 	c.values[c.count%c.length] = low
 	c.count++
+}
+
+// Clone returns an independent accumulator, including its buffered bars.
+// Reducer transactions must not advance committed completed-bar inputs on
+// rejection (CONTEXT.md: "Completed bar"). A nil receiver stays nil.
+func (c *ExitChannel) Clone() *ExitChannel {
+	if c == nil {
+		return nil
+	}
+	cloned := *c
+	cloned.values = slices.Clone(c.values)
+	return &cloned
 }

@@ -8,6 +8,46 @@
 4. Fail closed on unknown schemas, missing sequences, stale data, or uncertain brokerage state.
 5. Prefer table-driven tests and replay fixtures over behavior hidden inside LEAN callbacks.
 
+## Reducer transactions
+
+`Reducer.Apply` uses one copy-and-swap boundary, `transact`. Every input handler
+and emission builder is a method of the private `transition` type, which owns a
+deep copy of the reducer. They may mutate that candidate while deriving later
+payloads, but every payload must validate and marshal before the builder returns
+success. Only then are the candidate and its emission stream published. On any
+error the candidate and ordinary emissions are discarded, including fill
+acceptance: retrying a rejected fill must fail again, never become a duplicate.
+
+The snapshot includes every instrument's indicator buffers, Campaign and Units,
+entry/Add/exit proposals, the accepted-fills map and its UnitID slices, delistings,
+the Notional Account, and all scalar cash/chronology/currency state. All owned
+maps, slices and mutable pointers are independent; immutable `time.Time` location
+metadata may be shared. Adding mutable state requires extending the copy and
+no-aliasing tests. A complete snapshot is intentionally used rather than a
+manually maintained per-event write set; its copying cost grows with instrument
+state and retained fill history.
+
+This covers configuration, all fill kinds and `openCampaign` (including chained
+Adds and Exit Orders), snapshots and cash movements, completed bars (including
+indicator advancement and proposal expiries), delistings, and whole-stream
+completion across instruments. Pure arithmetic and payload builders need no
+separate nested transaction: they execute inside the same candidate. The public
+Notional Account arithmetic object is independently usable; reducer-owned calls
+always operate on the candidate account.
+
+One existing failure diagnostic is deliberately preserved: finding a Campaign
+without a valid Protective Stop emits an engine-state halt while leaving state
+unchanged (the safety invariants in `docs/architecture.md`). Only that explicit
+halt channel survives rejection; partial business decisions do not.
+
+Transaction tests use the private build callback as their only fault seam. They
+run the real handler, invalidate its last payload's required Rule, and reject it
+with the real payload validator before returning from the callback. This tests
+otherwise construction-unreachable final failures without adding a production
+validator override. Separate tests trigger actual builder failures through Apply.
+These mechanics do not change strategy rules, decision order or payload bytes
+(ADR 0016); the decision corpus and journal/registry goldens stay unchanged.
+
 ## Floating-point determinism: never leave a multiply-add fusible
 
 Go permits an implementation to fuse `a + b*c` into a single fused multiply-add, "possibly across statements", and arm64 does while amd64 does not. The fused form keeps the full-precision product, so the two architectures produce results that differ in the last bits — and a platform whose journal must be byte-identical for replay equivalence (ADR 0017) cannot afford that. This is the determinism rule in `.greptile/rules.md` applied to the arithmetic itself: same inputs, same configuration, same code version, same decisions — on any machine.

@@ -266,21 +266,26 @@ func NewReducer(strategyVersion string, payload event.ConfigurationPayload) (*Re
 	}, nil
 }
 
-// Apply implements replay.Handler. It recognises exactly four input event
+// Apply implements replay.Handler. It recognises the following input event
 // types:
 //
 //   - event.ConfigurationEventType: recorded, and required before any bar or
 //     account snapshot.
+//
 //   - event.CompletedBarEventType: updates that instrument's True Range/N
 //     and emits one event.SetupEvaluatedEventType decision.
+//
 //   - event.FillEventType: the only input that may change position state
 //     (see campaign.go).
+//
 //   - event.AccountSnapshotEventType: feeds actual equity to the Notional
 //     Account (ADR 0007: re-basing, the Drawdown Step ladder, and recovery,
 //     in that order) — see notional.go's applyAccountSnapshot.
+//
 //   - event.CashMovementEventType: scales the Notional Account for a
 //     deposit or withdrawal (ADR 0007) — see notional.go's
 //     applyCashMovement.
+//
 //   - event.MarketCorporateActionEventType: a fact about an instrument's own
 //     listing, external to any decision this system made — today, only a
 //     Delisting Exit (CONTEXT.md; ADR 0009), which forces an open Campaign
@@ -292,9 +297,18 @@ func NewReducer(strategyVersion string, payload event.ConfigurationPayload) (*Re
 //     event.RunCompletedEventType may follow it (checked below) — see
 //     applyAdapterRunStopped.
 //
+//   - event.RunCompletedEventType: expires outstanding proposals across the
+//     whole universe and records resulting Exit Order changes (ADR 0011).
+//
 // Any other event type fails closed rather than being silently ignored
 // (docs/development.md principle 4: "Fail closed on unknown schemas").
 func (r *Reducer) Apply(_ context.Context, envelope event.Envelope) ([]event.Envelope, error) {
+	return r.transact(func(tx *transition) ([]event.Envelope, error) {
+		return tx.apply(envelope)
+	})
+}
+
+func (r *transition) apply(envelope event.Envelope) ([]event.Envelope, error) {
 	if r.streamEnded {
 		return nil, fmt.Errorf("strategy: the input stream has already ended, so %q at sequence %d cannot exist; a run ends once (see applyRunCompleted)", envelope.Type, envelope.Sequence)
 	}
@@ -349,7 +363,7 @@ func (r *Reducer) Apply(_ context.Context, envelope event.Envelope) ([]event.Env
 //     mid-stream reconfiguration is not a supported concept here; a second
 //     configuration event (even one with a matching hash) is rejected
 //     rather than silently re-applied.
-func (r *Reducer) applyConfiguration(envelope event.Envelope) ([]event.Envelope, error) {
+func (r *transition) applyConfiguration(envelope event.Envelope) ([]event.Envelope, error) {
 	if r.configured {
 		return nil, fmt.Errorf("strategy: reducer is already configured (configuration hash %q); mid-stream reconfiguration is not supported (ADR 0006 freezes configuration at entry)", r.configurationHash)
 	}
@@ -430,7 +444,7 @@ func sizingModeFor(mode event.SizingMode) (sizing.Mode, error) {
 // 0015's envelope-level rule, applied here at the payload level): a schema
 // this build was not written against must never be silently interpreted as
 // the current one.
-func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, error) {
+func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, error) {
 	if !r.configured {
 		return nil, errors.New("strategy: received a completed bar before a configuration event; failing closed")
 	}
@@ -511,7 +525,8 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	// only be memory corruption, not a bad input, and why the halt envelope
 	// is returned alongside the error.
 	if halt, err := r.checkCampaignHasAProtectiveStop(state, bar, envelope); err != nil {
-		return []event.Envelope{halt}, err
+		r.failureEmissions = []event.Envelope{halt}
+		return nil, err
 	}
 
 	// ADR 0004: signal computation, including N and the Entry Channel, runs
@@ -549,7 +564,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	// previousPeriodEnd is the period end of the bar BEFORE this one — the moment this bar
 	// opened — captured here because the advance block below overwrites it. It
 	// is the earliest instant at which an order proposed on this bar could
-	// have executed; see Reducer.applyFill for the window it bounds.
+	// have executed; see transition.applyFill for the window it bounds.
 	previousPeriodEnd := state.lastPeriodEnd
 
 	entryChannelHigh, entryChannelReady := state.entryChannel.Extreme()
@@ -595,8 +610,8 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 	// evaluate/advance pair stays contiguous; it reads and writes none of
 	// that state. A trade proposal, an exit proposal or an Add proposal that
 	// no fill arrived for expires with its bar, per ADR 0011; see
-	// Reducer.expireEntryProposal, Reducer.expireExitProposal and
-	// Reducer.expireAddProposal for why the expiry is emitted rather than
+	// transition.expireEntryProposal, transition.expireExitProposal and
+	// transition.expireAddProposal for why the expiry is emitted rather than
 	// dropped. At most one of the three can be outstanding for a given
 	// instrument at a time (a pending entry proposal is always cleared
 	// before a Campaign, and so an exit or Add proposal, can exist; exit and
@@ -788,7 +803,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 
 		// A proposal is remembered as outstanding so that a fill can be
 		// checked against it — and NOTHING about position state moves here.
-		// See Reducer.rememberPendingProposal.
+		// See transition.rememberPendingProposal.
 		if err := r.rememberPendingProposal(state, sized, previousPeriodEnd); err != nil {
 			return nil, err
 		}
@@ -830,7 +845,7 @@ func (r *Reducer) applyCompletedBar(envelope event.Envelope) ([]event.Envelope, 
 // previousClose is the period end of the bar BEFORE the decision bar — the
 // moment the decision bar opened — and is what ADR 0010's cash basis is
 // measured at, not the decision bar's own close.
-func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, signalID string, entryLevel, n float64, nReady bool, previousClose time.Time) (event.Envelope, error) {
+func (r *transition) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, signalID string, entryLevel, n float64, nReady bool, previousClose time.Time) (event.Envelope, error) {
 	// Unreachable from this reducer: Tier A requires a ready N, and a
 	// Signal is only emitted at Tier A. Guarded anyway — .greptile/rules.md
 	// requires a zero, negative or not-yet-warm volatility value to fail
@@ -954,7 +969,7 @@ func (r *Reducer) sizeUnit(bar event.CompletedBarPayload, input event.Envelope, 
 // event.DeclineReasonInsufficientCash; every other caller passes 0, 0
 // (ProposalDeclinedPayload.Validate rejects a non-zero value for any other
 // reason).
-func (r *Reducer) decline(bar event.CompletedBarPayload, input event.Envelope, signalID, reason, detail string, requiredCash, availableCash float64) (event.Envelope, error) {
+func (r *transition) decline(bar event.CompletedBarPayload, input event.Envelope, signalID, reason, detail string, requiredCash, availableCash float64) (event.Envelope, error) {
 	payload := event.ProposalDeclinedPayload{
 		InstrumentID:  bar.InstrumentID,
 		PeriodEnd:     bar.PeriodEnd,
@@ -1000,7 +1015,7 @@ func (r *Reducer) decline(bar event.CompletedBarPayload, input event.Envelope, s
 // Accepting a snapshot onto the account timeline (applyAccountSnapshot,
 // notional.go) is deliberately separate from deciding whether it may be
 // spent: chronology there is per account, and this is per decision.
-func (r *Reducer) cashAtPreviousClose(instrumentID string, previousClose time.Time) (float64, error) {
+func (r *transition) cashAtPreviousClose(instrumentID string, previousClose time.Time) (float64, error) {
 	if !r.hasAvailableCash {
 		return 0, fmt.Errorf(
 			"strategy: instrument %q: no account.snapshot has ever supplied an available-cash figure; refusing to size a unit as though cash were infinite (ADR 0010)",
@@ -1074,7 +1089,7 @@ func decisionID(kind, instrumentID string, periodEnd time.Time) string {
 // event stream. Sequence, CausationID and CorrelationID are deliberately left
 // unset: replay.Engine assigns them, overwriting whatever a handler sets, so
 // a handler cannot claim causation it did not have (docs/architecture.md).
-func (r *Reducer) stamp(id, eventType string, schemaVersion uint32, periodEnd time.Time, input event.Envelope, payload json.RawMessage) event.Envelope {
+func (r *transition) stamp(id, eventType string, schemaVersion uint32, periodEnd time.Time, input event.Envelope, payload json.RawMessage) event.Envelope {
 	return event.Envelope{
 		ID:                id,
 		Type:              eventType,
@@ -1090,7 +1105,7 @@ func (r *Reducer) stamp(id, eventType string, schemaVersion uint32, periodEnd ti
 	}
 }
 
-func (r *Reducer) stateFor(instrumentID string) (*instrumentState, error) {
+func (r *transition) stateFor(instrumentID string) (*instrumentState, error) {
 	if state, ok := r.instruments[instrumentID]; ok {
 		return state, nil
 	}

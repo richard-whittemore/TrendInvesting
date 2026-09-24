@@ -1,6 +1,9 @@
 package indicator
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // EntryChannel is a rolling window that reports the highest high among the
 // last Length completed bars Added to it (CONTEXT.md: "Entry Channel"). The
@@ -24,7 +27,7 @@ import "fmt"
 //
 // This type's two-method shape (Extreme, then Add) makes the correct order
 // the only one that reads naturally at the call site — see
-// internal/strategy.Reducer.applyCompletedBar, which calls Extreme before
+// internal/strategy.transition.applyCompletedBar, which calls Extreme before
 // Add on every bar.
 //
 // A high exactly equal to the channel high is not a breakout: The Turtle
@@ -87,4 +90,16 @@ func (c *EntryChannel) Extreme() (value float64, ready bool) {
 func (c *EntryChannel) Add(high float64) {
 	c.values[c.count%c.length] = high
 	c.count++
+}
+
+// Clone returns an independent accumulator, including its buffered bars.
+// Reducer transactions must not advance committed completed-bar inputs on
+// rejection (CONTEXT.md: "Completed bar"). A nil receiver stays nil.
+func (c *EntryChannel) Clone() *EntryChannel {
+	if c == nil {
+		return nil
+	}
+	cloned := *c
+	cloned.values = slices.Clone(c.values)
+	return &cloned
 }

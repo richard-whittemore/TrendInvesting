@@ -85,7 +85,7 @@ type Step struct {
 }
 
 // NotionalAccount implements ADR 0007's Drawdown Step ladder: the equity
-// figure position sizing (internal/sizing.SizeUnit, via Reducer.sizeUnit) is
+// figure position sizing (internal/sizing.SizeUnit, via transition.sizeUnit) is
 // measured against, which is reduced during a drawdown and is therefore not
 // the same as actual account equity (CONTEXT.md: "Notional Account").
 //
@@ -529,7 +529,7 @@ func checkEquity(name string, v float64) error {
 // other than event.AccountSnapshotSchemaVersion before decoding (ADR 0015),
 // and requires a configuration event first: a snapshot has nowhere to apply
 // its steps to before the Notional Account exists.
-func (r *Reducer) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelope, error) {
+func (r *transition) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelope, error) {
 	if !r.configured {
 		return nil, errors.New("strategy: received an account snapshot before a configuration event; failing closed")
 	}
@@ -581,7 +581,7 @@ func (r *Reducer) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelop
 	// amendment. A snapshot replaces spendable cash outright, so prior
 	// withdrawals are not deducted again. AsOf travels with it: whether it
 	// may be spent on a given bar is decided at the decision itself, where the
-	// bar's previous close is known (Reducer.cashAtPreviousClose,
+	// bar's previous close is known (transition.cashAtPreviousClose,
 	// reducer.go). A snapshot is accepted on its own account-timeline
 	// chronology alone; it is the spending that is bound to the bar.
 	r.availableCash = snapshot.AvailableCash
@@ -687,7 +687,7 @@ func (r *Reducer) applyAccountSnapshot(envelope event.Envelope) ([]event.Envelop
 // timeline, and they may not share an AsOf — a cash movement carries its own
 // EquityBefore precisely so the rule is checkable from the event alone,
 // without needing a same-instant snapshot.
-func (r *Reducer) applyCashMovement(envelope event.Envelope) ([]event.Envelope, error) {
+func (r *transition) applyCashMovement(envelope event.Envelope) ([]event.Envelope, error) {
 	if !r.configured {
 		return nil, errors.New("strategy: received a cash movement before a configuration event; failing closed")
 	}
@@ -788,7 +788,7 @@ func notionalAccountEventID(kind string, asOf time.Time) string {
 // The pin survives
 // everything else the Notional Account does — re-basing, a Drawdown Step,
 // a recovery — since it lives on the Reducer, not on NotionalAccount.
-func (r *Reducer) pinAccountCurrency(currency string) error {
+func (r *transition) pinAccountCurrency(currency string) error {
 	if r.accountCurrency == "" {
 		r.accountCurrency = currency
 		return nil

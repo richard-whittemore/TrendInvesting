@@ -27,7 +27,7 @@ import (
 // because no bar superseded them. That instant is the envelope's own
 // EventTime, and the payload states none of its own: see
 // event.RunCompletedPayload.
-func (r *Reducer) applyRunCompleted(envelope event.Envelope) ([]event.Envelope, error) {
+func (r *transition) applyRunCompleted(envelope event.Envelope) ([]event.Envelope, error) {
 	if !r.configured {
 		return nil, errors.New("strategy: received an end-of-stream event before a configuration event; failing closed")
 	}
@@ -78,7 +78,7 @@ func (r *Reducer) applyRunCompleted(envelope event.Envelope) ([]event.Envelope, 
 // ascending order. The state is held in a map, and a journal's decision order
 // must not depend on Go's map iteration order (.greptile/rules.md:
 // determinism).
-func (r *Reducer) instrumentIDs() []string {
+func (r *transition) instrumentIDs() []string {
 	ids := make([]string, 0, len(r.instruments))
 	for id := range r.instruments {
 		ids = append(ids, id)
@@ -91,7 +91,7 @@ func (r *Reducer) instrumentIDs() []string {
 // in ADR 0010's decision order: exits before Adds before entries. At most one
 // of the three can be outstanding at a time in practice, so the order is a
 // statement rather than a behaviour any test can observe on one instrument.
-func (r *Reducer) expireOutstandingProposals(instrumentID string, completedAt time.Time, input event.Envelope) ([]event.Envelope, error) {
+func (r *transition) expireOutstandingProposals(instrumentID string, completedAt time.Time, input event.Envelope) ([]event.Envelope, error) {
 	state := r.instruments[instrumentID]
 	var emitted []event.Envelope
 
@@ -172,7 +172,7 @@ type endOfStreamExpiry struct {
 	level          float64
 }
 
-func (r *Reducer) emitEndOfStreamExpiry(expiry endOfStreamExpiry, completedAt time.Time, input event.Envelope) (event.Envelope, error) {
+func (r *transition) emitEndOfStreamExpiry(expiry endOfStreamExpiry, completedAt time.Time, input event.Envelope) (event.Envelope, error) {
 	payload := event.ProposalExpiredPayload{
 		InstrumentID:   expiry.instrumentID,
 		Kind:           expiry.kind,
