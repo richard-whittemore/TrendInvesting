@@ -26,6 +26,9 @@ Routed paths:
 - `applyRunCompleted`, including expiries and resulting Exit Orders across the
   whole universe, plus `streamEnded`.
 - `applyConfiguration` also uses the common boundary; it emits no payloads.
+- `applyAdapterRunStopped` (added on `main` after this branch was cut, and routed on rebase) uses the same boundary. It emits no payloads, but its `runStopped` flag commits only on success.
+
+`TestCloneCoversEveryReferenceTypedField` lists every reference-typed path reachable from `Reducer`, so a new map, slice or pointer fails until `clone` deep-copies it.
 
 No reducer input transition is left out. Pure arithmetic and payload helpers
 run inside the enclosing transition without nested commits. Independently
