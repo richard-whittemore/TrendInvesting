@@ -72,9 +72,66 @@ class CompletedBarsAlgorithm(QCAlgorithm):
     def OnData(self, data):
         if self.failed or self.client is None:
             return
+        changed = data.SymbolChangedEvents.get(self.symbol)
+        if changed is not None:
+            # A rename changes nothing for one instrument whose instrument_id
+            # this adapter holds constant, and a ticker change is not a
+            # delisting (CorporateActionPayload's closed Kind set), so it is
+            # recorded here and never published.
+            self.Log("adapter: symbol changed {} -> {}; instrument_id={} unchanged".format(
+                changed.OldSymbol, changed.NewSymbol, self.instrument))
+        notice = data.Delistings.get(self.symbol)
         bar = data.Bars.get(self.symbol)
-        if bar is None:
+        if bar is not None:
+            self.publish_completed_bar(bar)
+        if notice is not None and not self.failed:
+            self.handle_delisting(notice)
+
+    def handle_delisting(self, notice):
+        """Stop on LEAN's DELISTED rather than publish it as a fact.
+
+        LEAN derives a delisting from the end of a ticker's map file and
+        carries no reason, so a conversion reads exactly like a delisting:
+        it reported GOOAV, a when-issued share that became GOOG, as DELISTED
+        on 2014-04-03. The reducer treats a delisting as terminal (ADR 0009),
+        so publishing an untrustworthy one could record a Delisting Exit that
+        never happened. Until a source that states the reason exists, the run
+        stops and names the instrument instead (docs/development.md principle
+        4: fail closed on uncertain state).
+        """
+        if notice.Type == DelistingType.Warning:
+            self.Log("adapter: LEAN delisting warning for {} at {}; nothing published".format(
+                self.instrument, notice.Time))
             return
+        reason = ("LEAN reports {} DELISTED at {}; its delisting signal carries no reason and "
+                  "also fires for conversions, so the run stops rather than publish a delisting "
+                  "that may be false (adapter/lean/README.md)".format(self.instrument, notice.Time))
+        # End the stream cleanly first, so every outstanding proposal reaches
+        # its terminal event in the journal rather than being left open.
+        self.complete_run()
+        # A failed completion has already stopped the run with its own
+        # reason; keep it, since it is the one that says the journal may lack
+        # its terminal event.
+        if not self.failed:
+            self.stop(reason)
+
+    def complete_run(self):
+        """Send replay.run.completed once, if the stream is intact and not empty.
+
+        Called at the normal end of the algorithm and before a deliberate
+        stop. After a transport or reply failure the stream is no longer in
+        step with the engine, so nothing further is sent; the run's own
+        failure is the record.
+        """
+        if self.failed or self.client is None or self.publisher.completed \
+                or self.publisher.last_event_time is None:
+            return
+        try:
+            self.decision_count += len(self.publisher.publish_run_completed())
+        except Exception as err:
+            self.stop("run completion failed: {}".format(err))
+
+    def publish_completed_bar(self, bar):
         # Warm-up bars are published exactly like any other bar. The reducer
         # owns readiness: it builds N and the Entry/Exit Channels from every
         # completed bar it is given (internal/strategy/reducer.go), so
@@ -110,6 +167,7 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.stop("completed bar failed: {}".format(err))
 
     def OnEndOfAlgorithm(self):
+        self.complete_run()
         if self.client is not None:
             self.client.close()
         self.Log("adapter: bars={} warmup_bars={} decisions={} failed={}".format(

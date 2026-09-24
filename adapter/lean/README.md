@@ -45,6 +45,25 @@ for bar t+1. Warm-up follows exactly the same protocol. The adapter remains
 backtest-only and submits no orders; LEAN end-to-end acceptance is separate.
 See ADR 0020's 2026-09-24 producer amendment (#158).
 
+**Delistings stop the run; they are never published.** LEAN reports a
+delisting as the end of a ticker's map file, and its `Delisting` carries no
+reason. A conversion therefore reads exactly like a delisting: in a real run
+LEAN reported `GOOAV`, the when-issued class-C share that became `GOOG`, as
+`DELISTED` on 2014-04-03. The engine treats a delisting as terminal (ADR 0009):
+it closes any open Campaign at the last close and ignores the instrument
+afterwards. So publishing an untrustworthy one could record a Delisting Exit
+that never happened.
+
+On `DELISTED` for its instrument, the adapter publishes that slice's bar and
+snapshot, if the slice has one, and then stops the run, naming the instrument.
+A delisting warning is logged, and the run continues. A ticker change
+(`SymbolChangedEvents`) is logged and never published; the adapter holds
+`instrument_id` constant, so a rename changes nothing for one instrument. This
+is a backtest rule. In live trading the broker processes a delisting and the
+system learns of it through reconciliation (ADR 0019, #113). Publishing
+delistings needs a corporate-actions source that states *why* a security
+stopped trading (#41, #112).
+
 The adapter will still need to:
 
 - send `account.cash-movement` events into the same input sequence (outside #158);

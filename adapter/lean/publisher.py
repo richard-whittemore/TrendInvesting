@@ -6,6 +6,8 @@ from math import isfinite
 
 # event.AccountSnapshotSchemaVersion (internal/event/account.go); ADR 0015.
 ACCOUNT_SNAPSHOT_SCHEMA_VERSION = 2
+# event.RunCompletedSchemaVersion (internal/event/run_completed.go); ADR 0015.
+RUN_COMPLETED_SCHEMA_VERSION = 1
 
 
 def raw_view(history, end_time):
@@ -31,6 +33,8 @@ class Publisher:
         self.sequence = 1
         self.last_end = None
         self.last_as_of = None
+        self.last_event_time = None
+        self.completed = False
 
     def publish(self, instrument, bar, raw, period_end):
         if self.last_end is not None and bar.EndTime <= self.last_end:
@@ -69,7 +73,28 @@ class Publisher:
         self.last_as_of = as_of
         return decisions
 
+    def publish_run_completed(self):
+        """End the input stream the way cmd/backtest ends a run.
+
+        replay.run.completed tells the reducer no further input exists, so it
+        expires every proposal still outstanding and each reaches exactly one
+        terminal event (event.RunCompletedEventType). It is stamped with the
+        last input's own time, as cmd/backtest's drive stamps it with the last
+        bar's period end, so the expiries fall inside the journal's span.
+        Nothing may follow it.
+        """
+        if self.completed:
+            raise ValueError("the run's input stream has already been completed")
+        if self.last_event_time is None:
+            raise ValueError("a run with no inputs has nothing to complete")
+        decisions = self._publish("replay.run.completed", RUN_COMPLETED_SCHEMA_VERSION,
+                                  "run-completed", {}, self.last_event_time)
+        self.completed = True
+        return decisions
+
     def _publish(self, event_type, schema_version, id_kind, payload, period_end):
+        if self.completed:
+            raise ValueError("no input may follow the run's completion")
         encoded = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode()
         sequence = self.sequence + 1
         envelope = {
@@ -99,4 +124,5 @@ class Publisher:
         if not isinstance(decisions, list):
             raise ValueError("engine decisions must be an array")
         self.sequence = sequence
+        self.last_event_time = period_end
         return decisions
