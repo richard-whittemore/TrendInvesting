@@ -809,7 +809,9 @@ type ProposalExpiredPayload struct {
 // ExpiryReasonSupersededByNextBar only — strictly after PeriodEnd too (a
 // proposal is superseded by a LATER bar in that case; ExpiryReasonSupersededByStop's
 // own closing fill can legitimately land inside the SAME bar, see
-// ExpiredAt's own doc comment).
+// ExpiredAt's own doc comment), and — for Reason ExpiryReasonInputStreamEnded
+// only — at or after PeriodEnd, non-strictly (ExpiryReasonInputStreamEnded's
+// own doc comment: "at the earliest the proposal's own bar").
 func (p ProposalExpiredPayload) Validate() error {
 	var errs []error
 	if p.InstrumentID == "" {
@@ -864,6 +866,15 @@ func (p ProposalExpiredPayload) Validate() error {
 			errs = append(errs, fmt.Errorf("expired at %s must be after the proposal's period end %s: a proposal is superseded by a later bar",
 				p.ExpiredAt.Format(time.RFC3339), p.PeriodEnd.Format(time.RFC3339)))
 		}
+		// The weaker, non-strict rule for ExpiryReasonInputStreamEnded: its
+		// own doc comment states ExpiredAt is "at the earliest the
+		// proposal's own bar" — equal to PeriodEnd is fine (there is no
+		// later bar to wait for), but before it states a stream ending
+		// before a bar it already delivered.
+		if p.Reason == ExpiryReasonInputStreamEnded && periodEndPresent && p.ExpiredAt.Before(p.PeriodEnd) {
+			errs = append(errs, fmt.Errorf("expired at %s precedes the proposal's period end %s: a stream cannot end before a bar it already delivered",
+				p.ExpiredAt.Format(time.RFC3339), p.PeriodEnd.Format(time.RFC3339)))
+		}
 	}
 	if p.Rule == "" {
 		errs = append(errs, errors.New("rule is required"))
@@ -875,8 +886,9 @@ func (p ProposalExpiredPayload) Validate() error {
 	case ExpiryReasonSupersededByNextBar:
 		// recognised
 	case ExpiryReasonInputStreamEnded:
-		// Valid for every Kind, and subject only to the universal
-		// EarliestFillAt rule above: see the constant's own doc comment.
+		// Valid for every Kind, subject to the universal EarliestFillAt
+		// rule above and to the non-strict PeriodEnd lower bound checked
+		// with it: see the constant's own doc comment.
 	case ExpiryReasonSupersededByStop:
 		if p.Kind != ProposalKindAdd {
 			errs = append(errs, fmt.Errorf("reason %q is only valid for kind %q (got %q): only an add proposal is cancelled by a stop fill", ExpiryReasonSupersededByStop, ProposalKindAdd, p.Kind))

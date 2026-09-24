@@ -3,6 +3,7 @@ package event_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
@@ -76,5 +77,36 @@ func TestEndOfStreamExpiryStillCannotPredateTheEarliestPossibleFill(t *testing.T
 	}
 	if !strings.Contains(err.Error(), "earliest instant") {
 		t.Fatalf("Validate() error = %v, want one naming the earliest possible execution", err)
+	}
+}
+
+// TestEndOfStreamExpiryCannotPredateItsOwnBar: the constant's own doc
+// comment states ExpiredAt for this reason is "at the earliest the
+// proposal's own bar" — a lower bound of PeriodEnd, not just of
+// EarliestFillAt. A payload that satisfies the universal EarliestFillAt rule
+// (EarliestFillAt < ExpiredAt) but still states an ExpiredAt before
+// PeriodEnd claims a stream ended before a bar it already delivered, which
+// Validate must reject.
+func TestEndOfStreamExpiryCannotPredateItsOwnBar(t *testing.T) {
+	t.Parallel()
+
+	payload := endOfStreamExpiry(event.ProposalKindEntry)
+	// EarliestFillAt < ExpiredAt < PeriodEnd: passes the universal rule
+	// above, but still predates the proposal's own bar.
+	payload.ExpiredAt = payload.PeriodEnd.Add(-12 * time.Hour)
+	if !payload.ExpiredAt.After(payload.EarliestFillAt) {
+		t.Fatalf("fixture no longer satisfies EarliestFillAt < ExpiredAt (%s, %s); this test would then be exercising the wrong rule",
+			payload.EarliestFillAt, payload.ExpiredAt)
+	}
+	if !payload.ExpiredAt.Before(payload.PeriodEnd) {
+		t.Fatalf("fixture no longer states an ExpiredAt before PeriodEnd (%s, %s)", payload.ExpiredAt, payload.PeriodEnd)
+	}
+
+	err := payload.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want one naming the proposal's period end")
+	}
+	if !strings.Contains(err.Error(), "precedes the proposal's period end") {
+		t.Fatalf("Validate() error = %v, want one naming the proposal's period end", err)
 	}
 }
