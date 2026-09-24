@@ -388,7 +388,13 @@ func TestRerunStopsWhenItsInvocationIsCancelled(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := pipelineEquivalence(ctx, bytes.NewReader(journalBytes)); !errors.Is(err, context.Canceled) {
+	err = pipelineEquivalence(ctx, bytes.NewReader(journalBytes))
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("pipelineEquivalence(cancelled) error = %v, want it to wrap context.Canceled", err)
+	}
+	// The golden journal is valid, so a cancelled re-run of it must not
+	// report the partial output as a divergence.
+	if strings.Contains(err.Error(), "divergence") {
+		t.Fatalf("pipelineEquivalence(cancelled) error = %v, want no divergence reported for a valid journal", err)
 	}
 }
