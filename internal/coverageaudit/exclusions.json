@@ -674,7 +674,7 @@
       "file": "internal/fills/runbar.go",
       "function": "RunSession",
       "statement": "return result, err",
-      "occurrence": 4,
+      "occurrence": 5,
       "category": "unreachable-by-construction",
       "reason": "Propagates sessionClosedFor, whose only failures are its own excluded Validate and Marshal branches: the payload is built from bars sessionBars has already validated, all sharing one period end and naming distinct instruments, sorted here."
     },
@@ -684,6 +684,13 @@
       "statement": "return event.Envelope{}, fmt.Errorf(\"fills: built an invalid session closed payload: %w\", err)",
       "category": "unreachable-by-construction",
       "reason": "SessionClosedPayload.Validate on a payload built from sessionBars' output: at least one bar, each passing CompletedBarPayload.Validate (so a non-empty instrument ID and a non-zero, writable period end), no instrument twice, sorted immediately before."
+    },
+    {
+      "file": "internal/fills/account.go",
+      "function": "(*Simulator).closeOf",
+      "statement": "return fmt.Errorf(\"fills: marshal account snapshot payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/fills/runbar.go",
