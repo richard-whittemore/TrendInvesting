@@ -7,6 +7,10 @@ import (
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
 )
 
 // sampleDecisionEnvelope is a minimal, valid-shaped decision envelope for
@@ -156,5 +160,111 @@ func TestDecisionHashIsDeterministic(t *testing.T) {
 		if got := decisionHash(envelopes, nil); got != first {
 			t.Fatalf("decisionHash was not deterministic: got %q, want %q", got, first)
 		}
+	}
+}
+
+// TestDecideDecisionCorpus pins every outcome the corpus's guarantees rest
+// on, above all the refusal to overwrite a changed hash: that refusal is
+// what makes the corpus a tripwire rather than a record that follows
+// whatever the reducer last did (ADR 0016).
+func TestDecideDecisionCorpus(t *testing.T) {
+	t.Parallel()
+
+	const version, path = "9.9.9", "testdata/decision-corpus/9.9.9.json"
+	pinned := map[string]string{"A": "a", "B": "b"}
+
+	for _, tc := range []struct {
+		name                    string
+		existing                map[string]string
+		found                   bool
+		recorded                map[string]string
+		fullRun, passed, update bool
+		wantProblem             string // substring; "" means no problem at all
+		wantWrite               map[string]string
+	}{
+		{name: "unchanged full run is clean",
+			existing: pinned, found: true, recorded: pinned, fullRun: true, passed: true},
+		{name: "changed hash fails and names the scenario",
+			existing: pinned, found: true, recorded: map[string]string{"A": "a", "B": "CHANGED"},
+			fullRun: true, passed: true, wantProblem: "CHANGED for 1 scenario(s)"},
+		{name: "changed hash with update refuses and writes nothing",
+			existing: pinned, found: true, recorded: map[string]string{"A": "a", "B": "CHANGED"},
+			fullRun: true, passed: true, update: true, wantProblem: "refuses to overwrite a changed hash"},
+		{name: "new scenario without update fails",
+			existing: pinned, found: true, recorded: map[string]string{"A": "a", "B": "b", "C": "c"},
+			fullRun: true, passed: true, wantProblem: "not pinned (a new test)"},
+		{name: "new scenario with update adds it and keeps the rest",
+			existing: pinned, found: true, recorded: map[string]string{"A": "a", "B": "b", "C": "c"},
+			fullRun: true, passed: true, update: true,
+			wantWrite: map[string]string{"A": "a", "B": "b", "C": "c"}},
+		{name: "new scenario with update on a filtered run still adds, drops nothing",
+			existing: pinned, found: true, recorded: map[string]string{"C": "c"},
+			update: true, passed: true,
+			wantWrite: map[string]string{"A": "a", "B": "b", "C": "c"}},
+		{name: "missing scenario on a filtered run is not reported",
+			existing: pinned, found: true, recorded: map[string]string{"A": "a"}, passed: true},
+		{name: "missing scenario on a failing full run is not reported",
+			existing: pinned, found: true, recorded: map[string]string{"A": "a"}, fullRun: true},
+		{name: "missing scenario on a passing full run fails",
+			existing: pinned, found: true, recorded: map[string]string{"A": "a"},
+			fullRun: true, passed: true, wantProblem: "were not recorded by this full run"},
+		{name: "missing scenario on a passing full run with update drops it",
+			existing: pinned, found: true, recorded: map[string]string{"A": "a"},
+			fullRun: true, passed: true, update: true, wantWrite: map[string]string{"A": "a"}},
+		{name: "update from a failing run refuses and writes nothing",
+			existing: pinned, found: true, recorded: map[string]string{"A": "a"},
+			fullRun: true, update: true, wantProblem: "refusing to update"},
+		{name: "no file without update fails",
+			recorded: pinned, fullRun: true, passed: true, wantProblem: "no pinned file"},
+		{name: "no file with update on a filtered run refuses",
+			recorded: pinned, passed: true, update: true, wantProblem: "refusing to generate"},
+		{name: "no file with update on a passing full run generates it",
+			recorded: pinned, fullRun: true, passed: true, update: true, wantWrite: pinned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := decideDecisionCorpus(tc.existing, tc.found, tc.recorded, tc.fullRun, tc.passed, tc.update, version, path)
+			joined := strings.Join(got.problems, "\n")
+			switch {
+			case tc.wantProblem == "" && len(got.problems) > 0:
+				t.Fatalf("problems = %q, want none", joined)
+			case tc.wantProblem != "" && !strings.Contains(joined, tc.wantProblem):
+				t.Fatalf("problems = %q, want one containing %q", joined, tc.wantProblem)
+			}
+			if !reflect.DeepEqual(got.write, tc.wantWrite) {
+				t.Fatalf("write = %v, want %v", got.write, tc.wantWrite)
+			}
+		})
+	}
+}
+
+// TestReadDecisionCorpusFileRejectsTrailingData pins that a corpus file is
+// read in full or not at all: a valid object followed by anything else is an
+// error, not a corpus whose suffix was silently ignored.
+func TestReadDecisionCorpusFileRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+
+	for name, content := range map[string]string{
+		"second object":  `{"A":"a"}{"B":"b"}`,
+		"trailing bytes": `{"A":"a"} junk`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "corpus.json")
+			if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := readDecisionCorpusFile(path); err == nil {
+				t.Fatalf("readDecisionCorpusFile(%q) error = nil, want trailing data rejected", content)
+			}
+		})
+	}
+
+	path := filepath.Join(t.TempDir(), "corpus.json")
+	if err := os.WriteFile(path, []byte("{\"A\":\"a\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if m, found, err := readDecisionCorpusFile(path); err != nil || !found || m["A"] != "a" {
+		t.Fatalf("readDecisionCorpusFile(well-formed) = %v, %v, %v; want the object, found, nil", m, found, err)
 	}
 }

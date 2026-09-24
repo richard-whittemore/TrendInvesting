@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -172,6 +173,13 @@ func readDecisionCorpusFile(path string) (data map[string]string, found bool, er
 	if err := decoder.Decode(&m); err != nil {
 		return nil, false, fmt.Errorf("decode %s: %w", path, err)
 	}
+	// One JSON object and nothing after it. A second value, or any trailing
+	// bytes, means the file is not what -update-decision-corpus wrote, and a
+	// guard that silently ignored the rest would be trusting evidence it had
+	// not read.
+	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
+		return nil, false, fmt.Errorf("decode %s: trailing data after the corpus object", path)
+	}
 	return m, true, nil
 }
 
@@ -194,25 +202,42 @@ func writeDecisionCorpusFile(path string, m map[string]string) error {
 // decisionCorpusFullRun reports whether this test process ran the whole
 // package's tests, unfiltered — the only condition under which a scenario
 // pinned in the corpus but not recorded this run can be trusted to mean
-// "renamed or deleted" rather than "not selected". Two flags select a
-// subset: -run (test.run), naming a pattern, and -short (test.short), which
-// some tests in this package may honour by skipping themselves (none do
-// today, but nothing stops one from starting to). Either one means this run
-// cannot support "not recorded implies gone" — completeness is judged only
-// on a plain, filterless `go test`.
+// "renamed or deleted" rather than "not selected". Three flags select a
+// subset: -run (test.run) and -skip (test.skip), each naming a pattern, and
+// -short (test.short), which some tests in this package may honour by
+// skipping themselves (none do today, but nothing stops one from starting
+// to). Any one of them means this run cannot support "not recorded implies
+// gone" — completeness is judged only on a plain, filterless `go test`.
+// That is necessary, not sufficient: decideDecisionCorpus also requires the
+// run to have passed, since a failing or -failfast-stopped test may never
+// have reached stream.run.
 //
-// -run matching every test (e.g. -run '.*') is still treated as filtered:
+// A pattern matching every test (e.g. -run '.*') is still treated as filtered:
 // this reads the flag's presence, not what it happens to match, which is
 // the honest side of a real trade-off — false positives here would fail a
 // -run-scoped debugging session for scenarios it never touched; the cost is
 // a genuinely-complete -run invocation not getting the completeness check
-// it would have earned. `make check`'s own `go test ./...` never passes
-// either flag, so this never weakens what CI enforces.
+// it would have earned. `make check`'s own `go test ./...` passes none
+// of these flags, so this never weakens what CI enforces.
 func decisionCorpusFullRun() bool {
-	if runFlag := flag.Lookup("test.run"); runFlag != nil && runFlag.Value.String() != "" {
-		return false
+	for _, name := range []string{"test.run", "test.skip"} {
+		if f := flag.Lookup(name); f != nil && f.Value.String() != "" {
+			return false
+		}
 	}
 	return !testing.Short()
+}
+
+// decisionCorpusCountIsOne reports whether each test runs exactly once in
+// this process. With -count=N every test runs N times and stream.run's
+// per-name call counter keeps climbing across iterations, so the second
+// iteration's first call is recorded as "Name#2" — a key that means "the
+// second call within one run" everywhere else. Those keys cannot be told
+// apart from genuine repeat calls, so the corpus is not checked at all on
+// such a run rather than checked wrongly.
+func decisionCorpusCountIsOne() bool {
+	f := flag.Lookup("test.count")
+	return f == nil || f.Value.String() == "1"
 }
 
 // snapshotDecisionCorpus copies the corpus recorded so far, so the rest of
@@ -287,8 +312,20 @@ type decisionCorpusOutcome struct {
 // readDecisionCorpusFile reports it (found=false: no file yet, the state
 // right after a RulesVersion bump). recorded is what this run actually
 // produced (snapshotDecisionCorpus). fullRun is decisionCorpusFullRun's
-// answer; update is *updateDecisionCorpus.
-func decideDecisionCorpus(existing map[string]string, found bool, recorded map[string]string, fullRun, update bool, version, path string) decisionCorpusOutcome {
+// answer; passed is whether every test in the run passed; update is
+// *updateDecisionCorpus.
+//
+// Two rules keep the corpus append-only in the sense that matters — no
+// scenario loses its pinned entry except by being genuinely renamed or
+// deleted:
+//
+//   - Nothing is ever DROPPED unless the run was both unfiltered and
+//     passing. A failing test, or one -failfast stopped before it ran, may
+//     never have reached stream.run, and "not recorded" would then mean
+//     "did not get that far", not "gone".
+//   - Nothing is WRITTEN at all from a failing run. A corpus is evidence of
+//     what the reducer decides when its tests pass; a failing run is not.
+func decideDecisionCorpus(existing map[string]string, found bool, recorded map[string]string, fullRun, passed, update bool, version, path string) decisionCorpusOutcome {
 	changed := changedScenarios(existing, recorded)
 	if len(changed) > 0 {
 		msg := fmt.Sprintf(
@@ -304,6 +341,12 @@ func decideDecisionCorpus(existing map[string]string, found bool, recorded map[s
 		return decisionCorpusOutcome{problems: []string{msg}}
 	}
 
+	if update && !passed {
+		return decisionCorpusOutcome{problems: []string{fmt.Sprintf(
+			"decision corpus: refusing to update %s from a run with failing tests — a corpus records what the "+
+				"reducer decides when its tests pass; fix the failures and rerun", path)}}
+	}
+
 	if !found {
 		if !update {
 			return decisionCorpusOutcome{problems: []string{fmt.Sprintf(
@@ -312,15 +355,16 @@ func decideDecisionCorpus(existing map[string]string, found bool, recorded map[s
 		}
 		if !fullRun {
 			return decisionCorpusOutcome{problems: []string{fmt.Sprintf(
-				"decision corpus: refusing to generate %s from a filtered run (-run or -short excludes some "+
+				"decision corpus: refusing to generate %s from a filtered run (-run, -skip or -short excludes some "+
 					"scenarios) — rerun the whole package, unfiltered, with -update-decision-corpus", path)}}
 		}
 		return decisionCorpusOutcome{write: recorded}
 	}
 
 	added := newScenarios(existing, recorded)
+	complete := fullRun && passed
 	var missing []string
-	if fullRun {
+	if complete {
 		missing = droppedScenarios(existing, recorded)
 	}
 
@@ -344,7 +388,7 @@ func decideDecisionCorpus(existing map[string]string, found bool, recorded map[s
 				path, len(added), strings.Join(added, ", ")))
 		}
 	}
-	if fullRun && len(missing) > 0 {
+	if complete && len(missing) > 0 {
 		if update {
 			next = cloneStringMap(next)
 			for _, name := range missing {
@@ -376,7 +420,7 @@ func cloneStringMap(m map[string]string) map[string]string {
 
 // compareDecisionCorpus is decideDecisionCorpus wired to real file I/O, for
 // TestMain to call after every test has run.
-func compareDecisionCorpus() []string {
+func compareDecisionCorpus(passed bool) []string {
 	version := strategy.RulesVersion
 	path := decisionCorpusPath(version)
 
@@ -387,7 +431,7 @@ func compareDecisionCorpus() []string {
 
 	recorded := snapshotDecisionCorpus()
 	fullRun := decisionCorpusFullRun()
-	outcome := decideDecisionCorpus(existing, found, recorded, fullRun, *updateDecisionCorpus, version, path)
+	outcome := decideDecisionCorpus(existing, found, recorded, fullRun, passed, *updateDecisionCorpus, version, path)
 
 	if outcome.write != nil {
 		if err := writeDecisionCorpusFile(path, outcome.write); err != nil {
@@ -406,7 +450,12 @@ func compareDecisionCorpus() []string {
 func TestMain(m *testing.M) {
 	code := m.Run()
 
-	if problems := compareDecisionCorpus(); len(problems) > 0 {
+	if !decisionCorpusCountIsOne() {
+		fmt.Fprintln(os.Stderr, "decision corpus: not checked — -count is not 1, and repeated iterations cannot be told apart from repeated calls within one run")
+		os.Exit(code)
+	}
+
+	if problems := compareDecisionCorpus(code == 0); len(problems) > 0 {
 		for _, p := range problems {
 			fmt.Fprintln(os.Stderr, p)
 		}

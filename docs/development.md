@@ -177,7 +177,9 @@ So when the corpus asks you to add scenarios, ask of each one whether the previo
 
 - A pinned scenario's hash differs from what this run recorded: the reducer decided something different under an unchanged `RulesVersion`. Per ADR 0016 this is a rule change, not a journal-replay divergence, and needs (1) a `RulesVersion` bump, (2) a new `testdata/decision-corpus/<new-version>.json`, and (3) a new row in `RuleSurfaceFingerprints`.
 - A scenario recorded but not pinned (a new test) fails, asking for `-update-decision-corpus` (adds only).
-- On an unfiltered run (no `-run`, no `-short`) a pinned scenario that was not recorded at all (a renamed or deleted test) fails, asking for `-update-decision-corpus` to drop it. A filtered run never enforces this, since it necessarily recorded only a subset.
+- On an unfiltered run (no `-run`, `-skip` or `-short`) **whose tests all passed**, a pinned scenario that was not recorded at all (a renamed or deleted test) fails, asking for `-update-decision-corpus` to drop it. A filtered run never enforces this, since it recorded only a subset. Neither does a failing run: a test that failed, or that `-failfast` stopped before it ran, may never have reached `stream.run()`.
+
+`-update-decision-corpus` writes nothing from a run with failing tests, since the corpus records what the reducer decides when its tests pass. A run with `-count` other than 1 skips the corpus check entirely: repeated iterations can't be told apart from repeated calls within one test, so checking would only report false new scenarios. `make check` runs with neither.
 
 **After a deliberate rule change:**
 
