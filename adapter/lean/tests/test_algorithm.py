@@ -2,7 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
-from datetime import datetime, time
+from datetime import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,14 +15,14 @@ for p in (tests_dir, adapter_dir):
 from test_publisher import Client as FakeEngineClient, Frame, bar
 
 from client import Unavailable
-from publisher import Publisher
 
 
 class FakeAlgorithm:
     LiveMode = False
     def SetStartDate(self, *args): pass
     def SetEndDate(self, *args): pass
-    def SetCash(self, *args): pass
+    def SetCash(self, cash):
+        self.Portfolio = types.SimpleNamespace(TotalPortfolioValue=cash, Cash=cash)
     def SetTimeZone(self, *args): pass
     def AddEquity(self, ticker, resolution, **kwargs):
         self.subscription = kwargs
@@ -55,10 +55,10 @@ class AlgorithmTests(unittest.TestCase):
         settings = {"socket": "unused", "configuration_hash": "hash",
                     "strategy_version": "version", "run_id": "test",
                     "symbol": "AAPL", "start": "2014-06-09", "end": "2014-06-10",
-                    "warmup_bars": 3}
+                    "warmup_bars": 3, "cash": 1000000}
         algo = algorithm.CompletedBarsAlgorithm()
         with patch.object(algorithm, "load_settings", return_value=settings), \
-                patch.object(algorithm, "Client"):
+                patch.object(algorithm, "Client", return_value=FakeEngineClient()):
             algo.Initialize()
         return algo
 
@@ -68,7 +68,8 @@ class AlgorithmTests(unittest.TestCase):
         self.assertEqual(algo.subscription["dataNormalizationMode"], "split")
         self.assertFalse(algo.subscription["fillForward"])
         seen = []
-        algo.publisher = types.SimpleNamespace(sequence=2, publish=lambda *args: seen.append(args) or [])
+        algo.publisher = types.SimpleNamespace(sequence=2, publish=lambda *args: seen.append(args) or [],
+                                               publish_snapshot=lambda *args: [])
         for day, warming in ((4, True), (5, True), (6, True), (9, False)):
             b = bar(day)
             algo.IsWarmingUp = warming
@@ -87,8 +88,8 @@ class AlgorithmTests(unittest.TestCase):
     def test_warmup_bars_are_published_and_numbered_contiguously(self):
         """publishes every completed bar, warm-up included, in one contiguous sequence."""
         algo = self.init()
-        client = FakeEngineClient()
-        algo.publisher = Publisher(client, "hash", "version", "test")
+        client = algo.client
+        self.assertEqual(client.sent, [])
         for day, warming in ((4, True), (5, True), (6, True), (9, False)):
             b = bar(day)
             algo.IsWarmingUp = warming
@@ -98,14 +99,66 @@ class AlgorithmTests(unittest.TestCase):
         # The first bar carries Sequence 2 (continuing the engine's own
         # configuration input at Sequence 1), and warm-up bars share that
         # same numbering with the bars that follow warm-up, contiguously.
-        self.assertEqual([e["sequence"] for e in client.sent], [2, 3, 4, 5])
+        self.assertEqual([e["sequence"] for e in client.sent], list(range(2, 10)))
         self.assertEqual(algo.warmup_seen, 3)
         self.assertEqual(algo.bar_count, 4)
-        # FakeEngineClient answers every bar with zero decisions; what this
-        # test pins is that all four bars — warm-up included — reach the
-        # engine at all, contiguously numbered.
+        # FakeEngineClient answers every input with zero decisions; all four
+        # bars and their snapshots reach the engine in one sequence.
         self.assertEqual(algo.decision_count, 0)
-        self.assertEqual(client.sent[-1]["payload"]["period_end"], "2014-06-09T20:00:00Z")
+        self.assertEqual([e["type"] for e in client.sent],
+                         ["market.bar.completed", "account.snapshot"] * 4)
+        ends = []
+        for completed, snapshot in zip(client.sent[::2], client.sent[1::2]):
+            end = completed["payload"]["period_end"]
+            self.assertEqual(snapshot["payload"]["as_of"], end)
+            self.assertEqual(snapshot["recorded_at"], end)
+            ends.append(end)
+        self.assertTrue(all(a < b for a, b in zip(ends, ends[1:])))
+        self.assertEqual(ends[-1], "2014-06-09T20:00:00Z")
+
+    def test_portfolio_is_read_after_bar_reply(self):
+        algo = self.init()
+        def update_portfolio(envelope):
+            if envelope["type"] == "market.bar.completed":
+                algo.Portfolio.TotalPortfolioValue = 123456.75
+                algo.Portfolio.Cash = 54321.25
+        algo.client.after_reply = update_portfolio
+        algo.IsWarmingUp = True
+        algo.History = lambda *args, **kwargs: Frame(bar(6).EndTime)
+        algo.OnData(types.SimpleNamespace(Bars={"AAPL": bar(6)}))
+        self.assertFalse(algo.failed)
+        self.assertEqual(algo.client.sent[-1]["payload"], {
+            "as_of": "2014-06-06T20:00:00Z", "equity": 123456.75,
+            "available_cash": 54321.25, "currency": "USD"})
+
+    def test_bad_snapshot_reply_stops_run(self):
+        for field, value in (("configuration_hash", "other"), ("strategy_version", "other"),
+                             ("sequence", 99), ("correlation_id", "other"),
+                             ("causation_id", "other"), ("payload_hash", "bad"),
+                             ("type", "other"), ("schema_version", 99),
+                             ("envelope_version", 99), ("payload", {"decisions": None})):
+            with self.subTest(field=field):
+                algo = self.init()
+                algo.client.reply_overrides = {"account.snapshot": {field: value}}
+                algo.IsWarmingUp = True
+                algo.History = lambda *args, **kwargs: Frame(bar(6).EndTime)
+                data = types.SimpleNamespace(Bars={"AAPL": bar(6)})
+                algo.OnData(data)
+                self.assertTrue(algo.failed)
+                self.assertTrue(algo.client.closed)
+                self.assertEqual(len(algo.client.sent), 2)
+                self.assertEqual(algo.publisher.sequence, 2)
+                algo.OnData(data)
+                self.assertEqual(len(algo.client.sent), 2)
+
+    def test_bad_bar_reply_sends_no_snapshot(self):
+        algo = self.init()
+        algo.client.reply_overrides = {"market.bar.completed": {"sequence": 99}}
+        algo.IsWarmingUp = True
+        algo.History = lambda *args, **kwargs: Frame(bar(6).EndTime)
+        algo.OnData(types.SimpleNamespace(Bars={"AAPL": bar(6)}))
+        self.assertTrue(algo.failed)
+        self.assertEqual(len(algo.client.sent), 1)
 
     def test_missing_raw_stops_stream_without_reusing_connection(self):
         algo = self.init()
@@ -122,7 +175,7 @@ class AlgorithmTests(unittest.TestCase):
         settings = {"socket": "unused", "configuration_hash": "hash",
                     "strategy_version": "version", "run_id": "test",
                     "symbol": "AAPL", "start": "2014-06-09", "end": "2014-06-10",
-                    "warmup_bars": 3}
+                    "warmup_bars": 3, "cash": 1000000}
         with patch.object(algorithm, "load_settings", return_value=settings), \
                 patch.object(algorithm, "Client", side_effect=Unavailable("no engine on the socket")):
             algo = algorithm.CompletedBarsAlgorithm()
@@ -139,7 +192,8 @@ class AlgorithmTests(unittest.TestCase):
         count, resolution = algo.warmup
         self.assertIs(type(count), int)
         self.assertEqual((count, resolution), (3, "daily"))
-        algo.publisher = types.SimpleNamespace(sequence=2, publish=lambda *args: [])
+        algo.publisher = types.SimpleNamespace(sequence=2, publish=lambda *args: [],
+                                               publish_snapshot=lambda *args: [])
         for day in (6, 9, 10):
             b = bar(day)
             algo.IsWarmingUp = True
@@ -171,3 +225,33 @@ class AlgorithmTests(unittest.TestCase):
         self.assertTrue(algo.failed)
         self.assertIn("backtest-only", algo.quit_reason)
 
+
+
+class CashSettingTests(unittest.TestCase):
+    """Starting cash comes from the run's settings, never a built-in default."""
+    base = {"socket": "unused", "configuration_hash": "hash",
+            "strategy_version": "version", "run_id": "test", "symbol": "AAPL",
+            "start": "2014-06-09", "end": "2014-06-10", "warmup_bars": 3}
+
+    def start(self, settings):
+        algo = algorithm.CompletedBarsAlgorithm()
+        algo.SetCash = lambda value: setattr(algo, "cash", value)
+        with patch.object(algorithm, "load_settings", return_value=settings), \
+                patch.object(algorithm, "Client"):
+            algo.Initialize()
+        return algo
+
+    def test_cash_is_the_runs_own_figure(self):
+        algo = self.start(dict(self.base, cash=1000000))
+        self.assertFalse(algo.failed)
+        self.assertEqual(algo.cash, 1000000)
+
+    def test_missing_or_invalid_cash_fails_closed(self):
+        for bad in (None, 0, -1, "1000000", float("inf"), float("nan"), True):
+            with self.subTest(cash=bad):
+                settings = dict(self.base)
+                if bad is not None:
+                    settings["cash"] = bad
+                algo = self.start(settings)
+                self.assertTrue(algo.failed)
+                self.assertFalse(hasattr(algo, "cash"))

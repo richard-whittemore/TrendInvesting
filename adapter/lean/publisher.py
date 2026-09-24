@@ -1,6 +1,11 @@
-"""Map LEAN bars to the event contract without strategy arithmetic (ADR 0004)."""
+"""Map LEAN bars and portfolio readings to events (ADRs 0004 and 0020)."""
 import hashlib
 import json
+from datetime import datetime
+from math import isfinite
+
+# event.AccountSnapshotSchemaVersion (internal/event/account.go); ADR 0015.
+ACCOUNT_SNAPSHOT_SCHEMA_VERSION = 2
 
 
 def raw_view(history, end_time):
@@ -25,6 +30,7 @@ class Publisher:
         self.run_id = run_id
         self.sequence = 1
         self.last_end = None
+        self.last_as_of = None
 
     def publish(self, instrument, bar, raw, period_end):
         if self.last_end is not None and bar.EndTime <= self.last_end:
@@ -36,15 +42,43 @@ class Publisher:
                 ("Open", "High", "Low", "Close", "Volume")}),
             "raw": raw,
         }
+        decisions = self._publish("market.bar.completed", 1, "bar", payload, period_end)
+        self.last_end = bar.EndTime
+        return decisions
+
+    def publish_snapshot(self, portfolio, period_end):
+        """Report LEAN's close after its bar reply (ADR 0020's producer amendment).
+
+        period_end is the bar publisher's UTC timestamp; readings must advance
+        strictly, as required by event.AccountSnapshotPayload.AsOf.
+        """
+        as_of = datetime.strptime(period_end, "%Y-%m-%dT%H:%M:%SZ")
+        if self.last_as_of is not None and as_of <= self.last_as_of:
+            raise ValueError("duplicate or out-of-order account snapshot")
+        equity, cash = float(portfolio.TotalPortfolioValue), float(portfolio.Cash)
+        # Match event.AccountSnapshotPayload.Validate; never substitute or
+        # clamp an invalid account figure (ADR 0015).
+        if not isfinite(equity) or equity <= 0:
+            raise ValueError("equity must be finite and positive")
+        if not isfinite(cash) or cash < 0:
+            raise ValueError("available cash must be finite and not negative")
+        payload = {"as_of": period_end, "equity": equity,
+                   "available_cash": cash, "currency": "USD"}
+        decisions = self._publish("account.snapshot", ACCOUNT_SNAPSHOT_SCHEMA_VERSION,
+                                  "snapshot", payload, period_end)
+        self.last_as_of = as_of
+        return decisions
+
+    def _publish(self, event_type, schema_version, id_kind, payload, period_end):
         encoded = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode()
         sequence = self.sequence + 1
         envelope = {
-            "id": "{}:bar:{}".format(self.run_id, sequence),
-            "type": "market.bar.completed", "envelope_version": 1,
-            "schema_version": 1, "event_time": period_end,
-            # A backtest learns of a bar the moment it ends, exactly as
+            "id": "{}:{}:{}".format(self.run_id, id_kind, sequence),
+            "type": event_type, "envelope_version": 1,
+            "schema_version": schema_version, "event_time": period_end,
+            # A backtest records bars and portfolio readings at the close, as
             # cmd/backtest's inputEnvelope records it, so two runs over the
-            # same bars write the same inputs. This adapter refuses LiveMode;
+            # same data write the same inputs. This adapter refuses LiveMode;
             # a live producer records when it actually received the data.
             "recorded_at": period_end,
             "sequence": sequence, "correlation_id": self.run_id,
@@ -65,5 +99,4 @@ class Publisher:
         if not isinstance(decisions, list):
             raise ValueError("engine decisions must be an array")
         self.sequence = sequence
-        self.last_end = bar.EndTime
         return decisions

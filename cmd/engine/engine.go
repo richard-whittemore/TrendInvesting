@@ -11,10 +11,12 @@
 // # Wire contract: the adapter's first bar must carry Sequence 2
 //
 // This run's own configuration input is always delivered first, at Sequence
-// configurationSequence (1), before the socket opens. The adapter's own bar
-// stream continues that SAME sequence — it does not start a numbering of its
-// own — so the adapter's very first bar must carry Sequence
-// configurationSequence+1 (2), and each one after it the next integer. This
+// configurationSequence (1), before the socket opens. The adapter's bars and
+// account snapshots continue that SAME sequence — it does not start a
+// numbering of its own — so its very first bar must carry Sequence
+// configurationSequence+1 (2). Each account.snapshot follows its bar after
+// that bar's decisions have been received, continuing the single input
+// sequence: bar 2, snapshot 3, bar 4, snapshot 5, including warm-up. This
 // is not a convenience: the journal this run writes is read back as ONE
 // input stream (configuration included), and a stream in which two records
 // both claim Sequence 1 fails its own replay.

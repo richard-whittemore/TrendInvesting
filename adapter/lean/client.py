@@ -46,7 +46,7 @@ class Client:
     A connection is abandoned whenever an exchange does not complete: nothing
     on the wire pairs a request with a reply beyond ordering, so reusing a
     connection after a timeout would read the abandoned reply as the answer to
-    the next bar.
+    the next input.
     """
 
     def __init__(self, path, timeout=None, max_frame_bytes=DEFAULT_MAX_FRAME_BYTES):
@@ -76,12 +76,12 @@ class Client:
     def __exit__(self, *_):
         self.close()
 
-    def decide(self, bar):
-        """Send one bar envelope and return the decision envelope."""
+    def decide(self, envelope):
+        """Send one input envelope and return the decision envelope (ADR 0014)."""
         if self._broken:
             raise Unavailable("connection abandoned by an earlier failure")
         try:
-            return self._exchange(bar)
+            return self._exchange(envelope)
         except Rejected:
             # The engine answered, so the stream is still in step.
             raise
@@ -90,8 +90,8 @@ class Client:
             self.close()
             raise
 
-    def _exchange(self, bar):
-        frame = json.dumps(bar, separators=_SEPARATORS, allow_nan=False).encode("utf-8") + b"\n"
+    def _exchange(self, envelope):
+        frame = json.dumps(envelope, separators=_SEPARATORS, allow_nan=False).encode("utf-8") + b"\n"
         if len(frame) > self.max_frame_bytes:
             raise ValueError(
                 "request is {} bytes, limit is {}".format(len(frame), self.max_frame_bytes)
@@ -109,8 +109,8 @@ class Client:
         error = reply.get("error")
         if error is not None:
             causation = error.get("causation_id", "")
-            if causation and causation != bar["id"]:
-                raise OutOfOrder("error names {}, sent {}".format(causation, bar["id"]))
+            if causation and causation != envelope["id"]:
+                raise OutOfOrder("error names {}, sent {}".format(causation, envelope["id"]))
             if error.get("code") == CODE_UNAVAILABLE:
                 raise Unavailable(error.get("message", "engine is shutting down"))
             raise Rejected(error.get("code", ""), error.get("message", ""), causation)
@@ -118,9 +118,9 @@ class Client:
         decision = reply.get("envelope")
         if decision is None:
             raise Unavailable("reply carries neither a decision nor an error")
-        if decision.get("causation_id") != bar["id"]:
+        if decision.get("causation_id") != envelope["id"]:
             raise OutOfOrder(
-                "decision cites {}, sent {}".format(decision.get("causation_id"), bar["id"])
+                "decision cites {}, sent {}".format(decision.get("causation_id"), envelope["id"])
             )
         # The envelope's own integrity field (event.Envelope.Validate's
         # PayloadHash rule), checked before any decision inside it is used.
