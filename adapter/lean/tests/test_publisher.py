@@ -1,29 +1,52 @@
 import hashlib
 import json
+import subprocess
 import sys
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 adapter_dir = str(Path(__file__).resolve().parents[1])
 if adapter_dir not in sys.path:
     sys.path.insert(0, adapter_dir)
 
+from client import Client as WireClient
 from publisher import Publisher, raw_view
 
 
 class Client:
-    def __init__(self):
+    def __init__(self, reply_overrides=None, after_reply=None):
         self.sent = []
+        self.closed = False
+        self.reply_overrides = reply_overrides or {}
+        self.after_reply = after_reply
+
+    def close(self):
+        self.closed = True
 
     def decide(self, envelope):
         self.sent.append(envelope)
-        return {"type": "engine.decisions", "envelope_version": 1,
+        reply = {"type": "engine.decisions", "envelope_version": 1,
                 "schema_version": 1, "sequence": envelope["sequence"],
                 "causation_id": envelope["id"], "correlation_id": envelope["correlation_id"],
                 "configuration_hash": "hash",
                 "strategy_version": "version", "payload": {"decisions": []}}
+        reply.update(self.reply_overrides.get(envelope["type"], {}))
+        encoded = json.dumps(reply["payload"], separators=(",", ":")).encode()
+        reply.setdefault("payload_hash", hashlib.sha256(encoded).hexdigest())
+        # Exercise the production client's exact-byte hash check with the
+        # fake engine's reply; no socket server is needed for these cases.
+        wire = WireClient.__new__(WireClient)
+        wire._broken = False
+        wire.max_frame_bytes = 1 << 20
+        wire._sock = Mock()
+        wire._read_line = lambda: json.dumps({"envelope": reply}, separators=(",", ":")).encode()
+        result = wire.decide(envelope)
+        if self.after_reply is not None:
+            self.after_reply(envelope)
+        return result
 
 
 def bar(day):
@@ -42,6 +65,50 @@ class Frame:
 
 
 class PublisherTests(unittest.TestCase):
+    def test_snapshot_payload_matches_go_contract(self):
+        client = Client()
+        pub = Publisher(client, "hash", "version", "test")
+        for day, cash in ((6, 75000.25), (9, 0)):
+            end = "2014-06-{:02d}T20:00:00Z".format(day)
+            b = bar(day)
+            pub.publish("AAPL", b, raw_view(Frame(b.EndTime), b.EndTime), end)
+            pub.publish_snapshot(SimpleNamespace(TotalPortfolioValue=123456.75, Cash=cash), end)
+            envelope = client.sent[-1]
+            self.assertEqual(envelope["payload"], {
+                "as_of": end, "equity": 123456.75, "available_cash": cash, "currency": "USD"})
+            self.assertEqual(envelope["event_time"], end)
+            self.assertEqual(envelope["recorded_at"], end)
+            result = subprocess.run(
+                ["go", "run", "./adapter/lean/tests/testdata/snapshot_contract.go"],
+                cwd=Path(__file__).resolve().parents[3],
+                input=json.dumps(envelope, separators=(",", ":")),
+                text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_snapshot_rejects_duplicate_or_decreasing_as_of(self):
+        client = Client()
+        pub = Publisher(client, "hash", "version", "test")
+        portfolio = SimpleNamespace(TotalPortfolioValue=100000, Cash=50000)
+        pub.publish_snapshot(portfolio, "2014-06-09T20:00:00Z")
+        for end in ("2014-06-09T20:00:00Z", "2014-06-06T20:00:00Z"):
+            with self.subTest(end=end), self.assertRaises(ValueError):
+                pub.publish_snapshot(portfolio, end)
+        self.assertEqual(len(client.sent), 1)
+        self.assertEqual(pub.sequence, 2)
+
+    def test_invalid_portfolio_figures_are_not_published(self):
+        for equity, cash in ((0, 1), (-1, 1), (float("nan"), 1),
+                             (float("inf"), 1), (1, -1),
+                             (1, float("nan")), (1, float("inf"))):
+            with self.subTest(equity=equity, cash=cash):
+                client = Client()
+                pub = Publisher(client, "hash", "version", "test")
+                with self.assertRaises(ValueError):
+                    pub.publish_snapshot(SimpleNamespace(TotalPortfolioValue=equity, Cash=cash),
+                                         "2014-06-09T20:00:00Z")
+                self.assertEqual(client.sent, [])
+                self.assertEqual(pub.sequence, 1)
+
     def test_recorded_at_is_the_bars_own_period_end(self):
         """Two runs over the same bars write the same input envelopes."""
         client = Client()

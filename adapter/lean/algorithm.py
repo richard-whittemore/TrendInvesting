@@ -1,4 +1,4 @@
-"""Publish daily completed bars; Go owns every strategy decision (ADR 0014)."""
+"""Publish daily bars and portfolio snapshots (ADRs 0014 and 0020)."""
 from AlgorithmImports import *  # noqa: F401,F403
 
 # Bind stdlib names after AlgorithmImports: its datetime.time shadows time.
@@ -88,11 +88,15 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             end = bar.EndTime.replace(tzinfo=ZoneInfo("America/New_York"))
             period_end = end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             decisions = self.publisher.publish(self.instrument, bar, raw, period_end)
+            # ADR 0020: this close becomes the next bar's previous-close
+            # basis only after the current bar's decisions have arrived.
+            snapshot_decisions = self.publisher.publish_snapshot(self.Portfolio, period_end)
             self.bar_count += 1
             self.warmup_seen += int(warming)
-            self.decision_count += len(decisions)
-            self.Log("adapter: seq={} end={} warmup={} raw={} split-adjusted={} decisions={}".format(
-                self.publisher.sequence, period_end, warming, raw["close"], float(bar.Close), len(decisions)))
+            self.decision_count += len(decisions) + len(snapshot_decisions)
+            self.Log("adapter: seq={} end={} warmup={} raw={} split-adjusted={} decisions={} snapshot_decisions={}".format(
+                self.publisher.sequence, period_end, warming, raw["close"], float(bar.Close),
+                len(decisions), len(snapshot_decisions)))
         except Exception as err:
             self.stop("completed bar failed: {}".format(err))
 

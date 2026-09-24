@@ -178,3 +178,43 @@ cash-movement nor account-snapshot input schemas change. The future fill ledger
 must account for its own cost/check changes when versioning this contract.
 Replay uses the journal's movement order, including the original full amounts,
 so neither the conservative floor nor deferred deposits discard audit evidence.
+
+
+## Amendment: the adapter produces LEAN portfolio snapshots (2026-09-24)
+
+The LEAN adapter is the producer of `account.snapshot` for a running
+`cmd/engine`. It reports LEAN's own account figures, without strategy arithmetic:
+
+- `equity` is `Portfolio.TotalPortfolioValue`, `available_cash` is
+  `Portfolio.Cash`, and `currency` is `USD`. The payload follows
+  `event.AccountSnapshotPayload`, including its required fields and validation,
+  and uses `event.AccountSnapshotSchemaVersion` (currently 2).
+- Send one snapshot **after each completed bar's decisions have been received**,
+  before the next bar. Its `as_of` is that bar's own `period_end`, strictly
+  increasing across snapshots. Warm-up bars receive snapshots in exactly the
+  same way; they are neither withheld nor marked to change reducer readiness.
+- A snapshot is eligible for sizing only when its `as_of` is no later than the
+  decision bar's previous close (ADR 0010). Thus the snapshot as of bar *t*'s
+  close is precisely the basis used for bar *t+1*, never for bar *t* itself.
+- There is **no opening snapshot**. LEAN delivers warm-up bars before StartDate,
+  so an opening snapshot stamped at StartDate would not precede those bars.
+  None is needed: the reducer cannot size a Unit on the first bar it receives,
+  because N and the channels are computed from bars preceding the decision bar.
+  The snapshot sent after bar 1 therefore arrives before any sizing is possible.
+- `event_time` and `recorded_at` equal `as_of`, just as the bar publisher records
+  the bar's own period end. This preserves backtest determinism; the adapter
+  continues to refuse LiveMode.
+- Bars and snapshots share the one contiguous input sequence after the engine's
+  configuration at 1: first bar 2, its snapshot 3, next bar 4, its snapshot 5.
+  Each snapshot reply receives the same identity, sequence, causation,
+  correlation and payload-hash checks as a bar reply. Any failure stops the run.
+
+In live trading LEAN's portfolio is brokerage-backed and supplies the account
+observation for the reconciliation input ADR 0019 anticipates. Publishing these
+figures does not implement that reconciliation: its independent projection,
+causing-event evidence and halt requirements remain, and an observed balance
+cannot explain its own discrepancies. This amendment does not clear a live gate.
+
+`account.cash-movement` production remains out of scope. This amendment settles
+the snapshot producer and delivery timing only; no DISCLOSED strategy rule,
+Baseline or Variant setting, payload schema or RulesVersion changes.
