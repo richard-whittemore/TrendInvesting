@@ -186,32 +186,71 @@ func TestExtendedAddResolvesBeforeExpiry(t *testing.T) {
 	}
 }
 
-// TestAChainedAddEndsAtAnInterveningExitOrClose pins the limits of the extra
-// Session (ADR 0011, as amended 2026-09-24). The extension keeps an Add
-// working only for an open Campaign that this bar did not decide to exit: a
-// bar that would both Add and exit results in the exit only (ADR 0010), and a
-// Campaign already closed by a stop can take no further Unit. Either way the
-// chain expires at this bar and its hold is released (ADR 0020).
-func TestAChainedAddEndsAtAnInterveningExitOrClose(t *testing.T) {
-	for _, ending := range []string{"exit-proposed", "campaign-closed"} {
-		t.Run(ending, func(t *testing.T) {
-			r, fill := transitionFixture(t, "add")
-			windowApply(t, r, fill)
-			pending := r.instruments["AAPL"].pendingAddProposal
-			if pending == nil || !pending.survivesNextBar {
-				t.Fatal("fill reply did not chain a two-Session Add")
+// TestAChainedAddEndsAtAnInterveningExit pins a limit of the extra Session
+// (ADR 0011, as amended 2026-09-24): a bar that would both Add and exit
+// results in the exit only (ADR 0010), so the chain expires with the bar that
+// proposes the exit and its hold is released then (ADR 0020).
+func TestAChainedAddEndsAtAnInterveningExit(t *testing.T) {
+	r, fill := transitionFixture(t, "add")
+	windowApply(t, r, fill)
+	pending := r.instruments["AAPL"].pendingAddProposal
+	if pending == nil || !pending.survivesNextBar {
+		t.Fatal("fill reply did not chain a two-Session Add")
+	}
+	id := pending.proposalID
+	// The fixture's Exit Channel low is 99; a low of 98 breaches it.
+	bar := windowBar(t, 5)
+	var p event.CompletedBarPayload
+	if err := json.Unmarshal(bar.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	p.Raw.Low, p.SplitAdjusted.Low = 98, 98
+	bar.Payload, _ = json.Marshal(p)
+	out := windowApply(t, r, bar)
+	if r.instruments["AAPL"].pendingAddProposal != nil || slices.Contains(holdIDs(r), id) {
+		t.Fatal("the chained Add or its hold outlived the exit bar")
+	}
+	expired, exit := false, false
+	for _, e := range out {
+		switch e.Type {
+		case event.ExitProposalEventType:
+			exit = true
+		case event.ProposalExpiredEventType:
+			var p event.ProposalExpiredPayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatal(err)
 			}
-			id := pending.proposalID
-			bar := windowBar(t, 5)
-			if ending == "exit-proposed" {
-				// The fixture's Exit Channel low is 99; a low of 98 breaches it.
-				var p event.CompletedBarPayload
-				if err := json.Unmarshal(bar.Payload, &p); err != nil {
-					t.Fatal(err)
-				}
-				p.Raw.Low, p.SplitAdjusted.Low = 98, 98
-				bar.Payload, _ = json.Marshal(p)
+			expired = expired || p.ProposalID == id && p.ExpiredAt.Equal(day(5)) &&
+				p.Reason == event.ExpiryReasonSupersededByNextBar
+		}
+	}
+	if !exit || !expired {
+		t.Fatalf("exit proposed = %v, chain expired with the bar = %v; want both", exit, expired)
+	}
+}
+
+// TestAFullStopOutExpiresThePendingAdd: a stop fill that closes the whole
+// Campaign cancels its pending Add in the same transition, exactly as a
+// partial stop-out does, whether the Add is ordinary or fill-chained. It is
+// not left for a later bar to expire: a daily adapter reports the next
+// Session's fills before that bar, so the Add's order could otherwise fill
+// into a Campaign that no longer exists (ADR 0011 and ADR 0020, as amended
+// 2026-09-24). The expiry reuses the stop-superseded reason and its hold is
+// released at once.
+func TestAFullStopOutExpiresThePendingAdd(t *testing.T) {
+	for _, kind := range []string{"ordinary", "fill-chained"} {
+		t.Run(kind, func(t *testing.T) {
+			var r *Reducer
+			var stop event.Envelope
+			if kind == "ordinary" {
+				r, stop = transitionFixture(t, "full-stop")
 			} else {
+				var fill event.Envelope
+				r, fill = transitionFixture(t, "add")
+				windowApply(t, r, fill)
+				if p := r.instruments["AAPL"].pendingAddProposal; p == nil || !p.survivesNextBar {
+					t.Fatal("fill reply did not chain a two-Session Add")
+				}
 				c := r.instruments["AAPL"].campaign
 				ids := make([]string, 0, len(c.units))
 				var quantity int64
@@ -219,36 +258,41 @@ func TestAChainedAddEndsAtAnInterveningExitOrClose(t *testing.T) {
 					ids = append(ids, u.openingFillID)
 					quantity += u.quantity
 				}
-				stop := event.FillPayload{InstrumentID: "AAPL", Kind: event.FillKindStop, CampaignID: c.campaignID, FillID: "closing-stop", UnitIDs: ids, Direction: event.DirectionLong, Quantity: quantity, Price: 98, Level: 98, FilledAt: day(4)}
-				input := event.Envelope{Type: event.FillEventType, SchemaVersion: event.FillSchemaVersion, EventTime: day(4), RecordedAt: day(4)}
-				input.Payload, _ = json.Marshal(stop)
-				windowApply(t, r, input)
-				if r.instruments["AAPL"].campaign != nil {
-					t.Fatal("the stop did not close the Campaign")
-				}
+				payload := event.FillPayload{InstrumentID: "AAPL", Kind: event.FillKindStop, CampaignID: c.campaignID, FillID: "closing-stop", UnitIDs: ids, Direction: event.DirectionLong, Quantity: quantity, Price: 98, Level: 98, FilledAt: day(4)}
+				stop = event.Envelope{Type: event.FillEventType, SchemaVersion: event.FillSchemaVersion, EventTime: day(4), RecordedAt: day(4)}
+				stop.Payload, _ = json.Marshal(payload)
 			}
-			out := windowApply(t, r, bar)
+			id := r.instruments["AAPL"].pendingAddProposal.proposalID
+			out := windowApply(t, r, stop)
+			if r.instruments["AAPL"].campaign != nil {
+				t.Fatal("the stop did not close the Campaign")
+			}
 			if r.instruments["AAPL"].pendingAddProposal != nil || slices.Contains(holdIDs(r), id) {
-				t.Fatal("the chained Add or its hold outlived the bar")
+				t.Fatal("the pending Add or its hold outlived the full stop-out")
 			}
-			expired, exit := false, false
+			var types []string
+			expired := false
 			for _, e := range out {
-				switch e.Type {
-				case event.ExitProposalEventType:
-					exit = true
-				case event.ProposalExpiredEventType:
+				types = append(types, e.Type)
+				if e.Type == event.ProposalExpiredEventType {
 					var p event.ProposalExpiredPayload
 					if err := json.Unmarshal(e.Payload, &p); err != nil {
 						t.Fatal(err)
 					}
-					expired = expired || p.ProposalID == id && p.ExpiredAt.Equal(day(5))
+					expired = p.ProposalID == id && p.Kind == event.ProposalKindAdd &&
+						p.Reason == event.ExpiryReasonSupersededByStop &&
+						p.Rule == event.RuleAddProposalSupersededByStop
 				}
 			}
-			if !expired {
-				t.Fatal("the bar did not record the chain's expiry")
+			want := []string{event.CampaignUnitsStoppedEventType, event.ProposalExpiredEventType, event.CampaignExitedEventType}
+			if !expired || !slices.Equal(types, want) {
+				t.Fatalf("emissions %v (Add expired by the stop = %v), want %v", types, expired, want)
 			}
-			if exit != (ending == "exit-proposed") {
-				t.Fatalf("exit proposed = %v at the %s bar", exit, ending)
+			// The next bar has nothing left to expire.
+			for _, e := range windowApply(t, r, windowBar(t, 5)) {
+				if e.Type == event.ProposalExpiredEventType {
+					t.Fatal("the next bar expired the Add a second time")
+				}
 			}
 		})
 	}

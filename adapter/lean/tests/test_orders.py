@@ -1011,6 +1011,52 @@ class FillReturnTests(OrderTestCase):
                           [opened["payload"]["fill_id"]], 100, 22.0, 22.1))
         self.assertAlmostEqual(fill["slippage_applied"], 0.05 * 1.2)
 
+    def test_a_full_stop_out_cancels_the_working_add_order(self):
+        # ADR 0011, as amended 2026-09-24: a stop fill that closes the whole
+        # Campaign expires its pending Add in the same reply, ordinary or
+        # fill-chained, so the order is cancelled before the next Session and
+        # can never fill into the closed Campaign. The cancellation is
+        # requested inside the slice, so LEAN confirms it after the slice, and
+        # one it never confirms stops the run before the next bar.
+        for chained, confirmed in ((False, True), (True, True), (True, False)):
+            with self.subTest(chained=chained, confirmed=confirmed):
+                algo = self.start()
+                if chained:
+                    add = add_proposal(9, valid_for_sessions=2)
+                    self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1), add])
+                    stopped_on = 11
+                else:
+                    add = add_proposal(11)
+                    self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1)])
+                    self.feed(algo, 11, close_decisions=[add])
+                    stopped_on = 12
+                [ticket] = [t for t in self.tickets(algo) if t.Tag == add["id"]]
+                self.assertEqual(ticket.Status, "submitted")
+                [sell] = self.sells(algo)
+                self.fill(algo, sell, stopped_on, 22.0, fee=1.0)
+                if not confirmed:
+                    algo.Transactions.cancel_outcome = "never"
+                expired = proposal_expired(add, stopped_on, kind="add")
+                expired["payload"].update(rule="add-proposal.superseded-by-stop",
+                                          reason="superseded-by-stop")
+                self.feed(algo, stopped_on, replies={"execution.fill": {"payload": {"decisions": [
+                    units_stopped(stopped_on, fill_id="lean:2:2"), expired,
+                    campaign_exited(stopped_on)]}}})
+                self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+                self.assertEqual([order for order, _ in algo.Transactions.cancellations],
+                                 [ticket.OrderId])
+                sent = len(algo.client.sent)
+                self.feed(algo, stopped_on + 1)
+                if not confirmed:
+                    self.assertIn("did not confirm cancelling order(s) {} (tag={})".format(
+                        ticket.OrderId, add["id"]), algo.quit_reason)
+                    self.assertNotIn("market.bar.completed", self.types_sent(algo, sent))
+                    continue
+                self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+                self.assertEqual(ticket.Status, "canceled")
+                self.assertEqual([e["payload"]["kind"] for e in self.sent(algo, "execution.fill")],
+                                 ["entry", "stop"])
+
     def two_units_at_the_exit_channel(self, algo, unit2_source="exit-channel", unit2_level=23.4):
         """A Campaign of two Units, then an exit proposed at 23.4 on the 12th's bar."""
         self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1)])

@@ -780,8 +780,8 @@ const RuleAddProposalExpiresWithItsBar = "add-proposal.expires.with-its-bar"
 
 // RuleAddProposalSupersededByStop names the rule for
 // ProposalExpiredPayload.Rule when Reason is ExpiryReasonSupersededByStop: an
-// outstanding Add proposal is cancelled by a stop fill partially closing the
-// same Campaign, not by the next bar.
+// outstanding Add proposal is cancelled by a stop fill closing part or all of
+// the same Campaign, not by the next bar (ADR 0011, as amended 2026-09-24).
 const RuleAddProposalSupersededByStop = "add-proposal.superseded-by-stop"
 
 // RuleExitProposalSupersededByDelisting names the rule for
@@ -828,11 +828,12 @@ const ExpiryReasonSupersededByNextBar = "superseded-by-next-bar"
 // ExpiryReasonSupersededByStop is the SECOND expiry reason: an outstanding
 // Add proposal (ProposalKindAdd only — an entry or exit proposal has no analogous
 // interaction with a stop fill) is cancelled the instant a stop fill closes
-// PART of the same Campaign, rather than waiting for ADR 0011's ordinary
-// next-bar expiry. Without this, a fill for that stale proposal could still
-// arrive and be accepted before the next bar's own expiry ever ran,
-// bringing a further Unit into a Campaign that has already started coming
-// off. ExpiredAt for this reason is the CLOSING FILL's own timestamp, not a
+// PART or ALL of the same Campaign, rather than waiting for ADR 0011's
+// ordinary next-bar expiry (the full close since ADR 0011's 2026-09-24
+// amendment). Without this, a fill for that stale proposal could still
+// arrive before the next bar's own expiry ever ran, bringing a further Unit
+// into a Campaign that has already started coming off, or one already
+// closed. ExpiredAt for this reason is the CLOSING FILL's own timestamp, not a
 // bar's PeriodEnd.
 const ExpiryReasonSupersededByStop = "superseded-by-stop"
 

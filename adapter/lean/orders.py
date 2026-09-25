@@ -880,18 +880,24 @@ class OrderDesk:
         self.algorithm.Log("adapter: cancelled order {} tag={}: its proposal expired".format(
             order_id, proposal_id))
 
-    def require_cancels_confirmed(self, when):
+    def require_cancels_confirmed(self, when, requested_earlier):
         """Every cancellation requested in an earlier slice has been confirmed.
 
         LEAN confirms a cancellation after the slice it was requested in; one
         still unconfirmed when the next slice starts is an order that could
-        fill into a holding the engine does not expect.
+        fill into a holding the engine does not expect. requested_earlier is
+        the set of orders whose cancellation was pending when this slice
+        began. A cancellation this slice's own fill replies requested (a stop
+        fill that closes the Campaign expires its pending Add at once; ADR
+        0011, as amended 2026-09-24) cannot be confirmed until the slice
+        ends, and is checked at the start of the next one.
         """
-        if self.pending_cancels:
+        unconfirmed = {o: t for o, t in self.pending_cancels.items() if o in requested_earlier}
+        if unconfirmed:
             raise Uncertain("LEAN did not confirm cancelling order(s) {} {}; their proposals "
                             "expired, so a fill would be one the engine does not expect".format(
                                 ", ".join("{} (tag={})".format(o, t) for o, t in
-                                          sorted(self.pending_cancels.items())), when))
+                                          sorted(unconfirmed.items())), when))
 
     def _campaign_opened(self, decision, payload):
         """Remember the Campaign's frozen N (ADR 0006), for its Exit Orders' slippage,

@@ -141,3 +141,7 @@ Add schema/window/hash propagation only (all 121):
 - `TestStopMultipleOneRaisesUnitOneAboveItsEntry`
 - `TestTheStopLadderMovesEachUnitsExitOrder`
 - `TestUnaffordableThirdRungFollowedByAnAffordableFourth`
+
+### Full stop-out cancels a pending Add
+
+A later change in the same RulesVersion makes a stop fill that closes the whole Campaign cancel its pending Add (ordinary or fill-chained) in that transition, with reason `superseded-by-stop`, instead of leaving it for the next bar. Regenerating `1.11.0.json` from scratch afterwards reproduces it byte for byte: no corpus scenario has a full stop-out while an Add is pending, so no key changed. The three `cmd/backtest` goldens are also unchanged. The change is pinned by the in-package `TestAFullStopOutExpiresThePendingAdd` and the adapter's `test_a_full_stop_out_cancels_the_working_add_order`.

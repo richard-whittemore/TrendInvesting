@@ -172,8 +172,10 @@ package strategy
 // and ADR 0021 §7, as amended): an Add proposed in reply to a fill stays
 // valid for one additional Session. It survives the next completed bar for
 // its instrument, keeping its ADR 0020 hold, and expires at the one after;
-// it still expires at the next bar if that bar proposes an exit or a stop
-// has already closed its Campaign. While it stands, the intervening Session
+// it still expires at the next bar if that bar proposes an exit. A stop fill
+// that closes the Campaign in full now cancels a pending Add, ordinary or
+// fill-chained, at once, as a partial stop-out already did, instead of
+// leaving it for the next bar. While it stands, the intervening Session
 // close proposes no second Add. Entries and ordinary Adds keep their one-bar
 // lifetime. strategy.add.proposed advances to schema 3, which states the
 // window as valid_for_sessions (1 or 2). A daily run that places the chained

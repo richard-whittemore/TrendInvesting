@@ -721,9 +721,10 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 	}
 	if pending := state.pendingAddProposal; pending != nil && pending.survivesNextBar && state.campaign != nil {
 		// ADR 0011's fill-chain extension counts actual instrument bars,
-		// keeping the proposal and its ADR 0020 hold through the first. A
-		// Campaign a stop has already closed takes no further Unit, so its
-		// Add gets no extension.
+		// keeping the proposal and its ADR 0020 hold through the first. It
+		// never outlives its Campaign: a stop fill that closes the Campaign
+		// cancels the Add at once (applyStopFill), and this check keeps the
+		// extension from applying to a closed Campaign regardless.
 		pending.survivesNextBar = false
 	} else if state.pendingAddProposal != nil {
 		expired, err := r.expireAddProposal(state, bar, envelope)

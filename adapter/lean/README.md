@@ -293,8 +293,10 @@ never combines two levels.
   (see **Observed LEAN behaviour**). The engine expires an unfilled proposal
   at the instrument's next bar for entries and ordinary Adds, or one bar
   later for fill-chained Adds (ADR 0011, amended 2026-09-24; still at the
-  next bar if that bar proposes an exit or a stop has closed the Campaign),
-  and the adapter then cancels its order.
+  next bar if that bar proposes an exit), and the adapter then cancels its
+  order. A stop fill that closes the Campaign, in part or in full, expires a
+  pending Add in its own reply, so the adapter cancels that order before the
+  next Session can fill it.
 - **The order tag is the decision id**: the trade or Add proposal's id, or, for
   an Exit Order, the id of the `strategy.exit-order.set` now in force (an
   amendment updates the tag with the level). A decision whose id is already
@@ -341,7 +343,11 @@ never combines two levels.
     confirmed by the start of the next slice, since the order could still
     fill into a holding the engine doesn't expect. LEAN answers a cancel with
     `CancelPending` and reports `Canceled` after the slice; the cancellation
-    is logged as requested, then as done once LEAN confirms it;
+    is logged as requested, then as done once LEAN confirms it. A
+    cancellation a fill's reply requests at the start of a slice (a stop
+    fill that closes the Campaign expires its pending Add) is therefore
+    checked at the start of the following slice, not before this slice's
+    bar;
   - a trade proposal arriving while LEAN already holds the instrument: the
     engine proposes an entry only when it holds no Campaign there.
 - **Reconciliation before trading** (`docs/architecture.md`: reconcile before

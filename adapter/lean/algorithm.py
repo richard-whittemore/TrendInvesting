@@ -164,13 +164,16 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         # bar, and the engine must hear of them in the same order: a proposal
         # stays outstanding only until its expiry bar (ADR 0011, as amended),
         # so a fill delivered after that bar would name a proposal
-        # the engine no longer offers (drain_order_events).
+        # the engine no longer offers (drain_order_events). Cancellations
+        # pending before this slice must be confirmed now; one that a fill's
+        # reply requests in this slice is confirmed after it.
+        requested_earlier = frozenset(self.desk.pending_cancels)
         self.drain_order_events()
         self.flush_snapshot()
         if self.failed:
             return
         try:
-            self.desk.require_cancels_confirmed("before the next session's bar")
+            self.desk.require_cancels_confirmed("before the next session's bar", requested_earlier)
             # The second line behind verify_split: the split's changes to open
             # orders are checked again, final, before the next bar is sent.
             self.desk.require_split_applied("before the next session's bar", final=True)
