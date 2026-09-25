@@ -262,9 +262,10 @@ def fill_model_report(slippage_n):
         "row above); ADR 0005 adds slippage to that price where LEAN adds none, so the actual "
         "filled prices never agree; and an order still armed into a later session -- a "
         "fill-chained Add's second session, most plausibly -- can fill on a favorable gap open "
-        "below the shared level, a price ADR 0005's own rule for that bar never produces, since "
-        "it evaluates a proposal only against its own bar and expires it the next one (a "
-        "500/500 order that opens the next session at 490 fills at 490 under LEAN). A split "
+        "below the shared level, a price ADR 0005 never produces, because it prices a buy at "
+        "max(level, open), never below the level, even in a fill-chained Add's second session "
+        "(ADR 0011, as amended): a 500/500 order that opens the next session at 490 fills at "
+        "490 under LEAN and at 500 plus slippage under ADR 0005. A split "
         "adjusts the limit exactly as it adjusts its stop: both are multiplied by the split "
         "factor and rounded to the cent in the one UpdateSubmitted report that adjusts the "
         "quantity too.",
