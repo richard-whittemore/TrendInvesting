@@ -32,7 +32,16 @@ const ConfigurationEventType = "strategy.configuration"
 //     commission-side twin of the zero-slippage run ADR 0013 declares
 //     invalid by construction. So an older record is rejected outright
 //     rather than silently run free of costs (ADR 0015's rule).
-const ConfigurationSchemaVersion uint32 = 4
+//   - Version 5 added MaxUnitsPerIndustry, MaxUnitsPerSector and
+//     MaxUnitsTotalLong (ADR 0008 names four caps; MaxUnits alone, carried
+//     since version 1, models only the per-instrument level). An
+//     older record decodes all three as zero, which Validate rejects the
+//     same way it already rejects a zero MaxUnits: a zero cap is not a
+//     legitimate limit, it is the absence of one, and sizing against it
+//     would either decline every proposal or (read as "no limit") trade
+//     with no cap at all — so an older record is rejected outright rather
+//     than silently adopting either reading.
+const ConfigurationSchemaVersion uint32 = 5
 
 // SizingMode selects which quantity position size is keyed to (ADR 0003).
 type SizingMode string
@@ -93,9 +102,9 @@ type NotionalAccountConfig struct {
 }
 
 // ConfigurationPayload carries every Baseline parameter named in ADRs 0002,
-// 0003, 0005, 0007, and 0013: the strategy identifier, Sizing Mode, Unit
-// Volatility Fraction, Stop Multiple, Entry and Exit Channel lengths, the
-// maximum number of Units, slippage in N, and the Notional Account settings.
+// 0003, 0005, 0007, 0008, and 0013: the strategy identifier, Sizing Mode, Unit
+// Volatility Fraction, Stop Multiple, Entry and Exit Channel lengths, the four
+// Unit caps, slippage in N, and the Notional Account settings.
 //
 // The numeric policy for these fields (float64 precision, rounding,
 // eventual fixed-point representation) is deliberately unresolved here; that
@@ -112,8 +121,31 @@ type ConfigurationPayload struct {
 	StopMultiple           float64    `json:"stop_multiple"`
 	EntryChannelLength     int        `json:"entry_channel_length"`
 	ExitChannelLength      int        `json:"exit_channel_length"`
-	MaxUnits               int        `json:"max_units"`
-	SlippageN              float64    `json:"slippage_n"`
+	// MaxUnits is ADR 0008's per-instrument Unit cap (4 in the Baseline):
+	// at most this many Units may be held in one instrument at once. It is
+	// the one level of ADR 0008's four this payload has carried since
+	// version 1; MaxUnitsPerIndustry, MaxUnitsPerSector and
+	// MaxUnitsTotalLong below carry the other three.
+	MaxUnits int `json:"max_units"`
+	// MaxUnitsPerIndustry and MaxUnitsPerSector are ADR 0008's
+	// closely-correlated and loosely-correlated group caps (6 and 10 in the
+	// Baseline): at most this many Units may be held across every open
+	// Campaign sharing one industry, or one sector, at once. Every
+	// instrument without a point-in-time industry/sector label shares
+	// CONTEXT.md's single "Unclassified Group" instead of either grouping,
+	// and ADR 0008 caps that shared group at the loosely-correlated level —
+	// so MaxUnitsPerSector's own value, not a separate configured number,
+	// is what bounds it (internal/strategy's classificationOf is the seam
+	// that resolves a point-in-time label; until a classification input
+	// exists to populate it, every instrument is Unclassified).
+	MaxUnitsPerIndustry int `json:"max_units_per_industry"`
+	MaxUnitsPerSector   int `json:"max_units_per_sector"`
+	// MaxUnitsTotalLong is ADR 0008's total-long cap (12 in the Baseline):
+	// at most this many Units may be held long across the whole account at
+	// once, summed over every open Campaign regardless of instrument,
+	// industry or sector.
+	MaxUnitsTotalLong int     `json:"max_units_total_long"`
+	SlippageN         float64 `json:"slippage_n"`
 	// TierBDistanceInN is how close (in N) a Setup's high may sit below the
 	// Entry Channel and still be reported as Tier B (CONTEXT.md: "Tier").
 	// Unlike the channel lengths above, this is not a Faith number: System
@@ -159,7 +191,7 @@ type ConfigurationPayload struct {
 // Validate checks that every Baseline parameter is present and in range. A
 // zero slippage value is rejected (ADR 0013: "A backtest run with zero
 // slippage is invalid by construction"), the Sizing Mode must be one of the
-// two declared values, channel lengths and maximum Units must be positive
+// two declared values, channel lengths and all four Unit caps must be positive
 // integers, and every float64 parameter must be finite (isFinite, defined
 // alongside PriceView in bar.go): NaN and +/-Inf are rejected explicitly,
 // before the range check that follows, rather than silently passing an
@@ -217,6 +249,15 @@ func (c ConfigurationPayload) Validate() error {
 	}
 	if c.MaxUnits <= 0 {
 		errs = append(errs, errors.New("maximum units must be a positive integer"))
+	}
+	if c.MaxUnitsPerIndustry <= 0 {
+		errs = append(errs, errors.New("maximum units per industry must be a positive integer"))
+	}
+	if c.MaxUnitsPerSector <= 0 {
+		errs = append(errs, errors.New("maximum units per sector must be a positive integer"))
+	}
+	if c.MaxUnitsTotalLong <= 0 {
+		errs = append(errs, errors.New("maximum units total long must be a positive integer"))
 	}
 	switch {
 	case !isFinite(c.SlippageN):

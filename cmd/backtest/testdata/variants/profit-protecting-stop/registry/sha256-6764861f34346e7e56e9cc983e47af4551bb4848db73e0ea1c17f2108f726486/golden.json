@@ -1,10 +1,10 @@
 {
   "registry_version": 1,
-  "configuration_hash": "sha256:1f28d95f466d57e9493d4410d1db740ff594353eb8dc2f6d100be14ac6e95cb1",
+  "configuration_hash": "sha256:6764861f34346e7e56e9cc983e47af4551bb4848db73e0ea1c17f2108f726486",
   "run_id": "golden",
   "variant": "profit-protecting-stop",
   "status": "completed",
-  "strategy_version": "profit-protecting-stop/1.8.0+test",
+  "strategy_version": "profit-protecting-stop/1.9.0+test",
   "span_start": "2026-01-02T00:00:00Z",
   "span_end": "2026-02-02T00:00:00Z",
   "configuration": {
@@ -15,6 +15,9 @@
     "entry_channel_length": 20,
     "exit_channel_length": 10,
     "max_units": 4,
+    "max_units_per_industry": 1000000,
+    "max_units_per_sector": 1000000,
+    "max_units_total_long": 1000000,
     "slippage_n": 0.05,
     "tier_b_distance_in_n": 1,
     "dollars_per_point": 1,
@@ -33,7 +36,7 @@
   "artefacts": {
     "journal_path": "../journal.golden.jsonl",
     "record_count": 262,
-    "final_record_hash": "sha256:d78e6a1ee3b711655cfa370fd1a1319b8572c6fdc88937a503bf584c4b4333f2"
+    "final_record_hash": "sha256:616438327ff07a90eaeb2d715e9ac8465b43977ca45d025b9c1eeaba859b8db5"
   },
   "detail": ""
 }

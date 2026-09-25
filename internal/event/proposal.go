@@ -43,7 +43,13 @@ const ProposalDeclinedEventType = "strategy.proposal.declined"
 //     every actual fill cost"). It may therefore be negative: ADR 0020 floors
 //     the basis, never the fills taken from it. Schema-3 decisions must not
 //     silently acquire this meaning (ADR 0015).
-const ProposalDeclinedSchemaVersion uint32 = 4
+//   - Version 5 added Cap, CapLimit and PostTradeExposure, required exactly
+//     when Reason is DeclineReasonUnitCapExceeded (ADR 0008's four Unit caps
+//     and the Unclassified Group). A version-4 record decodes Cap as the
+//     empty string, which is not a recognised cap name, so a schema-5 record
+//     asserting that reason against an older schema is rejected outright —
+//     the same discipline every previous field addition follows.
+const ProposalDeclinedSchemaVersion uint32 = 5
 
 // The rule names for TradeProposalPayload.Rule, one per Sizing Mode.
 //
@@ -107,6 +113,31 @@ const (
 	// an infinity at all — and Detail carries the operands it was formed
 	// from instead.
 	DeclineReasonUnitCostNotRepresentable = "unit-cost-not-representable"
+	// DeclineReasonUnitCapExceeded means the Unit that would result from
+	// this proposal was checked against post-trade exposure — the Units
+	// that would be held after this Unit joined its instrument, its
+	// correlation group and the account's total long exposure — and one of
+	// ADR 0008's four caps (or the Unclassified Group's own, at the
+	// loosely-correlated level) is at or below that exposure already before
+	// this Unit, so admitting it would exceed the cap [T p.16]. Cap,
+	// CapLimit and PostTradeExposure name which cap bound and the exposure
+	// that would have resulted.
+	DeclineReasonUnitCapExceeded = "unit-cap-exceeded"
+)
+
+// The five cap identities ProposalDeclinedPayload.Cap names, one per level
+// of Faith's correlation grouping (ADR 0008, The Turtle Rules p.16):
+// CapInstrument and CapTotalLong are checked for every instrument;
+// CapUnclassifiedGroup applies in place of BOTH CapIndustry and CapSector
+// for an instrument with no point-in-time industry/sector label, since
+// every such instrument shares CONTEXT.md's single Unclassified Group
+// rather than two separate ones.
+const (
+	CapInstrument        = "instrument"
+	CapIndustry          = "industry"
+	CapSector            = "sector"
+	CapUnclassifiedGroup = "unclassified-group"
+	CapTotalLong         = "total-long"
 )
 
 // The two Kind values ProposalDeclinedPayload accepts, mirroring
@@ -490,6 +521,20 @@ type ProposalDeclinedPayload struct {
 	// stray number.
 	RequiredCash  float64 `json:"required_cash"`
 	AvailableCash float64 `json:"available_cash"`
+	// Cap, CapLimit and PostTradeExposure are the three figures
+	// DeclineReasonUnitCapExceeded was decided from: which of ADR 0008's
+	// caps bound (one of the CapInstrument/CapIndustry/CapSector/
+	// CapUnclassifiedGroup/CapTotalLong constants), the configured limit for
+	// that cap, and the Unit count that would have resulted — across every
+	// open Campaign sharing that cap's grouping — had this Unit been taken.
+	// Required and consistent (PostTradeExposure strictly greater than
+	// CapLimit, exactly the comparison that makes the Unit excessive) when
+	// Reason is DeclineReasonUnitCapExceeded; Cap must be empty and both
+	// counts zero for every other reason, mirroring RequiredCash/
+	// AvailableCash's own discipline for DeclineReasonInsufficientCash.
+	Cap               string `json:"cap"`
+	CapLimit          int    `json:"cap_limit"`
+	PostTradeExposure int    `json:"post_trade_exposure"`
 }
 
 // Validate checks the identifying fields, that Kind is one of the recognised
@@ -498,19 +543,26 @@ type ProposalDeclinedPayload struct {
 // free text, that Detail is present, and — only for Reason
 // DeclineReasonInsufficientCash — that RequiredCash and AvailableCash are
 // finite and consistent with an actual shortfall under the current schema;
-// RequiredCash must not be negative. For every other reason both must be zero.
+// RequiredCash must not be negative. For every other reason both must be
+// zero. Only for Reason DeclineReasonUnitCapExceeded — a schema-5 addition —
+// Cap must be one of the five recognised cap identities and CapLimit/
+// PostTradeExposure must be consistent with an actual excess; for every
+// other reason all three must be empty/zero.
 func (p ProposalDeclinedPayload) Validate() error {
 	return p.ValidateSchema(ProposalDeclinedSchemaVersion)
 }
 
 // ValidateSchema checks a decline under its declared schema (ADR 0015).
 // Schemas 2 and 3 require nonnegative AvailableCash; schema 4 permits the
-// negative ledger remainder introduced by ADR 0020. Schema 1 lacks the
-// required Kind and is unsupported, as are unknown schemas. Validating an
-// older payload does not upgrade its cash fields to the current meaning.
+// negative ledger remainder introduced by ADR 0020. Schema 5 additionally
+// recognises DeclineReasonUnitCapExceeded and its Cap/CapLimit/
+// PostTradeExposure fields; a record declared under an earlier schema cannot
+// assert that reason. Schema 1 lacks the required Kind and is unsupported,
+// as are unknown schemas. Validating an older payload does not upgrade its
+// cash fields to the current meaning.
 func (p ProposalDeclinedPayload) ValidateSchema(version uint32) error {
 	switch version {
-	case 2, 3, ProposalDeclinedSchemaVersion:
+	case 2, 3, 4, ProposalDeclinedSchemaVersion:
 	default:
 		return fmt.Errorf("proposal declined payload schema version %d is not supported", version)
 	}
@@ -546,6 +598,10 @@ func (p ProposalDeclinedPayload) ValidateSchema(version uint32) error {
 	case DeclineReasonNNotReady, DeclineReasonQuantityBelowOneUnit, DeclineReasonStopIntentNotPositive,
 		DeclineReasonInsufficientCash, DeclineReasonUnitCostNotRepresentable:
 		// recognised
+	case DeclineReasonUnitCapExceeded:
+		if version < 5 {
+			errs = append(errs, fmt.Errorf("reason %q is not recognised before proposal declined schema 5 (ADR 0015): a version-%d record cannot have asserted it", DeclineReasonUnitCapExceeded, version))
+		}
 	default:
 		errs = append(errs, fmt.Errorf("reason %q is not a recognised decline reason", p.Reason))
 	}
@@ -583,6 +639,33 @@ func (p ProposalDeclinedPayload) ValidateSchema(version uint32) error {
 		}
 		if p.AvailableCash != 0 {
 			errs = append(errs, fmt.Errorf("available cash must be zero for reason %q (got %v): it is only meaningful for %q", p.Reason, p.AvailableCash, DeclineReasonInsufficientCash))
+		}
+	}
+
+	if p.Reason == DeclineReasonUnitCapExceeded {
+		switch p.Cap {
+		case CapInstrument, CapIndustry, CapSector, CapUnclassifiedGroup, CapTotalLong:
+			// recognised
+		default:
+			errs = append(errs, fmt.Errorf("cap %q is not a recognised cap identity", p.Cap))
+		}
+		if p.CapLimit <= 0 {
+			errs = append(errs, errors.New("cap limit must be a positive integer"))
+		}
+		if p.PostTradeExposure <= p.CapLimit {
+			errs = append(errs, fmt.Errorf(
+				"post-trade exposure %d does not exceed the cap limit %d: a decline reasoned unit-cap-exceeded must record an actual excess",
+				p.PostTradeExposure, p.CapLimit))
+		}
+	} else {
+		if p.Cap != "" {
+			errs = append(errs, fmt.Errorf("cap must be empty for reason %q (got %q): it is only meaningful for %q", p.Reason, p.Cap, DeclineReasonUnitCapExceeded))
+		}
+		if p.CapLimit != 0 {
+			errs = append(errs, fmt.Errorf("cap limit must be zero for reason %q (got %d): it is only meaningful for %q", p.Reason, p.CapLimit, DeclineReasonUnitCapExceeded))
+		}
+		if p.PostTradeExposure != 0 {
+			errs = append(errs, fmt.Errorf("post-trade exposure must be zero for reason %q (got %d): it is only meaningful for %q", p.Reason, p.PostTradeExposure, DeclineReasonUnitCapExceeded))
 		}
 	}
 

@@ -58,8 +58,8 @@ func TestCashMovementSpendable(t *testing.T) {
 				if p.Reason != event.DeclineReasonInsufficientCash || p.AvailableCash != tc.wantCash || p.RequiredCash <= p.AvailableCash {
 					t.Fatalf("decline=%+v, want insufficient-cash with available=%v", p, tc.wantCash)
 				}
-				if declines[0].SchemaVersion != 4 {
-					t.Fatalf("decline schema=%d, want 4 for spendable cash", declines[0].SchemaVersion)
+				if declines[0].SchemaVersion != event.ProposalDeclinedSchemaVersion {
+					t.Fatalf("decline schema=%d, want %d for spendable cash", declines[0].SchemaVersion, event.ProposalDeclinedSchemaVersion)
 				}
 			}
 			verifyMovementJournal(t, s, emitted)

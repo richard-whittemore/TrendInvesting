@@ -97,7 +97,13 @@ type campaignState struct {
 	unitQuantity int64
 	stopMultiple float64
 	maxUnits     int
-	openedAt     time.Time
+	// classification is ADR 0008's correlation group, resolved once from
+	// classificationOf (unit_caps.go) at the moment this Campaign opens and
+	// never re-read afterward: the freeze-at-entry discipline that keeps a
+	// later change to the instrument's classification from retroactively
+	// altering an already-open Campaign's industry/sector cap grouping.
+	classification classification
+	openedAt       time.Time
 	// units holds every CURRENTLY OPEN Unit, in ascending index order.
 	// Non-empty for as long as the Campaign itself exists in state.campaign:
 	// openCampaign always appends Unit 1 before returning, and the per-Unit
@@ -1005,9 +1011,6 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 		// than at each call site separately.
 		return nil, nil
 	}
-	if len(campaign.units) >= campaign.maxUnits {
-		return nil, nil
-	}
 
 	last := campaign.lastUnit()
 	rung, err := sizing.NextAddLevel(last.fillPrice, campaign.campaignN, sizing.DirectionLong)
@@ -1015,10 +1018,33 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 		return nil, fmt.Errorf("strategy: instrument %q: campaign %q cannot compute the next add rung: %w", campaign.instrumentID, campaign.campaignID, err)
 	}
 	if state.lastBarHigh < rung {
+		// The rung has not been reached: there is no Add opportunity to
+		// decide, so nothing is journalled — the identical silence a Setup
+		// far from its own entry condition gets. This is distinct from the
+		// cap check below, which DOES journal: there, an opportunity fired
+		// (the rung WAS reached) and ADR 0008 requires that rejection be
+		// recorded.
 		return nil, nil
 	}
 
 	unitIndex := len(campaign.units) + 1
+
+	// ADR 0008's four Unit caps, checked against POST-TRADE exposure now
+	// that an Add opportunity has actually fired (unit_caps.go). Checked
+	// before cash, matching this function's own former ordering (the
+	// per-instrument cap used to be checked first of all, before the rung
+	// was even computed) and ADR 0021's "caps and cash ... in that order".
+	// A Campaign already at its configured maximum Units for the
+	// per-instrument cap is the common case this reaches; the group and
+	// total-long caps reach it too, today's shared Unclassified Group
+	// included, once several Campaigns together hold enough Units.
+	if capName, limit, exposure, exceeded := r.capExceeded(campaign.instrumentID, campaign.classification); exceeded {
+		declined, err := r.declineAddCap(campaign, state.lastBarPeriodEnd, unitIndex, input, capName, limit, exposure)
+		if err != nil {
+			return nil, err
+		}
+		return []event.Envelope{declined}, nil
+	}
 
 	// ADR 0010's snapshot eligibility and ADR 0020's withdrawal-constrained
 	// spendable cash, the identical check sizeUnit applies to a new entry.
@@ -1122,16 +1148,38 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 // (ProposalDeclinedPayload.Validate rejects a non-zero value for any other
 // reason).
 func (r *transition) declineAdd(campaign *campaignState, periodEnd time.Time, unitIndex int, input event.Envelope, reason, detail string, requiredCash, availableCash float64) (event.Envelope, error) {
-	payload := event.ProposalDeclinedPayload{
-		InstrumentID:  campaign.instrumentID,
-		PeriodEnd:     periodEnd,
+	return r.stampAddDecline(campaign, periodEnd, unitIndex, input, event.ProposalDeclinedPayload{
 		Kind:          event.ProposalDeclinedKindAdd,
-		CampaignID:    campaign.campaignID,
 		Reason:        reason,
 		Detail:        detail,
 		RequiredCash:  requiredCash,
 		AvailableCash: availableCash,
-	}
+	})
+}
+
+// declineAddCap is declineAdd's counterpart for ADR 0008: a reached Add
+// Ladder rung that a Unit cap (event.DeclineReasonUnitCapExceeded) blocks,
+// naming the cap that bound, its configured limit, and the post-trade
+// exposure the Unit would have produced (unit_caps.go: capExceeded).
+func (r *transition) declineAddCap(campaign *campaignState, periodEnd time.Time, unitIndex int, input event.Envelope, capName string, limit, exposure int) (event.Envelope, error) {
+	return r.stampAddDecline(campaign, periodEnd, unitIndex, input, event.ProposalDeclinedPayload{
+		Kind:              event.ProposalDeclinedKindAdd,
+		Reason:            event.DeclineReasonUnitCapExceeded,
+		Detail:            capDetail(capName, limit, exposure),
+		Cap:               capName,
+		CapLimit:          limit,
+		PostTradeExposure: exposure,
+	})
+}
+
+// stampAddDecline finalises payload with the identifying fields every
+// Add-kind decline shares (InstrumentID, PeriodEnd, CampaignID), validates,
+// marshals and stamps it — the common tail declineAdd and declineAddCap
+// share, whatever reason and figures produced the decline.
+func (r *transition) stampAddDecline(campaign *campaignState, periodEnd time.Time, unitIndex int, input event.Envelope, payload event.ProposalDeclinedPayload) (event.Envelope, error) {
+	payload.InstrumentID = campaign.instrumentID
+	payload.PeriodEnd = periodEnd
+	payload.CampaignID = campaign.campaignID
 	if err := payload.Validate(); err != nil {
 		return event.Envelope{}, fmt.Errorf("strategy: built invalid proposal declined payload: %w", err)
 	}
@@ -1604,18 +1652,19 @@ func (r *transition) openCampaign(state *instrumentState, pending *pendingPropos
 	// here. The chained Add below still reads this new state and can fail;
 	// transact publishes the Campaign only after that also succeeds.
 	state.campaign = &campaignState{
-		campaignID:   campaignID,
-		instrumentID: fill.InstrumentID,
-		proposalID:   pending.proposalID,
-		signalID:     pending.signalID,
-		direction:    fill.Direction,
-		campaignN:    pending.n,
-		unitQuantity: pending.quantity,
-		stopMultiple: pending.stopMultiple,
-		maxUnits:     r.maxUnits,
-		openedAt:     fill.FilledAt,
-		units:        []unitState{unit1},
-		unitsOpened:  1,
+		campaignID:     campaignID,
+		instrumentID:   fill.InstrumentID,
+		proposalID:     pending.proposalID,
+		signalID:       pending.signalID,
+		direction:      fill.Direction,
+		campaignN:      pending.n,
+		unitQuantity:   pending.quantity,
+		stopMultiple:   pending.stopMultiple,
+		maxUnits:       r.maxUnits,
+		classification: r.classificationOf(fill.InstrumentID),
+		openedAt:       fill.FilledAt,
+		units:          []unitState{unit1},
+		unitsOpened:    1,
 	}
 	recordExitOrders(state.campaign, nil)
 	// The proposal has been executed, so it is no longer outstanding and must

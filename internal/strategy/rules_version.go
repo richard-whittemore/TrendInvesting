@@ -104,7 +104,42 @@ package strategy
 // exits now funds entries and Adds the older build declined. Rerunning a
 // 1.7.0 run's own inputs through this build produces a different journal,
 // so the two cannot share a version.
-const RulesVersion = "1.8.0"
+//
+// Bumped 1.8.0 -> 1.9.0 when ADR 0008's industry, sector, total-long and
+// Unclassified Group Unit caps began being enforced against post-trade
+// exposure, for both entries and Adds, alongside the per-instrument cap
+// that was already enforced. Before, only the per-instrument cap existed,
+// and a Campaign already at it silently proposed no further Add rather
+// than declining one that was actually reached; now every cap produces a
+// named strategy.proposal.declined (event.DeclineReasonUnitCapExceeded)
+// when it binds, and an Add opportunity that reaches its rung while the
+// Campaign is already at its per-instrument cap is declined rather than
+// silently skipped. strategy.proposal.declined advances to payload schema
+// 5, carrying Cap, CapLimit and PostTradeExposure. Given the same inputs, a
+// run with several Campaigns sharing a correlation group, or several
+// Campaigns together, can now decline an entry or Add the older build
+// proposed, so the two builds no longer replay each other's journals.
+//
+// Industry and sector labels are not yet a real input: every instrument is
+// Unclassified today, and every Unclassified instrument shares CONTEXT.md's
+// single Unclassified Group, capped at the loosely-correlated level
+// (event.ConfigurationPayload.MaxUnitsPerSector). ConfigurationPayload also
+// advances to schema 5, carrying MaxUnitsPerIndustry, MaxUnitsPerSector and
+// MaxUnitsTotalLong — an older configuration record decodes all three as
+// zero, which Validate rejects the same way it already rejects a zero
+// MaxUnits.
+//
+// Whether Unit-cap headroom is shared across proposals decided within the
+// SAME session-close pass is left exactly as ADR 0010 and ADR 0020 state
+// it: "known at the previous close," unchanged by ADR 0020's cash-only
+// amendment. This build therefore checks each proposal against every OTHER
+// OPEN Campaign's current, already-committed Units — never against a
+// sibling proposal still being decided in the same pass. Two entries that
+// would each fit the total-long cap alone are therefore BOTH proposed if
+// decided in the same pass; see ADR 0008's own implementation note for the
+// full ADR text this reads and why a shared per-pass budget is a separate,
+// still-open decision rather than one made here.
+const RulesVersion = "1.9.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -192,4 +227,14 @@ var RuleSurfaceFingerprints = map[string]string{
 	// Unchanged from 1.7.0: the 1.8.0 change is in the account a backtest
 	// states, not any constant this surface declares.
 	"1.8.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
+	// Unchanged from 1.8.0: the 1.9.0 change is enforcing ADR 0008's
+	// existing cap numbers (already the Baseline's declared 4/6/10/12, and
+	// still configured, never hardcoded) against post-trade exposure, and a
+	// schema version bump, not a changed Rule*, ADR*, or declared numeric
+	// rule constant. event.CapInstrument/CapIndustry/CapSector/
+	// CapUnclassifiedGroup/CapTotalLong and event.DeclineReasonUnitCapExceeded
+	// are new constants but do not match the Rule*/ADR* naming this sweep
+	// looks for, and they carry cap IDENTITIES and a decline reason, not a
+	// numeric rule value.
+	"1.9.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
 }

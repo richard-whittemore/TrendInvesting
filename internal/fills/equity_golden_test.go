@@ -190,10 +190,16 @@ func equityGoldenConfig() event.ConfigurationPayload {
 		EntryChannelLength:     55,
 		ExitChannelLength:      20,
 		MaxUnits:               4,
-		SlippageN:              0.05,
-		TierBDistanceInN:       1.0,
-		DollarsPerPoint:        1,
-		RiskAtStopFraction:     0,
+		// ADR 0008's other three Unit caps, generous here since this fixture
+		// is not testing them: only the per-instrument cap above is exercised
+		// by name in this file.
+		MaxUnitsPerIndustry: 1_000_000,
+		MaxUnitsPerSector:   1_000_000,
+		MaxUnitsTotalLong:   1_000_000,
+		SlippageN:           0.05,
+		TierBDistanceInN:    1.0,
+		DollarsPerPoint:     1,
+		RiskAtStopFraction:  0,
 		NotionalAccount: event.NotionalAccountConfig{
 			StartingEquity: equityGoldenNotionalAccount,
 			RebasingMonth:  1,

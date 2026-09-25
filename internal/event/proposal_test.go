@@ -523,6 +523,24 @@ func validProposalDeclinedInsufficientCash() event.ProposalDeclinedPayload {
 	}
 }
 
+// validProposalDeclinedUnitCapExceeded mirrors validProposalDeclined for the
+// entry-kind, unit-cap-exceeded shape (ADR 0008, schema 5): PostTradeExposure
+// strictly above CapLimit, exactly the comparison that makes the Unit
+// excessive.
+func validProposalDeclinedUnitCapExceeded() event.ProposalDeclinedPayload {
+	return event.ProposalDeclinedPayload{
+		InstrumentID:      "AAPL",
+		PeriodEnd:         proposalPeriodEnd,
+		Kind:              event.ProposalDeclinedKindEntry,
+		SignalID:          "signal:AAPL:2026-02-27T00:00:00.000000000Z",
+		Reason:            event.DeclineReasonUnitCapExceeded,
+		Detail:            "unclassified-group post-trade exposure 11 exceeds the cap 10",
+		Cap:               event.CapUnclassifiedGroup,
+		CapLimit:          10,
+		PostTradeExposure: 11,
+	}
+}
+
 func TestProposalDeclinedPayloadValidate(t *testing.T) {
 	t.Parallel()
 
@@ -642,6 +660,21 @@ func TestProposalDeclinedPayloadValidate(t *testing.T) {
 			mutate:  func(p *event.ProposalDeclinedPayload) { p.AvailableCash = math.Inf(-1) },
 			wantErr: "available cash must be zero",
 		},
+		{
+			name:    "cap set for a non-cap reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.Cap = event.CapInstrument },
+			wantErr: "cap must be empty",
+		},
+		{
+			name:    "cap limit set for a non-cap reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.CapLimit = 4 },
+			wantErr: "cap limit must be zero",
+		},
+		{
+			name:    "post-trade exposure set for a non-cap reason",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.PostTradeExposure = 5 },
+			wantErr: "post-trade exposure must be zero",
+		},
 	}
 
 	for _, tt := range tests {
@@ -759,20 +792,103 @@ func TestProposalDeclinedPayloadValidateInsufficientCash(t *testing.T) {
 	}
 }
 
+// TestProposalDeclinedPayloadValidateUnitCapExceeded pins
+// DeclineReasonUnitCapExceeded's own figure invariants (ADR 0008, schema 5):
+// Cap must be one of the five recognised identities, CapLimit must be
+// positive, and PostTradeExposure must strictly exceed it — the comparison
+// that makes the decline auditable, mirroring
+// TestProposalDeclinedPayloadValidateInsufficientCash's own shape for
+// DeclineReasonInsufficientCash.
+func TestProposalDeclinedPayloadValidateUnitCapExceeded(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(*event.ProposalDeclinedPayload)
+		wantErr string
+	}{
+		{name: "valid"},
+		{
+			name:    "unrecognised cap",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.Cap = "because" },
+			wantErr: "is not a recognised cap identity",
+		},
+		{
+			name:    "missing cap",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.Cap = "" },
+			wantErr: "is not a recognised cap identity",
+		},
+		{
+			name:    "zero cap limit",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.CapLimit = 0 },
+			wantErr: "cap limit must be a positive integer",
+		},
+		{
+			name:    "negative cap limit",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.CapLimit = -1 },
+			wantErr: "cap limit must be a positive integer",
+		},
+		{
+			// Reject a unit-cap-exceeded claim at the boundary: exposure
+			// exactly equal to the cap is WITHIN it, so a decline claiming
+			// unit-cap-exceeded at that figure is internally inconsistent.
+			name:    "post-trade exposure equal to cap limit",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.PostTradeExposure = p.CapLimit },
+			wantErr: "does not exceed the cap limit",
+		},
+		{
+			name:    "post-trade exposure below cap limit",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.PostTradeExposure = p.CapLimit - 1 },
+			wantErr: "does not exceed the cap limit",
+		},
+		{
+			name: "every recognised cap identity is accepted",
+			mutate: func(p *event.ProposalDeclinedPayload) {
+				p.Cap = event.CapTotalLong
+			},
+			wantErr: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := validProposalDeclinedUnitCapExceeded()
+			if tt.mutate != nil {
+				tt.mutate(&payload)
+			}
+
+			err := payload.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestProposalDeclinedEventConstants(t *testing.T) {
 	t.Parallel()
 
 	if event.ProposalDeclinedEventType != "strategy.proposal.declined" {
 		t.Errorf("ProposalDeclinedEventType = %q, want %q", event.ProposalDeclinedEventType, "strategy.proposal.declined")
 	}
-	if event.ProposalDeclinedSchemaVersion != 4 {
-		t.Errorf("ProposalDeclinedSchemaVersion = %d, want 4", event.ProposalDeclinedSchemaVersion)
+	if event.ProposalDeclinedSchemaVersion != 5 {
+		t.Errorf("ProposalDeclinedSchemaVersion = %d, want 5", event.ProposalDeclinedSchemaVersion)
 	}
 	for _, reason := range []string{
 		event.DeclineReasonNNotReady,
 		event.DeclineReasonQuantityBelowOneUnit,
 		event.DeclineReasonStopIntentNotPositive,
 		event.DeclineReasonInsufficientCash,
+		event.DeclineReasonUnitCostNotRepresentable,
+		event.DeclineReasonUnitCapExceeded,
 	} {
 		if reason == "" {
 			t.Error("every decline reason constant must be a non-empty enumerated value")
@@ -781,6 +897,13 @@ func TestProposalDeclinedEventConstants(t *testing.T) {
 	for _, kind := range []string{event.ProposalDeclinedKindEntry, event.ProposalDeclinedKindAdd} {
 		if kind == "" {
 			t.Error("every proposal declined kind constant must be a non-empty enumerated value")
+		}
+	}
+	for _, cap := range []string{
+		event.CapInstrument, event.CapIndustry, event.CapSector, event.CapUnclassifiedGroup, event.CapTotalLong,
+	} {
+		if cap == "" {
+			t.Error("every cap identity constant must be a non-empty enumerated value")
 		}
 	}
 }
@@ -812,6 +935,41 @@ func TestProposalDeclinedPayloadRoundTrip(t *testing.T) {
 	}
 }
 
+// TestProposalDeclinedUnitCapExceededPayloadRoundTrip is
+// TestProposalDeclinedPayloadRoundTrip for the unit-cap-exceeded shape:
+// schema 5's Cap/CapLimit/PostTradeExposure fields must survive
+// marshal/unmarshal exactly, the same property the cash-shaped decline is
+// already pinned for.
+func TestProposalDeclinedUnitCapExceededPayloadRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := validProposalDeclinedUnitCapExceeded()
+
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	var decoded event.ProposalDeclinedPayload
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if err := decoded.Validate(); err != nil {
+		t.Fatalf("decoded.Validate() error = %v", err)
+	}
+	if decoded != original {
+		t.Fatalf("round trip changed the payload:\n  original: %+v\n  decoded:  %+v", original, decoded)
+	}
+
+	reEncoded, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatalf("re-Marshal() error = %v", err)
+	}
+	if !bytes.Equal(encoded, reEncoded) {
+		t.Fatalf("round trip not stable:\n  first:  %s\n  second: %s", encoded, reEncoded)
+	}
+}
+
 func TestProposalDeclinedPayloadJSONTags(t *testing.T) {
 	t.Parallel()
 
@@ -825,7 +983,7 @@ func TestProposalDeclinedPayloadJSONTags(t *testing.T) {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
 
-	for _, key := range []string{"instrument_id", "period_end", "kind", "signal_id", "campaign_id", "reason", "detail", "required_cash", "available_cash"} {
+	for _, key := range []string{"instrument_id", "period_end", "kind", "signal_id", "campaign_id", "reason", "detail", "required_cash", "available_cash", "cap", "cap_limit", "post_trade_exposure"} {
 		if _, ok := asMap[key]; !ok {
 			t.Errorf("encoded payload missing expected key %q: %s", key, encoded)
 		}

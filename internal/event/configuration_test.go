@@ -22,7 +22,13 @@ func validConfiguration() event.ConfigurationPayload {
 		EntryChannelLength:     55,
 		ExitChannelLength:      20,
 		MaxUnits:               4,
-		SlippageN:              0.05,
+		// ADR 0008's other three Unit caps: 6 Units per industry, 10 per
+		// sector (also the Unclassified Group's cap, at the same
+		// loosely-correlated level), 12 total long.
+		MaxUnitsPerIndustry: 6,
+		MaxUnitsPerSector:   10,
+		MaxUnitsTotalLong:   12,
+		SlippageN:           0.05,
 		// #9: 1.0 is a Baseline-declared adaptation (ADR 0012's provenance
 		// taxonomy), not a Faith number — used here only as a test fixture
 		// default. Whoever owns the Baseline configuration (#50) must pick
@@ -245,6 +251,36 @@ func TestConfigurationPayloadValidate(t *testing.T) {
 			name:    "negative max units",
 			mutate:  func(c *event.ConfigurationPayload) { c.MaxUnits = -4 },
 			wantErr: "maximum units",
+		},
+		{
+			name:    "zero max units per industry",
+			mutate:  func(c *event.ConfigurationPayload) { c.MaxUnitsPerIndustry = 0 },
+			wantErr: "maximum units per industry",
+		},
+		{
+			name:    "negative max units per industry",
+			mutate:  func(c *event.ConfigurationPayload) { c.MaxUnitsPerIndustry = -6 },
+			wantErr: "maximum units per industry",
+		},
+		{
+			name:    "zero max units per sector",
+			mutate:  func(c *event.ConfigurationPayload) { c.MaxUnitsPerSector = 0 },
+			wantErr: "maximum units per sector",
+		},
+		{
+			name:    "negative max units per sector",
+			mutate:  func(c *event.ConfigurationPayload) { c.MaxUnitsPerSector = -10 },
+			wantErr: "maximum units per sector",
+		},
+		{
+			name:    "zero max units total long",
+			mutate:  func(c *event.ConfigurationPayload) { c.MaxUnitsTotalLong = 0 },
+			wantErr: "maximum units total long",
+		},
+		{
+			name:    "negative max units total long",
+			mutate:  func(c *event.ConfigurationPayload) { c.MaxUnitsTotalLong = -12 },
+			wantErr: "maximum units total long",
 		},
 		{
 			name:    "zero slippage rejected per ADR 0013",
@@ -511,19 +547,21 @@ func TestConfigurationEventConstants(t *testing.T) {
 
 // TestConfigurationSchemaVersionBumpedForSizingFields pins the explicit
 // schema bumps this payload has taken: 2 for #9's TierBDistanceInN, 3 for
-// #10's DollarsPerPoint and RiskAtStopFraction, and 4 for #18's Commission.
+// #10's DollarsPerPoint and RiskAtStopFraction, 4 for #18's Commission, and 5
+// for #55's MaxUnitsPerIndustry/MaxUnitsPerSector/MaxUnitsTotalLong.
 // A new field on an existing payload always changes the schema version
 // (docs/development.md: a schema change is explicit in this project, never a
 // silent field addition), and here it must, because every new field decodes
-// as the float64 zero from an older record — a zero DollarsPerPoint divides
+// as the zero value from an older record — a zero DollarsPerPoint divides
 // by zero, a zero RiskAtStopFraction would size a fixed-risk-at-stop Unit
-// from a risk budget of nothing, and a zero commission cap would charge
-// nothing at all on every order.
+// from a risk budget of nothing, a zero commission cap would charge
+// nothing at all on every order, and a zero Unit cap is not a legitimate
+// limit at all (ConfigurationPayload.Validate's own doc comment).
 func TestConfigurationSchemaVersionBumpedForSizingFields(t *testing.T) {
 	t.Parallel()
 
-	if event.ConfigurationSchemaVersion != 4 {
-		t.Fatalf("ConfigurationSchemaVersion = %d, want 4", event.ConfigurationSchemaVersion)
+	if event.ConfigurationSchemaVersion != 5 {
+		t.Fatalf("ConfigurationSchemaVersion = %d, want 5", event.ConfigurationSchemaVersion)
 	}
 }
 

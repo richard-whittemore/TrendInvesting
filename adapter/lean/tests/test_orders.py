@@ -200,8 +200,9 @@ def proposal_declined(day, kind="entry"):
                "signal_id": decision_id("signal", day) if kind == "entry" else "",
                "campaign_id": decision_id("campaign", 6) if kind == "add" else "",
                "reason": "quantity-below-one-unit", "detail": "quantity 0 is below one unit",
-               "required_cash": 0.0, "available_cash": 0.0}
-    return envelope("strategy.proposal.declined", 4, decision_id("proposal-declined", day), payload)
+               "required_cash": 0.0, "available_cash": 0.0,
+               "cap": "", "cap_limit": 0, "post_trade_exposure": 0}
+    return envelope("strategy.proposal.declined", 5, decision_id("proposal-declined", day), payload)
 
 
 def engine_state(day):
