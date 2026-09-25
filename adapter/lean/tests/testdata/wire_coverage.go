@@ -9,34 +9,39 @@
 // rather than restating them by hand.
 //
 // discoverEventTypes parses every internal/event/*.go file (excluding
-// _test.go) for the two constant shapes every event type in that package
-// declares — `const XxxEventType = "..."` and
-// `const XxxSchemaVersion uint32 = N` — and pairs them by their shared Xxx
-// prefix. That is a parse of the actual source, not a second, independently
-// maintained inventory: bump a schema version or add a new event type and
-// this program's own view of "what internal/event defines" moves with it
-// automatically. What still has to be maintained by hand is classification —
-// which of those types the LEAN adapter's fixtures are meant to cover, and
-// which deliberately do not cross the boundary yet — and that is exactly the
-// two lists below.
+// _test.go) with go/parser and go/ast for the two declaration shapes every
+// event type in that package declares — `XxxEventType` and
+// `XxxSchemaVersion`, const or var, singly or grouped inside `const ( ... )`
+// — and pairs them by their shared Xxx prefix. That is a parse of the
+// actual source, not a second, independently maintained inventory: bump a
+// schema version or add a new event type and this program's own view of
+// "what internal/event defines" moves with it automatically. What still has
+// to be maintained by hand is classification — which of those types the
+// LEAN adapter's fixtures are meant to cover, and which deliberately do not
+// cross the boundary yet — and that is exactly the two lists below.
 package main
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-// eventTypeConstRe matches `const XxxEventType = "yyy"` (every event type in
-// internal/event declares its type string this way; see the package's own
-// files for the convention).
-var eventTypeConstRe = regexp.MustCompile(`(?m)^const (\w+)EventType\s*=\s*"([^"]+)"`)
-
-// schemaVersionConstRe matches `const XxxSchemaVersion uint32 = N`.
-var schemaVersionConstRe = regexp.MustCompile(`(?m)^const (\w+)SchemaVersion uint32 = (\d+)`)
+// minimumDiscoveredEventTypes is a floor on how many event types
+// discoverEventTypes should ever find in internal/event. Below it almost
+// certainly means the parser regressed — it skipped a file, a grouped
+// const/var block, or otherwise missed a declaration it should have read —
+// rather than that internal/event genuinely shrank to fewer types than it
+// has ever had. It is the count as of this writing (see wire_coverage's own
+// "N event types" success line); raise it if internal/event genuinely grows,
+// but a value observed to DROP below it is a parser bug to fix first, not a
+// classification list to edit.
+const minimumDiscoveredEventTypes = 29
 
 // wireCovered is every event type this build's LEAN adapter fixtures are
 // meant to exercise — sent by the adapter, acted on when received, or
@@ -97,6 +102,14 @@ func main() {
 	must(err)
 
 	var problems []string
+	if len(discovered) < minimumDiscoveredEventTypes {
+		problems = append(problems, fmt.Sprintf(
+			"found only %d event type(s) in internal/event, fewer than the %d this build expects "+
+				"(minimumDiscoveredEventTypes); that almost always means discoverEventTypes itself "+
+				"regressed -- missed a file, a grouped const/var block, or a declaration shape -- "+
+				"not that internal/event shrank; fix the parser before touching the coverage lists below",
+			len(discovered), minimumDiscoveredEventTypes))
+	}
 	for eventType := range discovered {
 		_, covered := wireCovered[eventType]
 		_, excused := notYetCrossed[eventType]
@@ -136,38 +149,45 @@ func main() {
 	fmt.Printf("wire_coverage: %d event types, all covered or excused\n", len(discovered))
 }
 
-// discoverEventTypes reads every *.go file directly in dir, except *_test.go,
-// and returns every type-string -> schema-version pair it can pair up by a
-// shared constant-name prefix. It fails closed if a file cannot be read, an
-// EventType constant has no matching SchemaVersion constant or vice versa
-// (internal/event's own convention, unbroken as of this writing), or two
-// constants claim the same event type string.
+// discoverEventTypes parses every *.go file directly in dir, except
+// *_test.go, with go/parser and go/ast, and returns every type-string ->
+// schema-version pair it can pair up by a shared declaration-name prefix.
+//
+// It walks each file's top-level const and var declarations
+// (ast.GenDecl.Specs holds one *ast.ValueSpec per name=value line whether or
+// not the declaration groups several such lines inside `const ( ... )` or
+// `var ( ... )`, so this one loop reads `const Foo = "x"` and
+// `const ( Foo = "x"; Bar uint32 = 1 )` identically), and for every declared
+// name ending in "EventType" or "SchemaVersion" reads the literal string or
+// integer it is assigned — a name's own declared type (a typed string
+// constant, say) is irrelevant here; only the literal value is. It fails
+// closed if a file cannot be parsed, a name in that shape is assigned
+// something other than a literal (this package computes no event type or
+// schema version from an expression, as of this writing, so failing rather
+// than guessing is correct), an EventType has no matching SchemaVersion or
+// vice versa, or two constants claim the same event type string.
 func discoverEventTypes(dir string) (map[string]uint32, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("wire_coverage: read %s: %w", dir, err)
 	}
 
+	fset := token.NewFileSet()
 	types := map[string]string{}    // prefix -> event type string
 	versions := map[string]uint32{} // prefix -> schema version
+
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		contents, err := os.ReadFile(dir + "/" + name)
+		path := dir + "/" + name
+		file, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
-			return nil, fmt.Errorf("wire_coverage: read %s: %w", name, err)
+			return nil, fmt.Errorf("wire_coverage: parse %s: %w", path, err)
 		}
-		for _, m := range eventTypeConstRe.FindAllStringSubmatch(string(contents), -1) {
-			types[m[1]] = m[2]
-		}
-		for _, m := range schemaVersionConstRe.FindAllStringSubmatch(string(contents), -1) {
-			version, err := strconv.ParseUint(m[2], 10, 32)
-			if err != nil {
-				return nil, fmt.Errorf("wire_coverage: %s: schema version %q for %sSchemaVersion: %w", name, m[2], m[1], err)
-			}
-			versions[m[1]] = uint32(version)
+		if err := collectEventDecls(path, file, types, versions); err != nil {
+			return nil, err
 		}
 	}
 
@@ -175,19 +195,85 @@ func discoverEventTypes(dir string) (map[string]uint32, error) {
 	for prefix, eventType := range types {
 		version, ok := versions[prefix]
 		if !ok {
-			return nil, fmt.Errorf("wire_coverage: %sEventType = %q has no matching %sSchemaVersion constant", prefix, eventType, prefix)
+			return nil, fmt.Errorf("wire_coverage: %sEventType = %q has no matching %sSchemaVersion declaration", prefix, eventType, prefix)
 		}
 		if existing, dup := discovered[eventType]; dup {
-			return nil, fmt.Errorf("wire_coverage: event type %q is declared by more than one constant (schema versions %d and %d)", eventType, existing, version)
+			return nil, fmt.Errorf("wire_coverage: event type %q is declared by more than one name (schema versions %d and %d)", eventType, existing, version)
 		}
 		discovered[eventType] = version
 	}
 	for prefix := range versions {
 		if _, ok := types[prefix]; !ok {
-			return nil, fmt.Errorf("wire_coverage: %sSchemaVersion has no matching %sEventType constant", prefix, prefix)
+			return nil, fmt.Errorf("wire_coverage: %sSchemaVersion has no matching %sEventType declaration", prefix, prefix)
 		}
 	}
 	return discovered, nil
+}
+
+// collectEventDecls walks file's top-level const and var declarations and
+// records every XxxEventType's string literal into types, and every
+// XxxSchemaVersion's integer literal into versions, keyed by the shared
+// prefix Xxx. Grouped and single declarations are the same shape in the AST
+// (see discoverEventTypes's own doc comment), so one loop over
+// genDecl.Specs handles both.
+func collectEventDecls(path string, file *ast.File, types map[string]string, versions map[string]uint32) error {
+	for _, decl := range file.Decls {
+		genDecl, ok := decl.(*ast.GenDecl)
+		if !ok || (genDecl.Tok != token.CONST && genDecl.Tok != token.VAR) {
+			continue
+		}
+		for _, spec := range genDecl.Specs {
+			valueSpec, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, ident := range valueSpec.Names {
+				var prefix, kind string
+				switch {
+				case strings.HasSuffix(ident.Name, "EventType"):
+					prefix, kind = strings.TrimSuffix(ident.Name, "EventType"), "EventType"
+				case strings.HasSuffix(ident.Name, "SchemaVersion"):
+					prefix, kind = strings.TrimSuffix(ident.Name, "SchemaVersion"), "SchemaVersion"
+				default:
+					continue
+				}
+				// A name repeating an earlier ValueSpec's value inside an
+				// iota-style block (const A = iota; B; C, where B and C
+				// carry no Values of their own) has nothing to read here.
+				// No EventType or SchemaVersion is declared that way as of
+				// this writing; skipping rather than indexing out of range
+				// is the fail-safe reading, not a silent acceptance of one.
+				if i >= len(valueSpec.Values) {
+					return fmt.Errorf("wire_coverage: %s: %s%s has no literal value of its own (an iota-style repeated value?); this package expects every event type and schema version to be its own literal", path, prefix, kind)
+				}
+				lit, ok := valueSpec.Values[i].(*ast.BasicLit)
+				if !ok {
+					return fmt.Errorf("wire_coverage: %s: %s%s is not a literal (%T); this package expects every event type and schema version to be a literal string or integer, not a computed expression", path, prefix, kind, valueSpec.Values[i])
+				}
+				switch kind {
+				case "EventType":
+					if lit.Kind != token.STRING {
+						return fmt.Errorf("wire_coverage: %s: %sEventType is not a string literal: %s", path, prefix, lit.Value)
+					}
+					value, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						return fmt.Errorf("wire_coverage: %s: %sEventType %s: %w", path, prefix, lit.Value, err)
+					}
+					types[prefix] = value
+				case "SchemaVersion":
+					if lit.Kind != token.INT {
+						return fmt.Errorf("wire_coverage: %s: %sSchemaVersion is not an integer literal: %s", path, prefix, lit.Value)
+					}
+					version, err := strconv.ParseUint(lit.Value, 10, 32)
+					if err != nil {
+						return fmt.Errorf("wire_coverage: %s: %sSchemaVersion %s: %w", path, prefix, lit.Value, err)
+					}
+					versions[prefix] = uint32(version)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func must(err error) {
