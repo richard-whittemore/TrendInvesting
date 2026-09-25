@@ -64,6 +64,12 @@ func (r *transition) emitWatchlist(live []string, input event.Envelope) ([]event
 		if !state.lastSetupPeriodEnd.Equal(r.sessionPeriodEnd) {
 			continue
 		}
+		// An instrument the universe gate excludes is no candidate for a new
+		// Campaign, so it is no Setup to list; evaluateUniverse has already
+		// settled this Session's verdict (ADR 0009, ADR 0011).
+		if ineligible, _ := r.universeIneligible(id); ineligible {
+			continue
+		}
 		ranking, _, ranked := r.rankSignal(id)
 		if !ranked {
 			continue
