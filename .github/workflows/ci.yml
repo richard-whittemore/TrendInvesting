@@ -150,6 +150,9 @@ jobs:
       - name: Run Go tests
         run: go test -race ./...
 
+      - name: Run the LEAN adapter suite
+        run: make adapter-test
+
   go-amd64:
     runs-on: ubuntu-24.04
     steps:
