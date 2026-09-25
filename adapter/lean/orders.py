@@ -10,6 +10,7 @@ exactly as the reducer expects for that order's kind, and every other change
 of an order becomes one execution.order.lifecycle.
 """
 from datetime import datetime, timezone
+from decimal import ROUND_FLOOR, Decimal
 from fractions import Fraction
 from math import isfinite
 from re import fullmatch
@@ -26,9 +27,15 @@ EXIT_PROPOSED = "strategy.exit.proposed"
 UNIT_ADDED = "strategy.campaign.unit-added"
 UNITS_STOPPED = "strategy.campaign.units-stopped"
 CAMPAIGN_EXITED = "strategy.campaign.exited"
-SCHEMA_VERSIONS = {TRADE_PROPOSED: 1, ADD_PROPOSED: 1, PROPOSAL_EXPIRED: 3,
+SCHEMA_VERSIONS = {TRADE_PROPOSED: 2, ADD_PROPOSED: 2, PROPOSAL_EXPIRED: 3,
                    CAMPAIGN_OPENED: 1, EXIT_ORDER_SET: 1, EXIT_PROPOSED: 1,
                    UNIT_ADDED: 1, UNITS_STOPPED: 1, CAMPAIGN_EXITED: 2}
+
+# event.OrderType* (internal/event/configuration.go): the order an entry or
+# Add rests as (ADR 0005, as amended 2026-09-24). A stop-limit carries its
+# price cap as its limit; a stop-market order, the declared Variant
+# "uncapped", carries none.
+STOP_LIMIT, STOP_MARKET = "stop-limit", "stop-market"
 
 # event.FillKind* (internal/event/fill.go).
 KIND_ENTRY, KIND_ADD, KIND_STOP, KIND_EXIT = "entry", "add", "stop", "exit"
@@ -139,12 +146,15 @@ def fill_model_report(slippage_n):
         "account (ADR 0010): no partial Units, no borrowing. LEAN runs on a cash account "
         "(AccountType.Cash via InteractiveBrokersBrokerageModel), so LEAN itself refuses an "
         "order it cannot fund at submission: status Invalid, rejected and logged, the same "
-        "path as any other order LEAN refuses. A gap that fills above the level can still cost "
-        "more than the cash on hand, in which case LEAN fills it anyway and cash goes negative; "
-        "account.snapshot refuses a negative figure and the run stops, as it must, since the "
-        "adapter reports what LEAN actually holds rather than clamping it. ADR 0020's running "
-        "debit at order placement is what actually bounds an order's affordability against a "
-        "sized estimate; it narrows this gap but a large enough one can still exceed the hold.",
+        "path as any other order LEAN refuses. The engine reserves each entry's and Add's "
+        "worst-case cost, at its price cap with slippage and commission, when it proposes it "
+        "(ADR 0020, as amended 2026-09-24), and a Baseline order is a stop-limit that cannot "
+        "execute above that cap, so a fill cannot cost more than was reserved. Under the "
+        "declared Variant 'uncapped' the order is a stop-market one, and a gap that fills far "
+        "above the level can still cost more than the cash on hand, in which case LEAN fills it "
+        "anyway and cash goes negative; account.snapshot refuses a negative figure and the run "
+        "stops, as it must, since the adapter reports what LEAN actually holds rather than "
+        "clamping it.",
         "slippage is {} x N per fill (ADR 0013), charged by the adapter's NSlippageModel "
         "from the N the engine sent: a trade proposal's n, an Add proposal's campaign_n, "
         "and the Campaign's frozen campaign_n for an Exit Order, each at the raw ratio in "
@@ -185,7 +195,8 @@ def fill_model_report(slippage_n):
         "entry timing: the engine proposes an entry or Add at a Session's close, and LEAN "
         "can fill it only in the next session. cmd/backtest fills it inside the bar that "
         "signalled it, so a LEAN run enters one bar later.",
-        "order lifetime: entries and Adds are good-till-cancelled stop-market orders that "
+        "order lifetime: entries and Adds are good-till-cancelled stop-limit orders (stop-market "
+        "under the declared Variant 'uncapped') that "
         "the adapter cancels when the engine expires their proposal at the next bar (ADR "
         "0011), so each works for exactly one session. LEAN's DAY orders are not used: at "
         "daily resolution LEAN expires a DAY order before it evaluates the session's fill "
@@ -204,6 +215,19 @@ def fill_model_report(slippage_n):
         "working assumption, not a settled choice.",
         "partial fills: a partial fill stops the run. The engine accepts one fill per order "
         "and does not accumulate partial fills into one Unit yet.",
+        "price cap (ADR 0005, as amended 2026-09-24): UNCONFIRMED, not yet observed on the "
+        "pinned image. A proposal carrying a price cap becomes a LEAN StopLimitOrder, stop at "
+        "the level and limit at the cap, rounded down to the tick so LEAN's limit never exceeds "
+        "the engine's cap. ADR 0005 fills a triggered stop-limit at max(level, open) when that "
+        "is within the cap, at the cap itself when the bar opened above it and traded back down "
+        "to it, and not at all otherwise, always plus slippage. LEAN's own stop-limit fill model "
+        "is believed, from its source rather than any observation, to trigger only when the "
+        "bar's high exceeds the stop, to fill only if the bar's close is below the limit, at "
+        "the lower of the bar's high and the limit, and to charge no slippage on a limit fill, "
+        "in which case the fill reports a slippage of zero. If so, LEAN skips gaps ADR 0005 "
+        "fills, fills some at a different price, and never costs more than the limit; each of "
+        "these must be observed before any paper-trading gate. The stop-limit signature "
+        "(symbol, quantity, stop, limit, asynchronous, tag, properties) is likewise unconfirmed.",
     ]
 
 
@@ -243,6 +267,20 @@ def _positive_price(value):
 
 def _positive_quantity(value):
     return type(value) is int and value > 0
+
+
+def floor_to_tick(price, tick):
+    """price rounded DOWN to a whole number of ticks.
+
+    A stop-limit's limit is the engine's price cap, the most the order may
+    pay (ADR 0005, as amended 2026-09-24), and LEAN rounds a price to the tick.
+    Rounded down here, the limit LEAN holds never exceeds the cap the
+    engine's hold was computed from, so rounding cannot let a fill cost more
+    than its hold. Decimal arithmetic on the shortest repr, so a price that
+    is a whole number of ticks is never floored a tick lower.
+    """
+    ticks = (Decimal(repr(price)) / Decimal(repr(tick))).to_integral_value(rounding=ROUND_FLOOR)
+    return float(ticks * Decimal(repr(tick)))
 
 
 def _whole(value):
@@ -480,6 +518,16 @@ class OrderDesk:
                                 "{:.4f}".format(ticket.OrderId, ticket.Tag, ticket.Quantity, stop,
                                                 placed["quantity"], placed["level"], quantity,
                                                 level))
+            if placed.get("price_cap") is not None:
+                # A stop-limit's limit is split like its stop: its price cap
+                # at the new ratio, within a tick (ADR 0005, as amended).
+                cap = placed["price_cap"] * ratio
+                limit = float(ticket.Get(self.lean.OrderField.LimitPrice))
+                if abs(limit - cap) > tick + 1e-9:
+                    problems.append("LEAN order {} (tag={}) is limited at {:.4f}, but the "
+                                    "engine's price cap {} is {:.4f} raw".format(
+                                        ticket.OrderId, ticket.Tag, limit, placed["price_cap"],
+                                        cap))
         if problems:
             raise Uncertain("after the split of {} at {}, at {} split-adjusted shares per raw "
                             "share, {}: {}".format(self.instrument, split_at, ratio, when,
@@ -564,8 +612,33 @@ class OrderDesk:
     def _already_submitted(self, tag):
         return self._tickets(lambda t: t.Tag == tag)
 
+    def _price_cap_reason(self, payload, level):
+        """Why the proposal's order type and price cap cannot be placed, or None.
+
+        A stop-limit's cap must be a positive price at or above its level; a
+        stop-market order carries none (event.TradeProposalPayload's own
+        rule, ADR 0005 as amended 2026-09-24). Any other order type is one
+        this adapter does not know how to place.
+        """
+        order_type, price_cap = payload.get("order_type"), payload.get("price_cap")
+        if order_type == STOP_LIMIT:
+            if not _positive_price(price_cap) or price_cap < level:
+                return "price cap {!r} is not a positive price at or above level {!r}".format(
+                    price_cap, level)
+            return None
+        if order_type == STOP_MARKET:
+            if price_cap != 0:
+                return "a stop-market proposal carries price cap {!r}; it has none".format(price_cap)
+            return None
+        return "order type {!r} is not one this adapter places".format(order_type)
+
     def _propose(self, decision, payload, bar_end, level, n, entry):
-        """An entry or Add: a good-till-cancelled buy stop-market order at the proposal's level.
+        """An entry or Add: a good-till-cancelled buy order at the proposal's level.
+
+        A stop-limit, limited at the proposal's price cap rounded down to the
+        tick, when the proposal carries one (the Baseline); a stop-market order
+        when it does not (the declared Variant "uncapped"; ADR 0005, as amended
+        2026-09-24). The adapter computes no cap: it places the engine's.
 
         Valid only for the session after the bar that produced it — ADR 0005's
         one-bar window, the same one event.ProposalExpiredPayload's
@@ -593,6 +666,8 @@ class OrderDesk:
             reason = "level {!r} is not a positive price".format(level)
         if reason is None and not _positive_price(n):
             reason = "N {!r} is not a positive figure to slip by (ADR 0013)".format(n)
+        if reason is None:
+            reason = self._price_cap_reason(payload, level)
         if reason is None and entry and payload.get("direction") != _LONG:
             reason = "direction {!r} is not {!r}".format(payload.get("direction"), _LONG)
         if reason is None:
@@ -624,33 +699,53 @@ class OrderDesk:
         properties = self.lean.OrderProperties()
         properties.TimeInForce = self.lean.TimeInForce.GoodTilCanceled
         self.n_by_tag[tag] = n
-        ticket = self._submit(raw_quantity, level * ratio, tag, properties)
+        price_cap = payload["price_cap"] if payload.get("order_type") == STOP_LIMIT else None
+        limit = None if price_cap is None else floor_to_tick(price_cap * ratio, self._tick())
+        ticket = self._submit(raw_quantity, level * ratio, tag, properties, limit)
         if ticket.Status == self.lean.OrderStatus.Invalid:
             self._reject(decision, "LEAN refused the order (status {})".format(ticket.Status))
             return
-        # level and quantity in the engine's split-adjusted view; quantity is
-        # what the raw order is, which may be less than the proposal's.
+        # level, cap and quantity in the engine's split-adjusted view;
+        # quantity is what the raw order is, which may be less than the
+        # proposal's.
         self.orders[ticket.OrderId] = {"kind": KIND_ENTRY if entry else KIND_ADD, "tag": tag,
                                        "campaign_id": payload.get("campaign_id", ""),
-                                       "level": level, "quantity": raw_quantity * ratio}
+                                       "level": level, "price_cap": price_cap,
+                                       "quantity": raw_quantity * ratio}
 
-    def _submit(self, quantity, level, tag, properties):
-        """Submit one stop-market order, in raw shares at a raw level,
-        reconciling first if it is the run's first.
+    def _tick(self):
+        """The instrument's minimum price variation, which LEAN rounds prices to."""
+        return float(self.algorithm.Securities[self.symbol].SymbolProperties.MinimumPriceVariation)
 
-        LEAN's signature is (symbol, quantity, stop_price, asynchronous, tag,
-        order_properties): the tag is the fifth argument, never the fourth.
+    def _submit(self, quantity, level, tag, properties, limit=None):
+        """Submit one order, in raw shares at a raw level, reconciling first if
+        it is the run's first: a stop-limit when limit is given, else a
+        stop-market order.
+
+        LEAN's StopMarketOrder signature is (symbol, quantity, stop_price,
+        asynchronous, tag, order_properties): the tag is the fifth argument,
+        never the fourth. StopLimitOrder is taken to follow it with the limit
+        after the stop, (symbol, quantity, stop_price, limit_price,
+        asynchronous, tag, order_properties); that signature is not yet
+        observed on the pinned image (README.md).
         """
         if not self.first_order_placed:
             self.require_flat("before the first order")
-        ticket = self.algorithm.StopMarketOrder(self.symbol, quantity, level, False, tag, properties)
+        if limit is None:
+            ticket = self.algorithm.StopMarketOrder(self.symbol, quantity, level, False, tag,
+                                                    properties)
+        else:
+            ticket = self.algorithm.StopLimitOrder(self.symbol, quantity, level, limit, False, tag,
+                                                   properties)
         self.first_order_placed = True
         if ticket.Status == self.lean.OrderStatus.Invalid:
             return ticket
         self.submitted += 1
-        self.algorithm.Log("adapter: order {} {} {} raw shares @ {} raw (split ratio {}) "
+        self.algorithm.Log("adapter: order {} {} {} raw shares @ {} raw{} (split ratio {}) "
                            "tag={}".format(ticket.OrderId, "buy" if quantity > 0 else "sell",
-                                           abs(quantity), level, self.ratio, tag))
+                                           abs(quantity), level,
+                                           "" if limit is None else ", limit {} raw".format(limit),
+                                           self.ratio, tag))
         return ticket
 
     def _expire(self, payload):

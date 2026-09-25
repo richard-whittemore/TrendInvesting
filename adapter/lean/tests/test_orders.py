@@ -54,18 +54,33 @@ def trade_proposal(day, **changes):
                "unit_volatility_fraction": 0.01, "stop_multiple": 2,
                "risk_at_stop": 0.02, "realised_risk_at_stop": 0.02,
                "dollars_per_point": 1, "notional_account": 1000000,
-               "protective_stop_intent": 22.1}
+               "protective_stop_intent": 22.1,
+               # The Baseline's stop-limit, capped at level + 1N (ADR 0005, as
+               # amended 2026-09-24): 24.5 + 1.2.
+               "order_type": "stop-limit", "gap_buffer_n": 1}
     payload.update(changes)
-    return envelope("strategy.trade.proposed", 1, decision_id("proposal", day), payload)
+    if "price_cap" not in changes:
+        level, n = payload["entry_level"], payload["n"]
+        # A malformed level or N gets the fixture's own cap, so each rejection
+        # test still names the one field it is about.
+        numeric = all(type(v) in (int, float) for v in (level, n))
+        payload["price_cap"] = level + n if numeric else 25.7
+    return envelope("strategy.trade.proposed", 2, decision_id("proposal", day), payload)
 
 
 def add_proposal(day, unit_index=2, **changes):
     payload = {"campaign_id": decision_id("campaign", 6), "instrument_id": "AAPL",
                "period_end": period_end(day), "unit_index": unit_index,
                "level": 25.1, "quantity": 100, "previous_unit_fill": 24.5,
-               "campaign_n": 1.2, "rule": "add.ladder.half-n", "adr": "0006"}
+               "campaign_n": 1.2, "rule": "add.ladder.half-n", "adr": "0006",
+               "order_type": "stop-limit", "gap_buffer_n": 1}
     payload.update(changes)
-    return envelope("strategy.add.proposed", 1,
+    if "price_cap" not in changes:
+        # The Add's cap is measured in the Campaign's frozen N.
+        level, n = payload["level"], payload["campaign_n"]
+        numeric = all(type(v) in (int, float) for v in (level, n))
+        payload["price_cap"] = level + n if numeric else 26.3
+    return envelope("strategy.add.proposed", 2,
                     decision_id("add-proposal-unit-{}".format(unit_index), day), payload)
 
 
@@ -202,7 +217,7 @@ def proposal_declined(day, kind="entry"):
                "reason": "quantity-below-one-unit", "detail": "quantity 0 is below one unit",
                "required_cash": 0.0, "available_cash": 0.0,
                "cap": "", "cap_limit": 0, "post_trade_exposure": 0}
-    return envelope("strategy.proposal.declined", 5, decision_id("proposal-declined", day), payload)
+    return envelope("strategy.proposal.declined", 6, decision_id("proposal-declined", day), payload)
 
 
 def engine_state(day):
@@ -321,10 +336,12 @@ class OrderTestCase(unittest.TestCase):
 
 
 class EntryAndAddOrderTests(OrderTestCase):
-    def test_a_valid_proposal_becomes_a_gtc_stop_market_order_at_its_level(self):
+    def test_a_valid_proposal_becomes_a_gtc_stop_limit_order_at_its_level_and_cap(self):
         # Good-till-cancelled, never DAY: at daily resolution LEAN expires a
         # DAY order before it evaluates the next session's fill (observed on
-        # the pinned image), so a DAY entry could never fill.
+        # the pinned image), so a DAY entry could never fill. A stop-limit,
+        # limited at the proposal's price cap (ADR 0005, as amended
+        # 2026-09-24).
         algo = self.start()
         proposal = trade_proposal(9)
         self.feed(algo, 9, [proposal])
@@ -332,8 +349,37 @@ class EntryAndAddOrderTests(OrderTestCase):
         [ticket] = self.tickets(algo)
         self.assertEqual((ticket.Symbol, ticket.Quantity, ticket.StopPrice, ticket.Tag),
                          ("AAPL", 100, 24.5, proposal["id"]))
+        self.assertEqual((ticket.OrderType, ticket.LimitPrice), ("stop-limit", 25.7))
         self.assertEqual(ticket.TimeInForce, "gtc")
         self.assertEqual(self.rejections(algo), [])
+
+    def test_an_uncapped_proposal_becomes_a_stop_market_order(self):
+        # The declared Variant "uncapped" keeps Faith's stop-market entry.
+        algo = self.start()
+        proposal = trade_proposal(9, order_type="stop-market", gap_buffer_n=0, price_cap=0)
+        self.feed(algo, 9, [proposal])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [ticket] = self.tickets(algo)
+        self.assertEqual((ticket.OrderType, ticket.StopPrice, ticket.LimitPrice),
+                         ("stop-market", 24.5, None))
+
+    def test_a_proposal_whose_order_cannot_be_placed_is_rejected(self):
+        # event.TradeProposalPayload's own rule: a stop-limit's cap is a price
+        # at or above its level; a stop-market order has none; no other order
+        # type exists.
+        for name, changes in {
+                "a cap below the level": dict(price_cap=24.4),
+                "a non-positive cap": dict(price_cap=0),
+                "a stop-market order stating a cap": dict(order_type="stop-market", price_cap=25.7),
+                "an unknown order type": dict(order_type="limit"),
+                "no order type": dict(order_type=None)}.items():
+            with self.subTest(name):
+                algo = self.start()
+                self.feed(algo, 9, [trade_proposal(9, **changes)])
+                self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+                self.assertEqual(self.tickets(algo), [])
+                [rejection] = self.rejections(algo)
+                self.assertIn("strategy.trade.proposed", rejection)
 
     def test_a_proposal_in_the_session_close_reply_becomes_an_order(self):
         # The engine decides entries and Adds when the Session closes (ADR
@@ -346,13 +392,14 @@ class EntryAndAddOrderTests(OrderTestCase):
         self.assertEqual(sorted(t.Tag for t in self.tickets(algo)), sorted([entry["id"], add["id"]]))
         self.assertTrue(all(t.TimeInForce == "gtc" for t in self.tickets(algo)))
 
-    def test_a_valid_add_proposal_becomes_a_gtc_stop_market_order_at_its_rung(self):
+    def test_a_valid_add_proposal_becomes_a_gtc_stop_limit_order_at_its_rung_and_cap(self):
         algo = self.start()
         proposal = add_proposal(9)
         self.feed(algo, 9, [proposal])
         [ticket] = self.tickets(algo)
         self.assertEqual((ticket.Quantity, ticket.StopPrice, ticket.Tag, ticket.TimeInForce),
                          (100, 25.1, proposal["id"], "gtc"))
+        self.assertEqual((ticket.OrderType, ticket.LimitPrice), ("stop-limit", 25.1 + 1.2))
 
     def test_a_redelivered_proposal_creates_no_second_order(self):
         algo = self.start()
@@ -584,9 +631,11 @@ class EntryAndAddOrderTests(OrderTestCase):
         self.assertEqual(algo.Transactions.cancellations, [])
 
     def test_an_unknown_schema_version_stops_the_run(self):
+        # Schema 1 predates the price cap (ADR 0005, as amended 2026-09-24):
+        # read as schema 2 it would be placed with no cap at all.
         algo = self.start()
         proposal = trade_proposal(9)
-        proposal["schema_version"] = 2
+        proposal["schema_version"] = 1
         self.feed(algo, 9, [proposal])
         self.assertTrue(algo.failed)
         self.assertEqual(self.tickets(algo), [])
@@ -1304,12 +1353,15 @@ class StartupReportTests(OrderTestCase):
                       "InteractiveBrokersFeeModel", "$0.005", "0.5%", "amended", "partial",
                       "one bar later", "CancelPending", "price views", "raw shares",
                       "split-adjusted view",
-                      "rounded down", "to the cent", "split"):
+                      "rounded down", "to the cent", "split", "price cap", "StopLimitOrder"):
             self.assertIn(topic, text)
         # Every statement about LEAN's own behaviour was settled by a run on
-        # the pinned image; none is left as belief.
-        self.assertNotIn("unconfirmed", text)
-        self.assertNotIn("believed", text)
+        # the pinned image except the stop-limit's, which has not been
+        # observed yet and says so; none other is left as belief.
+        unsettled = [m for m in report if "unconfirmed" in m.lower() or "believed" in m]
+        self.assertEqual(len(unsettled), 1, unsettled)
+        self.assertIn("price cap", unsettled[0])
+        self.assertIn("UNCONFIRMED", unsettled[0])
         # Logged at startup, before any bar reaches the engine.
         self.assertEqual(algo.client.sent, [])
 
@@ -1354,6 +1406,18 @@ class RawAccountingTests(OrderTestCase):
         self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
         [ticket] = self.tickets(algo)
         self.assertEqual((ticket.Quantity, ticket.StopPrice, ticket.Tag), (100, 24.5, proposal["id"]))
+
+    def test_a_cap_is_limited_in_raw_prices_rounded_down_to_the_tick(self):
+        # 0.925 split-adjusted is 25.9 raw at a ratio of 28; a cap of 0.92525
+        # is 25.907 raw, limited at 25.90: rounded down, so LEAN's limit never
+        # exceeds the engine's cap (ADR 0005 and ADR 0020, as amended).
+        for cap, limit in ((0.925, 25.9), (0.92525, 25.9)):
+            with self.subTest(cap=cap):
+                algo = self.start()
+                self.feed(algo, 9, [self.entry(price_cap=cap)])
+                self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+                [ticket] = self.tickets(algo)
+                self.assertEqual((ticket.StopPrice, ticket.LimitPrice), (24.5, limit))
 
     def test_an_add_is_ordered_in_raw_shares_at_the_raw_rung(self):
         algo = self.start()
@@ -1664,6 +1728,18 @@ class SplitTests(OrderTestCase):
         self.split(algo, 11, meddle=lambda: setattr(sell, "StopPrice", 22.0))
         self.assert_stopped_before_the_session(
             algo, "split", "order {}".format(sell.OrderId), "22.0", "22.4")
+
+    def test_a_split_that_moved_a_limit_off_the_engines_cap_stops_before_the_session(self):
+        # A working stop-limit entry's limit is split like its stop (assumed,
+        # unobserved: README.md); one LEAN left elsewhere is not the order the
+        # engine's hold was computed for.
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9, entry_level=0.875, quantity=5600, n=0.05)])
+        [entry] = self.tickets(algo)
+        self.assertAlmostEqual(entry.LimitPrice, 0.925 * 56)
+        self.split(algo, 10, meddle=lambda: setattr(entry, "LimitPrice", 30.0))
+        self.assert_stopped_before_the_session(
+            algo, "split", "order {}".format(entry.OrderId), "limited at 30.0000", "25.9000")
 
     def test_an_exit_order_lean_dropped_in_the_split_stops_before_the_session(self):
         # The holding still matches the engine's Units, so only checking each

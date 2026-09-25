@@ -157,11 +157,14 @@ image with a deliberately undersized cash balance:
   unaffordable at its own level is refused before it can ever fill) but does
   not remove it: a large enough gap still leaves cash negative, and the run
   must still stop, exactly as it does today, because `account.snapshot`
-  refuses to report a negative figure. #105's running debit at order
-  placement (ADR 0020) is what actually bounds an order's affordability
-  against a sized estimate that includes slippage and commission; it is what
-  narrows this further, not the account type, and even it cannot promise a
-  gap can never exceed the hold it reserved.
+  refuses to report a negative figure. Since the owner's decision of
+  2026-09-24 (ADR 0005 and ADR 0020, as amended), the engine reserves every
+  entry's and Add's worst-case cost when it proposes it, at its **price cap**
+  (level + 1N) with slippage and commission, and the Baseline's order is a
+  **stop-limit** limited at that cap. A gap above the cap then does not fill
+  at all, so a fill cannot cost more than was reserved; the account type is
+  not what bounds it. Only the declared Variant `uncapped`, whose orders are
+  stop-market, keeps the gap exposure described here.
 
 LEAN's starting cash is the run's own `cash` setting in `run.json`, required
 and never defaulted. Set it to the configuration's
@@ -269,8 +272,8 @@ never combines two levels.
 
 | Decision | LEAN order |
 | --- | --- |
-| `strategy.trade.proposed` | buy stop-market, **good-till-cancelled**, at `entry_level`, for `quantity`, each converted to raw (**Price views and raw accounting**) |
-| `strategy.add.proposed` | buy stop-market, **good-till-cancelled**, at `level`, for `quantity`, each converted to raw |
+| `strategy.trade.proposed` | buy **stop-limit**, **good-till-cancelled**, stop at `entry_level`, limit at `price_cap` rounded **down** to the tick, for `quantity`, each converted to raw (**Price views and raw accounting**); a **stop-market** order at `entry_level` when `order_type` is `stop-market` (the declared Variant `uncapped`) |
+| `strategy.add.proposed` | the same, at `level` and `price_cap`, for `quantity`, each converted to raw |
 | `strategy.proposal.expired` (kind `entry` or `add`) | cancel that proposal's order if it is still working |
 | `strategy.campaign.opened` | none: its frozen `campaign_n` is kept for its Exit Orders' slippage, and its `fill_id` as Unit 1's opening fill |
 | `strategy.campaign.unit-added` | none: its `fill_id` is kept as that Unit's opening fill |
@@ -353,7 +356,18 @@ never combines two levels.
 - **LEAN's own API, as the pinned image has it.** `StopMarketOrder`'s fourth
   argument is the bool `asynchronous`, so the tag and order properties are
   the fifth and sixth; the order-ticket collections are enumerables with no
-  length or indexing, so they are read with `list()`.
+  length or indexing, so they are read with `list()`. `StopLimitOrder` is
+  called as `(symbol, quantity, stop, limit, asynchronous, tag, properties)`,
+  by analogy: **unconfirmed**, not yet observed on the pinned image.
+- **A proposal's order must be placeable exactly as stated** (ADR 0005, as
+  amended 2026-09-24): `order_type` `stop-limit` with a positive `price_cap`
+  at or above its level, or `stop-market` with `price_cap` 0. Anything else is
+  rejected and logged, like any other malformed proposal. The adapter computes
+  no cap. It places the engine's, rounded **down** to LEAN's tick so the limit
+  LEAN holds never exceeds the cap the engine's hold was computed from. After a
+  split, a working stop-limit's limit must be its cap at the new ratio, within a
+  tick, like its stop. That LEAN splits a limit as it splits a stop is also
+  **unconfirmed**.
 
 **Fills and order changes.** `OnOrderEvent` sends nothing: LEAN raises it in
 the middle of placing an order (a submission is reported before
@@ -444,9 +458,35 @@ depart from ADR 0005 and ADR 0013: the two price views and the rounding of a
 Unit to raw shares, the cash account (ADR 0010) and what it does and does not
 prevent, gap-at-open behaviour, the cent tick, exact touches, same-bar
 ambiguity, amendments, intrabar ordering, entry timing, order lifetime,
-LEAN's default equity slippage, the commission schedule and partial fills.
-Each statement about LEAN's own behaviour was observed on the pinned image,
-as follows.
+LEAN's default equity slippage, the commission schedule, partial fills and
+the price cap. Each statement about LEAN's own behaviour was observed on the
+pinned image, as follows, **except the price cap's**, which is marked
+unconfirmed in the report itself (see **The stop-limit and ADR 0005**, below).
+
+**The stop-limit and ADR 0005** (unconfirmed: nothing below has been observed
+on the pinned image). ADR 0005's amended fill model handles a triggered buy
+stop-limit with stop `level` and limit `cap`, against a bar with reference
+(open) `R` and low `L`, in three cases:
+
+- if `max(level, R)` is at or below `cap`, it fills there;
+- if `R` is above `cap` and the bar trades back down to it (`L ≤ cap`), it
+  fills at `cap`;
+- otherwise it does not fill.
+
+Slippage is added in every case, so a fill never exceeds `cap` plus slippage,
+which is exactly what the engine's hold reserved. LEAN's own stop-limit fill
+model, read from its source rather than observed, differs:
+
+- it triggers only when the bar's high **exceeds** the stop;
+- it fills only if the bar's **close** is below the limit, at the lower of the
+  bar's high and the limit;
+- it charges no slippage on a limit fill, so `slippage_applied` would be
+  reported as zero.
+
+If that reading holds, LEAN skips some bars ADR 0005 fills (a touch, or a bar
+closing above the cap), fills others at a different price, and never pays
+more than the limit. Every one of these must be observed in a probe on the
+pinned image, and the table below extended, before any paper-trading gate.
 
 **Observed LEAN behaviour** (image
 `quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d`;
