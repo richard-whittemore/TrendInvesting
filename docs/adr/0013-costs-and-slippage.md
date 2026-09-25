@@ -16,3 +16,12 @@ ADR 0005 requires a declared slippage model on every fill. A fixed percentage of
 - Costs scale with the instrument's volatility, consistently with sizing, stops, and ladders.
 - Sublime's "enter above the high of the breakout bar" is, in effect, a large deliberate slippage; expressing slippage in N makes that a measurable Variant rather than a hidden assumption.
 - A backtest run with zero slippage is invalid by construction and must be rejected by the run registry.
+
+## Amendment: slippage and commission are part of a hold (2026-09-24)
+
+Under the owner's decision of 2026-09-24 (ADR 0005's and ADR 0020's amendments of that date), the reducer's affordability check and the cash hold it places at proposal use the Unit's **worst-case** cost. That cost is the proposal's price cap plus this ADR's slippage, `SlippageN × N` per share, times the quantity and dollars per point, plus this ADR's commission charged on that quantity at that price. The same parameters are used, so the check and the fill model agree:
+
+- The reducer computes the commission with the same arithmetic `internal/fills` charges a fill with (`sizing.Commission`: rate, then floor, then ceiling).
+- The charge never falls as the price rises, so the commission at the worst-case price bounds the commission on any fill below it.
+
+Slippage is still applied to every fill and is never zero. The cap bounds the execution price before slippage (ADR 0005's amendment), so the hold covers the cap and the slippage together.

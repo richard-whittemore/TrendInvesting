@@ -68,3 +68,19 @@ Faith's numbers are kept: **4 Units per instrument, 6 per industry, 10 per secto
 > per-pass budget is the unresolved decision #33/#34/#105 exist to make,
 > not one this ticket invented. See the #36 implementation report for the
 > full text considered and the options this leaves open.
+
+> **Implementation note (2026-09-24, RulesVersion 1.10.0): same-Session
+> headroom is now reserved.** The paragraph above, "Same-pass headroom is
+> deliberately NOT shared across proposals", described the rule as it stood
+> before the owner's decision of 2026-09-24 (Richard, on #220), which ADR 0020
+> records as its amendment "a proposal reserves its cash and its cap
+> headroom". Every proposed entry and Add now places a hold that reserves one
+> Unit under each cap it counts towards, until its proposal fills, expires or
+> is cancelled. Each cap is checked against **committed Units plus reserved
+> Units** plus the proposed one. Two entries that each fit the total-long cap
+> alone, decided in one session-close pass, no longer both propose: the second,
+> in ADR 0021's order, is declined, naming the cap. When a hold's order fills,
+> its reservation turns into a committed Unit, so it is never counted twice.
+> The same applies to the Unclassified Group and to the per-instrument cap. A
+> decline's `PostTradeExposure` counts reserved Units
+> (`strategy.proposal.declined` schema 6).

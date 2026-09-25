@@ -112,6 +112,14 @@ Which quantity position size is keyed to. *Volatility-normalised* sizes from **N
 The equity figure used for position sizing, which is reduced during a drawdown and is therefore not the same as actual account equity.
 _Avoid_: equity, balance, capital.
 
+**Price cap**:
+The highest price, before slippage, at which an entry or Add may execute. It is the order's level plus a configured multiple of N (1N in the Baseline). The order rests as a stop-limit: a bar that gaps above the cap and never trades back down to it does not fill, and the Unit is skipped. The declared Variant `uncapped` rests a stop-market order with no cap (ADR 0005, as amended).
+_Avoid_: limit (ambiguous with a Unit cap), gap buffer (the configured multiple, not the price).
+
+**Hold**:
+What a proposed entry or Add reserves from the moment it is proposed until its proposal fills, expires or is cancelled. It reserves its worst-case cost against spendable cash (the price cap plus slippage, times the quantity, plus commission), and one Unit of headroom under every Unit cap the Unit counts towards. Every later proposal is checked against cash less fill debits and standing holds, and against committed plus reserved Units. A fill replaces its hold with the fill's actual cost. A snapshot never releases a hold (ADR 0020, as amended).
+_Avoid_: reservation (the act, not the record), margin, buying power (the broker's concept, which this does not model).
+
 **Drawdown Step**:
 A 20 % reduction of the Notional Account, triggered each time actual equity falls 10 % below the figure the Notional Account was last measured against.
 

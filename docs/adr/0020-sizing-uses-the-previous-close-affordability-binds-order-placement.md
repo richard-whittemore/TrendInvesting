@@ -293,3 +293,54 @@ cannot explain its own discrepancies. This amendment does not clear a live gate.
 `account.cash-movement` production remains out of scope. This amendment settles
 the snapshot producer and delivery timing only; no DISCLOSED strategy rule,
 Baseline or Variant setting, payload schema or RulesVersion changes.
+
+## Amendment: a proposal reserves its cash and its cap headroom (2026-09-24)
+
+Decided by the owner (Richard, 2026-09-24, on #220). This amendment replaces **"A submitted order reserves its cash; a proposal still reserves nothing"** above, and withdraws the first of the "Alternatives rejected". It also settles the same-Session cap question that ADR 0008's RulesVersion 1.9.0 note left open.
+
+**Reserve at proposal, cash and caps together.** When the reducer proposes an entry or an Add, it places a **hold** for that Unit (CONTEXT.md: "Hold"). The hold does two things at once:
+
+- It reserves the Unit's worst-case cost against cash.
+- It reserves one Unit of headroom under every ADR 0008 cap the Unit counts towards: its instrument, its industry and sector (or the Unclassified Group), and total long.
+
+Every later proposal, whether in the same session-close pass, from a fill-chained Add, or in a later Session, is checked against both:
+
+> **available = basis − every fill debit still standing − every hold still standing**
+>
+> **post-trade exposure = committed Units + reserved Units + 1**, for each cap.
+
+Committed Units are the Units of every open Campaign. Reserved Units are one per standing hold in the cap's grouping. A Unit whose required cash exceeds `available` is declined with `insufficient-cash`, and one that would take any cap past its limit is declined with `unit-cap-exceeded`, exactly as before, but now against figures that count what earlier proposals have claimed.
+
+**Why reserving at proposal is now right.** The rejected alternative objected that a proposal is not a commitment, and that its order among competing proposals is arbitrary. Neither holds in this system any longer:
+
+- Every proposal becomes exactly one resting order at once. `internal/fills` rests it the moment the reducer emits it, and the LEAN adapter places it in reply to the decision that carries it. So reserving at proposal reserves at submission in a backtest, and one step before submission live, which is the more conservative of the two.
+- The order among proposals is ADR 0021's total order: Adds in ascending instrument, then entries in `rankSignals`' order, then fill-chained proposals in the recorded order of the fills that chained them. Every one of those is a journalled input, so replay reproduces the ledger byte for byte, for the reason "Why the ledger is deterministic" gives.
+
+Which of two competing entries is funded is therefore decided by `rankSignals`. Until Strength is computed, `rankSignals` orders by ascending instrument ID alone (ADR 0021, "Open").
+
+**The hold is the worst case, not an estimate.** Under the Baseline's stop-limit entry (ADR 0005's amendment of the same date), the hold for `q` shares is:
+
+> **q × (C + SlippageN × N) × DollarsPerPoint + commission(q, C + SlippageN × N)**
+
+`C = level + GapBufferN × N` is the proposal's price cap. N is the proposal's N (the Campaign's frozen N for an Add), and the commission is ADR 0013's model charged at that price. A fill executes at most at `C + SlippageN × N`, and ADR 0013's commission does not fall as the price rises, so a fill never costs more than the hold that reserved it. The "Filled" case above, "a fill that cost more than the hold set aside for it", cannot arise from a capped order.
+
+Under the declared Variant `uncapped` (stop-market), the hold is the check this ADR ran before the amendment, `q × level × DollarsPerPoint`, kept unchanged for the head-to-head comparison ADR 0012 requires. Under that Variant it is an estimate a gap can exceed, which is the behaviour being compared.
+
+**What releases a hold.**
+
+- **The proposal's fill.** The hold is released in full, and the fill is debited at its actual cost, once (the 1.7.0 note), so nothing is counted twice. A partial fill releases the whole hold. The reducer accepts one fill per proposal, so the unfilled remainder can never execute (`applyFillToOpenCampaign`).
+- **The proposal's expiry**: the next bar (ADR 0011), or the end of the stream.
+- **The proposal's cancellation**: an Add superseded by a partial stop-out, or any proposal cancelled by a delisting (ADR 0009).
+
+A stop that closes a Campaign outright leaves a pending Add's hold standing until the next bar expires the proposal. That is conservative, and matches the proposal's own life. An order lifecycle report (ADR 0022) releases nothing: the reducer still decides nothing from one, and a hold follows the proposal's lifecycle, which the reducer decides itself. Live, a proposal's expiry is safe to release on because the LEAN adapter stops the run if LEAN has not confirmed the cancellation of an expired proposal's order before the next slice (`require_cancels_confirmed`). An order in unknown state therefore never has its hold released while trading continues.
+
+**Snapshots never release a hold.** A snapshot replaces the basis and drops the debits of fills at or before its as-of (the 1.7.0 note, unchanged). It does not touch holds. A snapshot states the account's cash, which is reduced by what has filled and not by what is merely resting: the simulated account (`fills.Simulator.OpenAccount`) debits a buy only when it fills, and LEAN's `Portfolio.Cash` is the account's cash, not its buying power. Dropping a hold at a snapshot would therefore make reserved cash spendable again while its order can still fill. A hold released by a fill becomes that fill's debit, stamped at the fill's time, and the replacement rule then applies to it like any other debit. In `cmd/backtest` fill times and as-ofs share one clock (the 1.8.0 note). A live producer's clocks are still unconfirmed.
+
+**An unfundable fill.** Under the Baseline a fill can no longer cost more than its hold, and a hold is placed only when `available` covers it. So a fill the ledger cannot fund can now come only from outside this ledger, for example a broker error or an order this system did not place. The owner's decision is that a negative `available` puts the engine in ADR 0019's **Degraded** state: no new entries or Adds, stops and exits continue, and an alert is raised. That state machine is not yet built (#227). Until it is, the **interim form** is the existing behaviour. The fill is applied and recorded at its actual cost, `available` goes negative and is never floored, every later entry and Add is declined with `insufficient-cash`, and stops and exits continue. That blocks exactly what Degraded would block. The halt the section "A fill that arrives anyway is applied, and halts the run" describes applies only through the snapshot's own refusal of a negative balance, as the 1.8.0 note records.
+
+**Consequences.**
+
+- `strategy.proposal.declined` advances to payload schema **6**. `RequiredCash` is the hold the Unit would have placed, and `AvailableCash` is the figure after fill debits and standing holds. `PostTradeExposure` counts reserved Units as well as committed ones. Schema-5 decisions must not silently acquire these meanings (ADR 0015).
+- `strategy.trade.proposed` and `strategy.add.proposed` advance to payload schema **2**, carrying `order_type`, `gap_buffer_n` and `price_cap`. `strategy.configuration` advances to schema **6**, carrying `buy_order_type` and `gap_buffer_n`.
+- The ranking seam now decides what is funded, not only the order in which proposals are emitted. ADR 0021's "Open" section records that its stub ranks by instrument ID alone.
+- ADR 0010's sentence on Unit-cap headroom, "known at the previous close", now reads: the Units committed by fills so far, plus those reserved by standing holds.
