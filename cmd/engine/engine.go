@@ -40,6 +40,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"time"
 
@@ -49,6 +50,11 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 	"github.com/richard-whittemore/TrendInvesting/transport"
 )
+
+// rfc3339DateTime is RFC 3339's date-time production (section 5.6):
+// full-date "T" full-time, with optional "." fractional seconds and a "Z" or
+// numeric offset.
+var rfc3339DateTime = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$`)
 
 // sourceEngine is stamped on the configuration input this command
 // manufactures for itself at startup, and on the outer envelope newDecider
@@ -101,6 +107,13 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	}
 	if err := errors.Join(missing...); err != nil {
 		return fmt.Errorf("engine: %w", err)
+	}
+	// time.Parse's RFC 3339 layout is lenient (it accepts a comma before
+	// fractional seconds), so the strict RFC 3339 date-time syntax is checked
+	// first: a value the journal's own RFC 3339 writer would not produce is
+	// refused at startup (ADR 0017).
+	if !rfc3339DateTime.MatchString(opts.asOf) {
+		return fmt.Errorf("engine: -as-of must be an RFC 3339 time: %q is not RFC 3339 date-time syntax", opts.asOf)
 	}
 	asOf, err := time.Parse(time.RFC3339, opts.asOf)
 	if err != nil {
