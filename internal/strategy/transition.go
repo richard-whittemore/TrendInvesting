@@ -32,6 +32,12 @@ type transition struct {
 	touched map[string]*instrumentState
 	// newFills holds every fill this transaction has accepted.
 	newFills map[string]acceptedFillState
+	// removedInstrumentIDs holds every instrument id a symbol change has
+	// moved away from in this transaction (ADR 0024): commit deletes each one
+	// from the published instruments map, after touched has been copied in,
+	// so the old id leaves no stale entry behind. No other transition ever
+	// removes an instrument.
+	removedInstrumentIDs []string
 	// A capital-safety halt diagnoses pre-existing corruption and must survive
 	// rejection (docs/architecture.md: safety invariants). Ordinary decisions
 	// returned alongside an error are discarded with the candidate state.
@@ -53,8 +59,8 @@ func (r *Reducer) transact(build func(*transition) ([]event.Envelope, error)) ([
 
 // begin opens a transaction over r. Everything reachable from r that is not
 // behind the instrument or accepted-fill accessors is copied here; account
-// chronology, currency pinning, cash with its fill debits and holds, the delisted map and the open
-// Session's delisted bars are small and commit together with the instruments and fills (ADR 0007/0009).
+// chronology, currency pinning, cash with its fill debits and holds, the delisted and renamed maps and the open
+// Session's delisted bars are small and commit together with the instruments and fills (ADR 0007/0009, ADR 0024).
 // time.Time locations are immutable and may be shared.
 func (r *Reducer) begin() *transition {
 	tx := &transition{
@@ -64,6 +70,7 @@ func (r *Reducer) begin() *transition {
 	}
 	tx.notionalAccount = copyValue(r.notionalAccount)
 	tx.delisted = maps.Clone(r.delisted)
+	tx.renamed = maps.Clone(r.renamed)
 	// maps.Clone is shallow: classificationRecord.pending is a slice, so
 	// each record's own pending queue is cloned too, or a rejected
 	// transaction's promotion (evaluateUniverse) could mutate the backing
@@ -82,11 +89,24 @@ func (r *Reducer) begin() *transition {
 }
 
 // commit publishes the candidate into r: both overlays are written into the
-// published maps, then every eagerly copied field is swapped in. NewReducer,
-// the only constructor, allocates both published maps.
+// published maps, every instrument a symbol change moved away from is
+// deleted from the result (ADR 0024), then every eagerly copied field is
+// swapped in. NewReducer, the only constructor, allocates both published
+// maps.
+//
+// Deletion runs after the copy, never before: renameInstrument's caller
+// still holds the moved state under touched[oldID] until it reassigns it to
+// the new id in the same call, so deleting oldID first and copying second
+// would risk resurrecting it from a stale touched entry if a future handler
+// ever touched the old id again earlier in the same transaction. Running
+// last also means a transaction that renames the same id more than once (a
+// chain A->B->C) still ends with exactly the final id published.
 func (tx *transition) commit(r *Reducer) {
 	maps.Copy(tx.baseInstruments, tx.touched)
 	maps.Copy(tx.baseFills, tx.newFills)
+	for _, id := range tx.removedInstrumentIDs {
+		delete(tx.baseInstruments, id)
+	}
 	*r = tx.Reducer
 	r.instruments = tx.baseInstruments
 	r.acceptedFills = tx.baseFills
@@ -127,10 +147,28 @@ func (tx *transition) addInstrument(id string, state *instrumentState) {
 	tx.touched[id] = state
 }
 
+// renameInstrument moves state's identity from oldID to newID (ADR 0024): a
+// symbol change, not a delisting and a fresh instrument. It records oldID
+// for deletion at commit and republishes the same *instrumentState under
+// newID — the Campaign, indicator history, universe classification and every
+// pending proposal or hold it carries are the SAME value, not a copy, so
+// nothing in it needs its own migration.
+//
+// The caller must already hold its own copy of state from tx.instrument(oldID)
+// (never peekInstrument's shared, unowned value), since this transaction is
+// about to mutate what oldID maps to.
+func (tx *transition) renameInstrument(oldID, newID string, state *instrumentState) {
+	delete(tx.touched, oldID)
+	tx.addInstrument(newID, state)
+	tx.removedInstrumentIDs = append(tx.removedInstrumentIDs, oldID)
+}
+
 // instrumentIDs returns every instrument this transaction can see, published
-// or created by it, in ascending order. The state is held in maps, and a
-// journal's decision order must not depend on Go's map iteration order
-// (.greptile/rules.md: determinism).
+// or created by it, in ascending order, excluding any id this same
+// transaction has renamed away (ADR 0024) — commit has not yet deleted it
+// from baseInstruments, but it is no longer this transaction's to see. The
+// state is held in maps, and a journal's decision order must not depend on
+// Go's map iteration order (.greptile/rules.md: determinism).
 func (tx *transition) instrumentIDs() []string {
 	ids := make([]string, 0, len(tx.baseInstruments)+len(tx.touched))
 	for id := range tx.baseInstruments {
@@ -140,6 +178,13 @@ func (tx *transition) instrumentIDs() []string {
 		if _, published := tx.baseInstruments[id]; !published {
 			ids = append(ids, id)
 		}
+	}
+	if len(tx.removedInstrumentIDs) > 0 {
+		removed := make(map[string]bool, len(tx.removedInstrumentIDs))
+		for _, id := range tx.removedInstrumentIDs {
+			removed[id] = true
+		}
+		ids = slices.DeleteFunc(ids, func(id string) bool { return removed[id] })
 	}
 	sort.Strings(ids)
 	return ids

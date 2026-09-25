@@ -21,9 +21,12 @@ ORDER_LIFECYCLE_EVENT_TYPE = "execution.order.lifecycle"
 ORDER_LIFECYCLE_SCHEMA_VERSION = 1
 # event.MarketCorporateActionEventType / MarketCorporateActionSchemaVersion
 # (internal/event/corporate_action.go); ADR 0015. Schema 2 carries a split's
-# cash in lieu (ADR 0023).
+# cash in lieu (ADR 0023). Schema 3 adds a symbol-change and a dividend kind
+# (ADR 0024); this adapter still publishes only splits (#28 tracks the rest),
+# but every corporate action it sends must be labelled with the CURRENT
+# schema so a build that no longer knows schema 2 does not refuse it.
 CORPORATE_ACTION_EVENT_TYPE = "market.corporate-action"
-CORPORATE_ACTION_SCHEMA_VERSION = 2
+CORPORATE_ACTION_SCHEMA_VERSION = 3
 # event.AdapterRunStoppedReason* (internal/event/run_stopped.go): the closed
 # set of reasons this adapter may report, mirrored here so an unrecognised
 # reason fails at the source rather than reaching the engine, which would

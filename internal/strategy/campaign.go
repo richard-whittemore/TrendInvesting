@@ -1502,6 +1502,18 @@ func (r *transition) applyFill(envelope event.Envelope) ([]event.Envelope, error
 			fill.InstrumentID, fill.Kind, fill.FillID, delistedAt.Format(time.RFC3339))
 	}
 
+	// A fill for an instrument this reducer has already renamed away is the
+	// same reconciliation failure a delisted instrument's fill is, for the
+	// same reason (ADR 0024): every proposal and Campaign this reducer holds
+	// for it has already moved to the new instrument id, so an execution
+	// still naming the old one reports either a proposal this reducer no
+	// longer offers under that id, or a market this reducer no longer tracks
+	// under it. A fill is never absorbable the way a bar is (applyCompletedBar).
+	if newID, renamed := r.renamed[fill.InstrumentID]; renamed {
+		return nil, fmt.Errorf("strategy: instrument %q: %s fill %q arrived after a symbol change moved its Campaign and proposals to %q; an execution naming the old instrument id is a reconciliation failure, not something to absorb (ADR 0024, docs/architecture.md)",
+			fill.InstrumentID, fill.Kind, fill.FillID, newID)
+	}
+
 	// Deliberately a plain lookup rather than stateFor: an instrument the
 	// reducer has never seen a bar for cannot have been proposed for, and
 	// creating state here would make the reducer look as though it had.

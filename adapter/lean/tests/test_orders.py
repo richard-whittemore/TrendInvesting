@@ -2484,7 +2484,7 @@ class CashInLieuTests(OrderTestCase):
         self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
         self.assertEqual(algo.Portfolio.holdings["AAPL"], 24611)
         [action] = self.sent(algo, "market.corporate-action")
-        self.assertEqual(action["schema_version"], 2)
+        self.assertEqual(action["schema_version"], 3)
         self.assertEqual(action["event_time"], SPLIT_AT)
         payload = dict(action["payload"])
         self.assertAlmostEqual(payload.pop("cash_in_lieu"), cash, places=9)

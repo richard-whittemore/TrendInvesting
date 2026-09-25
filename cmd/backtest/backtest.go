@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -593,25 +594,22 @@ func syncDir(dir string) error {
 // (fills.Simulator.OpenAccount): the reducer sizes no Unit without a cash
 // basis (ADR 0010), and the account is where that basis comes from.
 //
-// actions is interleaved among bars PER INSTRUMENT: before a bar's own
-// decision runs, every not-yet-delivered action naming that SAME
-// instrument, whose EffectiveAt precedes the bar's own PeriodEnd, is
-// delivered first, so a delisting reaches the reducer ahead of the bar
-// decision it forces closed (CONTEXT.md: "Delisting Exit"), and a split's
-// cash in lieu ahead of the Session whose orders it resizes (CONTEXT.md:
-// "Cash in lieu"). Every action is delivered, however many name one
-// instrument. Positioning is per instrument rather
-// than against the bar stream as a whole because readBars promises only
-// "the order the run delivers them", never global chronology: an
-// instrument-grouped fixture (every bar of one instrument, then every bar of
-// the next) is well-formed, and measuring an action against a bar of a
-// DIFFERENT instrument would place it at the wrong point in its own
-// instrument's history — a defect a single stream-wide cursor cannot avoid,
-// however it is positioned. Nothing here judges whether a given action's
-// EffectiveAt is stale relative to what the reducer has already accepted for
-// its instrument — that is the reducer's own chronology check, on its own
-// state (internal/strategy/delisting.go, split.go), and this command does
-// not reimplement it.
+// actions is delivered once per Session, before that Session's own bars:
+// every not-yet-delivered action, across EVERY instrument at once, whose
+// EffectiveAt precedes the Session's own period end (every bar in one
+// Session shares that one instant — sessionsOf's own doc comment — so one
+// boundary check covers the whole Session), so a delisting reaches the
+// reducer ahead of the bar decision it forces closed (CONTEXT.md: "Delisting
+// Exit"), a split's cash in lieu ahead of the Session whose orders it
+// resizes (CONTEXT.md: "Cash in lieu"), and a symbol change or a dividend
+// ahead of the bar each affects (ADR 0024). Checked GLOBALLY rather than
+// against one instrument's own bar — deliverActionsDueBefore's own doc
+// comment records why, and what that replaced. Every action is delivered,
+// however many name one instrument. Nothing here judges whether a given
+// action's EffectiveAt is stale relative to what the reducer has already
+// accepted for its instrument — that is the reducer's own chronology check,
+// on its own state (internal/strategy/delisting.go, split.go,
+// symbol_change.go, dividend.go), and this command does not reimplement it.
 func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, bars []event.CompletedBarPayload, actions []event.CorporateActionPayload) error {
 	// The configuration event's own time is the first bar's period end: the
 	// run's configuration is in force from the moment the run starts, and
@@ -632,14 +630,13 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 	// byte-for-byte what it was before this flag existed.
 	delivered := make([]bool, len(actions))
 	for _, session := range sessionsOf(bars) {
-		// Every action due before any of the Session's bars is delivered
-		// before the Session opens: the reducer refuses a corporate action
+		// Every action due before the Session, across every instrument, is
+		// delivered before it opens: the reducer refuses a corporate action
 		// for an instrument whose bar the open Session already holds (ADR
-		// 0021).
-		for _, bar := range session {
-			if err := deliverActionsDueFor(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, bar.InstrumentID, bar.PeriodEnd); err != nil {
-				return err
-			}
+		// 0021). Every bar in session shares one PeriodEnd (sessionsOf), so
+		// the first bar's is the whole Session's own boundary.
+		if err := deliverActionsDueBefore(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, session[0].PeriodEnd); err != nil {
+			return err
 		}
 		envelopes := make([]event.Envelope, 0, len(session))
 		for _, bar := range session {
@@ -729,35 +726,64 @@ func latestPeriodEnd(bars []event.CompletedBarPayload) time.Time {
 	return latest
 }
 
-// deliverActionsDueFor delivers every not-yet-delivered action in actions
-// (per delivered, index-aligned with actions) that names instrumentID and
-// whose EffectiveAt is strictly before boundary — that instrument's own next
-// bar decision.
+// deliverActionsDueBefore delivers every not-yet-delivered action in actions
+// (per delivered, index-aligned with actions) whose EffectiveAt is strictly
+// before boundary — the Session about to open — regardless of which
+// instrument it names.
 //
-// It scans the whole list rather than following a single position in it,
-// because actions may interleave several instruments in any order the
-// fixture gives them: each instrument's own delivery point in the bar
-// stream depends only on ITS OWN bars, never on where another instrument's
-// bars or actions happen to sit in the file. deliverInEffectiveOrder sorts
-// the due actions into one total order before delivery (inEffectiveOrder),
-// so fixture order never decides the journal.
-func deliverActionsDueFor(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, instrumentID string, boundary time.Time) error {
+// # Global, not per instrument (a review finding)
+//
+// Three earlier designs each scoped this check to one instrument's own next
+// bar (deliverActionsDueFor, since replaced): the action's own InstrumentID
+// only; then also its NewInstrumentID for a symbol change; then a full
+// backward chain-walk (symbolChangeChain) for a rename with no bar of its
+// own in between. Each patch fixed one shape and left another: a dividend on
+// a symbol-change chain's own intermediate id — which never receives a bar
+// at all — could not be found by any per-instrument lookup, so it was swept
+// into deliverRemainingActions and wrongly refused as terminal even though a
+// later bar for the chain's destination was still coming; and two renames
+// sharing one instant depend on each other for delivery order in a way no
+// single instrument's own boundary check can express (dependencyOrder,
+// below). Checking globally removes the whole shape of bug: an action
+// becomes due the moment its own true EffectiveAt is reached, by ANY
+// Session's boundary, whether or not the instrument it names happens to have
+// a bar in that particular Session.
+//
+// This is a strict generalisation, not a behaviour change, for every
+// instrument that DOES have a bar in the Session being opened: checking
+// "before this Session's boundary" globally and "before this bar's own
+// PeriodEnd" for that one instrument are the same instant, since every bar
+// in one Session shares it (sessionsOf). Every existing delisting and split
+// fixture below ADR 0024 has exactly that shape, so none of them changes.
+// What changes is only the case those fixtures never exercised: an action on
+// an instrument the CURRENT Session's bars do not include.
+//
+// The reducer's own per-instrument chronology (an action must not predate
+// the instrument's own last completed bar) is unaffected: an action is still
+// delivered no earlier than the first Session boundary that exceeds its own
+// EffectiveAt, and that instrument's own last bar, if it has had one, fell in
+// some strictly earlier Session, already processed by the time this runs.
+func deliverActionsDueBefore(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, boundary time.Time) error {
 	var due []int
 	for i, action := range actions {
-		if delivered[i] || action.InstrumentID != instrumentID || !action.EffectiveAt.Before(boundary) {
-			continue
+		if !delivered[i] && action.EffectiveAt.Before(boundary) {
+			due = append(due, i)
 		}
-		due = append(due, i)
 	}
-	return deliverInEffectiveOrder(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, due)
+	ordered, err := effectiveOrder(actions, due)
+	if err != nil {
+		return err
+	}
+	return deliverOrdered(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, ordered)
 }
 
-// deliverInEffectiveOrder delivers the given actions in inEffectiveOrder,
-// every one of them: each split of an instrument applies on its own terms
-// (ADR 0023), and a delisting is terminal only in the reducer, which records
-// a repeated notice as the no-op it is (ADR 0009).
-func deliverInEffectiveOrder(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, due []int) error {
-	for _, i := range inEffectiveOrder(actions, due) {
+// deliverOrdered delivers ordered (indexes into actions, already in the
+// order effectiveOrder decided), every one of them: each split of an
+// instrument applies on its own terms (ADR 0023), and a delisting is
+// terminal only in the reducer, which records a repeated notice as the no-op
+// it is (ADR 0009).
+func deliverOrdered(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, ordered []int) error {
+	for _, i := range ordered {
 		if err := deliverCorporateAction(ctx, simulator, recorder, cfg, strategyVersion, actions[i]); err != nil {
 			return err
 		}
@@ -766,24 +792,35 @@ func deliverInEffectiveOrder(ctx context.Context, simulator *fills.Simulator, re
 	return nil
 }
 
-// inEffectiveOrder sorts due, indexes into actions, earliest first, and
-// returns it.
+// effectiveOrder returns due (indexes into actions) in the one total
+// delivery order this command's whole corporate-action pipeline is measured
+// against: EffectiveAt ascending, so an action always reaches the reducer no
+// later than a Session boundary its own true effective time requires (ADR
+// 0010/0021).
 //
-// Several actions for one instrument can fall before the same bar, and their
-// order is decision-relevant: the reducer applies every split in order and
-// refuses one not after the last (ADR 0023), and treats the first delisting
-// it accepts as terminal (ADR 0009). Delivering in the order the fixture
-// happened to list them would let the file decide the journal, which is a
-// fact about the file rather than about the instrument.
+// Several actions can share one EXACT instant, and their order is then
+// decision-relevant, for two reasons layered on each other:
 //
-// Sorting here rather than demanding a sorted fixture keeps the command's
-// output a function of what the actions say, not of how they were written
-// down -- which only holds if the order is TOTAL. Effective time,
-// instrument and kind do not separate two splits of one instrument at one
-// instant, so the whole payload's JSON encoding breaks the last tie: two
-// actions it cannot separate are the same value, whose order nothing can
-// observe.
-func inEffectiveOrder(actions []event.CorporateActionPayload, due []int) []int {
+//  1. A symbol change that PRODUCES an instrument id must be delivered
+//     before any other action, of any kind, that NAMES that id as its own
+//     InstrumentID at the SAME instant (a review finding: Z -> A and A -> B
+//     sharing one instant, where the plain instrument-id tiebreak below can
+//     deliver A -> B first, since "A" sorts before "Z"). dependencyOrder
+//     settles this within each equal-time group.
+//  2. Whatever is left unordered by (1) — same-instant actions with no
+//     dependency relationship, exactly the shape this function's own
+//     predecessor (inEffectiveOrder) already handled — breaks the tie by
+//     instrument id, then kind, then the whole payload's own JSON encoding:
+//     two actions that encoding cannot separate are the same value, whose
+//     order nothing can observe.
+//
+// Different instants never need dependency ordering: a later action naming
+// an id an earlier one produced or retired is already delivered in the right
+// relative order by EffectiveAt alone, and whether the REDUCER then accepts
+// or refuses it (ADR 0019/0024's own terminal-id rules) is that package's
+// question, not this sort's — see dependencyOrder's own doc comment for the
+// one case this does still have to refuse.
+func effectiveOrder(actions []event.CorporateActionPayload, due []int) ([]int, error) {
 	encoded := make(map[int][]byte, len(due))
 	for _, i := range due {
 		// Marshal of a payload readCorporateActions or rerun has already
@@ -791,19 +828,115 @@ func inEffectiveOrder(actions []event.CorporateActionPayload, due []int) []int {
 		encoded[i], _ = json.Marshal(actions[i])
 	}
 	sort.SliceStable(due, func(a, b int) bool {
-		left, right := actions[due[a]], actions[due[b]]
-		if !left.EffectiveAt.Equal(right.EffectiveAt) {
-			return left.EffectiveAt.Before(right.EffectiveAt)
+		return actions[due[a]].EffectiveAt.Before(actions[due[b]].EffectiveAt)
+	})
+	ordered := make([]int, 0, len(due))
+	for start := 0; start < len(due); {
+		end := start + 1
+		for end < len(due) && actions[due[end]].EffectiveAt.Equal(actions[due[start]].EffectiveAt) {
+			end++
 		}
+		group, err := dependencyOrder(actions, due[start:end], encoded)
+		if err != nil {
+			return nil, err
+		}
+		ordered = append(ordered, group...)
+		start = end
+	}
+	return ordered, nil
+}
+
+// dependencyOrder topologically sorts group, every due action sharing one
+// exact effective instant (Kahn's algorithm, with a deterministic tiebreak so
+// two runs of one fixture always agree — .greptile/rules.md's determinism
+// rule): a symbol change with NewInstrumentID == x is a PREDECESSOR of every
+// other action in group whose own InstrumentID is x, since that action's
+// identity does not exist until the rename produces it. Only a symbol change
+// can be a predecessor — no other kind has a NewInstrumentID — so only a
+// symbol change can ever be part of a cycle.
+//
+// Ties with no dependency edge break exactly as inEffectiveOrder always did:
+// by instrument id, then kind, then the whole payload's own encoding. A
+// fixture with no chain at all — every existing delisting and split fixture
+// below ADR 0024 — therefore sorts exactly as it always has: no group here
+// is ever larger than one action unless a producer actually states two
+// actions at the same instant, and dependency edges only ever exist between
+// symbol changes.
+//
+// # Cycles (a review finding)
+//
+// Two or more renames sharing one instant, each needing another to have
+// already happened (A -> B and B -> A, both at the same EffectiveAt), have
+// no valid order. The earlier design (symbolChangeChain) walked a chain
+// backward with no visited check and looped forever on exactly this input;
+// this one cannot loop — Kahn's algorithm terminates in at most len(group)
+// steps regardless of the graph — and instead refuses by name, naming the
+// shared instant and every instrument still stuck once every action with no
+// remaining predecessor has been placed.
+func dependencyOrder(actions []event.CorporateActionPayload, group []int, encoded map[int][]byte) ([]int, error) {
+	produces := make(map[string]int, len(group)) // NewInstrumentID -> index, symbol changes only.
+	for _, i := range group {
+		if actions[i].Kind == event.CorporateActionKindSymbolChange {
+			produces[actions[i].NewInstrumentID] = i
+		}
+	}
+	dependents := make(map[int][]int, len(group))
+	inDegree := make(map[int]int, len(group))
+	for _, i := range group {
+		inDegree[i] = 0
+	}
+	for _, i := range group {
+		if predecessor, ok := produces[actions[i].InstrumentID]; ok && predecessor != i {
+			dependents[predecessor] = append(dependents[predecessor], i)
+			inDegree[i]++
+		}
+	}
+	less := func(a, b int) bool {
+		left, right := actions[a], actions[b]
 		if left.InstrumentID != right.InstrumentID {
 			return left.InstrumentID < right.InstrumentID
 		}
 		if left.Kind != right.Kind {
 			return left.Kind < right.Kind
 		}
-		return bytes.Compare(encoded[due[a]], encoded[due[b]]) < 0
-	})
-	return due
+		return bytes.Compare(encoded[a], encoded[b]) < 0
+	}
+	var ready []int
+	for _, i := range group {
+		if inDegree[i] == 0 {
+			ready = append(ready, i)
+		}
+	}
+	sort.Slice(ready, func(a, b int) bool { return less(ready[a], ready[b]) })
+	ordered := make([]int, 0, len(group))
+	for len(ready) > 0 {
+		next := ready[0]
+		ready = ready[1:]
+		ordered = append(ordered, next)
+		var freed []int
+		for _, dependent := range dependents[next] {
+			inDegree[dependent]--
+			if inDegree[dependent] == 0 {
+				freed = append(freed, dependent)
+			}
+		}
+		if len(freed) > 0 {
+			ready = append(ready, freed...)
+			sort.Slice(ready, func(a, b int) bool { return less(ready[a], ready[b]) })
+		}
+	}
+	if len(ordered) != len(group) {
+		var stuck []string
+		for _, i := range group {
+			if inDegree[i] > 0 {
+				stuck = append(stuck, fmt.Sprintf("%s -> %s", actions[i].InstrumentID, actions[i].NewInstrumentID))
+			}
+		}
+		sort.Strings(stuck)
+		return nil, fmt.Errorf("backtest: %d symbol change(s) effective at %s form a cycle with no valid delivery order: %s (ADR 0024)",
+			len(stuck), actions[group[0]].EffectiveAt.Format(time.RFC3339), strings.Join(stuck, ", "))
+	}
+	return ordered, nil
 }
 
 // deliverRemainingActions delivers whatever in actions is not yet delivered
@@ -812,6 +945,16 @@ func inEffectiveOrder(actions []event.CorporateActionPayload, due []int) []int {
 // bar, or naming an instrument this run holds no bar for at all — the
 // unknown-instrument case the reducer records without error (delisting.go,
 // split.go).
+//
+// Before delivering any of them, every remaining action is checked for a
+// cash credit that could never reach a statement (refuseIfCashCrediting):
+// fills.StateLastClose has already taken the run's one and only closing
+// account.snapshot by the time this runs (drive's own call order, above), so
+// a dividend or a split's cash in lieu delivered here would credit the
+// simulated account's ledger with no statement ever recording it. The whole
+// run refuses before any of them is delivered, rather than delivering some
+// and refusing partway through, so the journal never holds a partial answer
+// to "did every remaining action apply".
 func deliverRemainingActions(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool) error {
 	var remaining []int
 	for i := range actions {
@@ -819,7 +962,38 @@ func deliverRemainingActions(ctx context.Context, simulator *fills.Simulator, re
 			remaining = append(remaining, i)
 		}
 	}
-	return deliverInEffectiveOrder(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, remaining)
+	ordered, err := effectiveOrder(actions, remaining)
+	if err != nil {
+		return err
+	}
+	for _, i := range ordered {
+		if err := refuseIfCashCrediting(actions[i]); err != nil {
+			return err
+		}
+	}
+	return deliverOrdered(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, ordered)
+}
+
+// refuseIfCashCrediting refuses a remaining action whose cash could never
+// reach any account.snapshot (ADR 0024's review finding, which found the
+// identical gap in ADR 0023's own cash in lieu and asked for both to be
+// fixed consistently). This is the conservative choice the finding named:
+// over inventing a second, artificial closing statement outside this run's
+// existing one-statement-per-Session contract (fills.RunSession,
+// fills.StateLastClose), refusing outright means a producer who needs this
+// credit recorded must place it before the instrument's own last bar, where
+// the ordinary per-Session statement already reflects it.
+func refuseIfCashCrediting(action event.CorporateActionPayload) error {
+	at := action.EffectiveAt.Format(time.RFC3339)
+	switch {
+	case action.Kind == event.CorporateActionKindDividend:
+		return fmt.Errorf("backtest: instrument %q: a dividend effective at %s falls at or after its own last bar, after the run's only closing account.snapshot; its cash could never reach any statement, so the run refuses rather than credit it silently (ADR 0024)",
+			action.InstrumentID, at)
+	case action.Kind == event.CorporateActionKindSplit && action.CashInLieu > 0:
+		return fmt.Errorf("backtest: instrument %q: a split effective at %s pays cash in lieu and falls at or after its own last bar, after the run's only closing account.snapshot; its cash could never reach any statement, so the run refuses rather than credit it silently (ADR 0023, ADR 0024)",
+			action.InstrumentID, at)
+	}
+	return nil
 }
 
 // deliverCorporateAction wraps action as an input envelope and delivers it

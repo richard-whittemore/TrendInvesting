@@ -250,7 +250,18 @@ package strategy
 // Bumped to 1.15.0 for ADR 0006's declared recompute-N-at-Add Variant:
 // Add sizing, spacing, cap, hold and stops share the proposal's prior-bar N.
 // The frozen Baseline and opening-N result normalisation remain unchanged.
-const RulesVersion = "1.15.0"
+//
+// Bumped 1.15.0 -> 1.16.0 for ADR 0024: two new market.corporate-action
+// kinds, symbol-change and dividend. Given the same inputs, a build at
+// 1.15.0 refused both outright ("kind ... is not implemented by this
+// reducer"), where this build carries a Campaign's whole state across a
+// symbol change and credits a dividend as cash, so the two builds do not
+// replay each other's journals. This also changes a schema-3
+// market.corporate-action's own "newer build" error text for a build still
+// at MarketCorporateActionSchemaVersion 2 (it now names 3, not 2), which is
+// why TestDelistingWithWrongSchemaVersionFailsClosed's pinned decision moves
+// too, even though a delisting itself is unchanged.
+const RulesVersion = "1.16.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -382,4 +393,9 @@ var RuleSurfaceFingerprints = map[string]string{
 	// the existing event.RuleAddLadderHalfN and ADR 0006 citation, not a
 	// changed or new Rule*/ADR* constant or declared numeric rule value.
 	"1.15.0": "2aabc203a0658c2ef9030b351709aeebaa3ba3ebddde18b204837d65096a9850",
+	// Changed from 1.15.0 by ADR 0024's four new declared Rule*/ADR*
+	// constants: event.RuleDividendCreditedAsCash/ADRDividendCreditedAsCash
+	// and event.RuleSymbolChangeCarriesInstrumentState/
+	// ADRSymbolChangeCarriesInstrumentState.
+	"1.16.0": "a7ea62fb2097265f8b8b78bbe9a03d72a29d35f464713c4ac78db8268eb4ba70",
 }

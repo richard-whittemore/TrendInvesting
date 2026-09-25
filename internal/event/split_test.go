@@ -174,9 +174,9 @@ func TestUpcastCorporateActionPayload(t *testing.T) {
 		{"a schema-1 record that is invalid", 1, []byte(`{"instrument_id":"","kind":"delisting","effective_at":"2026-02-27T00:00:00Z"}`), "instrument id"},
 		{"a schema-2 record followed by another", 2, []byte(`{"instrument_id":"AAPL","kind":"delisting","effective_at":"2026-02-27T00:00:00Z"} {}`), "trailing"},
 		{"a schema-2 record with an unknown field", 2, []byte(`{"instrument_id":"AAPL","kind":"delisting","effective_at":"2026-02-27T00:00:00Z","price":1}`), "decode"},
-		{"a schema-2 record that is invalid", 2, []byte(`{"instrument_id":"AAPL","kind":"merger","effective_at":"2026-02-27T00:00:00Z"}`), "not a recognised"},
+		{"a schema-2 record that is invalid", 2, []byte(`{"instrument_id":"AAPL","kind":"merger","effective_at":"2026-02-27T00:00:00Z"}`), "can only be"},
 		{"schema 0", 0, v1Delisting, "schema version 0"},
-		{"a newer schema", 3, v1Delisting, "newer"},
+		{"a newer schema", 4, v1Delisting, "newer"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()

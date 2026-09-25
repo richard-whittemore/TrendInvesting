@@ -370,6 +370,10 @@ func (s *Simulator) observe(envelope event.Envelope, ref reference) error {
 		return s.observeProposalExpired(envelope)
 	case event.CampaignCashInLieuEventType:
 		return s.observeCashInLieu(envelope)
+	case event.CampaignDividendEventType:
+		return s.observeDividend(envelope)
+	case event.InstrumentSymbolChangedEventType:
+		return s.observeSymbolChanged(envelope)
 
 	// Recognised and deliberately without effect on the resting-order book.
 	// Listed one by one rather than caught by a default branch, so that a
@@ -387,7 +391,7 @@ func (s *Simulator) observe(envelope event.Envelope, ref reference) error {
 		event.ConfigurationEventType,               // an input, carried at construction
 		event.CompletedBarEventType,                // an input, handled by RunSession itself
 		event.SessionClosedEventType,               // likewise
-		event.MarketCorporateActionEventType,       // any kind: the reducer's emissions resolve it (ADR 0009's cancellations, ADR 0023's cash in lieu)
+		event.MarketCorporateActionEventType,       // any kind: the reducer's emissions resolve it (ADR 0009's cancellations, ADR 0023's cash in lieu, ADR 0024's dividend and symbol change)
 		event.RunCompletedEventType,                // ADR 0011: proposal-expired and exit-order-set emissions resolve the book
 		event.FillEventType,                        // this package's own output
 		event.AccountSnapshotEventType,             // an input; no resting-order consequence
@@ -712,6 +716,59 @@ func (s *Simulator) observeCashInLieu(envelope event.Envelope) error {
 	}
 	for i, u := range units {
 		u.quantity = payload.Reductions[i].QuantityAfter
+	}
+	return nil
+}
+
+// observeDividend credits the simulated account the dividend's cash (ADR
+// 0024), with no effect on the resting-order book: a dividend changes no
+// Unit's quantity and re-rests no Exit Order, unlike a split's cash in lieu.
+func (s *Simulator) observeDividend(envelope event.Envelope) error {
+	var payload event.CampaignDividendPayload
+	if err := decodePayload(envelope, &payload); err != nil {
+		return err
+	}
+	if err := payload.Validate(); err != nil {
+		return fmt.Errorf("fills: instrument %q: %w", payload.InstrumentID, err)
+	}
+	if s.account != nil {
+		s.account.dividend(payload.CashAmount)
+	}
+	return nil
+}
+
+// observeSymbolChanged moves everything this package learned about the old
+// instrument id to the new one (ADR 0024): the resting-order book — so a
+// standing entry, Add or exit order is still found under the id the next
+// bar's fills are priced against — the campaign's own denormalised
+// instrumentID (the fills package's own campaign struct, read only in this
+// package's error messages), and, when a simulated account is kept, its
+// holding and latest close.
+//
+// This mirrors the reducer's own applySymbolChange (internal/strategy):
+// nothing here decides whether the change is valid — the reducer's
+// InstrumentSymbolChangedPayload is only ever produced once every guard has
+// already passed — so this package just carries state across the same way
+// it learns everything else, entirely from the reducer's emissions.
+func (s *Simulator) observeSymbolChanged(envelope event.Envelope) error {
+	var payload event.InstrumentSymbolChangedPayload
+	if err := decodePayload(envelope, &payload); err != nil {
+		return err
+	}
+	if err := payload.Validate(); err != nil {
+		return fmt.Errorf("fills: instrument %q: %w", payload.InstrumentID, err)
+	}
+	if b, ok := s.books[payload.InstrumentID]; ok {
+		delete(s.books, payload.InstrumentID)
+		s.books[payload.NewInstrumentID] = b
+		if b.campaign != nil {
+			b.campaign.instrumentID = payload.NewInstrumentID
+		}
+	}
+	if s.account != nil {
+		if err := s.account.renameInstrument(payload.InstrumentID, payload.NewInstrumentID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
