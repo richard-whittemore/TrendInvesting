@@ -497,9 +497,23 @@ type ProposalDeclinedPayload struct {
 // Kind requires, that Reason is one of the enumerated constants rather than
 // free text, that Detail is present, and — only for Reason
 // DeclineReasonInsufficientCash — that RequiredCash and AvailableCash are
-// finite, not negative, and consistent with an actual shortfall; for every
-// other reason both must be exactly zero.
+// finite and consistent with an actual shortfall under the current schema;
+// RequiredCash must not be negative. For every other reason both must be zero.
 func (p ProposalDeclinedPayload) Validate() error {
+	return p.ValidateSchema(ProposalDeclinedSchemaVersion)
+}
+
+// ValidateSchema checks a decline under its declared schema (ADR 0015).
+// Schemas 2 and 3 require nonnegative AvailableCash; schema 4 permits the
+// negative ledger remainder introduced by ADR 0020. Schema 1 lacks the
+// required Kind and is unsupported, as are unknown schemas. Validating an
+// older payload does not upgrade its cash fields to the current meaning.
+func (p ProposalDeclinedPayload) ValidateSchema(version uint32) error {
+	switch version {
+	case 2, 3, ProposalDeclinedSchemaVersion:
+	default:
+		return fmt.Errorf("proposal declined payload schema version %d is not supported", version)
+	}
 	var errs []error
 	if p.InstrumentID == "" {
 		errs = append(errs, errors.New("instrument id is required"))
@@ -550,6 +564,9 @@ func (p ProposalDeclinedPayload) Validate() error {
 		}
 		if !availableCashFinite {
 			errs = append(errs, errors.New("available cash must be finite"))
+		}
+		if version <= 3 && p.AvailableCash < 0 {
+			errs = append(errs, errors.New("available cash must not be negative in proposal declined schema 3 or below"))
 		}
 		if requiredCashFinite && availableCashFinite && p.RequiredCash <= p.AvailableCash {
 			errs = append(errs, fmt.Errorf(
