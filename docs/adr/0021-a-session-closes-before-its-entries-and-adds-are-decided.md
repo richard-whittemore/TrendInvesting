@@ -1,8 +1,8 @@
 # ADR 0021: A Session closes before its Adds and entries are decided
 
-- Status: Proposed
+- Status: Proposed (amended 2026-09-24: the LEAN adapter's actual per-slice order)
 - Date: 2026-09-24
-- Relates to: ADR 0005, ADR 0008, ADR 0010, ADR 0011, ADR 0015, ADR 0016, ADR 0020
+- Relates to: ADR 0005, ADR 0008, ADR 0010, ADR 0011, ADR 0015, ADR 0016, ADR 0019, ADR 0020
 
 ## Context
 
@@ -86,6 +86,8 @@ A byte-identical decision stream across reordered inputs is not claimed, because
 
 The snapshot must come after the session close. A snapshot stamped at this Session's `period_end` is later than the Session's previous close, so `cashAtPreviousClose` would refuse it. If it arrived before the session close, it would replace the only eligible figure and leave the session-close pass with no cash basis at all.
 
+> **Amended 2026-09-24** (see *Amendment: the LEAN adapter's actual per-slice order*, below): the paragraph above describes the adapter as it stood before fills and order-lifecycle reports joined the wire contract (ADR 0019, ADR 0020's fill-ledger implementation note). Its reasoning is unaffected, but a slice's actual order is fuller than bar/close/snapshot; see the amendment for where fills and order-lifecycle reports fall and why.
+
 ### 7. What stays within one instrument
 
 A proposal emitted by a fill, not by the session-close pass, follows its fill. That covers the next Add rung after an Add fill, and Unit 2's rung after an opening fill (`campaign.go`, `evaluateAdd` call sites 2 and 3). ADR 0010 orders **decisions made from a Session's bars**. ADR 0020 already records that it does not order **executions**, and a rung that depends on an earlier rung's actual fill price is a consequence of an execution. These proposals keep their present behaviour, their per-instrument cap check, and the cash check in force when they are made.
@@ -129,6 +131,30 @@ Step 1 used to interleave with step 3: each bar's open-instant pass, then
 that bar. The passes now all come first so the snapshot can follow every one
 of them. A single-instrument Session is delivered exactly as before, apart
 from the snapshot.
+
+### Amendment: the LEAN adapter's actual per-slice order (2026-09-24)
+
+§6's LEAN paragraph above, and the amendment before this one, both date from
+before the adapter reported fills and order-lifecycle changes at all: they
+state only where the bar, the session close and the previous Session's
+snapshot fall. Once orders are working, fills and order-lifecycle reports
+(ADR 0019, `internal/event/order_lifecycle.go`; ADR 0022) join the same
+sequence, each in a fixed position, and neither says where. This amendment
+states the LEAN adapter's actual order, transcribed from
+`adapter/lean/README.md`'s "Where each input falls" (which already
+implements it), and the reason for each position — bringing this ADR into
+agreement with the adapter it describes, and matching the shape of the
+`cmd/backtest` amendment immediately above.
+
+**One slice, in order:**
+
+1. **Confirmed cancels and amendments from the previous slice.** `OnOrderEvent` fires mid-step — LEAN reports a submission before `StopMarketOrder` even returns, and reports a confirmed cancellation only after `OnData` returns, before the next slice — so the adapter cannot send a report the instant it observes one; it queues every report it sees (`OrderDesk.observe`) and drains the queue only at fixed points (`drain_order_events`). The first drain of a slice is therefore whatever LEAN reported after the adapter last acted, none of it provoked by anything this slice has sent yet.
+2. **This Session's fills, and whatever acting on them placed.** A fill becomes `execution.fill`; the engine's reply to it may place or amend an order (a fill-chained Add's entry, a new Exit Order), and the queue is drained again once that reply has been acted on, so those follow-on reports arrive in this same position. **Fills must precede the bar that would expire their proposal**: ADR 0011 keeps a proposal outstanding only until its instrument's next bar, so a fill reported after that bar would name a proposal the engine no longer offers, and the engine would refuse it.
+3. **The previous Session's `account.snapshot`.** **The snapshot follows the fills** so that a fill-chained Add keeps an eligible cash basis: the engine attributes such an Add to the bar that signalled the entry and checks it against cash known at that bar's previous close (ADR 0010; ADR 0020's producer amendment) — the identical reason the `cmd/backtest` amendment above gives for its own snapshot position. A snapshot sent before those fills would already be later than that close, leaving the engine no eligible figure to check the Add against — observed directly on the first entry of the first acceptance attempt, before this order was fixed. The snapshot's own figures are read as of its stated close regardless of when it is sent, so this ordering costs it nothing; it still precedes the bar whose sizing it is the basis for.
+4. **This Session's bar, and its `market.session.closed`.** Unchanged from §6, above.
+5. **Reports of what acting on this Session's decisions placed or cancelled.** **Reports are queued, never sent from inside `OnOrderEvent`**: that handler fires mid-step, before the adapter has finished acting on the current slice's own decisions, so a report sent from it could interleave with a decision still being acted on. It is observed and queued like every other report, then drained once those decisions are acted on — becoming the next slice's own item 1.
+
+This does not change what §6 already established: the snapshot still follows the session close it is stamped from and still precedes the next Session's bar, for the reason §6 gives. What was missing is where fills and order-lifecycle reports fit around that, and this amendment supplies it. No DISCLOSED strategy rule, RulesVersion, payload schema, or Baseline/Variant setting changes; this records the existing LEAN producer's behaviour, matching `adapter/lean/README.md`'s own account of it.
 
 ## Alternatives rejected
 

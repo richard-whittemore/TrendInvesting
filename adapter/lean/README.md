@@ -8,13 +8,21 @@ included — carrying both the split-adjusted and raw price views (ADR 0004;
 see **Price views and raw accounting** below), continuing the Go engine's own input sequence (`cmd/engine/engine.go`'s
 package doc, "Wire contract: the adapter's first bar must carry Sequence 2").
 Each slice's bars are a Session (ADR 0021): after them the adapter sends
-`market.session.closed`, naming those bars' instruments, and only then the
-account snapshot, all in that same single sequence: configuration 1, bar 2,
-session close 3, snapshot 4, bar 5, and so on, including warm-up. Once orders
-are working, LEAN's fills and order changes join the same sequence (see
-**Fills and order changes** below). Every input type uses the same reply
-validation for run identity, sequence, causation, correlation and the hash of
-the exact payload bytes.
+`market.session.closed`, naming those bars' instruments, in that same single
+sequence. For example, in a run with no fills or order reports: configuration 1,
+bar 2, session close 3, then the *previous* Session's `account.snapshot` at the
+head of the next slice, before its own bar — 4, bar 5 — and so on, including
+warm-up. Fills and order-change reports drained at the start of a slice take
+the next numbers before that slice's snapshot and bar, so only the relative
+order is fixed, not the numbers. The snapshot is not sent
+inside the slice that closes the Session it reports: it is computed there and
+held, then sent at the start of the following slice, before that slice's own
+bar (`flush_snapshot`; see **Where each input falls** below for why). Once
+orders are working, LEAN's fills and order changes join the same sequence
+too, ahead of the bar for the identical reason (see **Fills and order
+changes** below). Every input type uses the same reply validation for run
+identity, sequence, causation, correlation and the hash of the exact payload
+bytes.
 Warm-up is counted in bars, not calendar days, but every warm-up bar is still
 sent: the reducer builds N and the Entry/Exit Channels from every completed
 bar it receives (`internal/strategy/reducer.go`), so withholding LEAN's
