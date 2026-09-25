@@ -59,6 +59,7 @@ var wireCovered = map[string]string{
 	"execution.fill":            "execution_contract.go (test_orders.py InputContractTests)",
 	"execution.order.lifecycle": "execution_contract.go (test_orders.py InputContractTests)",
 	"replay.run.completed":      "run_completed_contract.go (test_publisher.py)",
+	"market.corporate-action":   "corporate_action_contract.go (test_orders.py CashInLieuTests)",
 	// Decisions orders.py acts on (SCHEMA_VERSIONS).
 	"strategy.trade.proposed":         "order_decisions_contract.go (test_orders.py FixtureContractTests)",
 	"strategy.add.proposed":           "order_decisions_contract.go (test_orders.py FixtureContractTests)",
@@ -69,6 +70,7 @@ var wireCovered = map[string]string{
 	"strategy.campaign.unit-added":    "order_decisions_contract.go (test_orders.py FixtureContractTests)",
 	"strategy.campaign.units-stopped": "order_decisions_contract.go (test_orders.py FixtureContractTests)",
 	"strategy.campaign.exited":        "order_decisions_contract.go (test_orders.py FixtureContractTests)",
+	"strategy.campaign.cash-in-lieu":  "order_decisions_contract.go (test_orders.py FixtureContractTests, CashInLieuTests)",
 	// Decisions the adapter receives but never acts on (README.md's decision
 	// table; ADR 0022's discipline applied to the adapter's own boundary).
 	"strategy.campaign.evaluated":             "order_decisions_contract.go (test_orders.py IgnoredDecisionTests)",
@@ -93,8 +95,7 @@ var notYetCrossed = map[string]string{
 	// adapter never sends or receives one.
 	"strategy.configuration": "cmd/engine/engine.go's configurationEnvelope, not the adapter",
 	// adapter/lean/README.md's own "will still need to" list.
-	"account.cash-movement":   "adapter/lean/README.md: \"send account.cash-movement events\" (outside #158)",
-	"market.corporate-action": "adapter/lean/README.md: \"normalize... corporate actions... into versioned messages\"",
+	"account.cash-movement": "adapter/lean/README.md: \"send account.cash-movement events\" (outside #158)",
 }
 
 func main() {

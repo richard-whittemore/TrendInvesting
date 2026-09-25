@@ -183,7 +183,19 @@ package strategy
 // the two builds no longer replay each other's journals. The reference
 // backtest fills a chained rung inside the bar that covered it, so its
 // decisions do not change.
-const RulesVersion = "1.11.0"
+//
+// Bumped 1.11.0 -> 1.12.0 by the owner's decision of 2026-09-25 (ADR 0023):
+// a split's cash in lieu is a market.corporate-action of kind split, and a
+// split that left the broker short of the Units at the exact ratio takes one
+// raw share off each of the Campaign's most recent Units, the most recent
+// first, at most one per Unit, recording strategy.campaign.cash-in-lieu and
+// re-stating each reduced Unit's Exit Order. The lost shares and the cash
+// join the Campaign's whole-life exit figures as a partial disposal would.
+// market.corporate-action advances to schema 2, with an upcaster for a
+// schema-1 delisting. Given the same inputs, a split the older build refused
+// now changes the Campaign's Units and emits decisions, so the two builds no
+// longer replay each other's journals.
+const RulesVersion = "1.12.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -291,4 +303,8 @@ var RuleSurfaceFingerprints = map[string]string{
 	// a fill-chained Add expires) and a new payload field, not a changed
 	// Rule*, ADR* or numeric rule constant.
 	"1.11.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
+	// Changed from 1.11.0 by a split's cash-in-lieu rule and its ADR
+	// citation (event.RuleCashInLieuMostRecentUnitsFirst,
+	// event.ADRSplitCashInLieu; ADR 0023).
+	"1.12.0": "2522faa9e1c15b07a74b7a4d77b71d2280a0310f3016689896e4d4a3d188f41b",
 }

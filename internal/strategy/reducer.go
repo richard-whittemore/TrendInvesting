@@ -287,6 +287,11 @@ type instrumentState struct {
 	// across a later Campaign's whole life: see
 	// checkBarConfirmsCampaignClosing (campaign.go) for why that is safe.
 	lastClosingFillAt time.Time
+	// lastSplitAt is the EffectiveAt of the last split applied to this
+	// instrument, and the zero time before any: each split applies once, in
+	// order, so a redelivered one can never reduce a Unit twice (split.go;
+	// ADR 0023).
+	lastSplitAt time.Time
 }
 
 // NewReducer returns a Reducer that stamps every decision it emits with

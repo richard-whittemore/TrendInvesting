@@ -27,9 +27,13 @@ EXIT_PROPOSED = "strategy.exit.proposed"
 UNIT_ADDED = "strategy.campaign.unit-added"
 UNITS_STOPPED = "strategy.campaign.units-stopped"
 CAMPAIGN_EXITED = "strategy.campaign.exited"
+CASH_IN_LIEU = "strategy.campaign.cash-in-lieu"
 SCHEMA_VERSIONS = {TRADE_PROPOSED: 2, ADD_PROPOSED: 3, PROPOSAL_EXPIRED: 3,
                    CAMPAIGN_OPENED: 1, EXIT_ORDER_SET: 1, EXIT_PROPOSED: 1,
-                   UNIT_ADDED: 1, UNITS_STOPPED: 1, CAMPAIGN_EXITED: 2}
+                   UNIT_ADDED: 1, UNITS_STOPPED: 1, CAMPAIGN_EXITED: 2, CASH_IN_LIEU: 1}
+
+# event.CorporateActionKindSplit (internal/event/corporate_action.go).
+KIND_SPLIT = "split"
 
 # event.OrderType* (internal/event/configuration.go): the order an entry or
 # Add rests as (ADR 0005, as amended 2026-09-24). A stop-limit carries its
@@ -263,7 +267,9 @@ def fill_model_report(slippage_n):
         "carried across a run; any other stops it. LEAN applies a split to the holding and "
         "every open order itself, and the run stops, before the next session can fill "
         "anything, unless the result is exactly the engine's position and orders at the new "
-        "ratio.",
+        "ratio, or short of them only by the cash in lieu LEAN's rounded split factor paid: "
+        "at most one raw share per Unit, published as a market.corporate-action split and "
+        "applied by the engine to its most recent Units (ADR 0023).",
         "account (ADR 0010): no partial Units, no borrowing. LEAN runs on a cash account "
         "(AccountType.Cash via InteractiveBrokersBrokerageModel), so LEAN itself refuses an "
         "order it cannot fund at submission: status Invalid, rejected and logged, the same "
@@ -613,8 +619,10 @@ class OrderDesk:
                 self.ratio, ratio, period_end))
         self.ratio = ratio
 
-    def apply_split(self, split_factor, when):
-        """Take the new ratio from a split LEAN reports as having occurred.
+    def apply_split(self, split_factor, when, reference_price, effective_at):
+        """Take the new ratio from a split LEAN reports as having occurred, and
+        return the market.corporate-action payload that states it, or None
+        when LEAN held nothing across it (ADR 0023).
 
         The engine's split-adjusted view is adjusted for every split, later
         ones included, so a split changes none of its levels, quantities or
@@ -627,15 +635,25 @@ class OrderDesk:
 
         LEAN, under Raw normalisation, applies the split itself (observed on
         the pinned image). It has split the holding before this slice's
-        OnData, but not the open orders: it divides each order's quantity by
-        the factor, multiplies its stop by it rounded to the tick, and reports
-        it as UpdateSubmitted after OnData, in the same time step. So the
-        holding, and that every stored Exit Order is still working, are
-        checked now; the orders' new figures once LEAN has made them
-        (require_split_applied), before the next session can fill anything.
+        OnData, dividing it by its factor file's rounded factor, truncating it
+        to whole shares and paying the fraction as cash at the split's
+        reference price times the factor. It has not yet split the open
+        orders: it divides each order's quantity by the factor, multiplies its
+        stop by it rounded to the tick, and reports it as UpdateSubmitted
+        after OnData, in the same time step. So the holding, and that every
+        stored Exit Order is still working, are checked now; the orders' new
+        figures once LEAN has made them (require_split_applied), before the
+        next session can fill anything.
+
+        The holding must be the engine's Units at the new, exact ratio, or
+        short of it by at most one raw share per held Unit, and exactly LEAN's
+        own truncation of the Units at the old ratio divided by the factor:
+        that shortfall is the fraction LEAN paid as cash in lieu, and the
+        payload states it with the cash. Any other difference stops the run as
+        before (ADR 0019: never adopt a balance).
         """
         if self.ratio is None:
-            return
+            return None
         per_share = 1 / split_factor
         n = round(per_share) if isfinite(per_share) else 0
         if n < 2 or abs(per_share - n) > _SPLIT_RATIO_TOLERANCE * n or self.ratio % n:
@@ -647,17 +665,145 @@ class OrderDesk:
                                 "{}-for-{}".format(shares.numerator, shares.denominator)
                                 if shares else "non-finite", self.instrument, when, split_factor,
                                 self.ratio))
-        ratio = self.ratio // n
+        old_ratio, ratio = self.ratio, self.ratio // n
         self.algorithm.Log("adapter: split of {} at {} (factor {}): split ratio {} -> {}".format(
-            self.instrument, when, split_factor, self.ratio, ratio))
+            self.instrument, when, split_factor, old_ratio, ratio))
         self.ratio = ratio
         if self._flat():
-            return
+            return None
         self.split_to_check = when
-        problems = self._holding_problems() + self._exit_orders_not_working()
+        units = sum(order["quantity"] for order in self.exit_orders.values())
+        holding = _whole(self.algorithm.Portfolio[self.symbol].Quantity)
+        expected, before = units // ratio, units // old_ratio
+        lost = None if holding is None else expected - holding
+        split = Decimal(before) / Decimal(repr(split_factor))
+        problems = []
+        if lost is None or lost < 0 or lost > len(self.exit_orders):
+            problems.append("LEAN holds {} raw shares, but the engine's Units are {} raw shares; "
+                            "cash in lieu is at most one raw share per Unit, and the {} Unit(s) "
+                            "held allow no more".format(
+                                self.algorithm.Portfolio[self.symbol].Quantity, expected,
+                                len(self.exit_orders)))
+        elif lost and int(split) != holding:
+            problems.append("LEAN holds {} raw shares, {} short of the engine's Units' {}, but its "
+                            "own truncation of their {} raw shares before the split, divided by "
+                            "the factor {}, is {}; the shortfall is not this split's cash in "
+                            "lieu".format(holding, lost, expected, before, split_factor, int(split)))
+        problems += self._exit_orders_not_working()
         if problems:
             raise Uncertain("in the split of {} at {}, at {} split-adjusted shares per raw "
                             "share: {}".format(self.instrument, when, ratio, "; ".join(problems)))
+        if not holding:
+            return None
+        # The fraction LEAN kept past its truncated holding, paid at the
+        # reference price times the factor (observed on the pinned image:
+        # $0.25 on 1,000 shares and $2.75 on 11,056 at the 2005 2-for-1).
+        leftover = split - holding
+        cash = 0.0
+        if leftover > 0:
+            if not _positive_price(reference_price):
+                raise Uncertain("in the split of {} at {}: LEAN kept {} of a share but states "
+                                "reference price {!r}, so its cash in lieu cannot be stated "
+                                "(ADR 0023)".format(self.instrument, when, leftover,
+                                                    reference_price))
+            cash = float(leftover * Decimal(repr(reference_price)) * Decimal(repr(split_factor)))
+        if not isfinite(cash) or cash < 0 or (lost and cash <= 0):
+            raise Uncertain("in the split of {} at {}: LEAN's cash in lieu for {} raw share(s) lost "
+                            "at reference price {!r} is {!r}, which is not a payment for them "
+                            "(ADR 0023)".format(self.instrument, when, lost, reference_price, cash))
+        return {"instrument_id": self.instrument, "kind": KIND_SPLIT, "effective_at": effective_at,
+                "new_shares": n, "old_shares": 1, "engine_shares_per_raw_share": ratio,
+                "raw_shares_lost": lost, "cash_in_lieu": cash, "currency": _USD}
+
+    def split_decisions(self, decisions, action):
+        """Carry the engine's reply to a published split into this desk (ADR 0023).
+
+        A split that lost raw shares, or paid cash, must be answered by one
+        strategy.campaign.cash-in-lieu stating exactly that split, reducing
+        Units this desk carries by one raw share each; and one
+        strategy.exit-order.set per reduced Unit, at its unchanged level and
+        source, for its reduced quantity. LEAN's open orders are not yet
+        split in this slice, so the new quantities and tags are recorded here
+        and placed in LEAN at the pre-session check (require_split_applied).
+        Any other reply stops the run.
+        """
+        actionable = self._actionable(decisions)
+        reduced, reset = {}, set()
+        answered = False
+        for decision in actionable:
+            kind, payload = decision["type"], decision.get("payload") or {}
+            if kind == CASH_IN_LIEU:
+                self._split_cash_in_lieu(decision, payload, action, reduced)
+                answered = True
+            elif kind == EXIT_ORDER_SET:
+                reset.add(self._split_exit_order(decision, payload, reduced))
+            else:
+                raise Uncertain("{} {} does not answer a split; only a cash in lieu and its "
+                                "Exit Orders do (ADR 0023)".format(kind, decision.get("id")))
+        if (action["raw_shares_lost"] or action["cash_in_lieu"]) and not answered:
+            raise Uncertain("the engine answered the split of {} at {} ({} raw share(s) lost, {} "
+                            "cash in lieu) with no cash in lieu of its own".format(
+                                self.instrument, action["effective_at"], action["raw_shares_lost"],
+                                action["cash_in_lieu"]))
+        if set(reduced) != reset:
+            raise Uncertain("the engine reduced unit(s) {} at the split of {} but re-stated the Exit "
+                            "Orders of unit(s) {}".format(sorted(u[1] for u in reduced),
+                                                          self.instrument,
+                                                          sorted(u[1] for u in reset)))
+
+    def _split_cash_in_lieu(self, decision, payload, action, reduced):
+        """Check one cash-in-lieu decision against the split it answers and the
+        Units this desk carries, and note each reduced Unit's new quantity."""
+        stated = {key: payload.get(key) for key in ("instrument_id", "effective_at", "new_shares",
+                                                    "engine_shares_per_raw_share",
+                                                    "raw_shares_lost", "cash_in_lieu")}
+        published = {key: action[key] for key in stated}
+        if stated != published:
+            raise Uncertain("{} {} states {}, but the split published was {}".format(
+                decision["type"], decision.get("id"), stated, published))
+        reductions = payload.get("reductions") or []
+        if len(reductions) != action["raw_shares_lost"]:
+            raise Uncertain("{} {} reduces {} Unit(s) for {} raw share(s) lost".format(
+                decision["type"], decision.get("id"), len(reductions), action["raw_shares_lost"]))
+        for reduction in reductions:
+            unit = (payload.get("campaign_id"), reduction.get("unit_index"))
+            order = self.exit_orders.get(unit)
+            if order is None or order["quantity"] != reduction.get("quantity_before") or \
+                    reduction.get("quantity_before", 0) - reduction.get("quantity_after", 0) != self.ratio:
+                raise Uncertain("{} {} reduces campaign {!r} unit {} from {!r} to {!r} shares, but "
+                                "this adapter carries {} for it at {} split-adjusted shares per raw "
+                                "share".format(decision["type"], decision.get("id"), unit[0], unit[1],
+                                               reduction.get("quantity_before"),
+                                               reduction.get("quantity_after"),
+                                               "no Exit Order" if order is None else
+                                               "{} shares".format(order["quantity"]), self.ratio))
+            reduced[unit] = reduction["quantity_after"]
+
+    def _split_exit_order(self, decision, payload, reduced):
+        """Record a reduced Unit's re-stated Exit Order, to be placed in LEAN
+        at the pre-session check; returns the Unit."""
+        unit = (payload.get("campaign_id"), payload.get("unit_index"))
+        in_force = self.exit_orders.get(unit)
+        quantity = payload.get("quantity")
+        if in_force is None or unit not in reduced or quantity != reduced[unit]:
+            raise Uncertain("{} {} rests campaign {!r} unit {} for {!r} shares at the split, but the "
+                            "engine's cash in lieu reduced it to {!r}".format(
+                                decision["type"], decision.get("id"), unit[0], unit[1], quantity,
+                                reduced.get(unit)))
+        if payload.get("level") != in_force["level"] or payload.get("source") != in_force["source"]:
+            raise Uncertain("{} {} moves campaign {!r} unit {}'s Exit Order from {} ({}) to {!r} "
+                            "({!r}) at a split, which changes no level in the split-adjusted "
+                            "view (ADR 0004)".format(decision["type"], decision.get("id"), unit[0],
+                                                     unit[1], in_force["level"], in_force["source"],
+                                                     payload.get("level"), payload.get("source")))
+        try:
+            as_of = parse_time(payload.get("as_of"))
+        except ValueError as err:
+            raise Uncertain("{} {}: as_of unreadable: {}".format(
+                decision["type"], decision.get("id"), err))
+        in_force.update(quantity=quantity, as_of=as_of, split_tag=decision.get("id"))
+        self.orders[in_force["order_id"]]["quantity"] = -quantity
+        return unit
 
     def _holding_problems(self):
         """Every held Unit rests one Exit Order (ADR 0005's amendment), so LEAN's
@@ -703,7 +849,8 @@ class OrderDesk:
             self.split_to_check = None
         ratio = self.ratio
         tick = float(self.algorithm.Securities[self.symbol].SymbolProperties.MinimumPriceVariation)
-        problems = self._holding_problems() + self._exit_orders_not_working()
+        problems = self._amend_split_quantities(ratio)
+        problems += self._holding_problems() + self._exit_orders_not_working()
         holding = self.algorithm.Portfolio[self.symbol].Quantity
         for ticket in self._open_tickets():
             placed = self.orders.get(ticket.OrderId)
@@ -729,6 +876,52 @@ class OrderDesk:
         self.algorithm.Log("adapter: split at {} reconciled {}: LEAN holds {} raw shares and "
                            "works {} order(s), as the engine's figures are at split ratio {}".format(
                                split_at, when, holding, len(self._open_tickets()), ratio))
+
+    def _amend_split_quantities(self, ratio):
+        """Place the engine's quantities in LEAN's split orders (ADR 0023).
+
+        LEAN splits each open order with the same rounded factor as the
+        holding, so an order can land up to one raw share from the engine's
+        quantity at the new ratio; and an Exit Order the engine reduced for
+        cash in lieu carries a new quantity and tag (split_decisions). Each
+        such order is amended to exactly the engine's figure before the
+        session, decreases before increases so that working sells never
+        exceed the holding. An order further than one raw share off is left
+        for the checks that follow, which stop the run; so does an amendment
+        LEAN does not acknowledge. Returns the problems found.
+        """
+        pending = []
+        for ticket in self._open_tickets():
+            placed = self.orders.get(ticket.OrderId)
+            if placed is None:
+                continue
+            target = placed["quantity"] // ratio
+            unit = placed.get("unit")
+            tag = self.exit_orders.get(unit, {}).get("split_tag") if unit is not None else None
+            current = _whole(ticket.Quantity)
+            if current is None or abs(current - target) > 1 or (current == target and tag is None):
+                continue
+            pending.append((abs(target) - abs(current), ticket.OrderId, ticket, target, tag, unit))
+        problems = []
+        for _, _, ticket, target, tag, unit in sorted(pending, key=lambda p: p[:2]):
+            before = _whole(ticket.Quantity)
+            fields = self.lean.UpdateOrderFields()
+            if before != target:
+                fields.Quantity = target
+            if tag is not None:
+                fields.Tag = tag
+            response = self._amend(ticket, fields)
+            if not response.IsSuccess or _whole(ticket.Quantity) != target:
+                problems.append("LEAN order {} (tag={}) is for {} raw shares; amending it to the "
+                                "engine's {} was not acknowledged".format(
+                                    ticket.OrderId, ticket.Tag, before, target))
+                continue
+            if tag is not None:
+                self.exit_orders[unit].pop("split_tag")
+                self.orders[ticket.OrderId]["tag"] = tag
+            self.algorithm.Log("adapter: amended order {} (tag={}) quantity {} -> {} raw at the "
+                               "split".format(ticket.OrderId, ticket.Tag, before, target))
+        return problems
 
     def _split_limit_problems(self, ticket, stop, cap, engine_cap, tick):
         """A working stop-limit's limit after a split, against its cap at the
@@ -813,13 +1006,7 @@ class OrderDesk:
         bar is never acted on: LEAN's warm-up exists to build history, not to
         trade (README.md).
         """
-        actionable = [d for d in decisions if d.get("type") in SCHEMA_VERSIONS]
-        for decision in actionable:
-            if decision.get("schema_version") != SCHEMA_VERSIONS[decision["type"]]:
-                raise Uncertain("{} {} has schema version {!r}; this adapter reads version "
-                                "{} (ADR 0015)".format(decision["type"], decision.get("id"),
-                                                       decision.get("schema_version"),
-                                                       SCHEMA_VERSIONS[decision["type"]]))
+        actionable = self._actionable(decisions)
         if warming:
             if actionable:
                 self.algorithm.Log("adapter: {} decision(s) answer warm-up bar {}; "
@@ -851,8 +1038,27 @@ class OrderDesk:
                     self.exit_orders.pop((payload.get("campaign_id"), index), None)
             elif kind == CAMPAIGN_EXITED:
                 self._campaign_exited(payload.get("campaign_id"))
+            elif kind == CASH_IN_LIEU:
+                # The engine decides one only in reply to a split, which
+                # split_decisions carries across (ADR 0023); anywhere else it
+                # changes Units this adapter would not resize.
+                raise Uncertain("{} {} arrived other than in reply to a split; its Units' "
+                                "orders cannot be resized here (ADR 0023)".format(
+                                    kind, decision.get("id")))
             else:
                 self._exit_order(decision, payload)
+
+    def _actionable(self, decisions):
+        """The decisions this adapter acts on, each at the schema version it
+        was written against; any other version fails closed (ADR 0015)."""
+        actionable = [d for d in decisions if d.get("type") in SCHEMA_VERSIONS]
+        for decision in actionable:
+            if decision.get("schema_version") != SCHEMA_VERSIONS[decision["type"]]:
+                raise Uncertain("{} {} has schema version {!r}; this adapter reads version "
+                                "{} (ADR 0015)".format(decision["type"], decision.get("id"),
+                                                       decision.get("schema_version"),
+                                                       SCHEMA_VERSIONS[decision["type"]]))
+        return actionable
 
     def _reject(self, decision, reason):
         self.rejected += 1

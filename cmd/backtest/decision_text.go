@@ -150,6 +150,17 @@ func decisionSentence(e event.Envelope) (string, error) {
 		return renderDecision(e, event.CampaignUnitsStoppedSchemaVersion, func(p event.CampaignUnitsStoppedPayload) string {
 			return fmt.Sprintf("Protective Stop closed Units %v of Campaign %q: %d shares at %s because fill %q was recorded; %s remain; realised result %s", p.UnitIndexes, p.CampaignID, p.QuantityClosed, decisionNumber(p.FillPrice), p.FillID, unitCount(p.RemainingUnits), decisionNumber(p.RealisedResult))
 		})
+	case event.CampaignCashInLieuEventType:
+		return renderDecision(e, event.CampaignCashInLieuSchemaVersion, func(p event.CampaignCashInLieuPayload) string {
+			if len(p.Reductions) == 0 {
+				return fmt.Sprintf("recorded %s %s cash in lieu for Campaign %q from the %d-for-%d split of corporate action %q, which lost no whole share; the Campaign still holds %d shares", decisionNumber(p.CashInLieu), logText(p.Currency), p.CampaignID, p.NewShares, p.OldShares, p.CorporateActionID, p.QuantityAfter)
+			}
+			units := make([]int, len(p.Reductions))
+			for i, r := range p.Reductions {
+				units[i] = r.UnitIndex
+			}
+			return fmt.Sprintf("took one raw share (%s) off Units %v of Campaign %q, most recent first, because the %d-for-%d split of corporate action %q lost %d raw share(s) and paid %s %s cash in lieu; the Campaign now holds %d shares, %d before", engineShares(p.EngineSharesPerRawShare), units, p.CampaignID, p.NewShares, p.OldShares, p.CorporateActionID, p.RawSharesLost, decisionNumber(p.CashInLieu), logText(p.Currency), p.QuantityAfter, p.QuantityBefore)
+		})
 	case event.ProposalExpiredEventType:
 		return renderDecision(e, event.ProposalExpiredSchemaVersion, func(p event.ProposalExpiredPayload) string {
 			return fmt.Sprintf("expired %s proposal %q for %d shares at %s because %s; no fill was recorded for this proposal", logText(p.Kind), p.ProposalID, p.Quantity, decisionNumber(p.Level), logText(p.Reason))
@@ -209,6 +220,15 @@ func decisionSentence(e event.Envelope) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported decision type %q", e.Type)
 	}
+}
+
+// engineShares states a number of the engine's split-adjusted shares in
+// English: "1 engine share", otherwise "n engine shares".
+func engineShares(n int64) string {
+	if n == 1 {
+		return "1 engine share"
+	}
+	return fmt.Sprintf("%d engine shares", n)
 }
 
 // unitCount states a number of Units in English: "1 Unit", otherwise

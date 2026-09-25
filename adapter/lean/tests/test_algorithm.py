@@ -105,8 +105,12 @@ class FakeTicket:
         self.book.updates.append((self.OrderId, fields.StopPrice, fields.Tag))
         if fields.LimitPrice is not None:
             self.book.limit_updates.append((self.OrderId, fields.LimitPrice))
+        if fields.Quantity is not None:
+            self.book.quantity_updates.append((self.OrderId, fields.Quantity))
         if not self.book.acknowledge_updates:
             return FakeResponse(False)
+        if fields.Quantity is not None:
+            self.Quantity = fields.Quantity
         if fields.StopPrice is not None:
             self.StopPrice = fields.StopPrice
         if fields.LimitPrice is not None:
@@ -146,6 +150,7 @@ class FakeTransactions:
         self.tickets = []
         self.updates = []
         self.limit_updates = []
+        self.quantity_updates = []
         self.cancellations = []
         self.deferred = []
         self.acknowledge_updates = True
@@ -168,16 +173,19 @@ class FakeTransactions:
                 ticket.Status = "canceled"
             self.emit(ticket, status)
 
-    def split_holding(self, symbol, factor):
+    def split_holding(self, symbol, factor, reference_price=0.0):
         """LEAN's split of the holding under Raw normalisation, as observed on the
         pinned image (AAPL's 2-for-1 of 2005-02-28, factor 0.4999986): done
         before the split's slice reaches OnSplits and OnData, dividing the
         holding by the factor, truncated to whole shares with the remainder
-        paid as cash."""
+        paid as cash at the split's reference price times the factor ($0.25
+        on 1,000 shares, $2.75 on 11,056)."""
         portfolio = self.algorithm.Portfolio
         held = portfolio.holdings.get(symbol, 0)
         if held:
-            portfolio.holdings[symbol] = int(held / factor)
+            split = held / factor
+            portfolio.holdings[symbol] = int(split)
+            portfolio.Cash += (split - int(split)) * reference_price * factor
 
     def split_orders(self, symbol, factor, tick=0.01, limit_rounding=round):
         """LEAN's split of the open orders, as observed on the pinned image: done
@@ -318,6 +326,7 @@ class OrderProperties:
 
 
 class UpdateOrderFields:
+    Quantity = None
     StopPrice = None
     LimitPrice = None
     Tag = None

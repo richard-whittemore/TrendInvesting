@@ -13,6 +13,7 @@ import sys
 import types
 import unittest
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 tests_dir = str(Path(__file__).resolve().parent)
@@ -157,6 +158,24 @@ def exit_order_set(day, unit_index=1, level=22.1, quantity=100, cause="bar", **c
     return envelope("strategy.exit-order.set", 1,
                     decision_id("exit-order-set-unit-{}-{}".format(unit_index, cause), day),
                     payload)
+
+
+def cash_in_lieu(effective_at, reductions, per_raw=4, cash=91.0, new_shares=7):
+    """strategy.campaign.cash-in-lieu (ADR 0023): reductions are (unit index,
+    quantity before, quantity after), most recent first."""
+    before = sum(b for _, b, _ in reductions) or 5600
+    lost = len(reductions)
+    payload = {"campaign_id": decision_id("campaign", 6), "instrument_id": "AAPL",
+               "corporate_action_id": "test:corporate-action:9", "effective_at": effective_at,
+               "new_shares": new_shares, "old_shares": 1, "engine_shares_per_raw_share": per_raw,
+               "raw_shares_lost": lost, "engine_shares_lost": lost * per_raw,
+               "cash_in_lieu": cash, "currency": "USD",
+               "reductions": [{"unit_index": u, "quantity_before": b, "quantity_after": a}
+                              for u, b, a in reductions],
+               "quantity_before": before, "quantity_after": before - lost * per_raw,
+               "rule": "campaign.cash-in-lieu.most-recent-units-first", "adr": "0023"}
+    return envelope("strategy.campaign.cash-in-lieu", 1,
+                    "cash-in-lieu:AAPL:{}".format(effective_at), payload)
 
 
 # The decisions below carry no order of their own (README.md's own decision
@@ -2065,21 +2084,36 @@ class SplitTests(OrderTestCase):
     ratio = 56
 
     def split(self, algo, day, factor=HALF, orders_split=True, before_data=None, meddle=None,
-              checked=True, limit_rounding=round):
+              checked=True, limit_rounding=round, reference=49.0, engine=None):
         """The split's time step before day's session, as observed on the pinned
-        image. LEAN splits the holding; raises OnData with the split and no bar
-        (the tickets not yet adjusted); splits each open order and reports it
-        through OnOrderEvent; then the adapter's 00:01 scheduled check runs,
+        image. LEAN splits the holding, paying the fraction as cash at the
+        reference price times the factor; raises OnData with the split and no
+        bar (the tickets not yet adjusted); splits each open order and reports
+        it through OnOrderEvent; then the adapter's 00:01 scheduled check runs,
         before the session's fills. before_data and meddle change LEAN's state
         before OnData and after the orders' adjustment; checked=False leaves
-        the scheduled check out, as though it had not run."""
+        the scheduled check out, as though it had not run. engine is the
+        decisions the engine answers the split's corporate action with; by
+        default, the reducer's own answer to a split that lost no share: the
+        cash it paid, if any, reducing nothing (ADR 0023)."""
         self.at(algo, day)
         book = algo.Transactions
-        book.split_holding("AAPL", factor)
+        book.split_holding("AAPL", factor, reference)
         if before_data is not None:
             before_data()
+
+        def no_share_lost(sent):
+            action = sent["payload"]
+            if not action["cash_in_lieu"]:
+                return {"payload": {"decisions": []}}
+            return {"payload": {"decisions": [cash_in_lieu(
+                action["effective_at"], [], per_raw=action["engine_shares_per_raw_share"],
+                cash=action["cash_in_lieu"], new_shares=action["new_shares"])]}}
+        algo.client.reply_overrides = {"market.corporate-action": no_share_lost if engine is None
+                                       else {"payload": {"decisions": list(engine)}}}
         algo.OnData(scaffold.slice_of(splits={"AAPL": types.SimpleNamespace(
-            Type="split-occurred", SplitFactor=factor, Time=datetime(2014, 6, day))}))
+            Type="split-occurred", SplitFactor=factor, ReferencePrice=reference,
+            Time=datetime(2014, 6, day))}))
         if orders_split:
             book.split_orders("AAPL", factor, limit_rounding=limit_rounding)
         if meddle is not None:
@@ -2348,6 +2382,8 @@ class SplitTests(OrderTestCase):
         self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
         [entry] = self.tickets(algo)
         self.assertEqual((entry.Quantity, entry.StopPrice), (200, 24.5))
+        # Nothing was held, so there is no cash in lieu to publish (ADR 0023).
+        self.assertEqual(self.sent(algo, "market.corporate-action"), [])
 
     def test_a_changed_ratio_with_no_split_while_holding_stops_the_run(self):
         algo, _ = self.held()
@@ -2368,6 +2404,177 @@ class SplitTests(OrderTestCase):
         self.assertTrue(any("split ratio 56 -> 28" in m for m in algo.logs))
 
 
+# LEAN's factor file's 7-for-1 of AAPL on 2014-06-09: 1/7 rounded to seven
+# digits, slightly more than 1/7, so LEAN's division of a holding by it falls
+# just short of 7 times the holding (ADR 0023's Context).
+SEVENTH = 0.1428572
+SPLIT_AT = "2014-06-11T04:00:00Z"
+
+
+def lean_cash_in_lieu(before, factor, reference):
+    """LEAN's cash for the fraction of a share its truncated split left: the
+    fraction, times the reference price, times the factor (observed on the
+    pinned image: $0.25 on 1,000 shares, $2.75 on 11,056)."""
+    split = Decimal(before) / Decimal(repr(factor))
+    return float((split - int(split)) * Decimal(repr(reference)) * Decimal(repr(factor)))
+
+
+class CashInLieuTests(OrderTestCase):
+    """A split whose rounded factor left LEAN short of the engine's Units at the
+    exact ratio (CONTEXT.md: "Cash in lieu"; ADR 0023).
+
+    The adapter derives the shortfall from LEAN's holding against the Units,
+    accepts it only when it is at most one raw share per Unit and is LEAN's
+    own truncation of the pre-split holding, publishes it as a
+    market.corporate-action of kind split, and carries the engine's reduced
+    Exit Orders into LEAN before the session. Anything else stops the run as
+    before.
+    """
+    ratio = 56
+    split = SplitTests.split
+    scheduled_check = SplitTests.scheduled_check
+    held = SplitTests.held
+    assert_stopped_before_the_session = SplitTests.assert_stopped_before_the_session
+
+    def held_aapl(self):
+        """AAPL before its 7-for-1: one Unit of 3,516 raw shares at 28
+        split-adjusted shares a raw share, its Exit Order at 0.8 (22.40 raw)."""
+        return self.held(ratio=28, quantity=3516 * 28)
+
+    def aapl_cash_in_lieu(self, reductions=((1, 98448, 98444),)):
+        """The reducer's answer to the rounded 7-for-1: the cash LEAN paid,
+        and the most recent Unit one raw share smaller."""
+        return cash_in_lieu(SPLIT_AT, list(reductions), cash=lean_cash_in_lieu(3516, SEVENTH, 24.0))
+
+    def reduced(self, quantity=3516 * 28 - 4, level=0.8, **changes):
+        return exit_order_set(11, level=level, quantity=quantity, cause="split",
+                              as_of=SPLIT_AT, **changes)
+
+    def test_the_rounded_7_for_1_is_published_as_cash_in_lieu_and_carried_across(self):
+        algo, sell = self.held_aapl()
+        cash = lean_cash_in_lieu(3516, SEVENTH, 24.0)
+        reduced = self.reduced()
+        self.split(algo, 11, factor=SEVENTH, reference=24.0,
+                   engine=[cash_in_lieu(SPLIT_AT, [(1, 98448, 98444)], cash=cash), reduced])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(algo.Portfolio.holdings["AAPL"], 24611)
+        [action] = self.sent(algo, "market.corporate-action")
+        self.assertEqual(action["schema_version"], 2)
+        self.assertEqual(action["event_time"], SPLIT_AT)
+        payload = dict(action["payload"])
+        self.assertAlmostEqual(payload.pop("cash_in_lieu"), cash, places=9)
+        self.assertEqual(payload, {
+            "instrument_id": "AAPL", "kind": "split", "effective_at": SPLIT_AT,
+            "new_shares": 7, "old_shares": 1, "engine_shares_per_raw_share": 4,
+            "raw_shares_lost": 1, "currency": "USD"})
+        # LEAN split the order to 24,612 raw shares (the exact ratio); the
+        # engine's reduced Exit Order is 24,611, which is what LEAN holds,
+        # and the order now carries that decision's tag.
+        self.assertEqual((sell.Quantity, sell.Tag), (-24611, reduced["id"]))
+        self.assertIn((sell.OrderId, -24611), algo.Transactions.quantity_updates)
+        self.assertAlmostEqual(sell.StopPrice, 3.2)
+        # The next session trades on: the stop fills for the reduced Unit.
+        self.ratio = 4
+        self.feed(algo, 12)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.fill(algo, sell, 13, 3.1)
+        self.feed(algo, 13, replies={"execution.fill": {"payload": {"decisions": [
+            units_stopped(13, fill_id="lean:1:2"), campaign_exited(13)]}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        stop = self.sent(algo, "execution.fill")[-1]["payload"]
+        self.assertEqual((stop["kind"], stop["quantity"]), ("stop", 24611 * 4))
+
+    def test_the_published_split_is_valid_in_go(self):
+        algo, _ = self.held_aapl()
+        self.split(algo, 11, factor=SEVENTH, reference=24.0, engine=[
+            self.aapl_cash_in_lieu(), self.reduced()])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        result = subprocess.run(
+            ["go", "run", "./adapter/lean/tests/testdata/corporate_action_contract.go"],
+            cwd=Path(__file__).resolve().parents[3],
+            input=json.dumps(self.sent(algo, "market.corporate-action")[0], separators=(",", ":")),
+            text=True,
+            capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_split_with_no_share_lost_still_publishes_its_cash(self):
+        # AAPL's 2-for-1 of 2005: nothing lost, a fraction paid as cash. The
+        # engine records the cash and changes no order.
+        algo, sell = self.held()
+        self.split(algo, 11)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [action] = self.sent(algo, "market.corporate-action")
+        self.assertEqual(action["payload"]["raw_shares_lost"], 0)
+        self.assertAlmostEqual(action["payload"]["cash_in_lieu"], lean_cash_in_lieu(100, HALF, 49.0))
+        self.assertEqual(sell.Quantity, -200)
+        self.assertEqual(algo.Transactions.quantity_updates, [])
+
+    def test_a_shortfall_beyond_one_raw_share_per_unit_stops_the_run(self):
+        algo, _ = self.held_aapl()
+        self.split(algo, 11, factor=SEVENTH, reference=24.0, checked=False,
+                   before_data=lambda: algo.Portfolio.holdings.update(AAPL=24610))
+        self.assert_stopped_before_the_session(algo, "holds 24610", "24612")
+        self.assertEqual(self.sent(algo, "market.corporate-action"), [])
+
+    def test_a_shortfall_that_is_not_the_splits_own_truncation_stops_the_run(self):
+        # One raw share short of one Unit is within the bound, but LEAN's own
+        # division of 100 raw shares by the factor is 200, not 199: the share
+        # is missing for some other reason, which is not cash in lieu.
+        algo, _ = self.held()
+        self.split(algo, 11, checked=False,
+                   before_data=lambda: algo.Portfolio.holdings.update(AAPL=199))
+        self.assert_stopped_before_the_session(algo, "holds 199", "truncat")
+        self.assertEqual(self.sent(algo, "market.corporate-action"), [])
+
+    def test_an_engine_that_does_not_reduce_the_units_stops_the_run(self):
+        algo, _ = self.held_aapl()
+        self.split(algo, 11, factor=SEVENTH, reference=24.0, checked=False, engine=[])
+        self.assert_stopped_before_the_session(algo, "cash in lieu")
+
+    def test_an_engine_reduction_that_is_not_one_raw_share_stops_the_run(self):
+        algo, _ = self.held_aapl()
+        self.split(algo, 11, factor=SEVENTH, reference=24.0, checked=False, engine=[
+            self.aapl_cash_in_lieu(), self.reduced(quantity=98440)])
+        self.assert_stopped_before_the_session(algo, "98440")
+
+    def test_an_engine_that_moves_a_level_at_a_split_stops_the_run(self):
+        algo, _ = self.held_aapl()
+        self.split(algo, 11, factor=SEVENTH, reference=24.0, checked=False, engine=[
+            self.aapl_cash_in_lieu(), self.reduced(level=0.81)])
+        self.assert_stopped_before_the_session(algo, "level")
+
+    def test_a_cash_in_lieu_for_a_unit_lean_does_not_carry_stops_the_run(self):
+        algo, _ = self.held_aapl()
+        self.split(algo, 11, factor=SEVENTH, reference=24.0, checked=False, engine=[
+            self.aapl_cash_in_lieu([(2, 98448, 98444)]), self.reduced()])
+        self.assert_stopped_before_the_session(algo, "unit 2")
+
+    def test_a_cash_in_lieu_outside_a_split_stops_the_run(self):
+        algo, _ = self.held_aapl()
+        self.feed(algo, 11, [cash_in_lieu(SPLIT_AT, [(1, 98448, 98444)])])
+        self.assertTrue(algo.failed)
+        self.assertIn("split", algo.quit_reason)
+
+    def test_an_order_lean_split_one_share_off_is_amended_to_the_engines(self):
+        # LEAN rounds each open order's split with the same rounded factor,
+        # so an order can land one raw share from the engine's figure at the
+        # new ratio: it is amended back before the session.
+        algo, sell = self.held()
+        self.split(algo, 11, meddle=lambda: setattr(sell, "Quantity", -199))
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(sell.Quantity, -200)
+        self.assertIn((sell.OrderId, -200), algo.Transactions.quantity_updates)
+
+    def test_an_unacknowledged_quantity_amendment_stops_the_run(self):
+        algo, sell = self.held()
+
+        def refuse():
+            setattr(sell, "Quantity", -199)
+            algo.Transactions.acknowledge_updates = False
+        self.split(algo, 11, meddle=refuse)
+        self.assert_stopped_before_the_session(algo, "order {}".format(sell.OrderId), "-199")
+
+
 class FixtureContractTests(unittest.TestCase):
     """The fixtures above name only fields the Go payloads define."""
 
@@ -2376,6 +2583,7 @@ class FixtureContractTests(unittest.TestCase):
         fixtures = [proposal, add_proposal(9), proposal_expired(proposal, 10),
                     campaign_opened(), exit_order_set(9), exit_proposed(9), unit_added(9),
                     units_stopped(9), campaign_exited(9),
+                    cash_in_lieu("2014-06-11T04:00:00Z", [(1, 98448, 98444)]),
                     # The decisions the adapter receives but never acts on
                     # (issue #31: a fixture for every decision type, not only
                     # the ones orders.py's SCHEMA_VERSIONS names).

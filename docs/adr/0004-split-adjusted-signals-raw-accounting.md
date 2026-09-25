@@ -31,6 +31,8 @@ What is not invariant under the factor is anything computed per share or against
 
 Raw accounting also presupposes a mechanism that does not exist: a split has to change a held position's share count. `event.CorporateActionPayload` recognises only a delisting, so a Campaign's quantity is whatever its entry fill recorded. Pricing an exit from the raw view against a quantity in the adjusted view would report a real loss as a profit.
 
+> **Note (2026-09-25):** [ADR 0023](0023-a-split-carries-its-cash-in-lieu-as-a-corporate-action.md) adds a split kind to `event.CorporateActionPayload`. It carries only a split's cash in lieu, the whole raw shares a broker could not deliver: the split-adjusted view needs no other change at a split. A Campaign's money stays in that view.
+
 ### Decision
 
 Signal computation on split-adjusted prices is unchanged, as is crediting dividends as cash rather than folding them into either series.

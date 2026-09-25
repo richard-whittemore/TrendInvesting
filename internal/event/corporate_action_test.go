@@ -124,9 +124,11 @@ func TestCorporateActionPayloadRoundTrip(t *testing.T) {
 }
 
 // TestCorporateActionPayloadCarriesNoPrice pins the deliberate absence
-// documented on the payload's own doc comment: JSON-encoding it names only
-// instrument_id, kind and effective_at, so a producer that tried to add a
-// price would be adding a field this contract does not declare.
+// documented on the payload's own doc comment: JSON-encoding a delisting
+// names only instrument_id, kind and effective_at, so a producer that tried
+// to add a price would be adding a field this contract does not declare. The
+// split terms are omitted when zero, so a schema-2 delisting encodes to the
+// same bytes a schema-1 one did.
 func TestCorporateActionPayloadCarriesNoPrice(t *testing.T) {
 	t.Parallel()
 
@@ -155,10 +157,13 @@ func TestCorporateActionEventConstants(t *testing.T) {
 	if event.MarketCorporateActionEventType != "market.corporate-action" {
 		t.Errorf("MarketCorporateActionEventType = %q, want %q", event.MarketCorporateActionEventType, "market.corporate-action")
 	}
-	if event.MarketCorporateActionSchemaVersion != 1 {
-		t.Errorf("MarketCorporateActionSchemaVersion = %d, want 1", event.MarketCorporateActionSchemaVersion)
+	if event.MarketCorporateActionSchemaVersion != 2 {
+		t.Errorf("MarketCorporateActionSchemaVersion = %d, want 2", event.MarketCorporateActionSchemaVersion)
 	}
 	if event.CorporateActionKindDelisting != "delisting" {
 		t.Errorf("CorporateActionKindDelisting = %q, want %q", event.CorporateActionKindDelisting, "delisting")
+	}
+	if event.CorporateActionKindSplit != "split" {
+		t.Errorf("CorporateActionKindSplit = %q, want %q", event.CorporateActionKindSplit, "split")
 	}
 }
