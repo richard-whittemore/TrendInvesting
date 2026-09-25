@@ -40,10 +40,12 @@ def synthetic_series():
     """A range, a steady climb that breaks out and pyramids, then a slide.
 
     Not market data: every figure is generated here. Each entry is
-    (open, high, low, close).
+    (open, high, low, close). The range is long enough that the breakout's
+    Signal can be ranked: Strength needs 64 split-adjusted closes (ADR 0010,
+    as amended 2026-09-25).
     """
     bars = []
-    for i in range(25):
+    for i in range(65):
         close = 20 + (0.5 if i % 2 else -0.5)
         bars.append((close, close + 0.5, close - 0.5, close))
     close = bars[-1][3]

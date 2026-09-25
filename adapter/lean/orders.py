@@ -28,7 +28,7 @@ UNIT_ADDED = "strategy.campaign.unit-added"
 UNITS_STOPPED = "strategy.campaign.units-stopped"
 CAMPAIGN_EXITED = "strategy.campaign.exited"
 CASH_IN_LIEU = "strategy.campaign.cash-in-lieu"
-SCHEMA_VERSIONS = {TRADE_PROPOSED: 2, ADD_PROPOSED: 3, PROPOSAL_EXPIRED: 3,
+SCHEMA_VERSIONS = {TRADE_PROPOSED: 3, ADD_PROPOSED: 3, PROPOSAL_EXPIRED: 3,
                    CAMPAIGN_OPENED: 1, EXIT_ORDER_SET: 1, EXIT_PROPOSED: 1,
                    UNIT_ADDED: 1, UNITS_STOPPED: 1, CAMPAIGN_EXITED: 2, CASH_IN_LIEU: 1}
 

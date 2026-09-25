@@ -60,7 +60,10 @@ def trade_proposal(day, **changes):
                "protective_stop_intent": 22.1,
                # The Baseline's stop-limit, capped at level + 1N (ADR 0005, as
                # amended 2026-09-24): 24.5 + 1.2.
-               "order_type": "stop-limit", "gap_buffer_n": 1}
+               "order_type": "stop-limit", "gap_buffer_n": 1,
+               # Strength ranked this Signal (ADR 0010, as amended 2026-09-25);
+               # the adapter carries it through without acting on it.
+               "strength": 3.5}
     payload.update(changes)
     if "price_cap" not in changes:
         level, n = payload["entry_level"], payload["n"]
@@ -68,7 +71,7 @@ def trade_proposal(day, **changes):
         # test still names the one field it is about.
         numeric = all(type(v) in (int, float) for v in (level, n))
         payload["price_cap"] = level + n if numeric else 25.7
-    return envelope("strategy.trade.proposed", 2, decision_id("proposal", day), payload)
+    return envelope("strategy.trade.proposed", 3, decision_id("proposal", day), payload)
 
 
 def add_proposal(day, unit_index=2, **changes):
@@ -237,8 +240,8 @@ def proposal_declined(day, kind="entry"):
                "campaign_id": decision_id("campaign", 6) if kind == "add" else "",
                "reason": "quantity-below-one-unit", "detail": "quantity 0 is below one unit",
                "required_cash": 0.0, "available_cash": 0.0,
-               "cap": "", "cap_limit": 0, "post_trade_exposure": 0}
-    return envelope("strategy.proposal.declined", 6, decision_id("proposal-declined", day), payload)
+               "cap": "", "cap_limit": 0, "post_trade_exposure": 0, "strength": 0.0}
+    return envelope("strategy.proposal.declined", 7, decision_id("proposal-declined", day), payload)
 
 
 def engine_state(day):
