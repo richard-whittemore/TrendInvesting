@@ -1,10 +1,10 @@
 {
   "registry_version": 1,
-  "configuration_hash": "sha256:5f34cd2d7072790e43d44c3d85698147127131614909607f2002ff4228febf06",
+  "configuration_hash": "sha256:22e0f35d15322f7ac45ae50a263e77ed31a5005e41d0b90a1a3eb90b394dfc75",
   "run_id": "golden",
   "variant": "profit-protecting-stop",
   "status": "completed",
-  "strategy_version": "profit-protecting-stop/1.13.0+test",
+  "strategy_version": "profit-protecting-stop/1.14.0+test",
   "span_start": "2026-01-02T00:00:00Z",
   "span_end": "2026-02-02T00:00:00Z",
   "configuration": {
@@ -33,12 +33,15 @@
       "maximum_fraction_of_trade_value": 0.01
     },
     "buy_order_type": "stop-limit",
-    "gap_buffer_n": 1
+    "gap_buffer_n": 1,
+    "universe_min_price": 0,
+    "universe_min_dollar_volume": 0,
+    "universe_min_history_bars": 0
   },
   "artefacts": {
     "journal_path": "../journal.golden.jsonl",
     "record_count": 434,
-    "final_record_hash": "sha256:ba686cfa3afd469c3f59fde62e5096e9543c933484bd26d2178006945fbacbe0"
+    "final_record_hash": "sha256:9e802818070dbda7ee3e09fb3abdd38a6edb8d438a77b31cc3c02f2be2322c05"
   },
   "detail": ""
 }

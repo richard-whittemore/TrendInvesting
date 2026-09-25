@@ -64,6 +64,15 @@ func (r *Reducer) begin() *transition {
 	}
 	tx.notionalAccount = copyValue(r.notionalAccount)
 	tx.delisted = maps.Clone(r.delisted)
+	// maps.Clone is shallow: classificationRecord.pending is a slice, so
+	// each record's own pending queue is cloned too, or a rejected
+	// transaction's promotion (evaluateUniverse) could mutate the backing
+	// array published state still shares.
+	tx.classifications = maps.Clone(r.classifications)
+	for id, record := range tx.classifications {
+		record.pending = slices.Clone(record.pending)
+		tx.classifications[id] = record
+	}
 	tx.fillDebits = slices.Clone(r.fillDebits)
 	tx.holds = slices.Clone(r.holds)
 	tx.sessionDelistedBars = slices.Clone(r.sessionDelistedBars)

@@ -83,7 +83,14 @@ const ProposalDeclinedEventType = "strategy.proposal.declined"
 //     addition. A version-6 record decodes Strength as zero, which this
 //     version's Validate accepts for any reason it also recognises on that
 //     record's own terms; it is not a claim that Strength was computed.
-const ProposalDeclinedSchemaVersion uint32 = 7
+//   - Version 8 added DeclineReasonIneligible (ADR 0009): a Tier A Signal
+//     for an instrument this run's monthly universe evaluation last found
+//     ineligible is declined rather than sized, mirroring
+//     DeclineReasonInsufficientHistory's own schema-7 addition — recognised
+//     only from this schema version on, and, like that reason, ranking never
+//     ran (an ineligible instrument is excluded before rankSignals, not
+//     ranked and then declined), so Strength must be exactly zero for it too.
+const ProposalDeclinedSchemaVersion uint32 = 8
 
 // The rule names for TradeProposalPayload.Rule, one per Sizing Mode.
 //
@@ -169,6 +176,14 @@ const (
 	// incomparable instrument has no place in a total order. Strength is
 	// zero for this reason, since none was computed.
 	DeclineReasonInsufficientHistory = "insufficient-history"
+	// DeclineReasonIneligible means the instrument's most recent monthly
+	// universe evaluation (ADR 0009; event.UniverseEligibilityPayload) found
+	// it ineligible: not a candidate for a NEW Campaign, though an already
+	// open one is never affected by this (CONTEXT.md: "Eligible" — "Losing
+	// eligibility affects only new Campaigns, never open ones"). Checked
+	// before ranking, so Strength is zero for this reason, mirroring
+	// DeclineReasonInsufficientHistory's own discipline.
+	DeclineReasonIneligible = "ineligible"
 )
 
 // The five cap identities ProposalDeclinedPayload.Cap names, one per level
@@ -643,12 +658,15 @@ func (p ProposalDeclinedPayload) Validate() error {
 // PostTradeExposure fields; a record declared under an earlier schema cannot
 // assert that reason. Schema 6 changes the meaning of the cash and exposure
 // figures without changing their shape (ProposalDeclinedSchemaVersion), so
-// it is validated exactly as schema 5 is. Schema 1 lacks the required Kind and is unsupported,
+// it is validated exactly as schema 5 is. Schema 7 additionally recognises
+// DeclineReasonInsufficientHistory; schema 8 additionally recognises
+// DeclineReasonIneligible (ADR 0009) — a record declared under an earlier
+// schema cannot assert either reason. Schema 1 lacks the required Kind and is unsupported,
 // as are unknown schemas. Validating an older payload does not upgrade its
 // cash fields to the current meaning.
 func (p ProposalDeclinedPayload) ValidateSchema(version uint32) error {
 	switch version {
-	case 2, 3, 4, 5, 6, ProposalDeclinedSchemaVersion:
+	case 2, 3, 4, 5, 6, 7, ProposalDeclinedSchemaVersion:
 	default:
 		return fmt.Errorf("proposal declined payload schema version %d is not supported", version)
 	}
@@ -691,6 +709,10 @@ func (p ProposalDeclinedPayload) ValidateSchema(version uint32) error {
 	case DeclineReasonInsufficientHistory:
 		if version < 7 {
 			errs = append(errs, fmt.Errorf("reason %q is not recognised before proposal declined schema 7 (ADR 0015): a version-%d record cannot have asserted it", DeclineReasonInsufficientHistory, version))
+		}
+	case DeclineReasonIneligible:
+		if version < 8 {
+			errs = append(errs, fmt.Errorf("reason %q is not recognised before proposal declined schema 8 (ADR 0015): a version-%d record cannot have asserted it", DeclineReasonIneligible, version))
 		}
 	default:
 		errs = append(errs, fmt.Errorf("reason %q is not a recognised decline reason", p.Reason))
@@ -763,7 +785,7 @@ func (p ProposalDeclinedPayload) ValidateSchema(version uint32) error {
 	// Add answers no Signal at all, and DeclineReasonInsufficientHistory is
 	// the reason ranking never ran (mirroring RequiredCash/AvailableCash's
 	// own zero-for-every-other-reason discipline above).
-	if p.Kind == ProposalDeclinedKindAdd || p.Reason == DeclineReasonInsufficientHistory {
+	if p.Kind == ProposalDeclinedKindAdd || p.Reason == DeclineReasonInsufficientHistory || p.Reason == DeclineReasonIneligible {
 		if p.Strength != 0 {
 			errs = append(errs, fmt.Errorf("strength must be zero for kind %q reason %q (got %v): no Strength was computed for it", p.Kind, p.Reason, p.Strength))
 		}

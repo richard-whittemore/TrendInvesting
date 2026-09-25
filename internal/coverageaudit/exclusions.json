@@ -689,15 +689,15 @@
       "file": "internal/strategy/session.go",
       "function": "(*transition).applySessionClosed",
       "statement": "return nil, err",
-      "occurrence": 3,
+      "occurrence": 5,
       "category": "unreachable-by-construction",
-      "reason": "Propagates decline (via stampDecline) for a Signal rankSignal reports as insufficient history: the same validated-payload-json guarantee as every other stampDecline call site in this package — the payload's Reason is one of this package's own constants, Strength is exactly zero, and the remaining fields come from the bar under decision, already validated."
+      "reason": "Propagates decline (via stampDecline) for a Signal rankSignal reports as insufficient history: the same validated-payload-json guarantee as every other stampDecline call site in this package \u2014 the payload's Reason is one of this package's own constants, Strength is exactly zero, and the remaining fields come from the bar under decision, already validated."
     },
     {
       "file": "internal/strategy/session.go",
       "function": "(*transition).applySessionClosed",
       "statement": "return nil, err",
-      "occurrence": 5,
+      "occurrence": 7,
       "category": "unreachable-by-construction",
       "reason": "Propagates rememberPendingProposal, whose only failure is its own excluded decode of the trade proposal sizeUnit marshalled from a validated payload a statement earlier."
     },
@@ -750,6 +750,64 @@
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal declined payload: %w\", err)",
       "category": "unreachable-by-construction",
       "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
+    },
+    {
+      "file": "internal/strategy/session.go",
+      "function": "(*transition).applySessionClosed",
+      "statement": "return nil, err",
+      "occurrence": 2,
+      "category": "unreachable-by-construction",
+      "reason": "Propagates evaluateUniverse (universe.go), whose own three error paths are excluded there for the same reasons stateFor's other callers and stampDecline's validated-payload-json guarantee already are."
+    },
+    {
+      "file": "internal/strategy/session.go",
+      "function": "(*transition).applySessionClosed",
+      "statement": "return nil, err",
+      "occurrence": 4,
+      "category": "unreachable-by-construction",
+      "reason": "Propagates decline (via stampDecline) for a Signal ADR 0009's monthly universe evaluation found ineligible: the same validated-payload-json guarantee as this function's own insufficient-history decline call a few lines below \u2014 the payload's Reason is one of this package's own constants, Strength is exactly zero, and the remaining fields come from the bar under decision, already validated."
+    },
+    {
+      "file": "internal/strategy/universe.go",
+      "function": "securityTypeFor",
+      "statement": "return \"\", fmt.Errorf(\"strategy: security type %q is not a recognised security type; failing closed rather than classifying it as common stock\", securityType)",
+      "category": "unreachable-by-invariant",
+      "reason": "event.InstrumentClassificationPayload.Validate already restricts SecurityType to one of its four recognised constants before applyInstrumentClassification ever calls this function, so the default branch cannot be reached from any input that passed Validate. Reachable the moment a fifth SecurityType constant is added to the wire contract without a matching case here."
+    },
+    {
+      "file": "internal/strategy/universe.go",
+      "function": "(*transition).applyInstrumentClassification",
+      "statement": "return nil, err",
+      "category": "unreachable-by-construction",
+      "reason": "Propagates securityTypeFor's own error, which is itself excluded above (unreachable-by-invariant): Validate has already restricted SecurityType to a value securityTypeFor recognises."
+    },
+    {
+      "file": "internal/strategy/universe.go",
+      "function": "(*transition).evaluateUniverse",
+      "statement": "return nil, err",
+      "category": "unreachable-by-construction",
+      "reason": "Propagates stateFor's own error, excluded at every one of its other six call sites in reducer.go for the identical reason: NewWilderAverage/NewEntryChannel/NewExitChannel/NewRollingWindow only ever fail on a non-positive length, and applyConfiguration has already required entryChannelLength/exitChannelLength positive, and indicator.StrengthLookbackBars+1/indicator.DollarVolumeWindow are positive compile-time constants."
+    },
+    {
+      "file": "internal/strategy/universe.go",
+      "function": "(*transition).evaluateUniverse",
+      "statement": "return nil, fmt.Errorf(\"strategy: built invalid universe eligibility payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "Built field by field from figures already validated elsewhere (InstrumentID and PeriodEnd are r.classifications' own key and r.sessionPeriodEnd, both already required non-empty/writable; Price, DollarVolume and CompletedBars come from bars whose own PriceView.Validate already required them finite and non-negative), and Eligible is set to exactly the four criteria's own conjunction a few lines above, matching UniverseEligibilityPayload.Validate's own consistency check by construction."
+    },
+    {
+      "file": "internal/strategy/universe.go",
+      "function": "(*transition).evaluateUniverse",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal universe eligibility payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
+    },
+    {
+      "file": "internal/strategy/universe.go",
+      "function": "(*transition).universeIneligible",
+      "statement": "return true, fmt.Sprintf(\"instrument %q is classified but has not yet been evaluated by the Baseline universe (ADR 0009, as amended 2026-09-25): the universe gate is on, and an instrument is not a candidate for a new Campaign until its own evaluation has run\", id)",
+      "category": "unreachable-by-invariant",
+      "reason": "evaluateUniverse runs at the top of applySessionClosed, before this gate is ever consulted, and marks every classified instrument pendingEvaluation on the very declaration that creates or updates its classificationRecord; the first Session close at or after that declaration therefore always evaluates it in the same transaction, before any Signal for it can be ranked or declined. So by the time this function reads state.universe for an instrument r.classifications already knows, evaluated is always true: this branch states the general rule ADR 0009's amendment asks for, but the reducer's own always-catch-up design leaves it unreachable today. Reachable the moment evaluateUniverse's per-instrument trigger ever admits a classified instrument that has not just been marked pending."
     }
   ]
 }

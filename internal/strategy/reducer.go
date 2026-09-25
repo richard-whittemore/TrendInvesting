@@ -17,6 +17,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/indicator"
 	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
+	"github.com/richard-whittemore/TrendInvesting/internal/universe"
 )
 
 // sourceReducer is the value stamped into every envelope this package
@@ -193,6 +194,46 @@ type Reducer struct {
 	// applyFill refuses an execution naming one, and applyDelisting itself
 	// treats a repeated notice as stating no new fact.
 	delisted map[string]time.Time
+	// classifications records, per instrument, every declared
+	// event.MarketInstrumentClassificationEventType fact (ADR 0009; ADR
+	// 0021's own market.corporate-action fact is the precedent this
+	// mirrors): a producer's translation of internal/universe.Port's answer
+	// into a journalled, replayable record, so that ADR 0009's own
+	// Consequences — "membership changes only through declared criteria on
+	// declared dates, so it can be reproduced exactly on replay" — hold for
+	// the classification input as well as for the price/volume criteria the
+	// reducer already derives from bars. Held here rather than on
+	// instrumentState because a classification legitimately arrives for an
+	// instrument this reducer has no bar for yet (evaluateUniverse's own doc
+	// comment).
+	//
+	// Each classificationRecord distinguishes the declaration currently in
+	// force (active) from any later one still waiting for its own
+	// EffectiveAt (pending) — a fact effective in the future must never
+	// decide an earlier Session's eligibility (ADR 0009 is point-in-time).
+	//
+	// An instrument absent from this map, or present with no active
+	// declaration yet (every one of its own still pending), has never been
+	// classified for gating purposes. While the universe gate is off
+	// (universeEnabled false — every existing fixture, golden journal and
+	// decision-corpus scenario), that and every other instrument is left
+	// completely ungated regardless. While the gate is on, such an
+	// instrument, or one classified but present with no completed
+	// evaluation yet (instrumentState.universe.evaluated false), is declined
+	// ineligible for a NEW Campaign — it is not a candidate merely by
+	// default (universeIneligible's own doc comment; ADR 0009's amendment of
+	// 2026-09-25, the owner's decision).
+	classifications map[string]classificationRecord
+	// universeCriteria is ADR 0009's three thresholds
+	// (event.ConfigurationPayload.UniverseMinPrice/UniverseMinDollarVolume/
+	// UniverseMinHistoryBars), captured once from the configuration event.
+	// universeEnabled is whether they are all positive (the gate on) rather
+	// than all zero (off) — ConfigurationPayload.Validate has already
+	// refused any other combination, so reading one field's sign is
+	// sufficient, but the derivation lives in one named place
+	// (universeGateOn, universe.go) rather than being re-read inline at
+	// every call site.
+	universeCriteria universe.Criteria
 	// acceptedFills is defined and explained in
 	// campaign.go: every fill this reducer has accepted, for the WHOLE
 	// run, keyed by FillID — not per instrument — so that a fill id reused
@@ -254,6 +295,22 @@ type instrumentState struct {
 	splitAdjustedCloses *indicator.RollingWindow
 	rawCloses           *indicator.RollingWindow
 	rawVolumes          *indicator.RollingWindow
+	// completedBars counts every completed bar this reducer has accepted for
+	// the instrument, without bound (unlike the bounded windows above): ADR
+	// 0009's history criterion reads the total, not a recent window. Fed
+	// unconditionally in applyCompletedBar's advance block, alongside the
+	// three fields above.
+	completedBars int
+	// universe is this instrument's most recently recorded ADR 0009
+	// eligibility verdict (session.go: evaluateUniverse), evaluated once per
+	// calendar month at the Session close for the first trading day of that
+	// month. evaluated is false until the instrument has both a declared
+	// classification (Reducer.classifications) and at least one monthly
+	// evaluation; sizeUnit's eligibility gate (universeIneligible) applies no
+	// restriction at all while it is false — see Reducer.classifications'
+	// own doc comment for why an unclassified instrument is left ungated
+	// rather than asserted ineligible.
+	universe universeState
 
 	// Two additions, both defined and explained in campaign.go.
 	// pendingProposal is a trade proposal emitted and not yet resolved, and is
@@ -342,6 +399,7 @@ func NewReducer(strategyVersion string, payload event.ConfigurationPayload) (*Re
 		configurationHash: event.ConfigurationHash(payload),
 		instruments:       make(map[string]*instrumentState),
 		delisted:          make(map[string]time.Time),
+		classifications:   make(map[string]classificationRecord),
 		acceptedFills:     make(map[string]acceptedFillState),
 	}, nil
 }
@@ -375,6 +433,10 @@ func NewReducer(strategyVersion string, payload event.ConfigurationPayload) (*Re
 //     Delisting Exit (CONTEXT.md; ADR 0009), which forces an open Campaign
 //     closed at the last available price — see delisting.go's
 //     applyCorporateAction.
+//
+//   - event.MarketInstrumentClassificationEventType: a declared fact about
+//     an instrument's own listing (ADR 0009), read at each monthly universe
+//     evaluation — see universe.go's applyInstrumentClassification.
 //
 //   - event.AdapterRunStoppedEventType: record, no decision — an adapter's
 //     own report that it deliberately stopped this run (ADR 0012), the same
@@ -421,6 +483,8 @@ func (r *transition) apply(envelope event.Envelope) ([]event.Envelope, error) {
 		return r.applyCashMovement(envelope)
 	case event.MarketCorporateActionEventType:
 		return r.applyCorporateAction(envelope)
+	case event.MarketInstrumentClassificationEventType:
+		return r.applyInstrumentClassification(envelope)
 	case event.RunCompletedEventType:
 		return r.applyRunCompleted(envelope)
 	case event.AdapterRunStoppedEventType:
@@ -494,6 +558,11 @@ func (r *transition) applyConfiguration(envelope event.Envelope) ([]event.Envelo
 	r.maxUnitsTotalLong = payload.MaxUnitsTotalLong
 	r.buyOrderType = payload.BuyOrderType
 	r.gapBufferN = payload.GapBufferN
+	r.universeCriteria = universe.Criteria{
+		MinPrice:        payload.UniverseMinPrice,
+		MinDollarVolume: payload.UniverseMinDollarVolume,
+		MinHistoryBars:  payload.UniverseMinHistoryBars,
+	}
 	r.slippageN = payload.SlippageN
 	r.commission = sizing.CommissionSchedule{
 		PerShare:                    payload.Commission.PerShare,
@@ -712,6 +781,10 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 	state.splitAdjustedCloses.Add(view.Close)
 	state.rawCloses.Add(bar.Raw.Close)
 	state.rawVolumes.Add(bar.Raw.Volume)
+	// ADR 0009's history criterion: the total completed bars this reducer
+	// has ever accepted for the instrument, unbounded (unlike the three
+	// windows above), fed the same unconditional way.
+	state.completedBars++
 	// Remembered unconditionally, regardless of Campaign state, so the
 	// same-bar Add chain (campaign.go's evaluateAdd/applyAddFill) can read
 	// THIS bar's high, period end and earliest-fill-at bound from a LATER

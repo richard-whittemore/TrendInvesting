@@ -217,7 +217,37 @@ package strategy
 // internal/indicator gains RollingWindow, Strength and MedianDollarVolume:
 // the last is the one definition this ranking tie-break and ADR 0009's
 // still-unimplemented $5M eligibility test both read.
-const RulesVersion = "1.13.0"
+//
+// Bumped 1.13.0 -> 1.14.0 by ADR 0009: the Baseline universe, evaluated
+// point-in-time on the first trading day of each calendar month
+// (universe.FirstOfMonth), for every instrument this run's universe port
+// has declared a classification for (market.instrument-classification,
+// internal/universe.Port). Four criteria, every one a configured
+// threshold: common stock on a US primary exchange (no ETFs, ADRs, or
+// SPACs), price at least UniverseMinPrice (the raw view, ADR 0004, as
+// amended), 20-day median dollar volume at least UniverseMinDollarVolume
+// (indicator.MedianDollarVolume, the one definition this criterion and ADR
+// 0010's ranking tie-break share), and at least UniverseMinHistoryBars
+// completed bars of history. Each evaluation is recorded as
+// strategy.universe.eligibility, and an instrument found ineligible has its
+// next Tier A Signal declined (event.DeclineReasonIneligible, proposal
+// declined schema 8) before rankSignals ever runs, exactly where an
+// instrument short of ranking's own history is declined today. Losing
+// eligibility never closes an open Campaign and never gates an Add: the
+// gate applies to sizeUnit's entry path alone (session.go).
+//
+// This is strictly additive for every existing scenario: an instrument this
+// run's universe port never classifies (Reducer.classifications empty for
+// it) is never evaluated and never gated, which is every scenario that
+// predates this ADR, since none of them sends a classification input. Given
+// the same inputs, only a NEWLY classified instrument's decisions can
+// change under this build; nothing else does. The decision stream still
+// changes for every scenario in the corpus, though, because
+// ConfigurationSchemaVersion also moves to 7 (three new threshold fields),
+// which changes the configuration hash every decision is stamped with, even
+// when none of the three fields the schema bump added actually reads a
+// nonzero value.
+const RulesVersion = "1.14.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -335,4 +365,12 @@ var RuleSurfaceFingerprints = map[string]string{
 	// lookback and window lengths, not a Rule*/ADR* identity but a numeric
 	// rule value the sweep finds directly.
 	"1.13.0": "f382bf7c5be052f701374f3c034c90725a181bddb81ab50a5356d2259029fa31",
+	// Changed from 1.13.0 by ADR 0009's two new declared Rule*/ADR*
+	// constants: event.RuleUniverseEligibility and
+	// event.ADRUniverseEligibility. event.DeclineReasonIneligible and
+	// event.SecurityType* are new constants but, like
+	// event.DeclineReasonUnitCapExceeded before them, do not match the
+	// Rule*/ADR* naming this sweep looks for, and carry a decline reason
+	// and classification identities, not a numeric rule value.
+	"1.14.0": "2aabc203a0658c2ef9030b351709aeebaa3ba3ebddde18b204837d65096a9850",
 }

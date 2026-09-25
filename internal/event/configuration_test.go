@@ -66,6 +66,12 @@ func validConfiguration() event.ConfigurationPayload {
 		// stop-limit orders capped at level + 1N in the Baseline.
 		BuyOrderType: event.OrderTypeStopLimit,
 		GapBufferN:   1,
+		// ADR 0009's universe gate, all zero: off, as the owner's decision of
+		// 2026-09-25 makes every existing fixture. A test of the gate itself
+		// sets all three positive explicitly.
+		UniverseMinPrice:        0,
+		UniverseMinDollarVolume: 0,
+		UniverseMinHistoryBars:  0,
 	}
 }
 
@@ -552,21 +558,132 @@ func TestConfigurationEventConstants(t *testing.T) {
 // TestConfigurationSchemaVersionBumpedForSizingFields pins the explicit
 // schema bumps this payload has taken: 2 for #9's TierBDistanceInN, 3 for
 // #10's DollarsPerPoint and RiskAtStopFraction, 4 for #18's Commission, and 5
-// for #55's MaxUnitsPerIndustry/MaxUnitsPerSector/MaxUnitsTotalLong, and 6
-// for BuyOrderType and GapBufferN (ADR 0005, as amended 2026-09-24).
+// for #55's MaxUnitsPerIndustry/MaxUnitsPerSector/MaxUnitsTotalLong, 6
+// for BuyOrderType and GapBufferN (ADR 0005, as amended 2026-09-24), and 7
+// for ADR 0009's three universe thresholds.
 // A new field on an existing payload always changes the schema version
 // (docs/development.md: a schema change is explicit in this project, never a
-// silent field addition), and here it must, because every new field decodes
-// as the zero value from an older record — a zero DollarsPerPoint divides
-// by zero, a zero RiskAtStopFraction would size a fixed-risk-at-stop Unit
-// from a risk budget of nothing, a zero commission cap would charge
-// nothing at all on every order, and a zero Unit cap is not a legitimate
-// limit at all (ConfigurationPayload.Validate's own doc comment).
+// silent field addition). For every bump through 6, the version must
+// change, because every new field decodes as the zero value from an older
+// record — a zero DollarsPerPoint divides by zero, a zero
+// RiskAtStopFraction would size a fixed-risk-at-stop Unit from a risk
+// budget of nothing, a zero commission cap would charge nothing at all on
+// every order, and a zero Unit cap is not a legitimate limit at all
+// (ConfigurationPayload.Validate's own doc comment). Version 7 is
+// documentation rather than a rejection: its three fields' own zero value
+// is a legitimate declared Variant (ConfigurationSchemaVersion's own
+// version-7 note), so an older record recorded before they existed decodes
+// them as zero and Validate accepts that exactly as it accepts any other
+// configured zero for them.
 func TestConfigurationSchemaVersionBumpedForSizingFields(t *testing.T) {
 	t.Parallel()
 
-	if event.ConfigurationSchemaVersion != 6 {
-		t.Fatalf("ConfigurationSchemaVersion = %d, want 6", event.ConfigurationSchemaVersion)
+	if event.ConfigurationSchemaVersion != 7 {
+		t.Fatalf("ConfigurationSchemaVersion = %d, want 7", event.ConfigurationSchemaVersion)
+	}
+}
+
+// TestConfigurationPayloadValidateUniverseThresholds pins ADR 0009's three
+// universe thresholds' own rule, as amended 2026-09-25 (the owner's
+// decision): each is finite and not negative, and the three switch
+// together — all zero (the gate off, validConfiguration's own default) or
+// all positive (the gate on) — with a partial mix, some zero and some
+// positive, refused outright.
+func TestConfigurationPayloadValidateUniverseThresholds(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(*event.ConfigurationPayload)
+		wantErr string
+	}{
+		{
+			name: "every universe threshold at zero is accepted (the gate is off)",
+			mutate: func(p *event.ConfigurationPayload) {
+				p.UniverseMinPrice = 0
+				p.UniverseMinDollarVolume = 0
+				p.UniverseMinHistoryBars = 0
+			},
+		},
+		{
+			name: "every universe threshold positive is accepted (the gate is on)",
+			mutate: func(p *event.ConfigurationPayload) {
+				p.UniverseMinPrice = 5
+				p.UniverseMinDollarVolume = 5_000_000
+				p.UniverseMinHistoryBars = 250
+			},
+		},
+		{
+			name: "price alone positive is a partial configuration and is refused",
+			mutate: func(p *event.ConfigurationPayload) {
+				p.UniverseMinPrice = 5
+			},
+			wantErr: "universe thresholds must be either all zero",
+		},
+		{
+			name: "dollar volume alone positive is a partial configuration and is refused",
+			mutate: func(p *event.ConfigurationPayload) {
+				p.UniverseMinDollarVolume = 5_000_000
+			},
+			wantErr: "universe thresholds must be either all zero",
+		},
+		{
+			name: "history bars alone positive is a partial configuration and is refused",
+			mutate: func(p *event.ConfigurationPayload) {
+				p.UniverseMinHistoryBars = 250
+			},
+			wantErr: "universe thresholds must be either all zero",
+		},
+		{
+			name: "two of three positive, one still zero, is a partial configuration and is refused",
+			mutate: func(p *event.ConfigurationPayload) {
+				p.UniverseMinPrice = 5
+				p.UniverseMinDollarVolume = 5_000_000
+			},
+			wantErr: "universe thresholds must be either all zero",
+		},
+		{
+			name:    "negative universe min price",
+			mutate:  func(p *event.ConfigurationPayload) { p.UniverseMinPrice = -1 },
+			wantErr: "universe min price must not be negative",
+		},
+		{
+			name:    "non-finite universe min price",
+			mutate:  func(p *event.ConfigurationPayload) { p.UniverseMinPrice = math.NaN() },
+			wantErr: "universe min price must be finite",
+		},
+		{
+			name:    "negative universe min dollar volume",
+			mutate:  func(p *event.ConfigurationPayload) { p.UniverseMinDollarVolume = -1 },
+			wantErr: "universe min dollar volume must not be negative",
+		},
+		{
+			name:    "non-finite universe min dollar volume",
+			mutate:  func(p *event.ConfigurationPayload) { p.UniverseMinDollarVolume = math.Inf(1) },
+			wantErr: "universe min dollar volume must be finite",
+		},
+		{
+			name:    "negative universe min history bars",
+			mutate:  func(p *event.ConfigurationPayload) { p.UniverseMinHistoryBars = -1 },
+			wantErr: "universe min history bars must not be negative",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload := validConfiguration()
+			tt.mutate(&payload)
+			err := payload.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
