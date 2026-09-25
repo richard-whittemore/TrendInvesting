@@ -49,6 +49,7 @@ var runSession = fills.RunSession
 // operator's decision, which is why the zero-slippage refusal does not live
 // in the registry alone — see readConfiguration.
 type options struct {
+	fit        bool
 	configPath string
 	barsPath   string
 	// corporateActionsPath is a JSON array of event.CorporateActionPayload,
@@ -127,8 +128,28 @@ func backtest(ctx context.Context, opts options, out io.Writer) error {
 	// returned: the graveyard of failed and abandoned runs is the point of
 	// the registry (ADR 0012), and a run that is only registered when it went
 	// well is a curated record.
+	//
+	// This runs before the research report, and deliberately: registerRun's
+	// entry install is the one exclusive claim two concurrent attempts under
+	// the same run id race for (TestTwoRunsClaimingOneRunIDLeaveExactlyOneEntry),
+	// and only its confirmed winner goes on to attempt the report at all. A
+	// report install is a second, independent race on the same run id; racing
+	// it ahead of the entry would let a losing attempt's stray file be read
+	// back as the WINNING entry's own report failure, which is a worse audit
+	// defect than the one it would fix. A run that completes but whose report
+	// fails to install afterward still keeps its entry (this loop's `installed`
+	// check below), and its failure still fails the command (researchErr,
+	// joined into failure() beside runErr and journalErr); an opening it
+	// reserved is retained exactly as ADR 0012 already requires for any
+	// subsequently failed step, and a genuine retry needs a new run id, which
+	// the existing repeat-flagging machinery correctly reports as a new
+	// hypothesis.
 	if err := registerRun(opts, cfg, strategyVersion, result); err != nil {
 		return errors.Join(result.failure(), err)
+	}
+	if err := finishResearch(opts, cfg, result, out); err != nil {
+		result.researchErr = fmt.Errorf("backtest: report the run: %w", err)
+		return result.failure()
 	}
 	if !result.installed {
 		return result.failure()
@@ -151,15 +172,36 @@ func backtest(ctx context.Context, opts options, out io.Writer) error {
 // the flush after it is a second fact, so a run can hold a journal it
 // installed and an error describing what happened next.
 type outcome struct {
-	header     journal.Header
-	records    int
-	runErr     error
-	journalErr error
-	installed  bool
+	equity  []registry.EquityPoint
+	opening *registry.Opening
+	// declaredStart and declaredEnd are the span this run was GIVEN to run
+	// over (every bar and corporate action supplied to it), derived once by
+	// prepareResearch before execution — never the narrower span header
+	// states, which is only what the run went on to actually apply
+	// (journal.Recorder.Header's own doc comment). finishResearch reports
+	// against these so a run that stops early never states a designation
+	// narrower than the one its own opening, if any, was reserved under
+	// (ADR 0012, Accepted amendment).
+	declaredStart, declaredEnd time.Time
+	header                     journal.Header
+	records                    int
+	runErr                     error
+	journalErr                 error
+	// researchErr is set when the run's own research report failed to
+	// install after the entry recording it was already written (backtest,
+	// after registerRun). It is folded into failure() exactly as journalErr
+	// already is, so the command still fails loudly even though the entry
+	// itself -- already committed by the time this can be known, and never
+	// rewritten (ADR 0018) -- cannot be amended to say so. An opening this
+	// run reserved is retained regardless (ADR 0012), and a genuine retry
+	// needs a new run id, which the existing repeat-flagging machinery
+	// correctly reports as a new hypothesis.
+	researchErr error
+	installed   bool
 }
 
 // failure is everything that went wrong, as one error.
-func (o outcome) failure() error { return errors.Join(o.runErr, o.journalErr) }
+func (o outcome) failure() error { return errors.Join(o.runErr, o.journalErr, o.researchErr) }
 
 // status is what the registry records this run as (ADR 0012's vocabulary).
 //
@@ -203,27 +245,31 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 	if err != nil {
 		return outcome{runErr: err}
 	}
+	opening, declaredStart, declaredEnd, err := prepareResearch(opts, cfg, bars, corporateActions)
+	if err != nil {
+		return outcome{declaredStart: declaredStart, declaredEnd: declaredEnd, runErr: err}
+	}
 	openingCash := cfg.NotionalAccount.StartingEquity
 	if opts.availableCash != nil {
 		openingCash = *opts.availableCash
 	}
 	reducer, err := strategy.NewReducer(strategyVersion, cfg)
 	if err != nil {
-		return outcome{runErr: fmt.Errorf("backtest: %w", err)}
+		return outcome{opening: opening, declaredStart: declaredStart, declaredEnd: declaredEnd, runErr: fmt.Errorf("backtest: %w", err)}
 	}
 	simulator, err := fills.New(cfg, strategyVersion, configurationHash)
 	if err != nil {
-		return outcome{runErr: fmt.Errorf("backtest: %w", err)}
+		return outcome{opening: opening, declaredStart: declaredStart, declaredEnd: declaredEnd, runErr: fmt.Errorf("backtest: %w", err)}
 	}
 	// The simulator is the run's broker (ADR 0020), so it keeps the account
 	// and states it after every Session: the opening cash, less every buy,
 	// plus every sell.
 	if err := simulator.OpenAccount(openingCash); err != nil {
-		return outcome{runErr: fmt.Errorf("backtest: -available-cash: %w", err)}
+		return outcome{opening: opening, declaredStart: declaredStart, declaredEnd: declaredEnd, runErr: fmt.Errorf("backtest: -available-cash: %w", err)}
 	}
 	recorder := journal.NewBoundedRecorder(reducer, opts.recordBound())
 
-	result := outcome{runErr: namingTheBoundFlag(drive(ctx, simulator, recorder, cfg, strategyVersion, bars, corporateActions))}
+	result := outcome{opening: opening, declaredStart: declaredStart, declaredEnd: declaredEnd, runErr: namingTheBoundFlag(drive(ctx, simulator, recorder, cfg, strategyVersion, bars, corporateActions))}
 
 	// The journal is written whether or not the run completed: a handler
 	// that failed closed may have emitted a final event explaining why, and
@@ -240,6 +286,8 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 	// footprint at the moment it is tightest.
 	entries := recorder.Entries()
 	result.records = len(entries)
+	result.equity, err = registry.EquityCurve(entries)
+	result.runErr = errors.Join(result.runErr, err)
 	result.installed, result.journalErr = writeJournal(opts.outPath, header, entries)
 	return result
 }
