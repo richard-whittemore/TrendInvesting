@@ -687,9 +687,9 @@ func latestPeriodEnd(bars []event.CompletedBarPayload) time.Time {
 // because actions may interleave several instruments in any order the
 // fixture gives them: each instrument's own delivery point in the bar
 // stream depends only on ITS OWN bars, never on where another instrument's
-// bars or actions happen to sit in the file. readCorporateActions requires
-// actions non-decreasing by EffectiveAt, so the entries this finds for one
-// instrument are delivered here in ascending order too.
+// bars or actions happen to sit in the file. deliverInEffectiveOrder sorts
+// the due actions before delivery: ADR 0009 makes the first delisting
+// terminal, so fixture order must not choose the effective time of the exit.
 func deliverActionsDueFor(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, instrumentID string, boundary time.Time) error {
 	var due []int
 	for i, action := range actions {
@@ -739,7 +739,7 @@ func deliverInEffectiveOrder(ctx context.Context, simulator *fills.Simulator, re
 }
 
 // deliverRemainingActions delivers whatever in actions is not yet delivered
-// (per delivered), in the order actions gives them: called once, after the
+// (per delivered), in effective-time order (ADR 0009): called once, after the
 // last bar, for an action effective at or after its own instrument's last
 // bar, or naming an instrument this run holds no bar for at all — the
 // unknown-instrument case internal/strategy/delisting.go's applyDelisting

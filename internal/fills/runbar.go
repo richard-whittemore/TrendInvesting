@@ -39,7 +39,8 @@ func (r *Result) add(input event.Envelope, decisions []event.Envelope) {
 }
 
 // Deliver applies one input envelope that is not a completed bar — a
-// configuration event, an account snapshot, a cash movement — to handler,
+// configuration event, an account snapshot, a cash movement, a corporate
+// action (ADR 0009), or run completion (ADR 0011) — to handler,
 // numbering it into the composed input stream and folding whatever the
 // handler emits into the simulator's resting-order book.
 //

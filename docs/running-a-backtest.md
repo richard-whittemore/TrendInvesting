@@ -27,6 +27,18 @@ Each record is `{"sequence": N, "kind": "input"|"decision", "envelope": {...}, "
 
 The run's inputs are the configuration event, each completed bar (each one driven through the per-bar fill protocol of ADR 0005, so the fills the simulator decides are interleaved as inputs of their own), each Session's close, an account snapshot per Session, any supplied corporate actions, and finally an end-of-stream event that expires any proposal still outstanding — so every proposal in a completed run reaches exactly one terminal event.
 
+Corporate actions and run completion enter through `fills.Deliver`. The
+recorder journals each input and the reducer's resulting decisions; the
+simulator observes those decisions to update its orders. Direct
+`Simulator.Observe` also recognises both input types, but leaves orders alone:
+ADR 0009's delisting cancellations come from `strategy.proposal.expired` and
+`strategy.campaign.exited`, and ADR 0011's completion expiries and resulting
+`strategy.exit-order.set` decisions resolve the final book. A delisting closes
+at the instrument's last available split-adjusted close, removes every resting
+order for it, and prevents later fixture bars from trading it. The corporate
+action remains an input in the journal and is reproduced by both `-replay` and
+`-rerun`; fixtures declare the action rather than infer a real delisting.
+
 ### The simulated account
 
 In a backtest the fill simulator is the broker (ADR 0020), so it keeps the account the run trades and states it after every Session, in an `account.snapshot`:
