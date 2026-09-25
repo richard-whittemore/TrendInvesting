@@ -114,6 +114,7 @@ func TestServerDecisionsMatchBacktestForTheSameBars(t *testing.T) {
 	stop := startEngine(t, options{
 		socketPath: socketPath,
 		configPath: testConfigPath,
+		asOf:       testAsOf,
 		outPath:    engineJournal,
 		// "dev" matches buildinfo.Version's own default (cmd/backtest was
 		// just invoked with no -ldflags override), so the two runs

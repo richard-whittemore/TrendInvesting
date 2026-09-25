@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -156,12 +157,21 @@ func shortSocketDir(t *testing.T) string {
 // either order — and returns the same result every time.
 func startEngine(t *testing.T, opts options) (stop func() error) {
 	t.Helper()
+	return startEngineInvocation(t, func(ctx context.Context, out io.Writer) error {
+		return run(ctx, opts, out)
+	})
+}
+
+// startEngineInvocation exercises startup and shutdown through either the
+// parsed command or run, using ADR 0014's readiness signal before connecting.
+func startEngineInvocation(t *testing.T, invoke func(context.Context, io.Writer) error) (stop func() error) {
+	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	out := newReadySignal()
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- run(ctx, opts, out)
+		runErr <- invoke(ctx, out)
 	}()
 
 	var once sync.Once

@@ -6,7 +6,7 @@
 // file. It is composition only and contains no rules
 // (cmd-is-composition-only, .golangci.yml; AGENTS.md rule 7).
 //
-//	engine -socket <path> -config <configuration.json> -out <journal.jsonl>
+//	engine -socket <path> -config <configuration.json> -out <journal.jsonl> -as-of <RFC3339>
 //
 // # Wire contract: the adapter's first bar must carry Sequence 2
 //
@@ -70,6 +70,7 @@ type options struct {
 	socketPath      string
 	configPath      string
 	outPath         string
+	asOf            string
 	build           string
 	maxFrameBytes   int
 	decisionTimeout time.Duration
@@ -92,11 +93,21 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	if opts.outPath == "" {
 		missing = append(missing, errors.New("-out is required: where to write the run's journal when this process stops"))
 	}
+	if opts.asOf == "" {
+		missing = append(missing, errors.New("-as-of is required: the run's declared start as an RFC 3339 time (ADR 0012)"))
+	}
 	if opts.build == "" {
 		missing = append(missing, errors.New("the running build must be identified; it is part of every envelope's strategy version (ADR 0016)"))
 	}
 	if err := errors.Join(missing...); err != nil {
 		return fmt.Errorf("engine: %w", err)
+	}
+	asOf, err := time.Parse(time.RFC3339, opts.asOf)
+	if err != nil {
+		return fmt.Errorf("engine: -as-of must be an RFC 3339 time: %w", err)
+	}
+	if asOf.IsZero() {
+		return errors.New("engine: -as-of must be nonzero: the journal requires a nonzero span (ADR 0017)")
 	}
 
 	// Checked before the configuration is even read, so an operator is told
@@ -193,7 +204,7 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	// own first bar must carry configurationSequence+1 to be accepted — see
 	// configurationSequence's own doc comment, and cmd/engine's package doc
 	// comment, for where that is stated to an adapter author.
-	configEnvelope, err := configurationEnvelope(cfg, strategyVersion, time.Now().UTC())
+	configEnvelope, err := configurationEnvelope(cfg, strategyVersion, asOf.UTC())
 	if err != nil {
 		return err
 	}
@@ -363,16 +374,11 @@ const configurationSequence uint64 = 1
 // this command delivers to the reducer before it opens its socket (decision
 // 2, above), at Sequence configurationSequence.
 //
-// EventTime and RecordedAt are the moment this process is composing the run,
-// read from the wall clock — unlike cmd/backtest's fixture convention (the
-// first bar's own PeriodEnd, since a fixture has no clock of its own to read;
-// backtest.go's drive says so directly), this is a live process that does
-// have one. now is a parameter rather than a call to time.Now() here so this
-// function stays independently testable; .golangci.yml's forbidigo rule
-// forbidding time.Now is disabled for cmd/ regardless (the composition root
-// "legitimately touch[es] the outside world; determinism is enforced in the
-// domain"), so the constraint here is testability, not the lint rule.
-func configurationEnvelope(cfg event.ConfigurationPayload, strategyVersion string, now time.Time) (event.Envelope, error) {
+// EventTime and RecordedAt equal the nonzero declared run start, preserving
+// comparable evidence (ADR 0012) and a repeatable journal chain (ADR 0017).
+// The reducer ignores configuration time; warm-up bars may precede it, and
+// the journal span includes those earlier inputs under ADR 0017.
+func configurationEnvelope(cfg event.ConfigurationPayload, strategyVersion string, asOf time.Time) (event.Envelope, error) {
 	encoded, err := json.Marshal(cfg)
 	if err != nil {
 		return event.Envelope{}, fmt.Errorf("engine: encode the configuration payload: %w", err)
@@ -383,8 +389,8 @@ func configurationEnvelope(cfg event.ConfigurationPayload, strategyVersion strin
 		Type:              event.ConfigurationEventType,
 		SchemaVersion:     event.ConfigurationSchemaVersion,
 		EnvelopeVersion:   event.CurrentEnvelopeVersion,
-		EventTime:         now,
-		RecordedAt:        now,
+		EventTime:         asOf,
+		RecordedAt:        asOf,
 		Sequence:          configurationSequence,
 		Source:            sourceEngine,
 		StrategyVersion:   strategyVersion,
