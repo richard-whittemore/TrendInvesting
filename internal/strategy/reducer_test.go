@@ -1251,9 +1251,23 @@ func TestReducerEmitsExactlyOneSignalOnBreakoutBar(t *testing.T) {
 	// 55 warm-up bars each emit one Setup-evaluated event (no breakout: the
 	// channel is not ready until bar 55 has been added, i.e. when
 	// evaluating bar 56); bar 56 emits a Setup-evaluated event, a Signal,
-	// and — since #10 — the trade proposal the Signal is sized into.
+	// and the Signal's outcome at the Session's close.
 	if len(emitted) != len(highs)+2 {
 		t.Fatalf("len(emitted) = %d, want %d (55 bars x 1 event, plus bar 56's 3 events)", len(emitted), len(highs)+2)
+	}
+	// 56 closes are fewer than the 64 Strength needs, so the Signal cannot
+	// be ranked and bar 56's third emission is its insufficient-history
+	// decline, not a proposal (ADR 0010, as amended 2026-09-25).
+	last := emitted[len(emitted)-1]
+	if last.Type != event.ProposalDeclinedEventType {
+		t.Fatalf("bar 56's third emission is %s, want %s", last.Type, event.ProposalDeclinedEventType)
+	}
+	var declined event.ProposalDeclinedPayload
+	if err := json.Unmarshal(last.Payload, &declined); err != nil {
+		t.Fatal(err)
+	}
+	if declined.Reason != event.DeclineReasonInsufficientHistory {
+		t.Fatalf("decline reason = %q, want %q", declined.Reason, event.DeclineReasonInsufficientHistory)
 	}
 
 	var signals []event.Envelope
