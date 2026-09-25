@@ -245,9 +245,12 @@ type CampaignUnitAddedPayload struct {
 	// recognised as a duplicate rather than a further Unit.
 	FillID    string  `json:"fill_id"`
 	FillPrice float64 `json:"fill_price"`
-	// Quantity is what actually executed for this Unit — at most the
-	// Campaign's frozen UnitQuantity; a partial Add is accepted for the
-	// filled quantity, mirroring the Campaign's own opening fill.
+	// Quantity is what actually executed for this Unit — at most the Add
+	// proposal's quantity, which is the Campaign's frozen UnitQuantity in
+	// the Baseline and is sized from the Add's own N under the declared
+	// Variant that recomputes N at each Add (ADR 0006); a partial Add is
+	// accepted for the filled quantity, mirroring the Campaign's own
+	// opening fill.
 	Quantity int64 `json:"quantity"`
 	// CampaignN and StopMultiple are restated from the Campaign so
 	// ProtectiveStop is independently re-derivable from this payload alone,
