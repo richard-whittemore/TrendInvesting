@@ -99,6 +99,36 @@ func TestPriorOpeningsAcrossConfigurationsAndLegacyRuns(t *testing.T) {
 	}
 }
 
+// TestPriorOpeningsSkipsRunsThisProtocolAlreadyReportedOn: a run this
+// protocol reported on states its own exposure through its own .opening
+// sidecar, if it reserved one at all -- never through the span-based guess
+// legacy entries fall back to. A run recorded with a mixed span but a
+// .report and no .opening (an in-sample run, a refused -fit, or any other
+// attempt that reserved nothing) must not be re-guessed into exposure it
+// never took (ADR 0012, Proposed amendment).
+func TestPriorOpeningsSkipsRunsThisProtocolAlreadyReportedOn(t *testing.T) {
+	p := protocolForTest(t)
+	run := completedRun("reported")
+	run.Variant = "v"
+	entry := mustEntry(t, run)
+	entryPath := mustPath(t, entry)
+	dir, err := registry.Dir(entry.ConfigurationHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &researchStore{fs: fstest.MapFS{
+		entryPath:                &fstest.MapFile{Data: encoded(t, entry)},
+		dir + "/reported.report": &fstest.MapFile{Data: []byte("{}")},
+	}}
+	prior, err := p.PriorOpenings(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prior) != 0 {
+		t.Fatalf("a run this protocol already reported on must not be re-guessed from its span: %+v", prior)
+	}
+}
+
 func TestPriorOpeningsFailures(t *testing.T) {
 	p := protocolForTest(t)
 	run := completedRun("first")

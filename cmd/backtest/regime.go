@@ -32,12 +32,20 @@ type researchResult struct {
 // prepareResearch reserves held-out exposure before the simulator executes.
 // Failed reservations stop execution; failed runs retain their reservation
 // (ADR 0012, Proposed amendment). Inputs are the same in-memory fixtures drive uses.
-func prepareResearch(opts options, cfg event.ConfigurationPayload, bars []event.CompletedBarPayload, actions []event.CorporateActionPayload) (*registry.Opening, error) {
+//
+// It also returns the declared span it derived start and end from: the whole
+// input this run was GIVEN, every bar and corporate action, not merely
+// whatever the run goes on to apply before it might stop. finishResearch
+// reports against this same span, on purpose (ADR 0012, Proposed amendment:
+// "the designation uses all input dates"): the decision to reserve an
+// opening is made from it, before execution, so the report beside that
+// opening states the designation that decision was made under, never a
+// narrower one a run's own early stop happened to leave behind.
+func prepareResearch(opts options, cfg event.ConfigurationPayload, bars []event.CompletedBarPayload, actions []event.CorporateActionPayload) (opening *registry.Opening, start, end time.Time, err error) {
 	p, err := registry.ResearchProtocol()
 	if err != nil {
-		return nil, err
+		return nil, start, end, err
 	}
-	var start, end time.Time
 	include := func(at time.Time) {
 		if start.IsZero() || at.Before(start) {
 			start = at
@@ -54,16 +62,17 @@ func prepareResearch(opts options, cfg event.ConfigurationPayload, bars []event.
 	}
 	if opts.fit {
 		if err := p.PermitFit(start, end); err != nil {
-			return nil, err
+			return nil, start, end, err
 		}
 	}
 	if opts.variant == "" || opts.variant == registry.Baseline || p.Designation(start, end) == "in-sample" {
-		return nil, nil
+		return nil, start, end, nil
 	}
 	if opts.registryPath == "" {
-		return nil, errors.New("research: Variant out-of-sample evaluation requires a registry")
+		return nil, start, end, errors.New("research: Variant out-of-sample evaluation requires a registry")
 	}
-	return reserveOpening(opts, cfg, p)
+	opening, err = reserveOpening(opts, cfg, p)
+	return opening, start, end, err
 }
 
 func reserveOpening(opts options, cfg event.ConfigurationPayload, p registry.Protocol) (*registry.Opening, error) {
@@ -145,7 +154,7 @@ func finishResearch(opts options, cfg event.ConfigurationPayload, result outcome
 	if err != nil {
 		return err
 	}
-	report, err := p.Report(result.equity, result.header.SpanStart, result.header.SpanEnd)
+	report, err := p.Report(result.equity, result.declaredStart, result.declaredEnd)
 	if err != nil {
 		return err
 	}

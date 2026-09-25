@@ -188,7 +188,7 @@ func (p Protocol) metrics(points []EquityPoint) Metrics {
 	}
 	m.Start = points[0].At
 	m.End = points[len(points)-1].At
-	if len(points) < 2 || !m.End.After(m.Start) || points[0].Equity == 0 {
+	if len(points) < 2 || points[0].Equity == 0 {
 		m.State = "insufficient-history"
 		return m
 	}
@@ -199,6 +199,23 @@ func (p Protocol) metrics(points []EquityPoint) Metrics {
 	}
 	growth := points[len(points)-1].Equity / points[0].Equity
 	m.TotalReturn = growth - 1
+	// A carried pre-window mark and a boundary close at the very same
+	// instant (windowMetrics, ADR 0012's Proposed amendment) leave no
+	// elapsed time to annualise a return over. The drawdown and total
+	// return above come straight from the recorded equities and are kept
+	// regardless; only the annualised return, and the ratio it feeds, are
+	// undefined at zero duration, rather than the degenerate limit dividing
+	// by it would otherwise silently take (0.8^(1/0) is a finite 0, which
+	// would misreport any loss as an identical fixed rate).
+	if !m.End.After(m.Start) {
+		if !finite(m.TotalReturn) {
+			m.TotalReturn = 0
+			m.State = "non-finite-return"
+			return m
+		}
+		m.State = "zero-elapsed-time"
+		return m
+	}
 	years := m.End.Sub(m.Start).Hours() / (24 * p.DaysPerYear)
 	m.AnnualisedReturn = math.Pow(growth, 1/years) - 1
 	if !finite(m.TotalReturn) || !finite(m.AnnualisedReturn) {

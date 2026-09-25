@@ -215,6 +215,44 @@ func TestWindowKeepsFirstLossAndDoesNotInventAnEnd(t *testing.T) {
 	}
 }
 
+// TestZeroElapsedTimeWindowStillCountsTheLoss: a run that ends exactly at a
+// window's start carries its last pre-window mark to that same instant
+// (windowMetrics), so the window's only two points share one timestamp. Hand
+// computed: 100 carried, then 80 at that same instant, is a 20% drawdown and
+// a 20% total return that a zero elapsed time must not hide (ADR 0012,
+// Proposed amendment: "the first in-window loss is retained"). Only the
+// annualised return, and the ratio it feeds, are undefined over zero time.
+func TestZeroElapsedTimeWindowStillCountsTheLoss(t *testing.T) {
+	p := protocolForTest(t)
+	points := []registry.EquityPoint{{At: date("2019-06-01T00:00:00Z"), Equity: 100}, {At: date("2020-01-01T00:00:00Z"), Equity: 80}}
+	r, err := p.Report(points, points[0].At, points[1].At)
+	if err != nil {
+		t.Fatal(err)
+	}
+	covid := r.Windows[5].Metrics
+	if covid.State != "zero-elapsed-time" || math.Abs(covid.MaxDrawdown-.2) > 1e-12 || math.Abs(covid.TotalReturn+.2) > 1e-12 || covid.Primary != nil || covid.AnnualisedReturn != 0 {
+		t.Fatalf("COVID window %+v", covid)
+	}
+}
+
+// TestZeroElapsedTimeOverflowIsNonFiniteReturn: the same carried-mark,
+// same-instant construction as above, but with a jump large enough that
+// growth itself overflows. A zero elapsed time must not turn that overflow
+// into a fabricated finite total return either -- it is still refused as
+// non-finite-return, exactly as a non-zero-duration overflow already is.
+func TestZeroElapsedTimeOverflowIsNonFiniteReturn(t *testing.T) {
+	p := protocolForTest(t)
+	points := []registry.EquityPoint{{At: date("2019-06-01T00:00:00Z"), Equity: 1e-300}, {At: date("2020-01-01T00:00:00Z"), Equity: 1e300}}
+	r, err := p.Report(points, points[0].At, points[1].At)
+	if err != nil {
+		t.Fatal(err)
+	}
+	covid := r.Windows[5].Metrics
+	if covid.State != "non-finite-return" || covid.TotalReturn != 0 {
+		t.Fatalf("COVID window %+v", covid)
+	}
+}
+
 func TestOpeningValidationAndOtherVariants(t *testing.T) {
 	p := protocolForTest(t)
 	run := completedRun("first")

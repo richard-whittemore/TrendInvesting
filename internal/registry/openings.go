@@ -16,8 +16,15 @@ import (
 )
 
 // PriorOpenings reads reservations and legacy runs across every configuration
-// hash. A failed legacy run of unknown span counts conservatively as an opening
-// (ADR 0012, Proposed amendment). The caller must serialise read plus install.
+// hash. A failed legacy run of unknown span counts conservatively as an
+// opening (ADR 0012, Proposed amendment) -- but only a LEGACY one: a run this
+// protocol itself reported on (it carries a .report sidecar, scanned below
+// for its runID) states its own exposure through its .opening sidecar, if it
+// reserved one at all, and is never guessed at again from its span. Without
+// that distinction, a run this protocol refused before it touched any
+// held-out input -- a -fit rejection, in particular -- would be recorded
+// with an unknown span and wrongly counted as exposure it never took. The
+// caller must serialise read plus install.
 func (p Protocol) PriorOpenings(store Store) ([]Opening, error) {
 	dirs, err := store.ReadDir(".")
 	if errors.Is(err, fs.ErrNotExist) {
@@ -33,20 +40,29 @@ func (p Protocol) PriorOpenings(store Store) ([]Opening, error) {
 			continue
 		}
 		hash := strings.Replace(dir, "-", ":", 1)
-		runs, err := Runs(store, hash)
-		if err != nil {
-			return nil, err
-		}
-		for _, run := range runs {
-			if run.Variant != Baseline && p.Designation(run.SpanStart, run.SpanEnd) != "in-sample" {
-				prior = append(prior, Opening{Variant: run.Variant, Hypothesis: run.ConfigurationHash + "/" + run.RunID})
-			}
-		}
 		names, err := store.ReadDir(dir)
 		if err != nil {
 			return nil, err
 		}
 		slices.Sort(names)
+		reported := map[string]bool{}
+		for _, name := range names {
+			if id, ok := strings.CutSuffix(name, ".report"); ok {
+				reported[id] = true
+			}
+		}
+		runs, err := Runs(store, hash)
+		if err != nil {
+			return nil, err
+		}
+		for _, run := range runs {
+			if reported[run.RunID] {
+				continue
+			}
+			if run.Variant != Baseline && p.Designation(run.SpanStart, run.SpanEnd) != "in-sample" {
+				prior = append(prior, Opening{Variant: run.Variant, Hypothesis: run.ConfigurationHash + "/" + run.RunID})
+			}
+		}
 		for _, name := range names {
 			if !strings.HasSuffix(name, ".opening") {
 				continue

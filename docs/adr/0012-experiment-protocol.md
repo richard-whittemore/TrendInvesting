@@ -74,13 +74,18 @@ ratification; they do not change any Accepted strategy parameter above.
   Maximum drawdown is `max((running_peak - equity)/running_peak)`, over the
   net account-equity marks, including costs and unrealised positions, never
   the Notional Account. The ratio is annualised return / maximum drawdown.
-  Zero drawdown, insufficient history and non-finite arithmetic have a null
-  ratio and an explicit state, never an infinite winning score. No external
-  cash flows are supported by this calculation; they require a separately
-  agreed return-adjustment methodology and fail closed.
+  Zero drawdown, insufficient history, zero elapsed time and non-finite
+  arithmetic have a null ratio and an explicit state, never an infinite
+  winning score. No external cash flows are supported by this calculation;
+  they require a separately agreed return-adjustment methodology and fail
+  closed.
 - **Window marks:** use snapshot `AsOf`, not delivery time. Carry the last mark
-  preceding a window to its starting boundary so its first loss is counted.
-  Do not extrapolate the last observed mark to an unobserved window end.
+  preceding a window to its starting boundary so its first loss is counted,
+  even when the boundary mark and the window's only other mark share that
+  same instant: the drawdown and total return between them are still
+  reported, and only the annualised return, and the ratio it feeds, are left
+  undefined over that zero elapsed time. Do not extrapolate the last observed
+  mark to an unobserved window end.
   Every window is reported, including `no-data`; actual metric start/end and
   sample count show partial coverage. A partial or failed run is not evidence
   that a Variant clears the adoption criteria.
