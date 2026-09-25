@@ -7,7 +7,7 @@ A research and trading platform that evaluates three declared strategies on US e
 ## Non-negotiables
 
 1. **TDD.** Write the failing test first, then the code (red–green–refactor). Golden scenarios come from primary sources — transcribe them, don't invent them.
-2. **`make check` must pass** before any PR: format, vet, staticcheck, race-enabled tests, coverage floor, `govulncheck`, build.
+2. **`make check` must pass** before any PR: format, vet, staticcheck, race-enabled tests, coverage floor, `govulncheck`, build, and the LEAN adapter's Python suite (`make adapter-test`).
 3. **Cite the source of every strategy rule.** `docs/methodology/Methodology_Analysis.md` is the reference, with page and timestamp citations and provenance tags. Never restate a rule from memory. A rule tagged DISCLOSED for the baseline cannot be changed by an implementation — that is a specification change; stop and say so. Source comments follow `docs/development.md`'s comment standard: what it does, the rule and its citation, any invariant — never a ticket number, PR number, or review round.
 4. **Keep source rules separate from experiments.** Turtle baseline (½N adds, 2N stop) and Sublime/hybrid variants (1 ATR adds, 3×ATR stop) are distinct configurations, never silently blended.
 5. **No live-order behaviour** before the paper-trading and limited-live gates. Determinism, replay, and fail-closed states come first.

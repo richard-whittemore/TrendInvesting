@@ -3,7 +3,7 @@ export GOTOOLCHAIN := local
 COVERAGE_MIN ?= 80.0
 COVERAGE_PROFILE ?= coverage.out
 
-.PHONY: build check coverage deps fmt fmt-check golangci lint staticcheck test vet vuln
+.PHONY: adapter-test build check coverage deps fmt fmt-check golangci lint staticcheck test vet vuln
 
 build:
 	go build ./...
@@ -41,4 +41,11 @@ deps:
 	go mod tidy -diff
 	go mod verify
 
-check: deps lint coverage vuln build
+# The LEAN adapter's suite, standard-library Python only. It includes the
+# Go-to-Python decision contract and an end-to-end run against cmd/engine,
+# so a Go change to an event the adapter reads fails here, not in LEAN.
+# The arm64 CI job, which does not run make check, runs this target itself.
+adapter-test:
+	cd adapter/lean && python3 -m unittest discover -s tests
+
+check: deps lint coverage vuln build adapter-test
