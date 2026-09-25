@@ -385,6 +385,8 @@ func (s *Simulator) observe(envelope event.Envelope, ref reference) error {
 		event.ConfigurationEventType,               // an input, carried at construction
 		event.CompletedBarEventType,                // an input, handled by RunSession itself
 		event.SessionClosedEventType,               // likewise
+		event.MarketCorporateActionEventType,       // ADR 0009: proposal-expired and campaign-exited emissions cancel orders
+		event.RunCompletedEventType,                // ADR 0011: proposal-expired and exit-order-set emissions resolve the book
 		event.FillEventType,                        // this package's own output
 		event.AccountSnapshotEventType,             // an input; no resting-order consequence
 		event.CashMovementEventType:                // likewise

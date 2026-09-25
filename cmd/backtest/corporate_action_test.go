@@ -43,13 +43,28 @@ func decisionsOfType(t *testing.T, written []byte, eventType string) []event.Env
 
 // TestADelistingClosesACampaignInTheJournal is the command-seam test: a
 // Delisting Exit (CONTEXT.md: "Delisting Exit"), correct and tested at the
-// event seam already, must also be reachable through the one artefact this
-// project treats as evidence — the journal a backtest run writes.
+// event seam already, must also be reachable through the journal (ADR 0017),
+// before a later bar can trade the delisted instrument (ADR 0009).
 func TestADelistingClosesACampaignInTheJournal(t *testing.T) {
+	bars, err := readBars(barsDelistingFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := bars[len(bars)-1]
+	later.PeriodEnd = later.PeriodEnd.AddDate(0, 0, 2)
+	bars = append(bars, later)
+	encoded, err := json.Marshal(bars)
+	if err != nil {
+		t.Fatal(err)
+	}
+	barsPath := filepath.Join(t.TempDir(), "bars.json")
+	if err := os.WriteFile(barsPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	out := filepath.Join(t.TempDir(), "journal.jsonl")
 	opts := options{
 		configPath:           configurationFixture,
-		barsPath:             barsDelistingFixture,
+		barsPath:             barsPath,
 		corporateActionsPath: corporateActionsDelistingFixture,
 		outPath:              out,
 		build:                testBuild,
@@ -74,6 +89,64 @@ func TestADelistingClosesACampaignInTheJournal(t *testing.T) {
 	}
 	if payload.Reason != event.ExitReasonDelisting {
 		t.Fatalf("campaign exited reason = %q, want %q", payload.Reason, event.ExitReasonDelisting)
+	}
+	_, records, err := journal.Read(bytes.NewReader(written))
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions, err := readCorporateActions(corporateActionsDelistingFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, actionIndex, exitIndex := 0, -1, -1
+	var lastClose float64
+	for i, record := range records {
+		switch record.Envelope.Type {
+		case event.MarketCorporateActionEventType:
+			if record.Kind != journal.KindInput {
+				t.Fatal("corporate action must be journalled as an input")
+			}
+			var action event.CorporateActionPayload
+			if err := json.Unmarshal(record.Envelope.Payload, &action); err != nil {
+				t.Fatal(err)
+			}
+			if action != actions[0] || !record.Envelope.EventTime.Equal(action.EffectiveAt) {
+				t.Fatalf("recorded action differs from fixture: %+v", action)
+			}
+			count++
+			actionIndex = i
+		case event.CompletedBarEventType:
+			var bar event.CompletedBarPayload
+			if err := json.Unmarshal(record.Envelope.Payload, &bar); err != nil {
+				t.Fatal(err)
+			}
+			if bar.InstrumentID == actions[0].InstrumentID {
+				// ADRs 0009/0010: the action precedes the next bar's
+				// decisions and closes at the last available close.
+				if bar.PeriodEnd.After(actions[0].EffectiveAt) && actionIndex < 0 {
+					t.Fatal("a later bar preceded its delisting input")
+				}
+				if actionIndex < 0 {
+					lastClose = bar.SplitAdjusted.Close
+				}
+			}
+		case event.CampaignExitedEventType:
+			exitIndex = i
+		case event.FillEventType:
+			if actionIndex >= 0 {
+				t.Fatal("a later bar filled an order after delisting")
+			}
+		}
+	}
+	if count != 1 || exitIndex <= actionIndex || payload.ExitPrice != lastClose {
+		t.Fatalf("action count=%d, action index=%d, exit index=%d, exit price=%v, last close=%v",
+			count, actionIndex, exitIndex, payload.ExitPrice, lastClose)
+	}
+	for _, mode := range []string{"-verify", "-replay", "-rerun"} {
+		var checked bytes.Buffer
+		if err := run(context.Background(), []string{mode, out}, &checked); err != nil {
+			t.Fatalf("%s: %v\n%s", mode, err, checked.String())
+		}
 	}
 }
 
