@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/indicator"
 )
 
 // pendingSignalState is a Signal whose sizing waits for its Session to close
@@ -147,11 +149,38 @@ func (r *transition) applySessionClosed(envelope event.Envelope) ([]event.Envelo
 			signalled = append(signalled, id)
 		}
 	}
-	for _, id := range rankSignals(signalled) {
+
+	// Rank first, so an instrument that cannot be ranked is declined instead
+	// of entering rankSignals' order at all (ADR 0010, as amended by the
+	// owner's decision of 2026-09-25: an incomparable instrument has no place
+	// in a total order).
+	var rankable []signalRanking
+	for _, id := range signalled {
+		ranking, detail, ranked := r.rankSignal(id)
+		if ranked {
+			rankable = append(rankable, ranking)
+			continue
+		}
 		state, _ := r.instrument(id)
 		signal := state.pendingSignal
 		state.pendingSignal = nil
-		sized, err := r.sizeUnit(id, signal.periodEnd, envelope, signal.signalID, signal.entryLevel, signal.n, signal.nReady, signal.earliestFillAt)
+		declined, err := r.decline(id, signal.periodEnd, envelope, signal.signalID,
+			event.DeclineReasonInsufficientHistory, detail, 0, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		emissions = append(emissions, declined)
+	}
+
+	strengthByID := make(map[string]float64, len(rankable))
+	for _, ranking := range rankable {
+		strengthByID[ranking.instrumentID] = ranking.strength
+	}
+	for _, id := range rankSignals(rankable) {
+		state, _ := r.instrument(id)
+		signal := state.pendingSignal
+		state.pendingSignal = nil
+		sized, err := r.sizeUnit(id, signal.periodEnd, envelope, signal.signalID, signal.entryLevel, signal.n, signal.nReady, signal.earliestFillAt, strengthByID[id])
 		if err != nil {
 			return nil, err
 		}
@@ -171,18 +200,78 @@ func (r *transition) applySessionClosed(envelope event.Envelope) ([]event.Envelo
 	return emissions, nil
 }
 
-// rankSignals orders a Session's Signals for sizing. ADR 0010 ranks
-// simultaneous Signals by Strength, (close − close 63 bars ago) / N, highest
-// first [T p.29], with ties broken by 20-day median dollar volume and then
-// by symbol. Neither Strength nor median dollar volume is computed yet, and
-// their definitions are unsettled (ADR 0021, "Open"), so this applies only
-// the last tie-break: ascending instrument ID. That is total and independent
-// of arrival order. Every proposal reserves its cash and cap headroom as it
-// is made (ADR 0020, as amended 2026-09-24), so this order also decides
-// which Signals are funded when the Session's Signals together exceed the
-// cash or a cap: until Strength is computed, the lowest instrument ID first.
-func rankSignals(instrumentIDs []string) []string {
-	return slices.Sorted(slices.Values(instrumentIDs))
+// signalRanking pairs a rankable Signal's instrument ID with the two figures
+// ADR 0010's order compares: Strength and 20-day median dollar volume.
+// rankSignals breaks the remaining tie directly on instrumentID, so it is not
+// carried here.
+type signalRanking struct {
+	instrumentID string
+	strength     float64
+	dollarVolume float64
+}
+
+// rankSignal computes id's ranking figures for the Session that is closing,
+// or reports why id cannot be ranked at all (ADR 0010, as amended by the
+// owner's decision of 2026-09-25): fewer than
+// indicator.StrengthLookbackBars+1 split-adjusted closes, fewer than
+// indicator.DollarVolumeWindow raw closes/volumes, or an N that is not a
+// usable volatility reading at this Session's own close. Every one of these
+// is insufficient history to rank, never a reason to rank last — an
+// incomparable instrument has no place in a total order, so it is declined
+// (event.DeclineReasonInsufficientHistory) instead of entering the order at
+// all.
+//
+// n is read directly from the instrument's own indicator.WilderAverage,
+// AFTER this Session's own bar has already advanced it (reducer.go's
+// applyCompletedBar) — N(d), the Session's own N, deliberately not the
+// pre-advance N pendingSignalState.n carries for the Signal's entry sizing:
+// see indicator.Strength's own doc comment for why the two differ.
+func (r *transition) rankSignal(id string) (ranking signalRanking, detail string, ranked bool) {
+	state := r.peekInstrument(id)
+	n := state.n.Value()
+	if !state.n.Ready() || n <= 0 {
+		return signalRanking{}, fmt.Sprintf(
+			"n is not a usable volatility reading at the session's close (n %v): insufficient history to rank (ADR 0010, as amended 2026-09-25)", n), false
+	}
+	closes := state.splitAdjustedCloses.Values()
+	strength, strengthReady := indicator.Strength(closes, n)
+	rawCloses := state.rawCloses.Values()
+	rawVolumes := state.rawVolumes.Values()
+	dollarVolume, volumeReady := indicator.MedianDollarVolume(rawCloses, rawVolumes)
+	if !strengthReady || !volumeReady {
+		return signalRanking{}, fmt.Sprintf(
+			"%d split-adjusted close(s) (need %d) and %d raw volume(s) (need %d): insufficient history to rank (ADR 0010, as amended 2026-09-25)",
+			len(closes), indicator.StrengthLookbackBars+1, len(rawVolumes), indicator.DollarVolumeWindow), false
+	}
+	return signalRanking{instrumentID: id, strength: strength, dollarVolume: dollarVolume}, "", true
+}
+
+// rankSignals orders a Session's rankable Signals for sizing (ADR 0010, as
+// amended by the owner's decision of 2026-09-25): Strength descending, then
+// 20-day median dollar volume descending, then instrument ID ascending.
+// Instrument IDs are unique, so this is a total order — two Signals tied on
+// both Strength and dollar volume still resolve deterministically, and the
+// same input always produces the same order, independent of arrival order or
+// of Go's own map iteration. Every proposal reserves its cash and cap
+// headroom as it is made (ADR 0020, as amended 2026-09-24), so this order
+// also decides which Signals are funded when the Session's Signals together
+// exceed the cash or a cap.
+func rankSignals(rankings []signalRanking) []string {
+	sorted := slices.Clone(rankings)
+	slices.SortFunc(sorted, func(a, b signalRanking) int {
+		if c := cmp.Compare(b.strength, a.strength); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(b.dollarVolume, a.dollarVolume); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.instrumentID, b.instrumentID)
+	})
+	ids := make([]string, len(sorted))
+	for i, ranking := range sorted {
+		ids[i] = ranking.instrumentID
+	}
+	return ids
 }
 
 // sessionLiveInstruments returns, in ascending order, every instrument whose

@@ -174,7 +174,7 @@ func TestDecisionLogExplainsAProposalTheRunEndedHolding(t *testing.T) {
 	if err := run(context.Background(), []string{"-decisions", path, "-date", "2026-01-23"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	const want = `AAPL: expired exit proposal "exit-proposal:AAPL:2026-01-23T00:00:00.000000000Z" for 20000 shares at 125.21 because input-stream-ended; no fill was recorded for this proposal (rule exit-proposal.expires.with-its-bar; ADR 0011).`
+	const want = `AAPL: expired exit proposal "exit-proposal:AAPL:2026-01-23T00:00:00.000000000Z" for 20000 shares at 126.01 because input-stream-ended; no fill was recorded for this proposal (rule exit-proposal.expires.with-its-bar; ADR 0011).`
 	if !strings.Contains(out.String(), want) {
 		t.Fatalf("got:\n%s\nwant a line ending:\n%s", &out, want)
 	}
@@ -208,7 +208,7 @@ func TestDecisionLogMixedGolden(t *testing.T) {
 	if err := run(context.Background(), []string{"-decisions", path}, &out); err != nil {
 		t.Fatal(err)
 	}
-	const want = `2026-01-22T00:00:00Z [decision 22] AAPL: Signal long because high 129.01 exceeded Entry Channel 127.01; N was 1 (rule entry.channel.breakout; ADR 0002).
+	const want = `2026-01-22T00:00:00Z [decision 65] AAPL: Signal long because high 129.01 exceeded Entry Channel 127.01; N was 1 (rule entry.channel.breakout; ADR 0002).
 2026-01-22T00:00:00Z [decision 23] MSFT: declined entry proposal because insufficient-cash: one Unit cannot be funded; Signal "signal:MSFT"; required cash 20615 exceeded available cash 20614.99 (rule not recorded; ADR not recorded).
 `
 	if out.String() != want {

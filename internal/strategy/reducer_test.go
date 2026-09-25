@@ -218,38 +218,11 @@ func decodeSignal(t *testing.T, envelope event.Envelope) event.SignalPayload {
 // Entry Channel.
 func runReducerOverHighs(t *testing.T, instrumentID string, highs []float64, cfg event.ConfigurationPayload) []event.Envelope {
 	t.Helper()
-	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
-	if err != nil {
-		t.Fatalf("NewReducer() error = %v", err)
-	}
-	engine, err := replay.New(reducer)
-	if err != nil {
-		t.Fatalf("replay.New() error = %v", err)
-	}
-
-	envelopes := []event.Envelope{
-		configEnvelopeWithConfig(t, 1, day(0), cfg),
-		// ADR 0010's cash basis: a Unit is never sized without an
-		// account.snapshot ever having supplied an available-cash figure. A
-		// no-op reading (Equity equal to cfg's own starting figure, so the
-		// Notional Account is unaffected) and generous headroom, since this
-		// file's own subject is Setup/Signal/sizing mechanics, not
-		// affordability (internal/strategy's cash_skip_test.go owns that).
-		accountSnapshotEnvelope(t, 2, defaultAccountSnapshot(cfg), day(0)),
-	}
-	seq := uint64(3)
+	bars := make([]event.CompletedBarPayload, 0, len(highs))
 	for i, high := range highs {
-		periodEnd := day(i + 1)
-		bar := syntheticBar(instrumentID, periodEnd, high-100)
-		envelopes = append(envelopes, barEnvelope(t, seq, bar, periodEnd))
-		seq++
+		bars = append(bars, syntheticBar(instrumentID, day(i+1), high-100))
 	}
-
-	emitted, err := engine.Run(context.Background(), withSessionCloses(t, envelopes))
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	return emitted
+	return runReducerOverBars(t, cfg, bars)
 }
 
 // referenceStep is one bar's expected Setup-evaluated outcome, as computed
@@ -1910,13 +1883,18 @@ func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
-	highs := breakoutFixtureHighs()
-	emitted := runReducerOverHighs(t, "AAPL", highs, cfg)
+	// breakoutBars, not breakoutFixtureHighs directly: the breakout Signal
+	// needs #34's 64-close history to be ranked at all (ADR 0010, as amended
+	// 2026-09-25), which breakoutBars' own history preamble supplies without
+	// moving the breakout off day(56) or changing N (breakoutBars' own doc
+	// comment).
+	bars := breakoutBars("AAPL")
+	emitted := runReducerOverBars(t, cfg, bars)
 
-	// 55 warm-up bars emit one Setup-evaluated event each; the breakout bar
-	// emits three (Setup-evaluated, Signal, Proposal).
-	if len(emitted) != len(highs)+2 {
-		t.Fatalf("len(emitted) = %d, want %d (55 x 1, plus the breakout bar's 3)", len(emitted), len(highs)+2)
+	// Every non-breakout bar emits one Setup-evaluated event each; the
+	// breakout bar emits three (Setup-evaluated, Signal, Proposal).
+	if len(emitted) != len(bars)+2 {
+		t.Fatalf("len(emitted) = %d, want %d (%d x 1, plus the breakout bar's 3)", len(emitted), len(bars)+2, len(bars)-1)
 	}
 
 	setupIndex, signalIndex, proposalIndex := len(emitted)-3, len(emitted)-2, len(emitted)-1
@@ -2030,6 +2008,13 @@ func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 	if proposal.ProtectiveStopIntent != 155-float64(cfg.StopMultiple*wantN) {
 		t.Errorf("Proposal ProtectiveStopIntent = %v, want exactly %v (entry - 2N)", proposal.ProtectiveStopIntent, 155-float64(cfg.StopMultiple*wantN))
 	}
+	// Strength is (close(d) - close(d-63)) / N(d) (ADR 0010, as amended
+	// 2026-09-25); this fixture's split-adjusted close is 100 on every bar
+	// (syntheticBar), so the numerator, and therefore Strength itself, is
+	// exactly zero.
+	if proposal.Strength != 0 {
+		t.Errorf("Proposal Strength = %v, want exactly 0 (a flat close series)", proposal.Strength)
+	}
 	if err := proposal.Validate(); err != nil {
 		t.Errorf("emitted proposal fails its own Validate(): %v", err)
 	}
@@ -2049,7 +2034,7 @@ func TestReducerEmitsFixedRiskAtStopProposal(t *testing.T) {
 	cfg.StopMultiple = 3
 	cfg.RiskAtStopFraction = 0.02
 
-	emitted := runReducerOverHighs(t, "AAPL", breakoutFixtureHighs(), cfg)
+	emitted := runReducerOverBars(t, cfg, breakoutBars("AAPL"))
 
 	proposals := envelopesOfType(emitted, event.TradeProposalEventType)
 	if len(proposals) != 1 {
@@ -2101,11 +2086,11 @@ func TestReducerDeclinesWhenTheAccountIsTooSmallForOneShare(t *testing.T) {
 	cfg := validConfigurationPayload()
 	cfg.NotionalAccount.StartingEquity = 100
 
-	highs := breakoutFixtureHighs()
-	emitted := runReducerOverHighs(t, "AAPL", highs, cfg)
+	bars := breakoutBars("AAPL")
+	emitted := runReducerOverBars(t, cfg, bars)
 
-	if len(emitted) != len(highs)+2 {
-		t.Fatalf("len(emitted) = %d, want %d (55 x 1, plus the breakout bar's Setup-evaluated, Signal and decline)", len(emitted), len(highs)+2)
+	if len(emitted) != len(bars)+2 {
+		t.Fatalf("len(emitted) = %d, want %d (%d x 1, plus the breakout bar's Setup-evaluated, Signal and decline)", len(emitted), len(bars)+2, len(bars)-1)
 	}
 	if got := len(envelopesOfType(emitted, event.SignalEventType)); got != 1 {
 		t.Fatalf("got %d Signal(s), want exactly 1: sizing declines the trade, it does not suppress the Signal", got)
@@ -2148,6 +2133,12 @@ func TestReducerDeclinesWhenTheAccountIsTooSmallForOneShare(t *testing.T) {
 	if decline.Detail == "" {
 		t.Error("Decline Detail is empty; the journal must record the numbers that produced the decline")
 	}
+	// Ranking runs, and Strength is computed, before sizing ever declines a
+	// quantity too small: this fixture's flat close series makes it exactly
+	// zero (ADR 0010, as amended 2026-09-25).
+	if decline.Strength != 0 {
+		t.Errorf("Decline Strength = %v, want exactly 0 (a flat close series)", decline.Strength)
+	}
 	if err := decline.Validate(); err != nil {
 		t.Errorf("emitted decline fails its own Validate(): %v", err)
 	}
@@ -2169,7 +2160,7 @@ func TestReducerDeclinesWhenTheProtectiveStopIntentIsNotPositive(t *testing.T) {
 	cfg := validConfigurationPayload()
 	cfg.StopMultiple = 6
 
-	emitted := runReducerOverHighs(t, "AAPL", breakoutFixtureHighs(), cfg)
+	emitted := runReducerOverBars(t, cfg, breakoutBars("AAPL"))
 
 	if got := len(envelopesOfType(emitted, event.TradeProposalEventType)); got != 0 {
 		t.Fatalf("got %d proposal(s), want 0", got)
@@ -2258,8 +2249,8 @@ func TestReplayingProposalFixtureTwiceYieldsByteIdenticalEmissions(t *testing.T)
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
-	first := runReducerOverHighs(t, "AAPL", breakoutFixtureHighs(), cfg)
-	second := runReducerOverHighs(t, "AAPL", breakoutFixtureHighs(), cfg)
+	first := runReducerOverBars(t, cfg, breakoutBars("AAPL"))
+	second := runReducerOverBars(t, cfg, breakoutBars("AAPL"))
 
 	if len(envelopesOfType(first, event.TradeProposalEventType)) != 1 {
 		t.Fatal("fixture must emit exactly one proposal for this property to mean anything")
@@ -2362,10 +2353,21 @@ func runReducerOverBars(t *testing.T, cfg event.ConfigurationPayload, bars []eve
 // The previous close is always 100, so the gap term (high - previous close)
 // is 100 and the bar's True Range is max(200-low, 100, 100-low) — a low of
 // 199 gives 100, a low of 1 gives 199.
+//
+// breakoutHistoryPreamble additional Sessions are inserted between the ramp
+// and the breakout, at hourly offsets inside day(55) so the breakout stays at
+// day(56) — the identical #34 history the breakout Signal needs to be ranked
+// at all (ADR 0010, as amended 2026-09-25), built the same way
+// campaign_test.go's breakoutBars is, and leaving N and the Entry Channel
+// unchanged for the same reason that fixture's own doc comment gives.
 func breakoutBarsWithFinalRange(instrumentID string, finalLow, finalClose float64) []event.CompletedBarPayload {
-	bars := make([]event.CompletedBarPayload, 0, 56)
+	bars := make([]event.CompletedBarPayload, 0, 56+breakoutHistoryPreamble)
 	for i := 1; i <= 55; i++ {
 		bars = append(bars, completedBar(instrumentID, day(i), 100+float64(i), 100, 100))
+	}
+	n := stableRampWilderValue()
+	for i := 1; i <= breakoutHistoryPreamble; i++ {
+		bars = append(bars, completedBar(instrumentID, day(55).Add(time.Duration(i)*time.Hour), 100+n, 100, 100))
 	}
 	return append(bars, completedBar(instrumentID, day(56), 200, finalLow, finalClose))
 }

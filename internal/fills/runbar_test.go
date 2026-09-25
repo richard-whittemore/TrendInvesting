@@ -154,7 +154,7 @@ func TestAddLadderRungsAreMeasuredFromTheSlippedFill(t *testing.T) {
 	t.Parallel()
 
 	bars := campaignLifeBars()
-	run := runComposed(t, baselineConfig(), bars[:59]) // through day(59), Unit 4
+	run := runComposed(t, baselineConfig(), bars[:59+breakoutHistoryPreamble]) // through day(59), Unit 4
 
 	got := fillPayloads(t, run.Inputs)
 	if len(got) != 4 {

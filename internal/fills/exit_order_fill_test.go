@@ -126,7 +126,7 @@ func TestABarCoveringBothLevelsFillsAtTheExitLevelWhenItIsHigher(t *testing.T) {
 func TestAnExitLevelBelowTheStopsLeavesEveryUnitAtItsStop(t *testing.T) {
 	t.Parallel()
 
-	bars := campaignLifeBars()[:59]
+	bars := campaignLifeBars()[:59+breakoutHistoryPreamble]
 	bars = append(bars, bar(day(60), 159, 159.2, 138, 140))
 	run := runComposed(t, baselineConfig(), bars)
 
@@ -454,7 +454,7 @@ func TestTotalQuantitySoldNeverExceedsTheHolding(t *testing.T) {
 
 	both := campaignLifeBars()
 	both[len(both)-1] = bar(day(80), 163.0, 163.1, 150, 152)
-	lowExit := campaignLifeBars()[:59]
+	lowExit := campaignLifeBars()[:59+breakoutHistoryPreamble]
 	lowExit = append(lowExit, bar(day(60), 159, 159.2, 138, 140))
 
 	for name, bars := range map[string][]event.CompletedBarPayload{

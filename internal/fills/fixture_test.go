@@ -9,6 +9,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/fills"
+	"github.com/richard-whittemore/TrendInvesting/internal/indicator"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
@@ -133,14 +134,35 @@ func bar(periodEnd time.Time, open, high, low, closeAt float64) event.CompletedB
 //
 // At the end of the series the Entry Channel (55 bars) stands at 155.5 —
 // bar 55's high — and the Exit Channel (20 bars) at 135, bar 36's low.
+//
+// breakoutHistoryPreamble additional Sessions follow bar 55, timestamped
+// inside day(55)'s own calendar day (strictly before day(56), where every
+// caller's own breakoutBar or first post-warm-up bar already sits), giving
+// whatever breaks out next the indicator.StrengthLookbackBars+1 closes #34's
+// Strength needs (ADR 0010, as amended 2026-09-25). Each one repeats bar 55's
+// own OHLC exactly, which is already the Wilder recursion's fixed point (a
+// True Range of 1.5 against a previous close of 155 reproduces itself), so N
+// stays exactly 1.5, and each bar's own high (155.5) ties rather than
+// exceeds the Entry Channel's own 55-bar maximum, so the channel the next
+// real bar is decided against is unchanged too.
 func warmUpBars() []event.CompletedBarPayload {
-	bars := make([]event.CompletedBarPayload, 0, 55)
+	bars := make([]event.CompletedBarPayload, 0, 55+breakoutHistoryPreamble)
 	for i := 1; i <= 55; i++ {
 		base := 100 + float64(i)
 		bars = append(bars, bar(day(i), base, base+0.5, base-1, base))
 	}
+	for i := 1; i <= breakoutHistoryPreamble; i++ {
+		periodEnd := day(55).Add(time.Duration(i) * time.Hour)
+		bars = append(bars, bar(periodEnd, 155, 155.5, 154, 155))
+	}
 	return bars
 }
+
+// breakoutHistoryPreamble is how many additional completed Sessions
+// warmUpBars appends after its own 55-bar ramp: the 55-bar warm-up alone
+// gives the next bar only 55 total closes, and #34's Strength needs
+// indicator.StrengthLookbackBars+1.
+const breakoutHistoryPreamble = indicator.StrengthLookbackBars + 1 - 56
 
 // breakoutBar is bar 56 in every fixture except the entered-then-stopped one:
 // a clean breakout above the 155.5 Entry Channel whose own low (155) stays

@@ -186,7 +186,7 @@ func TestAProposalThatWouldReserveTwiceStopsTheRun(t *testing.T) {
 		if err := tx.placeHold(decisionID("proposal", "AAPL", day(2)), "AAPL", unclassifiedClassification, 1); err != nil {
 			t.Fatal(err)
 		}
-		_, err := tx.sizeUnit("AAPL", day(2), event.Envelope{}, "signal", 100, 2, true, day(1))
+		_, err := tx.sizeUnit("AAPL", day(2), event.Envelope{}, "signal", 100, 2, true, day(1), 0)
 		if err == nil || !strings.Contains(err.Error(), "already has a hold") {
 			t.Fatalf("sizeUnit = %v, want the second hold refused", err)
 		}

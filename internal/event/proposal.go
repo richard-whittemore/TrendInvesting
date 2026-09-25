@@ -23,7 +23,14 @@ const TradeProposalEventType = "strategy.trade.proposed"
 //     version-1 record decodes OrderType as the empty string, which is not a
 //     recognised order type, so it is rejected rather than read as an
 //     uncapped order (ADR 0015).
-const TradeProposalSchemaVersion uint32 = 2
+//   - Version 3 added Strength (ADR 0010, as amended by the owner's decision
+//     of 2026-09-25): the ranking measure that placed this Signal ahead of
+//     the Session's other Signals. A version-2 record decodes it as zero,
+//     which this schema's Validate accepts as any other finite Strength
+//     would, so an older record is not rejected outright — but its zero is
+//     not a claim that Strength was actually computed as zero, since no
+//     earlier build ever computed it at all.
+const TradeProposalSchemaVersion uint32 = 3
 
 // ProposalDeclinedEventType identifies the payload recorded when a Signal
 // fired but produced no position. It exists so that "the strategy recognised
@@ -63,7 +70,20 @@ const ProposalDeclinedEventType = "strategy.proposal.declined"
 //     AND every standing hold. PostTradeExposure counts the Units reserved by
 //     standing holds as well as the Units committed by fills. Schema-5
 //     decisions must not silently acquire these meanings (ADR 0015).
-const ProposalDeclinedSchemaVersion uint32 = 6
+//   - Version 7 added Strength and DeclineReasonInsufficientHistory (ADR
+//     0010, as amended by the owner's decision of 2026-09-25). Strength is
+//     required and finite for Kind ProposalDeclinedKindEntry whenever Reason
+//     is not DeclineReasonInsufficientHistory — the ranking measure this
+//     Signal was compared by before it was declined — and must be exactly
+//     zero for ProposalDeclinedKindAdd (an Add answers no Signal) and for
+//     DeclineReasonInsufficientHistory (no Strength could be computed for an
+//     instrument this reason declines to rank at all). Reason
+//     DeclineReasonInsufficientHistory is recognised only from this schema
+//     version on, mirroring DeclineReasonUnitCapExceeded's own schema-5
+//     addition. A version-6 record decodes Strength as zero, which this
+//     version's Validate accepts for any reason it also recognises on that
+//     record's own terms; it is not a claim that Strength was computed.
+const ProposalDeclinedSchemaVersion uint32 = 7
 
 // The rule names for TradeProposalPayload.Rule, one per Sizing Mode.
 //
@@ -140,6 +160,15 @@ const (
 	// CapLimit and PostTradeExposure name which cap bound and the exposure
 	// that would have resulted.
 	DeclineReasonUnitCapExceeded = "unit-cap-exceeded"
+	// DeclineReasonInsufficientHistory means a Tier A Signal could not be
+	// ranked at all: fewer than the split-adjusted closes Strength needs, or
+	// fewer than the raw closes/volumes the 20-day median dollar volume
+	// tie-break needs, or an N that is not a usable volatility reading at the
+	// Session's own close (ADR 0010, as amended by the owner's decision of
+	// 2026-09-25). The Signal is declined rather than ranked last: an
+	// incomparable instrument has no place in a total order. Strength is
+	// zero for this reason, since none was computed.
+	DeclineReasonInsufficientHistory = "insufficient-history"
 )
 
 // The five cap identities ProposalDeclinedPayload.Cap names, one per level
@@ -273,6 +302,13 @@ type TradeProposalPayload struct {
 	OrderType  OrderType `json:"order_type"`
 	GapBufferN float64   `json:"gap_buffer_n"`
 	PriceCap   float64   `json:"price_cap"`
+	// Strength is Faith's ranking measure that placed this Signal ahead of
+	// the Session's other Signals: (close(d) - close(d-63)) / N(d)
+	// (CONTEXT.md: "Strength"; The Turtle Rules p.29, ADR 0010, as amended by
+	// the owner's decision of 2026-09-25). It can be negative — an
+	// instrument can still make a fresh 55-bar high while its longer-term
+	// price change is negative — so only finiteness is checked.
+	Strength float64 `json:"strength"`
 }
 
 // Validate checks that a proposal is internally consistent, not merely
@@ -427,6 +463,10 @@ func (p TradeProposalPayload) Validate() error {
 		errs = append(errs, errors.New("notional account must be positive"))
 	}
 
+	if !isFinite(p.Strength) {
+		errs = append(errs, errors.New("strength must be finite"))
+	}
+
 	stopIntentFinite := isFinite(p.ProtectiveStopIntent)
 	switch {
 	case !stopIntentFinite:
@@ -569,6 +609,16 @@ type ProposalDeclinedPayload struct {
 	Cap               string `json:"cap"`
 	CapLimit          int    `json:"cap_limit"`
 	PostTradeExposure int    `json:"post_trade_exposure"`
+	// Strength is the ranking measure (ADR 0010, as amended by the owner's
+	// decision of 2026-09-25) that placed this Signal in the session-close
+	// pass. Required and finite for Kind ProposalDeclinedKindEntry whenever
+	// Reason is not DeclineReasonInsufficientHistory — every other entry-kind
+	// reason is reached only after ranking has already computed it. Zero for
+	// ProposalDeclinedKindAdd (an Add answers no Signal) and for
+	// DeclineReasonInsufficientHistory (no Strength could be computed at
+	// all), mirroring RequiredCash/AvailableCash's own reason-keyed
+	// discipline above.
+	Strength float64 `json:"strength"`
 }
 
 // Validate checks the identifying fields, that Kind is one of the recognised
@@ -598,7 +648,7 @@ func (p ProposalDeclinedPayload) Validate() error {
 // cash fields to the current meaning.
 func (p ProposalDeclinedPayload) ValidateSchema(version uint32) error {
 	switch version {
-	case 2, 3, 4, 5, ProposalDeclinedSchemaVersion:
+	case 2, 3, 4, 5, 6, ProposalDeclinedSchemaVersion:
 	default:
 		return fmt.Errorf("proposal declined payload schema version %d is not supported", version)
 	}
@@ -637,6 +687,10 @@ func (p ProposalDeclinedPayload) ValidateSchema(version uint32) error {
 	case DeclineReasonUnitCapExceeded:
 		if version < 5 {
 			errs = append(errs, fmt.Errorf("reason %q is not recognised before proposal declined schema 5 (ADR 0015): a version-%d record cannot have asserted it", DeclineReasonUnitCapExceeded, version))
+		}
+	case DeclineReasonInsufficientHistory:
+		if version < 7 {
+			errs = append(errs, fmt.Errorf("reason %q is not recognised before proposal declined schema 7 (ADR 0015): a version-%d record cannot have asserted it", DeclineReasonInsufficientHistory, version))
 		}
 	default:
 		errs = append(errs, fmt.Errorf("reason %q is not a recognised decline reason", p.Reason))
@@ -703,6 +757,18 @@ func (p ProposalDeclinedPayload) ValidateSchema(version uint32) error {
 		if p.PostTradeExposure != 0 {
 			errs = append(errs, fmt.Errorf("post-trade exposure must be zero for reason %q (got %d): it is only meaningful for %q", p.Reason, p.PostTradeExposure, DeclineReasonUnitCapExceeded))
 		}
+	}
+
+	// Strength is meaningful only once ranking has actually computed it: an
+	// Add answers no Signal at all, and DeclineReasonInsufficientHistory is
+	// the reason ranking never ran (mirroring RequiredCash/AvailableCash's
+	// own zero-for-every-other-reason discipline above).
+	if p.Kind == ProposalDeclinedKindAdd || p.Reason == DeclineReasonInsufficientHistory {
+		if p.Strength != 0 {
+			errs = append(errs, fmt.Errorf("strength must be zero for kind %q reason %q (got %v): no Strength was computed for it", p.Kind, p.Reason, p.Strength))
+		}
+	} else if !isFinite(p.Strength) {
+		errs = append(errs, errors.New("strength must be finite"))
 	}
 
 	if err := errors.Join(errs...); err != nil {

@@ -74,17 +74,46 @@ func compactFixtureHighs() []float64 {
 	return append(highs, 121)
 }
 
+// compactHistoryPreamble is how many additional completed Sessions
+// compactEntryBars prepends before its DefaultPeriod-bar ramp, so the
+// breakout bar has the indicator.StrengthLookbackBars+1 closes #34's Strength
+// needs (ADR 0010, as amended 2026-09-25). Unlike breakoutBars' own preamble,
+// nothing in this file hand-derives N independently of the reducer's own
+// output (probeCompactEntry queries it), so the preamble need not be a
+// Wilder fixed point. But the Entry Channel here is exactly
+// indicator.DefaultPeriod long — the same length as the ramp itself — so
+// unlike breakoutBars' own 55-bar channel, which stays fed from bars the
+// preamble never reaches, this one becomes ready DURING the preamble and
+// slides across it. Each preamble bar's own High is therefore fixed at the
+// ramp's own maximum (100+DefaultPeriod): high enough that no ramp bar ever
+// exceeds the window while a preamble bar still occupies it, low enough that
+// the true breakout (a fresh, still-higher high) still exceeds it once the
+// window is entirely the ramp's own 20 bars, exactly as it does with no
+// preamble at all.
+const compactHistoryPreamble = indicator.StrengthLookbackBars + 1 - (indicator.DefaultPeriod + 1)
+
+// compactEntryStride is the number of calendar days one compactEntryBars
+// fixture spans, plus one day's gap: what a caller adds to startDay to place
+// a second instrument's fixture strictly after the first's, non-overlapping
+// (ADR 0021: Sessions follow one another strictly).
+const compactEntryStride = compactHistoryPreamble + indicator.DefaultPeriod + 1 + 1
+
 // compactEntryBars is compactFixtureHighs as bars for instrumentID, starting
-// at day(startDay+1) and ending at day(startDay+21) — the same shape
-// breakoutBars gives at startDay 0 (CONTEXT.md's evaluate-then-advance
-// discipline needs no more), scaled down and made relocatable so several
-// instruments can each warm up in their own, non-overlapping run of
-// Sessions (ADR 0021: Sessions follow one another strictly).
+// at day(startDay+1) and ending at day(startDay+compactHistoryPreamble+21) —
+// the same shape breakoutBars gives at startDay 0 (CONTEXT.md's
+// evaluate-then-advance discipline needs no more), scaled down and made
+// relocatable so several instruments can each warm up in their own,
+// non-overlapping run of Sessions (ADR 0021: Sessions follow one another
+// strictly). compactHistoryPreamble additional Sessions precede the ramp
+// itself, for the identical reason breakoutBars' own preamble exists (#34).
 func compactEntryBars(instrumentID string, startDay int) []event.CompletedBarPayload {
 	highs := compactFixtureHighs()
-	bars := make([]event.CompletedBarPayload, 0, len(highs))
+	bars := make([]event.CompletedBarPayload, 0, compactHistoryPreamble+len(highs))
+	for i := 1; i <= compactHistoryPreamble; i++ {
+		bars = append(bars, syntheticBar(instrumentID, day(startDay+i), indicator.DefaultPeriod))
+	}
 	for i, high := range highs {
-		bars = append(bars, syntheticBar(instrumentID, day(startDay+i+1), high-100))
+		bars = append(bars, syntheticBar(instrumentID, day(startDay+compactHistoryPreamble+i+1), high-100))
 	}
 	return bars
 }
@@ -214,14 +243,14 @@ func TestUnclassifiedGroupCapBindsAcrossSeveralInstruments(t *testing.T) {
 
 	s := newStream(t, cfg)
 	for i, id := range []string{"AAA", "BBB"} {
-		bars := compactEntryBars(id, i*22)
+		bars := compactEntryBars(id, i*compactEntryStride)
 		fill := compactEntryFill(id, bars[len(bars)-1].PeriodEnd, fmt.Sprintf("sim-fill-%s", id), quantity, entryLevel)
 		s = s.bars(bars).fill(fill)
 	}
 	// A third Unclassified instrument: the group already holds 2 Units (its
 	// own configured cap), so this entry's post-trade exposure of 3 exceeds
 	// it, and the Signal is declined rather than sized into a Campaign.
-	thirdBars := compactEntryBars("CCC", 2*22)
+	thirdBars := compactEntryBars("CCC", 2*compactEntryStride)
 	emitted := s.bars(thirdBars).mustRun()
 
 	opened := envelopesOfType(emitted, event.CampaignOpenedEventType)
@@ -266,11 +295,11 @@ func TestTotalLongCapBindsAcrossInstruments(t *testing.T) {
 
 	s := newStream(t, cfg)
 	for i, id := range []string{"DDD", "EEE"} {
-		bars := compactEntryBars(id, i*22)
+		bars := compactEntryBars(id, i*compactEntryStride)
 		fill := compactEntryFill(id, bars[len(bars)-1].PeriodEnd, fmt.Sprintf("sim-fill-%s", id), quantity, entryLevel)
 		s = s.bars(bars).fill(fill)
 	}
-	thirdBars := compactEntryBars("FFF", 2*22)
+	thirdBars := compactEntryBars("FFF", 2*compactEntryStride)
 	emitted := s.bars(thirdBars).mustRun()
 
 	opened := envelopesOfType(emitted, event.CampaignOpenedEventType)
@@ -308,14 +337,15 @@ func TestAddBlockedByTheTotalLongCap(t *testing.T) {
 	cfg := compactChannelConfig(1_000_000, 1_000_000, 1_000_000, 2)
 	quantity, entryLevel, _ := probeCompactEntry(t, cfg)
 
-	campaignID := testDecisionID("campaign", "GGG", day(21))
 	ggg := compactEntryBars("GGG", 0)
+	campaignID := testDecisionID("campaign", "GGG", ggg[len(ggg)-1].PeriodEnd)
 	gggFill := compactEntryFill("GGG", ggg[len(ggg)-1].PeriodEnd, "sim-fill-GGG", quantity, entryLevel)
-	hhh := compactEntryBars("HHH", 22)
+	hhh := compactEntryBars("HHH", compactEntryStride)
 	hhhFill := compactEntryFill("HHH", hhh[len(hhh)-1].PeriodEnd, "sim-fill-HHH", quantity, entryLevel)
 	// Clears any conceivable Add Ladder rung: the point of this bar is the
-	// cap, not the rung arithmetic.
-	addBar := addOpportunityBar("GGG", day(45), entryLevel+1_000_000)
+	// cap, not the rung arithmetic. Strictly after HHH's own fill, so both
+	// Campaigns are open before GGG's Add rung is evaluated.
+	addBar := addOpportunityBar("GGG", hhh[len(hhh)-1].PeriodEnd.AddDate(0, 0, 1), entryLevel+1_000_000)
 
 	emitted := newStream(t, cfg).
 		bars(ggg).fill(gggFill).
@@ -369,7 +399,7 @@ func TestReplayingACapDeclineFixtureTwiceYieldsByteIdenticalEmissions(t *testing
 		first := compactEntryBars("III", 0)
 		firstFill := compactEntryFill("III", first[len(first)-1].PeriodEnd, "sim-fill-III", quantity, entryLevel)
 		s = s.bars(first).fill(firstFill)
-		second := compactEntryBars("JJJ", 22)
+		second := compactEntryBars("JJJ", compactEntryStride)
 		return s.bars(second).mustRun()
 	}
 
@@ -665,5 +695,160 @@ func assertSecondSameSessionEntryDeclinedForCap(t *testing.T, cfg event.Configur
 	}
 	if err := decline.Validate(); err != nil {
 		t.Errorf("decline fails its own Validate(): %v", err)
+	}
+}
+
+// strengthFixtureBars is compactEntryBars with the breakout bar's own high
+// and split-adjusted close replaced, so its Signal's Strength —
+// (close(d) - close(d-63)) / N(d), ADR 0010 as amended 2026-09-25 — is
+// controllable directly through finalClose: every one of the
+// StrengthLookbackBars completed Sessions before it (the preamble and the
+// ramp) shares compactEntryBars' own close of 100, so
+// close(d-StrengthLookbackBars) is always exactly 100. finalHigh must clear
+// the ramp's own Entry Channel high (120) for the bar to remain a genuine
+// breakout, and must be at least finalClose (completedBar's own OHLC
+// consistency, PriceView.validate).
+func strengthFixtureBars(instrumentID string, startDay int, finalHigh, finalClose float64) []event.CompletedBarPayload {
+	bars := compactEntryBars(instrumentID, startDay)
+	last := len(bars) - 1
+	bars[last] = completedBar(instrumentID, bars[last].PeriodEnd, finalHigh, 100, finalClose)
+	return bars
+}
+
+// withRawVolume sets the raw view's Volume (ADR 0004: dollar volume is a raw
+// quantity) on bars' last count elements — exactly
+// indicator.DollarVolumeWindow, the median dollar volume tie-break's own
+// window, ending at the decision Session inclusive.
+func withRawVolume(bars []event.CompletedBarPayload, count int, volume float64) []event.CompletedBarPayload {
+	for i := len(bars) - count; i < len(bars); i++ {
+		bars[i].Raw.Volume = volume
+	}
+	return bars
+}
+
+// TestTotalLongCapBindsOnStrengthNotSymbol is #34's capacity-constrained
+// event-seam test: two Signals in the same session-close pass, together
+// exceeding the total-long cap of 1, so only one is proposed and the other
+// is declined. AAA sorts before ZZZ alphabetically, but ZZZ's Strength is the
+// larger one (a genuine 63-Session price rise against AAA's flat close, ADR
+// 0010 as amended 2026-09-25) — so ZZZ, not AAA, is the one taken. Falsified
+// by a ranking seam that still falls back to the symbol alone.
+func TestTotalLongCapBindsOnStrengthNotSymbol(t *testing.T) {
+	t.Parallel()
+
+	cfg := compactChannelConfig(1_000_000, 1_000_000, 1_000_000, 1)
+	// AAA: close(d) == close(d-63) == 100, Strength exactly 0.
+	aaa := strengthFixtureBars("AAA", 0, 121, 100)
+	// ZZZ: close(d) 150 against the identical close(d-63) of 100, Strength
+	// (150-100)/N(d), strictly positive and therefore strictly ahead of
+	// AAA's zero.
+	zzz := strengthFixtureBars("ZZZ", 0, 155, 150)
+
+	emitted := newStream(t, cfg).lockstep(aaa, zzz).mustRun()
+
+	proposals := envelopesOfType(emitted, event.TradeProposalEventType)
+	if len(proposals) != 1 {
+		t.Fatalf("got %d trade proposal(s), want exactly 1", len(proposals))
+	}
+	proposal := decodeTradeProposal(t, proposals[0])
+	if proposal.InstrumentID != "ZZZ" {
+		t.Fatalf("proposed %q, want ZZZ: its Strength is greater, whatever the symbol order", proposal.InstrumentID)
+	}
+	if proposal.Strength <= 0 {
+		t.Errorf("ZZZ's Strength = %v, want strictly positive", proposal.Strength)
+	}
+
+	declines := envelopesOfType(emitted, event.ProposalDeclinedEventType)
+	if len(declines) != 1 {
+		t.Fatalf("got %d decline(s), want exactly 1, for AAA", len(declines))
+	}
+	decline := decodeProposalDeclined(t, declines[0])
+	if decline.InstrumentID != "AAA" || decline.Reason != event.DeclineReasonUnitCapExceeded {
+		t.Fatalf("decline = %+v, want AAA declined for the total-long cap", decline)
+	}
+	if decline.Strength != 0 {
+		t.Errorf("AAA's Strength = %v, want exactly 0 (its close never moves)", decline.Strength)
+	}
+	if err := decline.Validate(); err != nil {
+		t.Errorf("decline fails its own Validate(): %v", err)
+	}
+}
+
+// TestTotalLongCapBindsOnDollarVolumeWhenStrengthTies is #34's tie-break
+// event-seam test: two Signals with IDENTICAL Strength (both a flat 63-day
+// close, ADR 0010 as amended 2026-09-25) but different 20-day median dollar
+// volume, together exceeding the total-long cap of 1. AAA sorts before HHH
+// alphabetically, but HHH's dollar volume — the same raw close, four times
+// the raw volume over the tie-break's own window — is the larger one, so
+// HHH, not AAA, is the one taken. Falsified by a ranking seam that only ever
+// reaches the symbol, never the dollar-volume tie-break.
+func TestTotalLongCapBindsOnDollarVolumeWhenStrengthTies(t *testing.T) {
+	t.Parallel()
+
+	cfg := compactChannelConfig(1_000_000, 1_000_000, 1_000_000, 1)
+	// Both close at 100 throughout: Strength ties at exactly 0 for both.
+	aaa := withRawVolume(strengthFixtureBars("AAA", 0, 121, 100), indicator.DollarVolumeWindow, 500_000)
+	hhh := withRawVolume(strengthFixtureBars("HHH", 0, 121, 100), indicator.DollarVolumeWindow, 2_000_000)
+
+	emitted := newStream(t, cfg).lockstep(aaa, hhh).mustRun()
+
+	proposals := envelopesOfType(emitted, event.TradeProposalEventType)
+	if len(proposals) != 1 {
+		t.Fatalf("got %d trade proposal(s), want exactly 1", len(proposals))
+	}
+	proposal := decodeTradeProposal(t, proposals[0])
+	if proposal.InstrumentID != "HHH" {
+		t.Fatalf("proposed %q, want HHH: its dollar volume is greater once Strength ties, whatever the symbol order", proposal.InstrumentID)
+	}
+	if proposal.Strength != 0 {
+		t.Errorf("HHH's Strength = %v, want exactly 0 (tied with AAA's)", proposal.Strength)
+	}
+
+	declines := envelopesOfType(emitted, event.ProposalDeclinedEventType)
+	if len(declines) != 1 {
+		t.Fatalf("got %d decline(s), want exactly 1, for AAA", len(declines))
+	}
+	decline := decodeProposalDeclined(t, declines[0])
+	if decline.InstrumentID != "AAA" || decline.Reason != event.DeclineReasonUnitCapExceeded {
+		t.Fatalf("decline = %+v, want AAA declined for the total-long cap", decline)
+	}
+	if decline.Strength != 0 {
+		t.Errorf("AAA's Strength = %v, want exactly 0", decline.Strength)
+	}
+	if err := decline.Validate(); err != nil {
+		t.Errorf("decline fails its own Validate(): %v", err)
+	}
+}
+
+// TestReplayingAStrengthRankedFixtureTwiceYieldsByteIdenticalEmissions
+// extends this package's standard replay-equivalence property to a fixture
+// whose ranking is decided by genuinely different Strength values, not by
+// the symbol fallback alone.
+func TestReplayingAStrengthRankedFixtureTwiceYieldsByteIdenticalEmissions(t *testing.T) {
+	t.Parallel()
+
+	cfg := compactChannelConfig(1_000_000, 1_000_000, 1_000_000, 1)
+	build := func() []event.Envelope {
+		aaa := strengthFixtureBars("AAA", 0, 121, 100)
+		zzz := strengthFixtureBars("ZZZ", 0, 155, 150)
+		return newStream(t, cfg).lockstep(aaa, zzz).mustRun()
+	}
+
+	first, second := build(), build()
+	if len(first) != len(second) {
+		t.Fatalf("emission counts differ: %d and %d", len(first), len(second))
+	}
+	for i := range first {
+		a, err := json.Marshal(first[i])
+		if err != nil {
+			t.Fatalf("Marshal(first[%d]) error = %v", i, err)
+		}
+		b, err := json.Marshal(second[i])
+		if err != nil {
+			t.Fatalf("Marshal(second[%d]) error = %v", i, err)
+		}
+		if !bytes.Equal(a, b) {
+			t.Fatalf("emission %d differs between runs:\n  first:  %s\n  second: %s", i, a, b)
+		}
 	}
 }

@@ -228,7 +228,8 @@ func TestAnExpiredProposalReleasesItsHold(t *testing.T) {
 
 	cfg := holdCashConfig()
 	_, hold := compactHold(t, cfg)
-	mmm := append(compactEntryBars("MMM", 0), quietCompactBar("MMM", day(22)))
+	mmm := compactEntryBars("MMM", 0)
+	mmm = append(mmm, quietCompactBar("MMM", mmm[len(mmm)-1].PeriodEnd.AddDate(0, 0, 1)))
 	nnn := compactEntryBars("NNN", 1)
 
 	emitted := newStream(t, cfg).

@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/indicator"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
@@ -39,15 +40,49 @@ import (
 
 const propertyFixtureStrategyVersion = "replay-fixture/1.1.0+test"
 
-// propertyCampaignN is N as the fixture's 20 warm-up bars leave it: every
-// one of them has a True Range of exactly 2 (flatBar's Open/Close sit at the
+// propertyHistoryPreamble is how many additional completed Sessions
+// propertyFixture prepends before its own 20-bar warm-up ramp, so the
+// breakout bar has the indicator.StrengthLookbackBars+1 closes #34's
+// Strength needs (ADR 0010, as amended 2026-09-25).
+const propertyHistoryPreamble = indicator.StrengthLookbackBars + 1 - (20 + 1)
+
+// propertyCampaignN is N as the fixture's own bars leave it, computed from
+// the identical indicator.TrueRange/indicator.WilderAverage arithmetic the
+// reducer itself runs, rather than transcribed: the warm-up ramp's own 20
+// bars each have a True Range of exactly 2 (flatBar's Open/Close sit at the
 // midpoint of High and Low, and each bar's High steps up by 1 from the one
 // before, so every gap term but High-Low itself resolves to 0 or 2 — see
-// flatBar's own doc comment). Twenty identical True Range values seed
-// Wilder's average at exactly that value and hold it there, so N is 2 the
-// moment bar 21 is decided. Asserted, not merely assumed: see
-// TestThePropertyFixtureOpensACampaignTakesAnAddAndExits.
-const propertyCampaignN = 2.0
+// flatBar's own doc comment), and seed Wilder's average at exactly 2 — but
+// #34's history preamble (propertyHistoryPreamble) sits at a level the ramp
+// does not (pinned at the ramp's own eventual maximum of 120, so the Entry
+// Channel — exactly as long as the ramp — never reads an early breakout
+// against it), so the ramp's own first bar gaps down from it with a True
+// Range of 20, not 2, nudging N slightly above 2 for the handful of bars
+// Wilder's recursion takes to forget it. Computed once, here, so the Add
+// rung and Protective Stop below (and the assertion in
+// TestThePropertyFixtureOpensACampaignTakesAnAddAndExits) agree with
+// whatever the reducer itself actually produces.
+func propertyCampaignNValue() float64 {
+	n, err := indicator.NewWilderAverage(indicator.DefaultPeriod)
+	if err != nil {
+		panic(err)
+	}
+	previousClose, hasPrevious := 0.0, false
+	addBar := func(high, low float64) {
+		n.Add(indicator.TrueRange(high, low, previousClose, hasPrevious))
+		previousClose, hasPrevious = (high+low)/2, true
+	}
+	for i := 1; i <= propertyHistoryPreamble; i++ {
+		addBar(120, 118)
+	}
+	for i := 0; i < 20; i++ {
+		high := 100 + float64(i+1)
+		addBar(high, high-2)
+	}
+	return n.Value()
+}
+
+var propertyCampaignN = propertyCampaignNValue()
 
 // propertyEntryFillPrice is what bar 21's proposal actually fills at: above
 // the warmed-up Entry Channel high of 120 (bar 20's own High) — the
@@ -276,6 +311,31 @@ func propertyFixture(t *testing.T, recordedAt arrivalSchedule) (cfg event.Config
 		})
 		seq++
 		arrival++
+	}
+
+	// #34's history preamble: propertyHistoryPreamble additional Sessions,
+	// timestamped inside propertyDay(0)'s own calendar day (strictly after
+	// the configuration and snapshot events stamped at propertyDay(0)
+	// itself, strictly before propertyDay(1)) so every day this fixture's
+	// many callers already name (propertyDay(21) on) is unaffected, giving
+	// the eventual breakout the indicator.StrengthLookbackBars+1 closes
+	// Strength needs (ADR 0010, as amended 2026-09-25). Pinned at the warm-up
+	// ramp's own eventual maximum (120, narrow enough — Low 118 — to hold its
+	// own True Range at 2 throughout, discounting the one bar it gaps the
+	// ramp down from): the Entry Channel is exactly indicator.DefaultPeriod
+	// (20) long, the same length as the ramp itself, so a lower preamble
+	// would leave every later ramp bar (each a fresh high over its own
+	// recent past) reading as its own breakout —
+	// TestASignalNeverSurvivesItsBar is what catches that.
+	// propertyCampaignNValue folds this preamble's own True Range sequence,
+	// gap bar included, into N exactly as the reducer would.
+	for i := 1; i <= propertyHistoryPreamble; i++ {
+		periodEnd := propertyDay(0).Add(time.Duration(i) * 20 * time.Minute)
+		bar := flatBar("AAPL", periodEnd, 120, 118)
+		envelopes = append(envelopes, propertyBarEnvelope(t, seq, bar, cfg, recordedAt(arrival, bar.PeriodEnd)))
+		seq++
+		arrival++
+		closeSession(bar.PeriodEnd)
 	}
 
 	for i := 0; i < 20; i++ {

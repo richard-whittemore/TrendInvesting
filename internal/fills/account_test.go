@@ -111,7 +111,7 @@ func TestTheAccountStatesEverySessionsCloseAsTheNextSessionsBasis(t *testing.T) 
 	// The Campaign of campaignLifeBars holds four Units after day 59; day 60
 	// opens below every Unit's Protective Stop, so each stop fills at the
 	// open (ADR 0005), before day 60's bar reaches the reducer.
-	bars := campaignLifeBars()[:59]
+	bars := campaignLifeBars()[:59+breakoutHistoryPreamble]
 	bars = append(bars, bar(day(60), 150.0, 150.5, 149.0, 150.0), bar(day(61), 150.0, 150.5, 149.0, 150.0))
 	run := runAccount(t, accountCash, bars)
 	snapshots := envelopesOfType(run.Inputs, event.AccountSnapshotEventType)

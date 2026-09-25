@@ -216,6 +216,7 @@ func TestAnEntryIsCheckedAgainstCashLessAnotherInstrumentsFillAndNoExitCredit(t 
 	campaignN := breakoutFixtureN(t, cfg)
 
 	aapl := breakoutBars("AAPL")
+	breakoutLen := len(aapl)
 	aapl = append(aapl, syntheticBar("AAPL", day(57), 50))
 	msft := breakoutBars("MSFT")
 	msft[len(msft)-1] = syntheticBar("MSFT", day(56), 50) // below its Entry Channel
@@ -229,10 +230,10 @@ func TestAnEntryIsCheckedAgainstCashLessAnotherInstrumentsFillAndNoExitCredit(t 
 
 	emitted := newStream(t, cfg).
 		snapshot(cashSnapshot(cfg, day(0).Add(time.Hour), cash)).
-		lockstep(aapl[:56], msft[:56]).
+		lockstep(aapl[:breakoutLen], msft[:breakoutLen]).
 		fill(opening).
 		fill(closingStopFill("AAPL", campaignID, campaignN, day(57))).
-		lockstep(aapl[56:], msft[56:]).
+		lockstep(aapl[breakoutLen:], msft[breakoutLen:]).
 		mustRun()
 
 	proposals := envelopesOfType(emitted, event.TradeProposalEventType)

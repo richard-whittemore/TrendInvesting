@@ -12,7 +12,7 @@ import (
 // ADR 0015 preserves each schema's meaning; ADR 0020 first permits a
 // negative available-cash remainder in decline schema 4.
 func TestProposalDeclinedValidationBySchema(t *testing.T) {
-	for _, version := range []uint32{0, 1, 2, 3, 4, 5, 6} {
+	for _, version := range []uint32{0, 1, 2, 3, 4, 5, 6, 7} {
 		for _, cash := range []float64{-1, 0, 1, math.NaN(), math.Inf(-1)} {
 			t.Run(fmt.Sprintf("schema-%d/cash-%v", version, cash), func(t *testing.T) {
 				p := validProposalDeclinedInsufficientCash()
@@ -44,7 +44,7 @@ func TestProposalDeclinedValidationBySchema(t *testing.T) {
 // identical discipline TestProposalDeclinedValidationBySchema exercises for
 // AvailableCash's own meaning change.
 func TestProposalDeclinedUnitCapExceededValidationBySchema(t *testing.T) {
-	for _, version := range []uint32{2, 3, 4, 5, 6} {
+	for _, version := range []uint32{2, 3, 4, 5, 6, 7} {
 		t.Run(fmt.Sprintf("schema-%d", version), func(t *testing.T) {
 			p := validProposalDeclinedUnitCapExceeded()
 			err := p.ValidateSchema(version)
@@ -53,6 +53,26 @@ func TestProposalDeclinedUnitCapExceededValidationBySchema(t *testing.T) {
 				t.Fatalf("ValidateSchema(%d) = %v; want valid %v", version, err, wantValid)
 			}
 			if version < 5 && (err == nil || !strings.Contains(err.Error(), "not recognised before proposal declined schema 5")) {
+				t.Fatalf("schema %d: want the schema-gating error, got %v", version, err)
+			}
+		})
+	}
+}
+
+// TestProposalDeclinedInsufficientHistoryValidationBySchema is
+// TestProposalDeclinedUnitCapExceededValidationBySchema's counterpart for
+// DeclineReasonInsufficientHistory (ADR 0010, as amended 2026-09-25):
+// recognised only from schema 7 onward, the version that introduced it.
+func TestProposalDeclinedInsufficientHistoryValidationBySchema(t *testing.T) {
+	for _, version := range []uint32{2, 3, 4, 5, 6, 7} {
+		t.Run(fmt.Sprintf("schema-%d", version), func(t *testing.T) {
+			p := validProposalDeclinedInsufficientHistory()
+			err := p.ValidateSchema(version)
+			wantValid := version >= 7
+			if (err == nil) != wantValid {
+				t.Fatalf("ValidateSchema(%d) = %v; want valid %v", version, err, wantValid)
+			}
+			if version < 7 && (err == nil || !strings.Contains(err.Error(), "not recognised before proposal declined schema 7")) {
 				t.Fatalf("schema %d: want the schema-gating error, got %v", version, err)
 			}
 		})

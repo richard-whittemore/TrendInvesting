@@ -38,27 +38,33 @@ func TestCloneCoversEveryReferenceTypedField(t *testing.T) {
 		immutable   = "immutable"
 	)
 	isolation := map[string]string{
-		"Reducer.acceptedFills (map)":                            overlay,
-		"Reducer.acceptedFills[v].unitIDs (slice)":               immutable,
-		"Reducer.delisted (map)":                                 eager,
-		"Reducer.fillDebits (slice)":                             eager,
-		"Reducer.holds (slice)":                                  eager,
-		"Reducer.instruments (map)":                              overlay,
-		"Reducer.instruments[v] (pointer)":                       firstAccess,
-		"Reducer.instruments[v]->.campaign (pointer)":            firstAccess,
-		"Reducer.instruments[v]->.campaign->.units (slice)":      firstAccess,
-		"Reducer.instruments[v]->.entryChannel (pointer)":        firstAccess,
-		"Reducer.instruments[v]->.entryChannel->.values (slice)": firstAccess,
-		"Reducer.instruments[v]->.exitChannel (pointer)":         firstAccess,
-		"Reducer.instruments[v]->.exitChannel->.values (slice)":  firstAccess,
-		"Reducer.instruments[v]->.n (pointer)":                   firstAccess,
-		"Reducer.instruments[v]->.n->.seed (slice)":              firstAccess,
-		"Reducer.instruments[v]->.pendingAddProposal (pointer)":  firstAccess,
-		"Reducer.instruments[v]->.pendingExitProposal (pointer)": firstAccess,
-		"Reducer.instruments[v]->.pendingProposal (pointer)":     firstAccess,
-		"Reducer.instruments[v]->.pendingSignal (pointer)":       firstAccess,
-		"Reducer.notionalAccount (pointer)":                      eager,
-		"Reducer.sessionDelistedBars (slice)":                    eager,
+		"Reducer.acceptedFills (map)":                                   overlay,
+		"Reducer.acceptedFills[v].unitIDs (slice)":                      immutable,
+		"Reducer.delisted (map)":                                        eager,
+		"Reducer.fillDebits (slice)":                                    eager,
+		"Reducer.holds (slice)":                                         eager,
+		"Reducer.instruments (map)":                                     overlay,
+		"Reducer.instruments[v] (pointer)":                              firstAccess,
+		"Reducer.instruments[v]->.campaign (pointer)":                   firstAccess,
+		"Reducer.instruments[v]->.campaign->.units (slice)":             firstAccess,
+		"Reducer.instruments[v]->.entryChannel (pointer)":               firstAccess,
+		"Reducer.instruments[v]->.entryChannel->.values (slice)":        firstAccess,
+		"Reducer.instruments[v]->.exitChannel (pointer)":                firstAccess,
+		"Reducer.instruments[v]->.exitChannel->.values (slice)":         firstAccess,
+		"Reducer.instruments[v]->.n (pointer)":                          firstAccess,
+		"Reducer.instruments[v]->.n->.seed (slice)":                     firstAccess,
+		"Reducer.instruments[v]->.pendingAddProposal (pointer)":         firstAccess,
+		"Reducer.instruments[v]->.pendingExitProposal (pointer)":        firstAccess,
+		"Reducer.instruments[v]->.pendingProposal (pointer)":            firstAccess,
+		"Reducer.instruments[v]->.pendingSignal (pointer)":              firstAccess,
+		"Reducer.instruments[v]->.rawCloses (pointer)":                  firstAccess,
+		"Reducer.instruments[v]->.rawCloses->.values (slice)":           firstAccess,
+		"Reducer.instruments[v]->.rawVolumes (pointer)":                 firstAccess,
+		"Reducer.instruments[v]->.rawVolumes->.values (slice)":          firstAccess,
+		"Reducer.instruments[v]->.splitAdjustedCloses (pointer)":        firstAccess,
+		"Reducer.instruments[v]->.splitAdjustedCloses->.values (slice)": firstAccess,
+		"Reducer.notionalAccount (pointer)":                             eager,
+		"Reducer.sessionDelistedBars (slice)":                           eager,
 	}
 	want := slices.Sorted(maps.Keys(isolation))
 	if !slices.Equal(got, want) {
@@ -149,6 +155,14 @@ func assertNoSharedReferences(t *testing.T, original, copied reflect.Value, path
 // referencePaths appends every pointer, map, slice, interface, func and chan
 // path reachable from t. time.Time is skipped: its location pointer is
 // immutable and shared by design.
+//
+// seen tracks only the types on the CURRENT path from the root, not every
+// type visited anywhere in the walk: it is unmarked again after each pointer
+// recursion returns. That is enough to stop a genuinely self-referential type
+// from recursing forever, and no more — two sibling fields of the identical
+// pointer type (instrumentState's splitAdjustedCloses, rawCloses and
+// rawVolumes, all *indicator.RollingWindow) are independent occurrences, not
+// a cycle, and each must still contribute its own nested paths.
 func referencePaths(t reflect.Type, prefix string, seen map[reflect.Type]bool, out *[]string) {
 	switch t.Kind() {
 	case reflect.Pointer:
@@ -156,6 +170,7 @@ func referencePaths(t reflect.Type, prefix string, seen map[reflect.Type]bool, o
 		if !seen[t.Elem()] {
 			seen[t.Elem()] = true
 			referencePaths(t.Elem(), prefix+"->", seen, out)
+			delete(seen, t.Elem())
 		}
 	case reflect.Map:
 		*out = append(*out, prefix+" (map)")
