@@ -103,10 +103,14 @@ class FakeTicket:
     def Update(self, fields):
         """LEAN's amendment: acknowledged at once, reported after the slice."""
         self.book.updates.append((self.OrderId, fields.StopPrice, fields.Tag))
+        if fields.LimitPrice is not None:
+            self.book.limit_updates.append((self.OrderId, fields.LimitPrice))
         if not self.book.acknowledge_updates:
             return FakeResponse(False)
         if fields.StopPrice is not None:
             self.StopPrice = fields.StopPrice
+        if fields.LimitPrice is not None:
+            self.LimitPrice = fields.LimitPrice
         if fields.Tag is not None:
             self.Tag = fields.Tag
         self.book.deferred.append((self, "update-submitted"))
@@ -141,6 +145,7 @@ class FakeTransactions:
         self.algorithm = algorithm
         self.tickets = []
         self.updates = []
+        self.limit_updates = []
         self.cancellations = []
         self.deferred = []
         self.acknowledge_updates = True
@@ -174,7 +179,7 @@ class FakeTransactions:
         if held:
             portfolio.holdings[symbol] = int(held / factor)
 
-    def split_orders(self, symbol, factor, tick=0.01):
+    def split_orders(self, symbol, factor, tick=0.01, limit_rounding=round):
         """LEAN's split of the open orders, as observed on the pinned image: done
         after the split's slice's OnData returns, in the same time step, each
         order's quantity divided by the factor and its stop multiplied by it
@@ -186,7 +191,10 @@ class FakeTransactions:
             if ticket.LimitPrice is not None:
                 # Assumed, by analogy with the stop: a stop-limit's limit is
                 # split the same way. Not observed on the pinned image.
-                ticket.LimitPrice = round(round(ticket.LimitPrice * factor / tick) * tick, 10)
+                # limit_rounding picks the direction (round, math.floor or
+                # math.ceil): LEAN rounds a split limit to the tick, and it
+                # can land either side of the engine's cap.
+                ticket.LimitPrice = round(limit_rounding(round(ticket.LimitPrice * factor / tick, 9)) * tick, 10)
             self.emit(ticket, "update-submitted")
 
     def GetOrderTickets(self, predicate=None):
@@ -302,6 +310,7 @@ class OrderProperties:
 
 class UpdateOrderFields:
     StopPrice = None
+    LimitPrice = None
     Tag = None
 
 

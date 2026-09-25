@@ -519,15 +519,8 @@ class OrderDesk:
                                                 placed["quantity"], placed["level"], quantity,
                                                 level))
             if placed.get("price_cap") is not None:
-                # A stop-limit's limit is split like its stop: its price cap
-                # at the new ratio, within a tick (ADR 0005, as amended).
-                cap = placed["price_cap"] * ratio
-                limit = float(ticket.Get(self.lean.OrderField.LimitPrice))
-                if abs(limit - cap) > tick + 1e-9:
-                    problems.append("LEAN order {} (tag={}) is limited at {:.4f}, but the "
-                                    "engine's price cap {} is {:.4f} raw".format(
-                                        ticket.OrderId, ticket.Tag, limit, placed["price_cap"],
-                                        cap))
+                problems += self._split_limit_problems(ticket, placed["price_cap"] * ratio,
+                                                       placed["price_cap"], tick)
         if problems:
             raise Uncertain("after the split of {} at {}, at {} split-adjusted shares per raw "
                             "share, {}: {}".format(self.instrument, split_at, ratio, when,
@@ -535,6 +528,40 @@ class OrderDesk:
         self.algorithm.Log("adapter: split at {} reconciled {}: LEAN holds {} raw shares and "
                            "works {} order(s), as the engine's figures are at split ratio {}".format(
                                split_at, when, holding, len(self._open_tickets()), ratio))
+
+    def _split_limit_problems(self, ticket, cap, engine_cap, tick):
+        """A working stop-limit's limit after a split, against its cap at the
+        new ratio (ADR 0005 and ADR 0020, as amended 2026-09-24).
+
+        LEAN rounds a split limit to the tick, either way. Rounded down, within
+        a tick of the cap, it is kept: it can only pay less. Rounded above the
+        cap, it could fill above what the engine's hold reserved, so it is
+        amended down to the cap floored to the tick, here, before the next
+        session can fill; if LEAN does not acknowledge the amendment, or the
+        limit is still above the cap, the run stops. A limit further than a
+        tick below the cap is not the order the engine placed, and stops the
+        run too.
+        """
+        limit = float(ticket.Get(self.lean.OrderField.LimitPrice))
+        if limit > cap + 1e-9:
+            target = floor_to_tick(cap, tick)
+            fields = self.lean.UpdateOrderFields()
+            fields.LimitPrice = target
+            response = ticket.Update(fields)
+            amended = float(ticket.Get(self.lean.OrderField.LimitPrice))
+            if not response.IsSuccess or amended > cap + 1e-9:
+                return ["LEAN order {} (tag={}) is limited at {:.4f}, above the engine's price cap "
+                        "{} at {:.4f} raw, and amending it to {:.4f} was not acknowledged "
+                        "(limit now {:.4f})".format(ticket.OrderId, ticket.Tag, limit, engine_cap,
+                                                    cap, target, amended)]
+            self.algorithm.Log("adapter: amended order {} (tag={}) limit {} -> {} raw: the split "
+                               "rounded it above the price cap {:.4f}".format(
+                                   ticket.OrderId, ticket.Tag, limit, amended, cap))
+            return []
+        if limit < cap - tick - 1e-9:
+            return ["LEAN order {} (tag={}) is limited at {:.4f}, but the engine's price cap {} "
+                    "is {:.4f} raw".format(ticket.OrderId, ticket.Tag, limit, engine_cap, cap)]
+        return []
 
     def n_for_tag(self, tag):
         """The raw N LEAN slips the tagged order by: the engine's split-adjusted

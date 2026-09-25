@@ -7,6 +7,7 @@ state. The fixtures use the engine's own field names; FixtureContractTests
 checks them against the Go payload types, so a renamed field fails here.
 """
 import json
+import math
 import subprocess
 import sys
 import types
@@ -1596,7 +1597,7 @@ class SplitTests(OrderTestCase):
     ratio = 56
 
     def split(self, algo, day, factor=HALF, orders_split=True, before_data=None, meddle=None,
-              checked=True):
+              checked=True, limit_rounding=round):
         """The split's time step before day's session, as observed on the pinned
         image. LEAN splits the holding; raises OnData with the split and no bar
         (the tickets not yet adjusted); splits each open order and reports it
@@ -1612,7 +1613,7 @@ class SplitTests(OrderTestCase):
         algo.OnData(scaffold.slice_of(splits={"AAPL": types.SimpleNamespace(
             Type="split-occurred", SplitFactor=factor, Time=datetime(2014, 6, day))}))
         if orders_split:
-            book.split_orders("AAPL", factor)
+            book.split_orders("AAPL", factor, limit_rounding=limit_rounding)
         if meddle is not None:
             meddle()
         if checked:
@@ -1729,17 +1730,51 @@ class SplitTests(OrderTestCase):
         self.assert_stopped_before_the_session(
             algo, "split", "order {}".format(sell.OrderId), "22.0", "22.4")
 
-    def test_a_split_that_moved_a_limit_off_the_engines_cap_stops_before_the_session(self):
+    def test_a_split_that_moved_a_limit_far_below_the_cap_stops_before_the_session(self):
         # A working stop-limit entry's limit is split like its stop (assumed,
-        # unobserved: README.md); one LEAN left elsewhere is not the order the
-        # engine's hold was computed for.
+        # unobserved: README.md); one LEAN left more than a tick below the cap
+        # is not the order the engine's hold was computed for.
         algo = self.start()
         self.feed(algo, 9, [trade_proposal(9, entry_level=0.875, quantity=5600, n=0.05)])
         [entry] = self.tickets(algo)
         self.assertAlmostEqual(entry.LimitPrice, 0.925 * 56)
-        self.split(algo, 10, meddle=lambda: setattr(entry, "LimitPrice", 30.0))
+        self.split(algo, 10, meddle=lambda: setattr(entry, "LimitPrice", 20.0))
         self.assert_stopped_before_the_session(
-            algo, "split", "order {}".format(entry.OrderId), "limited at 30.0000", "25.9000")
+            algo, "split", "order {}".format(entry.OrderId), "limited at 20.0000", "25.9000")
+
+    def capped_entry_across_a_split(self, limit_rounding, acknowledge=True):
+        """A stop-limit entry capped at 0.92525 split-adjusted, limited at 51.81
+        raw at 56 (51.814 floored), working across the 2-for-1: at 28 its cap
+        is 25.907 raw, and LEAN's split puts the limit at 25.90 rounded down
+        or 25.91 rounded up."""
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9, entry_level=0.875, quantity=5600, n=0.05,
+                                           price_cap=0.92525)])
+        [entry] = self.tickets(algo)
+        self.assertEqual(entry.LimitPrice, 51.81)
+        algo.Transactions.acknowledge_updates = acknowledge
+        self.split(algo, 10, limit_rounding=limit_rounding)
+        return algo, entry
+
+    def test_a_split_limit_rounded_up_above_the_cap_is_amended_down(self):
+        # A limit above the cap could fill above what the engine's hold
+        # reserved (ADR 0020, as amended 2026-09-24), so it is amended to the
+        # cap floored to the tick before the session can fill.
+        algo, entry = self.capped_entry_across_a_split(math.ceil)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(algo.Transactions.limit_updates, [(entry.OrderId, 25.9)])
+        self.assertEqual(entry.LimitPrice, 25.9)
+
+    def test_a_split_limit_rounded_down_below_the_cap_is_kept(self):
+        algo, entry = self.capped_entry_across_a_split(math.floor)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(algo.Transactions.limit_updates, [])
+        self.assertEqual(entry.LimitPrice, 25.9)
+
+    def test_an_unacknowledged_amendment_of_a_split_limit_stops_before_the_session(self):
+        algo, entry = self.capped_entry_across_a_split(math.ceil, acknowledge=False)
+        self.assert_stopped_before_the_session(
+            algo, "split", "order {}".format(entry.OrderId), "25.9100", "25.9070")
 
     def test_an_exit_order_lean_dropped_in_the_split_stops_before_the_session(self):
         # The holding still matches the engine's Units, so only checking each

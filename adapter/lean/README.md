@@ -365,9 +365,14 @@ never combines two levels.
   rejected and logged, like any other malformed proposal. The adapter computes
   no cap. It places the engine's, rounded **down** to LEAN's tick so the limit
   LEAN holds never exceeds the cap the engine's hold was computed from. After a
-  split, a working stop-limit's limit must be its cap at the new ratio, within a
-  tick, like its stop. That LEAN splits a limit as it splits a stop is also
-  **unconfirmed**.
+  split, a working stop-limit's limit is checked against its cap at the new
+  ratio at the 00:01 pre-session check and again at the next slice's start.
+  A limit LEAN rounded **down** is kept if it is within a tick of the cap. A
+  limit it rounded **above** the cap is amended down to the cap floored to the
+  tick (`UpdateOrderFields.LimitPrice`) before the session can fill; if LEAN
+  does not acknowledge that, or the limit is still above the cap, the run
+  stops. That LEAN splits a limit as it splits a stop, rounding either way, is
+  also **unconfirmed**.
 
 **Fills and order changes.** `OnOrderEvent` sends nothing: LEAN raises it in
 the middle of placing an order (a submission is reported before
