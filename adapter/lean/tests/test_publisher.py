@@ -99,6 +99,42 @@ class PublisherTests(unittest.TestCase):
                 text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_bar_payload_matches_go_contract(self):
+        """Issue #31: a pinned fixture for market.bar.completed, the one
+        input the adapter sends that no *_contract.go had checked."""
+        client = Client()
+        pub = Publisher(client, "hash", "version", "test")
+        b = bar(9)
+        pub.publish("AAPL", b, split_adjusted_view(Frame(b.EndTime), b.EndTime), "2014-06-09T20:00:00Z")
+        envelope = client.sent[-1]
+        self.assertEqual(envelope["type"], "market.bar.completed")
+        self.assertEqual(envelope["schema_version"], 1)
+        result = subprocess.run(
+            ["go", "run", "./adapter/lean/tests/testdata/bar_contract.go"],
+            cwd=Path(__file__).resolve().parents[3],
+            input=json.dumps(envelope, separators=(",", ":")),
+            text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_run_completed_payload_matches_go_contract(self):
+        """Issue #31: a pinned fixture for replay.run.completed, sent once at
+        the end of every stream (publish_run_completed) but never previously
+        checked against Go's own contract."""
+        client = Client()
+        pub = Publisher(client, "hash", "version", "test")
+        b = bar(9)
+        pub.publish("AAPL", b, split_adjusted_view(Frame(b.EndTime), b.EndTime), "2014-06-09T20:00:00Z")
+        pub.publish_run_completed()
+        envelope = client.sent[-1]
+        self.assertEqual(envelope["type"], "replay.run.completed")
+        self.assertEqual(envelope["payload"], {})
+        result = subprocess.run(
+            ["go", "run", "./adapter/lean/tests/testdata/run_completed_contract.go"],
+            cwd=Path(__file__).resolve().parents[3],
+            input=json.dumps(envelope, separators=(",", ":")),
+            text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_session_closed_payload_matches_go_contract(self):
         """ADR 0021: the close names the Session's bars, after them and
         before the snapshot, continuing the one sequence."""
