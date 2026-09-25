@@ -137,6 +137,13 @@ func TestAProposalWithoutItsHoldStopsTheRun(t *testing.T) {
 		}},
 		{name: "a bar expiring an entry", fixture: "bar", prepare: pendingEntry},
 		{name: "a bar expiring an Add", fixture: "bar", prepare: pendingAdd},
+		// The fixture bar breaches the Exit Channel, so the exit it proposes
+		// ends a fill-chained Add's extra Session (ADR 0011, as amended
+		// 2026-09-24).
+		{name: "an exit expiring a fill-chained Add", fixture: "bar", prepare: func(r *Reducer) {
+			pendingAdd(r)
+			r.instruments["AAPL"].pendingAddProposal.survivesNextBar = true
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

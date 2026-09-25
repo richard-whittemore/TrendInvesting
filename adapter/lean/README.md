@@ -291,20 +291,26 @@ never combines two levels.
   resolution LEAN expires a DAY order before it evaluates the next session's
   fill: DAY buy stops whose next bar crossed their level expired unfilled
   (see **Observed LEAN behaviour**). The engine expires an unfilled proposal
-  at the instrument's next bar (ADR 0011) and the adapter then cancels its
-  order, so each still works for exactly one session.
+  at the instrument's next bar for entries and ordinary Adds, or one bar
+  later for fill-chained Adds (ADR 0011, amended 2026-09-24; still at the
+  next bar if that bar proposes an exit or a stop has closed the Campaign),
+  and the adapter then cancels its order.
 - **The order tag is the decision id**: the trade or Add proposal's id, or, for
   an Exit Order, the id of the `strategy.exit-order.set` now in force (an
   amendment updates the tag with the level). A decision whose id is already
   on an order in LEAN's own order book, in any state, is not submitted again,
   so redelivering a proposal never opens a second position. A cancellation
   passes no tag, because LEAN's `Cancel(tag)` overwrites the order's own.
-- **A proposal is valid only for the session after the bar that produced
-  it** (ADR 0005's window; `EarliestFillAt`): its `period_end` must be the
-  bar the decisions answer. A proposal in a fill's reply answers the session
-  the fill executed in, so an Add the engine chains from a fill, measured
-  against the bar that signalled the entry, is stale: that session has
-  already traded in LEAN. Anything stale is rejected.
+- **Entries and ordinary Adds retain their one-bar window.** An entry's
+  `period_end` must be the bar the decisions answer. Add schema 3 carries
+  `valid_for_sessions`: 1 for an ordinary Add, 2 for a fill-chained Add
+  (ADR 0011 and ADR 0021 §7, amended 2026-09-24). A chained Add can therefore
+  be placed from a fill's reply in the first following session and fill in
+  LEAN's next slice. The adapter remembers the last two actual instrument
+  bar ends to validate the window; fill timestamps and deferred snapshots
+  never advance that history, and weekends or holidays are not calendar-day
+  increments. A missing, malformed or wider window is rejected. A proposal
+  older than its declared window is still stale and rejected.
 - **Every rejection is logged with its reason** as `adapter: REJECTED <type>
   <id>: <reason>`: an instrument that isn't this run's symbol or isn't
   tradable, a quantity that isn't a positive whole number or is under one raw
@@ -581,8 +587,20 @@ $0.005 × raw shares with the $1.00 minimum, $2,453.56 in all, where the same
 orders in split-adjusted shares would have been charged $116,726.68 before
 the cap. Each Unit is up to one raw share short of the engine's quantity (a
 2003 proposal of 615,898 split-adjusted shares filled as 10,998 raw, 615,888).
-The ten rejected decisions are all Adds chained from a fill, which are stale
-in LEAN.
+The ten rejected decisions in this recorded run were all Adds chained from
+fills, rejected under the lifetime rule then in force. This historical result
+is preserved. ADR 0011's 2026-09-24 amendment now allows their extra session;
+the real-engine synthetic test verifies a chained Add is placed and filled,
+but the pinned-image acceptance run has not been repeated under that rule.
+
+**Live-trading fill delivery.** The owner's 2026-09-24 clarification requires
+fills to reach the engine intraday, while subsequent orders can still work
+in that session (ADR 0021 §7). The current daily backtest queues LEAN's fill
+reports until `OnData`; a live integration must drain them promptly at a safe
+transport boundary without interleaving a request already in progress.
+Waiting for the daily close is not an acceptable live implementation. This
+requirement does not enable live trading or replace its paper and limited-live
+gates.
 
 The adapter will still need to:
 

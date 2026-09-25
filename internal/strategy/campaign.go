@@ -684,12 +684,11 @@ func (r *transition) expireExitProposal(state *instrumentState, bar event.Comple
 // Add fill — never from this proposal alone (see evaluateAdd and
 // applyAddFill).
 //
-// It lives for one bar, the identical lifetime ADR 0011 gives every
-// proposal in this system: the next completed bar for the instrument
-// supersedes it (see transition.expireAddProposal) — including a proposal
-// raised by the SAME-BAR Add chain (see applyAddFill), since that proposal
-// is still attributed to the bar that produced the opportunity for it, not
-// to the fill that happened to trigger the next rung's evaluation.
+// ADR 0011, as amended 2026-09-24: an ordinary Add expires on the next
+// instrument bar; a fill-chained Add survives that bar and expires on the
+// second, unless that next bar proposes an exit or a stop has already closed
+// its Campaign (see applyCompletedBar). Both stay attributed to the bar that
+// covered their rung.
 //
 // earliestFillAt is the Add-side twin of pendingExitProposalState's own
 // field of the same name: the earliest instant at which an order for THIS
@@ -702,6 +701,9 @@ func (r *transition) expireExitProposal(state *instrumentState, bar event.Comple
 // one opening moment as the earliest an execution could exist (see
 // instrumentState.lastBarEarliestFillAt).
 type pendingAddProposalState struct {
+	// survivesNextBar is consumed by the first subsequent instrument bar.
+	// Its hold stands through that bar (ADR 0011 and ADR 0020, as amended).
+	survivesNextBar  bool
 	proposalID       string
 	periodEnd        time.Time
 	unitIndex        int
@@ -711,8 +713,9 @@ type pendingAddProposalState struct {
 	earliestFillAt   time.Time
 }
 
-// expireAddProposal ends an outstanding Add proposal that the next completed
-// bar has superseded, and returns the event that records it — the Add-side
+// expireAddProposal ends an Add at its expiry bar (ADR 0011, as amended)
+// and releases its hold (ADR 0020). The caller consumes the fill-chain
+// extension before calling here. It returns the event that records it — the Add-side
 // mirror of expireExitProposal, reusing the identical
 // event.ProposalExpiredPayload with Kind ProposalKindAdd rather than a third
 // event type. Like an exit-kind expiry, SignalID is left empty: an Add
@@ -1009,6 +1012,11 @@ func (r *transition) evaluateCampaign(state *instrumentState, bar event.Complete
 // error.
 func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) ([]event.Envelope, error) {
 	campaign := state.campaign
+	// A surviving chain already reserves this rung and its hold. A later
+	// Session cannot replace it or reserve it twice (ADR 0011, ADR 0020).
+	if state.pendingAddProposal != nil {
+		return nil, nil
+	}
 	if campaign.partiallyStopped {
 		// The Turtle Rules p.23-24 describes a Whipsaw variant in
 		// which Faith re-enters after a partial stop-out; that is a
@@ -1104,7 +1112,12 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 		return []event.Envelope{declined}, nil
 	}
 
+	validForSessions := 1
+	if input.Type == event.FillEventType {
+		validForSessions = 2
+	}
 	payload := event.AddProposalPayload{
+		ValidForSessions: validForSessions,
 		CampaignID:       campaign.campaignID,
 		InstrumentID:     campaign.instrumentID,
 		PeriodEnd:        state.lastBarPeriodEnd,
@@ -1144,6 +1157,7 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 	// No Campaign state moves here: applyAddFill is this reducer's only path
 	// to actually adding a Unit.
 	state.pendingAddProposal = &pendingAddProposalState{
+		survivesNextBar:  validForSessions == 2,
 		proposalID:       proposalEnvelope.ID,
 		periodEnd:        state.lastBarPeriodEnd,
 		unitIndex:        unitIndex,

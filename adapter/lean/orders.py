@@ -27,7 +27,7 @@ EXIT_PROPOSED = "strategy.exit.proposed"
 UNIT_ADDED = "strategy.campaign.unit-added"
 UNITS_STOPPED = "strategy.campaign.units-stopped"
 CAMPAIGN_EXITED = "strategy.campaign.exited"
-SCHEMA_VERSIONS = {TRADE_PROPOSED: 2, ADD_PROPOSED: 2, PROPOSAL_EXPIRED: 3,
+SCHEMA_VERSIONS = {TRADE_PROPOSED: 2, ADD_PROPOSED: 3, PROPOSAL_EXPIRED: 3,
                    CAMPAIGN_OPENED: 1, EXIT_ORDER_SET: 1, EXIT_PROPOSED: 1,
                    UNIT_ADDED: 1, UNITS_STOPPED: 1, CAMPAIGN_EXITED: 2}
 
@@ -202,8 +202,10 @@ def fill_model_report(slippage_n):
         "signalled it, so a LEAN run enters one bar later.",
         "order lifetime: entries and Adds are good-till-cancelled stop-limit orders (stop-market "
         "under the declared Variant 'uncapped') that "
-        "the adapter cancels when the engine expires their proposal at the next bar (ADR "
-        "0011), so each works for exactly one session. LEAN's DAY orders are not used: at "
+        "the adapter cancels when the engine expires their proposal (ADR 0011): entries and "
+        "ordinary Adds at the next bar, fill-chained Adds one bar later. The explicit "
+        "valid_for_sessions field gives a fill-chained Add one extra session. LEAN's DAY "
+        "orders are not used: at "
         "daily resolution LEAN expires a DAY order before it evaluates the session's fill "
         "(observed: DAY orders whose next bar crossed their level expired unfilled). Exit "
         "Orders are good-till-cancelled. A cancellation is confirmed asynchronously: LEAN "
@@ -356,6 +358,9 @@ class OrderDesk:
         # When a split LEAN applied to a position or order is still to be
         # checked (require_split_applied); None otherwise.
         self.split_to_check = None
+        # Actual instrument bars, never fill times or deferred snapshots.
+        # ADR 0011 gives fill-chained Adds one additional observed session.
+        self.bar_ends = []
 
     def _closed(self):
         """The LEAN order statuses in which an order no longer works at the broker."""
@@ -598,6 +603,17 @@ class OrderDesk:
         """Record the raw slippage LEAN charged, restated in the split-adjusted view."""
         self.slippage_applied[order_id] = slippage / self._require_ratio()
 
+    def observe_bar(self, period_end):
+        """Remember the last two instrument bars for ADR 0011's Add window.
+
+        No calendar-day forecast: a weekend, holiday or missing instrument
+        bar is not another observed session. Replies and fills are not bars.
+        """
+        end = parse_time(period_end)
+        if self.bar_ends and end <= self.bar_ends[-1]:
+            raise Uncertain("completed bar period ends must advance")
+        self.bar_ends = (self.bar_ends + [end])[-2:]
+
     def act(self, decisions, period_end, warming):
         """Act on one input's decisions, in the order the engine sent them.
 
@@ -681,6 +697,33 @@ class OrderDesk:
             return None
         return "order type {!r} is not one this adapter places".format(order_type)
 
+    def _window_reason(self, payload, answered_at, entry):
+        """Validate only the engine's explicit lifetime (ADR 0011 amendment).
+
+        Before the next bar arrives, a fill's timestamp can be later than
+        the last completed bar. After that bar arrives, only its own end
+        still names the extra session; a later fill is already too old.
+        """
+        sessions = 1 if entry else payload.get("valid_for_sessions")
+        if type(sessions) is not int or sessions not in (1, 2):
+            return "valid_for_sessions {!r} must be integer 1 or 2 (ADR 0011)".format(sessions)
+        try:
+            produced = parse_time(payload.get("period_end"))
+        except ValueError as err:
+            return "period_end unreadable: {}".format(err)
+        valid = produced == answered_at
+        if sessions == 2:
+            valid = bool(self.bar_ends) and (
+                produced == self.bar_ends[-1] and answered_at >= produced
+                or len(self.bar_ends) == 2 and produced == self.bar_ends[0]
+                and answered_at == self.bar_ends[-1])
+        if not valid:
+            return ("stale: produced by the bar ending {}, valid for {} session(s), "
+                    "but this answers {} (ADR 0011)".format(
+                        payload.get("period_end"), sessions,
+                        answered_at.strftime("%Y-%m-%dT%H:%M:%SZ")))
+        return None
+
     def _propose(self, decision, payload, bar_end, level, n, entry):
         """An entry or Add: a good-till-cancelled buy order at the proposal's level.
 
@@ -689,12 +732,12 @@ class OrderDesk:
         when it does not (the declared Variant "uncapped"; ADR 0005, as amended
         2026-09-24). The adapter computes no cap: it places the engine's.
 
-        Valid only for the session after the bar that produced it — ADR 0005's
-        one-bar window, the same one event.ProposalExpiredPayload's
-        EarliestFillAt bounds — so it must answer the bar just published. The
-        engine expires it at the next bar (ADR 0011) and the adapter then
-        cancels it, so it works for exactly that one session. A rejected
-        proposal is logged and dropped: the engine re-issues it on a later bar
+        Entries and ordinary Adds answer their own bar. A fill-chained Add
+        carries valid_for_sessions=2 and may also answer the first following
+        session (ADR 0011 and ADR 0021 section 7, amended 2026-09-24). Actual
+        instrument bars bound that window; no calendar date is forecast.
+        The engine expires the proposal and the adapter cancels its order.
+        A rejected proposal is logged and dropped: the engine re-issues it on a later bar
         if its setup still holds.
         """
         tag = decision.get("id")
@@ -720,14 +763,7 @@ class OrderDesk:
         if reason is None and entry and payload.get("direction") != _LONG:
             reason = "direction {!r} is not {!r}".format(payload.get("direction"), _LONG)
         if reason is None:
-            try:
-                produced = parse_time(payload.get("period_end"))
-            except ValueError as err:
-                produced, reason = None, "period_end unreadable: {}".format(err)
-            if produced is not None and produced != bar_end:
-                reason = ("stale: produced by the bar ending {}, but valid only for the session "
-                          "after it and this answers {} (ADR 0005)".format(
-                              payload.get("period_end"), bar_end.strftime("%Y-%m-%dT%H:%M:%SZ")))
+            reason = self._window_reason(payload, bar_end, entry)
         if reason is None and not tag:
             reason = "no decision id to tag the order with"
         if reason is None:

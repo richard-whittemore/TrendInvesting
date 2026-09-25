@@ -167,7 +167,21 @@ package strategy
 // Session has more Signals than its cash or caps allow, now declines what
 // the older build proposed, and a backtest skips an entry that gapped above
 // its cap, so the two builds no longer replay each other's journals.
-const RulesVersion = "1.10.0"
+//
+// Bumped 1.10.0 -> 1.11.0 by the owner's decision of 2026-09-24 (ADR 0011
+// and ADR 0021 §7, as amended): an Add proposed in reply to a fill stays
+// valid for one additional Session. It survives the next completed bar for
+// its instrument, keeping its ADR 0020 hold, and expires at the one after;
+// it still expires at the next bar if that bar proposes an exit or a stop
+// has already closed its Campaign. While it stands, the intervening Session
+// close proposes no second Add. Entries and ordinary Adds keep their one-bar
+// lifetime. strategy.add.proposed advances to schema 3, which states the
+// window as valid_for_sessions (1 or 2). A daily run that places the chained
+// Add a Session late now lets it fill where the older build expired it, so
+// the two builds no longer replay each other's journals. The reference
+// backtest fills a chained rung inside the bar that covered it, so its
+// decisions do not change.
+const RulesVersion = "1.11.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -271,4 +285,8 @@ var RuleSurfaceFingerprints = map[string]string{
 	// declared as a constant, not a changed Rule*, ADR* or numeric rule
 	// constant.
 	"1.10.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
+	// Unchanged from 1.10.0: the 1.11.0 change is a changed predicate (when
+	// a fill-chained Add expires) and a new payload field, not a changed
+	// Rule*, ADR* or numeric rule constant.
+	"1.11.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
 }

@@ -162,8 +162,8 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             return
         # LEAN reports a session's fills before it delivers that session's
         # bar, and the engine must hear of them in the same order: a proposal
-        # stays outstanding only until the instrument's next bar expires it
-        # (ADR 0011), so a fill delivered after that bar would name a proposal
+        # stays outstanding only until its expiry bar (ADR 0011, as amended),
+        # so a fill delivered after that bar would name a proposal
         # the engine no longer offers (drain_order_events).
         self.drain_order_events()
         self.flush_snapshot()
@@ -280,8 +280,8 @@ class CompletedBarsAlgorithm(QCAlgorithm):
                                            payload["price"], payload["filled_at"], payload["level"],
                                            payload["slippage_applied"], payload["commission"],
                                            len(decisions)))
-            # The fill's decisions answer the session it executed in, so a
-            # proposal they carry for an earlier bar is stale (OrderDesk._propose).
+            # ADR 0011's amendment permits a fill-chained Add's explicit
+            # extra session; ordinary proposals still answer their own bar.
             self.desk.act(decisions, payload["filled_at"], self.IsWarmingUp)
 
     def handle_delisting(self, notice):
@@ -374,6 +374,7 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             # the bar reaches the engine.
             self.desk.observe_ratio(whole_split_ratio(float(bar.Close) / adjusted["close"]),
                                     period_end)
+            self.desk.observe_bar(period_end)
             decisions = self.publisher.publish(self.instrument, bar, adjusted, period_end)
             # ADR 0021: the slice's bars are its Session; closing it lets the
             # engine decide the day's Adds and entries.

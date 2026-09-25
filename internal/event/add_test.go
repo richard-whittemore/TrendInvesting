@@ -24,6 +24,7 @@ func validAddProposal() event.AddProposalPayload {
 	previousFill := campaignEntryPrice
 	n := proposalN
 	return event.AddProposalPayload{
+		ValidForSessions: 1,
 		CampaignID:       "campaign:AAPL:2026-02-27T00:00:00.000000000Z",
 		InstrumentID:     "AAPL",
 		PeriodEnd:        addProposalPeriodEnd,
@@ -49,6 +50,10 @@ func TestAddProposalPayloadValidate(t *testing.T) {
 		wantErr string
 	}{
 		{name: "valid add proposal"},
+		{name: "fill-chained window", mutate: func(p *event.AddProposalPayload) { p.ValidForSessions = 2 }},
+		{name: "missing window", mutate: func(p *event.AddProposalPayload) { p.ValidForSessions = 0 }, wantErr: "valid for sessions"},
+		{name: "negative window", mutate: func(p *event.AddProposalPayload) { p.ValidForSessions = -1 }, wantErr: "valid for sessions"},
+		{name: "overlong window", mutate: func(p *event.AddProposalPayload) { p.ValidForSessions = 3 }, wantErr: "valid for sessions"},
 		{
 			name:    "missing campaign id",
 			mutate:  func(p *event.AddProposalPayload) { p.CampaignID = "" },
@@ -213,8 +218,8 @@ func TestAddProposalEventConstants(t *testing.T) {
 	if event.AddProposalEventType != "strategy.add.proposed" {
 		t.Errorf("AddProposalEventType = %q, want %q", event.AddProposalEventType, "strategy.add.proposed")
 	}
-	if event.AddProposalSchemaVersion != 2 {
-		t.Errorf("AddProposalSchemaVersion = %d, want 2 (version 2 added the price cap, ADR 0005)", event.AddProposalSchemaVersion)
+	if event.AddProposalSchemaVersion != 3 {
+		t.Errorf("AddProposalSchemaVersion = %d, want 3 (version 3 adds the session window, ADR 0011)", event.AddProposalSchemaVersion)
 	}
 	if event.RuleAddLadderHalfN != "add.ladder.half-n" {
 		t.Errorf("RuleAddLadderHalfN = %q, want %q", event.RuleAddLadderHalfN, "add.ladder.half-n")

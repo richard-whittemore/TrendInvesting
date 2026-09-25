@@ -143,6 +143,7 @@ func cappedTradeProposal(t *testing.T, id string, level, priceCap float64, quant
 func addProposal(t *testing.T, id, campaignID string, level float64, quantity int64, n float64) event.Envelope {
 	t.Helper()
 	return envelope(t, id, event.AddProposalEventType, event.AddProposalSchemaVersion, day(56), event.AddProposalPayload{
+		ValidForSessions: 1,
 		CampaignID:       campaignID,
 		InstrumentID:     testInstrument,
 		PeriodEnd:        day(56),

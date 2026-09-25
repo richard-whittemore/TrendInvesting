@@ -771,13 +771,11 @@ const (
 // misdescribe it.
 const RuleExitProposalExpiresWithItsBar = "exit-proposal.expires.with-its-bar"
 
-// RuleAddProposalExpiresWithItsBar names the rule for
-// ProposalExpiredPayload.Rule when Kind is ProposalKindAdd: an Add
-// proposal belongs to one bar and expires with it, the same lifecycle
-// RuleExitProposalExpiresWithItsBar states for an exit-kind proposal — kept
-// as a separate constant for the same reason that one is: an Add proposal
-// answers no Signal at all either, so a rule named "signal.expires..." would
-// misdescribe it.
+// RuleAddProposalExpiresWithItsBar identifies an Add's bar-based expiry
+// under ADR 0011: the next instrument bar for an ordinary Add, the second
+// subsequent bar for a fill-chained Add (amended 2026-09-24). The original
+// identifier is retained; AddProposalPayload.ValidForSessions states the
+// window. An Add answers no Signal, so it has its own rule identity.
 const RuleAddProposalExpiresWithItsBar = "add-proposal.expires.with-its-bar"
 
 // RuleAddProposalSupersededByStop names the rule for
@@ -819,10 +817,12 @@ const RuleSignalExpiresWithItsBar = "signal.expires.with-its-bar"
 // a declared Variant rather than the Baseline.
 const ADRSignalExpiry = "0011"
 
-// ExpiryReasonSupersededByNextBar is the ORDINARY expiry reason: the next
-// completed bar for the instrument arrived and no fill for the proposal ever
-// did. It is an enumerated value rather than free text for the same reason the
-// decline reasons are — a journal must be groupable by it.
+// ExpiryReasonSupersededByNextBar is the ORDINARY expiry reason: the
+// proposal's expiry bar for the instrument arrived and no fill for the
+// proposal ever did — the next bar, or for a fill-chained Add the one after
+// (ADR 0011, as amended 2026-09-24). It is an enumerated value rather than
+// free text for the same reason the decline reasons are — a journal must be
+// groupable by it.
 const ExpiryReasonSupersededByNextBar = "superseded-by-next-bar"
 
 // ExpiryReasonSupersededByStop is the SECOND expiry reason: an outstanding

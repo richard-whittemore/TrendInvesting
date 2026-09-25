@@ -176,6 +176,14 @@ class EndToEndTests(OrderTestCase):
         chained = [d for d in decisions if d["type"] == "strategy.add.proposed"
                    and d["causation_id"].split(":")[-2] == "fill"]
         self.assertTrue(chained, "no Add was chained from a fill")
+        chained_ids = {d["id"] for d in chained}
+        placed_chains = [t for t in algo.Transactions.tickets if t.Tag in chained_ids]
+        self.assertTrue(placed_chains, "no fill-chained Add was placed")
+        filled_chains = [e for e in inputs if e["type"] == "execution.fill"
+                         and e["payload"]["proposal_id"] in chained_ids]
+        self.assertTrue(filled_chains, "no fill-chained Add filled; ticket states: {}".format(
+            [(t.Tag, t.Status) for t in placed_chains]))
+        self.assertTrue(all(d["payload"]["valid_for_sessions"] == 2 for d in chained))
         statuses = {e["payload"]["status"] for e in inputs if e["type"] == "execution.order.lifecycle"}
         self.assertTrue({"submitted", "updated"} <= statuses, statuses)
         self.assertEqual(inputs[-1]["type"], "replay.run.completed")
@@ -235,6 +243,7 @@ class EndToEndTests(OrderTestCase):
         add_lifecycle = [e["payload"] for e in inputs if e["type"] == "execution.order.lifecycle"
                          and e["payload"]["tag"].startswith("add-proposal")]
         self.assertEqual(add_lifecycle, [])
+        self.assertEqual(self.rejections(algo), [], "cash declines must not be adapter rejections")
 
         replay = subprocess.run([self.backtest, "-replay", self.journal],
                                 capture_output=True, text=True)

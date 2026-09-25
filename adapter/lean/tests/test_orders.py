@@ -71,7 +71,7 @@ def trade_proposal(day, **changes):
 
 def add_proposal(day, unit_index=2, **changes):
     payload = {"campaign_id": decision_id("campaign", 6), "instrument_id": "AAPL",
-               "period_end": period_end(day), "unit_index": unit_index,
+               "period_end": period_end(day), "unit_index": unit_index, "valid_for_sessions": 1,
                "level": 25.1, "quantity": 100, "previous_unit_fill": 24.5,
                "campaign_n": 1.2, "rule": "add.ladder.half-n", "adr": "0006",
                "order_type": "stop-limit", "gap_buffer_n": 1}
@@ -81,7 +81,7 @@ def add_proposal(day, unit_index=2, **changes):
         level, n = payload["level"], payload["campaign_n"]
         numeric = all(type(v) in (int, float) for v in (level, n))
         payload["price_cap"] = level + n if numeric else 26.3
-    return envelope("strategy.add.proposed", 2,
+    return envelope("strategy.add.proposed", 3,
                     decision_id("add-proposal-unit-{}".format(unit_index), day), payload)
 
 
@@ -1115,14 +1115,76 @@ class FillReturnTests(OrderTestCase):
         self.assertTrue(any("has already filled and that fill is reported next" in m
                             for m in algo.logs))
 
-    def test_a_chained_add_proposal_in_a_fill_reply_is_stale(self):
-        # The engine measures the next rung from the fill against the bar
-        # that signalled the entry; that session has already traded in LEAN.
+    def test_a_chained_add_proposal_in_a_fill_reply_is_placed(self):
+        # ADR 0011's amendment: a fill-chained Add has one extra session.
+        algo = self.start()
+        chained = add_proposal(9, valid_for_sessions=2)
+        self.entered(algo, reply=[campaign_opened(), exit_order_set(10), chained])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual([t.Quantity for t in self.tickets(algo)], [100, -100, 100])
+        self.assertEqual(self.tickets(algo)[-1].Tag, chained["id"])
+        self.assertEqual(self.rejections(algo), [])
+
+    def test_an_ordinary_add_in_a_fill_reply_is_still_stale(self):
         algo = self.start()
         self.entered(algo, reply=[campaign_opened(), exit_order_set(10), add_proposal(9)])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
         self.assertEqual([t.Quantity for t in self.tickets(algo)], [100, -100])
         [rejection] = self.rejections(algo)
         self.assertIn("stale", rejection)
+
+    def test_a_chained_add_window_counts_bars_across_a_weekend(self):
+        algo = self.start()
+        self.hold(algo, 100)
+        chained = add_proposal(6, valid_for_sessions=2)
+        self.feed(algo, 9, replies={"execution.fill": {"payload": {"decisions": [chained]}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(self.tickets(algo)[-1].Tag, chained["id"])
+        self.assertEqual(self.rejections(algo), [])
+
+    def test_a_chained_add_is_accepted_at_the_first_next_bar(self):
+        algo = self.start()
+        self.feed(algo, 6)
+        chained = add_proposal(6, valid_for_sessions=2)
+        self.feed(algo, 9, [chained])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual([t.Tag for t in self.tickets(algo)], [chained["id"]])
+
+    def test_a_chained_add_older_than_its_window_is_rejected(self):
+        algo = self.start()
+        self.feed(algo, 6)
+        self.feed(algo, 9)
+        self.feed(algo, 10, [add_proposal(6, valid_for_sessions=2)])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(self.tickets(algo), [])
+        [rejection] = self.rejections(algo)
+        self.assertIn("stale", rejection)
+
+    def test_a_later_fill_reply_cannot_renew_a_chained_add_window(self):
+        algo = self.start()
+        self.feed(algo, 6)
+        self.feed(algo, 9, [trade_proposal(9)])
+        [entry] = self.tickets(algo)
+        self.fill(algo, entry, 10, 24.56)
+        self.feed(algo, 10, replies={"execution.fill": {"payload": {"decisions": [
+            add_proposal(6, valid_for_sessions=2)]}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(len(self.tickets(algo)), 1)
+        [rejection] = self.rejections(algo)
+        self.assertIn("stale", rejection)
+
+    def test_an_add_with_an_invalid_window_is_rejected(self):
+        for window in (None, 0, 3, -1, True, 2.0, "2"):
+            with self.subTest(window=window):
+                algo = self.start()
+                proposal = add_proposal(9, valid_for_sessions=window)
+                if window is None:
+                    del proposal["payload"]["valid_for_sessions"]
+                self.feed(algo, 9, [proposal])
+                self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+                self.assertEqual(self.tickets(algo), [])
+                [rejection] = self.rejections(algo)
+                self.assertIn("valid_for_sessions", rejection)
 
     def test_a_partial_fill_stops_the_run(self):
         algo = self.start()
