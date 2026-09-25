@@ -760,10 +760,17 @@ class IgnoredDecisionTests(OrderTestCase):
     def test_an_ignored_decision_beside_an_actionable_one_still_places_the_order(self):
         # Ignored decisions are dropped by OrderDesk.act's own filter, not by
         # skipping the whole reply: an actionable decision delivered
-        # alongside them is still acted on.
+        # alongside them is still acted on. setup_evaluated and signal are
+        # reachable together: the reducer emits "Setup-evaluated, Signal,
+        # sizing outcome" for one breakout bar (internal/strategy/reducer.go's
+        # own doc comment). engine_state is deliberately NOT used here: it is
+        # the reducer's own halt, emitted alone when a capital-safety
+        # invariant fails (event.EngineStatePayload's doc comment), so a
+        # decisions list ever pairing it with a trade proposal cannot occur
+        # and using it here would test a reply the reducer never sends.
         algo = self.start()
         proposal = trade_proposal(9)
-        self.feed(algo, 9, [signal(9), proposal, engine_state(9)])
+        self.feed(algo, 9, [signal(9), proposal, setup_evaluated(9)])
         self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
         [ticket] = self.tickets(algo)
         self.assertEqual(ticket.Tag, proposal["id"])
