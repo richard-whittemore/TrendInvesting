@@ -172,11 +172,12 @@ type order struct {
 	// Signal was sized under for an entry (ADR 0003), the Campaign's frozen N
 	// for an Add (ADR 0006).
 	n float64
-	// priceCap is the limit of a stop-limit order, its proposal's own
-	// PriceCap (ADR 0005, as amended 2026-09-24), or zero for a stop-market
-	// order, which has none.
-	priceCap float64
-	ref      reference
+	// orderType is the order it rests as (ADR 0005, as amended 2026-09-24),
+	// and decides how it fills; priceCap is a stop-limit's limit, its
+	// proposal's own PriceCap, and is never read for a stop-market order.
+	orderType event.OrderType
+	priceCap  float64
+	ref       reference
 }
 
 // exitProposal is the outstanding Exit-Channel exit proposal for an open
@@ -414,12 +415,13 @@ func (s *Simulator) observeTradeProposal(envelope event.Envelope, ref reference)
 	if err := decodePayload(envelope, &payload); err != nil {
 		return err
 	}
-	priceCap, err := buyPriceCap(envelope, payload.OrderType, payload.PriceCap)
+	priceCap, err := buyPriceCap(envelope, payload.OrderType, payload.PriceCap, payload.EntryLevel)
 	if err != nil {
 		return err
 	}
 	b := s.bookFor(payload.InstrumentID)
 	b.entry = &order{
+		orderType:  payload.OrderType,
 		kind:       event.FillKindEntry,
 		side:       SideBuy,
 		proposalID: envelope.ID,
@@ -434,11 +436,17 @@ func (s *Simulator) observeTradeProposal(envelope event.Envelope, ref reference)
 
 // buyPriceCap is the limit an entry or Add proposal rests with: its
 // PriceCap for a stop-limit, none for a stop-market (ADR 0005, as amended
-// 2026-09-24). Any other order type fails closed: this simulator would
+// 2026-09-24). A stop-limit's cap must be a finite price at or above its
+// level: zero is not a way of saying "uncapped", which only the order type
+// says, and a cap the simulator could not honour would let a fill cost more
+// than its hold. Any other order type fails closed: this simulator would
 // otherwise rest an order the reducer did not describe.
-func buyPriceCap(envelope event.Envelope, orderType event.OrderType, priceCap float64) (float64, error) {
+func buyPriceCap(envelope event.Envelope, orderType event.OrderType, priceCap, level float64) (float64, error) {
 	switch orderType {
 	case event.OrderTypeStopLimit:
+		if !isFinite(priceCap) || priceCap <= 0 || priceCap < level {
+			return 0, fmt.Errorf("fills: stop-limit proposal %s at level %v states price cap %v, which is not a finite price at or above its level; refusing an order whose limit could not bound its fill (ADR 0005)", envelope.ID, level, priceCap)
+		}
 		return priceCap, nil
 	case event.OrderTypeStopMarket:
 		return 0, nil
@@ -452,12 +460,13 @@ func (s *Simulator) observeAddProposal(envelope event.Envelope, ref reference) e
 	if err := decodePayload(envelope, &payload); err != nil {
 		return err
 	}
-	priceCap, err := buyPriceCap(envelope, payload.OrderType, payload.PriceCap)
+	priceCap, err := buyPriceCap(envelope, payload.OrderType, payload.PriceCap, payload.Level)
 	if err != nil {
 		return err
 	}
 	b := s.bookFor(payload.InstrumentID)
 	b.add = &order{
+		orderType:  payload.OrderType,
 		kind:       event.FillKindAdd,
 		side:       SideBuy,
 		proposalID: envelope.ID,
@@ -934,7 +943,7 @@ func sortStable(items []candidate, less func(a, b candidate) bool) {
 // stop-limit capped at its price cap when it has one, and as a stop-market
 // order otherwise (ADR 0005, as amended 2026-09-24).
 func (s *Simulator) priceBuy(o *order, r Range) (candidate, bool, error) {
-	if o.priceCap == 0 {
+	if o.orderType == event.OrderTypeStopMarket {
 		return s.price(o.kind, o.side, o.level, o.n, o.quantity, r)
 	}
 	if !isFinite(o.n) || o.n <= 0 {

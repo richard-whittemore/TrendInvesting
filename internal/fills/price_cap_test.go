@@ -190,3 +190,27 @@ func TestAProposalOfAnUnknownOrderTypeIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// TestAStopLimitProposalWithoutAUsableCapIsRefused: a stop-limit's cap is
+// the most it may pay (ADR 0005, as amended 2026-09-24), so a proposal whose
+// cap is zero, negative or below its own level is refused rather than
+// rested as an order that could fill above the cap its hold reserved. (A
+// non-finite cap cannot be written as JSON, so no envelope can carry one.)
+func TestAStopLimitProposalWithoutAUsableCapIsRefused(t *testing.T) {
+	t.Parallel()
+
+	for _, priceCap := range []float64{0, -1, 155.9} {
+		entry := cappedTradeProposal(t, "proposal:AAPL:day-56", 156, priceCap, fixtureUnitQuantity, fixtureN)
+		if err := newSimulator(t).Observe(entry); err == nil || !strings.Contains(err.Error(), "price cap") {
+			t.Errorf("entry capped at %v: Observe() error = %v, want the cap refused", priceCap, err)
+		}
+		add := addProposal(t, "add-proposal:AAPL:day-56", "campaign:AAPL:day-56", 156, fixtureUnitQuantity, fixtureN)
+		var payload event.AddProposalPayload
+		decodeInto(t, add, &payload)
+		payload.OrderType, payload.PriceCap = event.OrderTypeStopLimit, priceCap
+		add = envelope(t, add.ID, add.Type, add.SchemaVersion, day(56), payload)
+		if err := newSimulator(t).Observe(add); err == nil || !strings.Contains(err.Error(), "price cap") {
+			t.Errorf("add capped at %v: Observe() error = %v, want the cap refused", priceCap, err)
+		}
+	}
+}

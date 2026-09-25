@@ -18,8 +18,15 @@ func validatePriceCap(orderType OrderType, gapBufferN, priceCap, level, n float6
 	errs := validateGapBuffer(orderType, gapBufferN)
 	switch orderType {
 	case OrderTypeStopLimit:
-		if !isFinite(priceCap) {
+		switch {
+		case !isFinite(priceCap):
 			return append(errs, errors.New("price cap must be finite"))
+		case priceCap <= 0:
+			// A stop-limit's cap is the most it may pay; zero is not a
+			// marker for "uncapped", which only a stop-market order is.
+			return append(errs, fmt.Errorf("price cap must be positive for a %s order, got %v", OrderTypeStopLimit, priceCap))
+		case derivable && priceCap < level:
+			return append(errs, fmt.Errorf("price cap %v is below the level %v: a %s order capped there could never fill", priceCap, level, OrderTypeStopLimit))
 		}
 		if len(errs) == 0 && derivable {
 			if derived, ok := sizing.PriceCap(level, gapBufferN, n); !ok || priceCap != derived {
