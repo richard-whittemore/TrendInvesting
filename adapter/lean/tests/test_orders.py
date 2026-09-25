@@ -314,8 +314,11 @@ class OrderTestCase(unittest.TestCase):
         ticket.QuantityFilled += quantity
         ticket.Status = status
         algo.Portfolio.holdings["AAPL"] = algo.Portfolio.holdings.get("AAPL", 0) + quantity
-        if ticket.Tag in algo.desk.n_by_tag:
-            # Only an order this adapter placed has an N to slip by.
+        if ticket.OrderId in algo.desk.orders:
+            # LEAN asks the slippage model for every order the adapter
+            # placed, under the tag the order carries now: one whose tag the
+            # desk never gave an N reaches the model and fails it, exactly as
+            # in LEAN, rather than being skipped here.
             algo.security.slippage_model.GetSlippageApproximation(
                 algo.security, types.SimpleNamespace(Tag=ticket.Tag, Id=ticket.OrderId))
         algo.Transactions.emit(ticket, status, fill_quantity=float(quantity),
@@ -2663,6 +2666,64 @@ class CashInLieuTests(OrderTestCase):
         self.assertTrue(algo.failed)
         for fact in ("order {}".format(first.OrderId), "-9169", "invalid-new-order-status",
                      "processed and refused"):
+            self.assertIn(fact, algo.quit_reason)
+
+    def truncated_split(self, algo, processed=True):
+        """The two-Unit Campaign across the rounded 7-for-1, LEAN truncating
+        each order, the engine reducing Unit 2; returns Unit 2's re-stated
+        Exit Order."""
+        reduced = exit_order_set(13, unit_index=2, level=0.82, quantity=36676, cause="split",
+                                 as_of="2014-06-13T04:00:00Z")
+        self.split(algo, 13, factor=SEVENTH, reference=24.0, quantity_rounding=math.trunc,
+                   processed=processed, engine=[
+                       cash_in_lieu("2014-06-13T04:00:00Z", [(2, 36680, 36676)],
+                                    cash=lean_cash_in_lieu(2620, SEVENTH, 24.0)),
+                       reduced])
+        return reduced
+
+    def test_a_reduced_units_stop_fills_after_the_split_and_is_slipped(self):
+        # The re-stated Exit Order carries the engine's new decision id as its
+        # tag; LEAN slips its fill by the Campaign's frozen N at the new
+        # ratio, looked up by that tag (ADR 0013, ADR 0023).
+        algo, (first, second) = self.two_units_aapl()
+        reduced = self.truncated_split(algo)
+        self.assertEqual(second.Tag, reduced["id"])
+        self.ratio = 4
+        self.feed(algo, 13)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.fill(algo, second, 16, 3.2)
+        self.feed(algo, 16, replies={"execution.fill": {"payload": {"decisions": [
+            units_stopped(16, unit_indexes=(2,), fill_id="lean:{}:2".format(second.OrderId),
+                          remaining=1)]}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        stop = self.sent(algo, "execution.fill")[-1]["payload"]
+        self.assertEqual((stop["kind"], stop["quantity"]), ("stop", 36676))
+        self.assertAlmostEqual(stop["slippage_applied"], 0.05 * 0.05)
+        self.assertAlmostEqual(algo.security.slippage_model.GetSlippageApproximation(
+            algo.security, types.SimpleNamespace(Tag=second.Tag, Id=second.OrderId)),
+            0.05 * 0.05 * 4)
+
+    def test_a_tag_lean_refuses_to_apply_at_the_split_stops_the_run(self):
+        # A tag-only amendment (the reduced Unit's order already at its
+        # quantity) is answered with success on submission; if LEAN refuses it
+        # when it processes it, the order does not carry the decision in
+        # force, and the next slice's check stops the run.
+        algo, (_, second) = self.two_units_aapl()
+        old_tag = second.Tag
+        self.truncated_split(algo, processed=False)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        request = second.UpdateRequests[-1]
+        request.Status = "error"
+        request.Response = types.SimpleNamespace(ErrorCode="invalid-request",
+                                                 ErrorMessage="tag refused")
+        second.Tag = old_tag
+        algo.Transactions.deferred = [d for d in algo.Transactions.deferred
+                                      if not isinstance(d[1], tuple) or d[1][1] is not request]
+        algo.Transactions.settle()
+        self.ratio = 4
+        self.feed(algo, 13)
+        self.assertTrue(algo.failed)
+        for fact in ("order {}".format(second.OrderId), old_tag, "exit-order-set-unit-2-split"):
             self.assertIn(fact, algo.quit_reason)
 
     def two_units_aapl(self):

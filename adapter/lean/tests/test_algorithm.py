@@ -122,9 +122,11 @@ class FakeTicket:
             self.book.quantity_updates.append((self.OrderId, fields.Quantity))
         if not self.book.acknowledge_updates:
             self.UpdateRequests.append(types.SimpleNamespace(
-                Quantity=fields.Quantity, StopPrice=fields.StopPrice, Status="error"))
+                Quantity=fields.Quantity, StopPrice=fields.StopPrice, Tag=fields.Tag,
+                Status="error"))
             return FakeResponse(False, "invalid-request", "the fake broker refused the update")
         request = types.SimpleNamespace(Quantity=fields.Quantity, StopPrice=fields.StopPrice,
+                                        Tag=fields.Tag,
                                         Status="processing")
         self.UpdateRequests.append(request)
         if fields.StopPrice is not None:
@@ -217,7 +219,7 @@ class FakeTransactions:
         for ticket in self.GetOpenOrderTickets(symbol):
             ticket.Quantity = quantity_rounding(ticket.Quantity / factor)
             ticket.UpdateRequests.append(types.SimpleNamespace(
-                Quantity=ticket.Quantity, StopPrice=None, Status="processed"))
+                Quantity=ticket.Quantity, StopPrice=None, Tag=None, Status="processed"))
             ticket.StopPrice = round(round(ticket.StopPrice * factor / tick) * tick, 10)
             if ticket.LimitPrice is not None:
                 # Confirmed by a probe on the pinned image (adapter README,

@@ -586,11 +586,25 @@ class OrderDesk:
         and reading it alone would mistake a pending change for a refused
         one.
         """
+        quantity = self._requested(ticket, "Quantity")
+        return _whole(ticket.Quantity if quantity is None else quantity)
+
+    def _working_tag(self, ticket):
+        """The tag an order carries once LEAN has processed every change
+        requested of it, read the way _working_quantity reads its quantity: a
+        tag amendment is likewise confirmed on submission and applied when
+        LEAN processes it."""
+        tag = self._requested(ticket, "Tag")
+        return ticket.Tag if tag is None else tag
+
+    def _requested(self, ticket, field):
+        """The field's value in the order's latest update request that states
+        it and that LEAN has not refused, or None if none does."""
         for request in reversed(list(ticket.UpdateRequests)):
-            if request.Quantity is not None and \
-                    request.Status != self.lean.OrderRequestStatus.Error:
-                return _whole(request.Quantity)
-        return _whole(ticket.Quantity)
+            value = getattr(request, field)
+            if value is not None and request.Status != self.lean.OrderRequestStatus.Error:
+                return value
+        return None
 
     @staticmethod
     def _refusal(response):
@@ -601,13 +615,19 @@ class OrderDesk:
     def _refused_quantity(self, ticket):
         """LEAN's reason for refusing this order's latest quantity amendment,
         if it refused one after accepting it; empty otherwise."""
+        return self._refused_request(ticket, "Quantity")
+
+    def _refused_request(self, ticket, field):
+        """LEAN's reason for refusing this order's latest request to change
+        field, if it refused one after accepting it; empty otherwise."""
         for request in reversed(list(ticket.UpdateRequests)):
-            if request.Quantity is None:
+            value = getattr(request, field)
+            if value is None:
                 continue
             if request.Status == self.lean.OrderRequestStatus.Error:
                 response = getattr(request, "Response", None)
-                return " (LEAN refused amending it to {}: {})".format(
-                    request.Quantity, self._refusal(response) if response is not None
+                return " (LEAN refused amending its {} to {}: {})".format(
+                    field.lower(), value, self._refusal(response) if response is not None
                     else "no reason given")
             return ""
         return ""
@@ -842,6 +862,14 @@ class OrderDesk:
         except ValueError as err:
             raise Uncertain("{} {}: as_of unreadable: {}".format(
                 decision["type"], decision.get("id"), err))
+        n = self.campaign_n.get(unit[0])
+        if n is None:
+            raise Uncertain("{} {} names campaign {!r}, whose frozen N the engine never sent; "
+                            "its Exit Order cannot be slipped (ADR 0013)".format(
+                                decision["type"], decision.get("id"), unit[0]))
+        # The order will carry this decision's id as its tag, and LEAN slips
+        # its fill by the N looked up by that tag (ADR 0013; ADR 0023).
+        self.n_by_tag[decision.get("id")] = n
         in_force.update(quantity=quantity, as_of=as_of, split_tag=decision.get("id"))
         self.orders[in_force["order_id"]]["quantity"] = -quantity
         return unit
@@ -911,6 +939,14 @@ class OrderDesk:
                                 "{:.4f}{}".format(ticket.OrderId, ticket.Tag, working, stop,
                                                   placed["quantity"], placed["level"], quantity,
                                                   level, self._refused_quantity(ticket)))
+            tag = self._working_tag(ticket)
+            if tag != placed["tag"]:
+                # A tag amendment is confirmed on submission, not on
+                # completion: an order not carrying the decision in force
+                # would be reported to the engine as the wrong decision's.
+                problems.append("LEAN order {} carries tag {!r}, but the decision in force for it "
+                                "is {!r}{}".format(ticket.OrderId, tag, placed["tag"],
+                                                   self._refused_request(ticket, "Tag")))
             if placed.get("price_cap") is not None:
                 problems += self._split_limit_problems(ticket, stop, placed["price_cap"] * ratio,
                                                        placed["price_cap"], tick)
