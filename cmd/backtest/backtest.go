@@ -173,8 +173,9 @@ func backtest(ctx context.Context, opts options, out io.Writer) error {
 // the flush after it is a second fact, so a run can hold a journal it
 // installed and an error describing what happened next.
 type outcome struct {
-	equity  []registry.EquityPoint
-	opening *registry.Opening
+	exposure *registry.ExposureMetrics
+	equity   []registry.EquityPoint
+	opening  *registry.Opening
 	// declaredStart and declaredEnd are the span this run was GIVEN to run
 	// over (every bar and corporate action supplied to it), derived once by
 	// prepareResearch before execution — never the narrower span header
@@ -288,6 +289,8 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 	entries := recorder.Entries()
 	result.records = len(entries)
 	result.equity, err = registry.EquityCurve(entries)
+	result.runErr = errors.Join(result.runErr, err)
+	result.exposure, err = registry.CampaignExposure(entries)
 	result.runErr = errors.Join(result.runErr, err)
 	result.installed, result.journalErr = writeJournal(opts.outPath, header, entries)
 	return result

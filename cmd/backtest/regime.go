@@ -158,6 +158,7 @@ func finishResearch(opts options, cfg event.ConfigurationPayload, result outcome
 	if err != nil {
 		return err
 	}
+	report.Exposure = result.exposure
 	r := researchResult{Version: 1, RunID: opts.runID, Variant: opts.variant, ConfigurationHash: event.ConfigurationHash(cfg), Status: result.status(), Fit: opts.fit, Report: report, Opening: result.opening}
 	if err := result.failure(); err != nil {
 		r.Error = err.Error()

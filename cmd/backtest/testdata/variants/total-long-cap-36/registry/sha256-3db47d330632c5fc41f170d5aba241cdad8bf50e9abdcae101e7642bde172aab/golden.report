@@ -1,0 +1,231 @@
+{
+  "version": 1,
+  "run_id": "golden",
+  "variant": "total-long-cap-36",
+  "configuration_hash": "sha256:3db47d330632c5fc41f170d5aba241cdad8bf50e9abdcae101e7642bde172aab",
+  "status": "completed",
+  "fit": false,
+  "artefacts": {
+    "journal_path": "../journal.golden.jsonl",
+    "record_count": 352,
+    "final_record_hash": "sha256:c123dcb299bf9944c7a27f91e034e8bf66b8f2f9df09ca10573e713e70213235"
+  },
+  "report": {
+    "schema_version": 2,
+    "exposure": {
+      "peak_sector_units": 4,
+      "time_weighted_largest_sector_share": 1,
+      "peak_concurrent_open_units": 4,
+      "independent_campaigns": 1
+    },
+    "protocol": {
+      "version": 1,
+      "split": "2016-01-01T00:00:00Z",
+      "days_per_year": 365.25,
+      "windows": [
+        {
+          "name": "1998–2000 late bull",
+          "start": "1998-01-01T00:00:00Z",
+          "end": "2001-01-01T00:00:00Z"
+        },
+        {
+          "name": "2000–02 bear",
+          "start": "2000-01-01T00:00:00Z",
+          "end": "2003-01-01T00:00:00Z"
+        },
+        {
+          "name": "2003–07 bull",
+          "start": "2003-01-01T00:00:00Z",
+          "end": "2008-01-01T00:00:00Z"
+        },
+        {
+          "name": "2008–09 crash",
+          "start": "2008-01-01T00:00:00Z",
+          "end": "2010-01-01T00:00:00Z"
+        },
+        {
+          "name": "2009–19 bull",
+          "start": "2009-01-01T00:00:00Z",
+          "end": "2020-01-01T00:00:00Z"
+        },
+        {
+          "name": "2020 COVID",
+          "start": "2020-01-01T00:00:00Z",
+          "end": "2021-01-01T00:00:00Z"
+        },
+        {
+          "name": "2022 correction",
+          "start": "2022-01-01T00:00:00Z",
+          "end": "2023-01-01T00:00:00Z"
+        }
+      ]
+    },
+    "protocol_hash": "sha256:f69aafd4aec8272529195e27838c9db97f7eda7efe62634f6a24ff08d7309c7f",
+    "declared_start": "2026-01-02T00:00:00Z",
+    "declared_end": "2026-02-02T00:00:00Z",
+    "designation": "out-of-sample",
+    "full": {
+      "samples": 75,
+      "start": "2026-01-02T00:00:00Z",
+      "end": "2026-02-02T00:00:00Z",
+      "total_return": 0.017100000000000115,
+      "annualised_return": 0.22112599196665284,
+      "max_drawdown": 0.024083669161389366,
+      "return_over_max_drawdown": 9.181574056878311,
+      "state": "ok"
+    },
+    "in_sample": {
+      "samples": 0,
+      "start": "0001-01-01T00:00:00Z",
+      "end": "0001-01-01T00:00:00Z",
+      "total_return": 0,
+      "annualised_return": 0,
+      "max_drawdown": 0,
+      "return_over_max_drawdown": null,
+      "state": "no-data"
+    },
+    "out_of_sample": {
+      "samples": 75,
+      "start": "2026-01-02T00:00:00Z",
+      "end": "2026-02-02T00:00:00Z",
+      "total_return": 0.017100000000000115,
+      "annualised_return": 0.22112599196665284,
+      "max_drawdown": 0.024083669161389366,
+      "return_over_max_drawdown": 9.181574056878311,
+      "state": "ok"
+    },
+    "windows": [
+      {
+        "window": {
+          "name": "1998–2000 late bull",
+          "start": "1998-01-01T00:00:00Z",
+          "end": "2001-01-01T00:00:00Z"
+        },
+        "metrics": {
+          "samples": 0,
+          "start": "0001-01-01T00:00:00Z",
+          "end": "0001-01-01T00:00:00Z",
+          "total_return": 0,
+          "annualised_return": 0,
+          "max_drawdown": 0,
+          "return_over_max_drawdown": null,
+          "state": "no-data"
+        }
+      },
+      {
+        "window": {
+          "name": "2000–02 bear",
+          "start": "2000-01-01T00:00:00Z",
+          "end": "2003-01-01T00:00:00Z"
+        },
+        "metrics": {
+          "samples": 0,
+          "start": "0001-01-01T00:00:00Z",
+          "end": "0001-01-01T00:00:00Z",
+          "total_return": 0,
+          "annualised_return": 0,
+          "max_drawdown": 0,
+          "return_over_max_drawdown": null,
+          "state": "no-data"
+        }
+      },
+      {
+        "window": {
+          "name": "2003–07 bull",
+          "start": "2003-01-01T00:00:00Z",
+          "end": "2008-01-01T00:00:00Z"
+        },
+        "metrics": {
+          "samples": 0,
+          "start": "0001-01-01T00:00:00Z",
+          "end": "0001-01-01T00:00:00Z",
+          "total_return": 0,
+          "annualised_return": 0,
+          "max_drawdown": 0,
+          "return_over_max_drawdown": null,
+          "state": "no-data"
+        }
+      },
+      {
+        "window": {
+          "name": "2008–09 crash",
+          "start": "2008-01-01T00:00:00Z",
+          "end": "2010-01-01T00:00:00Z"
+        },
+        "metrics": {
+          "samples": 0,
+          "start": "0001-01-01T00:00:00Z",
+          "end": "0001-01-01T00:00:00Z",
+          "total_return": 0,
+          "annualised_return": 0,
+          "max_drawdown": 0,
+          "return_over_max_drawdown": null,
+          "state": "no-data"
+        }
+      },
+      {
+        "window": {
+          "name": "2009–19 bull",
+          "start": "2009-01-01T00:00:00Z",
+          "end": "2020-01-01T00:00:00Z"
+        },
+        "metrics": {
+          "samples": 0,
+          "start": "0001-01-01T00:00:00Z",
+          "end": "0001-01-01T00:00:00Z",
+          "total_return": 0,
+          "annualised_return": 0,
+          "max_drawdown": 0,
+          "return_over_max_drawdown": null,
+          "state": "no-data"
+        }
+      },
+      {
+        "window": {
+          "name": "2020 COVID",
+          "start": "2020-01-01T00:00:00Z",
+          "end": "2021-01-01T00:00:00Z"
+        },
+        "metrics": {
+          "samples": 0,
+          "start": "0001-01-01T00:00:00Z",
+          "end": "0001-01-01T00:00:00Z",
+          "total_return": 0,
+          "annualised_return": 0,
+          "max_drawdown": 0,
+          "return_over_max_drawdown": null,
+          "state": "no-data"
+        }
+      },
+      {
+        "window": {
+          "name": "2022 correction",
+          "start": "2022-01-01T00:00:00Z",
+          "end": "2023-01-01T00:00:00Z"
+        },
+        "metrics": {
+          "samples": 0,
+          "start": "0001-01-01T00:00:00Z",
+          "end": "0001-01-01T00:00:00Z",
+          "total_return": 0,
+          "annualised_return": 0,
+          "max_drawdown": 0,
+          "return_over_max_drawdown": null,
+          "state": "no-data"
+        }
+      }
+    ]
+  },
+  "opening": {
+    "schema_version": 1,
+    "variant": "total-long-cap-36",
+    "run_id": "golden",
+    "configuration_hash": "sha256:3db47d330632c5fc41f170d5aba241cdad8bf50e9abdcae101e7642bde172aab",
+    "protocol_hash": "sha256:f69aafd4aec8272529195e27838c9db97f7eda7efe62634f6a24ff08d7309c7f",
+    "declared_start": "2026-01-02T00:00:00Z",
+    "declared_end": "2026-02-02T00:00:00Z",
+    "hypothesis": "sha256:3db47d330632c5fc41f170d5aba241cdad8bf50e9abdcae101e7642bde172aab/golden",
+    "repeat": false,
+    "prior": null
+  }
+}

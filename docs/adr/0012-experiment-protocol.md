@@ -141,3 +141,34 @@ amendment raised as Proposed are answered, and recorded here as decisions:
    before a Variant is adopted.
 4. Annualisation uses 365.25 days.
 5. Grid and selection provenance is deferred to a later ticket.
+
+## Reporting — Session exposure (Accepted, 2026-09-25)
+
+For the executed run, sample the final recorded book once per closed Session,
+including committed fills after the Session-close marker (ADR 0021). Unchanged
+books still contribute one sample per Session. Incomplete Sessions without a
+close marker do not contribute; failed runs remain ineligible for adoption.
+
+- **Peak sector Units:** the maximum number of open Units in any one ADR 0008
+  group across the Session samples, expressed as a count.
+- **Time-weighted largest-sector share:** the arithmetic mean of
+  `largest group open Units / total open Units` over Sessions with at least one
+  open Unit. Each Session has equal weight; empty Sessions are excluded. With
+  no nonempty Sessions, report zero.
+- **Peak concurrent open Units:** the maximum total open Units across the
+  Session samples, giving context for the sector count and share.
+- **Independent Campaigns:** count distinct Campaign openings over the run,
+  including those still open at the end. Adds and partial stops do not create
+  Campaigns; re-entry does. This is a lifecycle count, not statistical independence.
+
+**Unclassified instruments are one group under ADR 0008.** A run without
+classifications reports everything in that single group. Its nonempty Session
+shares are therefore 1 and its peak sector count equals its peak total count;
+this is expected, not a bug. Shares, notional value, risk and unfilled holds do
+not enter these Unit counts.
+
+These measures replace the uninformative peak largest-sector share, which
+reaches 1 at the first single-Unit opening even if a book later diversifies.
+Report schema 2 remains unreleased and changes shape in place. Version-1 reads
+continue to upcast absent exposure to unknown (`null`), never historical zeros;
+released evidence is unchanged (ADR 0015, ADR 0018).

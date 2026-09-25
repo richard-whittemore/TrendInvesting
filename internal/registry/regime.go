@@ -127,10 +127,14 @@ type WindowResult struct {
 	Metrics Metrics `json:"metrics"`
 }
 
+// Report retains ADR 0012's run and window results, including Session-end
+// exposure. Unclassified instruments are one group under ADR 0008; a run
+// without classifications reports everything in that single group, as expected.
 type Report struct {
-	SchemaVersion int      `json:"schema_version"`
-	Protocol      Protocol `json:"protocol"`
-	ProtocolHash  string   `json:"protocol_hash"`
+	SchemaVersion int              `json:"schema_version"`
+	Exposure      *ExposureMetrics `json:"exposure"`
+	Protocol      Protocol         `json:"protocol"`
+	ProtocolHash  string           `json:"protocol_hash"`
 	// DeclaredStart and DeclaredEnd are the span Designation was computed
 	// from -- the whole input a run was GIVEN, not merely what it went on to
 	// apply before it might have stopped early. They are retained beside
@@ -257,9 +261,10 @@ func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 // .opening sidecars. Both are retained evidence that is never rewritten
 // (ADR 0018), so a later change to either shape bumps its version and reads
 // older records forward with an upcaster rather than rejecting them
-// (ADR 0015).
+// (ADR 0015). Report version 2 is unreleased; its exposure shape is revised
+// in place under ADR 0012, while released version-1 reads remain supported.
 const (
-	ReportSchemaVersion  = 1
+	ReportSchemaVersion  = 2
 	OpeningSchemaVersion = 1
 )
 

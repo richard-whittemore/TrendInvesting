@@ -1,0 +1,48 @@
+{
+  "registry_version": 1,
+  "configuration_hash": "sha256:41e6e2b8c13989c60dbfbfb1797fabce4c9c6c64391ef5c5356f71fdbe3f215f",
+  "run_id": "golden",
+  "variant": "total-long-cap-24",
+  "status": "completed",
+  "strategy_version": "total-long-cap-24/1.16.0+test",
+  "span_start": "2026-01-02T00:00:00Z",
+  "span_end": "2026-02-02T00:00:00Z",
+  "configuration": {
+    "recompute_n_at_add": false,
+    "strategy_id": "total-long-cap-24",
+    "sizing_mode": "volatility-normalised",
+    "unit_volatility_fraction": 0.005,
+    "stop_multiple": 2,
+    "entry_channel_length": 20,
+    "exit_channel_length": 10,
+    "max_units": 4,
+    "max_units_per_industry": 1000000,
+    "max_units_per_sector": 1000000,
+    "max_units_total_long": 24,
+    "slippage_n": 0.05,
+    "tier_b_distance_in_n": 1,
+    "dollars_per_point": 1,
+    "risk_at_stop_fraction": 0,
+    "notional_account": {
+      "starting_equity": 1000000,
+      "rebasing_month": 1,
+      "rebasing_day": 1
+    },
+    "commission": {
+      "per_share": 0.005,
+      "minimum_per_order": 1,
+      "maximum_fraction_of_trade_value": 0.01
+    },
+    "buy_order_type": "stop-limit",
+    "gap_buffer_n": 1,
+    "universe_min_price": 0,
+    "universe_min_dollar_volume": 0,
+    "universe_min_history_bars": 0
+  },
+  "artefacts": {
+    "journal_path": "../journal.golden.jsonl",
+    "record_count": 352,
+    "final_record_hash": "sha256:ddd32004eb954fcc9724bced47730926672454010975d63b5cea201e667e5e53"
+  },
+  "detail": ""
+}

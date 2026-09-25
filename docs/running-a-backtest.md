@@ -343,3 +343,41 @@ hash. Commit these JSON sidecars with the existing `.json` entry and journal;
 none is overwritten. Registry version-1 files and released journal fixtures
 remain unchanged. Baseline runs are exempt from opening restrictions but receive
 the same reports. No-data and failed results remain in the record.
+
+Report schema 2 adds `report.exposure` for the executed run:
+
+- `peak_sector_units` is the maximum number of open Units in any one ADR 0008
+  group across Session-end samples (ADR 0012).
+- `time_weighted_largest_sector_share` is the mean of each nonempty Session's
+  largest group Unit count divided by total open Units. Each Session has equal
+  weight. Empty Sessions are excluded; no nonempty Sessions yields zero.
+- `peak_concurrent_open_units` is the maximum total open Units across those
+  Session samples, giving context for sector counts and shares.
+- `independent_campaigns` counts distinct Campaign openings, including Campaigns
+  still open at the end. Adds and partial stops do not create Campaigns. A later
+  re-entry in the same instrument does. This is a lifecycle count, not a claim
+  of statistical independence.
+
+The report reader upcasts schema 1 with unknown (`null`) exposure instead of
+inventing historical zeros. Schema 2 also permits null when exposure could not
+be computed, such as a failure before a journal was available. The `.report`
+wrapper remains version 1; its nested report's `schema_version` is 2. Existing
+sidecars are never rewritten (ADR 0015, ADR 0018).
+
+Samples use the final recorded book of each closed Session, including fills
+committed after its close marker; unchanged books still contribute a sample.
+Incomplete Sessions without a close marker do not contribute. Shares, notional
+value, risk and unfilled holds are not Unit counts.
+
+Unclassified instruments are one group under ADR 0008. The current
+classification seam puts everything in that single group, so nonempty Session
+shares are 1 and peak sector Units equal peak total Units. This is expected,
+not a bug. The unreleased schema 2 changes in place; released evidence and
+version-1 reads remain unchanged.
+
+ADR 0008's declared [`total-long-cap-24`](../cmd/backtest/testdata/variants/total-long-cap-24/README.md)
+and [`total-long-cap-36`](../cmd/backtest/testdata/variants/total-long-cap-36/README.md)
+change only total-long headroom, keeping the Baseline at 12. Their synthetic
+command fixtures retain journals, registry entries, reports and openings, with
+byte comparisons and full replay/rerun checks. They do not judge either Variant
+against ADR 0012: that requires the diversified Baseline backtest (#42).

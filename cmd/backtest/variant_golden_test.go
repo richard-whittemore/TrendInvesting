@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -43,6 +44,8 @@ type declaredVariant struct {
 // declaredVariants is every Variant with a pinned golden.
 func declaredVariants() []declaredVariant {
 	return []declaredVariant{
+		{name: "total-long-cap-24", barsPath: fourUnitBarsFixture, declare: func(c *event.ConfigurationPayload) { c.MaxUnitsTotalLong = 24 }, scenario: assertCapVariantCampaign},
+		{name: "total-long-cap-36", barsPath: fourUnitBarsFixture, declare: func(c *event.ConfigurationPayload) { c.MaxUnitsTotalLong = 36 }, scenario: assertCapVariantCampaign},
 		{
 			name:     "recompute-n-at-add",
 			barsPath: "testdata/variants/recompute-n-at-add/bars.json",
@@ -89,6 +92,12 @@ func runDeclaredVariantGolden(t *testing.T, v declaredVariant) {
 	wantConfig := fixtureConfiguration(t)
 	wantConfig.StrategyID = v.name
 	v.declare(&wantConfig)
+	if v.name == "total-long-cap-24" || v.name == "total-long-cap-36" {
+		declared, err := registry.WiderTotalLongCap(fixtureConfiguration(t), v.name)
+		if err != nil || declared != wantConfig {
+			t.Fatalf("registry declaration differs: %+v %v", declared, err)
+		}
+	}
 	if cfg != wantConfig {
 		t.Fatalf("Variant %q declaration changed: want only the named strategy identity and its one declared dimension to differ from the existing fixture", v.name)
 	}
@@ -155,6 +164,32 @@ func runDeclaredVariantGolden(t *testing.T, v declaredVariant) {
 		t.Fatal(err)
 	}
 	registryGolden := filepath.Join(fixture, "registry", entryPath)
+	if v.name == "total-long-cap-24" || v.name == "total-long-cap-36" {
+		for _, suffix := range []string{".report", ".opening"} {
+			sidecar := strings.TrimSuffix(entryPath, ".json") + suffix
+			got, err := os.ReadFile(filepath.Join(root, sidecar))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pinned := filepath.Join(fixture, "registry", sidecar)
+			if *updateGolden {
+				if err := os.MkdirAll(filepath.Dir(pinned), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(pinned, got, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				want, err := os.ReadFile(pinned)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(got, want) {
+					t.Fatalf("Variant %s sidecar differs", suffix)
+				}
+			}
+		}
+	}
 	log.Reset()
 	if err := doReplay(context.Background(), path, &log); err != nil {
 		t.Fatalf("Variant replay: %v", err)
@@ -275,5 +310,22 @@ func assertRecomputedAdds(t *testing.T, records []journal.Record) {
 	}
 	if !changed {
 		t.Fatal("Variant never resized an Add from changed N")
+	}
+}
+
+// assertCapVariantCampaign requires real filled Units in the ADR 0008 fixture.
+func assertCapVariantCampaign(t *testing.T, records []journal.Record) {
+	t.Helper()
+	opened, added := 0, 0
+	for _, r := range records {
+		switch r.Envelope.Type {
+		case event.CampaignOpenedEventType:
+			opened++
+		case event.CampaignUnitAddedEventType:
+			added++
+		}
+	}
+	if opened != 1 || added != 3 {
+		t.Fatalf("opened %d added %d, want one four-Unit Campaign", opened, added)
 	}
 }

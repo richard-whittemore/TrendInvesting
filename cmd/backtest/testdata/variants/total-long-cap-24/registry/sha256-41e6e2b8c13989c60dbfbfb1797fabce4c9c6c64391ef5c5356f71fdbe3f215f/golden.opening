@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "variant": "total-long-cap-24",
+  "run_id": "golden",
+  "configuration_hash": "sha256:41e6e2b8c13989c60dbfbfb1797fabce4c9c6c64391ef5c5356f71fdbe3f215f",
+  "protocol_hash": "sha256:f69aafd4aec8272529195e27838c9db97f7eda7efe62634f6a24ff08d7309c7f",
+  "declared_start": "2026-01-02T00:00:00Z",
+  "declared_end": "2026-02-02T00:00:00Z",
+  "hypothesis": "sha256:41e6e2b8c13989c60dbfbfb1797fabce4c9c6c64391ef5c5356f71fdbe3f215f/golden",
+  "repeat": false,
+  "prior": null
+}
