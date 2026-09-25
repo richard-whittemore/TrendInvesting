@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/indicator"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
@@ -31,14 +32,56 @@ import (
 // a long entry.
 const campaignFillPrice = 201.25
 
-// breakoutBars is breakoutFixtureHighs as bars for one instrument: 55 warm-up
-// bars followed by the breakout bar at day(56), whose high is 200.
+// breakoutHistoryPreamble is how many additional completed Sessions
+// breakoutBars inserts before the breakout bar: the 55-bar warm-up alone
+// gives it only 56 total closes, and #34's Strength needs
+// indicator.StrengthLookbackBars+1 (ADR 0010, as amended 2026-09-25).
+const breakoutHistoryPreamble = indicator.StrengthLookbackBars + 1 - 56
+
+// stableRampWilderValue is N exactly as breakoutFixtureHighs' 55-bar ramp
+// (True Range 1..55) leaves indicator.WilderAverage — computed from the real
+// accumulator, never transcribed, so it can never drift from what the
+// reducer itself computes from the same bars.
+func stableRampWilderValue() float64 {
+	n, err := indicator.NewWilderAverage(indicator.DefaultPeriod)
+	if err != nil {
+		panic(err)
+	}
+	for i := 1; i <= 55; i++ {
+		n.Add(float64(i))
+	}
+	return n.Value()
+}
+
+// breakoutBars is breakoutFixtureHighs as bars for one instrument: the same
+// 55 warm-up bars at day(1)..day(55) and the breakout bar at day(56) every
+// existing caller already names (ADR 0002's 55-bar Entry Channel), with
+// breakoutHistoryPreamble additional Sessions inserted strictly between
+// them — timestamped inside day(55)'s own calendar day, one hour apart, so no
+// caller's day(56)-and-later reference shifts.
+//
+// Each inserted bar's own True Range is the Wilder recursion's fixed point,
+// exactly N as the 55-bar ramp leaves it (WilderNext(n, n, period) == n
+// algebraically, and exact in this fixture's own float64 arithmetic), and its
+// High is well under the ramp's own maximum of 155. So neither N nor the
+// Entry Channel differ from what every existing caller already asserts about
+// the breakout bar: the channel's last-55-bar window simply now reads bars
+// 9..63 (still topping out at bar 55's 155) instead of 1..55.
 func breakoutBars(instrumentID string) []event.CompletedBarPayload {
 	highs := breakoutFixtureHighs()
-	bars := make([]event.CompletedBarPayload, 0, len(highs))
-	for i, high := range highs {
+	ramp, breakoutHigh := highs[:55], highs[55]
+
+	bars := make([]event.CompletedBarPayload, 0, len(ramp)+breakoutHistoryPreamble+1)
+	for i, high := range ramp {
 		bars = append(bars, syntheticBar(instrumentID, day(i+1), high-100))
 	}
+
+	n := stableRampWilderValue()
+	for i := 1; i <= breakoutHistoryPreamble; i++ {
+		bars = append(bars, syntheticBar(instrumentID, day(55).Add(time.Duration(i)*time.Hour), n))
+	}
+
+	bars = append(bars, syntheticBar(instrumentID, day(56), breakoutHigh-100))
 	return bars
 }
 
@@ -459,16 +502,17 @@ func TestFillOpensACampaignWithNAndUnitSizeFrozen(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
+	bars := breakoutBars("AAPL")
 	emitted := newStream(t, cfg).
-		bars(breakoutBars("AAPL")).
+		bars(bars).
 		fill(openingFill("AAPL")).
 		mustRun()
 
-	// 55 warm-up bars emit one Setup-evaluated each; the breakout bar emits
-	// three (Setup-evaluated, Signal, Proposal); the fill emits three
+	// Every non-breakout bar emits one Setup-evaluated each; the breakout bar
+	// emits three (Setup-evaluated, Signal, Proposal); the fill emits three
 	// (Campaign-opened, Protective-Stop-set, then Unit 1's Exit Order).
-	if len(emitted) != 61 {
-		t.Fatalf("len(emitted) = %d, want 61 (55 x 1, the breakout bar's 3, and the fill's 3)", len(emitted))
+	if want := len(bars) + 5; len(emitted) != want {
+		t.Fatalf("len(emitted) = %d, want %d (%d x 1, the breakout bar's 3, and the fill's 3)", len(emitted), want, len(bars)-1)
 	}
 
 	proposalEnvelope := onlyEnvelopeOfType(t, emitted, event.TradeProposalEventType)
@@ -702,8 +746,9 @@ func TestOnlyAFillOpensACampaignNotTheProposalThatPrecededIt(t *testing.T) {
 func TestProposalWithNoFillOpensNoCampaignAndExpiresWithItsBar(t *testing.T) {
 	t.Parallel()
 
+	bars := breakoutBars("AAPL")
 	emitted := newStream(t, validConfigurationPayload()).
-		bars(breakoutBars("AAPL")).
+		bars(bars).
 		bar(nextBreakoutBar("AAPL")).
 		mustRun()
 
@@ -711,10 +756,11 @@ func TestProposalWithNoFillOpensNoCampaignAndExpiresWithItsBar(t *testing.T) {
 		t.Fatalf("got %d Campaign(s), want 0: no fill arrived", got)
 	}
 
-	// 55 warm-up bars, the breakout bar's 3 events, and bar 57's 4 (the
-	// expiry of bar 56's proposal, then Setup-evaluated, Signal, Proposal).
-	if len(emitted) != 62 {
-		t.Fatalf("len(emitted) = %d, want 62", len(emitted))
+	// Every non-breakout bar of the preamble, the breakout bar's 3 events, and
+	// bar 57's 4 (the expiry of bar 56's proposal, then Setup-evaluated,
+	// Signal, Proposal).
+	if want := len(bars) + 6; len(emitted) != want {
+		t.Fatalf("len(emitted) = %d, want %d", len(emitted), want)
 	}
 
 	expiredEnvelope := onlyEnvelopeOfType(t, emitted, event.ProposalExpiredEventType)
@@ -869,8 +915,9 @@ func TestSecondPartialFillWithADifferentFillIDIsRejected(t *testing.T) {
 func TestDuplicateFillIsAnIdempotentNoOp(t *testing.T) {
 	t.Parallel()
 
+	bars := breakoutBars("AAPL")
 	emitted := newStream(t, validConfigurationPayload()).
-		bars(breakoutBars("AAPL")).
+		bars(bars).
 		fill(openingFill("AAPL")).
 		fill(openingFill("AAPL")).
 		mustRun()
@@ -879,11 +926,11 @@ func TestDuplicateFillIsAnIdempotentNoOp(t *testing.T) {
 		t.Fatalf("got %d Campaign(s), want exactly 1 despite the duplicate delivery", got)
 	}
 	// The second delivery must emit nothing at all, not merely nothing new:
-	// the emission count is identical to the single-delivery run (61: the
-	// warm-up and breakout bars' 58, plus the opening fill's Campaign-opened,
-	// Protective-Stop-set and Exit Order).
-	if len(emitted) != 61 {
-		t.Errorf("len(emitted) = %d, want 61 (the duplicate fill emits nothing)", len(emitted))
+	// the emission count is identical to the single-delivery run (the
+	// warm-up and breakout bars' events, plus the opening fill's
+	// Campaign-opened, Protective-Stop-set and Exit Order).
+	if want := len(bars) + 5; len(emitted) != want {
+		t.Errorf("len(emitted) = %d, want %d (the duplicate fill emits nothing)", len(emitted), want)
 	}
 }
 
@@ -1283,8 +1330,9 @@ func TestFillAfterTheDecisionBarButBeforeTheNextIsAccepted(t *testing.T) {
 	fill := openingFill("AAPL")
 	fill.FilledAt = nextSession
 
+	bars := breakoutBars("AAPL")
 	emitted := newStream(t, validConfigurationPayload()).
-		bars(breakoutBars("AAPL")).
+		bars(bars).
 		fill(fill).
 		bar(nextBreakoutBar("AAPL")).
 		mustRun()
@@ -1296,8 +1344,8 @@ func TestFillAfterTheDecisionBarButBeforeTheNextIsAccepted(t *testing.T) {
 	// The bar that follows is applied without error — the instrument is now
 	// in a Campaign, so it produces no Setup/Signal/proposal, only its own
 	// Campaign-evaluated event (#13).
-	if len(emitted) != 62 {
-		t.Errorf("len(emitted) = %d, want 62 (the bar after the fill adds its own Campaign-evaluated event, #13)", len(emitted))
+	if want := len(bars) + 6; len(emitted) != want {
+		t.Errorf("len(emitted) = %d, want %d (the bar after the fill adds its own Campaign-evaluated event, #13)", len(emitted), want)
 	}
 }
 
@@ -1371,8 +1419,9 @@ func TestBarPredatingTheCampaignsOpeningFillFailsClosed(t *testing.T) {
 func TestNoSignalOrProposalWhileACampaignIsOpen(t *testing.T) {
 	t.Parallel()
 
+	bars := breakoutBars("AAPL")
 	withCampaign := newStream(t, validConfigurationPayload()).
-		bars(breakoutBars("AAPL")).
+		bars(bars).
 		fill(openingFill("AAPL")).
 		bar(nextBreakoutBar("AAPL")).
 		mustRun()
@@ -1381,7 +1430,7 @@ func TestNoSignalOrProposalWhileACampaignIsOpen(t *testing.T) {
 	// 57 is a breakout in its own right and is proposed as usual. The
 	// difference between the two is exactly what the Campaign suppressed.
 	withoutCampaign := newStream(t, validConfigurationPayload()).
-		bars(breakoutBars("AAPL")).
+		bars(bars).
 		bar(nextBreakoutBar("AAPL")).
 		mustRun()
 
@@ -1395,8 +1444,8 @@ func TestNoSignalOrProposalWhileACampaignIsOpen(t *testing.T) {
 	if got := countFor(t, withCampaign, event.TradeProposalEventType, "AAPL"); got != 1 {
 		t.Errorf("AAPL emitted %d proposal(s) with a Campaign open, want 1", got)
 	}
-	if got := countFor(t, withCampaign, event.SetupEvaluatedEventType, "AAPL"); got != 56 {
-		t.Errorf("AAPL emitted %d Setup-evaluated event(s), want 56 (bars 1..56 only): an instrument in a Campaign is not a Setup", got)
+	if got, want := countFor(t, withCampaign, event.SetupEvaluatedEventType, "AAPL"), len(bars); got != want {
+		t.Errorf("AAPL emitted %d Setup-evaluated event(s), want %d (bars 1..%[2]d only): an instrument in a Campaign is not a Setup", got, want)
 	}
 	// Bar 57 therefore emits no Setup/Signal/proposal at all — but #13 gives
 	// it exactly one Campaign-evaluated event, since nextBreakoutBar's Low
@@ -1413,8 +1462,8 @@ func TestNoSignalOrProposalWhileACampaignIsOpen(t *testing.T) {
 	if last := withCampaign[len(withCampaign)-1]; last.Type != event.CampaignEvaluatedEventType {
 		t.Errorf("last emission is %q, want the Campaign-evaluated event bar 57 produces (#13)", last.Type)
 	}
-	if len(withCampaign) != 62 {
-		t.Errorf("len(emitted) = %d, want 62: the bar arriving during a Campaign now adds its own Campaign-evaluated event (#13)", len(withCampaign))
+	if want := len(bars) + 6; len(withCampaign) != want {
+		t.Errorf("len(emitted) = %d, want %d: the bar arriving during a Campaign now adds its own Campaign-evaluated event (#13)", len(withCampaign), want)
 	}
 }
 
@@ -1425,7 +1474,7 @@ func TestASecondInstrumentIsUnaffectedByAnothersCampaign(t *testing.T) {
 
 	emitted := staggered(newStream(t, validConfigurationPayload()), breakoutBars("AAPL"), laggedBreakoutBars("MSFT")).
 		fill(openingFill("AAPL")).
-		session(nextBreakoutBar("AAPL"), laggedBreakoutBars("MSFT")[55]).
+		session(nextBreakoutBar("AAPL"), laggedBreakoutBars("MSFT")[len(laggedBreakoutBars("MSFT"))-1]).
 		mustRun()
 
 	if got := countFor(t, emitted, event.CampaignOpenedEventType, "AAPL"); got != 1 {
@@ -1437,8 +1486,8 @@ func TestASecondInstrumentIsUnaffectedByAnothersCampaign(t *testing.T) {
 	if got := countFor(t, emitted, event.TradeProposalEventType, "MSFT"); got != 1 {
 		t.Errorf("MSFT emitted %d proposal(s), want 1", got)
 	}
-	if got := countFor(t, emitted, event.SetupEvaluatedEventType, "MSFT"); got != 56 {
-		t.Errorf("MSFT emitted %d Setup-evaluated event(s), want 56", got)
+	if got, want := countFor(t, emitted, event.SetupEvaluatedEventType, "MSFT"), len(breakoutBars("MSFT")); got != want {
+		t.Errorf("MSFT emitted %d Setup-evaluated event(s), want %d", got, want)
 	}
 	// AAPL's bar 57 is still suppressed by its own Campaign.
 	if got := countFor(t, emitted, event.SignalEventType, "AAPL"); got != 1 {
@@ -1623,8 +1672,9 @@ func TestAfterAStopExitTheInstrumentSignalsAgain(t *testing.T) {
 	campaignN := breakoutFixtureN(t, cfg)
 	stop := closingStopFill("AAPL", campaignID, campaignN, day(57))
 
+	bars := breakoutBars("AAPL")
 	emitted := newStream(t, cfg).
-		bars(breakoutBars("AAPL")).
+		bars(bars).
 		fill(openingFill("AAPL")).
 		fill(stop).
 		bar(nextBreakoutBar("AAPL")).
@@ -1636,7 +1686,7 @@ func TestAfterAStopExitTheInstrumentSignalsAgain(t *testing.T) {
 	// Both the entry fill (day 56) and the closing stop fill (day 57) land
 	// before the fixture's next bar (also day 57, see nextBreakoutBar's
 	// doc comment) is even processed, so no bar in this fixture is ever
-	// evaluated WHILE the Campaign is open — every one of the 56 warm-up
+	// evaluated WHILE the Campaign is open — every one of the warm-up
 	// and breakout bars, plus the bar after the exit, gets an ordinary
 	// Setup-evaluated event. The point this test exists to prove is what
 	// happens AFTER the exit, not the suppression while open (that is
@@ -1644,8 +1694,8 @@ func TestAfterAStopExitTheInstrumentSignalsAgain(t *testing.T) {
 	// exit is itself a fresh breakout (nextBreakoutBar's doc comment), so it
 	// produces a second Signal and proposal exactly as if no Campaign had
 	// ever existed.
-	if got := countFor(t, emitted, event.SetupEvaluatedEventType, "AAPL"); got != 57 {
-		t.Errorf("AAPL emitted %d Setup-evaluated event(s), want 57 (every bar, since none falls while the campaign is open)", got)
+	if got, want := countFor(t, emitted, event.SetupEvaluatedEventType, "AAPL"), len(bars)+1; got != want {
+		t.Errorf("AAPL emitted %d Setup-evaluated event(s), want %d (every bar, since none falls while the campaign is open)", got, want)
 	}
 	if got := countFor(t, emitted, event.SignalEventType, "AAPL"); got != 2 {
 		t.Errorf("AAPL emitted %d Signal(s), want 2 (the original entry, and the fresh one after the exit)", got)
@@ -1667,8 +1717,9 @@ func TestDuplicateStopFillIsAnIdempotentNoOp(t *testing.T) {
 	campaignN := breakoutFixtureN(t, cfg)
 	stop := closingStopFill("AAPL", campaignID, campaignN, day(57))
 
+	bars := breakoutBars("AAPL")
 	emitted := newStream(t, cfg).
-		bars(breakoutBars("AAPL")).
+		bars(bars).
 		fill(openingFill("AAPL")).
 		fill(stop).
 		fill(stop).
@@ -1677,11 +1728,11 @@ func TestDuplicateStopFillIsAnIdempotentNoOp(t *testing.T) {
 	if got := len(envelopesOfType(emitted, event.CampaignExitedEventType)); got != 1 {
 		t.Fatalf("got %d Campaign-exited event(s), want exactly 1 despite the duplicate delivery", got)
 	}
-	// 55 x 1, the breakout bar's 3, the opening fill's 3, the stop fill's 2
-	// (units-stopped, Campaign-exited):
-	// the duplicate delivery emits nothing at all, not merely nothing new.
-	if len(emitted) != 63 {
-		t.Errorf("len(emitted) = %d, want 63 (the duplicate stop fill emits nothing)", len(emitted))
+	// Every non-breakout bar x 1, the breakout bar's 3, the opening fill's 3,
+	// the stop fill's 2 (units-stopped, Campaign-exited): the duplicate
+	// delivery emits nothing at all, not merely nothing new.
+	if want := len(bars) + 7; len(emitted) != want {
+		t.Errorf("len(emitted) = %d, want %d (the duplicate stop fill emits nothing)", len(emitted), want)
 	}
 }
 
@@ -1884,7 +1935,7 @@ func TestASecondInstrumentIsUnaffectedByAnothersStopExit(t *testing.T) {
 
 	emitted := staggered(newStream(t, cfg), breakoutBars("AAPL"), laggedBreakoutBars("MSFT")).
 		fill(openingFill("AAPL")).
-		bar(laggedBreakoutBars("MSFT")[55]).
+		bar(laggedBreakoutBars("MSFT")[len(laggedBreakoutBars("MSFT"))-1]).
 		fill(stop).
 		mustRun()
 
@@ -2023,8 +2074,9 @@ func TestOpeningFillRedeliveredAfterTheCampaignClosedIsANoOp(t *testing.T) {
 	campaignN := breakoutFixtureN(t, cfg)
 	stop := closingStopFill("AAPL", campaignID, campaignN, day(57))
 
+	bars := breakoutBars("AAPL")
 	emitted := newStream(t, cfg).
-		bars(breakoutBars("AAPL")).
+		bars(bars).
 		fill(openingFill("AAPL")).
 		fill(stop).
 		fill(openingFill("AAPL")). // redelivered, after the campaign already closed
@@ -2037,11 +2089,11 @@ func TestOpeningFillRedeliveredAfterTheCampaignClosedIsANoOp(t *testing.T) {
 		t.Fatalf("got %d Campaign-exited event(s), want exactly 1", got)
 	}
 	// The redelivered opening fill must emit nothing at all, not merely
-	// nothing new: 55 warm-up + the breakout bar's 3 + the opening fill's 3
-	// (Campaign-opened, Protective-Stop-set, Exit Order) + the stop fill's 2
-	// (units-stopped, Campaign-exited).
-	if len(emitted) != 63 {
-		t.Errorf("len(emitted) = %d, want 63 (the redelivered opening fill emits nothing)", len(emitted))
+	// nothing new: every non-breakout bar + the breakout bar's 3 + the
+	// opening fill's 3 (Campaign-opened, Protective-Stop-set, Exit Order) +
+	// the stop fill's 2 (units-stopped, Campaign-exited).
+	if want := len(bars) + 7; len(emitted) != want {
+		t.Errorf("len(emitted) = %d, want %d (the redelivered opening fill emits nothing)", len(emitted), want)
 	}
 }
 

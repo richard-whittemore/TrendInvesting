@@ -500,7 +500,7 @@
     {
       "file": "internal/strategy/reducer.go",
       "function": "(*transition).sizeUnit",
-      "statement": "return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonNNotReady, fmt.Sprintf(\"n is not a usable volatility reading (n %v); no unit can be sized from it\", n), 0, 0)",
+      "statement": "return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonNNotReady, fmt.Sprintf(\"n is not a usable volatility reading (n %v); no unit can be sized from it\", n), 0, 0, strength)",
       "category": "unreachable-by-invariant",
       "reason": "sizeUnit has one call site, applySessionClosed, which sizes only a pendingSignalState recorded by applyCompletedBar inside the branch guarded by `ready := nReady && entryChannelReady`, so nReady is always true here. The guard stays because it is what stops a division by an unusable N if that Tier gate ever changes, and 'it cannot happen here' is not a reason to divide by it."
     },
@@ -516,7 +516,7 @@
       "function": "(*transition).stateFor",
       "statement": "return nil, fmt.Errorf(\"strategy: %w\", err)",
       "category": "unreachable-by-invariant",
-      "reason": "indicator.NewWilderAverage, NewEntryChannel and NewExitChannel refuse a non-positive length. The period is indicator.DefaultPeriod, a positive compile-time constant, and the two channel lengths come from a ConfigurationPayload whose Validate has already required both to be positive."
+      "reason": "indicator.NewWilderAverage, NewEntryChannel, NewExitChannel and NewRollingWindow refuse a non-positive length/capacity. The period is indicator.DefaultPeriod, and the ranking seam's two capacities (StrengthLookbackBars+1, DollarVolumeWindow) are positive compile-time constants; the two channel lengths come from a ConfigurationPayload whose Validate has already required both to be positive."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -524,7 +524,7 @@
       "statement": "return nil, fmt.Errorf(\"strategy: %w\", err)",
       "occurrence": 2,
       "category": "unreachable-by-invariant",
-      "reason": "indicator.NewWilderAverage, NewEntryChannel and NewExitChannel refuse a non-positive length. The period is indicator.DefaultPeriod, a positive compile-time constant, and the two channel lengths come from a ConfigurationPayload whose Validate has already required both to be positive."
+      "reason": "indicator.NewWilderAverage, NewEntryChannel, NewExitChannel and NewRollingWindow refuse a non-positive length/capacity. The period is indicator.DefaultPeriod, and the ranking seam's two capacities (StrengthLookbackBars+1, DollarVolumeWindow) are positive compile-time constants; the two channel lengths come from a ConfigurationPayload whose Validate has already required both to be positive."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -532,7 +532,31 @@
       "statement": "return nil, fmt.Errorf(\"strategy: %w\", err)",
       "occurrence": 3,
       "category": "unreachable-by-invariant",
-      "reason": "indicator.NewWilderAverage, NewEntryChannel and NewExitChannel refuse a non-positive length. The period is indicator.DefaultPeriod, a positive compile-time constant, and the two channel lengths come from a ConfigurationPayload whose Validate has already required both to be positive."
+      "reason": "indicator.NewWilderAverage, NewEntryChannel, NewExitChannel and NewRollingWindow refuse a non-positive length/capacity. The period is indicator.DefaultPeriod, and the ranking seam's two capacities (StrengthLookbackBars+1, DollarVolumeWindow) are positive compile-time constants; the two channel lengths come from a ConfigurationPayload whose Validate has already required both to be positive."
+    },
+    {
+      "file": "internal/strategy/reducer.go",
+      "function": "(*transition).stateFor",
+      "statement": "return nil, fmt.Errorf(\"strategy: %w\", err)",
+      "occurrence": 4,
+      "category": "unreachable-by-invariant",
+      "reason": "indicator.NewWilderAverage, NewEntryChannel, NewExitChannel and NewRollingWindow refuse a non-positive length/capacity. The period is indicator.DefaultPeriod, and the ranking seam's two capacities (StrengthLookbackBars+1, DollarVolumeWindow) are positive compile-time constants; the two channel lengths come from a ConfigurationPayload whose Validate has already required both to be positive."
+    },
+    {
+      "file": "internal/strategy/reducer.go",
+      "function": "(*transition).stateFor",
+      "statement": "return nil, fmt.Errorf(\"strategy: %w\", err)",
+      "occurrence": 5,
+      "category": "unreachable-by-invariant",
+      "reason": "indicator.NewWilderAverage, NewEntryChannel, NewExitChannel and NewRollingWindow refuse a non-positive length/capacity. The period is indicator.DefaultPeriod, and the ranking seam's two capacities (StrengthLookbackBars+1, DollarVolumeWindow) are positive compile-time constants; the two channel lengths come from a ConfigurationPayload whose Validate has already required both to be positive."
+    },
+    {
+      "file": "internal/strategy/reducer.go",
+      "function": "(*transition).stateFor",
+      "statement": "return nil, fmt.Errorf(\"strategy: %w\", err)",
+      "occurrence": 6,
+      "category": "unreachable-by-invariant",
+      "reason": "indicator.NewWilderAverage, NewEntryChannel, NewExitChannel and NewRollingWindow refuse a non-positive length/capacity. The period is indicator.DefaultPeriod, and the ranking seam's two capacities (StrengthLookbackBars+1, DollarVolumeWindow) are positive compile-time constants; the two channel lengths come from a ConfigurationPayload whose Validate has already required both to be positive."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -665,9 +689,24 @@
       "file": "internal/strategy/session.go",
       "function": "(*transition).applySessionClosed",
       "statement": "return nil, err",
-      "occurrence": 4,
+      "occurrence": 3,
+      "category": "unreachable-by-construction",
+      "reason": "Propagates decline (via stampDecline) for a Signal rankSignal reports as insufficient history: the same validated-payload-json guarantee as every other stampDecline call site in this package — the payload's Reason is one of this package's own constants, Strength is exactly zero, and the remaining fields come from the bar under decision, already validated."
+    },
+    {
+      "file": "internal/strategy/session.go",
+      "function": "(*transition).applySessionClosed",
+      "statement": "return nil, err",
+      "occurrence": 5,
       "category": "unreachable-by-construction",
       "reason": "Propagates rememberPendingProposal, whose only failure is its own excluded decode of the trade proposal sizeUnit marshalled from a validated payload a statement earlier."
+    },
+    {
+      "file": "internal/strategy/session.go",
+      "function": "(*transition).rankSignal",
+      "statement": "return signalRanking{}, fmt.Sprintf( \"n is not a usable volatility reading at the session's close (n %v): insufficient history to rank (ADR 0010, as amended 2026-09-25)\", n), false",
+      "category": "unreachable-by-invariant",
+      "reason": "rankSignal's only caller, applySessionClosed, runs it only for an id with a pendingSignal, which applyCompletedBar records only when nReady was true for that same instrument's own bar (the Tier gate). A Wilder average already ready and positive cannot become non-positive from one more non-negative True Range added to it (WilderNext's weighted-average shape), so this Session's own N, read here after that bar has advanced it, is provably still ready and positive. The guard stays for the identical reason sizeUnit's own dead nReady check does: it is what stops rankSignal dividing by an unusable N if that proof's premise ever stops holding."
     },
     {
       "file": "internal/strategy/campaign.go",

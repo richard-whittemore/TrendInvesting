@@ -61,6 +61,7 @@ func validTradeProposal() event.TradeProposalPayload {
 		OrderType:              event.OrderTypeStopLimit,
 		GapBufferN:             1,
 		PriceCap:               200 + float64(1*proposalN),
+		Strength:               2.5,
 	}
 }
 
@@ -296,6 +297,17 @@ func TestTradeProposalPayloadValidate(t *testing.T) {
 			mutate:  func(p *event.TradeProposalPayload) { p.RealisedRiskAtStop = -0.01 },
 			wantErr: "realised risk at stop",
 		},
+		{
+			// Strength can legitimately be negative: an instrument can make
+			// a fresh 55-bar high while its 63-bar price change is negative.
+			name:   "negative strength is valid",
+			mutate: func(p *event.TradeProposalPayload) { p.Strength = -12.5 },
+		},
+		{
+			// And legitimately zero: a flat 63-bar price change.
+			name:   "zero strength is valid",
+			mutate: func(p *event.TradeProposalPayload) { p.Strength = 0 },
+		},
 	}
 
 	for _, tt := range tests {
@@ -343,6 +355,7 @@ func TestTradeProposalPayloadValidateRejectsNonFiniteFields(t *testing.T) {
 		{"dollars per point", func(p *event.TradeProposalPayload, f float64) { p.DollarsPerPoint = f }, "dollars per point must be finite"},
 		{"notional account", func(p *event.TradeProposalPayload, f float64) { p.NotionalAccount = f }, "notional account must be finite"},
 		{"protective stop intent", func(p *event.TradeProposalPayload, f float64) { p.ProtectiveStopIntent = f }, "protective stop intent must be finite"},
+		{"strength", func(p *event.TradeProposalPayload, f float64) { p.Strength = f }, "strength must be finite"},
 	}
 
 	nonFinite := []struct {
@@ -410,8 +423,8 @@ func TestTradeProposalEventConstants(t *testing.T) {
 	if event.TradeProposalEventType != "strategy.trade.proposed" {
 		t.Errorf("TradeProposalEventType = %q, want %q", event.TradeProposalEventType, "strategy.trade.proposed")
 	}
-	if event.TradeProposalSchemaVersion != 2 {
-		t.Errorf("TradeProposalSchemaVersion = %d, want 2 (version 2 added the price cap, ADR 0005)", event.TradeProposalSchemaVersion)
+	if event.TradeProposalSchemaVersion != 3 {
+		t.Errorf("TradeProposalSchemaVersion = %d, want 3 (version 3 added Strength, ADR 0010)", event.TradeProposalSchemaVersion)
 	}
 	// The rule names say what the rule computes, not which vendor's system
 	// it resembles — #9's finding, applied to sizing: a Variant that changes
@@ -488,6 +501,7 @@ func TestTradeProposalPayloadJSONTags(t *testing.T) {
 		"dollars_per_point",
 		"notional_account",
 		"protective_stop_intent",
+		"strength",
 	} {
 		if _, ok := asMap[key]; !ok {
 			t.Errorf("encoded payload missing expected key %q: %s", key, encoded)
@@ -507,6 +521,21 @@ func validProposalDeclined() event.ProposalDeclinedPayload {
 		SignalID:     "signal:AAPL:2026-02-27T00:00:00.000000000Z",
 		Reason:       event.DeclineReasonQuantityBelowOneUnit,
 		Detail:       "notional account 100.00 at unit volatility fraction 0.005000 sizes 0 shares at n 40.698903",
+		Strength:     3.5,
+	}
+}
+
+// validProposalDeclinedInsufficientHistory mirrors validProposalDeclined for
+// the entry-kind, insufficient-history shape (ADR 0010, as amended
+// 2026-09-25, schema 7): Strength is zero, since ranking never computed one.
+func validProposalDeclinedInsufficientHistory() event.ProposalDeclinedPayload {
+	return event.ProposalDeclinedPayload{
+		InstrumentID: "AAPL",
+		PeriodEnd:    proposalPeriodEnd,
+		Kind:         event.ProposalDeclinedKindEntry,
+		SignalID:     "signal:AAPL:2026-02-27T00:00:00.000000000Z",
+		Reason:       event.DeclineReasonInsufficientHistory,
+		Detail:       "63 split-adjusted close(s) (need 64) and 20 raw volume(s) (need 20)",
 	}
 }
 
@@ -541,6 +570,7 @@ func validProposalDeclinedUnitCapExceeded() event.ProposalDeclinedPayload {
 		Cap:               event.CapUnclassifiedGroup,
 		CapLimit:          10,
 		PostTradeExposure: 11,
+		Strength:          3.5,
 	}
 }
 
@@ -876,14 +906,96 @@ func TestProposalDeclinedPayloadValidateUnitCapExceeded(t *testing.T) {
 	}
 }
 
+// TestProposalDeclinedPayloadValidateInsufficientHistory pins
+// DeclineReasonInsufficientHistory's own invariant (ADR 0010, as amended
+// 2026-09-25): Strength must be exactly zero, since ranking never computed
+// one for a Signal this reason declines to rank at all.
+func TestProposalDeclinedPayloadValidateInsufficientHistory(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(*event.ProposalDeclinedPayload)
+		wantErr string
+	}{
+		{name: "valid"},
+		{
+			name:    "strength set for insufficient history",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.Strength = 1 },
+			wantErr: "strength must be zero",
+		},
+		{
+			name:    "nan strength for insufficient history",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.Strength = math.NaN() },
+			wantErr: "strength must be zero",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := validProposalDeclinedInsufficientHistory()
+			if tt.mutate != nil {
+				tt.mutate(&payload)
+			}
+
+			err := payload.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestProposalDeclinedPayloadValidateStrength pins Strength's own reason- and
+// kind-keyed rule (ADR 0010, as amended 2026-09-25), independent of any
+// specific decline reason's own figures: required and finite for an
+// entry-kind decline that is not DeclineReasonInsufficientHistory, and
+// exactly zero for an add-kind decline (an Add answers no Signal).
+func TestProposalDeclinedPayloadValidateStrength(t *testing.T) {
+	t.Parallel()
+
+	t.Run("entry kind requires a finite strength", func(t *testing.T) {
+		t.Parallel()
+		payload := validProposalDeclined() // entry kind, quantity-below-one-unit
+		payload.Strength = math.NaN()
+		if err := payload.Validate(); err == nil || !strings.Contains(err.Error(), "strength must be finite") {
+			t.Fatalf("Validate() error = %v, want substring %q", err, "strength must be finite")
+		}
+	})
+	t.Run("entry kind accepts a negative strength", func(t *testing.T) {
+		t.Parallel()
+		payload := validProposalDeclined()
+		payload.Strength = -7.25
+		if err := payload.Validate(); err != nil {
+			t.Fatalf("Validate() error = %v, want nil", err)
+		}
+	})
+	t.Run("add kind rejects a nonzero strength", func(t *testing.T) {
+		t.Parallel()
+		payload := validProposalDeclinedInsufficientCash() // add kind
+		payload.Strength = 1
+		if err := payload.Validate(); err == nil || !strings.Contains(err.Error(), "strength must be zero") {
+			t.Fatalf("Validate() error = %v, want substring %q", err, "strength must be zero")
+		}
+	})
+}
+
 func TestProposalDeclinedEventConstants(t *testing.T) {
 	t.Parallel()
 
 	if event.ProposalDeclinedEventType != "strategy.proposal.declined" {
 		t.Errorf("ProposalDeclinedEventType = %q, want %q", event.ProposalDeclinedEventType, "strategy.proposal.declined")
 	}
-	if event.ProposalDeclinedSchemaVersion != 6 {
-		t.Errorf("ProposalDeclinedSchemaVersion = %d, want 6", event.ProposalDeclinedSchemaVersion)
+	if event.ProposalDeclinedSchemaVersion != 7 {
+		t.Errorf("ProposalDeclinedSchemaVersion = %d, want 7", event.ProposalDeclinedSchemaVersion)
 	}
 	for _, reason := range []string{
 		event.DeclineReasonNNotReady,
@@ -892,6 +1004,7 @@ func TestProposalDeclinedEventConstants(t *testing.T) {
 		event.DeclineReasonInsufficientCash,
 		event.DeclineReasonUnitCostNotRepresentable,
 		event.DeclineReasonUnitCapExceeded,
+		event.DeclineReasonInsufficientHistory,
 	} {
 		if reason == "" {
 			t.Error("every decline reason constant must be a non-empty enumerated value")
@@ -986,7 +1099,7 @@ func TestProposalDeclinedPayloadJSONTags(t *testing.T) {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
 
-	for _, key := range []string{"instrument_id", "period_end", "kind", "signal_id", "campaign_id", "reason", "detail", "required_cash", "available_cash", "cap", "cap_limit", "post_trade_exposure"} {
+	for _, key := range []string{"instrument_id", "period_end", "kind", "signal_id", "campaign_id", "reason", "detail", "required_cash", "available_cash", "cap", "cap_limit", "post_trade_exposure", "strength"} {
 		if _, ok := asMap[key]; !ok {
 			t.Errorf("encoded payload missing expected key %q: %s", key, encoded)
 		}

@@ -215,13 +215,34 @@ func buildCorruptedCampaignState(t *testing.T, r *Reducer, protectiveStop float6
 	if err != nil {
 		t.Fatalf("indicator.NewExitChannel() error = %v", err)
 	}
+	// #34: every instrumentState now also carries the ranking seam's bounded
+	// history, fed alongside n/entryChannel/exitChannel regardless of
+	// Campaign state (reducer.go's applyCompletedBar). Fresh, empty windows
+	// here are fine: this file's point is the Protective Stop invariant, and
+	// none of these tests' fixture bars ever reach the session-close pass
+	// that would read them.
+	splitAdjustedCloses, err := indicator.NewRollingWindow(indicator.StrengthLookbackBars + 1)
+	if err != nil {
+		t.Fatalf("indicator.NewRollingWindow() error = %v", err)
+	}
+	rawCloses, err := indicator.NewRollingWindow(indicator.DollarVolumeWindow)
+	if err != nil {
+		t.Fatalf("indicator.NewRollingWindow() error = %v", err)
+	}
+	rawVolumes, err := indicator.NewRollingWindow(indicator.DollarVolumeWindow)
+	if err != nil {
+		t.Fatalf("indicator.NewRollingWindow() error = %v", err)
+	}
 
 	r.instruments = map[string]*instrumentState{
 		instrumentID: {
-			n:             n,
-			entryChannel:  entryChannel,
-			exitChannel:   exitChannel,
-			lastPeriodEnd: day(1),
+			n:                   n,
+			entryChannel:        entryChannel,
+			exitChannel:         exitChannel,
+			splitAdjustedCloses: splitAdjustedCloses,
+			rawCloses:           rawCloses,
+			rawVolumes:          rawVolumes,
+			lastPeriodEnd:       day(1),
 			campaign: &campaignState{
 				campaignID:   "campaign:AAPL:corrupted",
 				instrumentID: instrumentID,

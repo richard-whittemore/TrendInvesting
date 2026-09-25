@@ -238,6 +238,23 @@ type instrumentState struct {
 	// entryChannel and n.
 	exitChannel *indicator.ExitChannel
 
+	// splitAdjustedCloses, rawCloses and rawVolumes are the bounded history
+	// the ranking seam reads (session.go: rankSignal; CONTEXT.md: "Strength";
+	// ADR 0010, as amended by the owner's decision of 2026-09-25).
+	// splitAdjustedCloses holds the last indicator.StrengthLookbackBars+1
+	// split-adjusted closes (ADR 0004) Strength divides by N(d) from;
+	// rawCloses and rawVolumes hold the last indicator.DollarVolumeWindow raw
+	// closes and volumes the median dollar volume tie-break reads — the same
+	// definition ADR 0009's eligibility test will share. All three are fed
+	// once per completed bar, in applyCompletedBar's advance block, alongside
+	// previousClose: unlike N and the channels above, ranking runs only once
+	// the Session has fully closed (session.go), so this bar's own close and
+	// volume are already completed facts by then and need no evaluate-before-
+	// advance discipline.
+	splitAdjustedCloses *indicator.RollingWindow
+	rawCloses           *indicator.RollingWindow
+	rawVolumes          *indicator.RollingWindow
+
 	// Two additions, both defined and explained in campaign.go.
 	// pendingProposal is a trade proposal emitted and not yet resolved, and is
 	// deliberately NOT position state: no Campaign is ever derived from it
@@ -685,6 +702,16 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 	state.previousClose = view.Close
 	state.hasPreviousClose = true
 	state.lastPeriodEnd = bar.PeriodEnd
+	// Strength (CONTEXT.md: "Strength"; ADR 0010) and the dollar-volume
+	// tie-break (ADR 0009; ADR 0010, as amended by the owner's decision of
+	// 2026-09-25) both read this bar's own close and volume once they are
+	// completed facts, at the Session's close (session.go: rankSignal) —
+	// unlike N and the channels above, which must exclude this bar to keep
+	// the resting order computable before it opens (ADR 0005). Fed here,
+	// unconditionally, so the history is warm the moment ranking needs it.
+	state.splitAdjustedCloses.Add(view.Close)
+	state.rawCloses.Add(bar.Raw.Close)
+	state.rawVolumes.Add(bar.Raw.Volume)
 	// Remembered unconditionally, regardless of Campaign state, so the
 	// same-bar Add chain (campaign.go's evaluateAdd/applyAddFill) can read
 	// THIS bar's high, period end and earliest-fill-at bound from a LATER
@@ -957,7 +984,14 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 // previousClose is the period end of the bar BEFORE the decision bar — the
 // moment the decision bar opened — and is what ADR 0010's cash basis is
 // measured at, not the decision bar's own close.
-func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input event.Envelope, signalID string, entryLevel, n float64, nReady bool, previousClose time.Time) (event.Envelope, error) {
+//
+// strength is the Signal's own Strength, already computed by rankSignal
+// (session.go) for the ranking pass that placed this Signal ahead of or
+// behind the Session's others (ADR 0010, as amended by the owner's decision
+// of 2026-09-25). Every path below carries it into whichever decision event
+// results, proposed or declined, so "each Signal's Strength appears in its
+// decision event" holds for every one of sizeUnit's outcomes.
+func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input event.Envelope, signalID string, entryLevel, n float64, nReady bool, previousClose time.Time, strength float64) (event.Envelope, error) {
 	// Unreachable from this reducer: Tier A requires a ready N, and a
 	// Signal is only emitted at Tier A. Guarded anyway — .greptile/rules.md
 	// requires a zero, negative or not-yet-warm volatility value to fail
@@ -965,7 +999,7 @@ func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input ev
 	// the Tier logic above ever changes.
 	if !nReady {
 		return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonNNotReady,
-			fmt.Sprintf("n is not a usable volatility reading (n %v); no unit can be sized from it", n), 0, 0)
+			fmt.Sprintf("n is not a usable volatility reading (n %v); no unit can be sized from it", n), 0, 0, strength)
 	}
 
 	unit, err := sizing.SizeUnit(sizing.Inputs{
@@ -993,7 +1027,7 @@ func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input ev
 		// about the account, not an error.
 		return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonQuantityBelowOneUnit,
 			fmt.Sprintf("notional account %v under %s sizing, with n %v and dollars per point %v, sizes fewer than one whole unit",
-				r.notionalAccount.Current(), r.configuredSizingMode, n, r.dollarsPerPoint), 0, 0)
+				r.notionalAccount.Current(), r.configuredSizingMode, n, r.dollarsPerPoint), 0, 0, strength)
 	}
 
 	// The Protective Stop intent, in the expression order
@@ -1009,7 +1043,7 @@ func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input ev
 		// looking like a bar that simply did not signal.
 		return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonStopIntentNotPositive,
 			fmt.Sprintf("protective stop intent %v (entry level %v - stop multiple %v x n %v) is not a reachable price for a long position",
-				protectiveStopIntent, entryLevel, r.stopMultiple, n), 0, 0)
+				protectiveStopIntent, entryLevel, r.stopMultiple, n), 0, 0, strength)
 	}
 
 	// ADR 0008's four Unit caps, checked against POST-TRADE exposure: the
@@ -1022,7 +1056,7 @@ func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input ev
 	// the account's total long exposure is already near its limit.
 	instrumentClass := r.classificationOf(instrumentID)
 	if capName, limit, exposure, exceeded := r.capExceeded(instrumentID, instrumentClass); exceeded {
-		return r.declineCap(instrumentID, periodEnd, input, signalID, capName, limit, exposure)
+		return r.declineCap(instrumentID, periodEnd, input, signalID, capName, limit, exposure, strength)
 	}
 
 	availableCash, err := r.cashAtPreviousClose(instrumentID, previousClose)
@@ -1040,7 +1074,7 @@ func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input ev
 		// payload can carry.
 		return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonUnitCostNotRepresentable,
 			fmt.Sprintf("unit hold (%s) leaves the representable range, so it exceeds any cash that could fund it; spendable cash at the attempt was %v",
-				r.buyHoldDetail(unit.Quantity, entryLevel, n, priceCap), availableCash), 0, 0)
+				r.buyHoldDetail(unit.Quantity, entryLevel, n, priceCap), availableCash), 0, 0, strength)
 	}
 	if cost > availableCash {
 		// No partial Unit, ever: the whole Unit is skipped (ADR 0010), never
@@ -1048,7 +1082,7 @@ func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input ev
 		return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonInsufficientCash,
 			fmt.Sprintf("unit hold %v (%s) exceeds spendable cash at the attempt %v, after fill debits and standing holds",
 				cost, r.buyHoldDetail(unit.Quantity, entryLevel, n, priceCap), availableCash),
-			cost, availableCash)
+			cost, availableCash, strength)
 	}
 
 	proposal := event.TradeProposalPayload{
@@ -1077,6 +1111,7 @@ func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input ev
 		OrderType:              r.buyOrderType,
 		GapBufferN:             r.gapBufferN,
 		PriceCap:               priceCap,
+		Strength:               strength,
 	}
 	if err := proposal.Validate(); err != nil {
 		return event.Envelope{}, fmt.Errorf("strategy: built invalid trade proposal payload: %w", err)
@@ -1106,8 +1141,12 @@ func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input ev
 // requiredCash and availableCash are only meaningful for reason
 // event.DeclineReasonInsufficientCash; every other caller passes 0, 0
 // (ProposalDeclinedPayload.Validate rejects a non-zero value for any other
-// reason).
-func (r *transition) decline(instrumentID string, periodEnd time.Time, input event.Envelope, signalID, reason, detail string, requiredCash, availableCash float64) (event.Envelope, error) {
+// reason). strength is the Signal's own Strength (ADR 0010, as amended by the
+// owner's decision of 2026-09-25); every caller except session.go's
+// insufficient-history path passes the value rankSignal already computed for
+// it, since ranking runs, and Strength is known, before any of these reasons
+// can be reached.
+func (r *transition) decline(instrumentID string, periodEnd time.Time, input event.Envelope, signalID, reason, detail string, requiredCash, availableCash, strength float64) (event.Envelope, error) {
 	return r.stampDecline(instrumentID, periodEnd, input, event.ProposalDeclinedPayload{
 		Kind:          event.ProposalDeclinedKindEntry,
 		SignalID:      signalID,
@@ -1115,6 +1154,7 @@ func (r *transition) decline(instrumentID string, periodEnd time.Time, input eve
 		Detail:        detail,
 		RequiredCash:  requiredCash,
 		AvailableCash: availableCash,
+		Strength:      strength,
 	})
 }
 
@@ -1123,7 +1163,7 @@ func (r *transition) decline(instrumentID string, periodEnd time.Time, input eve
 // (event.DeclineReasonUnitCapExceeded) blocks, naming the cap that bound,
 // its configured limit, and the post-trade exposure the Unit would have
 // produced (unit_caps.go: capExceeded).
-func (r *transition) declineCap(instrumentID string, periodEnd time.Time, input event.Envelope, signalID, capName string, limit, exposure int) (event.Envelope, error) {
+func (r *transition) declineCap(instrumentID string, periodEnd time.Time, input event.Envelope, signalID, capName string, limit, exposure int, strength float64) (event.Envelope, error) {
 	return r.stampDecline(instrumentID, periodEnd, input, event.ProposalDeclinedPayload{
 		Kind:              event.ProposalDeclinedKindEntry,
 		SignalID:          signalID,
@@ -1132,6 +1172,7 @@ func (r *transition) declineCap(instrumentID string, periodEnd time.Time, input 
 		Cap:               capName,
 		CapLimit:          limit,
 		PostTradeExposure: exposure,
+		Strength:          strength,
 	})
 }
 
@@ -1305,7 +1346,30 @@ func (r *transition) stateFor(instrumentID string) (*instrumentState, error) {
 		// than panicking, in case that ever changes.
 		return nil, fmt.Errorf("strategy: %w", err)
 	}
-	state := &instrumentState{n: n, entryChannel: entryChannel, exitChannel: exitChannel}
+	// The ranking seam's own bounded history (session.go: rankSignal). Both
+	// capacities are package constants, so, like n/entryChannel/exitChannel
+	// above, these never actually fail; guarded anyway rather than
+	// panicking.
+	splitAdjustedCloses, err := indicator.NewRollingWindow(indicator.StrengthLookbackBars + 1)
+	if err != nil {
+		return nil, fmt.Errorf("strategy: %w", err)
+	}
+	rawCloses, err := indicator.NewRollingWindow(indicator.DollarVolumeWindow)
+	if err != nil {
+		return nil, fmt.Errorf("strategy: %w", err)
+	}
+	rawVolumes, err := indicator.NewRollingWindow(indicator.DollarVolumeWindow)
+	if err != nil {
+		return nil, fmt.Errorf("strategy: %w", err)
+	}
+	state := &instrumentState{
+		n:                   n,
+		entryChannel:        entryChannel,
+		exitChannel:         exitChannel,
+		splitAdjustedCloses: splitAdjustedCloses,
+		rawCloses:           rawCloses,
+		rawVolumes:          rawVolumes,
+	}
 	r.addInstrument(instrumentID, state)
 	return state, nil
 }

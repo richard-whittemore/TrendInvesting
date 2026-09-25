@@ -490,12 +490,21 @@ func cashSkipOverflowConfiguration() event.ConfigurationPayload {
 
 // cashSkipOverflowBars warms the Entry Channel to overflowChannelHigh with a
 // True Range of exactly overflowTrueRange on every bar — so N is exactly
-// overflowTrueRange — and then breaks out above it.
+// overflowTrueRange — and then breaks out above it. breakoutHistoryPreamble
+// additional Sessions, at hourly offsets inside day(55), give the breakout
+// the indicator.StrengthLookbackBars+1 closes #34's Strength needs (ADR
+// 0010, as amended 2026-09-25) without moving it off day(56): every bar here
+// already shares the identical High/Low/Close, so unlike breakoutBars' own
+// preamble no fixed-point derivation is needed — N and the close are already
+// constant throughout.
 func cashSkipOverflowBars(instrumentID string) []event.CompletedBarPayload {
 	low := overflowChannelHigh - overflowTrueRange
-	bars := make([]event.CompletedBarPayload, 0, 56)
+	bars := make([]event.CompletedBarPayload, 0, 56+breakoutHistoryPreamble)
 	for i := 1; i <= 55; i++ {
 		bars = append(bars, completedBar(instrumentID, day(i), overflowChannelHigh, low, low))
+	}
+	for i := 1; i <= breakoutHistoryPreamble; i++ {
+		bars = append(bars, completedBar(instrumentID, day(55).Add(time.Duration(i)*time.Hour), overflowChannelHigh, low, low))
 	}
 	return append(bars, completedBar(instrumentID, day(56), 2*overflowChannelHigh, low, low))
 }

@@ -250,14 +250,23 @@ func TestAddLadderOneRungPerBarUpToFourUnitsThenNoFifth(t *testing.T) {
 // breakoutBarsWithBar56High is breakoutBars, with the breakout bar's own high
 // (day 56) replaced by high instead of breakoutFixtureHighs' fixed 200. Bars
 // 1-55 (warm-up, and so the Entry Channel and N) are unchanged.
+// breakoutBarsWithBar56High is breakoutBars with the breakout bar's own high
+// replaced, for testing what that bar's own range covers on the Add Ladder —
+// #34's history preamble is inserted the identical way breakoutBars' own doc
+// comment explains, so the breakout Signal still has the 64 closes it needs
+// to be ranked, and stays at day(56).
 func breakoutBarsWithBar56High(instrumentID string, high float64) []event.CompletedBarPayload {
 	highs := breakoutFixtureHighs()
-	highs[len(highs)-1] = high
-	bars := make([]event.CompletedBarPayload, 0, len(highs))
-	for i, h := range highs {
+	ramp := highs[:55]
+	bars := make([]event.CompletedBarPayload, 0, len(ramp)+breakoutHistoryPreamble+1)
+	for i, h := range ramp {
 		bars = append(bars, syntheticBar(instrumentID, day(i+1), h-100))
 	}
-	return bars
+	n := stableRampWilderValue()
+	for i := 1; i <= breakoutHistoryPreamble; i++ {
+		bars = append(bars, syntheticBar(instrumentID, day(55).Add(time.Duration(i)*time.Hour), n))
+	}
+	return append(bars, syntheticBar(instrumentID, day(56), high-100))
 }
 
 // TestAddWithinTheBreakoutBarItself is the positive case: the breakout bar's

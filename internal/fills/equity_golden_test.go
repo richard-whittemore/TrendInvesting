@@ -249,13 +249,29 @@ func equityGoldenBar(periodEnd time.Time, open, high, low, closeAt float64) even
 }
 
 // equityGoldenBars is the whole fixture: 55 warm-up bars at a True Range of
-// exactly 2.5, the breakout, and the two bars that reach the second Add
-// Ladder rung the account cannot afford. See this file's own derivation.
+// exactly 2.5, #34's history preamble (below), the breakout, and the two
+// bars that reach the second Add Ladder rung the account cannot afford. See
+// this file's own derivation.
+//
+// breakoutHistoryPreamble additional Sessions follow bar 55, timestamped
+// inside day(55)'s own calendar day (strictly before day(56), the breakout),
+// giving the breakout the indicator.StrengthLookbackBars+1 closes #34's
+// Strength needs (ADR 0010, as amended 2026-09-25). Each one repeats bar 55's
+// own OHLC exactly — already the Wilder recursion's fixed point, a True
+// Range of 2.5 against a previous close of 155 reproducing itself — so N
+// stays exactly 2.5, and each bar's own high (156) stays under the Entry
+// Channel's own 55-bar maximum (156, bar 55's own high — tying it, not
+// exceeding it), so the channel the breakout is decided against is
+// unchanged too.
 func equityGoldenBars() []event.CompletedBarPayload {
-	bars := make([]event.CompletedBarPayload, 0, 58)
+	bars := make([]event.CompletedBarPayload, 0, 58+breakoutHistoryPreamble)
 	for i := 1; i <= 55; i++ {
 		base := 100 + float64(i)
 		bars = append(bars, equityGoldenBar(day(i), base, base+1, base-1.5, base))
+	}
+	for i := 1; i <= breakoutHistoryPreamble; i++ {
+		periodEnd := day(55).Add(time.Duration(i) * time.Hour)
+		bars = append(bars, equityGoldenBar(periodEnd, 155, 156, 153.5, 155))
 	}
 	return append(bars,
 		equityGoldenBar(day(56), 155.0, 157.0, 154.5, 156.5),

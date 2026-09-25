@@ -61,22 +61,50 @@ func sessionClosedEnvelope(t *testing.T, sequence uint64, periodEnd time.Time, i
 	}
 }
 
-// laggedBreakoutBars is breakoutBars one day later: its breakout is day(57).
+// laggedBreakoutBars is breakoutBars one day later: every bar's PeriodEnd
+// moves by exactly one calendar day, so its breakout — whichever index that
+// lands on, once #34's history preamble is inserted — stays exactly one day
+// behind lead's own: day(57) today.
 func laggedBreakoutBars(instrumentID string) []event.CompletedBarPayload {
 	bars := breakoutBars(instrumentID)
 	for i := range bars {
-		bars[i].PeriodEnd = day(i + 2)
+		bars[i].PeriodEnd = bars[i].PeriodEnd.AddDate(0, 0, 1)
 	}
 	return bars
 }
 
 // staggered appends lead's series with lagged's one day behind it, sharing
-// every Session they both have a bar in: lead[0] alone, then lead[i] with
-// lagged[i-1]. lagged's last bar is left for the caller's own Session.
+// every Session they both have a bar in: lead[0] alone, then, for each of
+// lead's later bars, paired with whichever of lagged's bars falls on the
+// identical PeriodEnd, if any. lagged's own bars that share no lead Session —
+// #34's history preamble, whose hourly-offset timestamps
+// (breakoutBars' own doc comment) never coincide with lead's — are sent on
+// their own, in order, once lead's own series is exhausted. lagged's very
+// last bar is left for the caller's own Session.
+//
+// Matching by PeriodEnd, rather than by lead[i] paired with lagged[i-1],
+// is what keeps this correct once #34's preamble makes consecutive elements
+// of either series no longer exactly one calendar day apart.
 func staggered(s *stream, lead, lagged []event.CompletedBarPayload) *stream {
+	byPeriodEnd := make(map[time.Time]event.CompletedBarPayload, len(lagged))
+	for _, b := range lagged {
+		byPeriodEnd[b.PeriodEnd] = b
+	}
+	consumed := make(map[time.Time]bool, len(lagged))
+
 	s.bar(lead[0])
 	for i := 1; i < len(lead); i++ {
-		s.session(lead[i], lagged[i-1])
+		if partner, ok := byPeriodEnd[lead[i].PeriodEnd]; ok {
+			s.session(lead[i], partner)
+			consumed[partner.PeriodEnd] = true
+			continue
+		}
+		s.bar(lead[i])
+	}
+	for _, b := range lagged[:len(lagged)-1] {
+		if !consumed[b.PeriodEnd] {
+			s.bar(b)
+		}
 	}
 	return s
 }
@@ -91,16 +119,41 @@ func openingFillAs(instrumentID, fillID string) event.FillPayload {
 
 // sessionHistory is every Session up to and including day(56), with both
 // breakouts filled.
+//
+// EXIT and ADD (day(1)-based) and ENTRY and BREAK (one day later) share the
+// same 55-bar ramp shape, and #34's own breakoutHistoryPreamble bars once it
+// ends, but each side's preamble sits at hourly offsets private to its own
+// timeline (breakoutBars' own doc comment) — EXIT/ADD's between day(55) and
+// day(56), ENTRY/BREAK's one day later, between day(56) and day(57). So
+// unlike the shared 55-bar ramp, where every Session still holds a bar from
+// both timelines, each side's preamble Sessions hold only that side's own
+// bars — exactly as day(1)'s own opening Session above already holds only
+// EXIT and ADD, before ENTRY and BREAK have a bar at all.
 func sessionHistory(t *testing.T) *stream {
 	t.Helper()
 	s := newStream(t, validConfigurationPayload())
 	exit, add := breakoutBars(sessionExit), breakoutBars(sessionAdd)
 	entry, brk := laggedBreakoutBars(sessionEntry), laggedBreakoutBars(sessionBreak)
+	rampLen := len(exit) - breakoutHistoryPreamble - 1 // the shared, one-day-apart ramp: 55
+
 	s.session(exit[0], add[0])
-	for i := 1; i < 56; i++ {
+	for i := 1; i < rampLen; i++ {
 		// EXIT first, so the Session's own ranking, not arrival order, is
 		// what puts ADD's entry ahead of EXIT's at day(56).
 		s.session(exit[i], entry[i-1], add[i], brk[i-1])
+	}
+	// EXIT and ADD's own #34 history preamble: ENTRY and BREAK have no bar
+	// yet in any of these Sessions.
+	for i := rampLen; i < rampLen+breakoutHistoryPreamble; i++ {
+		s.session(exit[i], add[i])
+	}
+	// day(56): EXIT and ADD break out; ENTRY and BREAK are still one bar from
+	// their own — their last ramp bar, unaffected by either side's preamble.
+	s.session(exit[len(exit)-1], entry[rampLen-1], add[len(add)-1], brk[rampLen-1])
+	// ENTRY and BREAK's own #34 history preamble, one day later than EXIT and
+	// ADD's: EXIT and ADD have already broken out and have no bar here.
+	for i := rampLen; i < rampLen+breakoutHistoryPreamble; i++ {
+		s.session(entry[i], brk[i])
 	}
 	s.fill(openingFillAs(sessionAdd, "sim-fill-add-1"))
 	s.fill(openingFillAs(sessionExit, "sim-fill-exit-1"))
@@ -114,11 +167,12 @@ func day57Bars(t *testing.T) map[string]event.CompletedBarPayload {
 	if err != nil {
 		t.Fatalf("NextAddLevel() error = %v", err)
 	}
+	entry, brk := laggedBreakoutBars(sessionEntry), laggedBreakoutBars(sessionBreak)
 	return map[string]event.CompletedBarPayload{
 		sessionExit:  postEntryBar(sessionExit, day(57), 90),
 		sessionAdd:   addOpportunityBar(sessionAdd, day(57), rung+1),
-		sessionEntry: laggedBreakoutBars(sessionEntry)[55],
-		sessionBreak: laggedBreakoutBars(sessionBreak)[55],
+		sessionEntry: entry[len(entry)-1],
+		sessionBreak: brk[len(brk)-1],
 	}
 }
 
@@ -249,11 +303,18 @@ func TestASessionsDecisionsDoNotDependOnTheOrderItsBarsArrived(t *testing.T) {
 	}
 }
 
-// TestSimultaneousSignalsAreTakenInRankedOrder pins the ranking seam as it
-// stands: Strength and its dollar-volume tie-break are not yet computed
-// (ADR 0021, "Open"), so Signals are taken in ascending instrument ID. At
-// day(56) EXIT's bar arrives before ADD's, and ADD's entry is still taken
-// first. Falsified by taking Signals in arrival order.
+// TestSimultaneousSignalsAreTakenInRankedOrder pins ADR 0010's ranking (as
+// amended by the owner's decision of 2026-09-25): Strength descending, then
+// 20-day median dollar volume descending, then symbol ascending. Every
+// synthetic bar this package's fixtures build shares one split-adjusted
+// close (syntheticBar) and one raw volume (priceView), so EXIT and ADD's
+// Signals here tie on both Strength and dollar volume, and the order falls
+// through to the last tie-break: ADD (alphabetically first) is taken before
+// EXIT, at day(56), even though EXIT's bar arrives first in the stream.
+// Falsified by taking Signals in arrival order.
+// TestUnclassifiedGroupCapBindsOnStrengthNotSymbol (unit_caps_test.go) is
+// this test's counterpart with genuinely different Strength values, proving
+// the first two keys — not just the symbol fallback — actually govern.
 func TestSimultaneousSignalsAreTakenInRankedOrder(t *testing.T) {
 	t.Parallel()
 
@@ -307,7 +368,13 @@ func TestAnInstrumentIsEvaluatedOncePerSession(t *testing.T) {
 	})
 	t.Run("delisted", func(t *testing.T) {
 		t.Parallel()
-		sessionHistory(t).corporateAction(delistingAction(sessionEntry, day(56))).
+		// sessionHistory leaves ENTRY's own last completed bar at the end of
+		// its #34 history preamble (one Session before day(57)'s breakout,
+		// entry[len(entry)-1], which day57Bars itself reserves) — not simply
+		// day(56) now that the preamble sits between them.
+		entry := laggedBreakoutBars(sessionEntry)
+		entryLastBar := entry[len(entry)-2].PeriodEnd
+		sessionHistory(t).corporateAction(delistingAction(sessionEntry, entryLastBar.Add(time.Minute))).
 			barOnly(bars[sessionEntry]).barOnly(bars[sessionEntry]).
 			wantRunError(`instrument "ENTRY" already has a bar in the Session ending`)
 	})

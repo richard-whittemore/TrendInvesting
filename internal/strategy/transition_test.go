@@ -37,6 +37,9 @@ func transitionFixture(t *testing.T, kind string) (*Reducer, event.Envelope) {
 	}
 	s.entryChannel.Add(101)
 	s.n.Add(2)
+	s.splitAdjustedCloses.Add(100)
+	s.rawCloses.Add(100)
+	s.rawVolumes.Add(1_000_000)
 	r.acceptedFills["old-stop"] = acceptedFillState{unitIDs: []string{"old-unit"}}
 	r.delisted["OLD"] = day(1)
 	s.pendingAddProposal = &pendingAddProposalState{proposalID: "add", periodEnd: day(2), earliestFillAt: day(1), unitIndex: 2, quantity: 1, level: 100.5, previousUnitFill: 100}

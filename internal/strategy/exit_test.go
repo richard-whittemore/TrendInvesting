@@ -123,8 +123,9 @@ func TestCampaignEvaluatedEmittedEveryBarWhileCampaignOpenWithNoBreach(t *testin
 	campaignID := testDecisionID("campaign", "AAPL", day(56))
 	campaignN := breakoutFixtureN(t, cfg)
 
+	bars := breakoutBars("AAPL")
 	emitted := newStream(t, cfg).
-		bars(breakoutBars("AAPL")).
+		bars(bars).
 		fill(openingFill("AAPL")).
 		bar(postEntryBar("AAPL", day(57), 105)).
 		bar(postEntryBar("AAPL", day(58), 110)).
@@ -163,8 +164,8 @@ func TestCampaignEvaluatedEmittedEveryBarWhileCampaignOpenWithNoBreach(t *testin
 	// An instrument in a Campaign is not a Setup (CONTEXT.md): confirms these
 	// two bars produced no Setup-evaluated event either, the same invariant
 	// #11/#12 already established.
-	if got := countFor(t, emitted, event.SetupEvaluatedEventType, "AAPL"); got != 56 {
-		t.Errorf("got %d Setup-evaluated event(s), want 56 (bars 1..56 only)", got)
+	if got, want := countFor(t, emitted, event.SetupEvaluatedEventType, "AAPL"), len(bars); got != want {
+		t.Errorf("got %d Setup-evaluated event(s), want %d (bars 1..%[2]d only)", got, want)
 	}
 }
 
@@ -666,20 +667,37 @@ func TestNoExitProposalWhileExitChannelNotReady(t *testing.T) {
 
 	cfg := validConfigurationPayload()
 	cfg.EntryChannelLength = 3
-	cfg.ExitChannelLength = 30
+	// Comfortably above the fixture's own ~65 total bars (#34's history
+	// preamble below, plus the warm-up and breakout), so the Exit Channel is
+	// still genuinely unready the first time the Campaign is evaluated —
+	// the property this test exists to check — rather than incidentally
+	// warmed by the very history #34 now requires before an entry can be
+	// ranked at all (ADR 0010, as amended 2026-09-25).
+	cfg.ExitChannelLength = 100
 
-	// 20 warm-up bars (TR 1..20, Low fixed at 100 via syntheticBar) make N
-	// ready for the first time on bar 21; the 3-bar Entry Channel is long
-	// since warm. Bar 21 is a breakout by construction (300 exceeds any
-	// 3-bar window built from highs 101..120).
+	// #34's history preamble (compactHistoryPreamble: the 20-bar-ramp form,
+	// since this fixture's own N warm-up is 20 bars, exactly
+	// unit_caps_test.go's compactFixtureHighs shape): flat bars, all tied at
+	// the same high, so none of them is itself a breakout, ahead of the
+	// existing 20-bar warm-up (TR 1..20, Low fixed at 100 via syntheticBar)
+	// that makes N ready for the first time on the bar after them; the 3-bar
+	// Entry Channel is long since warm. The breakout bar is a breakout by
+	// construction (300 exceeds any 3-bar window built from highs 101..120
+	// or the flat preamble's own 100), and now has the
+	// indicator.StrengthLookbackBars+1 closes Strength needs.
 	var bars []event.CompletedBarPayload
-	for i := 1; i <= 20; i++ {
-		bars = append(bars, syntheticBar("AAPL", day(i), float64(i)))
+	for i := 1; i <= compactHistoryPreamble; i++ {
+		bars = append(bars, syntheticBar("AAPL", day(i), 0))
 	}
-	breakoutBar := completedBar("AAPL", day(21), 300, 100, 250)
+	rampStart := compactHistoryPreamble
+	for i := 1; i <= 20; i++ {
+		bars = append(bars, syntheticBar("AAPL", day(rampStart+i), float64(i)))
+	}
+	breakoutDay := day(rampStart + 21)
+	breakoutBar := completedBar("AAPL", breakoutDay, 300, 100, 250)
 	bars = append(bars, breakoutBar)
 
-	proposalID := testDecisionID("proposal", "AAPL", day(21))
+	proposalID := testDecisionID("proposal", "AAPL", breakoutDay)
 	fill := event.FillPayload{
 		InstrumentID: "AAPL",
 		Kind:         event.FillKindEntry,
@@ -688,12 +706,12 @@ func TestNoExitProposalWhileExitChannelNotReady(t *testing.T) {
 		Direction:    event.DirectionLong,
 		Quantity:     1,
 		Price:        300,
-		FilledAt:     day(21),
+		FilledAt:     breakoutDay,
 	}
 	// A bar whose low (1) would unambiguously "look like" a breach against
 	// any real channel level, arriving the very next day: proves the
 	// suppression is about readiness, not merely about the level chosen.
-	nextBar := completedBar("AAPL", day(22), 50, 1, 25)
+	nextBar := completedBar("AAPL", breakoutDay.AddDate(0, 0, 1), 50, 1, 25)
 
 	emitted := newStream(t, cfg).
 		bars(bars).
@@ -703,7 +721,7 @@ func TestNoExitProposalWhileExitChannelNotReady(t *testing.T) {
 
 	evaluated := decodeCampaignEvaluated(t, onlyEnvelopeOfType(t, emitted, event.CampaignEvaluatedEventType))
 	if evaluated.ExitChannelReady {
-		t.Fatal("ExitChannelReady = true, want false: only 21 completed bars have ever been seen against a 30-bar Exit Channel")
+		t.Fatal("ExitChannelReady = true, want false: fewer completed bars have ever been seen than the configured Exit Channel length")
 	}
 	if evaluated.ExitChannelLow != 0 {
 		t.Errorf("ExitChannelLow = %v, want 0 while not ready", evaluated.ExitChannelLow)
@@ -731,7 +749,7 @@ func TestASecondInstrumentIsUnaffectedByAnothersExitChannelExit(t *testing.T) {
 
 	emitted := staggered(newStream(t, cfg), breakoutBars("AAPL"), laggedBreakoutBars("MSFT")).
 		fill(openingFill("AAPL")).
-		session(postEntryBar("AAPL", breachAt, 99), laggedBreakoutBars("MSFT")[55]).
+		session(postEntryBar("AAPL", breachAt, 99), laggedBreakoutBars("MSFT")[len(laggedBreakoutBars("MSFT"))-1]).
 		fill(exitFill).
 		mustRun()
 

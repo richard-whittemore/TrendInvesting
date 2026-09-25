@@ -84,6 +84,15 @@ func runReducerWithAccountSnapshotsThenHighs(t *testing.T, instrumentID string, 
 // cash known at the decision bar's previous close, so a fixture whose
 // snapshot is stamped after its bars is a stream the reducer refuses; the
 // bars have to follow the snapshot in time, not only in the stream.
+//
+// highs is extended with breakoutHistoryPreamble additional Sessions before
+// its own breakout bar, exactly as breakoutBars extends
+// breakoutFixtureHighs, so the breakout Signal has the
+// indicator.StrengthLookbackBars+1 closes #34's Strength needs (ADR 0010, as
+// amended 2026-09-25); no caller here reads a specific day for the breakout
+// bar, so the preamble is simply appended in sequence rather than squeezed
+// into day(55)'s own hours the way breakoutBars must for its day(56)-naming
+// callers.
 func runReducerWithAccountSnapshotsThenHighsFrom(t *testing.T, instrumentID string, snapshots []event.AccountSnapshotPayload, highs []float64, cfg event.ConfigurationPayload, firstBarDay int) []event.Envelope {
 	t.Helper()
 	reducer, err := strategy.NewReducer(testStrategyVersion, validConfigurationPayload())
@@ -101,7 +110,8 @@ func runReducerWithAccountSnapshotsThenHighsFrom(t *testing.T, instrumentID stri
 		envelopes = append(envelopes, accountSnapshotEnvelope(t, seq, snap, snap.AsOf))
 		seq++
 	}
-	for i, high := range highs {
+	extended := extendHighsWithHistoryPreamble(highs)
+	for i, high := range extended {
 		periodEnd := day(firstBarDay + i)
 		bar := syntheticBar(instrumentID, periodEnd, high-100)
 		envelopes = append(envelopes, barEnvelope(t, seq, bar, periodEnd))
@@ -113,6 +123,24 @@ func runReducerWithAccountSnapshotsThenHighsFrom(t *testing.T, instrumentID stri
 		t.Fatalf("Run() error = %v", err)
 	}
 	return emitted
+}
+
+// extendHighsWithHistoryPreamble inserts breakoutHistoryPreamble copies of
+// the Wilder recursion's own fixed point — N exactly as highs' first 55
+// entries leave it (stableRampWilderValue, campaign_test.go) — between
+// highs[:55] and its own final (breakout) entry, so a caller that turns the
+// result into consecutive daily bars gives the breakout the 64 closes #34's
+// Strength needs without moving N or the Entry Channel high breakoutBars'
+// own doc comment already explains this for. Only ever called with
+// breakoutFixtureHighs' own 56-element shape.
+func extendHighsWithHistoryPreamble(highs []float64) []float64 {
+	n := stableRampWilderValue()
+	extended := make([]float64, 0, len(highs)+breakoutHistoryPreamble)
+	extended = append(extended, highs[:55]...)
+	for i := 0; i < breakoutHistoryPreamble; i++ {
+		extended = append(extended, 100+n)
+	}
+	return append(extended, highs[55])
 }
 
 // snapshotBefore is the AsOf every account.snapshot fixture in this file
@@ -316,7 +344,7 @@ func TestReducerWithoutASnapshotSizesFromTheConfiguredStartingEquity(t *testing.
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
-	emitted := runReducerOverHighs(t, "AAPL", breakoutFixtureHighs(), cfg)
+	emitted := runReducerOverBars(t, cfg, breakoutBars("AAPL"))
 
 	proposals := envelopesOfType(emitted, event.TradeProposalEventType)
 	if len(proposals) != 1 {

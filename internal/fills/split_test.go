@@ -46,7 +46,7 @@ func fourUnits(t *testing.T) (*fills.Simulator, *journal.Recorder, []event.Compl
 		t.Fatal(err)
 	}
 	bars := campaignLifeBars()
-	for _, b := range bars[:59] {
+	for _, b := range bars[:59+breakoutHistoryPreamble] {
 		if _, err := fills.RunBar(ctx, simulator, recorder, barEnvelope(t, b)); err != nil {
 			t.Fatal(err)
 		}
@@ -54,7 +54,7 @@ func fourUnits(t *testing.T) (*fills.Simulator, *journal.Recorder, []event.Compl
 	if stops := stopsResting(simulator); len(stops) != 4 {
 		t.Fatalf("the fixture must hold four Units by day 59, holds %d: %v", len(stops), stops)
 	}
-	return simulator, recorder, bars[59:]
+	return simulator, recorder, bars[59+breakoutHistoryPreamble:]
 }
 
 // stopsResting is the book's Exit Orders by Unit index.
@@ -257,7 +257,7 @@ func TestACashInLieuWithoutAnAccountStillShrinksTheBook(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, b := range campaignLifeBars()[:59] {
+	for _, b := range campaignLifeBars()[:59+breakoutHistoryPreamble] {
 		if _, err := fills.RunBar(ctx, simulator, reducer, barEnvelope(t, b)); err != nil {
 			t.Fatal(err)
 		}

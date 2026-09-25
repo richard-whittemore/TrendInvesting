@@ -195,7 +195,29 @@ package strategy
 // schema-1 delisting. Given the same inputs, a split the older build refused
 // now changes the Campaign's Units and emits decisions, so the two builds no
 // longer replay each other's journals.
-const RulesVersion = "1.12.0"
+//
+// Bumped 1.12.0 -> 1.13.0 by the owner's decision of 2026-09-25 (ADR 0010,
+// as amended): rankSignals orders a Session's Signals by Faith's
+// Strength — (close(d) - close(d-63)) / N(d) [T p.29] — descending, then by
+// 20-day median dollar volume descending, then by instrument ID ascending,
+// in place of the ascending-instrument-ID stub. An instrument with fewer
+// than indicator.StrengthLookbackBars+1 split-adjusted closes or fewer than
+// indicator.DollarVolumeWindow raw closes/volumes cannot be ranked at all:
+// its Signal is declined with the new reason
+// event.DeclineReasonInsufficientHistory, never ranked last. Given the same
+// inputs, a run whose Signals differ in Strength or dollar volume can now
+// order and fund them differently than the old alphabetical stub did, and a
+// Signal on an instrument short of that history now declines where the
+// stub proposed it, so the two builds no longer replay each other's
+// journals. strategy.trade.proposed advances to schema 3 and
+// strategy.proposal.declined to schema 7, both adding Strength — required
+// and finite whenever a Signal was actually ranked, exactly zero for an
+// Add-kind decline or one declined for insufficient history, so "each
+// Signal's Strength appears in its decision event" holds for every outcome.
+// internal/indicator gains RollingWindow, Strength and MedianDollarVolume:
+// the last is the one definition this ranking tie-break and ADR 0009's
+// still-unimplemented $5M eligibility test both read.
+const RulesVersion = "1.13.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -307,4 +329,10 @@ var RuleSurfaceFingerprints = map[string]string{
 	// citation (event.RuleCashInLieuMostRecentUnitsFirst,
 	// event.ADRSplitCashInLieu; ADR 0023).
 	"1.12.0": "2522faa9e1c15b07a74b7a4d77b71d2280a0310f3016689896e4d4a3d188f41b",
+	// Changed from 1.12.0 by two new declared numeric rule constants in
+	// internal/indicator: StrengthLookbackBars (63, The Turtle Rules p.29)
+	// and DollarVolumeWindow (20, ADR 0009/0010) — the ranking rule's own
+	// lookback and window lengths, not a Rule*/ADR* identity but a numeric
+	// rule value the sweep finds directly.
+	"1.13.0": "f382bf7c5be052f701374f3c034c90725a181bddb81ab50a5356d2259029fa31",
 }

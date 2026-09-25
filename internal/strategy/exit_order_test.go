@@ -205,17 +205,26 @@ func TestTheExitOrderRestsAtTheHigherLevel(t *testing.T) {
 
 		cfg := validConfigurationPayload()
 		cfg.EntryChannelLength = 3
-		cfg.ExitChannelLength = 30
+		// Comfortably above the fixture's own ~65 total bars (#34's history
+		// preamble below), so the Exit Channel is still genuinely unready the
+		// first time the Campaign is evaluated — see
+		// TestNoExitProposalWhileExitChannelNotReady's identical reasoning.
+		cfg.ExitChannelLength = 100
 		var bars []event.CompletedBarPayload
+		for i := 1; i <= compactHistoryPreamble; i++ {
+			bars = append(bars, syntheticBar("AAPL", day(i), 0))
+		}
+		rampStart := compactHistoryPreamble
 		for i := 1; i <= 20; i++ {
-			bars = append(bars, syntheticBar("AAPL", day(i), float64(i)))
+			bars = append(bars, syntheticBar("AAPL", day(rampStart+i), float64(i)))
 		}
-		bars = append(bars, completedBar("AAPL", day(21), 300, 100, 250))
+		breakoutDay := day(rampStart + 21)
+		bars = append(bars, completedBar("AAPL", breakoutDay, 300, 100, 250))
 		fill := event.FillPayload{
-			InstrumentID: "AAPL", Kind: event.FillKindEntry, ProposalID: testDecisionID("proposal", "AAPL", day(21)),
-			FillID: "sim-fill-notready", Direction: event.DirectionLong, Quantity: 1, Price: 300, FilledAt: day(21),
+			InstrumentID: "AAPL", Kind: event.FillKindEntry, ProposalID: testDecisionID("proposal", "AAPL", breakoutDay),
+			FillID: "sim-fill-notready", Direction: event.DirectionLong, Quantity: 1, Price: 300, FilledAt: breakoutDay,
 		}
-		emitted := newStream(t, cfg).bars(bars).fill(fill).bar(completedBar("AAPL", day(22), 50, 1, 25)).mustRun()
+		emitted := newStream(t, cfg).bars(bars).fill(fill).bar(completedBar("AAPL", breakoutDay.AddDate(0, 0, 1), 50, 1, 25)).mustRun()
 
 		orders := exitOrdersIn(t, emitted)
 		if len(orders) != 1 {

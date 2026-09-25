@@ -4,7 +4,7 @@
   "run_id": "golden",
   "variant": "profit-protecting-stop",
   "status": "completed",
-  "strategy_version": "profit-protecting-stop/1.12.0+test",
+  "strategy_version": "profit-protecting-stop/1.13.0+test",
   "span_start": "2026-01-02T00:00:00Z",
   "span_end": "2026-02-02T00:00:00Z",
   "configuration": {
@@ -37,8 +37,8 @@
   },
   "artefacts": {
     "journal_path": "../journal.golden.jsonl",
-    "record_count": 262,
-    "final_record_hash": "sha256:67b9c2cdcb2e779ff7f30fc2e1662aefb989d45969be80834236c73a375ab5b8"
+    "record_count": 434,
+    "final_record_hash": "sha256:ba686cfa3afd469c3f59fde62e5096e9543c933484bd26d2178006945fbacbe0"
   },
   "detail": ""
 }
