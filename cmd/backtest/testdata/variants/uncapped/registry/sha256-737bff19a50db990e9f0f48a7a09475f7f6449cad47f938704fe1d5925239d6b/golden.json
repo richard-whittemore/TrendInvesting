@@ -1,0 +1,48 @@
+{
+  "registry_version": 1,
+  "configuration_hash": "sha256:737bff19a50db990e9f0f48a7a09475f7f6449cad47f938704fe1d5925239d6b",
+  "run_id": "golden",
+  "variant": "uncapped",
+  "status": "completed",
+  "strategy_version": "uncapped/1.15.0+test",
+  "span_start": "2026-01-02T00:00:00Z",
+  "span_end": "2026-02-02T00:00:00Z",
+  "configuration": {
+    "recompute_n_at_add": false,
+    "strategy_id": "uncapped",
+    "sizing_mode": "volatility-normalised",
+    "unit_volatility_fraction": 0.005,
+    "stop_multiple": 2,
+    "entry_channel_length": 20,
+    "exit_channel_length": 10,
+    "max_units": 4,
+    "max_units_per_industry": 1000000,
+    "max_units_per_sector": 1000000,
+    "max_units_total_long": 1000000,
+    "slippage_n": 0.05,
+    "tier_b_distance_in_n": 1,
+    "dollars_per_point": 1,
+    "risk_at_stop_fraction": 0,
+    "notional_account": {
+      "starting_equity": 1000000,
+      "rebasing_month": 1,
+      "rebasing_day": 1
+    },
+    "commission": {
+      "per_share": 0.005,
+      "minimum_per_order": 1,
+      "maximum_fraction_of_trade_value": 0.01
+    },
+    "buy_order_type": "stop-market",
+    "gap_buffer_n": 0,
+    "universe_min_price": 0,
+    "universe_min_dollar_volume": 0,
+    "universe_min_history_bars": 0
+  },
+  "artefacts": {
+    "journal_path": "../journal.golden.jsonl",
+    "record_count": 322,
+    "final_record_hash": "sha256:17685dc83d15167656da04d7c71c90be0d86f15ff30423c4988b0fa3e1daf034"
+  },
+  "detail": ""
+}

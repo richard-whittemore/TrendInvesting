@@ -306,8 +306,8 @@ func TestProtectiveStopSetEventConstants(t *testing.T) {
 	if event.ProtectiveStopSetEventType != "strategy.protective-stop.set" {
 		t.Errorf("ProtectiveStopSetEventType = %q, want %q", event.ProtectiveStopSetEventType, "strategy.protective-stop.set")
 	}
-	if event.ProtectiveStopSetSchemaVersion != 2 {
-		t.Errorf("ProtectiveStopSetSchemaVersion = %d, want 2", event.ProtectiveStopSetSchemaVersion)
+	if event.ProtectiveStopSetSchemaVersion != 3 {
+		t.Errorf("ProtectiveStopSetSchemaVersion = %d, want 3", event.ProtectiveStopSetSchemaVersion)
 	}
 	if event.RuleProtectiveStopSetFromFill != "protective-stop.set.from-fill" {
 		t.Errorf("RuleProtectiveStopSetFromFill = %q", event.RuleProtectiveStopSetFromFill)

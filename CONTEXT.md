@@ -42,7 +42,7 @@ Price exceeding the **Entry Channel**. A Breakout is an event in the market, not
 One indivisible increment of a position: the share count at which a 1N price move equals a declared fraction of account equity. The Turtle rules measure exposure and risk limits in Units rather than in currency.
 
 **Campaign**:
-The complete life of a position in one instrument, from the first Unit's entry to the exit of the last. A Campaign, not a Unit, is what gets entered, added to, stopped out, and exited. A Campaign begins **only when a recorded fill says it does** — never when an order is submitted and never from a quoted price — and its **N** and **Unit** size are frozen at that first entry (ADR 0006), measured from the price that actually filled. A proposal that is never filled leaves no Campaign behind. While an instrument is in a Campaign it is not a **Setup**, so no new entry is signalled for it.
+The complete life of a position in one instrument, from the first Unit's entry to the exit of the last. A Campaign, not a Unit, is what gets entered, added to, stopped out, and exited. A Campaign begins **only when a recorded fill says it does** — never when an order is submitted and never from a quoted price — and in the Baseline its **N** and **Unit** size are frozen at that first entry (ADR 0006), measured from the price that actually filled. A proposal that is never filled leaves no Campaign behind. While an instrument is in a Campaign it is not a **Setup**, so no new entry is signalled for it.
 _Avoid_: trade, position (both ambiguous between a Unit and the whole Campaign).
 
 **Add**:
@@ -50,7 +50,7 @@ A further Unit taken into an already-profitable Campaign.
 _Avoid_: pyramid, scale-in, compound (Sublime's word for its own, differently-conditioned version of this).
 
 **Add Ladder**:
-The set of prices at which successive Units of a Campaign will be added, determined when the Campaign opens.
+The set of prices at which successive Units of a Campaign will be added, determined when the Campaign opens in the Baseline. The declared `recompute-n-at-add` Variant uses preceding-bar N at each Add opportunity (ADR 0006).
 
 **Protective Stop**:
 The price at which a Campaign's Units are exited to cap loss. Every open Campaign has one at all times.

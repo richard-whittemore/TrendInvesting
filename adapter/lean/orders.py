@@ -28,9 +28,9 @@ UNIT_ADDED = "strategy.campaign.unit-added"
 UNITS_STOPPED = "strategy.campaign.units-stopped"
 CAMPAIGN_EXITED = "strategy.campaign.exited"
 CASH_IN_LIEU = "strategy.campaign.cash-in-lieu"
-SCHEMA_VERSIONS = {TRADE_PROPOSED: 3, ADD_PROPOSED: 3, PROPOSAL_EXPIRED: 3,
+SCHEMA_VERSIONS = {TRADE_PROPOSED: 3, ADD_PROPOSED: 4, PROPOSAL_EXPIRED: 3,
                    CAMPAIGN_OPENED: 1, EXIT_ORDER_SET: 1, EXIT_PROPOSED: 1,
-                   UNIT_ADDED: 1, UNITS_STOPPED: 1, CAMPAIGN_EXITED: 2, CASH_IN_LIEU: 1}
+                   UNIT_ADDED: 2, UNITS_STOPPED: 1, CAMPAIGN_EXITED: 2, CASH_IN_LIEU: 1}
 
 # event.CorporateActionKindSplit (internal/event/corporate_action.go).
 KIND_SPLIT = "split"
@@ -289,7 +289,7 @@ def fill_model_report(slippage_n):
         "stops, as it must, since the adapter reports what LEAN actually holds rather than "
         "clamping it.",
         "slippage is {} x N per fill (ADR 0013), charged by the adapter's NSlippageModel "
-        "from the N the engine sent: a trade proposal's n, an Add proposal's campaign_n, "
+        "from the N the engine sent: a trade proposal's n, an Add proposal's add_n (or frozen campaign_n), "
         "and the Campaign's frozen campaign_n for an Exit Order, each at the raw ratio in "
         "force when LEAN fills the order. LEAN applies it to a stop-market fill itself; a "
         "stop-limit's fill is the adapter's ADR 0005 fill model's, which adds it explicitly, "
@@ -1112,7 +1112,7 @@ class OrderDesk:
                               payload.get("n"), entry=True)
             elif kind == ADD_PROPOSED:
                 self._propose(decision, payload, bar_end, payload.get("level"),
-                              payload.get("campaign_n"), entry=False)
+                              payload.get("add_n", 0) if payload.get("add_n", 0) != 0 else payload.get("campaign_n"), entry=False)
             elif kind == PROPOSAL_EXPIRED:
                 self._expire(payload)
             elif kind == CAMPAIGN_OPENED:

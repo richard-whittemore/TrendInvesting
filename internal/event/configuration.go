@@ -59,7 +59,8 @@ const ConfigurationEventType = "strategy.configuration"
 //     fields switch together: all positive turns the gate on, and a partial
 //     configuration (some zero, some positive) is rejected outright, never
 //     silently read as "no floor" for the zero ones alone.
-const ConfigurationSchemaVersion uint32 = 7
+//   - Version 8 adds the explicit recompute-N-at-Add Variant (ADR 0006).
+const ConfigurationSchemaVersion uint32 = 8
 
 // OrderType is the order an entry or Add rests as (ADR 0005, as amended
 // 2026-09-24). It is carried by the configuration (BuyOrderType) and by every
@@ -146,6 +147,11 @@ type NotionalAccountConfig struct {
 // 0016) derives from exactly this payload plus its schema version — see
 // ConfigurationHash.
 type ConfigurationPayload struct {
+	// RecomputeNAtAdd selects ADR 0006's declared Variant. False preserves
+	// frozen Baseline N and Unit size. Only N changes in the sizing formula;
+	// the opening proposal's Notional Account remains the sizing numerator.
+	RecomputeNAtAdd bool `json:"recompute_n_at_add"`
+
 	// StrategyID is the declared identifier for this configuration. It must
 	// match [A-Za-z0-9._-]{1,64} to be safely usable as a run registry
 	// directory name (ADR 0012).

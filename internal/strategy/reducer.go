@@ -89,6 +89,7 @@ type Reducer struct {
 	// never a string conversion back from the arithmetic package — such a
 	// conversion would quietly launder a drift between the two enumerations
 	// into an audit record instead of failing on it.
+	recomputeNAtAdd      bool
 	configuredSizingMode event.SizingMode
 	sizingMode           sizing.Mode
 	unitVolatilityFrac   float64
@@ -350,6 +351,8 @@ type instrumentState struct {
 	// resulting proposal is attributed to), and the earliest instant an
 	// execution for it could exist all have to outlive the single Apply call
 	// that read the bar itself.
+	// lastBarN excludes the decision bar, including for fill-chained Adds (ADR 0006).
+	lastBarN              float64
 	lastBarHigh           float64
 	lastBarPeriodEnd      time.Time
 	lastBarEarliestFillAt time.Time
@@ -546,6 +549,7 @@ func (r *transition) applyConfiguration(envelope event.Envelope) ([]event.Envelo
 	r.entryChannelLength = payload.EntryChannelLength
 	r.exitChannelLength = payload.ExitChannelLength
 	r.tierBDistanceInN = payload.TierBDistanceInN
+	r.recomputeNAtAdd = payload.RecomputeNAtAdd
 	r.configuredSizingMode = payload.SizingMode
 	r.sizingMode = sizingMode
 	r.unitVolatilityFrac = payload.UnitVolatilityFraction
@@ -791,6 +795,7 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 	// Apply call — the Add fill's own — after this bar's own call has
 	// already returned. See instrumentState's own doc comment on these
 	// fields for why they must outlive a single Apply call.
+	state.lastBarN = decisionN
 	state.lastBarHigh = view.High
 	state.lastBarPeriodEnd = bar.PeriodEnd
 	state.lastBarEarliestFillAt = previousPeriodEnd

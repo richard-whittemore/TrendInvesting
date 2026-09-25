@@ -46,7 +46,8 @@ func TestConfigurationHashStability(t *testing.T) {
 	// The previous pin, for schema version 4 with no
 	// MaxUnitsPerIndustry/MaxUnitsPerSector/MaxUnitsTotalLong, was
 	// sha256:acdf9cc9f6b45ea4658373abff96306af35539d68ad2a1e0eedee4a014fbb386.
-	const want = "sha256:9ae82a8dd8afb310b8ab42882648f2d4af431ab7d2bf30db8e616c9a078fb0cf"
+	// Schema 8 adds RecomputeNAtAdd=false to the frozen Baseline (ADR 0006).
+	const want = "sha256:badfd0c1bf083e4d9f988a767267b3a71f6451cb06361500245cec447b97fe53"
 	if got != want {
 		t.Fatalf("ConfigurationHash(baseline) = %q, want the pinned hash %q", got, want)
 	}

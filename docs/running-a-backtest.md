@@ -224,6 +224,18 @@ opening above the Baseline's cap: this Variant fills the gap at the open,
 where the Baseline skips it and enters on the next bar's breakout. None of
 these goldens establishes coverage of every possible Variant predicate.
 
+The declared [`recompute-n-at-add` Variant](../cmd/backtest/testdata/variants/recompute-n-at-add/README.md)
+is ADR 0006's first ablation: every quantity the Baseline freezes at first
+entry — Unit size, Add Ladder spacing, price cap, Add slippage and cash
+hold, and both the new Unit's stop and the earlier Units' half-N raises —
+instead uses the N current at each Add, while the opening Campaign N and
+the entry proposal's Notional Account basis stay fixed. It runs bars
+authored so the January 22 breakout's own volatility differs from the next
+day's, producing a differently sized second Add under the Variant than
+under the Baseline. This is a mechanics golden only; ADR 0012's adoption
+criteria are out of scope pending the diversified Baseline backtest and
+Regime Window evaluation.
+
 ```sh
 go test ./cmd/backtest -run '^TestDeclaredVariantGolden$' -count=1 -v
 ```

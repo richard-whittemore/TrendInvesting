@@ -37,7 +37,9 @@ const AddProposalEventType = "strategy.add.proposed"
 //     decodes OrderType as the empty string and is rejected (ADR 0015).
 //   - Version 3 adds the explicit session lifetime (ADR 0011, as amended
 //     2026-09-24). A missing window is rejected rather than inferred.
-const AddProposalSchemaVersion uint32 = 3
+//
+// Version 4 adds AddN without overwriting CampaignN (ADR 0006).
+const AddProposalSchemaVersion uint32 = 4
 
 // RuleAddLadderHalfN names the rule for AddProposalPayload.Rule and
 // CampaignUnitAddedPayload.Rule: the next Unit is added half a campaign N
@@ -49,7 +51,7 @@ const RuleAddLadderHalfN = "add.ladder.half-n"
 // open Campaign: the whole of a Turtle Add Ladder rung (The Turtle Rules
 // p.19-20), before any fill exists.
 //
-// Level is PreviousUnitFill + 0.5 x CampaignN (sizing.NextAddLevel; Validate
+// Level is PreviousUnitFill + 0.5 x EffectiveN() (sizing.NextAddLevel; Validate
 // re-derives it exactly, the same discipline every derived level in this
 // package uses) — measured from the ACTUAL fill of the Unit immediately
 // before the one this proposal would open, never from an intended or
@@ -58,11 +60,9 @@ const RuleAddLadderHalfN = "add.ladder.half-n"
 // 0005 makes it a resting order, and the fill simulator decides the executed
 // price.
 //
-// Quantity is always the Campaign's frozen UnitQuantity (ADR 0006): an Add
-// is never resized from the current Notional Account — the whole Add Ladder
-// is computable at entry from the frozen campaign N and Unit share count, so
-// a later Add sized from a drifted account figure would silently break that
-// invariant and risk more or less than the ladder promised.
+// Quantity is the frozen UnitQuantity in the Baseline (ADR 0006). The declared
+// Variant substitutes AddN in the entry sizing formula, retaining its account
+// basis and truncating to whole shares anew; it never resizes from account drift.
 //
 // Deliberately out of scope, so nothing here should be read as having
 // considered them:
@@ -75,6 +75,11 @@ const RuleAddLadderHalfN = "add.ladder.half-n"
 //     internal/strategy.Reducer evaluates an Add relative to an exit, not by
 //     anything on this payload.
 type AddProposalPayload struct {
+	// AddN is ADR 0006's recomputed N for this Add or its stop change.
+	// Zero selects the Baseline's CampaignN; positive values are captured
+	// before the decision bar and retained through the Add's fill.
+	AddN float64 `json:"add_n,omitempty"`
+
 	// ValidForSessions counts subsequent instrument bars until expiry:
 	// 1 for an ordinary Add, 2 for a fill-chained Add (ADR 0011, as amended
 	// 2026-09-24). PeriodEnd anchors the count; no calendar is inferred.
@@ -89,13 +94,13 @@ type AddProposalPayload struct {
 	UnitIndex int `json:"unit_index"`
 	// Level is the rung that was reached (see the type's doc comment).
 	Level float64 `json:"level"`
-	// Quantity is the Campaign's frozen UnitQuantity (see the type's doc
-	// comment) — never resized from the current Notional Account.
+	// Quantity follows the configured N policy (see the type comment),
+	// always retaining the entry account basis (ADR 0006).
 	Quantity int64 `json:"quantity"`
 	// PreviousUnitFill is the actual fill price Level was measured from.
 	PreviousUnitFill float64 `json:"previous_unit_fill"`
-	// CampaignN is the Campaign's frozen campaign N (ADR 0006), restated so
-	// Level is independently re-derivable from this payload alone.
+	// CampaignN is the immutable opening reference (ADR 0006). EffectiveN
+	// selects AddN for the Variant when re-deriving Level and PriceCap.
 	CampaignN float64 `json:"campaign_n"`
 	// Rule and ADR name the rule that produced this decision
 	// (docs/development.md principle 3).
@@ -103,7 +108,7 @@ type AddProposalPayload struct {
 	ADR  string `json:"adr"`
 	// OrderType, GapBufferN and PriceCap state the order the Add rests as
 	// (ADR 0005, as amended 2026-09-24): a stop-limit at Level capped at
-	// PriceCap = Level + GapBufferN x CampaignN, or, in the declared Variant
+	// PriceCap = Level + GapBufferN x EffectiveN(), or, in the declared Variant
 	// "uncapped", a stop-market order with GapBufferN and PriceCap both zero
 	// (CONTEXT.md: "Price cap"). Validate re-derives the cap exactly.
 	OrderType  OrderType `json:"order_type"`
@@ -123,6 +128,9 @@ type AddProposalPayload struct {
 // (ADR 0005, as amended 2026-09-24).
 func (p AddProposalPayload) Validate() error {
 	var errs []error
+	if !isFinite(p.AddN) || p.AddN < 0 {
+		errs = append(errs, errors.New("add n must be finite and non-negative"))
+	}
 	if p.ValidForSessions != 1 && p.ValidForSessions != 2 {
 		errs = append(errs, errors.New("valid for sessions must be 1 or 2 (ADR 0011)"))
 	}
@@ -170,14 +178,14 @@ func (p AddProposalPayload) Validate() error {
 	}
 
 	if previousFillFinite && campaignNFinite && levelFinite {
-		if derived := p.PreviousUnitFill + sizing.Product(0.5, p.CampaignN); p.Level != derived {
+		if derived := p.PreviousUnitFill + sizing.Product(0.5, p.EffectiveN()); p.Level != derived {
 			errs = append(errs, fmt.Errorf(
 				"stated level %v does not match the derivation %v (previous unit fill %v + 0.5 x campaign n %v): the add ladder is measured from the actual fill (The Turtle Rules p.19)",
 				p.Level, derived, p.PreviousUnitFill, p.CampaignN))
 		}
 	}
 
-	errs = append(errs, validatePriceCap(p.OrderType, p.GapBufferN, p.PriceCap, p.Level, p.CampaignN, levelFinite && campaignNFinite)...)
+	errs = append(errs, validatePriceCap(p.OrderType, p.GapBufferN, p.PriceCap, p.Level, p.EffectiveN(), levelFinite && campaignNFinite)...)
 
 	if p.Rule == "" {
 		errs = append(errs, errors.New("rule is required"))
@@ -202,7 +210,8 @@ const CampaignUnitAddedEventType = "strategy.campaign.unit-added"
 
 // CampaignUnitAddedSchemaVersion is the current schema version of
 // CampaignUnitAddedPayload, for the Envelope's SchemaVersion field.
-const CampaignUnitAddedSchemaVersion uint32 = 1
+// Version 2 adds AddN for the new Unit stop (ADR 0006).
+const CampaignUnitAddedSchemaVersion uint32 = 2
 
 // CampaignUnitAddedPayload records a further Unit joining an open Campaign,
 // and the fresh Protective Stop set for that Unit ALONE.
@@ -221,6 +230,11 @@ const CampaignUnitAddedSchemaVersion uint32 = 1
 // two agree, so a producer that ever let them drift fails rather than
 // journaling a silently inconsistent count.
 type CampaignUnitAddedPayload struct {
+	// AddN is ADR 0006's recomputed N for this Add or its stop change.
+	// Zero selects the Baseline's CampaignN; positive values are captured
+	// before the decision bar and retained through the Add's fill.
+	AddN float64 `json:"add_n,omitempty"`
+
 	CampaignID   string `json:"campaign_id"`
 	InstrumentID string `json:"instrument_id"`
 	// UnitIndex is which Unit this is: 2 through the Campaign's configured
@@ -259,6 +273,9 @@ type CampaignUnitAddedPayload struct {
 // long-only shape CampaignOpenedPayload.ProtectiveStop enforces for Unit 1.
 func (p CampaignUnitAddedPayload) Validate() error {
 	var errs []error
+	if !isFinite(p.AddN) || p.AddN < 0 {
+		errs = append(errs, errors.New("add n must be finite and non-negative"))
+	}
 	if p.CampaignID == "" {
 		errs = append(errs, errors.New("campaign id is required"))
 	}
@@ -311,7 +328,7 @@ func (p CampaignUnitAddedPayload) Validate() error {
 	}
 
 	if fillPriceFinite && stopMultipleFinite && campaignNFinite && stopFinite {
-		if derived := p.FillPrice - sizing.Product(p.StopMultiple, p.CampaignN); p.ProtectiveStop != derived {
+		if derived := p.FillPrice - sizing.Product(p.StopMultiple, p.EffectiveN()); p.ProtectiveStop != derived {
 			errs = append(errs, fmt.Errorf(
 				"stated protective stop %v does not match the derivation %v (fill price %v - stop multiple %v x campaign n %v)",
 				p.ProtectiveStop, derived, p.FillPrice, p.StopMultiple, p.CampaignN))
@@ -337,4 +354,22 @@ func (p CampaignUnitAddedPayload) Validate() error {
 		return fmt.Errorf("invalid campaign unit added payload: %w", err)
 	}
 	return nil
+}
+
+// EffectiveN returns the N driving this decision (ADR 0006). CampaignN
+// stays the opening reference; AddN explicitly selects the Variant operand.
+func (p AddProposalPayload) EffectiveN() float64 {
+	if p.AddN != 0 {
+		return p.AddN
+	}
+	return p.CampaignN
+}
+
+// EffectiveN returns the N driving this decision (ADR 0006). CampaignN
+// stays the opening reference; AddN explicitly selects the Variant operand.
+func (p CampaignUnitAddedPayload) EffectiveN() float64 {
+	if p.AddN != 0 {
+		return p.AddN
+	}
+	return p.CampaignN
 }

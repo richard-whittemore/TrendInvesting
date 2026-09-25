@@ -578,8 +578,8 @@ func TestConfigurationEventConstants(t *testing.T) {
 func TestConfigurationSchemaVersionBumpedForSizingFields(t *testing.T) {
 	t.Parallel()
 
-	if event.ConfigurationSchemaVersion != 7 {
-		t.Fatalf("ConfigurationSchemaVersion = %d, want 7", event.ConfigurationSchemaVersion)
+	if event.ConfigurationSchemaVersion != 8 {
+		t.Fatalf("ConfigurationSchemaVersion = %d, want 8", event.ConfigurationSchemaVersion)
 	}
 }
 

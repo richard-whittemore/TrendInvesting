@@ -44,6 +44,12 @@ type declaredVariant struct {
 func declaredVariants() []declaredVariant {
 	return []declaredVariant{
 		{
+			name:     "recompute-n-at-add",
+			barsPath: "testdata/variants/recompute-n-at-add/bars.json",
+			declare:  func(c *event.ConfigurationPayload) { c.RecomputeNAtAdd = true },
+			scenario: assertRecomputedAdds,
+		},
+		{
 			name: narrowStopVariant,
 			// The scenario needs the Add Ladder's stop raises, so it runs on
 			// the golden bars lowered until the default account, 1,000,000
@@ -239,5 +245,35 @@ func assertEntryFilledAboveTheCap(t *testing.T, records []journal.Record) {
 	}
 	if !filledAbove {
 		t.Fatal("Variant no longer reaches its declared scenario: an entry must fill at a gap above the level + 1N the Baseline caps it at")
+	}
+}
+
+// assertRecomputedAdds requires the ADR 0006 Variant to resize an Add and
+// journal its distinct N, instead of merely carrying a Variant label.
+func assertRecomputedAdds(t *testing.T, records []journal.Record) {
+	t.Helper()
+	changed := false
+	var opening event.CampaignOpenedPayload
+	for _, r := range records {
+		switch r.Envelope.Type {
+		case event.CampaignOpenedEventType:
+			if err := json.Unmarshal(r.Envelope.Payload, &opening); err != nil {
+				t.Fatal(err)
+			}
+		case event.AddProposalEventType:
+			var p event.AddProposalPayload
+			if err := json.Unmarshal(r.Envelope.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			if p.AddN <= 0 {
+				t.Fatal("Variant Add missing add_n")
+			}
+			if p.AddN != opening.CampaignN && p.Quantity != opening.UnitQuantity {
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		t.Fatal("Variant never resized an Add from changed N")
 	}
 }
