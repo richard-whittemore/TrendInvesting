@@ -347,7 +347,11 @@ never combines two levels.
     cancellation a fill's reply requests at the start of a slice (a stop
     fill that closes the Campaign expires its pending Add) is therefore
     checked at the start of the following slice, not before this slice's
-    bar;
+    bar. That check runs before any of the following slice's fills is sent,
+    counting a `Canceled` report LEAN queued for it as confirmation;
+  - a fill, or partial fill, of an order whose cancellation the adapter has
+    requested, confirmed or not: the engine has already expired its
+    proposal, so the fill is never sent and the run stops (ADR 0019);
   - a trade proposal arriving while LEAN already holds the instrument: the
     engine proposes an entry only when it holds no Campaign there.
 - **Reconciliation before trading** (`docs/architecture.md`: reconcile before

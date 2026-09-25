@@ -165,9 +165,18 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         # stays outstanding only until its expiry bar (ADR 0011, as amended),
         # so a fill delivered after that bar would name a proposal
         # the engine no longer offers (drain_order_events). Cancellations
-        # pending before this slice must be confirmed now; one that a fill's
-        # reply requests in this slice is confirmed after it.
+        # pending before this slice must be confirmed by the reports LEAN
+        # queued for it, and that is checked before any of this slice's fills
+        # reaches the engine: an order whose cancellation went unconfirmed
+        # could have filled. One that a fill's reply requests in this slice
+        # is confirmed after it, and checked at the start of the next.
         requested_earlier = frozenset(self.desk.pending_cancels)
+        try:
+            self.desk.require_cancels_confirmed("before this session's fills", requested_earlier,
+                                                self.order_events)
+        except Exception as err:
+            self.stop("order state uncertain: {}".format(err))
+            return
         self.drain_order_events()
         self.flush_snapshot()
         if self.failed:

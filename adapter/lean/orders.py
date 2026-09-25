@@ -346,6 +346,10 @@ class OrderDesk:
         # LEAN order id -> proposal id, for a cancellation LEAN has not yet
         # confirmed.
         self.pending_cancels = {}
+        # LEAN order id -> proposal id, for every order whose cancellation
+        # this adapter has requested, confirmed or not: the engine expired
+        # its proposal, so no fill of it may ever reach the engine.
+        self.cancel_requested = {}
         # LEAN order ids whose fill LEAN has reported but the engine has not
         # yet been told of.
         self.undelivered = set()
@@ -868,6 +872,7 @@ class OrderDesk:
                 raise Uncertain("LEAN did not confirm cancelling order {} (tag={}) after its "
                                 "proposal expired: response success={}, status {}".format(
                                     ticket.OrderId, proposal_id, response.IsSuccess, ticket.Status))
+            self.cancel_requested[ticket.OrderId] = proposal_id
             if ticket.Status == self.lean.OrderStatus.Canceled:
                 self._cancel_confirmed(ticket.OrderId, proposal_id)
             else:
@@ -880,7 +885,7 @@ class OrderDesk:
         self.algorithm.Log("adapter: cancelled order {} tag={}: its proposal expired".format(
             order_id, proposal_id))
 
-    def require_cancels_confirmed(self, when, requested_earlier):
+    def require_cancels_confirmed(self, when, requested_earlier, queued=()):
         """Every cancellation requested in an earlier slice has been confirmed.
 
         LEAN confirms a cancellation after the slice it was requested in; one
@@ -890,9 +895,14 @@ class OrderDesk:
         began. A cancellation this slice's own fill replies requested (a stop
         fill that closes the Campaign expires its pending Add at once; ADR
         0011, as amended 2026-09-24) cannot be confirmed until the slice
-        ends, and is checked at the start of the next one.
+        ends, and is checked at the start of the next one. queued is the
+        slice's undrained order reports: a Canceled report among them
+        confirms its order, so the check can run before any of the slice's
+        fills is sent.
         """
-        unconfirmed = {o: t for o, t in self.pending_cancels.items() if o in requested_earlier}
+        confirmed = {r["order_id"] for r in queued if r["status"] == self.lean.OrderStatus.Canceled}
+        unconfirmed = {o: t for o, t in self.pending_cancels.items()
+                       if o in requested_earlier and o not in confirmed}
         if unconfirmed:
             raise Uncertain("LEAN did not confirm cancelling order(s) {} {}; their proposals "
                             "expired, so a fill would be one the engine does not expect".format(
@@ -1087,6 +1097,19 @@ class OrderDesk:
 
     def is_execution(self, record):
         status = self.lean.OrderStatus
+        if record["status"] in (status.Filled, status.PartiallyFilled) \
+                and record["order_id"] in self.cancel_requested:
+            # The engine expired this order's proposal and the adapter asked
+            # LEAN to cancel it, so a fill contradicts the engine's state and
+            # is never sent: what to do about the position is a person's
+            # decision (ADR 0011, as amended 2026-09-24; ADR 0019).
+            raise Uncertain("LEAN reports order {} (tag={}) filled {} at {}, but its proposal "
+                            "expired and this adapter requested its cancellation ({}); the fill "
+                            "is not sent to the engine".format(
+                                record["order_id"], record["tag"], record["fill_quantity"],
+                                record["fill_price"],
+                                "confirmed" if record["order_id"] not in self.pending_cancels
+                                else "not yet confirmed"))
         if record["status"] == status.PartiallyFilled:
             # The engine accepts one fill per order: a second partial of the
             # same entry is refused, and a partial stop or exit cannot close
