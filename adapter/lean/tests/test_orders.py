@@ -1314,6 +1314,25 @@ class FillReturnTests(OrderTestCase):
         self.assertEqual(self.types_sent(algo, sent), [])
         self.assert_stopped_after(algo, sent)
 
+    def test_a_fill_above_a_stop_limits_cap_stops_the_run(self):
+        # A stop-limit's price cap is the most the hold reserved (ADR 0005 and
+        # ADR 0020, as amended 2026-09-24). A fill LEAN itself reports above
+        # its own LimitPrice, raw, means this adapter's understanding of
+        # LEAN's fill model is wrong, so the run stops rather than accept a
+        # fill the hold did not cover; the fill is never sent to the engine.
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        [entry] = self.tickets(algo)
+        self.assertEqual(entry.LimitPrice, 25.7)
+        sent = len(algo.client.sent)
+        self.fill(algo, entry, 10, 26.0)
+        self.feed(algo, 10)
+        for fact in ("above its own limit", "26.0", "25.7", str(entry.OrderId)):
+            self.assertIn(fact, algo.quit_reason)
+        self.assertEqual(self.types_sent(algo, sent), [])
+        self.assert_stopped_after(algo, sent)
+
     def test_a_fill_of_an_order_the_adapter_did_not_place_stops_the_run(self):
         algo = self.start()
         props = scaffold.OrderProperties()
@@ -1551,7 +1570,15 @@ class StartupReportTests(OrderTestCase):
         [price_cap] = [m for m in report if "price cap (ADR 0005" in m]
         for fact in (
                 "confirmed", "min(high, limit)", "does not trigger",
-                "favorable gap", "never above the limit", "k = 0",
+                "favorable gap", "bounded by the limit",
+                # The hold guarantee is qualified by the same fee-model gap
+                # the account paragraph names, not restated as unconditional.
+                "fee-model gap #81 tracks", "above its own LimitPrice",
+                # k = 0 is agreement on the triggering bar's pre-slippage
+                # price only, not exact agreement overall: three named
+                # exceptions (the touch, slippage, a later-session favorable
+                # gap) must all still be present.
+                "k = 0", "not exact agreement", "500/500", "fills at 490",
                 "the limit exactly as it adjusts its stop"):
             self.assertIn(fact, price_cap)
         # Logged at startup, before any bar reaches the engine.

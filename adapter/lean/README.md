@@ -455,6 +455,14 @@ empty.
   (#67), the adapter invents no position logic; a `PartiallyFilled` event, or
   a `Filled` one for less than the order, stops the run with the order, tag,
   quantities and price in the reason.
+- **A fill above a stop-limit's own cap stops the run.** ADR 0005 and ADR
+  0020 (as amended 2026-09-24) both depend on a capped order never costing
+  more than its limit; if LEAN ever reports a fill of an entry's or Add's
+  stop-limit order priced above that order's own `LimitPrice`, raw, that
+  dependency is false and this adapter's understanding of LEAN's fill model
+  (**The stop-limit and ADR 0005**, above) is wrong. Rather than trust such a
+  fill, the adapter raises `Uncertain` naming the order, the fill price and
+  the limit, and the fill is never sent to the engine.
 - **Where each input falls.** A slice is: reports LEAN made after the last
   slice (confirmed cancellations and amendments); this session's fills, and
   what acting on them placed; the previous Session's `account.snapshot`; this
@@ -537,28 +545,48 @@ mechanism, not a variant of ADR 0005's:
 - **no slippage is applied to a stop-limit fill of either kind**:
   `slippage_applied` is always zero, where ADR 0013 requires it on every
   fill.
-- **the `k = 0` edge case (limit equal to stop after tick flooring) agrees
-  with ADR 0005 exactly**: `min(high, limit)` reduces to `level` itself
-  whenever the order fires at all (triggering already requires
-  `high > level == limit`), in both the gap and inside-the-bar case. LEAN
-  places and correctly fills an order whose limit equals its stop.
+- **the `k = 0` edge case (limit equal to stop after tick flooring) matches
+  ADR 0005's pre-slippage price only for a fill LEAN makes on the triggering
+  bar itself**: `min(high, limit)` reduces to `level` whenever the order
+  fires that bar (triggering already requires `high > level == limit`), gap
+  or no gap. That is **not** exact agreement, in three respects: an exact
+  touch (`high` equal to both `level` and `limit`) fills under ADR 0005 but
+  does not trigger under LEAN at all (the touch row above); ADR 0005 adds
+  slippage to that price where LEAN adds none, so the two never agree on the
+  actual filled price; and an order still armed into a later session — a
+  fill-chained Add's second session, most plausibly — can fill on a
+  favorable-gap open below the shared level, a price ADR 0005's own rule for
+  that bar never produces, since it evaluates a proposal only against its
+  own bar and expires it the next one. A 500/500 order that opens the next
+  session at 490 fills at 490 under LEAN.
 - **a split adjusts the limit exactly as it adjusts the stop**: both are
   multiplied by the split factor and rounded to the cent, reported in the one
   `UpdateSubmitted` event that also halves the quantity.
 
-A fill's price is never above the limit, so it never costs more than the hold
-reserved (ADR 0020) even though the mechanism is not ADR 0005's. But because
-the mechanism differs — LEAN prices a plain inside-the-bar trigger at the
-bar's high rather than at the stop's own level, and never adds slippage — a
-LEAN acceptance run's entries and Adds should be expected to price
-differently, sometimes materially, from `cmd/backtest`'s for the same signal.
-Two ways to close that gap, neither implemented here: accept the divergence,
-since LEAN's own fills are already the evidence a LEAN run exists to gather
-and the two engines are "compared, never forced to agree" by design; or give
-the adapter a custom LEAN fill model (`Security.SetFillModel`) that
-reproduces ADR 0005's rule exactly, at the cost of a second fill-model
-implementation to keep in step with `internal/fills`. The second is a
-material design change and needs the owner's decision before it is built.
+**Execution price is bounded by the limit in every case observed**:
+`min(high, limit)` and a favorable-gap open at or below it are both,
+structurally, at or below the limit. **Total cost is a separate claim.**
+LEAN's `InteractiveBrokersFeeModel` charges a $1.00 minimum per order where
+the hold reserved ADR 0013's schedule (**Costs**, above, and the fee-model
+gap #81 tracks it), and the price cap does not close that gap — only the
+price side of it. So a fill never costs more than the hold reserved
+(ADR 0020) up to that same fee-model difference, not exactly, and the
+mechanism is not ADR 0005's regardless: a LEAN acceptance run's entries and
+Adds should be expected to price differently, sometimes materially, from
+`cmd/backtest`'s for the same signal. As a safety net against this adapter's
+own understanding of that mechanism being wrong, it now refuses rather than
+trusts a fill LEAN reports above its own `LimitPrice`, raw: `Uncertain`,
+naming the order, the fill price and the limit, and the fill is never sent
+to the engine (**Orders**, above).
+
+Two ways to close the pricing gap, neither implemented here: accept the
+divergence, since LEAN's own fills are already the evidence a LEAN run
+exists to gather and the two engines are "compared, never forced to agree"
+by design; or give the adapter a custom LEAN fill model
+(`Security.SetFillModel`) that reproduces ADR 0005's rule exactly, at the
+cost of a second fill-model implementation to keep in step with
+`internal/fills`. The second is a material design change and needs the
+owner's decision before it is built.
 
 **Observed LEAN behaviour** (image
 `quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d`;

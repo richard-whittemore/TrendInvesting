@@ -243,15 +243,31 @@ def fill_model_report(slippage_n):
         "ordinary entry's or Add's order before that matters, but a chained Add's second "
         "session is exactly this later-bar case. No slippage is applied to a stop-limit fill of "
         "either kind: slippage_applied is always zero, where ADR 0013 requires it on every "
-        "fill. A fill's price is never above the limit, so it never costs more than the hold "
-        "reserved (ADR 0020) even though the mechanism is not ADR 0005's, and a LEAN "
-        "acceptance run's entries and Adds should be expected to price differently, sometimes "
-        "materially, from cmd/backtest's for the same signal. The k = 0 edge case (limit equal "
-        "to stop after tick flooring) agrees with ADR 0005 exactly: min(high, limit) reduces to "
-        "the stop itself whenever the order fires, gap or no gap, and LEAN places and correctly "
-        "fills an order whose limit equals its stop. A split adjusts the limit exactly as it "
-        "adjusts its stop: both are multiplied by the split factor and rounded to the cent in "
-        "the one UpdateSubmitted report that adjusts the quantity too.",
+        "fill. Execution price is bounded by the limit in every case observed: min(high, limit) "
+        "and a favorable-gap open at or below it are both, structurally, at or below the limit. "
+        "Total cost is a separate claim: LEAN's InteractiveBrokersFeeModel charges a $1.00 "
+        "minimum per order where the hold reserved ADR 0013's schedule (the account paragraph "
+        "above, the fee-model gap #81 tracks), and the price cap does not close that gap, only "
+        "the price side of it -- so a fill never costs more than the hold reserved (ADR 0020) "
+        "up to that same fee-model difference, not exactly, and the mechanism is not ADR 0005's "
+        "regardless: a LEAN acceptance run's entries and Adds should be expected to price "
+        "differently, sometimes materially, from cmd/backtest's for the same signal. The "
+        "adapter itself now refuses, rather than trusts, a fill LEAN reports above its own "
+        "LimitPrice: Uncertain, naming the order, the fill price and the limit. "
+        "The k = 0 edge case (limit equal to stop after tick flooring) matches ADR 0005's "
+        "pre-slippage price only for a fill LEAN makes on the triggering bar itself: "
+        "min(high, limit) reduces to the stop whenever the order fires that bar, gap or no gap. "
+        "That is not exact agreement, in three respects: an exact touch (high equal to both "
+        "stop and limit) fills under ADR 0005 but does not trigger under LEAN at all (the touch "
+        "row above); ADR 0005 adds slippage to that price where LEAN adds none, so the actual "
+        "filled prices never agree; and an order still armed into a later session -- a "
+        "fill-chained Add's second session, most plausibly -- can fill on a favorable gap open "
+        "below the shared level, a price ADR 0005's own rule for that bar never produces, since "
+        "it evaluates a proposal only against its own bar and expires it the next one (a "
+        "500/500 order that opens the next session at 490 fills at 490 under LEAN). A split "
+        "adjusts the limit exactly as it adjusts its stop: both are multiplied by the split "
+        "factor and rounded to the cent in the one UpdateSubmitted report that adjusts the "
+        "quantity too.",
     ]
 
 
@@ -1097,6 +1113,7 @@ class OrderDesk:
         tickets = self._tickets(lambda t: t.OrderId == order_event.OrderId)
         fee = order_event.OrderFee.Value
         stop_price = order_event.StopPrice
+        limit_price = order_event.LimitPrice
         return {
             "order_id": order_event.OrderId,
             "event_id": order_event.Id,
@@ -1109,6 +1126,9 @@ class OrderDesk:
             "fee": fee.Amount,
             "fee_currency": fee.Currency,
             "stop_price": None if stop_price is None else float(stop_price),
+            # None for a stop-market order's fill; a stop-limit's own limit,
+            # raw, as LEAN reports it on the fill (fills' price-cap guard).
+            "limit_price": None if limit_price is None else float(limit_price),
             "message": order_event.Message or "",
         }
 
@@ -1221,6 +1241,23 @@ class OrderDesk:
                 raise Uncertain("LEAN reports order {} (tag={}) filled {} shares, but it is the "
                                 "adapter's {} order".format(record["order_id"], record["tag"],
                                                             quantity, placed["kind"]))
+            if buy and placed.get("price_cap") is not None:
+                # A stop-limit's price cap is the most the hold reserved (ADR
+                # 0005 and ADR 0020, as amended 2026-09-24); a fill above
+                # LEAN's own LimitPrice, raw, means LEAN's engine and this
+                # adapter's understanding of its own fill model disagree, so
+                # the run stops rather than accept a fill the hold did not
+                # cover. Compared against LEAN's LimitPrice as it reports it
+                # on the fill, not the engine's price_cap, since a
+                # tick-floored or post-split limit can differ from it by
+                # design (floor_to_tick, _split_limit_problems).
+                limit_price = record.get("limit_price")
+                if limit_price is not None and price > limit_price + 1e-9:
+                    raise Uncertain(
+                        "LEAN reports order {} (tag={}) filled at {} raw, above its own limit "
+                        "of {} raw; a stop-limit fill can never cost more than its cap, so this "
+                        "fill is not sent to the engine".format(
+                            record["order_id"], record["tag"], price, limit_price))
             self.algorithm.Log("adapter: LEAN filled order {} (tag={}): {} raw shares @ {} raw, "
                                "commission {} {} (split ratio {})".format(
                                    record["order_id"], record["tag"], quantity, price, fee,
