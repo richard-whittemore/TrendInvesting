@@ -127,6 +127,14 @@ type Simulator struct {
 	// itself. A stamp that followed delivery order would date those fills to
 	// the previous bar.
 	recordedAt time.Time
+
+	// startingEquity is the configured starting equity (ADR 0007), which the
+	// simulated account's equity opens at (see OpenAccount).
+	startingEquity float64
+	// account is the simulated brokerage account, nil until OpenAccount.
+	account *account
+	// sessionsRun counts the Sessions RunSession has run.
+	sessionsRun int
 }
 
 // book is one instrument's resting orders.
@@ -300,6 +308,7 @@ func New(cfg event.ConfigurationPayload, strategyVersion, configurationHash stri
 			MaximumFractionOfTradeValue: cfg.Commission.MaximumFractionOfTradeValue,
 		},
 		dollarsPerPoint:   cfg.DollarsPerPoint,
+		startingEquity:    cfg.NotionalAccount.StartingEquity,
 		strategyVersion:   strategyVersion,
 		configurationHash: configurationHash,
 		books:             make(map[string]*book),
@@ -609,6 +618,9 @@ func (s *Simulator) observeCampaignExited(envelope event.Envelope) error {
 	b.campaign = nil
 	b.add = nil
 	b.exit = nil
+	if s.account != nil && payload.Reason == event.ExitReasonDelisting {
+		return s.account.delist(payload.InstrumentID)
+	}
 	return nil
 }
 

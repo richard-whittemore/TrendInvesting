@@ -200,6 +200,61 @@ so neither the conservative floor nor deferred deposits discard audit evidence.
 > run. `cmd/backtest` still states one opening snapshot, so in its runs exit
 > proceeds never return (Consequences, above).
 
+> **Implementation note (2026-09-24, RulesVersion 1.8.0).** `cmd/backtest`
+> now states a figure every day, as the Consequences above require. In a
+> backtest `internal/fills` is the broker, so it keeps the account
+> (`fills.Simulator.OpenAccount`) and states each Session's close in an
+> `account.snapshot`:
+>
+> - `available_cash` is the simulator's own ledger: the opening cash, less
+>   every buy's quantity x price x dollars per point plus commission (the
+>   figure the reducer debits), plus every sell's proceeds less commission,
+>   plus every accepted cash movement, plus a Delisting Exit settled at the
+>   last available price (ADR 0009). `equity` is that cash plus every holding
+>   at its split-adjusted close (ADR 0004, as amended), plus any part of the
+>   configured starting equity the opening cash does not account for.
+>   `as_of`, `event_time` and `recorded_at` are the Session's period end.
+> - It reaches the reducer after the next Session's open-instant fills and
+>   before that Session's bars, as a LEAN run's does, and the last one before
+>   the end of the stream. There is no separate opening snapshot: the first
+>   statement, after the first Session, carries the opening cash.
+> - The replacement rule of the 1.7.0 note then gives exactly the right
+>   debits. Every fill of Session *t* is stamped at *t*'s period end, so the
+>   statement as of *t* drops its debits and states the balance that paid
+>   them; Session *t+1*'s open-instant fills are stamped at *t+1* and stay
+>   debited on top of it. In a backtest fill times and as-ofs are one clock,
+>   which settles the confirmation #220 asks for here; a live producer's
+>   clocks remain #220's question.
+> - A statement the account cannot make stops the run: negative cash is a
+>   fill the ledger could not fund, which this ADR halts on. A backtest
+>   therefore halts at the close after such a fill rather than at the fill.
+>
+> **The two readings #217 flagged do not conflict.** "Alternatives
+> rejected" says of a producer that re-states cash after every fill: "it
+> would let same-day exit proceeds back in through the same door unless the
+> producer itself implemented the credit rule. The credit half belongs in the
+> declared rule, not in a producer contract." The cash-movement amendment
+> says a deposit adds nothing until "a later accepted snapshot may include
+> it", because "a movement states a delta, not the account's balance". Read
+> together they state one asymmetry, and a per-Session statement sits inside
+> it:
+>
+> - The credit rule stays in the declared rule. `cashAtPreviousClose`
+>   refuses any figure stated later than the decision bar's previous close,
+>   so proceeds from a sale in Session *t*, which only the statement as of
+>   *t* includes, can fund Session *t+1* and never *t*, whatever a producer
+>   sends. The producer states balances; it implements no timing, so the
+>   rejected alternative's danger does not arise.
+> - The statement is a balance, not a delta. It is the "later accepted
+>   snapshot" the cash-movement amendment defers credits to, and it includes
+>   sale proceeds and deposits for the reason it includes everything: it
+>   states what the account holds. The reducer still promotes neither a
+>   sell fill nor a deposit on its own.
+>
+> Debits enter from what the reducer itself records (fills, withdrawals);
+> credits enter only through a balance stated as of a previous close. No
+> behaviour of either passage changes, and no ADR text is amended.
+
 ## Amendment: the adapter produces LEAN portfolio snapshots (2026-09-24)
 
 The LEAN adapter is the producer of `account.snapshot` for a running

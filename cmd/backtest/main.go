@@ -71,7 +71,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	configPath := flags.String("config", "", "path to the JSON strategy configuration to run")
 	barsPath := flags.String("bars", "", "path to the JSON array of completed bars to run over")
 	corporateActionsPath := flags.String("corporate-actions", "", "path to a JSON array of corporate actions (event.CorporateActionPayload) to interleave with the bars by effective time; omitted, a run carries none")
-	availableCash := flags.String("available-cash", "", "opening available cash in USD; finite and nonnegative, including zero; omitted, defaults to starting equity; no subsequent cash updates")
+	availableCash := flags.String("available-cash", "", "cash in USD the simulated account opens with; finite and nonnegative, including zero; omitted, defaults to starting equity; every later figure is derived from the run's own fills")
 	outPath := flags.String("out", "", "path to write the run's journal to")
 	verifyPath := flags.String("verify", "", "path of a journal to verify instead of running a backtest")
 	replayPath := flags.String("replay", "", "path of a journal to check for replay equivalence instead of running a backtest")

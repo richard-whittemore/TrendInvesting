@@ -34,15 +34,19 @@ const barsMultiInstrumentOutOfOrderFixture = "testdata/bars_multi_instrument_out
 // own last bar (AAPL's, in this fixture). A run that used the correct
 // maximum never trips that check.
 //
-// AAPL's bars are the golden fixture's cut the day after its breakout
-// (barsEndingWithAnOutstandingExit), so AAPL still holds an exit proposal
-// when the stream ends and the run has something to resolve.
+// AAPL's bars are the four-Unit fixture's cut the day after its breakout
+// (barsCutWithAnOutstandingExit), so AAPL still holds an exit proposal when
+// the stream ends and the run has something to resolve. They are the
+// lowered bars at the default account rather than the golden bars in a
+// larger one: MSFT's December bars put the first snapshot in 2025, so
+// AAPL's January snapshots re-base the Notional Account to the account's
+// equity (ADR 0007), and a larger account would size larger Units.
 func TestRunCompletedIsStampedWithTheLatestPeriodEndAcrossEveryInstrument(t *testing.T) {
 	fixture, err := readBars(barsMultiInstrumentOutOfOrderFixture)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bars := barsEndingWithAnOutstandingExit(t)
+	bars := barsCutWithAnOutstandingExit(t, fourUnitBarsFixture, fourUnitShift)
 	for _, bar := range fixture {
 		if bar.InstrumentID != "AAPL" {
 			bars = append(bars, bar)
@@ -50,12 +54,12 @@ func TestRunCompletedIsStampedWithTheLatestPeriodEndAcrossEveryInstrument(t *tes
 	}
 
 	out := filepath.Join(t.TempDir(), "journal.jsonl")
-	opts := withFourUnitCash(options{
+	opts := options{
 		configPath: configurationFixture,
 		barsPath:   writeBars(t, bars),
 		outPath:    out,
 		build:      testBuild,
-	})
+	}
 
 	var log bytes.Buffer
 	if err := backtest(context.Background(), opts, &log); err != nil {

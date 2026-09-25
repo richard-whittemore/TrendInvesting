@@ -30,7 +30,10 @@ func runWithCashFlags(t *testing.T, cashFlags ...string) (written []byte, journa
 }
 
 // ADR 0010's existing cash refusal must be reachable through a journalled
-// command run, with its cash input preserved for ADR 0017 replay.
+// command run, with its cash input preserved for ADR 0017 replay. With no
+// fill, every Session's snapshot states the opening cash unchanged, and
+// equity stays at the starting equity: the part of it that is not cash is
+// held, untraded, beside it (fills.Simulator.OpenAccount).
 func TestAvailableCashReachesTheJournalAndDeclinesUnaffordableUnits(t *testing.T) {
 	for _, cash := range []float64{1000, 0} {
 		t.Run(strconv.FormatFloat(cash, 'f', -1, 64), func(t *testing.T) {
@@ -70,8 +73,12 @@ func TestAvailableCashReachesTheJournalAndDeclinesUnaffordableUnits(t *testing.T
 					t.Fatal("a cash-refused fixture must produce no fill")
 				}
 			}
-			if snapshots != 1 || declines == 0 {
-				t.Fatalf("got %d snapshots and %d insufficient-cash declines; want one snapshot and at least one decline", snapshots, declines)
+			bars, err := readBars(barsFixture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshots != len(bars) || declines == 0 {
+				t.Fatalf("got %d snapshots and %d insufficient-cash declines; want one snapshot per Session and at least one decline", snapshots, declines)
 			}
 			if divergence, err := replayJournalFile(t, path); err != nil || divergence != nil {
 				t.Fatalf("cash-constrained journal replay: divergence=%+v error=%v", divergence, err)

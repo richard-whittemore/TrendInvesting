@@ -54,6 +54,21 @@ func Deliver(ctx context.Context, sim *Simulator, handler replay.Handler, envelo
 		return Result{}, fmt.Errorf("fills: a %s envelope belongs to RunSession, which applies the per-bar protocol to it", envelope.Type)
 	}
 	var result Result
+	if sim.account != nil {
+		switch envelope.Type {
+		case event.AccountSnapshotEventType:
+			// Two producers stating one account would contradict each
+			// other, and the reducer would take whichever came last.
+			return result, fmt.Errorf("fills: the simulated account states the account, so a snapshot from another producer (%s) is refused", envelope.ID)
+		case event.CashMovementEventType:
+			// Account events share one strictly increasing timeline (ADR
+			// 0007), so the close already taken is stated before a movement
+			// that follows it.
+			if err := sim.statePendingClose(ctx, handler, &result); err != nil {
+				return result, err
+			}
+		}
+	}
 	if err := sim.deliver(ctx, handler, envelope, reference{}, &result); err != nil {
 		return result, err
 	}
@@ -212,9 +227,26 @@ func RunSession(ctx context.Context, sim *Simulator, handler replay.Handler, bar
 		if err := sim.fillPass(ctx, handler, b.bar, b.bar.SplitAdjusted, true, &b.fills, &result); err != nil {
 			return result, err
 		}
-		// Step 2: the bar itself.
+	}
+
+	// Step 2: the previous Session's close, stated by the simulated account
+	// (if it keeps one), after every open-instant fill of this Session and
+	// before its bars: the order a LEAN run delivers them in (ADR 0021, as
+	// amended). A chained Add proposed by an open-instant fill is checked
+	// against the cash known at its signalling bar's previous close, which
+	// this statement would no longer be; and this Session's close must find
+	// it, since it is this Session's previous-close basis (ADR 0010).
+	if err := sim.statePendingClose(ctx, handler, &result); err != nil {
+		return result, err
+	}
+
+	// Step 3: the bars themselves.
+	for _, b := range session {
 		if err := sim.deliver(ctx, handler, b.envelope, reference{}, &result); err != nil {
 			return result, err
+		}
+		if sim.account != nil {
+			sim.account.closes[b.bar.InstrumentID] = b.bar.SplitAdjusted.Close
 		}
 	}
 
@@ -235,7 +267,8 @@ func RunSession(ctx context.Context, sim *Simulator, handler replay.Handler, bar
 			return result, err
 		}
 	}
-	return result, nil
+	sim.sessionsRun++
+	return result, sim.closeOf(session[0].bar.PeriodEnd, closed.RecordedAt)
 }
 
 // sessionBar is one bar of a Session: its envelope, its decoded payload, and
@@ -470,6 +503,9 @@ func (s *Simulator) deliver(ctx context.Context, handler replay.Handler, envelop
 	result.add(envelope, decisions)
 	if applyErr != nil {
 		return fmt.Errorf("fills: apply event %s at sequence %d: %w", envelope.ID, envelope.Sequence, applyErr)
+	}
+	if err := s.record(envelope); err != nil {
+		return err
 	}
 	for i, decision := range decisions {
 		if err := s.observe(decision, ref); err != nil {

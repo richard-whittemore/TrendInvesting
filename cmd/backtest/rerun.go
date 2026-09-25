@@ -22,7 +22,11 @@ type rerunInputs struct {
 	cfg     event.ConfigurationPayload
 	bars    []event.CompletedBarPayload
 	actions []event.CorporateActionPayload
-	account event.AccountSnapshotPayload
+	// openingCash is the cash the simulated account opened with. The
+	// account's statements are simulator output, derived like the fills;
+	// only the first, stated before any fill, still says what it opened
+	// with.
+	openingCash float64
 }
 
 // pipelineEquivalence regenerates a completed backtest through drive and
@@ -69,8 +73,11 @@ func pipelineEquivalence(ctx context.Context, r io.Reader) error {
 	if err != nil {
 		return err
 	}
+	if err := simulator.OpenAccount(facts.openingCash); err != nil {
+		return err
+	}
 	recorder := journal.NewBoundedRecorder(reducer, len(records)+1)
-	runErr := drive(ctx, simulator, recorder, facts.cfg, header.StrategyVersion, facts.bars, facts.actions, facts.account)
+	runErr := drive(ctx, simulator, recorder, facts.cfg, header.StrategyVersion, facts.bars, facts.actions)
 	entries := recorder.Entries()
 	if ctxErr := ctx.Err(); runErr != nil && ctxErr != nil && errors.Is(runErr, ctxErr) {
 		// A re-run stopped by the operator's own cancellation ends short of
@@ -104,8 +111,11 @@ func pipelineEquivalence(ctx context.Context, r io.Reader) error {
 
 // reconstructRun refuses missing, repeated and unsupported independent inputs
 // rather than defaulting them (docs/development.md principle 4, ADR 0015).
-// Configuration, opening account and completion each occur exactly once in
-// drive's protocol; a later account update cannot be treated as opening cash.
+// Configuration and completion each occur exactly once in drive's protocol.
+// The simulated account states every Session's close, so its snapshots are
+// derived output like the fills; the opening cash is read from the first,
+// and only when no fill precedes it, since a later statement is not the
+// opening cash.
 func reconstructRun(cfg event.ConfigurationPayload, inputs []event.Envelope) (rerunInputs, error) {
 	facts := rerunInputs{cfg: cfg}
 	counts := make(map[string]int)
@@ -122,10 +132,17 @@ func reconstructRun(cfg event.ConfigurationPayload, inputs []event.Envelope) (re
 			}
 			err = decodeRerunInput(input, event.ConfigurationSchemaVersion, &facts.cfg)
 		case event.AccountSnapshotEventType:
-			if i != 1 || counts[input.Type] != 1 {
-				return facts, errors.New("backtest: rerun requires exactly one opening account.snapshot as the second input; later account updates are unsupported")
+			if counts[input.Type] != 1 {
+				// Derived from the bars and the opening cash: compared
+				// later, never replayed into the pipeline.
+				break
 			}
-			err = decodeRerunInput(input, event.AccountSnapshotSchemaVersion, &facts.account)
+			if counts[event.FillEventType] != 0 {
+				return facts, errors.New("backtest: rerun cannot read the opening cash from an account.snapshot that follows a fill")
+			}
+			var opening event.AccountSnapshotPayload
+			err = decodeRerunInput(input, event.AccountSnapshotSchemaVersion, &opening)
+			facts.openingCash = opening.AvailableCash
 		case event.CompletedBarEventType:
 			var bar event.CompletedBarPayload
 			err = decodeRerunInput(input, event.CompletedBarSchemaVersion, &bar)

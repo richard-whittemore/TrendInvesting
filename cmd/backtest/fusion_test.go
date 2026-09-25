@@ -19,14 +19,17 @@ import (
 // the other. Treat that as a property of a toolchain and target, not of
 // arm64, and re-establish it rather than assume it if either changes.
 //
-// The golden bars, run with fourUnitCash, buy four Units whose
+// The golden bars, run in a fourUnitCash account, buy four Units whose
 // quantity-price products need more than 53 bits, so the weighted entry
 // price, the weighted exit price and the aggregate open risk diverge when a
 // product is left fusible; making all products exact would let a journal
-// pass even with fusible arithmetic. At the default cash the main golden
+// pass even with fusible arithmetic. At the default account the main golden
 // holds one Unit (ADR 0020 debits Unit 1's fill before Unit 2 is checked),
-// so these tests run the four-Unit Campaign themselves, and the declared
-// Variant's golden, which opens with fourUnitCash, commits one.
+// so these tests run the four-Unit Campaign themselves. No committed golden
+// holds a sensitive one: the declared Variant's golden runs the golden bars
+// lowered to prices below 64 (fourUnitBarsFixture), whose product errors are
+// too small to cross the rounding of their sums, so these tests are the
+// guard.
 //
 // That Campaign closes all four Units in one exit fill: every Unit's Exit
 // Order rests at the Exit Channel (ADR 0005, as amended), so its exit side

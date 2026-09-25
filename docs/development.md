@@ -186,7 +186,8 @@ Three separate journal checks answer different questions:
   fills**, through a fresh reducer and compares decisions. It checks reducer
   equivalence, so it cannot detect changes in the simulator that produced fills.
 - `backtest -rerun <journal>` reconstructs configuration, completed bars,
-  corporate actions and the opening account snapshot, then runs the same
+  corporate actions and the opening cash (the first account snapshot, which
+  precedes every fill; the simulated account states the rest), then runs the same
   `drive` pipeline as a backtest, regenerating fills (ADR 0005) and decisions.
   It compares every ordered record, including sequence, kind, chain hash and
   canonical envelope bytes, plus every header field. It reports the first
@@ -201,8 +202,9 @@ compares record hashes too, it also detects chain differences; `-verify` remains
 useful on its own and does not require a reproducible run. All checks leave the
 original evidence untouched. Re-run shares replay's strategy, configuration
 hash, rules-version, identity and span refusals. Missing inputs, unsupported
-schemas or input types, repeated configurations/accounts, and a missing final
-completion marker fail closed. Incomplete runs may lack the bar that caused an
+schemas or input types, repeated configurations, a first account snapshot
+that follows a fill, and a missing final completion marker fail closed. Every
+later account snapshot is accepted as the simulated account's derived output. Incomplete runs may lack the bar that caused an
 already-recorded fill, and their interruption/record limit is not journalled;
 re-run therefore refuses to guess how they stopped. It bounds regenerated
 records at the recorded count plus one input boundary to detect extra output.

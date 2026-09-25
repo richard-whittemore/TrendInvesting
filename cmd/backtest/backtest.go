@@ -58,11 +58,12 @@ type options struct {
 	// all: this field, unset, is the zero value every existing caller of
 	// options already passes.
 	corporateActionsPath string
-	// A scalar flag suffices because this input changes only the existing
-	// opening snapshot for ADR 0010's cash check. A fixture would imply a
-	// sequence of account updates this command does not model. Nil preserves
-	// the all-cash default; zero is explicit. ADR 0020's within-bar ledger
-	// and later previous-close snapshots remain separate work.
+	// availableCash is the cash the simulated account opens with, in place
+	// of the configured starting equity. A scalar suffices: every later
+	// figure is derived by the simulator from this one and the run's own
+	// fills (fills.Simulator.OpenAccount). Nil is the default, an account
+	// opened fully in cash at the starting equity (ADR 0007); zero is
+	// explicit.
 	availableCash *float64
 	outPath       string
 	registryPath  string
@@ -202,17 +203,9 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 	if err != nil {
 		return outcome{runErr: err}
 	}
-	openingAccount := event.AccountSnapshotPayload{
-		AsOf:          bars[0].PeriodEnd,
-		Equity:        cfg.NotionalAccount.StartingEquity,
-		AvailableCash: cfg.NotionalAccount.StartingEquity,
-		Currency:      "USD",
-	}
+	openingCash := cfg.NotionalAccount.StartingEquity
 	if opts.availableCash != nil {
-		openingAccount.AvailableCash = *opts.availableCash
-	}
-	if err := openingAccount.Validate(); err != nil {
-		return outcome{runErr: fmt.Errorf("backtest: -available-cash opening snapshot: %w", err)}
+		openingCash = *opts.availableCash
 	}
 	reducer, err := strategy.NewReducer(strategyVersion, cfg)
 	if err != nil {
@@ -222,9 +215,15 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 	if err != nil {
 		return outcome{runErr: fmt.Errorf("backtest: %w", err)}
 	}
+	// The simulator is the run's broker (ADR 0020), so it keeps the account
+	// and states it after every Session: the opening cash, less every buy,
+	// plus every sell.
+	if err := simulator.OpenAccount(openingCash); err != nil {
+		return outcome{runErr: fmt.Errorf("backtest: -available-cash: %w", err)}
+	}
 	recorder := journal.NewBoundedRecorder(reducer, opts.recordBound())
 
-	result := outcome{runErr: namingTheBoundFlag(drive(ctx, simulator, recorder, cfg, strategyVersion, bars, corporateActions, openingAccount))}
+	result := outcome{runErr: namingTheBoundFlag(drive(ctx, simulator, recorder, cfg, strategyVersion, bars, corporateActions))}
 
 	// The journal is written whether or not the run completed: a handler
 	// that failed closed may have emitted a final event explaining why, and
@@ -538,7 +537,13 @@ func syncDir(dir string) error {
 	return err
 }
 
-// drive applies the run's inputs in order.
+// drive applies the run's inputs in order: the configuration; then each
+// Session through fills.RunSession, which states the previous Session's
+// close from the simulated account after the Session's open-instant fills
+// and before its bars (ADR 0021, as amended); then the last Session's close;
+// then the end of the stream. The simulator must already keep the account
+// (fills.Simulator.OpenAccount): the reducer sizes no Unit without a cash
+// basis (ADR 0010), and the account is where that basis comes from.
 //
 // actions is interleaved among bars PER INSTRUMENT (CONTEXT.md: "Delisting
 // Exit"): before a bar's own decision runs, every not-yet-delivered action
@@ -556,7 +561,7 @@ func syncDir(dir string) error {
 // its instrument — that is internal/strategy/delisting.go's applyDelisting
 // chronology check, on the reducer's own state, and this command does not
 // reimplement it.
-func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, bars []event.CompletedBarPayload, actions []event.CorporateActionPayload, openingAccount event.AccountSnapshotPayload) error {
+func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, bars []event.CompletedBarPayload, actions []event.CorporateActionPayload) error {
 	// The configuration event's own time is the first bar's period end: the
 	// run's configuration is in force from the moment the run starts, and
 	// this command has no clock to consult (nor would a recorded time from
@@ -567,21 +572,6 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 		return err
 	}
 	if _, err := fills.Deliver(ctx, simulator, recorder, configuration); err != nil {
-		return fmt.Errorf("backtest: %w", err)
-	}
-
-	// ADR 0010's cash basis: the reducer sizes no Unit until an
-	// account.snapshot has supplied an available-cash figure. Journal the
-	// stated opening cash so replay uses that same input (ADR 0017). Equity
-	// and timestamp retain their existing fixture values; absent a cash flag,
-	// the run still opens fully in cash at starting equity (ADR 0007).
-	startingCash, err := inputEnvelope("account-snapshot:starting",
-		event.AccountSnapshotEventType, event.AccountSnapshotSchemaVersion, bars[0].PeriodEnd,
-		openingAccount, cfg, strategyVersion)
-	if err != nil {
-		return err
-	}
-	if _, err := fills.Deliver(ctx, simulator, recorder, startingCash); err != nil {
 		return fmt.Errorf("backtest: %w", err)
 	}
 
@@ -612,6 +602,11 @@ func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Re
 		if _, err := runSession(ctx, simulator, recorder, envelopes); err != nil {
 			return fmt.Errorf("backtest: %w", err)
 		}
+	}
+	// The last Session's close has no next Session to be stated in, so it is
+	// stated here, before anything stamped after it.
+	if _, err := fills.StateLastClose(ctx, simulator, recorder); err != nil {
+		return fmt.Errorf("backtest: %w", err)
 	}
 	// Whatever is left is not before any bar this run holds for its own
 	// instrument: an action effective at or after that instrument's own last
