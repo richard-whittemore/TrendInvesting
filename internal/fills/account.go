@@ -255,6 +255,21 @@ func (a *account) recordFill(fill event.FillPayload) error {
 	return nil
 }
 
+// cashInLieu settles a split's cash in lieu (ADR 0023): the account holds
+// the shares the broker could not deliver fewer, and is credited the cash it
+// paid for them. The credit is the account's; the reducer's spendable cash
+// sees it only in the next Session's statement (ADR 0020). An account that
+// does not hold the Campaign's quantity before fails closed before anything
+// moves, so it always ends at the decision's quantity after.
+func (a *account) cashInLieu(instrumentID string, holdingBefore, sharesLost int64, cash float64) error {
+	if a.holdings[instrumentID] != holdingBefore {
+		return fmt.Errorf("fills: a split's cash in lieu expects the simulated account to hold %d shares of %q, but it holds %d; settling would leave it off the decision's quantity after (ADR 0023)", holdingBefore, instrumentID, a.holdings[instrumentID])
+	}
+	a.holdings[instrumentID] -= sharesLost
+	a.cash += cash
+	return nil
+}
+
 // delist settles a Delisting Exit: the Campaign is closed at the last
 // available price, the split-adjusted close of its last completed bar, with
 // no fill and no order (ADR 0009; ADR 0004, as amended), so the account

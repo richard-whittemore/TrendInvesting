@@ -137,6 +137,9 @@ An instrument that satisfies the Universe criteria on the day in question. Losin
 **Unclassified Group**:
 The single correlation group that holds every instrument whose industry and sector are unknown. Its members are treated as correlated with one another.
 
+**Cash in lieu**:
+The cash a broker pays, at a split, for a fraction of a share it cannot deliver. It leaves the broker holding up to one raw share fewer per Unit than the Campaign's Units at the exact split ratio. The engine accepts that shortfall only from the split's own recorded event: it takes one raw share off each affected Unit, the most recent Unit first, and re-states their Exit Orders (ADR 0023). Any other difference between the broker's holding and the Units halts (ADR 0019).
+
 **Delisting Exit**:
 The forced closing of a Campaign because its instrument ceased to trade, distinct from an Exit-Channel exit or a stop-out.
 

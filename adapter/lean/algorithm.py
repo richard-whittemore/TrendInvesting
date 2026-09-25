@@ -111,7 +111,7 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.desk = OrderDesk(self, self.symbol, self.instrument, SimpleNamespace(
                 OrderProperties=OrderProperties, TimeInForce=TimeInForce,
                 UpdateOrderFields=UpdateOrderFields, OrderStatus=OrderStatus,
-                OrderField=OrderField),
+                OrderField=OrderField, OrderRequestStatus=OrderRequestStatus),
                 refusal=self.model_failure)
             # ADR 0010: no partial Units, no borrowing. LEAN's default equity
             # account is margin, which let a gap fill cost more than the
@@ -192,7 +192,7 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.desk.require_split_applied("before the next session's bar", final=True)
             split = data.Splits.get(self.symbol)
             if split is not None and split.Type == SplitType.SplitOccurred:
-                self.desk.apply_split(float(split.SplitFactor), split.Time)
+                self.publish_split(split)
         except Exception as err:
             self.stop("order state uncertain: {}".format(err))
             return
@@ -233,6 +233,27 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.stop("order state uncertain: {}".format(failure))
             return False
         return True
+
+    def publish_split(self, split):
+        """Carry a split LEAN reports as having occurred across (ADR 0004), and
+        publish it as market.corporate-action while LEAN holds a position
+        through it, with the shortfall and cash in lieu LEAN's rounded factor
+        left (ADR 0023). The engine's reply resizes the reduced Units' Exit
+        Orders, which the desk places in LEAN at the pre-session check. Any
+        difference that is not cash in lieu raises, for the caller to stop
+        the run."""
+        effective = split.Time.replace(tzinfo=ZoneInfo("America/New_York")).astimezone(timezone.utc)
+        action = self.desk.apply_split(float(split.SplitFactor), split.Time,
+                                       float(split.ReferencePrice),
+                                       effective.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        if action is None:
+            return
+        decisions = self.publisher.publish_corporate_action(action)
+        self.decision_count += len(decisions)
+        self.Log("adapter: split of {} published: {} raw share(s) lost, {} {} cash in lieu, "
+                 "decisions={}".format(self.instrument, action["raw_shares_lost"],
+                                       action["cash_in_lieu"], action["currency"], len(decisions)))
+        self.desk.split_decisions(decisions, action)
 
     def verify_split(self):
         """The 00:01 scheduled check: after a split, LEAN's position and orders,

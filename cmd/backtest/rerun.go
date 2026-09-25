@@ -148,8 +148,13 @@ func reconstructRun(cfg event.ConfigurationPayload, inputs []event.Envelope) (re
 			err = decodeRerunInput(input, event.CompletedBarSchemaVersion, &bar)
 			facts.bars = append(facts.bars, bar)
 		case event.MarketCorporateActionEventType:
+			// Read through the payload's own upcaster (ADR 0015), as the
+			// reducer reads it.
 			var action event.CorporateActionPayload
-			err = decodeRerunInput(input, event.MarketCorporateActionSchemaVersion, &action)
+			action, err = event.UpcastCorporateActionPayload(input.SchemaVersion, input.Payload)
+			if err != nil {
+				err = fmt.Errorf("backtest: rerun %s: %w", input.Type, err)
+			}
 			facts.actions = append(facts.actions, action)
 		case event.RunCompletedEventType:
 			if i != len(inputs)-1 || counts[input.Type] != 1 {

@@ -19,6 +19,11 @@ FILL_SCHEMA_VERSION = 4
 # (internal/event/order_lifecycle.go); ADR 0015.
 ORDER_LIFECYCLE_EVENT_TYPE = "execution.order.lifecycle"
 ORDER_LIFECYCLE_SCHEMA_VERSION = 1
+# event.MarketCorporateActionEventType / MarketCorporateActionSchemaVersion
+# (internal/event/corporate_action.go); ADR 0015. Schema 2 carries a split's
+# cash in lieu (ADR 0023).
+CORPORATE_ACTION_EVENT_TYPE = "market.corporate-action"
+CORPORATE_ACTION_SCHEMA_VERSION = 2
 # event.AdapterRunStoppedReason* (internal/event/run_stopped.go): the closed
 # set of reasons this adapter may report, mirrored here so an unrecognised
 # reason fails at the source rather than reaching the engine, which would
@@ -153,6 +158,14 @@ class Publisher:
         """
         return self._publish(FILL_EVENT_TYPE, FILL_SCHEMA_VERSION, "fill", payload,
                              payload["filled_at"])
+
+    def publish_corporate_action(self, payload):
+        """Report a split LEAN applied to a held position as
+        market.corporate-action (event.CorporateActionPayload; ADR 0023),
+        stamped at the split's own effective time. The desk derives the
+        payload (OrderDesk.apply_split); this adds no figure of its own."""
+        return self._publish(CORPORATE_ACTION_EVENT_TYPE, CORPORATE_ACTION_SCHEMA_VERSION,
+                             "corporate-action", payload, payload["effective_at"])
 
     def publish_order_lifecycle(self, payload):
         """Report one LEAN order change that is not an execution

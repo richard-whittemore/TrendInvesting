@@ -272,7 +272,7 @@
       "function": "(*transition).applyCorporateAction",
       "statement": "return nil, fmt.Errorf(\"strategy: corporate action kind %q is not implemented by this reducer\", payload.Kind)",
       "category": "unreachable-by-invariant",
-      "reason": "event.CorporateActionPayload.Validate accepts only event.CorporateActionKindDelisting today, and this switch is reached only after that Validate has already run. The arm is kept so that a payload contract which later recognises a second kind (a merger, a spinoff) fails closed here the moment it does, rather than a reducer that does not yet implement it silently doing nothing."
+      "reason": "event.CorporateActionPayload.Validate accepts only event.CorporateActionKindDelisting and event.CorporateActionKindSplit, both dispatched above, and this switch is reached only after event.UpcastCorporateActionPayload has run that Validate. The arm is kept so that a payload contract which later recognises another kind (a merger, a spinoff) fails closed here the moment it does, rather than a reducer that does not yet implement it silently doing nothing."
     },
     {
       "file": "internal/strategy/delisting.go",
@@ -592,10 +592,31 @@
     },
     {
       "file": "internal/strategy/exit_order.go",
-      "function": "(*transition).exitOrderChanges",
-      "statement": "return nil, fmt.Errorf(\"strategy: marshal exit order payload: %w\", err)",
+      "function": "(*transition).exitOrderSet",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal exit order payload: %w\", err)",
       "category": "unreachable-by-construction",
       "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
+    },
+    {
+      "file": "internal/strategy/split.go",
+      "function": "(*transition).applySplit",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: built invalid cash in lieu payload: %w\", id, err)",
+      "category": "unreachable-by-construction",
+      "reason": "CampaignCashInLieuPayload.Validate on a payload applySplit assembled from figures it has just checked: the ids and time come from the validated corporate action and the open Campaign; the ratio, currency and a positive cash from CorporateActionPayload.Validate (a split reaching this point states a shortfall or cash, and a shortfall requires cash); one reduction per raw share lost, taken from the most recent Units in descending index order, each by exactly EngineSharesPerRawShare and only after the guard that the Unit keeps at least one share; and EngineSharesLost and QuantityAfter derived by the same integer arithmetic, bounded by the Campaign's own holding, so no sum overflows."
+    },
+    {
+      "file": "internal/strategy/split.go",
+      "function": "(*transition).applySplit",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal cash in lieu payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
+    },
+    {
+      "file": "internal/strategy/split.go",
+      "function": "(*transition).applySplit",
+      "statement": "return nil, err",
+      "category": "unreachable-by-construction",
+      "reason": "Propagates exitOrderSet's error (internal/strategy/exit_order.go) for a reduced Unit re-stated at its unchanged, already-validated level and source for a positive quantity; its validation failure needs an invalid level or quantity, and its marshal failure is unreachable by construction (its entry in this list)."
     },
     {
       "file": "internal/fills/fills.go",

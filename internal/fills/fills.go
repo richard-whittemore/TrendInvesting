@@ -368,6 +368,8 @@ func (s *Simulator) observe(envelope event.Envelope, ref reference) error {
 		return s.observeCampaignExited(envelope)
 	case event.ProposalExpiredEventType:
 		return s.observeProposalExpired(envelope)
+	case event.CampaignCashInLieuEventType:
+		return s.observeCashInLieu(envelope)
 
 	// Recognised and deliberately without effect on the resting-order book.
 	// Listed one by one rather than caught by a default branch, so that a
@@ -385,7 +387,7 @@ func (s *Simulator) observe(envelope event.Envelope, ref reference) error {
 		event.ConfigurationEventType,               // an input, carried at construction
 		event.CompletedBarEventType,                // an input, handled by RunSession itself
 		event.SessionClosedEventType,               // likewise
-		event.MarketCorporateActionEventType,       // ADR 0009: proposal-expired and campaign-exited emissions cancel orders
+		event.MarketCorporateActionEventType,       // any kind: the reducer's emissions resolve it (ADR 0009's cancellations, ADR 0023's cash in lieu)
 		event.RunCompletedEventType,                // ADR 0011: proposal-expired and exit-order-set emissions resolve the book
 		event.FillEventType,                        // this package's own output
 		event.AccountSnapshotEventType,             // an input; no resting-order consequence
@@ -664,6 +666,52 @@ func (s *Simulator) observeCampaignExited(envelope event.Envelope) error {
 	b.exit = nil
 	if s.account != nil && payload.Reason == event.ExitReasonDelisting {
 		return s.account.delist(payload.InstrumentID)
+	}
+	return nil
+}
+
+// observeCashInLieu applies a split's cash in lieu as the reducer decided it
+// (ADR 0023): each named Unit shrinks from its quantity before to its
+// quantity after, and the simulated account, if kept, holds the shares lost
+// fewer and is credited the cash. The Units' Exit Orders are re-rested by
+// the strategy.exit-order.set decisions that follow it, so its level is left
+// alone here.
+//
+// Every disagreement with the book fails closed before anything moves: a
+// Campaign the book does not hold, a Unit it does not hold, or a Unit whose
+// quantity is not the decision's quantity before, or an account that does
+// not hold the Campaign's quantity before. Applying it anyway would shrink
+// the wrong shares.
+func (s *Simulator) observeCashInLieu(envelope event.Envelope) error {
+	var payload event.CampaignCashInLieuPayload
+	if err := decodePayload(envelope, &payload); err != nil {
+		return err
+	}
+	if err := payload.Validate(); err != nil {
+		return fmt.Errorf("fills: instrument %q: %w", payload.InstrumentID, err)
+	}
+	b := s.bookFor(payload.InstrumentID)
+	if b.campaign == nil || b.campaign.id != payload.CampaignID {
+		return fmt.Errorf("fills: instrument %q: cash in lieu names campaign %q, which this simulator has no open campaign for", payload.InstrumentID, payload.CampaignID)
+	}
+	units := make([]*unit, len(payload.Reductions))
+	for i, r := range payload.Reductions {
+		u := b.campaign.unitAt(r.UnitIndex)
+		if u == nil {
+			return fmt.Errorf("fills: instrument %q: cash in lieu reduces unit %d of campaign %q, which this simulator does not hold", payload.InstrumentID, r.UnitIndex, payload.CampaignID)
+		}
+		if u.quantity != r.QuantityBefore {
+			return fmt.Errorf("fills: instrument %q: cash in lieu reduces unit %d of campaign %q from %d shares, but the unit holds %d", payload.InstrumentID, r.UnitIndex, payload.CampaignID, r.QuantityBefore, u.quantity)
+		}
+		units[i] = u
+	}
+	if s.account != nil {
+		if err := s.account.cashInLieu(payload.InstrumentID, payload.QuantityBefore, payload.EngineSharesLost, payload.CashInLieu); err != nil {
+			return err
+		}
+	}
+	for i, u := range units {
+		u.quantity = payload.Reductions[i].QuantityAfter
 	}
 	return nil
 }

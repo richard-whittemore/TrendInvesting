@@ -29,28 +29,22 @@ import (
 // applyCorporateAction handles event.MarketCorporateActionEventType: a fact
 // about an instrument's own listing, external to any decision this system
 // made and to any execution a venue reported (see that event type's own doc
-// comment). Like applyConfiguration and applyCompletedBar, an unexpected
-// schema version is rejected before decoding (ADR 0015).
+// comment). Its payload is read through event.UpcastCorporateActionPayload,
+// which reads a schema-1 delisting forward and refuses any schema it does
+// not know (ADR 0015).
 //
 // Dispatch is by Kind even though event.CorporateActionPayload.Validate
-// recognises only event.CorporateActionKindDelisting today, so that a future
-// payload version which recognises a SECOND kind before this reducer
-// implements it fails closed here rather than silently doing nothing with a
-// corporate action it does not understand (docs/development.md principle 4).
+// recognises only the kinds handled below, so that a future payload version
+// which recognises another kind before this reducer implements it fails
+// closed here rather than silently doing nothing with a corporate action it
+// does not understand (docs/development.md principle 4).
 func (r *transition) applyCorporateAction(envelope event.Envelope) ([]event.Envelope, error) {
 	if !r.configured {
 		return nil, errors.New("strategy: received a corporate action before a configuration event; failing closed")
 	}
-	if envelope.SchemaVersion != event.MarketCorporateActionSchemaVersion {
-		return nil, fmt.Errorf("strategy: corporate action payload schema version %d does not match the version %d this build requires; an older or newer schema is rejected, never silently upgraded, until an explicit upcaster exists (ADR 0015)", envelope.SchemaVersion, event.MarketCorporateActionSchemaVersion)
-	}
-
-	var payload event.CorporateActionPayload
-	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
-		return nil, fmt.Errorf("strategy: decode corporate action payload: %w", err)
-	}
-	if err := payload.Validate(); err != nil {
-		return nil, fmt.Errorf("strategy: invalid corporate action payload: %w", err)
+	payload, err := event.UpcastCorporateActionPayload(envelope.SchemaVersion, envelope.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("strategy: %w", err)
 	}
 
 	// The open Session has not yet decided this instrument's Add or entry
@@ -63,6 +57,8 @@ func (r *transition) applyCorporateAction(envelope event.Envelope) ([]event.Enve
 	switch payload.Kind {
 	case event.CorporateActionKindDelisting:
 		return r.applyDelisting(payload, envelope)
+	case event.CorporateActionKindSplit:
+		return r.applySplit(payload, envelope)
 	default:
 		return nil, fmt.Errorf("strategy: corporate action kind %q is not implemented by this reducer", payload.Kind)
 	}

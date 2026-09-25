@@ -53,7 +53,7 @@ type options struct {
 	barsPath   string
 	// corporateActionsPath is a JSON array of event.CorporateActionPayload,
 	// the fixture-driven input path for a corporate action (CONTEXT.md:
-	// "Delisting Exit"). Empty names no fixture, and a run given none
+	// "Delisting Exit", "Cash in lieu"). Empty names no fixture, and a run given none
 	// behaves exactly as one with no corporate-action input in its stream at
 	// all: this field, unset, is the zero value every existing caller of
 	// options already passes.
@@ -545,11 +545,14 @@ func syncDir(dir string) error {
 // (fills.Simulator.OpenAccount): the reducer sizes no Unit without a cash
 // basis (ADR 0010), and the account is where that basis comes from.
 //
-// actions is interleaved among bars PER INSTRUMENT (CONTEXT.md: "Delisting
-// Exit"): before a bar's own decision runs, every not-yet-delivered action
-// naming that SAME instrument, whose EffectiveAt precedes the bar's own
-// PeriodEnd, is delivered first, so a delisting reaches the reducer ahead of
-// the bar decision it forces closed. Positioning is per instrument rather
+// actions is interleaved among bars PER INSTRUMENT: before a bar's own
+// decision runs, every not-yet-delivered action naming that SAME
+// instrument, whose EffectiveAt precedes the bar's own PeriodEnd, is
+// delivered first, so a delisting reaches the reducer ahead of the bar
+// decision it forces closed (CONTEXT.md: "Delisting Exit"), and a split's
+// cash in lieu ahead of the Session whose orders it resizes (CONTEXT.md:
+// "Cash in lieu"). Every action is delivered, however many name one
+// instrument. Positioning is per instrument rather
 // than against the bar stream as a whole because readBars promises only
 // "the order the run delivers them", never global chronology: an
 // instrument-grouped fixture (every bar of one instrument, then every bar of
@@ -558,9 +561,9 @@ func syncDir(dir string) error {
 // instrument's history — a defect a single stream-wide cursor cannot avoid,
 // however it is positioned. Nothing here judges whether a given action's
 // EffectiveAt is stale relative to what the reducer has already accepted for
-// its instrument — that is internal/strategy/delisting.go's applyDelisting
-// chronology check, on the reducer's own state, and this command does not
-// reimplement it.
+// its instrument — that is the reducer's own chronology check, on its own
+// state (internal/strategy/delisting.go, split.go), and this command does
+// not reimplement it.
 func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, bars []event.CompletedBarPayload, actions []event.CorporateActionPayload) error {
 	// The configuration event's own time is the first bar's period end: the
 	// run's configuration is in force from the moment the run starts, and
@@ -688,8 +691,8 @@ func latestPeriodEnd(bars []event.CompletedBarPayload) time.Time {
 // fixture gives them: each instrument's own delivery point in the bar
 // stream depends only on ITS OWN bars, never on where another instrument's
 // bars or actions happen to sit in the file. deliverInEffectiveOrder sorts
-// the due actions before delivery: ADR 0009 makes the first delisting
-// terminal, so fixture order must not choose the effective time of the exit.
+// the due actions into one total order before delivery (inEffectiveOrder),
+// so fixture order never decides the journal.
 func deliverActionsDueFor(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, instrumentID string, boundary time.Time) error {
 	var due []int
 	for i, action := range actions {
@@ -701,35 +704,12 @@ func deliverActionsDueFor(ctx context.Context, simulator *fills.Simulator, recor
 	return deliverInEffectiveOrder(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, due)
 }
 
-// deliverInEffectiveOrder delivers the given actions earliest first.
-//
-// Several actions for one instrument can fall before the same bar, and the
-// reducer treats the first delisting it accepts as terminal: a later notice
-// for the same instrument states no new fact and is ignored. Delivering in
-// the order the fixture happened to list them would therefore let the file's
-// order decide which effective time the Campaign's exit records, which is a
-// fact about the file rather than about the instrument.
-//
-// Sorting here rather than demanding a sorted fixture keeps the command's
-// output a function of what the actions say, not of how they were written
-// down -- which only holds if the order is TOTAL. Effective time alone is
-// not: two actions sharing an instant would fall back on their position in
-// the file, and the journal would again describe the fixture rather than
-// the instruments. Instrument and kind break the tie, and since those three
-// fields are the whole of a CorporateActionPayload, two it cannot separate
-// are the same value, whose order nothing can observe.
+// deliverInEffectiveOrder delivers the given actions in inEffectiveOrder,
+// every one of them: each split of an instrument applies on its own terms
+// (ADR 0023), and a delisting is terminal only in the reducer, which records
+// a repeated notice as the no-op it is (ADR 0009).
 func deliverInEffectiveOrder(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, due []int) error {
-	sort.SliceStable(due, func(a, b int) bool {
-		left, right := actions[due[a]], actions[due[b]]
-		if !left.EffectiveAt.Equal(right.EffectiveAt) {
-			return left.EffectiveAt.Before(right.EffectiveAt)
-		}
-		if left.InstrumentID != right.InstrumentID {
-			return left.InstrumentID < right.InstrumentID
-		}
-		return left.Kind < right.Kind
-	})
-	for _, i := range due {
+	for _, i := range inEffectiveOrder(actions, due) {
 		if err := deliverCorporateAction(ctx, simulator, recorder, cfg, strategyVersion, actions[i]); err != nil {
 			return err
 		}
@@ -738,12 +718,52 @@ func deliverInEffectiveOrder(ctx context.Context, simulator *fills.Simulator, re
 	return nil
 }
 
+// inEffectiveOrder sorts due, indexes into actions, earliest first, and
+// returns it.
+//
+// Several actions for one instrument can fall before the same bar, and their
+// order is decision-relevant: the reducer applies every split in order and
+// refuses one not after the last (ADR 0023), and treats the first delisting
+// it accepts as terminal (ADR 0009). Delivering in the order the fixture
+// happened to list them would let the file decide the journal, which is a
+// fact about the file rather than about the instrument.
+//
+// Sorting here rather than demanding a sorted fixture keeps the command's
+// output a function of what the actions say, not of how they were written
+// down -- which only holds if the order is TOTAL. Effective time,
+// instrument and kind do not separate two splits of one instrument at one
+// instant, so the whole payload's JSON encoding breaks the last tie: two
+// actions it cannot separate are the same value, whose order nothing can
+// observe.
+func inEffectiveOrder(actions []event.CorporateActionPayload, due []int) []int {
+	encoded := make(map[int][]byte, len(due))
+	for _, i := range due {
+		// Marshal of a payload readCorporateActions or rerun has already
+		// validated cannot fail (validated-payload-json, docs/development.md).
+		encoded[i], _ = json.Marshal(actions[i])
+	}
+	sort.SliceStable(due, func(a, b int) bool {
+		left, right := actions[due[a]], actions[due[b]]
+		if !left.EffectiveAt.Equal(right.EffectiveAt) {
+			return left.EffectiveAt.Before(right.EffectiveAt)
+		}
+		if left.InstrumentID != right.InstrumentID {
+			return left.InstrumentID < right.InstrumentID
+		}
+		if left.Kind != right.Kind {
+			return left.Kind < right.Kind
+		}
+		return bytes.Compare(encoded[due[a]], encoded[due[b]]) < 0
+	})
+	return due
+}
+
 // deliverRemainingActions delivers whatever in actions is not yet delivered
-// (per delivered), in effective-time order (ADR 0009): called once, after the
+// (per delivered), in inEffectiveOrder: called once, after the
 // last bar, for an action effective at or after its own instrument's last
 // bar, or naming an instrument this run holds no bar for at all — the
-// unknown-instrument case internal/strategy/delisting.go's applyDelisting
-// records without error.
+// unknown-instrument case the reducer records without error (delisting.go,
+// split.go).
 func deliverRemainingActions(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool) error {
 	var remaining []int
 	for i := range actions {
@@ -839,7 +859,8 @@ func readBars(path string) ([]event.CompletedBarPayload, error) {
 }
 
 // readCorporateActions loads the corporate-action fixture named by path: a
-// JSON array of event.CorporateActionPayload (CONTEXT.md: "Delisting Exit"),
+// JSON array of event.CorporateActionPayload (CONTEXT.md: "Delisting Exit",
+// "Cash in lieu"), at the payload's current schema,
 // in any order — the same
 // event.MarketCorporateActionEventType a live producer would eventually
 // deliver instead, so the reducer never learns which one sent it
@@ -866,8 +887,8 @@ func readBars(path string) ([]event.CompletedBarPayload, error) {
 // command handles correctly, to catch a mistake that has no consequence.
 //
 // Whether an action is stale relative to what the reducer has already
-// accepted for its instrument remains entirely
-// internal/strategy/delisting.go's applyDelisting's own question.
+// accepted for its instrument remains entirely the reducer's own question
+// (internal/strategy/delisting.go, split.go).
 func readCorporateActions(path string) ([]event.CorporateActionPayload, error) {
 	if path == "" {
 		return nil, nil

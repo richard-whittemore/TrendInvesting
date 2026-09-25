@@ -71,34 +71,45 @@ func (r *transition) exitOrderChanges(campaign *campaignState, units []unitState
 		if order.level == u.exitOrderLevel && order.source == u.exitOrderSource {
 			continue
 		}
-		payload := event.ExitOrderSetPayload{
-			CampaignID:       campaign.campaignID,
-			InstrumentID:     campaign.instrumentID,
-			UnitIndex:        u.index,
-			Level:            order.level,
-			Quantity:         u.quantity,
-			Source:           order.source,
-			ProtectiveStop:   u.protectiveStop,
-			ExitChannelLevel: order.exitLevel,
-			AsOf:             asOf,
-			Rule:             event.RuleExitOrderHigherOfStopAndExitChannel,
-			ADR:              event.ADRExitOrderRestsAtTheLevel,
-		}
-		if err := payload.Validate(); err != nil {
-			return nil, fmt.Errorf("strategy: instrument %q: campaign %q: built invalid exit order payload for unit %d: %w", campaign.instrumentID, campaign.campaignID, u.index, err)
-		}
-		payloadBytes, err := json.Marshal(payload)
+		envelope, err := r.exitOrderSet(campaign, u, order, asOf, cause, input)
 		if err != nil {
-			// validated-payload-json (docs/development.md).
-			return nil, fmt.Errorf("strategy: marshal exit order payload: %w", err)
+			return nil, err
 		}
-		emissions = append(emissions, r.stamp(
-			decisionID(fmt.Sprintf("exit-order-set-unit-%d-%s", u.index, cause), campaign.instrumentID, asOf),
-			event.ExitOrderSetEventType, event.ExitOrderSetSchemaVersion,
-			asOf, input, payloadBytes,
-		))
+		emissions = append(emissions, envelope)
 	}
 	return emissions, nil
+}
+
+// exitOrderSet builds the strategy.exit-order.set decision for one Unit's
+// Exit Order at order, for the Unit's own current quantity. It moves no
+// state.
+func (r *transition) exitOrderSet(campaign *campaignState, u unitState, order exitOrder, asOf time.Time, cause string, input event.Envelope) (event.Envelope, error) {
+	payload := event.ExitOrderSetPayload{
+		CampaignID:       campaign.campaignID,
+		InstrumentID:     campaign.instrumentID,
+		UnitIndex:        u.index,
+		Level:            order.level,
+		Quantity:         u.quantity,
+		Source:           order.source,
+		ProtectiveStop:   u.protectiveStop,
+		ExitChannelLevel: order.exitLevel,
+		AsOf:             asOf,
+		Rule:             event.RuleExitOrderHigherOfStopAndExitChannel,
+		ADR:              event.ADRExitOrderRestsAtTheLevel,
+	}
+	if err := payload.Validate(); err != nil {
+		return event.Envelope{}, fmt.Errorf("strategy: instrument %q: campaign %q: built invalid exit order payload for unit %d: %w", campaign.instrumentID, campaign.campaignID, u.index, err)
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		// validated-payload-json (docs/development.md).
+		return event.Envelope{}, fmt.Errorf("strategy: marshal exit order payload: %w", err)
+	}
+	return r.stamp(
+		decisionID(fmt.Sprintf("exit-order-set-unit-%d-%s", u.index, cause), campaign.instrumentID, asOf),
+		event.ExitOrderSetEventType, event.ExitOrderSetSchemaVersion,
+		asOf, input, payloadBytes,
+	), nil
 }
 
 // recordExitOrders remembers, on every Unit the Campaign holds, the Exit

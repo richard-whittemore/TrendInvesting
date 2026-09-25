@@ -220,8 +220,14 @@ func (c *campaignState) entryPrice() float64 {
 // remaining position), or only the named subset for a stop fill (the
 // per-Unit closing) — computed by the caller, which already has the
 // distinction to make.
+//
+// A split's cash in lieu accumulates into the same three figures (split.go;
+// ADR 0023): its lost shares at their Units' entry prices, and its cash, in
+// points, as exit value. Cash paid with no share lost adds exit value with
+// no quantity, which is why the shortcut below also requires no closed exit
+// value.
 func (c *campaignState) lifeAggregate(thisQuantity int64, thisEntryWeightedSum, price float64) (quantity int64, entryPrice, exitPrice float64) {
-	if c.closedQuantity == 0 {
+	if c.closedQuantity == 0 && c.closedExitWeightedSum == 0 {
 		// Whenever no partial close has ever happened, thisQuantity and
 		// thisEntryWeightedSum always describe EVERY Unit c.units still
 		// holds (both callers close the whole remaining position in that
