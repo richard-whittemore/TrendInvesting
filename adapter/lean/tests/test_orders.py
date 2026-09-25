@@ -1775,6 +1775,7 @@ class SplitTests(OrderTestCase):
     def test_a_split_limit_rounded_down_below_the_cap_is_kept(self):
         algo, entry = self.capped_entry_across_a_split(math.floor)
         self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertLessEqual(entry.StopPrice, entry.LimitPrice)
         self.assertEqual(algo.Transactions.limit_updates, [])
         self.assertEqual(entry.LimitPrice, 25.9)
 
@@ -1782,6 +1783,32 @@ class SplitTests(OrderTestCase):
         algo, entry = self.capped_entry_across_a_split(math.ceil, acknowledge=False)
         self.assert_stopped_before_the_session(
             algo, "split", "order {}".format(entry.OrderId), "25.9100", "25.9070")
+
+    def test_a_split_cap_that_floors_below_the_split_stop_stops_before_the_session(self):
+        # k = 0: the cap is the level, 0.87525 split-adjusted, 49.014 raw at 56
+        # (limit 49.01 floored). At 28 LEAN rounds the split stop up to 24.51
+        # and the limit up to 24.51, above the 24.507 cap; flooring the cap
+        # gives 24.50, below the stop, so a touch of the stop could no longer
+        # fill. The run stops rather than silently skip the Unit.
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9, entry_level=0.87525, quantity=5600, n=0.05,
+                                           gap_buffer_n=0, price_cap=0.87525)])
+        [entry] = self.tickets(algo)
+        self.split(algo, 10, limit_rounding=math.ceil)
+        self.assertEqual(algo.Transactions.limit_updates, [])
+        self.assert_stopped_before_the_session(
+            algo, "split", "order {}".format(entry.OrderId), "below its stop", "24.5100")
+
+    def test_a_split_limit_rounded_down_below_the_split_stop_stops_before_the_session(self):
+        # The same k = 0 order with the limit rounded down, to 24.50: within a
+        # tick of the cap, but below the 24.51 stop.
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9, entry_level=0.87525, quantity=5600, n=0.05,
+                                           gap_buffer_n=0, price_cap=0.87525)])
+        [entry] = self.tickets(algo)
+        self.split(algo, 10, limit_rounding=math.floor)
+        self.assert_stopped_before_the_session(
+            algo, "split", "order {}".format(entry.OrderId), "below its stop", "24.5000")
 
     def test_an_exit_order_lean_dropped_in_the_split_stops_before_the_session(self):
         # The holding still matches the engine's Units, so only checking each

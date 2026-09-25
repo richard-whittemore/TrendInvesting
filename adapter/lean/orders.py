@@ -524,7 +524,7 @@ class OrderDesk:
                                                 placed["quantity"], placed["level"], quantity,
                                                 level))
             if placed.get("price_cap") is not None:
-                problems += self._split_limit_problems(ticket, placed["price_cap"] * ratio,
+                problems += self._split_limit_problems(ticket, stop, placed["price_cap"] * ratio,
                                                        placed["price_cap"], tick)
         if problems:
             raise Uncertain("after the split of {} at {}, at {} split-adjusted shares per raw "
@@ -534,7 +534,7 @@ class OrderDesk:
                            "works {} order(s), as the engine's figures are at split ratio {}".format(
                                split_at, when, holding, len(self._open_tickets()), ratio))
 
-    def _split_limit_problems(self, ticket, cap, engine_cap, tick):
+    def _split_limit_problems(self, ticket, stop, cap, engine_cap, tick):
         """A working stop-limit's limit after a split, against its cap at the
         new ratio (ADR 0005 and ADR 0020, as amended 2026-09-24).
 
@@ -546,10 +546,24 @@ class OrderDesk:
         limit is still above the cap, the run stops. A limit further than a
         tick below the cap is not the order the engine placed, and stops the
         run too.
+
+        Whatever it is kept or amended to, the limit must stay at or above the
+        working stop (ADR 0005, as amended: the order fills at max(stop, open)
+        within the cap). If the split rounded the stop above the cap floored
+        to the tick, as it can when the cap is the level itself (gap_buffer_n
+        0), no limit is both within the cap and at or above the stop, so the
+        run stops rather than rest an order a touch of its stop could not
+        fill. Moving the stop is not a correction ADR 0005 makes: the stop is
+        the engine's level.
         """
         limit = float(ticket.Get(self.lean.OrderField.LimitPrice))
         if limit > cap + 1e-9:
             target = floor_to_tick(cap, tick)
+            if target < stop - 1e-9:
+                return ["LEAN order {} (tag={}) is limited at {:.4f}, above the engine's price cap "
+                        "{} at {:.4f} raw, but the cap floored to the tick, {:.4f}, is below its "
+                        "stop {:.4f}: no limit within the cap can fill at the stop".format(
+                            ticket.OrderId, ticket.Tag, limit, engine_cap, cap, target, stop)]
             fields = self.lean.UpdateOrderFields()
             fields.LimitPrice = target
             response = ticket.Update(fields)
@@ -566,6 +580,9 @@ class OrderDesk:
         if limit < cap - tick - 1e-9:
             return ["LEAN order {} (tag={}) is limited at {:.4f}, but the engine's price cap {} "
                     "is {:.4f} raw".format(ticket.OrderId, ticket.Tag, limit, engine_cap, cap)]
+        if limit < stop - 1e-9:
+            return ["LEAN order {} (tag={}) is limited at {:.4f}, below its stop {:.4f}: a touch "
+                    "of the stop could not fill".format(ticket.OrderId, ticket.Tag, limit, stop)]
         return []
 
     def n_for_tag(self, tag):

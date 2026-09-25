@@ -377,7 +377,11 @@ never combines two levels.
   limit it rounded **above** the cap is amended down to the cap floored to the
   tick (`UpdateOrderFields.LimitPrice`) before the session can fill; if LEAN
   does not acknowledge that, or the limit is still above the cap, the run
-  stops. That LEAN splits a limit as it splits a stop, rounding either way, is
+  stops. Kept or amended, the limit must also stay at or above the working
+  stop. When the split rounds the stop above the cap floored to the tick (it
+  can when `gap_buffer_n` is 0), no limit can satisfy both, and the run stops
+  rather than rest an order that a touch of its stop could not fill. The stop
+  is never moved, because it is the engine's level. That LEAN splits a limit as it splits a stop, rounding either way, is
   also **unconfirmed**.
 
 **Fills and order changes.** `OnOrderEvent` sends nothing: LEAN raises it in
