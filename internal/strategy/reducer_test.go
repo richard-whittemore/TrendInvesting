@@ -48,7 +48,13 @@ func validConfigurationPayload() event.ConfigurationPayload {
 		EntryChannelLength:     55,
 		ExitChannelLength:      20,
 		MaxUnits:               4,
-		SlippageN:              0.05,
+		// ADR 0008's other three Unit caps, generous here since this fixture
+		// is not testing them: only the per-instrument cap above is exercised
+		// by name in this file.
+		MaxUnitsPerIndustry: 1_000_000,
+		MaxUnitsPerSector:   1_000_000,
+		MaxUnitsTotalLong:   1_000_000,
+		SlippageN:           0.05,
 		// #9: 1.0 is a Baseline-declared adaptation (ADR 0012's provenance
 		// taxonomy), not a Faith number — used here only as a test fixture
 		// default. Whoever owns the Baseline configuration (#50) must pick

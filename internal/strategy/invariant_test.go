@@ -47,10 +47,16 @@ func invariantTestConfigurationPayload() event.ConfigurationPayload {
 		EntryChannelLength:     55,
 		ExitChannelLength:      20,
 		MaxUnits:               4,
-		SlippageN:              0.05,
-		TierBDistanceInN:       1.0,
-		DollarsPerPoint:        1,
-		RiskAtStopFraction:     0,
+		// ADR 0008's other three Unit caps, generous here since this fixture
+		// is not testing them: only the per-instrument cap above is exercised
+		// by name in this file.
+		MaxUnitsPerIndustry: 1_000_000,
+		MaxUnitsPerSector:   1_000_000,
+		MaxUnitsTotalLong:   1_000_000,
+		SlippageN:           0.05,
+		TierBDistanceInN:    1.0,
+		DollarsPerPoint:     1,
+		RiskAtStopFraction:  0,
 		NotionalAccount: event.NotionalAccountConfig{
 			StartingEquity: 1_000_000,
 			RebasingMonth:  1,
@@ -96,6 +102,15 @@ func newConfiguredReducerForInvariantTest(t *testing.T) *Reducer {
 	// set here even though this file's own point is the Protective Stop
 	// invariant, not sizing.
 	r.dollarsPerPoint = 1
+	// ADR 0008's group and total-long caps, generous here since this file's
+	// fixtures build Campaign state by hand and are not testing the caps
+	// themselves (unit_caps_test.go is): a zero default would make every
+	// fixture's single Campaign read as exceeding an unconfigured
+	// zero-Unit cap.
+	r.maxUnits = 4
+	r.maxUnitsPerIndustry = 1_000_000
+	r.maxUnitsPerSector = 1_000_000
+	r.maxUnitsTotalLong = 1_000_000
 	notionalAccount, err := NewNotionalAccount(1_000_000, 1, 1)
 	if err != nil {
 		t.Fatalf("NewNotionalAccount() error = %v", err)
