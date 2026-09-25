@@ -94,9 +94,11 @@ package strategy
 // ADR 0021, as amended). Before, a backtest stated one opening snapshot, so
 // exit proceeds never returned to the cash later Units are checked against,
 // and every Campaign after the first could be declined for cash the account
-// in fact held. No decision this package makes from a given input changes,
-// so a 1.7.0 journal still replays byte-identically under this build, as a
-// 1.4.0 journal did under 1.5.0. But the snapshots are part of what a
+// in fact held. No decision this package makes from a given input changes:
+// this reducer, fed a 1.7.0 journal's inputs, produces its decisions
+// byte for byte, as with 1.4.0 under 1.5.0. cmd/backtest's -replay
+// nonetheless refuses that journal, because it compares on the rules
+// version alone (ADR 0016). But the snapshots are part of what a
 // backtest feeds this package: every journal gains one per Session, the
 // opening one moves to after the first Session, and a run whose Campaign
 // exits now funds entries and Adds the older build declined. Rerunning a

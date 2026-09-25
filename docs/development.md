@@ -202,8 +202,9 @@ compares record hashes too, it also detects chain differences; `-verify` remains
 useful on its own and does not require a reproducible run. All checks leave the
 original evidence untouched. Re-run shares replay's strategy, configuration
 hash, rules-version, identity and span refusals. Missing inputs, unsupported
-schemas or input types, repeated configurations/accounts, and a missing final
-completion marker fail closed. Incomplete runs may lack the bar that caused an
+schemas or input types, repeated configurations, a first account snapshot
+that follows a fill, and a missing final completion marker fail closed. Every
+later account snapshot is accepted as the simulated account's derived output. Incomplete runs may lack the bar that caused an
 already-recorded fill, and their interruption/record limit is not journalled;
 re-run therefore refuses to guess how they stopped. It bounds regenerated
 records at the recorded count plus one input boundary to detect extra output.
