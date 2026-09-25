@@ -527,7 +527,10 @@ func TestOnlyTheUnitsWhoseOwnStopWasReachedAreStopped(t *testing.T) {
 		// Reaches 156: below Unit 2's stop, above Unit 1's.
 		bar(day(58), 160, 160.2, 156, 157),
 	)
-	run := runComposed(t, baselineConfig(), bars)
+	// The declared Variant "uncapped": under the Baseline's 1N price cap
+	// (157.825) the gap to 160 would skip Unit 2 rather than fill it
+	// (TestAGapAboveThePriceCapDoesNotFill).
+	run := runComposed(t, uncappedConfig(), bars)
 
 	got := fillPayloads(t, run.Inputs)
 	if len(got) != 3 {

@@ -17,7 +17,13 @@ const TradeProposalEventType = "strategy.trade.proposed"
 
 // TradeProposalSchemaVersion is the current schema version of
 // TradeProposalPayload, for the Envelope's SchemaVersion field.
-const TradeProposalSchemaVersion uint32 = 1
+//
+//   - Version 2 added OrderType, GapBufferN and PriceCap (ADR 0005, as
+//     amended 2026-09-24): the order the entry rests as and its price cap. A
+//     version-1 record decodes OrderType as the empty string, which is not a
+//     recognised order type, so it is rejected rather than read as an
+//     uncapped order (ADR 0015).
+const TradeProposalSchemaVersion uint32 = 2
 
 // ProposalDeclinedEventType identifies the payload recorded when a Signal
 // fired but produced no position. It exists so that "the strategy recognised
@@ -49,7 +55,15 @@ const ProposalDeclinedEventType = "strategy.proposal.declined"
 //     empty string, which is not a recognised cap name, so a schema-5 record
 //     asserting that reason against an older schema is rejected outright —
 //     the same discipline every previous field addition follows.
-const ProposalDeclinedSchemaVersion uint32 = 5
+//   - Version 6 changes three meanings, adding no field (ADR 0020, as
+//     amended 2026-09-24). RequiredCash is the hold the Unit would have
+//     placed, its worst-case cost at its price cap with slippage and
+//     commission (under the declared Variant "uncapped", its cost at the
+//     level, as before). AvailableCash is spendable cash after fill debits
+//     AND every standing hold. PostTradeExposure counts the Units reserved by
+//     standing holds as well as the Units committed by fills. Schema-5
+//     decisions must not silently acquire these meanings (ADR 0015).
+const ProposalDeclinedSchemaVersion uint32 = 6
 
 // The rule names for TradeProposalPayload.Rule, one per Sizing Mode.
 //
@@ -96,12 +110,15 @@ const (
 	// would in fact risk the whole position rather than the derived
 	// fraction.
 	DeclineReasonStopIntentNotPositive = "stop-intent-not-positive"
-	// DeclineReasonInsufficientCash means the Unit's cost — quantity x the
-	// order's resting level x dollars per point — exceeds snapshot-backed
-	// spendable cash after accepted withdrawal debits and the fills the
-	// snapshot does not yet reflect (ADR 0010 and ADR 0020). There is no partial Unit and no
-	// borrowing: the whole Unit is skipped, and RequiredCash/AvailableCash
-	// carry the two figures the comparison was made from.
+	// DeclineReasonInsufficientCash means the hold the Unit would place —
+	// its worst-case cost: quantity x (price cap + slippage) x dollars per
+	// point plus commission, or quantity x level x dollars per point under
+	// the declared Variant "uncapped" — exceeds snapshot-backed spendable
+	// cash after accepted withdrawal debits, the fills the snapshot does not
+	// yet reflect, and every hold still standing (ADR 0010 and ADR 0020, as
+	// amended). There is no partial Unit and no borrowing: the whole Unit is
+	// skipped, and RequiredCash/AvailableCash carry the two figures the
+	// comparison was made from.
 	DeclineReasonInsufficientCash = "insufficient-cash"
 	// DeclineReasonUnitCostNotRepresentable means the Unit's cost is a
 	// finite number only in exact arithmetic: quantity x the order's resting
@@ -248,6 +265,14 @@ type TradeProposalPayload struct {
 	// Rules p.22's 2N stop in the Baseline). It is an intent, not an order:
 	// no stop exists until a fill does.
 	ProtectiveStopIntent float64 `json:"protective_stop_intent"`
+	// OrderType, GapBufferN and PriceCap state the order the entry rests as
+	// (ADR 0005, as amended 2026-09-24): a stop-limit at EntryLevel capped at
+	// PriceCap = EntryLevel + GapBufferN x N, or, in the declared Variant
+	// "uncapped", a stop-market order with GapBufferN and PriceCap both zero
+	// (CONTEXT.md: "Price cap"). Validate re-derives the cap exactly.
+	OrderType  OrderType `json:"order_type"`
+	GapBufferN float64   `json:"gap_buffer_n"`
+	PriceCap   float64   `json:"price_cap"`
 }
 
 // Validate checks that a proposal is internally consistent, not merely
@@ -294,6 +319,11 @@ type TradeProposalPayload struct {
 //     is that fraction times the Stop Multiple.) Under fixed-risk-at-stop
 //     the budget is stated at the stop instead: Quantity x StopMultiple x N
 //     x DollarsPerPoint must not exceed NotionalAccount x RiskAtStop.
+//
+//  5. **The price cap matches its derivation.** A stop-limit's PriceCap
+//     must be exactly EntryLevel + GapBufferN x N (sizing.PriceCap), with
+//     GapBufferN finite and at least zero; a stop-market order carries
+//     neither (ADR 0005, as amended 2026-09-24).
 func (p TradeProposalPayload) Validate() error {
 	var errs []error
 	if p.InstrumentID == "" {
@@ -424,6 +454,10 @@ func (p TradeProposalPayload) Validate() error {
 				p.ProtectiveStopIntent, derived, p.EntryLevel, p.StopMultiple, p.N))
 		}
 	}
+
+	// Invariant 5: the price cap matches its derivation (ADR 0005, as
+	// amended 2026-09-24).
+	errs = append(errs, validatePriceCap(p.OrderType, p.GapBufferN, p.PriceCap, p.EntryLevel, p.N, entryLevelFinite && nFinite)...)
 
 	// Invariant 3: the realised risk matches its derivation and does not
 	// exceed the declared budget.
@@ -557,12 +591,14 @@ func (p ProposalDeclinedPayload) Validate() error {
 // negative ledger remainder introduced by ADR 0020. Schema 5 additionally
 // recognises DeclineReasonUnitCapExceeded and its Cap/CapLimit/
 // PostTradeExposure fields; a record declared under an earlier schema cannot
-// assert that reason. Schema 1 lacks the required Kind and is unsupported,
+// assert that reason. Schema 6 changes the meaning of the cash and exposure
+// figures without changing their shape (ProposalDeclinedSchemaVersion), so
+// it is validated exactly as schema 5 is. Schema 1 lacks the required Kind and is unsupported,
 // as are unknown schemas. Validating an older payload does not upgrade its
 // cash fields to the current meaning.
 func (p ProposalDeclinedPayload) ValidateSchema(version uint32) error {
 	switch version {
-	case 2, 3, 4, ProposalDeclinedSchemaVersion:
+	case 2, 3, 4, 5, ProposalDeclinedSchemaVersion:
 	default:
 		return fmt.Errorf("proposal declined payload schema version %d is not supported", version)
 	}

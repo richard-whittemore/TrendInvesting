@@ -30,7 +30,12 @@ const AddProposalEventType = "strategy.add.proposed"
 
 // AddProposalSchemaVersion is the current schema version of
 // AddProposalPayload, for the Envelope's SchemaVersion field.
-const AddProposalSchemaVersion uint32 = 1
+//
+//   - Version 2 added OrderType, GapBufferN and PriceCap (ADR 0005, as
+//     amended 2026-09-24), exactly as TradeProposalSchemaVersion's own
+//     version 2 did, measured in the Campaign's frozen N. A version-1 record
+//     decodes OrderType as the empty string and is rejected (ADR 0015).
+const AddProposalSchemaVersion uint32 = 2
 
 // RuleAddLadderHalfN names the rule for AddProposalPayload.Rule and
 // CampaignUnitAddedPayload.Rule: the next Unit is added half a campaign N
@@ -90,6 +95,14 @@ type AddProposalPayload struct {
 	// (docs/development.md principle 3).
 	Rule string `json:"rule"`
 	ADR  string `json:"adr"`
+	// OrderType, GapBufferN and PriceCap state the order the Add rests as
+	// (ADR 0005, as amended 2026-09-24): a stop-limit at Level capped at
+	// PriceCap = Level + GapBufferN x CampaignN, or, in the declared Variant
+	// "uncapped", a stop-market order with GapBufferN and PriceCap both zero
+	// (CONTEXT.md: "Price cap"). Validate re-derives the cap exactly.
+	OrderType  OrderType `json:"order_type"`
+	GapBufferN float64   `json:"gap_buffer_n"`
+	PriceCap   float64   `json:"price_cap"`
 }
 
 // Validate checks that the payload identifies the Campaign, the instrument
@@ -100,7 +113,8 @@ type AddProposalPayload struct {
 // derived level in this package uses (CampaignOpenedPayload.ProtectiveStop,
 // ProtectiveStopSetPayload.Level): a tolerance would let a
 // differently-derived rung through, which is the defect the check exists to
-// catch.
+// catch. The price cap is re-derived the same way, from Level and CampaignN
+// (ADR 0005, as amended 2026-09-24).
 func (p AddProposalPayload) Validate() error {
 	var errs []error
 	if p.CampaignID == "" {
@@ -153,6 +167,8 @@ func (p AddProposalPayload) Validate() error {
 				p.Level, derived, p.PreviousUnitFill, p.CampaignN))
 		}
 	}
+
+	errs = append(errs, validatePriceCap(p.OrderType, p.GapBufferN, p.PriceCap, p.Level, p.CampaignN, levelFinite && campaignNFinite)...)
 
 	if p.Rule == "" {
 		errs = append(errs, errors.New("rule is required"))

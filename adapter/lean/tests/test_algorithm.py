@@ -69,18 +69,23 @@ def order_event(ticket, status, when, fill_quantity=0, fill_price=0.0, fee=0.0,
         OrderId=ticket.OrderId, Id=ticket.event_ids, Symbol=ticket.Symbol, Status=status,
         UtcTime=when, FillQuantity=fill_quantity, FillPrice=fill_price,
         OrderFee=types.SimpleNamespace(Value=types.SimpleNamespace(Amount=fee, Currency=currency)),
-        StopPrice=ticket.StopPrice, Quantity=ticket.Quantity, Message=message)
+        StopPrice=ticket.StopPrice, LimitPrice=ticket.LimitPrice, Quantity=ticket.Quantity,
+        Message=message)
 
 
 class FakeTicket:
-    """A LEAN OrderTicket for a stop-market order, held in FakeTransactions."""
-    def __init__(self, book, order_id, symbol, quantity, stop_price, tag, properties):
+    """A LEAN OrderTicket for a stop-market or stop-limit order, held in
+    FakeTransactions. LimitPrice is None for a stop-market order."""
+    def __init__(self, book, order_id, symbol, quantity, stop_price, tag, properties,
+                 limit_price=None):
         self.book = book
         self.OrderId = order_id
         self.Symbol = symbol
         self.Quantity = quantity
         self.QuantityFilled = 0
         self.StopPrice = stop_price
+        self.LimitPrice = limit_price
+        self.OrderType = "stop-market" if limit_price is None else "stop-limit"
         self.Tag = tag
         self.TimeInForce = properties.TimeInForce
         self.Status = book.submit_status
@@ -88,17 +93,24 @@ class FakeTicket:
 
     def Get(self, field):
         """LEAN's OrderTicket.Get(OrderField): the order's current figure."""
-        if field != "stop-price":
-            raise ValueError("this fake knows only OrderField.StopPrice")
-        return self.StopPrice
+        if field == "stop-price":
+            return self.StopPrice
+        if field == "limit-price" and self.LimitPrice is not None:
+            return self.LimitPrice
+        raise ValueError("this fake knows only OrderField.StopPrice, and LimitPrice for a "
+                         "stop-limit order")
 
     def Update(self, fields):
         """LEAN's amendment: acknowledged at once, reported after the slice."""
         self.book.updates.append((self.OrderId, fields.StopPrice, fields.Tag))
+        if fields.LimitPrice is not None:
+            self.book.limit_updates.append((self.OrderId, fields.LimitPrice))
         if not self.book.acknowledge_updates:
             return FakeResponse(False)
         if fields.StopPrice is not None:
             self.StopPrice = fields.StopPrice
+        if fields.LimitPrice is not None:
+            self.LimitPrice = fields.LimitPrice
         if fields.Tag is not None:
             self.Tag = fields.Tag
         self.book.deferred.append((self, "update-submitted"))
@@ -133,6 +145,7 @@ class FakeTransactions:
         self.algorithm = algorithm
         self.tickets = []
         self.updates = []
+        self.limit_updates = []
         self.cancellations = []
         self.deferred = []
         self.acknowledge_updates = True
@@ -166,7 +179,7 @@ class FakeTransactions:
         if held:
             portfolio.holdings[symbol] = int(held / factor)
 
-    def split_orders(self, symbol, factor, tick=0.01):
+    def split_orders(self, symbol, factor, tick=0.01, limit_rounding=round):
         """LEAN's split of the open orders, as observed on the pinned image: done
         after the split's slice's OnData returns, in the same time step, each
         order's quantity divided by the factor and its stop multiplied by it
@@ -175,6 +188,13 @@ class FakeTransactions:
         for ticket in self.GetOpenOrderTickets(symbol):
             ticket.Quantity = round(ticket.Quantity / factor)
             ticket.StopPrice = round(round(ticket.StopPrice * factor / tick) * tick, 10)
+            if ticket.LimitPrice is not None:
+                # Assumed, by analogy with the stop: a stop-limit's limit is
+                # split the same way. Not observed on the pinned image.
+                # limit_rounding picks the direction (round, math.floor or
+                # math.ceil): LEAN rounds a split limit to the tick, and it
+                # can land either side of the engine's cap.
+                ticket.LimitPrice = round(limit_rounding(round(ticket.LimitPrice * factor / tick, 9)) * tick, 10)
             self.emit(ticket, "update-submitted")
 
     def GetOrderTickets(self, predicate=None):
@@ -251,7 +271,22 @@ class FakeAlgorithm:
     # none was made rather than relying on the method being absent.
     def _order(self, *args, **kwargs):
         self.__dict__.setdefault("orders", []).append((args, kwargs))
-    MarketOrder = LimitOrder = StopLimitOrder = MarketOnOpenOrder = _order
+    MarketOrder = LimitOrder = MarketOnOpenOrder = _order
+    def StopLimitOrder(self, symbol, quantity, stop_price, limit_price, asynchronous=False,
+                       tag="", order_properties=None):
+        """LEAN's stop-limit entry point, taken to follow StopMarketOrder's
+        observed signature with the limit after the stop (adapter README:
+        unconfirmed on the pinned image)."""
+        if type(asynchronous) is not bool:
+            raise TypeError("stop_limit_order: argument 5 ('asynchronous') expected bool, "
+                            "got {}".format(type(asynchronous).__name__))
+        self._order(symbol, quantity, stop_price, limit_price, tag, order_properties)
+        book = self.Transactions
+        ticket = FakeTicket(book, len(book.tickets) + 1, symbol, quantity,
+                            stop_price, tag, order_properties, limit_price=limit_price)
+        book.tickets.append(ticket)
+        book.emit(ticket, "invalid" if ticket.Status == "invalid" else "submitted")
+        return ticket
     def StopMarketOrder(self, symbol, quantity, stop_price, asynchronous=False, tag="",
                         order_properties=None):
         """LEAN's signature, observed on the pinned image: the fourth argument is
@@ -275,6 +310,7 @@ class OrderProperties:
 
 class UpdateOrderFields:
     StopPrice = None
+    LimitPrice = None
     Tag = None
 
 
@@ -291,7 +327,7 @@ imports.AccountType = types.SimpleNamespace(Cash="cash", Margin="margin")
 imports.TimeZones = types.SimpleNamespace(NewYork="NY")
 imports.DelistingType = types.SimpleNamespace(Warning="warning", Delisted="delisted")
 imports.SplitType = types.SimpleNamespace(Warning="split-warning", SplitOccurred="split-occurred")
-imports.OrderField = types.SimpleNamespace(StopPrice="stop-price")
+imports.OrderField = types.SimpleNamespace(StopPrice="stop-price", LimitPrice="limit-price")
 imports.time = time
 imports.OrderProperties = OrderProperties
 imports.UpdateOrderFields = UpdateOrderFields

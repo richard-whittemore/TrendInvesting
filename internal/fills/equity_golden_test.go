@@ -35,7 +35,8 @@ import (
 //	Slippage                    0.05 N                  (ADR 0013)
 //	Dollars per point           1                       (a share, not a contract)
 //	Notional Account            8,400                   (ADR 0007, configured)
-//	Available cash              5,016.99                (ADR 0010, observed)
+//	Available cash              5,059.99                (ADR 0010, observed)
+//	Buy order                   stop-limit, cap 1 N     (ADR 0005, as amended)
 //
 // # The bars, and why they are these bars
 //
@@ -79,12 +80,21 @@ import (
 // Bar 56's own high of 157 falls short of rung 2, so no Unit is added inside
 // the breakout bar.
 //
+// The entry itself was checked, when it was proposed, against its hold: its
+// worst-case cost at its price cap, the level plus 1 N, with slippage and
+// commission (ADR 0020, as amended 2026-09-24):
+//
+//	entry hold  = 16 x (156 + 2.5 + 0.125) + 1.00 = 2,539.00   (<= 5,059.99)
+//
+// and its fill released that hold and was debited at its actual cost.
+//
 // **Bars 57 and 58 — the skipped rung.** Both bars reach rung 2 (158 and
 // 158.5 are each above 157.375), so on each the cash check runs against the
-// snapshot less the entry fill's actual cost (ADR 0020):
+// snapshot less the entry fill's actual cost (ADR 0020), and what must be
+// funded is rung 2's hold, at its price cap 157.375 + 2.5 = 159.875:
 //
-//	rung 2 cost = 16 x 157.375 x 1           = 2,518.00
-//	cash        = 5,016.99 - (2,498.00 + 1.00) = 2,517.99
+//	rung 2 hold = 16 x (159.875 + 0.125) + 1.00  = 2,561.00
+//	cash        = 5,059.99 - (2,498.00 + 1.00)   = 2,560.99
 //
 // One cent short, so the whole Unit is skipped — no partial Unit, no
 // borrowing, no deferred queue (ADR 0010) — and the rejection is journalled
@@ -107,14 +117,15 @@ import (
 //     a quotient that rounded the same either way would test nothing.
 //   - **A multiplier of one.** At Faith's 42,000 the same account sizes 0.0004
 //     of a contract and the Signal produces a decline, not a position.
-//   - **2,517.99 of cash after the entry.** It sits in the window (2,498,
-//     2,518]. Costing the Add from the entry level (16 x 156 = 2,496) or from
-//     the previous fill (16 x 156.125 = 2,498) rather than from the rung would
-//     make the Unit affordable and no skip would happen; so would reading the
-//     8,400 Notional Account as the cash basis instead of the snapshot's
-//     observed figure, or the snapshot's 5,016.99 without the entry fill's
-//     debit (ADR 0020). A cash figure comfortably clear of the rung
-//     distinguishes none of those.
+//   - **2,560.99 of cash after the entry.** It sits in the window (2,518,
+//     2,561]. Costing the Add from the entry level (16 x 156 = 2,496), from
+//     the previous fill (16 x 156.125 = 2,498), or from the rung without its
+//     price cap, slippage and commission (16 x 157.375 = 2,518, the check the
+//     declared Variant "uncapped" makes) would make the Unit affordable and
+//     no skip would happen; so would reading the 8,400 Notional Account as
+//     the cash basis instead of the snapshot's observed figure, or the
+//     snapshot's 5,059.99 without the entry fill's debit (ADR 0020). A cash
+//     figure comfortably clear of the hold distinguishes none of those.
 //   - **156, not 157.** Entering at the breakout bar's own high instead of the
 //     Entry Channel high would fill at 157.125, put rung 2 at 158.375, and
 //     bar 57's high of 158 would no longer reach it.
@@ -133,11 +144,11 @@ const (
 	// equityGoldenOpeningCash is ADR 0010's cash basis: an OBSERVED figure
 	// from an account.snapshot, deliberately different from the Notional
 	// Account above so that a fixture reading one for the other fails.
-	equityGoldenOpeningCash = 5_016.99
+	equityGoldenOpeningCash = 5_059.99
 	// equityGoldenAvailableCash is what the Add is checked against: the
 	// opening cash less the entry fill's actual cost, 16 x 156.125 plus the
 	// 1.00 commission (ADR 0020).
-	equityGoldenAvailableCash = 2_517.99
+	equityGoldenAvailableCash = 2_560.99
 
 	// equityGoldenEntryChannelHigh is bar 55's high, the level a resting
 	// buy-stop sits at (ADR 0005).
@@ -163,8 +174,13 @@ const (
 	equityGoldenUnitOneStop = 151.125
 	// equityGoldenRungTwo is 156.125 + 0.5 x 2.5 (T p.19).
 	equityGoldenRungTwo = 157.375
-	// equityGoldenRungTwoCost is 16 x 157.375 x 1 — one cent above the cash.
+	// equityGoldenRungTwoCost is 16 x 157.375 x 1: rung 2's cost at its own
+	// level, the check the declared Variant "uncapped" makes.
 	equityGoldenRungTwoCost = 2_518.0
+	// equityGoldenRungTwoHold is rung 2's hold, 16 x (157.375 + 1 x 2.5 +
+	// 0.05 x 2.5) + 1.00 (ADR 0020, as amended 2026-09-24) — one cent above
+	// the cash.
+	equityGoldenRungTwoHold = 2_561.0
 
 	// equityGoldenLastPrice is bar 58's close: the last available price a
 	// Delisting Exit closes at (ADR 0009).
@@ -210,6 +226,8 @@ func equityGoldenConfig() event.ConfigurationPayload {
 			MinimumPerOrder:             1.00,
 			MaximumFractionOfTradeValue: 0.01,
 		},
+		BuyOrderType: event.OrderTypeStopLimit,
+		GapBufferN:   1,
 	}
 }
 
@@ -421,8 +439,9 @@ func TestEquityGoldenScenarioFillsTheRestingOrderAndFreezesTheCampaign(t *testin
 }
 
 // TestEquityGoldenScenarioSkipsTheRungItCannotAfford is ADR 0010's cash-skip
-// rule: the Unit costs 2,518.00 at its rung and the account holds 2,517.99
-// once the entry fill is debited (ADR 0020), so the whole Unit is skipped and the rejection carries both figures. It is
+// rule: the Unit's hold at its rung is 2,561.00 and the account holds
+// 2,560.99 once the entry fill is debited (ADR 0020), so the whole Unit is
+// skipped and the rejection carries both figures. It is
 // skipped on each of the two bars that reach the rung — a skip does not
 // poison the ladder.
 func TestEquityGoldenScenarioSkipsTheRungItCannotAfford(t *testing.T) {
@@ -455,7 +474,7 @@ func TestEquityGoldenScenarioSkipsTheRungItCannotAfford(t *testing.T) {
 		if !declined.PeriodEnd.Equal(wantBars[i]) {
 			t.Errorf("decline %d PeriodEnd = %s, want %s", i, declined.PeriodEnd, wantBars[i])
 		}
-		assertPrice(t, "decline RequiredCash", declined.RequiredCash, equityGoldenRungTwoCost)
+		assertPrice(t, "decline RequiredCash", declined.RequiredCash, equityGoldenRungTwoHold)
 		assertPrice(t, "decline AvailableCash", declined.AvailableCash, equityGoldenAvailableCash)
 		if declined.RequiredCash <= declined.AvailableCash {
 			t.Errorf("decline %d claims insufficient cash but %v does not exceed %v", i, declined.RequiredCash, declined.AvailableCash)
@@ -473,17 +492,22 @@ func TestEquityGoldenScenarioSkipsTheRungItCannotAfford(t *testing.T) {
 	}{
 		{equityGoldenEntryChannelHigh, "the entry level"},
 		{equityGoldenEntryFill, "the previous unit's fill"},
+		{equityGoldenRungTwo, "the rung without its price cap, slippage and commission"},
 	} {
 		if cost := float64(equityGoldenUnitQuantity) * wrong.basis; cost > equityGoldenAvailableCash {
 			t.Errorf("costing the Add from %s gives %v, already above the %v available: this fixture's cash no longer distinguishes that basis from the rung",
 				wrong.name, cost, equityGoldenAvailableCash)
 		}
 	}
-	if cost := equityGoldenRungTwoCost; cost > equityGoldenOpeningCash {
-		t.Errorf("the rung's cost %v is above the opening cash %v: this fixture's cash no longer distinguishes the entry fill's debit from none", cost, equityGoldenOpeningCash)
+	if cost := equityGoldenRungTwoHold; cost > equityGoldenOpeningCash {
+		t.Errorf("the rung's hold %v is above the opening cash %v: this fixture's cash no longer distinguishes the entry fill's debit from none", cost, equityGoldenOpeningCash)
 	}
 	if cost := float64(equityGoldenUnitQuantity) * equityGoldenRungTwo; !closeTo(cost, equityGoldenRungTwoCost) {
 		t.Fatalf("the fixture's own arithmetic is wrong: 16 x %v = %v, not %v", equityGoldenRungTwo, cost, equityGoldenRungTwoCost)
+	}
+	priceCap := equityGoldenRungTwo + equityGoldenN
+	if hold := float64(float64(equityGoldenUnitQuantity)*(priceCap+equityGoldenSlippage)) + equityGoldenCommission; !closeTo(hold, equityGoldenRungTwoHold) {
+		t.Fatalf("the fixture's own arithmetic is wrong: 16 x (%v + %v) + %v = %v, not %v", priceCap, equityGoldenSlippage, equityGoldenCommission, hold, equityGoldenRungTwoHold)
 	}
 }
 

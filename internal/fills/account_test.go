@@ -256,11 +256,14 @@ func TestASnapshotFollowingItsFillsIsNotDebitedTwice(t *testing.T) {
 	bars := append(warmUpBars(), breakoutBar(), bar(day(57), 155.7, 156.7, 155.5, 156.5))
 	entry := float64(fixtureUnitQuantity) * (155.5 + fixtureSlippage)
 	commission := math.Max(1, 0.005*float64(fixtureUnitQuantity))
-	// Unit 2 is checked at its rung and fills a slippage above it, so the
-	// account holds the fill's cost: enough to pass the check once, and
-	// never enough to pass it with the entry debited twice.
-	rung := 155.5 + fixtureSlippage + 0.5*fixtureN
-	cash := entry + commission + float64(float64(fixtureUnitQuantity)*(rung+fixtureSlippage)) + commission + 1
+	// Unit 2 is checked against its hold, its cost at its price cap (the
+	// rung plus 1 N) with slippage and commission (ADR 0020, as amended
+	// 2026-09-24), so the account holds that hold and a dollar: enough to
+	// pass the check once, and never enough to pass it with the entry
+	// debited twice.
+	rung := 155.5 + fixtureSlippage + float64(0.5*fixtureN)
+	hold := float64(float64(fixtureUnitQuantity)*(rung+fixtureN+fixtureSlippage)) + commission
+	cash := entry + commission + hold + 1
 	run := runAccount(t, cash, bars)
 	if n := len(envelopesOfType(run.Decisions, event.CampaignUnitAddedEventType)); n != 1 {
 		t.Fatalf("%d Units added, want Unit 2 funded by the snapshot's cash%s", n, describe(run.Decisions))

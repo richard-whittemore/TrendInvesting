@@ -113,6 +113,15 @@ type Reducer struct {
 	maxUnitsPerIndustry int
 	maxUnitsPerSector   int
 	maxUnitsTotalLong   int
+	// buyOrderType, gapBufferN, slippageN and commission are what a hold is
+	// computed from (hold.go; ADR 0005 and ADR 0020, as amended 2026-09-24):
+	// the order an entry or Add rests as, its price cap's distance above the
+	// level in N, and ADR 0013's slippage and commission, captured once from
+	// the configuration event.
+	buyOrderType event.OrderType
+	gapBufferN   float64
+	slippageN    float64
+	commission   sizing.CommissionSchedule
 	// notionalAccount is ADR 0007's Notional Account (CONTEXT.md),
 	// initialised to the configured starting equity and driven by
 	// event.AccountSnapshotEventType and event.CashMovementEventType events
@@ -142,9 +151,8 @@ type Reducer struct {
 	// availableCash is ADR 0020's basis: the snapshot's available cash less
 	// accepted withdrawals, floored at zero (ADR 0020's cash-movement
 	// amendment). Deposits do not credit it; a later snapshot replaces it
-	// outright. Both sizeUnit and evaluateAdd read it, less fillDebits,
-	// through cashAtPreviousClose. Proposals do not reserve or debit cash
-	// (ADR 0020).
+	// outright. Both sizeUnit and evaluateAdd read it, less fillDebits and
+	// holds, through cashAtPreviousClose.
 	//
 	// availableCashAsOf is the snapshot timestamp, unchanged by movements;
 	// hasAvailableCash remains false until the first snapshot is accepted.
@@ -160,6 +168,13 @@ type Reducer struct {
 	// reflect (applyAccountSnapshot). Reducer.begin copies it, since it is
 	// small: a snapshot empties it of everything up to its own as-of.
 	fillDebits []fillDebit
+	// holds holds every standing reservation, one per outstanding entry or
+	// Add proposal, in placement order (hold.go; ADR 0020, as amended
+	// 2026-09-24: "available = basis - fill debits - holds"). A proposal's
+	// fill, expiry or cancellation releases it; a snapshot never does.
+	// Reducer.begin copies it, since it is small: it holds at most one hold
+	// per instrument with a proposal outstanding.
+	holds []hold
 
 	instruments map[string]*instrumentState
 	// delisted records, per instrument, the EffectiveAt of the delisting that
@@ -455,6 +470,14 @@ func (r *transition) applyConfiguration(envelope event.Envelope) ([]event.Envelo
 	r.maxUnitsPerIndustry = payload.MaxUnitsPerIndustry
 	r.maxUnitsPerSector = payload.MaxUnitsPerSector
 	r.maxUnitsTotalLong = payload.MaxUnitsTotalLong
+	r.buyOrderType = payload.BuyOrderType
+	r.gapBufferN = payload.GapBufferN
+	r.slippageN = payload.SlippageN
+	r.commission = sizing.CommissionSchedule{
+		PerShare:                    payload.Commission.PerShare,
+		MinimumPerOrder:             payload.Commission.MinimumPerOrder,
+		MaximumFractionOfTradeValue: payload.Commission.MaximumFractionOfTradeValue,
+	}
 	// ADR 0007's Notional Account, at its configured starting value: before
 	// any account.snapshot arrives it equals StartingEquity exactly
 	// (applyAccountSnapshot, in notional.go, is what steps it down;
@@ -891,9 +914,9 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 // The Notional Account is read from r.notionalAccount.Current() (ADR 0007):
 // its configured starting value until an account.snapshot applies a
 // Drawdown Step, never actual account equity. Yearly re-basing and recovery
-// are handled separately (notional.go). This function sizes one Unit without
-// checking caps. campaign.go enforces ADR 0008's per-instrument Unit cap;
-// the ADR's industry, sector and total-long caps are not implemented.
+// are handled separately (notional.go). A proposal places a hold for its
+// Unit (hold.go; ADR 0020, as amended 2026-09-24), so every later proposal
+// is checked against the cash and cap headroom it leaves.
 //
 // entryLevel is the Entry Channel high the breakout exceeded — the level a
 // resting buy-stop actually sits at under ADR 0005, not the breakout bar's
@@ -983,22 +1006,25 @@ func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input ev
 	if err != nil {
 		return event.Envelope{}, err
 	}
-	cost, costRepresentable := unitCost(unit.Quantity, entryLevel, r.dollarsPerPoint)
+	// The hold this Unit would place is what it must be able to fund: its
+	// worst-case cost at its price cap, slippage and commission included
+	// (ADR 0020, as amended 2026-09-24; hold.go's buyHold).
+	cost, priceCap, costRepresentable := r.buyHold(unit.Quantity, entryLevel, n)
 	if !costRepresentable {
 		// More than any cash that can be held, so the Unit is skipped on the
 		// same rule an unaffordable one is (ADR 0010) — journalled, with the
 		// operands in Detail, rather than stopping the run on a cost no
 		// payload can carry.
 		return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonUnitCostNotRepresentable,
-			fmt.Sprintf("unit cost (%d shares x entry level %v x %v dollars per point) leaves the representable range, so it exceeds any cash that could fund it; spendable cash at the attempt was %v",
-				unit.Quantity, entryLevel, r.dollarsPerPoint, availableCash), 0, 0)
+			fmt.Sprintf("unit hold (%s) leaves the representable range, so it exceeds any cash that could fund it; spendable cash at the attempt was %v",
+				r.buyHoldDetail(unit.Quantity, entryLevel, n, priceCap), availableCash), 0, 0)
 	}
 	if cost > availableCash {
 		// No partial Unit, ever: the whole Unit is skipped (ADR 0010), never
 		// resized down to what the available cash would cover.
 		return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonInsufficientCash,
-			fmt.Sprintf("unit cost %v (%d shares x entry level %v x %v dollars per point) exceeds spendable cash at the attempt %v",
-				cost, unit.Quantity, entryLevel, r.dollarsPerPoint, availableCash),
+			fmt.Sprintf("unit hold %v (%s) exceeds spendable cash at the attempt %v, after fill debits and standing holds",
+				cost, r.buyHoldDetail(unit.Quantity, entryLevel, n, priceCap), availableCash),
 			cost, availableCash)
 	}
 
@@ -1025,6 +1051,9 @@ func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input ev
 		DollarsPerPoint:        r.dollarsPerPoint,
 		NotionalAccount:        r.notionalAccount.Current(),
 		ProtectiveStopIntent:   protectiveStopIntent,
+		OrderType:              r.buyOrderType,
+		GapBufferN:             r.gapBufferN,
+		PriceCap:               priceCap,
 	}
 	if err := proposal.Validate(); err != nil {
 		return event.Envelope{}, fmt.Errorf("strategy: built invalid trade proposal payload: %w", err)
@@ -1033,8 +1062,15 @@ func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input ev
 	if err != nil {
 		return event.Envelope{}, fmt.Errorf("strategy: marshal trade proposal payload: %w", err)
 	}
+	proposalID := decisionID("proposal", instrumentID, periodEnd)
+	// Reserved now, before the next proposal of this pass is checked (ADR
+	// 0020, as amended 2026-09-24): the Unit's cost against cash, and its
+	// Unit against every cap it counts towards.
+	if err := r.placeHold(proposalID, instrumentID, instrumentClass, cost); err != nil {
+		return event.Envelope{}, err
+	}
 	return r.stamp(
-		decisionID("proposal", instrumentID, periodEnd),
+		proposalID,
 		event.TradeProposalEventType, event.TradeProposalSchemaVersion,
 		periodEnd, input, proposalBytes,
 	), nil
@@ -1101,9 +1137,10 @@ func (r *transition) stampDecline(instrumentID string, periodEnd time.Time, inpu
 // opened at previousClose. ADR 0010 requires the snapshot to be known at the
 // previous close; ADR 0020's cash-movement amendment reduces its cash by
 // accepted withdrawals without advancing that timestamp; and ADR 0020 takes
-// from it every entry and Add fill the snapshot cannot reflect: "available =
-// basis - every actual fill cost". Exits in bar t free capital for bar t+1
-// and never for bar t.
+// from it every entry and Add fill the snapshot cannot reflect and, as
+// amended 2026-09-24, every hold still standing: "available = basis -
+// every actual fill cost - every hold still standing". Exits in bar t free
+// capital for bar t+1 and never for bar t.
 //
 // The result can be negative. The zero floor bounds the basis only, and a
 // fill the basis could not fund is recorded at its actual cost (ADR 0020,
@@ -1135,7 +1172,7 @@ func (r *transition) cashAtPreviousClose(instrumentID string, previousClose time
 			"strategy: instrument %q: the available-cash figure as of %s is not cash known at the previous close %s; refusing to size a unit against cash the decision bar had not yet earned (ADR 0010)",
 			instrumentID, r.availableCashAsOf.Format(time.RFC3339), previousClose.Format(time.RFC3339))
 	}
-	return r.availableCash - r.fillDebitTotal(), nil
+	return r.availableCash - r.fillDebitTotal() - r.holdTotal(), nil
 }
 
 // unitCost is what one whole Unit costs to put on under ADR 0010: its

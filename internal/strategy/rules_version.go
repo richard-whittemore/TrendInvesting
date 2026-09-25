@@ -139,7 +139,35 @@ package strategy
 // decided in the same pass; see ADR 0008's own implementation note for the
 // full ADR text this reads and why a shared per-pass budget is a separate,
 // still-open decision rather than one made here.
-const RulesVersion = "1.9.0"
+//
+// Bumped 1.9.0 -> 1.10.0 by the owner's decisions of 2026-09-24 (ADR 0005,
+// ADR 0008's note, ADR 0013 and ADR 0020, as amended), which settle that
+// open question and two more:
+//
+//   - A proposal reserves at once. Every entry and Add places a hold for its
+//     worst-case cost and one Unit of headroom under every cap it counts
+//     towards, until it fills, expires or is cancelled; every later proposal,
+//     in the same session-close pass or later, is checked against cash less
+//     fill debits and holds, and against committed plus reserved Units. Two
+//     entries that each fit alone in one pass no longer both propose.
+//   - The check and the hold use the worst-case price. Under the Baseline an
+//     entry or Add rests as a stop-limit capped at level + GapBufferN x N
+//     (1N), and what it must fund is its quantity at that cap plus ADR
+//     0013's slippage and commission, not its quantity at its level.
+//   - A backtest fills that stop-limit as such: a bar that gaps above the
+//     cap and never trades back down to it does not fill. The declared
+//     Variant "uncapped" keeps the stop-market entry and the check at the
+//     level.
+//
+// strategy.configuration advances to schema 6 (BuyOrderType, GapBufferN),
+// strategy.trade.proposed and strategy.add.proposed to schema 2 (OrderType,
+// GapBufferN, PriceCap), and strategy.proposal.declined to schema 6, whose
+// cash and exposure figures count holds. Given the same inputs, a run whose
+// Units are affordable at their level but not at their worst case, or whose
+// Session has more Signals than its cash or caps allow, now declines what
+// the older build proposed, and a backtest skips an entry that gapped above
+// its cap, so the two builds no longer replay each other's journals.
+const RulesVersion = "1.10.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -237,4 +265,10 @@ var RuleSurfaceFingerprints = map[string]string{
 	// looks for, and they carry cap IDENTITIES and a decline reason, not a
 	// numeric rule value.
 	"1.9.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
+	// Unchanged from 1.9.0: the 1.10.0 change is a changed predicate (what
+	// a proposal reserves and is checked against) and a configured
+	// parameter, GapBufferN, carried on the configuration rather than
+	// declared as a constant, not a changed Rule*, ADR* or numeric rule
+	// constant.
+	"1.10.0": "11413d17f3f22208d7682620c110aa68d3cf4e4c48ea7cd9bc8ea5cbadde7bc5",
 }

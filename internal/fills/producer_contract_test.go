@@ -125,7 +125,19 @@ func tradeProposal(t *testing.T, id string, level float64, quantity int64, n flo
 		DollarsPerPoint:        1,
 		NotionalAccount:        1_000_000,
 		ProtectiveStopIntent:   level - 2*fixtureN,
+		OrderType:              event.OrderTypeStopMarket,
 	})
+}
+
+// cappedTradeProposal is tradeProposal resting as the Baseline's
+// stop-limit, capped at priceCap (ADR 0005, as amended 2026-09-24).
+func cappedTradeProposal(t *testing.T, id string, level, priceCap float64, quantity int64, n float64) event.Envelope {
+	t.Helper()
+	e := tradeProposal(t, id, level, quantity, n)
+	var payload event.TradeProposalPayload
+	decodeInto(t, e, &payload)
+	payload.OrderType, payload.PriceCap = event.OrderTypeStopLimit, priceCap
+	return envelope(t, id, event.TradeProposalEventType, event.TradeProposalSchemaVersion, day(56), payload)
 }
 
 func addProposal(t *testing.T, id, campaignID string, level float64, quantity int64, n float64) event.Envelope {
@@ -141,6 +153,7 @@ func addProposal(t *testing.T, id, campaignID string, level float64, quantity in
 		CampaignN:        n,
 		Rule:             event.RuleAddLadderHalfN,
 		ADR:              event.ADRCampaignFrozenAtEntry,
+		OrderType:        event.OrderTypeStopMarket,
 	})
 }
 
@@ -450,6 +463,14 @@ func TestAnOrderCarryingAnUnusableNFailsClosed(t *testing.T) {
 			decisions: func(t *testing.T) []event.Envelope {
 				t.Helper()
 				return []event.Envelope{tradeProposal(t, "proposal:AAPL:day-56", 156, fixtureUnitQuantity, 0)}
+			},
+			wantKind: event.FillKindEntry,
+		},
+		{
+			name: "stop-limit entry order",
+			decisions: func(t *testing.T) []event.Envelope {
+				t.Helper()
+				return []event.Envelope{cappedTradeProposal(t, "proposal:AAPL:day-56", 156, 157.5, fixtureUnitQuantity, 0)}
 			},
 			wantKind: event.FillKindEntry,
 		},

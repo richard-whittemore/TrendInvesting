@@ -58,6 +58,9 @@ func validTradeProposal() event.TradeProposalPayload {
 		DollarsPerPoint:        1,
 		NotionalAccount:        1_000_000,
 		ProtectiveStopIntent:   200 - float64(2*proposalN),
+		OrderType:              event.OrderTypeStopLimit,
+		GapBufferN:             1,
+		PriceCap:               200 + float64(1*proposalN),
 	}
 }
 
@@ -407,8 +410,8 @@ func TestTradeProposalEventConstants(t *testing.T) {
 	if event.TradeProposalEventType != "strategy.trade.proposed" {
 		t.Errorf("TradeProposalEventType = %q, want %q", event.TradeProposalEventType, "strategy.trade.proposed")
 	}
-	if event.TradeProposalSchemaVersion != 1 {
-		t.Errorf("TradeProposalSchemaVersion = %d, want 1 (a new payload starts at 1)", event.TradeProposalSchemaVersion)
+	if event.TradeProposalSchemaVersion != 2 {
+		t.Errorf("TradeProposalSchemaVersion = %d, want 2 (version 2 added the price cap, ADR 0005)", event.TradeProposalSchemaVersion)
 	}
 	// The rule names say what the rule computes, not which vendor's system
 	// it resembles — #9's finding, applied to sizing: a Variant that changes
@@ -879,8 +882,8 @@ func TestProposalDeclinedEventConstants(t *testing.T) {
 	if event.ProposalDeclinedEventType != "strategy.proposal.declined" {
 		t.Errorf("ProposalDeclinedEventType = %q, want %q", event.ProposalDeclinedEventType, "strategy.proposal.declined")
 	}
-	if event.ProposalDeclinedSchemaVersion != 5 {
-		t.Errorf("ProposalDeclinedSchemaVersion = %d, want 5", event.ProposalDeclinedSchemaVersion)
+	if event.ProposalDeclinedSchemaVersion != 6 {
+		t.Errorf("ProposalDeclinedSchemaVersion = %d, want 6", event.ProposalDeclinedSchemaVersion)
 	}
 	for _, reason := range []string{
 		event.DeclineReasonNNotReady,

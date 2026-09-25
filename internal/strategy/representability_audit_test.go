@@ -173,7 +173,7 @@ func TestCampaignAddRungOverflowPropagatesFromBothFillKinds(t *testing.T) {
 
 func TestCampaignStopRaiseOverflowIsRefused(t *testing.T) {
 	t.Parallel()
-	cfg := validConfigurationPayload()
+	cfg := uncappedConfigurationPayload()
 	cfg.NotionalAccount.StartingEquity = 1000
 	cfg.DollarsPerPoint = 1e-305
 	cfg.StopMultiple = 0.1
@@ -191,7 +191,7 @@ func TestCampaignStopRaiseOverflowIsRefused(t *testing.T) {
 
 func TestCampaignAggregateRiskOverflowIsRefused(t *testing.T) {
 	t.Parallel()
-	cfg := validConfigurationPayload()
+	cfg := uncappedConfigurationPayload()
 	cfg.NotionalAccount.StartingEquity = 1.7e308
 	cfg.UnitVolatilityFraction = 0.25
 	cfg.StopMultiple = 4

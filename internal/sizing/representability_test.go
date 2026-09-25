@@ -54,6 +54,9 @@ func sizingCalls() []sizingCall {
 		{"FixedRiskAtStopQuantity", sizing.FixedRiskAtStopQuantity, []any{1e6, .01, 2., 5., 1.}},
 		{"RiskAtStop", sizing.RiskAtStop, []any{sizing.ModeVolatilityNormalised, .005, 2., 0.}},
 		{"RiskAtStop", sizing.RiskAtStop, []any{sizing.ModeFixedRiskAtStop, .005, 2., .01}},
+		{"Commission", sizing.Commission, []any{int64(100), 50., 1., sizing.CommissionSchedule{PerShare: .005, MinimumPerOrder: 1, MaximumFractionOfTradeValue: .01}}},
+		{"PriceCap", sizing.PriceCap, []any{100., 1., 5.}},
+		{"WorstCaseBuyCost", sizing.WorstCaseBuyCost, []any{int64(100), 105., .05, 5., 1., sizing.CommissionSchedule{PerShare: .005, MinimumPerOrder: 1, MaximumFractionOfTradeValue: .01}}},
 	}
 }
 

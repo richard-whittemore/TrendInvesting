@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -92,11 +94,28 @@ func transitionFixture(t *testing.T, kind string) (*Reducer, event.Envelope) {
 	default:
 		t.Fatalf("unknown fixture %s", kind)
 	}
+	placeFixtureHolds(r)
 	bytes, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return r, event.Envelope{ID: "transition-input", Type: typ, SchemaVersion: schema, EventTime: day(3), RecordedAt: day(3), Payload: bytes}
+}
+
+// placeFixtureHolds gives every outstanding entry and Add proposal a fixture
+// builds directly the hold the reducer would have placed when it emitted it
+// (ADR 0020, as amended 2026-09-24), so the fixture's ledger matches its
+// proposals as a real run's always does.
+func placeFixtureHolds(r *Reducer) {
+	r.holds = nil
+	for _, id := range slices.Sorted(maps.Keys(r.instruments)) {
+		s := r.instruments[id]
+		for _, proposalID := range []string{pendingProposalID(s), pendingAddProposalID(s)} {
+			if proposalID != "" {
+				r.holds = append(r.holds, hold{proposalID: proposalID, instrumentID: id, classification: unclassifiedClassification, cost: 1})
+			}
+		}
+	}
 }
 
 // rejectFinalPayload uses the private transaction builder as a test-only fault

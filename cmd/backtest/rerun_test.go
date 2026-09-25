@@ -74,7 +74,7 @@ func TestRerunDetectsSimulatorDriftThatReplayCannot(t *testing.T) {
 // TestRerunGoldens reads committed evidence without regenerating the reference
 // side (ADR 0012, ADR 0017), including a distinct declared Variant.
 func TestRerunGoldens(t *testing.T) {
-	for _, path := range []string{goldenJournal, "testdata/variants/profit-protecting-stop/journal.golden.jsonl"} {
+	for _, path := range []string{goldenJournal, "testdata/variants/profit-protecting-stop/journal.golden.jsonl", "testdata/variants/uncapped/journal.golden.jsonl"} {
 		var out bytes.Buffer
 		if err := run(context.Background(), []string{"-rerun", path}, &out); err != nil {
 			t.Fatal(err)

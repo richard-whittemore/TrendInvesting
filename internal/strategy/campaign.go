@@ -554,6 +554,11 @@ func (r *transition) rememberPendingProposal(state *instrumentState, emitted eve
 func (r *transition) expireEntryProposal(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
 	pending := state.pendingProposal
 	state.pendingProposal = nil
+	// An expired proposal can no longer fill, so its hold is released (ADR
+	// 0020, as amended 2026-09-24).
+	if err := r.releaseHold(pending.proposalID); err != nil {
+		return event.Envelope{}, err
+	}
 
 	payload := event.ProposalExpiredPayload{
 		InstrumentID:   bar.InstrumentID,
@@ -716,6 +721,11 @@ type pendingAddProposalState struct {
 func (r *transition) expireAddProposal(state *instrumentState, bar event.CompletedBarPayload, input event.Envelope) (event.Envelope, error) {
 	pending := state.pendingAddProposal
 	state.pendingAddProposal = nil
+	// An expired proposal can no longer fill, so its hold is released (ADR
+	// 0020, as amended 2026-09-24).
+	if err := r.releaseHold(pending.proposalID); err != nil {
+		return event.Envelope{}, err
+	}
 
 	payload := event.ProposalExpiredPayload{
 		InstrumentID:   bar.InstrumentID,
@@ -1064,13 +1074,18 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 	// and the NEXT bar re-evaluates this same rung on its own merits
 	// (evaluateAdd is re-entered from applySessionClosed with no memory of
 	// this decline): a skip does not poison the ladder.
-	cost, costRepresentable := unitCost(campaign.unitQuantity, rung, r.dollarsPerPoint)
+	//
+	// What must be fundable is the hold the Add would place: its worst-case
+	// cost at its price cap, measured in the Campaign's frozen N, slippage
+	// and commission included (ADR 0020, as amended 2026-09-24; hold.go's
+	// buyHold).
+	cost, priceCap, costRepresentable := r.buyHold(campaign.unitQuantity, rung, campaign.campaignN)
 	switch {
 	case !costRepresentable:
 		declined, err := r.declineAdd(campaign, state.lastBarPeriodEnd, unitIndex, input,
 			event.DeclineReasonUnitCostNotRepresentable,
-			fmt.Sprintf("unit %d cost (%d shares x rung %v x %v dollars per point) leaves the representable range, so it exceeds any cash that could fund it; spendable cash at the attempt was %v",
-				unitIndex, campaign.unitQuantity, rung, r.dollarsPerPoint, availableCash),
+			fmt.Sprintf("unit %d hold (%s) leaves the representable range, so it exceeds any cash that could fund it; spendable cash at the attempt was %v",
+				unitIndex, r.buyHoldDetail(campaign.unitQuantity, rung, campaign.campaignN, priceCap), availableCash),
 			0, 0)
 		if err != nil {
 			return nil, err
@@ -1080,8 +1095,8 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 		// No partial Unit, ever: the whole Unit is skipped (ADR 0010).
 		declined, err := r.declineAdd(campaign, state.lastBarPeriodEnd, unitIndex, input,
 			event.DeclineReasonInsufficientCash,
-			fmt.Sprintf("unit %d cost %v (%d shares x rung %v x %v dollars per point) exceeds spendable cash at the attempt %v",
-				unitIndex, cost, campaign.unitQuantity, rung, r.dollarsPerPoint, availableCash),
+			fmt.Sprintf("unit %d hold %v (%s) exceeds spendable cash at the attempt %v, after fill debits and standing holds",
+				unitIndex, cost, r.buyHoldDetail(campaign.unitQuantity, rung, campaign.campaignN, priceCap), availableCash),
 			cost, availableCash)
 		if err != nil {
 			return nil, err
@@ -1100,6 +1115,9 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 		CampaignN:        campaign.campaignN,
 		Rule:             event.RuleAddLadderHalfN,
 		ADR:              event.ADRCampaignFrozenAtEntry,
+		OrderType:        r.buyOrderType,
+		GapBufferN:       r.gapBufferN,
+		PriceCap:         priceCap,
 	}
 	if err := payload.Validate(); err != nil {
 		return nil, fmt.Errorf("strategy: instrument %q: built invalid add proposal payload: %w", campaign.instrumentID, err)
@@ -1133,6 +1151,12 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 		level:            rung,
 		previousUnitFill: last.fillPrice,
 		earliestFillAt:   state.lastBarEarliestFillAt,
+	}
+	// Reserved now, so the next rung of a chain and every later proposal
+	// see it (ADR 0020, as amended 2026-09-24): the Add's hold, and its Unit
+	// under every cap in the Campaign's own frozen classification.
+	if err := r.placeHold(proposalEnvelope.ID, campaign.instrumentID, campaign.classification, cost); err != nil {
+		return nil, err
 	}
 
 	return []event.Envelope{proposalEnvelope}, nil
@@ -1675,8 +1699,15 @@ func (r *transition) openCampaign(state *instrumentState, pending *pendingPropos
 	// arrives and however much has happened to the instrument since (see
 	// acceptedFillState's doc comment).
 	r.recordAcceptedFill(fill.FillID, acceptedFillFromPayload(fill))
-	// ADR 0020: the fill's actual cost is spent now, before the chained Add
-	// below is checked against what remains.
+	// ADR 0020, as amended 2026-09-24: the proposal's hold is released and
+	// the fill's actual cost is spent in its place, so the two are never
+	// counted together, before the chained Add below is checked against what
+	// remains. A partial fill releases the whole hold: this reducer accepts
+	// one fill per proposal (applyFillToOpenCampaign), so the rest can never
+	// execute.
+	if err := r.releaseHold(pending.proposalID); err != nil {
+		return nil, err
+	}
 	if err := r.debitFill(fill); err != nil {
 		return nil, err
 	}
@@ -2015,6 +2046,11 @@ func (r *transition) applyStopFill(state *instrumentState, fill event.FillPayloa
 		// transition validated successfully, is state.pendingAddProposal
 		// actually cleared.
 		if addExpiryEnvelope != nil {
+			// The cancelled Add can no longer fill, so its hold is released
+			// (ADR 0020, as amended 2026-09-24).
+			if err := r.releaseHold(state.pendingAddProposal.proposalID); err != nil {
+				return nil, err
+			}
 			state.pendingAddProposal = nil
 			emissions = append(emissions, *addExpiryEnvelope)
 		}
@@ -2448,8 +2484,12 @@ func (r *transition) applyAddFill(state *instrumentState, fill event.FillPayload
 	recordExitOrders(campaign, state.pendingExitProposal)
 	state.pendingAddProposal = nil
 	r.recordAcceptedFill(fill.FillID, acceptedFillFromPayload(fill))
-	// ADR 0020: the fill's actual cost is spent now, before the chained Add
-	// below is checked against what remains.
+	// ADR 0020, as amended 2026-09-24: the Add's hold is released and the
+	// fill's actual cost is spent in its place, before the chained Add below
+	// is checked against what remains.
+	if err := r.releaseHold(pending.proposalID); err != nil {
+		return nil, err
+	}
 	if err := r.debitFill(fill); err != nil {
 		return nil, err
 	}

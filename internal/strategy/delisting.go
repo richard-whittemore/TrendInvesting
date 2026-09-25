@@ -266,6 +266,16 @@ func (r *transition) applyDelisting(payload event.CorporateActionPayload, input 
 		state.campaign = nil
 		state.lastClosingFillAt = payload.EffectiveAt
 	}
+	// A cancelled proposal can no longer fill, so its hold is released (ADR
+	// 0020, as amended 2026-09-24).
+	for _, pending := range []string{pendingProposalID(state), pendingAddProposalID(state)} {
+		if pending == "" {
+			continue
+		}
+		if err := r.releaseHold(pending); err != nil {
+			return nil, err
+		}
+	}
 	state.pendingProposal = nil
 	state.pendingExitProposal = nil
 	state.pendingAddProposal = nil

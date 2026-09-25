@@ -110,6 +110,9 @@ func (r *transition) expireOutstandingProposals(state *instrumentState, instrume
 
 	if pending := state.pendingAddProposal; pending != nil {
 		state.pendingAddProposal = nil
+		if err := r.releaseHold(pending.proposalID); err != nil {
+			return nil, err
+		}
 		envelope, err := r.emitEndOfStreamExpiry(endOfStreamExpiry{
 			idKind:         "add-proposal-expired-at-end-of-stream",
 			instrumentID:   instrumentID,
@@ -129,6 +132,9 @@ func (r *transition) expireOutstandingProposals(state *instrumentState, instrume
 
 	if pending := state.pendingProposal; pending != nil {
 		state.pendingProposal = nil
+		if err := r.releaseHold(pending.proposalID); err != nil {
+			return nil, err
+		}
 		envelope, err := r.emitEndOfStreamExpiry(endOfStreamExpiry{
 			idKind:         "proposal-expired-at-end-of-stream",
 			instrumentID:   instrumentID,

@@ -55,6 +55,18 @@ const (
 // production code actually computes.
 var testConfigurationHash = event.ConfigurationHash(baselineConfig())
 
+// uncappedConfig is baselineConfig as the declared Variant "uncapped" states
+// it: every entry and Add rests as a stop-market order with no price cap, so
+// a gap above the level fills at the open however far it gapped (ADR 0005,
+// as amended 2026-09-24). The Crude-style gap scenarios, whose Add must fill
+// far above its rung, run under it.
+func uncappedConfig() event.ConfigurationPayload {
+	cfg := baselineConfig()
+	cfg.BuyOrderType = event.OrderTypeStopMarket
+	cfg.GapBufferN = 0
+	return cfg
+}
+
 // baselineConfig is the Baseline (ADRs 0002/0003/0005/0007/0008/0013) with
 // Interactive Brokers commission parameters exercised by
 // TestCommissionModelCharge: 0.005 per share, a 1.00 minimum, and a 1% cap.
@@ -87,6 +99,8 @@ func baselineConfig() event.ConfigurationPayload {
 			MinimumPerOrder:             1.00,
 			MaximumFractionOfTradeValue: 0.01,
 		},
+		BuyOrderType: event.OrderTypeStopLimit,
+		GapBufferN:   1,
 	}
 }
 
@@ -289,7 +303,11 @@ func driveComposed(t *testing.T, simulator *fills.Simulator, reducer *strategy.R
 
 func configurationEnvelope(t *testing.T, cfg event.ConfigurationPayload) event.Envelope {
 	t.Helper()
-	return envelope(t, "cfg-1", event.ConfigurationEventType, event.ConfigurationSchemaVersion, day(0), cfg)
+	e := envelope(t, "cfg-1", event.ConfigurationEventType, event.ConfigurationSchemaVersion, day(0), cfg)
+	// The reducer accepts only the hash of the configuration it carries (ADR
+	// 0016), so a fixture running a Variant states that Variant's own.
+	e.ConfigurationHash = event.ConfigurationHash(cfg)
+	return e
 }
 
 // fixtureAvailableCash is the AvailableCash every fixture in this package
@@ -373,6 +391,10 @@ func restingEntryProposal(t *testing.T, level float64) event.Envelope {
 		DollarsPerPoint:        1,
 		NotionalAccount:        1_000_000,
 		ProtectiveStopIntent:   level - 2*fixtureN,
+		// A stop-market order (the declared Variant "uncapped"): the gap
+		// cases this stands in for pin ADR 0005's rule 1 alone. The
+		// stop-limit's own cap is ExecuteStopLimit's and priceBuy's subject.
+		OrderType: event.OrderTypeStopMarket,
 	}
 	if err := proposal.Validate(); err != nil {
 		t.Fatalf("the fixture proposal is invalid: %v", err)

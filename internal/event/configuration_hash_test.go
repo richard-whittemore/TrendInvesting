@@ -18,7 +18,12 @@ func TestConfigurationHashStability(t *testing.T) {
 	t.Parallel()
 
 	got := event.ConfigurationHash(validConfiguration())
-	// This pin includes ConfigurationSchemaVersion 5 and #55's three new
+	// This pin includes ConfigurationSchemaVersion 6 and its BuyOrderType
+	// and GapBufferN (ADR 0005, as amended 2026-09-24). The previous pin,
+	// for schema version 5, was
+	// sha256:bfbf4c6abc13336089e13fb46870052b82048eb7a372678390397f3401e7b272.
+	//
+	// That pin included ConfigurationSchemaVersion 5 and #55's three new
 	// Unit-cap fields (MaxUnitsPerIndustry, MaxUnitsPerSector,
 	// MaxUnitsTotalLong), alongside the Commission fields
 	// (PerShare, MinimumPerOrder, MaximumFractionOfTradeValue) schema
@@ -29,7 +34,7 @@ func TestConfigurationHashStability(t *testing.T) {
 	// The previous pin, for schema version 4 with no
 	// MaxUnitsPerIndustry/MaxUnitsPerSector/MaxUnitsTotalLong, was
 	// sha256:acdf9cc9f6b45ea4658373abff96306af35539d68ad2a1e0eedee4a014fbb386.
-	const want = "sha256:bfbf4c6abc13336089e13fb46870052b82048eb7a372678390397f3401e7b272"
+	const want = "sha256:1bab80d294ae64f7cb84ae95168b74e3970023f9eb06209a14aecee731b6ac3d"
 	if got != want {
 		t.Fatalf("ConfigurationHash(baseline) = %q, want the pinned hash %q", got, want)
 	}

@@ -238,7 +238,9 @@ func TestAGapBelowBothLevelsFillsTheExitOrderAtTheOpen(t *testing.T) {
 func TestMixedUnitsEachFillAtTheirOwnOrdersLevel(t *testing.T) {
 	t.Parallel()
 
-	run := runComposed(t, baselineConfig(), mixedUnitsBars())
+	// The declared Variant "uncapped": the Baseline's 1N price cap would skip
+	// the gapped Add this scenario needs (TestAGapAboveThePriceCapDoesNotFill).
+	run := runComposed(t, uncappedConfig(), mixedUnitsBars())
 
 	var mixed int
 	for _, e := range envelopesOfType(run.Decisions, event.ExitOrderSetEventType) {

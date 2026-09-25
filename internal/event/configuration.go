@@ -41,7 +41,28 @@ const ConfigurationEventType = "strategy.configuration"
 //     would either decline every proposal or (read as "no limit") trade
 //     with no cap at all — so an older record is rejected outright rather
 //     than silently adopting either reading.
-const ConfigurationSchemaVersion uint32 = 5
+//   - Version 6 added BuyOrderType and GapBufferN (ADR 0005 and ADR 0020, as
+//     amended 2026-09-24): every entry and Add rests as a stop-limit capped
+//     at level + GapBufferN x N, or, in the declared Variant "uncapped", as a
+//     stop-market order. An older record decodes BuyOrderType as the empty
+//     string, which is not a recognised order type, so it is rejected
+//     outright rather than silently read as either.
+const ConfigurationSchemaVersion uint32 = 6
+
+// OrderType is the order an entry or Add rests as (ADR 0005, as amended
+// 2026-09-24). It is carried by the configuration (BuyOrderType) and by every
+// trade and Add proposal (OrderType), so a consumer placing the order never
+// infers it.
+type OrderType string
+
+// The two declared buy order types. Stop-limit is the Baseline: a buy stop
+// at the proposal's level whose limit is its price cap (CONTEXT.md: "Price
+// cap"). Stop-market is the declared Variant "uncapped": Faith's own entry
+// [T p.18], which fills a gap at any open.
+const (
+	OrderTypeStopLimit  OrderType = "stop-limit"
+	OrderTypeStopMarket OrderType = "stop-market"
+)
 
 // SizingMode selects which quantity position size is keyed to (ADR 0003).
 type SizingMode string
@@ -104,7 +125,8 @@ type NotionalAccountConfig struct {
 // ConfigurationPayload carries every Baseline parameter named in ADRs 0002,
 // 0003, 0005, 0007, 0008, and 0013: the strategy identifier, Sizing Mode, Unit
 // Volatility Fraction, Stop Multiple, Entry and Exit Channel lengths, the four
-// Unit caps, slippage in N, and the Notional Account settings.
+// Unit caps, slippage in N, the Notional Account settings, and the order an
+// entry or Add rests as with its gap buffer.
 //
 // The numeric policy for these fields (float64 precision, rounding,
 // eventual fixed-point representation) is deliberately unresolved here; that
@@ -186,6 +208,20 @@ type ConfigurationPayload struct {
 	// Commission is ADR 0013's commission model, the cost-model companion to
 	// SlippageN above.
 	Commission CommissionConfig `json:"commission"`
+	// BuyOrderType is the order every entry and Add rests as (ADR 0005, as
+	// amended 2026-09-24): OrderTypeStopLimit in the Baseline, capped at
+	// level + GapBufferN x N, or OrderTypeStopMarket in the declared Variant
+	// "uncapped", with no cap.
+	BuyOrderType OrderType `json:"buy_order_type"`
+	// GapBufferN is k, the price cap's distance above the level in N (ADR
+	// 0005, as amended 2026-09-24): 1 in the Baseline, a Baseline-declared
+	// adaptation (ADR 0012), and testable at other values as a Variant.
+	// Under OrderTypeStopLimit it must be finite and at least zero; zero
+	// caps the order at its own level. Under OrderTypeStopMarket it must be
+	// zero, since there is no cap for it to set: stating one would be a
+	// figure nothing in the arithmetic honours, the confusion
+	// RiskAtStopFraction's own rule exists to prevent.
+	GapBufferN float64 `json:"gap_buffer_n"`
 }
 
 // Validate checks that every Baseline parameter is present and in range. A
@@ -328,8 +364,32 @@ func (c ConfigurationPayload) Validate() error {
 	case c.Commission.MaximumFractionOfTradeValue <= 0 || c.Commission.MaximumFractionOfTradeValue > 1:
 		errs = append(errs, errors.New("commission maximum fraction of trade value must be greater than zero and at most one; a zero cap would charge nothing on every order, and is what a configuration recorded before the commission model existed decodes to"))
 	}
+	errs = append(errs, validateGapBuffer(c.BuyOrderType, c.GapBufferN)...)
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid configuration payload: %w", err)
+	}
+	return nil
+}
+
+// validateGapBuffer checks an order type and its gap buffer together, for a
+// configuration and a proposal alike: a stop-limit's buffer is finite and at
+// least zero, and a stop-market order carries none (ADR 0005, as amended
+// 2026-09-24).
+func validateGapBuffer(orderType OrderType, gapBufferN float64) []error {
+	switch orderType {
+	case OrderTypeStopLimit:
+		switch {
+		case !isFinite(gapBufferN):
+			return []error{errors.New("gap buffer in n must be finite")}
+		case gapBufferN < 0:
+			return []error{errors.New("gap buffer in n must not be negative: a price cap below the level could never fill")}
+		}
+	case OrderTypeStopMarket:
+		if gapBufferN != 0 {
+			return []error{fmt.Errorf("gap buffer in n must be zero for a %s order, which has no price cap (ADR 0005), got %v", OrderTypeStopMarket, gapBufferN)}
+		}
+	default:
+		return []error{fmt.Errorf("buy order type %q is not a recognised order type", orderType)}
 	}
 	return nil
 }
