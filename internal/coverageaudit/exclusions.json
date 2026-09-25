@@ -31,7 +31,7 @@
       "function": "numberIsFloat64Safe",
       "statement": "return false",
       "category": "unreachable-by-invariant",
-      "reason": "Both `!ok` guards parse a string this function already knows is well-formed. The first parses n's own literal: json.Number's only producer in this codebase is a json.Decoder with UseNumber, whose contract is to hand back a string that already matches JSON's number grammar (RFC 8259) — a strict subset of the decimal-or-exponent syntax big.Rat.SetString accepts — so it always succeeds. The second parses strconv.FormatFloat's own output for f, and f is finite whenever n.Float64() returns a nil error on the line immediately above (ParseFloat's only route to a non-finite result is through a non-nil error), so FormatFloat's 'g' output is always a valid, finite decimal-or-exponent literal, which SetString also always accepts. Reachable the moment either producer's own contract stops holding."
+      "reason": "Both `!ok` guards parse a string this function already knows is well-formed. The first parses n's own literal: json.Number's only producer in this codebase is a json.Decoder with UseNumber, whose contract is to hand back a string that already matches JSON's number grammar (RFC 8259) \u2014 a strict subset of the decimal-or-exponent syntax big.Rat.SetString accepts \u2014 so it always succeeds. The second parses strconv.FormatFloat's own output for f, and f is finite whenever n.Float64() returns a nil error on the line immediately above (ParseFloat's only route to a non-finite result is through a non-nil error), so FormatFloat's 'g' output is always a valid, finite decimal-or-exponent literal, which SetString also always accepts. Reachable the moment either producer's own contract stops holding."
     },
     {
       "file": "internal/replay/divergence_report.go",
@@ -39,7 +39,7 @@
       "statement": "return false",
       "occurrence": 3,
       "category": "unreachable-by-invariant",
-      "reason": "Both `!ok` guards parse a string this function already knows is well-formed. The first parses n's own literal: json.Number's only producer in this codebase is a json.Decoder with UseNumber, whose contract is to hand back a string that already matches JSON's number grammar (RFC 8259) — a strict subset of the decimal-or-exponent syntax big.Rat.SetString accepts — so it always succeeds. The second parses strconv.FormatFloat's own output for f, and f is finite whenever n.Float64() returns a nil error on the line immediately above (ParseFloat's only route to a non-finite result is through a non-nil error), so FormatFloat's 'g' output is always a valid, finite decimal-or-exponent literal, which SetString also always accepts. Reachable the moment either producer's own contract stops holding."
+      "reason": "Both `!ok` guards parse a string this function already knows is well-formed. The first parses n's own literal: json.Number's only producer in this codebase is a json.Decoder with UseNumber, whose contract is to hand back a string that already matches JSON's number grammar (RFC 8259) \u2014 a strict subset of the decimal-or-exponent syntax big.Rat.SetString accepts \u2014 so it always succeeds. The second parses strconv.FormatFloat's own output for f, and f is finite whenever n.Float64() returns a nil error on the line immediately above (ParseFloat's only route to a non-finite result is through a non-nil error), so FormatFloat's 'g' output is always a valid, finite decimal-or-exponent literal, which SetString also always accepts. Reachable the moment either producer's own contract stops holding."
     },
     {
       "file": "internal/sizing/sizing.go",
@@ -53,7 +53,7 @@
       "function": "(*transition).applyAddFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: add fill %q is %s but campaign %q is %s; the add must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)\", fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)",
       "category": "unreachable-by-invariant",
-      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract — a fill in the opposite direction is a different position, not a variant of the same one — and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
+      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract \u2014 a fill in the opposite direction is a different position, not a variant of the same one \u2014 and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -96,7 +96,7 @@
       "function": "(*transition).applyExitFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)\", fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)",
       "category": "unreachable-by-invariant",
-      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract — a fill in the opposite direction is a different position, not a variant of the same one — and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
+      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract \u2014 a fill in the opposite direction is a different position, not a variant of the same one \u2014 and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -110,14 +110,14 @@
       "function": "(*transition).applyFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: fill %q is %s but proposal %q is %s; a fill in the opposite direction is a different position, not the proposed one\", fill.InstrumentID, fill.FillID, fill.Direction, fill.ProposalID, pending.direction)",
       "category": "unreachable-by-invariant",
-      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract — a fill in the opposite direction is a different position, not a variant of the same one — and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
+      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract \u2014 a fill in the opposite direction is a different position, not a variant of the same one \u2014 and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*transition).applyStopFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q is %s but campaign %q is %s; the closing fill must be in the campaign's own direction (FillPayload.Direction is the position's direction, not the order's buy/sell side)\", fill.InstrumentID, fill.FillID, fill.Direction, campaign.campaignID, campaign.direction)",
       "category": "unreachable-by-invariant",
-      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract — a fill in the opposite direction is a different position, not a variant of the same one — and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
+      "reason": "The Baseline is long-only: event.DirectionLong is the only direction FillPayload.Validate, TradeProposalPayload.Validate and CampaignOpenedPayload.Validate accept, and a Campaign's own direction is only ever set from an accepted fill. The comparison therefore cannot differ today. It is kept, not deleted, because the rule it states is about reconciliation rather than about the payload contract \u2014 a fill in the opposite direction is a different position, not a variant of the same one \u2014 and it must already be in place on the day shorts are added rather than being remembered then. This entry becomes reachable, and must move to a test, the moment a second direction is accepted anywhere."
     },
     {
       "file": "internal/strategy/campaign.go",
@@ -263,31 +263,9 @@
       "file": "internal/strategy/campaign.go",
       "function": "(*transition).evaluateAdd",
       "statement": "return nil, err",
-      "occurrence": 2,
-      "category": "unreachable-by-construction",
-      "reason": "Both propagate declineAdd's error — one per decline branch, the unrepresentable cost and the unaffordable one — and declineAdd's own two failure paths (Validate and json.Marshal) are themselves unreachable by construction (their entries in this list, function (*Reducer).declineAdd). The third propagation in this function, of cashAtPreviousClose's error, is NOT here: it is reachable and covered by TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*transition).evaluateAdd",
-      "statement": "return nil, err",
       "occurrence": 3,
       "category": "unreachable-by-construction",
-      "reason": "Both propagate declineAdd's error — one per decline branch, the unrepresentable cost and the unaffordable one — and declineAdd's own two failure paths (Validate and json.Marshal) are themselves unreachable by construction (their entries in this list, function (*Reducer).declineAdd). The third propagation in this function, of cashAtPreviousClose's error, is NOT here: it is reachable and covered by TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*transition).declineAdd",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal declined payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "Validate on a payload assembled field by field from campaign identifiers already known non-empty (an open Campaign always has both) and from cash figures the only call site, evaluateAdd, has already constrained to exactly the two shapes Validate accepts. Finiteness is not assumed: unitCost (reducer.go) reports whether the product left the float64 range, and evaluateAdd branches on that — the unrepresentable branch passes 0, 0 with a reason for which Validate requires exactly zero, and the unaffordable branch passes a requiredCash unitCost has just certified finite and which its own if-condition has just certified strictly greater than an availableCash read from an already-validated AccountSnapshotPayload. If either relationship ever stopped holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
-    },
-    {
-      "file": "internal/strategy/campaign.go",
-      "function": "(*transition).declineAdd",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal declined payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
+      "reason": "Both propagate declineAdd's error \u2014 one per decline branch, the unrepresentable cost and the unaffordable one \u2014 and declineAdd's own two failure paths (Validate and json.Marshal) moved into the shared stampAddDecline helper, itself unreachable by construction (this list's stampAddDecline entries). The cap-check propagation (occurrence 1, declineAddCap's error) is a separate entry; the cash-check propagation (occurrence 2, cashAtPreviousClose's error) is NOT here: it is reachable and covered by TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd."
     },
     {
       "file": "internal/strategy/delisting.go",
@@ -301,14 +279,14 @@
       "function": "(*transition).closeCampaignForDelisting",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: instrument %q: delisting cannot compute the average move in n: %w\", payload.InstrumentID, err)",
       "category": "unreachable-by-construction",
-      "reason": "sizing.AverageMoveInN over the Campaign's whole-life entry and exit prices and its frozen N. The prices are quantity-weighted averages of fill prices each required positive by FillPayload.Validate/CampaignOpenedPayload.Validate, and CampaignN was required positive when the Campaign opened and is never recomputed while it is open (ADR 0006) — the identical reasoning applyExitFill's own entry in this list gives for the same call."
+      "reason": "sizing.AverageMoveInN over the Campaign's whole-life entry and exit prices and its frozen N. The prices are quantity-weighted averages of fill prices each required positive by FillPayload.Validate/CampaignOpenedPayload.Validate, and CampaignN was required positive when the Campaign opened and is never recomputed while it is open (ADR 0006) \u2014 the identical reasoning applyExitFill's own entry in this list gives for the same call."
     },
     {
       "file": "internal/strategy/delisting.go",
       "function": "(*transition).closeCampaignForDelisting",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: instrument %q: delisting cannot compute the realised result in unit n: %w\", payload.InstrumentID, err)",
       "category": "unreachable-by-construction",
-      "reason": "sizing.RealisedResultInUnitN over the Campaign's frozen N, its Unit quantity and the configured dollars per point, all three required positive by CampaignOpenedPayload.Validate and ConfigurationPayload.Validate — the identical reasoning applyExitFill's own entry in this list gives for the same call."
+      "reason": "sizing.RealisedResultInUnitN over the Campaign's frozen N, its Unit quantity and the configured dollars per point, all three required positive by CampaignOpenedPayload.Validate and ConfigurationPayload.Validate \u2014 the identical reasoning applyExitFill's own entry in this list gives for the same call."
     },
     {
       "file": "internal/strategy/delisting.go",
@@ -322,14 +300,14 @@
       "function": "(*transition).closeCampaignForDelisting",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal campaign exited payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold — a NaN or an infinity in a float64 field — and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, a time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, a time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/delisting.go",
       "function": "(*transition).applyDelisting",
       "statement": "return nil, err",
       "category": "unreachable-by-construction",
-      "reason": "Propagates emitDelistingExpiry's own error for whichever of the three pending-proposal kinds is outstanding; its two failure paths (a Validate and a Marshal of a payload built from an already-recorded pending proposal) are themselves unreachable by construction — their own entries in this list. Three blocks, one per proposal kind. closeCampaignForDelisting's error return, textually identical, is reachable and is covered."
+      "reason": "Propagates emitDelistingExpiry's own error for whichever of the three pending-proposal kinds is outstanding; its two failure paths (a Validate and a Marshal of a payload built from an already-recorded pending proposal) are themselves unreachable by construction \u2014 their own entries in this list. Three blocks, one per proposal kind. closeCampaignForDelisting's error return, textually identical, is reachable and is covered."
     },
     {
       "file": "internal/strategy/delisting.go",
@@ -337,7 +315,7 @@
       "statement": "return nil, err",
       "occurrence": 2,
       "category": "unreachable-by-construction",
-      "reason": "Propagates emitDelistingExpiry's own error for whichever of the three pending-proposal kinds is outstanding; its two failure paths (a Validate and a Marshal of a payload built from an already-recorded pending proposal) are themselves unreachable by construction — their own entries in this list. Three blocks, one per proposal kind. closeCampaignForDelisting's error return, textually identical, is reachable and is covered."
+      "reason": "Propagates emitDelistingExpiry's own error for whichever of the three pending-proposal kinds is outstanding; its two failure paths (a Validate and a Marshal of a payload built from an already-recorded pending proposal) are themselves unreachable by construction \u2014 their own entries in this list. Three blocks, one per proposal kind. closeCampaignForDelisting's error return, textually identical, is reachable and is covered."
     },
     {
       "file": "internal/strategy/delisting.go",
@@ -345,7 +323,7 @@
       "statement": "return nil, err",
       "occurrence": 3,
       "category": "unreachable-by-construction",
-      "reason": "Propagates emitDelistingExpiry's own error for whichever of the three pending-proposal kinds is outstanding; its two failure paths (a Validate and a Marshal of a payload built from an already-recorded pending proposal) are themselves unreachable by construction — their own entries in this list. Three blocks, one per proposal kind. closeCampaignForDelisting's error return, textually identical, is reachable and is covered."
+      "reason": "Propagates emitDelistingExpiry's own error for whichever of the three pending-proposal kinds is outstanding; its two failure paths (a Validate and a Marshal of a payload built from an already-recorded pending proposal) are themselves unreachable by construction \u2014 their own entries in this list. Three blocks, one per proposal kind. closeCampaignForDelisting's error return, textually identical, is reachable and is covered."
     },
     {
       "file": "internal/strategy/delisting.go",
@@ -359,7 +337,7 @@
       "function": "(*transition).emitDelistingExpiry",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal expired payload: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold — a NaN or an infinity in a float64 field — and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, a time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
+      "reason": "json.Marshal of the payload the Validate immediately above has just accepted. The encoder refuses exactly one thing this payload could hold \u2014 a NaN or an infinity in a float64 field \u2014 and that payload's own Validate tests every one of its float fields for finiteness before this line is reached. Nothing else in it (strings, ints, a time.Time) has a failing encoding at all. Reachable the moment a float field is added without a finiteness check beside it."
     },
     {
       "file": "internal/strategy/end_of_stream.go",
@@ -373,7 +351,7 @@
       "function": "(*transition).applyRunCompleted",
       "statement": "return nil, fmt.Errorf(\"strategy: %w\", err)",
       "category": "unreachable-by-construction",
-      "reason": "event.RunCompletedPayload is an empty struct and its Validate returns nil unconditionally — the end-of-stream event states nothing, so there is nothing to check. The call is kept so that the payload growing a field is guarded from the day it does."
+      "reason": "event.RunCompletedPayload is an empty struct and its Validate returns nil unconditionally \u2014 the end-of-stream event states nothing, so there is nothing to check. The call is kept so that the payload growing a field is guarded from the day it does."
     },
     {
       "file": "internal/strategy/end_of_stream.go",
@@ -544,20 +522,6 @@
     },
     {
       "file": "internal/strategy/reducer.go",
-      "function": "(*transition).decline",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal declined payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "ProposalDeclinedPayload.Validate on a payload whose Reason is one of this package's own constants and whose remaining fields come from the bar under decision, already validated. The two cash figures are not assumed finite: sizeUnit passes 0, 0 for every reason for which Validate requires exactly zero, and for insufficient-cash it passes a requiredCash unitCost (reducer.go) has just certified representable and its own if-condition has just certified strictly greater than an availableCash read from an already-validated AccountSnapshotPayload."
-    },
-    {
-      "file": "internal/strategy/reducer.go",
-      "function": "(*transition).decline",
-      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal declined payload: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
-    },
-    {
-      "file": "internal/strategy/reducer.go",
       "function": "(*transition).sizeUnit",
       "statement": "return r.decline(instrumentID, periodEnd, input, signalID, event.DeclineReasonNNotReady, fmt.Sprintf(\"n is not a usable volatility reading (n %v); no unit can be sized from it\", n), 0, 0)",
       "category": "unreachable-by-invariant",
@@ -626,28 +590,28 @@
       "function": "(*transition).evaluateCampaign",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: campaign %q: %w\", bar.InstrumentID, campaign.campaignID, err)",
       "category": "unreachable-by-construction",
-      "reason": "sizing.LowestProtectiveStop refuses a stop that is not finite and positive, and no such stop can be stored on a held Unit. Every assignment to unitState.protectiveStop is preceded by a payload Validate that routes through sizing.ValidStopLevel: the Campaign open validates openedPayload and stopSetPayload before storing (campaign.go:1602), the Add validates before storing (the 'would add an invalid unit' refusal, campaign.go:2250), and the Stop Ladder validates raisedPayload before assigning (campaign.go:2329, assigned at 2346). All four sites were checked for this entry rather than assumed. This branch becomes reachable the moment any of those stores stops validating first, or a new store is added without one — at which point it fires, becomes covered, and the audit reports this entry as stale. LowestProtectiveStop also refuses an EMPTY slice, which is unreachable here for a separate reason worth stating rather than folding into the one above. The three sites reading campaign.units hold a Campaign, and a Campaign exists only while it holds Units: the Add appends one, and the close that empties it removes the Campaign rather than leaving it holding none. applyStopFill reads the Units a fill names, and reaches this call only after FillPayload.Validate has required UnitIDs to be non-empty and after resolveUnits has reported no missing one -- a fill naming an unknown or already-closed Unit is refused as a reconciliation failure before any stop is read."
+      "reason": "sizing.LowestProtectiveStop refuses a stop that is not finite and positive, and no such stop can be stored on a held Unit. Every assignment to unitState.protectiveStop is preceded by a payload Validate that routes through sizing.ValidStopLevel: the Campaign open validates openedPayload and stopSetPayload before storing (campaign.go:1602), the Add validates before storing (the 'would add an invalid unit' refusal, campaign.go:2250), and the Stop Ladder validates raisedPayload before assigning (campaign.go:2329, assigned at 2346). All four sites were checked for this entry rather than assumed. This branch becomes reachable the moment any of those stores stops validating first, or a new store is added without one \u2014 at which point it fires, becomes covered, and the audit reports this entry as stale. LowestProtectiveStop also refuses an EMPTY slice, which is unreachable here for a separate reason worth stating rather than folding into the one above. The three sites reading campaign.units hold a Campaign, and a Campaign exists only while it holds Units: the Add appends one, and the close that empties it removes the Campaign rather than leaving it holding none. applyStopFill reads the Units a fill names, and reaches this call only after FillPayload.Validate has required UnitIDs to be non-empty and after resolveUnits has reported no missing one -- a fill naming an unknown or already-closed Unit is refused as a reconciliation failure before any stop is read."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*transition).applyStopFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: stop fill %q: %w\", fill.InstrumentID, fill.FillID, err)",
       "category": "unreachable-by-construction",
-      "reason": "sizing.LowestProtectiveStop refuses a stop that is not finite and positive, and no such stop can be stored on a held Unit. Every assignment to unitState.protectiveStop is preceded by a payload Validate that routes through sizing.ValidStopLevel: the Campaign open validates openedPayload and stopSetPayload before storing (campaign.go:1602), the Add validates before storing (the 'would add an invalid unit' refusal, campaign.go:2250), and the Stop Ladder validates raisedPayload before assigning (campaign.go:2329, assigned at 2346). All four sites were checked for this entry rather than assumed. This branch becomes reachable the moment any of those stores stops validating first, or a new store is added without one — at which point it fires, becomes covered, and the audit reports this entry as stale. LowestProtectiveStop also refuses an EMPTY slice, which is unreachable here for a separate reason worth stating rather than folding into the one above. The three sites reading campaign.units hold a Campaign, and a Campaign exists only while it holds Units: the Add appends one, and the close that empties it removes the Campaign rather than leaving it holding none. applyStopFill reads the Units a fill names, and reaches this call only after FillPayload.Validate has required UnitIDs to be non-empty and after resolveUnits has reported no missing one -- a fill naming an unknown or already-closed Unit is refused as a reconciliation failure before any stop is read."
+      "reason": "sizing.LowestProtectiveStop refuses a stop that is not finite and positive, and no such stop can be stored on a held Unit. Every assignment to unitState.protectiveStop is preceded by a payload Validate that routes through sizing.ValidStopLevel: the Campaign open validates openedPayload and stopSetPayload before storing (campaign.go:1602), the Add validates before storing (the 'would add an invalid unit' refusal, campaign.go:2250), and the Stop Ladder validates raisedPayload before assigning (campaign.go:2329, assigned at 2346). All four sites were checked for this entry rather than assumed. This branch becomes reachable the moment any of those stores stops validating first, or a new store is added without one \u2014 at which point it fires, becomes covered, and the audit reports this entry as stale. LowestProtectiveStop also refuses an EMPTY slice, which is unreachable here for a separate reason worth stating rather than folding into the one above. The three sites reading campaign.units hold a Campaign, and a Campaign exists only while it holds Units: the Add appends one, and the close that empties it removes the Campaign rather than leaving it holding none. applyStopFill reads the Units a fill names, and reaches this call only after FillPayload.Validate has required UnitIDs to be non-empty and after resolveUnits has reported no missing one -- a fill naming an unknown or already-closed Unit is refused as a reconciliation failure before any stop is read."
     },
     {
       "file": "internal/strategy/campaign.go",
       "function": "(*transition).applyExitFill",
       "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: exit fill %q: %w\", fill.InstrumentID, fill.FillID, err)",
       "category": "unreachable-by-construction",
-      "reason": "sizing.LowestProtectiveStop refuses a stop that is not finite and positive, and no such stop can be stored on a held Unit. Every assignment to unitState.protectiveStop is preceded by a payload Validate that routes through sizing.ValidStopLevel: the Campaign open validates openedPayload and stopSetPayload before storing (campaign.go:1602), the Add validates before storing (the 'would add an invalid unit' refusal, campaign.go:2250), and the Stop Ladder validates raisedPayload before assigning (campaign.go:2329, assigned at 2346). All four sites were checked for this entry rather than assumed. This branch becomes reachable the moment any of those stores stops validating first, or a new store is added without one — at which point it fires, becomes covered, and the audit reports this entry as stale. LowestProtectiveStop also refuses an EMPTY slice, which is unreachable here for a separate reason worth stating rather than folding into the one above. The three sites reading campaign.units hold a Campaign, and a Campaign exists only while it holds Units: the Add appends one, and the close that empties it removes the Campaign rather than leaving it holding none. applyStopFill reads the Units a fill names, and reaches this call only after FillPayload.Validate has required UnitIDs to be non-empty and after resolveUnits has reported no missing one -- a fill naming an unknown or already-closed Unit is refused as a reconciliation failure before any stop is read."
+      "reason": "sizing.LowestProtectiveStop refuses a stop that is not finite and positive, and no such stop can be stored on a held Unit. Every assignment to unitState.protectiveStop is preceded by a payload Validate that routes through sizing.ValidStopLevel: the Campaign open validates openedPayload and stopSetPayload before storing (campaign.go:1602), the Add validates before storing (the 'would add an invalid unit' refusal, campaign.go:2250), and the Stop Ladder validates raisedPayload before assigning (campaign.go:2329, assigned at 2346). All four sites were checked for this entry rather than assumed. This branch becomes reachable the moment any of those stores stops validating first, or a new store is added without one \u2014 at which point it fires, becomes covered, and the audit reports this entry as stale. LowestProtectiveStop also refuses an EMPTY slice, which is unreachable here for a separate reason worth stating rather than folding into the one above. The three sites reading campaign.units hold a Campaign, and a Campaign exists only while it holds Units: the Add appends one, and the close that empties it removes the Campaign rather than leaving it holding none. applyStopFill reads the Units a fill names, and reaches this call only after FillPayload.Validate has required UnitIDs to be non-empty and after resolveUnits has reported no missing one -- a fill naming an unknown or already-closed Unit is refused as a reconciliation failure before any stop is read."
     },
     {
       "file": "internal/strategy/delisting.go",
       "function": "(*transition).closeCampaignForDelisting",
       "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: instrument %q: delisting: %w\", payload.InstrumentID, err)",
       "category": "unreachable-by-construction",
-      "reason": "sizing.LowestProtectiveStop refuses a stop that is not finite and positive, and no such stop can be stored on a held Unit. Every assignment to unitState.protectiveStop is preceded by a payload Validate that routes through sizing.ValidStopLevel: the Campaign open validates openedPayload and stopSetPayload before storing (campaign.go:1602), the Add validates before storing (the 'would add an invalid unit' refusal, campaign.go:2250), and the Stop Ladder validates raisedPayload before assigning (campaign.go:2329, assigned at 2346). All four sites were checked for this entry rather than assumed. This branch becomes reachable the moment any of those stores stops validating first, or a new store is added without one — at which point it fires, becomes covered, and the audit reports this entry as stale. LowestProtectiveStop also refuses an EMPTY slice, which is unreachable here for a separate reason worth stating rather than folding into the one above. The three sites reading campaign.units hold a Campaign, and a Campaign exists only while it holds Units: the Add appends one, and the close that empties it removes the Campaign rather than leaving it holding none. applyStopFill reads the Units a fill names, and reaches this call only after FillPayload.Validate has required UnitIDs to be non-empty and after resolveUnits has reported no missing one -- a fill naming an unknown or already-closed Unit is refused as a reconciliation failure before any stop is read."
+      "reason": "sizing.LowestProtectiveStop refuses a stop that is not finite and positive, and no such stop can be stored on a held Unit. Every assignment to unitState.protectiveStop is preceded by a payload Validate that routes through sizing.ValidStopLevel: the Campaign open validates openedPayload and stopSetPayload before storing (campaign.go:1602), the Add validates before storing (the 'would add an invalid unit' refusal, campaign.go:2250), and the Stop Ladder validates raisedPayload before assigning (campaign.go:2329, assigned at 2346). All four sites were checked for this entry rather than assumed. This branch becomes reachable the moment any of those stores stops validating first, or a new store is added without one \u2014 at which point it fires, becomes covered, and the audit reports this entry as stale. LowestProtectiveStop also refuses an EMPTY slice, which is unreachable here for a separate reason worth stating rather than folding into the one above. The three sites reading campaign.units hold a Campaign, and a Campaign exists only while it holds Units: the Add appends one, and the close that empties it removes the Campaign rather than leaving it holding none. applyStopFill reads the Units a fill names, and reaches this call only after FillPayload.Validate has required UnitIDs to be non-empty and after resolveUnits has reported no missing one -- a fill naming an unknown or already-closed Unit is refused as a reconciliation failure before any stop is read."
     },
     {
       "file": "internal/strategy/exit_order.go",
@@ -706,6 +670,49 @@
       "occurrence": 4,
       "category": "unreachable-by-construction",
       "reason": "Propagates rememberPendingProposal, whose only failure is its own excluded decode of the trade proposal sizeUnit marshalled from a validated payload a statement earlier."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*transition).evaluateAdd",
+      "statement": "return nil, err",
+      "category": "unreachable-by-construction",
+      "reason": "Propagates declineAddCap's error. declineAddCap's own two failure paths (Validate and json.Marshal) moved into the shared stampAddDecline helper and are themselves unreachable by construction (this list's stampAddDecline entries): the payload it builds carries Cap, CapLimit and PostTradeExposure straight from capExceeded's own return values \u2014 a recognised cap constant, and an exposure capExceeded's own comparison has already certified strictly exceeds the limit \u2014 with the cash fields left zero, exactly the schema-5 shape ProposalDeclinedPayload.Validate accepts."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*transition).evaluateAdd",
+      "statement": "return nil, err",
+      "occurrence": 4,
+      "category": "unreachable-by-construction",
+      "reason": "Both propagate declineAdd's error \u2014 one per decline branch, the unrepresentable cost and the unaffordable one \u2014 and declineAdd's own two failure paths (Validate and json.Marshal) moved into the shared stampAddDecline helper, itself unreachable by construction (this list's stampAddDecline entries). The cap-check propagation (occurrence 1, declineAddCap's error) is a separate entry; the cash-check propagation (occurrence 2, cashAtPreviousClose's error) is NOT here: it is reachable and covered by TestSnapshotDatedAfterTheDecisionBarIsRefusedOnAnAdd."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*transition).stampAddDecline",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal declined payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "Validate on a payload assembled field by field from campaign identifiers already known non-empty (an open Campaign always has both) and from figures each of the three call sites has already constrained to a Validate-accepted shape: declineAdd's two callers pass cash figures unitCost (reducer.go) has certified finite/representable and compared to an already-validated AccountSnapshotPayload's cash, with Reason-appropriate zero cap fields; declineAddCap passes Cap/CapLimit/PostTradeExposure straight from capExceeded's own return values (a recognised cap constant, and an exposure capExceeded's own comparison has already certified strictly exceeds the limit), with Reason-appropriate zero cash fields. If any of these relationships ever stopped holding this guard fires, becomes covered, and the audit reports this entry as stale rather than letting it pass."
+    },
+    {
+      "file": "internal/strategy/campaign.go",
+      "function": "(*transition).stampAddDecline",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal declined payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
+    },
+    {
+      "file": "internal/strategy/reducer.go",
+      "function": "(*transition).stampDecline",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: built invalid proposal declined payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "ProposalDeclinedPayload.Validate on a payload whose Reason is one of this package's own constants and whose remaining fields come from the bar under decision, already validated. The cash figures are not assumed finite: sizeUnit passes 0, 0 for every reason for which Validate requires exactly zero, and for insufficient-cash it passes a requiredCash unitCost (reducer.go) has just certified representable and its own if-condition has just certified strictly greater than an availableCash read from an already-validated AccountSnapshotPayload. declineCap passes Cap/CapLimit/PostTradeExposure straight from capExceeded's own return values, with the cash fields left zero, exactly the schema-5 shape Validate accepts."
+    },
+    {
+      "file": "internal/strategy/reducer.go",
+      "function": "(*transition).stampDecline",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"strategy: marshal proposal declined payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     }
   ]
 }
