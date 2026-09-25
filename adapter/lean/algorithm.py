@@ -305,7 +305,14 @@ class CompletedBarsAlgorithm(QCAlgorithm):
                 # LEAN's own account of how it priced the fill, such as a gap
                 # filled at the open: evidence for the fill-model report.
                 self.Log("adapter: LEAN on order {}: {}".format(record["order_id"], record["message"]))
+        # Acting on one fill's decisions can place or amend an order, and
+        # LEAN's rescan can then record a fill-model failure while the rest
+        # of this instant's fills wait: the model is checked before each fill
+        # is sent and after each is acted on (fail closed;
+        # orders.adr_0005_fill_model).
         for payload, order_ids in self.desk.fills(records):
+            if not self.fill_model_sound():
+                return
             decisions = self.publisher.publish_fill(payload)
             self.desk.delivered(order_ids)
             self.fill_count += 1
@@ -318,6 +325,8 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             # ADR 0011's amendment permits a fill-chained Add's explicit
             # extra session; ordinary proposals still answer their own bar.
             self.desk.act(decisions, payload["filled_at"], self.IsWarmingUp)
+            if not self.fill_model_sound():
+                return
 
     def handle_delisting(self, notice):
         """Stop on LEAN's DELISTED rather than publish it as a fact.

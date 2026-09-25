@@ -1199,6 +1199,63 @@ class FillReturnTests(OrderTestCase):
                          [("stop", 22.6, ["lean:1:2"]),
                           ("stop", 22.75, ["lean:{}:2".format(add.OrderId)])])
 
+    def test_a_fill_model_failure_while_acting_on_one_fill_stops_the_rest_of_its_group(self):
+        # Acting on a fill's decisions can place or amend an order, and
+        # LEAN's rescan can then record a fill-model failure while the next
+        # fill of the same instant waits to be sent. The run stops before
+        # it: the second stop fill never reaches the engine.
+        algo = self.start()
+        self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1)])
+        self.feed(algo, 11, close_decisions=[add_proposal(11)])
+        add = self.tickets(algo)[-1]
+        self.fill(algo, add, 12, 25.2)
+        self.feed(algo, 12, replies={"execution.fill": {"payload": {"decisions": [
+            unit_added(12, fill_id="lean:{}:2".format(add.OrderId)),
+            exit_order_set(12, unit_index=2, level=22.8, cause="add"),
+            exit_order_set(12, unit_index=1, level=22.7, cause="add")]}}})
+        unit1, unit2 = self.sells(algo)
+        self.fill(algo, unit2, 13, 22.75)
+        self.fill(algo, unit1, 13, 22.6)
+        sent = len(algo.client.sent)
+        original_act = algo.desk.act
+
+        def act(decisions, *args, **kwargs):
+            result = original_act(decisions, *args, **kwargs)
+            if "execution.fill" in self.types_sent(algo, sent) and algo.fill_model.failure is None:
+                algo.fill_model.failure = "LEAN order 9 (tag=x) could not be priced"
+            return result
+
+        algo.desk.act = act
+        self.feed(algo, 13)
+        self.assertTrue(algo.failed)
+        self.assertIn("could not be priced", algo.quit_reason)
+        fills = [e["payload"] for e in self.sent(algo, "execution.fill")]
+        self.assertEqual([f["price"] for f in fills[-1:]], [22.6])
+        self.assertEqual(self.types_sent(algo, sent).count("execution.fill"), 1)
+
+    def test_a_fill_model_failure_while_acting_on_a_groups_last_fill_stops_the_run_there(self):
+        # The failure is recorded while acting on the only fill of the
+        # instant and nothing else is queued: the run stops there, before
+        # the session's snapshot or bar is sent.
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9)])
+        [entry] = self.tickets(algo)
+        self.fill(algo, entry, 10, 24.56)
+        sent = len(algo.client.sent)
+        original_act = algo.desk.act
+
+        def act(decisions, *args, **kwargs):
+            result = original_act(decisions, *args, **kwargs)
+            if "execution.fill" in self.types_sent(algo, sent) and algo.fill_model.failure is None:
+                algo.fill_model.failure = "LEAN order 9 (tag=x) could not be priced"
+            return result
+
+        algo.desk.act = act
+        self.feed(algo, 10)
+        self.assertTrue(algo.failed)
+        self.assertIn("could not be priced", algo.quit_reason)
+        self.assertEqual(self.types_sent(algo, sent), ["execution.fill"])
+
     def test_only_some_units_at_the_exit_channel_filling_stops_the_run(self):
         algo = self.start()
         _, [first, _] = self.two_units_at_the_exit_channel(algo)
