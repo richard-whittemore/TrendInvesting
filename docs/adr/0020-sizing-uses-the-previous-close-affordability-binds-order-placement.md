@@ -329,7 +329,7 @@ Under the declared Variant `uncapped` (stop-market), the hold is the check this 
 **What releases a hold.**
 
 - **The proposal's fill.** The hold is released in full, and the fill is debited at its actual cost, once (the 1.7.0 note), so nothing is counted twice. A partial fill releases the whole hold. The reducer accepts one fill per proposal, so the unfilled remainder can never execute (`applyFillToOpenCampaign`).
-- **The proposal's expiry**: the next bar (ADR 0011), or the end of the stream.
+- **The proposal's expiry**: the next bar, or the second subsequent bar for a fill-chained Add (ADR 0011's 2026-09-24 amendment), or the end of the stream.
 - **The proposal's cancellation**: an Add superseded by a partial stop-out, or any proposal cancelled by a delisting (ADR 0009).
 
 A stop that closes a Campaign outright leaves a pending Add's hold standing until the next bar expires the proposal. That is conservative, and matches the proposal's own life. An order lifecycle report (ADR 0022) releases nothing: the reducer still decides nothing from one, and a hold follows the proposal's lifecycle, which the reducer decides itself. Live, a proposal's expiry is safe to release on because the LEAN adapter stops the run if LEAN has not confirmed the cancellation of an expired proposal's order before the next slice (`require_cancels_confirmed`). An order in unknown state therefore never has its hold released while trading continues.

@@ -21,3 +21,37 @@ Separately, a Signal that could not be acted on (a cap or the cash rule bound) r
 - The reducer holds no "pending signal" memory in the Baseline; Setup state for the Baseline is a pure function of the bar and the frozen configuration. The Sublime Variant's 4PS phases are the one place Setup state carries memory, and those transitions are journaled.
 - A future reader who wants to "fix" the Baseline by adding a quality filter, or by carrying a good Signal forward a day, should find this record first.
 - Scanning cost is not a design input: the per-bar evaluation across the whole universe is a few arithmetic operations per instrument on rolling windows and is dominated by data loading, which the adapter owns.
+
+## Amendment: a fill-chained Add has one additional Session (2026-09-24)
+
+Decided by Richard on 2026-09-24, option B in issue #211, with the
+clarification that a live adapter must relay fills intraday. This is a
+declared execution-lifetime change, not a change to a DISCLOSED Turtle
+ladder or Signal rule.
+
+An Add proposed in reply to an entry or Add fill remains attributed to the
+last completed bar that covered its rung. Unlike an ordinary session-close
+Add, it survives the next completed bar for that instrument and expires on
+the second subsequent bar if still unfilled. Fills must arrive before the
+expiring bar; their timestamp is still checked against the first bar received
+after the fill. Entries and ordinary Adds retain their one-bar lifetime.
+A Session means an actual trading observation, never a calendar-day offset.
+
+The Add payload, schema 3 under ADR 0015, states `valid_for_sessions`: **1**
+for an ordinary Add, **2** for a fill-chained Add, measured from its
+`period_end`. This explicit window lets consumers validate placement against
+observed Sessions without implementing strategy or forecasting a trading
+calendar. The adapter may place the chain during the first subsequent
+Session's reply, so it can execute in the second. It must reject placement
+older than that window. No entry receives this extension.
+
+A standing Add is not replaced or reserved a second time at the intervening
+session close. Exit evaluation still runs first (ADR 0010); the extension
+never suppresses an exit. Existing fill and cancellation paths remain in
+force. Its ADR 0020 cash and cap hold remains until fill, cancellation, expiry
+at the second bar, or end of stream; snapshots never release it.
+
+RulesVersion changes from 1.10.0 to 1.11.0 (ADR 0016). The reference backtest
+still fills covered chained rungs intrabar (ADR 0005), so this lifetime
+extension must not change its trading decisions. Schema and version
+propagation are separately accounted for in the evidence.

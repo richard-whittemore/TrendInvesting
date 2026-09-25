@@ -92,6 +92,24 @@ The snapshot must come after the session close. A snapshot stamped at this Sessi
 
 A proposal emitted by a fill, not by the session-close pass, follows its fill. That covers the next Add rung after an Add fill, and Unit 2's rung after an opening fill (`campaign.go`, `evaluateAdd` call sites 2 and 3). ADR 0010 orders **decisions made from a Session's bars**. ADR 0020 already records that it does not order **executions**, and a rung that depends on an earlier rung's actual fill price is a consequence of an execution. These proposals keep their present behaviour, their per-instrument cap check, and the cash check in force when they are made.
 
+### Amendment to §7: fill-chained Add lifetime (2026-09-24)
+
+Richard's 2026-09-24 decision on issue #211, option B, amends §7's
+"present behaviour" only as to lifetime: an Add emitted in reply to a fill
+survives the first subsequent instrument bar and expires on the second,
+as specified in ADR 0011's amendment of the same date. Its schema-3
+`valid_for_sessions` is 2; a session-close Add's is 1. The surviving
+proposal keeps its identity and ADR 0020 hold, and prevents another Add
+proposal at the intervening close. Exit evaluation and cancellation retain
+their existing precedence. Neither ladder prices nor sizing change.
+
+The reference `cmd/backtest` producer still fills chained rungs inside the
+bar whose high covered them (§6, ADR 0005). The daily LEAN producer can
+place the fill's reply in its next slice and now keep that order through
+its next possible execution Session. The owner's clarification requires
+live fills to be relayed intraday; deferring them to a daily close is not
+a live implementation of this contract. No paper or live gate is cleared.
+
 ### Amendment: `cmd/backtest` states each Session's close (2026-09-24)
 
 §6's `cmd/backtest` producer gains the account snapshot a LEAN run already
