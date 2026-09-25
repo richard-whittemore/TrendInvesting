@@ -20,7 +20,14 @@ func TestConfigurationHashStability(t *testing.T) {
 	got := event.ConfigurationHash(validConfiguration())
 	// This pin includes ConfigurationSchemaVersion 7 and its three ADR 0009
 	// universe thresholds (UniverseMinPrice, UniverseMinDollarVolume,
-	// UniverseMinHistoryBars). The previous pin, for schema version 6, was
+	// UniverseMinHistoryBars), all zero: the universe gate off, as ADR
+	// 0009's amendment of 2026-09-25 (the owner's decision) makes every
+	// existing fixture. The pin immediately before this one, with the same
+	// schema version but all three thresholds at the Baseline's declared
+	// values (5, 5,000,000, 250) rather than the gate-off zero every
+	// existing fixture actually runs under, was
+	// sha256:c3b6828fd5c55d289d657a0d7360e094b4f262b2409abbfb65d95d54a155560c.
+	// The pin before that, for schema version 6, was
 	// sha256:1bab80d294ae64f7cb84ae95168b74e3970023f9eb06209a14aecee731b6ac3d.
 	//
 	// That pin included ConfigurationSchemaVersion 6 and its BuyOrderType
@@ -39,7 +46,7 @@ func TestConfigurationHashStability(t *testing.T) {
 	// The previous pin, for schema version 4 with no
 	// MaxUnitsPerIndustry/MaxUnitsPerSector/MaxUnitsTotalLong, was
 	// sha256:acdf9cc9f6b45ea4658373abff96306af35539d68ad2a1e0eedee4a014fbb386.
-	const want = "sha256:c3b6828fd5c55d289d657a0d7360e094b4f262b2409abbfb65d95d54a155560c"
+	const want = "sha256:9ae82a8dd8afb310b8ab42882648f2d4af431ab7d2bf30db8e616c9a078fb0cf"
 	if got != want {
 		t.Fatalf("ConfigurationHash(baseline) = %q, want the pinned hash %q", got, want)
 	}

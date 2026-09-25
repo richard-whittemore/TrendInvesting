@@ -26,6 +26,17 @@ import (
 // falls naturally inside this package's existing fixtures without any
 // special-cased calendar arithmetic.
 
+// universeOn sets cfg's three universe thresholds to a small, positive
+// triple, turning ADR 0009's gate on (as amended 2026-09-25, the owner's
+// decision: all three must switch together, never a partial mix) with a
+// floor low enough for this package's compact fixtures to clear on their own
+// price and dollar volume.
+func universeOn(cfg *event.ConfigurationPayload) {
+	cfg.UniverseMinPrice = 1
+	cfg.UniverseMinDollarVolume = 1
+	cfg.UniverseMinHistoryBars = 1
+}
+
 func classificationEnvelope(t *testing.T, sequence uint64, payload event.InstrumentClassificationPayload) event.Envelope {
 	t.Helper()
 	marshalled := mustMarshal(t, payload)
@@ -108,7 +119,7 @@ func TestMonthlyEvaluationEmitsOneEligibilityDecisionPerInstrumentPerMonth(t *te
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
-	cfg.UniverseMinHistoryBars = 1
+	universeOn(&cfg)
 
 	quiet := func(d int) event.CompletedBarPayload { return completedBar("QQQQ", day(d), 150, 150, 150) }
 
@@ -146,13 +157,15 @@ func TestMonthlyEvaluationEmitsOneEligibilityDecisionPerInstrumentPerMonth(t *te
 	}
 }
 
-// TestAnUnclassifiedInstrumentIsNeverGated proves this design's central
-// default: an instrument this run's universe port has never classified is
-// left completely ungated (never evaluated, never declined for
-// ineligibility) — the additive default every pre-existing scenario in this
-// package's whole test suite depends on, since none of them classifies
-// anything at all.
-func TestAnUnclassifiedInstrumentIsNeverGated(t *testing.T) {
+// TestWithTheUniverseGateOffAnUnclassifiedInstrumentIsNeverGated proves the
+// OFF half of ADR 0009's amendment of 2026-09-25 (the owner's decision):
+// with every threshold at zero (validConfigurationPayload's own default),
+// an instrument this run's universe port has never classified is left
+// completely ungated (never evaluated, never declined for ineligibility) —
+// what every pre-existing fixture, golden journal and decision-corpus
+// scenario in this whole repository runs under, since none of them turns
+// the gate on or classifies anything at all.
+func TestWithTheUniverseGateOffAnUnclassifiedInstrumentIsNeverGated(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
@@ -161,15 +174,120 @@ func TestAnUnclassifiedInstrumentIsNeverGated(t *testing.T) {
 		mustRun()
 
 	if decisions := universeEligibilityFor(t, emitted, "AAPL"); len(decisions) != 0 {
-		t.Fatalf("got %d universe.eligibility decision(s) for an instrument never classified, want 0", len(decisions))
+		t.Fatalf("got %d universe.eligibility decision(s) with the gate off, want 0", len(decisions))
 	}
 	proposals := envelopesOfType(emitted, event.TradeProposalEventType)
 	if len(proposals) != 1 {
-		t.Fatalf("got %d trade proposal(s) for an unclassified instrument's breakout, want exactly 1 (ADR 0009 must not gate an instrument this run's port never spoke to)", len(proposals))
+		t.Fatalf("got %d trade proposal(s) for an unclassified instrument's breakout with the gate off, want exactly 1", len(proposals))
 	}
 	declined := envelopesOfType(emitted, event.ProposalDeclinedEventType)
 	if len(declined) != 0 {
-		t.Fatalf("got %d decline(s) for an unclassified instrument, want 0", len(declined))
+		t.Fatalf("got %d decline(s) for an unclassified instrument with the gate off, want 0", len(declined))
+	}
+}
+
+// TestWithTheUniverseGateOnAnUnclassifiedInstrumentIsDeclined proves the ON
+// half: turning the gate on (universeOn) makes an unclassified instrument's
+// entry Signal declined ineligible, with a detail naming why, rather than
+// merely ungated (ADR 0009, as amended 2026-09-25, the owner's decision:
+// "an instrument that is unclassified ... is declined as ineligible").
+func TestWithTheUniverseGateOnAnUnclassifiedInstrumentIsDeclined(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	universeOn(&cfg)
+
+	emitted := newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		mustRun()
+
+	if proposals := envelopesOfType(emitted, event.TradeProposalEventType); len(proposals) != 0 {
+		t.Fatalf("got %d trade proposal(s) for an unclassified instrument with the gate on, want 0", len(proposals))
+	}
+	declines := envelopesOfType(emitted, event.ProposalDeclinedEventType)
+	if len(declines) != 1 {
+		t.Fatalf("got %d decline(s), want exactly 1", len(declines))
+	}
+	decline := decodeProposalDeclined(t, declines[0])
+	if decline.Reason != event.DeclineReasonIneligible {
+		t.Errorf("decline.Reason = %q, want %q", decline.Reason, event.DeclineReasonIneligible)
+	}
+	if !strings.Contains(decline.Detail, "never classified") {
+		t.Errorf("decline.Detail = %q, want it to name that the instrument was never classified", decline.Detail)
+	}
+}
+
+// TestTheRunsFirstSessionCloseEvaluatesAClassifiedInstrumentAtOnce covers
+// the ticket's own "no month-long wait" case for a run's very first
+// Session: an instrument classified before the run's first bar is evaluated
+// at that very first Session close, not held for a month boundary that, for
+// a run starting mid-month, could be weeks away.
+func TestTheRunsFirstSessionCloseEvaluatesAClassifiedInstrumentAtOnce(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	universeOn(&cfg)
+	// day(15) is 2026-01-17, deliberately mid-month: a purely monthly
+	// cadence would not evaluate anything until day(30) (2026-02-01), more
+	// than two weeks later.
+	start := 15
+	emitted := newStream(t, cfg).
+		classify(eligibleClassification("AAPL", day(0))).
+		bar(completedBar("AAPL", day(start), 150, 150, 150)).
+		mustRun()
+
+	decisions := universeEligibilityFor(t, emitted, "AAPL")
+	if len(decisions) != 1 {
+		t.Fatalf("got %d decision(s), want exactly 1", len(decisions))
+	}
+	if !decisions[0].PeriodEnd.Equal(day(start)) {
+		t.Errorf("decision PeriodEnd = %s, want the run's very first Session %s, not a later month boundary", decisions[0].PeriodEnd, day(start))
+	}
+}
+
+// TestAMidMonthClassificationIsEvaluatedAtTheNextSessionClose covers the
+// ticket's own "mid-month classification evaluated at next close" case: an
+// instrument classified after a run is already under way, off any calendar
+// month boundary, is evaluated at the very next Session close rather than
+// waiting for the next first-of-month.
+func TestAMidMonthClassificationIsEvaluatedAtTheNextSessionClose(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	universeOn(&cfg)
+
+	// day(1) opens the run (no classification yet, so nothing to evaluate);
+	// day(10) and day(11) are both comfortably inside January, nowhere near
+	// day(30)'s February boundary.
+	emitted := newStream(t, cfg).
+		bar(completedBar("AAPL", day(1), 150, 150, 150)).
+		classify(eligibleClassification("AAPL", day(1).Add(time.Hour))).
+		bar(completedBar("AAPL", day(10), 150, 150, 150)).
+		bar(completedBar("AAPL", day(11), 150, 150, 150)).
+		mustRun()
+
+	decisions := universeEligibilityFor(t, emitted, "AAPL")
+	if len(decisions) != 1 {
+		t.Fatalf("got %d decision(s), want exactly 1", len(decisions))
+	}
+	if !decisions[0].PeriodEnd.Equal(day(10)) {
+		t.Errorf("decision PeriodEnd = %s, want day(10) %s: the Session immediately after the classification arrived, not day(11) or a month boundary", decisions[0].PeriodEnd, day(10))
+	}
+}
+
+// TestNewReducerRefusesAPartialUniverseConfiguration is the reducer-seam
+// counterpart of internal/event's own ConfigurationPayload.Validate tests:
+// NewReducer validates the payload it is given, so a partial universe
+// configuration is refused before any input is ever applied.
+func TestNewReducerRefusesAPartialUniverseConfiguration(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	cfg.UniverseMinPrice = 5 // dollar volume and history bars left at zero
+
+	_, err := strategy.NewReducer(testStrategyVersion, cfg)
+	if err == nil || !strings.Contains(err.Error(), "universe thresholds must be either all zero") {
+		t.Fatalf("NewReducer() error = %v, want it to name the partial universe configuration", err)
 	}
 }
 
@@ -182,7 +300,7 @@ func TestAnEligibleInstrumentsSignalProposesNormally(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
-	cfg.UniverseMinHistoryBars = 1
+	universeOn(&cfg)
 
 	emitted := newStream(t, cfg).
 		classify(eligibleClassification("AAPL", day(0))).
@@ -220,7 +338,7 @@ func TestAnIneligibleInstrumentsSignalIsDeclinedInsteadOfProposed(t *testing.T) 
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
-	cfg.UniverseMinHistoryBars = 1
+	universeOn(&cfg)
 
 	emitted := newStream(t, cfg).
 		classify(etfClassification("BBB", day(0))).
@@ -287,9 +405,9 @@ func TestLosingEligibilityNeverClosesAnOpenCampaignOrBlocksItsAdds(t *testing.T)
 	// breakoutBars gives 64 completed bars by day(56), short of the
 	// Baseline's 250-bar floor; this fixture is about the eligibility gate
 	// and the Add Ladder, not the history criterion (already covered
-	// directly by internal/universe's own tests), so it configures a floor
-	// the fixture actually reaches.
-	cfg.UniverseMinHistoryBars = 1
+	// directly by internal/universe's own tests), so it turns the gate on
+	// with a floor the fixture actually reaches.
+	universeOn(&cfg)
 	campaignID := testDecisionID("campaign", "CCC", day(56))
 	campaignN := breakoutFixtureN(t, cfg)
 
@@ -467,7 +585,7 @@ func TestEveryDeclaredSecurityTypeBridgesToInternalUniverse(t *testing.T) {
 		t.Run(securityType, func(t *testing.T) {
 			t.Parallel()
 			cfg := validConfigurationPayload()
-			cfg.UniverseMinHistoryBars = 1
+			universeOn(&cfg)
 			payload := eligibleClassification("AAPL", day(0))
 			payload.SecurityType = securityType
 			emitted := newStream(t, cfg).
@@ -496,7 +614,7 @@ func TestALaterClassificationReplacesAnEarlierOne(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
-	cfg.UniverseMinHistoryBars = 1
+	universeOn(&cfg)
 	emitted := newStream(t, cfg).
 		classify(eligibleClassification("AAPL", day(0))).
 		classify(etfClassification("AAPL", day(0).Add(time.Hour))).

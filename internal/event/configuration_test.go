@@ -66,12 +66,12 @@ func validConfiguration() event.ConfigurationPayload {
 		// stop-limit orders capped at level + 1N in the Baseline.
 		BuyOrderType: event.OrderTypeStopLimit,
 		GapBufferN:   1,
-		// ADR 0009's three Baseline universe thresholds: at least $5, at
-		// least $5,000,000 of 20-day median dollar volume, and at least 250
-		// completed bars of history.
-		UniverseMinPrice:        5,
-		UniverseMinDollarVolume: 5_000_000,
-		UniverseMinHistoryBars:  250,
+		// ADR 0009's universe gate, all zero: off, as the owner's decision of
+		// 2026-09-25 makes every existing fixture. A test of the gate itself
+		// sets all three positive explicitly.
+		UniverseMinPrice:        0,
+		UniverseMinDollarVolume: 0,
+		UniverseMinHistoryBars:  0,
 	}
 }
 
@@ -584,10 +584,11 @@ func TestConfigurationSchemaVersionBumpedForSizingFields(t *testing.T) {
 }
 
 // TestConfigurationPayloadValidateUniverseThresholds pins ADR 0009's three
-// universe thresholds' own rule: finite and not negative, but — unlike
-// every other numeric field this payload requires positive — zero is a
-// legitimate, accepted value (a declared Variant with no floor at all;
-// ConfigurationSchemaVersion's own version-7 note).
+// universe thresholds' own rule, as amended 2026-09-25 (the owner's
+// decision): each is finite and not negative, and the three switch
+// together — all zero (the gate off, validConfiguration's own default) or
+// all positive (the gate on) — with a partial mix, some zero and some
+// positive, refused outright.
 func TestConfigurationPayloadValidateUniverseThresholds(t *testing.T) {
 	t.Parallel()
 
@@ -597,12 +598,49 @@ func TestConfigurationPayloadValidateUniverseThresholds(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "every universe threshold at zero is accepted",
+			name: "every universe threshold at zero is accepted (the gate is off)",
 			mutate: func(p *event.ConfigurationPayload) {
 				p.UniverseMinPrice = 0
 				p.UniverseMinDollarVolume = 0
 				p.UniverseMinHistoryBars = 0
 			},
+		},
+		{
+			name: "every universe threshold positive is accepted (the gate is on)",
+			mutate: func(p *event.ConfigurationPayload) {
+				p.UniverseMinPrice = 5
+				p.UniverseMinDollarVolume = 5_000_000
+				p.UniverseMinHistoryBars = 250
+			},
+		},
+		{
+			name: "price alone positive is a partial configuration and is refused",
+			mutate: func(p *event.ConfigurationPayload) {
+				p.UniverseMinPrice = 5
+			},
+			wantErr: "universe thresholds must be either all zero",
+		},
+		{
+			name: "dollar volume alone positive is a partial configuration and is refused",
+			mutate: func(p *event.ConfigurationPayload) {
+				p.UniverseMinDollarVolume = 5_000_000
+			},
+			wantErr: "universe thresholds must be either all zero",
+		},
+		{
+			name: "history bars alone positive is a partial configuration and is refused",
+			mutate: func(p *event.ConfigurationPayload) {
+				p.UniverseMinHistoryBars = 250
+			},
+			wantErr: "universe thresholds must be either all zero",
+		},
+		{
+			name: "two of three positive, one still zero, is a partial configuration and is refused",
+			mutate: func(p *event.ConfigurationPayload) {
+				p.UniverseMinPrice = 5
+				p.UniverseMinDollarVolume = 5_000_000
+			},
+			wantErr: "universe thresholds must be either all zero",
 		},
 		{
 			name:    "negative universe min price",

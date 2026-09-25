@@ -801,6 +801,13 @@
       "statement": "return nil, fmt.Errorf(\"strategy: marshal universe eligibility payload: %w\", err)",
       "category": "unreachable-by-construction",
       "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
+    },
+    {
+      "file": "internal/strategy/universe.go",
+      "function": "(*transition).universeIneligible",
+      "statement": "return true, fmt.Sprintf(\"instrument %q is classified but has not yet been evaluated by the Baseline universe (ADR 0009, as amended 2026-09-25): the universe gate is on, and an instrument is not a candidate for a new Campaign until its own evaluation has run\", id)",
+      "category": "unreachable-by-invariant",
+      "reason": "evaluateUniverse runs at the top of applySessionClosed, before this gate is ever consulted, and marks every classified instrument pendingEvaluation on the very declaration that creates or updates its classificationRecord; the first Session close at or after that declaration therefore always evaluates it in the same transaction, before any Signal for it can be ranked or declined. So by the time this function reads state.universe for an instrument r.classifications already knows, evaluated is always true: this branch states the general rule ADR 0009's amendment asks for, but the reducer's own always-catch-up design leaves it unreachable today. Reachable the moment evaluateUniverse's per-instrument trigger ever admits a classified instrument that has not just been marked pending."
     }
   ]
 }

@@ -49,16 +49,16 @@ const ConfigurationEventType = "strategy.configuration"
 //     outright rather than silently read as either.
 //   - Version 7 added UniverseMinPrice, UniverseMinDollarVolume and
 //     UniverseMinHistoryBars (ADR 0009): the Baseline universe's three
-//     numeric thresholds, every one of them a parameter. Unlike every
-//     addition above, an older record's zero for all three is accepted, not
-//     rejected: ADR 0009's own Consequences call the thresholds
-//     "sensitivity-tested," so zero is a legitimate declared Variant (no
-//     floor at all), not a signal of an unconfigured field — and, because
-//     the universe evaluation these thresholds feed only ever runs for an
-//     instrument this run's universe port has actually classified
-//     (internal/strategy: Reducer.classifications), a record that predates
-//     this field and classifies nothing is unaffected regardless of what
-//     these three decode to.
+//     numeric thresholds. Unlike every addition above, an older record's
+//     zero for all three is accepted, not rejected: ADR 0009's own amendment
+//     of 2026-09-25 (the owner's decision) makes all-zero the OFF state of
+//     the universe gate, deliberately including a record that predates this
+//     field and so decodes it as zero — the Baseline configuration until a
+//     provider-backed universe port exists, and what every existing fixture,
+//     golden journal and decision-corpus scenario runs under. The three
+//     fields switch together: all positive turns the gate on, and a partial
+//     configuration (some zero, some positive) is rejected outright, never
+//     silently read as "no floor" for the zero ones alone.
 const ConfigurationSchemaVersion uint32 = 7
 
 // OrderType is the order an entry or Add rests as (ADR 0005, as amended
@@ -240,11 +240,15 @@ type ConfigurationPayload struct {
 	// raw close (ADR 0004, as amended), at least $5,000,000 20-day median
 	// dollar volume (the raw view, indicator.MedianDollarVolume — the same
 	// definition ADR 0010's ranking tie-break reads), and at least 250
-	// completed bars of history, in the Baseline. Every threshold is a
-	// parameter and may legitimately be zero (a declared Variant with no
-	// floor at all) — see ConfigurationSchemaVersion's own version-7 note
-	// for why zero is accepted rather than rejected here, unlike every
-	// other numeric field this payload requires positive.
+	// completed bars of history, in the Baseline.
+	//
+	// The three switch together (ADR 0009's amendment of 2026-09-25, the
+	// owner's decision): all positive turns the universe gate ON — every
+	// instrument must then be classified and evaluated eligible before a new
+	// Campaign can open in it — and all zero turns it OFF, gating nothing.
+	// Validate rejects a partial configuration (some zero, some positive)
+	// outright, so the gate can never bind on one criterion while silently
+	// carrying no floor at all on another.
 	UniverseMinPrice        float64 `json:"universe_min_price"`
 	UniverseMinDollarVolume float64 `json:"universe_min_dollar_volume"`
 	UniverseMinHistoryBars  int     `json:"universe_min_history_bars"`
@@ -391,24 +395,38 @@ func (c ConfigurationPayload) Validate() error {
 		errs = append(errs, errors.New("commission maximum fraction of trade value must be greater than zero and at most one; a zero cap would charge nothing on every order, and is what a configuration recorded before the commission model existed decodes to"))
 	}
 	errs = append(errs, validateGapBuffer(c.BuyOrderType, c.GapBufferN)...)
-	// ADR 0009's three universe thresholds: finite and not negative. Unlike
-	// most other fields above, zero is a legitimate value here, not
-	// rejected — see UniverseMinPrice's own field comment and
-	// ConfigurationSchemaVersion's version-7 note for why.
+	// ADR 0009's three universe thresholds, as amended 2026-09-25: each is
+	// finite and not negative, and the three switch together — all zero (the
+	// gate off) or all positive (the gate on), never a partial mix that
+	// would bind on one criterion while silently carrying no floor on
+	// another. The pairing check below only runs once every field has
+	// individually passed the range checks, so a NaN or a negative value is
+	// reported as exactly that, never masked by the pairing message.
+	priceFinite := isFinite(c.UniverseMinPrice)
 	switch {
-	case !isFinite(c.UniverseMinPrice):
+	case !priceFinite:
 		errs = append(errs, errors.New("universe min price must be finite"))
 	case c.UniverseMinPrice < 0:
 		errs = append(errs, errors.New("universe min price must not be negative"))
 	}
+	dollarVolumeFinite := isFinite(c.UniverseMinDollarVolume)
 	switch {
-	case !isFinite(c.UniverseMinDollarVolume):
+	case !dollarVolumeFinite:
 		errs = append(errs, errors.New("universe min dollar volume must be finite"))
 	case c.UniverseMinDollarVolume < 0:
 		errs = append(errs, errors.New("universe min dollar volume must not be negative"))
 	}
 	if c.UniverseMinHistoryBars < 0 {
 		errs = append(errs, errors.New("universe min history bars must not be negative"))
+	}
+	if priceFinite && c.UniverseMinPrice >= 0 && dollarVolumeFinite && c.UniverseMinDollarVolume >= 0 && c.UniverseMinHistoryBars >= 0 {
+		on := c.UniverseMinPrice > 0 && c.UniverseMinDollarVolume > 0 && c.UniverseMinHistoryBars > 0
+		off := c.UniverseMinPrice == 0 && c.UniverseMinDollarVolume == 0 && c.UniverseMinHistoryBars == 0
+		if !on && !off {
+			errs = append(errs, fmt.Errorf(
+				"universe thresholds must be either all zero (the universe gate is off) or all positive (the gate is on), got price %v, dollar volume %v, history bars %d: a partial configuration would silently carry no floor on whichever criterion is left at zero",
+				c.UniverseMinPrice, c.UniverseMinDollarVolume, c.UniverseMinHistoryBars))
+		}
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid configuration payload: %w", err)

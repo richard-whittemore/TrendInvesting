@@ -90,12 +90,12 @@ func validConfigurationPayload() event.ConfigurationPayload {
 		// rest as stop-limit orders capped at level + 1N.
 		BuyOrderType: event.OrderTypeStopLimit,
 		GapBufferN:   1,
-		// ADR 0009's three Baseline universe thresholds: at least $5, at
-		// least $5,000,000 of 20-day median dollar volume, and at least 250
-		// completed bars of history.
-		UniverseMinPrice:        5,
-		UniverseMinDollarVolume: 5_000_000,
-		UniverseMinHistoryBars:  250,
+		// ADR 0009's universe gate, all zero: off, as the owner's decision of
+		// 2026-09-25 makes every existing fixture. A test of the gate itself
+		// sets all three positive explicitly.
+		UniverseMinPrice:        0,
+		UniverseMinDollarVolume: 0,
+		UniverseMinHistoryBars:  0,
 	}
 }
 

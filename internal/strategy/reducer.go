@@ -207,16 +207,25 @@ type Reducer struct {
 	// instrument this reducer has no bar for yet (evaluateUniverse's own doc
 	// comment).
 	//
-	// An instrument absent from this map has never been classified, and
-	// evaluateUniverse never evaluates it at all: it is not a universe
-	// candidate this run's Port has ever spoken to, so it is left ungated
-	// rather than being asserted ineligible (universeIneligible's own doc
-	// comment; this is what keeps every scenario that never sends this
-	// input event unaffected by ADR 0009's gate).
+	// An instrument absent from this map has never been classified. While
+	// the universe gate is off (universeEnabled false — every existing
+	// fixture, golden journal and decision-corpus scenario), that and every
+	// other instrument is left completely ungated regardless. While the
+	// gate is on, an instrument absent from this map, or present but not yet
+	// evaluated (instrumentState.universe.evaluated false), is declined
+	// ineligible for a NEW Campaign — it is not a candidate merely by
+	// default (universeIneligible's own doc comment; ADR 0009's amendment of
+	// 2026-09-25, the owner's decision).
 	classifications map[string]classificationRecord
 	// universeCriteria is ADR 0009's three thresholds
 	// (event.ConfigurationPayload.UniverseMinPrice/UniverseMinDollarVolume/
 	// UniverseMinHistoryBars), captured once from the configuration event.
+	// universeEnabled is whether they are all positive (the gate on) rather
+	// than all zero (off) — ConfigurationPayload.Validate has already
+	// refused any other combination, so reading one field's sign is
+	// sufficient, but the derivation lives in one named place
+	// (universeGateOn, universe.go) rather than being re-read inline at
+	// every call site.
 	universeCriteria universe.Criteria
 	// acceptedFills is defined and explained in
 	// campaign.go: every fill this reducer has accepted, for the WHOLE
