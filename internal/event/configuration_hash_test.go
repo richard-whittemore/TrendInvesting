@@ -18,15 +18,18 @@ func TestConfigurationHashStability(t *testing.T) {
 	t.Parallel()
 
 	got := event.ConfigurationHash(validConfiguration())
-	// This pin includes ConfigurationSchemaVersion 4 and the Commission
-	// fields (PerShare, MinimumPerOrder, MaximumFractionOfTradeValue).
-	// ADR 0016 requires both to feed the hash: the schema version is inside
-	// the hashed prefix, and the fields are inside the canonical bytes.
-	// This prevents a schema or commission-field change from being silently
-	// omitted from configuration identity. The previous pin, for schema
-	// version 3 with no Commission field, was
-	// sha256:9b74eadaa35438307bf91513f3a685008aeb1f1878b1daf9a4822ff8d72c89d1.
-	const want = "sha256:acdf9cc9f6b45ea4658373abff96306af35539d68ad2a1e0eedee4a014fbb386"
+	// This pin includes ConfigurationSchemaVersion 5 and #55's three new
+	// Unit-cap fields (MaxUnitsPerIndustry, MaxUnitsPerSector,
+	// MaxUnitsTotalLong), alongside the Commission fields
+	// (PerShare, MinimumPerOrder, MaximumFractionOfTradeValue) schema
+	// version 4 added. ADR 0016 requires both the version and every field to
+	// feed the hash: the schema version is inside the hashed prefix, and the
+	// fields are inside the canonical bytes. This prevents a schema or
+	// field change from being silently omitted from configuration identity.
+	// The previous pin, for schema version 4 with no
+	// MaxUnitsPerIndustry/MaxUnitsPerSector/MaxUnitsTotalLong, was
+	// sha256:acdf9cc9f6b45ea4658373abff96306af35539d68ad2a1e0eedee4a014fbb386.
+	const want = "sha256:bfbf4c6abc13336089e13fb46870052b82048eb7a372678390397f3401e7b272"
 	if got != want {
 		t.Fatalf("ConfigurationHash(baseline) = %q, want the pinned hash %q", got, want)
 	}
@@ -83,6 +86,9 @@ func TestConfigurationHashChangesWithEveryField(t *testing.T) {
 		{"entry channel length", func(c *event.ConfigurationPayload) { c.EntryChannelLength = 20 }},
 		{"exit channel length", func(c *event.ConfigurationPayload) { c.ExitChannelLength = 10 }},
 		{"max units", func(c *event.ConfigurationPayload) { c.MaxUnits = 6 }},
+		{"max units per industry", func(c *event.ConfigurationPayload) { c.MaxUnitsPerIndustry = 7 }},
+		{"max units per sector", func(c *event.ConfigurationPayload) { c.MaxUnitsPerSector = 11 }},
+		{"max units total long", func(c *event.ConfigurationPayload) { c.MaxUnitsTotalLong = 13 }},
 		{"slippage n", func(c *event.ConfigurationPayload) { c.SlippageN = 0.1 }},
 		{"tier b distance in n", func(c *event.ConfigurationPayload) { c.TierBDistanceInN = 2.0 }},
 		{"dollars per point", func(c *event.ConfigurationPayload) { c.DollarsPerPoint = 42000 }},
