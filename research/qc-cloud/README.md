@@ -233,12 +233,17 @@ is hidden; each names the ADR it touches.
    side is different, and tracked explicitly:
    `TurtleBaselineResearch.reservations_by_order_id` records exactly which
    order reserved which instrument/industry/sector/total-long headroom at
-   placement, and releases it the moment (and only the moment) that order
-   is cancelled, expires, or LEAN refuses it outright
+   placement, and releases it the moment that order resolves with nothing
+   filled under it -- cancelled, expired, or refused outright by LEAN
    (`OrderStatus.Invalid`) -- never earlier, and never left standing
-   forever. A filled order's reservation converts into a real, committed
-   Unit instead, released only when that Unit itself later closes
-   (`_handle_unit_exit`). This is not merely "session-scoped": it is the
+   forever. (The one exception, itself narrow and explicit: if something
+   HAS already filled under an order LEAN is cancelling -- the anomaly
+   deviation #14 describes -- the reservation is deliberately left
+   standing for that settlement to decide, rather than released at
+   cancellation regardless.) A filled order's reservation converts into a
+   real, committed Unit instead, released only when that Unit itself
+   later closes (`_handle_unit_exit`). This is not merely "session-scoped":
+   it is the
    same per-reservation lifetime discipline ADR 0020 describes for the Go
    engine's own holds, implemented against `rules.UnitCaps` directly
    rather than against a journalled event stream. (An earlier version of
@@ -335,28 +340,63 @@ is hidden; each names the ADR it touches.
     understates a multi-decade buy-and-hold return) and began its curve
     before warm-up ended (a longer span than the strategy's own) -- both
     caught in PR #253 review (Greptile and CodeRabbit, main.py:384).
-14. **A Unit's own buy or sell settles once, atomically, when its order is
-    fully resolved -- never on an in-progress partial fill.** A Unit is
-    indivisible (CONTEXT.md "Unit"). `OnOrderEvent` accumulates every
-    `PartiallyFilled` event's quantity and price for an order and takes no
-    Campaign action at all until that order is either `Filled` or
-    `Canceled` after having filled something, using the ACCUMULATED total
-    quantity and volume-weighted average price, never one partial slice in
-    isolation. An entry or Add whose buy order does not end up fully
-    filled (a cancellation after a partial fill) is not opened as a
-    smaller Unit -- Faith's "no partial Units" (ADR 0010) is treated as
-    the general rule here too -- it is declined by selling back whatever
-    quantity did trade, immediately, and logging it. A Unit's own Exit
-    Order is treated as closing that whole Unit at the traded average
-    price once it settles; the rare case where a cancellation left it
-    short of the Unit's full recorded quantity is logged visibly rather
-    than silently absorbed, since this script has no smaller
-    representation than a whole Unit to fall back on. An earlier version
-    of this script acted on every `PartiallyFilled` event as though it
-    were a complete fill, which could replace an in-progress Campaign,
-    double-count an Add, or release a whole Unit's cap headroom for a sale
-    that had not actually finished (caught in PR #253 review, Greptile
-    main.py:585).
+14. **A `PartiallyFilled` order is treated as an anomaly, not a routine
+    case, and is handled by one small, conservative path -- not by
+    machinery that tracks a partial fill's progress.** A Unit is
+    indivisible (CONTEXT.md "Unit"), and on daily equity data this is not
+    expected to matter in practice: this script's own ADR 0005 buy fill
+    model fills an order's whole quantity or none
+    (`_stop_limit_buy_fill_price` returns a price or `None`, never a
+    partial one), and every Exit Order is a plain stop-market sell, filled
+    by LEAN's own native equity fill model, which does the same. So
+    `OnOrderEvent` logs a `PartiallyFilled` event once, in full, and takes
+    no action on it at all -- the order simply keeps resting. Action is
+    taken only once LEAN reports the order fully resolved, `Filled` or
+    `Canceled`, using LEAN's own order-ticket totals for the WHOLE order's
+    life (`Ticket.QuantityFilled`, `Ticket.AverageFillPrice`) rather than
+    this script accumulating anything itself. Three things are then kept
+    consistent, deliberately kept small enough to reason about:
+    - **An entry or Add that ends up short of the exact quantity it
+      requested** (a `Canceled` order that partially filled first) is
+      never opened as, or added to, a smaller Unit: it is declined --
+      Faith's "no partial Units" (ADR 0010) is treated as the general rule
+      here too -- by selling back whatever quantity did trade, releasing
+      its Unit-cap reservation, and logging it as an anomaly.
+    - **A Unit's own Exit Order settling at anything other than that
+      Unit's own full recorded quantity** (or an order this script cannot
+      match back to a specific Unit at all) fails closed: `campaign.units`,
+      `unit_tickets`, and the Unit caps are left exactly as they were, and
+      the anomaly is logged loudly rather than guessed at or silently
+      absorbed -- this script has no representation for a Unit smaller
+      than a whole one, and it does not invent one under pressure from an
+      event it does not expect to see (PR #253 review round 2, CodeRabbit
+      main.py:952: "Do not close a Unit on a partial canceled exit").
+      This can only follow from a cause outside a backtest this script's
+      own code fully controls, since this script never itself cancels a
+      Unit's own Exit Order.
+    - **A Unit-cap reservation is released exactly once, by exactly one
+      code path.** `_cancel_ticket` releases it immediately only when
+      NOTHING has filled under the order yet; if something has (the
+      anomaly above), the reservation is left standing, and
+      `OnOrderEvent`'s own settlement -- not the cancellation -- decides
+      whether to commit or release it. Releasing it at cancellation
+      regardless of what had already filled was an earlier version's own
+      defect: `_commit_reservation` would then have nothing left to
+      commit for shares LEAN really had bought, understating every Unit
+      cap for the rest of the run (PR #253 review round 2, Greptile
+      main.py:726: "Partial fills lose cap reservations").
+
+    Two defects in an earlier, more elaborate version of this handling
+    (which accumulated every partial fill's quantity and price itself)
+    are also fixed by this simplification: a guard meant to catch "nothing
+    filled" treated a Unit's own Exit Order -- always a negative fill
+    quantity, since it is a sell -- as no fill at all, so an Exit Order's
+    `Filled` event never actually closed its Unit (Greptile main.py:834:
+    "Exit fills are discarded"); and neither settlement path compared the
+    filled quantity against the quantity actually requested, so a
+    partially-filled-then-cancelled entry or Add could still be recorded
+    as a whole Unit at the wrong size (Greptile main.py:841 and
+    CodeRabbit main.py:875: "partial buys become Units").
 15. **An Add fill that arrives with no Campaign left able to take it is
     liquidated immediately, not silently dropped or left to raise.** A
     resting Add order and a Unit's own Exit Order can both be triggered by
@@ -398,7 +438,16 @@ is hidden; each names the ADR it touches.
     for a newly added symbol before that same day's own `OnData` bar for
     it -- the ordinary universe-selection ordering, but one this
     repository cannot independently confirm without a live QuantConnect
-    run.
+    run. Every bar this script ever feeds into a symbol's N/channels
+    (`_advance`) is stamped with its own date and refuses one dated on or
+    before the last it already advanced through, so a History row that
+    happens to cover a date the algorithm's own warm-up or live bar
+    delivery also covers is skipped rather than counted twice -- which an
+    earlier version of this backfill did not guard against, silently
+    distorting N and the channels and potentially satisfying the 250-bar
+    floor before 250 distinct bars had actually been observed (caught in
+    PR #253 review round 2, Greptile main.py:413: "Warm-up bars counted
+    twice").
 
 ## Reading the results against costs, in plain words
 
