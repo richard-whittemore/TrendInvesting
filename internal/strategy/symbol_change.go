@@ -83,12 +83,45 @@ func (r *transition) applySymbolChange(payload event.CorporateActionPayload, inp
 	if _, delisted := r.delisted[newID]; delisted {
 		return nil, fmt.Errorf("strategy: instrument %q: a symbol change effective at %s would continue %q under %q, which is already delisted (ADR 0009)", oldID, at, oldID, newID)
 	}
+	// Reducer.renamed is terminal, in both directions: a retired id is never
+	// reused, as either the source of another rename or the destination of
+	// one. Checked before r.instrument(oldID) below, which alone cannot tell
+	// "genuinely never seen" apart from "already moved away" — an id this
+	// reducer has renamed away has no live *instrumentState (it was moved to
+	// its successor and removed from Reducer.instruments), so it looks
+	// exactly as unknown as one this reducer never saw at all, and that
+	// no-op branch would otherwise silently overwrite Reducer.renamed[oldID]
+	// with a second, different successor while the Campaign it actually
+	// carries sits under the first one — the source-side review finding.
+	// The destination-side finding is the same rule the other way: newID
+	// might equally have no live instrument state after being renamed away
+	// itself, so the "already tracked" check below cannot catch it reusing a
+	// retired identity, which would leave Reducer.renamed[newID] pointing at
+	// its OWN successor while a fresh Campaign moved in underneath it.
+	if successor, retired := r.renamed[oldID]; retired {
+		return nil, fmt.Errorf("strategy: instrument %q: a symbol change effective at %s names an instrument already renamed to %q; a retired instrument id is never reused, so a later change applies to %q directly (ADR 0019, ADR 0024)",
+			oldID, at, successor, successor)
+	}
+	if successor, retired := r.renamed[newID]; retired {
+		return nil, fmt.Errorf("strategy: instrument %q: a symbol change effective at %s would continue it under %q, which this reducer already renamed to %q; a retired instrument id is never reused (ADR 0019, ADR 0024)",
+			oldID, at, newID, successor)
+	}
 	if r.barReceivedInOpenSession(newID) {
 		return nil, fmt.Errorf("strategy: instrument %q: a symbol change effective at %s would continue it under %q, whose bar the open Session ending %s already holds; state it between Sessions (ADR 0021)",
 			oldID, at, newID, r.sessionPeriodEnd.Format(time.RFC3339))
 	}
 	if _, alreadyTracked := r.instrument(newID); alreadyTracked {
 		return nil, fmt.Errorf("strategy: instrument %q: a symbol change effective at %s would continue it under %q, which this reducer already tracks as its own instrument; a symbol change must never merge two instruments (ADR 0019, ADR 0024)",
+			oldID, at, newID)
+	}
+	// A declared universe classification (ADR 0009) can exist for an
+	// instrument with no bar yet — Reducer.classifications' own doc comment
+	// — so it is state r.instrument(newID) above cannot see. Left unchecked,
+	// the rename below would silently overwrite newID's own declared
+	// classification with oldID's, which is exactly the merge ADR 0019
+	// forbids, just through a map r.instrument never looks at.
+	if _, classified := r.classifications[newID]; classified {
+		return nil, fmt.Errorf("strategy: instrument %q: a symbol change effective at %s would continue it under %q, which this reducer has already classified as its own instrument (ADR 0009); a symbol change must never merge two instruments (ADR 0019, ADR 0024)",
 			oldID, at, newID)
 	}
 

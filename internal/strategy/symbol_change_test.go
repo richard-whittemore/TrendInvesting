@@ -223,6 +223,69 @@ func TestASymbolChangeIntoAnInstrumentWithABarInTheOpenSessionFailsClosed(t *tes
 		wantRunError("already holds", "state it between Sessions")
 }
 
+// TestASecondSymbolChangeFromAnAlreadyRetiredInstrumentFailsClosed pins a
+// review finding on symbol_change.go: once AAPL has been renamed to AAPL2,
+// AAPL is retired (Reducer.renamed["AAPL"] = "AAPL2"). A second symbol change
+// still naming AAPL as the OLD id must be refused outright, not silently
+// overwrite that entry to point at a different instrument while the
+// Campaign it actually carried sits under AAPL2 — the "genuinely unknown
+// instrument" branch (AAPL is no longer in Reducer.instruments once renamed)
+// must not be reached for an id this reducer has already retired, or a later
+// bar for AAPL would fail closed pointing at the wrong successor.
+func TestASecondSymbolChangeFromAnAlreadyRetiredInstrumentFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		corporateAction(symbolChangeAction("AAPL", "AAPL2", symbolChangeAt)).
+		corporateAction(symbolChangeAction("AAPL", "AAPL3", symbolChangeAt.Add(time.Hour))).
+		wantRunError("already renamed", "AAPL2")
+}
+
+// TestASymbolChangeIntoAnAlreadyRetiredInstrumentFailsClosed pins a review
+// finding on symbol_change.go: once AAPL has been renamed to AAPL2, AAPL no
+// longer has any live instrument state (it was moved to AAPL2 and removed
+// from Reducer.instruments), so the existing "already tracked" guard
+// (r.instrument(newID)) cannot see that AAPL is a retired identity, not a
+// fresh one. A LATER symbol change naming AAPL as the NEW id must still be
+// refused: reusing a retired id would leave Reducer.renamed["AAPL"] pointing
+// at AAPL2 while a brand new Campaign lives under AAPL, so the very next bar
+// or fill for AAPL would fail closed against its own state.
+func TestASymbolChangeIntoAnAlreadyRetiredInstrumentFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		corporateAction(symbolChangeAction("AAPL", "AAPL2", symbolChangeAt)).
+		corporateAction(symbolChangeAction("MSFT", "AAPL", symbolChangeAt.Add(time.Hour))).
+		wantRunError("already renamed", "AAPL2")
+}
+
+// TestASymbolChangeIntoAnInstrumentWithADeclaredClassificationFailsClosed
+// pins a review finding on symbol_change.go: a classification declared for
+// the new id, with no bar accepted for it yet, lives in the separate
+// Reducer.classifications map (its own doc comment: "a classification
+// legitimately arrives for an instrument this reducer has no bar for yet"),
+// which r.instrument(newID) cannot see. Without also checking that map, the
+// existing "already tracked" guard misses this case, and the rename would
+// silently overwrite AAPL2's own declared classification with AAPL's,
+// exactly the kind of merge ADR 0019 forbids.
+func TestASymbolChangeIntoAnInstrumentWithADeclaredClassificationFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	newStream(t, cfg).
+		bars(breakoutBars("AAPL")).
+		fill(openingFill("AAPL")).
+		classify(eligibleClassification("AAPL2", day(1))).
+		corporateAction(symbolChangeAction("AAPL", "AAPL2", symbolChangeAt)).
+		wantRunError("already classified", "merge two instruments")
+}
+
 // TestAFillForARenamedInstrumentFailsClosed: an execution naming the OLD
 // instrument id after a symbol change is a reconciliation failure, the same
 // shape as a fill for a delisted instrument (campaign.go's applyFill).

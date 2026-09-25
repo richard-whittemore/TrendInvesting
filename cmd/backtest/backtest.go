@@ -834,6 +834,16 @@ func inEffectiveOrder(actions []event.CorporateActionPayload, due []int) []int {
 // bar, or naming an instrument this run holds no bar for at all — the
 // unknown-instrument case the reducer records without error (delisting.go,
 // split.go).
+//
+// Before delivering any of them, every remaining action is checked for a
+// cash credit that could never reach a statement (refuseIfCashCrediting):
+// fills.StateLastClose has already taken the run's one and only closing
+// account.snapshot by the time this runs (drive's own call order, above), so
+// a dividend or a split's cash in lieu delivered here would credit the
+// simulated account's ledger with no statement ever recording it. The whole
+// run refuses before any of them is delivered, rather than delivering some
+// and refusing partway through, so the journal never holds a partial answer
+// to "did every remaining action apply".
 func deliverRemainingActions(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool) error {
 	var remaining []int
 	for i := range actions {
@@ -841,7 +851,34 @@ func deliverRemainingActions(ctx context.Context, simulator *fills.Simulator, re
 			remaining = append(remaining, i)
 		}
 	}
+	for _, i := range inEffectiveOrder(actions, remaining) {
+		if err := refuseIfCashCrediting(actions[i]); err != nil {
+			return err
+		}
+	}
 	return deliverInEffectiveOrder(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, remaining)
+}
+
+// refuseIfCashCrediting refuses a remaining action whose cash could never
+// reach any account.snapshot (ADR 0024's review finding, which found the
+// identical gap in ADR 0023's own cash in lieu and asked for both to be
+// fixed consistently). This is the conservative choice the finding named:
+// over inventing a second, artificial closing statement outside this run's
+// existing one-statement-per-Session contract (fills.RunSession,
+// fills.StateLastClose), refusing outright means a producer who needs this
+// credit recorded must place it before the instrument's own last bar, where
+// the ordinary per-Session statement already reflects it.
+func refuseIfCashCrediting(action event.CorporateActionPayload) error {
+	at := action.EffectiveAt.Format(time.RFC3339)
+	switch {
+	case action.Kind == event.CorporateActionKindDividend:
+		return fmt.Errorf("backtest: instrument %q: a dividend effective at %s falls at or after its own last bar, after the run's only closing account.snapshot; its cash could never reach any statement, so the run refuses rather than credit it silently (ADR 0024)",
+			action.InstrumentID, at)
+	case action.Kind == event.CorporateActionKindSplit && action.CashInLieu > 0:
+		return fmt.Errorf("backtest: instrument %q: a split effective at %s pays cash in lieu and falls at or after its own last bar, after the run's only closing account.snapshot; its cash could never reach any statement, so the run refuses rather than credit it silently (ADR 0023, ADR 0024)",
+			action.InstrumentID, at)
+	}
+	return nil
 }
 
 // deliverCorporateAction wraps action as an input envelope and delivers it
