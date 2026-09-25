@@ -128,9 +128,10 @@ type WindowResult struct {
 }
 
 type Report struct {
-	SchemaVersion int      `json:"schema_version"`
-	Protocol      Protocol `json:"protocol"`
-	ProtocolHash  string   `json:"protocol_hash"`
+	SchemaVersion int              `json:"schema_version"`
+	Exposure      *ExposureMetrics `json:"exposure"`
+	Protocol      Protocol         `json:"protocol"`
+	ProtocolHash  string           `json:"protocol_hash"`
 	// DeclaredStart and DeclaredEnd are the span Designation was computed
 	// from -- the whole input a run was GIVEN, not merely what it went on to
 	// apply before it might have stopped early. They are retained beside
@@ -259,7 +260,7 @@ func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 // older records forward with an upcaster rather than rejecting them
 // (ADR 0015).
 const (
-	ReportSchemaVersion  = 1
+	ReportSchemaVersion  = 2
 	OpeningSchemaVersion = 1
 )
 

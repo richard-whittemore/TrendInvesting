@@ -343,3 +343,34 @@ hash. Commit these JSON sidecars with the existing `.json` entry and journal;
 none is overwritten. Registry version-1 files and released journal fixtures
 remain unchanged. Baseline runs are exempt from opening restrictions but receive
 the same reports. No-data and failed results remain in the record.
+
+Report schema 2 adds `report.exposure` for the executed run:
+
+- `peak_sector_concentration` is the maximum, after each committed Campaign
+  opening, Add, partial stop or exit, of the largest sector's open Unit count
+  divided by all open Units (ADR 0008, ADR 0012). Empty books contribute zero;
+  shares, notional value, risk and unfilled holds are not the denominator.
+- `independent_campaigns` counts distinct Campaign openings, including Campaigns
+  still open at the end. Adds and partial stops do not create Campaigns. A later
+  re-entry in the same instrument does. This is a lifecycle count, not a claim
+  of statistical independence.
+
+The report reader upcasts schema 1 with unknown (`null`) exposure instead of
+inventing historical zeros. Schema 2 also permits null when exposure could not
+be computed, such as a failure before a journal was available. The `.report`
+wrapper remains version 1; its nested report's `schema_version` is 2. Existing
+sidecars are never rewritten (ADR 0015, ADR 0018).
+
+The current classification seam puts all instruments in the one Unclassified
+Group, so every nonempty run currently has peak concentration 1. Moreover, the
+literal event-by-event maximum includes the first one-Unit opening, which has
+concentration 1 even if the eventual book diversifies. This definition follows
+the requested whole-run maximum; adopting a session-close, minimum-book-size or
+other research comparison would require an explicit protocol decision.
+
+ADR 0008's declared [`total-long-cap-24`](../cmd/backtest/testdata/variants/total-long-cap-24/README.md)
+and [`total-long-cap-36`](../cmd/backtest/testdata/variants/total-long-cap-36/README.md)
+change only total-long headroom, keeping the Baseline at 12. Their synthetic
+command fixtures retain journals, registry entries, reports and openings, with
+byte comparisons and full replay/rerun checks. They do not judge either Variant
+against ADR 0012: that requires the diversified Baseline backtest (#42).

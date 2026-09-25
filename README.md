@@ -32,6 +32,15 @@ make check
 
 This runs the same formatting, analysis, race-enabled tests, coverage, vulnerability, dependency, and build gates used by CI. See [docs/architecture.md](docs/architecture.md), [docs/development.md](docs/development.md), and [docs/dependency-policy.md](docs/dependency-policy.md) before adding production behavior.
 
+## Declared Variants
+
+The declared wider-cap Variants are
+[`total-long-cap-24`](cmd/backtest/testdata/variants/total-long-cap-24/README.md) and
+[`total-long-cap-36`](cmd/backtest/testdata/variants/total-long-cap-36/README.md).
+They change only the total-long cap; the Baseline stays at 12 Units (ADR 0008).
+Every run's [research report](docs/running-a-backtest.md#regime-reports-and-held-out-evaluations)
+now carries peak sector concentration and the count of independent Campaigns.
+
 ## Safety
 
 This software is under active development. It must not be used to place live orders until the paper-trading and limited-live readiness gates are explicitly satisfied.
