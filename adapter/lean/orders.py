@@ -94,22 +94,32 @@ class NSlippageModel:
     """ADR 0013: every fill slips slippage_n x N against the trader.
 
     N is the figure the engine sent with the order's own decision, looked up
-    by the order's tag; the adapter never computes one. An order with no
-    supplied N raises rather than slipping by zero, which ADR 0013 declares
-    invalid by construction. What was charged is recorded per LEAN order, so
-    the fill reports the slippage LEAN actually applied.
+    by the order's tag; the adapter never computes one. LEAN swallows model
+    exceptions, so any failure (including an order with no supplied N) is
+    recorded in failure, the first only. The numeric fallback is not a valid
+    charge: the algorithm and both adapter boundaries must stop on failure
+    before any affected fill reaches the engine (ADRs 0005, 0013, 0019).
+    Successful charges are recorded per LEAN order for its fill report.
     """
 
     def __init__(self, slippage_n, n_for_tag, record=None):
         self.slippage_n = slippage_n
         self.n_for_tag = n_for_tag
         self.record = record
+        self.failure = None
 
     def GetSlippageApproximation(self, asset, order):
-        slippage = self.slippage_n * self.n_for_tag(order.Tag)
-        if self.record is not None:
-            self.record(getattr(order, "Id", None), slippage)
-        return slippage
+        try:
+            slippage = self.slippage_n * self.n_for_tag(order.Tag)
+            if self.record is not None:
+                self.record(getattr(order, "Id", None), slippage)
+            return slippage
+        except Exception as err:
+            if self.failure is None:
+                self.failure = "LEAN order {} (tag={}) could not be slipped by the adapter's " \
+                               "ADR 0013 slippage model: {}".format(
+                                   getattr(order, "Id", None), getattr(order, "Tag", None), err)
+            return 0.0
 
     get_slippage_approximation = GetSlippageApproximation
 
@@ -216,6 +226,8 @@ def adr_0005_fill_model(base, lean):
             if _utc(lean.to_utc(prices.EndTime, asset.Exchange.TimeZone)) <= _utc(order.Time):
                 return None
             slippage = float(self.slippage_model.GetSlippageApproximation(asset, order))
+            if self.slippage_model.failure is not None:
+                raise Uncertain(self.slippage_model.failure)
             return stop_limit_buy_fill_price(
                 float(order.StopPrice), float(order.LimitPrice), float(prices.Open),
                 float(prices.High), float(prices.Low), slippage)
@@ -474,7 +486,7 @@ class OrderDesk:
         self.instrument = instrument
         # Asked before every change this desk makes to LEAN's order book
         # (_require_sound): while it returns a reason, the adapter's ADR 0005
-        # fill model has recorded a failure, the run is stopping, and no
+        # fill or ADR 0013 slippage model has failed, the run is stopping, and no
         # order is placed, amended or cancelled.
         self.refusal = refusal
         # OrderProperties, TimeInForce, UpdateOrderFields and OrderStatus from
@@ -520,9 +532,9 @@ class OrderDesk:
         """The one chokepoint every change to LEAN's order book passes through.
 
         LEAN rescans every working order whenever one is placed or amended,
-        so the adapter's ADR 0005 fill model can record a failure it could not
-        price at any point (orders.adr_0005_fill_model). From then on the run
-        is stopping, and what to do about the orders already working is a
+        so the adapter's ADR 0005 fill or ADR 0013 slippage model can record
+        a failure at any point. From then on the run is stopping, and what
+        to do about the orders already working is a
         person's decision (ADR 0019), so nothing is placed, amended or
         cancelled on that uncertain state: Uncertain, for the caller to stop
         the run.

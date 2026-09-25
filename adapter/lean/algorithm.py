@@ -112,7 +112,7 @@ class CompletedBarsAlgorithm(QCAlgorithm):
                 OrderProperties=OrderProperties, TimeInForce=TimeInForce,
                 UpdateOrderFields=UpdateOrderFields, OrderStatus=OrderStatus,
                 OrderField=OrderField),
-                refusal=lambda: getattr(getattr(self, "fill_model", None), "failure", None))
+                refusal=self.model_failure)
             # ADR 0010: no partial Units, no borrowing. LEAN's default equity
             # account is margin, which let a gap fill cost more than the
             # cash held; a cash account makes LEAN itself refuse an order it
@@ -124,14 +124,15 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage, AccountType.Cash)
             # ADR 0013: slippage_n x the N the engine supplied with each
             # order's decision, and Interactive Brokers commissions.
-            slippage = NSlippageModel(slippage_n, self.desk.n_for_tag, self.desk.record_slippage)
-            security.SetSlippageModel(slippage)
+            self.slippage_model = NSlippageModel(slippage_n, self.desk.n_for_tag,
+                                                self.desk.record_slippage)
+            security.SetSlippageModel(self.slippage_model)
             # ADR 0005, as amended 2026-09-24: a capped entry or Add fills by
             # the engine's own rule, not LEAN's native stop-limit fill, and
             # slips by the same model (orders.adr_0005_fill_model).
             self.fill_model = adr_0005_fill_model(EquityFillModel, SimpleNamespace(
                 OrderEvent=OrderEvent, OrderFee=OrderFee, OrderStatus=OrderStatus,
-                OrderDirection=OrderDirection, to_utc=Extensions.ConvertToUtc))(slippage)
+                OrderDirection=OrderDirection, to_utc=Extensions.ConvertToUtc))(self.slippage_model)
             security.SetFillModel(self.fill_model)
             security.SetFeeModel(InteractiveBrokersFeeModel())
             # ADR 0004: a split's changes to open orders are checked before
@@ -147,7 +148,7 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.client = Client(settings["socket"], timeout=5)
             self.publisher = Publisher(self.client, settings["configuration_hash"],
                                        settings["strategy_version"], settings["run_id"],
-                                       refusal=lambda: self.fill_model.failure)
+                                       refusal=self.model_failure)
         except Exception as err:
             self.stop("engine unavailable or invalid startup: {}".format(err))
 
@@ -210,16 +211,24 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         if notice is not None and not self.failed:
             self.handle_delisting(notice)
 
-    def fill_model_sound(self):
-        """Stop the run if the adapter's fill model could not price an order.
+    def model_failure(self):
+        """The recorded pricing failure both adapter boundaries refuse on
+        (ADRs 0005, 0013, 0019), including during partial initialization.
 
-        LEAN swallows an exception from a fill model and leaves the order
-        unfilled (observed on the pinned image), so the model records what it
-        could not price instead, and the run stops here, in the same time
-        step, before any of the slice's fills reaches the engine (fail
-        closed; orders.adr_0005_fill_model).
+        Prefer the slippage cause when the fill model also records its failure.
         """
-        failure = getattr(getattr(self, "fill_model", None), "failure", None)
+        for name in ("slippage_model", "fill_model"):
+            failure = getattr(getattr(self, name, None), "failure", None)
+            if failure is not None:
+                return failure
+        return None
+
+    def fill_model_sound(self):
+        """Stop on either model's recorded failure before affected fills reach
+        the engine (ADRs 0005, 0013). LEAN swallows model exceptions, so the
+        recorded failure, not exception propagation, must stop the run.
+        """
+        failure = self.model_failure()
         if failure is not None:
             self.stop("order state uncertain: {}".format(failure))
             return False
@@ -274,12 +283,12 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         is sent as execution.fill and every other change as
         execution.order.lifecycle. Any failure stops the run.
 
-        The fill model's soundness is checked before each report is sent, at
+        Both models' soundness is checked before each report is sent, at
         every drain: LEAN rescans every working order after one is placed or
-        amended, so the model can record a failure mid-slice, after the
+        amended, so either model can record a failure mid-slice, after the
         check at the start of OnData, while that same scan's other reports
         wait here. None of them may reach the engine (fail closed;
-        orders.adr_0005_fill_model).
+        ADRs 0005, 0013).
         """
         try:
             while self.order_events and not self.failed and self.fill_model_sound():
@@ -308,10 +317,10 @@ class CompletedBarsAlgorithm(QCAlgorithm):
                 # filled at the open: evidence for the fill-model report.
                 self.Log("adapter: LEAN on order {}: {}".format(record["order_id"], record["message"]))
         # Acting on one fill's decisions can place or amend an order, and
-        # LEAN's rescan can then record a fill-model failure while the rest
-        # of this instant's fills wait: the model is checked before each fill
+        # LEAN's rescan can then record a pricing failure while the rest
+        # of this instant's fills wait: both models are checked before each fill
         # is sent and after each is acted on (fail closed;
-        # orders.adr_0005_fill_model).
+        # ADRs 0005, 0013).
         for payload, order_ids in self.desk.fills(records):
             if not self.fill_model_sound():
                 return

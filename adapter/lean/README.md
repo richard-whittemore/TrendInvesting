@@ -494,9 +494,10 @@ engine supplied with it: a trade proposal's `n`, an Add proposal's
 `campaign_n`, and the Campaign's frozen `campaign_n` (from
 `strategy.campaign.opened`) for an Exit Order, looked up by the order's tag.
 LEAN prices the fill in raw, so it slips by that N × the split ratio in force
-when LEAN fills the order. An order with no supplied N raises rather than
-slipping by zero. LEAN charges it on a stop-market fill itself; a
-stop-limit's fill is priced by the adapter's ADR 0005 fill model, which
+when LEAN fills the order. An order with no supplied N records a permanent
+slippage-model failure and stops the run before any affected fill reaches
+the engine (see **it fails closed** below). LEAN charges it on a stop-market
+fill itself; a stop-limit's fill is priced by the adapter's ADR 0005 fill model, which
 charges the same `NSlippageModel` explicitly, because LEAN's native
 stop-limit fill applies no slippage at all (observed).
 `slippage_n` is the run's own required setting in `run.json`, never
@@ -567,15 +568,23 @@ returns an `OrderEvent`:
   generic `FillModel` instead would not: it filled stop-market orders at
   the bar's **close** plus or minus slippage and ignored exact touches
   (observed).
-- **it fails closed.** LEAN catches an exception raised in a fill model,
-  logs it as an order error ("Transaction model failed to fill") and leaves
-  the order unfilled, so a raised error would not stop the run. The model
-  instead records the first thing it cannot price (a non-positive or
-  non-finite price, a cap below the stop, a bar whose high is below its low,
-  an order with no N) in `failure` and leaves the order unfilled. LEAN
-  rescans every working order after one is placed or amended, so a failure
+- **it fails closed.** LEAN catches an exception raised in a fill or slippage
+  model, logs it as an order error ("Transaction model failed to fill") and leaves
+  the order unfilled, so a raised error would not stop the run. Each model
+  instead records its first failure in `failure`, never overwriting it.
+  The ADR 0005 fill model leaves an order it cannot price unfilled (a
+  non-positive or non-finite price, a cap below the stop, a bar whose high
+  is below its low, or a slippage failure). `NSlippageModel` records any
+  failure in looking up N, calculating slippage or recording its charge,
+  including an unknown tag on a stop-market order: the Variant `uncapped`'s
+  entries and Adds and every Exit Order. It returns `0.0` only as a numeric
+  fallback for LEAN; that is **not a valid zero-slippage fill** under ADR
+  0013. Even if LEAN produces a fill from that return, the adapter stops
+  before it reaches the engine. LEAN rescans every working order after one
+  is placed or amended, so a failure
   can be recorded at any point in a slice. The guard is therefore
-  structural, on both sides of the adapter:
+  structural, on both sides of the adapter, using `model_failure()` to
+  check both models:
   - **toward the engine:** `Publisher._publish`, the one method every input
     passes through, asks for the recorded failure before each send and,
     while there is one, sends nothing and raises `Refused`, so the run
@@ -590,9 +599,9 @@ returns an `OrderEvent`:
     order is placed, amended or cancelled on that uncertain state:
     containing the orders already working is a person's decision (ADR 0019).
 
-  `algorithm.py` also checks at the start of `OnData`, around each drain and
-  fill, and at the end of the run. Those checks only give the stop an
-  earlier, clearer reason.
+  `algorithm.py` also checks both models through `fill_model_sound()` at the
+  start of `OnData`, around each drain and fill, and at the end of the run.
+  Those checks only give the stop an earlier, clearer reason.
 
 **Two implementations, kept in step.** `internal/fills.ExecuteStopLimit`
 and the adapter's `stop_limit_buy_fill_price` are two implementations of
