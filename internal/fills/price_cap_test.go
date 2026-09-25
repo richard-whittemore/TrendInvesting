@@ -214,3 +214,27 @@ func TestAStopLimitProposalWithoutAUsableCapIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// TestAStopMarketProposalStatingACapIsRefused: a stop-market order has no
+// cap (ADR 0005, as amended 2026-09-24), so a proposal stating one is
+// contradictory, and resting it uncapped would ignore the cap it states.
+func TestAStopMarketProposalStatingACapIsRefused(t *testing.T) {
+	t.Parallel()
+
+	entry := tradeProposal(t, "proposal:AAPL:day-56", 156, fixtureUnitQuantity, fixtureN)
+	var trade event.TradeProposalPayload
+	decodeInto(t, entry, &trade)
+	trade.PriceCap = 157.5
+	add := addProposal(t, "add-proposal:AAPL:day-56", "campaign:AAPL:day-56", 156, fixtureUnitQuantity, fixtureN)
+	var addPayload event.AddProposalPayload
+	decodeInto(t, add, &addPayload)
+	addPayload.PriceCap = 157.5
+	for name, e := range map[string]event.Envelope{
+		"entry": envelope(t, entry.ID, entry.Type, entry.SchemaVersion, day(56), trade),
+		"add":   envelope(t, add.ID, add.Type, add.SchemaVersion, day(56), addPayload),
+	} {
+		if err := newSimulator(t).Observe(e); err == nil || !strings.Contains(err.Error(), "stop-market") {
+			t.Errorf("%s: Observe() error = %v, want the stated cap refused", name, err)
+		}
+	}
+}

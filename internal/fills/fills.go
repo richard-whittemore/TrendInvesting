@@ -439,7 +439,8 @@ func (s *Simulator) observeTradeProposal(envelope event.Envelope, ref reference)
 // 2026-09-24). A stop-limit's cap must be a finite price at or above its
 // level: zero is not a way of saying "uncapped", which only the order type
 // says, and a cap the simulator could not honour would let a fill cost more
-// than its hold. Any other order type fails closed: this simulator would
+// than its hold. A stop-market proposal stating a cap contradicts itself and
+// is refused too. Any other order type fails closed: this simulator would
 // otherwise rest an order the reducer did not describe.
 func buyPriceCap(envelope event.Envelope, orderType event.OrderType, priceCap, level float64) (float64, error) {
 	switch orderType {
@@ -449,6 +450,9 @@ func buyPriceCap(envelope event.Envelope, orderType event.OrderType, priceCap, l
 		}
 		return priceCap, nil
 	case event.OrderTypeStopMarket:
+		if priceCap != 0 {
+			return 0, fmt.Errorf("fills: stop-market proposal %s states price cap %v; a stop-market order has none, so resting it would ignore the cap it states (ADR 0005)", envelope.ID, priceCap)
+		}
 		return 0, nil
 	default:
 		return 0, fmt.Errorf("fills: proposal %s rests as order type %q, which this simulator cannot fill; refusing rather than guessing (ADR 0005)", envelope.ID, orderType)
