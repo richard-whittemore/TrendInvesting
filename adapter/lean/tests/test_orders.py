@@ -1534,8 +1534,7 @@ class StartupReportTests(OrderTestCase):
                       "rounded down", "to the cent", "split", "price cap", "StopLimitOrder"):
             self.assertIn(topic, text)
         # Every statement about LEAN's own behaviour was settled by a run on
-        # the pinned image except the stop-limit's, which has not been
-        # observed yet and says so; none other is left as belief.
+        # the pinned image, the price cap's included: none is left as belief.
         # The no-fill-exceeds-its-hold guarantee is exact only in cmd/backtest:
         # LEAN's fee model can charge more than ADR 0013's schedule the hold
         # reserves (a $1.00 minimum against a few cents), so the account
@@ -1543,10 +1542,18 @@ class StartupReportTests(OrderTestCase):
         [account] = [m for m in report if "account (ADR 0010)" in m]
         for fact in ("exact in cmd/backtest", "fee model", "$1.00 minimum", "#81"):
             self.assertIn(fact, account)
-        unsettled = [m for m in report if "unconfirmed" in m.lower() or "believed" in m]
-        self.assertEqual(len(unsettled), 1, unsettled)
-        self.assertIn("price cap", unsettled[0])
-        self.assertIn("UNCONFIRMED", unsettled[0])
+        # No statement about LEAN's own behaviour is left unsettled: the price
+        # cap, once the only belief rather than an observation, is confirmed
+        # by a probe on the pinned image (README.md, "Observed LEAN
+        # behaviour"), and the report says so rather than leaving "believed"
+        # or "unconfirmed" language behind.
+        self.assertEqual([m for m in report if "unconfirmed" in m.lower() or "believed" in m], [])
+        [price_cap] = [m for m in report if "price cap (ADR 0005" in m]
+        for fact in (
+                "confirmed", "min(high, limit)", "does not trigger",
+                "favorable gap", "never above the limit", "k = 0",
+                "the limit exactly as it adjusts its stop"):
+            self.assertIn(fact, price_cap)
         # Logged at startup, before any bar reaches the engine.
         self.assertEqual(algo.client.sent, [])
 
@@ -1928,9 +1935,10 @@ class SplitTests(OrderTestCase):
             algo, "split", "order {}".format(sell.OrderId), "22.0", "22.4")
 
     def test_a_split_that_moved_a_limit_far_below_the_cap_stops_before_the_session(self):
-        # A working stop-limit entry's limit is split like its stop (assumed,
-        # unobserved: README.md); one LEAN left more than a tick below the cap
-        # is not the order the engine's hold was computed for.
+        # A working stop-limit entry's limit is split like its stop, confirmed
+        # by a probe on the pinned image (README.md, "Observed LEAN
+        # behaviour"); one LEAN left more than a tick below the cap is not the
+        # order the engine's hold was computed for.
         algo = self.start()
         self.feed(algo, 9, [trade_proposal(9, entry_level=0.875, quantity=5600, n=0.05)])
         [entry] = self.tickets(algo)
