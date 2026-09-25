@@ -725,7 +725,7 @@ class OrderDesk:
                             "held allow no more".format(
                                 self.algorithm.Portfolio[self.symbol].Quantity, expected,
                                 len(self.exit_orders)))
-        elif lost and int(split) != holding:
+        elif int(split) != holding:
             problems.append("LEAN holds {} raw shares, {} short of the engine's Units' {}, but its "
                             "own truncation of their {} raw shares before the split, divided by "
                             "the factor {}, is {}; the shortfall is not this split's cash in "

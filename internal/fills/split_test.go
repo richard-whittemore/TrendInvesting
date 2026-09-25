@@ -213,11 +213,32 @@ func TestACashInLieuTheBookCannotApplyFailsClosed(t *testing.T) {
 			}
 		}
 		err := mirror.Observe(decision(func(*event.CampaignCashInLieuPayload) {}))
-		if err == nil || !strings.Contains(err.Error(), "simulated account holds 0") {
+		if err == nil || !strings.Contains(err.Error(), "expects the simulated account to hold") {
 			t.Fatalf("Observe() error = %v, want the account's refusal", err)
 		}
 		if !reflect.DeepEqual(held, stopsResting(mirror)) {
 			t.Fatal("a refused cash in lieu changed the mirrored book")
+		}
+	})
+
+	t.Run("an account holding that is not the decision's quantity before", func(t *testing.T) {
+		// Every Unit matches, but the decision's Campaign quantity before is
+		// not what the account holds: settling would leave the account off
+		// the decision's quantity after, so it is refused before any share
+		// or cash moves.
+		accountBefore := simulator.Account()
+		err := simulator.Observe(decision(func(p *event.CampaignCashInLieuPayload) {
+			p.QuantityBefore++
+			p.QuantityAfter++
+		}))
+		if err == nil || !strings.Contains(err.Error(), "expects") {
+			t.Fatalf("Observe() error = %v, want the account's quantity-before refusal", err)
+		}
+		if !reflect.DeepEqual(accountBefore, simulator.Account()) {
+			t.Fatal("a refused cash in lieu moved the account")
+		}
+		if !reflect.DeepEqual(held, stopsResting(simulator)) {
+			t.Fatal("a refused cash in lieu changed the book")
 		}
 	})
 }

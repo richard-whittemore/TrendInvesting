@@ -2542,6 +2542,17 @@ class CashInLieuTests(OrderTestCase):
         self.assert_stopped_before_the_session(algo, "holds 199", "truncat")
         self.assertEqual(self.sent(algo, "market.corporate-action"), [])
 
+    def test_a_holding_above_leans_own_truncation_stops_the_run(self):
+        # LEAN holds exactly the engine's 24,612, but its own division of
+        # 3,516 raw shares by the rounded factor is 24,611: the holding is not
+        # what this split produced, so it is unexplained even though it
+        # matches the Units.
+        algo, _ = self.held_aapl()
+        self.split(algo, 11, factor=SEVENTH, reference=24.0, checked=False,
+                   before_data=lambda: algo.Portfolio.holdings.update(AAPL=24612))
+        self.assert_stopped_before_the_session(algo, "holds 24612", "truncat")
+        self.assertEqual(self.sent(algo, "market.corporate-action"), [])
+
     def test_an_engine_that_does_not_reduce_the_units_stops_the_run(self):
         algo, _ = self.held_aapl()
         self.split(algo, 11, factor=SEVENTH, reference=24.0, checked=False, engine=[])

@@ -679,8 +679,9 @@ func (s *Simulator) observeCampaignExited(envelope event.Envelope) error {
 //
 // Every disagreement with the book fails closed before anything moves: a
 // Campaign the book does not hold, a Unit it does not hold, or a Unit whose
-// quantity is not the decision's quantity before. Applying it anyway would
-// shrink the wrong shares.
+// quantity is not the decision's quantity before, or an account that does
+// not hold the Campaign's quantity before. Applying it anyway would shrink
+// the wrong shares.
 func (s *Simulator) observeCashInLieu(envelope event.Envelope) error {
 	var payload event.CampaignCashInLieuPayload
 	if err := decodePayload(envelope, &payload); err != nil {
@@ -705,7 +706,7 @@ func (s *Simulator) observeCashInLieu(envelope event.Envelope) error {
 		units[i] = u
 	}
 	if s.account != nil {
-		if err := s.account.cashInLieu(payload.InstrumentID, payload.EngineSharesLost, payload.CashInLieu); err != nil {
+		if err := s.account.cashInLieu(payload.InstrumentID, payload.QuantityBefore, payload.EngineSharesLost, payload.CashInLieu); err != nil {
 			return err
 		}
 	}
