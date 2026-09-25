@@ -1427,6 +1427,19 @@ class RawAccountingTests(OrderTestCase):
                 [ticket] = self.tickets(algo)
                 self.assertEqual((ticket.StopPrice, ticket.LimitPrice), (24.5, limit))
 
+    def test_a_cap_whose_tick_floor_is_below_the_stop_is_rejected_not_placed(self):
+        # A stop of 0.9251 split-adjusted is 25.9028 raw at a ratio of 28; a
+        # cap of 0.9252 is 25.9056 raw, floored to 25.90, below the stop, so
+        # touching the stop could never fill. The limit is never raised above
+        # the engine's cap (ADR 0005 and ADR 0020, as amended), so the
+        # proposal is rejected and the engine re-issues or expires it.
+        algo = self.start()
+        proposal = self.entry(entry_level=0.9251, price_cap=0.9252)
+        self.feed(algo, 9, [proposal])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(self.tickets(algo), [])
+        self.assertTrue(any("below the stop" in r for r in self.rejections(algo)), self.rejections(algo))
+
     def test_an_add_is_ordered_in_raw_shares_at_the_raw_rung(self):
         algo = self.start()
         proposal = add_proposal(9, level=0.9, quantity=2800, campaign_n=0.05)

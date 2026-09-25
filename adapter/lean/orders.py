@@ -750,6 +750,13 @@ class OrderDesk:
         self.n_by_tag[tag] = n
         price_cap = payload["price_cap"] if payload.get("order_type") == STOP_LIMIT else None
         limit = None if price_cap is None else floor_to_tick(price_cap * ratio, self._tick())
+        if limit is not None and limit < level * ratio:
+            # The limit is never raised above the engine's cap (ADR 0005 and
+            # ADR 0020, as amended), so a cap whose tick floor falls below the
+            # stop can never fill at the stop: rejected, not placed.
+            self._reject(decision, "the tick-rounded limit {} is below the stop {}".format(
+                limit, level * ratio))
+            return
         ticket = self._submit(raw_quantity, level * ratio, tag, properties, limit)
         if ticket.Status == self.lean.OrderStatus.Invalid:
             self._reject(decision, "LEAN refused the order (status {})".format(ticket.Status))
