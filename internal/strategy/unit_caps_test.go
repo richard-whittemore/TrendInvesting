@@ -411,11 +411,9 @@ func TestReplayingACapDeclineFixtureTwiceYieldsByteIdenticalEmissions(t *testing
 // configured cap. The generator is seeded, so the sequence it drives the
 // reducer through is identical on every run.
 //
-// This is deliberately NOT a claim about two proposals decided within the
-// SAME session-close pass: every action here is its own Session, so no two
-// proposals in this test are ever sized against one another's outcome.
-// TestTwoEntriesInOneSessionCloseBothProposeAgainstOnlyCommittedExposure,
-// below, documents that separate, intentional case.
+// Every action here is its own Session. Same-Session competition is
+// TestFilledExposureNeverExceedsAnyCapUnderSameSessionCompetition's subject
+// (hold_test.go).
 //
 // The per-instrument cap is set to 1, so EVERY Add attempt in the generated
 // sequence is a falsifiable instrument-cap case: an implementation that
@@ -610,59 +608,62 @@ func TestASingleProposalNeverTakesExposurePastAnyCap(t *testing.T) {
 	}
 }
 
-// TestTwoEntriesInOneSessionCloseBothProposeAgainstOnlyCommittedExposure
-// documents the CURRENT, intentional rule for two proposals decided within
-// the SAME session-close pass, which
+// TestTwoEntriesInOneSessionCloseShareTheTotalLongCap pins the rule for two
+// proposals decided within the SAME session-close pass, which
 // TestASingleProposalNeverTakesExposurePastAnyCap does not exercise (every
 // action there is its own Session).
 //
-// ADR 0010 states Unit-cap headroom is "known at the previous close," and
-// ADR 0020 — which built a running ledger for CASH within a bar — says of
-// that same sentence: "For Unit-cap headroom that stands unchanged." So
-// capExceeded (unit_caps.go) checks post-trade exposure against every
-// OTHER open Campaign's CURRENT, ALREADY-COMMITTED Units — Units an
-// accepted fill actually put there — never against a sibling proposal
-// still being decided in the same pass, because a proposal commits
-// nothing. Two Unclassified instruments breaking out in the SAME Session
-// are therefore BOTH sized against the SAME committed total-long exposure
-// (zero, before either fills), and with the cap configured to 1, both are
-// proposed rather than the second being declined for a cap the first's own
-// still-unfilled proposal has not yet consumed.
-//
-// This is the current rule, not a settled one: whether a shared per-pass
-// budget should instead be reserved at proposal time is the owner decision
-// ADR 0021's "Open, deferred to #34" section and #33/#105 leave open, the
-// same shape ADR 0020 resolved for cash by reserving at ORDER PLACEMENT
-// rather than at proposal time. If that decision changes, THIS test is the
-// one that must change with it — it is not a bug fixed by adding a per-pass
-// tally here.
-func TestTwoEntriesInOneSessionCloseBothProposeAgainstOnlyCommittedExposure(t *testing.T) {
+// ADR 0020, as amended 2026-09-24, reserves cap headroom at proposal: the
+// first entry the pass proposes places a hold that reserves its Unit under
+// every cap it counts towards, before the next is checked (ADR 0008's
+// RulesVersion 1.10.0 note). Two Unclassified instruments breaking out in
+// the same Session, with the total-long cap at 1, are therefore NOT both
+// proposed: the first in rankSignals' order, MMM, is proposed, and NNN is
+// declined naming the total-long cap, with the post-trade exposure its Unit
+// would have made counting MMM's reserved Unit.
+func TestTwoEntriesInOneSessionCloseShareTheTotalLongCap(t *testing.T) {
 	t.Parallel()
 
 	// Instrument cap and group cap generous: only the total-long cap, set
 	// to 1, is under test.
 	cfg := compactChannelConfig(1_000_000, 1_000_000, 1_000_000, 1)
-	barsM := compactEntryBars("MMM", 0)
-	barsN := compactEntryBars("NNN", 0)
+	assertSecondSameSessionEntryDeclinedForCap(t, cfg, event.CapTotalLong, 1)
+}
 
-	emitted := newStream(t, cfg).lockstep(barsM, barsN).mustRun()
+// TestTwoEntriesInOneSessionCloseShareTheUnclassifiedGroupCap is the same
+// rule on CONTEXT.md's Unclassified Group: both instruments are
+// Unclassified, so MMM's hold reserves the group's one Unit of headroom.
+func TestTwoEntriesInOneSessionCloseShareTheUnclassifiedGroupCap(t *testing.T) {
+	t.Parallel()
+
+	cfg := compactChannelConfig(1_000_000, 1_000_000, 1, 1_000_000)
+	assertSecondSameSessionEntryDeclinedForCap(t, cfg, event.CapUnclassifiedGroup, 1)
+}
+
+// assertSecondSameSessionEntryDeclinedForCap runs MMM and NNN breaking out
+// in one Session under cfg and requires MMM proposed and NNN declined for
+// capName, whose limit is limit, at a post-trade exposure of limit + 1: the
+// reserved Unit plus its own.
+func assertSecondSameSessionEntryDeclinedForCap(t *testing.T, cfg event.ConfigurationPayload, capName string, limit int) {
+	t.Helper()
+	emitted := newStream(t, cfg).lockstep(compactEntryBars("MMM", 0), compactEntryBars("NNN", 0)).mustRun()
 
 	proposals := envelopesOfType(emitted, event.TradeProposalEventType)
-	if len(proposals) != 2 {
-		t.Fatalf("got %d trade proposal(s), want exactly 2: a total-long cap of 1 does not stop a SECOND proposal decided in the same session-close pass, only a fill-backed Campaign already open before it", len(proposals))
+	if len(proposals) != 1 || decodeTradeProposal(t, proposals[0]).InstrumentID != "MMM" {
+		t.Fatalf("got %d trade proposal(s), want exactly 1, for MMM: its hold reserves the %s cap's only Unit before NNN is checked", len(proposals), capName)
 	}
-	if got := envelopesOfType(emitted, event.ProposalDeclinedEventType); len(got) != 0 {
-		t.Fatalf("got %d decline(s), want 0: neither proposal has been filled, so neither is committed exposure the other's cap check can see", len(got))
+	declines := envelopesOfType(emitted, event.ProposalDeclinedEventType)
+	if len(declines) != 1 {
+		t.Fatalf("got %d decline(s), want exactly 1, for NNN", len(declines))
 	}
-	gotInstruments := make(map[string]bool, 2)
-	for _, p := range proposals {
-		payload := decodeTradeProposal(t, p)
-		if err := payload.Validate(); err != nil {
-			t.Errorf("proposal for %q fails its own Validate(): %v", payload.InstrumentID, err)
-		}
-		gotInstruments[payload.InstrumentID] = true
+	decline := decodeProposalDeclined(t, declines[0])
+	if decline.InstrumentID != "NNN" || decline.Reason != event.DeclineReasonUnitCapExceeded || decline.Cap != capName {
+		t.Fatalf("decline = %+v, want NNN declined for the %s cap", decline, capName)
 	}
-	if !gotInstruments["MMM"] || !gotInstruments["NNN"] {
-		t.Fatalf("proposed instruments = %v, want both MMM and NNN", gotInstruments)
+	if decline.CapLimit != limit || decline.PostTradeExposure != limit+1 {
+		t.Errorf("CapLimit/PostTradeExposure = %d/%d, want %d/%d: MMM's reserved Unit plus NNN's own", decline.CapLimit, decline.PostTradeExposure, limit, limit+1)
+	}
+	if err := decline.Validate(); err != nil {
+		t.Errorf("decline fails its own Validate(): %v", err)
 	}
 }

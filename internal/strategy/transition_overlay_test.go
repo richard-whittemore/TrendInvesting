@@ -231,6 +231,9 @@ func TestWholeUniversePassSeesInstrumentsCreatedInTheSameTransaction(t *testing.
 			}
 			state, _ := tx.instrument("NEWCO")
 			state.pendingProposal = &pendingProposalState{proposalID: "created", signalID: "signal", periodEnd: day(5), earliestFillAt: day(5), direction: event.DirectionLong, quantity: 1, n: 1, stopMultiple: 2, entryLevel: 100}
+			if err := tx.placeHold("created", "NEWCO", unclassifiedClassification, 1); err != nil {
+				t.Fatal(err)
+			}
 			return tx.apply(runCompletedEnvelope(t, day(6)))
 		})
 		if err != nil || len(out) != 1 || out[0].Type != event.ProposalExpiredEventType {

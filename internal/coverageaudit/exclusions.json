@@ -342,13 +342,6 @@
     {
       "file": "internal/strategy/end_of_stream.go",
       "function": "(*transition).applyRunCompleted",
-      "statement": "return nil, err",
-      "category": "unreachable-by-construction",
-      "reason": "Propagates expireOutstandingProposals' error, whose own three failure paths are themselves unreachable by construction (their entries in this list)."
-    },
-    {
-      "file": "internal/strategy/end_of_stream.go",
-      "function": "(*transition).applyRunCompleted",
       "statement": "return nil, fmt.Errorf(\"strategy: %w\", err)",
       "category": "unreachable-by-construction",
       "reason": "event.RunCompletedPayload is an empty struct and its Validate returns nil unconditionally \u2014 the end-of-stream event states nothing, so there is nothing to check. The call is kept so that the payload growing a field is guarded from the day it does."
@@ -378,7 +371,7 @@
       "file": "internal/strategy/end_of_stream.go",
       "function": "(*transition).expireOutstandingProposals",
       "statement": "return nil, err",
-      "occurrence": 2,
+      "occurrence": 3,
       "category": "unreachable-by-construction",
       "reason": "Propagates emitEndOfStreamExpiry's error, whose two failure paths are a Validate and a Marshal of a payload built from an already-recorded pending proposal (their entries in this list)."
     },
@@ -386,7 +379,7 @@
       "file": "internal/strategy/end_of_stream.go",
       "function": "(*transition).expireOutstandingProposals",
       "statement": "return nil, err",
-      "occurrence": 3,
+      "occurrence": 5,
       "category": "unreachable-by-construction",
       "reason": "Propagates emitEndOfStreamExpiry's error, whose two failure paths are a Validate and a Marshal of a payload built from an already-recorded pending proposal (their entries in this list)."
     },
@@ -459,23 +452,7 @@
       "statement": "return nil, err",
       "occurrence": 2,
       "category": "unreachable-by-construction",
-      "reason": "Four of this function's nine identical error propagations remain unreachable: stateFor (occurrence 2) and the three proposal-expiry builders (5, 6, 7), whose failing branches are themselves excluded. Occurrence 1, admitToSession, is covered by the Session tests (ADR 0021). Occurrence 9, emitExitOrderChanges, is exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology and Campaign risk guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
-    },
-    {
-      "file": "internal/strategy/reducer.go",
-      "function": "(*transition).applyCompletedBar",
-      "statement": "return nil, err",
-      "occurrence": 7,
-      "category": "unreachable-by-construction",
-      "reason": "Four of this function's nine identical error propagations remain unreachable: stateFor (occurrence 2) and the three proposal-expiry builders (5, 6, 7), whose failing branches are themselves excluded. Occurrence 1, admitToSession, is covered by the Session tests (ADR 0021). Occurrence 9, emitExitOrderChanges, is exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology and Campaign risk guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
-    },
-    {
-      "file": "internal/strategy/reducer.go",
-      "function": "(*transition).applyCompletedBar",
-      "statement": "return nil, err",
-      "occurrence": 5,
-      "category": "unreachable-by-construction",
-      "reason": "Four of this function's nine identical error propagations remain unreachable: stateFor (occurrence 2) and the three proposal-expiry builders (5, 6, 7), whose failing branches are themselves excluded. Occurrence 1, admitToSession, is covered by the Session tests (ADR 0021). Occurrence 9, emitExitOrderChanges, is exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology and Campaign risk guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
+      "reason": "Two of this function's nine identical error propagations remain unreachable: stateFor (occurrence 2) and the exit-proposal expiry builder (6), whose failing branches are themselves excluded. Occurrences 5 and 7, the entry and Add expiries, fail when the proposal has no hold standing to release (ADR 0020, as amended 2026-09-24), which TestAProposalWithoutItsHoldStopsTheRun exercises. Occurrence 1, admitToSession, is covered by the Session tests (ADR 0021). Occurrence 9, emitExitOrderChanges, is exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology and Campaign risk guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
     },
     {
       "file": "internal/strategy/reducer.go",
@@ -483,7 +460,7 @@
       "statement": "return nil, err",
       "occurrence": 6,
       "category": "unreachable-by-construction",
-      "reason": "Four of this function's nine identical error propagations remain unreachable: stateFor (occurrence 2) and the three proposal-expiry builders (5, 6, 7), whose failing branches are themselves excluded. Occurrence 1, admitToSession, is covered by the Session tests (ADR 0021). Occurrence 9, emitExitOrderChanges, is exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology and Campaign risk guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
+      "reason": "Two of this function's nine identical error propagations remain unreachable: stateFor (occurrence 2) and the exit-proposal expiry builder (6), whose failing branches are themselves excluded. Occurrences 5 and 7, the entry and Add expiries, fail when the proposal has no hold standing to release (ADR 0020, as amended 2026-09-24), which TestAProposalWithoutItsHoldStopsTheRun exercises. Occurrence 1, admitToSession, is covered by the Session tests (ADR 0021). Occurrence 9, emitExitOrderChanges, is exercised by TestApplyRejectsInvalidFinalPayloadWithoutCommitting/bar through deliberately corrupted candidate metadata. The opening/closing chronology and Campaign risk guards are covered by their domain tests. Occurrences count all identical blocks, including covered ones."
     },
     {
       "file": "internal/strategy/reducer.go",

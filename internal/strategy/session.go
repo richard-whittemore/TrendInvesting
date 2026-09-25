@@ -90,7 +90,9 @@ func (r *transition) barReceivedInOpenSession(instrumentID string) bool {
 //  2. Entries, for every Signal of the Session, in rankSignals' order.
 //
 // Each is checked against the caps and cash this reducer implements, in that
-// order, so any budget they come to share is spent on Adds before entries.
+// order, and each proposal places its hold before the next is checked (ADR
+// 0020, as amended 2026-09-24), so the budget they share is spent on Adds
+// before entries, and on entries in rankSignals' order.
 // The pass reads every instrument, but copies only those it proposes for.
 func (r *transition) applySessionClosed(envelope event.Envelope) ([]event.Envelope, error) {
 	if !r.configured {
@@ -175,9 +177,10 @@ func (r *transition) applySessionClosed(envelope event.Envelope) ([]event.Envelo
 // by symbol. Neither Strength nor median dollar volume is computed yet, and
 // their definitions are unsettled (ADR 0021, "Open"), so this applies only
 // the last tie-break: ascending instrument ID. That is total and independent
-// of arrival order, and while no cap or cash budget is shared across
-// instruments at proposal time it decides the order of emission, not which
-// Signals are proposed.
+// of arrival order. Every proposal reserves its cash and cap headroom as it
+// is made (ADR 0020, as amended 2026-09-24), so this order also decides
+// which Signals are funded when the Session's Signals together exceed the
+// cash or a cap: until Strength is computed, the lowest instrument ID first.
 func rankSignals(instrumentIDs []string) []string {
 	return slices.Sorted(slices.Values(instrumentIDs))
 }

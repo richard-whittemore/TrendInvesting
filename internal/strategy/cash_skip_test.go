@@ -44,11 +44,13 @@ const (
 	cashSkipEntryLevel    float64 = 155
 )
 
-// cashSkipEntryCost mirrors sizeUnit's own arithmetic exactly (reducer.go):
-// quantity x entry level x dollars per point, a bare product feeding only a
-// comparison, never an addition or subtraction.
-func cashSkipEntryCost(cfg event.ConfigurationPayload) float64 {
-	return float64(cashSkipEntryQuantity) * cashSkipEntryLevel * cfg.DollarsPerPoint
+// cashSkipEntryCost is the hold the breakout fixture's entry places, which
+// is what it must be able to fund (ADR 0020, as amended 2026-09-24): its
+// worst-case cost at its price cap, with slippage and commission, under the
+// Baseline's stop-limit order.
+func cashSkipEntryCost(t *testing.T, cfg event.ConfigurationPayload) float64 {
+	t.Helper()
+	return wantHold(cfg, cashSkipEntryQuantity, cashSkipEntryLevel, breakoutFixtureN(t, cfg))
 }
 
 // cashSnapshot builds an account.snapshot payload with Equity held at cfg's
@@ -73,7 +75,7 @@ func TestAffordableUnitProposesNormally(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
-	cost := cashSkipEntryCost(cfg)
+	cost := cashSkipEntryCost(t, cfg)
 	emitted := newStream(t, cfg).
 		snapshot(cashSnapshot(cfg, day(0).Add(time.Hour), cost+10_000)).
 		bars(breakoutBars("AAPL")).
@@ -99,7 +101,7 @@ func TestUnaffordableUnitIsDeclinedWithBothCashFigures(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
-	cost := cashSkipEntryCost(cfg)
+	cost := cashSkipEntryCost(t, cfg)
 	available := cost - 0.01
 	emitted := newStream(t, cfg).
 		snapshot(cashSnapshot(cfg, day(0).Add(time.Hour), available)).
@@ -143,7 +145,7 @@ func TestCostExactlyEqualToAvailableCashIsAffordable(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
-	cost := cashSkipEntryCost(cfg)
+	cost := cashSkipEntryCost(t, cfg)
 	emitted := newStream(t, cfg).
 		snapshot(cashSnapshot(cfg, day(0).Add(time.Hour), cost)).
 		bars(breakoutBars("AAPL")).
@@ -231,10 +233,10 @@ func runCashSkipLadderFixture(t *testing.T) []event.Envelope {
 		t.Fatalf("NextAddLevel(rung 4) error = %v", err)
 	}
 
-	// The exact cost of Unit 3's rung, mirroring evaluateAdd's own
-	// arithmetic (campaign.go): frozen quantity x rung x dollars per point.
-	cost3 := float64(cashSkipCampaignUnitQuantity) * rung3 * cfg.DollarsPerPoint
-	cost4 := float64(cashSkipCampaignUnitQuantity) * rung4 * cfg.DollarsPerPoint
+	// The hold Unit 3's and Unit 4's rungs would each place, which is what
+	// each must be able to fund (ADR 0020, as amended 2026-09-24).
+	cost3 := wantHold(cfg, cashSkipCampaignUnitQuantity, rung3, campaignN)
+	cost4 := wantHold(cfg, cashSkipCampaignUnitQuantity, rung4, campaignN)
 
 	bar57 := addOpportunityBar("AAPL", day(57), rung2+5)
 	fill2 := addFill("AAPL", campaignID, 2, day(57), "sim-fill-add-2", rung2, cashSkipCampaignUnitQuantity, day(57))
@@ -552,7 +554,13 @@ func TestAddCostBeyondTheRepresentableRangeIsSkippedNotHalted(t *testing.T) {
 	// the float64 range, so the same frozen quantity at rung 2, half an N
 	// higher, costs more than float64 can state. The breakout bar's own high
 	// of 200 covers that rung, so the Add is decided in the fill's own chain.
-	cfg := validConfigurationPayload()
+	//
+	// It runs the declared Variant "uncapped", whose hold is the cost at the
+	// level: under the Baseline's price cap the entry's own hold, a full N
+	// above its level, is already beyond this multiplier's range, so no fill
+	// could exist for the Add path to be reached from. The branch it pins is
+	// the same for both order types (hold.go's buyHold).
+	cfg := uncappedConfigurationPayload()
 	cfg.NotionalAccount.StartingEquity = 1.7e308
 	cfg.UnitVolatilityFraction = 0.25
 	cfg.DollarsPerPoint = math.MaxFloat64 / 165

@@ -25,6 +25,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/indicator"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
 // invariantTestStrategyVersion/ConfigurationPayload mirror
@@ -70,6 +71,8 @@ func invariantTestConfigurationPayload() event.ConfigurationPayload {
 			MinimumPerOrder:             1.00,
 			MaximumFractionOfTradeValue: 0.01,
 		},
+		BuyOrderType: event.OrderTypeStopLimit,
+		GapBufferN:   1,
 	}
 }
 
@@ -111,6 +114,12 @@ func newConfiguredReducerForInvariantTest(t *testing.T) *Reducer {
 	r.maxUnitsPerIndustry = 1_000_000
 	r.maxUnitsPerSector = 1_000_000
 	r.maxUnitsTotalLong = 1_000_000
+	// ADR 0005 and ADR 0020, as amended 2026-09-24: the Baseline's
+	// stop-limit order and the costs its hold reserves.
+	r.buyOrderType = event.OrderTypeStopLimit
+	r.gapBufferN = 1
+	r.slippageN = 0.05
+	r.commission = sizing.CommissionSchedule{PerShare: 0.005, MinimumPerOrder: 1, MaximumFractionOfTradeValue: 0.01}
 	notionalAccount, err := NewNotionalAccount(1_000_000, 1, 1)
 	if err != nil {
 		t.Fatalf("NewNotionalAccount() error = %v", err)

@@ -93,7 +93,7 @@ func TestAChainedAddIsCheckedAgainstCashLessTheFillsBeforeIt(t *testing.T) {
 	fill3 := addFill("AAPL", campaignID, 3, day(57), "sim-fill-add-3", rung3, 133, day(57))
 	fill3.Commission = commission
 
-	unit4Cost := 133 * rung4 * cfg.DollarsPerPoint
+	unit4Cost := wantHold(cfg, 133, rung4, breakoutFixtureN(t, cfg))
 	cash := fillCost(cfg, opening) + fillCost(cfg, fill2) + fillCost(cfg, fill3) + unit4Cost - 0.01
 	wantAvailable := cash - fillCost(cfg, opening) - fillCost(cfg, fill2) - fillCost(cfg, fill3)
 
@@ -115,7 +115,7 @@ func TestAChainedAddIsCheckedAgainstCashLessTheFillsBeforeIt(t *testing.T) {
 		t.Errorf("Kind = %q, want %q", decline.Kind, event.ProposalDeclinedKindAdd)
 	}
 	if decline.RequiredCash != unit4Cost {
-		t.Errorf("RequiredCash = %v, want exactly %v (unit 4's quantity x its rung)", decline.RequiredCash, unit4Cost)
+		t.Errorf("RequiredCash = %v, want exactly %v (the hold unit 4's rung would place)", decline.RequiredCash, unit4Cost)
 	}
 	if decline.AvailableCash != wantAvailable {
 		t.Errorf("AvailableCash = %v, want exactly %v (the snapshot less three fills' actual costs and commissions)", decline.AvailableCash, wantAvailable)
@@ -146,7 +146,7 @@ func TestASessionCloseAddIsCheckedAgainstCashLessAFillTheSnapshotPredates(t *tes
 	// Session's trading, before that Session's bar.
 	fill3 := addFill("AAPL", campaignID, 3, day(58), "sim-fill-add-3", rung3, 133, day(58).Add(14*time.Hour))
 
-	unit4Cost := 133 * rung4 * cfg.DollarsPerPoint
+	unit4Cost := wantHold(cfg, 133, rung4, breakoutFixtureN(t, cfg))
 	cashAt58 := fillCost(cfg, fill3) + unit4Cost - 0.01
 	wantAvailable := cashAt58 - fillCost(cfg, fill3)
 
@@ -185,7 +185,7 @@ func TestASnapshotStatedAfterAFillAlreadyReflectsIt(t *testing.T) {
 
 	cfg := validConfigurationPayload()
 	rung2, rung3, _ := addRungs(t, cfg)
-	unit2Cost := 133 * rung2 * cfg.DollarsPerPoint
+	unit2Cost := wantHold(cfg, 133, rung2, breakoutFixtureN(t, cfg))
 	cashAt56 := unit2Cost - 0.01
 
 	emitted := newStream(t, cfg).

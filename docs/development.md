@@ -21,8 +21,9 @@ acceptance: retrying a rejected fill must fail again, never become a duplicate.
 The candidate is copy-on-write, so a transaction's cost follows what the input
 touches rather than the size of the universe or the length of the run:
 
-- `Reducer.begin` copies scalars, the Notional Account and the `delisted` map
-  eagerly for every transaction.
+- `Reducer.begin` copies scalars, the Notional Account, the `delisted` map, the
+  fill debits and the holds (ADR 0020, as amended 2026-09-24) eagerly for every
+  transaction.
 - Instrument state is copied on first access. `transition.instrument(id)`
   returns the transaction's own copy of that instrument, deep-copying the
   published state (indicator buffers, all three proposals, the Campaign and its

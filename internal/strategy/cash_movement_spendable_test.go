@@ -191,7 +191,7 @@ func TestAWithdrawalReducesTheCashAnAddIsCheckedAgainst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextAddLevel(rung 2) error = %v", err)
 	}
-	cost2 := float64(cashSkipCampaignUnitQuantity) * rung2 * cfg.DollarsPerPoint
+	cost2 := wantHold(cfg, cashSkipCampaignUnitQuantity, rung2, campaignN)
 	openingCost := fillCost(cfg, openingFill("AAPL"))
 	initialCash := openingCost + cost2 + 5_000
 	const withdrawal = 10_000.0

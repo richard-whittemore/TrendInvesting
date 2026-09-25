@@ -13,21 +13,18 @@ import (
 // rejection names the specific cap that bound and the exposure that would
 // have resulted (event.DeclineReasonUnitCapExceeded).
 //
-// Post-trade exposure is read from every OPEN Campaign's current state at
-// the moment of the check (reducer.go's sizeUnit for an entry, campaign.go's
-// evaluateAdd for an Add): the Units it already holds, plus the one Unit
-// this proposal would add. ADR 0010 states that Unit-cap headroom, like
-// cash, is "known at the previous close" and ADR 0020 — which amended that
-// sentence for cash only — leaves it "unchanged" for caps. Neither ADR
-// describes a running ledger for caps the way ADR 0020 built one for cash.
-// So a Unit proposed earlier in the SAME session-close pass is not yet
-// reflected here unless it has already been folded into instrumentState by
-// an accepted fill: this function reads committed Campaign state, never
-// other pending proposals from the same pass. Reserving cap headroom at
-// proposal time, ranked against other proposals in the same pass, would be
-// the "aggregate check with a new priority order" ADR 0020 explicitly
-// rejects for the analogous cash case — see ADR 0008's own implementation
-// note for the full reasoning and the ADR text it is read from.
+// Post-trade exposure is read at the moment of the check (reducer.go's
+// sizeUnit for an entry, campaign.go's evaluateAdd for an Add) as the Units
+// every OPEN Campaign sharing the cap's grouping already holds (committed),
+// plus one Unit for every standing hold in that grouping (reserved), plus
+// the one Unit this proposal would add. ADR 0020, as amended 2026-09-24,
+// reserves cash and cap headroom together at proposal: a Unit proposed
+// earlier in the same session-close pass, or in an earlier Session and
+// still outstanding, has already claimed its headroom (hold.go). When its
+// order fills, its hold is released as its Unit joins the Campaign, so it is
+// counted once, as committed; when its proposal expires or is cancelled,
+// the headroom returns. ADR 0008's RulesVersion 1.10.0 note records the
+// change.
 
 // classification is the correlation group ADR 0008's industry and sector
 // Unit caps count a Campaign against. It is captured once when a Campaign
@@ -73,22 +70,25 @@ func (r *transition) classificationOf(instrumentID string) classification {
 }
 
 // instrumentUnits returns the Units instrumentID's own open Campaign
-// currently holds, or 0 if it has none.
+// currently holds, or 0 if it has none, plus the Units standing holds
+// reserve for it.
 func (r *transition) instrumentUnits(instrumentID string) int {
+	reserved := r.reservedUnits(func(h hold) bool { return h.instrumentID == instrumentID })
 	state := r.peekInstrument(instrumentID)
 	if state == nil || state.campaign == nil {
-		return 0
+		return reserved
 	}
-	return len(state.campaign.units)
+	return len(state.campaign.units) + reserved
 }
 
 // groupUnits sums the Units held across every open Campaign, over every
-// instrument this transaction can see, whose classification matches. It
+// instrument this transaction can see, whose classification matches, and
+// the Units every standing hold whose classification matches reserves. It
 // reads with peekInstrument (docs/development.md: reducer transactions), so
 // checking a cap never copies an instrument this transaction is not already
 // proposing for.
 func (r *transition) groupUnits(matches func(classification) bool) int {
-	total := 0
+	total := r.reservedUnits(func(h hold) bool { return matches(h.classification) })
 	for _, id := range r.instrumentIDs() {
 		state := r.peekInstrument(id)
 		if state == nil || state.campaign == nil {
@@ -101,30 +101,30 @@ func (r *transition) groupUnits(matches func(classification) bool) int {
 	return total
 }
 
-// industryUnits sums Units across every open Campaign classified (not
-// Unclassified) in industry.
+// industryUnits sums Units, held and reserved, across every open Campaign
+// and standing hold classified (not Unclassified) in industry.
 func (r *transition) industryUnits(industry string) int {
 	return r.groupUnits(func(c classification) bool {
 		return !c.Unclassified && c.Industry == industry
 	})
 }
 
-// sectorUnits sums Units across every open Campaign classified (not
-// Unclassified) in sector.
+// sectorUnits sums Units, held and reserved, across every open Campaign
+// and standing hold classified (not Unclassified) in sector.
 func (r *transition) sectorUnits(sector string) int {
 	return r.groupUnits(func(c classification) bool {
 		return !c.Unclassified && c.Sector == sector
 	})
 }
 
-// unclassifiedGroupUnits sums Units across every open Campaign in
-// CONTEXT.md's single Unclassified Group.
+// unclassifiedGroupUnits sums Units, held and reserved, across every open
+// Campaign and standing hold in CONTEXT.md's single Unclassified Group.
 func (r *transition) unclassifiedGroupUnits() int {
 	return r.groupUnits(func(c classification) bool { return c.Unclassified })
 }
 
-// totalLongUnits sums Units across every open Campaign, of any instrument,
-// industry, sector or classification. Every Campaign in this system is long
+// totalLongUnits sums Units, held and reserved, across every open Campaign
+// and standing hold, of any instrument, industry, sector or classification. Every Campaign in this system is long
 // (event.DirectionLong; long_only_test.go), so this is ADR 0008's total-long
 // cap's own exposure figure without a direction filter.
 func (r *transition) totalLongUnits() int {
@@ -133,8 +133,8 @@ func (r *transition) totalLongUnits() int {
 
 // capExceeded reports the first of ADR 0008's Unit caps that ONE further
 // Unit at classification c for instrumentID would exceed, given every open
-// Campaign's CURRENT state (see this file's own doc comment on post-trade
-// exposure and same-pass headroom). Caps are checked tightest correlation
+// Campaign's CURRENT state and every standing hold (see this file's own doc
+// comment on post-trade exposure and reserved headroom). Caps are checked tightest correlation
 // first — instrument, then the Unclassified Group or industry and sector,
 // then total long [T p.16] — and capExceeded returns as soon as one binds,
 // since a single decline already names one cap and one resulting exposure;
