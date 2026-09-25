@@ -241,8 +241,9 @@ func collectEventDecls(path string, file *ast.File, types map[string]string, ver
 				// iota-style block (const A = iota; B; C, where B and C
 				// carry no Values of their own) has nothing to read here.
 				// No EventType or SchemaVersion is declared that way as of
-				// this writing; skipping rather than indexing out of range
-				// is the fail-safe reading, not a silent acceptance of one.
+				// this writing, so such a name is refused with an error
+				// (fail closed) rather than skipped or indexed out of range:
+				// an iota-style event constant is never silently accepted.
 				if i >= len(valueSpec.Values) {
 					return fmt.Errorf("wire_coverage: %s: %s%s has no literal value of its own (an iota-style repeated value?); this package expects every event type and schema version to be its own literal", path, prefix, kind)
 				}
