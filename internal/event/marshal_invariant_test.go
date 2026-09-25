@@ -43,6 +43,7 @@ func marshalPayloads() []validatedPayload {
 		validInstrumentClassification(), validUniverseEligibility(),
 		validSymbolChangeAction(), validInstrumentSymbolChanged(),
 		validDividendAction(), validCampaignDividend(),
+		validWatchlistPublished(),
 	}
 }
 

@@ -389,6 +389,24 @@ type instrumentState struct {
 	// this guards only against re-delivery of the SAME instant, never against
 	// a genuinely later one.
 	lastDividendAt time.Time
+	// lastSetupTier, lastSetupDistanceToEntryInN and lastSetupPeriodEnd mirror
+	// this instrument's most recently emitted Setup-evaluated decision
+	// (reducer.go's applyCompletedBar): set, unconditionally, to whatever
+	// that bar decided — including TierNone — every time a Setup is
+	// evaluated (never while a Campaign is open, since no Setup-evaluated
+	// event is emitted then). session.go's emitWatchlist reads them, matched
+	// against the closing Session's own period end, to build ADR 0011's
+	// Watchlist without re-evaluating a Setup a second time.
+	//
+	// Because every field is overwritten every time a Setup is evaluated,
+	// nothing here is ever carried forward from an earlier Session: Tier B
+	// is memoryless (ADR 0011; CONTEXT.md: "Tier"), and an instrument that
+	// entered a Campaign this bar (so no Setup-evaluated event fired at all)
+	// leaves last Session's stale period end unmatched, which is what
+	// excludes it from THIS Session's Watchlist.
+	lastSetupTier               string
+	lastSetupDistanceToEntryInN float64
+	lastSetupPeriodEnd          time.Time
 }
 
 // NewReducer returns a Reducer that stamps every decision it emits with
@@ -965,6 +983,15 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 			tier = event.TierB
 		}
 	}
+
+	// Recorded unconditionally, including TierNone, so session.go's
+	// emitWatchlist can tell "evaluated TierNone this Session" apart from
+	// "no Setup-evaluated event fired this Session at all" (a Campaign is
+	// open) purely from lastSetupPeriodEnd matching the Session that is
+	// closing — see instrumentState's own doc comment on these three fields.
+	state.lastSetupTier = tier
+	state.lastSetupDistanceToEntryInN = distanceToEntryInN
+	state.lastSetupPeriodEnd = bar.PeriodEnd
 
 	reportedEntryChannelHigh := entryChannelHigh
 	if !entryChannelReady {

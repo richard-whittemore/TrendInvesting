@@ -509,10 +509,11 @@ func TestFillOpensACampaignWithNAndUnitSizeFrozen(t *testing.T) {
 		mustRun()
 
 	// Every non-breakout bar emits one Setup-evaluated each; the breakout bar
-	// emits three (Setup-evaluated, Signal, Proposal); the fill emits three
-	// (Campaign-opened, Protective-Stop-set, then Unit 1's Exit Order).
-	if want := len(bars) + 5; len(emitted) != want {
-		t.Fatalf("len(emitted) = %d, want %d (%d x 1, the breakout bar's 3, and the fill's 3)", len(emitted), want, len(bars)-1)
+	// emits four (Setup-evaluated, Signal, ADR 0011's Watchlist, Proposal);
+	// the fill emits three (Campaign-opened, Protective-Stop-set, then Unit
+	// 1's Exit Order).
+	if want := len(bars) + 6; len(emitted) != want {
+		t.Fatalf("len(emitted) = %d, want %d (%d x 1, the breakout bar's 4, and the fill's 3)", len(emitted), want, len(bars)-1)
 	}
 
 	proposalEnvelope := onlyEnvelopeOfType(t, emitted, event.TradeProposalEventType)
@@ -756,21 +757,25 @@ func TestProposalWithNoFillOpensNoCampaignAndExpiresWithItsBar(t *testing.T) {
 		t.Fatalf("got %d Campaign(s), want 0: no fill arrived", got)
 	}
 
-	// Every non-breakout bar of the preamble, the breakout bar's 3 events, and
-	// bar 57's 4 (the expiry of bar 56's proposal, then Setup-evaluated,
-	// Signal, Proposal).
-	if want := len(bars) + 6; len(emitted) != want {
+	// Every non-breakout bar of the preamble, the breakout bar's 4 events
+	// (Setup-evaluated, Signal, ADR 0011's Watchlist, Proposal), and bar 57's
+	// 5 (the expiry of bar 56's proposal, then Setup-evaluated, Signal,
+	// Watchlist, Proposal): bar 57 is a fresh breakout in its own right
+	// (nextBreakoutBar's own doc comment), so its Session publishes its own
+	// Watchlist too.
+	if want := len(bars) + 8; len(emitted) != want {
 		t.Fatalf("len(emitted) = %d, want %d", len(emitted), want)
 	}
 
 	expiredEnvelope := onlyEnvelopeOfType(t, emitted, event.ProposalExpiredEventType)
 	// The expiry closes the previous bar's business before the new bar is
 	// evaluated, mirroring ADR 0010's exits-before-entries ordering.
-	tail := emitted[len(emitted)-4:]
+	tail := emitted[len(emitted)-5:]
 	wantOrder := []string{
 		event.ProposalExpiredEventType,
 		event.SetupEvaluatedEventType,
 		event.SignalEventType,
+		event.WatchlistPublishedEventType,
 		event.TradeProposalEventType,
 	}
 	for i, want := range wantOrder {
@@ -927,9 +932,10 @@ func TestDuplicateFillIsAnIdempotentNoOp(t *testing.T) {
 	}
 	// The second delivery must emit nothing at all, not merely nothing new:
 	// the emission count is identical to the single-delivery run (the
-	// warm-up and breakout bars' events, plus the opening fill's
-	// Campaign-opened, Protective-Stop-set and Exit Order).
-	if want := len(bars) + 5; len(emitted) != want {
+	// warm-up and breakout bars' events, the breakout Session's Watchlist,
+	// plus the opening fill's Campaign-opened, Protective-Stop-set and Exit
+	// Order).
+	if want := len(bars) + 6; len(emitted) != want {
 		t.Errorf("len(emitted) = %d, want %d (the duplicate fill emits nothing)", len(emitted), want)
 	}
 }
@@ -1342,9 +1348,10 @@ func TestFillAfterTheDecisionBarButBeforeTheNextIsAccepted(t *testing.T) {
 		t.Errorf("OpenedAt = %v, want the next session's fill time %v", campaign.OpenedAt, nextSession)
 	}
 	// The bar that follows is applied without error — the instrument is now
-	// in a Campaign, so it produces no Setup/Signal/proposal, only its own
-	// Campaign-evaluated event (#13).
-	if want := len(bars) + 6; len(emitted) != want {
+	// in a Campaign, so it produces no Setup/Signal/proposal (and so no
+	// Watchlist for that Session either, #35), only its own Campaign-evaluated
+	// event (#13).
+	if want := len(bars) + 7; len(emitted) != want {
 		t.Errorf("len(emitted) = %d, want %d (the bar after the fill adds its own Campaign-evaluated event, #13)", len(emitted), want)
 	}
 }
@@ -1462,7 +1469,7 @@ func TestNoSignalOrProposalWhileACampaignIsOpen(t *testing.T) {
 	if last := withCampaign[len(withCampaign)-1]; last.Type != event.CampaignEvaluatedEventType {
 		t.Errorf("last emission is %q, want the Campaign-evaluated event bar 57 produces (#13)", last.Type)
 	}
-	if want := len(bars) + 6; len(withCampaign) != want {
+	if want := len(bars) + 7; len(withCampaign) != want {
 		t.Errorf("len(emitted) = %d, want %d: the bar arriving during a Campaign now adds its own Campaign-evaluated event (#13)", len(withCampaign), want)
 	}
 }
@@ -1728,10 +1735,11 @@ func TestDuplicateStopFillIsAnIdempotentNoOp(t *testing.T) {
 	if got := len(envelopesOfType(emitted, event.CampaignExitedEventType)); got != 1 {
 		t.Fatalf("got %d Campaign-exited event(s), want exactly 1 despite the duplicate delivery", got)
 	}
-	// Every non-breakout bar x 1, the breakout bar's 3, the opening fill's 3,
-	// the stop fill's 2 (units-stopped, Campaign-exited): the duplicate
-	// delivery emits nothing at all, not merely nothing new.
-	if want := len(bars) + 7; len(emitted) != want {
+	// Every non-breakout bar x 1, the breakout bar's 4 (Setup-evaluated,
+	// Signal, Watchlist, Proposal), the opening fill's 3, the stop fill's 2
+	// (units-stopped, Campaign-exited): the duplicate delivery emits nothing
+	// at all, not merely nothing new.
+	if want := len(bars) + 8; len(emitted) != want {
 		t.Errorf("len(emitted) = %d, want %d (the duplicate stop fill emits nothing)", len(emitted), want)
 	}
 }
@@ -2089,10 +2097,11 @@ func TestOpeningFillRedeliveredAfterTheCampaignClosedIsANoOp(t *testing.T) {
 		t.Fatalf("got %d Campaign-exited event(s), want exactly 1", got)
 	}
 	// The redelivered opening fill must emit nothing at all, not merely
-	// nothing new: every non-breakout bar + the breakout bar's 3 + the
-	// opening fill's 3 (Campaign-opened, Protective-Stop-set, Exit Order) +
-	// the stop fill's 2 (units-stopped, Campaign-exited).
-	if want := len(bars) + 7; len(emitted) != want {
+	// nothing new: every non-breakout bar + the breakout bar's 4
+	// (Setup-evaluated, Signal, Watchlist, Proposal) + the opening fill's 3
+	// (Campaign-opened, Protective-Stop-set, Exit Order) + the stop fill's 2
+	// (units-stopped, Campaign-exited).
+	if want := len(bars) + 8; len(emitted) != want {
 		t.Errorf("len(emitted) = %d, want %d (the redelivered opening fill emits nothing)", len(emitted), want)
 	}
 }

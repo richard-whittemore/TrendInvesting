@@ -41,7 +41,7 @@ import (
 // "N event types" success line); raise it if internal/event genuinely grows,
 // but a value observed to DROP below it is a parser bug to fix first, not a
 // classification list to edit.
-const minimumDiscoveredEventTypes = 34
+const minimumDiscoveredEventTypes = 35
 
 // wireCovered is every event type this build's LEAN adapter fixtures are
 // meant to exercise — sent by the adapter, acted on when received, or
@@ -115,6 +115,15 @@ var notYetCrossed = map[string]string{
 	// be fiction rather than evidence of anything it does today.
 	"strategy.instrument.symbol-changed": "LEAN publishing of symbol changes is #28, not yet built",
 	"strategy.campaign.dividend":         "LEAN publishing of dividends is #28, not yet built",
+	// ADR 0011's Watchlist is a per-Session observability decision the
+	// reducer journals; nothing wires it to the LEAN adapter yet, and it
+	// never will need to be acted on (it is not one of orders.py's
+	// SCHEMA_VERSIONS entries by design, the same as strategy.setup.evaluated
+	// and strategy.signal beside it). A fixture proving the adapter merely
+	// ignores it, like those two, is left for when the adapter boundary is
+	// next touched, so it stays here rather than in wireCovered's "ignored
+	// decision" group.
+	"strategy.watchlist.published": "no LEAN adapter fixture proves receipt or handling yet; not part of orders.py's SCHEMA_VERSIONS",
 }
 
 func main() {

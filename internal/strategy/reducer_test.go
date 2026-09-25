@@ -216,6 +216,18 @@ func decodeSignal(t *testing.T, envelope event.Envelope) event.SignalPayload {
 	return payload
 }
 
+func decodeWatchlistPublished(t *testing.T, envelope event.Envelope) event.WatchlistPublishedPayload {
+	t.Helper()
+	if envelope.Type != event.WatchlistPublishedEventType {
+		t.Fatalf("envelope.Type = %q, want %q", envelope.Type, event.WatchlistPublishedEventType)
+	}
+	var payload event.WatchlistPublishedPayload
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(payload) error = %v", err)
+	}
+	return payload
+}
+
 // runReducerOverHighs replays a configuration event (payload cfg) followed by
 // one bar per entry in highs for instrumentID, and returns every envelope the
 // engine emitted. Each bar's split-adjusted High is exactly highs[i], with
@@ -1912,18 +1924,25 @@ func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 	emitted := runReducerOverBars(t, cfg, bars)
 
 	// Every non-breakout bar emits one Setup-evaluated event each; the
-	// breakout bar emits three (Setup-evaluated, Signal, Proposal).
-	if len(emitted) != len(bars)+2 {
-		t.Fatalf("len(emitted) = %d, want %d (%d x 1, plus the breakout bar's 3)", len(emitted), len(bars)+2, len(bars)-1)
+	// breakout bar emits four (Setup-evaluated, Signal, Watchlist, Proposal)
+	// — ADR 0011's Watchlist is built and emitted at the Session's close,
+	// after the Signal that fired at the bar and before the entry it is the
+	// pre-image of.
+	if len(emitted) != len(bars)+3 {
+		t.Fatalf("len(emitted) = %d, want %d (%d x 1, plus the breakout bar's 4)", len(emitted), len(bars)+3, len(bars)-1)
 	}
 
-	setupIndex, signalIndex, proposalIndex := len(emitted)-3, len(emitted)-2, len(emitted)-1
-	wantOrder := []string{event.SetupEvaluatedEventType, event.SignalEventType, event.TradeProposalEventType}
+	setupIndex, signalIndex, watchlistIndex, proposalIndex := len(emitted)-4, len(emitted)-3, len(emitted)-2, len(emitted)-1
+	wantOrder := []string{event.SetupEvaluatedEventType, event.SignalEventType, event.WatchlistPublishedEventType, event.TradeProposalEventType}
 	for offset, want := range wantOrder {
 		index := setupIndex + offset
 		if emitted[index].Type != want {
-			t.Fatalf("emitted[%d].Type = %q, want %q (emission order must be Setup-evaluated, Signal, Proposal)", index, emitted[index].Type, want)
+			t.Fatalf("emitted[%d].Type = %q, want %q (emission order must be Setup-evaluated, Signal, Watchlist, Proposal)", index, emitted[index].Type, want)
 		}
+	}
+	watchlist := decodeWatchlistPublished(t, emitted[watchlistIndex])
+	if len(watchlist.Entries) != 1 || watchlist.Entries[0].InstrumentID != "AAPL" || watchlist.Entries[0].Tier != event.TierA {
+		t.Fatalf("Watchlist entries = %+v, want exactly one Tier A entry for AAPL", watchlist.Entries)
 	}
 
 	proposalEnvelope := emitted[proposalIndex]
@@ -2109,8 +2128,8 @@ func TestReducerDeclinesWhenTheAccountIsTooSmallForOneShare(t *testing.T) {
 	bars := breakoutBars("AAPL")
 	emitted := runReducerOverBars(t, cfg, bars)
 
-	if len(emitted) != len(bars)+2 {
-		t.Fatalf("len(emitted) = %d, want %d (%d x 1, plus the breakout bar's Setup-evaluated, Signal and decline)", len(emitted), len(bars)+2, len(bars)-1)
+	if len(emitted) != len(bars)+3 {
+		t.Fatalf("len(emitted) = %d, want %d (%d x 1, plus the breakout bar's Setup-evaluated, Signal, Watchlist and decline)", len(emitted), len(bars)+3, len(bars)-1)
 	}
 	if got := len(envelopesOfType(emitted, event.SignalEventType)); got != 1 {
 		t.Fatalf("got %d Signal(s), want exactly 1: sizing declines the trade, it does not suppress the Signal", got)

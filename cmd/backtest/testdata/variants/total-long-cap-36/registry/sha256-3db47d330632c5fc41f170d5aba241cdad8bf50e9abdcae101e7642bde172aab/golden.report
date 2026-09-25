@@ -7,8 +7,8 @@
   "fit": false,
   "artefacts": {
     "journal_path": "../journal.golden.jsonl",
-    "record_count": 352,
-    "final_record_hash": "sha256:c123dcb299bf9944c7a27f91e034e8bf66b8f2f9df09ca10573e713e70213235"
+    "record_count": 353,
+    "final_record_hash": "sha256:f06d16a44653a0b824c5db50ad80a690e57cb60e13e2069b9cf03b4bba275706"
   },
   "report": {
     "schema_version": 2,
