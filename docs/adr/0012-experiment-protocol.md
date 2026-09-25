@@ -48,3 +48,74 @@ An implementer who finds a Baseline number that differs from the source should e
 - Return per unit of drawdown, not CAGR, is the primary metric: it measures return per unit of pain, and a strategy that would have been abandoned mid-drawdown is not a good strategy.
 - The regime and perturbation rules filter out regime luck and coincidental thresholds; the trade-count floor and concentration rule filter out hindsight selection and accidental sector bets.
 - Every run's configuration, span, split, and outcome are journaled, so an adopted Variant can be shown to have cleared every rule.
+
+## Amendment — executable windows and opening records (Proposed, 2026-09-25)
+
+**Status: Proposed.** These conservative implementation conventions need owner
+ratification; they do not change any Accepted strategy parameter above.
+
+- **Configuration:** `internal/registry/protocol.json` is the versioned research
+  configuration, embedded in the build. No command-line or trading-configuration
+  override exists. Each report retains the entire protocol and its canonical
+  SHA-256 fingerprint; each opening retains that fingerprint. Changing the file
+  is a reviewed protocol change, never a new per-run setting.
+- **Dates:** named years include their whole UTC calendar years, represented as
+  `[start, next-year-start)`. Thus 2000 belongs to both the late bull and bear,
+  and 2009 to both the crash and subsequent bull. Nothing silently assigns these
+  overlapping years to a preferred regime. Missing years remain outside all
+  windows. The split is inclusive on the out-of-sample side. A spanning run is
+  explicitly `mixed`, never usable as a fitting run; the full report also
+  separates the in-sample and out-of-sample curves. Empty failed runs are
+  `unknown`. The designation uses all input dates, including corporate actions.
+- **Metric:** the primary numerator is the annualised return specified by
+  adoption criterion 1, not unannualised profit. Report total return too.
+  With positive opening equity `E0`, final equity `E1`, and elapsed years
+  `Y = elapsed UTC hours / (24 × 365.25)`, compute `(E1/E0)^(1/Y) - 1`.
+  Maximum drawdown is `max((running_peak - equity)/running_peak)`, over the
+  net account-equity marks, including costs and unrealised positions, never
+  the Notional Account. The ratio is annualised return / maximum drawdown.
+  Zero drawdown, insufficient history and non-finite arithmetic have a null
+  ratio and an explicit state, never an infinite winning score. No external
+  cash flows are supported by this calculation; they require a separately
+  agreed return-adjustment methodology and fail closed.
+- **Window marks:** use snapshot `AsOf`, not delivery time. Carry the last mark
+  preceding a window to its starting boundary so its first loss is counted.
+  Do not extrapolate the last observed mark to an unobserved window end.
+  Every window is reported, including `no-data`; actual metric start/end and
+  sample count show partial coverage. A partial or failed run is not evidence
+  that a Variant clears the adoption criteria.
+- **Opening:** every attempt that can execute any out-of-sample input consumes
+  one opening, including a subsequently failed, interrupted or abandoned run.
+  An immutable `.opening` sidecar is installed and flushed **before** strategy
+  execution. A repeat remains executable but is prominently flagged as a new
+  hypothesis, identified by configuration hash plus run ID, with links to all
+  prior hypotheses. Changing a parameter hash does not reset a Variant's
+  history. Old registry entries are included across all configuration hashes;
+  a legacy Variant run whose span is unknown conservatively counts as exposure.
+  A run and its opening are deduplicated. The Baseline is exempt, as stated above.
+- **Authority and concurrency:** exactly-once protection applies to one complete,
+  authoritative registry directory. An exclusive directory lock serialises
+  reading history and installing openings on that filesystem. An abandoned lock
+  requires an operator audit, not automatic expiry. Independent clones cannot
+  prove a global first look while offline. Their first-look claims must not be
+  used for adoption until histories are reconciled; no distributed exactly-once
+  guarantee is claimed. Variant labels must remain stable across parameter
+  choices and machines. Renaming a label does not establish a fresh hypothesis
+  scientifically, even though a file registry cannot infer semantic equivalence.
+- **Fitting:** `backtest -fit` rejects any span not wholly before the configured
+  split, before strategy execution. An ordinary run is evaluation, not evidence
+  of parameter selection. Declaring the parameter grid before fitting remains
+  required by the Accepted protocol; a grid/selection provenance workflow is
+  outside this reporting command and must be implemented before automated tuning.
+- **Retention:** preserve existing version-1 registry entries and journals
+  unchanged. New reports use append-only version-1 `.report` JSON sidecars beside
+  each entry, containing configuration identity, status, protocol, journal anchor
+  and any opening. Readers of old registry entries remain compatible. Commit
+  sidecars with the registry and journals. Unregistered fixture runs print a
+  report but do not establish auditable Variant results.
+
+**Owner questions:** ratify whole-year overlapping windows and UTC boundaries;
+ratify 365.25-day annualisation and the carried opening mark; designate the
+single authoritative registry and the process for reconciling offline clones;
+confirm that failed attempts consume an opening and that grid/selection
+provenance should be a separate implementation.

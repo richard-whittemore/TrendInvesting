@@ -49,6 +49,7 @@ var runSession = fills.RunSession
 // operator's decision, which is why the zero-slippage refusal does not live
 // in the registry alone — see readConfiguration.
 type options struct {
+	fit        bool
 	configPath string
 	barsPath   string
 	// corporateActionsPath is a JSON array of event.CorporateActionPayload,
@@ -130,6 +131,9 @@ func backtest(ctx context.Context, opts options, out io.Writer) error {
 	if err := registerRun(opts, cfg, strategyVersion, result); err != nil {
 		return errors.Join(result.failure(), err)
 	}
+	if err := finishResearch(opts, cfg, result, out); err != nil {
+		return errors.Join(result.failure(), fmt.Errorf("backtest: report the run: %w", err))
+	}
 	if !result.installed {
 		return result.failure()
 	}
@@ -151,6 +155,8 @@ func backtest(ctx context.Context, opts options, out io.Writer) error {
 // the flush after it is a second fact, so a run can hold a journal it
 // installed and an error describing what happened next.
 type outcome struct {
+	equity     []registry.EquityPoint
+	opening    *registry.Opening
 	header     journal.Header
 	records    int
 	runErr     error
@@ -203,27 +209,31 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 	if err != nil {
 		return outcome{runErr: err}
 	}
+	opening, err := prepareResearch(opts, cfg, bars, corporateActions)
+	if err != nil {
+		return outcome{runErr: err}
+	}
 	openingCash := cfg.NotionalAccount.StartingEquity
 	if opts.availableCash != nil {
 		openingCash = *opts.availableCash
 	}
 	reducer, err := strategy.NewReducer(strategyVersion, cfg)
 	if err != nil {
-		return outcome{runErr: fmt.Errorf("backtest: %w", err)}
+		return outcome{opening: opening, runErr: fmt.Errorf("backtest: %w", err)}
 	}
 	simulator, err := fills.New(cfg, strategyVersion, configurationHash)
 	if err != nil {
-		return outcome{runErr: fmt.Errorf("backtest: %w", err)}
+		return outcome{opening: opening, runErr: fmt.Errorf("backtest: %w", err)}
 	}
 	// The simulator is the run's broker (ADR 0020), so it keeps the account
 	// and states it after every Session: the opening cash, less every buy,
 	// plus every sell.
 	if err := simulator.OpenAccount(openingCash); err != nil {
-		return outcome{runErr: fmt.Errorf("backtest: -available-cash: %w", err)}
+		return outcome{opening: opening, runErr: fmt.Errorf("backtest: -available-cash: %w", err)}
 	}
 	recorder := journal.NewBoundedRecorder(reducer, opts.recordBound())
 
-	result := outcome{runErr: namingTheBoundFlag(drive(ctx, simulator, recorder, cfg, strategyVersion, bars, corporateActions))}
+	result := outcome{opening: opening, runErr: namingTheBoundFlag(drive(ctx, simulator, recorder, cfg, strategyVersion, bars, corporateActions))}
 
 	// The journal is written whether or not the run completed: a handler
 	// that failed closed may have emitted a final event explaining why, and
@@ -240,6 +250,8 @@ func perform(ctx context.Context, opts options, cfg event.ConfigurationPayload, 
 	// footprint at the moment it is tightest.
 	entries := recorder.Entries()
 	result.records = len(entries)
+	result.equity, err = registry.EquityCurve(entries)
+	result.runErr = errors.Join(result.runErr, err)
 	result.installed, result.journalErr = writeJournal(opts.outPath, header, entries)
 	return result
 }

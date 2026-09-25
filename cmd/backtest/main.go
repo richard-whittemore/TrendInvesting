@@ -68,6 +68,7 @@ func main() {
 func run(ctx context.Context, args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("backtest", flag.ContinueOnError)
 	flags.SetOutput(out)
+	fit := flags.Bool("fit", false, "parameter fitting: refuse any out-of-sample input (ADR 0012)")
 	configPath := flags.String("config", "", "path to the JSON strategy configuration to run")
 	barsPath := flags.String("bars", "", "path to the JSON array of completed bars to run over")
 	corporateActionsPath := flags.String("corporate-actions", "", "path to a JSON array of corporate actions (event.CorporateActionPayload) to interleave with the bars by effective time; omitted, a run carries none")
@@ -133,6 +134,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	// as a run flag only when the invocation is not asking to read the
 	// registry.
 	runFlags := []named{{"-config", *configPath}, {"-bars", *barsPath}, {"-corporate-actions", *corporateActionsPath}, {"-out", *outPath}, {"-run-id", *runID}, {"-variant", *variant}, {"-max-records", *maxRecords}}
+	if *fit {
+		runFlags = append(runFlags, named{"-fit", "set"})
+	}
 	if cashSet {
 		runFlags = append(runFlags, named{"-available-cash", "set"})
 	}
@@ -219,6 +223,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 
 	return backtest(ctx, options{
+		fit:                  *fit,
 		configPath:           *configPath,
 		barsPath:             *barsPath,
 		corporateActionsPath: *corporateActionsPath,
