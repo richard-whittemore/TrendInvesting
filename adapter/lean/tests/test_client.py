@@ -211,6 +211,73 @@ class ClientTests(unittest.TestCase):
         client.close()
         th.join()
 
+    def _reply_shape(self, raw_json_line):
+        """A single exchange whose reply is exactly raw_json_line: valid JSON,
+        of whatever shape the caller wants to probe."""
+        def handler(conn):
+            conn.recv(4096)
+            conn.sendall(raw_json_line + b"\n")
+
+        th = self._serve_one(handler)
+        client = Client(self.sock_path, timeout=2.0)
+        try:
+            with self.assertRaises(Unavailable) as cm:
+                client.decide({"id": "bar-2", "sequence": 2})
+            self.assertIn("must be a JSON object", str(cm.exception))
+            self.assertTrue(client._broken)
+            with self.assertRaises(Unavailable) as cm:
+                client.decide({"id": "bar-3", "sequence": 3})
+            self.assertIn("abandoned", str(cm.exception))
+        finally:
+            client.close()
+            th.join()
+
+    def test_a_reply_that_is_a_json_array_fails_closed_without_reuse(self):
+        """Valid JSON of the wrong shape (issue #31 review) is exactly as
+        unusable as no reply at all: every field access below assumes a JSON
+        object, and this must fail closed with a clear, typed error rather
+        than a bare AttributeError from the first .get call."""
+        self._reply_shape(b"[]")
+
+    def test_a_reply_that_is_json_null_fails_closed_without_reuse(self):
+        self._reply_shape(b"null")
+
+    def test_a_reply_that_is_a_json_string_fails_closed_without_reuse(self):
+        self._reply_shape(b'"not an object"')
+
+    def test_a_reply_whose_error_field_is_the_wrong_type_fails_closed(self):
+        """The top-level reply is a well-formed object, but its "error" is a
+        string rather than the object every other reply's error is; the
+        shape check must catch this nested case too, not only the top level."""
+        def handler(conn):
+            conn.recv(4096)
+            conn.sendall(b'{"error": "boom"}\n')
+
+        th = self._serve_one(handler)
+        client = Client(self.sock_path, timeout=2.0)
+        with self.assertRaises(Unavailable) as cm:
+            client.decide({"id": "bar-2", "sequence": 2})
+        self.assertIn("error", str(cm.exception))
+        self.assertIn("must be a JSON object", str(cm.exception))
+        self.assertTrue(client._broken)
+        client.close()
+        th.join()
+
+    def test_a_reply_whose_envelope_field_is_the_wrong_type_fails_closed(self):
+        def handler(conn):
+            conn.recv(4096)
+            conn.sendall(b'{"envelope": "boom"}\n')
+
+        th = self._serve_one(handler)
+        client = Client(self.sock_path, timeout=2.0)
+        with self.assertRaises(Unavailable) as cm:
+            client.decide({"id": "bar-2", "sequence": 2})
+        self.assertIn("envelope", str(cm.exception))
+        self.assertIn("must be a JSON object", str(cm.exception))
+        self.assertTrue(client._broken)
+        client.close()
+        th.join()
+
     def test_oversized_request_rejected_locally(self):
         client = Client.__new__(Client)
         client.max_frame_bytes = 100
