@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
 // The two sides an order can rest on. A buy opens or extends a long position
@@ -146,6 +148,47 @@ func Execute(side string, level float64, r Range, slippage float64) (Execution, 
 	return Execution{Filled: true, Price: price, AtReference: atReference}, nil
 }
 
+// ExecuteStopLimit applies ADR 0005's rules, as amended 2026-09-24, to one
+// resting stop-limit buy: a stop at level whose limit, its price cap, is
+// priceCap (CONTEXT.md: "Price cap"). Every entry and Add of the Baseline
+// rests as one.
+//
+//   - Not triggered (High < level): no fill, exactly as Execute.
+//   - Triggered at or below the cap (max(level, Reference) <= priceCap): rule
+//     1 unchanged, executing at max(level, Reference).
+//   - Gapped above the cap (Reference > priceCap): triggered at the
+//     reference, the order works as a limit buy at priceCap. It fills at the
+//     cap itself, pessimistically, if the bar trades back down to it (Low <=
+//     priceCap), and otherwise not at all: the Unit is skipped. Such a fill
+//     happened after the reference, so it is not AtReference.
+//
+// Rule 2 is unchanged: slippage is added to every fill. The cap bounds the
+// execution price BEFORE slippage, so a recorded price is at most priceCap +
+// slippage, exactly the per-share price the reducer's hold reserved (ADR
+// 0020, as amended), and a fill never costs more than its hold. A cap below
+// the level could never fill, and is refused as a malformed order.
+func ExecuteStopLimit(level, priceCap float64, r Range, slippage float64) (Execution, error) {
+	if err := checkPositive("price cap", priceCap); err != nil {
+		return Execution{}, err
+	}
+	if priceCap < level {
+		return Execution{}, fmt.Errorf("fills: a stop-limit buy at level %v is capped at %v, below its own level; it could never fill", level, priceCap)
+	}
+	unlimited, err := Execute(SideBuy, level, r, slippage)
+	if err != nil || !unlimited.Filled {
+		return unlimited, err
+	}
+	if r.Reference <= priceCap {
+		// Rule 1's max(level, Reference) is within the cap.
+		return unlimited, nil
+	}
+	if r.Low > priceCap {
+		// Gapped above the cap and never traded back down to it.
+		return Execution{}, nil
+	}
+	return Execution{Filled: true, Price: priceCap + slippage}, nil
+}
+
 // CommissionModel is ADR 0013's commission model: an Interactive-Brokers-style
 // per-share schedule with a per-order floor and a per-order ceiling expressed
 // as a fraction of the order's own trade value.
@@ -208,12 +251,16 @@ func (m CommissionModel) Charge(quantity int64, price, dollarsPerPoint float64) 
 		return 0, fmt.Errorf("fills: commission maximum fraction of trade value must be greater than zero and at most one, got %v", m.MaximumFractionOfTradeValue)
 	}
 
-	charge := float64(quantity) * m.PerShare
-	if charge < m.MinimumPerOrder {
-		charge = m.MinimumPerOrder
-	}
-	if ceiling := float64(quantity) * price * dollarsPerPoint * m.MaximumFractionOfTradeValue; charge > ceiling {
-		charge = ceiling
+	// The arithmetic is sizing.Commission's, the one the reducer bounds a
+	// hold with, so a fill's charge and the charge its hold reserved never
+	// disagree (ADR 0013, as amended 2026-09-24).
+	charge, ok := sizing.Commission(quantity, price, dollarsPerPoint, sizing.CommissionSchedule{
+		PerShare:                    m.PerShare,
+		MinimumPerOrder:             m.MinimumPerOrder,
+		MaximumFractionOfTradeValue: m.MaximumFractionOfTradeValue,
+	})
+	if !ok {
+		return 0, fmt.Errorf("fills: the commission on %d at %v x %v dollars per point is not a finite figure", quantity, price, dollarsPerPoint)
 	}
 	return charge, nil
 }
