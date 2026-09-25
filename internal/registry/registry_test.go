@@ -61,6 +61,8 @@ func baselineConfiguration() event.ConfigurationPayload {
 			MinimumPerOrder:             1,
 			MaximumFractionOfTradeValue: 0.01,
 		},
+		BuyOrderType: event.OrderTypeStopLimit,
+		GapBufferN:   1,
 	}
 }
 

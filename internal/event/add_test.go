@@ -34,6 +34,9 @@ func validAddProposal() event.AddProposalPayload {
 		CampaignN:        n,
 		Rule:             event.RuleAddLadderHalfN,
 		ADR:              event.ADRCampaignFrozenAtEntry,
+		OrderType:        event.OrderTypeStopLimit,
+		GapBufferN:       1,
+		PriceCap:         previousFill + float64(0.5*n) + float64(1*n),
 	}
 }
 
@@ -210,8 +213,8 @@ func TestAddProposalEventConstants(t *testing.T) {
 	if event.AddProposalEventType != "strategy.add.proposed" {
 		t.Errorf("AddProposalEventType = %q, want %q", event.AddProposalEventType, "strategy.add.proposed")
 	}
-	if event.AddProposalSchemaVersion != 1 {
-		t.Errorf("AddProposalSchemaVersion = %d, want 1", event.AddProposalSchemaVersion)
+	if event.AddProposalSchemaVersion != 2 {
+		t.Errorf("AddProposalSchemaVersion = %d, want 2 (version 2 added the price cap, ADR 0005)", event.AddProposalSchemaVersion)
 	}
 	if event.RuleAddLadderHalfN != "add.ladder.half-n" {
 		t.Errorf("RuleAddLadderHalfN = %q, want %q", event.RuleAddLadderHalfN, "add.ladder.half-n")

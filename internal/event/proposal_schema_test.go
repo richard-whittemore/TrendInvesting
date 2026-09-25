@@ -48,7 +48,7 @@ func TestProposalDeclinedUnitCapExceededValidationBySchema(t *testing.T) {
 		t.Run(fmt.Sprintf("schema-%d", version), func(t *testing.T) {
 			p := validProposalDeclinedUnitCapExceeded()
 			err := p.ValidateSchema(version)
-			wantValid := version == event.ProposalDeclinedSchemaVersion
+			wantValid := version >= 5
 			if (err == nil) != wantValid {
 				t.Fatalf("ValidateSchema(%d) = %v; want valid %v", version, err, wantValid)
 			}

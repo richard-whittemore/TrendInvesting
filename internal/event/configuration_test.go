@@ -62,6 +62,10 @@ func validConfiguration() event.ConfigurationPayload {
 			MinimumPerOrder:             1.00,
 			MaximumFractionOfTradeValue: 0.01,
 		},
+		// ADR 0005, as amended 2026-09-24: entries and Adds rest as
+		// stop-limit orders capped at level + 1N in the Baseline.
+		BuyOrderType: event.OrderTypeStopLimit,
+		GapBufferN:   1,
 	}
 }
 
@@ -548,7 +552,8 @@ func TestConfigurationEventConstants(t *testing.T) {
 // TestConfigurationSchemaVersionBumpedForSizingFields pins the explicit
 // schema bumps this payload has taken: 2 for #9's TierBDistanceInN, 3 for
 // #10's DollarsPerPoint and RiskAtStopFraction, 4 for #18's Commission, and 5
-// for #55's MaxUnitsPerIndustry/MaxUnitsPerSector/MaxUnitsTotalLong.
+// for #55's MaxUnitsPerIndustry/MaxUnitsPerSector/MaxUnitsTotalLong, and 6
+// for BuyOrderType and GapBufferN (ADR 0005, as amended 2026-09-24).
 // A new field on an existing payload always changes the schema version
 // (docs/development.md: a schema change is explicit in this project, never a
 // silent field addition), and here it must, because every new field decodes
@@ -560,8 +565,8 @@ func TestConfigurationEventConstants(t *testing.T) {
 func TestConfigurationSchemaVersionBumpedForSizingFields(t *testing.T) {
 	t.Parallel()
 
-	if event.ConfigurationSchemaVersion != 5 {
-		t.Fatalf("ConfigurationSchemaVersion = %d, want 5", event.ConfigurationSchemaVersion)
+	if event.ConfigurationSchemaVersion != 6 {
+		t.Fatalf("ConfigurationSchemaVersion = %d, want 6", event.ConfigurationSchemaVersion)
 	}
 }
 
