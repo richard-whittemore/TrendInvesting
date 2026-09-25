@@ -34,7 +34,7 @@ func TestRegimeReportsAndRepeatedEvaluation(t *testing.T) {
 		if err := json.Unmarshal(raw, &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Report.Exposure == nil || report.Report.Exposure.IndependentCampaigns != 1 || report.Report.Exposure.PeakSectorConcentration != 1 {
+		if report.Report.Exposure == nil || report.Report.Exposure.IndependentCampaigns != 1 || report.Report.Exposure.TimeWeightedLargestSectorShare != 1 || report.Report.Exposure.PeakSectorUnits != 1 || report.Report.Exposure.PeakConcurrentOpenUnits != 1 {
 			t.Fatalf("missing Campaign exposure: %+v", report.Report.Exposure)
 		}
 		if report.Report.Designation != "out-of-sample" || len(report.Report.Windows) != 7 || report.Report.Full.Samples < 2 || report.Opening == nil || report.Opening.Repeat != (i == 1) {

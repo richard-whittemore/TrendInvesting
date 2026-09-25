@@ -346,10 +346,13 @@ the same reports. No-data and failed results remain in the record.
 
 Report schema 2 adds `report.exposure` for the executed run:
 
-- `peak_sector_concentration` is the maximum, after each committed Campaign
-  opening, Add, partial stop or exit, of the largest sector's open Unit count
-  divided by all open Units (ADR 0008, ADR 0012). Empty books contribute zero;
-  shares, notional value, risk and unfilled holds are not the denominator.
+- `peak_sector_units` is the maximum number of open Units in any one ADR 0008
+  group across Session-end samples (ADR 0012).
+- `time_weighted_largest_sector_share` is the mean of each nonempty Session's
+  largest group Unit count divided by total open Units. Each Session has equal
+  weight. Empty Sessions are excluded; no nonempty Sessions yields zero.
+- `peak_concurrent_open_units` is the maximum total open Units across those
+  Session samples, giving context for sector counts and shares.
 - `independent_campaigns` counts distinct Campaign openings, including Campaigns
   still open at the end. Adds and partial stops do not create Campaigns. A later
   re-entry in the same instrument does. This is a lifecycle count, not a claim
@@ -361,12 +364,16 @@ be computed, such as a failure before a journal was available. The `.report`
 wrapper remains version 1; its nested report's `schema_version` is 2. Existing
 sidecars are never rewritten (ADR 0015, ADR 0018).
 
-The current classification seam puts all instruments in the one Unclassified
-Group, so every nonempty run currently has peak concentration 1. Moreover, the
-literal event-by-event maximum includes the first one-Unit opening, which has
-concentration 1 even if the eventual book diversifies. This definition follows
-the requested whole-run maximum; adopting a session-close, minimum-book-size or
-other research comparison would require an explicit protocol decision.
+Samples use the final recorded book of each closed Session, including fills
+committed after its close marker; unchanged books still contribute a sample.
+Incomplete Sessions without a close marker do not contribute. Shares, notional
+value, risk and unfilled holds are not Unit counts.
+
+Unclassified instruments are one group under ADR 0008. The current
+classification seam puts everything in that single group, so nonempty Session
+shares are 1 and peak sector Units equal peak total Units. This is expected,
+not a bug. The unreleased schema 2 changes in place; released evidence and
+version-1 reads remain unchanged.
 
 ADR 0008's declared [`total-long-cap-24`](../cmd/backtest/testdata/variants/total-long-cap-24/README.md)
 and [`total-long-cap-36`](../cmd/backtest/testdata/variants/total-long-cap-36/README.md)

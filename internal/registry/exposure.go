@@ -5,30 +5,86 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 )
 
-// ExposureMetrics reports ADR 0012's concentration and Campaign count.
-// Concentration is a fraction of open Units, including the shared Unclassified
-// Group (ADR 0008). An empty book contributes zero. Campaigns count once at
-// opening, including those still open at the end; Adds never count as Campaigns.
+// ExposureMetrics reports Session-end exposure and Campaign counts (ADR 0012).
+// PeakSectorUnits is the maximum open Unit count in any ADR 0008 group;
+// PeakConcurrentOpenUnits is the maximum total open Units across those samples.
+// TimeWeightedLargestSectorShare is the mean largest-group / total open Units
+// over nonempty Sessions, weighting each Session equally; no such Sessions
+// yields zero. Unclassified instruments are one group under ADR 0008: a run
+// without classifications reports everything in that single group, as expected.
+// Campaigns count once at opening, including those still open at the end;
+// Adds never count as Campaigns.
 type ExposureMetrics struct {
-	PeakSectorConcentration float64 `json:"peak_sector_concentration"`
-	IndependentCampaigns    int     `json:"independent_campaigns"`
+	PeakSectorUnits                int     `json:"peak_sector_units"`
+	TimeWeightedLargestSectorShare float64 `json:"time_weighted_largest_sector_share"`
+	PeakConcurrentOpenUnits        int     `json:"peak_concurrent_open_units"`
+	IndependentCampaigns           int     `json:"independent_campaigns"`
+}
+
+type exposureAccumulator struct {
+	ExposureMetrics
+	nonemptySessions int
+	shareSum         float64
+}
+
+// observeSession samples one final Session book grouped by ADR 0008 labels
+// (ADR 0012). Each call represents one Session, including unchanged books;
+// callers supply nonnegative Unit counts, with Unclassified in one group.
+func (m *exposureAccumulator) observeSession(groups map[string]int) {
+	total, largest := 0, 0
+	for _, n := range groups {
+		total += n
+		largest = max(largest, n)
+	}
+	m.PeakSectorUnits = max(m.PeakSectorUnits, largest)
+	m.PeakConcurrentOpenUnits = max(m.PeakConcurrentOpenUnits, total)
+	if total == 0 {
+		return
+	}
+	m.nonemptySessions++
+	m.shareSum += float64(largest) / float64(total)
+	m.TimeWeightedLargestSectorShare = m.shareSum / float64(m.nonemptySessions)
 }
 
 // CampaignExposure observes committed decisions in journal order, including
 // partial stops, never proposals or duplicate input fills (ADR 0008, ADR 0012).
+// It samples each closed Session after all its same-time decisions, including
+// fills after the ADR 0021 close marker; an incomplete Session has no sample.
+// Entries must be validated reducer evidence in journal order, with decisions
+// stamped at their Session's period end.
 // The current classification seam assigns every Campaign to the shared
 // Unclassified Group (strategy/unit_caps.go). When point-in-time labels arrive,
 // their frozen opening classification must also be carried into this report.
 func CampaignExposure(entries []journal.Entry) (*ExposureMetrics, error) {
-	m := &ExposureMetrics{}
+	m := &exposureAccumulator{}
 	units := map[string]int{}
 	seen := map[string]bool{}
+	var session time.Time
+	sample := func() {
+		total := 0
+		for _, n := range units {
+			total += n
+		}
+		m.observeSession(map[string]int{"": total})
+	}
 	for _, e := range entries {
+		if !session.IsZero() && e.Envelope.EventTime.After(session) {
+			sample()
+			session = time.Time{}
+		}
+		if e.Kind == journal.KindInput && e.Envelope.Type == event.SessionClosedEventType {
+			if e.Envelope.SchemaVersion != event.SessionClosedSchemaVersion || e.Envelope.EventTime.IsZero() {
+				return nil, errors.New("report: invalid Session close")
+			}
+			session = e.Envelope.EventTime
+			continue
+		}
 		if e.Kind != journal.KindDecision {
 			continue
 		}
@@ -85,26 +141,11 @@ func CampaignExposure(entries []journal.Entry) (*ExposureMetrics, error) {
 			}
 			delete(units, p.CampaignID)
 		}
-		// All current Campaigns have the same ADR 0008 correlation group.
-		total := 0
-		for _, n := range units {
-			total += n
-		}
-		m.PeakSectorConcentration = max(m.PeakSectorConcentration, largestSectorShare(map[string]int{"": total}))
 	}
-	return m, nil
-}
-
-func largestSectorShare(units map[string]int) float64 {
-	total, largest := 0, 0
-	for _, n := range units {
-		total += n
-		largest = max(largest, n)
+	if !session.IsZero() {
+		sample()
 	}
-	if total == 0 {
-		return 0
-	}
-	return float64(largest) / float64(total)
+	return &m.ExposureMetrics, nil
 }
 
 // UnmarshalJSON explicitly upcasts schema 1's absent exposure to unknown (nil),
@@ -141,7 +182,7 @@ func (r *Report) UnmarshalJSON(raw []byte) error {
 		return fmt.Errorf("report: unsupported schema version %d (ADR 0015)", decoded.SchemaVersion)
 	}
 	if m := decoded.Exposure; m != nil {
-		if !finite(m.PeakSectorConcentration) || m.PeakSectorConcentration < 0 || m.PeakSectorConcentration > 1 || m.IndependentCampaigns < 0 {
+		if !finite(m.TimeWeightedLargestSectorShare) || m.TimeWeightedLargestSectorShare < 0 || m.TimeWeightedLargestSectorShare > 1 || m.PeakSectorUnits < 0 || m.PeakConcurrentOpenUnits < m.PeakSectorUnits || m.IndependentCampaigns < 0 {
 			return errors.New("report: invalid exposure metrics")
 		}
 	}

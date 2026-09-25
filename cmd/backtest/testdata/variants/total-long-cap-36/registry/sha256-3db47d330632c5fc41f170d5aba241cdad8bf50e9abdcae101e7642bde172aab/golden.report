@@ -13,7 +13,9 @@
   "report": {
     "schema_version": 2,
     "exposure": {
-      "peak_sector_concentration": 1,
+      "peak_sector_units": 4,
+      "time_weighted_largest_sector_share": 1,
+      "peak_concurrent_open_units": 4,
       "independent_campaigns": 1
     },
     "protocol": {
