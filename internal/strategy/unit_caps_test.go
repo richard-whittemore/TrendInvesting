@@ -399,14 +399,23 @@ func TestReplayingACapDeclineFixtureTwiceYieldsByteIdenticalEmissions(t *testing
 	}
 }
 
-// --- Property test: post-trade Unit exposure never exceeds any cap ------
+// --- Property test: a single proposal never takes exposure past any cap -
 
-// TestPostTradeExposureNeverExceedsAnyCap is #36's property test: across a
-// deterministically generated sequence of entries and Add attempts, spread
-// over several Unclassified instruments, post-trade Unit exposure — per
-// instrument, across the shared Unclassified Group, and in total — never
-// exceeds its configured cap. The generator is seeded, so the sequence it
-// drives the reducer through is identical on every run.
+// TestASingleProposalNeverTakesExposurePastAnyCap is #36's property test
+// for the case the caps are actually implemented to decide: ONE proposal at
+// a time (an entry or an Add, each its own Session, each therefore decided
+// against every Campaign the run has ALREADY committed to by an accepted
+// fill), across a deterministically generated sequence spread over several
+// Unclassified instruments. Post-trade Unit exposure — per instrument,
+// across the shared Unclassified Group, and in total — never exceeds its
+// configured cap. The generator is seeded, so the sequence it drives the
+// reducer through is identical on every run.
+//
+// This is deliberately NOT a claim about two proposals decided within the
+// SAME session-close pass: every action here is its own Session, so no two
+// proposals in this test are ever sized against one another's outcome.
+// TestTwoEntriesInOneSessionCloseBothProposeAgainstOnlyCommittedExposure,
+// below, documents that separate, intentional case.
 //
 // The per-instrument cap is set to 1, so EVERY Add attempt in the generated
 // sequence is a falsifiable instrument-cap case: an implementation that
@@ -421,7 +430,7 @@ func TestReplayingACapDeclineFixtureTwiceYieldsByteIdenticalEmissions(t *testing
 // (which instruments have a real, filled Campaign to Add to) depends on
 // what the PREVIOUS one actually produced, not on an assumption pinned in
 // advance.
-func TestPostTradeExposureNeverExceedsAnyCap(t *testing.T) {
+func TestASingleProposalNeverTakesExposurePastAnyCap(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -598,5 +607,62 @@ func TestPostTradeExposureNeverExceedsAnyCap(t *testing.T) {
 	}
 	if len(envelopesOfType(emitted, event.ProposalDeclinedEventType)) == 0 {
 		t.Fatal("fixture error: the generated sequence produced no decline at all; the caps were never exercised")
+	}
+}
+
+// TestTwoEntriesInOneSessionCloseBothProposeAgainstOnlyCommittedExposure
+// documents the CURRENT, intentional rule for two proposals decided within
+// the SAME session-close pass, which
+// TestASingleProposalNeverTakesExposurePastAnyCap does not exercise (every
+// action there is its own Session).
+//
+// ADR 0010 states Unit-cap headroom is "known at the previous close," and
+// ADR 0020 — which built a running ledger for CASH within a bar — says of
+// that same sentence: "For Unit-cap headroom that stands unchanged." So
+// capExceeded (unit_caps.go) checks post-trade exposure against every
+// OTHER open Campaign's CURRENT, ALREADY-COMMITTED Units — Units an
+// accepted fill actually put there — never against a sibling proposal
+// still being decided in the same pass, because a proposal commits
+// nothing. Two Unclassified instruments breaking out in the SAME Session
+// are therefore BOTH sized against the SAME committed total-long exposure
+// (zero, before either fills), and with the cap configured to 1, both are
+// proposed rather than the second being declined for a cap the first's own
+// still-unfilled proposal has not yet consumed.
+//
+// This is the current rule, not a settled one: whether a shared per-pass
+// budget should instead be reserved at proposal time is the owner decision
+// ADR 0021's "Open, deferred to #34" section and #33/#105 leave open, the
+// same shape ADR 0020 resolved for cash by reserving at ORDER PLACEMENT
+// rather than at proposal time. If that decision changes, THIS test is the
+// one that must change with it — it is not a bug fixed by adding a per-pass
+// tally here.
+func TestTwoEntriesInOneSessionCloseBothProposeAgainstOnlyCommittedExposure(t *testing.T) {
+	t.Parallel()
+
+	// Instrument cap and group cap generous: only the total-long cap, set
+	// to 1, is under test.
+	cfg := compactChannelConfig(1_000_000, 1_000_000, 1_000_000, 1)
+	barsM := compactEntryBars("MMM", 0)
+	barsN := compactEntryBars("NNN", 0)
+
+	emitted := newStream(t, cfg).lockstep(barsM, barsN).mustRun()
+
+	proposals := envelopesOfType(emitted, event.TradeProposalEventType)
+	if len(proposals) != 2 {
+		t.Fatalf("got %d trade proposal(s), want exactly 2: a total-long cap of 1 does not stop a SECOND proposal decided in the same session-close pass, only a fill-backed Campaign already open before it", len(proposals))
+	}
+	if got := envelopesOfType(emitted, event.ProposalDeclinedEventType); len(got) != 0 {
+		t.Fatalf("got %d decline(s), want 0: neither proposal has been filled, so neither is committed exposure the other's cap check can see", len(got))
+	}
+	gotInstruments := make(map[string]bool, 2)
+	for _, p := range proposals {
+		payload := decodeTradeProposal(t, p)
+		if err := payload.Validate(); err != nil {
+			t.Errorf("proposal for %q fails its own Validate(): %v", payload.InstrumentID, err)
+		}
+		gotInstruments[payload.InstrumentID] = true
+	}
+	if !gotInstruments["MMM"] || !gotInstruments["NNN"] {
+		t.Fatalf("proposed instruments = %v, want both MMM and NNN", gotInstruments)
 	}
 }

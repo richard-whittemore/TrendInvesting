@@ -124,17 +124,38 @@ func newConfiguredReducerForInvariantTest(t *testing.T) *Reducer {
 // the invariant check under test did NOT stop the run, the rest of
 // applyCompletedBar would proceed without erroring for an unrelated reason
 // (which would make a passing test ambiguous about what it actually
-// checked).
+// checked). High 101 is safe for the halt-path tests, none of which reach
+// evaluateCampaign at all: see invariantTestBarEnvelopeAt for the two
+// "does not halt" tests, which must not let their high clear an Add Ladder
+// rung.
 func invariantTestBarEnvelope(t *testing.T, sequence uint64, instrumentID string, periodEnd time.Time) event.Envelope {
+	t.Helper()
+	return invariantTestBarEnvelopeAt(t, sequence, instrumentID, periodEnd, 101)
+}
+
+// invariantTestBarEnvelopeAt is invariantTestBarEnvelope with an explicit
+// high. buildCorruptedCampaignState freezes fillPrice 100 and campaignN 1,
+// so the Campaign's next Add Ladder rung (sizing.NextAddLevel) is 100.5:
+// TestCampaignWithAValidProtectiveStopDoesNotHalt and
+// TestCampaignWithAStopAtOrAboveEntryDoesNotHalt proceed far enough to
+// evaluate that open Campaign (unlike the halt-path tests, which stop
+// before doing so), so their own bar must stay AT OR BELOW the rung — high
+// 100, not 101 — so their exact single Campaign-evaluated assertion holds
+// because no Add opportunity was reached, not merely because the reducer
+// happens not to evaluate Adds at bar time today (ADR 0021: Adds are
+// decided at Session close, and this fixture sends no session close at
+// all). Keeping the fixture itself unreachable-by-construction is what
+// makes the assertion robust to that detail changing.
+func invariantTestBarEnvelopeAt(t *testing.T, sequence uint64, instrumentID string, periodEnd time.Time, high float64) event.Envelope {
 	t.Helper()
 	bar := event.CompletedBarPayload{
 		InstrumentID: instrumentID,
 		PeriodEnd:    periodEnd,
 		SplitAdjusted: event.PriceView{
-			View: event.ViewSplitAdjusted, Open: 100, High: 101, Low: 99, Close: 100, Volume: 1_000_000,
+			View: event.ViewSplitAdjusted, Open: 100, High: high, Low: 99, Close: 100, Volume: 1_000_000,
 		},
 		Raw: event.PriceView{
-			View: event.ViewRaw, Open: 100, High: 101, Low: 99, Close: 100, Volume: 1_000_000,
+			View: event.ViewRaw, Open: 100, High: high, Low: 99, Close: 100, Volume: 1_000_000,
 		},
 	}
 	payload, err := json.Marshal(bar)
@@ -355,7 +376,7 @@ func TestCampaignWithAValidProtectiveStopDoesNotHalt(t *testing.T) {
 	r := newConfiguredReducerForInvariantTest(t)
 	instrumentID := buildCorruptedCampaignState(t, r, 75) // below the fixture's entryPrice of 100
 
-	bar := invariantTestBarEnvelope(t, 1, instrumentID, day(2))
+	bar := invariantTestBarEnvelopeAt(t, 1, instrumentID, day(2), 100)
 	emissions, err := r.Apply(context.Background(), bar)
 	if err != nil {
 		t.Fatalf("Apply() error = %v, want nil for a campaign with a legitimate protective stop", err)
@@ -420,7 +441,7 @@ func TestCampaignWithAStopAtOrAboveEntryDoesNotHalt(t *testing.T) {
 			r := newConfiguredReducerForInvariantTest(t)
 			instrumentID := buildCorruptedCampaignState(t, r, tt.protectiveStop)
 
-			bar := invariantTestBarEnvelope(t, 1, instrumentID, day(2))
+			bar := invariantTestBarEnvelopeAt(t, 1, instrumentID, day(2), 100)
 			emissions, err := r.Apply(context.Background(), bar)
 			if err != nil {
 				t.Fatalf("Apply() error = %v, want nil: a stop at or above entry is a legitimate risk-free position, not an invariant violation", err)
