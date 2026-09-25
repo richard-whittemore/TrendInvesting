@@ -62,9 +62,9 @@ class Publisher:
     refusal, if given, is asked there before each input is sent: while it
     returns a reason, no input of any type is sent and Refused is raised for
     the caller to stop the run. The algorithm answers with the adapter's
-    ADR 0005 fill model's recorded failure (orders.adr_0005_fill_model),
-    which LEAN can record at any point in a slice, whenever it rescans the
-    working orders after one is placed or amended.
+    ADR 0005 fill or ADR 0013 slippage model's recorded failure, which LEAN
+    can record at any point in a slice, whenever it rescans the working
+    orders after one is placed or amended.
     """
     def __init__(self, client, configuration_hash, strategy_version, run_id, refusal=None):
         if not all((configuration_hash, strategy_version, run_id)):

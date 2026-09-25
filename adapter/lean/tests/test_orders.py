@@ -906,10 +906,12 @@ class SlippageTests(OrderTestCase):
         self.assertAlmostEqual(self.slip(algo, placed["id"]), 0.05 * 2.5)
         self.assertAlmostEqual(self.slip(algo, raised["id"]), 0.05 * 2.5)
 
-    def test_an_order_without_a_supplied_n_is_never_slipped_by_zero(self):
+    def test_an_order_without_a_supplied_n_records_a_failure_and_stops_the_run(self):
         algo = self.start()
-        with self.assertRaises(ValueError):
-            self.slip(algo, "an order this adapter never placed")
+        self.slip(algo, "an order this adapter never placed")
+        self.assertIn("no N was supplied", algo.security.slippage_model.failure)
+        self.assertFalse(algo.fill_model_sound())
+        self.assertTrue(algo.failed)
 
     def test_commission_uses_leans_interactive_brokers_fee_model(self):
         algo = self.start()
