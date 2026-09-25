@@ -160,6 +160,57 @@ class ClientTests(unittest.TestCase):
         client.close()
         th.join()
 
+    def test_a_slow_engine_times_out_and_the_connection_is_abandoned(self):
+        """Issue #31's 'timeout' case (ADR 0014's measured failure table:
+        'Slow engine, adapter's deadline first' -> safe mode). The server
+        accepts the connection but never answers; the client's own deadline
+        fires first, raising Unavailable rather than blocking forever, and
+        the connection is abandoned exactly like any other failed exchange:
+        it is never reused for a later input."""
+        released = threading.Event()
+
+        def handler(conn):
+            conn.recv(4096)
+            released.wait(2.0)
+            conn.close()
+
+        th = self._serve_one(handler)
+        client = Client(self.sock_path, timeout=0.1)
+        try:
+            with self.assertRaises(Unavailable) as cm:
+                client.decide({"id": "bar-2", "sequence": 2})
+            self.assertIn("deadline", str(cm.exception))
+            self.assertTrue(client._broken)
+            with self.assertRaises(Unavailable) as cm:
+                client.decide({"id": "bar-3", "sequence": 3})
+            self.assertIn("abandoned", str(cm.exception))
+        finally:
+            released.set()
+            client.close()
+            th.join()
+
+    def test_undecodable_json_reply_fails_closed_without_reuse(self):
+        """A corrupted reply (issue #31: 'corrupted payload') is refused with
+        a clear, typed error, never a bare json.JSONDecodeError, and the
+        connection is abandoned exactly as any other failed exchange is: the
+        next call is refused too, never silently retried on the same
+        connection (ADR 0014)."""
+        def handler(conn):
+            conn.recv(4096)
+            conn.sendall(b"not json at all\n")
+
+        th = self._serve_one(handler)
+        client = Client(self.sock_path, timeout=2.0)
+        with self.assertRaises(Unavailable) as cm:
+            client.decide({"id": "bar-2", "sequence": 2})
+        self.assertIn("not valid JSON", str(cm.exception))
+        self.assertTrue(client._broken)
+        with self.assertRaises(Unavailable) as cm:
+            client.decide({"id": "bar-3", "sequence": 3})
+        self.assertIn("abandoned", str(cm.exception))
+        client.close()
+        th.join()
+
     def test_oversized_request_rejected_locally(self):
         client = Client.__new__(Client)
         client.max_frame_bytes = 100

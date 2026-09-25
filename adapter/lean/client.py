@@ -105,7 +105,15 @@ class Client:
             self.close()
             raise Unavailable("connection failed: {}".format(err)) from err
 
-        reply = json.loads(line)
+        try:
+            reply = json.loads(line)
+        except ValueError as err:
+            # A corrupted reply is exactly as unusable as no reply: fail
+            # closed with a clear, typed error rather than letting a bare
+            # json.JSONDecodeError propagate (docs/architecture.md: "when
+            # state is uncertain, no new orders"). decide() below marks the
+            # connection broken either way, so this frame is never retried.
+            raise Unavailable("reply is not valid JSON: {}".format(err)) from err
         error = reply.get("error")
         if error is not None:
             causation = error.get("causation_id", "")
