@@ -271,11 +271,18 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         reports those too, so the queue is drained until it is empty. A fill
         is sent as execution.fill and every other change as
         execution.order.lifecycle. Any failure stops the run.
+
+        The fill model's soundness is checked before each report is sent, at
+        every drain: LEAN rescans every working order after one is placed or
+        amended, so the model can record a failure mid-slice, after the
+        check at the start of OnData, while that same scan's other reports
+        wait here. None of them may reach the engine (fail closed;
+        orders.adr_0005_fill_model).
         """
         try:
-            while self.order_events and not self.failed:
+            while self.order_events and not self.failed and self.fill_model_sound():
                 pending, self.order_events = self.order_events, []
-                while pending and not self.failed:
+                while pending and not self.failed and self.fill_model_sound():
                     record = pending.pop(0)
                     if not self.desk.is_execution(record):
                         self.publish_order_lifecycle(record)

@@ -1377,6 +1377,36 @@ class FillReturnTests(OrderTestCase):
         self.assertEqual(self.types_sent(algo, sent), [])
         self.assert_stopped_after(algo, sent)
 
+    def test_a_fill_model_failure_recorded_mid_slice_stops_the_run_before_any_queued_report(self):
+        # LEAN rescans every working order after an order is placed or
+        # amended, so the fill model can record a failure after the check at
+        # the start of OnData and while other reports of that same scan are
+        # queued. Every drain checks first: neither the queued fill nor the
+        # placement's own report reaches the engine.
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9)])
+        [entry] = self.tickets(algo)
+        original_act = algo.desk.act
+        state = {"sent": None}
+
+        def act(decisions, *args, **kwargs):
+            result = original_act(decisions, *args, **kwargs)
+            if decisions and state["sent"] is None:
+                # The slice's decisions placed an order; LEAN's rescan then
+                # filled another and the fill model failed on a third.
+                state["sent"] = len(algo.client.sent)
+                algo.fill_model.failure = "LEAN order 9 (tag=x) could not be priced"
+                self.fill(algo, entry, 10, 24.56)
+            return result
+
+        algo.desk.act = act
+        self.feed(algo, 10, [trade_proposal(10)])
+        self.assertIsNotNone(state["sent"])
+        self.assertTrue(algo.failed)
+        self.assertIn("could not be priced", algo.quit_reason)
+        self.assertEqual([t for t in self.types_sent(algo, state["sent"])
+                          if t.startswith("execution.")], [])
+
     def test_a_fill_model_failure_in_the_last_slice_stops_the_run_at_its_end(self):
         algo = self.start()
         self.feed(algo, 9, [trade_proposal(9)])

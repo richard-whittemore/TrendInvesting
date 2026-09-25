@@ -573,8 +573,10 @@ returns an `OrderEvent`:
   instead records the first thing it cannot price (a non-positive or
   non-finite price, a cap below the stop, a bar whose high is below its low,
   an order with no N) in `failure` and leaves the order unfilled, and
-  `algorithm.py` stops the run on it at the start of `OnData`, in the same
-  time step and before any of that slice's fills reaches the engine.
+  `algorithm.py` stops the run on it before any queued report is sent: at
+  the start of `OnData`, before each report at every drain (LEAN rescans
+  every working order after one is placed or amended, so a failure can be
+  recorded mid-slice), and at the end of the run.
 
 **Two implementations, kept in step.** `internal/fills.ExecuteStopLimit`
 and the adapter's `stop_limit_buy_fill_price` are two implementations of
