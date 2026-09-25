@@ -189,11 +189,15 @@ class FakeTransactions:
             ticket.Quantity = round(ticket.Quantity / factor)
             ticket.StopPrice = round(round(ticket.StopPrice * factor / tick) * tick, 10)
             if ticket.LimitPrice is not None:
-                # Assumed, by analogy with the stop: a stop-limit's limit is
-                # split the same way. Not observed on the pinned image.
-                # limit_rounding picks the direction (round, math.floor or
-                # math.ceil): LEAN rounds a split limit to the tick, and it
-                # can land either side of the engine's cap.
+                # Confirmed by a probe on the pinned image (adapter README,
+                # "Observed LEAN behaviour"): a stop-limit's limit is split
+                # the same way as its stop, multiplied by the factor and
+                # rounded to the cent in the same report. limit_rounding
+                # picks the direction (round, math.floor or math.ceil): the
+                # probe's own factor happened to round up both times, but the
+                # exact tie-break for a value landing precisely on a
+                # half-cent was not observed, so the code defends both ways
+                # the rounding can land relative to the engine's cap.
                 ticket.LimitPrice = round(limit_rounding(round(ticket.LimitPrice * factor / tick, 9)) * tick, 10)
             self.emit(ticket, "update-submitted")
 
@@ -274,9 +278,10 @@ class FakeAlgorithm:
     MarketOrder = LimitOrder = MarketOnOpenOrder = _order
     def StopLimitOrder(self, symbol, quantity, stop_price, limit_price, asynchronous=False,
                        tag="", order_properties=None):
-        """LEAN's stop-limit entry point, taken to follow StopMarketOrder's
-        observed signature with the limit after the stop (adapter README:
-        unconfirmed on the pinned image)."""
+        """LEAN's stop-limit entry point: (symbol, quantity, stop_price,
+        limit_price, asynchronous, tag, order_properties), confirmed by a
+        probe on the pinned image (adapter README, "Observed LEAN
+        behaviour")."""
         if type(asynchronous) is not bool:
             raise TypeError("stop_limit_order: argument 5 ('asynchronous') expected bool, "
                             "got {}".format(type(asynchronous).__name__))

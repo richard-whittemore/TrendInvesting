@@ -222,19 +222,54 @@ def fill_model_report(slippage_n):
         "working assumption, not a settled choice.",
         "partial fills: a partial fill stops the run. The engine accepts one fill per order "
         "and does not accumulate partial fills into one Unit yet.",
-        "price cap (ADR 0005, as amended 2026-09-24): UNCONFIRMED, not yet observed on the "
-        "pinned image. A proposal carrying a price cap becomes a LEAN StopLimitOrder, stop at "
-        "the level and limit at the cap, rounded down to the tick so LEAN's limit never exceeds "
-        "the engine's cap. ADR 0005 fills a triggered stop-limit at max(level, open) when that "
-        "is within the cap, at the cap itself when the bar opened above it and traded back down "
-        "to it, and not at all otherwise, always plus slippage. LEAN's own stop-limit fill model "
-        "is believed, from its source rather than any observation, to trigger only when the "
-        "bar's high exceeds the stop, to fill only if the bar's close is below the limit, at "
-        "the lower of the bar's high and the limit, and to charge no slippage on a limit fill, "
-        "in which case the fill reports a slippage of zero. If so, LEAN skips gaps ADR 0005 "
-        "fills, fills some at a different price, and never costs more than the limit; each of "
-        "these must be observed before any paper-trading gate. The stop-limit signature "
-        "(symbol, quantity, stop, limit, asynchronous, tag, properties) is likewise unconfirmed.",
+        "price cap (ADR 0005, as amended 2026-09-24): confirmed by a StopLimitOrder probe on "
+        "the pinned image (AAPL daily bars, 2-11 January 2013, and the 2005-02-28 split). The "
+        "signature is StopLimitOrder(symbol, quantity, stop_price, limit_price, asynchronous, "
+        "tag, order_properties), exactly as placed, limit rounded down to the tick so LEAN's "
+        "limit never exceeds the engine's cap. LEAN's own fill model differs from ADR 0005's "
+        "max(level, open)-within-the-cap, cap-with-trade-back rule: the stop triggers only when "
+        "a bar's high exceeds it, strictly (an exact touch does not trigger, unlike a "
+        "stop-market order's, observed a cent either side of a bar's exact high). Once "
+        "triggered, the order stays triggered, and fills on the first bar from there onward "
+        "whose low is at or below the limit: at that bar's open when the bar is not the one "
+        "that triggered it and the open is at or below the limit (a favorable gap, logged as "
+        "such), otherwise at min(high, limit). So on the triggering bar itself, gap or no gap, "
+        "the fill is min(high, limit) whenever the bar's low reaches the limit: an ordinary "
+        "inside-the-bar trigger with no gap at all still fills at the bar's high bounded by the "
+        "limit, not at the stop's own level cmd/backtest would use, and a gap that trades back "
+        "to the limit fills at the limit, matching ADR 0005's rule 3. A bar whose low never "
+        "reaches the limit leaves the order resting, unfilled and still armed for the next bar; "
+        "the adapter's own one-session proposal window (two for a fill-chained Add) cancels an "
+        "ordinary entry's or Add's order before that matters, but a chained Add's second "
+        "session is exactly this later-bar case. No slippage is applied to a stop-limit fill of "
+        "either kind: slippage_applied is always zero, where ADR 0013 requires it on every "
+        "fill. Execution price is bounded by the limit in every case observed: min(high, limit) "
+        "and a favorable-gap open at or below it are both, structurally, at or below the limit. "
+        "Total cost is a separate claim: LEAN's InteractiveBrokersFeeModel charges a $1.00 "
+        "minimum per order where the hold reserved ADR 0013's schedule (the account paragraph "
+        "above, the fee-model gap #81 tracks), and the price cap does not close that gap, only "
+        "the price side of it -- so a fill never costs more than the hold reserved (ADR 0020) "
+        "up to that same fee-model difference, not exactly, and the mechanism is not ADR 0005's "
+        "regardless: a LEAN acceptance run's entries and Adds should be expected to price "
+        "differently, sometimes materially, from cmd/backtest's for the same signal. The "
+        "adapter itself now refuses, rather than trusts, a fill LEAN reports above its own "
+        "LimitPrice: Uncertain, naming the order, the fill price and the limit. "
+        "The k = 0 edge case (limit equal to stop after tick flooring) matches ADR 0005's "
+        "pre-slippage price only for a fill LEAN makes on the triggering bar itself: "
+        "min(high, limit) reduces to the stop whenever the order fires that bar, gap or no gap. "
+        "That is not exact agreement, in three respects: an exact touch (high equal to both "
+        "stop and limit) fills under ADR 0005 but does not trigger under LEAN at all (the touch "
+        "row above); ADR 0005 adds slippage to that price where LEAN adds none, so the actual "
+        "filled prices never agree; and an order still armed into a later session -- a "
+        "fill-chained Add's second session, most plausibly -- can fill on a favorable gap open "
+        "below the shared level, a price ADR 0005 never produces, because it prices a buy at "
+        "max(level, open), never below the level, even in a fill-chained Add's second session "
+        "(ADR 0011, as amended): a 500/500 order that opens the next session at 490 fills at "
+        "490 under LEAN; under ADR 0005 it fills at 500 plus slippage only if that session's "
+        "high reaches 500, and otherwise does not fill at all. A split "
+        "adjusts the limit exactly as it adjusts its stop: both are multiplied by the split "
+        "factor and rounded to the cent in the one UpdateSubmitted report that adjusts the "
+        "quantity too.",
     ]
 
 
@@ -1080,6 +1115,7 @@ class OrderDesk:
         tickets = self._tickets(lambda t: t.OrderId == order_event.OrderId)
         fee = order_event.OrderFee.Value
         stop_price = order_event.StopPrice
+        limit_price = order_event.LimitPrice
         return {
             "order_id": order_event.OrderId,
             "event_id": order_event.Id,
@@ -1092,6 +1128,9 @@ class OrderDesk:
             "fee": fee.Amount,
             "fee_currency": fee.Currency,
             "stop_price": None if stop_price is None else float(stop_price),
+            # None for a stop-market order's fill; a stop-limit's own limit,
+            # raw, as LEAN reports it on the fill (fills' price-cap guard).
+            "limit_price": None if limit_price is None else float(limit_price),
             "message": order_event.Message or "",
         }
 
@@ -1204,6 +1243,23 @@ class OrderDesk:
                 raise Uncertain("LEAN reports order {} (tag={}) filled {} shares, but it is the "
                                 "adapter's {} order".format(record["order_id"], record["tag"],
                                                             quantity, placed["kind"]))
+            if buy and placed.get("price_cap") is not None:
+                # A stop-limit's price cap is the most the hold reserved (ADR
+                # 0005 and ADR 0020, as amended 2026-09-24); a fill above
+                # LEAN's own LimitPrice, raw, means LEAN's engine and this
+                # adapter's understanding of its own fill model disagree, so
+                # the run stops rather than accept a fill the hold did not
+                # cover. Compared against LEAN's LimitPrice as it reports it
+                # on the fill, not the engine's price_cap, since a
+                # tick-floored or post-split limit can differ from it by
+                # design (floor_to_tick, _split_limit_problems).
+                limit_price = record.get("limit_price")
+                if limit_price is not None and price > limit_price + 1e-9:
+                    raise Uncertain(
+                        "LEAN reports order {} (tag={}) filled at {} raw, above its own limit "
+                        "of {} raw; a stop-limit fill can never cost more than its cap, so this "
+                        "fill is not sent to the engine".format(
+                            record["order_id"], record["tag"], price, limit_price))
             self.algorithm.Log("adapter: LEAN filled order {} (tag={}): {} raw shares @ {} raw, "
                                "commission {} {} (split ratio {})".format(
                                    record["order_id"], record["tag"], quantity, price, fee,
