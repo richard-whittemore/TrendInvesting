@@ -9,9 +9,12 @@ see **Price views and raw accounting** below), continuing the Go engine's own in
 package doc, "Wire contract: the adapter's first bar must carry Sequence 2").
 Each slice's bars are a Session (ADR 0021): after them the adapter sends
 `market.session.closed`, naming those bars' instruments, in that same single
-sequence: configuration 1, bar 2, session close 3, then the *previous*
-Session's `account.snapshot` at the head of the next slice, before its own
-bar — 4, bar 5 — and so on, including warm-up. The snapshot is not sent
+sequence. For example, in a run with no fills or order reports: configuration 1,
+bar 2, session close 3, then the *previous* Session's `account.snapshot` at the
+head of the next slice, before its own bar — 4, bar 5 — and so on, including
+warm-up. Fills and order-change reports drained at the start of a slice take
+the next numbers before that slice's snapshot and bar, so only the relative
+order is fixed, not the numbers. The snapshot is not sent
 inside the slice that closes the Session it reports: it is computed there and
 held, then sent at the start of the following slice, before that slice's own
 bar (`flush_snapshot`; see **Where each input falls** below for why). Once

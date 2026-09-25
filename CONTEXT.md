@@ -64,7 +64,7 @@ The one sell order a held Unit rests, for that Unit's own shares: at its **Prote
 _Avoid_: exit proposal (the Campaign-level decision to exit, one of the two inputs), stop order.
 
 **Order lifecycle report**:
-A venue's account of a state change to a resting order that is not an execution: acknowledged, amended, pending cancellation, cancelled, or refused (ADR 0022). It moves no position — the only event that may is a **fill** — and the engine records it without deciding anything from it; it exists so reconciliation (ADR 0019) can tell an ordinary cancel-and-replace from an unexplained difference in the broker's own order book.
+A venue's account of a change in an order's lifecycle that is not an execution: acknowledged, amended, pending cancellation, cancelled, or refused, including an order the venue refused before it ever rested (ADR 0022). It moves no position — the only event that may is a **fill** — and the engine records it without deciding anything from it; it exists so reconciliation (ADR 0019) can tell an ordinary cancel-and-replace from an unexplained difference in the broker's own order book.
 _Avoid_: fill, execution (both change a position; a lifecycle report never does).
 
 **risk-free**:

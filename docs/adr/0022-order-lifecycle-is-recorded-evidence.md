@@ -6,7 +6,7 @@
 
 ## Context
 
-`docs/architecture.md`'s invariant is that positions, Protective Stops and pyramid state change only from a recorded fill. But a venue reports more about a resting order than whether it filled: it acknowledges a submission, confirms an amendment, moves a cancellation through its own pending state, confirms the cancellation, or refuses the order outright. None of those five moves a position, and none of them is a fill.
+`docs/architecture.md`'s invariant is that positions, Protective Stops and pyramid state change only from a recorded fill. But a venue reports more about an order than whether it filled: it acknowledges a submission, confirms an amendment, moves a cancellation through its own pending state, confirms the cancellation, or refuses the order outright. None of those five moves a position, and none of them is a fill.
 
 ADR 0019 needs every one of them anyway. Its expected-open-orders comparison is built "from journalled acknowledgements and lifecycle events, not unsubmitted proposals", and an "acknowledged, journalled lifecycle transition can explain" a change reconciliation would otherwise flag as unexplained — a cancellation this system asked for, an amendment it made, an order the venue refused before it ever worked. Without a journalled record of those events, reconciliation could not tell "the venue did what we asked" from "something changed that we cannot explain", and every ordinary cancel-and-replace would look identical to a discrepancy.
 
@@ -16,7 +16,7 @@ ADR 0019 needs every one of them anyway. Its expected-open-orders comparison is 
 
 ### The closed status set
 
-`OrderLifecyclePayload.Status` is one of exactly five values, matching the five ways a resting order can change without executing:
+`OrderLifecyclePayload.Status` is one of exactly five values, matching the five ways an order's lifecycle can change without executing, including a refusal before it ever rests:
 
 | Status | Meaning |
 | --- | --- |
@@ -32,11 +32,11 @@ This is the set of state changes ADR 0019's reconciliation names as explaining a
 
 `applyOrderLifecycle` reads the payload, validates it, and returns `(nil, nil)`: no decision, no state change. This is deliberate, not an omission pending a future ticket. `docs/architecture.md`'s own invariant — "positions, protective stops, and pyramid state change only from recorded brokerage events", and the only such event that may move a position is a fill — already answers what a lifecycle report may do to a Campaign: nothing. `OrderLifecycleEventType` exists as a type distinct from `FillEventType` specifically so that no reducer code path and no reader of a journal can mistake an acknowledgement or a cancellation for an execution; folding lifecycle changes into a status field on the fill event, the alternative considered below, would have reopened exactly that confusion.
 
-What it validates is still real: instrument, order and tag are required (tag is the join back to the decision the order carries — the proposal or the `strategy.exit-order.set` in force), quantity must be non-zero, the stop price must be finite and positive (ADR 0005: every order this system places rests at a stated level), and the status must be one of the five above. A payload that fails any of these is not journalled as a lifecycle report, because a report recorded under the wrong meaning would mislead the reconciliation that later reads it — the same fail-closed discipline `docs/development.md` principle 4 states generally, applied here to a record whose only job is to be trusted evidence.
+What it validates is still real: instrument, order and tag are required (tag is the join back to the decision the order carries — the proposal or the `strategy.exit-order.set` in force), quantity must be non-zero, the stop price must be finite and positive (ADR 0005: every order this system places rests at a stated level), the occurrence time must be present (non-zero) and writable as RFC 3339, and the status must be one of the five above. A payload that fails any of these is not journalled as a lifecycle report, because a report recorded under the wrong meaning would mislead the reconciliation that later reads it — the same fail-closed discipline `docs/development.md` principle 4 states generally, applied here to a record whose only job is to be trusted evidence.
 
 ### Any other status stops the run
 
-`Reducer.Apply`'s dispatch fails closed on any event type it does not recognise (`docs/development.md` principle 4, restated in `Apply`'s own doc comment: "Any other event type fails closed rather than being silently ignored"). `applyOrderLifecycle` applies the identical discipline one level down, inside a type it does recognise: a `Status` outside the closed set fails `Validate`, `applyOrderLifecycle` returns that error unchanged, and — exactly as for a malformed bar, a schema-version mismatch, or any other input the reducer refuses — the run stops rather than absorbing an order-lifecycle report it cannot classify. Silently defaulting an unrecognised status to the nearest known one, or dropping it while continuing the run, would let reconciliation reason about an order book from a record that quietly omitted or misstated one of its changes — the one kind of gap ADR 0019 exists to make impossible.
+`Reducer.Apply`'s dispatch fails closed on any event type it does not recognise (`docs/development.md` principle 4, restated in `Apply`'s own doc comment: "Any other event type fails closed rather than being silently ignored"). `applyOrderLifecycle` applies the identical discipline one level down, inside a type it does recognise: a `Status` outside the closed set fails `Validate`, `applyOrderLifecycle` returns that error wrapped with a `strategy:` prefix (the wrapper changes only the message, not the fail-closed outcome), and — exactly as for a malformed bar, a schema-version mismatch, or any other input the reducer refuses — the run stops rather than absorbing an order-lifecycle report it cannot classify. Silently defaulting an unrecognised status to the nearest known one, or dropping it while continuing the run, would let reconciliation reason about an order book from a record that quietly omitted or misstated one of its changes — the one kind of gap ADR 0019 exists to make impossible.
 
 ### Why an input, not a decision
 
@@ -54,4 +54,4 @@ ADR 0017 draws the journal's own closed line between the two: `kind` is `input` 
 - `internal/strategy.applyOrderLifecycle` needs no further work to satisfy this ADR; it already validates and records without deciding, and already fails closed on an unrecognised status. This ADR documents that behaviour rather than changing it.
 - Reconciliation (ADR 0019, still design-only) can rely on `execution.order.lifecycle` being present in the journal for every acknowledgement, amendment, cancellation and refusal a venue reports, in the order it reported them, as one of the "journalled acknowledgements and lifecycle events" its expected-open-orders comparison already assumes.
 - A future venue-specific status this build does not recognise is a schema or contract question (ADR 0015), not something a producer or the reducer may paper over locally.
-- **Glossary.** CONTEXT.md gains **Order lifecycle report**: a venue's account of a state change to a resting order that is not an execution.
+- **Glossary.** CONTEXT.md gains **Order lifecycle report**: a venue's account of a change in an order's lifecycle that is not an execution, including a refusal before the order ever rests.
