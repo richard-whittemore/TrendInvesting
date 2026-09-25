@@ -41,7 +41,7 @@ import (
 // "N event types" success line); raise it if internal/event genuinely grows,
 // but a value observed to DROP below it is a parser bug to fix first, not a
 // classification list to edit.
-const minimumDiscoveredEventTypes = 29
+const minimumDiscoveredEventTypes = 32
 
 // wireCovered is every event type this build's LEAN adapter fixtures are
 // meant to exercise — sent by the adapter, acted on when received, or
@@ -96,6 +96,17 @@ var notYetCrossed = map[string]string{
 	"strategy.configuration": "cmd/engine/engine.go's configurationEnvelope, not the adapter",
 	// adapter/lean/README.md's own "will still need to" list.
 	"account.cash-movement": "adapter/lean/README.md: \"send account.cash-movement events\" (outside #158)",
+	// ADR 0009's universe port is fixture-backed only so far: a
+	// provider-backed implementation, which would need the LEAN adapter to
+	// actually send this fact, is separate, later work. A fixture here would
+	// be fiction rather than evidence of anything the adapter does today.
+	"market.instrument-classification": "no provider-backed universe port yet; the adapter never sends this fact",
+	// The adapter never acts on this decision (SCHEMA_VERSIONS omits it, like
+	// every other decision orders.py ignores), but a fixture proving that
+	// would need the same provider-backed wiring the classification fact
+	// above does, so it stays here alongside it rather than moving to
+	// wireCovered's "ignored decision" group on its own.
+	"strategy.universe.eligibility": "no provider-backed universe port yet; the adapter never receives this decision",
 }
 
 func main() {

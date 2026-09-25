@@ -64,6 +64,7 @@ func (r *Reducer) begin() *transition {
 	}
 	tx.notionalAccount = copyValue(r.notionalAccount)
 	tx.delisted = maps.Clone(r.delisted)
+	tx.classifications = maps.Clone(r.classifications)
 	tx.fillDebits = slices.Clone(r.fillDebits)
 	tx.holds = slices.Clone(r.holds)
 	tx.sessionDelistedBars = slices.Clone(r.sessionDelistedBars)

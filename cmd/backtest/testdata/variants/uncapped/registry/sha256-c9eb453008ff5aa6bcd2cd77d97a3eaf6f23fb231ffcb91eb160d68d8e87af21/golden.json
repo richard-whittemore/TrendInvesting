@@ -1,10 +1,10 @@
 {
   "registry_version": 1,
-  "configuration_hash": "sha256:7bab5791560ada23bb0eb8c6827fbcd59217e3f1874e7d9dc9f84dd831a89c48",
+  "configuration_hash": "sha256:c9eb453008ff5aa6bcd2cd77d97a3eaf6f23fb231ffcb91eb160d68d8e87af21",
   "run_id": "golden",
   "variant": "uncapped",
   "status": "completed",
-  "strategy_version": "uncapped/1.13.0+test",
+  "strategy_version": "uncapped/1.14.0+test",
   "span_start": "2026-01-02T00:00:00Z",
   "span_end": "2026-02-02T00:00:00Z",
   "configuration": {
@@ -33,12 +33,15 @@
       "maximum_fraction_of_trade_value": 0.01
     },
     "buy_order_type": "stop-market",
-    "gap_buffer_n": 0
+    "gap_buffer_n": 0,
+    "universe_min_price": 0,
+    "universe_min_dollar_volume": 0,
+    "universe_min_history_bars": 0
   },
   "artefacts": {
     "journal_path": "../journal.golden.jsonl",
     "record_count": 322,
-    "final_record_hash": "sha256:ad853d1f7949a37b6547432885ffa7d402e341770172461d01fd3b61e901d86f"
+    "final_record_hash": "sha256:f1e7ee5b891493a79e66ca564fd6df4486dc12c86fe054b3a142e9d2793f1410"
   },
   "detail": ""
 }

@@ -47,7 +47,19 @@ const ConfigurationEventType = "strategy.configuration"
 //     stop-market order. An older record decodes BuyOrderType as the empty
 //     string, which is not a recognised order type, so it is rejected
 //     outright rather than silently read as either.
-const ConfigurationSchemaVersion uint32 = 6
+//   - Version 7 added UniverseMinPrice, UniverseMinDollarVolume and
+//     UniverseMinHistoryBars (ADR 0009): the Baseline universe's three
+//     numeric thresholds, every one of them a parameter. Unlike every
+//     addition above, an older record's zero for all three is accepted, not
+//     rejected: ADR 0009's own Consequences call the thresholds
+//     "sensitivity-tested," so zero is a legitimate declared Variant (no
+//     floor at all), not a signal of an unconfigured field — and, because
+//     the universe evaluation these thresholds feed only ever runs for an
+//     instrument this run's universe port has actually classified
+//     (internal/strategy: Reducer.classifications), a record that predates
+//     this field and classifies nothing is unaffected regardless of what
+//     these three decode to.
+const ConfigurationSchemaVersion uint32 = 7
 
 // OrderType is the order an entry or Add rests as (ADR 0005, as amended
 // 2026-09-24). It is carried by the configuration (BuyOrderType) and by every
@@ -222,6 +234,20 @@ type ConfigurationPayload struct {
 	// figure nothing in the arithmetic honours, the confusion
 	// RiskAtStopFraction's own rule exists to prevent.
 	GapBufferN float64 `json:"gap_buffer_n"`
+	// UniverseMinPrice, UniverseMinDollarVolume and UniverseMinHistoryBars
+	// are ADR 0009's Baseline universe thresholds, read alongside the
+	// classification criterion by internal/universe.Evaluate: at least $5
+	// raw close (ADR 0004, as amended), at least $5,000,000 20-day median
+	// dollar volume (the raw view, indicator.MedianDollarVolume — the same
+	// definition ADR 0010's ranking tie-break reads), and at least 250
+	// completed bars of history, in the Baseline. Every threshold is a
+	// parameter and may legitimately be zero (a declared Variant with no
+	// floor at all) — see ConfigurationSchemaVersion's own version-7 note
+	// for why zero is accepted rather than rejected here, unlike every
+	// other numeric field this payload requires positive.
+	UniverseMinPrice        float64 `json:"universe_min_price"`
+	UniverseMinDollarVolume float64 `json:"universe_min_dollar_volume"`
+	UniverseMinHistoryBars  int     `json:"universe_min_history_bars"`
 }
 
 // Validate checks that every Baseline parameter is present and in range. A
@@ -365,6 +391,25 @@ func (c ConfigurationPayload) Validate() error {
 		errs = append(errs, errors.New("commission maximum fraction of trade value must be greater than zero and at most one; a zero cap would charge nothing on every order, and is what a configuration recorded before the commission model existed decodes to"))
 	}
 	errs = append(errs, validateGapBuffer(c.BuyOrderType, c.GapBufferN)...)
+	// ADR 0009's three universe thresholds: finite and not negative. Unlike
+	// most other fields above, zero is a legitimate value here, not
+	// rejected — see UniverseMinPrice's own field comment and
+	// ConfigurationSchemaVersion's version-7 note for why.
+	switch {
+	case !isFinite(c.UniverseMinPrice):
+		errs = append(errs, errors.New("universe min price must be finite"))
+	case c.UniverseMinPrice < 0:
+		errs = append(errs, errors.New("universe min price must not be negative"))
+	}
+	switch {
+	case !isFinite(c.UniverseMinDollarVolume):
+		errs = append(errs, errors.New("universe min dollar volume must be finite"))
+	case c.UniverseMinDollarVolume < 0:
+		errs = append(errs, errors.New("universe min dollar volume must not be negative"))
+	}
+	if c.UniverseMinHistoryBars < 0 {
+		errs = append(errs, errors.New("universe min history bars must not be negative"))
+	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid configuration payload: %w", err)
 	}

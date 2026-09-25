@@ -125,6 +125,17 @@ func (r *transition) applySessionClosed(envelope event.Envelope) ([]event.Envelo
 	}
 
 	var emissions []event.Envelope
+
+	// ADR 0009's monthly, point-in-time universe evaluation: recorded before
+	// this Session's Adds and entries are decided, so a Signal ranked or
+	// declined below already reflects it. It never touches an open
+	// Campaign — see universe.go's own doc comment.
+	universeEmissions, err := r.evaluateUniverse(envelope)
+	if err != nil {
+		return nil, err
+	}
+	emissions = append(emissions, universeEmissions...)
+
 	for _, id := range live {
 		if !r.peekInstrument(id).addDue {
 			continue
@@ -150,12 +161,36 @@ func (r *transition) applySessionClosed(envelope event.Envelope) ([]event.Envelo
 		}
 	}
 
+	// ADR 0009: an instrument this run's most recent monthly evaluation
+	// found ineligible is declined before ranking, and never enters
+	// rankSignals' order at all — the identical shape as ADR 0010's own
+	// insufficient-history exclusion just below, for an unrelated reason.
+	// This never touches any open Campaign: a Signal fires only for a Setup
+	// (CONTEXT.md defines a Setup as an instrument NOT in a Campaign), so an
+	// instrument declined here has none to close.
+	var candidates []string
+	for _, id := range signalled {
+		if ineligible, detail := r.universeIneligible(id); ineligible {
+			state, _ := r.instrument(id)
+			signal := state.pendingSignal
+			state.pendingSignal = nil
+			declined, err := r.decline(id, signal.periodEnd, envelope, signal.signalID,
+				event.DeclineReasonIneligible, detail, 0, 0, 0)
+			if err != nil {
+				return nil, err
+			}
+			emissions = append(emissions, declined)
+			continue
+		}
+		candidates = append(candidates, id)
+	}
+
 	// Rank first, so an instrument that cannot be ranked is declined instead
 	// of entering rankSignals' order at all (ADR 0010, as amended by the
 	// owner's decision of 2026-09-25: an incomparable instrument has no place
 	// in a total order).
 	var rankable []signalRanking
-	for _, id := range signalled {
+	for _, id := range candidates {
 		ranking, detail, ranked := r.rankSignal(id)
 		if ranked {
 			rankable = append(rankable, ranking)

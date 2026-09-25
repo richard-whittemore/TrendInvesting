@@ -40,6 +40,7 @@ func TestCloneCoversEveryReferenceTypedField(t *testing.T) {
 	isolation := map[string]string{
 		"Reducer.acceptedFills (map)":                                   overlay,
 		"Reducer.acceptedFills[v].unitIDs (slice)":                      immutable,
+		"Reducer.classifications (map)":                                 eager,
 		"Reducer.delisted (map)":                                        eager,
 		"Reducer.fillDebits (slice)":                                    eager,
 		"Reducer.holds (slice)":                                         eager,

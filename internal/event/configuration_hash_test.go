@@ -18,8 +18,13 @@ func TestConfigurationHashStability(t *testing.T) {
 	t.Parallel()
 
 	got := event.ConfigurationHash(validConfiguration())
-	// This pin includes ConfigurationSchemaVersion 6 and its BuyOrderType
-	// and GapBufferN (ADR 0005, as amended 2026-09-24). The previous pin,
+	// This pin includes ConfigurationSchemaVersion 7 and its three ADR 0009
+	// universe thresholds (UniverseMinPrice, UniverseMinDollarVolume,
+	// UniverseMinHistoryBars). The previous pin, for schema version 6, was
+	// sha256:1bab80d294ae64f7cb84ae95168b74e3970023f9eb06209a14aecee731b6ac3d.
+	//
+	// That pin included ConfigurationSchemaVersion 6 and its BuyOrderType
+	// and GapBufferN (ADR 0005, as amended 2026-09-24). The pin before that,
 	// for schema version 5, was
 	// sha256:bfbf4c6abc13336089e13fb46870052b82048eb7a372678390397f3401e7b272.
 	//
@@ -34,7 +39,7 @@ func TestConfigurationHashStability(t *testing.T) {
 	// The previous pin, for schema version 4 with no
 	// MaxUnitsPerIndustry/MaxUnitsPerSector/MaxUnitsTotalLong, was
 	// sha256:acdf9cc9f6b45ea4658373abff96306af35539d68ad2a1e0eedee4a014fbb386.
-	const want = "sha256:1bab80d294ae64f7cb84ae95168b74e3970023f9eb06209a14aecee731b6ac3d"
+	const want = "sha256:c3b6828fd5c55d289d657a0d7360e094b4f262b2409abbfb65d95d54a155560c"
 	if got != want {
 		t.Fatalf("ConfigurationHash(baseline) = %q, want the pinned hash %q", got, want)
 	}
@@ -107,6 +112,12 @@ func TestConfigurationHashChangesWithEveryField(t *testing.T) {
 		{"commission per share", func(c *event.ConfigurationPayload) { c.Commission.PerShare = 0.01 }},
 		{"commission minimum per order", func(c *event.ConfigurationPayload) { c.Commission.MinimumPerOrder = 2.00 }},
 		{"commission maximum fraction of trade value", func(c *event.ConfigurationPayload) { c.Commission.MaximumFractionOfTradeValue = 0.02 }},
+		// ADR 0009's three universe thresholds (schema version 7): no
+		// exception to "every field, one at a time" just because they
+		// arrived after this test was first written.
+		{"universe min price", func(c *event.ConfigurationPayload) { c.UniverseMinPrice = 10 }},
+		{"universe min dollar volume", func(c *event.ConfigurationPayload) { c.UniverseMinDollarVolume = 10_000_000 }},
+		{"universe min history bars", func(c *event.ConfigurationPayload) { c.UniverseMinHistoryBars = 300 }},
 	}
 
 	for _, tt := range tests {

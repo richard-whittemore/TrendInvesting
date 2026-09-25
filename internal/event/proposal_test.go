@@ -539,6 +539,20 @@ func validProposalDeclinedInsufficientHistory() event.ProposalDeclinedPayload {
 	}
 }
 
+// validProposalDeclinedIneligible mirrors validProposalDeclined for the
+// entry-kind, ineligible shape (ADR 0009, schema 8): Strength is zero, since
+// an ineligible instrument is excluded before rankSignals ever runs.
+func validProposalDeclinedIneligible() event.ProposalDeclinedPayload {
+	return event.ProposalDeclinedPayload{
+		InstrumentID: "AAPL",
+		PeriodEnd:    proposalPeriodEnd,
+		Kind:         event.ProposalDeclinedKindEntry,
+		SignalID:     "signal:AAPL:2026-02-27T00:00:00.000000000Z",
+		Reason:       event.DeclineReasonIneligible,
+		Detail:       "instrument \"AAPL\" was found ineligible for the Baseline universe at its most recent monthly evaluation (ADR 0009)",
+	}
+}
+
 // validProposalDeclinedInsufficientCash mirrors validProposalDeclined for
 // the add-kind, insufficient-cash shape: no SignalID, a CampaignID instead,
 // and RequiredCash strictly above AvailableCash.
@@ -954,6 +968,48 @@ func TestProposalDeclinedPayloadValidateInsufficientHistory(t *testing.T) {
 	}
 }
 
+// TestProposalDeclinedPayloadValidateIneligible pins DeclineReasonIneligible's
+// own invariant (ADR 0009): Strength must be exactly zero, since an
+// ineligible instrument is excluded before rankSignals ever runs.
+func TestProposalDeclinedPayloadValidateIneligible(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mutate  func(*event.ProposalDeclinedPayload)
+		wantErr string
+	}{
+		{name: "valid"},
+		{
+			name:    "strength set for ineligible",
+			mutate:  func(p *event.ProposalDeclinedPayload) { p.Strength = 1 },
+			wantErr: "strength must be zero",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := validProposalDeclinedIneligible()
+			if tt.mutate != nil {
+				tt.mutate(&payload)
+			}
+
+			err := payload.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // TestProposalDeclinedPayloadValidateStrength pins Strength's own reason- and
 // kind-keyed rule (ADR 0010, as amended 2026-09-25), independent of any
 // specific decline reason's own figures: required and finite for an
@@ -994,8 +1050,8 @@ func TestProposalDeclinedEventConstants(t *testing.T) {
 	if event.ProposalDeclinedEventType != "strategy.proposal.declined" {
 		t.Errorf("ProposalDeclinedEventType = %q, want %q", event.ProposalDeclinedEventType, "strategy.proposal.declined")
 	}
-	if event.ProposalDeclinedSchemaVersion != 7 {
-		t.Errorf("ProposalDeclinedSchemaVersion = %d, want 7", event.ProposalDeclinedSchemaVersion)
+	if event.ProposalDeclinedSchemaVersion != 8 {
+		t.Errorf("ProposalDeclinedSchemaVersion = %d, want 8", event.ProposalDeclinedSchemaVersion)
 	}
 	for _, reason := range []string{
 		event.DeclineReasonNNotReady,
@@ -1005,6 +1061,7 @@ func TestProposalDeclinedEventConstants(t *testing.T) {
 		event.DeclineReasonUnitCostNotRepresentable,
 		event.DeclineReasonUnitCapExceeded,
 		event.DeclineReasonInsufficientHistory,
+		event.DeclineReasonIneligible,
 	} {
 		if reason == "" {
 			t.Error("every decline reason constant must be a non-empty enumerated value")

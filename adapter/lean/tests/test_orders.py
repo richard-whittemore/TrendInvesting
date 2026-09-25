@@ -241,7 +241,7 @@ def proposal_declined(day, kind="entry"):
                "reason": "quantity-below-one-unit", "detail": "quantity 0 is below one unit",
                "required_cash": 0.0, "available_cash": 0.0,
                "cap": "", "cap_limit": 0, "post_trade_exposure": 0, "strength": 0.0}
-    return envelope("strategy.proposal.declined", 7, decision_id("proposal-declined", day), payload)
+    return envelope("strategy.proposal.declined", 8, decision_id("proposal-declined", day), payload)
 
 
 def engine_state(day):
