@@ -465,6 +465,163 @@ func TestLosingEligibilityNeverClosesAnOpenCampaignOrBlocksItsAdds(t *testing.T)
 	}
 }
 
+// TestAFutureEffectiveClassificationDoesNotChangeAnEarlierSessionsVerdict
+// covers a Greptile review finding on this ticket's PR: a declaration
+// effective AFTER a Session that must nonetheless evaluate (here,
+// day(30)'s first-of-month close) must not be read by that evaluation just
+// because it happened to arrive before the Session closed. ADR 0009 is
+// point-in-time: a fact takes effect only at the first Session close at or
+// after its own EffectiveAt, never earlier, however early it is declared.
+func TestAFutureEffectiveClassificationDoesNotChangeAnEarlierSessionsVerdict(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	universeOn(&cfg)
+
+	quiet := func(d int) event.CompletedBarPayload { return completedBar("EEEE", day(d), 150, 150, 150) }
+
+	s := newStream(t, cfg).classify(eligibleClassification("EEEE", day(0)))
+	for d := 1; d <= 29; d++ { // January.
+		s.bar(quiet(d))
+	}
+	// Declared well before day(30)'s close, but not effective until
+	// day(35) — after it.
+	s.classify(etfClassification("EEEE", day(35)))
+	s.bar(quiet(30)) // day(30) = 2026-02-01, February's first trading day.
+	for d := 31; d <= 34; d++ {
+		s.bar(quiet(d))
+	}
+	s.bar(quiet(35)) // the first close at or after day(35)'s own EffectiveAt.
+	emitted := s.mustRun()
+
+	decisions := universeEligibilityFor(t, emitted, "EEEE")
+	byPeriodEnd := make(map[time.Time]event.UniverseEligibilityPayload, len(decisions))
+	for _, d := range decisions {
+		byPeriodEnd[d.PeriodEnd] = d
+	}
+
+	feb1, ok := byPeriodEnd[day(30)]
+	if !ok {
+		t.Fatalf("no decision recorded at day(30) (2026-02-01); got %+v", decisions)
+	}
+	if !feb1.ClassificationEligible || !feb1.Eligible {
+		t.Errorf("day(30)'s decision = %+v, want still eligible: the ETF declaration is not effective until day(35), so it must not have been read yet", feb1)
+	}
+
+	promotion, ok := byPeriodEnd[day(35)]
+	if !ok {
+		t.Fatalf("no decision recorded at day(35), the first close at or after the ETF declaration's own EffectiveAt; got %+v", decisions)
+	}
+	if promotion.ClassificationEligible || promotion.Eligible {
+		t.Errorf("day(35)'s decision = %+v, want ineligible: the ETF declaration has now taken effect", promotion)
+	}
+
+	// Nothing between day(30) and day(35) should have re-evaluated EEEE at
+	// all: no declaration was due yet, and neither Session was a month
+	// boundary.
+	for d := 31; d <= 34; d++ {
+		if _, evaluated := byPeriodEnd[day(d)]; evaluated {
+			t.Errorf("an unexpected decision was recorded at day(%d); the ETF declaration is not due until day(35)", d)
+		}
+	}
+}
+
+// TestAnInstrumentWithOnlyAFutureDeclarationHasNoActiveClassificationYet
+// covers the case evaluateUniverse's own promotion loop guards against:
+// an instrument whose only declaration so far is not yet effective has
+// nothing active at all, and so is skipped entirely — no decision, and no
+// gating — even at a Session close (here, the run's very first) that would
+// otherwise evaluate it.
+func TestAnInstrumentWithOnlyAFutureDeclarationHasNoActiveClassificationYet(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	universeOn(&cfg)
+
+	quiet := func(d int) event.CompletedBarPayload { return completedBar("FFFF", day(d), 150, 150, 150) }
+
+	emitted := newStream(t, cfg).
+		classify(eligibleClassification("FFFF", day(10))). // not effective until day(10)
+		bar(quiet(1)).                                     // the run's first Session: nothing active yet
+		bar(quiet(9)).
+		bar(quiet(10)). // the first close at or after the declaration's own EffectiveAt
+		mustRun()
+
+	decisions := universeEligibilityFor(t, emitted, "FFFF")
+	if len(decisions) != 1 {
+		t.Fatalf("got %d decision(s), want exactly 1 (none before day(10), one at it)", len(decisions))
+	}
+	if !decisions[0].PeriodEnd.Equal(day(10)) {
+		t.Errorf("decision PeriodEnd = %s, want day(10) %s", decisions[0].PeriodEnd, day(10))
+	}
+
+	// Before day(10), FFFF is not yet a candidate the gate has anything to
+	// say about, but it also is not declined: sizeUnit only ever runs for
+	// a bar that breaks out, and none of these quiet bars do.
+	if declines := envelopesOfType(emitted, event.ProposalDeclinedEventType); len(declines) != 0 {
+		t.Fatalf("got %d decline(s), want 0", len(declines))
+	}
+}
+
+// TestAMidMonthReclassificationToAnETFIsDeclinedAtTheNextSignal covers a
+// Greptile review finding on this ticket's PR: a stock found eligible and
+// later reclassified to an ETF, off any month boundary, must not let a
+// Signal slip through on its stale (or unevaluated) verdict before the next
+// scheduled monthly evaluation. classificationRecord.pendingEvaluation
+// already closes this gap by construction — evaluateUniverse always runs,
+// and always catches this reclassification up, before any Signal for the
+// same Session can be ranked or declined — and this test proves it end to
+// end rather than merely by inspection.
+func TestAMidMonthReclassificationToAnETFIsDeclinedAtTheNextSignal(t *testing.T) {
+	t.Parallel()
+
+	cfg := validConfigurationPayload()
+	universeOn(&cfg)
+
+	bars := breakoutBars("DDD") // breakout at day(56); day(30) crosses into February.
+	breakout := bars[len(bars)-1]
+	warmup := bars[:len(bars)-1]
+
+	emitted := newStream(t, cfg).
+		classify(eligibleClassification("DDD", day(0))).
+		bars(warmup).
+		// Reclassified to an ETF between the last warm-up bar and the
+		// breakout bar's own Session close, effective at the breakout bar's
+		// own period end: this is "mid-month" (day(56) is 2026-02-27, no
+		// month boundary of its own) and it is declared before, not after,
+		// the Session it must gate.
+		classify(etfClassification("DDD", breakout.PeriodEnd)).
+		bar(breakout).
+		mustRun()
+
+	decisions := universeEligibilityFor(t, emitted, "DDD")
+	if len(decisions) == 0 {
+		t.Fatal("got 0 universe.eligibility decisions for DDD, want at least 1")
+	}
+	// Every evaluation before the reclassification found DDD eligible
+	// (common stock); only the last one, at the breakout's own Session,
+	// reflects the reclassification.
+	last := decisions[len(decisions)-1]
+	if !last.PeriodEnd.Equal(breakout.PeriodEnd) {
+		t.Fatalf("last decision's PeriodEnd = %s, want the breakout's own %s", last.PeriodEnd, breakout.PeriodEnd)
+	}
+	if last.Eligible || last.ClassificationEligible {
+		t.Errorf("last decision = %+v, want ineligible on the classification criterion", last)
+	}
+
+	if proposals := envelopesOfType(emitted, event.TradeProposalEventType); len(proposals) != 0 {
+		t.Fatalf("got %d trade proposal(s), want 0: DDD was reclassified an ETF before its own breakout Session closed", len(proposals))
+	}
+	declines := envelopesOfType(emitted, event.ProposalDeclinedEventType)
+	if len(declines) != 1 {
+		t.Fatalf("got %d decline(s), want exactly 1", len(declines))
+	}
+	decline := decodeProposalDeclined(t, declines[0])
+	if decline.Reason != event.DeclineReasonIneligible {
+		t.Errorf("decline.Reason = %q, want %q", decline.Reason, event.DeclineReasonIneligible)
+	}
+}
+
 // --- Chronology and payload validity: fail-closed everywhere else --------
 
 // classificationAtSchema delivers a classification stamped with a schema

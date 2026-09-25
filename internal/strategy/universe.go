@@ -21,23 +21,61 @@ import (
 // universeIneligible's one caller is sizeUnit's NEW-entry path, never
 // evaluateCampaign, evaluateAdd, or any exit path.
 
-// classificationRecord is one instrument's most recently declared
-// classification fact (Reducer.classifications' own doc comment):
-// universe.Classification plus the EffectiveAt it was declared at, kept so a
-// later declaration cannot regress the audit trail's own chronology.
+// pendingClassification is one declared classification fact not yet in
+// force: ADR 0009 is point-in-time, so a fact effective in the future must
+// not be read by any evaluation before its own EffectiveAt arrives (a
+// Greptile review finding on this ticket's PR, valid: storing a
+// future-effective declaration immediately let it decide an earlier
+// Session's eligibility). classificationRecord.pending holds these,
+// ascending by EffectiveAt, until evaluateUniverse promotes each one whose
+// EffectiveAt has arrived.
+type pendingClassification struct {
+	classification universe.Classification
+	effectiveAt    time.Time
+}
+
+// classificationRecord is one instrument's classification history: the
+// declaration currently in force (active, as of activeEffectiveAt — the
+// zero time.Time before any declaration has ever taken effect), and any
+// later declarations still waiting for their own EffectiveAt (pending, in
+// ascending order).
+//
+// Every declaration is admitted here in the order it is received
+// (applyInstrumentClassification's own chronology check), but only takes
+// effect — becomes active, and is read by evaluateUniverse or
+// universeIneligible — at the first Session close at or after its own
+// EffectiveAt (evaluateUniverse's own doc comment). Two or more pending
+// declarations can be promoted at once if a gap in Sessions jumps past
+// several of their effective dates together; only the LAST one promoted at
+// any such close becomes active, since none of the ones it supersedes was
+// ever active for any Session's own evaluation.
 //
 // pendingEvaluation is ADR 0009's amendment of 2026-09-25 (the owner's
-// decision): true from the moment this record is written — a brand new
-// classification, or one restating an existing instrument — until
-// evaluateUniverse next evaluates it, so "an instrument classified since its
-// last evaluation is evaluated at the next Session close" holds without
-// waiting for the next calendar month. false once evaluated; the monthly
-// cadence (universe.FirstOfMonth) governs every later re-evaluation, until
-// another classification arrives and sets it again.
+// decision): true from the moment a declaration is PROMOTED to active —
+// never merely accepted while still pending — until evaluateUniverse next
+// evaluates it, so "an instrument classified since its last evaluation is
+// evaluated at the next Session close" holds without waiting for the next
+// calendar month. false once evaluated; the monthly cadence
+// (universe.FirstOfMonth) governs every later re-evaluation, until another
+// declaration is promoted and sets it again.
 type classificationRecord struct {
-	classification    universe.Classification
-	effectiveAt       time.Time
+	active            universe.Classification
+	activeEffectiveAt time.Time
+	pending           []pendingClassification
 	pendingEvaluation bool
+}
+
+// lastDeclaredEffectiveAt is the EffectiveAt of the most recently accepted
+// declaration for this instrument, active or still pending — what a new
+// declaration's own chronology is checked against
+// (applyInstrumentClassification), so a classification cannot be restated
+// out of order regardless of whether the one it would regress has taken
+// effect yet.
+func (r classificationRecord) lastDeclaredEffectiveAt() time.Time {
+	if n := len(r.pending); n > 0 {
+		return r.pending[n-1].effectiveAt
+	}
+	return r.activeEffectiveAt
 }
 
 // universeState is one instrument's most recently recorded ADR 0009
@@ -78,11 +116,16 @@ func securityTypeFor(securityType string) (universe.SecurityType, error) {
 //
 // Unlike a corporate action, a classification carries no chronology
 // constraint against the open Session's bars: it does not retroactively
-// change any decision already made, only a monthly evaluation that has not
-// yet run. EffectiveAt is checked only against the instrument's own prior
-// declaration, so the record itself cannot regress — a producer restating
-// an older fact after a newer one would corrupt the audit trail this field
-// exists to keep honest.
+// change any decision already made. It is admitted here the moment it
+// arrives, in r.classifications' pending queue, but does not take effect —
+// is not read by any evaluation — until the first Session close at or
+// after its own EffectiveAt (evaluateUniverse; ADR 0009 is point-in-time, so
+// a fact effective in the future must never decide an earlier Session's
+// eligibility). EffectiveAt is checked only against the instrument's own
+// most recently accepted declaration (classificationRecord.
+// lastDeclaredEffectiveAt), active or still pending, so the record itself
+// cannot regress — a producer restating an older fact after a newer one
+// would corrupt the audit trail this field exists to keep honest.
 func (r *transition) applyInstrumentClassification(envelope event.Envelope) ([]event.Envelope, error) {
 	if !r.configured {
 		return nil, errors.New("strategy: received an instrument classification before a configuration event; failing closed")
@@ -101,18 +144,19 @@ func (r *transition) applyInstrumentClassification(envelope event.Envelope) ([]e
 	if err != nil {
 		return nil, err
 	}
-	if existing, known := r.classifications[payload.InstrumentID]; known && payload.EffectiveAt.Before(existing.effectiveAt) {
+	record := r.classifications[payload.InstrumentID]
+	if lastDeclared := record.lastDeclaredEffectiveAt(); !lastDeclared.IsZero() && payload.EffectiveAt.Before(lastDeclared) {
 		return nil, fmt.Errorf("strategy: instrument %q: classification effective at %s predates its own most recent declaration at %s; a classification cannot be restated out of order",
-			payload.InstrumentID, payload.EffectiveAt.Format(time.RFC3339), existing.effectiveAt.Format(time.RFC3339))
+			payload.InstrumentID, payload.EffectiveAt.Format(time.RFC3339), lastDeclared.Format(time.RFC3339))
 	}
-	r.classifications[payload.InstrumentID] = classificationRecord{
+	record.pending = append(record.pending, pendingClassification{
 		classification: universe.Classification{
 			SecurityType:      securityType,
 			USPrimaryExchange: payload.USPrimaryExchange,
 		},
-		effectiveAt:       payload.EffectiveAt,
-		pendingEvaluation: true,
-	}
+		effectiveAt: payload.EffectiveAt,
+	})
+	r.classifications[payload.InstrumentID] = record
 	return nil, nil
 }
 
@@ -134,38 +178,52 @@ func (r *transition) universeGateOn() bool {
 // unconditionally, while the universe gate is off (universeGateOn false):
 // no evaluation, no decision, nothing recorded.
 //
+// # Promotion: a declaration takes effect only once its own date arrives
+//
+// Before anything else, every instrument's pending queue is checked against
+// THIS Session's own period end: every pending declaration whose EffectiveAt
+// is at or before it is promoted to active, in ascending order, oldest
+// first. This is what keeps eligibility point-in-time (ADR 0009): a
+// declaration effective in the future is inert until a Session close
+// actually reaches its date, however long before that it was received. An
+// instrument with no active declaration at all yet (activeEffectiveAt still
+// the zero time.Time after promotion) has nothing to evaluate and is
+// skipped entirely — CONTEXT.md: "Eligible" reads a declared fact, not one
+// that has not arrived yet.
+//
 // # Which Sessions evaluate which instruments (ADR 0009, as amended
 // 2026-09-25, the owner's decision)
 //
-// Per instrument, not per Session: an instrument evaluates at this Session's
-// close when EITHER
+// Per instrument, not per Session: an instrument with an active declaration
+// evaluates at this Session's close when EITHER
 //
-//   - it has been classified, or reclassified, since its own last
-//     evaluation (classificationRecord.pendingEvaluation), which is
-//     necessarily true the first time it is ever classified — so the run's
-//     first Session close, and the very next one after any later
-//     (re)classification, both evaluate it without waiting for a month
-//     boundary — OR
+//   - a declaration was just promoted to active this Session close
+//     (classificationRecord.pendingEvaluation), which is necessarily true
+//     the first time any declaration of its ever takes effect — so the
+//     first Session close at or after that, and the next one after any
+//     later declaration takes effect in turn, both evaluate it without
+//     waiting for a month boundary — OR
 //   - universe.FirstOfMonth reports that the CLOSING Session — the one
 //     applySessionClosed is deciding, r.sessionPeriodEnd — is the first
 //     trading day of its calendar month, purely from the sequence of
 //     Sessions this reducer has closed (ADR 0021: Sessions follow one
 //     another strictly, so comparing consecutive Sessions is sufficient).
 //
-// An instrument neither newly (re)classified nor due for its month is left
+// An instrument neither newly promoted nor due for its month is left
 // exactly as its last evaluation recorded it: no new decision, and its
 // existing state.universe verdict still governs universeIneligible.
 //
 // # Which instruments evaluate, and which day's figures
 //
-// Every instrument in r.classifications is evaluated, whether or not it has
-// a bar in THIS Session — ADR 0009's universe is a fact about the whole
-// declared set, not only today's traders. r.stateFor is used rather than
-// peekInstrument/instrument so that an instrument classified before its
-// first bar still evaluates, against zero history: stateFor returns a
-// freshly initialised, empty instrumentState for one this reducer has never
-// seen a bar for, which fails ADR 0009's history criterion honestly rather
-// than needing a separate "not yet evaluated" case.
+// Every instrument in r.classifications with an active declaration is
+// evaluated, whether or not it has a bar in THIS Session — ADR 0009's
+// universe is a fact about the whole declared set, not only today's
+// traders. r.stateFor is used rather than peekInstrument/instrument so that
+// an instrument classified before its first bar still evaluates, against
+// zero history: stateFor returns a freshly initialised, empty
+// instrumentState for one this reducer has never seen a bar for, which
+// fails ADR 0009's history criterion honestly rather than needing a
+// separate "not yet evaluated" case.
 //
 // Price is the instrument's most recent raw close (ADR 0004, as amended:
 // absolute price floors in universe eligibility read the raw view), and the
@@ -200,6 +258,23 @@ func (r *transition) evaluateUniverse(envelope event.Envelope) ([]event.Envelope
 	var emissions []event.Envelope
 	for _, id := range ids {
 		record := r.classifications[id]
+
+		// Promote every pending declaration due by this Session's own
+		// period end, oldest first. Only the last one promoted becomes
+		// active: none of the ones it supersedes here was ever active for
+		// any Session's own evaluation, so there is nothing of theirs to
+		// preserve.
+		for len(record.pending) > 0 && !record.pending[0].effectiveAt.After(r.sessionPeriodEnd) {
+			record.active = record.pending[0].classification
+			record.activeEffectiveAt = record.pending[0].effectiveAt
+			record.pending = record.pending[1:]
+			record.pendingEvaluation = true
+		}
+		r.classifications[id] = record
+
+		if record.activeEffectiveAt.IsZero() {
+			continue // no declaration has taken effect yet
+		}
 		if !record.pendingEvaluation && !firstOfMonth {
 			continue
 		}
@@ -213,7 +288,7 @@ func (r *transition) evaluateUniverse(envelope event.Envelope) ([]event.Envelope
 			price = rawCloses[len(rawCloses)-1]
 		}
 		result := universe.Evaluate(universe.Input{
-			Classification:      record.classification,
+			Classification:      record.active,
 			Price:               price,
 			DollarVolumeCloses:  rawCloses,
 			DollarVolumeVolumes: state.rawVolumes.Values(),
@@ -277,8 +352,11 @@ func (r *transition) universeIneligible(id string) (ineligible bool, detail stri
 	}
 	state := r.peekInstrument(id)
 	if state == nil || !state.universe.evaluated {
-		_, classified := r.classifications[id]
-		if classified {
+		// A purely pending declaration (record.activeEffectiveAt still
+		// zero) does not count as "classified" here: ADR 0009 is
+		// point-in-time, and a fact not yet in effect is exactly as absent,
+		// for gating purposes, as one that was never declared at all.
+		if record, known := r.classifications[id]; known && !record.activeEffectiveAt.IsZero() {
 			return true, fmt.Sprintf("instrument %q is classified but has not yet been evaluated by the Baseline universe (ADR 0009, as amended 2026-09-25): the universe gate is on, and an instrument is not a candidate for a new Campaign until its own evaluation has run", id)
 		}
 		return true, fmt.Sprintf("instrument %q was never classified for the Baseline universe (ADR 0009, as amended 2026-09-25): the universe gate is on, and an unclassified instrument is not a candidate for a new Campaign", id)

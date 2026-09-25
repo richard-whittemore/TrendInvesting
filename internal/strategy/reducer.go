@@ -194,7 +194,7 @@ type Reducer struct {
 	// applyFill refuses an execution naming one, and applyDelisting itself
 	// treats a repeated notice as stating no new fact.
 	delisted map[string]time.Time
-	// classifications records, per instrument, the most recently declared
+	// classifications records, per instrument, every declared
 	// event.MarketInstrumentClassificationEventType fact (ADR 0009; ADR
 	// 0021's own market.corporate-action fact is the precedent this
 	// mirrors): a producer's translation of internal/universe.Port's answer
@@ -207,12 +207,19 @@ type Reducer struct {
 	// instrument this reducer has no bar for yet (evaluateUniverse's own doc
 	// comment).
 	//
-	// An instrument absent from this map has never been classified. While
-	// the universe gate is off (universeEnabled false — every existing
-	// fixture, golden journal and decision-corpus scenario), that and every
-	// other instrument is left completely ungated regardless. While the
-	// gate is on, an instrument absent from this map, or present but not yet
-	// evaluated (instrumentState.universe.evaluated false), is declined
+	// Each classificationRecord distinguishes the declaration currently in
+	// force (active) from any later one still waiting for its own
+	// EffectiveAt (pending) — a fact effective in the future must never
+	// decide an earlier Session's eligibility (ADR 0009 is point-in-time).
+	//
+	// An instrument absent from this map, or present with no active
+	// declaration yet (every one of its own still pending), has never been
+	// classified for gating purposes. While the universe gate is off
+	// (universeEnabled false — every existing fixture, golden journal and
+	// decision-corpus scenario), that and every other instrument is left
+	// completely ungated regardless. While the gate is on, such an
+	// instrument, or one classified but present with no completed
+	// evaluation yet (instrumentState.universe.evaluated false), is declined
 	// ineligible for a NEW Campaign — it is not a candidate merely by
 	// default (universeIneligible's own doc comment; ADR 0009's amendment of
 	// 2026-09-25, the owner's decision).
