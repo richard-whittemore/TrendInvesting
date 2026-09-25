@@ -142,6 +142,98 @@ def exit_order_set(day, unit_index=1, level=22.1, quantity=100, cause="bar", **c
                     payload)
 
 
+# The decisions below carry no order of their own (README.md's own decision
+# table): OrderDesk.act ignores every one of them (they are not in
+# SCHEMA_VERSIONS). Issue #31 still wants a pinned fixture for every decision
+# type the adapter may receive, acted on or not, so IgnoredDecisionTests below
+# checks the adapter is unmoved by any of them and FixtureContractTests checks
+# each against Go's own contract (order_decisions_contract.go). Every derived
+# figure below (aggregate_open_risk, the drawdown/cash-adjustment/rebase
+# figures, and the raised protective stop) was computed and validated by Go's
+# own internal/sizing helpers, not typed by hand, so it cannot silently drift
+# from the exact-equality rules each payload's own Validate enforces.
+
+
+def campaign_evaluated(day, unit_index=1, entry_price=24.5, quantity=100, protective_stop=22.1):
+    payload = {"campaign_id": decision_id("campaign", 6), "instrument_id": "AAPL",
+               "period_end": period_end(day), "protective_stop": protective_stop,
+               "units": [{"unit_index": unit_index, "entry_price": entry_price,
+                          "quantity": quantity, "protective_stop": protective_stop}],
+               "exit_channel_low": 20.0, "exit_channel_ready": True, "exit_condition_met": False,
+               "dollars_per_point": 1, "aggregate_open_risk": 239.99999999999986,
+               "notional_account": 1000000, "aggregate_open_risk_fraction": 0.00023999999999999987}
+    return envelope("strategy.campaign.evaluated", 2, decision_id("campaign-evaluated", day), payload)
+
+
+def drawdown_step_applied(day):
+    payload = {"as_of": period_end(day), "equity": 890000.0, "threshold": 900000.0,
+               "notional_before": 1000000.0, "notional_after": 800000.0, "step_number": 1,
+               "rule": "notional-account.drawdown-step", "adr": "0007"}
+    return envelope("strategy.drawdown-step.applied", 1, decision_id("drawdown-step", day), payload)
+
+
+def notional_account_cash_adjusted(day):
+    payload = {"as_of": period_end(day), "amount": 100000.0, "equity_before": 1000000.0,
+               "equity_after": 1100000.0, "starting_figure_before": 1000000.0,
+               "starting_figure_after": 1100000.0, "notional_before": 1000000.0,
+               "notional_after": 1100000.0, "rule": "notional-account.cash-adjustment", "adr": "0007"}
+    return envelope("strategy.notional-account.cash-adjusted", 1,
+                    decision_id("notional-cash-adjusted", day), payload)
+
+
+def notional_account_rebased(day):
+    payload = {"as_of": period_end(day), "previous_starting_figure": 1000000.0,
+               "new_starting_figure": 1250000.0, "equity": 1250000.0,
+               "rule": "notional-account.rebase", "adr": "0007"}
+    return envelope("strategy.notional-account.rebased", 1, decision_id("notional-rebased", day), payload)
+
+
+def notional_account_recovered(day):
+    payload = {"as_of": period_end(day), "equity": 1000000.0, "starting_figure": 1000000.0,
+               "notional_before": 800000.0, "steps_cleared": 1,
+               "rule": "notional-account.recovery", "adr": "0007"}
+    return envelope("strategy.notional-account.recovered", 1, decision_id("notional-recovered", day), payload)
+
+
+def proposal_declined(day, kind="entry"):
+    payload = {"instrument_id": "AAPL", "period_end": period_end(day), "kind": kind,
+               "signal_id": decision_id("signal", day) if kind == "entry" else "",
+               "campaign_id": decision_id("campaign", 6) if kind == "add" else "",
+               "reason": "quantity-below-one-unit", "detail": "quantity 0 is below one unit",
+               "required_cash": 0.0, "available_cash": 0.0}
+    return envelope("strategy.proposal.declined", 4, decision_id("proposal-declined", day), payload)
+
+
+def engine_state(day):
+    payload = {"state": "halted", "reason": "campaign-without-protective-stop",
+               "detail": "campaign {} has no protective stop".format(decision_id("campaign", 6))}
+    return envelope("strategy.engine.state", 1, decision_id("engine-state", day), payload)
+
+
+def setup_evaluated(day):
+    payload = {"instrument_id": "AAPL", "period_end": period_end(day), "n": 1.2, "n_ready": True,
+               "entry_channel_high": 24.0, "entry_channel_ready": True, "tier": "B",
+               "distance_to_entry_in_n": 0.5}
+    return envelope("strategy.setup.evaluated", 2, decision_id("setup-evaluated", day), payload)
+
+
+def signal(day):
+    payload = {"instrument_id": "AAPL", "period_end": period_end(day),
+               "rule": "entry.channel.breakout", "adr": "0002", "direction": "long",
+               "entry_channel_length": 55, "entry_channel_high": 24.0, "breakout_high": 24.5, "n": 1.2}
+    return envelope("strategy.signal", 1, decision_id("signal", day), payload)
+
+
+def protective_stop_set(day, reason="initial", level=22.1, previous_level=0.0):
+    rule = "protective-stop.set.from-fill" if reason == "initial" else "stop-ladder.raised-by-half-n"
+    payload = {"campaign_id": decision_id("campaign", 6), "instrument_id": "AAPL", "unit_index": 1,
+               "reason": reason, "as_of": period_end(day), "level": level,
+               "previous_level": previous_level, "entry_price": 24.5, "campaign_n": 1.2,
+               "stop_multiple": 2, "rule": rule, "adr": "0006"}
+    return envelope("strategy.protective-stop.set", 2,
+                    decision_id("protective-stop-set-{}".format(reason), day), payload)
+
+
 class OrderTestCase(unittest.TestCase):
     def start(self):
         algo = scaffold.AlgorithmTests.init(self)
@@ -641,6 +733,95 @@ class ExitOrderTests(OrderTestCase):
         self.feed(algo, 10, [exit_order_set(10, level=23.4)])
         self.assertTrue(algo.failed)
         self.assertEqual(len(self.sells(algo)), 1)
+        self.assertEqual(algo.Transactions.updates, [])
+
+
+class IgnoredDecisionTests(OrderTestCase):
+    """Issue #31: the decision types the reducer emits that name no order of
+    their own (README.md's decision table) are received without error and
+    place, amend or cancel nothing, whatever their contents. OrderDesk.act's
+    `actionable` filter is the whole mechanism: only a type in SCHEMA_VERSIONS
+    is ever looked at, and everything else -- including a future type this
+    build has never heard of -- passes through untouched (the same "no new
+    orders, no crash" contract a truly unknown type would need)."""
+
+    IGNORED = (campaign_evaluated, drawdown_step_applied, notional_account_cash_adjusted,
+              notional_account_rebased, notional_account_recovered, proposal_declined,
+              engine_state, setup_evaluated, signal, protective_stop_set)
+
+    def test_every_ignored_decision_type_causes_no_order_and_no_failure(self):
+        for builder in self.IGNORED:
+            with self.subTest(builder.__name__):
+                algo = self.start()
+                self.feed(algo, 9, [builder(9)])
+                self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+                self.assertEqual(self.tickets(algo), [])
+
+    def test_an_ignored_decision_beside_an_actionable_one_still_places_the_order(self):
+        # Ignored decisions are dropped by OrderDesk.act's own filter, not by
+        # skipping the whole reply: an actionable decision delivered
+        # alongside them is still acted on. setup_evaluated and signal are
+        # reachable together: the reducer emits "Setup-evaluated, Signal,
+        # sizing outcome" for one breakout bar (internal/strategy/reducer.go's
+        # own doc comment). engine_state is deliberately NOT used here: it is
+        # the reducer's own halt, emitted alone when a capital-safety
+        # invariant fails (event.EngineStatePayload's doc comment), so a
+        # decisions list ever pairing it with a trade proposal cannot occur
+        # and using it here would test a reply the reducer never sends.
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [signal(9), proposal, setup_evaluated(9)])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [ticket] = self.tickets(algo)
+        self.assertEqual(ticket.Tag, proposal["id"])
+
+
+class ProtectiveOrderSurvivalTests(OrderTestCase):
+    """Issue #31: 'Existing protective orders are preserved.' Whatever else a
+    fault does, the adapter never cancels a Unit's already-working GTC Exit
+    Order merely because something unrelated went wrong: docs/architecture.md
+    and the ticket's own governing rule are 'no NEW orders', never 'no
+    existing protection'. OrderDesk has no code path that cancels an Exit
+    Order at all (_expire only ever cancels an entry or Add's buy order), so
+    this fixes that absence in place with a test rather than leaving it
+    merely implicit."""
+
+    def test_a_working_exit_order_survives_an_unknown_schema_version(self):
+        algo = self.start()
+        self.hold(algo, 100)
+        self.feed(algo, 9, [campaign_opened(), exit_order_set(9, unit_index=1, level=22.1, quantity=100)])
+        [stop] = self.sells(algo)
+        self.assertEqual(stop.Status, "submitted")
+
+        bad = trade_proposal(10)
+        bad["schema_version"] = 2
+        self.feed(algo, 10, [bad])
+        self.assertTrue(algo.failed)
+
+        self.assertEqual(stop.Status, "submitted")
+        self.assertEqual(algo.Transactions.cancellations, [])
+        self.assertEqual(algo.Transactions.updates, [])
+
+    def test_a_working_exit_order_survives_go_unreachable(self):
+        algo = self.start()
+        self.hold(algo, 100)
+        self.feed(algo, 9, [campaign_opened(), exit_order_set(9, unit_index=1, level=22.1, quantity=100)])
+        [stop] = self.sells(algo)
+
+        engine = algo.client
+        answer = engine.decide
+
+        def decide(input_envelope):
+            if input_envelope["type"] == "market.bar.completed":
+                raise Unavailable("engine closed the connection mid-exchange")
+            return answer(input_envelope)
+        engine.decide = decide
+
+        self.feed(algo, 10)
+        self.assertTrue(algo.failed)
+
+        self.assertEqual(stop.Status, "submitted")
+        self.assertEqual(algo.Transactions.cancellations, [])
         self.assertEqual(algo.Transactions.updates, [])
 
 
@@ -1586,7 +1767,15 @@ class FixtureContractTests(unittest.TestCase):
         proposal = trade_proposal(9)
         fixtures = [proposal, add_proposal(9), proposal_expired(proposal, 10),
                     campaign_opened(), exit_order_set(9), exit_proposed(9), unit_added(9),
-                    units_stopped(9), campaign_exited(9)]
+                    units_stopped(9), campaign_exited(9),
+                    # The decisions the adapter receives but never acts on
+                    # (issue #31: a fixture for every decision type, not only
+                    # the ones orders.py's SCHEMA_VERSIONS names).
+                    campaign_evaluated(9), drawdown_step_applied(9), notional_account_cash_adjusted(9),
+                    notional_account_rebased(9), notional_account_recovered(9), proposal_declined(9),
+                    engine_state(9), setup_evaluated(9), signal(9), protective_stop_set(9),
+                    protective_stop_set(9, reason="add-ladder", level=22.700000000000003,
+                                        previous_level=22.1)]
         result = subprocess.run(
             ["go", "run", "./adapter/lean/tests/testdata/order_decisions_contract.go"],
             cwd=Path(__file__).resolve().parents[3],

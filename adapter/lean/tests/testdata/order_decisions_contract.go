@@ -1,7 +1,13 @@
-// Command order_decisions_contract checks the adapter's order-test fixtures
-// against the Go decision payloads the adapter reads (ADR 0015): each fixture
-// must carry its type's current schema version and name only fields that
-// type defines. Python tests feed a JSON array of decision envelopes on stdin.
+// Command order_decisions_contract checks the adapter's decision fixtures
+// against the Go decision payloads the adapter may receive (ADR 0015): each
+// fixture must carry its type's current schema version and name only fields
+// that type defines. Python tests feed a JSON array of decision envelopes on
+// stdin. Covers both the decision types orders.py's SCHEMA_VERSIONS acts on
+// and the ones it deliberately ignores (bookkeeping and diagnostic decisions
+// that name no order of the reducer's own — ADR 0022's discipline applied to
+// the adapter's own boundary, tests/test_orders.py's IgnoredDecisionTests).
+// tests/testdata/wire_coverage.go keeps this switch in step with every
+// decision type internal/event defines.
 package main
 
 import (
@@ -59,6 +65,30 @@ func contract(eventType string) (uint32, any, bool) {
 		return event.CampaignUnitsStoppedSchemaVersion, &event.CampaignUnitsStoppedPayload{}, true
 	case event.CampaignExitedEventType:
 		return event.CampaignExitedSchemaVersion, &event.CampaignExitedPayload{}, true
+	// The decisions below carry no order of their own; orders.py's
+	// OrderDesk.act ignores them (they are not in SCHEMA_VERSIONS). They are
+	// still checked here so a fixture exists for every decision type the
+	// adapter may receive (issue #31), not only the ones it acts on.
+	case event.CampaignEvaluatedEventType:
+		return event.CampaignEvaluatedSchemaVersion, &event.CampaignEvaluatedPayload{}, true
+	case event.DrawdownStepAppliedEventType:
+		return event.DrawdownStepAppliedSchemaVersion, &event.DrawdownStepAppliedPayload{}, true
+	case event.NotionalAccountCashAdjustedEventType:
+		return event.NotionalAccountCashAdjustedSchemaVersion, &event.NotionalAccountCashAdjustedPayload{}, true
+	case event.NotionalAccountRebasedEventType:
+		return event.NotionalAccountRebasedSchemaVersion, &event.NotionalAccountRebasedPayload{}, true
+	case event.NotionalAccountRecoveredEventType:
+		return event.NotionalAccountRecoveredSchemaVersion, &event.NotionalAccountRecoveredPayload{}, true
+	case event.ProposalDeclinedEventType:
+		return event.ProposalDeclinedSchemaVersion, &event.ProposalDeclinedPayload{}, true
+	case event.EngineStateEventType:
+		return event.EngineStateSchemaVersion, &event.EngineStatePayload{}, true
+	case event.SetupEvaluatedEventType:
+		return event.SetupEvaluatedSchemaVersion, &event.SetupEvaluatedPayload{}, true
+	case event.SignalEventType:
+		return event.SignalSchemaVersion, &event.SignalPayload{}, true
+	case event.ProtectiveStopSetEventType:
+		return event.ProtectiveStopSetSchemaVersion, &event.ProtectiveStopSetPayload{}, true
 	}
 	return 0, nil, false
 }

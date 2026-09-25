@@ -29,6 +29,19 @@ def raw_payload(line):
 class Unavailable(Exception):
     """The engine cannot safely answer this stream."""
 
+
+def _require_object(value, what):
+    """Fail closed unless value is a JSON object (a Python dict).
+
+    Every reply field this client reads is then accessed with .get, which
+    silently assumes a dict; called before any such access, this turns valid
+    JSON of the wrong shape ([], null, a bare string, a number, ...) into the
+    same typed Unavailable every other malformed reply raises, rather than a
+    bare AttributeError once the first .get call is reached.
+    """
+    if not isinstance(value, dict):
+        raise Unavailable("{} must be a JSON object, got {}".format(what, type(value).__name__))
+
 class Rejected(Exception):
     """The engine rejected an input; the adapter must stop the run."""
     def __init__(self, code, message, causation_id=""):
@@ -105,9 +118,25 @@ class Client:
             self.close()
             raise Unavailable("connection failed: {}".format(err)) from err
 
-        reply = json.loads(line)
+        try:
+            reply = json.loads(line)
+        except ValueError as err:
+            # A corrupted reply is exactly as unusable as no reply: fail
+            # closed with a clear, typed error rather than letting a bare
+            # json.JSONDecodeError propagate (docs/architecture.md: "when
+            # state is uncertain, no new orders"). decide() below marks the
+            # connection broken either way, so this frame is never retried.
+            raise Unavailable("reply is not valid JSON: {}".format(err)) from err
+        # Valid JSON of the wrong shape ([], null, a string, ...) is just as
+        # unusable as invalid JSON: every field access below assumes a JSON
+        # object, so the shape is checked here, before any of them, rather
+        # than letting a malformed-but-parseable reply surface as a bare
+        # AttributeError.
+        _require_object(reply, "reply")
+
         error = reply.get("error")
         if error is not None:
+            _require_object(error, "reply's error")
             causation = error.get("causation_id", "")
             if causation and causation != envelope["id"]:
                 raise OutOfOrder("error names {}, sent {}".format(causation, envelope["id"]))
@@ -118,6 +147,7 @@ class Client:
         decision = reply.get("envelope")
         if decision is None:
             raise Unavailable("reply carries neither a decision nor an error")
+        _require_object(decision, "reply's envelope")
         if decision.get("causation_id") != envelope["id"]:
             raise OutOfOrder(
                 "decision cites {}, sent {}".format(decision.get("causation_id"), envelope["id"])
