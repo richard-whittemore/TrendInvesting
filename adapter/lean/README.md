@@ -553,3 +553,31 @@ the engine chains from a fill, and an Exit-Channel exit of every Unit as one
 fill. It then runs `cmd/backtest -verify` and `-replay` on the engine's
 journal and requires a complete, verified run that replays byte-identically.
 It needs the Go toolchain and nothing else: no LEAN, docker or network.
+
+## Coverage: issue #31's acceptance criteria
+
+Issue #31 ("Adapter contract fixtures and fault cases") asks for a pinned
+fixture at every event type's current schema version, and a test proving
+every way the boundary can fail does so without trading. This table maps each
+criterion to the test(s) that satisfy it; most already existed, and are
+listed here rather than duplicated.
+
+| Criterion | Test(s) |
+| --- | --- |
+| A fixture exists for every input and decision event type at the current schema version | `tests/testdata/*_contract.go`, one per input shape (`bar_contract.go`, `session_contract.go`, `snapshot_contract.go`, `execution_contract.go` for fills and lifecycle reports, `run_stopped_contract.go`, `run_completed_contract.go`) and `order_decisions_contract.go` for every decision type, acted on (`TestFixtureFieldsAndSchemaVersionsMatchTheGoPayloads`) or not (`test_orders.py`'s `IgnoredDecisionTests`, `FixtureContractTests`). `tests/testdata/wire_coverage.go` and `test_wire_coverage.py`'s `test_every_go_event_type_is_covered_or_explicitly_excused` parse `internal/event`'s own source for every `EventType`/`SchemaVersion` pair and fail if one has no adapter fixture and no documented reason it doesn't cross the boundary yet (`strategy.configuration`, `account.cash-movement`, `market.corporate-action`) |
+| An unsupported schema version fails closed with a clear error | `test_orders.py`'s `test_an_unknown_schema_version_stops_the_run` (a decision type the adapter acts on); `test_algorithm.py`'s `test_bad_snapshot_reply_stops_run` and `test_bad_bar_reply_sends_no_snapshot`/`test_bad_session_close_reply_sends_no_snapshot` (the wire reply's own schema/type/sequence/causation, including `schema_version`, via `publisher.py`'s `_publish`); `test_client.py`'s `test_undecodable_json_reply_fails_closed_without_reuse` (a reply that is not even parseable JSON, wrapped as a clear `Unavailable` by `client.py`, not a bare `json.JSONDecodeError`) |
+| Go unreachable: no orders submitted | `test_client.py`'s `test_connect_fails_closed_when_absent`; `test_algorithm.py`'s `test_absent_engine_quits_at_startup`; `test_orders.py`'s `test_go_unreachable_means_nothing_is_submitted` |
+| Go unreachable: safe mode entered, alert-worthy event emitted | **Not implemented, and this is stated rather than assumed.** ADR 0019's Degraded/Halted states and its Alerting section are design-only ("Proposed", "This is a design, not code yet") and gated on #151 (engine journal durability); no alerting channel exists. The adapter's actual, tested contract for "Go unreachable" is the strongest available response given that: the run stops (`self.stop`/`Quit`), submitting nothing further, which is `docs/architecture.md`'s safety invariant ("If the Go decision engine is unavailable, the adapter submits no new orders") — not a degraded-but-continuing mode. There is deliberately no fabricated "alert" event standing in for the real one ADR 0019 describes |
+| Go crash mid-run: no duplicate orders on restart | `test_orders.py`'s `test_a_redelivered_proposal_creates_no_second_order` and `test_duplicate_detection_reads_leans_order_book_not_adapter_memory` (a decision id already on an order in LEAN's book — filled, so not even working — is never resubmitted by an adapter instance whose own memory holds nothing, which is exactly the property a restart needs: LEAN's order book, not this process's memory, is the record); `test_a_redelivered_exit_order_set_changes_nothing` (idempotent Exit Order amendments too) |
+| Go crash mid-run: reconciliation performed | `test_orders.py`'s `StartupReconciliationTests` (`require_flat`): every run reconciles before its first order, today to "LEAN holds nothing and works no order" — the only state a backtest-only adapter can start from. Full broker-vs-engine reconciliation (ADR 0019: positions, cash, open orders, explained differences) is design-only and needs a live broker integration (#81), a durable engine journal (#151) and recovering which LEAN order is each Unit's Exit Order after a real process restart (#207); none of that exists to test yet |
+| Duplicate, out-of-order, and corrupted messages are each rejected without trading | Duplicate bar: `test_publisher.py`'s `test_fail_closed_on_duplicate_bar_or_wrong_engine_identity`. Duplicate decision: see "no duplicate orders" above. Out-of-order (wrong causation/sequence): `test_client.py`'s `test_decide_causation_mismatch_raises_out_of_order`; `test_publisher.py`'s `test_reply_with_another_runs_correlation_id_is_rejected`; `test_algorithm.py`'s field-by-field reply tests. Corrupted (bad payload hash): `test_client.py`'s `test_payload_that_does_not_match_its_hash_is_refused`. Corrupted (undecodable JSON): `test_client.py`'s `test_undecodable_json_reply_fails_closed_without_reuse`. Every case above also proves the abandoned connection is never reused (`test_decide_broken_connection_abandoned`) |
+| Protective orders survive an adapter fault | `test_orders.py`'s `ProtectiveOrderSurvivalTests`: a working Exit Order's LEAN ticket is untouched (no `Cancel`, no `Update`) after an unrelated fault stops the run, both for an unsupported schema version and for Go becoming unreachable. `OrderDesk` in fact has no code path that ever cancels an Exit Order at all — `_expire` only ever cancels an entry or Add's own buy order — so this is the existing contract, now pinned rather than merely implicit |
+| `make check` green | Enforced by CI/the working agreement; verified locally for this change |
+
+Timeout (`docs/architecture.md`'s failure modes; ADR 0014's measured failure
+table) is covered by `Client`'s own `socket.settimeout` plus
+`test_client.py`'s general "no reply within the deadline" path exercised
+through the same abandoned-connection tests above: a timed-out exchange and a
+closed connection are both `Unavailable`, handled identically by
+`algorithm.py`'s fail-closed `except` blocks, and neither is retried on the
+same connection.
