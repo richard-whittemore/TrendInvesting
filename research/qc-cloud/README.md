@@ -170,29 +170,47 @@ is hidden; each names the ADR it touches.
    the same-bar chaining #1 describes in the first place), so every entry
    and Add proposal gets exactly one Session to fill before it expires --
    the ordinary-case rule, applied uniformly.
-3. **No shared, provider-backed corporate-actions or classification
-   feed.** The Go engine reads point-in-time industry/sector labels from a
-   dedicated classification input (ADR 0008's "classification seam",
-   `internal/strategy/unit_caps.go`), which does not exist yet even in the
-   production system (`classificationOf` always reports Unclassified there
-   too, per ADR 0008's own 2026-09-24 implementation note). This script
-   makes the identical, ADR-0008-endorsed choice deliberately and by
-   design: it never attempts to read QuantConnect Fundamental data's own
-   sector/industry classification, so **every instrument is Unclassified
-   throughout**, and the industry (6) and sector (10) caps collapse onto
-   the single shared Unclassified Group's own 10-Unit ceiling (ADR 0008:
-   "unclassified names are treated as correlated ... capped at the
-   loosely-correlated level"). This is the same fail-safe state the
-   production engine is in today, not a shortcut invented for this script.
-4. **Security-type filtering is best-effort.** `main.py`'s
-   `FineSelectionFunction` filters to QuantConnect's own "common stock"
-   Morningstar code (`SecurityReference.SecurityType == "ST00000001"`) to
-   approximate ADR 0009's "common stock on a US primary exchange (no ETFs,
-   ADRs, or SPACs)" rule. This repository cannot run a QuantConnect backtest
-   itself to verify that filter's exact coverage; if a run's universe looks
-   wrong (an ETF or ADR clearly present), that is the first thing to
-   check, and is expected to need a follow-up ticket, not a silent
-   assumption that it is already correct.
+3. **Classification uses QuantConnect's free Morningstar codes, mapped
+   onto ADR 0008's two levels by hierarchy depth, not by an exact label
+   match.** The Go engine has no classification input even in the
+   production system yet (`internal/strategy/unit_caps.go`'s
+   `classificationOf` always reports Unclassified there, per ADR 0008's own
+   2026-09-24 implementation note), so there is no production behaviour
+   this script could match exactly. `main.py`'s `_classification_groups`
+   instead reads QuantConnect's own free fine/fundamental universe data:
+   Morningstar's Sector code for ADR 0008's "sector" (its loosely
+   correlated, 10-Unit level -- the broadest Morningstar level available),
+   and Morningstar's Industry Group code (not the finer Industry code) for
+   ADR 0008's "industry" (its closely-correlated, 6-Unit level), reasoned
+   through in that function's own comment. This is a considered mapping,
+   not a verified one: this repository cannot run a QuantConnect backtest
+   itself to confirm Morningstar's own Industry Group boundaries actually
+   read as "closely correlated" in Faith's sense for every sector. An
+   instrument Morningstar has no classification for at all -- code 0, or
+   no `AssetClassification` -- falls into `rules.py`'s single, shared
+   Unclassified Group, exactly the case ADR 0008 itself describes and
+   blesses, capped once at the sector (10-Unit) level and never also
+   checked against a separate, tighter industry cap of its own (see
+   `rules.UnitCaps`'s own doc comment).
+4. **Security-type filtering is best-effort, and unverified until the
+   first real run.** `main.py`'s `FineSelectionFunction` filters to
+   QuantConnect's own "common stock" Morningstar code
+   (`SecurityReference.SecurityType == "ST00000001"`) to approximate ADR
+   0009's "common stock on a US primary exchange (no ETFs, ADRs, or
+   SPACs)" rule. This repository cannot run a QuantConnect backtest itself
+   to verify that filter's exact coverage. **To confirm it on your own
+   first run**, check the Logs tab for a line like:
+
+   ```
+   research: universe common-stock filter (SecurityType=='ST00000001') kept 187 dropped 340 of 527 fine candidates this month
+   ```
+
+   printed once every month the universe refreshes. If "kept" is
+   implausibly low (near zero) or implausibly high (equal to the whole
+   candidate count, meaning nothing was filtered), or if the run's universe
+   otherwise looks wrong (an ETF or ADR clearly present), that is the
+   filter to suspect first, and is expected to need a follow-up ticket, not
+   a silent assumption that it is already correct.
 5. **No 20-day-median-dollar-volume universe eligibility inside the coarse
    filter.** ADR 0009's $5M 20-day median dollar volume test needs 20
    Sessions of an instrument's own history, which `main.py` only has once

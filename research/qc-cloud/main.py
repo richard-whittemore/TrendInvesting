@@ -107,6 +107,40 @@ def _n_slippage_model(n_by_order_id):
     return NSlippageModel()
 
 
+def _classification_groups(fine):
+    """ADR 0008 maps company -> industry -> sector -> total-long onto
+    Faith's four Unit-cap levels (The Turtle Rules p.16: 4 per market/6 per
+    closely-correlated group/10 per loosely-correlated group/12 total
+    long). QuantConnect's Free plan supplies Morningstar classification on
+    the fine/fundamental universe, three levels broad to narrow: Sector,
+    Industry Group, Industry.
+
+    - ADR 0008's "sector" is its LOOSELY-correlated, 10-Unit level, so it
+      reads Morningstar's own (broadest) Sector code.
+    - ADR 0008's "industry" is the TIGHTER, closely-correlated, 6-Unit
+      level. Morningstar's finest code, Industry, is narrower than that --
+      The Turtle Rules p.16's own examples of close correlation (heating
+      oil/crude, gold/silver, CHF/DEM) are related but distinct lines of
+      business, not identical ones -- so this reads the middle level,
+      Industry Group, for ADR 0008's "industry".
+
+    Returns ``(industry, sector)`` as strings, or ``(None, None)`` /
+    ``(None, <sector>)`` etc. when Morningstar has no code for a level (a
+    code of 0, or no ``AssetClassification`` at all) -- reaching
+    rules.UnitCaps' own Unclassified Group exactly for an instrument
+    Morningstar genuinely has no classification for, per ADR 0008's own
+    words: "every instrument without a label belongs to a single shared
+    'unclassified' group."
+    """
+    classification = getattr(fine, "AssetClassification", None)
+    sector_code = getattr(classification, "MorningstarSectorCode", None) if classification else None
+    industry_code = getattr(classification, "MorningstarIndustryGroupCode", None) \
+        if classification else None
+    sector = str(sector_code) if sector_code else None
+    industry = str(industry_code) if industry_code else None
+    return industry, sector
+
+
 def _adr_0005_fill_model(slippage_model):
     """A subclass of LEAN's own EquityFillModel that replaces StopLimitFill
     for a BUY only (ADR 0005, as amended). Every other order (a sell, or a
@@ -158,7 +192,7 @@ class _SymbolState:
 
     __slots__ = ("n", "entry_channel", "exit_channel", "closes", "raw_closes", "raw_volumes",
                  "bars_seen", "previous_close", "campaign", "entry_ticket", "add_ticket",
-                 "unit_tickets", "industry", "sector")
+                 "unit_tickets")
 
     def __init__(self):
         self.n = rules.WilderN()
@@ -175,8 +209,6 @@ class _SymbolState:
         self.entry_ticket = None        # the resting entry stop-limit order
         self.add_ticket = None          # the resting Add stop-limit order
         self.unit_tickets = []          # one resting sell order per open Unit
-        self.industry = None            # always None: no classifier (README)
-        self.sector = None              # always None: no classifier (README)
 
     def record_close(self, raw_close, raw_volume, split_adjusted_close):
         self.closes.append(split_adjusted_close)
@@ -240,10 +272,22 @@ class TurtleBaselineResearch(QCAlgorithm):
 
         self.symbol_state = {}
         self._last_eligibility_month = None
+        # symbol -> (industry, sector), from Morningstar classification
+        # (ADR 0008; _classification_groups), refreshed every month
+        # FineSelectionFunction runs. A new Campaign reads this at the
+        # moment it opens and freezes it (rules.Campaign); it is never
+        # re-read afterward (ADR 0008's own freeze-at-entry discipline).
+        self._classification = {}
 
         self.notional_account = rules.NotionalAccount(self.STARTING_CASH)
         self.unit_caps = rules.UnitCaps()
         self.n_by_order_id = {}
+        # entry order id -> the (industry, sector) read at proposal time,
+        # so the Unit-cap check made when the order was placed and the
+        # classification the resulting Campaign freezes are the SAME
+        # reading, never two separate lookups that a mid-flight monthly
+        # reclassification could pull apart.
+        self.classification_by_order_id = {}
         self.slippage_model = _n_slippage_model(self.n_by_order_id)
         self.fill_model = _adr_0005_fill_model(self.slippage_model)()
 
@@ -267,10 +311,9 @@ class TurtleBaselineResearch(QCAlgorithm):
     # -------------------------------------------------------------------
     # Universe (ADR 0009): coarse dollar-volume/price filter, refreshed
     # only on the first trading day of each month; fine filter for common
-    # stock. See README.md, "Deviations", "Universe classification", for
-    # what this cannot verify on the Free plan (ADR/SPAC exclusion, and
-    # industry/sector, hence every instrument being Unclassified under
-    # ADR 0008).
+    # stock and Morningstar sector/industry classification (ADR 0008). See
+    # README.md, "Deviations", for what the common-stock filter cannot yet
+    # verify on the Free plan (ADR/SPAC exclusion).
     # -------------------------------------------------------------------
 
     def CoarseSelectionFunction(self, coarse):
@@ -290,9 +333,23 @@ class TurtleBaselineResearch(QCAlgorithm):
         # Morningstar's own common-stock code in QuantConnect's Fundamental
         # data set; this is the one part of the universe filter this
         # script cannot independently verify without a live QuantConnect
-        # session (README.md, "Deviations").
-        return [f.Symbol for f in fine
-                if getattr(getattr(f, "SecurityReference", None), "SecurityType", None) == "ST00000001"]
+        # session (README.md, "Deviations" -- which also names the log
+        # line just below as how to confirm it on the first real run).
+        selected = []
+        kept = dropped = 0
+        for f in fine:
+            if getattr(getattr(f, "SecurityReference", None), "SecurityType", None) != "ST00000001":
+                dropped += 1
+                continue
+            kept += 1
+            # ADR 0008: recorded now, read (and frozen) only when a
+            # Campaign later opens in this symbol (_decide_entry,
+            # OnOrderEvent) -- never re-read by an already-open Campaign.
+            self._classification[f.Symbol] = _classification_groups(f)
+            selected.append(f.Symbol)
+        self.Log("research: universe common-stock filter (SecurityType=='ST00000001') kept {} "
+                 "dropped {} of {} fine candidates this month".format(kept, dropped, kept + dropped))
+        return selected
 
     def OnSecuritiesChanged(self, changes):
         for security in changes.AddedSecurities:
@@ -433,8 +490,12 @@ class TurtleBaselineResearch(QCAlgorithm):
         cap = rules.price_cap(rung, n)
         slip = rules.slippage(n)
         commission = rules.commission_estimate(quantity, cap)
-        accepted, reason = ledger.try_reserve(str(symbol), state.industry, state.sector, quantity,
-                                              cap, slip, 1.0, commission)
+        # ADR 0008: an Add checks against the CAMPAIGN's own frozen
+        # industry/sector, never a fresh classification lookup -- the same
+        # freeze-at-entry discipline ADR 0006 applies to N and Unit size.
+        accepted, reason = ledger.try_reserve(str(symbol), state.campaign.industry,
+                                              state.campaign.sector, quantity, cap, slip, 1.0,
+                                              commission)
         if not accepted:
             self.Log("research: {} add declined at rung {:.4f}: {}".format(symbol, rung, reason))
             return
@@ -462,14 +523,20 @@ class TurtleBaselineResearch(QCAlgorithm):
         cap = rules.price_cap(entry_level, n)
         slip = rules.slippage(n)
         commission = rules.commission_estimate(quantity, cap)
-        accepted, reason = ledger.try_reserve(str(symbol), state.industry, state.sector, quantity,
-                                              cap, slip, 1.0, commission)
+        # ADR 0008: the classification read HERE, at proposal time, is the
+        # one the resulting Campaign freezes at its fill (OnOrderEvent) --
+        # one reading, via classification_by_order_id, never two separate
+        # lookups a mid-flight monthly reclassification could pull apart.
+        industry, sector = self._classification.get(symbol, (None, None))
+        accepted, reason = ledger.try_reserve(str(symbol), industry, sector, quantity, cap, slip,
+                                              1.0, commission)
         if not accepted:
             self.Log("research: {} entry declined at level {:.4f}: {}".format(symbol, entry_level, reason))
             return
         tag = "entry:{}:{}".format(symbol, n)
         ticket = self.StopLimitOrder(symbol, quantity, entry_level, self._round_tick(symbol, cap), tag=tag)
         self.n_by_order_id[ticket.OrderId] = n
+        self.classification_by_order_id[ticket.OrderId] = (industry, sector)
         state.entry_ticket = ticket
 
     def _round_tick(self, symbol, price):
@@ -528,8 +595,12 @@ class TurtleBaselineResearch(QCAlgorithm):
         if tag.startswith("entry:"):
             n = float(tag.split(":")[-1])
             quantity = int(order_event.FillQuantity)
+            # ADR 0008: the SAME (industry, sector) reading _decide_entry's
+            # own Unit-cap check already used, frozen onto the Campaign now
+            # and never re-read afterward.
+            industry, sector = self.classification_by_order_id.pop(order_event.OrderId, (None, None))
             state.campaign = rules.Campaign(symbol, fill_price, n, quantity,
-                                            industry=state.industry, sector=state.sector)
+                                            industry=industry, sector=sector)
             state.entry_ticket = None
             state.unit_tickets = []
             self._maintain_exit_orders(state, None)
@@ -565,6 +636,12 @@ class TurtleBaselineResearch(QCAlgorithm):
         r_multiple = (fill_price - entry_price) / (rules.STOP_MULTIPLE * n)
         indices = [unit_index] if unit_index is not None and unit_index < len(campaign.units) else \
             list(range(len(campaign.units)))
+        # ADR 0008: a closed Unit frees its own instrument/industry/sector/
+        # total-long headroom, against the SAME frozen classification it
+        # was reserved under (campaign.industry/.sector) -- otherwise the
+        # caps only ever fill up over a run and never reflect what is
+        # actually still open.
+        self.unit_caps.remove(str(symbol), campaign.industry, campaign.sector, units=len(indices))
         campaign.remove_units(indices)
         if unit_index is not None and unit_index < len(state.unit_tickets):
             state.unit_tickets[unit_index] = None

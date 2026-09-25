@@ -332,6 +332,64 @@ class UnitCapsTests(unittest.TestCase):
         exceeded, _ = caps.would_exceed("AAA", None, None, additional_units=4)
         self.assertFalse(exceeded)
 
+    def test_realistic_two_sector_scenario_isolates_industry_and_sector_binding(self):
+        """A realistic scenario with several classified instruments across
+        TWO sectors (ADR 0008), each with real-looking Morningstar-style
+        group names, exercising the industry cap (6) and the sector cap
+        (10) as the SEPARATE constraints they are: an industry cap that
+        binds while its own sector is nowhere near its cap, and a sector
+        cap that binds across two DIFFERENT industries, for an instrument
+        and an industry that are each nowhere near their OWN caps -- proof
+        that the sector aggregate, not the instrument or the industry, is
+        what is actually declining it.
+        """
+        caps = rules.UnitCaps()
+
+        # Two industries sharing one sector (Technology), plus an entirely
+        # separate sector (Financial Services) with its own industry.
+        caps.add("AAPL", "Software", "Technology", units=2)
+        caps.add("NVDA", "Semiconductors", "Technology", units=2)
+        caps.add("JPM", "Banks", "Financial Services", units=1)
+        # Technology sector so far: 2 (Software) + 2 (Semiconductors) = 4.
+
+        # Adding 4 more Software Units reaches the INDUSTRY cap (6)
+        # exactly -- not yet over it, and Technology's own sector total
+        # (8) and the total-long cap (9) both still have headroom.
+        exceeded, reason = caps.would_exceed("MSFT", "Software", "Technology", additional_units=4)
+        self.assertFalse(exceeded, reason)
+        caps.add("MSFT", "Software", "Technology", units=4)
+
+        # A further Software Unit is declined by the INDUSTRY cap (6),
+        # even though Technology's own SECTOR total (8) is still well
+        # under its cap (10).
+        exceeded, reason = caps.would_exceed("AAPL", "Software", "Technology")
+        self.assertTrue(exceeded)
+        self.assertEqual(reason, "industry")
+
+        # Semiconductors, the OTHER industry sharing Technology's sector,
+        # is nowhere near its own industry cap: two more Units are added
+        # without objection.
+        for _ in range(2):
+            exceeded, reason = caps.would_exceed("NVDA", "Semiconductors", "Technology")
+            self.assertFalse(exceeded, reason)
+            caps.add("NVDA", "Semiconductors", "Technology", units=1)
+        # Technology sector is now exactly AT its own cap: 6 (Software) +
+        # 4 (Semiconductors) = 10.
+
+        # A brand-new instrument in Semiconductors -- an industry at only
+        # 4 of its own 6-Unit cap, and an instrument with no Units of its
+        # own at all -- is declined by the SECTOR cap (10), not by either
+        # of those two: proof the sector aggregate across BOTH industries
+        # is what actually binds here.
+        exceeded, reason = caps.would_exceed("AMD", "Semiconductors", "Technology")
+        self.assertTrue(exceeded)
+        self.assertEqual(reason, "sector")
+
+        # Financial Services, the entirely separate sector, is untouched
+        # by any of the above and still has its own headroom.
+        exceeded, reason = caps.would_exceed("JPM", "Banks", "Financial Services")
+        self.assertFalse(exceeded, reason)
+
 
 class StrengthAndTieBreakTests(unittest.TestCase):
     def test_strength_formula(self):
