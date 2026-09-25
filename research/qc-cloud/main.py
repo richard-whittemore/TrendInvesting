@@ -32,6 +32,7 @@ from datetime import date, datetime, timezone
 
 from os.path import abspath, dirname
 from sys import path
+from types import SimpleNamespace
 
 # rules.py sits beside this file. QuantConnect's cloud IDE runs every file
 # in one project folder, so this is normally unnecessary, but it mirrors
@@ -41,6 +42,17 @@ if _HERE not in path:
     path.insert(0, _HERE)
 
 import rules  # noqa: E402
+
+# How many trailing daily bars a symbol needs before it can be sized or
+# judged eligible: the deepest of ADR 0009's 250-bar history floor, the
+# 55-bar Entry Channel and 20-bar Exit Channel (ADR 0002), and Strength's
+# own 64-bar lookback (ADR 0010, as amended). Used both for the
+# algorithm's own initial SetWarmUp and for backfilling a stock the
+# universe selects only after the algorithm has already started
+# (PR #253 review, Greptile: main.py:360 -- "New selections lack prior
+# history"; see TurtleBaselineResearch._warm_up_new_symbol).
+WARMUP_BARS = max(rules.ENTRY_CHANNEL_LENGTH, rules.UNIVERSE_MIN_HISTORY_BARS,
+                  rules.STRENGTH_LOOKBACK_BARS + 1)
 
 
 # =============================================================================
@@ -266,8 +278,16 @@ class TurtleBaselineResearch(QCAlgorithm):
         self.AddUniverse(self.CoarseSelectionFunction, self.FineSelectionFunction)
 
         # SPY, for the buy-and-hold comparison the closing summary reports.
+        # This is the one series in this script priced on QuantConnect's
+        # split-AND-DIVIDEND-adjusted ("Adjusted") basis, deliberately
+        # unlike every traded instrument's own SplitAdjusted subscription
+        # (ADR 0004 governs the strategy's own signals and fills, not an
+        # external comparison benchmark): a buy-and-hold total-return
+        # figure needs dividends folded in, or it understates SPY and
+        # flatters the strategy by comparison (PR #253 review, Greptile
+        # and CodeRabbit: main.py:384, "SPY comparison omits dividends").
         self.spy = self.AddEquity(
-            "SPY", Resolution.Daily, dataNormalizationMode=DataNormalizationMode.SplitAdjusted).Symbol
+            "SPY", Resolution.Daily, dataNormalizationMode=DataNormalizationMode.Adjusted).Symbol
         self.spy_curve = []
 
         self.symbol_state = {}
@@ -288,6 +308,31 @@ class TurtleBaselineResearch(QCAlgorithm):
         # reading, never two separate lookups that a mid-flight monthly
         # reclassification could pull apart.
         self.classification_by_order_id = {}
+        # order id -> "entry" | "add" | "exit", set the moment an order is
+        # placed (_decide_entry/_decide_add/_maintain_exit_orders) and read
+        # by OnOrderEvent. Replaces parsing meaning out of the order's own
+        # tag string, which went stale the moment a Unit's own index moved
+        # (PR #253 review, Greptile main.py:647 and CodeRabbit main.py:647:
+        # "Keep state.unit_tickets aligned ... locate the ticket by
+        # order_event.OrderId rather than relying on the now-stale index
+        # in the order tag").
+        self.order_kind = {}
+        # order id -> (symbol, industry, sector): the Unit-cap headroom an
+        # entry or Add order reserved at placement (rules.SessionLedger).
+        # Committed (popped, kept reserved) the moment the order fully
+        # fills; released (popped, and unit_caps.remove called) the moment
+        # it is cancelled or LEAN refuses it outright -- otherwise every
+        # unfilled proposal exhausts its Unit's headroom forever (PR #253
+        # review, Greptile rules.py:841 and CodeRabbit main.py:411,
+        # Critical: "Unfilled orders exhaust Unit caps").
+        self.reservations_by_order_id = {}
+        # order id -> [total_quantity, total_notional] accumulated across
+        # every OrderEvent seen for it so far (PartiallyFilled or Filled).
+        # Nothing acts on a PartiallyFilled event alone -- a Unit is
+        # indivisible (CONTEXT.md "Unit") -- only once the order is fully
+        # resolved, using the accumulated total (PR #253 review, Greptile
+        # main.py:585: "Partial fills count as Units").
+        self.pending_fills = {}
         self.slippage_model = _n_slippage_model(self.n_by_order_id)
         self.fill_model = _adr_0005_fill_model(self.slippage_model)()
 
@@ -306,7 +351,7 @@ class TurtleBaselineResearch(QCAlgorithm):
             "2022 correction": (date(2022, 1, 1), date(2023, 1, 1)),
         }
 
-        self.SetWarmUp(max(rules.ENTRY_CHANNEL_LENGTH, rules.UNIVERSE_MIN_HISTORY_BARS), Resolution.Daily)
+        self.SetWarmUp(WARMUP_BARS, Resolution.Daily)
 
     # -------------------------------------------------------------------
     # Universe (ADR 0009): coarse dollar-volume/price filter, refreshed
@@ -356,17 +401,56 @@ class TurtleBaselineResearch(QCAlgorithm):
             security.SetSlippageModel(self.slippage_model)
             security.SetFeeModel(InteractiveBrokersFeeModel())
             security.SetFillModel(self.fill_model)
-            if security.Symbol not in self.symbol_state:
+            is_new = security.Symbol not in self.symbol_state
+            if is_new:
                 self.symbol_state[security.Symbol] = _SymbolState()
+                # PR #253 review, Greptile main.py:360: a stock the
+                # universe selects only after the algorithm's own start
+                # has none of its own history yet, so it could never clear
+                # ADR 0009's >= 250-bar requirement, or warm up N or the
+                # channels, however long it then remains selected.
+                # Backfill it immediately with QuantConnect's own History.
+                self._warm_up_new_symbol(security.Symbol)
         for security in changes.RemovedSecurities:
             state = self.symbol_state.get(security.Symbol)
-            # ADR 0009: losing eligibility never closes an open Campaign;
-            # keep tracking state for any symbol still in one, drop it
-            # otherwise. An entry/Add proposal still resting is cancelled,
-            # since a new Campaign may not open in an ineligible name.
+            # ADR 0009: losing eligibility never closes an open Campaign,
+            # and never un-happens a fill LEAN reports anyway (the
+            # broker's reality is authoritative). symbol_state is
+            # therefore never deleted here -- only an entry proposal no
+            # longer eligible to open a NEW Campaign is cancelled, and its
+            # Unit-cap reservation released (_cancel_ticket). Deleting the
+            # state risked a stray late fill for an order this method had
+            # already "released" arriving with nowhere to be recorded,
+            # silently leaking a real position out of every cap and out of
+            # the equity/Campaign accounting alike.
             if state is not None and state.campaign is None:
                 self._cancel_ticket(state.entry_ticket)
-                del self.symbol_state[security.Symbol]
+                state.entry_ticket = None
+
+    def _warm_up_new_symbol(self, symbol):
+        """Backfill a newly-selected symbol's indicators from QuantConnect's
+        own History, in the same split-adjusted view OnData itself reads
+        (ADR 0004), so a stock the universe only selects well into the run
+        is not permanently unable to satisfy ADR 0009's 250-bar history
+        floor or warm up N/the channels (PR #253 review, Greptile
+        main.py:360). Feeds each historical bar through the same
+        evaluate-then-advance path a live bar would (_advance), so this
+        symbol's state is indistinguishable, once the backfill is done,
+        from one that had been tracked from the algorithm's own start.
+        """
+        state = self.symbol_state[symbol]
+        history = self.History([symbol], WARMUP_BARS, Resolution.Daily,
+                               dataNormalizationMode=DataNormalizationMode.SplitAdjusted)
+        if history is None or len(history) == 0:
+            return
+        try:
+            rows = history.loc[symbol]
+        except (KeyError, TypeError):
+            return
+        for _, row in rows.iterrows():
+            bar = SimpleNamespace(High=float(row["high"]), Low=float(row["low"]),
+                                  Close=float(row["close"]), Volume=float(row.get("volume", 0.0)))
+            self._advance(state, bar)
 
     # -------------------------------------------------------------------
     # The daily Session (ADR 0021): QuantConnect delivers every security's
@@ -379,9 +463,11 @@ class TurtleBaselineResearch(QCAlgorithm):
     # -------------------------------------------------------------------
 
     def OnData(self, slice_):
+        # Read now, appended later (after the warm-up check) so the SPY
+        # curve covers exactly the Sessions equity_curve does -- both, or
+        # neither (PR #253 review, CodeRabbit main.py:384: "Record SPY
+        # marks only after warm-up ends").
         spy_bar = slice_.Bars.get(self.spy)
-        if spy_bar is not None:
-            self.spy_curve.append((self.Time, float(spy_bar.Close)))
 
         if self.IsWarmingUp:
             for symbol, bar in slice_.Bars.items():
@@ -465,6 +551,8 @@ class TurtleBaselineResearch(QCAlgorithm):
         equity = float(self.Portfolio.TotalPortfolioValue)
         self.notional_account.observe(self.Time.date(), equity)
         self.equity_curve.append((self.Time, equity))
+        if spy_bar is not None:
+            self.spy_curve.append((self.Time, float(spy_bar.Close)))
 
     def _advance(self, state, bar):
         high, low, close = float(bar.High), float(bar.Low), float(bar.Close)
@@ -493,15 +581,17 @@ class TurtleBaselineResearch(QCAlgorithm):
         # ADR 0008: an Add checks against the CAMPAIGN's own frozen
         # industry/sector, never a fresh classification lookup -- the same
         # freeze-at-entry discipline ADR 0006 applies to N and Unit size.
-        accepted, reason = ledger.try_reserve(str(symbol), state.campaign.industry,
-                                              state.campaign.sector, quantity, cap, slip, 1.0,
-                                              commission)
+        industry, sector = state.campaign.industry, state.campaign.sector
+        accepted, reason = ledger.try_reserve(str(symbol), industry, sector, quantity, cap, slip,
+                                              1.0, commission)
         if not accepted:
             self.Log("research: {} add declined at rung {:.4f}: {}".format(symbol, rung, reason))
             return
         tag = "add:{}".format(symbol)
         ticket = self.StopLimitOrder(symbol, quantity, rung, self._round_tick(symbol, cap), tag=tag)
         self.n_by_order_id[ticket.OrderId] = n
+        self.order_kind[ticket.OrderId] = "add"
+        self.reservations_by_order_id[ticket.OrderId] = (str(symbol), industry, sector)
         state.add_ticket = ticket
 
     def _decide_entry(self, state, symbol, entry_level, n, ledger):
@@ -514,6 +604,19 @@ class TurtleBaselineResearch(QCAlgorithm):
             float(self.Securities[symbol].Price), dv_value, state.bars_seen, is_common_stock=True)
         if not eligible:
             self.Log("research: {} entry declined: ineligible".format(symbol))
+            return
+        # PR #253 review, Greptile main.py:603: decline BEFORE placing an
+        # order whose own fill would leave rules.protective_stop_level
+        # unable to compute a positive initial stop (The Turtle Rules
+        # p.22: entry_level - Stop Multiple x N must be positive). A fill
+        # at or above entry_level only widens this margin, so checking the
+        # level here is the conservative, sufficient bound -- and it must
+        # be checked here, before submission, never left to raise inside
+        # OnOrderEvent, which would abort the whole backtest.
+        if entry_level - rules.STOP_MULTIPLE * n <= 0:
+            self.Log("research: {} entry declined: level {:.4f} minus {}xN ({:.4f}) is not "
+                     "positive".format(symbol, entry_level, rules.STOP_MULTIPLE,
+                                       rules.STOP_MULTIPLE * n))
             return
         notional = self.notional_account.current
         quantity = rules.unit_quantity(notional, rules.UNIT_VOLATILITY_FRACTION, n)
@@ -536,7 +639,9 @@ class TurtleBaselineResearch(QCAlgorithm):
         tag = "entry:{}:{}".format(symbol, n)
         ticket = self.StopLimitOrder(symbol, quantity, entry_level, self._round_tick(symbol, cap), tag=tag)
         self.n_by_order_id[ticket.OrderId] = n
+        self.order_kind[ticket.OrderId] = "entry"
         self.classification_by_order_id[ticket.OrderId] = (industry, sector)
+        self.reservations_by_order_id[ticket.OrderId] = (str(symbol), industry, sector)
         state.entry_ticket = ticket
 
     def _round_tick(self, symbol, price):
@@ -555,25 +660,87 @@ class TurtleBaselineResearch(QCAlgorithm):
         campaign = state.campaign
         while len(state.unit_tickets) < len(campaign.units):
             state.unit_tickets.append(None)
+        symbol_tag = getattr(campaign.symbol, "Value", campaign.symbol)
         for index, unit in enumerate(campaign.units):
             level = rules.exit_order_level(unit["stop"], exit_extreme)
             level = self._round_tick(campaign.symbol, level)
             ticket = state.unit_tickets[index]
             if ticket is None:
-                symbol_tag = getattr(campaign.symbol, "Value", campaign.symbol)
-                tag = "exit:{}:{}:{}".format(symbol_tag, index, campaign.campaign_n)
+                # The tag is a label for LEAN's own order blotter only:
+                # WHICH Unit an exit order belongs to is looked up by
+                # OrderId (_unit_index_for_order), never parsed back out of
+                # this string, so a later index shift (a Unit closing)
+                # cannot make it stale (PR #253 review, Greptile
+                # main.py:647 and CodeRabbit main.py:647).
+                tag = "exit:{}".format(symbol_tag)
                 ticket = self.StopMarketOrder(campaign.symbol, -campaign.unit_quantity, level, tag=tag)
                 self.n_by_order_id[ticket.OrderId] = campaign.campaign_n
+                self.order_kind[ticket.OrderId] = "exit"
                 state.unit_tickets[index] = ticket
             else:
                 fields = UpdateOrderFields()
                 fields.StopPrice = level
                 ticket.Update(fields)
 
+    def _unit_index_for_order(self, state, order_id):
+        """Which of campaign.units (by position) this order_id's resting
+        Exit Order belongs to, found by identity in state.unit_tickets --
+        never by parsing an index out of the order's own tag, which a
+        earlier Unit's closure can shift (PR #253 review, Greptile
+        main.py:647 and CodeRabbit main.py:647)."""
+        for index, ticket in enumerate(state.unit_tickets):
+            if ticket is not None and ticket.OrderId == order_id:
+                return index
+        return None
+
     def _cancel_ticket(self, ticket):
-        if ticket is not None and ticket.Status not in (OrderStatus.Filled, OrderStatus.Canceled,
-                                                          OrderStatus.Invalid):
+        """Cancel a resting order, if it is still open, and release any
+        Unit-cap reservation it was holding (reservations_by_order_id): a
+        cancelled or otherwise abandoned proposal must give back the
+        headroom it claimed at placement, or unfilled proposals silently
+        exhaust every cap over the life of a run (PR #253 review, Greptile
+        rules.py:841 and CodeRabbit main.py:411, Critical).
+
+        Two call sites, two different reasons this is safe:
+
+        - ADR 0011 expiry (OnData) and a universe removal
+          (OnSecuritiesChanged): by the time either runs, LEAN has already
+          resolved every fill this order could ever have received against
+          the most recently delivered bar, so it truly has no fill left to
+          race.
+        - An exit fill cancelling a resting Add (_handle_unit_exit): the
+          Add's own fill CAN still be in flight in this same bar's event
+          batch (a wide bar touching both the Add rung and a stop). If it
+          arrives anyway, releasing the reservation here is not the whole
+          story -- OnOrderEvent still delivers that fill, and
+          _settle_add's own campaign-state check (Loaded, closed, or
+          partially stopped) is what makes THAT outcome safe, by
+          liquidating it. This method's own release is correct either way:
+          the reservation must not survive whichever of "cancelled" or
+          "settled as an orphan" actually happens.
+        """
+        if ticket is None:
+            return
+        if ticket.Status not in (OrderStatus.Filled, OrderStatus.Canceled, OrderStatus.Invalid):
             ticket.Cancel()
+        self._release_reservation(ticket.OrderId)
+
+    def _release_reservation(self, order_id):
+        """Give back the Unit-cap headroom order_id's reservation was
+        holding, if any. Idempotent (pop-based): calling it twice for the
+        same order, from two different code paths, is harmless."""
+        entry = self.reservations_by_order_id.pop(order_id, None)
+        if entry is not None:
+            symbol, industry, sector = entry
+            self.unit_caps.remove(symbol, industry, sector, units=1)
+
+    def _commit_reservation(self, order_id):
+        """An order that fully fills converts its Unit-cap reservation into
+        a real, committed Unit: stop tracking it as a pending reservation
+        (so a later, unrelated cancellation can never release it), but do
+        NOT call unit_caps.remove -- the Unit stays counted in unit_caps
+        until its own exit (_handle_unit_exit) releases it."""
+        self.reservations_by_order_id.pop(order_id, None)
 
     # -------------------------------------------------------------------
     # Fills (OnOrderEvent): opening/adding to a Campaign, and closing Units
@@ -582,74 +749,216 @@ class TurtleBaselineResearch(QCAlgorithm):
     # -------------------------------------------------------------------
 
     def OnOrderEvent(self, order_event):
-        if order_event.Status != OrderStatus.Filled and order_event.Status != OrderStatus.PartiallyFilled:
+        order_id = order_event.OrderId
+        status = order_event.Status
+
+        if status == OrderStatus.Invalid:
+            # LEAN refused the order outright -- its own affordability or
+            # margin check disagreed with this script's own pre-check (ADR
+            # 0020). Nothing was bought; give back its Unit-cap headroom
+            # (PR #253 review, Greptile rules.py:841 and CodeRabbit
+            # main.py:411, Critical) rather than leaving it reserved
+            # forever, and forget the now-dead ticket.
+            self._release_reservation(order_id)
+            self.pending_fills.pop(order_id, None)
+            self._forget_ticket(order_event.Symbol, order_id)
             return
+
+        if status not in (OrderStatus.Filled, OrderStatus.PartiallyFilled, OrderStatus.Canceled):
+            return
+
         self.total_commission += float(order_event.OrderFee.Value.Amount)
-        symbol = order_event.Symbol
+        total_qty, total_notional = self.pending_fills.get(order_id, (0.0, 0.0))
+        total_qty += float(order_event.FillQuantity)
+        total_notional += float(order_event.FillQuantity) * float(order_event.FillPrice)
+
+        if status == OrderStatus.PartiallyFilled:
+            # PR #253 review, Greptile main.py:585 ("Partial fills count as
+            # Units"): a Unit is indivisible (CONTEXT.md "Unit"); wait for
+            # this order to fully resolve -- Filled, or Canceled with
+            # something already filled -- before acting on it at all,
+            # using the TOTAL accumulated across every partial fill, never
+            # one slice of it in isolation.
+            self.pending_fills[order_id] = (total_qty, total_notional)
+            return
+
+        self.pending_fills.pop(order_id, None)
+        if status == OrderStatus.Canceled and total_qty <= 0:
+            # The common case (ADR 0011 expiry, or a universe removal):
+            # _cancel_ticket already released this order's reservation,
+            # and nothing ever traded.
+            return
+
+        try:
+            self._settle_order(order_event, total_qty, total_notional)
+        except Exception as err:
+            # PR #253 review, Greptile main.py:603 ("High volatility fills
+            # abort backtests") and CodeRabbit main.py:612, Critical: a
+            # fill handler must never raise. LEAN does not guard a
+            # Python exception raised from OnOrderEvent the way it guards
+            # one from a fill or slippage model, so an uncaught one aborts
+            # the WHOLE backtest over one instrument's edge case. Log it
+            # and let the run continue; this defends every branch below,
+            # not only the specific cases already handled explicitly.
+            self.Log("research: {} order event could not be settled: {}".format(
+                order_event.Symbol, err))
+
+    def _forget_ticket(self, symbol, order_id):
+        """Clear a state's own reference to order_id if it still holds one
+        (an entry/Add order LEAN refused outright, OrderStatus.Invalid),
+        so a later Session's ADR 0011 expiry loop does not try to cancel
+        an order that never worked in the first place."""
         state = self.symbol_state.get(symbol)
         if state is None:
             return
-        tag = order_event.Ticket.Tag or ""
-        fill_price = float(order_event.FillPrice)
-
-        if tag.startswith("entry:"):
-            n = float(tag.split(":")[-1])
-            quantity = int(order_event.FillQuantity)
-            # ADR 0008: the SAME (industry, sector) reading _decide_entry's
-            # own Unit-cap check already used, frozen onto the Campaign now
-            # and never re-read afterward.
-            industry, sector = self.classification_by_order_id.pop(order_event.OrderId, (None, None))
-            state.campaign = rules.Campaign(symbol, fill_price, n, quantity,
-                                            industry=industry, sector=sector)
+        if state.entry_ticket is not None and state.entry_ticket.OrderId == order_id:
             state.entry_ticket = None
-            state.unit_tickets = []
-            self._maintain_exit_orders(state, None)
-
-        elif tag.startswith("add:"):
-            if state.campaign is not None:
-                state.campaign.add_unit(fill_price)
+        if state.add_ticket is not None and state.add_ticket.OrderId == order_id:
             state.add_ticket = None
+
+    def _settle_order(self, order_event, total_quantity, total_notional):
+        """Act on an order that is now fully resolved: entirely filled, or
+        cancelled after partially filling (the broker's own reality is
+        authoritative, mirroring ADR 0019's spirit short of its full
+        reconciliation machinery). total_quantity/total_notional are
+        accumulated across every fill this order ever reported, so a
+        Unit's own recorded quantity and price are what actually filled,
+        never assumed to equal the original request (PR #253 review,
+        Greptile main.py:585)."""
+        symbol = order_event.Symbol
+        state = self.symbol_state.get(symbol)
+        quantity = int(round(total_quantity))
+        order_id = order_event.OrderId
+        if state is None or quantity <= 0:
+            self._release_reservation(order_id)
+            return
+        price = total_notional / total_quantity
+        kind = self.order_kind.pop(order_id, None)
+
+        if kind == "entry":
+            self._settle_entry(state, symbol, order_id, quantity, price)
+        elif kind == "add":
+            self._settle_add(state, symbol, order_id, quantity, price)
+        elif kind == "exit":
+            self._handle_unit_exit(state, symbol, order_id, quantity, price)
+
+    def _settle_entry(self, state, symbol, order_id, quantity, price):
+        # Cleared unconditionally, before either branch below: this order
+        # is now fully resolved one way or the other, and state.entry_ticket
+        # must never keep pointing at it -- a resting reference to an
+        # already-Filled order would permanently read as "still awaiting
+        # this Session's decision" and block every future entry attempt
+        # for this symbol.
+        state.entry_ticket = None
+        n = self.n_by_order_id.pop(order_id, None)
+        industry, sector = self.classification_by_order_id.pop(order_id, (None, None))
+        # PR #253 review, Greptile main.py:603 ("High volatility fills
+        # abort backtests"): the pre-placement check in _decide_entry
+        # already declines an entry level too close to 2N of itself; this
+        # is defence in depth against the ACTUAL fill price (slippage, a
+        # gap, or a missing N) still leaving the initial stop non-positive.
+        # Never let opening the Campaign raise -- decline the fill by
+        # selling the shares straight back out instead.
+        if n is None or price - rules.STOP_MULTIPLE * n <= 0:
+            self._release_reservation(order_id)
+            self.MarketOrder(symbol, -quantity, tag="entry-declined-liquidate:{}".format(symbol))
+            self.Log("research: {} entry fill at {} could not open a Campaign (N={}); "
+                     "liquidated immediately".format(symbol, price, n))
+            return
+        # ADR 0008: the SAME (industry, sector) reading _decide_entry's own
+        # Unit-cap check already used, frozen onto the Campaign now and
+        # never re-read afterward. Construct the Campaign, THEN commit the
+        # reservation: if rules.Campaign's own construction were somehow to
+        # raise despite the check above, the reservation must stay pending
+        # (recoverable by a later cancellation) rather than being marked
+        # committed against a Campaign that was never actually created.
+        state.campaign = rules.Campaign(symbol, price, n, quantity, industry=industry, sector=sector)
+        self._commit_reservation(order_id)
+        state.unit_tickets = []
+        self._maintain_exit_orders(state, None)
+
+    def _settle_add(self, state, symbol, order_id, quantity, price):
+        state.add_ticket = None
+        campaign = state.campaign
+        if campaign is not None and not campaign.loaded and not campaign.partially_stopped:
+            # add_unit BEFORE committing the reservation, for the identical
+            # reason _settle_entry orders its own two calls this way.
+            campaign.add_unit(price)
+            self._commit_reservation(order_id)
             self._maintain_exit_orders(state, None)
+            return
+        # PR #253 review, CodeRabbit main.py:612, Critical ("Handle an Add
+        # fill that arrives after a partial or full stop-out"): the
+        # Campaign this Add was meant for has already fully closed, or
+        # already stopped a Unit out, since the order was placed -- a
+        # same-bar stop-then-add race, or a bar wide enough to touch both
+        # the Add rung and a stop. The fill is real; selling it straight
+        # back out is the fail-safe response, never silently dropping it
+        # (which would leave real shares LEAN holds untracked) and never
+        # raising inside add_unit (which would abort the backtest).
+        self._release_reservation(order_id)
+        self.MarketOrder(symbol, -quantity, tag="add-orphan-liquidate:{}".format(symbol))
+        self.Log("research: {} Add fill at {} arrived with no Campaign able to take it; "
+                 "liquidated immediately".format(symbol, price))
 
-        elif tag.startswith("exit:"):
-            self._handle_unit_exit(state, symbol, tag, fill_price)
-
-    def _handle_unit_exit(self, state, symbol, tag, fill_price):
+    def _handle_unit_exit(self, state, symbol, order_id, quantity, price):
         campaign = state.campaign
         if campaign is None:
             return
-        try:
-            # "exit:{symbol}:{index}:{n}"; rsplit from the right so a
-            # symbol string that happens to contain a colon cannot shift
-            # which field is the index.
-            _, index_str, _ = tag.split(":", 1)[1].rsplit(":", 2)
-            unit_index = int(index_str)
-        except (IndexError, ValueError):
-            unit_index = None
-        entry_price = campaign.entry_price()
-        n = campaign.campaign_n
-        # This one Unit's own R multiple: (exit - entry) / (stop distance),
-        # i.e. in units of the Campaign's own initial 1-Unit risk (Stop
-        # Multiple x N) -- a standard, ADR-consistent way to express a
-        # trade's result independently of position size, used only for
-        # this script's OWN reporting (not itself an ADR-cited rule).
-        r_multiple = (fill_price - entry_price) / (rules.STOP_MULTIPLE * n)
-        indices = [unit_index] if unit_index is not None and unit_index < len(campaign.units) else \
-            list(range(len(campaign.units)))
+        # PR #253 review, CodeRabbit main.py:612, Critical: a resting Add
+        # must not survive ANY exit fill, partial or full, not only the
+        # Campaign's very last one -- the Campaign it was meant to extend
+        # may no longer be able to take it the moment ANY Unit closes (ADR
+        # 0012: no further Add once a Campaign is partially stopped).
+        self._cancel_ticket(state.add_ticket)
+        state.add_ticket = None
+
+        # Which Unit this specific resting order belonged to, found by
+        # identity (never by parsing an index out of its own tag, which an
+        # earlier Unit's own closure would have made stale -- PR #253
+        # review, Greptile main.py:647 and CodeRabbit main.py:647).
+        unit_index = self._unit_index_for_order(state, order_id)
+        indices = [unit_index] if unit_index is not None else list(range(len(campaign.units)))
+
+        # A Unit is indivisible (CONTEXT.md "Unit"): this treats ANY
+        # non-zero settlement of a Unit's own Exit Order as closing that
+        # WHOLE Unit, at the traded average price. That is exact for the
+        # overwhelmingly common case -- a full Filled event -- but a
+        # Canceled-with-partial-fill settlement (OnOrderEvent) can, in
+        # principle, close fewer shares than the Unit's own recorded
+        # quantity; logged here, visibly, rather than silently modelling a
+        # Unit this script has no smaller representation for (README.md,
+        # "Deviations").
+        if unit_index is not None and quantity != campaign.unit_quantity:
+            self.Log("research: {} exit order for unit {} settled {} of {} shares (a partial fill "
+                     "resolved by cancellation); treating the Unit as fully closed at the traded "
+                     "average price {}".format(symbol, unit_index, quantity, campaign.unit_quantity,
+                                               price))
+
         # ADR 0008: a closed Unit frees its own instrument/industry/sector/
         # total-long headroom, against the SAME frozen classification it
         # was reserved under (campaign.industry/.sector) -- otherwise the
         # caps only ever fill up over a run and never reflect what is
         # actually still open.
         self.unit_caps.remove(str(symbol), campaign.industry, campaign.sector, units=len(indices))
-        campaign.remove_units(indices)
-        if unit_index is not None and unit_index < len(state.unit_tickets):
-            state.unit_tickets[unit_index] = None
+        # PR #253 review, Greptile main.py:649 ("Campaign results omit
+        # earlier Units"): realise EVERY closed Unit's own (exit - fill)
+        # into the Campaign's running total; r_multiple() is read only
+        # once the whole Campaign has closed, below.
+        campaign.close_units(indices, price)
+        # Keep state.unit_tickets exactly aligned with campaign.units:
+        # delete the SAME indices, in descending order (so an earlier
+        # deletion cannot shift a later one's own position), rather than
+        # only nulling the slot the closing order itself occupied (PR #253
+        # review, Greptile main.py:647 and CodeRabbit main.py:647).
+        for index in sorted(indices, reverse=True):
+            if index < len(state.unit_tickets):
+                del state.unit_tickets[index]
+
         if not campaign.units:
+            r_multiple = campaign.r_multiple()
             self.closed_campaigns.append({"r_multiple": r_multiple, "win": r_multiple > 0})
-            self._cancel_ticket(state.add_ticket)
             state.campaign = None
-            state.add_ticket = None
             state.unit_tickets = []
 
     # -------------------------------------------------------------------

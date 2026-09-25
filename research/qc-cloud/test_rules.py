@@ -237,6 +237,50 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(campaign.unit_count, 0)
         self.assertFalse(campaign.partially_stopped)
 
+    def test_entry_price_stays_the_original_even_after_a_partial_stop(self):
+        """PR #253 review, Greptile main.py:649: entry_price() must return
+        the Campaign's ORIGINAL entry fill, not self.units[0] -- which,
+        after a partial stop-out, is whichever Unit SURVIVED, not
+        necessarily the Campaign's own first one."""
+        campaign = rules.Campaign("XYZ", entry_fill_price=100.0, campaign_n=2.0, unit_quantity_value=10)
+        campaign.add_unit(101.0)
+        self.assertEqual(campaign.entry_price(), 100.0)
+        campaign.remove_units([0])  # Unit 1 (the original entry) stopped out
+        self.assertEqual(campaign.unit_count, 1)
+        self.assertEqual(campaign.units[0]["fill_price"], 101.0)  # the survivor
+        self.assertEqual(campaign.entry_price(), 100.0)  # still the ORIGINAL entry
+
+    def test_r_multiple_aggregates_every_unit_not_only_the_last_exit(self):
+        """PR #253 review (Greptile, main.py:649): three Units stopped out
+        at a loss, then the LAST Unit exits ABOVE Unit 1's own entry fill.
+        Comparing only that last exit against Unit 1's entry would score
+        the whole Campaign a WIN. Aggregating every Unit's own
+        (exit - fill) correctly scores it a LOSS, since the three
+        stop-outs together lost more than the last Unit's own gain."""
+        n = 2.0
+        campaign = rules.Campaign("XYZ", entry_fill_price=100.0, campaign_n=n, unit_quantity_value=10)
+        campaign.add_unit(101.0)
+        campaign.add_unit(102.0)
+        campaign.add_unit(103.0)
+        self.assertEqual(campaign.unit_count, 4)
+        self.assertEqual(campaign.realized_price_pnl, 0.0)
+
+        campaign.close_units([0], exit_price=96.0)   # Unit 1 (fill 100.0): -4.0
+        campaign.close_units([0], exit_price=97.0)   # Unit 2 (fill 101.0): -4.0
+        campaign.close_units([0], exit_price=98.0)   # Unit 3 (fill 102.0): -4.0
+        self.assertEqual(campaign.unit_count, 1)
+        self.assertTrue(campaign.partially_stopped)
+
+        # Unit 4 (fill 103.0) exits at 110.0 -- ABOVE Unit 1's 100.0 entry,
+        # which a last-exit-only calculation would score a win.
+        campaign.close_units([0], exit_price=110.0)  # Unit 4: +7.0
+        self.assertEqual(campaign.unit_count, 0)
+
+        expected_total = -4.0 - 4.0 - 4.0 + 7.0  # -5.0 net: a loss overall.
+        self.assertAlmostEqual(campaign.realized_price_pnl, expected_total)
+        self.assertAlmostEqual(campaign.r_multiple(), expected_total / (rules.STOP_MULTIPLE * n))
+        self.assertLess(campaign.r_multiple(), 0)
+
 
 class NotionalAccountDrawdownTests(unittest.TestCase):
     def test_turtle_worked_example(self):
@@ -473,15 +517,12 @@ class PriceCapAndSlippageTests(unittest.TestCase):
 
 
 class CommissionAndAffordabilityTests(unittest.TestCase):
-    def test_commission_floor_wins_on_a_small_cheap_order(self):
-        # 1 share at $12.01: rate is $0.005, floored to the $1.00 minimum,
-        # and the 1% cap ($0.1201) does not win because it is BELOW the
-        # floor here it must still not go below... actually the cap must
-        # bind when it is the smaller of the two (see the next test); this
-        # case is deliberately the OTHER way around: a expensive-enough
-        # trade where the floor is not capped away.
+    def test_commission_per_share_rate_between_floor_and_cap(self):
+        # 500 shares at $5.00: the per-share rate (500 x $0.005 = $2.50)
+        # sits above the $1 floor and below the 1% cap ($25), so neither
+        # bound binds and the plain rate is charged.
         commission = rules.commission_estimate(500, 5.0)
-        self.assertAlmostEqual(commission, 2.5)  # 500 x 0.005 = 2.50, above the $1 floor, below the 1% cap ($25)
+        self.assertAlmostEqual(commission, 2.5)
 
     def test_commission_minimum_floor(self):
         commission = rules.commission_estimate(50, 100.0)

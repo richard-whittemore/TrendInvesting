@@ -224,16 +224,29 @@ is hidden; each names the ADR it touches.
    is a size/liquidity pre-filter only; the eligibility rule that actually
    gates a new Campaign is ADR 0009's own, computed exactly as `rules.py`
    states it.
-6. **Cash and Unit-cap reservation resets every Session, not continuously
-   (ADR 0020).** The Go engine's holds are released individually, exactly
-   when their own proposal fills, expires, or is cancelled, so a hold from
-   three days ago can still be standing today. This script's
-   `rules.SessionLedger` is rebuilt fresh every trading day from that day's
-   actual `Portfolio.Cash` and the Unit caps' own running totals (which
-   persist correctly across days), so it never carries a *stale* hold
-   forward, but it also never models a hold with a multi-day lifetime of
-   its own -- which cannot arise here anyway, since deviation #2 means no
-   proposal here ever survives past its own next Session.
+6. **Cash resets every Session; Unit-cap reservations have their own
+   per-order lifetime (ADR 0020).** `rules.SessionLedger`'s *cash* side is
+   rebuilt fresh every trading day from that day's actual `Portfolio.Cash`
+   -- it never carries a stale cash hold forward, and it never needs a
+   multi-day cash lifetime of its own, since deviation #2 means no
+   proposal here ever survives past its own next Session. Its *Unit-cap*
+   side is different, and tracked explicitly:
+   `TurtleBaselineResearch.reservations_by_order_id` records exactly which
+   order reserved which instrument/industry/sector/total-long headroom at
+   placement, and releases it the moment (and only the moment) that order
+   is cancelled, expires, or LEAN refuses it outright
+   (`OrderStatus.Invalid`) -- never earlier, and never left standing
+   forever. A filled order's reservation converts into a real, committed
+   Unit instead, released only when that Unit itself later closes
+   (`_handle_unit_exit`). This is not merely "session-scoped": it is the
+   same per-reservation lifetime discipline ADR 0020 describes for the Go
+   engine's own holds, implemented against `rules.UnitCaps` directly
+   rather than against a journalled event stream. (An earlier version of
+   this script placed an order's reservation and never released it on
+   cancellation, so unfilled proposals silently exhausted every cap over
+   the life of a run -- caught in PR #253 review, Greptile rules.py:841
+   and CodeRabbit main.py:411, both Critical, and fixed before this
+   research check was ever run for real.)
 7. **Approximate commission for the affordability check, real commission
    for the trade.** `rules.commission_estimate` (ADR 0013) estimates
    commission for the pre-trade cash check using the IBKR Pro Fixed
@@ -248,12 +261,23 @@ is hidden; each names the ADR it touches.
    figure, never the estimate.
 8. **R-multiple accounting is this script's own convention.** "Campaign
    count, win rate, average win and loss in R" is not itself a quantity any
-   ADR defines; `main.py` computes each closed Unit's R multiple as
-   `(exit price - Campaign entry price) / (Stop Multiple x campaign N)` and
-   reports it per Campaign (a Campaign closes, for this purpose, the moment
-   its last Unit is sold). This is a standard, widely-used convention for
-   comparing trades of different sizes, chosen for this script's reporting
-   only.
+   ADR defines. `rules.Campaign` accumulates each closed Unit's own
+   `(exit price - its own fill price)` into `realized_price_pnl` as every
+   Unit closes (`close_units`), and reports the whole Campaign's R
+   multiple, once every Unit has closed, as that running total divided by
+   the Campaign's 1-Unit initial risk (`r_multiple`:
+   `realized_price_pnl / (Stop Multiple x campaign N)`). This is every Unit
+   the Campaign ever held, not only the last one to close: comparing only
+   the final exit against the Campaign's own entry price -- an earlier
+   version of this script did exactly that -- can misreport a Campaign
+   that lost money overall as a win, whenever its last Unit happens to
+   exit above the original entry while earlier Units were stopped out at a
+   loss (caught in PR #253 review, Greptile main.py:649 and CodeRabbit
+   main.py:649, with the exact scenario transcribed as
+   `test_r_multiple_aggregates_every_unit_not_only_the_last_exit` in
+   `test_rules.py`). This aggregate-R convention is a standard,
+   widely-used way to compare trades of different sizes, chosen for this
+   script's reporting only.
 9. **No corporate-action handling beyond what QuantConnect's own
    split-adjusted data already neutralises.** ADR 0023 (a split's cash in
    lieu) and ADR 0024 (symbol changes, dividends as cash events) exist in
@@ -291,7 +315,90 @@ is hidden; each names the ADR it touches.
     script trusts QuantConnect's own backtest simulator throughout a run
     and does not attempt to detect or halt on a state mismatch; a
     backtest's own internal consistency is QuantConnect's responsibility,
-    not this script's.
+    not this script's. It does, narrowly, react to LEAN refusing an entry
+    or Add outright (`OrderStatus.Invalid`): that order's Unit-cap
+    reservation is released (deviation #6) rather than left standing on a
+    trade that never happened. That is bookkeeping hygiene, not
+    reconciliation -- it does not compare this script's own state against
+    the broker's at any point.
+13. **The SPY comparison uses a dividend-adjusted, total-return basis,
+    deliberately unlike the strategy's own SplitAdjusted instruments (ADR
+    0004).** SPY exists only for the closing summary's buy-and-hold line,
+    never as a traded or signalled instrument, so ADR 0004's
+    split-adjusted-signals rule does not apply to it. It is subscribed on
+    QuantConnect's `DataNormalizationMode.Adjusted` (split AND dividend
+    adjusted), and its curve is recorded only from the same Session
+    `equity_curve` itself starts recording from (once warm-up ends) --
+    both covering exactly the same span, so the two CAGR/max-drawdown
+    lines are a fair like-for-like comparison. An earlier version of this
+    script priced SPY split-adjusted only (omitting dividends, which
+    understates a multi-decade buy-and-hold return) and began its curve
+    before warm-up ended (a longer span than the strategy's own) -- both
+    caught in PR #253 review (Greptile and CodeRabbit, main.py:384).
+14. **A Unit's own buy or sell settles once, atomically, when its order is
+    fully resolved -- never on an in-progress partial fill.** A Unit is
+    indivisible (CONTEXT.md "Unit"). `OnOrderEvent` accumulates every
+    `PartiallyFilled` event's quantity and price for an order and takes no
+    Campaign action at all until that order is either `Filled` or
+    `Canceled` after having filled something, using the ACCUMULATED total
+    quantity and volume-weighted average price, never one partial slice in
+    isolation. An entry or Add whose buy order does not end up fully
+    filled (a cancellation after a partial fill) is not opened as a
+    smaller Unit -- Faith's "no partial Units" (ADR 0010) is treated as
+    the general rule here too -- it is declined by selling back whatever
+    quantity did trade, immediately, and logging it. A Unit's own Exit
+    Order is treated as closing that whole Unit at the traded average
+    price once it settles; the rare case where a cancellation left it
+    short of the Unit's full recorded quantity is logged visibly rather
+    than silently absorbed, since this script has no smaller
+    representation than a whole Unit to fall back on. An earlier version
+    of this script acted on every `PartiallyFilled` event as though it
+    were a complete fill, which could replace an in-progress Campaign,
+    double-count an Add, or release a whole Unit's cap headroom for a sale
+    that had not actually finished (caught in PR #253 review, Greptile
+    main.py:585).
+15. **An Add fill that arrives with no Campaign left able to take it is
+    liquidated immediately, not silently dropped or left to raise.** A
+    resting Add order and a Unit's own Exit Order can both be triggered by
+    the same wide bar (a range spanning more than the ½N to the Add rung
+    plus the distance to a stop). This script cancels any resting Add the
+    moment ANY of its Campaign's Units closes, partial or full (not only
+    the Campaign's last), but a fill that was already in flight can still
+    arrive afterward. If it does, and the Campaign it targeted has since
+    fully closed, been Loaded, or been partially stopped (ADR 0012: no
+    further Add once partially stopped), the filled shares are sold back
+    out with a market order and logged, rather than either being dropped
+    (leaving a real LEAN position this script no longer tracks) or passed
+    to `rules.Campaign.add_unit`, which raises in exactly this situation
+    (caught in PR #253 review, CodeRabbit main.py:612, Critical).
+16. **An entry whose own fill would leave a non-positive initial
+    Protective Stop is declined, not allowed to abort the backtest.** The
+    Turtle Rules p.22 (via `rules.protective_stop_level`) requires
+    `entry price - Stop Multiple x N` to be positive; an unusually high N
+    relative to a low-priced, highly volatile stock can violate that.
+    `_decide_entry` declines such an entry BEFORE placing its order
+    (checking the proposed level against 2N), and `OnOrderEvent`'s own
+    settlement repeats the same check against the ACTUAL fill price as a
+    second line of defence, selling the shares back out immediately if it
+    still fails, rather than letting `rules.Campaign`'s own `ValueError`
+    propagate out of a fill handler and stop the whole run over one
+    instrument (caught in PR #253 review, Greptile main.py:603).
+17. **A stock the universe selects only after the algorithm's own start is
+    backfilled with QuantConnect's own History, not left permanently
+    unable to qualify.** `OnSecuritiesChanged` calls QuantConnect's
+    `History` API for `WARMUP_BARS` trailing daily bars (the same figure
+    `SetWarmUp` itself uses) the moment a genuinely new symbol is added,
+    feeding each historical bar through the identical evaluate-then-advance
+    path (`_advance`) a live bar would use, in the same SplitAdjusted view
+    (ADR 0004). Before this, a stock the monthly universe refresh only
+    began selecting years into a multi-decade run had zero bars of its own
+    history and could never clear ADR 0009's 250-bar floor no matter how
+    long it then remained selected (caught in PR #253 review, Greptile
+    main.py:360). This assumes QuantConnect delivers `OnSecuritiesChanged`
+    for a newly added symbol before that same day's own `OnData` bar for
+    it -- the ordinary universe-selection ordering, but one this
+    repository cannot independently confirm without a live QuantConnect
+    run.
 
 ## Reading the results against costs, in plain words
 
@@ -310,12 +417,12 @@ trade with*, not as a raw dollar figure:
   Issue #41 gives this repository's own reference figures for buying full
   US equity history locally: about $2,736 once, plus $1,440 a year. On a
   $50,000 account, three years of use, that is
-  `(2,736 + 1,440 x 3) / 50,000 = 14.4%` of the account -- a bar the
-  strategy's own after-cost return has to clear before the data purchase
-  even breaks even, before any trading cost at all. On a $500,000 account
-  the identical arithmetic gives `1.44%`, a far easier bar. The same
-  formula, run with the account size you actually have, is the number to
-  compare against a backtest's own CAGR.
+  `(2,736 + 1,440 x 3) / 50,000 = 7,056 / 50,000 = 14.1%` of the account --
+  a bar the strategy's own after-cost return has to clear before the data
+  purchase even breaks even, before any trading cost at all. On a $500,000
+  account the identical arithmetic gives `7,056 / 500,000 = 1.41%`, a far
+  easier bar. The same formula, run with the account size you actually
+  have, is the number to compare against a backtest's own CAGR.
 - **Trading cost as a percentage of account size** = total commission
   reported by the run (`total_commission`, this script's own log line) ÷
   starting equity, then annualised by the number of years the backtest

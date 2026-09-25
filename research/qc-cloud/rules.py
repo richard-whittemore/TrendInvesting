@@ -392,6 +392,17 @@ class Campaign:
         self.spacing_n = spacing_n
         initial_stop = protective_stop_level(entry_fill_price, campaign_n, stop_multiple)
         self.units = [{"fill_price": entry_fill_price, "stop": initial_stop}]
+        # Frozen at construction (ADR 0006), for entry_price()'s own use --
+        # never re-derived from self.units[0], which after a partial
+        # stop-out is whichever Unit SURVIVED, not necessarily the
+        # Campaign's own first one (PR #253 review, Greptile: main.py:649).
+        self._original_entry_price = entry_fill_price
+        # The sum of every CLOSED Unit's own (exit - fill) price distance
+        # (close_units), so the Campaign's own r_multiple() reflects EVERY
+        # Unit it ever held, not only the last one to close (PR #253
+        # review, Greptile: main.py:649 -- "Campaign results omit earlier
+        # Units").
+        self.realized_price_pnl = 0.0
         # The Baseline never re-adds once any Unit has been stopped out
         # (The Turtle Rules p.23-24's Whipsaw re-entry alternative is a
         # declared Variant, not the Baseline -- ADR 0012; mirrors
@@ -442,16 +453,51 @@ class Campaign:
         """Remove the Units at ``indices`` (a stop-out or an Exit-Channel
         exit closed them), and mark the Campaign partially stopped if any
         Unit survives -- a full exit (no survivors) is not a "partial"
-        stop, it is the Campaign's own end."""
+        stop, it is the Campaign's own end. Does not itself realise any
+        P&L; see close_units for the priced version callers with an actual
+        exit price should use."""
         surviving_indices = set(range(len(self.units))) - set(indices)
         self.units = [self.units[i] for i in sorted(surviving_indices)]
         if self.units:
             self.partially_stopped = True
 
+    def close_units(self, indices, exit_price):
+        """Realise each of the given Units' own (exit_price - fill_price)
+        into the Campaign's running realized_price_pnl, THEN remove them
+        (remove_units) -- so a Campaign's eventual r_multiple() reflects
+        every Unit it ever held, not only whichever one happens to close
+        last (PR #253 review, Greptile: main.py:649). ``indices`` are
+        positions in the CURRENT self.units list, exactly as remove_units
+        already requires; each Unit may exit at its own price (its own
+        stop, or its own Exit Order's fill), so this takes one exit_price
+        per call rather than per index -- callers with several Units
+        closing at DIFFERENT prices in the same Session call this once per
+        price, exactly as they already call remove_units once per fill."""
+        for index in indices:
+            self.realized_price_pnl += exit_price - self.units[index]["fill_price"]
+        self.remove_units(indices)
+
+    def r_multiple(self):
+        """The Campaign's own R multiple, once it has fully closed: the sum
+        of every closed Unit's own (exit - fill) price distance
+        (realized_price_pnl), divided by the Campaign's 1-Unit initial risk
+        (Stop Multiple x campaign N) -- CONTEXT.md "Campaign": a Campaign's
+        result reflects every Unit it held, not only the last to close.
+        Every Unit shares the same frozen unit_quantity (ADR 0006), so that
+        common factor cancels out of both the price-distance numerator and
+        the risk denominator, and this is exactly the Campaign's total
+        dollar P&L over its total initial 1-Unit dollar risk. Meaningful
+        once no Units remain; this class does not itself track that --
+        the caller already knows the moment its last Unit closes."""
+        return self.realized_price_pnl / (self.stop_multiple * self.campaign_n)
+
     def entry_price(self):
-        """Unit 1's own fill price -- the Campaign's own entry, for R-multiple
-        and reporting purposes."""
-        return self.units[0]["fill_price"] if self.units else None
+        """The Campaign's own ORIGINAL entry: Unit 1's own fill price,
+        frozen at construction (ADR 0006), for reporting. Never
+        self.units[0], which after a partial stop-out is whichever Unit
+        SURVIVED, not necessarily the Campaign's own first one (PR #253
+        review, Greptile: main.py:649)."""
+        return self._original_entry_price
 
 
 # ---------------------------------------------------------------------------
