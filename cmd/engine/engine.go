@@ -6,7 +6,7 @@
 // file. It is composition only and contains no rules
 // (cmd-is-composition-only, .golangci.yml; AGENTS.md rule 7).
 //
-//	engine -socket <path> -config <configuration.json> -out <journal.jsonl>
+//	engine -socket <path> -config <configuration.json> -out <journal.jsonl> -as-of <RFC3339>
 //
 // # Wire contract: the adapter's first bar must carry Sequence 2
 //
@@ -40,7 +40,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -49,6 +51,11 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 	"github.com/richard-whittemore/TrendInvesting/transport"
 )
+
+// rfc3339DateTime is RFC 3339's date-time production (section 5.6):
+// full-date "T" full-time ("T" and "Z" may be lower case, section 5.6), with optional "." fractional seconds and a "Z" or
+// numeric offset whose hours are 00-23 and minutes 00-59.
+var rfc3339DateTime = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]([01]\d|2[0-3]):[0-5]\d)$`)
 
 // sourceEngine is stamped on the configuration input this command
 // manufactures for itself at startup, and on the outer envelope newDecider
@@ -70,6 +77,7 @@ type options struct {
 	socketPath      string
 	configPath      string
 	outPath         string
+	asOf            string
 	build           string
 	maxFrameBytes   int
 	decisionTimeout time.Duration
@@ -92,11 +100,29 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	if opts.outPath == "" {
 		missing = append(missing, errors.New("-out is required: where to write the run's journal when this process stops"))
 	}
+	if opts.asOf == "" {
+		missing = append(missing, errors.New("-as-of is required: the run's declared start as an RFC 3339 time (ADR 0012)"))
+	}
 	if opts.build == "" {
 		missing = append(missing, errors.New("the running build must be identified; it is part of every envelope's strategy version (ADR 0016)"))
 	}
 	if err := errors.Join(missing...); err != nil {
 		return fmt.Errorf("engine: %w", err)
+	}
+	// time.Parse's RFC 3339 layout is lenient (it accepts a comma before
+	// fractional seconds), so the strict RFC 3339 date-time syntax is checked
+	// first: a value the journal's own RFC 3339 writer would not produce is
+	// refused at startup (ADR 0017).
+	if !rfc3339DateTime.MatchString(opts.asOf) {
+		return fmt.Errorf("engine: -as-of must be an RFC 3339 time: %q is not RFC 3339 date-time syntax", opts.asOf)
+	}
+	// time.Parse accepts only upper-case separators; RFC 3339 allows both.
+	asOf, err := time.Parse(time.RFC3339, strings.ToUpper(opts.asOf))
+	if err != nil {
+		return fmt.Errorf("engine: -as-of must be an RFC 3339 time: %w", err)
+	}
+	if asOf.IsZero() {
+		return errors.New("engine: -as-of must be nonzero: the journal requires a nonzero span (ADR 0017)")
 	}
 
 	// Checked before the configuration is even read, so an operator is told
@@ -193,7 +219,7 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	// own first bar must carry configurationSequence+1 to be accepted — see
 	// configurationSequence's own doc comment, and cmd/engine's package doc
 	// comment, for where that is stated to an adapter author.
-	configEnvelope, err := configurationEnvelope(cfg, strategyVersion, time.Now().UTC())
+	configEnvelope, err := configurationEnvelope(cfg, strategyVersion, asOf.UTC())
 	if err != nil {
 		return err
 	}
@@ -363,16 +389,11 @@ const configurationSequence uint64 = 1
 // this command delivers to the reducer before it opens its socket (decision
 // 2, above), at Sequence configurationSequence.
 //
-// EventTime and RecordedAt are the moment this process is composing the run,
-// read from the wall clock — unlike cmd/backtest's fixture convention (the
-// first bar's own PeriodEnd, since a fixture has no clock of its own to read;
-// backtest.go's drive says so directly), this is a live process that does
-// have one. now is a parameter rather than a call to time.Now() here so this
-// function stays independently testable; .golangci.yml's forbidigo rule
-// forbidding time.Now is disabled for cmd/ regardless (the composition root
-// "legitimately touch[es] the outside world; determinism is enforced in the
-// domain"), so the constraint here is testability, not the lint rule.
-func configurationEnvelope(cfg event.ConfigurationPayload, strategyVersion string, now time.Time) (event.Envelope, error) {
+// EventTime and RecordedAt equal the nonzero declared run start, preserving
+// comparable evidence (ADR 0012) and a repeatable journal chain (ADR 0017).
+// The reducer ignores configuration time; warm-up bars may precede it, and
+// the journal span includes those earlier inputs under ADR 0017.
+func configurationEnvelope(cfg event.ConfigurationPayload, strategyVersion string, asOf time.Time) (event.Envelope, error) {
 	encoded, err := json.Marshal(cfg)
 	if err != nil {
 		return event.Envelope{}, fmt.Errorf("engine: encode the configuration payload: %w", err)
@@ -383,8 +404,8 @@ func configurationEnvelope(cfg event.ConfigurationPayload, strategyVersion strin
 		Type:              event.ConfigurationEventType,
 		SchemaVersion:     event.ConfigurationSchemaVersion,
 		EnvelopeVersion:   event.CurrentEnvelopeVersion,
-		EventTime:         now,
-		RecordedAt:        now,
+		EventTime:         asOf,
+		RecordedAt:        asOf,
 		Sequence:          configurationSequence,
 		Source:            sourceEngine,
 		StrategyVersion:   strategyVersion,

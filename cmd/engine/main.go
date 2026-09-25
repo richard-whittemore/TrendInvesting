@@ -40,6 +40,7 @@ func parseAndRun(ctx context.Context, args []string, out io.Writer) error {
 	socketPath := flags.String("socket", "", "Unix-domain socket path to listen on (ADR 0014)")
 	configPath := flags.String("config", "", "path to the JSON strategy configuration this run decides under")
 	outPath := flags.String("out", "", "path to write the run's journal to when this process stops")
+	asOf := flags.String("as-of", "", "required nonzero run start as an RFC 3339 time; warm-up bars may precede it (ADR 0012)")
 	maxFrame := flags.Int("max-frame", transport.DefaultMaxFrameBytes, "maximum frame size in bytes")
 	decisionTimeout := flags.Duration("decision-timeout", 5*time.Second, "per-decision timeout; 0 disables")
 	if err := flags.Parse(args); err != nil {
@@ -49,6 +50,7 @@ func parseAndRun(ctx context.Context, args []string, out io.Writer) error {
 		socketPath:      *socketPath,
 		configPath:      *configPath,
 		outPath:         *outPath,
+		asOf:            *asOf,
 		build:           buildinfo.Version,
 		maxFrameBytes:   *maxFrame,
 		decisionTimeout: *decisionTimeout,

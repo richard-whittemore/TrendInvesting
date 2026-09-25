@@ -99,7 +99,7 @@ class EndToEndTests(OrderTestCase):
         self.socket = os.path.join(socket_dir, "s.sock")
         self.journal = os.path.join(self.work, "journal-{}.jsonl".format(self.id().rsplit(".", 1)[-1]))
         engine = subprocess.Popen([self.engine, "-socket", self.socket, "-config", str(CONFIGURATION),
-                                   "-out", self.journal],
+                                   "-out", self.journal, "-as-of", "2014-01-01T00:00:00Z"],
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: engine.poll() is None and engine.kill())
         self.assertIn("listening on", engine.stdout.readline())

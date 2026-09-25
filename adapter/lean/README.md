@@ -485,13 +485,26 @@ GOOS=linux GOARCH="$(docker version --format '{{.Server.Arch}}')" CGO_ENABLED=0 
 docker volume create trend30sock
 docker run -d --name trend30-engine -v trend30sock:/run/adapter -v <stage>:/stage \
   --entrypoint /stage/engine quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d \
-  -socket /run/adapter/private/s.sock -config /stage/configuration.json -out /stage/journal.jsonl
+  -socket /run/adapter/private/s.sock -config /stage/configuration.json -out /stage/journal.jsonl \
+  -as-of 2003-01-01T00:00:00Z
 lean backtest <project> --image quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d \
   --no-update --extra-docker-config '{"volumes": {"trend30sock": {"bind": "/run/adapter", "mode": "rw"}}}'
 docker stop trend30-engine   # the engine writes the journal on SIGTERM
 go run ./cmd/backtest -verify <stage>/journal.jsonl
 go run ./cmd/backtest -replay <stage>/journal.jsonl
 ```
+
+The required `-as-of` is the run's declared start in RFC 3339: this example
+uses `run.json`'s `"start": "2003-01-01"` as midnight UTC. Change both
+together. Missing, invalid or zero times refuse engine startup before the
+socket opens. The configuration input's `event_time` and `recorded_at` both
+use this value, keeping identical runs' journals comparable (ADRs 0012, 0017).
+
+Configuration time need not precede the first bar's period end: the reducer
+does not read it, and bar/session chronology is checked separately. LEAN's
+warm-up bars before `start` are accepted. The journal span remains the earliest
+and latest input event times (ADR 0017), so `span_start` equals `-as-of` when
+no input predates it, or the earliest warm-up input when one does.
 
 `run.json`'s `configuration_hash` and `strategy_version` must be the
 engine's own for that configuration and build. The journal and the market

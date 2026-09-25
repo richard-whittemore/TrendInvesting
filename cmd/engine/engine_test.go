@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -16,8 +17,8 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/transport"
 )
 
-// readySignal is an io.Writer that closes ready the first time anything is
-// written to it — run's first write is "listening on %s\n", once
+// readySignal is an io.Writer that closes ready when socket readiness is
+// reported — run's first write is "listening on %s\n", once
 // transport.Listen has already bound the socket, so a test waiting on ready
 // never dials a socket that has not been created yet, and never polls or
 // sleeps to find out.
@@ -36,7 +37,7 @@ func (r *readySignal) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	n, err := r.buf.Write(p)
-	if !r.once {
+	if !r.once && strings.Contains(r.buf.String(), "listening on ") {
 		r.once = true
 		close(r.ready)
 	}
@@ -60,6 +61,7 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 	stop := startEngine(t, options{
 		socketPath: socketPath,
 		configPath: testConfigPath,
+		asOf:       testAsOf,
 		outPath:    outPath,
 		build:      "test-build",
 	})
@@ -206,6 +208,7 @@ func TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst(t *
 	stop := startEngine(t, options{
 		socketPath: socketPath,
 		configPath: testConfigPath,
+		asOf:       testAsOf,
 		outPath:    outPath,
 		build:      "test-build",
 	})
@@ -293,6 +296,7 @@ func TestRunRefusesToStartWithoutAValidConfiguration(t *testing.T) {
 	err := run(context.Background(), options{
 		socketPath: socketPath,
 		configPath: badConfig,
+		asOf:       testAsOf,
 		outPath:    filepath.Join(dir, "journal.jsonl"),
 		build:      "test-build",
 	}, &bytes.Buffer{})
@@ -338,6 +342,7 @@ func TestRunReportsAJournalWriteFailureRatherThanExitingClean(t *testing.T) {
 	stop := startEngine(t, options{
 		socketPath: socketPath,
 		configPath: testConfigPath,
+		asOf:       testAsOf,
 		outPath:    outPath,
 		build:      "test-build",
 	})
