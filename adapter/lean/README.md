@@ -575,13 +575,23 @@ returns an `OrderEvent`:
   an order with no N) in `failure` and leaves the order unfilled. LEAN
   rescans every working order after one is placed or amended, so a failure
   can be recorded at any point in a slice. The guard is therefore
-  structural: `Publisher._publish`, the one method every input passes
-  through on its way to the engine, asks for the recorded failure before
-  each send and, while there is one, sends nothing and raises `Refused`, so
-  the run stops. No bar, session close, snapshot, fill, order report,
-  `adapter.run.stopped` or `replay.run.completed` reaches the engine after
-  it. `algorithm.py` also checks at the start of `OnData`, around each
-  drain and fill, and at the end of the run, which only gives the stop an
+  structural, on both sides of the adapter:
+  - **toward the engine:** `Publisher._publish`, the one method every input
+    passes through, asks for the recorded failure before each send and,
+    while there is one, sends nothing and raises `Refused`, so the run
+    stops. No bar, session close, snapshot, fill, order report,
+    `adapter.run.stopped` or `replay.run.completed` reaches the engine after
+    it.
+  - **toward LEAN:** `OrderDesk._require_sound`, the one check every change
+    to LEAN's order book passes through (`_submit` for a stop-market or
+    stop-limit order, `_amend` for `ticket.Update`, `_cancel` for
+    `ticket.Cancel`), raises `Uncertain` while a failure is recorded, and
+    `act` checks it before each decision, so a batch stops at once. No
+    order is placed, amended or cancelled on that uncertain state:
+    containing the orders already working is a person's decision (ADR 0019).
+
+  `algorithm.py` also checks at the start of `OnData`, around each drain and
+  fill, and at the end of the run. Those checks only give the stop an
   earlier, clearer reason.
 
 **Two implementations, kept in step.** `internal/fills.ExecuteStopLimit`

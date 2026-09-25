@@ -111,7 +111,8 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.desk = OrderDesk(self, self.symbol, self.instrument, SimpleNamespace(
                 OrderProperties=OrderProperties, TimeInForce=TimeInForce,
                 UpdateOrderFields=UpdateOrderFields, OrderStatus=OrderStatus,
-                OrderField=OrderField))
+                OrderField=OrderField),
+                refusal=lambda: getattr(getattr(self, "fill_model", None), "failure", None))
             # ADR 0010: no partial Units, no borrowing. LEAN's default equity
             # account is margin, which let a gap fill cost more than the
             # cash held; a cash account makes LEAN itself refuse an order it

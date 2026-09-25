@@ -468,10 +468,15 @@ class OrderDesk:
     so every cash amount and the commission, is the same in both views.
     """
 
-    def __init__(self, algorithm, symbol, instrument, lean):
+    def __init__(self, algorithm, symbol, instrument, lean, refusal=None):
         self.algorithm = algorithm
         self.symbol = symbol
         self.instrument = instrument
+        # Asked before every change this desk makes to LEAN's order book
+        # (_require_sound): while it returns a reason, the adapter's ADR 0005
+        # fill model has recorded a failure, the run is stopping, and no
+        # order is placed, amended or cancelled.
+        self.refusal = refusal
         # OrderProperties, TimeInForce, UpdateOrderFields and OrderStatus from
         # AlgorithmImports, passed in so this module never imports LEAN.
         self.lean = lean
@@ -510,6 +515,31 @@ class OrderDesk:
         # Actual instrument bars, never fill times or deferred snapshots.
         # ADR 0011 gives fill-chained Adds one additional observed session.
         self.bar_ends = []
+
+    def _require_sound(self, action):
+        """The one chokepoint every change to LEAN's order book passes through.
+
+        LEAN rescans every working order whenever one is placed or amended,
+        so the adapter's ADR 0005 fill model can record a failure it could not
+        price at any point (orders.adr_0005_fill_model). From then on the run
+        is stopping, and what to do about the orders already working is a
+        person's decision (ADR 0019), so nothing is placed, amended or
+        cancelled on that uncertain state: Uncertain, for the caller to stop
+        the run.
+        """
+        reason = self.refusal() if self.refusal is not None else None
+        if reason is not None:
+            raise Uncertain("{} refused: {}".format(action, reason))
+
+    def _amend(self, ticket, fields):
+        """Amend a working order, unless the run is stopping (_require_sound)."""
+        self._require_sound("amending LEAN order {} (tag={})".format(ticket.OrderId, ticket.Tag))
+        return ticket.Update(fields)
+
+    def _cancel(self, ticket):
+        """Cancel a working order, unless the run is stopping (_require_sound)."""
+        self._require_sound("cancelling LEAN order {} (tag={})".format(ticket.OrderId, ticket.Tag))
+        return ticket.Cancel()
 
     def _closed(self):
         """The LEAN order statuses in which an order no longer works at the broker."""
@@ -720,7 +750,7 @@ class OrderDesk:
                             ticket.OrderId, ticket.Tag, limit, engine_cap, cap, target, stop)]
             fields = self.lean.UpdateOrderFields()
             fields.LimitPrice = target
-            response = ticket.Update(fields)
+            response = self._amend(ticket, fields)
             amended = float(ticket.Get(self.lean.OrderField.LimitPrice))
             if not response.IsSuccess or amended > cap + 1e-9:
                 return ["LEAN order {} (tag={}) is limited at {:.4f}, above the engine's price cap "
@@ -785,6 +815,9 @@ class OrderDesk:
             return
         bar_end = parse_time(period_end)
         for decision in actionable:
+            # A failure recorded while acting on an earlier decision stops the
+            # batch here, before this one is even read.
+            self._require_sound("acting on {} {}".format(decision["type"], decision.get("id")))
             kind, payload = decision["type"], decision.get("payload") or {}
             if kind == TRADE_PROPOSED:
                 self._propose(decision, payload, bar_end, payload.get("entry_level"),
@@ -973,6 +1006,7 @@ class OrderDesk:
         "Observed LEAN behaviour"). A stop-limit is filled by the adapter's
         ADR 0005 fill model (adr_0005_fill_model), not LEAN's native one.
         """
+        self._require_sound("placing an order (tag={})".format(tag))
         if not self.first_order_placed:
             self.require_flat("before the first order")
         if limit is None:
@@ -1010,7 +1044,7 @@ class OrderDesk:
         for ticket in self._open_tickets():
             if ticket.Tag != proposal_id:
                 continue
-            response = ticket.Cancel()
+            response = self._cancel(ticket)
             if not response.IsSuccess or ticket.Status not in (
                     self.lean.OrderStatus.CancelPending, self.lean.OrderStatus.Canceled):
                 # An order the engine expired that is still working could fill
@@ -1205,7 +1239,7 @@ class OrderDesk:
         fields.StopPrice = level * self.ratio
         fields.Tag = tag
         self.n_by_tag[tag] = n
-        response = ticket.Update(fields)
+        response = self._amend(ticket, fields)
         if not response.IsSuccess:
             self.algorithm.Log("adapter: amendment of order {} to {} (tag={}) not acknowledged; "
                                "the previous level stays in force".format(ticket.OrderId, level, tag))

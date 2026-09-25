@@ -23,6 +23,7 @@ import test_algorithm as scaffold
 from test_publisher import Frame, bar
 
 from client import Unavailable
+import orders
 
 algorithm = scaffold.algorithm
 
@@ -1489,6 +1490,66 @@ class FillReturnTests(OrderTestCase):
         self.assertTrue(algo.failed)
         self.assertIn("could not be priced", algo.quit_reason)
         self.assertEqual(self.types_sent(algo, state["sent"]), [])
+
+    def test_a_fill_model_failure_during_one_decision_stops_the_rest_of_the_batch(self):
+        # OrderDesk.act takes the engine's decisions in turn. If LEAN records
+        # a fill-model failure while the first one amends an order, the next
+        # one places or amends nothing: the run is stopping, and containment
+        # is a person's (ADR 0019).
+        for refused in (False, True):
+            with self.subTest(refused=refused):
+                algo = self.start()
+                self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1)])
+                [sell] = self.sells(algo)
+                placed = len(self.tickets(algo))
+                amend = sell.Update
+
+                def update(fields, amend=amend, algo=algo):
+                    response = amend(fields)
+                    if refused:
+                        algo.fill_model.failure = "LEAN order 9 (tag=x) could not be priced"
+                    return response
+
+                sell.Update = update
+                self.feed(algo, 11, close_decisions=[exit_order_set(11, level=22.5),
+                                                     add_proposal(11)])
+                self.assertEqual(sell.StopPrice, 22.5)
+                if not refused:
+                    self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+                    self.assertEqual(len(self.tickets(algo)), placed + 1)
+                    continue
+                self.assertTrue(algo.failed)
+                self.assertIn("could not be priced", algo.quit_reason)
+                self.assertEqual(len(self.tickets(algo)), placed)
+
+    def test_no_order_is_placed_amended_or_cancelled_while_a_fill_model_failure_is_recorded(self):
+        # The desk's one chokepoint for every change it makes to LEAN's order
+        # book: once a failure is recorded, submit, amend and cancel all
+        # refuse, and LEAN's book is left exactly as it was.
+        algo = self.start()
+        self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1)])
+        self.feed(algo, 11, close_decisions=[add_proposal(11)])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [sell] = self.sells(algo)
+        add = self.tickets(algo)[-1]
+        algo.fill_model.failure = "LEAN order 9 (tag=x) could not be priced"
+        book = algo.Transactions
+        before = (len(book.tickets), list(book.updates), sell.StopPrice, add.Status)
+        fields = scaffold.UpdateOrderFields()
+        fields.StopPrice = 23.0
+        props = scaffold.OrderProperties()
+        attempts = {
+            "submit": lambda: algo.desk._submit(10, 24.0, "another", props, 25.0),
+            "amend": lambda: algo.desk._amend(sell, fields),
+            "cancel": lambda: algo.desk._cancel(add),
+        }
+        for action, attempt in attempts.items():
+            with self.subTest(action):
+                with self.assertRaises(orders.Uncertain) as caught:
+                    attempt()
+                self.assertIn("could not be priced", str(caught.exception))
+                self.assertEqual((len(book.tickets), list(book.updates), sell.StopPrice,
+                                  add.Status), before)
 
     def test_a_fill_model_failure_in_the_last_slice_stops_the_run_at_its_end(self):
         algo = self.start()
