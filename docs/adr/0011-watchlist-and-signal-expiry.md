@@ -47,9 +47,15 @@ older than that window. No entry receives this extension.
 
 A standing Add is not replaced or reserved a second time at the intervening
 session close. Exit evaluation still runs first (ADR 0010); the extension
-never suppresses an exit. Existing fill and cancellation paths remain in
-force. Its ADR 0020 cash and cap hold remains until fill, cancellation, expiry
-at the second bar, or end of stream; snapshots never release it.
+never suppresses an exit, and an exit ends the extension: if the intervening
+bar proposes an exit, the standing Add expires with that bar, because a bar
+that would both Add and exit results in the exit only. Nor does the extension
+outlive its Campaign: if a stop has already closed the Campaign, the Add
+expires at the intervening bar exactly as an ordinary Add would. Existing
+fill and cancellation paths remain in force. Its ADR 0020 cash and cap hold
+remains until fill, cancellation, expiry (at the second bar, or at the
+intervening bar in the two cases above), or end of stream; snapshots never
+release it.
 
 RulesVersion changes from 1.10.0 to 1.11.0 (ADR 0016). The reference backtest
 still fills covered chained rungs intrabar (ADR 0005), so this lifetime

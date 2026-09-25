@@ -101,7 +101,9 @@ as specified in ADR 0011's amendment of the same date. Its schema-3
 `valid_for_sessions` is 2; a session-close Add's is 1. The surviving
 proposal keeps its identity and ADR 0020 hold, and prevents another Add
 proposal at the intervening close. Exit evaluation and cancellation retain
-their existing precedence. Neither ladder prices nor sizing change.
+their existing precedence: an exit proposed at the intervening bar, or a
+Campaign a stop has already closed, ends the extension at that bar (ADR
+0011's amendment). Neither ladder prices nor sizing change.
 
 The reference `cmd/backtest` producer still fills chained rungs inside the
 bar whose high covered them (§6, ADR 0005). The daily LEAN producer can
