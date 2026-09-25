@@ -22,5 +22,7 @@
     "per_share": 0.005,
     "minimum_per_order": 1,
     "maximum_fraction_of_trade_value": 0.01
-  }
+  },
+  "buy_order_type": "stop-limit",
+  "gap_buffer_n": 1
 }

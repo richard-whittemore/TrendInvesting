@@ -169,7 +169,7 @@ A registry root that does not exist is reported rather than read as an empty one
 
 ## The committed fixture
 
-`cmd/backtest/testdata/` holds a one-instrument fixture and the golden journal it produces: a 32-bar run under a deliberately small test configuration (a 20-bar Entry Channel, a 10-bar Exit Channel, a maximum of four Units). It opens a Campaign with Unit 1 in the breakout bar on 2026-01-22, filling 5,000 shares at 127.06. Each Unit costs about 64 % of the 1,000,000 starting equity, which is also the run's default cash, so once Unit 1's fill is debited (ADR 0020) Unit 2 is declined with `insufficient-cash` on each of the 11 bars from 2026-01-22 to 2026-02-01 that reach its rung: 364,675 available against 637,800 required. Each of those declines is against the previous close's snapshot, which states the 364,675 Unit 1 left. On 2026-02-02 the Exit Channel exit fills the 5,000 shares at 128.75, the Campaign exits with a realised result of 8,450, and the last snapshot states 1,008,400: the 1,000,000, plus 8,450, less 50 of commission. With `-available-cash 3000000` the same bars fund all four Units, which is how the fused-multiply-add tests run them; `testdata/bars_four_units.json` does so at the default cash.
+`cmd/backtest/testdata/` holds a one-instrument fixture and the golden journal it produces: a 32-bar run under a deliberately small test configuration (a 20-bar Entry Channel, a 10-bar Exit Channel, a maximum of four Units). It opens a Campaign with Unit 1 in the breakout bar on 2026-01-22, filling 5,000 shares at 127.06. Each Unit costs about 64 % of the 1,000,000 starting equity, which is also the run's default cash, so once Unit 1's fill is debited (ADR 0020) Unit 2 is declined with `insufficient-cash` on each of the 11 bars from 2026-01-22 to 2026-02-01 that reach its rung: 364,675 available against the 643,075 its hold requires, its 5,000 shares at its price cap (the rung plus 1N) with slippage and commission (ADR 0020, as amended 2026-09-24). At its level alone, the check before RulesVersion 1.10.0, the same Unit costs 637,800. Each of those declines is against the previous close's snapshot, which states the 364,675 Unit 1 left. On 2026-02-02 the Exit Channel exit fills the 5,000 shares at 128.75, the Campaign exits with a realised result of 8,450, and the last snapshot states 1,008,400: the 1,000,000, plus 8,450, less 50 of commission. With `-available-cash 3000000` the same bars fund all four Units, which is how the fused-multiply-add tests run them; `testdata/bars_four_units.json` does so at the default cash.
 
 The golden journal is asserted byte for byte. Regenerate it only deliberately:
 
@@ -192,8 +192,15 @@ when a validator aborts the run. This complements the rule-constant fingerprint
 with behavioral coverage of a predicate the original golden never reaches
 (ADR 0016); it does not fingerprint source or require a bump for a refactor.
 The declaration explains why this synthetic software test is not an ADR 0012
-performance experiment. Neither golden establishes coverage of every possible
-Variant predicate.
+performance experiment.
+
+The declared [`uncapped` Variant](../cmd/backtest/testdata/variants/uncapped/README.md)
+keeps Faith's stop-market entry, with no price cap, for the head-to-head
+comparison with the Baseline's 1N cap (ADR 0005, as amended 2026-09-24). It
+runs `bars_gap_above_cap.json`, the authored bars with the breakout bar
+opening above the Baseline's cap: this Variant fills the gap at the open,
+where the Baseline skips it and enters on the next bar's breakout. None of
+these goldens establishes coverage of every possible Variant predicate.
 
 ```sh
 go test ./cmd/backtest -run '^TestDeclaredVariantGolden$' -count=1 -v

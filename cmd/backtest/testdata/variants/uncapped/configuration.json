@@ -1,5 +1,5 @@
 {
-  "strategy_id": "backtest-fixture",
+  "strategy_id": "uncapped",
   "sizing_mode": "volatility-normalised",
   "unit_volatility_fraction": 0.005,
   "stop_multiple": 2,
@@ -23,6 +23,6 @@
     "minimum_per_order": 1,
     "maximum_fraction_of_trade_value": 0.01
   },
-  "buy_order_type": "stop-limit",
-  "gap_buffer_n": 1
+  "buy_order_type": "stop-market",
+  "gap_buffer_n": 0
 }

@@ -44,13 +44,13 @@ including failed runs, remain append-only under ADR 0012/0018.
 Run without updating:
 
 ```sh
-go test ./cmd/backtest -run '^TestDeclaredVariantGolden$' -count=1 -v
+go test ./cmd/backtest -run '^TestDeclaredVariantGolden$/^profit-protecting-stop$' -count=1 -v
 ```
 
 Regenerate only after reviewing why decisions changed:
 
 ```sh
-go test ./cmd/backtest -run '^TestDeclaredVariantGolden$' -count=1 -update -v
+go test ./cmd/backtest -run '^TestDeclaredVariantGolden$/^profit-protecting-stop$' -count=1 -update -v
 ```
 
 Every Session's close is stated by the simulated account in an
