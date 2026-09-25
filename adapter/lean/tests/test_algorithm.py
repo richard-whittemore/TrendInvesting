@@ -221,6 +221,10 @@ class FakeSecurity:
         self.fee_model = model
         if self.algorithm is not None:
             self.algorithm.model_calls.append(("SetFeeModel", model))
+    def SetFillModel(self, model):
+        self.fill_model = model
+        if self.algorithm is not None:
+            self.algorithm.model_calls.append(("SetFillModel", model))
 
 
 class FakeAlgorithm:
@@ -323,6 +327,33 @@ class InteractiveBrokersFeeModel:
     pass
 
 
+class EquityFillModel:
+    """LEAN's EquityFillModel, as far as the adapter's fill model uses it: the
+    protected helpers it calls (whether the exchange is open, and the bar's
+    prices) answer from the security, and its own StopLimitFill (LEAN's
+    native fill) is recorded, never priced."""
+    def __init__(self):
+        self.native_calls = []
+    def StopLimitFill(self, asset, order):
+        self.native_calls.append(order)
+        return ("lean's own stop-limit fill", order)
+    def IsExchangeOpen(self, asset, is_extended_market_hours):
+        return asset.exchange_open
+    def GetPricesCheckingPythonWrapper(self, asset, direction):
+        return asset.prices
+
+
+class OrderEvent:
+    """LEAN's OrderEvent(order, utc_time, order_fee): unfilled until set."""
+    def __init__(self, order, utc_time, order_fee):
+        self.OrderId = order.Id
+        self.UtcTime = utc_time
+        self.OrderFee = order_fee
+        self.Status = None
+        self.FillQuantity = 0
+        self.FillPrice = 0
+
+
 imports = types.ModuleType("AlgorithmImports")
 imports.QCAlgorithm = FakeAlgorithm
 imports.Resolution = types.SimpleNamespace(Daily="daily")
@@ -337,6 +368,12 @@ imports.time = time
 imports.OrderProperties = OrderProperties
 imports.UpdateOrderFields = UpdateOrderFields
 imports.InteractiveBrokersFeeModel = InteractiveBrokersFeeModel
+imports.EquityFillModel = EquityFillModel
+imports.OrderEvent = OrderEvent
+imports.OrderFee = types.SimpleNamespace(Zero="no fee")
+imports.OrderDirection = types.SimpleNamespace(Buy="buy", Sell="sell")
+# Extensions.ConvertToUtc: the fakes' exchange times are already UTC.
+imports.Extensions = types.SimpleNamespace(ConvertToUtc=lambda moment, time_zone: moment)
 imports.TimeInForce = types.SimpleNamespace(Day="day", GoodTilCanceled="gtc")
 imports.OrderStatus = types.SimpleNamespace(
     New="new", Submitted="submitted", PartiallyFilled="partially-filled", Filled="filled",
@@ -600,6 +637,17 @@ class BrokerageModelTests(unittest.TestCase):
         self.assertIsInstance(algo.security.slippage_model, algorithm.NSlippageModel)
         self.assertIsInstance(algo.security.fee_model, InteractiveBrokersFeeModel)
 
+    def test_capped_buys_fill_by_the_adapters_adr_0005_model_slipped_by_its_slippage_model(self):
+        # ADR 0005, as amended 2026-09-24, in place of LEAN's native
+        # stop-limit fill; a subclass of LEAN's EquityFillModel, so every
+        # other order keeps LEAN's own equity fill.
+        algo = AlgorithmTests.init(self)
+        model = algo.security.fill_model
+        self.assertIsInstance(model, EquityFillModel)
+        self.assertIn("StopLimitFill", vars(type(model)))
+        self.assertIs(model, algo.fill_model)
+        self.assertIs(model.slippage_model, algo.security.slippage_model)
+
     def test_the_brokerage_model_is_set_before_the_fee_and_slippage_models(self):
         """LEAN was observed to reset a security's slippage model back to its
         own default when SetBrokerageModel is called after the security's own
@@ -609,7 +657,7 @@ class BrokerageModelTests(unittest.TestCase):
         kinds = [call[0] for call in algo.model_calls]
         self.assertIn("SetBrokerageModel", kinds)
         brokerage_index = kinds.index("SetBrokerageModel")
-        for kind in ("SetSlippageModel", "SetFeeModel"):
+        for kind in ("SetSlippageModel", "SetFillModel", "SetFeeModel"):
             self.assertGreater(kinds.index(kind), brokerage_index,
                                "{} must be set after SetBrokerageModel".format(kind))
 

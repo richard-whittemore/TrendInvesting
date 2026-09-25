@@ -23,6 +23,7 @@ import test_algorithm as scaffold
 from test_publisher import Frame, bar
 
 from client import Unavailable
+import orders
 
 algorithm = scaffold.algorithm
 
@@ -1199,6 +1200,63 @@ class FillReturnTests(OrderTestCase):
                          [("stop", 22.6, ["lean:1:2"]),
                           ("stop", 22.75, ["lean:{}:2".format(add.OrderId)])])
 
+    def test_a_fill_model_failure_while_acting_on_one_fill_stops_the_rest_of_its_group(self):
+        # Acting on a fill's decisions can place or amend an order, and
+        # LEAN's rescan can then record a fill-model failure while the next
+        # fill of the same instant waits to be sent. The run stops before
+        # it: the second stop fill never reaches the engine.
+        algo = self.start()
+        self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1)])
+        self.feed(algo, 11, close_decisions=[add_proposal(11)])
+        add = self.tickets(algo)[-1]
+        self.fill(algo, add, 12, 25.2)
+        self.feed(algo, 12, replies={"execution.fill": {"payload": {"decisions": [
+            unit_added(12, fill_id="lean:{}:2".format(add.OrderId)),
+            exit_order_set(12, unit_index=2, level=22.8, cause="add"),
+            exit_order_set(12, unit_index=1, level=22.7, cause="add")]}}})
+        unit1, unit2 = self.sells(algo)
+        self.fill(algo, unit2, 13, 22.75)
+        self.fill(algo, unit1, 13, 22.6)
+        sent = len(algo.client.sent)
+        original_act = algo.desk.act
+
+        def act(decisions, *args, **kwargs):
+            result = original_act(decisions, *args, **kwargs)
+            if "execution.fill" in self.types_sent(algo, sent) and algo.fill_model.failure is None:
+                algo.fill_model.failure = "LEAN order 9 (tag=x) could not be priced"
+            return result
+
+        algo.desk.act = act
+        self.feed(algo, 13)
+        self.assertTrue(algo.failed)
+        self.assertIn("could not be priced", algo.quit_reason)
+        fills = [e["payload"] for e in self.sent(algo, "execution.fill")]
+        self.assertEqual([f["price"] for f in fills[-1:]], [22.6])
+        self.assertEqual(self.types_sent(algo, sent).count("execution.fill"), 1)
+
+    def test_a_fill_model_failure_while_acting_on_a_groups_last_fill_stops_the_run_there(self):
+        # The failure is recorded while acting on the only fill of the
+        # instant and nothing else is queued: the run stops there, before
+        # the session's snapshot or bar is sent.
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9)])
+        [entry] = self.tickets(algo)
+        self.fill(algo, entry, 10, 24.56)
+        sent = len(algo.client.sent)
+        original_act = algo.desk.act
+
+        def act(decisions, *args, **kwargs):
+            result = original_act(decisions, *args, **kwargs)
+            if "execution.fill" in self.types_sent(algo, sent) and algo.fill_model.failure is None:
+                algo.fill_model.failure = "LEAN order 9 (tag=x) could not be priced"
+            return result
+
+        algo.desk.act = act
+        self.feed(algo, 10)
+        self.assertTrue(algo.failed)
+        self.assertIn("could not be priced", algo.quit_reason)
+        self.assertEqual(self.types_sent(algo, sent), ["execution.fill"])
+
     def test_only_some_units_at_the_exit_channel_filling_stops_the_run(self):
         algo = self.start()
         _, [first, _] = self.two_units_at_the_exit_channel(algo)
@@ -1332,6 +1390,176 @@ class FillReturnTests(OrderTestCase):
             self.assertIn(fact, algo.quit_reason)
         self.assertEqual(self.types_sent(algo, sent), [])
         self.assert_stopped_after(algo, sent)
+
+    def test_a_fill_at_a_stop_limits_cap_plus_its_slippage_is_sent(self):
+        # ADR 0005 bounds the execution by the cap before slippage, and ADR
+        # 0013 adds slippage to every fill: cap plus slippage is exactly what
+        # the hold reserved, and a legitimate fill.
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        [entry] = self.tickets(algo)
+        slippage = 0.05 * proposal["payload"]["n"]
+        self.fill(algo, entry, 10, 25.7 + slippage)
+        self.feed(algo, 10)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [fill] = self.sent(algo, "execution.fill")
+        self.assertAlmostEqual(fill["payload"]["price"], 25.7 + slippage)
+        self.assertAlmostEqual(fill["payload"]["slippage_applied"], slippage)
+
+    def test_a_fill_just_above_a_stop_limits_cap_plus_its_slippage_stops_the_run(self):
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        [entry] = self.tickets(algo)
+        sent = len(algo.client.sent)
+        self.fill(algo, entry, 10, 25.7 + 0.05 * proposal["payload"]["n"] + 1e-6)
+        self.feed(algo, 10)
+        for fact in ("above its own limit", "plus the", "slippage", str(entry.OrderId)):
+            self.assertIn(fact, algo.quit_reason)
+        self.assertEqual(self.types_sent(algo, sent), [])
+
+    def test_an_order_the_fill_model_could_not_price_stops_the_run_before_the_slices_fills(self):
+        # LEAN swallows a fill model's exception and leaves the order
+        # unfilled, so the adapter's model records the failure and the run
+        # stops at the slice's first point, before any fill is sent.
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        [entry] = self.tickets(algo)
+        sent = len(algo.client.sent)
+        algo.fill_model.failure = "LEAN order 1 (tag=x) could not be priced"
+        self.fill(algo, entry, 10, 24.56)
+        self.feed(algo, 10)
+        self.assertIn("could not be priced", algo.quit_reason)
+        self.assertEqual(self.types_sent(algo, sent), [])
+        self.assert_stopped_after(algo, sent)
+
+    def test_a_fill_model_failure_recorded_mid_slice_stops_the_run_before_any_queued_report(self):
+        # LEAN rescans every working order after an order is placed or
+        # amended, so the fill model can record a failure after the check at
+        # the start of OnData and while other reports of that same scan are
+        # queued. Every drain checks first: neither the queued fill nor the
+        # placement's own report reaches the engine.
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9)])
+        [entry] = self.tickets(algo)
+        original_act = algo.desk.act
+        state = {"sent": None}
+
+        def act(decisions, *args, **kwargs):
+            result = original_act(decisions, *args, **kwargs)
+            if decisions and state["sent"] is None:
+                # The slice's decisions placed an order; LEAN's rescan then
+                # filled another and the fill model failed on a third.
+                state["sent"] = len(algo.client.sent)
+                algo.fill_model.failure = "LEAN order 9 (tag=x) could not be priced"
+                self.fill(algo, entry, 10, 24.56)
+            return result
+
+        algo.desk.act = act
+        self.feed(algo, 10, [trade_proposal(10)])
+        self.assertIsNotNone(state["sent"])
+        self.assertTrue(algo.failed)
+        self.assertIn("could not be priced", algo.quit_reason)
+        self.assertEqual([t for t in self.types_sent(algo, state["sent"])
+                          if t.startswith("execution.")], [])
+
+    def test_a_fill_model_failure_while_acting_on_a_snapshots_decisions_sends_no_bar(self):
+        # A snapshot's decisions can place or amend an order, and LEAN's
+        # rescan can then record a fill-model failure. The next input, the
+        # session's bar, is refused at the publisher, the one chokepoint
+        # every input passes through: neither the bar nor its session close
+        # reaches the engine.
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9)])
+        state = {"sent": None}
+        original_act = algo.desk.act
+
+        def act(decisions, *args, **kwargs):
+            result = original_act(decisions, *args, **kwargs)
+            if state["sent"] is None and algo.client.sent \
+                    and algo.client.sent[-1]["type"] == "account.snapshot":
+                state["sent"] = len(algo.client.sent)
+                algo.fill_model.failure = "LEAN order 9 (tag=x) could not be priced"
+            return result
+
+        algo.desk.act = act
+        self.feed(algo, 10, snapshot_decisions=[proposal_expired(trade_proposal(9), 10)])
+        self.assertIsNotNone(state["sent"])
+        self.assertTrue(algo.failed)
+        self.assertIn("could not be priced", algo.quit_reason)
+        self.assertEqual(self.types_sent(algo, state["sent"]), [])
+
+    def test_a_fill_model_failure_during_one_decision_stops_the_rest_of_the_batch(self):
+        # OrderDesk.act takes the engine's decisions in turn. If LEAN records
+        # a fill-model failure while the first one amends an order, the next
+        # one places or amends nothing: the run is stopping, and containment
+        # is a person's (ADR 0019).
+        for refused in (False, True):
+            with self.subTest(refused=refused):
+                algo = self.start()
+                self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1)])
+                [sell] = self.sells(algo)
+                placed = len(self.tickets(algo))
+                amend = sell.Update
+
+                def update(fields, amend=amend, algo=algo):
+                    response = amend(fields)
+                    if refused:
+                        algo.fill_model.failure = "LEAN order 9 (tag=x) could not be priced"
+                    return response
+
+                sell.Update = update
+                self.feed(algo, 11, close_decisions=[exit_order_set(11, level=22.5),
+                                                     add_proposal(11)])
+                self.assertEqual(sell.StopPrice, 22.5)
+                if not refused:
+                    self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+                    self.assertEqual(len(self.tickets(algo)), placed + 1)
+                    continue
+                self.assertTrue(algo.failed)
+                self.assertIn("could not be priced", algo.quit_reason)
+                self.assertEqual(len(self.tickets(algo)), placed)
+
+    def test_no_order_is_placed_amended_or_cancelled_while_a_fill_model_failure_is_recorded(self):
+        # The desk's one chokepoint for every change it makes to LEAN's order
+        # book: once a failure is recorded, submit, amend and cancel all
+        # refuse, and LEAN's book is left exactly as it was.
+        algo = self.start()
+        self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1)])
+        self.feed(algo, 11, close_decisions=[add_proposal(11)])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [sell] = self.sells(algo)
+        add = self.tickets(algo)[-1]
+        algo.fill_model.failure = "LEAN order 9 (tag=x) could not be priced"
+        book = algo.Transactions
+        before = (len(book.tickets), list(book.updates), sell.StopPrice, add.Status)
+        fields = scaffold.UpdateOrderFields()
+        fields.StopPrice = 23.0
+        props = scaffold.OrderProperties()
+        attempts = {
+            "submit": lambda: algo.desk._submit(10, 24.0, "another", props, 25.0),
+            "amend": lambda: algo.desk._amend(sell, fields),
+            "cancel": lambda: algo.desk._cancel(add),
+        }
+        for action, attempt in attempts.items():
+            with self.subTest(action):
+                with self.assertRaises(orders.Uncertain) as caught:
+                    attempt()
+                self.assertIn("could not be priced", str(caught.exception))
+                self.assertEqual((len(book.tickets), list(book.updates), sell.StopPrice,
+                                  add.Status), before)
+
+    def test_a_fill_model_failure_in_the_last_slice_stops_the_run_at_its_end(self):
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9)])
+        sent = len(algo.client.sent)
+        algo.fill_model.failure = "LEAN order 1 (tag=x) could not be priced"
+        algo.OnEndOfAlgorithm()
+        self.assertTrue(algo.failed)
+        self.assertIn("could not be priced", algo.quit_reason)
+        self.assertEqual(self.types_sent(algo, sent), [])
 
     def test_a_fill_of_an_order_the_adapter_did_not_place_stops_the_run(self):
         algo = self.start()
@@ -1569,18 +1797,25 @@ class StartupReportTests(OrderTestCase):
         self.assertEqual([m for m in report if "unconfirmed" in m.lower() or "believed" in m], [])
         [price_cap] = [m for m in report if "price cap (ADR 0005" in m]
         for fact in (
-                "confirmed", "min(high, limit)", "does not trigger",
-                "favorable gap", "bounded by the limit",
-                # The hold guarantee is qualified by the same fee-model gap
-                # the account paragraph names, not restated as unconditional.
-                "fee-model gap #81 tracks", "above its own LimitPrice",
-                # k = 0 is agreement on the triggering bar's pre-slippage
-                # price only, not exact agreement overall: three named
-                # exceptions (the touch, slippage, a later-session favorable
-                # gap) must all still be present.
-                "k = 0", "not exact agreement", "500/500", "fills at 490",
+                # The adapter's own fill model, ADR 0005's rule, in place of
+                # LEAN's native stop-limit fill, confirmed on the pinned image
+                # against the table shared with internal/fills.
+                "adapter's ADR 0005 fill model", "not by LEAN's native stop-limit fill",
+                "EquityFillModel", "an exact touch included", "max(stop, open)",
+                "trades back down to it", "slippage_n x N", "stop_limit_fill_cases.json",
+                "to within 1e-9", "expiry stays the adapter's",
+                # The guard and the hold, qualified by the same fee-model gap
+                # the account paragraph names.
+                "above its own LimitPrice plus the slippage", "fee-model gap #81 tracks",
+                # A fill model's exception is swallowed by LEAN, so the run
+                # stops on the recorded failure instead.
+                "swallows an exception",
+                # LEAN's native model is kept as history.
+                "min(high, limit)", "favorable-gap open", "applied no slippage",
                 "the limit exactly as it adjusts its stop"):
             self.assertIn(fact, price_cap)
+        [slippage] = [m for m in report if m.startswith("adapter: fill model: slippage is")]
+        self.assertIn("adds it explicitly", slippage)
         # Logged at startup, before any bar reaches the engine.
         self.assertEqual(algo.client.sent, [])
 
