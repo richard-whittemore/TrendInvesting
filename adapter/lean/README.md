@@ -146,11 +146,20 @@ other answer. LEAN has not split the open orders in that slice yet, so the
 reduced quantities and new tags are placed at the 00:01 check. There, every
 working order LEAN split to within one raw share of the engine's quantity at
 the new ratio is amended to exactly that quantity
-(`UpdateOrderFields.Quantity`), reductions before increases, because LEAN
-rounds each order's split with the same rounded factor. An order further off,
-or an amendment LEAN does not acknowledge, stops the run. A
-`strategy.campaign.cash-in-lieu` arriving other than in reply to a split stops
-the run too.
+(`UpdateOrderFields.Quantity`), reductions before increases. This is needed
+because LEAN splits each open order on its own and truncates it: at the 2014
+split each Unit's -1,310 became -9,169, not -9,170, while the holding as a
+whole lost only one share. LEAN answers a quantity amendment with success at
+once but applies it only when it processes the request, at the start of the
+next time step and before that session's fills, so the ticket's `Quantity`
+still reads the old figure at 00:01. The adapter therefore reads what an
+order will work from LEAN's own `UpdateRequests` (the latest one stating a
+quantity that LEAN has not refused). The next slice's check amends nothing: it
+verifies what LEAN made of the requests. An order further off, an amendment
+LEAN refuses when asked or when it processes it, or a quantity that is not the
+engine's by the next slice stops the run, and the failure names LEAN's own
+`ErrorCode` and `ErrorMessage`. A `strategy.campaign.cash-in-lieu` arriving
+other than in reply to a split stops the run too.
 
 After each bar's decisions have been received, the adapter reads one
 `account.snapshot` from `Portfolio.TotalPortfolioValue` (equity) and
@@ -744,6 +753,7 @@ every order the adapter places; they are kept as history:
 | Early closes | LEAN's one-bar `History` returned two rows on 2002-12-24 (13:00 close); `split_adjusted_view` takes the row ending with the bar. |
 | Both views from one run | With a Raw subscription, a one-bar `History(..., dataNormalizationMode=SplitAdjusted)` returns the split-adjusted bar: AAPL on 2005-02-22 closed at 85.38 raw and 1.524639198 split-adjusted, 56.000134 apart, the factor file's rounded 1/56. |
 | Tick | LEAN rounds every raw stop price to the cent, including a split's adjustment of an open stop, logging "To meet brokerage precision requirements, order StopPrice was rounded to 15.30 from 15.29996328" for the first only: all 193 order changes in the raw run are at whole cents. |
+| A quantity amendment after a split | For AAPL's 7-for-1 of 2014-06-09 (factor 0.1428572), probed with three -9,170 sell stops over 27,510 raw shares: LEAN truncated each order on its own to -64,189, not -64,190, while the holding became 192,569. `UpdateOrderFields.Quantity = -64190` (signed, as the order is) at the 00:01 event answered `IsSuccess` true, `ErrorCode` NONE, but the ticket still read -64,189 and its latest update request was `PROCESSING`. LEAN applied it at the start of the session's time step, reporting `UpdateSubmitted` with -64,190 before the session's fills: an order amended together with a stop the session reached filled for -64,190. The cash LEAN paid for the fraction was exactly the fraction × `ReferencePrice` (645.57) × the factor: $85.120470324. |
 | A split under Raw normalisation | For AAPL's 2-for-1 of 2005-02-28 (factor 0.4999986): `SplitType.Warning` in a bar-less slice on the 25th, then `SplitOccurred` in a bar-less slice at midnight on the 28th, when the holding has already doubled (1,000 → 2,000, the average price halved, and a fractional share paid as cash: $0.25 on 1,000 shares). Each open stop's quantity doubles and its price halves, rounded to the cent (62.23 → 31.11 for a sell, 115.57 → 57.78 for a buy), but only after that slice's `OnData` returns, whose tickets are still unadjusted; each is then reported through `OnOrderEvent` as `UpdateSubmitted` with its ticket already changed, still at midnight. A scheduled event at 00:01 then fires with every ticket adjusted, before the session's fills at 16:00, and a `Quit` there prevents those fills (a sell stop that filled that session did not). `OnEndOfTimeStep` is never called for a Python algorithm. In the raw run 4 Units (11,056 raw shares) and their 4 Exit Orders were carried across it: 22,112 shares, each stop at half its level, and $2.75 of fractional-share cash. |
 
 **The acceptance run.** A one-instrument backtest on the pinned image, with
@@ -836,6 +846,27 @@ available cash reported was $125,586.58, and the last snapshot, at
 2014-06-06, had $170,081.45 available of $2,707,171.55 equity. The Exit
 Channel partial fill that stopped the previous attempt on 2005-04-15 (#233)
 did not occur in this run; that issue remains open.
+
+The same run under ADR 0023's cash in lieu (#222), with the recipe above,
+from a fresh engine, socket volume and journal. A first attempt published the
+2014 split correctly (one raw share lost, $91.209486564) and then stopped at
+the 00:01 check, because LEAN applies a quantity amendment only at the next
+time step and the adapter read the ticket before it had; that journal is
+incomplete at 2014-06-09 and verifies and replays byte-identically. With the
+amendment read back from LEAN's update requests, the run reached 2014-12-31:
+3,081 bars, 153 fills (35 entries, 61 Adds, 37 stops, 20 exits; six of them
+after the split) and 682 order changes; 14,944 records, a verified chain,
+`-verify` reporting a complete run, and a byte-identical replay. Both splits
+were published. At 2005-02-28, no share was lost and $2.7303102677 was paid,
+against LEAN's own change in cash of $2.7303102679. At 2014-06-09, one raw
+share was lost and $91.209486564 was paid, against $91.20948656404. The
+engine took one raw share off Unit 3 of three (110,040 split-adjusted shares
+to 110,036). The adapter amended Units 1 and 2's Exit Orders from LEAN's
+-9,169 back to -9,170, and Unit 3's order kept LEAN's -9,169 under the
+engine's new tag, which is 27,509 in all, LEAN's holding. Each stop LEAN
+rounded to the cent stayed within the one-tick tolerance (80.51 against the
+engine's 80.5138). Cash never went negative (the lowest was $125,586.58),
+and the last snapshot showed $2,953,509.22, all of it cash.
 
 **Live-trading fill delivery.** The owner's 2026-09-24 clarification requires
 fills to reach the engine intraday, while subsequent orders can still work

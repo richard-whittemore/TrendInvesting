@@ -34,8 +34,11 @@ class FakePortfolio:
 
 
 class FakeResponse:
-    def __init__(self, success):
+    """LEAN's OrderResponse: a refusal carries LEAN's error code and message."""
+    def __init__(self, success, code="none", message=None):
         self.IsSuccess = success
+        self.ErrorCode = code
+        self.ErrorMessage = message
 
 
 # The LEAN OrderStatus values in which an order is no longer working; a
@@ -90,6 +93,9 @@ class FakeTicket:
         self.TimeInForce = properties.TimeInForce
         self.Status = book.submit_status
         self.event_ids = 0
+        # LEAN's record of every change requested of the order, the split's
+        # own adjustment and each amendment alike, oldest first.
+        self.UpdateRequests = []
 
     def Get(self, field):
         """LEAN's OrderTicket.Get(OrderField): the order's current figure."""
@@ -101,23 +107,33 @@ class FakeTicket:
                          "stop-limit order")
 
     def Update(self, fields):
-        """LEAN's amendment: acknowledged at once, reported after the slice."""
+        """LEAN's amendment, as observed on the pinned image. A stop, limit or
+        tag change reads back at once (OrderTicket.Get consults the pending
+        request) and is reported after the slice. A QUANTITY change is
+        answered with success at once but applied, and reported, only when
+        LEAN processes the request at the end of the time step (settle), so
+        the ticket's Quantity is unchanged until then; its request stays
+        "processing" meanwhile. An unacknowledged amendment is an error
+        response carrying LEAN's code and message."""
         self.book.updates.append((self.OrderId, fields.StopPrice, fields.Tag))
         if fields.LimitPrice is not None:
             self.book.limit_updates.append((self.OrderId, fields.LimitPrice))
         if fields.Quantity is not None:
             self.book.quantity_updates.append((self.OrderId, fields.Quantity))
         if not self.book.acknowledge_updates:
-            return FakeResponse(False)
-        if fields.Quantity is not None:
-            self.Quantity = fields.Quantity
+            self.UpdateRequests.append(types.SimpleNamespace(
+                Quantity=fields.Quantity, StopPrice=fields.StopPrice, Status="error"))
+            return FakeResponse(False, "invalid-request", "the fake broker refused the update")
+        request = types.SimpleNamespace(Quantity=fields.Quantity, StopPrice=fields.StopPrice,
+                                        Status="processing")
+        self.UpdateRequests.append(request)
         if fields.StopPrice is not None:
             self.StopPrice = fields.StopPrice
         if fields.LimitPrice is not None:
             self.LimitPrice = fields.LimitPrice
         if fields.Tag is not None:
             self.Tag = fields.Tag
-        self.book.deferred.append((self, "update-submitted"))
+        self.book.deferred.append((self, ("update-submitted", request)))
         return FakeResponse(True)
 
     def Cancel(self, tag=None):
@@ -167,6 +183,11 @@ class FakeTransactions:
         """The end of LEAN's time step: confirm cancellations and amendments."""
         deferred, self.deferred = self.deferred, []
         for ticket, status in deferred:
+            if isinstance(status, tuple):
+                status, request = status
+                if request.Quantity is not None:
+                    ticket.Quantity = request.Quantity
+                request.Status = "processed"
             if status == "canceled":
                 if ticket.Status != "cancel-pending" or self.cancel_outcome == "never":
                     continue
@@ -187,14 +208,16 @@ class FakeTransactions:
             portfolio.holdings[symbol] = int(split)
             portfolio.Cash += (split - int(split)) * reference_price * factor
 
-    def split_orders(self, symbol, factor, tick=0.01, limit_rounding=round):
+    def split_orders(self, symbol, factor, tick=0.01, limit_rounding=round, quantity_rounding=round):
         """LEAN's split of the open orders, as observed on the pinned image: done
         after the split's slice's OnData returns, in the same time step, each
         order's quantity divided by the factor and its stop multiplied by it
         and rounded to the tick, each reported through OnOrderEvent as
         UpdateSubmitted with its ticket already changed."""
         for ticket in self.GetOpenOrderTickets(symbol):
-            ticket.Quantity = round(ticket.Quantity / factor)
+            ticket.Quantity = quantity_rounding(ticket.Quantity / factor)
+            ticket.UpdateRequests.append(types.SimpleNamespace(
+                Quantity=ticket.Quantity, StopPrice=None, Status="processed"))
             ticket.StopPrice = round(round(ticket.StopPrice * factor / tick) * tick, 10)
             if ticket.LimitPrice is not None:
                 # Confirmed by a probe on the pinned image (adapter README,
@@ -373,6 +396,8 @@ imports.TimeZones = types.SimpleNamespace(NewYork="NY")
 imports.DelistingType = types.SimpleNamespace(Warning="warning", Delisted="delisted")
 imports.SplitType = types.SimpleNamespace(Warning="split-warning", SplitOccurred="split-occurred")
 imports.OrderField = types.SimpleNamespace(StopPrice="stop-price", LimitPrice="limit-price")
+imports.OrderRequestStatus = types.SimpleNamespace(
+    Unprocessed="unprocessed", Processing="processing", Processed="processed", Error="error")
 imports.time = time
 imports.OrderProperties = OrderProperties
 imports.UpdateOrderFields = UpdateOrderFields

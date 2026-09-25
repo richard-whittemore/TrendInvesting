@@ -495,8 +495,9 @@ class OrderDesk:
         # fill or ADR 0013 slippage model has failed, the run is stopping, and no
         # order is placed, amended or cancelled.
         self.refusal = refusal
-        # OrderProperties, TimeInForce, UpdateOrderFields and OrderStatus from
-        # AlgorithmImports, passed in so this module never imports LEAN.
+        # OrderProperties, TimeInForce, UpdateOrderFields, OrderStatus,
+        # OrderField and OrderRequestStatus from AlgorithmImports, passed in so
+        # this module never imports LEAN.
         self.lean = lean
         self.n_by_tag = {}
         self.campaign_n = {}
@@ -570,6 +571,46 @@ class OrderDesk:
 
     def _open_tickets(self):
         return list(self.algorithm.Transactions.GetOpenOrderTickets(self.symbol))
+
+    def _working_quantity(self, ticket):
+        """The quantity an order works at once LEAN has processed every change
+        requested of it: its latest update request stating a quantity that
+        LEAN has not refused, else the ticket's own.
+
+        LEAN answers a quantity amendment with success at once but applies it
+        only when it processes the request, at the start of the next time
+        step and before that step's fills (observed on the pinned image: an
+        order amended at the 00:01 check after AAPL's 2014 split still read
+        its old Quantity then, and filled that session for the amended one).
+        The ticket's own Quantity therefore lags an acknowledged amendment,
+        and reading it alone would mistake a pending change for a refused
+        one.
+        """
+        for request in reversed(list(ticket.UpdateRequests)):
+            if request.Quantity is not None and \
+                    request.Status != self.lean.OrderRequestStatus.Error:
+                return _whole(request.Quantity)
+        return _whole(ticket.Quantity)
+
+    @staticmethod
+    def _refusal(response):
+        """LEAN's own reason for refusing a request, for the failure text."""
+        return "LEAN answered {}: {}".format(getattr(response, "ErrorCode", None),
+                                             getattr(response, "ErrorMessage", None))
+
+    def _refused_quantity(self, ticket):
+        """LEAN's reason for refusing this order's latest quantity amendment,
+        if it refused one after accepting it; empty otherwise."""
+        for request in reversed(list(ticket.UpdateRequests)):
+            if request.Quantity is None:
+                continue
+            if request.Status == self.lean.OrderRequestStatus.Error:
+                response = getattr(request, "Response", None)
+                return " (LEAN refused amending it to {}: {})".format(
+                    request.Quantity, self._refusal(response) if response is not None
+                    else "no reason given")
+            return ""
+        return ""
 
     def require_flat(self, when):
         """Reconcile before trading: LEAN holds nothing and works no order for the instrument.
@@ -849,7 +890,10 @@ class OrderDesk:
             self.split_to_check = None
         ratio = self.ratio
         tick = float(self.algorithm.Securities[self.symbol].SymbolProperties.MinimumPriceVariation)
-        problems = self._amend_split_quantities(ratio)
+        # Amended only at the pre-session check, so LEAN applies each change
+        # before the session's fills; the next slice's check verifies what LEAN
+        # made of them and amends nothing.
+        problems = [] if final else self._amend_split_quantities(ratio)
         problems += self._holding_problems() + self._exit_orders_not_working()
         holding = self.algorithm.Portfolio[self.symbol].Quantity
         for ticket in self._open_tickets():
@@ -860,12 +904,13 @@ class OrderDesk:
                 continue
             quantity, level = placed["quantity"] // ratio, placed["level"] * ratio
             stop = float(ticket.Get(self.lean.OrderField.StopPrice))
-            if ticket.Quantity != quantity or abs(stop - level) > tick + 1e-9:
+            working = self._working_quantity(ticket)
+            if working != quantity or abs(stop - level) > tick + 1e-9:
                 problems.append("LEAN order {} (tag={}) is for {} raw shares at {:.4f}, but the "
                                 "engine's {} split-adjusted shares at {} are {} raw shares at "
-                                "{:.4f}".format(ticket.OrderId, ticket.Tag, ticket.Quantity, stop,
-                                                placed["quantity"], placed["level"], quantity,
-                                                level))
+                                "{:.4f}{}".format(ticket.OrderId, ticket.Tag, working, stop,
+                                                  placed["quantity"], placed["level"], quantity,
+                                                  level, self._refused_quantity(ticket)))
             if placed.get("price_cap") is not None:
                 problems += self._split_limit_problems(ticket, stop, placed["price_cap"] * ratio,
                                                        placed["price_cap"], tick)
@@ -886,9 +931,15 @@ class OrderDesk:
         cash in lieu carries a new quantity and tag (split_decisions). Each
         such order is amended to exactly the engine's figure before the
         session, decreases before increases so that working sells never
-        exceed the holding. An order further than one raw share off is left
-        for the checks that follow, which stop the run; so does an amendment
-        LEAN does not acknowledge. Returns the problems found.
+        exceed the holding; LEAN processes the requests in that order. LEAN
+        answers each with success at once and applies it at the start of the
+        next time step, before the session's fills (observed on the pinned
+        image), so what it will work is read back from its update requests
+        (_working_quantity) rather than from the ticket. An order further
+        than one raw share off is left for the checks that follow, which stop
+        the run; so does an amendment LEAN refuses, now or when it processes
+        it, and the failure carries LEAN's own reason. Returns the problems
+        found.
         """
         pending = []
         for ticket in self._open_tickets():
@@ -898,23 +949,24 @@ class OrderDesk:
             target = placed["quantity"] // ratio
             unit = placed.get("unit")
             tag = self.exit_orders.get(unit, {}).get("split_tag") if unit is not None else None
-            current = _whole(ticket.Quantity)
+            current = self._working_quantity(ticket)
             if current is None or abs(current - target) > 1 or (current == target and tag is None):
                 continue
             pending.append((abs(target) - abs(current), ticket.OrderId, ticket, target, tag, unit))
         problems = []
         for _, _, ticket, target, tag, unit in sorted(pending, key=lambda p: p[:2]):
-            before = _whole(ticket.Quantity)
+            before = self._working_quantity(ticket)
             fields = self.lean.UpdateOrderFields()
             if before != target:
                 fields.Quantity = target
             if tag is not None:
                 fields.Tag = tag
             response = self._amend(ticket, fields)
-            if not response.IsSuccess or _whole(ticket.Quantity) != target:
+            if not response.IsSuccess or self._working_quantity(ticket) != target:
                 problems.append("LEAN order {} (tag={}) is for {} raw shares; amending it to the "
-                                "engine's {} was not acknowledged".format(
-                                    ticket.OrderId, ticket.Tag, before, target))
+                                "engine's {} was not acknowledged ({})".format(
+                                    ticket.OrderId, ticket.Tag, before, target,
+                                    self._refusal(response)))
                 continue
             if tag is not None:
                 self.exit_orders[unit].pop("split_tag")
@@ -960,8 +1012,9 @@ class OrderDesk:
             if not response.IsSuccess or amended > cap + 1e-9:
                 return ["LEAN order {} (tag={}) is limited at {:.4f}, above the engine's price cap "
                         "{} at {:.4f} raw, and amending it to {:.4f} was not acknowledged "
-                        "(limit now {:.4f})".format(ticket.OrderId, ticket.Tag, limit, engine_cap,
-                                                    cap, target, amended)]
+                        "(limit now {:.4f}; {})".format(ticket.OrderId, ticket.Tag, limit,
+                                                        engine_cap, cap, target, amended,
+                                                        self._refusal(response))]
             self.algorithm.Log("adapter: amended order {} (tag={}) limit {} -> {} raw: the split "
                                "rounded it above the price cap {:.4f}".format(
                                    ticket.OrderId, ticket.Tag, limit, amended, cap))
@@ -1328,7 +1381,8 @@ class OrderDesk:
         self.exit_proposals.pop(campaign_id, None)
 
     def _working_sell_quantity(self):
-        return sum(-(t.Quantity - t.QuantityFilled) for t in self._open_tickets() if t.Quantity < 0)
+        return sum(-(self._working_quantity(t) - t.QuantityFilled)
+                   for t in self._open_tickets() if self._working_quantity(t) < 0)
 
     def _exit_order(self, decision, payload):
         """Mirror one Unit's Exit Order (CONTEXT.md: "Exit Order"; ADR 0005's amendment).
@@ -1443,11 +1497,11 @@ class OrderDesk:
                             "but the engine still sets its level".format(
                                 unit[0], unit[1], in_force["order_id"]))
         ticket = tickets[0]
-        if -ticket.Quantity != quantity // self.ratio:
+        if -self._working_quantity(ticket) != quantity // self.ratio:
             raise Uncertain("campaign {!r} unit {}'s exit order {} sells {} raw shares, but the "
                             "engine says the Unit holds {} split-adjusted shares, which is {} raw "
                             "at {} per raw share".format(unit[0], unit[1], ticket.OrderId,
-                                                         -ticket.Quantity, quantity,
+                                                         -self._working_quantity(ticket), quantity,
                                                          quantity // self.ratio, self.ratio))
         if as_of < in_force["as_of"]:
             self._reject(decision, "older than the level in force for campaign {!r} unit {}".format(
@@ -1459,8 +1513,9 @@ class OrderDesk:
         self.n_by_tag[tag] = n
         response = self._amend(ticket, fields)
         if not response.IsSuccess:
-            self.algorithm.Log("adapter: amendment of order {} to {} (tag={}) not acknowledged; "
-                               "the previous level stays in force".format(ticket.OrderId, level, tag))
+            self.algorithm.Log("adapter: amendment of order {} to {} (tag={}) not acknowledged ({}); "
+                               "the previous level stays in force".format(
+                                   ticket.OrderId, level, tag, self._refusal(response)))
             return
         in_force.update(as_of=as_of, source=source, level=level)
         self.orders[ticket.OrderId].update(tag=tag, level=level)

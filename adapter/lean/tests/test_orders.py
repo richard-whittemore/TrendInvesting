@@ -2084,7 +2084,8 @@ class SplitTests(OrderTestCase):
     ratio = 56
 
     def split(self, algo, day, factor=HALF, orders_split=True, before_data=None, meddle=None,
-              checked=True, limit_rounding=round, reference=49.0, engine=None):
+              checked=True, limit_rounding=round, reference=49.0, engine=None,
+              quantity_rounding=round, processed=True):
         """The split's time step before day's session, as observed on the pinned
         image. LEAN splits the holding, paying the fraction as cash at the
         reference price times the factor; raises OnData with the split and no
@@ -2092,7 +2093,8 @@ class SplitTests(OrderTestCase):
         it through OnOrderEvent; then the adapter's 00:01 scheduled check runs,
         before the session's fills. before_data and meddle change LEAN's state
         before OnData and after the orders' adjustment; checked=False leaves
-        the scheduled check out, as though it had not run. engine is the
+        the scheduled check out, as though it had not run; processed=False
+        stops before LEAN processes the requests it made. engine is the
         decisions the engine answers the split's corporate action with; by
         default, the reducer's own answer to a split that lost no share: the
         cash it paid, if any, reducing nothing (ADR 0023)."""
@@ -2115,11 +2117,16 @@ class SplitTests(OrderTestCase):
             Type="split-occurred", SplitFactor=factor, ReferencePrice=reference,
             Time=datetime(2014, 6, day))}))
         if orders_split:
-            book.split_orders("AAPL", factor, limit_rounding=limit_rounding)
+            book.split_orders("AAPL", factor, limit_rounding=limit_rounding,
+                              quantity_rounding=quantity_rounding)
         if meddle is not None:
             meddle()
         if checked:
             self.scheduled_check(algo)
+        if processed:
+            # LEAN's next time step processes the requests made at 00:01,
+            # before the session's fills (observed on the pinned image).
+            book.settle()
 
     def scheduled_check(self, algo):
         """LEAN fires the adapter's 00:01 event: after a split's time step, and
@@ -2411,6 +2418,12 @@ SEVENTH = 0.1428572
 SPLIT_AT = "2014-06-11T04:00:00Z"
 
 
+def lean_split_to(ticket, quantity):
+    """LEAN's split of ticket landed on quantity (its own rounding)."""
+    ticket.Quantity = quantity
+    ticket.UpdateRequests[-1].Quantity = quantity
+
+
 def lean_cash_in_lieu(before, factor, reference):
     """LEAN's cash for the fraction of a share its truncated split left: the
     fraction, times the reference price, times the factor (observed on the
@@ -2469,14 +2482,17 @@ class CashInLieuTests(OrderTestCase):
             "raw_shares_lost": 1, "currency": "USD"})
         # LEAN split the order to 24,612 raw shares (the exact ratio); the
         # engine's reduced Exit Order is 24,611, which is what LEAN holds,
-        # and the order now carries that decision's tag.
-        self.assertEqual((sell.Quantity, sell.Tag), (-24611, reduced["id"]))
+        # and the order now carries that decision's tag. LEAN applies the
+        # quantity when it processes the request, before the session.
+        self.assertEqual(sell.Tag, reduced["id"])
         self.assertIn((sell.OrderId, -24611), algo.Transactions.quantity_updates)
+        self.assertEqual(sell.UpdateRequests[-1].Quantity, -24611)
         self.assertAlmostEqual(sell.StopPrice, 3.2)
         # The next session trades on: the stop fills for the reduced Unit.
         self.ratio = 4
         self.feed(algo, 12)
         self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(sell.Quantity, -24611)
         self.fill(algo, sell, 13, 3.1)
         self.feed(algo, 13, replies={"execution.fill": {"payload": {"decisions": [
             units_stopped(13, fill_id="lean:1:2"), campaign_exited(13)]}}})
@@ -2560,19 +2576,105 @@ class CashInLieuTests(OrderTestCase):
         # so an order can land one raw share from the engine's figure at the
         # new ratio: it is amended back before the session.
         algo, sell = self.held()
-        self.split(algo, 11, meddle=lambda: setattr(sell, "Quantity", -199))
+        self.split(algo, 11, meddle=lambda: lean_split_to(sell, -199), processed=False)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertIn((sell.OrderId, -200), algo.Transactions.quantity_updates)
+        self.assertEqual(sell.Quantity, -199)
+        algo.Transactions.settle()
+        self.ratio = 28
+        self.feed(algo, 11)
         self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
         self.assertEqual(sell.Quantity, -200)
-        self.assertIn((sell.OrderId, -200), algo.Transactions.quantity_updates)
 
     def test_an_unacknowledged_quantity_amendment_stops_the_run(self):
         algo, sell = self.held()
 
         def refuse():
-            setattr(sell, "Quantity", -199)
+            lean_split_to(sell, -199)
             algo.Transactions.acknowledge_updates = False
         self.split(algo, 11, meddle=refuse)
-        self.assert_stopped_before_the_session(algo, "order {}".format(sell.OrderId), "-199")
+        # The failure carries LEAN's own reason.
+        self.assert_stopped_before_the_session(
+            algo, "order {}".format(sell.OrderId), "-199", "invalid-request",
+            "the fake broker refused the update")
+
+    def test_lean_truncating_every_resting_order_at_the_split_is_carried_across(self):
+        # The 2014-06-09 acceptance run: LEAN split each Unit's Exit Order on
+        # its own, truncating each (-1,310 raw became -9,169, not -9,170),
+        # while the holding as a whole lost one share. The engine reduces the
+        # most recent Unit only, so the other Unit's order is amended back up
+        # to its exact figure: LEAN answers with success and applies it when
+        # it processes the request, before the session's fills.
+        algo, (first, second) = self.two_units_aapl()
+        reduced = exit_order_set(13, unit_index=2, level=0.82, quantity=36676, cause="split",
+                                 as_of="2014-06-13T04:00:00Z")
+        self.split(algo, 13, factor=SEVENTH, reference=24.0, quantity_rounding=math.trunc,
+                   processed=False, engine=[
+                       cash_in_lieu("2014-06-13T04:00:00Z", [(2, 36680, 36676)],
+                                    cash=lean_cash_in_lieu(2620, SEVENTH, 24.0)),
+                       reduced])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(algo.Portfolio.holdings["AAPL"], 18339)
+        self.assertEqual((first.Quantity, second.Quantity), (-9169, -9169))
+        self.assertEqual(first.UpdateRequests[-1].Quantity, -9170)
+        self.assertEqual(second.Tag, reduced["id"])
+        self.assertNotIn((second.OrderId, -9170), algo.Transactions.quantity_updates)
+        # LEAN processes the amendment; the next slice's final check finds
+        # every Exit Order at its Unit's quantity, together the holding.
+        algo.Transactions.settle()
+        self.ratio = 4
+        self.feed(algo, 13)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual((first.Quantity, second.Quantity), (-9170, -9169))
+        self.assertEqual(-(first.Quantity + second.Quantity), algo.Portfolio.holdings["AAPL"])
+
+    def test_an_amendment_lean_refuses_when_it_processes_it_stops_the_run(self):
+        # LEAN can accept a request and refuse it when it processes it: the
+        # next slice's final check then finds the old quantity, and stops the
+        # run naming LEAN's reason.
+        algo, (first, _) = self.two_units_aapl()
+        self.split(algo, 13, factor=SEVENTH, reference=24.0, quantity_rounding=math.trunc,
+                   processed=False, engine=[
+                       cash_in_lieu("2014-06-13T04:00:00Z", [(2, 36680, 36676)],
+                                    cash=lean_cash_in_lieu(2620, SEVENTH, 24.0)),
+                       exit_order_set(13, unit_index=2, level=0.82, quantity=36676,
+                                      cause="split", as_of="2014-06-13T04:00:00Z")])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        request = first.UpdateRequests[-1]
+        request.Status = "error"
+        request.Response = types.SimpleNamespace(ErrorCode="invalid-new-order-status",
+                                                 ErrorMessage="processed and refused")
+        algo.Transactions.deferred = [d for d in algo.Transactions.deferred
+                                      if not isinstance(d[1], tuple) or d[1][1] is not request]
+        algo.Transactions.settle()
+        self.ratio = 4
+        self.feed(algo, 13)
+        self.assertTrue(algo.failed)
+        for fact in ("order {}".format(first.OrderId), "-9169", "invalid-new-order-status",
+                     "processed and refused"):
+            self.assertIn(fact, algo.quit_reason)
+
+    def two_units_aapl(self):
+        """Two Units of 1,310 raw shares each at 28 split-adjusted shares a raw
+        share (the acceptance run's Unit size), each resting its Exit Order."""
+        self.ratio = 28
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9, entry_level=0.875, quantity=36680, n=0.05)])
+        [entry] = self.tickets(algo)
+        self.fill(algo, entry, 10, entry.StopPrice + 0.1)
+        self.feed(algo, 10, replies={"execution.fill": {"payload": {"decisions": [
+            campaign_opened(campaign_n=0.05), exit_order_set(10, level=0.8, quantity=36680)]}}})
+        self.feed(algo, 11, close_decisions=[add_proposal(
+            11, level=0.9, quantity=36680, campaign_n=0.05, previous_unit_fill=0.88)])
+        add = self.tickets(algo)[-1]
+        self.fill(algo, add, 12, add.StopPrice + 0.1)
+        self.feed(algo, 12, replies={"execution.fill": {"payload": {"decisions": [
+            unit_added(12, fill_id="lean:{}:2".format(add.OrderId), quantity=36680),
+            exit_order_set(12, unit_index=2, level=0.82, quantity=36680, cause="add")]}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        sells = self.sells(algo)
+        self.assertEqual([t.Quantity for t in sells], [-1310, -1310])
+        return algo, sells
 
 
 class FixtureContractTests(unittest.TestCase):
