@@ -36,7 +36,8 @@ const ProtectiveStopSetEventType = "strategy.protective-stop.set"
 // rejected outright rather than silently read as Unit 0 or an unrecognised
 // reason (ADR 0015's rule, the same discipline CampaignExitedSchemaVersion's
 // own bump applies to a new field with an ambiguous zero value).
-const ProtectiveStopSetSchemaVersion uint32 = 2
+// Version 3 adds AddN for initial and raised stops (ADR 0006).
+const ProtectiveStopSetSchemaVersion uint32 = 3
 
 // RuleProtectiveStopSetFromFill names the rule for
 // ProtectiveStopSetPayload.Rule when Reason is ProtectiveStopReasonInitial:
@@ -111,6 +112,11 @@ const (
 // type here would force every consumer that wants "every stop movement,
 // first set and raise alike" to subscribe to two types and merge them.
 type ProtectiveStopSetPayload struct {
+	// AddN is ADR 0006's recomputed N for this Add or its stop change.
+	// Zero selects the Baseline's CampaignN; positive values are captured
+	// before the decision bar and retained through the Add's fill.
+	AddN float64 `json:"add_n,omitempty"`
+
 	CampaignID   string `json:"campaign_id"`
 	InstrumentID string `json:"instrument_id"`
 	// UnitIndex is which Unit this stop belongs to: 1 through the Campaign's
@@ -179,6 +185,9 @@ type ProtectiveStopSetPayload struct {
 // disagree about the Stop Ladder's own arithmetic.
 func (p ProtectiveStopSetPayload) Validate() error {
 	var errs []error
+	if !isFinite(p.AddN) || p.AddN < 0 {
+		errs = append(errs, errors.New("add n must be finite and non-negative"))
+	}
 	if p.CampaignID == "" {
 		errs = append(errs, errors.New("campaign id is required"))
 	}
@@ -268,7 +277,7 @@ func (p ProtectiveStopSetPayload) Validate() error {
 			}
 		}
 		if entryPriceFinite && stopMultipleFinite && campaignNFinite && levelFinite {
-			if derived := p.EntryPrice - sizing.Product(p.StopMultiple, p.CampaignN); p.Level != derived {
+			if derived := p.EntryPrice - sizing.Product(p.StopMultiple, p.EffectiveN()); p.Level != derived {
 				errs = append(errs, fmt.Errorf(
 					"stated level %v does not match the derivation %v (entry price %v - stop multiple %v x campaign n %v)",
 					p.Level, derived, p.EntryPrice, p.StopMultiple, p.CampaignN))
@@ -289,7 +298,7 @@ func (p ProtectiveStopSetPayload) Validate() error {
 			}
 		}
 		if previousLevelFinite && p.PreviousLevel > 0 && campaignNFinite && levelFinite {
-			if derived, err := sizing.RaisedStop(p.PreviousLevel, p.CampaignN); err == nil && p.Level != derived {
+			if derived, err := sizing.RaisedStop(p.PreviousLevel, p.EffectiveN()); err == nil && p.Level != derived {
 				errs = append(errs, fmt.Errorf(
 					"stated level %v does not match the derivation %v (previous level %v + 0.5 x campaign n %v): the stop ladder raises an earlier unit's stop by half n (The Turtle Rules p.22)",
 					p.Level, derived, p.PreviousLevel, p.CampaignN))
@@ -301,4 +310,13 @@ func (p ProtectiveStopSetPayload) Validate() error {
 		return fmt.Errorf("invalid protective stop set payload: %w", err)
 	}
 	return nil
+}
+
+// EffectiveN returns the N driving this decision (ADR 0006). CampaignN
+// stays the opening reference; AddN explicitly selects the Variant operand.
+func (p ProtectiveStopSetPayload) EffectiveN() float64 {
+	if p.AddN != 0 {
+		return p.AddN
+	}
+	return p.CampaignN
 }

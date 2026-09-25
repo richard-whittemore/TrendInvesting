@@ -120,15 +120,15 @@ func decisionSentence(e event.Envelope) (string, error) {
 		})
 	case event.AddProposalEventType:
 		return renderDecision(e, event.AddProposalSchemaVersion, func(p event.AddProposalPayload) string {
-			return fmt.Sprintf("proposed Add of Unit %d to Campaign %q: %d shares at Add Ladder level %s, following Unit fill %s with Campaign N %s", p.UnitIndex, p.CampaignID, p.Quantity, decisionNumber(p.Level), decisionNumber(p.PreviousUnitFill), decisionNumber(p.CampaignN))
+			return fmt.Sprintf("proposed Add of Unit %d to Campaign %q: %d shares at Add Ladder level %s, following Unit fill %s with Campaign N %s", p.UnitIndex, p.CampaignID, p.Quantity, decisionNumber(p.Level), decisionNumber(p.PreviousUnitFill), decisionNumber(p.CampaignN)) + recomputedNText(p.AddN)
 		})
 	case event.CampaignUnitAddedEventType:
 		return renderDecision(e, event.CampaignUnitAddedSchemaVersion, func(p event.CampaignUnitAddedPayload) string {
-			return fmt.Sprintf("completed Add of Unit %d to Campaign %q: %d shares at %s because fill %q was recorded; now %s with the added Unit's Protective Stop at %s", p.UnitIndex, p.CampaignID, p.Quantity, decisionNumber(p.FillPrice), p.FillID, unitCount(p.Units), decisionNumber(p.ProtectiveStop))
+			return fmt.Sprintf("completed Add of Unit %d to Campaign %q: %d shares at %s because fill %q was recorded; now %s with the added Unit's Protective Stop at %s", p.UnitIndex, p.CampaignID, p.Quantity, decisionNumber(p.FillPrice), p.FillID, unitCount(p.Units), decisionNumber(p.ProtectiveStop)) + recomputedNText(p.AddN)
 		})
 	case event.ProtectiveStopSetEventType:
 		return renderDecision(e, event.ProtectiveStopSetSchemaVersion, func(p event.ProtectiveStopSetPayload) string {
-			return fmt.Sprintf("set Protective Stop for Unit %d of Campaign %q to %s because %s; previous level %s, entry price %s, Campaign N %s", p.UnitIndex, p.CampaignID, decisionNumber(p.Level), logText(p.Reason), decisionNumber(p.PreviousLevel), decisionNumber(p.EntryPrice), decisionNumber(p.CampaignN))
+			return fmt.Sprintf("set Protective Stop for Unit %d of Campaign %q to %s because %s; previous level %s, entry price %s, Campaign N %s", p.UnitIndex, p.CampaignID, decisionNumber(p.Level), logText(p.Reason), decisionNumber(p.PreviousLevel), decisionNumber(p.EntryPrice), decisionNumber(p.CampaignN)) + recomputedNText(p.AddN)
 		})
 	case event.ExitOrderSetEventType:
 		return renderDecision(e, event.ExitOrderSetSchemaVersion, func(p event.ExitOrderSetPayload) string {
@@ -238,4 +238,13 @@ func unitCount(n int) string {
 		return "1 Unit"
 	}
 	return fmt.Sprintf("%d Units", n)
+}
+
+// recomputedNText identifies ADR 0006's Variant operand without relabelling
+// the opening Campaign N retained in the journal.
+func recomputedNText(n float64) string {
+	if n == 0 {
+		return ""
+	}
+	return "; recomputed Add N " + decisionNumber(n)
 }

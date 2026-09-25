@@ -46,11 +46,11 @@ type unitState struct {
 	openingFillID string
 	fillPrice     float64
 	// quantity is what actually executed for this Unit — at most the
-	// Campaign's frozen unitQuantity; a partial fill is accepted for the
+	// proposal's quantity; a partial fill is accepted for the
 	// filled quantity, mirroring the same rule for Unit 1.
 	quantity int64
 	// protectiveStop is THIS Unit's own stop, fillPrice - stopMultiple x
-	// campaignN, set once when the Unit's fill was accepted and never moved
+	// effective proposal N (ADR 0006), set when the fill was accepted and moved only
 	// here (the Stop Ladder is what raises earlier Units' stops as later
 	// ones are added).
 	protectiveStop float64
@@ -76,7 +76,9 @@ type unitState struct {
 // p.19-20) and each Protective Stop sits stopMultiple campaign N below its
 // OWN Unit's fill (p.22): every rung of both ladders is arithmetic over
 // those numbers and the frozen stopMultiple, with no recomputation of N
-// while the Campaign is open. That is what makes replay reconstruct the
+// while the Baseline Campaign is open. The declared Variant uses the Add
+// proposal's explicit addN for both ladders and keeps the opening reference.
+// That is what makes replay reconstruct the
 // same ladders rather than re-deriving different ones from the bars — the
 // reason ADR 0006 requires the frozen values to be journaled, which
 // event.CampaignOpenedPayload and event.CampaignUnitAddedPayload do.
@@ -95,8 +97,10 @@ type campaignState struct {
 	direction    string
 	campaignN    float64
 	unitQuantity int64
-	stopMultiple float64
-	maxUnits     int
+	// sizingAccount preserves the entry sizing numerator while only N varies (ADR 0006).
+	sizingAccount float64
+	stopMultiple  float64
+	maxUnits      int
 	// classification is ADR 0008's correlation group, resolved once from
 	// classificationOf (unit_caps.go) at the moment this Campaign opens and
 	// never re-read afterward: the freeze-at-entry discipline that keeps a
@@ -491,6 +495,7 @@ type pendingProposalState struct {
 	n              float64
 	stopMultiple   float64
 	entryLevel     float64
+	sizingAccount  float64
 }
 
 // rememberPendingProposal records the trade proposal just emitted for this
@@ -532,6 +537,7 @@ func (r *transition) rememberPendingProposal(state *instrumentState, emitted eve
 		n:              proposal.N,
 		stopMultiple:   proposal.StopMultiple,
 		entryLevel:     proposal.EntryLevel,
+		sizingAccount:  proposal.NotionalAccount,
 	}
 	return nil
 }
@@ -708,6 +714,8 @@ func (r *transition) expireExitProposal(state *instrumentState, bar event.Comple
 // one opening moment as the earliest an execution could exist (see
 // instrumentState.lastBarEarliestFillAt).
 type pendingAddProposalState struct {
+	// addN is zero for the Baseline; the Variant keeps its proposal N through fill (ADR 0006).
+	addN float64
 	// survivesNextBar is consumed by the first subsequent instrument bar.
 	// Its hold stands through that bar (ADR 0011 and ADR 0020, as amended).
 	survivesNextBar  bool
@@ -1038,8 +1046,13 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 		return nil, nil
 	}
 
+	n, quantity := campaign.campaignN, campaign.unitQuantity
+	addN := 0.0
+	if r.recomputeNAtAdd {
+		n, addN = state.lastBarN, state.lastBarN
+	}
 	last := campaign.lastUnit()
-	rung, err := sizing.NextAddLevel(last.fillPrice, campaign.campaignN, sizing.DirectionLong)
+	rung, err := sizing.NextAddLevel(last.fillPrice, n, sizing.DirectionLong)
 	if err != nil {
 		return nil, fmt.Errorf("strategy: instrument %q: campaign %q cannot compute the next add rung: %w", campaign.instrumentID, campaign.campaignID, err)
 	}
@@ -1072,6 +1085,28 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 		return []event.Envelope{declined}, nil
 	}
 
+	if r.recomputeNAtAdd {
+		unit, err := sizing.SizeUnit(sizing.Inputs{
+			Mode: r.sizingMode, NotionalAccount: campaign.sizingAccount,
+			UnitVolatilityFraction: r.unitVolatilityFrac, StopMultiple: campaign.stopMultiple,
+			RiskAtStopFraction: r.riskAtStopFraction, N: n, DollarsPerPoint: r.dollarsPerPoint,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("strategy: recompute Add size: %w", err)
+		}
+		quantity = unit.Quantity
+		if quantity == 0 {
+			declined, err := r.declineAdd(campaign, state.lastBarPeriodEnd, unitIndex, input, event.DeclineReasonQuantityBelowOneUnit,
+				"recomputed N sizes fewer than one whole share", 0, 0)
+			return []event.Envelope{declined}, err
+		}
+		if rung-sizing.Product(campaign.stopMultiple, n) <= 0 {
+			declined, err := r.declineAdd(campaign, state.lastBarPeriodEnd, unitIndex, input, event.DeclineReasonStopIntentNotPositive,
+				"recomputed N gives a non-positive Add stop intent", 0, 0)
+			return []event.Envelope{declined}, err
+		}
+	}
+
 	// ADR 0010's snapshot eligibility and ADR 0020's withdrawal-constrained
 	// spendable cash, the identical check sizeUnit applies to a new entry.
 	// The decision bar's previous close for a same-bar Add chain is
@@ -1084,7 +1119,7 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 		return nil, err
 	}
 	// The rung is the resting order's own level (ADR 0005), and the quantity
-	// is the one frozen at entry — an Add is never resized. Either outcome
+	// follows the declared N policy (ADR 0006). Either outcome
 	// below skips the whole Unit and remembers no pendingAddProposal —
 	// nothing was proposed, so there is nothing for a later bar to expire —
 	// and the NEXT bar re-evaluates this same rung on its own merits
@@ -1092,16 +1127,16 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 	// this decline): a skip does not poison the ladder.
 	//
 	// What must be fundable is the hold the Add would place: its worst-case
-	// cost at its price cap, measured in the Campaign's frozen N, slippage
+	// cost at its price cap, measured in this Add's effective N, slippage
 	// and commission included (ADR 0020, as amended 2026-09-24; hold.go's
 	// buyHold).
-	cost, priceCap, costRepresentable := r.buyHold(campaign.unitQuantity, rung, campaign.campaignN)
+	cost, priceCap, costRepresentable := r.buyHold(quantity, rung, n)
 	switch {
 	case !costRepresentable:
 		declined, err := r.declineAdd(campaign, state.lastBarPeriodEnd, unitIndex, input,
 			event.DeclineReasonUnitCostNotRepresentable,
 			fmt.Sprintf("unit %d hold (%s) leaves the representable range, so it exceeds any cash that could fund it; spendable cash at the attempt was %v",
-				unitIndex, r.buyHoldDetail(campaign.unitQuantity, rung, campaign.campaignN, priceCap), availableCash),
+				unitIndex, r.buyHoldDetail(quantity, rung, n, priceCap), availableCash),
 			0, 0)
 		if err != nil {
 			return nil, err
@@ -1112,7 +1147,7 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 		declined, err := r.declineAdd(campaign, state.lastBarPeriodEnd, unitIndex, input,
 			event.DeclineReasonInsufficientCash,
 			fmt.Sprintf("unit %d hold %v (%s) exceeds spendable cash at the attempt %v, after fill debits and standing holds",
-				unitIndex, cost, r.buyHoldDetail(campaign.unitQuantity, rung, campaign.campaignN, priceCap), availableCash),
+				unitIndex, cost, r.buyHoldDetail(quantity, rung, n, priceCap), availableCash),
 			cost, availableCash)
 		if err != nil {
 			return nil, err
@@ -1131,7 +1166,8 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 		PeriodEnd:        state.lastBarPeriodEnd,
 		UnitIndex:        unitIndex,
 		Level:            rung,
-		Quantity:         campaign.unitQuantity,
+		Quantity:         quantity,
+		AddN:             addN,
 		PreviousUnitFill: last.fillPrice,
 		CampaignN:        campaign.campaignN,
 		Rule:             event.RuleAddLadderHalfN,
@@ -1169,7 +1205,8 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 		proposalID:       proposalEnvelope.ID,
 		periodEnd:        state.lastBarPeriodEnd,
 		unitIndex:        unitIndex,
-		quantity:         campaign.unitQuantity,
+		quantity:         quantity,
+		addN:             addN,
 		level:            rung,
 		previousUnitFill: last.fillPrice,
 		earliestFillAt:   state.lastBarEarliestFillAt,
@@ -1705,6 +1742,7 @@ func (r *transition) openCampaign(state *instrumentState, pending *pendingPropos
 		direction:      fill.Direction,
 		campaignN:      pending.n,
 		unitQuantity:   pending.quantity,
+		sizingAccount:  pending.sizingAccount,
 		stopMultiple:   pending.stopMultiple,
 		maxUnits:       r.maxUnits,
 		classification: r.classificationOf(fill.InstrumentID),
@@ -2349,9 +2387,13 @@ func (r *transition) applyAddFill(state *instrumentState, fill event.FillPayload
 	}
 
 	// The Turtle Rules p.22's 2N stop, measured from THIS Unit's own actual
-	// fill and the campaign's frozen N (ADR 0006) — identical arithmetic to
+	// fill and the proposal's retained N (ADR 0006) — identical arithmetic to
 	// openCampaign's own, applied to a later Unit.
-	protectiveStop, err := sizing.ProtectiveStopLevel(fill.Price, campaign.campaignN, campaign.stopMultiple, sizing.DirectionLong)
+	n := campaign.campaignN
+	if pending.addN != 0 {
+		n = pending.addN
+	}
+	protectiveStop, err := sizing.ProtectiveStopLevel(fill.Price, n, campaign.stopMultiple, sizing.DirectionLong)
 	if err != nil {
 		return nil, fmt.Errorf("strategy: instrument %q: add fill %q cannot compute a protective stop: %w", fill.InstrumentID, fill.FillID, err)
 	}
@@ -2360,6 +2402,7 @@ func (r *transition) applyAddFill(state *instrumentState, fill event.FillPayload
 	unitsAfter := len(campaign.units) + 1
 
 	unitAddedPayload := event.CampaignUnitAddedPayload{
+		AddN:           pending.addN,
 		CampaignID:     campaign.campaignID,
 		InstrumentID:   fill.InstrumentID,
 		UnitIndex:      unitIndex,
@@ -2388,6 +2431,7 @@ func (r *transition) applyAddFill(state *instrumentState, fill event.FillPayload
 	// brand-new stop for a Unit that never had one before, not a raise of
 	// an earlier Unit's stop (the Stop Ladder, built below).
 	newUnitStopSetPayload := event.ProtectiveStopSetPayload{
+		AddN:          pending.addN,
 		CampaignID:    campaign.campaignID,
 		InstrumentID:  fill.InstrumentID,
 		UnitIndex:     unitIndex,
@@ -2414,7 +2458,7 @@ func (r *transition) applyAddFill(state *instrumentState, fill event.FillPayload
 	// were added, the stops for earlier units were raised by 1/2 N." Every
 	// EARLIER Unit's own stop — never the newly-added Unit's own, set
 	// above from ITS OWN fill — rises by exactly RaisedStop(previous,
-	// campaignN), regardless of how far the new Unit's own fill landed
+	// effective proposal N), regardless of how far the new Unit's own fill landed
 	// from its rung: this is what keeps the earlier Units at the standard
 	// raise even in the gap case (a later Unit filling well past its rung),
 	// implementing the source's literal first sentence rather than the
@@ -2431,7 +2475,7 @@ func (r *transition) applyAddFill(state *instrumentState, fill event.FillPayload
 	}
 	raises := make([]raise, 0, len(campaign.units))
 	for _, earlier := range campaign.units {
-		newStop, err := sizing.RaisedStop(earlier.protectiveStop, campaign.campaignN)
+		newStop, err := sizing.RaisedStop(earlier.protectiveStop, n)
 		if err != nil {
 			// Unreachable: RaisedStop refuses a non-finite or non-positive
 			// previous stop, and checkCampaignHasAProtectiveStop halts the run
@@ -2440,6 +2484,7 @@ func (r *transition) applyAddFill(state *instrumentState, fill event.FillPayload
 			return nil, fmt.Errorf("strategy: instrument %q: add fill %q cannot raise unit %d's protective stop: %w", fill.InstrumentID, fill.FillID, earlier.index, err)
 		}
 		raisedPayload := event.ProtectiveStopSetPayload{
+			AddN:          pending.addN,
 			CampaignID:    campaign.campaignID,
 			InstrumentID:  fill.InstrumentID,
 			UnitIndex:     earlier.index,

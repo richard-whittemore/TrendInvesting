@@ -247,7 +247,10 @@ package strategy
 // which changes the configuration hash every decision is stamped with, even
 // when none of the three fields the schema bump added actually reads a
 // nonzero value.
-const RulesVersion = "1.14.0"
+// Bumped to 1.15.0 for ADR 0006's declared recompute-N-at-Add Variant:
+// Add sizing, spacing, cap, hold and stops share the proposal's prior-bar N.
+// The frozen Baseline and opening-N result normalisation remain unchanged.
+const RulesVersion = "1.15.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -373,4 +376,10 @@ var RuleSurfaceFingerprints = map[string]string{
 	// Rule*/ADR* naming this sweep looks for, and carry a decline reason
 	// and classification identities, not a numeric rule value.
 	"1.14.0": "2aabc203a0658c2ef9030b351709aeebaa3ba3ebddde18b204837d65096a9850",
+	// Unchanged from 1.14.0: the 1.15.0 change is ADR 0006's declared
+	// recompute-N-at-Add Variant, a new configuration field and payload
+	// operand (event.ConfigurationPayload.RecomputeNAtAdd, AddN) reusing
+	// the existing event.RuleAddLadderHalfN and ADR 0006 citation, not a
+	// changed or new Rule*/ADR* constant or declared numeric rule value.
+	"1.15.0": "2aabc203a0658c2ef9030b351709aeebaa3ba3ebddde18b204837d65096a9850",
 }

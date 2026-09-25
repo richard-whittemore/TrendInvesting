@@ -83,10 +83,10 @@ def add_proposal(day, unit_index=2, **changes):
     payload.update(changes)
     if "price_cap" not in changes:
         # The Add's cap is measured in the Campaign's frozen N.
-        level, n = payload["level"], payload["campaign_n"]
+        level, n = payload["level"], payload.get("add_n", 0) or payload["campaign_n"]
         numeric = all(type(v) in (int, float) for v in (level, n))
         payload["price_cap"] = level + n if numeric else 26.3
-    return envelope("strategy.add.proposed", 3,
+    return envelope("strategy.add.proposed", 4,
                     decision_id("add-proposal-unit-{}".format(unit_index), day), payload)
 
 
@@ -125,7 +125,7 @@ def unit_added(day, unit_index=2, fill_id="lean:2:2", quantity=100):
                "quantity": quantity, "campaign_n": 1.2, "stop_multiple": 2,
                "protective_stop": 22.8, "units": unit_index, "added_at": period_end(day),
                "rule": "add.ladder.half-n", "adr": "0006"}
-    return envelope("strategy.campaign.unit-added", 1,
+    return envelope("strategy.campaign.unit-added", 2,
                     decision_id("unit-added-{}".format(unit_index), day), payload)
 
 
@@ -270,7 +270,7 @@ def protective_stop_set(day, reason="initial", level=22.1, previous_level=0.0):
                "reason": reason, "as_of": period_end(day), "level": level,
                "previous_level": previous_level, "entry_price": 24.5, "campaign_n": 1.2,
                "stop_multiple": 2, "rule": rule, "adr": "0006"}
-    return envelope("strategy.protective-stop.set", 2,
+    return envelope("strategy.protective-stop.set", 3,
                     decision_id("protective-stop-set-{}".format(reason), day), payload)
 
 
@@ -920,6 +920,12 @@ class SlippageTests(OrderTestCase):
         proposal = add_proposal(9, campaign_n=1.7)
         self.feed(algo, 9, [proposal])
         self.assertAlmostEqual(self.slip(algo, proposal["id"]), 0.05 * 1.7)
+
+    def test_recomputed_add_n_drives_slippage(self):
+        algo = self.start()
+        proposal = add_proposal(9, add_n=2.2)
+        self.feed(algo, 9, [proposal])
+        self.assertAlmostEqual(self.slip(algo, proposal["id"]), 0.11)
 
     def test_an_exit_order_slips_by_the_campaigns_frozen_n_after_amendment_too(self):
         algo = self.start()
@@ -2757,7 +2763,7 @@ class FixtureContractTests(unittest.TestCase):
 
     def test_fixture_fields_and_schema_versions_match_the_go_payloads(self):
         proposal = trade_proposal(9)
-        fixtures = [proposal, add_proposal(9), proposal_expired(proposal, 10),
+        fixtures = [proposal, add_proposal(9, add_n=2.2, level=25.6), add_proposal(9), proposal_expired(proposal, 10),
                     campaign_opened(), exit_order_set(9), exit_proposed(9), unit_added(9),
                     units_stopped(9), campaign_exited(9),
                     cash_in_lieu("2014-06-11T04:00:00Z", [(1, 98448, 98444)]),

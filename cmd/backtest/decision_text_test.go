@@ -483,3 +483,32 @@ func TestDecisionTextExitOrderSentences(t *testing.T) {
 		})
 	}
 }
+
+// TestDecisionTextNamesTheRecomputedOperand makes ADR 0006's Variant
+// auditable without confusing its Add N with the opening Campaign N.
+func TestDecisionTextNamesTheRecomputedOperand(t *testing.T) {
+	_, records := readJournalFile(t, "testdata/variants/recompute-n-at-add/journal.golden.jsonl")
+	count := 0
+	for _, r := range records {
+		var p struct {
+			AddN float64 `json:"add_n"`
+		}
+		if err := json.Unmarshal(r.Envelope.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.AddN == 0 {
+			continue
+		}
+		line, err := decisionSentence(r.Envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(line, "recomputed Add N "+decisionNumber(p.AddN)) {
+			t.Fatalf("missing Add N: %s", line)
+		}
+		count++
+	}
+	if count == 0 {
+		t.Fatal("no Variant decisions")
+	}
+}

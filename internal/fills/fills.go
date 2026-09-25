@@ -481,7 +481,7 @@ func (s *Simulator) observeAddProposal(envelope event.Envelope, ref reference) e
 		campaignID: payload.CampaignID,
 		level:      payload.Level,
 		quantity:   payload.Quantity,
-		n:          payload.CampaignN,
+		n:          payload.EffectiveN(),
 		priceCap:   priceCap,
 		ref:        ref,
 	}

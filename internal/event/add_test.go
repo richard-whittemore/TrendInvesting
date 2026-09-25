@@ -218,8 +218,8 @@ func TestAddProposalEventConstants(t *testing.T) {
 	if event.AddProposalEventType != "strategy.add.proposed" {
 		t.Errorf("AddProposalEventType = %q, want %q", event.AddProposalEventType, "strategy.add.proposed")
 	}
-	if event.AddProposalSchemaVersion != 3 {
-		t.Errorf("AddProposalSchemaVersion = %d, want 3 (version 3 adds the session window, ADR 0011)", event.AddProposalSchemaVersion)
+	if event.AddProposalSchemaVersion != 4 {
+		t.Errorf("AddProposalSchemaVersion = %d, want 4 (version 4 adds AddN, ADR 0006)", event.AddProposalSchemaVersion)
 	}
 	if event.RuleAddLadderHalfN != "add.ladder.half-n" {
 		t.Errorf("RuleAddLadderHalfN = %q, want %q", event.RuleAddLadderHalfN, "add.ladder.half-n")
@@ -476,8 +476,8 @@ func TestCampaignUnitAddedEventConstants(t *testing.T) {
 	if event.CampaignUnitAddedEventType != "strategy.campaign.unit-added" {
 		t.Errorf("CampaignUnitAddedEventType = %q, want %q", event.CampaignUnitAddedEventType, "strategy.campaign.unit-added")
 	}
-	if event.CampaignUnitAddedSchemaVersion != 1 {
-		t.Errorf("CampaignUnitAddedSchemaVersion = %d, want 1", event.CampaignUnitAddedSchemaVersion)
+	if event.CampaignUnitAddedSchemaVersion != 2 {
+		t.Errorf("CampaignUnitAddedSchemaVersion = %d, want 2", event.CampaignUnitAddedSchemaVersion)
 	}
 }
 

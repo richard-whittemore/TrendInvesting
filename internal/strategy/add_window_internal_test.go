@@ -94,8 +94,8 @@ func windowAssertWire(t *testing.T, out []event.Envelope, want float64) {
 			if err := json.Unmarshal(e.Payload, &p); err != nil {
 				t.Fatal(err)
 			}
-			if e.SchemaVersion != 3 || p["valid_for_sessions"] != want {
-				t.Errorf("window schema=%d payload=%v, want schema3 window %v", e.SchemaVersion, p["valid_for_sessions"], want)
+			if e.SchemaVersion != event.AddProposalSchemaVersion || p["valid_for_sessions"] != want {
+				t.Errorf("window schema=%d payload=%v, want current schema window %v", e.SchemaVersion, p["valid_for_sessions"], want)
 			}
 			return
 		}
