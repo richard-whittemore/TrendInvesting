@@ -15,7 +15,7 @@ import (
 )
 
 // researchResult is an append-only sidecar of the existing registry entry
-// (ADR 0012, Proposed amendment). Legacy entry and journal formats are unchanged.
+// (ADR 0012, Accepted amendment). Legacy entry and journal formats are unchanged.
 type researchResult struct {
 	Version           uint32             `json:"version"`
 	RunID             string             `json:"run_id"`
@@ -31,12 +31,12 @@ type researchResult struct {
 
 // prepareResearch reserves held-out exposure before the simulator executes.
 // Failed reservations stop execution; failed runs retain their reservation
-// (ADR 0012, Proposed amendment). Inputs are the same in-memory fixtures drive uses.
+// (ADR 0012, Accepted amendment). Inputs are the same in-memory fixtures drive uses.
 //
 // It also returns the declared span it derived start and end from: the whole
 // input this run was GIVEN, every bar and corporate action, not merely
 // whatever the run goes on to apply before it might stop. finishResearch
-// reports against this same span, on purpose (ADR 0012, Proposed amendment:
+// reports against this same span, on purpose (ADR 0012, Accepted amendment:
 // "the designation uses all input dates"): the decision to reserve an
 // opening is made from it, before execution, so the report beside that
 // opening states the designation that decision was made under, never a
@@ -71,11 +71,11 @@ func prepareResearch(opts options, cfg event.ConfigurationPayload, bars []event.
 	if opts.registryPath == "" {
 		return nil, start, end, errors.New("research: Variant out-of-sample evaluation requires a registry")
 	}
-	opening, err = reserveOpening(opts, cfg, p)
+	opening, err = reserveOpening(opts, cfg, p, start, end)
 	return opening, start, end, err
 }
 
-func reserveOpening(opts options, cfg event.ConfigurationPayload, p registry.Protocol) (*registry.Opening, error) {
+func reserveOpening(opts options, cfg event.ConfigurationPayload, p registry.Protocol, declaredStart, declaredEnd time.Time) (*registry.Opening, error) {
 	// An exclusive directory serialises local and shared-filesystem openings.
 	// A crash leaves the lock in place; automatic stale-lock removal could
 	// reopen unseen evidence, so recovery is an operator audit (ADR 0012).
@@ -97,7 +97,7 @@ func reserveOpening(opts options, cfg event.ConfigurationPayload, p registry.Pro
 	if err != nil {
 		return nil, err
 	}
-	opening, err := p.Opening(registry.Run{RunID: opts.runID, Variant: opts.variant, Configuration: cfg}, prior)
+	opening, err := p.Opening(registry.Run{RunID: opts.runID, Variant: opts.variant, Configuration: cfg}, declaredStart, declaredEnd, prior)
 	if err != nil {
 		return nil, err
 	}

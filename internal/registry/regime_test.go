@@ -92,19 +92,23 @@ func TestPrimaryMetricHandComputed(t *testing.T) {
 
 func TestSecondOpeningIsNewHypothesis(t *testing.T) {
 	p := protocolForTest(t)
+	declaredStart, declaredEnd := p.Split, p.Split.Add(24*time.Hour)
 	run := registry.Run{RunID: "first", Variant: "wider-cap", Configuration: baselineConfiguration()}
-	first, err := p.Opening(run, nil)
+	first, err := p.Opening(run, declaredStart, declaredEnd, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	run.RunID = "second"
 	run.Configuration.MaxUnitsTotalLong++ // A new parameter value is still the same Variant.
-	second, err := p.Opening(run, []registry.Opening{first})
+	second, err := p.Opening(run, declaredStart, declaredEnd, []registry.Opening{first})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.Repeat || !second.Repeat || second.Hypothesis == first.Hypothesis || len(second.Prior) != 1 {
 		t.Fatalf("first %+v second %+v", first, second)
+	}
+	if !first.DeclaredStart.Equal(declaredStart) || !first.DeclaredEnd.Equal(declaredEnd) {
+		t.Fatalf("declared span %+v", first)
 	}
 }
 
@@ -220,7 +224,7 @@ func TestWindowKeepsFirstLossAndDoesNotInventAnEnd(t *testing.T) {
 // (windowMetrics), so the window's only two points share one timestamp. Hand
 // computed: 100 carried, then 80 at that same instant, is a 20% drawdown and
 // a 20% total return that a zero elapsed time must not hide (ADR 0012,
-// Proposed amendment: "the first in-window loss is retained"). Only the
+// Accepted amendment: "the first in-window loss is retained"). Only the
 // annualised return, and the ratio it feeds, are undefined over zero time.
 func TestZeroElapsedTimeWindowStillCountsTheLoss(t *testing.T) {
 	p := protocolForTest(t)
@@ -255,9 +259,10 @@ func TestZeroElapsedTimeOverflowIsNonFiniteReturn(t *testing.T) {
 
 func TestOpeningValidationAndOtherVariants(t *testing.T) {
 	p := protocolForTest(t)
+	declaredStart, declaredEnd := p.Split, p.Split.Add(24*time.Hour)
 	run := completedRun("first")
 	run.Variant = "v"
-	first, err := p.Opening(run, []registry.Opening{{Variant: "different", Hypothesis: "other"}})
+	first, err := p.Opening(run, declaredStart, declaredEnd, []registry.Opening{{Variant: "different", Hypothesis: "other"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +276,7 @@ func TestOpeningValidationAndOtherVariants(t *testing.T) {
 	if first.Repeat {
 		t.Fatal("other Variant consumed opening")
 	}
-	if _, err := p.Opening(run, []registry.Opening{first}); err == nil {
+	if _, err := p.Opening(run, declaredStart, declaredEnd, []registry.Opening{first}); err == nil {
 		t.Fatal("reused opening")
 	}
 	for _, bad := range [][]byte{nil, []byte(`{}`), append(append([]byte{}, raw...), []byte(` {}`)...)} {
@@ -281,6 +286,7 @@ func TestOpeningValidationAndOtherVariants(t *testing.T) {
 	}
 	for _, mutate := range []func(*registry.Opening){
 		func(o *registry.Opening) { o.ConfigurationHash = "bad" }, func(o *registry.Opening) { o.ProtocolHash = "bad" }, func(o *registry.Opening) { o.Hypothesis = "other" }, func(o *registry.Opening) { o.Variant = "" }, func(o *registry.Opening) { o.Repeat = true },
+		func(o *registry.Opening) { o.DeclaredStart = time.Time{} }, func(o *registry.Opening) { o.DeclaredEnd = time.Time{} }, func(o *registry.Opening) { o.DeclaredEnd = o.DeclaredStart.Add(-time.Second) },
 	} {
 		o := first
 		mutate(&o)
@@ -293,12 +299,19 @@ func TestOpeningValidationAndOtherVariants(t *testing.T) {
 		}
 	}
 	run.RunID = "../bad"
-	if _, err := p.Opening(run, nil); err == nil {
+	if _, err := p.Opening(run, declaredStart, declaredEnd, nil); err == nil {
 		t.Fatal("bad id")
 	}
 	run.RunID = "good"
 	run.Variant = registry.Baseline
-	if _, err := p.Opening(run, nil); err == nil {
+	if _, err := p.Opening(run, declaredStart, declaredEnd, nil); err == nil {
 		t.Fatal("baseline opening")
+	}
+	run.Variant = "v"
+	if _, err := p.Opening(run, declaredEnd, declaredStart, nil); err == nil {
+		t.Fatal("backwards declared span")
+	}
+	if _, err := p.Opening(run, time.Time{}, declaredEnd, nil); err == nil {
+		t.Fatal("zero declared start")
 	}
 }

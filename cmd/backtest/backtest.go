@@ -124,24 +124,32 @@ func backtest(ctx context.Context, opts options, out io.Writer) error {
 
 	result := perform(ctx, opts, cfg, configurationHash, strategyVersion)
 
-	// Attempted before the entry is written, and its own failure folded into
-	// the outcome the entry then records: an opening and an entry are never
-	// deleted or overwritten (ADR 0018), so a report that fails to install
-	// here cannot be silently retried under this run id later. Recording the
-	// failure in the entry's own Detail is what keeps that entry from
-	// looking like a normal completed run beside a report that never
-	// arrived — the same thing a journal-write failure after a completed
-	// run already does (outcome.status's own doc comment).
-	if err := finishResearch(opts, cfg, result, out); err != nil {
-		result.researchErr = fmt.Errorf("backtest: install the run's research report: %w", err)
-	}
-
 	// Recorded whatever became of the run, and before the failure is
 	// returned: the graveyard of failed and abandoned runs is the point of
 	// the registry (ADR 0012), and a run that is only registered when it went
 	// well is a curated record.
+	//
+	// This runs before the research report, and deliberately: registerRun's
+	// entry install is the one exclusive claim two concurrent attempts under
+	// the same run id race for (TestTwoRunsClaimingOneRunIDLeaveExactlyOneEntry),
+	// and only its confirmed winner goes on to attempt the report at all. A
+	// report install is a second, independent race on the same run id; racing
+	// it ahead of the entry would let a losing attempt's stray file be read
+	// back as the WINNING entry's own report failure, which is a worse audit
+	// defect than the one it would fix. A run that completes but whose report
+	// fails to install afterward still keeps its entry (this loop's `installed`
+	// check below), and its failure still fails the command (researchErr,
+	// joined into failure() beside runErr and journalErr); an opening it
+	// reserved is retained exactly as ADR 0012 already requires for any
+	// subsequently failed step, and a genuine retry needs a new run id, which
+	// the existing repeat-flagging machinery correctly reports as a new
+	// hypothesis.
 	if err := registerRun(opts, cfg, strategyVersion, result); err != nil {
 		return errors.Join(result.failure(), err)
+	}
+	if err := finishResearch(opts, cfg, result, out); err != nil {
+		result.researchErr = fmt.Errorf("backtest: report the run: %w", err)
+		return result.failure()
 	}
 	if !result.installed {
 		return result.failure()
@@ -173,20 +181,21 @@ type outcome struct {
 	// (journal.Recorder.Header's own doc comment). finishResearch reports
 	// against these so a run that stops early never states a designation
 	// narrower than the one its own opening, if any, was reserved under
-	// (ADR 0012, Proposed amendment).
+	// (ADR 0012, Accepted amendment).
 	declaredStart, declaredEnd time.Time
 	header                     journal.Header
 	records                    int
 	runErr                     error
 	journalErr                 error
 	// researchErr is set when the run's own research report failed to
-	// install after a run that otherwise completed (backtest, after
-	// finishResearch). It is folded into failure and Detail exactly as
-	// journalErr already is, and for the same reason: the bookkeeping around
-	// a run is not the run itself (status's own doc comment), but a failure
-	// in it is never left unrecorded, because an opening and a report are
-	// never deleted or overwritten (ADR 0018) and so cannot be silently
-	// retried under the same run id later.
+	// install after the entry recording it was already written (backtest,
+	// after registerRun). It is folded into failure() exactly as journalErr
+	// already is, so the command still fails loudly even though the entry
+	// itself -- already committed by the time this can be known, and never
+	// rewritten (ADR 0018) -- cannot be amended to say so. An opening this
+	// run reserved is retained regardless (ADR 0012), and a genuine retry
+	// needs a new run id, which the existing repeat-flagging machinery
+	// correctly reports as a new hypothesis.
 	researchErr error
 	installed   bool
 }

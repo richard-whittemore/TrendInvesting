@@ -17,7 +17,7 @@ import (
 
 // PriorOpenings reads reservations and legacy runs across every configuration
 // hash. A failed legacy run of unknown span counts conservatively as an
-// opening (ADR 0012, Proposed amendment) -- but only a LEGACY one: a run this
+// opening (ADR 0012, Accepted amendment) -- but only a LEGACY one: a run this
 // protocol itself reported on (it carries a .report sidecar, scanned below
 // for its runID) states its own exposure through its .opening sidecar, if it
 // reserved one at all, and is never guessed at again from its span. Without
@@ -106,12 +106,19 @@ func DecodeOpening(raw []byte) (Opening, error) {
 	if o.Variant == "" || o.Variant == Baseline || o.Hypothesis != o.ConfigurationHash+"/"+o.RunID || o.Repeat != (len(o.Prior) > 0) {
 		return Opening{}, errors.New("opening: invalid attribution")
 	}
+	// The declared span this opening reserved is retained so the reservation
+	// can never be read with no dates behind it (ADR 0012, Accepted
+	// amendment): a decoded opening is held to the same shape Opening itself
+	// only ever produces.
+	if o.DeclaredStart.IsZero() || o.DeclaredEnd.IsZero() || !writableTime(o.DeclaredStart) || !writableTime(o.DeclaredEnd) || o.DeclaredEnd.Before(o.DeclaredStart) {
+		return Opening{}, errors.New("opening: invalid declared span")
+	}
 	return o, nil
 }
 
 // EquityCurve uses snapshot as-of times, not delayed delivery times (ADR 0021).
 // Cash flows need a return-adjustment policy and are refused (ADR 0012,
-// Proposed amendment); this fixture runner emits none.
+// Accepted amendment); this fixture runner emits none.
 func EquityCurve(entries []journal.Entry) ([]EquityPoint, error) {
 	var points []EquityPoint
 	for _, e := range entries {

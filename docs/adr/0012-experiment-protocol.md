@@ -49,10 +49,12 @@ An implementer who finds a Baseline number that differs from the source should e
 - The regime and perturbation rules filter out regime luck and coincidental thresholds; the trade-count floor and concentration rule filter out hindsight selection and accidental sector bets.
 - Every run's configuration, span, split, and outcome are journaled, so an adopted Variant can be shown to have cleared every rule.
 
-## Amendment — executable windows and opening records (Proposed, 2026-09-25)
+## Amendment — executable windows and opening records (Accepted, 2026-09-25)
 
-**Status: Proposed.** These conservative implementation conventions need owner
-ratification; they do not change any Accepted strategy parameter above.
+**Status: Accepted**, by the owner's ratification of 2026-09-25 ("Accept
+all"), of every point raised when this amendment was first recorded as
+Proposed the same day. These are conservative implementation conventions;
+they do not change any Accepted strategy parameter above.
 
 - **Configuration:** `internal/registry/protocol.json` is the versioned research
   configuration, embedded in the build. No command-line or trading-configuration
@@ -66,7 +68,12 @@ ratification; they do not change any Accepted strategy parameter above.
   windows. The split is inclusive on the out-of-sample side. A spanning run is
   explicitly `mixed`, never usable as a fitting run; the full report also
   separates the in-sample and out-of-sample curves. Empty failed runs are
-  `unknown`. The designation uses all input dates, including corporate actions.
+  `unknown`. The designation uses all input dates, including corporate actions
+  -- the whole span a run was GIVEN, not merely what it goes on to apply
+  before it might stop early. Both the report and the opening it sits beside
+  retain that declared span alongside the executed one the equity curve
+  itself reflects, so a run that stops early never leaves its own designation
+  unexplained.
 - **Metric:** the primary numerator is the annualised return specified by
   adoption criterion 1, not unannualised profit. Report total return too.
   With positive opening equity `E0`, final equity `E1`, and elapsed years
@@ -99,13 +106,16 @@ ratification; they do not change any Accepted strategy parameter above.
   a legacy Variant run whose span is unknown conservatively counts as exposure.
   A run and its opening are deduplicated. The Baseline is exempt, as stated above.
 - **Authority and concurrency:** exactly-once protection applies to one complete,
-  authoritative registry directory. An exclusive directory lock serialises
-  reading history and installing openings on that filesystem. An abandoned lock
-  requires an operator audit, not automatic expiry. Independent clones cannot
-  prove a global first look while offline. Their first-look claims must not be
-  used for adoption until histories are reconciled; no distributed exactly-once
-  guarantee is claimed. Variant labels must remain stable across parameter
-  choices and machines. Renaming a label does not establish a fresh hypothesis
+  authoritative registry directory: the repository's registry on the owner's
+  machine (owner ratification, 2026-09-25). An exclusive directory lock
+  serialises reading history and installing openings on that filesystem. An
+  abandoned lock requires an operator audit, not automatic expiry. A clone
+  other than the owner's machine cannot prove a global first look while
+  offline; a look at held-out data taken from any such clone must be reported
+  by a person and reconciled against the authoritative registry before a
+  Variant is adopted on it — no distributed exactly-once guarantee is
+  claimed. Variant labels must remain stable across parameter choices and
+  machines. Renaming a label does not establish a fresh hypothesis
   scientifically, even though a file registry cannot infer semantic equivalence.
 - **Fitting:** `backtest -fit` rejects any span not wholly before the configured
   split, before strategy execution. An ordinary run is evaluation, not evidence
@@ -119,8 +129,15 @@ ratification; they do not change any Accepted strategy parameter above.
   sidecars with the registry and journals. Unregistered fixture runs print a
   report but do not establish auditable Variant results.
 
-**Owner questions:** ratify whole-year overlapping windows and UTC boundaries;
-ratify 365.25-day annualisation and the carried opening mark; designate the
-single authoritative registry and the process for reconciling offline clones;
-confirm that failed attempts consume an opening and that grid/selection
-provenance should be a separate implementation.
+**Owner ratification (2026-09-25, "Accept all").** The questions this
+amendment raised as Proposed are answered, and recorded here as decisions:
+
+1. Boundary years belong to both neighbouring windows, which are half-open
+   whole-UTC-year intervals (`[start, next-year-start)`).
+2. The split date, 2016-01-01, is out-of-sample.
+3. "Exactly once" is enforced within one authoritative registry: the
+   repository's registry on the owner's machine. A look at held-out data
+   taken from any other clone must be reported and reconciled by a person
+   before a Variant is adopted.
+4. Annualisation uses 365.25 days.
+5. Grid and selection provenance is deferred to a later ticket.

@@ -56,13 +56,14 @@ func marshalResearch(t *testing.T, value any) []byte {
 
 func TestPriorOpeningsAcrossConfigurationsAndLegacyRuns(t *testing.T) {
 	p := protocolForTest(t)
+	declaredStart, declaredEnd := p.Split, p.Split.Add(24*time.Hour)
 	run := completedRun("legacy")
 	run.Variant = "v"
 	entry := mustEntry(t, run)
 	entryPath := mustPath(t, entry)
 	run.RunID = "reserved"
 	run.Configuration.MaxUnitsTotalLong++
-	opening, err := p.Opening(run, nil)
+	opening, err := p.Opening(run, declaredStart, declaredEnd, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +85,7 @@ func TestPriorOpeningsAcrossConfigurationsAndLegacyRuns(t *testing.T) {
 		t.Fatalf("prior %+v", prior)
 	}
 	run.RunID = "third"
-	next, err := p.Opening(run, prior)
+	next, err := p.Opening(run, declaredStart, declaredEnd, prior)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +94,7 @@ func TestPriorOpeningsAcrossConfigurationsAndLegacyRuns(t *testing.T) {
 	}
 	// A completed run and its reservation are one exposure, not two.
 	prior = append(prior, prior[0])
-	next, err = p.Opening(run, prior)
+	next, err = p.Opening(run, declaredStart, declaredEnd, prior)
 	if err != nil || len(next.Prior) != 2 {
 		t.Fatalf("dedup %+v, %v", next, err)
 	}
@@ -105,7 +106,7 @@ func TestPriorOpeningsAcrossConfigurationsAndLegacyRuns(t *testing.T) {
 // legacy entries fall back to. A run recorded with a mixed span but a
 // .report and no .opening (an in-sample run, a refused -fit, or any other
 // attempt that reserved nothing) must not be re-guessed into exposure it
-// never took (ADR 0012, Proposed amendment).
+// never took (ADR 0012, Accepted amendment).
 func TestPriorOpeningsSkipsRunsThisProtocolAlreadyReportedOn(t *testing.T) {
 	p := protocolForTest(t)
 	run := completedRun("reported")
@@ -133,7 +134,7 @@ func TestPriorOpeningsFailures(t *testing.T) {
 	p := protocolForTest(t)
 	run := completedRun("first")
 	run.Variant = "v"
-	o, err := p.Opening(run, nil)
+	o, err := p.Opening(run, p.Split, p.Split.Add(24*time.Hour), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

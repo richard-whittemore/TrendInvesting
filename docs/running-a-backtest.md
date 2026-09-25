@@ -298,10 +298,14 @@ Every backtest prints a JSON research report with the full-span result, the
 in-sample and out-of-sample results, and all seven configured Regime Windows.
 The primary metric is annualised net equity return divided by maximum drawdown;
 `state` explains a null ratio (for example, no observations or zero drawdown).
-The actual sample count and dates identify partial windows. Protocol dates and
-the split are embedded from `internal/registry/protocol.json`; they cannot be
-set per run. See ADR 0012's **Proposed** 2026-09-25 amendment for the conventions
-that still require owner ratification.
+The actual sample count and dates identify partial windows. `declared_start`
+and `declared_end` are the whole span a run was given -- what the report's
+`designation` is computed from -- kept beside the full-span metrics, which
+instead reflect whatever was actually recorded; a run that stops early can
+state both without either one silently standing in for the other. Protocol
+dates and the split are embedded from `internal/registry/protocol.json`; they
+cannot be set per run. See ADR 0012's 2026-09-25 amendment, **Accepted** by
+owner ratification the same day, for these conventions in full.
 
 Use `-fit` for parameter fitting: the command rejects all data at or after the
 configured split, including mixed spans. An ordinary evaluation across the
@@ -310,13 +314,16 @@ a grid declared beforehand under ADR 0012; this command does not automate grid
 selection or attest that a human chose parameters without seeing prior results.
 
 For a declared Variant, use one authoritative registry with a stable `-variant`
-label across parameter configurations. Before a held-out evaluation executes,
-`<configuration-directory>/<run-id>.opening` is installed durably. Failed attempts
+label across parameter configurations: the repository's registry on the
+owner's machine (ADR 0012's amendment, owner-ratified). Before a held-out
+evaluation executes, `<configuration-directory>/<run-id>.opening` is installed
+durably, carrying the same declared span its report does. Failed attempts
 consume an opening. Repeats print `new hypothesis` and link earlier attempts;
 they are never silently treated as a first look. Reusing an opening ID is refused.
 An occupied `.research-lock` stops evaluation; audit interrupted work before
-removing an abandoned lock. Concurrent independent registry clones cannot prove
-exactly-once exposure across machines and must be reconciled before adoption.
+removing an abandoned lock. A registry clone other than the owner's machine
+cannot prove exactly-once exposure while offline; a look at held-out data taken
+from one must be reported and reconciled by a person before adoption.
 
 A registered run also writes `<configuration-directory>/<run-id>.report`, which
 anchors the report to the run's journal and retains the full protocol and its

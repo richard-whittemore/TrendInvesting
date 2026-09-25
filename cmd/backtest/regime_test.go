@@ -106,13 +106,17 @@ func flatBar(instrumentID string, at time.Time) event.CompletedBarPayload {
 // report must not then claim "in-sample" for a run whose opening was
 // reserved because the full declared span crossed the split: that would
 // contradict the very evidence (the .opening sidecar) sitting beside it
-// (ADR 0012, Proposed amendment: "the designation uses all input dates").
+// (ADR 0012, Accepted amendment: "the designation uses all input dates").
+//
+// Both sidecars must also carry the declared dates that justify that
+// designation, not merely the designation string on its own: an auditor
+// reading a "mixed" report beside an in-sample journal, with no dates
+// recorded anywhere, cannot recover WHY it is "mixed" rather than check it.
 func TestReportDesignationUsesTheReservedSpanNotThePartialRecord(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "runs")
-	bars := []event.CompletedBarPayload{
-		flatBar("AAPL", time.Date(2015, time.December, 31, 0, 0, 0, 0, time.UTC)),
-		flatBar("AAPL", time.Date(2016, time.January, 1, 0, 0, 0, 0, time.UTC)),
-	}
+	declaredStart := time.Date(2015, time.December, 31, 0, 0, 0, 0, time.UTC)
+	declaredEnd := time.Date(2016, time.January, 1, 0, 0, 0, 0, time.UTC)
+	bars := []event.CompletedBarPayload{flatBar("AAPL", declaredStart), flatBar("AAPL", declaredEnd)}
 	opts := options{configPath: configurationFixture, barsPath: writeBars(t, bars), outPath: filepath.Join(t.TempDir(), "journal.jsonl"), registryPath: root, runID: "partial", variant: "test-variant", build: testBuild, maxRecords: 1}
 	var out bytes.Buffer
 	if err := backtest(context.Background(), opts, &out); err == nil {
@@ -135,6 +139,23 @@ func TestReportDesignationUsesTheReservedSpanNotThePartialRecord(t *testing.T) {
 	}
 	if report.Report.Designation != "mixed" {
 		t.Fatalf("designation %q contradicts the opening reserved beside it: %+v", report.Report.Designation, report)
+	}
+	if !report.Report.DeclaredStart.Equal(declaredStart) || !report.Report.DeclaredEnd.Equal(declaredEnd) {
+		t.Fatalf("report declared span %s..%s want %s..%s", report.Report.DeclaredStart, report.Report.DeclaredEnd, declaredStart, declaredEnd)
+	}
+	if !report.Opening.DeclaredStart.Equal(declaredStart) || !report.Opening.DeclaredEnd.Equal(declaredEnd) {
+		t.Fatalf("opening declared span %s..%s want %s..%s", report.Opening.DeclaredStart, report.Opening.DeclaredEnd, declaredStart, declaredEnd)
+	}
+	rawOpening, err := os.ReadFile(filepath.Join(root, dir, "partial.opening"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var opening registry.Opening
+	if err := json.Unmarshal(rawOpening, &opening); err != nil {
+		t.Fatal(err)
+	}
+	if !opening.DeclaredStart.Equal(declaredStart) || !opening.DeclaredEnd.Equal(declaredEnd) {
+		t.Fatalf(".opening declared span %s..%s want %s..%s", opening.DeclaredStart, opening.DeclaredEnd, declaredStart, declaredEnd)
 	}
 }
 
@@ -164,11 +185,12 @@ func TestOpeningLockAndConcurrentReservations(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := fixtureConfiguration(t)
+	declaredStart, declaredEnd := p.Split, p.Split.Add(24*time.Hour)
 	if err := os.MkdirAll(filepath.Join(root, ".research-lock"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	opts := options{registryPath: root, runID: "first", variant: "v"}
-	if _, err := reserveOpening(opts, cfg, p); err == nil {
+	if _, err := reserveOpening(opts, cfg, p, declaredStart, declaredEnd); err == nil {
 		t.Fatal("opened while registry locked")
 	}
 	if err := os.Remove(filepath.Join(root, ".research-lock")); err != nil {
@@ -186,7 +208,7 @@ func TestOpeningLockAndConcurrentReservations(t *testing.T) {
 			<-gate
 			local := opts
 			local.runID = id
-			o, err := reserveOpening(local, cfg, p)
+			o, err := reserveOpening(local, cfg, p, declaredStart, declaredEnd)
 			results <- result{o, err, id}
 		}(id)
 	}
@@ -203,7 +225,7 @@ func TestOpeningLockAndConcurrentReservations(t *testing.T) {
 	}
 	for _, id := range retry {
 		opts.runID = id
-		o, err := reserveOpening(opts, cfg, p)
+		o, err := reserveOpening(opts, cfg, p, declaredStart, declaredEnd)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -219,7 +241,7 @@ func TestOpeningLockAndConcurrentReservations(t *testing.T) {
 		t.Fatalf("concurrent reservations %+v", successful)
 	}
 	opts.runID = "one"
-	if _, err := reserveOpening(opts, cfg, p); err == nil {
+	if _, err := reserveOpening(opts, cfg, p, declaredStart, declaredEnd); err == nil {
 		t.Fatal("opening id reused")
 	}
 }
@@ -241,16 +263,17 @@ func TestResearchSidecarsCannotBeOverwritten(t *testing.T) {
 	}
 }
 
-// TestReportInstallFailureIsRecordedExplicitlyInTheEntry: an opening and a
-// report are never deleted or overwritten (ADR 0018), so a run whose report
-// fails to install cannot be silently retried under its own run id -- the
-// remedy is that the failure is recorded, not hidden, in the entry
-// registerRun already wrote for it, rather than an entry that looks exactly
-// like a normal completed run beside a report that never arrived. This does
-// not weaken exactly-once: a genuine second look still needs a new run id,
-// which the existing repeat-flagging machinery then correctly reports as a
-// new hypothesis.
-func TestReportInstallFailureIsRecordedExplicitlyInTheEntry(t *testing.T) {
+// TestReportInstallFailureStillKeepsTheEntryAndFailsLoudly: the entry is
+// installed before the report is even attempted (registerRun runs first, so
+// that its exclusive claim on the run id -- and only its exclusive claim --
+// decides who wins a run id two concurrent attempts both claim; see
+// TestTwoRunsClaimingOneRunIDLeaveExactlyOneEntry), so a report-install
+// failure can no longer be folded into that entry's own Detail, which is
+// already committed and never rewritten (ADR 0018). The command still fails
+// loudly instead of silently succeeding, the entry is never lost, and a
+// second attempt under a NEW run id -- the only way to retry, since a run id
+// once claimed is never reused -- is not blocked by the failure.
+func TestReportInstallFailureStillKeepsTheEntryAndFailsLoudly(t *testing.T) {
 	root := t.TempDir()
 	cfg := fixtureConfiguration(t)
 	dir, err := registry.Dir(event.ConfigurationHash(cfg))
@@ -267,8 +290,9 @@ func TestReportInstallFailureIsRecordedExplicitlyInTheEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := options{configPath: configurationFixture, barsPath: barsFixture, outPath: filepath.Join(t.TempDir(), "journal.jsonl"), registryPath: root, runID: "blocked", variant: registry.Baseline, build: testBuild}
-	if err := backtest(context.Background(), opts, &bytes.Buffer{}); err == nil {
-		t.Fatal("expected the occupied report sidecar to fail the command")
+	err = backtest(context.Background(), opts, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "retain report") {
+		t.Fatalf("expected the occupied report sidecar to fail the command naming the report: %v", err)
 	}
 	raw, err := os.ReadFile(filepath.Join(root, dir, "blocked.json"))
 	if err != nil {
@@ -281,8 +305,14 @@ func TestReportInstallFailureIsRecordedExplicitlyInTheEntry(t *testing.T) {
 	if entry.Status != registry.StatusCompleted {
 		t.Fatalf("status %q", entry.Status)
 	}
-	if entry.Detail == "" {
-		t.Fatal("a run whose report failed to install must say so in its own Detail, not leave the entry looking complete")
+	// A second attempt under a new run id is not blocked by the first
+	// attempt's report failure: nothing about it consumed an opening (this
+	// is the Baseline) or claimed any exclusive resource the retry needs.
+	retry := opts
+	retry.runID = "retry"
+	retry.outPath = filepath.Join(t.TempDir(), "retry.jsonl")
+	if err := backtest(context.Background(), retry, &bytes.Buffer{}); err != nil {
+		t.Fatalf("a fresh run id must not be blocked by the earlier report failure: %v", err)
 	}
 }
 
@@ -313,7 +343,7 @@ func TestPrepareResearchUsesFullInputSpan(t *testing.T) {
 			}
 			// The declared span is derived, and returned, even from a
 			// refused attempt: finishResearch reports it regardless of
-			// whether the attempt was permitted to run (ADR 0012, Proposed
+			// whether the attempt was permitted to run (ADR 0012, Accepted
 			// amendment).
 			if start != tc.start || end != tc.end {
 				t.Fatalf("span %s..%s want %s..%s", start, end, tc.start, tc.end)

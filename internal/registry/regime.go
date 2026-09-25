@@ -18,7 +18,7 @@ import (
 var protocolJSON []byte
 
 // Protocol fixes the research windows independently of trading configurations
-// (ADR 0012, Proposed amendment 2026-09-25). There is no per-run override.
+// (ADR 0012, Accepted amendment 2026-09-25). There is no per-run override.
 type Protocol struct {
 	Version     uint32    `json:"version"`
 	Split       time.Time `json:"split"`
@@ -33,7 +33,7 @@ type Window struct {
 }
 
 // Contains uses inclusive starts and exclusive ends; shared named years
-// deliberately belong to both regimes (ADR 0012, Proposed amendment).
+// deliberately belong to both regimes (ADR 0012, Accepted amendment).
 func (w Window) Contains(at time.Time) bool { return !at.Before(w.Start) && at.Before(w.End) }
 
 func ResearchProtocol() (Protocol, error) { return DecodeProtocol(protocolJSON) }
@@ -128,13 +128,25 @@ type WindowResult struct {
 }
 
 type Report struct {
-	Protocol     Protocol       `json:"protocol"`
-	ProtocolHash string         `json:"protocol_hash"`
-	Designation  string         `json:"designation"`
-	Full         Metrics        `json:"full"`
-	InSample     Metrics        `json:"in_sample"`
-	OutOfSample  Metrics        `json:"out_of_sample"`
-	Windows      []WindowResult `json:"windows"`
+	Protocol     Protocol `json:"protocol"`
+	ProtocolHash string   `json:"protocol_hash"`
+	// DeclaredStart and DeclaredEnd are the span Designation was computed
+	// from -- the whole input a run was GIVEN, not merely what it went on to
+	// apply before it might have stopped early. They are retained beside
+	// Designation, rather than only spent computing it, so a run that
+	// stopped early leaves an auditable reason for its own designation: Full
+	// (and InSample, OutOfSample and Windows below) keep the EXECUTED span
+	// instead, from whatever equity was actually recorded, so both spans
+	// sit side by side rather than one silently standing in for the other
+	// (ADR 0012, Accepted amendment: "the designation uses all input
+	// dates").
+	DeclaredStart time.Time      `json:"declared_start"`
+	DeclaredEnd   time.Time      `json:"declared_end"`
+	Designation   string         `json:"designation"`
+	Full          Metrics        `json:"full"`
+	InSample      Metrics        `json:"in_sample"`
+	OutOfSample   Metrics        `json:"out_of_sample"`
+	Windows       []WindowResult `json:"windows"`
 }
 
 // Report computes annualised net equity return / peak-to-trough fractional
@@ -152,7 +164,7 @@ func (p Protocol) Report(points []EquityPoint, start, end time.Time) (Report, er
 			return Report{}, errors.New("report: invalid or unordered equity curve")
 		}
 	}
-	r := Report{Protocol: p, ProtocolHash: p.Fingerprint(), Designation: p.Designation(start, end)}
+	r := Report{Protocol: p, ProtocolHash: p.Fingerprint(), DeclaredStart: start, DeclaredEnd: end, Designation: p.Designation(start, end)}
 	r.Full = p.metrics(points)
 	r.InSample = p.windowMetrics(points, time.Time{}, p.Split)
 	r.OutOfSample = p.windowMetrics(points, p.Split, time.Time{})
@@ -164,7 +176,7 @@ func (p Protocol) Report(points []EquityPoint, start, end time.Time) (Report, er
 
 // windowMetrics carries the last pre-window mark to the boundary so the
 // first in-window loss is retained, without inventing observations at the end
-// of a partial window (ADR 0012, Proposed amendment).
+// of a partial window (ADR 0012, Accepted amendment).
 func (p Protocol) windowMetrics(points []EquityPoint, start, end time.Time) Metrics {
 	var selected []EquityPoint
 	for i, point := range points {
@@ -200,7 +212,7 @@ func (p Protocol) metrics(points []EquityPoint) Metrics {
 	growth := points[len(points)-1].Equity / points[0].Equity
 	m.TotalReturn = growth - 1
 	// A carried pre-window mark and a boundary close at the very same
-	// instant (windowMetrics, ADR 0012's Proposed amendment) leave no
+	// instant (windowMetrics, ADR 0012's Accepted amendment) leave no
 	// elapsed time to annualise a return over. The drawdown and total
 	// return above come straight from the recorded equities and are kept
 	// regardless; only the annualised return, and the ratio it feeds, are
@@ -242,25 +254,41 @@ func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 // Opening records an attempt before held-out evaluation, including attempts
 // that later fail. Identity is the Variant across all parameter hashes;
-// every repeat gets its own hypothesis (ADR 0012, Proposed amendment).
+// every repeat gets its own hypothesis (ADR 0012, Accepted amendment).
 type Opening struct {
-	Variant           string   `json:"variant"`
-	RunID             string   `json:"run_id"`
-	ConfigurationHash string   `json:"configuration_hash"`
-	ProtocolHash      string   `json:"protocol_hash"`
-	Hypothesis        string   `json:"hypothesis"`
-	Repeat            bool     `json:"repeat"`
-	Prior             []string `json:"prior"`
+	Variant           string `json:"variant"`
+	RunID             string `json:"run_id"`
+	ConfigurationHash string `json:"configuration_hash"`
+	ProtocolHash      string `json:"protocol_hash"`
+	// DeclaredStart and DeclaredEnd are the whole span this attempt was
+	// GIVEN to run over, the same span its own Designation is computed
+	// from (Report's own DeclaredStart/DeclaredEnd), retained here too so
+	// the opening that reserved held-out exposure carries the dates that
+	// justified reserving it at all, not only the report installed beside
+	// it (ADR 0012, Accepted amendment).
+	DeclaredStart time.Time `json:"declared_start"`
+	DeclaredEnd   time.Time `json:"declared_end"`
+	Hypothesis    string    `json:"hypothesis"`
+	Repeat        bool      `json:"repeat"`
+	Prior         []string  `json:"prior"`
 }
 
-func (p Protocol) Opening(run Run, prior []Opening) (Opening, error) {
+// Opening reserves declaredStart..declaredEnd as the span this attempt
+// consumes: the same span a caller used to decide the attempt needed
+// reserving at all (Designation(declaredStart, declaredEnd) != "in-sample"),
+// carried here so the reservation is never left to assert its own
+// designation with no dates behind it (ADR 0012, Accepted amendment).
+func (p Protocol) Opening(run Run, declaredStart, declaredEnd time.Time, prior []Opening) (Opening, error) {
 	if err := checkRunID(run.RunID); err != nil {
 		return Opening{}, err
 	}
 	if run.Variant == "" || run.Variant == Baseline {
 		return Opening{}, errors.New("opening: a declared Variant is required")
 	}
-	o := Opening{Variant: run.Variant, RunID: run.RunID, ConfigurationHash: event.ConfigurationHash(run.Configuration), ProtocolHash: p.Fingerprint()}
+	if declaredStart.IsZero() || declaredEnd.IsZero() || !writableTime(declaredStart) || !writableTime(declaredEnd) || declaredEnd.Before(declaredStart) {
+		return Opening{}, errors.New("opening: invalid declared span")
+	}
+	o := Opening{Variant: run.Variant, RunID: run.RunID, ConfigurationHash: event.ConfigurationHash(run.Configuration), ProtocolHash: p.Fingerprint(), DeclaredStart: declaredStart, DeclaredEnd: declaredEnd}
 	o.Hypothesis = o.ConfigurationHash + "/" + o.RunID
 	for _, old := range prior {
 		if old.Variant != o.Variant {
