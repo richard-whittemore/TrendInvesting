@@ -769,6 +769,55 @@ class IgnoredDecisionTests(OrderTestCase):
         self.assertEqual(ticket.Tag, proposal["id"])
 
 
+class ProtectiveOrderSurvivalTests(OrderTestCase):
+    """Issue #31: 'Existing protective orders are preserved.' Whatever else a
+    fault does, the adapter never cancels a Unit's already-working GTC Exit
+    Order merely because something unrelated went wrong: docs/architecture.md
+    and the ticket's own governing rule are 'no NEW orders', never 'no
+    existing protection'. OrderDesk has no code path that cancels an Exit
+    Order at all (_expire only ever cancels an entry or Add's buy order), so
+    this fixes that absence in place with a test rather than leaving it
+    merely implicit."""
+
+    def test_a_working_exit_order_survives_an_unknown_schema_version(self):
+        algo = self.start()
+        self.hold(algo, 100)
+        self.feed(algo, 9, [campaign_opened(), exit_order_set(9, unit_index=1, level=22.1, quantity=100)])
+        [stop] = self.sells(algo)
+        self.assertEqual(stop.Status, "submitted")
+
+        bad = trade_proposal(10)
+        bad["schema_version"] = 2
+        self.feed(algo, 10, [bad])
+        self.assertTrue(algo.failed)
+
+        self.assertEqual(stop.Status, "submitted")
+        self.assertEqual(algo.Transactions.cancellations, [])
+        self.assertEqual(algo.Transactions.updates, [])
+
+    def test_a_working_exit_order_survives_go_unreachable(self):
+        algo = self.start()
+        self.hold(algo, 100)
+        self.feed(algo, 9, [campaign_opened(), exit_order_set(9, unit_index=1, level=22.1, quantity=100)])
+        [stop] = self.sells(algo)
+
+        engine = algo.client
+        answer = engine.decide
+
+        def decide(input_envelope):
+            if input_envelope["type"] == "market.bar.completed":
+                raise Unavailable("engine closed the connection mid-exchange")
+            return answer(input_envelope)
+        engine.decide = decide
+
+        self.feed(algo, 10)
+        self.assertTrue(algo.failed)
+
+        self.assertEqual(stop.Status, "submitted")
+        self.assertEqual(algo.Transactions.cancellations, [])
+        self.assertEqual(algo.Transactions.updates, [])
+
+
 class SlippageTests(OrderTestCase):
     """ADR 0013: every fill slips slippage_n x the N the engine supplied."""
 
