@@ -63,6 +63,10 @@ The progression of Protective Stops as Units are added to a Campaign.
 The one sell order a held Unit rests, for that Unit's own shares: at its **Protective Stop**, or, while an Exit-Channel exit is proposed for the Campaign, at the Exit Channel level if that is higher (a tie names the stop). A Campaign's Exit Orders together cover exactly its holding, so a stop and an exit can never both sell the same shares. The engine decides the level and records each change; a consumer mirroring orders never combines the two levels itself.
 _Avoid_: exit proposal (the Campaign-level decision to exit, one of the two inputs), stop order.
 
+**Order lifecycle report**:
+A venue's account of a state change to a resting order that is not an execution: acknowledged, amended, pending cancellation, cancelled, or refused (ADR 0022). It moves no position — the only event that may is a **fill** — and the engine records it without deciding anything from it; it exists so reconciliation (ADR 0019) can tell an ordinary cancel-and-replace from an unexplained difference in the broker's own order book.
+_Avoid_: fill, execution (both change a position; a lifecycle report never does).
+
 **risk-free**:
 A held Unit whose current Protective Stop, after being raised by the Stop Ladder, sits at or above its own entry price — reachable only by raising, never by an initial stop, which must sit strictly below entry. Its contribution to a Campaign's aggregate open risk is exactly zero: `max(0, EntryPrice − ProtectiveStop)`, a per-share price distance, never a negative figure and never a validation failure — sizing.AggregateOpenRisk scales that distance by the Unit's Quantity and by DollarsPerPoint to reach the account-currency figure. A break-even or profit-protecting stop is a legitimate outcome of the Stop Ladder, not a corrupted one (The Turtle Rules p.23–24).
 _Avoid_: risk-free rate (the unrelated finance term).
