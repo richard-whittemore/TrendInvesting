@@ -123,3 +123,26 @@ fill/snapshot clock and cutoff semantics also remain unconfirmed.
 These concerns are recorded locally because the task expressly forbids GitHub
 access. The holds, transaction-isolation tests, fill response, and associated
 RulesVersion 1.9.0 evidence remain outstanding pending the specification choice.
+
+## Resolved by the owner's decisions of 2026-09-24
+
+The three pending questions above were answered on #220 ("Decisions (Richard,
+2026-09-24)") and are recorded as amendments to ADR 0005, ADR 0008's note, ADR
+0010, ADR 0013, ADR 0020 and ADR 0021, all dated 2026-09-24:
+
+- **Holds.** A proposal reserves its worst-case cost and its cap headroom at
+  once, in ADR 0021's order, fill-chained proposals included. ADR 0020's
+  rejected alternative "Reserve at proposal time" is withdrawn. The hold is
+  the Unit's quantity at its price cap (level + 1N in the Baseline), plus
+  slippage and commission at that price. A fill releases it and is debited
+  once at its actual cost; an expiry or a cancellation releases it.
+- **Snapshots.** A snapshot never releases a hold. It states the account's
+  cash, which an unfilled order has not reduced.
+- **An unfundable fill.** Under the Baseline's stop-limit a fill cannot cost
+  more than its hold. The safety net is ADR 0019's Degraded state (#227);
+  until that exists, the existing behaviour (every later Unit declined while
+  available cash is negative) is the interim form.
+
+Implemented at RulesVersion 1.10.0. The version-aware decline validation
+above carries forward: schema 6 is validated as schema 5 is, with the new
+meanings stated on `event.ProposalDeclinedSchemaVersion`.
