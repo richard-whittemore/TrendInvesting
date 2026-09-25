@@ -180,8 +180,12 @@ func TestCorporateActionsAreDeliveredInATotalOrder(t *testing.T) {
 	actions := []event.CorporateActionPayload{split(1, 10), split(0, 2.75), delisting, split(1, 9)}
 	want := []event.CorporateActionPayload{delisting, split(0, 2.75), split(1, 10), split(1, 9)}
 	for _, due := range [][]int{{0, 1, 2, 3}, {3, 2, 1, 0}, {1, 3, 0, 2}} {
+		ordered, err := effectiveOrder(actions, slices.Clone(due))
+		if err != nil {
+			t.Fatalf("effectiveOrder(%v) error = %v", due, err)
+		}
 		var got []event.CorporateActionPayload
-		for _, i := range inEffectiveOrder(actions, slices.Clone(due)) {
+		for _, i := range ordered {
 			got = append(got, actions[i])
 		}
 		if !slices.Equal(got, want) {
