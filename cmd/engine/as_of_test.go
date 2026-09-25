@@ -157,6 +157,8 @@ func TestAsOfRefusesInvalidStartup(t *testing.T) {
 		{"invalid", []string{"-as-of", "not-a-time"}, "-as-of must be an RFC 3339 time"},
 		{"date-only", []string{"-as-of", "2026-01-01"}, "-as-of must be an RFC 3339 time"},
 		{"comma fraction", []string{"-as-of", "2026-01-01T00:00:00,5Z"}, "-as-of must be an RFC 3339 time"},
+		{"offset hour out of range", []string{"-as-of", "2026-01-01T00:00:00+24:00"}, "-as-of must be an RFC 3339 time"},
+		{"offset minute out of range", []string{"-as-of", "2026-01-01T00:00:00+00:60"}, "-as-of must be an RFC 3339 time"},
 		{"lowercase separator", []string{"-as-of", "2026-01-01t00:00:00Z"}, "-as-of must be an RFC 3339 time"},
 		{"zero", []string{"-as-of", "0001-01-01T00:00:00Z"}, "-as-of must be nonzero"},
 	} {

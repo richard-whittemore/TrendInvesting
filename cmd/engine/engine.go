@@ -53,8 +53,8 @@ import (
 
 // rfc3339DateTime is RFC 3339's date-time production (section 5.6):
 // full-date "T" full-time, with optional "." fractional seconds and a "Z" or
-// numeric offset.
-var rfc3339DateTime = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$`)
+// numeric offset whose hours are 00-23 and minutes 00-59.
+var rfc3339DateTime = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]([01]\d|2[0-3]):[0-5]\d)$`)
 
 // sourceEngine is stamped on the configuration input this command
 // manufactures for itself at startup, and on the outer envelope newDecider
