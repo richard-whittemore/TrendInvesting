@@ -128,8 +128,9 @@ type WindowResult struct {
 }
 
 type Report struct {
-	Protocol     Protocol `json:"protocol"`
-	ProtocolHash string   `json:"protocol_hash"`
+	SchemaVersion int      `json:"schema_version"`
+	Protocol      Protocol `json:"protocol"`
+	ProtocolHash  string   `json:"protocol_hash"`
 	// DeclaredStart and DeclaredEnd are the span Designation was computed
 	// from -- the whole input a run was GIVEN, not merely what it went on to
 	// apply before it might have stopped early. They are retained beside
@@ -164,7 +165,7 @@ func (p Protocol) Report(points []EquityPoint, start, end time.Time) (Report, er
 			return Report{}, errors.New("report: invalid or unordered equity curve")
 		}
 	}
-	r := Report{Protocol: p, ProtocolHash: p.Fingerprint(), DeclaredStart: start, DeclaredEnd: end, Designation: p.Designation(start, end)}
+	r := Report{SchemaVersion: ReportSchemaVersion, Protocol: p, ProtocolHash: p.Fingerprint(), DeclaredStart: start, DeclaredEnd: end, Designation: p.Designation(start, end)}
 	r.Full = p.metrics(points)
 	r.InSample = p.windowMetrics(points, time.Time{}, p.Split)
 	r.OutOfSample = p.windowMetrics(points, p.Split, time.Time{})
@@ -252,10 +253,21 @@ func (p Protocol) metrics(points []EquityPoint) Metrics {
 
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
+// ReportSchemaVersion and OpeningSchemaVersion version the .report and
+// .opening sidecars. Both are retained evidence that is never rewritten
+// (ADR 0018), so a later change to either shape bumps its version and reads
+// older records forward with an upcaster rather than rejecting them
+// (ADR 0015).
+const (
+	ReportSchemaVersion  = 1
+	OpeningSchemaVersion = 1
+)
+
 // Opening records an attempt before held-out evaluation, including attempts
 // that later fail. Identity is the Variant across all parameter hashes;
 // every repeat gets its own hypothesis (ADR 0012, Accepted amendment).
 type Opening struct {
+	SchemaVersion     int    `json:"schema_version"`
 	Variant           string `json:"variant"`
 	RunID             string `json:"run_id"`
 	ConfigurationHash string `json:"configuration_hash"`
@@ -288,7 +300,7 @@ func (p Protocol) Opening(run Run, declaredStart, declaredEnd time.Time, prior [
 	if declaredStart.IsZero() || declaredEnd.IsZero() || !writableTime(declaredStart) || !writableTime(declaredEnd) || declaredEnd.Before(declaredStart) {
 		return Opening{}, errors.New("opening: invalid declared span")
 	}
-	o := Opening{Variant: run.Variant, RunID: run.RunID, ConfigurationHash: event.ConfigurationHash(run.Configuration), ProtocolHash: p.Fingerprint(), DeclaredStart: declaredStart, DeclaredEnd: declaredEnd}
+	o := Opening{SchemaVersion: OpeningSchemaVersion, Variant: run.Variant, RunID: run.RunID, ConfigurationHash: event.ConfigurationHash(run.Configuration), ProtocolHash: p.Fingerprint(), DeclaredStart: declaredStart, DeclaredEnd: declaredEnd}
 	o.Hypothesis = o.ConfigurationHash + "/" + o.RunID
 	for _, old := range prior {
 		if old.Variant != o.Variant {

@@ -81,6 +81,9 @@ func TestPrimaryMetricHandComputed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if r.SchemaVersion != registry.ReportSchemaVersion {
+		t.Fatalf("report schema version = %d, want %d", r.SchemaVersion, registry.ReportSchemaVersion)
+	}
 	m := r.Full
 	if math.Abs(m.TotalReturn-.1) > 1e-12 || math.Abs(m.MaxDrawdown-.25) > 1e-12 || m.Primary == nil || math.Abs(*m.Primary-.4) > 1e-12 {
 		t.Fatalf("metrics %+v", m)
@@ -273,6 +276,9 @@ func TestOpeningValidationAndOtherVariants(t *testing.T) {
 	if _, err := registry.DecodeOpening(raw); err != nil {
 		t.Fatal(err)
 	}
+	if first.SchemaVersion != registry.OpeningSchemaVersion {
+		t.Fatalf("opening schema version = %d, want %d", first.SchemaVersion, registry.OpeningSchemaVersion)
+	}
 	if first.Repeat {
 		t.Fatal("other Variant consumed opening")
 	}
@@ -286,6 +292,7 @@ func TestOpeningValidationAndOtherVariants(t *testing.T) {
 	}
 	for _, mutate := range []func(*registry.Opening){
 		func(o *registry.Opening) { o.ConfigurationHash = "bad" }, func(o *registry.Opening) { o.ProtocolHash = "bad" }, func(o *registry.Opening) { o.Hypothesis = "other" }, func(o *registry.Opening) { o.Variant = "" }, func(o *registry.Opening) { o.Repeat = true },
+		func(o *registry.Opening) { o.RunID = "../bad" }, func(o *registry.Opening) { o.SchemaVersion = 0 }, func(o *registry.Opening) { o.SchemaVersion = registry.OpeningSchemaVersion + 1 },
 		func(o *registry.Opening) { o.DeclaredStart = time.Time{} }, func(o *registry.Opening) { o.DeclaredEnd = time.Time{} }, func(o *registry.Opening) { o.DeclaredEnd = o.DeclaredStart.Add(-time.Second) },
 	} {
 		o := first

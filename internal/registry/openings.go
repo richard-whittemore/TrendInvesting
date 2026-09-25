@@ -94,6 +94,11 @@ func DecodeOpening(raw []byte) (Opening, error) {
 	if _, err := d.Token(); !errors.Is(err, io.EOF) {
 		return Opening{}, errors.New("opening: trailing data")
 	}
+	// Only the version this code writes is read; a later version must come
+	// with an upcaster before it can be read here (ADR 0015).
+	if o.SchemaVersion != OpeningSchemaVersion {
+		return Opening{}, fmt.Errorf("opening: schema version %d, this reader reads %d (ADR 0015)", o.SchemaVersion, OpeningSchemaVersion)
+	}
 	if err := checkRunID(o.RunID); err != nil {
 		return Opening{}, err
 	}
