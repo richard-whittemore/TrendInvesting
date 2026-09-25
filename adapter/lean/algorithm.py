@@ -18,8 +18,8 @@ for candidate in ("/LeanCLI", dirname(abspath(__file__))):
         path.insert(0, candidate)
 
 from client import Client
-from orders import (NSlippageModel, OrderDesk, fill_model_report, validate_slippage_n,
-                    whole_split_ratio)
+from orders import (NSlippageModel, OrderDesk, adr_0005_fill_model, fill_model_report,
+                    validate_slippage_n, whole_split_ratio)
 from publisher import Publisher, split_adjusted_view
 
 # quantconnect/lean@sha256:<64 lowercase hex>; never a tag such as :latest
@@ -115,24 +115,23 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             # ADR 0010: no partial Units, no borrowing. LEAN's default equity
             # account is margin, which let a gap fill cost more than the
             # cash held; a cash account makes LEAN itself refuse an order it
-            # cannot fund at submission. Must precede the explicit fee and
-            # slippage sets below: setting the brokerage model here was
-            # observed to reset the security's slippage model back to
-            # LEAN's own default (adapter/lean/README.md, "Observed LEAN
-            # behaviour").
-            # ADR 0010: no partial Units, no borrowing. LEAN's default equity
-            # account is margin, which let a gap fill cost more than the
-            # cash held; a cash account makes LEAN itself refuse an order it
-            # cannot fund at submission. Must precede the explicit fee and
-            # slippage sets below: setting the brokerage model here was
+            # cannot fund at submission. Must precede the explicit fill, fee
+            # and slippage sets below: setting the brokerage model here was
             # observed to reset the security's slippage model back to
             # LEAN's own default (adapter/lean/README.md, "Observed LEAN
             # behaviour").
             self.SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage, AccountType.Cash)
             # ADR 0013: slippage_n x the N the engine supplied with each
             # order's decision, and Interactive Brokers commissions.
-            security.SetSlippageModel(NSlippageModel(slippage_n, self.desk.n_for_tag,
-                                                     self.desk.record_slippage))
+            slippage = NSlippageModel(slippage_n, self.desk.n_for_tag, self.desk.record_slippage)
+            security.SetSlippageModel(slippage)
+            # ADR 0005, as amended 2026-09-24: a capped entry or Add fills by
+            # the engine's own rule, not LEAN's native stop-limit fill, and
+            # slips by the same model (orders.adr_0005_fill_model).
+            self.fill_model = adr_0005_fill_model(EquityFillModel, SimpleNamespace(
+                OrderEvent=OrderEvent, OrderFee=OrderFee, OrderStatus=OrderStatus,
+                OrderDirection=OrderDirection, to_utc=Extensions.ConvertToUtc))(slippage)
+            security.SetFillModel(self.fill_model)
             security.SetFeeModel(InteractiveBrokersFeeModel())
             # ADR 0004: a split's changes to open orders are checked before
             # the next session can fill them. LEAN makes them after the
@@ -171,6 +170,8 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         # could have filled. One that a fill's reply requests in this slice
         # is confirmed after it, and checked at the start of the next.
         requested_earlier = frozenset(self.desk.pending_cancels)
+        if not self.fill_model_sound():
+            return
         try:
             self.desk.require_cancels_confirmed("before this session's fills", requested_earlier,
                                                 self.order_events)
@@ -206,6 +207,21 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.publish_completed_bar(bar)
         if notice is not None and not self.failed:
             self.handle_delisting(notice)
+
+    def fill_model_sound(self):
+        """Stop the run if the adapter's fill model could not price an order.
+
+        LEAN swallows an exception from a fill model and leaves the order
+        unfilled (observed on the pinned image), so the model records what it
+        could not price instead, and the run stops here, in the same time
+        step, before any of the slice's fills reaches the engine (fail
+        closed; orders.adr_0005_fill_model).
+        """
+        failure = getattr(getattr(self, "fill_model", None), "failure", None)
+        if failure is not None:
+            self.stop("order state uncertain: {}".format(failure))
+            return False
+        return True
 
     def verify_split(self):
         """The 00:01 scheduled check: after a split, LEAN's position and orders,
@@ -440,7 +456,7 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.stop("account snapshot failed: {}".format(err))
 
     def OnEndOfAlgorithm(self):
-        if not self.failed and self.client is not None:
+        if not self.failed and self.client is not None and self.fill_model_sound():
             self.drain_order_events()
             if self.desk.pending_cancels:
                 # No session follows in which the order could fill.

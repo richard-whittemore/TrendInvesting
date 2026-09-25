@@ -114,6 +114,115 @@ class NSlippageModel:
     get_slippage_approximation = GetSlippageApproximation
 
 
+def stop_limit_buy_fill_price(level, price_cap, open_, high, low, slippage):
+    """ADR 0005's stop-limit buy, as amended 2026-09-24, against one bar: the
+    fill price, or None for no fill. internal/fills.ExecuteStopLimit is the
+    reference; tests/testdata/stop_limit_fill_cases.json holds the cases both
+    must answer alike.
+
+    The order rests from the bar's open. It triggers when the bar reaches the
+    level, an exact touch included (High >= level). Triggered, it executes at
+    max(level, open) when that is within the cap. An open above the cap
+    leaves it working as a limit buy at the cap: it fills at the cap itself
+    if the bar trades back down to it (Low <= cap), and otherwise not at all.
+    Slippage is added to every fill (ADR 0013), after the cap bounds the
+    price, so a fill is at most the cap plus slippage: the per-share price
+    its hold reserved (ADR 0020, as amended).
+
+    Every input must be a finite positive price, the high at least the low,
+    and the cap at least the level; anything else raises Uncertain rather
+    than price a fill from it (fail closed, as ExecuteStopLimit refuses).
+    """
+    for name, value in (("level", level), ("price cap", price_cap), ("open", open_),
+                        ("high", high), ("low", low), ("slippage", slippage)):
+        if not _positive_price(value):
+            raise Uncertain("a stop-limit buy cannot be priced from {} {!r}: it must be a finite "
+                            "positive number (ADR 0005; ADR 0013 for slippage)".format(name, value))
+    if high < low:
+        raise Uncertain("a stop-limit buy cannot be priced against a bar whose high {!r} is below "
+                        "its low {!r}".format(high, low))
+    if price_cap < level:
+        raise Uncertain("a stop-limit buy at level {!r} is capped at {!r}, below its own level; it "
+                        "could never fill (ADR 0005)".format(level, price_cap))
+    if high < level:
+        return None
+    if open_ <= price_cap:
+        return max(level, open_) + slippage
+    if low > price_cap:
+        return None
+    return price_cap + slippage
+
+
+def adr_0005_fill_model(base, lean):
+    """The adapter's ADR 0005 fill model: a subclass of base, LEAN's
+    EquityFillModel, the model LEAN itself fills equities with.
+
+    lean supplies what the model needs from LEAN, so this module never
+    imports it: OrderEvent, OrderFee, OrderStatus, OrderDirection, and
+    to_utc(local_time, time_zone) (LEAN's Extensions.ConvertToUtc).
+
+    It replaces LEAN's own stop-limit fill for a buy, the only stop-limit
+    this adapter places (an entry or Add at its price cap), with ADR 0005's
+    rule as amended (stop_limit_buy_fill_price), priced against the one bar
+    LEAN evaluates the order in: that bar alone decides, and the order is
+    evaluated afresh against each later bar it still works in. Expiry stays
+    the adapter's: it cancels the order when the engine expires its proposal
+    (ADR 0011). LEAN's own stop-limit fill applies no slippage, so this model
+    charges it itself (ADR 0013), from the slippage model it is given
+    (NSlippageModel: slippage_n x the order's N), which records what it
+    charged. Every other order, a stop-market entry or Add under the Variant
+    "uncapped" and every Exit Order, keeps EquityFillModel's own fill.
+
+    As LEAN's own fills do, it fills nothing for a cancelled order, while the
+    exchange is closed, or against a bar that ended at or before the order
+    was placed: a new order never fills against the bar it was placed after.
+
+    LEAN catches an exception raised by a fill model, logs it as an order
+    error and carries on with the order unfilled, so raising would not stop
+    the run. Anything this model cannot price is instead recorded in failure
+    (the first only) and the order left unfilled for that bar; the algorithm
+    stops the run on it before the slice's fills reach the engine.
+    """
+
+    class Adr0005FillModel(base):
+        def __init__(self, slippage_model):
+            super().__init__()
+            self.slippage_model = slippage_model
+            self.failure = None
+
+        def StopLimitFill(self, asset, order):
+            if order.Direction != lean.OrderDirection.Buy:
+                return super().StopLimitFill(asset, order)
+            fill = lean.OrderEvent(order, lean.to_utc(asset.LocalTime, asset.Exchange.TimeZone),
+                                   lean.OrderFee.Zero)
+            try:
+                price = self._buy_price(asset, order)
+            except Exception as err:
+                if self.failure is None:
+                    self.failure = "LEAN order {} (tag={}) could not be priced by the adapter's " \
+                                   "ADR 0005 fill model: {}".format(order.Id, order.Tag, err)
+                return fill
+            if price is not None:
+                fill.Status = lean.OrderStatus.Filled
+                fill.FillQuantity = order.Quantity
+                fill.FillPrice = price
+            return fill
+
+        def _buy_price(self, asset, order):
+            """The bar's fill price for a buy stop-limit, or None."""
+            if order.Status == lean.OrderStatus.Canceled or not self.IsExchangeOpen(asset, False):
+                return None
+            prices = self.GetPricesCheckingPythonWrapper(asset, order.Direction)
+            if _utc(lean.to_utc(prices.EndTime, asset.Exchange.TimeZone)) <= _utc(order.Time):
+                return None
+            slippage = float(self.slippage_model.GetSlippageApproximation(asset, order))
+            return stop_limit_buy_fill_price(
+                float(order.StopPrice), float(order.LimitPrice), float(prices.Open),
+                float(prices.High), float(prices.Low), slippage)
+
+    return Adr0005FillModel
+
+
 def validate_slippage_n(value):
     """Require the run's slippage fraction: finite and positive (ADR 0013)."""
     if type(value) not in (int, float) or not isfinite(value) or value <= 0:
@@ -288,6 +397,14 @@ def parse_time(text):
     micro = (fraction or "").ljust(6, "0")[:6]
     zone = "+00:00" if zone == "Z" else zone
     return datetime.fromisoformat("{}.{}{}".format(whole, micro, zone)).astimezone(timezone.utc)
+
+
+def _utc(moment):
+    """A LEAN DateTime, as pythonnet hands it over, as an aware UTC datetime;
+    a naive one is read as UTC, as LEAN's UtcTime is by definition."""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
 
 
 def format_time(moment):
@@ -1244,22 +1361,26 @@ class OrderDesk:
                                 "adapter's {} order".format(record["order_id"], record["tag"],
                                                             quantity, placed["kind"]))
             if buy and placed.get("price_cap") is not None:
-                # A stop-limit's price cap is the most the hold reserved (ADR
-                # 0005 and ADR 0020, as amended 2026-09-24); a fill above
-                # LEAN's own LimitPrice, raw, means LEAN's engine and this
-                # adapter's understanding of its own fill model disagree, so
-                # the run stops rather than accept a fill the hold did not
-                # cover. Compared against LEAN's LimitPrice as it reports it
-                # on the fill, not the engine's price_cap, since a
+                # A stop-limit's price cap bounds its execution before
+                # slippage, so a fill is at most the cap plus slippage: the
+                # per-share price the hold reserved (ADR 0005 and ADR 0020, as
+                # amended 2026-09-24; ADR 0013). A fill above LEAN's own
+                # LimitPrice, raw, plus the slippage the adapter's model
+                # charged means LEAN's engine and the adapter's fill model
+                # disagree, so the run stops rather than accept a fill the
+                # hold did not cover. Compared against LEAN's LimitPrice as it
+                # reports it on the fill, not the engine's price_cap, since a
                 # tick-floored or post-split limit can differ from it by
                 # design (floor_to_tick, _split_limit_problems).
                 limit_price = record.get("limit_price")
-                if limit_price is not None and price > limit_price + 1e-9:
+                slippage = self.slippage_applied.get(record["order_id"], 0.0) * self._require_ratio()
+                if limit_price is not None and price > limit_price + slippage + 1e-9:
                     raise Uncertain(
                         "LEAN reports order {} (tag={}) filled at {} raw, above its own limit "
-                        "of {} raw; a stop-limit fill can never cost more than its cap, so this "
-                        "fill is not sent to the engine".format(
-                            record["order_id"], record["tag"], price, limit_price))
+                        "of {} raw plus the {} raw slippage charged on it; a stop-limit fill can "
+                        "never cost more than its cap plus slippage, so this fill is not sent "
+                        "to the engine".format(record["order_id"], record["tag"], price,
+                                               limit_price, slippage))
             self.algorithm.Log("adapter: LEAN filled order {} (tag={}): {} raw shares @ {} raw, "
                                "commission {} {} (split ratio {})".format(
                                    record["order_id"], record["tag"], quantity, price, fee,

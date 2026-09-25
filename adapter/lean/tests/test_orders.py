@@ -1333,6 +1333,60 @@ class FillReturnTests(OrderTestCase):
         self.assertEqual(self.types_sent(algo, sent), [])
         self.assert_stopped_after(algo, sent)
 
+    def test_a_fill_at_a_stop_limits_cap_plus_its_slippage_is_sent(self):
+        # ADR 0005 bounds the execution by the cap before slippage, and ADR
+        # 0013 adds slippage to every fill: cap plus slippage is exactly what
+        # the hold reserved, and a legitimate fill.
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        [entry] = self.tickets(algo)
+        slippage = 0.05 * proposal["payload"]["n"]
+        self.fill(algo, entry, 10, 25.7 + slippage)
+        self.feed(algo, 10)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [fill] = self.sent(algo, "execution.fill")
+        self.assertAlmostEqual(fill["payload"]["price"], 25.7 + slippage)
+        self.assertAlmostEqual(fill["payload"]["slippage_applied"], slippage)
+
+    def test_a_fill_just_above_a_stop_limits_cap_plus_its_slippage_stops_the_run(self):
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        [entry] = self.tickets(algo)
+        sent = len(algo.client.sent)
+        self.fill(algo, entry, 10, 25.7 + 0.05 * proposal["payload"]["n"] + 1e-6)
+        self.feed(algo, 10)
+        for fact in ("above its own limit", "plus the", "slippage", str(entry.OrderId)):
+            self.assertIn(fact, algo.quit_reason)
+        self.assertEqual(self.types_sent(algo, sent), [])
+
+    def test_an_order_the_fill_model_could_not_price_stops_the_run_before_the_slices_fills(self):
+        # LEAN swallows a fill model's exception and leaves the order
+        # unfilled, so the adapter's model records the failure and the run
+        # stops at the slice's first point, before any fill is sent.
+        algo = self.start()
+        proposal = trade_proposal(9)
+        self.feed(algo, 9, [proposal])
+        [entry] = self.tickets(algo)
+        sent = len(algo.client.sent)
+        algo.fill_model.failure = "LEAN order 1 (tag=x) could not be priced"
+        self.fill(algo, entry, 10, 24.56)
+        self.feed(algo, 10)
+        self.assertIn("could not be priced", algo.quit_reason)
+        self.assertEqual(self.types_sent(algo, sent), [])
+        self.assert_stopped_after(algo, sent)
+
+    def test_a_fill_model_failure_in_the_last_slice_stops_the_run_at_its_end(self):
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9)])
+        sent = len(algo.client.sent)
+        algo.fill_model.failure = "LEAN order 1 (tag=x) could not be priced"
+        algo.OnEndOfAlgorithm()
+        self.assertTrue(algo.failed)
+        self.assertIn("could not be priced", algo.quit_reason)
+        self.assertEqual(self.types_sent(algo, sent), [])
+
     def test_a_fill_of_an_order_the_adapter_did_not_place_stops_the_run(self):
         algo = self.start()
         props = scaffold.OrderProperties()
