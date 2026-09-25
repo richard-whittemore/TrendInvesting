@@ -684,12 +684,12 @@ func (r *transition) expireExitProposal(state *instrumentState, bar event.Comple
 // Add fill — never from this proposal alone (see evaluateAdd and
 // applyAddFill).
 //
-// It lives for one bar, the identical lifetime ADR 0011 gives every
-// proposal in this system: the next completed bar for the instrument
-// supersedes it (see transition.expireAddProposal) — including a proposal
-// raised by the SAME-BAR Add chain (see applyAddFill), since that proposal
-// is still attributed to the bar that produced the opportunity for it, not
-// to the fill that happened to trigger the next rung's evaluation.
+// ADR 0011, as amended 2026-09-24: an ordinary Add expires on the next
+// instrument bar; a fill-chained Add survives that bar and expires on the
+// second, unless that next bar proposes an exit (see applyCompletedBar). A
+// stop fill closing the Campaign, in part or in full, cancels either at once
+// (see expireAddProposalForStop). Both stay attributed to the bar that
+// covered their rung.
 //
 // earliestFillAt is the Add-side twin of pendingExitProposalState's own
 // field of the same name: the earliest instant at which an order for THIS
@@ -702,6 +702,9 @@ func (r *transition) expireExitProposal(state *instrumentState, bar event.Comple
 // one opening moment as the earliest an execution could exist (see
 // instrumentState.lastBarEarliestFillAt).
 type pendingAddProposalState struct {
+	// survivesNextBar is consumed by the first subsequent instrument bar.
+	// Its hold stands through that bar (ADR 0011 and ADR 0020, as amended).
+	survivesNextBar  bool
 	proposalID       string
 	periodEnd        time.Time
 	unitIndex        int
@@ -711,8 +714,9 @@ type pendingAddProposalState struct {
 	earliestFillAt   time.Time
 }
 
-// expireAddProposal ends an outstanding Add proposal that the next completed
-// bar has superseded, and returns the event that records it — the Add-side
+// expireAddProposal ends an Add at its expiry bar (ADR 0011, as amended)
+// and releases its hold (ADR 0020). The caller consumes the fill-chain
+// extension before calling here. It returns the event that records it — the Add-side
 // mirror of expireExitProposal, reusing the identical
 // event.ProposalExpiredPayload with Kind ProposalKindAdd rather than a third
 // event type. Like an exit-kind expiry, SignalID is left empty: an Add
@@ -761,7 +765,8 @@ func (r *transition) expireAddProposal(state *instrumentState, bar event.Complet
 }
 
 // expireAddProposalForStop cancels an outstanding Add proposal the instant a
-// stop fill closes PART of the same Campaign — the SECOND way an Add
+// stop fill closes PART or ALL of the same Campaign (ADR 0011, as amended
+// 2026-09-24) — the SECOND way an Add
 // proposal can end, next to expireAddProposal's ordinary next-bar expiry
 // (ADR 0011). Reused payload and event type (event.ProposalExpiredPayload /
 // ProposalExpiredEventType), discriminated by
@@ -1009,6 +1014,11 @@ func (r *transition) evaluateCampaign(state *instrumentState, bar event.Complete
 // error.
 func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) ([]event.Envelope, error) {
 	campaign := state.campaign
+	// A surviving chain already reserves this rung and its hold. A later
+	// Session cannot replace it or reserve it twice (ADR 0011, ADR 0020).
+	if state.pendingAddProposal != nil {
+		return nil, nil
+	}
 	if campaign.partiallyStopped {
 		// The Turtle Rules p.23-24 describes a Whipsaw variant in
 		// which Faith re-enters after a partial stop-out; that is a
@@ -1104,7 +1114,12 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 		return []event.Envelope{declined}, nil
 	}
 
+	validForSessions := 1
+	if input.Type == event.FillEventType {
+		validForSessions = 2
+	}
 	payload := event.AddProposalPayload{
+		ValidForSessions: validForSessions,
 		CampaignID:       campaign.campaignID,
 		InstrumentID:     campaign.instrumentID,
 		PeriodEnd:        state.lastBarPeriodEnd,
@@ -1144,6 +1159,7 @@ func (r *transition) evaluateAdd(state *instrumentState, input event.Envelope) (
 	// No Campaign state moves here: applyAddFill is this reducer's only path
 	// to actually adding a Unit.
 	state.pendingAddProposal = &pendingAddProposalState{
+		survivesNextBar:  validForSessions == 2,
 		proposalID:       proposalEnvelope.ID,
 		periodEnd:        state.lastBarPeriodEnd,
 		unitIndex:        unitIndex,
@@ -1986,11 +2002,13 @@ func (r *transition) applyStopFill(state *instrumentState, fill event.FillPayloa
 	// genuinely reachable, not merely defensive: a stop-superseded expiry's
 	// ExpiredAt/EarliestFillAt chronology (see event.ProposalExpiredPayload's
 	// own doc comment) depends on the PENDING PROPOSAL's own bar, which this
-	// closing fill's own timestamp has no guaranteed relationship to. Only
-	// relevant for a PARTIAL close: a full close discards the whole Campaign
-	// (and so any pending Add proposal for it) regardless.
+	// closing fill's own timestamp has no guaranteed relationship to. A
+	// partial close and a full close alike cancel the pending Add: a daily
+	// adapter reports the next Session's fills before the next bar, so an Add
+	// left for that bar to expire could fill into a Campaign this stop has
+	// already closed (ADR 0011 and ADR 0020, as amended 2026-09-24).
 	var addExpiryEnvelope *event.Envelope
-	if remainingAfter > 0 && state.pendingAddProposal != nil {
+	if state.pendingAddProposal != nil {
 		envelope, err := r.expireAddProposalForStop(state, fill, input)
 		if err != nil {
 			return nil, err
@@ -2012,6 +2030,18 @@ func (r *transition) applyStopFill(state *instrumentState, fill event.FillPayloa
 		event.CampaignUnitsStoppedEventType, event.CampaignUnitsStoppedSchemaVersion, fill.FilledAt, input, unitsStoppedBytes,
 	)}
 
+	if addExpiryEnvelope != nil {
+		// The cancelled Add can no longer fill, so its hold is released
+		// (ADR 0020, as amended 2026-09-24). Emitted before a full close's
+		// campaign-exited, while the Campaign it would have extended is
+		// still the one named.
+		if err := r.releaseHold(state.pendingAddProposal.proposalID); err != nil {
+			return nil, err
+		}
+		state.pendingAddProposal = nil
+		emissions = append(emissions, *addExpiryEnvelope)
+	}
+
 	if exitedEnvelope != nil {
 		// The instrument is a Setup again — CONTEXT.md defines a Setup
 		// as an Eligible instrument not in a Campaign, and clearing this is
@@ -2032,28 +2062,14 @@ func (r *transition) applyStopFill(state *instrumentState, fill event.FillPayloa
 		// Units remain, and no further Add is ever proposed for it again
 		// (see evaluateAdd's own doc comment and this function's own,
 		// "Per-Unit closing").
+		//
+		// partiallyStopped stops evaluateAdd from proposing a FURTHER Add;
+		// an Add proposal already outstanding from a bar BEFORE this stop
+		// was cancelled above rather than left to expire with the next bar
+		// (ADR 0011), since a fill for it could otherwise arrive and be
+		// accepted before that next bar ever does (see applyAddFill's own
+		// partiallyStopped guard for the second half of this fix).
 		campaign.partiallyStopped = true
-
-		// partiallyStopped stops evaluateAdd from proposing a FURTHER Add, but an Add
-		// proposal already outstanding from a bar BEFORE this partial stop
-		// is untouched by that flag alone — cancel it here, explicitly,
-		// rather than letting it wait to expire with the next bar (ADR
-		// 0011's ordinary lifecycle), since a fill for it could otherwise
-		// arrive and be accepted before that next bar ever does (see
-		// applyAddFill's own new partiallyStopped guard for the second half
-		// of this fix). The envelope was already built and validated above,
-		// before any state moved; only now, once we know the WHOLE
-		// transition validated successfully, is state.pendingAddProposal
-		// actually cleared.
-		if addExpiryEnvelope != nil {
-			// The cancelled Add can no longer fill, so its hold is released
-			// (ADR 0020, as amended 2026-09-24).
-			if err := r.releaseHold(state.pendingAddProposal.proposalID); err != nil {
-				return nil, err
-			}
-			state.pendingAddProposal = nil
-			emissions = append(emissions, *addExpiryEnvelope)
-		}
 	}
 
 	return emissions, nil
@@ -2264,8 +2280,8 @@ func (r *transition) applyAddFill(state *instrumentState, fill event.FillPayload
 	}
 	// Belt and braces
 	// alongside expireAddProposalForStop, which already clears
-	// state.pendingAddProposal the instant a stop fill partially closes
-	// this Campaign (so the "no outstanding add proposal" check below would
+	// state.pendingAddProposal the instant a stop fill closes part or
+	// all of this Campaign (so the "no outstanding add proposal" check below would
 	// already catch a stale fill on its own) — checked explicitly, and
 	// first, so the error names the actual reason rather than a generic
 	// "no proposal" one, matching the maxUnits check's own redundancy just

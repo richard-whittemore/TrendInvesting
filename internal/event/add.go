@@ -35,7 +35,9 @@ const AddProposalEventType = "strategy.add.proposed"
 //     amended 2026-09-24), exactly as TradeProposalSchemaVersion's own
 //     version 2 did, measured in the Campaign's frozen N. A version-1 record
 //     decodes OrderType as the empty string and is rejected (ADR 0015).
-const AddProposalSchemaVersion uint32 = 2
+//   - Version 3 adds the explicit session lifetime (ADR 0011, as amended
+//     2026-09-24). A missing window is rejected rather than inferred.
+const AddProposalSchemaVersion uint32 = 3
 
 // RuleAddLadderHalfN names the rule for AddProposalPayload.Rule and
 // CampaignUnitAddedPayload.Rule: the next Unit is added half a campaign N
@@ -73,6 +75,10 @@ const RuleAddLadderHalfN = "add.ladder.half-n"
 //     internal/strategy.Reducer evaluates an Add relative to an exit, not by
 //     anything on this payload.
 type AddProposalPayload struct {
+	// ValidForSessions counts subsequent instrument bars until expiry:
+	// 1 for an ordinary Add, 2 for a fill-chained Add (ADR 0011, as amended
+	// 2026-09-24). PeriodEnd anchors the count; no calendar is inferred.
+	ValidForSessions int `json:"valid_for_sessions"`
 	// CampaignID identifies the Campaign this proposal would extend.
 	CampaignID   string    `json:"campaign_id"`
 	InstrumentID string    `json:"instrument_id"`
@@ -117,6 +123,9 @@ type AddProposalPayload struct {
 // (ADR 0005, as amended 2026-09-24).
 func (p AddProposalPayload) Validate() error {
 	var errs []error
+	if p.ValidForSessions != 1 && p.ValidForSessions != 2 {
+		errs = append(errs, errors.New("valid for sessions must be 1 or 2 (ADR 0011)"))
+	}
 	if p.CampaignID == "" {
 		errs = append(errs, errors.New("campaign id is required"))
 	}

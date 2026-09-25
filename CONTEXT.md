@@ -88,7 +88,7 @@ The quality band of a Setup, derived from a mechanical score over its trend hist
 _Avoid_: tier.
 
 **Signal**:
-The event of a Setup reaching Tier A on a completed bar — the strategy recognising that its entry condition is met. In the Baseline a Signal is a Breakout; in the Sublime Variant it is the second breakout. A Signal belongs to one bar and expires with it, and so does the trade proposal a Signal produced: the next completed bar for that instrument supersedes an unfilled proposal (ADR 0011).
+The event of a Setup reaching Tier A on a completed bar — the strategy recognising that its entry condition is met. In the Baseline a Signal is a Breakout; in the Sublime Variant it is the second breakout. A Signal belongs to one bar and expires with it, and so does the trade proposal a Signal produced: the next completed bar for that instrument supersedes an unfilled proposal (ADR 0011). A fill-chained **Add** is not a Signal: its proposal alone survives one additional Session under ADR 0011's 2026-09-24 amendment.
 _Avoid_: breakout (a market event, not a strategy decision), trigger, alert.
 
 **Watchlist**:

@@ -645,12 +645,12 @@ func (s *Simulator) observeUnitsStopped(envelope event.Envelope) error {
 
 // observeCampaignExited drops the Campaign and every order belonging to it.
 //
-// The Add order is dropped here as well as on the reducer's own expiry event,
-// and that is not redundant: a stop fill that closes a Campaign outright
-// leaves any outstanding Add proposal to expire with the NEXT bar (only a
-// PARTIAL stop cancels it immediately), so between the exit and that expiry
-// the reducer still holds the proposal while the Campaign it belongs to is
-// gone. Filling it would be a fill for a Campaign that no longer exists.
+// The Add order is dropped here as well as on the reducer's own expiry event.
+// A stop fill that closes a Campaign, in part or in full, already expires
+// any outstanding Add proposal in the same reply, before campaign-exited
+// (ADR 0011, as amended 2026-09-24), so this is belt and braces: filling an
+// Add order that outlived its Campaign would be a fill for a Campaign that
+// no longer exists.
 func (s *Simulator) observeCampaignExited(envelope event.Envelope) error {
 	var payload event.CampaignExitedPayload
 	if err := decodePayload(envelope, &payload); err != nil {

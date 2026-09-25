@@ -699,12 +699,11 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 	// no fill arrived for expires with its bar, per ADR 0011; see
 	// transition.expireEntryProposal, transition.expireExitProposal and
 	// transition.expireAddProposal for why the expiry is emitted rather than
-	// dropped. At most one of the three can be outstanding for a given
-	// instrument at a time (a pending entry proposal is always cleared
-	// before a Campaign, and so an exit or Add proposal, can exist; exit and
-	// Add proposals are themselves mutually exclusive per bar — ADR 0010's
-	// exit precedence), but all three checks are unconditional here so none
-	// is skipped by construction.
+	// dropped. The one exception is a fill-chained Add (ADR 0011, as amended
+	// 2026-09-24), which survives this bar while its Campaign is still open.
+	// If this bar then proposes an exit, the surviving Add expires with it
+	// below, so an exit and an Add proposal are still never outstanding
+	// together (ADR 0010's exit precedence).
 	var emissions []event.Envelope
 	if state.pendingProposal != nil {
 		expired, err := r.expireEntryProposal(state, bar, envelope)
@@ -720,7 +719,14 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 		}
 		emissions = append(emissions, expired)
 	}
-	if state.pendingAddProposal != nil {
+	if pending := state.pendingAddProposal; pending != nil && pending.survivesNextBar && state.campaign != nil {
+		// ADR 0011's fill-chain extension counts actual instrument bars,
+		// keeping the proposal and its ADR 0020 hold through the first. It
+		// never outlives its Campaign: a stop fill that closes the Campaign
+		// cancels the Add at once (applyStopFill), and this check keeps the
+		// extension from applying to a closed Campaign regardless.
+		pending.survivesNextBar = false
+	} else if state.pendingAddProposal != nil {
 		expired, err := r.expireAddProposal(state, bar, envelope)
 		if err != nil {
 			return nil, err
@@ -756,6 +762,18 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 			return nil, err
 		}
 		emissions = append(emissions, campaignEmissions...)
+
+		// A bar that would both Add and exit results in the exit only (ADR
+		// 0010): a fill-chained Add that survived the expiry block above
+		// expires with the bar that proposes the exit, and its hold is
+		// released (ADR 0011 and ADR 0020, as amended 2026-09-24).
+		if state.pendingAddProposal != nil && state.pendingExitProposal != nil {
+			expired, err := r.expireAddProposal(state, bar, envelope)
+			if err != nil {
+				return nil, err
+			}
+			emissions = append(emissions, expired)
+		}
 
 		// Every held Unit's Exit Order moved by this bar — by the exit
 		// proposal it raised, or by the expiry of the previous bar's — after

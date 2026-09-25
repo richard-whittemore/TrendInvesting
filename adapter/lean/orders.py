@@ -27,7 +27,7 @@ EXIT_PROPOSED = "strategy.exit.proposed"
 UNIT_ADDED = "strategy.campaign.unit-added"
 UNITS_STOPPED = "strategy.campaign.units-stopped"
 CAMPAIGN_EXITED = "strategy.campaign.exited"
-SCHEMA_VERSIONS = {TRADE_PROPOSED: 2, ADD_PROPOSED: 2, PROPOSAL_EXPIRED: 3,
+SCHEMA_VERSIONS = {TRADE_PROPOSED: 2, ADD_PROPOSED: 3, PROPOSAL_EXPIRED: 3,
                    CAMPAIGN_OPENED: 1, EXIT_ORDER_SET: 1, EXIT_PROPOSED: 1,
                    UNIT_ADDED: 1, UNITS_STOPPED: 1, CAMPAIGN_EXITED: 2}
 
@@ -202,8 +202,10 @@ def fill_model_report(slippage_n):
         "signalled it, so a LEAN run enters one bar later.",
         "order lifetime: entries and Adds are good-till-cancelled stop-limit orders (stop-market "
         "under the declared Variant 'uncapped') that "
-        "the adapter cancels when the engine expires their proposal at the next bar (ADR "
-        "0011), so each works for exactly one session. LEAN's DAY orders are not used: at "
+        "the adapter cancels when the engine expires their proposal (ADR 0011): entries and "
+        "ordinary Adds at the next bar, fill-chained Adds one bar later. The explicit "
+        "valid_for_sessions field gives a fill-chained Add one extra session. LEAN's DAY "
+        "orders are not used: at "
         "daily resolution LEAN expires a DAY order before it evaluates the session's fill "
         "(observed: DAY orders whose next bar crossed their level expired unfilled). Exit "
         "Orders are good-till-cancelled. A cancellation is confirmed asynchronously: LEAN "
@@ -344,6 +346,10 @@ class OrderDesk:
         # LEAN order id -> proposal id, for a cancellation LEAN has not yet
         # confirmed.
         self.pending_cancels = {}
+        # LEAN order id -> proposal id, for every order whose cancellation
+        # this adapter has requested, confirmed or not: the engine expired
+        # its proposal, so no fill of it may ever reach the engine.
+        self.cancel_requested = {}
         # LEAN order ids whose fill LEAN has reported but the engine has not
         # yet been told of.
         self.undelivered = set()
@@ -356,6 +362,9 @@ class OrderDesk:
         # When a split LEAN applied to a position or order is still to be
         # checked (require_split_applied); None otherwise.
         self.split_to_check = None
+        # Actual instrument bars, never fill times or deferred snapshots.
+        # ADR 0011 gives fill-chained Adds one additional observed session.
+        self.bar_ends = []
 
     def _closed(self):
         """The LEAN order statuses in which an order no longer works at the broker."""
@@ -598,6 +607,17 @@ class OrderDesk:
         """Record the raw slippage LEAN charged, restated in the split-adjusted view."""
         self.slippage_applied[order_id] = slippage / self._require_ratio()
 
+    def observe_bar(self, period_end):
+        """Remember the last two instrument bars for ADR 0011's Add window.
+
+        No calendar-day forecast: a weekend, holiday or missing instrument
+        bar is not another observed session. Replies and fills are not bars.
+        """
+        end = parse_time(period_end)
+        if self.bar_ends and end <= self.bar_ends[-1]:
+            raise Uncertain("completed bar period ends must advance")
+        self.bar_ends = (self.bar_ends + [end])[-2:]
+
     def act(self, decisions, period_end, warming):
         """Act on one input's decisions, in the order the engine sent them.
 
@@ -681,6 +701,33 @@ class OrderDesk:
             return None
         return "order type {!r} is not one this adapter places".format(order_type)
 
+    def _window_reason(self, payload, answered_at, entry):
+        """Validate only the engine's explicit lifetime (ADR 0011 amendment).
+
+        Before the next bar arrives, a fill's timestamp can be later than
+        the last completed bar. After that bar arrives, only its own end
+        still names the extra session; a later fill is already too old.
+        """
+        sessions = 1 if entry else payload.get("valid_for_sessions")
+        if type(sessions) is not int or sessions not in (1, 2):
+            return "valid_for_sessions {!r} must be integer 1 or 2 (ADR 0011)".format(sessions)
+        try:
+            produced = parse_time(payload.get("period_end"))
+        except ValueError as err:
+            return "period_end unreadable: {}".format(err)
+        valid = produced == answered_at
+        if sessions == 2:
+            valid = bool(self.bar_ends) and (
+                produced == self.bar_ends[-1] and answered_at >= produced
+                or len(self.bar_ends) == 2 and produced == self.bar_ends[0]
+                and answered_at == self.bar_ends[-1])
+        if not valid:
+            return ("stale: produced by the bar ending {}, valid for {} session(s), "
+                    "but this answers {} (ADR 0011)".format(
+                        payload.get("period_end"), sessions,
+                        answered_at.strftime("%Y-%m-%dT%H:%M:%SZ")))
+        return None
+
     def _propose(self, decision, payload, bar_end, level, n, entry):
         """An entry or Add: a good-till-cancelled buy order at the proposal's level.
 
@@ -689,12 +736,12 @@ class OrderDesk:
         when it does not (the declared Variant "uncapped"; ADR 0005, as amended
         2026-09-24). The adapter computes no cap: it places the engine's.
 
-        Valid only for the session after the bar that produced it — ADR 0005's
-        one-bar window, the same one event.ProposalExpiredPayload's
-        EarliestFillAt bounds — so it must answer the bar just published. The
-        engine expires it at the next bar (ADR 0011) and the adapter then
-        cancels it, so it works for exactly that one session. A rejected
-        proposal is logged and dropped: the engine re-issues it on a later bar
+        Entries and ordinary Adds answer their own bar. A fill-chained Add
+        carries valid_for_sessions=2 and may also answer the first following
+        session (ADR 0011 and ADR 0021 section 7, amended 2026-09-24). Actual
+        instrument bars bound that window; no calendar date is forecast.
+        The engine expires the proposal and the adapter cancels its order.
+        A rejected proposal is logged and dropped: the engine re-issues it on a later bar
         if its setup still holds.
         """
         tag = decision.get("id")
@@ -720,14 +767,7 @@ class OrderDesk:
         if reason is None and entry and payload.get("direction") != _LONG:
             reason = "direction {!r} is not {!r}".format(payload.get("direction"), _LONG)
         if reason is None:
-            try:
-                produced = parse_time(payload.get("period_end"))
-            except ValueError as err:
-                produced, reason = None, "period_end unreadable: {}".format(err)
-            if produced is not None and produced != bar_end:
-                reason = ("stale: produced by the bar ending {}, but valid only for the session "
-                          "after it and this answers {} (ADR 0005)".format(
-                              payload.get("period_end"), bar_end.strftime("%Y-%m-%dT%H:%M:%SZ")))
+            reason = self._window_reason(payload, bar_end, entry)
         if reason is None and not tag:
             reason = "no decision id to tag the order with"
         if reason is None:
@@ -832,6 +872,7 @@ class OrderDesk:
                 raise Uncertain("LEAN did not confirm cancelling order {} (tag={}) after its "
                                 "proposal expired: response success={}, status {}".format(
                                     ticket.OrderId, proposal_id, response.IsSuccess, ticket.Status))
+            self.cancel_requested[ticket.OrderId] = proposal_id
             if ticket.Status == self.lean.OrderStatus.Canceled:
                 self._cancel_confirmed(ticket.OrderId, proposal_id)
             else:
@@ -844,18 +885,29 @@ class OrderDesk:
         self.algorithm.Log("adapter: cancelled order {} tag={}: its proposal expired".format(
             order_id, proposal_id))
 
-    def require_cancels_confirmed(self, when):
+    def require_cancels_confirmed(self, when, requested_earlier, queued=()):
         """Every cancellation requested in an earlier slice has been confirmed.
 
         LEAN confirms a cancellation after the slice it was requested in; one
         still unconfirmed when the next slice starts is an order that could
-        fill into a holding the engine does not expect.
+        fill into a holding the engine does not expect. requested_earlier is
+        the set of orders whose cancellation was pending when this slice
+        began. A cancellation this slice's own fill replies requested (a stop
+        fill that closes the Campaign expires its pending Add at once; ADR
+        0011, as amended 2026-09-24) cannot be confirmed until the slice
+        ends, and is checked at the start of the next one. queued is the
+        slice's undrained order reports: a Canceled report among them
+        confirms its order, so the check can run before any of the slice's
+        fills is sent.
         """
-        if self.pending_cancels:
+        confirmed = {r["order_id"] for r in queued if r["status"] == self.lean.OrderStatus.Canceled}
+        unconfirmed = {o: t for o, t in self.pending_cancels.items()
+                       if o in requested_earlier and o not in confirmed}
+        if unconfirmed:
             raise Uncertain("LEAN did not confirm cancelling order(s) {} {}; their proposals "
                             "expired, so a fill would be one the engine does not expect".format(
                                 ", ".join("{} (tag={})".format(o, t) for o, t in
-                                          sorted(self.pending_cancels.items())), when))
+                                          sorted(unconfirmed.items())), when))
 
     def _campaign_opened(self, decision, payload):
         """Remember the Campaign's frozen N (ADR 0006), for its Exit Orders' slippage,
@@ -1045,6 +1097,19 @@ class OrderDesk:
 
     def is_execution(self, record):
         status = self.lean.OrderStatus
+        if record["status"] in (status.Filled, status.PartiallyFilled) \
+                and record["order_id"] in self.cancel_requested:
+            # The engine expired this order's proposal and the adapter asked
+            # LEAN to cancel it, so a fill contradicts the engine's state and
+            # is never sent: what to do about the position is a person's
+            # decision (ADR 0011, as amended 2026-09-24; ADR 0019).
+            raise Uncertain("LEAN reports order {} (tag={}) filled {} at {}, but its proposal "
+                            "expired and this adapter requested its cancellation ({}); the fill "
+                            "is not sent to the engine".format(
+                                record["order_id"], record["tag"], record["fill_quantity"],
+                                record["fill_price"],
+                                "confirmed" if record["order_id"] not in self.pending_cancels
+                                else "not yet confirmed"))
         if record["status"] == status.PartiallyFilled:
             # The engine accepts one fill per order: a second partial of the
             # same entry is refused, and a partial stop or exit cannot close

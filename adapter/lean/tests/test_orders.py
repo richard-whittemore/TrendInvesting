@@ -71,7 +71,7 @@ def trade_proposal(day, **changes):
 
 def add_proposal(day, unit_index=2, **changes):
     payload = {"campaign_id": decision_id("campaign", 6), "instrument_id": "AAPL",
-               "period_end": period_end(day), "unit_index": unit_index,
+               "period_end": period_end(day), "unit_index": unit_index, "valid_for_sessions": 1,
                "level": 25.1, "quantity": 100, "previous_unit_fill": 24.5,
                "campaign_n": 1.2, "rule": "add.ladder.half-n", "adr": "0006",
                "order_type": "stop-limit", "gap_buffer_n": 1}
@@ -81,7 +81,7 @@ def add_proposal(day, unit_index=2, **changes):
         level, n = payload["level"], payload["campaign_n"]
         numeric = all(type(v) in (int, float) for v in (level, n))
         payload["price_cap"] = level + n if numeric else 26.3
-    return envelope("strategy.add.proposed", 2,
+    return envelope("strategy.add.proposed", 3,
                     decision_id("add-proposal-unit-{}".format(unit_index), day), payload)
 
 
@@ -1011,6 +1011,121 @@ class FillReturnTests(OrderTestCase):
                           [opened["payload"]["fill_id"]], 100, 22.0, 22.1))
         self.assertAlmostEqual(fill["slippage_applied"], 0.05 * 1.2)
 
+    def test_a_full_stop_out_cancels_the_working_add_order(self):
+        # ADR 0011, as amended 2026-09-24: a stop fill that closes the whole
+        # Campaign expires its pending Add in the same reply, ordinary or
+        # fill-chained, so the order is cancelled before the next Session and
+        # can never fill into the closed Campaign. The cancellation is
+        # requested inside the slice, so LEAN confirms it after the slice, and
+        # one it never confirms stops the run before the next bar.
+        for chained, confirmed in ((False, True), (True, True), (True, False)):
+            with self.subTest(chained=chained, confirmed=confirmed):
+                algo = self.start()
+                if chained:
+                    add = add_proposal(9, valid_for_sessions=2)
+                    self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1), add])
+                    stopped_on = 11
+                else:
+                    add = add_proposal(11)
+                    self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1)])
+                    self.feed(algo, 11, close_decisions=[add])
+                    stopped_on = 12
+                [ticket] = [t for t in self.tickets(algo) if t.Tag == add["id"]]
+                self.assertEqual(ticket.Status, "submitted")
+                [sell] = self.sells(algo)
+                self.fill(algo, sell, stopped_on, 22.0, fee=1.0)
+                if not confirmed:
+                    algo.Transactions.cancel_outcome = "never"
+                expired = proposal_expired(add, stopped_on, kind="add")
+                expired["payload"].update(rule="add-proposal.superseded-by-stop",
+                                          reason="superseded-by-stop")
+                self.feed(algo, stopped_on, replies={"execution.fill": {"payload": {"decisions": [
+                    units_stopped(stopped_on, fill_id="lean:2:2"), expired,
+                    campaign_exited(stopped_on)]}}})
+                self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+                self.assertEqual([order for order, _ in algo.Transactions.cancellations],
+                                 [ticket.OrderId])
+                sent = len(algo.client.sent)
+                self.feed(algo, stopped_on + 1)
+                if not confirmed:
+                    self.assertIn("did not confirm cancelling order(s) {} (tag={})".format(
+                        ticket.OrderId, add["id"]), algo.quit_reason)
+                    self.assertNotIn("market.bar.completed", self.types_sent(algo, sent))
+                    continue
+                self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+                self.assertEqual(ticket.Status, "canceled")
+                self.assertEqual([e["payload"]["kind"] for e in self.sent(algo, "execution.fill")],
+                                 ["entry", "stop"])
+
+    def stopped_out_with_a_working_add(self, algo, confirmed):
+        """A fill-chained Add working when a stop fill closes its Campaign on the
+        11th; the stop's reply expires the Add and the adapter requests its
+        cancellation, which LEAN confirms after the slice unless confirmed is
+        False (ADR 0011, as amended 2026-09-24)."""
+        add = add_proposal(9, valid_for_sessions=2)
+        self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1), add])
+        [ticket] = [t for t in self.tickets(algo) if t.Tag == add["id"]]
+        [sell] = self.sells(algo)
+        self.fill(algo, sell, 11, 22.0, fee=1.0)
+        if not confirmed:
+            algo.Transactions.cancel_outcome = "never"
+        expired = proposal_expired(add, 11, kind="add")
+        expired["payload"].update(rule="add-proposal.superseded-by-stop", reason="superseded-by-stop")
+        self.feed(algo, 11, replies={"execution.fill": {"payload": {"decisions": [
+            units_stopped(11, fill_id="lean:2:2"), expired, campaign_exited(11)]}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(ticket.Status, "cancel-pending")
+        return ticket
+
+    def test_an_add_filling_before_its_cancellation_is_confirmed_stops_the_run(self):
+        # ADR 0019: the engine expired the Add when the stop closed its
+        # Campaign, so LEAN filling it anyway contradicts the engine's state.
+        # The unconfirmed cancellation is found at the start of the next
+        # slice, before any of that slice's fills reaches the engine.
+        algo = self.start()
+        ticket = self.stopped_out_with_a_working_add(algo, confirmed=False)
+        sent = len(algo.client.sent)
+        self.fill(algo, ticket, 12, 25.2)
+        self.feed(algo, 12)
+        self.assertTrue(algo.failed)
+        self.assertIn("did not confirm cancelling order(s) {} (tag={})".format(
+            ticket.OrderId, ticket.Tag), algo.quit_reason)
+        self.assertEqual(self.types_sent(algo, sent), [],
+                         "nothing may reach the engine after an unconfirmed cancellation")
+
+    def test_a_fill_of_an_order_whose_cancellation_was_requested_is_never_sent(self):
+        # Whenever it is drained, a fill of an order the adapter has asked LEAN
+        # to cancel, confirmed or not, stops the run instead of reaching the
+        # engine, which has already expired its proposal (ADR 0011, ADR 0019).
+        for confirmed in (False, True):
+            with self.subTest(confirmed=confirmed):
+                algo = self.start()
+                ticket = self.stopped_out_with_a_working_add(algo, confirmed=confirmed)
+                if confirmed:
+                    self.feed(algo, 12)
+                    self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+                    self.assertEqual(ticket.Status, "canceled")
+                sent = len(algo.client.sent)
+                # LEAN reports the fill at a point where the queue is drained
+                # without the slice-start check (after a slice's decisions).
+                self.fill(algo, ticket, 13, 25.2)
+                algo.drain_order_events()
+                self.assertTrue(algo.failed)
+                self.assertIn("order {} (tag={})".format(ticket.OrderId, ticket.Tag),
+                              algo.quit_reason)
+                self.assertIn("cancellation", algo.quit_reason)
+                self.assertNotIn("execution.fill", self.types_sent(algo, sent))
+
+    def test_an_add_whose_cancellation_is_confirmed_never_fills(self):
+        algo = self.start()
+        ticket = self.stopped_out_with_a_working_add(algo, confirmed=True)
+        self.feed(algo, 12)
+        self.feed(algo, 13)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(ticket.Status, "canceled")
+        self.assertEqual([e["payload"]["kind"] for e in self.sent(algo, "execution.fill")],
+                         ["entry", "stop"])
+
     def two_units_at_the_exit_channel(self, algo, unit2_source="exit-channel", unit2_level=23.4):
         """A Campaign of two Units, then an exit proposed at 23.4 on the 12th's bar."""
         self.entered(algo, reply=[campaign_opened(), exit_order_set(10, level=22.1)])
@@ -1115,14 +1230,76 @@ class FillReturnTests(OrderTestCase):
         self.assertTrue(any("has already filled and that fill is reported next" in m
                             for m in algo.logs))
 
-    def test_a_chained_add_proposal_in_a_fill_reply_is_stale(self):
-        # The engine measures the next rung from the fill against the bar
-        # that signalled the entry; that session has already traded in LEAN.
+    def test_a_chained_add_proposal_in_a_fill_reply_is_placed(self):
+        # ADR 0011's amendment: a fill-chained Add has one extra session.
+        algo = self.start()
+        chained = add_proposal(9, valid_for_sessions=2)
+        self.entered(algo, reply=[campaign_opened(), exit_order_set(10), chained])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual([t.Quantity for t in self.tickets(algo)], [100, -100, 100])
+        self.assertEqual(self.tickets(algo)[-1].Tag, chained["id"])
+        self.assertEqual(self.rejections(algo), [])
+
+    def test_an_ordinary_add_in_a_fill_reply_is_still_stale(self):
         algo = self.start()
         self.entered(algo, reply=[campaign_opened(), exit_order_set(10), add_proposal(9)])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
         self.assertEqual([t.Quantity for t in self.tickets(algo)], [100, -100])
         [rejection] = self.rejections(algo)
         self.assertIn("stale", rejection)
+
+    def test_a_chained_add_window_counts_bars_across_a_weekend(self):
+        algo = self.start()
+        self.hold(algo, 100)
+        chained = add_proposal(6, valid_for_sessions=2)
+        self.feed(algo, 9, replies={"execution.fill": {"payload": {"decisions": [chained]}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(self.tickets(algo)[-1].Tag, chained["id"])
+        self.assertEqual(self.rejections(algo), [])
+
+    def test_a_chained_add_is_accepted_at_the_first_next_bar(self):
+        algo = self.start()
+        self.feed(algo, 6)
+        chained = add_proposal(6, valid_for_sessions=2)
+        self.feed(algo, 9, [chained])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual([t.Tag for t in self.tickets(algo)], [chained["id"]])
+
+    def test_a_chained_add_older_than_its_window_is_rejected(self):
+        algo = self.start()
+        self.feed(algo, 6)
+        self.feed(algo, 9)
+        self.feed(algo, 10, [add_proposal(6, valid_for_sessions=2)])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(self.tickets(algo), [])
+        [rejection] = self.rejections(algo)
+        self.assertIn("stale", rejection)
+
+    def test_a_later_fill_reply_cannot_renew_a_chained_add_window(self):
+        algo = self.start()
+        self.feed(algo, 6)
+        self.feed(algo, 9, [trade_proposal(9)])
+        [entry] = self.tickets(algo)
+        self.fill(algo, entry, 10, 24.56)
+        self.feed(algo, 10, replies={"execution.fill": {"payload": {"decisions": [
+            add_proposal(6, valid_for_sessions=2)]}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.assertEqual(len(self.tickets(algo)), 1)
+        [rejection] = self.rejections(algo)
+        self.assertIn("stale", rejection)
+
+    def test_an_add_with_an_invalid_window_is_rejected(self):
+        for window in (None, 0, 3, -1, True, 2.0, "2"):
+            with self.subTest(window=window):
+                algo = self.start()
+                proposal = add_proposal(9, valid_for_sessions=window)
+                if window is None:
+                    del proposal["payload"]["valid_for_sessions"]
+                self.feed(algo, 9, [proposal])
+                self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+                self.assertEqual(self.tickets(algo), [])
+                [rejection] = self.rejections(algo)
+                self.assertIn("valid_for_sessions", rejection)
 
     def test_a_partial_fill_stops_the_run(self):
         algo = self.start()

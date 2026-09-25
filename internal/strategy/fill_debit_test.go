@@ -327,7 +327,7 @@ func TestAFillWhoseCostCannotBeStatedFailsClosed(t *testing.T) {
 			bars(cashSkipOverflowBars("AAPL")).
 			fill(affordable).
 			bar(completedBar("AAPL", day(57), rung2, low, low)).
-			fill(addFill("AAPL", campaignID, 2, day(57), "sim-fill-add-2", 1e21, quantity, day(57))).
+			fill(addFill("AAPL", campaignID, 2, day(56), "sim-fill-add-2", 1e21, quantity, day(57))).
 			wantRunError(`fill "sim-fill-add-2"`, "leaves the representable range of spendable cash", "0020")
 	})
 }

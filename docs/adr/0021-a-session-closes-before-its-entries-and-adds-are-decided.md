@@ -92,6 +92,26 @@ The snapshot must come after the session close. A snapshot stamped at this Sessi
 
 A proposal emitted by a fill, not by the session-close pass, follows its fill. That covers the next Add rung after an Add fill, and Unit 2's rung after an opening fill (`campaign.go`, `evaluateAdd` call sites 2 and 3). ADR 0010 orders **decisions made from a Session's bars**. ADR 0020 already records that it does not order **executions**, and a rung that depends on an earlier rung's actual fill price is a consequence of an execution. These proposals keep their present behaviour, their per-instrument cap check, and the cash check in force when they are made.
 
+### Amendment to §7: fill-chained Add lifetime (2026-09-24)
+
+Richard's 2026-09-24 decision on issue #211, option B, amends §7's
+"present behaviour" only as to lifetime: an Add emitted in reply to a fill
+survives the first subsequent instrument bar and expires on the second,
+as specified in ADR 0011's amendment of the same date. Its schema-3
+`valid_for_sessions` is 2; a session-close Add's is 1. The surviving
+proposal keeps its identity and ADR 0020 hold, and prevents another Add
+proposal at the intervening close. Exit evaluation and cancellation retain
+their existing precedence: an exit proposed at the intervening bar ends the
+extension at that bar, and a stop fill that closes the Campaign cancels the
+Add at once (ADR 0011's amendment). Neither ladder prices nor sizing change.
+
+The reference `cmd/backtest` producer still fills chained rungs inside the
+bar whose high covered them (§6, ADR 0005). The daily LEAN producer can
+place the fill's reply in its next slice and now keep that order through
+its next possible execution Session. The owner's clarification requires
+live fills to be relayed intraday; deferring them to a daily close is not
+a live implementation of this contract. No paper or live gate is cleared.
+
 ### Amendment: `cmd/backtest` states each Session's close (2026-09-24)
 
 §6's `cmd/backtest` producer gains the account snapshot a LEAN run already
@@ -149,7 +169,7 @@ agreement with the adapter it describes, and matching the shape of the
 **One slice, in order:**
 
 1. **Confirmed cancels and amendments from the previous slice.** `OnOrderEvent` fires mid-step — LEAN reports a submission before `StopMarketOrder` even returns, and reports a confirmed cancellation only after `OnData` returns, before the next slice — so the adapter cannot send a report the instant it observes one; it queues every report it sees (`OrderDesk.observe`) and drains the queue only at fixed points (`drain_order_events`). The first drain of a slice is therefore whatever LEAN reported after the adapter last acted, none of it provoked by anything this slice has sent yet.
-2. **This Session's fills, and whatever acting on them placed.** A fill becomes `execution.fill`; the engine's reply to it may place or amend an order (a fill-chained Add's entry, a new Exit Order), and the queue is drained again once that reply has been acted on, so those follow-on reports arrive in this same position. **Fills must precede the bar that would expire their proposal**: ADR 0011 keeps a proposal outstanding only until its instrument's next bar, so a fill reported after that bar would name a proposal the engine no longer offers, and the engine would refuse it.
+2. **This Session's fills, and whatever acting on them placed.** A fill becomes `execution.fill`; the engine's reply to it may place or amend an order (a fill-chained Add's entry, a new Exit Order), and the queue is drained again once that reply has been acted on, so those follow-on reports arrive in this same position. **Fills must precede the bar that would expire their proposal**: ADR 0011 keeps an entry or an ordinary Add outstanding only until its instrument's next bar, and a fill-chained Add until the bar after that (or the next bar, if it proposes an exit; a stop fill that closes the Campaign cancels any pending Add at once), so a fill reported after the expiring bar would name a proposal the engine no longer offers, and the engine would refuse it.
 3. **The previous Session's `account.snapshot`.** **The snapshot follows the fills** so that a fill-chained Add keeps an eligible cash basis: the engine attributes such an Add to the bar that signalled the entry and checks it against cash known at that bar's previous close (ADR 0010; ADR 0020's producer amendment) — the identical reason the `cmd/backtest` amendment above gives for its own snapshot position. A snapshot sent before those fills would already be later than that close, leaving the engine no eligible figure to check the Add against — observed directly on the first entry of the first acceptance attempt, before this order was fixed. The snapshot's own figures are read as of its stated close regardless of when it is sent, so this ordering costs it nothing; it still precedes the bar whose sizing it is the basis for.
 4. **This Session's bar, and its `market.session.closed`.** Unchanged from §6, above.
 5. **Reports of what acting on this Session's decisions placed or cancelled.** **Reports are queued, never sent from inside `OnOrderEvent`**: that handler fires mid-step, before the adapter has finished acting on the current slice's own decisions, so a report sent from it could interleave with a decision still being acted on. It is observed and queued like every other report, then drained once those decisions are acted on — becoming the next slice's own item 1.
