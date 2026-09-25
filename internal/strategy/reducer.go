@@ -101,6 +101,18 @@ type Reducer struct {
 	// mid-run in any case, see applyConfiguration) must never change how
 	// many Units an already-open Campaign may hold.
 	maxUnits int
+	// maxUnitsPerIndustry, maxUnitsPerSector and maxUnitsTotalLong are ADR
+	// 0008's other three Unit caps (event.ConfigurationPayload's own fields
+	// of the same names), captured once alongside maxUnits. Unlike maxUnits
+	// they are never frozen onto a Campaign: a group or total-long cap is
+	// checked against every OPEN Campaign together (unit_caps.go's
+	// capExceeded), not against one Campaign's own state, so there is
+	// nothing campaign-shaped to freeze — only maxUnits and a Campaign's own
+	// frozen classification (openCampaign) matter to what unit_caps.go reads
+	// from a Campaign already open.
+	maxUnitsPerIndustry int
+	maxUnitsPerSector   int
+	maxUnitsTotalLong   int
 	// notionalAccount is ADR 0007's Notional Account (CONTEXT.md),
 	// initialised to the configured starting equity and driven by
 	// event.AccountSnapshotEventType and event.CashMovementEventType events
@@ -440,6 +452,9 @@ func (r *transition) applyConfiguration(envelope event.Envelope) ([]event.Envelo
 	r.riskAtStopFraction = payload.RiskAtStopFraction
 	r.dollarsPerPoint = payload.DollarsPerPoint
 	r.maxUnits = payload.MaxUnits
+	r.maxUnitsPerIndustry = payload.MaxUnitsPerIndustry
+	r.maxUnitsPerSector = payload.MaxUnitsPerSector
+	r.maxUnitsTotalLong = payload.MaxUnitsTotalLong
 	// ADR 0007's Notional Account, at its configured starting value: before
 	// any account.snapshot arrives it equals StartingEquity exactly
 	// (applyAccountSnapshot, in notional.go, is what steps it down;
@@ -729,8 +744,15 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 		emissions = append(emissions, exitOrderEmissions...)
 
 		// The Add itself is decided when the Session closes, after every
-		// instrument's exits (ADR 0010, ADR 0021; session.go).
-		state.addDue = state.pendingExitProposal == nil && len(state.campaign.units) < state.campaign.maxUnits
+		// instrument's exits (ADR 0010, ADR 0021; session.go). Marked due
+		// whenever no exit was proposed, regardless of the Campaign's
+		// current Unit count: a Campaign already at (or, via a shared
+		// group or total-long cap, effectively at) its cap still needs
+		// evaluateAdd to run so a reached rung is DECLINED and journalled
+		// (ADR 0008), rather than silently never being considered again.
+		// evaluateAdd itself is what decides whether a reached rung
+		// produces a proposal or a cap decline (campaign.go).
+		state.addDue = state.pendingExitProposal == nil
 
 		return emissions, nil
 	}
@@ -944,6 +966,19 @@ func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input ev
 				protectiveStopIntent, entryLevel, r.stopMultiple, n), 0, 0)
 	}
 
+	// ADR 0008's four Unit caps, checked against POST-TRADE exposure: the
+	// Units that would be held, across every open Campaign sharing a cap's
+	// grouping, once this new Campaign's opening Unit joined them
+	// (unit_caps.go). No Campaign exists yet for this instrument (a Signal
+	// only fires for a Setup, CONTEXT.md), so the per-instrument cap can
+	// never bind here — only the group and total-long caps can, once
+	// several Campaigns already share this instrument's classification or
+	// the account's total long exposure is already near its limit.
+	instrumentClass := r.classificationOf(instrumentID)
+	if capName, limit, exposure, exceeded := r.capExceeded(instrumentID, instrumentClass); exceeded {
+		return r.declineCap(instrumentID, periodEnd, input, signalID, capName, limit, exposure)
+	}
+
 	availableCash, err := r.cashAtPreviousClose(instrumentID, previousClose)
 	if err != nil {
 		return event.Envelope{}, err
@@ -1014,16 +1049,40 @@ func (r *transition) sizeUnit(instrumentID string, periodEnd time.Time, input ev
 // (ProposalDeclinedPayload.Validate rejects a non-zero value for any other
 // reason).
 func (r *transition) decline(instrumentID string, periodEnd time.Time, input event.Envelope, signalID, reason, detail string, requiredCash, availableCash float64) (event.Envelope, error) {
-	payload := event.ProposalDeclinedPayload{
-		InstrumentID:  instrumentID,
-		PeriodEnd:     periodEnd,
+	return r.stampDecline(instrumentID, periodEnd, input, event.ProposalDeclinedPayload{
 		Kind:          event.ProposalDeclinedKindEntry,
 		SignalID:      signalID,
 		Reason:        reason,
 		Detail:        detail,
 		RequiredCash:  requiredCash,
 		AvailableCash: availableCash,
-	}
+	})
+}
+
+// declineCap is decline's counterpart for ADR 0008: a Signal that fired and
+// sized, but whose resulting Campaign a Unit cap
+// (event.DeclineReasonUnitCapExceeded) blocks, naming the cap that bound,
+// its configured limit, and the post-trade exposure the Unit would have
+// produced (unit_caps.go: capExceeded).
+func (r *transition) declineCap(instrumentID string, periodEnd time.Time, input event.Envelope, signalID, capName string, limit, exposure int) (event.Envelope, error) {
+	return r.stampDecline(instrumentID, periodEnd, input, event.ProposalDeclinedPayload{
+		Kind:              event.ProposalDeclinedKindEntry,
+		SignalID:          signalID,
+		Reason:            event.DeclineReasonUnitCapExceeded,
+		Detail:            capDetail(capName, limit, exposure),
+		Cap:               capName,
+		CapLimit:          limit,
+		PostTradeExposure: exposure,
+	})
+}
+
+// stampDecline finalises payload with the identifying fields every
+// entry-kind decline shares (InstrumentID, PeriodEnd), validates, marshals
+// and stamps it — the common tail decline and declineCap share, whatever
+// reason and figures produced the decline.
+func (r *transition) stampDecline(instrumentID string, periodEnd time.Time, input event.Envelope, payload event.ProposalDeclinedPayload) (event.Envelope, error) {
+	payload.InstrumentID = instrumentID
+	payload.PeriodEnd = periodEnd
 	if err := payload.Validate(); err != nil {
 		return event.Envelope{}, fmt.Errorf("strategy: built invalid proposal declined payload: %w", err)
 	}

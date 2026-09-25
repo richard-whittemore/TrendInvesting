@@ -12,14 +12,14 @@ import (
 // ADR 0015 preserves each schema's meaning; ADR 0020 first permits a
 // negative available-cash remainder in decline schema 4.
 func TestProposalDeclinedValidationBySchema(t *testing.T) {
-	for _, version := range []uint32{0, 1, 2, 3, 4, 5} {
+	for _, version := range []uint32{0, 1, 2, 3, 4, 5, 6} {
 		for _, cash := range []float64{-1, 0, 1, math.NaN(), math.Inf(-1)} {
 			t.Run(fmt.Sprintf("schema-%d/cash-%v", version, cash), func(t *testing.T) {
 				p := validProposalDeclinedInsufficientCash()
 				p.RequiredCash = 2
 				p.AvailableCash = cash
 				err := p.ValidateSchema(version)
-				wantValid := version >= 2 && version <= 4 && !math.IsNaN(cash) && !math.IsInf(cash, 0) && (cash >= 0 || version == 4)
+				wantValid := version >= 2 && version <= event.ProposalDeclinedSchemaVersion && !math.IsNaN(cash) && !math.IsInf(cash, 0) && (cash >= 0 || version >= 4)
 				if (err == nil) != wantValid {
 					t.Fatalf("ValidateSchema(%d), cash %v = %v; want valid %v", version, cash, err, wantValid)
 				}
@@ -29,11 +29,32 @@ func TestProposalDeclinedValidationBySchema(t *testing.T) {
 			})
 		}
 	}
-	for _, version := range []uint32{2, 3, event.ProposalDeclinedSchemaVersion} {
+	for _, version := range []uint32{2, 3, 4, event.ProposalDeclinedSchemaVersion} {
 		p := validProposalDeclinedInsufficientCash()
 		p.Detail = ""
 		if err := p.ValidateSchema(version); err == nil || !strings.Contains(err.Error(), "detail is required") {
 			t.Fatalf("schema %d bypassed payload validation: %v", version, err)
 		}
+	}
+}
+
+// ADR 0015/ADR 0008: DeclineReasonUnitCapExceeded and its Cap/CapLimit/
+// PostTradeExposure fields are recognised only from schema 5 onward. An
+// older schema version cannot have asserted the reason at all — the
+// identical discipline TestProposalDeclinedValidationBySchema exercises for
+// AvailableCash's own meaning change.
+func TestProposalDeclinedUnitCapExceededValidationBySchema(t *testing.T) {
+	for _, version := range []uint32{2, 3, 4, 5, 6} {
+		t.Run(fmt.Sprintf("schema-%d", version), func(t *testing.T) {
+			p := validProposalDeclinedUnitCapExceeded()
+			err := p.ValidateSchema(version)
+			wantValid := version == event.ProposalDeclinedSchemaVersion
+			if (err == nil) != wantValid {
+				t.Fatalf("ValidateSchema(%d) = %v; want valid %v", version, err, wantValid)
+			}
+			if version < 5 && (err == nil || !strings.Contains(err.Error(), "not recognised before proposal declined schema 5")) {
+				t.Fatalf("schema %d: want the schema-gating error, got %v", version, err)
+			}
+		})
 	}
 }
