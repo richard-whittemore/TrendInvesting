@@ -793,15 +793,16 @@ class TurtleBaselineResearch(QCAlgorithm):
         quantity or nothing. A PartiallyFilled event is logged, once, in
         full, and otherwise ignored: the order simply keeps resting, and
         is handled the ordinary way once LEAN reports it Filled or
-        Canceled -- at which point ``order_event.Ticket`` (LEAN's own
-        order-ticket object) already knows the TOTAL quantity filled
+        Canceled -- at which point the order's ticket, looked up by id
+        (``Transactions.GetOrderTicket``, since an OrderEvent carries no
+        ticket of its own), already knows the TOTAL quantity filled
         across every partial fill it took (``QuantityFilled``) and the
         volume-weighted average price across them (``AverageFillPrice``),
         so this method never accumulates either figure itself.
         """
         order_id = order_event.OrderId
         status = order_event.Status
-        ticket = order_event.Ticket
+        ticket = self.Transactions.GetOrderTicket(order_id)
 
         if order_event.FillQuantity:
             # A real execution occurred in THIS event (Filled,
