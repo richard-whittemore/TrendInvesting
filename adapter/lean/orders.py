@@ -265,7 +265,8 @@ def fill_model_report(slippage_n):
         "below the shared level, a price ADR 0005 never produces, because it prices a buy at "
         "max(level, open), never below the level, even in a fill-chained Add's second session "
         "(ADR 0011, as amended): a 500/500 order that opens the next session at 490 fills at "
-        "490 under LEAN and at 500 plus slippage under ADR 0005. A split "
+        "490 under LEAN; under ADR 0005 it fills at 500 plus slippage only if that session's "
+        "high reaches 500, and otherwise does not fill at all. A split "
         "adjusts the limit exactly as it adjusts its stop: both are multiplied by the split "
         "factor and rounded to the cent in the one UpdateSubmitted report that adjusts the "
         "quantity too.",

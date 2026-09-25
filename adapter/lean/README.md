@@ -559,7 +559,8 @@ mechanism, not a variant of ADR 0005's:
   produces, because it prices a buy at `max(level, open)`, never below the
   level, even in a fill-chained Add's second session (ADR 0011, as
   amended). A 500/500 order that opens the next session at 490 fills at 490
-  under LEAN and at 500 plus slippage under ADR 0005.
+  under LEAN; under ADR 0005 it fills at 500 plus slippage only if that
+  session's high reaches 500, and otherwise does not fill at all.
 - **a split adjusts the limit exactly as it adjusts the stop**: both are
   multiplied by the split factor and rounded to the cent, reported in the one
   `UpdateSubmitted` event that also halves the quantity.
