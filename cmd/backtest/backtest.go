@@ -756,22 +756,79 @@ func latestPeriodEnd(bars []event.CompletedBarPayload) time.Time {
 // deliverRemainingActions, after every bar in the run, which violates "a
 // corporate action is applied before the decision for the bar it affects"
 // (ADR 0010/0021) for the very bar the rename exists to precede.
+//
+// A CHAIN of symbol changes — instrumentID's own rename, and whatever
+// earlier rename produced its own old id, and so on — is delivered in full,
+// not just the last hop: symbolChangeChain walks it back to wherever it
+// stops being an undelivered symbol change (a review finding). Without this,
+// matching only "NewInstrumentID == instrumentID" catches the LAST hop of a
+// multi-hop chain that lands entirely between two bars (no instrument in the
+// middle ever receives one), and the earlier hop reaches the reducer only
+// later, for an id (the last hop's own OLD id) it has never actually seen —
+// silently recorded as a retired id with nothing to carry, or refused
+// outright once the destination is already known (Reducer.renamed), either
+// way losing or blocking a Campaign a well-formed chain should carry across
+// intact.
 func deliverActionsDueFor(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, instrumentID string, boundary time.Time) error {
-	var due []int
+	dueSet := make(map[int]bool)
 	for i, action := range actions {
-		if delivered[i] || !action.EffectiveAt.Before(boundary) {
-			continue
+		if !delivered[i] && action.InstrumentID == instrumentID && action.EffectiveAt.Before(boundary) {
+			dueSet[i] = true
 		}
-		matches := action.InstrumentID == instrumentID
-		if action.Kind == event.CorporateActionKindSymbolChange {
-			matches = matches || action.NewInstrumentID == instrumentID
+	}
+	for _, i := range symbolChangeChain(actions, delivered, instrumentID) {
+		if actions[i].EffectiveAt.Before(boundary) {
+			dueSet[i] = true
 		}
-		if !matches {
-			continue
-		}
+	}
+	due := make([]int, 0, len(dueSet))
+	for i := range dueSet {
 		due = append(due, i)
 	}
 	return deliverInEffectiveOrder(ctx, simulator, recorder, cfg, strategyVersion, actions, delivered, due)
+}
+
+// symbolChangeChain returns the index of every not-yet-delivered symbol
+// change, in effective order oldest first, that instrumentID's own identity
+// descends from: the change that produced instrumentID (NewInstrumentID ==
+// instrumentID), the change that produced ITS own old id, and so on, until
+// the walk reaches an id no undelivered symbol change names as its
+// NewInstrumentID — either because it was already delivered earlier (its own
+// predecessor, if any, was necessarily delivered with it), or because the
+// chain genuinely starts there.
+//
+// A well-formed fixture never has two undelivered symbol changes sharing one
+// NewInstrumentID — the reducer refuses reusing a retired id as a
+// destination (symbol_change.go), and this function does not reimplement
+// that check — so at most one match exists at each step; the first one found
+// is taken.
+func symbolChangeChain(actions []event.CorporateActionPayload, delivered []bool, instrumentID string) []int {
+	var chain []int
+	target := instrumentID
+	for {
+		found := -1
+		for i, action := range actions {
+			if delivered[i] || action.Kind != event.CorporateActionKindSymbolChange {
+				continue
+			}
+			if action.NewInstrumentID == target {
+				found = i
+				break
+			}
+		}
+		if found == -1 {
+			break
+		}
+		chain = append(chain, found)
+		target = actions[found].InstrumentID
+	}
+	// Reverse: the walk finds the LAST hop first (instrumentID's own
+	// immediate predecessor) and works backward, but the earliest hop must
+	// be delivered, and so reach the reducer, first.
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
+	}
+	return chain
 }
 
 // deliverInEffectiveOrder delivers the given actions in inEffectiveOrder,

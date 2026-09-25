@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 )
 
 // This file holds the command-seam tests for a cash-crediting corporate
@@ -60,6 +61,35 @@ func runTerminalBacktest(t *testing.T, actionsPath string) error {
 	}
 	var log bytes.Buffer
 	return backtest(context.Background(), opts, &log)
+}
+
+// runTerminalBacktestRecords is runTerminalBacktest for a run expected to
+// succeed, returning the journal's records rather than only its error.
+func runTerminalBacktestRecords(t *testing.T, actionsPath string) []journal.Record {
+	t.Helper()
+	return runJournal(t, options{
+		configPath:           configurationFixture,
+		barsPath:             writeBars(t, barsThroughEntry(t)),
+		corporateActionsPath: actionsPath,
+	})
+}
+
+// finalAccountSnapshot returns the last account.snapshot record in records.
+func finalAccountSnapshot(t *testing.T, records []journal.Record) event.AccountSnapshotPayload {
+	t.Helper()
+	var last event.AccountSnapshotPayload
+	found := false
+	for _, r := range records {
+		if r.Envelope.Type != event.AccountSnapshotEventType {
+			continue
+		}
+		found = true
+		decodeRecord(t, r, &last)
+	}
+	if !found {
+		t.Fatal("no account.snapshot record in the journal")
+	}
+	return last
 }
 
 // TestATerminalDividendIsRefused is the review finding's pinned regression:
@@ -139,5 +169,63 @@ func TestATerminalSplitWithNoCashInLieuIsNotRefused(t *testing.T) {
 	}))
 	if err != nil {
 		t.Fatalf("backtest() error = %v, want none: a split crediting no cash has nothing a terminal statement could miss", err)
+	}
+}
+
+// TestATerminalSymbolChangeLeavesTheClosingSnapshotCorrect answers a review
+// finding: a symbol change effective at or after its instrument's own last
+// bar is, like a terminal dividend or cash in lieu, delivered by
+// deliverRemainingActions AFTER fills.StateLastClose has already computed
+// and frozen the run's one closing account.snapshot. Unlike a dividend or
+// cash in lieu, this is NOT the same gap: event.AccountSnapshotPayload states
+// only the account's aggregate Equity and AvailableCash — actual account
+// figures, never the Notional Account (CONTEXT.md: "Notional Account" is a
+// separate, sizing-only figure this payload does not carry at all) — with no
+// per-instrument field a rename could leave stale, and a pure identity
+// relabelling moves no cash and changes no holding's quantity or value
+// (internal/fills.observeSymbolChanged only moves map keys: Simulator.books,
+// account.holdings, account.closes).
+// So the aggregate figures the closing statement already carries are exactly
+// the same whether the rename is delivered before or after it. This test
+// proves that, rather than asserting it: the final statement of a run ending
+// with a terminal symbol change is byte-for-byte the SAME as one with no
+// corporate action at all, over the identical bars.
+//
+// Refusing a terminal symbol change, the way a terminal cash credit is
+// refused, would therefore reject a legitimate, common scenario (a company's
+// last recorded bar under an old ticker, renamed before any new one arrives)
+// for no correctness reason — the closing statement was never wrong.
+func TestATerminalSymbolChangeLeavesTheClosingSnapshotCorrect(t *testing.T) {
+	t.Parallel()
+
+	renameAt := outstandingExitBar.Add(12 * time.Hour)
+
+	baseline := finalAccountSnapshot(t, runTerminalBacktestRecords(t, corporateActionsEmptyFixture))
+	withRename := runTerminalBacktestRecords(t, writeActions(t, []event.CorporateActionPayload{
+		{
+			InstrumentID:    "AAPL",
+			Kind:            event.CorporateActionKindSymbolChange,
+			EffectiveAt:     renameAt,
+			NewInstrumentID: "AAPL2",
+		},
+	}))
+
+	if got, want := finalAccountSnapshot(t, withRename), baseline; got != want {
+		t.Fatalf("final account snapshot with a terminal symbol change = %+v, want the SAME as the baseline's %+v: a pure rename moves no cash and changes no holding's value", got, want)
+	}
+
+	found := false
+	for _, r := range withRename {
+		if r.Envelope.Type != event.InstrumentSymbolChangedEventType {
+			continue
+		}
+		var changed event.InstrumentSymbolChangedPayload
+		decodeRecord(t, r, &changed)
+		if changed.InstrumentID == "AAPL" && changed.NewInstrumentID == "AAPL2" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no strategy.instrument.symbol-changed decision for AAPL -> AAPL2: the rename was not actually applied, so the matching statement above proves nothing")
 	}
 }
