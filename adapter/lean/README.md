@@ -135,11 +135,12 @@ cost more than the cash held — observed on a 2003–2014 AAPL run, where a gap
 fill on 2011-07-20 drove cash negative and the run stopped, because
 `account.snapshot` refuses a negative figure. So `Initialize` calls
 `SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage,
-AccountType.Cash)`, which must precede the explicit `SetSlippageModel` and
-`SetFeeModel` calls: calling it after was observed to reset the security's
-slippage model back to LEAN's own default (`NullSlippageModel`; see
-**Observed LEAN behaviour** below), and the adapter's `InteractiveBrokersFeeModel`
-and `NSlippageModel` must survive it. Two cases, both observed on the pinned
+AccountType.Cash)`, which must precede the explicit `SetSlippageModel`,
+`SetFillModel` and `SetFeeModel` calls: calling it after was observed to
+reset the security's slippage model back to LEAN's own default
+(`NullSlippageModel`; see **Observed LEAN behaviour** below), and the
+adapter's `InteractiveBrokersFeeModel`, `NSlippageModel` and ADR 0005 fill
+model must survive it. Two cases, both observed on the pinned
 image with a deliberately undersized cash balance:
 
 - **At submission,** an order the cash account cannot fund at its own level
@@ -161,8 +162,11 @@ image with a deliberately undersized cash balance:
   2026-09-24 (ADR 0005 and ADR 0020, as amended), the engine reserves every
   entry's and Add's worst-case cost when it proposes it, at its **price cap**
   (level + 1N) with slippage and commission, and the Baseline's order is a
-  **stop-limit** limited at that cap. A gap above the cap then does not fill
-  at all; the account type is not what bounds it. That no fill costs more
+  **stop-limit** limited at that cap, filled by the adapter's ADR 0005 fill
+  model (**The stop-limit and ADR 0005**, below). A gap above the cap then
+  fills at the cap only if the bar trades back down to it, and otherwise not
+  at all, so no fill exceeds the cap plus slippage; the account type is not
+  what bounds it. That no fill costs more
   than its hold is **exact in `cmd/backtest`**, whose commission is ADR 0013's
   schedule. In a LEAN run it holds only **up to the difference between LEAN's
   fee model and that schedule**: `InteractiveBrokersFeeModel` charges a $1.00
@@ -455,14 +459,17 @@ empty.
   (#67), the adapter invents no position logic; a `PartiallyFilled` event, or
   a `Filled` one for less than the order, stops the run with the order, tag,
   quantities and price in the reason.
-- **A fill above a stop-limit's own cap stops the run.** ADR 0005 and ADR
-  0020 (as amended 2026-09-24) both depend on a capped order never costing
-  more than its limit; if LEAN ever reports a fill of an entry's or Add's
-  stop-limit order priced above that order's own `LimitPrice`, raw, that
-  dependency is false and this adapter's understanding of LEAN's fill model
-  (**The stop-limit and ADR 0005**, above) is wrong. Rather than trust such a
-  fill, the adapter raises `Uncertain` naming the order, the fill price and
-  the limit, and the fill is never sent to the engine.
+- **A fill above a stop-limit's own cap plus its slippage stops the run.**
+  ADR 0005 and ADR 0020 (as amended 2026-09-24) both depend on a capped
+  order never executing above its limit before slippage, so never costing
+  more per share than the limit plus slippage, which is what its hold
+  reserved. If LEAN ever reports a fill of an entry's or Add's stop-limit
+  order priced above that order's own `LimitPrice`, raw, plus the raw
+  slippage the adapter's model charged on it, the adapter's fill model
+  (**The stop-limit and ADR 0005**, below) was not the one that priced it.
+  Rather than trust such a fill, the adapter raises `Uncertain` naming the
+  order, the fill price, the limit and the slippage, and the fill is never
+  sent to the engine.
 - **Where each input falls.** A slice is: reports LEAN made after the last
   slice (confirmed cancellations and amendments); this session's fills, and
   what acting on them placed; the previous Session's `account.snapshot`; this
@@ -488,7 +495,10 @@ engine supplied with it: a trade proposal's `n`, an Add proposal's
 `strategy.campaign.opened`) for an Exit Order, looked up by the order's tag.
 LEAN prices the fill in raw, so it slips by that N × the split ratio in force
 when LEAN fills the order. An order with no supplied N raises rather than
-slipping by zero.
+slipping by zero. LEAN charges it on a stop-market fill itself; a
+stop-limit's fill is priced by the adapter's ADR 0005 fill model, which
+charges the same `NSlippageModel` explicitly, because LEAN's native
+stop-limit fill applies no slippage at all (observed).
 `slippage_n` is the run's own required setting in `run.json`, never
 defaulted; set it to the configuration's `slippage_n` (0.05 in the Baseline),
 as `cash` must equal `notional_account.starting_equity`. Commission uses
@@ -504,28 +514,102 @@ Unit to raw shares, the cash account (ADR 0010) and what it does and does not
 prevent, gap-at-open behaviour, the cent tick, exact touches, same-bar
 ambiguity, amendments, intrabar ordering, entry timing, order lifetime,
 LEAN's default equity slippage, the commission schedule, partial fills and
-the price cap. Every statement about LEAN's own behaviour, the price cap's
-included, was observed on the pinned image, as follows.
+the price cap, which is now priced by the adapter's ADR 0005 fill model in
+place of LEAN's native stop-limit fill. Every statement about LEAN's own
+behaviour, and about the adapter's fill model running inside it, was
+observed on the pinned image, as follows.
 
-**The stop-limit and ADR 0005** (confirmed by a probe on the pinned image:
-see **Observed LEAN behaviour**). ADR 0005's amended fill model handles a
-triggered buy stop-limit with stop `level` and limit `cap`, against a bar
-with reference (open) `R` and low `L`, in three cases:
+**The stop-limit and ADR 0005: the adapter's ADR 0005 fill model.** ADR
+0005's amended fill model handles a triggered buy stop-limit with stop
+`level` and limit `cap`, against a bar with reference (open) `R` and low
+`L`, in three cases:
 
 - if `max(level, R)` is at or below `cap`, it fills there;
 - if `R` is above `cap` and the bar trades back down to it (`L ≤ cap`), it
   fills at `cap`;
 - otherwise it does not fill.
 
-Slippage is added in every case, so a fill never exceeds `cap` plus slippage,
-which is exactly what the engine's hold reserved. LEAN's own stop-limit fill
-model, now observed rather than read from source, is a genuinely different
-mechanism, not a variant of ADR 0005's:
+It triggers when the bar reaches the level (`high ≥ level`, an exact touch
+included), and slippage is added in every case, so a fill never exceeds
+`cap` plus slippage, which is exactly what the engine's hold reserved.
+
+LEAN's own stop-limit fill is a different mechanism (below, kept as
+history), so the owner's decision of 2026-09-25 replaced it for the
+adapter's capped buys: `algorithm.py` sets **the adapter's ADR 0005 fill
+model** (`orders.adr_0005_fill_model`) on the security, after the brokerage
+model. It is a Python subclass of LEAN's `EquityFillModel`, the model LEAN
+fills equities with on the pinned image (before and after
+`SetBrokerageModel`), and overrides one method, `StopLimitFill(asset,
+order)`, which LEAN calls through its `FillModelPythonWrapper` and which
+returns an `OrderEvent`:
+
+- **for a buy**, it reads the bar LEAN is evaluating from the inherited
+  `GetPricesCheckingPythonWrapper(asset, order.Direction)` (the daily
+  `TradeBar`'s open, high and low), the order's `StopPrice` and
+  `LimitPrice`, and its N from `NSlippageModel` (which records the charge),
+  and prices it with `stop_limit_buy_fill_price`, the Python twin of
+  `internal/fills.ExecuteStopLimit`. A fill is the whole order,
+  `OrderStatus.Filled` at that price; otherwise the event is returned
+  unfilled. As LEAN's own fills do, it fills nothing for a cancelled order,
+  while the exchange is closed (`IsExchangeOpen`), or against a bar that
+  ended at or before the order was placed.
+- **each bar decides afresh.** The order fills in the bar that triggers it
+  or not at all in that bar; nothing is carried to a later bar. Expiry stays
+  the adapter's: it cancels the order when the engine expires the proposal
+  (ADR 0011), after one session, or two for a fill-chained Add, and that
+  second session is priced from its own open exactly as `internal/fills`
+  prices it.
+- **every other order keeps `EquityFillModel`'s own fill**: a sell
+  stop-limit (the adapter places none) through the base method, and every
+  stop-market order (the Variant `uncapped`'s entries and Adds, and every
+  Exit Order) because nothing else is overridden. Those were observed to
+  match ADR 0005 already (the gap and touch rows below). Subclassing the
+  generic `FillModel` instead would not: it filled stop-market orders at
+  the bar's **close** plus or minus slippage and ignored exact touches
+  (observed).
+- **it fails closed.** LEAN catches an exception raised in a fill model,
+  logs it as an order error ("Transaction model failed to fill") and leaves
+  the order unfilled, so a raised error would not stop the run. The model
+  instead records the first thing it cannot price (a non-positive or
+  non-finite price, a cap below the stop, a bar whose high is below its low,
+  an order with no N) in `failure` and leaves the order unfilled, and
+  `algorithm.py` stops the run on it at the start of `OnData`, in the same
+  time step and before any of that slice's fills reaches the engine.
+
+**Two implementations, kept in step.** `internal/fills.ExecuteStopLimit`
+and the adapter's `stop_limit_buy_fill_price` are two implementations of
+one rule, so both answer one shared table,
+`tests/testdata/stop_limit_fill_cases.json` (bar OHLC, level, cap, N,
+`slippage_n`, and the fill or no-fill with its price), to within 1e-9:
+`TestExecuteStopLimitAnswersTheSharedCases` in `internal/fills` and
+`SharedCaseTests` here. Changing the rule in one place and not the other
+fails one of the two suites. The table's bars are **synthetic**, invented
+round numbers: market data is never committed. On the pinned image, a probe
+run locally on real AAPL daily bars placed every case the table covers as a
+real `StopLimitOrder` with the adapter's models: each LEAN fill matched
+`internal/fills`' price to 1.1e-13, or did not fill where it does not
+(**Observed LEAN behaviour**).
+
+**What still differs from `cmd/backtest`.** The tick: LEAN's stop is the
+level rounded to the cent and its limit the cap rounded down to the cent,
+so a LEAN fill can differ from `cmd/backtest`'s by that rounding. Entry
+timing (the next session). And total cost: LEAN's
+`InteractiveBrokersFeeModel` charges a $1.00 minimum per order where the
+hold reserved ADR 0013's schedule (**Costs**, above, and the fee-model gap
+#81 tracks), so a fill never costs more than the hold reserved (ADR 0020)
+up to that same fee-model difference, not exactly. As a safety net against
+a fill this model did not price, the adapter refuses rather than trusts a
+fill LEAN reports above its own `LimitPrice`, raw, plus the slippage
+charged on it (**Fills and order changes**, above).
+
+**LEAN's native stop-limit fill (history, observed before the adapter's
+model replaced it).** Now observed rather than read from source, and no
+longer used for any order the adapter places:
 
 - **the trigger is `high > level`, strictly.** An exact touch (`high == level`)
   does **not** trigger, unlike a plain stop-market order's (which does; see
   the exact-touch row below). Bracketed a cent either side of a bar's exact
-  high (549.65 triggers, 549.66 and 549.67 do not) on the pinned image.
+  high on the pinned image.
 - **once triggered, the order stays triggered**, and fills on the first bar
   from the trigger bar onward whose low is at or below the limit: at that
   bar's open when the bar is **not** the one that triggered it and the open
@@ -536,65 +620,34 @@ mechanism, not a variant of ADR 0005's:
   at `level` — instead fills at the bar's **high**, bounded by the limit, a
   worse (more expensive) price for the buyer than ADR 0005's, though never
   above the limit. A gap that trades back to the limit fills at the limit,
-  matching ADR 0005's rule 3 exactly. A bar whose low never reaches the limit
-  leaves the order resting, unfilled and still armed for the next bar — ADR
-  0005 instead expires the proposal at the very next bar, and in practice the
-  adapter cancels the LEAN order then too (an ordinary entry's or Add's
-  one-session window), so this persistence is only ever live for a
-  fill-chained Add's second session.
+  matching ADR 0005's rule 3. A bar whose low never reaches the limit leaves
+  the order resting, unfilled and still armed for the next bar, where it
+  could fill at a favorable-gap open below its own stop, a price ADR 0005
+  never produces.
 - **no slippage is applied to a stop-limit fill of either kind**:
-  `slippage_applied` is always zero, where ADR 0013 requires it on every
+  `slippage_applied` was always zero, where ADR 0013 requires it on every
   fill.
-- **the `k = 0` edge case (limit equal to stop after tick flooring) matches
-  ADR 0005's pre-slippage price only for a fill LEAN makes on the triggering
-  bar itself**: `min(high, limit)` reduces to `level` whenever the order
-  fires that bar (triggering already requires `high > level == limit`), gap
-  or no gap. That is **not** exact agreement, in three respects: an exact
-  touch (`high` equal to both `level` and `limit`) fills under ADR 0005 but
-  does not trigger under LEAN at all (the touch row above); ADR 0005 adds
-  slippage to that price where LEAN adds none, so the two never agree on the
-  actual filled price; and an order still armed into a later session — a
-  fill-chained Add's second session, most plausibly — can fill on a
-  favorable-gap open below the shared level, a price ADR 0005 never
-  produces, because it prices a buy at `max(level, open)`, never below the
-  level, even in a fill-chained Add's second session (ADR 0011, as
-  amended). A 500/500 order that opens the next session at 490 fills at 490
-  under LEAN; under ADR 0005 it fills at 500 plus slippage only if that
-  session's high reaches 500, and otherwise does not fill at all.
+- **`k = 0`** (limit equal to stop after tick flooring) matched ADR 0005's
+  pre-slippage price only for a fill on the triggering bar itself, and never
+  on an exact touch, which did not trigger.
 - **a split adjusts the limit exactly as it adjusts the stop**: both are
   multiplied by the split factor and rounded to the cent, reported in the one
-  `UpdateSubmitted` event that also halves the quantity.
+  `UpdateSubmitted` event that also halves the quantity. This is LEAN's
+  order handling, not its fill model, and still applies.
 
-**Execution price is bounded by the limit in every case observed**:
-`min(high, limit)` and a favorable-gap open at or below it are both,
-structurally, at or below the limit. **Total cost is a separate claim.**
-LEAN's `InteractiveBrokersFeeModel` charges a $1.00 minimum per order where
-the hold reserved ADR 0013's schedule (**Costs**, above, and the fee-model
-gap #81 tracks it), and the price cap does not close that gap — only the
-price side of it. So a fill never costs more than the hold reserved
-(ADR 0020) up to that same fee-model difference, not exactly, and the
-mechanism is not ADR 0005's regardless: a LEAN acceptance run's entries and
-Adds should be expected to price differently, sometimes materially, from
-`cmd/backtest`'s for the same signal. As a safety net against this adapter's
-own understanding of that mechanism being wrong, it now refuses rather than
-trusts a fill LEAN reports above its own `LimitPrice`, raw: `Uncertain`,
-naming the order, the fill price and the limit, and the fill is never sent
-to the engine (**Orders**, above).
-
-Two ways to close the pricing gap, neither implemented here: accept the
-divergence, since LEAN's own fills are already the evidence a LEAN run
-exists to gather and the two engines are "compared, never forced to agree"
-by design; or give the adapter a custom LEAN fill model
-(`Security.SetFillModel`) that reproduces ADR 0005's rule exactly, at the
-cost of a second fill-model implementation to keep in step with
-`internal/fills`. The second is a material design change and needs the
-owner's decision before it is built.
+In the 2003–2014 acceptance run under the adapter's model (below), 84 of
+the 92 capped buy fills were priced differently from what LEAN's native
+`min(high, limit)` would have charged.
 
 **Observed LEAN behaviour** (image
 `quantconnect/lean@sha256:9b8e69ec49e49f0ee207c27c6b0f3e2e6b35cfd7a241f31aa16577c6debb890d`;
 a probe algorithm on AAPL, BAC and SPY daily bars for 2–11 January 2013, a
 `StopLimitOrder` probe on AAPL for the same window and across the 2005-02-28
-split, and the acceptance run below):
+split, a probe of the adapter's ADR 0005 fill model on real AAPL daily bars
+run locally, and the acceptance runs below). The rows on a stop-limit's
+trigger, its fill inside the bar, its gaps, `k = 0` and its slippage record
+LEAN's native stop-limit fill, which the adapter's model has replaced for
+every order the adapter places; they are kept as history:
 
 | Question | Observed |
 | --- | --- |
@@ -609,6 +662,12 @@ split, and the acceptance run below):
 | A stop-limit gap above the limit, no trade-back that bar | **Does not fill that bar, but stays armed rather than expiring** (ADR 0005 would expire the proposal): stop 500.00, limit 520.00, against Jan 3 (open 547.95, high 549.66, low 541.00 > limit): no fill on Jan 3. The same order, still resting (triggered once, permanently), filled 4 sessions later (Jan 7: low 515.20 ≤ 520 ≤ high 529.30, open 522.05 above the limit so no favorable gap) at exactly 520.00 — even though that day's **close**, 524.16, ended up above the limit, confirming the fill needs the bar's low at or below the limit and never the close. A companion order (stop 500.00, limit 525.00) armed on Jan 4, whose low (525.83) missed its limit by 0.83, similarly stayed resting and filled 3 sessions later, on Jan 7, at that day's **open** (522.05, at or below the 525.00 limit): a "favorable gap" fill, logged as such — the same favorable-gap rule an ordinary resting limit order uses, available only once already triggered (row above: a gap on the triggering bar itself does not take this branch). |
 | `k = 0` (limit equal to stop) | LEAN accepts the order and fills it at exactly that shared price when triggered, in both a gap (armed at 530.00/530.00 against a bar opening at 537.15: filled at 530.00) and a non-gap trigger (armed at 548.50/548.50 against Jan 3: filled at 548.50). |
 | Slippage on a stop-limit fill | **Zero, always.** A marker slippage model returning a fixed, distinguishable 0.11 on every order was attached to the security; none of 7 stop-limit fills across both probes showed that offset — every fill matched the unslipped `min(high, limit)`, cap, or open exactly. |
+| Which fill model LEAN gives an equity | `EquityFillModel`, both at `AddEquity` and after `SetBrokerageModel(InteractiveBrokersBrokerage, AccountType.Cash)`. |
+| Overriding a stop-limit's fill from Python | A Python subclass of `EquityFillModel` set with `SetFillModel` is wrapped in LEAN's `FillModelPythonWrapper`, which calls the subclass's `StopLimitFill(asset, order)` (`Security`, `StopLimitOrder`) and takes the `OrderEvent` it returns; `super().StopLimitFill` reaches LEAN's own. The protected helpers `IsExchangeOpen(asset, False)` and `GetPricesCheckingPythonWrapper(asset, order.Direction)` (a `Prices` with the daily bar's `Open`, `High`, `Low`, `Close`, `EndTime`) are callable from the subclass. .NET `DateTime`s (`order.Time`, `Prices.EndTime` after `Extensions.ConvertToUtc`) arrive as Python `datetime`s, with no `Ticks`. `StopLimitOrder.StopTriggered` has an internal setter, so the subclass leaves it alone. A Python float assigned to `OrderEvent.FillPrice` is accepted, and LEAN's fee model still charges the fill ($1.00 on each 1-share fill). |
+| The adapter's ADR 0005 fill model against the shared cases | **Matches `internal/fills` in every case**, on real AAPL daily bars run locally (the bars are not committed): a 1-share `StopLimitOrder` for each case the shared table covers (a trigger inside the bar, an exact touch, a gap within the cap, an open exactly at the cap, a gap above the cap with a trade-back, one whose low is exactly the cap, one that closes above the cap, one with no trade-back, a level never reached, the `k = 0` variants and a second slippage figure), placed after the bar before its session and cancelled after it, with the adapter's own models (IB cash account, `NSlippageModel`, the fill model, `InteractiveBrokersFeeModel`). Every LEAN fill price equalled `internal/fills.ExecuteStopLimit`'s for the same bar to 1.1e-13, and every case `internal/fills` does not fill did not fill. |
+| Stop-market orders and sell stops alongside it | **Match ADR 0005** (`internal/fills.Execute`), unchanged by the adapter's model, in the same probe: buy stops inside the bar, on an exact touch of the high, gapped through (with LEAN's "unfavorable gap" message) and never reached; sell stops inside the bar, on an exact touch of the low, gapped through and never reached. Each filled at `internal/fills`' price, or did not fill where it does not. |
+| Subclassing the generic `FillModel` instead | **Diverges from ADR 0005 for stop-market orders**, so the adapter's model subclasses `EquityFillModel`: with the generic base, a gapped-through buy stop and sell stop each filled at the bar's **close** plus or minus slippage rather than the open, a buy stop triggered inside the bar filled at its level with no slippage, and neither exact touch filled. |
+| An exception in a fill model | **Swallowed**: LEAN logs "Order Error: id: <n>, Transaction model failed to fill for order type: StopLimit with error: ...", leaves the order unfilled, and the algorithm carries on. The adapter's model therefore records it instead: a stop-limit tagged with no N was left unfilled on a bar that reached it, with `failure` naming the order, and no LEAN error. |
 | A split and a resting stop-limit's limit | **Adjusted exactly like the stop.** A stop-limit armed at 95.00/97.00 for 10 shares before AAPL's 2005-02-28 2-for-1 (factor 0.49999860000056007) was reported, in the one post-split `UpdateSubmitted` event, as 20 shares at stop 47.50 and limit 48.50 — both the raw halved values (47.49986, 48.49986) rounded to the nearest cent, the same way and the same direction. |
 | Is a cancel synchronous? | **No.** `Cancel()` returns success with the order `CancelPending`; `Canceled` is reported after `OnData` returns, before the next slice. In the acceptance run all 15 cancellations were confirmed that way. |
 | Does `SetBrokerageModel` reset a security's own models? | **Yes, if called after them.** A security whose slippage model was set, then had `SetBrokerageModel(InteractiveBrokersBrokerage, AccountType.Cash)` called, had its slippage model reset to `NullSlippageModel`; calling `SetBrokerageModel` first and the explicit `SetSlippageModel`/`SetFeeModel` after left both as set. |
@@ -683,6 +742,36 @@ fills, rejected under the lifetime rule then in force. This historical result
 is preserved. ADR 0011's 2026-09-24 amendment now allows their extra session;
 the real-engine synthetic test verifies a chained Add is placed and filled,
 but the pinned-image acceptance run has not been repeated under that rule.
+
+The acceptance run under the adapter's ADR 0005 fill model, and under ADR
+0011's amended lifetime for fill-chained Adds: AAPL from 2003-01-01 to
+2014-12-31 with 60 warm-up bars, the Baseline's 55/20 channels, a 0.5% Unit,
+$1,000,000 and stop-limit buys capped at 1N (`gap_buffer_n` 1), by the
+recipe above with `-as-of 2003-01-01T00:00:00Z`. It ran 2,937 bars, to
+2014-06-06, and stopped at the 7-for-1 split of 2014-06-09: LEAN's rounded
+split factor (0.1428572) left it holding 27,509 raw shares where the
+engine's Units were 27,510, and the adapter's split check stopped the run
+(#222). 147 fills (34 entries, 58 Adds, 37 stops, 18 exits), none with zero
+slippage, and 655 order changes (287 submitted, 162 updated, 103 cancelled);
+14,173 records, a verified chain, a byte-identical replay, and `-verify`
+reporting the run incomplete, as a stopped run must be. Every one of the 92
+capped buy fills is `stop_limit_buy_fill_price` of LEAN's raw stop, its
+tick-floored limit and the raw bar, to 5.7e-14 (27 triggered inside the bar,
+58 gapped within the cap, 7 gapped above it and traded back); 84 of them
+would have been priced differently by LEAN's native `min(high, limit)`.
+Every one of the 55 stop and exit fills is `min(level, open)` less
+slippage, to 1.1e-13. Of 195 buy proposals (39 entries, 156 Adds), 92
+filled, and every other one was placed and is accounted for by ADR 0005:
+80 (2 entries, 78 Adds) gapped above their cap without trading back and
+were skipped, and 23 (3 entries, 20 Adds) never reached their level; each
+was cancelled when its proposal expired. All 13 fill-chained Adds were
+placed and 10 filled. The engine declined 645 Add proposals before any
+order was placed (477 at the instrument's Unit cap, 168 for insufficient
+cash), and the adapter rejected none. Cash never went negative: the lowest
+available cash reported was $125,586.58, and the last snapshot, at
+2014-06-06, had $170,081.45 available of $2,707,171.55 equity. The Exit
+Channel partial fill that stopped the previous attempt on 2005-04-15 (#233)
+did not occur in this run; that issue remains open.
 
 **Live-trading fill delivery.** The owner's 2026-09-24 clarification requires
 fills to reach the engine intraday, while subsequent orders can still work

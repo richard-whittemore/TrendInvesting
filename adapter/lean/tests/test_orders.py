@@ -1623,18 +1623,25 @@ class StartupReportTests(OrderTestCase):
         self.assertEqual([m for m in report if "unconfirmed" in m.lower() or "believed" in m], [])
         [price_cap] = [m for m in report if "price cap (ADR 0005" in m]
         for fact in (
-                "confirmed", "min(high, limit)", "does not trigger",
-                "favorable gap", "bounded by the limit",
-                # The hold guarantee is qualified by the same fee-model gap
-                # the account paragraph names, not restated as unconditional.
-                "fee-model gap #81 tracks", "above its own LimitPrice",
-                # k = 0 is agreement on the triggering bar's pre-slippage
-                # price only, not exact agreement overall: three named
-                # exceptions (the touch, slippage, a later-session favorable
-                # gap) must all still be present.
-                "k = 0", "not exact agreement", "500/500", "fills at 490",
+                # The adapter's own fill model, ADR 0005's rule, in place of
+                # LEAN's native stop-limit fill, confirmed on the pinned image
+                # against the table shared with internal/fills.
+                "adapter's ADR 0005 fill model", "not by LEAN's native stop-limit fill",
+                "EquityFillModel", "an exact touch included", "max(stop, open)",
+                "trades back down to it", "slippage_n x N", "stop_limit_fill_cases.json",
+                "to within 1e-9", "expiry stays the adapter's",
+                # The guard and the hold, qualified by the same fee-model gap
+                # the account paragraph names.
+                "above its own LimitPrice plus the slippage", "fee-model gap #81 tracks",
+                # A fill model's exception is swallowed by LEAN, so the run
+                # stops on the recorded failure instead.
+                "swallows an exception",
+                # LEAN's native model is kept as history.
+                "min(high, limit)", "favorable-gap open", "applied no slippage",
                 "the limit exactly as it adjusts its stop"):
             self.assertIn(fact, price_cap)
+        [slippage] = [m for m in report if m.startswith("adapter: fill model: slippage is")]
+        self.assertIn("adds it explicitly", slippage)
         # Logged at startup, before any bar reaches the engine.
         self.assertEqual(algo.client.sent, [])
 
