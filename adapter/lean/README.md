@@ -162,9 +162,15 @@ image with a deliberately undersized cash balance:
   entry's and Add's worst-case cost when it proposes it, at its **price cap**
   (level + 1N) with slippage and commission, and the Baseline's order is a
   **stop-limit** limited at that cap. A gap above the cap then does not fill
-  at all, so a fill cannot cost more than was reserved; the account type is
-  not what bounds it. Only the declared Variant `uncapped`, whose orders are
-  stop-market, keeps the gap exposure described here.
+  at all; the account type is not what bounds it. That no fill costs more
+  than its hold is **exact in `cmd/backtest`**, whose commission is ADR 0013's
+  schedule. In a LEAN run it holds only **up to the difference between LEAN's
+  fee model and that schedule**: `InteractiveBrokersFeeModel` charges a $1.00
+  minimum per order, and the hold reserved ADR 0013's charge. For example, a
+  one-share order at $5 reserves about $0.05 of commission and LEAN charges
+  $1.00 (see **Observed LEAN behaviour**, IB fee tier; tracked in #81). Only
+  the declared Variant `uncapped`, whose orders are stop-market, keeps the
+  gap exposure described here.
 
 LEAN's starting cash is the run's own `cash` setting in `run.json`, required
 and never defaulted. Set it to the configuration's

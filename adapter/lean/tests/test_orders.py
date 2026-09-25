@@ -1359,6 +1359,13 @@ class StartupReportTests(OrderTestCase):
         # Every statement about LEAN's own behaviour was settled by a run on
         # the pinned image except the stop-limit's, which has not been
         # observed yet and says so; none other is left as belief.
+        # The no-fill-exceeds-its-hold guarantee is exact only in cmd/backtest:
+        # LEAN's fee model can charge more than ADR 0013's schedule the hold
+        # reserves (a $1.00 minimum against a few cents), so the account
+        # statement qualifies it by that difference (#81).
+        [account] = [m for m in report if "account (ADR 0010)" in m]
+        for fact in ("exact in cmd/backtest", "fee model", "$1.00 minimum", "#81"):
+            self.assertIn(fact, account)
         unsettled = [m for m in report if "unconfirmed" in m.lower() or "believed" in m]
         self.assertEqual(len(unsettled), 1, unsettled)
         self.assertIn("price cap", unsettled[0])
