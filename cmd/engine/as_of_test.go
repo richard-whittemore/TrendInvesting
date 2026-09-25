@@ -35,9 +35,11 @@ func TestAsOfMakesJournalDeterministic(t *testing.T) {
 		{"at-first-bar", "2026-01-02T00:00:00Z", 2},
 		{"warmup-before-start", "2026-01-03T00:00:00Z", 2},
 		{"offset", "2026-01-01T01:00:00+01:00", 0},
+		// RFC 3339 section 5.6: "T" and "Z" may be lower case.
+		{"lowercase-separators", "2026-01-01t00:00:00z", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			asOf, err := time.Parse(time.RFC3339, tc.asOf)
+			asOf, err := time.Parse(time.RFC3339, strings.ToUpper(tc.asOf))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -159,7 +161,6 @@ func TestAsOfRefusesInvalidStartup(t *testing.T) {
 		{"comma fraction", []string{"-as-of", "2026-01-01T00:00:00,5Z"}, "-as-of must be an RFC 3339 time"},
 		{"offset hour out of range", []string{"-as-of", "2026-01-01T00:00:00+24:00"}, "-as-of must be an RFC 3339 time"},
 		{"offset minute out of range", []string{"-as-of", "2026-01-01T00:00:00+00:60"}, "-as-of must be an RFC 3339 time"},
-		{"lowercase separator", []string{"-as-of", "2026-01-01t00:00:00Z"}, "-as-of must be an RFC 3339 time"},
 		{"zero", []string{"-as-of", "0001-01-01T00:00:00Z"}, "-as-of must be nonzero"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

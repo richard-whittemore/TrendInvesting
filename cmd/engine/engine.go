@@ -42,6 +42,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -52,9 +53,9 @@ import (
 )
 
 // rfc3339DateTime is RFC 3339's date-time production (section 5.6):
-// full-date "T" full-time, with optional "." fractional seconds and a "Z" or
+// full-date "T" full-time ("T" and "Z" may be lower case, section 5.6), with optional "." fractional seconds and a "Z" or
 // numeric offset whose hours are 00-23 and minutes 00-59.
-var rfc3339DateTime = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]([01]\d|2[0-3]):[0-5]\d)$`)
+var rfc3339DateTime = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]([01]\d|2[0-3]):[0-5]\d)$`)
 
 // sourceEngine is stamped on the configuration input this command
 // manufactures for itself at startup, and on the outer envelope newDecider
@@ -115,7 +116,8 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	if !rfc3339DateTime.MatchString(opts.asOf) {
 		return fmt.Errorf("engine: -as-of must be an RFC 3339 time: %q is not RFC 3339 date-time syntax", opts.asOf)
 	}
-	asOf, err := time.Parse(time.RFC3339, opts.asOf)
+	// time.Parse accepts only upper-case separators; RFC 3339 allows both.
+	asOf, err := time.Parse(time.RFC3339, strings.ToUpper(opts.asOf))
 	if err != nil {
 		return fmt.Errorf("engine: -as-of must be an RFC 3339 time: %w", err)
 	}
