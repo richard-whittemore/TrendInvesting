@@ -1464,6 +1464,32 @@ class FillReturnTests(OrderTestCase):
         self.assertEqual([t for t in self.types_sent(algo, state["sent"])
                           if t.startswith("execution.")], [])
 
+    def test_a_fill_model_failure_while_acting_on_a_snapshots_decisions_sends_no_bar(self):
+        # A snapshot's decisions can place or amend an order, and LEAN's
+        # rescan can then record a fill-model failure. The next input, the
+        # session's bar, is refused at the publisher, the one chokepoint
+        # every input passes through: neither the bar nor its session close
+        # reaches the engine.
+        algo = self.start()
+        self.feed(algo, 9, [trade_proposal(9)])
+        state = {"sent": None}
+        original_act = algo.desk.act
+
+        def act(decisions, *args, **kwargs):
+            result = original_act(decisions, *args, **kwargs)
+            if state["sent"] is None and algo.client.sent \
+                    and algo.client.sent[-1]["type"] == "account.snapshot":
+                state["sent"] = len(algo.client.sent)
+                algo.fill_model.failure = "LEAN order 9 (tag=x) could not be priced"
+            return result
+
+        algo.desk.act = act
+        self.feed(algo, 10, snapshot_decisions=[proposal_expired(trade_proposal(9), 10)])
+        self.assertIsNotNone(state["sent"])
+        self.assertTrue(algo.failed)
+        self.assertIn("could not be priced", algo.quit_reason)
+        self.assertEqual(self.types_sent(algo, state["sent"]), [])
+
     def test_a_fill_model_failure_in_the_last_slice_stops_the_run_at_its_end(self):
         algo = self.start()
         self.feed(algo, 9, [trade_proposal(9)])

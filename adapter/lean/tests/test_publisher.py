@@ -13,7 +13,7 @@ if adapter_dir not in sys.path:
     sys.path.insert(0, adapter_dir)
 
 from client import Client as WireClient
-from publisher import Publisher, split_adjusted_view
+from publisher import Publisher, Refused, split_adjusted_view
 
 
 class Client:
@@ -259,6 +259,51 @@ class PublisherTests(unittest.TestCase):
         frame.index.insert(0, ("AAPL", datetime(2002, 12, 23, 16)))
         frame.iloc.insert(0, {"open": 1, "high": 1, "low": 1, "close": 1, "volume": 1})
         self.assertEqual(split_adjusted_view(frame, end)["close"], 23.056 / 28)
+
+    def test_no_input_of_any_type_is_sent_while_a_refusal_is_recorded(self):
+        # The one chokepoint every input passes through on its way to the
+        # engine: while the adapter's fill model has recorded a failure it
+        # could not price (orders.adr_0005_fill_model), nothing more may
+        # reach the engine, whatever its type (fail closed). Each attempt
+        # starts from a stream in which that input would otherwise be sent.
+        b9 = bar(9)
+        end9 = "2014-06-09T20:00:00Z"
+        attempts = {
+            "market.bar.completed": (False, lambda pub: pub.publish(
+                "AAPL", b9, split_adjusted_view(Frame(b9.EndTime), b9.EndTime), end9)),
+            "market.session.closed": (True, lambda pub: pub.publish_session_closed(end9)),
+            "account.snapshot": (True, lambda pub: pub.publish_snapshot(
+                SimpleNamespace(TotalPortfolioValue=100.0, Cash=50.0), end9)),
+            "execution.fill": (True, lambda pub: pub.publish_fill({"filled_at": end9})),
+            "execution.order.lifecycle": (True, lambda pub: pub.publish_order_lifecycle(
+                {"occurred_at": end9})),
+            "adapter.run.stopped": (True, lambda pub: pub.publish_run_stopped(
+                "delisted", "detail", "AAPL")),
+            "replay.run.completed": (True, lambda pub: pub.publish_run_completed()),
+        }
+        for event_type, (after_a_bar, attempt) in attempts.items():
+            for refused in (False, True):
+                with self.subTest(event_type, refused=refused):
+                    client = Client()
+                    failure = {"reason": None}
+                    pub = Publisher(client, "hash", "version", "test",
+                                    refusal=lambda: failure["reason"])
+                    if after_a_bar:
+                        pub.publish("AAPL", b9, split_adjusted_view(Frame(b9.EndTime),
+                                                                    b9.EndTime), end9)
+                    sent = len(client.sent)
+                    if not refused:
+                        # The same attempt is sent when nothing is recorded,
+                        # so the refusal below is the chokepoint's alone.
+                        attempt(pub)
+                        self.assertEqual([e["type"] for e in client.sent[sent:]], [event_type])
+                        continue
+                    failure["reason"] = "LEAN order 9 (tag=x) could not be priced"
+                    with self.assertRaises(Refused) as caught:
+                        attempt(pub)
+                    self.assertIn("could not be priced", str(caught.exception))
+                    self.assertEqual(len(client.sent), sent)
+                    self.assertFalse(pub.completed)
 
     def test_run_stopped_payload_matches_go_contract(self):
         client = Client()

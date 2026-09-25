@@ -51,12 +51,26 @@ def split_adjusted_view(history, end_time):
                                          ("open", "high", "low", "close", "volume")})
 
 
+class Refused(Exception):
+    """An input the publisher will not send: the run is stopping (fail closed)."""
+
+
 class Publisher:
-    """Continue cmd/engine's input stream after configuration Sequence 1."""
-    def __init__(self, client, configuration_hash, strategy_version, run_id):
+    """Continue cmd/engine's input stream after configuration Sequence 1.
+
+    Every input reaches the engine through _publish, the one chokepoint.
+    refusal, if given, is asked there before each input is sent: while it
+    returns a reason, no input of any type is sent and Refused is raised for
+    the caller to stop the run. The algorithm answers with the adapter's
+    ADR 0005 fill model's recorded failure (orders.adr_0005_fill_model),
+    which LEAN can record at any point in a slice, whenever it rescans the
+    working orders after one is placed or amended.
+    """
+    def __init__(self, client, configuration_hash, strategy_version, run_id, refusal=None):
         if not all((configuration_hash, strategy_version, run_id)):
             raise ValueError("run identity is required")
         self.client = client
+        self.refusal = refusal
         self.configuration_hash = configuration_hash
         self.strategy_version = strategy_version
         self.run_id = run_id
@@ -192,6 +206,9 @@ class Publisher:
         return decisions
 
     def _publish(self, event_type, schema_version, id_kind, payload, period_end):
+        reason = self.refusal() if self.refusal is not None else None
+        if reason is not None:
+            raise Refused("{} not sent: {}".format(event_type, reason))
         if self.completed:
             raise ValueError("no input may follow the run's completion")
         encoded = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode()

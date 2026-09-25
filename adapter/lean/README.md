@@ -572,11 +572,17 @@ returns an `OrderEvent`:
   the order unfilled, so a raised error would not stop the run. The model
   instead records the first thing it cannot price (a non-positive or
   non-finite price, a cap below the stop, a bar whose high is below its low,
-  an order with no N) in `failure` and leaves the order unfilled, and
-  `algorithm.py` stops the run on it before any queued report is sent: at
-  the start of `OnData`, before each report at every drain (LEAN rescans
-  every working order after one is placed or amended, so a failure can be
-  recorded mid-slice), and at the end of the run.
+  an order with no N) in `failure` and leaves the order unfilled. LEAN
+  rescans every working order after one is placed or amended, so a failure
+  can be recorded at any point in a slice. The guard is therefore
+  structural: `Publisher._publish`, the one method every input passes
+  through on its way to the engine, asks for the recorded failure before
+  each send and, while there is one, sends nothing and raises `Refused`, so
+  the run stops. No bar, session close, snapshot, fill, order report,
+  `adapter.run.stopped` or `replay.run.completed` reaches the engine after
+  it. `algorithm.py` also checks at the start of `OnData`, around each
+  drain and fill, and at the end of the run, which only gives the stop an
+  earlier, clearer reason.
 
 **Two implementations, kept in step.** `internal/fills.ExecuteStopLimit`
 and the adapter's `stop_limit_buy_fill_price` are two implementations of

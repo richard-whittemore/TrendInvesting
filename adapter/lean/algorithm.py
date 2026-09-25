@@ -145,7 +145,8 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.SetWarmUp(warmup, Resolution.Daily)
             self.client = Client(settings["socket"], timeout=5)
             self.publisher = Publisher(self.client, settings["configuration_hash"],
-                                       settings["strategy_version"], settings["run_id"])
+                                       settings["strategy_version"], settings["run_id"],
+                                       refusal=lambda: self.fill_model.failure)
         except Exception as err:
             self.stop("engine unavailable or invalid startup: {}".format(err))
 
