@@ -4,7 +4,7 @@
   "run_id": "golden",
   "variant": "uncapped",
   "status": "completed",
-  "strategy_version": "uncapped/1.15.0+test",
+  "strategy_version": "uncapped/1.16.0+test",
   "span_start": "2026-01-02T00:00:00Z",
   "span_end": "2026-02-02T00:00:00Z",
   "configuration": {
@@ -42,7 +42,7 @@
   "artefacts": {
     "journal_path": "../journal.golden.jsonl",
     "record_count": 322,
-    "final_record_hash": "sha256:17685dc83d15167656da04d7c71c90be0d86f15ff30423c4988b0fa3e1daf034"
+    "final_record_hash": "sha256:5ca97040c313a47abc5ced6ea67217f950dd8b9930d30a089bf11f757774692c"
   },
   "detail": ""
 }

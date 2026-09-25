@@ -66,6 +66,7 @@ func TestCloneCoversEveryReferenceTypedField(t *testing.T) {
 		"Reducer.instruments[v]->.splitAdjustedCloses (pointer)":        firstAccess,
 		"Reducer.instruments[v]->.splitAdjustedCloses->.values (slice)": firstAccess,
 		"Reducer.notionalAccount (pointer)":                             eager,
+		"Reducer.renamed (map)":                                         eager,
 		"Reducer.sessionDelistedBars (slice)":                           eager,
 	}
 	want := slices.Sorted(maps.Keys(isolation))

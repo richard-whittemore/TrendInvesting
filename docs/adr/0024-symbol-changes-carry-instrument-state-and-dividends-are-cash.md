@@ -1,0 +1,111 @@
+# ADR 0024: A symbol change carries an instrument's state to a new id, and a dividend is credited as cash
+
+- Status: Proposed
+- Date: 2026-09-25
+- Relates to: ADR 0004, ADR 0006, ADR 0008, ADR 0009, ADR 0010, ADR 0015, ADR 0019, ADR 0020, ADR 0021, ADR 0023
+
+## In plain English
+
+*A summary for reading the rest of this ADR against. Where the two differ, the detailed text below governs.*
+
+Two more corporate actions join the one ADR 0023 already added.
+
+A **symbol change** is a stock continuing under a new ticker. The engine's instrument id was already an opaque, adapter-assigned identity, never the ticker itself, so nothing about a Campaign, its indicator history or its universe classification needs to change at all — except that this reducer keys every one of those things by that id in a map, and a symbol change moves the whole entry to a new key, in one step, rather than closing the old one and opening a fresh one. That is the whole engineering problem this ADR solves: a rename, not a delisting.
+
+A **dividend** is cash paid on shares already held. It is credited to the account, exactly the way a split's cash in lieu already is (ADR 0023), and it changes nothing else: no channel level, no N, no price the rules see (ADR 0004).
+
+## Context
+
+Issue #38 asks the domain to handle two of the events the LEAN adapter will eventually emit (#28, still out of scope): a symbol change and a dividend. Both are journalled as a new `market.corporate-action` kind, following ADR 0023's shape and its schema-versioning discipline (ADR 0015).
+
+### Instrument identity: is the engine's id the ticker?
+
+No, and this is already true today, not a new decision this ADR makes. `event.CompletedBarPayload.InstrumentID` and every other payload's own instrument field carry an opaque string a producer assigns; nothing in `internal/event` or `internal/strategy` derives it from, or compares it against, a ticker. `adapter/lean/algorithm.py`'s own handling of `SymbolChangedEvents` already states this in a comment: *"A rename changes nothing for one instrument whose instrument_id this adapter holds constant, and a ticker change is not a delisting... so it is recorded here and never published."* The adapter's own instrument id is a per-`QCAlgorithm` constant, set once, and is never derived from LEAN's `Symbol` object at all.
+
+So the question issue #38 poses — "is the engine's instrument ID the ticker? If it is, a symbol change needs a mapping or a stable ID" — is answered by the existing code: it is already a stable ID, not a ticker. That does not make a symbol change a no-op in the domain, though. `Reducer.instruments` is `map[string]*instrumentState`, keyed by that id, and everything ADR 0038's acceptance criteria name — the open Campaign, its frozen N and Unit size (ADR 0006), its indicator history (N, the Entry/Exit Channels, the ranking windows), its universe classification (ADR 0009) and its resting orders (its pending proposals and their ADR 0020 holds) — lives inside the one `*instrumentState` value that key points at. A symbol change is therefore a **statement that a producer is about to start using a different key for state this reducer already holds**, and the reducer has to move it, not recompute it.
+
+This is deliberately general, not contingent on today's adapter's actual behaviour (which keeps its own id fixed across a LEAN rename and would never need this at all). A future producer — a different adapter, or the same one keying by a listing-derived id — may legitimately need the id to move. This ADR gives the domain a correct, general mechanism for that, matching ADR 0019's own words for the failure mode it must avoid: *"a symbol rename must not merge unrelated instruments."*
+
+### A dividend
+
+ADR 0004's Decision already states the rule: "dividends credited as cash events when they occur," never folded into either price series, because a dividend-adjusted history rewrites the breakout levels that actually existed. Nothing in the domain implements that yet — there is no dividend event at all. ADR 0023's cash in lieu is the closest existing shape: a corporate action's cash reaching the account only through the next previous-close snapshot (ADR 0020), with the reducer recording the credit and never touching spendable cash itself.
+
+## Decision
+
+### 1. The event: `market.corporate-action`, two new kinds
+
+`event.CorporateActionPayload` moves to schema version **3**. Kind is still a closed set, now `delisting`, `split`, `symbol-change` or `dividend`.
+
+A **symbol change** states:
+
+| Field | Meaning |
+| --- | --- |
+| `instrument_id`, `effective_at` | as for every kind: which instrument, and when |
+| `new_instrument_id` | the id `instrument_id`'s Campaign, indicator history and universe classification continue under |
+
+A **dividend** states:
+
+| Field | Meaning |
+| --- | --- |
+| `instrument_id`, `effective_at` | as for every kind |
+| `cash_amount` | the exact cash the broker paid on `instrument_id`'s held shares |
+| `currency` | that currency (shared with a split's `cash_in_lieu`) |
+
+Validate rejects a kind carrying another kind's fields, exactly as ADR 0023 already does for a delisting and a split, and now also for these two: a symbol change carries no split or dividend terms, a dividend carries no split or symbol-change terms, and so on.
+
+**The upcaster (ADR 0015).** A schema-2 record could only ever be a delisting or a split, since schema 2's Kind set held nothing else. `event.UpcastCorporateActionPayload` reads a schema-1 record forward exactly as before, and now also reads a schema-2 record forward unchanged (it never had `new_instrument_id` or `cash_amount` to lose), rejecting a schema-2 record naming a kind or field it could not have had. Every reader uses it: the reducer, and `cmd/backtest`'s re-run.
+
+### 2. The rule: a symbol change moves the whole `*instrumentState`, once, to the new key
+
+On a symbol change from `old` to `new`, the reducer:
+
+1. Refuses if either id is already delisted (ADR 0009), or if `new` already names an instrument this reducer tracks — merging two instruments' histories under one id is refused outright, never silently combined (ADR 0019's own rule, quoted above).
+2. Refuses if the change is not chronologically between Sessions, at or after `old`'s last completed bar and before either id's bar in the currently open Session — the same ADR 0010/0021 ordering every corporate action keeps.
+3. When `old` is genuinely unknown (no bar ever accepted for it), there is nothing to move, and nothing is journalled — mirroring `applyDelisting`'s identical no-op for an instrument this reducer never saw. The id is still retired (below).
+4. Otherwise, emits one `strategy.instrument.symbol-changed` decision, then moves the **same** `*instrumentState` value from key `old` to key `new`: no field is copied or recomputed, so there is nothing this move could fail to carry across by forgetting to name it. The Campaign's own denormalised `instrumentID` field (read directly by later Add proposals and Exit Orders) moves with it, in the same step. Every standing ADR 0020 hold naming `old` is re-pointed at `new`, so per-instrument cap accounting (ADR 0008) still recognises it. The instrument's declared universe classification (ADR 0009, held in a separate reducer-level map) moves too.
+
+**Why this is not a delisting plus a new instrument.** A delisting emits `strategy.campaign.exited` with `Reason: delisting` and leaves nothing behind to reopen; a fresh Campaign under a "new" instrument would start with no indicator history and no frozen values, at Unit 1. A symbol change emits neither an exit nor an open: the Campaign's identity (`CampaignID`) is unchanged, its Units are unchanged, and its frozen N and Unit size are unchanged, because it is the same value, filed under a new key.
+
+**The old id is retired.** `Reducer.renamed` records `old -> new`, mirroring `Reducer.delisted`. Unlike a delisted instrument's bar, which is absorbed (a delisting notice may legitimately name an instrument this strategy never had a stake in), a bar or a fill still naming a renamed-away id **fails closed**: the old id DID have a stake here before the rename, so a later input naming it is almost certainly a producer defect (a duplicate feed, or one that never switched to the new id), not a benign coincidence. Absorbing it would let the reducer open a fresh, zero-history Setup under a name that used to mean something else.
+
+### 3. The rule: a dividend is a cash credit, and changes nothing else
+
+On a dividend for `instrument_id`, the reducer:
+
+1. Refuses if the instrument is delisted, or if there is no open Campaign to explain the payment — a dividend is a return on held shares, and a payment this reducer can attribute to no Unit is unexplained (ADR 0019), exactly as a split's shortfall with nothing held is.
+2. Refuses a dividend at or before the instrument's last completed bar, or at or before the last dividend already applied to it (each dividend applies once; unlike a split, a Campaign may legitimately be paid several dividends over its life, so a later, genuinely different one is not refused).
+3. Otherwise, emits one `strategy.campaign.dividend` decision naming the Campaign, the cash and its currency. Nothing else moves: no Unit's quantity changes, no Exit Order is re-rested, and no channel level, N or price the rules see is touched (ADR 0004). The cash reaches spendable cash only through the next previous-close snapshot, exactly like a split's cash in lieu (ADR 0020): the reducer records the credit and never adds it to spendable cash itself.
+
+### 4. Ordering: before the decision for the bar it affects
+
+Both kinds are dispatched through the same `applyCorporateAction` entry point ADR 0023 built, which already refuses a corporate action for an instrument whose bar the open Session already holds (ADR 0021). A symbol change additionally checks the SAME rule against its own new id, since a producer could otherwise deliver the change after the new id's own first bar of the same Session — the old id's check alone would miss that. `cmd/backtest`'s `-corporate-actions` fixture delivers every action before the Session it is due for; a symbol change is matched against BOTH the id it leaves and the id its bars continue under, since the fixture's next bar for a renamed instrument never again carries the old id.
+
+### 5. The fill simulator learns both from the reducer's emissions
+
+`internal/fills` observes `strategy.campaign.dividend` by crediting the simulated account's cash, with no book effect — a dividend changes no Unit's quantity. It observes `strategy.instrument.symbol-changed` by moving the resting-order book (`Simulator.books[old] -> [new]`), the campaign's own denormalised instrument id inside it, and, when a simulated account is kept, its holding and latest close, from `old` to `new`. `Simulator.observe` still treats the `market.corporate-action` input itself as having no effect on the book, whatever its kind, for both — the same discipline ADR 0023 established.
+
+### 6. Versions
+
+- `market.corporate-action` → schema 3, with the upcaster above.
+- New decision `strategy.instrument.symbol-changed`, schema 1.
+- New decision `strategy.campaign.dividend`, schema 1.
+- `strategy.RulesVersion` 1.15.0 → **1.16.0**. Given the same inputs, a build at 1.15.0 refused both new kinds outright ("kind ... is not implemented by this reducer"); this build carries a Campaign's whole state across a symbol change and credits a dividend as cash, so the two builds do not replay each other's journals (ADR 0016). Every existing Baseline and Variant golden journal is otherwise byte-identical once `strategy_version` and every hash derived from it are excluded: no DISCLOSED rule, ladder or Baseline/Variant setting changed.
+
+### 7. What this does not do
+
+Publishing a symbol change or a dividend FROM LEAN is #28, deliberately out of scope: `adapter/lean` still only carries a split's cash in lieu across the wire. `CORPORATE_ACTION_SCHEMA_VERSION` in `adapter/lean/publisher.py` moves to 3 because the Go/Python contract test (`corporate_action_contract.go`) checks the envelope's schema version exactly, not merely that it is upcastable — the wire shape of a split is unaffected, since both new fields are `omitempty` and a split never sets them.
+
+## Alternatives rejected
+
+- **Represent a symbol change as a delisting followed by a fresh instrument.** This is explicitly what issue #38 asks NOT to build: it would lose the Campaign's frozen values and indicator history, and would report a real, ongoing position as two: one exited (wrongly, at a "last available price" that is really just the day before a ticker changed) and one newly opened at Unit 1 with no history.
+- **Copy the instrument's fields into a new state under the new key, leaving the old key in place.** This keeps two live copies of one Campaign's history, doubles every later read (which id is authoritative?), and gives ADR 0019's reconciliation exactly the merge risk it warns against, in the other direction: two ids that both look like they hold something.
+- **Give the dividend a per-share amount and have the reducer multiply by the Campaign's held quantity.** The engine's Units are in split-adjusted shares, and a dividend is paid per RAW share at the broker; computing the total from a per-share figure would require a raw/adjusted conversion this ADR has no need to introduce. Stating the exact posted cash directly, the way ADR 0023's `cash_in_lieu` already does, needs no such conversion and matches ADR 0019's own preference for "the exact posted amount," not a derived one.
+- **Let a symbol change also carry split-like share adjustments.** Nothing about a ticker change touches share counts; conflating the two kinds would resurrect exactly the field-exclusivity problem ADR 0023 solved for split vs. delisting.
+
+## Consequences
+
+- A symbol change mid-Campaign, a dividend during an open Campaign, and a split, all have failing-tests-first coverage at the reducer seam (`internal/strategy`) and the fill-simulator seam (`internal/fills`).
+- `Reducer.renamed`, `Reducer.begin`'s eager copy of it, and `transition.renameInstrument`'s commit-time deletion are new reducer-transaction machinery (docs/development.md), the first to remove an instrument's map entry rather than only add or mutate one.
+- `campaignState.instrumentID` (a denormalised copy of the map key, read directly by Add proposals, Exit Orders, cap checks and hold placement) and `hold.instrumentID` (read by per-instrument cap accounting) both need their own rewrite at a symbol change; a rename that moved only the map key would leave every subsequent decision for that Campaign silently citing the old id.
+- Every journal with a symbol change or a dividend gains a corporate-action input and one decision. Journals without either are unchanged except for the rules version.
+- Live trading needs the broker's own dividend statement, and its own confirmation of a symbol change, to be journalled as these events, with source transaction identity, before ADR 0019's reconciliation can use either as an explanation — the same live-readiness gap ADR 0023 already states for a split's cash in lieu.

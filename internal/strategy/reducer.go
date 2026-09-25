@@ -195,6 +195,18 @@ type Reducer struct {
 	// applyFill refuses an execution naming one, and applyDelisting itself
 	// treats a repeated notice as stating no new fact.
 	delisted map[string]time.Time
+	// renamed records every instrument id a symbol change has moved away
+	// from, to the instrument id its Campaign, indicator history, universe
+	// classification and resting orders continued under (ADR 0024): the
+	// symbol-change counterpart of delisted, above. It is terminal in the
+	// same way: once an id is a key here, this reducer tracks no further
+	// business under it, and a later bar naming it fails closed rather than
+	// being read as a different, coincidentally-reused instrument — unlike a
+	// delisting notice, an instrument this reducer renamed away DID have a
+	// stake here, so a bar for its old id afterwards is not absorbable the
+	// way applyCompletedBar's delisted case is (see that function's own
+	// reasoning for why the two are not the same shape).
+	renamed map[string]string
 	// classifications records, per instrument, every declared
 	// event.MarketInstrumentClassificationEventType fact (ADR 0009; ADR
 	// 0021's own market.corporate-action fact is the precedent this
@@ -369,6 +381,14 @@ type instrumentState struct {
 	// order, so a redelivered one can never reduce a Unit twice (split.go;
 	// ADR 0023).
 	lastSplitAt time.Time
+	// lastDividendAt is the EffectiveAt of the last dividend applied to this
+	// instrument, and the zero time before any: a dividend must arrive
+	// strictly after the last one applied, so a redelivered one can never
+	// credit its cash twice (dividend.go; ADR 0024). Unlike a split, a
+	// Campaign may legitimately be paid several dividends over its life, so
+	// this guards only against re-delivery of the SAME instant, never against
+	// a genuinely later one.
+	lastDividendAt time.Time
 }
 
 // NewReducer returns a Reducer that stamps every decision it emits with
@@ -402,6 +422,7 @@ func NewReducer(strategyVersion string, payload event.ConfigurationPayload) (*Re
 		configurationHash: event.ConfigurationHash(payload),
 		instruments:       make(map[string]*instrumentState),
 		delisted:          make(map[string]time.Time),
+		renamed:           make(map[string]string),
 		classifications:   make(map[string]classificationRecord),
 		acceptedFills:     make(map[string]acceptedFillState),
 	}, nil
@@ -665,6 +686,22 @@ func (r *transition) applyCompletedBar(envelope event.Envelope) ([]event.Envelop
 	}
 	if _, delisted := r.delisted[bar.InstrumentID]; delisted {
 		return nil, r.admitDelistedBar(bar)
+	}
+	// A bar naming an instrument this reducer has already renamed away FAILS
+	// CLOSED, unlike a delisted instrument's bar above (ADR 0024). The two
+	// look similar — both name an id this reducer will decide nothing
+	// further under — but a delisting notice may legitimately name an
+	// instrument this strategy never had a stake in, where a renamed-away id
+	// DID: every bar before the rename ran under it. A later bar still
+	// naming it is therefore not a benign "different, unrelated instrument"
+	// the way an unknown delisted id can be; it is almost certainly a
+	// producer defect (a duplicate feed, or one that never switched to the
+	// new id), and silently absorbing it would let the reducer open a fresh,
+	// zero-history Setup under an id whose real history it has already moved
+	// elsewhere.
+	if newID, renamed := r.renamed[bar.InstrumentID]; renamed {
+		return nil, fmt.Errorf("strategy: instrument %q: a bar arrived for it, but a symbol change already moved its Campaign, indicator history and universe classification to %q; state it under the new instrument id (ADR 0024)",
+			bar.InstrumentID, newID)
 	}
 
 	state, err := r.stateFor(bar.InstrumentID)

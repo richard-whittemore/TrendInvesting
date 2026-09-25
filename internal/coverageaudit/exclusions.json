@@ -808,6 +808,49 @@
       "statement": "return true, fmt.Sprintf(\"instrument %q is classified but has not yet been evaluated by the Baseline universe (ADR 0009, as amended 2026-09-25): the universe gate is on, and an instrument is not a candidate for a new Campaign until its own evaluation has run\", id)",
       "category": "unreachable-by-invariant",
       "reason": "evaluateUniverse runs at the top of applySessionClosed, before this gate is ever consulted, and marks every classified instrument pendingEvaluation on the very declaration that creates or updates its classificationRecord; the first Session close at or after that declaration therefore always evaluates it in the same transaction, before any Signal for it can be ranked or declined. So by the time this function reads state.universe for an instrument r.classifications already knows, evaluated is always true: this branch states the general rule ADR 0009's amendment asks for, but the reducer's own always-catch-up design leaves it unreachable today. Reachable the moment evaluateUniverse's per-instrument trigger ever admits a classified instrument that has not just been marked pending."
+    },
+    {
+      "file": "internal/strategy/dividend.go",
+      "function": "(*transition).applyDividend",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: built invalid campaign dividend payload: %w\", id, err)",
+      "category": "unreachable-by-construction",
+      "reason": "CampaignDividendPayload.Validate on a payload applyDividend assembled entirely from figures already checked upstream: CampaignID and InstrumentID come from the open Campaign and the corporate action's own InstrumentID, both required non-empty by their own contracts; CorporateActionID is the input envelope's own required ID; EffectiveAt, CashAmount and Currency are copied verbatim from CorporateActionPayload, which CorporateActionPayload.Validate (via dividendTermErrors) has already required writable, positive/finite and non-empty respectively; Rule and ADR are the package's own non-empty constants. No field is derived by arithmetic this function could get wrong."
+    },
+    {
+      "file": "internal/strategy/dividend.go",
+      "function": "(*transition).applyDividend",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal campaign dividend payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
+    },
+    {
+      "file": "internal/strategy/symbol_change.go",
+      "function": "(*transition).applySymbolChange",
+      "statement": "return nil, fmt.Errorf(\"strategy: instrument %q: built invalid instrument symbol changed payload: %w\", oldID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "InstrumentSymbolChangedPayload.Validate on a payload applySymbolChange assembled entirely from figures already checked upstream: InstrumentID and NewInstrumentID are the corporate action's own fields, which CorporateActionPayload.Validate (via symbolChangeTermErrors) has already required non-empty and distinct from each other; CorporateActionID is the input envelope's own required ID; EffectiveAt is copied verbatim from the corporate action, already required writable; CampaignID is either empty (a Setup, not a Campaign) or the open Campaign's own non-empty campaignID; Rule and ADR are the package's own non-empty constants. No field is derived by arithmetic this function could get wrong."
+    },
+    {
+      "file": "internal/strategy/symbol_change.go",
+      "function": "(*transition).applySymbolChange",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal instrument symbol changed payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
+    },
+    {
+      "file": "internal/fills/account.go",
+      "function": "(*account).renameInstrument",
+      "statement": "return fmt.Errorf(\"fills: a symbol change would continue %q's holding under %q, which the simulated account already holds shares of; a symbol change must never merge two instruments (ADR 0024)\", oldID, newID)",
+      "category": "unreachable-by-invariant",
+      "reason": "internal/fills learns its book and its simulated account's holdings ENTIRELY from the SAME reducer's own emissions (fills.go's own doc comment on its observe switch): an instrument's holding here exists only because that same reducer opened a Campaign in it. The reducer's own applySymbolChange (internal/strategy/symbol_change.go) refuses a symbol change whose NewInstrumentID already names an instrument IT tracks, before ever emitting strategy.instrument.symbol-changed -- so by the time this package observes that decision, newID cannot be an instrument the reducer, and therefore this package, already holds anything under. Reachable only if a caller feeds this package a symbol-changed decision no reducer actually emitted, which is exactly the disagreement ADR 0019 already treats as a reconciliation failure elsewhere; this guard exists for that scenario's defence in depth, not because today's wiring can reach it."
+    },
+    {
+      "file": "internal/fills/fills.go",
+      "function": "(*Simulator).observeSymbolChanged",
+      "statement": "return err",
+      "category": "unreachable-by-invariant",
+      "occurrence": 2,
+      "reason": "Propagates account.renameInstrument's own \"already holds shares\" refusal (internal/fills/account.go, its own entry in this list), which is unreachable for the identical reason: this package's account holds a position only under an instrument id the same reducer run opened a Campaign in, and the reducer's own applySymbolChange refuses a rename into an instrument id it already tracks before ever emitting the decision this function observes."
     }
   ]
 }

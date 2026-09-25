@@ -41,7 +41,7 @@ import (
 // "N event types" success line); raise it if internal/event genuinely grows,
 // but a value observed to DROP below it is a parser bug to fix first, not a
 // classification list to edit.
-const minimumDiscoveredEventTypes = 32
+const minimumDiscoveredEventTypes = 34
 
 // wireCovered is every event type this build's LEAN adapter fixtures are
 // meant to exercise — sent by the adapter, acted on when received, or
@@ -107,6 +107,14 @@ var notYetCrossed = map[string]string{
 	// above does, so it stays here alongside it rather than moving to
 	// wireCovered's "ignored decision" group on its own.
 	"strategy.universe.eligibility": "no provider-backed universe port yet; the adapter never receives this decision",
+	// ADR 0024 adds these two market.corporate-action kinds and their own
+	// decisions in the Go domain. Publishing a symbol change or a dividend
+	// FROM LEAN is #28, deliberately out of scope here: this adapter still
+	// carries only a split's cash in lieu across the wire (corporate_action_contract.go),
+	// so a fixture proving the adapter sends or acts on either of these would
+	// be fiction rather than evidence of anything it does today.
+	"strategy.instrument.symbol-changed": "LEAN publishing of symbol changes is #28, not yet built",
+	"strategy.campaign.dividend":         "LEAN publishing of dividends is #28, not yet built",
 }
 
 func main() {

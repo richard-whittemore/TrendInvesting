@@ -151,19 +151,39 @@ func TestCorporateActionPayloadCarriesNoPrice(t *testing.T) {
 	}
 }
 
+// TestUpcastCorporateActionPayloadRefusesAnUndecodableCurrentSchemaRecord
+// covers the current-schema decode branch (schema 3, ADR 0024): a record
+// stamped with today's own schema version but whose bytes are not valid
+// JSON for the payload, or that carries an unknown field, is refused rather
+// than silently misread.
+func TestUpcastCorporateActionPayloadRefusesAnUndecodableCurrentSchemaRecord(t *testing.T) {
+	t.Parallel()
+
+	_, err := event.UpcastCorporateActionPayload(event.MarketCorporateActionSchemaVersion, []byte(`{"instrument_id":"AAPL","kind":"dividend","effective_at":"2026-03-02T04:00:00Z","cash_amount":184,"currency":"USD","price":1}`))
+	if err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("UpcastCorporateActionPayload(current schema, unknown field) error = %v, want a decode failure", err)
+	}
+}
+
 func TestCorporateActionEventConstants(t *testing.T) {
 	t.Parallel()
 
 	if event.MarketCorporateActionEventType != "market.corporate-action" {
 		t.Errorf("MarketCorporateActionEventType = %q, want %q", event.MarketCorporateActionEventType, "market.corporate-action")
 	}
-	if event.MarketCorporateActionSchemaVersion != 2 {
-		t.Errorf("MarketCorporateActionSchemaVersion = %d, want 2", event.MarketCorporateActionSchemaVersion)
+	if event.MarketCorporateActionSchemaVersion != 3 {
+		t.Errorf("MarketCorporateActionSchemaVersion = %d, want 3", event.MarketCorporateActionSchemaVersion)
 	}
 	if event.CorporateActionKindDelisting != "delisting" {
 		t.Errorf("CorporateActionKindDelisting = %q, want %q", event.CorporateActionKindDelisting, "delisting")
 	}
 	if event.CorporateActionKindSplit != "split" {
 		t.Errorf("CorporateActionKindSplit = %q, want %q", event.CorporateActionKindSplit, "split")
+	}
+	if event.CorporateActionKindSymbolChange != "symbol-change" {
+		t.Errorf("CorporateActionKindSymbolChange = %q, want %q", event.CorporateActionKindSymbolChange, "symbol-change")
+	}
+	if event.CorporateActionKindDividend != "dividend" {
+		t.Errorf("CorporateActionKindDividend = %q, want %q", event.CorporateActionKindDividend, "dividend")
 	}
 }

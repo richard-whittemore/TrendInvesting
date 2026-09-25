@@ -597,9 +597,13 @@ func syncDir(dir string) error {
 // decision runs, every not-yet-delivered action naming that SAME
 // instrument, whose EffectiveAt precedes the bar's own PeriodEnd, is
 // delivered first, so a delisting reaches the reducer ahead of the bar
-// decision it forces closed (CONTEXT.md: "Delisting Exit"), and a split's
-// cash in lieu ahead of the Session whose orders it resizes (CONTEXT.md:
-// "Cash in lieu"). Every action is delivered, however many name one
+// decision it forces closed (CONTEXT.md: "Delisting Exit"), a split's cash
+// in lieu ahead of the Session whose orders it resizes (CONTEXT.md: "Cash in
+// lieu"), and a symbol change or a dividend ahead of the bar each affects
+// (ADR 0024). A symbol change is matched against both the id it leaves and
+// the id its bars continue under (deliverActionsDueFor's own doc comment),
+// since the fixture's next bar for a renamed instrument never again carries
+// the old id. Every action is delivered, however many name one
 // instrument. Positioning is per instrument rather
 // than against the bar stream as a whole because readBars promises only
 // "the order the run delivers them", never global chronology: an
@@ -610,8 +614,8 @@ func syncDir(dir string) error {
 // however it is positioned. Nothing here judges whether a given action's
 // EffectiveAt is stale relative to what the reducer has already accepted for
 // its instrument — that is the reducer's own chronology check, on its own
-// state (internal/strategy/delisting.go, split.go), and this command does
-// not reimplement it.
+// state (internal/strategy/delisting.go, split.go, symbol_change.go,
+// dividend.go), and this command does not reimplement it.
 func drive(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, bars []event.CompletedBarPayload, actions []event.CorporateActionPayload) error {
 	// The configuration event's own time is the first bar's period end: the
 	// run's configuration is in force from the moment the run starts, and
@@ -741,10 +745,28 @@ func latestPeriodEnd(bars []event.CompletedBarPayload) time.Time {
 // bars or actions happen to sit in the file. deliverInEffectiveOrder sorts
 // the due actions into one total order before delivery (inEffectiveOrder),
 // so fixture order never decides the journal.
+//
+// A symbol change (ADR 0024) is matched against BOTH instrument ids it
+// names: its own InstrumentID (the old id, whose bars stop) and
+// NewInstrumentID (the id its bars continue under). Only the old id's own
+// remaining bars, if any, would ever reach this function under InstrumentID
+// alone — the fixture's next bar for the renamed instrument arrives under
+// the NEW id, which never equals a delisting or split's own InstrumentID
+// field. Without this, a symbol change would never become due until
+// deliverRemainingActions, after every bar in the run, which violates "a
+// corporate action is applied before the decision for the bar it affects"
+// (ADR 0010/0021) for the very bar the rename exists to precede.
 func deliverActionsDueFor(ctx context.Context, simulator *fills.Simulator, recorder *journal.Recorder, cfg event.ConfigurationPayload, strategyVersion string, actions []event.CorporateActionPayload, delivered []bool, instrumentID string, boundary time.Time) error {
 	var due []int
 	for i, action := range actions {
-		if delivered[i] || action.InstrumentID != instrumentID || !action.EffectiveAt.Before(boundary) {
+		if delivered[i] || !action.EffectiveAt.Before(boundary) {
+			continue
+		}
+		matches := action.InstrumentID == instrumentID
+		if action.Kind == event.CorporateActionKindSymbolChange {
+			matches = matches || action.NewInstrumentID == instrumentID
+		}
+		if !matches {
 			continue
 		}
 		due = append(due, i)

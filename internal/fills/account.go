@@ -270,6 +270,35 @@ func (a *account) cashInLieu(instrumentID string, holdingBefore, sharesLost int6
 	return nil
 }
 
+// dividend settles a dividend (ADR 0024): the account is credited the cash,
+// with no other effect. Unlike cashInLieu, no holding changes, so there is
+// nothing to guard against disagreeing with — a dividend cannot be short a
+// share the way a split's rounding can.
+func (a *account) dividend(cash float64) {
+	a.cash += cash
+}
+
+// renameInstrument moves instrumentID's holding and latest close from oldID
+// to newID (ADR 0024), mirroring Simulator.observeSymbolChanged's move of the
+// resting-order book under the same rename. newID must not already hold a
+// position or a close: a symbol change into an instrument this account
+// already tracks would silently merge two unrelated holdings, the identical
+// concern the reducer's own applySymbolChange guards against.
+func (a *account) renameInstrument(oldID, newID string) error {
+	if _, exists := a.holdings[newID]; exists {
+		return fmt.Errorf("fills: a symbol change would continue %q's holding under %q, which the simulated account already holds shares of; a symbol change must never merge two instruments (ADR 0024)", oldID, newID)
+	}
+	if held, ok := a.holdings[oldID]; ok {
+		delete(a.holdings, oldID)
+		a.holdings[newID] = held
+	}
+	if closeAt, ok := a.closes[oldID]; ok {
+		delete(a.closes, oldID)
+		a.closes[newID] = closeAt
+	}
+	return nil
+}
+
 // delist settles a Delisting Exit: the Campaign is closed at the last
 // available price, the split-adjusted close of its last completed bar, with
 // no fill and no order (ADR 0009; ADR 0004, as amended), so the account

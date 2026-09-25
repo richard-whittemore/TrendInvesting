@@ -41,6 +41,8 @@ func marshalPayloads() []validatedPayload {
 		validExitOrderSet(), validExitOrderSetAtExitChannel(),
 		validAdapterRunStopped(), validSessionClosed(), validOrderLifecycle(),
 		validInstrumentClassification(), validUniverseEligibility(),
+		validSymbolChangeAction(), validInstrumentSymbolChanged(),
+		validDividendAction(), validCampaignDividend(),
 	}
 }
 

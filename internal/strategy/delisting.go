@@ -59,6 +59,10 @@ func (r *transition) applyCorporateAction(envelope event.Envelope) ([]event.Enve
 		return r.applyDelisting(payload, envelope)
 	case event.CorporateActionKindSplit:
 		return r.applySplit(payload, envelope)
+	case event.CorporateActionKindSymbolChange:
+		return r.applySymbolChange(payload, envelope)
+	case event.CorporateActionKindDividend:
+		return r.applyDividend(payload, envelope)
 	default:
 		return nil, fmt.Errorf("strategy: corporate action kind %q is not implemented by this reducer", payload.Kind)
 	}

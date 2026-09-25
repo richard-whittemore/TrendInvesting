@@ -24,15 +24,17 @@ const MarketCorporateActionEventType = "market.corporate-action"
 // CorporateActionPayload, for the Envelope's SchemaVersion field (ADR 0015):
 //
 //   - 1: a delisting, the only Kind, with no terms of its own.
-//   - 2: adds the split Kind and its terms (ADR 0023). A schema-1 record is
-//     read forward by UpcastCorporateActionPayload.
-const MarketCorporateActionSchemaVersion uint32 = 2
+//   - 2: adds the split Kind and its terms (ADR 0023).
+//   - 3: adds the symbol-change and dividend Kinds and their terms (ADR
+//     0024). A schema-1 or schema-2 record is read forward by
+//     UpcastCorporateActionPayload.
+const MarketCorporateActionSchemaVersion uint32 = 3
 
 // CorporateActionKindDelisting is an instrument that stopped trading
 // (CONTEXT.md: "Delisting Exit"; ADR 0009). Kind is a closed set — Validate
 // rejects anything else — so that a future corporate action (a merger, a
-// spinoff, a ticker change) is a new recognised value added deliberately, on
-// both this payload and the reducer that dispatches on it
+// spinoff) is a new recognised value added deliberately, on both this
+// payload and the reducer that dispatches on it
 // (internal/strategy/delisting.go), never a string a producer could send
 // today and have silently misread as a known kind.
 const CorporateActionKindDelisting = "delisting"
@@ -44,6 +46,20 @@ const CorporateActionKindDelisting = "delisting"
 // figures: the payload carries only what the split did not do exactly — the
 // whole raw shares lost and the cash paid for them.
 const CorporateActionKindSplit = "split"
+
+// CorporateActionKindSymbolChange is an instrument continuing under a new
+// identity: the same instrument, its Campaign, indicator history and
+// universe classification unchanged, filed under a new instrument id (ADR
+// 0024). It is not a delisting: nothing closes, and nothing about the
+// instrument's history is disowned.
+const CorporateActionKindSymbolChange = "symbol-change"
+
+// CorporateActionKindDividend is a cash dividend paid on an instrument's held
+// shares (CONTEXT.md: "Cash in lieu" states the sibling rule for a split;
+// ADR 0004, ADR 0024). It never changes a channel level, N, or any price the
+// rules see: the cash is credited to the account exactly as a split's cash in
+// lieu is, through the next previous-close snapshot (ADR 0020).
+const CorporateActionKindDividend = "dividend"
 
 // CorporateActionPayload records a fact about an instrument's own listing,
 // external to any decision this system made or any execution a venue
@@ -62,6 +78,8 @@ const CorporateActionKindSplit = "split"
 //
 // The split terms are omitted when zero, so a delisting encodes to exactly
 // the bytes it did at schema 1; a delisting carrying any of them is invalid.
+// A symbol change and a dividend each carry only their own terms, and
+// Validate rejects any kind carrying another kind's fields.
 type CorporateActionPayload struct {
 	InstrumentID string `json:"instrument_id"`
 	// Kind is one of the CorporateActionKind* constants.
@@ -74,8 +92,9 @@ type CorporateActionPayload struct {
 	// closed, never proposed first"). It must not precede the period end of
 	// the last completed bar the reducer holds for the instrument, since
 	// that bar's close is the last available price this action closes at —
-	// see internal/strategy/delisting.go's own chronology check. A split is
-	// held to the same bound (internal/strategy/split.go).
+	// see internal/strategy/delisting.go's own chronology check. A split, a
+	// symbol change and a dividend are each held to the same bound
+	// (internal/strategy/split.go, symbol_change.go, dividend.go).
 	EffectiveAt time.Time `json:"effective_at"`
 	// NewShares and OldShares are a split's ratio: NewShares new shares for
 	// every OldShares old ones (7 and 1 for a 7-for-1).
@@ -92,9 +111,23 @@ type CorporateActionPayload struct {
 	// CashInLieu is the cash the broker paid for the fractional shares, in
 	// Currency. A split that lost a share must have paid for it.
 	CashInLieu float64 `json:"cash_in_lieu,omitempty"`
-	// Currency is the currency CashInLieu is stated in, mirroring
-	// CashMovementPayload.Currency.
+	// Currency is the currency CashInLieu or CashAmount is stated in,
+	// mirroring CashMovementPayload.Currency. Shared by a split and a
+	// dividend; a delisting and a symbol change carry neither.
 	Currency string `json:"currency,omitempty"`
+	// NewInstrumentID is a symbol change's own term: the instrument id
+	// InstrumentID's Campaign, indicator history and universe classification
+	// continue under (ADR 0024). It must differ from InstrumentID and must
+	// not already name an instrument this reducer tracks — a symbol change
+	// carries one instrument's identity forward, and must never merge two
+	// (ADR 0019's own rule for reconciliation: "a symbol rename must not
+	// merge unrelated instruments").
+	NewInstrumentID string `json:"new_instrument_id,omitempty"`
+	// CashAmount is a dividend's own term: the exact cash the broker paid on
+	// InstrumentID's held shares, in Currency (ADR 0024). Unlike a split's
+	// CashInLieu, no share count changes: the dividend is credited to the
+	// account with no other effect on the Campaign.
+	CashAmount float64 `json:"cash_amount,omitempty"`
 }
 
 // Validate checks that the payload identifies an instrument, that Kind is a
@@ -107,12 +140,27 @@ func (p CorporateActionPayload) Validate() error {
 	}
 	switch p.Kind {
 	case CorporateActionKindDelisting:
-		if p.NewShares != 0 || p.OldShares != 0 || p.EngineSharesPerRawShare != 0 ||
-			p.RawSharesLost != 0 || p.CashInLieu != 0 || p.Currency != "" {
+		if p.hasSplitOnlyTerms() || p.Currency != "" {
 			errs = append(errs, errors.New("a delisting carries no split terms"))
 		}
+		if p.NewInstrumentID != "" || p.CashAmount != 0 {
+			errs = append(errs, errors.New("a delisting carries no symbol change or dividend terms"))
+		}
 	case CorporateActionKindSplit:
+		if p.NewInstrumentID != "" || p.CashAmount != 0 {
+			errs = append(errs, errors.New("a split carries no symbol change or dividend terms"))
+		}
 		errs = append(errs, p.splitTermErrors()...)
+	case CorporateActionKindSymbolChange:
+		if p.hasSplitOnlyTerms() || p.Currency != "" || p.CashAmount != 0 {
+			errs = append(errs, errors.New("a symbol change carries no split or dividend terms"))
+		}
+		errs = append(errs, p.symbolChangeTermErrors()...)
+	case CorporateActionKindDividend:
+		if p.hasSplitOnlyTerms() || p.NewInstrumentID != "" {
+			errs = append(errs, errors.New("a dividend carries no split or symbol change terms"))
+		}
+		errs = append(errs, p.dividendTermErrors()...)
 	default:
 		errs = append(errs, fmt.Errorf("kind %q is not a recognised corporate action kind", p.Kind))
 	}
@@ -126,6 +174,44 @@ func (p CorporateActionPayload) Validate() error {
 		return fmt.Errorf("invalid corporate action payload: %w", err)
 	}
 	return nil
+}
+
+// hasSplitOnlyTerms reports whether any of a split's OWN fields — its ratio,
+// EngineSharesPerRawShare, RawSharesLost or CashInLieu — is set. Currency is
+// excluded: it is shared with a dividend (both state a cash amount in it),
+// so each kind's own branch checks Currency directly instead.
+func (p CorporateActionPayload) hasSplitOnlyTerms() bool {
+	return p.NewShares != 0 || p.OldShares != 0 || p.EngineSharesPerRawShare != 0 ||
+		p.RawSharesLost != 0 || p.CashInLieu != 0
+}
+
+// symbolChangeTermErrors checks a symbol change's own terms (ADR 0024):
+// NewInstrumentID is required, and must name a different instrument than
+// InstrumentID — a symbol change carries one instrument's identity forward,
+// never to itself.
+func (p CorporateActionPayload) symbolChangeTermErrors() []error {
+	var errs []error
+	switch p.NewInstrumentID {
+	case "":
+		errs = append(errs, errors.New("new instrument id is required for a symbol change"))
+	case p.InstrumentID:
+		errs = append(errs, fmt.Errorf("new instrument id %q is the same as instrument id: a symbol change must name a different instrument", p.NewInstrumentID))
+	}
+	return errs
+}
+
+// dividendTermErrors checks a dividend's own terms (ADR 0024): CashAmount
+// must be positive and finite, and Currency is required, mirroring a split's
+// CashInLieu.
+func (p CorporateActionPayload) dividendTermErrors() []error {
+	var errs []error
+	if !isFinite(p.CashAmount) || p.CashAmount <= 0 {
+		errs = append(errs, fmt.Errorf("cash amount must be positive and finite, got %v: a dividend that paid nothing is not a dividend", p.CashAmount))
+	}
+	if p.Currency == "" {
+		errs = append(errs, errors.New("currency is required for a dividend"))
+	}
+	return errs
 }
 
 // splitTermErrors checks a split's own terms (ADR 0023).
@@ -173,15 +259,35 @@ type corporateActionV1 struct {
 	EffectiveAt  time.Time `json:"effective_at"`
 }
 
+// corporateActionV2 is the schema-2 shape: a delisting or a split, with no
+// symbol-change or dividend terms (ADR 0023). Frozen here so schema 2's own
+// field set stays exactly what it was the day ADR 0024 added new fields,
+// rather than drifting to match whatever CorporateActionPayload declares next.
+type corporateActionV2 struct {
+	InstrumentID            string    `json:"instrument_id"`
+	Kind                    string    `json:"kind"`
+	EffectiveAt             time.Time `json:"effective_at"`
+	NewShares               int64     `json:"new_shares,omitempty"`
+	OldShares               int64     `json:"old_shares,omitempty"`
+	EngineSharesPerRawShare int64     `json:"engine_shares_per_raw_share,omitempty"`
+	RawSharesLost           int64     `json:"raw_shares_lost,omitempty"`
+	CashInLieu              float64   `json:"cash_in_lieu,omitempty"`
+	Currency                string    `json:"currency,omitempty"`
+}
+
 // UpcastCorporateActionPayload decodes a market.corporate-action payload
 // recorded at schemaVersion into the current CorporateActionPayload, and
 // validates it (ADR 0015).
 //
 // Schema 1 recognised only a delisting and carried no other field, so a
-// schema-1 record is read as the schema-2 delisting it is. One that names
-// another kind, or any field schema 1 did not have, is not a schema-1
-// record and is refused, as is every schema this build does not know, older
-// or newer: an upcaster translates what an old schema said, never guesses.
+// schema-1 record is read as the schema-2 delisting it is. Schema 2
+// recognised only a delisting or a split and carried none of schema 3's
+// symbol-change or dividend fields, so a schema-2 record is read forward
+// unchanged into schema 3, which added those fields with no effect on a
+// delisting or a split's own encoding. A record naming a kind or field its
+// own schema version did not have is not a genuine record of that version
+// and is refused, as is every schema this build does not know, older or
+// newer: an upcaster translates what an old schema said, never guesses.
 // Unknown fields are refused at every version, so a producer's addition is
 // never silently dropped.
 func UpcastCorporateActionPayload(schemaVersion uint32, payload []byte) (CorporateActionPayload, error) {
@@ -196,6 +302,20 @@ func UpcastCorporateActionPayload(schemaVersion uint32, payload []byte) (Corpora
 			return CorporateActionPayload{}, fmt.Errorf("a schema-1 corporate action can only be a %q, got kind %q", CorporateActionKindDelisting, old.Kind)
 		}
 		decoded = CorporateActionPayload{InstrumentID: old.InstrumentID, Kind: old.Kind, EffectiveAt: old.EffectiveAt}
+	case schemaVersion == 2:
+		var old corporateActionV2
+		if err := decodeStrict(payload, &old); err != nil {
+			return CorporateActionPayload{}, fmt.Errorf("decode schema-2 corporate action payload: %w", err)
+		}
+		if old.Kind != CorporateActionKindDelisting && old.Kind != CorporateActionKindSplit {
+			return CorporateActionPayload{}, fmt.Errorf("a schema-2 corporate action can only be a %q or a %q, got kind %q", CorporateActionKindDelisting, CorporateActionKindSplit, old.Kind)
+		}
+		decoded = CorporateActionPayload{
+			InstrumentID: old.InstrumentID, Kind: old.Kind, EffectiveAt: old.EffectiveAt,
+			NewShares: old.NewShares, OldShares: old.OldShares,
+			EngineSharesPerRawShare: old.EngineSharesPerRawShare,
+			RawSharesLost:           old.RawSharesLost, CashInLieu: old.CashInLieu, Currency: old.Currency,
+		}
 	case schemaVersion == MarketCorporateActionSchemaVersion:
 		if err := decodeStrict(payload, &decoded); err != nil {
 			return CorporateActionPayload{}, fmt.Errorf("decode corporate action payload: %w", err)
