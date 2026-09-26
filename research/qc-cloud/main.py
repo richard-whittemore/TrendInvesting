@@ -412,8 +412,10 @@ class TurtleBaselineResearch(QCAlgorithm):
         # The Free plan allows 10 KB of log per backtest, so this line is
         # written once, at the first month with candidates, and afterwards
         # only when the filter actually drops something.
-        if (kept and not self._filter_logged) or dropped:
+        first_kept = bool(kept) and not self._filter_logged
+        if first_kept:
             self._filter_logged = True
+        if first_kept or dropped:
             self.Log("research: universe common-stock filter (SecurityType=='ST00000001') kept {} "
                      "dropped {} of {} fine candidates this month".format(kept, dropped, kept + dropped))
         return selected
@@ -1046,8 +1048,10 @@ class TurtleBaselineResearch(QCAlgorithm):
         self.decline_counts[reason] = self.decline_counts.get(reason, 0) + 1
 
     def _publish(self, key, value):
-        """Report one summary figure both as a runtime statistic, which the
-        backtest result carries with no size limit, and as a log line."""
+        """Report one summary figure both as a runtime statistic and as a log
+        line. QuantConnect truncates a long statistic value (about 200
+        characters were kept in practice), so each value is kept short and a
+        multi-part tally is split across several keys."""
         self.SetRuntimeStatistic(key, str(value))
         self.Log("research: {} = {}".format(key, value))
 
@@ -1066,8 +1070,11 @@ class TurtleBaselineResearch(QCAlgorithm):
         self._publish("Campaigns", "{} win_rate={} avg_win_R={} avg_loss_R={}".format(
             count, _fmt(win_rate), _fmt(avg_win), _fmt(avg_loss)))
         self._publish("Commission", "{:.2f}".format(self.total_commission))
-        self._publish("Declines", "; ".join("{}={}".format(k, v) for k, v in
-                                            sorted(self.decline_counts.items())) or "none")
+        # One short statistic per decline reason, never one long tally that
+        # QuantConnect would truncate.
+        self._publish("Declines", sum(self.decline_counts.values()))
+        for reason, count in sorted(self.decline_counts.items()):
+            self._publish("Decline " + reason, count)
 
         self._log_span("SPY BUY-AND-HOLD", self.spy_curve)
 

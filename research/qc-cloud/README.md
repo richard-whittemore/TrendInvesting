@@ -118,8 +118,10 @@ run finishes (see "Deviations" below for how this script keeps the log
 itself from doing that on its own). Every closing figure this script
 reports is therefore published twice, by `_publish` (`main.py`): once as a
 **runtime statistic** (`SetRuntimeStatistic`), which the backtest result
-carries with no size limit and is what you should actually read, and once
-as an ordinary **log line**, which may be truncated or missing if the log
+carries whatever the log budget, and is what you should actually read. A
+statistic's value is truncated if long (about 200 characters survived in
+practice), so every value is kept short and a tally is split into one key
+per item. Each figure is also written as an ordinary **log line**, which may be truncated or missing if the log
 budget ran out first.
 
 **In the statistics panel**, once the backtest finishes, look for these
@@ -141,8 +143,8 @@ ones this script itself adds):
   script's own reporting convention, not itself a quantity any ADR names.
 - `Commission` -- total commission paid over the run, in dollars, as
   charged by LEAN's own `InteractiveBrokersFeeModel`.
-- `Declines` -- a `reason=count` tally of every proposal this script
-  declined (an ineligible entry, an exhausted Unit cap, insufficient cash,
+- `Declines` -- the total number of proposals this script declined, and
+  one `Decline <reason>` key per reason with its count (an ineligible entry, an exhausted Unit cap, insufficient cash,
   and so on), counted rather than logged one line per decline, which is
   exactly what would exhaust the log budget by early in the run (see
   "Deviations").

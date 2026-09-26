@@ -74,9 +74,9 @@ def build():
     DIST.mkdir(exist_ok=True)
     sizes = {}
     for name in SOURCES:
-        source = (HERE / name).read_text()
+        source = (HERE / name).read_text(encoding="utf-8")
         stripped = strip_source(source)
-        (DIST / name).write_text(stripped)
+        (DIST / name).write_text(stripped, encoding="utf-8")
         sizes[name] = len(stripped)
     return sizes
 
