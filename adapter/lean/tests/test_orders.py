@@ -2206,7 +2206,7 @@ class SplitTests(OrderTestCase):
             algo.security, types.SimpleNamespace(Tag=sell.Tag)), 0.05 * 0.05 * 28)
 
     def test_a_stop_fill_in_the_splits_final_verification_slice_is_not_a_missing_stop(self):
-        # Greptile 4112071877: require_split_applied's own "final" check now
+        # require_split_applied's own "final" check now
         # runs before this slice's fills are drained, exactly like a
         # dividend or a new split, so LEAN's Portfolio and order book can
         # already reflect this session's own stop fill, closing the Unit,
@@ -2229,7 +2229,7 @@ class SplitTests(OrderTestCase):
         self.assertEqual((stop["kind"], stop["quantity"]), ("stop", 5600))
 
     def test_a_genuine_holding_mismatch_with_a_pending_fill_still_stops_after_the_drain(self):
-        # Greptile 4112182821, CodeRabbit 4112187237: the holding check must
+        # The holding check must
         # be deferred, not skipped, while this session's own fill is
         # queued. An unrelated, genuine desync -- LEAN holds a raw share the
         # fill does not explain -- must still stop the run, once the fill is
@@ -2249,8 +2249,8 @@ class SplitTests(OrderTestCase):
         self.assertIn("after this session's fills", algo.quit_reason)
 
     def test_a_dropped_exit_order_with_a_pending_fill_still_stops_after_the_drain(self):
-        # Greptile 4112182821: "this check skips every stored Exit Order,
-        # even if the fill concerns a different Unit." Unit 1's stop fires
+        # The Exit Order check must run even when the pending fill concerns
+        # a different Unit. Unit 1's stop fires
         # (the pending fill); Unit 2's own Exit Order is separately dropped
         # by LEAN and must still be caught, once the fill is drained.
         algo, sell1 = self.held()

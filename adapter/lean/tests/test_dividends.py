@@ -47,9 +47,9 @@ class DividendTests(OrderTestCase):
         start = len(algo.client.sent)
         self.pay(algo, with_bar=True)
         self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
-        # Published before this session's fills are drained (Greptile
-        # 4112071877), so it now precedes the previous close's own snapshot,
-        # not just the bar it affects.
+        # Published before this session's fills are drained, so it now
+        # precedes the previous close's own snapshot, not just the bar it
+        # affects.
         self.assertEqual(self.types_sent(algo, start), [
             "market.corporate-action", "account.snapshot", "market.bar.completed",
             "market.session.closed"])
@@ -121,8 +121,8 @@ class DividendTests(OrderTestCase):
             lambda r: r["payload"]["decisions"].append(copy.deepcopy(r["payload"]["decisions"][0])),
             lambda r: r["payload"]["decisions"][0].update(type="strategy.engine.state"),
             lambda r: r["payload"]["decisions"][0].update(schema_version=2),
-            # CodeRabbit 4112019884: a bool is an int in Python (True == 1),
-            # and a non-empty non-str id must not be accepted as one.
+            # A bool is an int in Python (True == 1), and a non-empty
+            # non-str id must not be accepted as one.
             lambda r: r["payload"]["decisions"][0].update(schema_version=True),
             lambda r: r["payload"]["decisions"][0].update(envelope_version=True),
             lambda r: r["payload"]["decisions"][0].update(id=""),
@@ -198,8 +198,8 @@ class DividendTests(OrderTestCase):
                 self.assertEqual(self.sent(algo, "market.corporate-action"), [])
 
     def test_invalid_distribution_while_flat_still_stops(self):
-        # CodeRabbit 4112019881: the flat check must not short-circuit past
-        # an invalid distribution, since the run stops on either fact.
+        # The flat check must not short-circuit past an invalid
+        # distribution, since the run stops on either fact.
         self.ratio = 1
         for distribution in (0, -1, float("nan"), float("inf")):
             with self.subTest(distribution=distribution):
@@ -241,8 +241,8 @@ class DividendTests(OrderTestCase):
                          before + 50)
 
     def test_an_add_fill_on_the_dividends_effective_date_is_credited_and_reconciled(self):
-        # Greptile 4112071877: LEAN reports a same-day fill before OnData, so
-        # its Portfolio already holds the Add's shares by the time the
+        # LEAN reports a same-day fill before OnData, so its Portfolio
+        # already holds the Add's shares by the time the
         # dividend is considered. The entitlement must stay the ex-date
         # holding (Unit 1 alone), and the same-day fill must not trip the
         # reducer's chronology guard (it must reach the engine first).
@@ -283,8 +283,8 @@ class DividendTests(OrderTestCase):
         self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
 
     def test_a_full_exit_in_the_dividends_slice_still_credits_it(self):
-        # Greptile 4112071877: LEAN's holding already reads flat by the time
-        # the dividend is considered, since its exit fill is reported before
+        # LEAN's holding already reads flat by the time the dividend is
+        # considered, since its exit fill is reported before
         # OnData, but the shares WERE held at the dividend's effective time
         # and the dividend must still be credited, not dropped as flat.
         algo, sell = self.held()
@@ -308,10 +308,9 @@ class DividendTests(OrderTestCase):
         self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
 
     def test_a_genuine_post_drain_holding_mismatch_with_a_pending_fill_stops(self):
-        # Greptile 4112182821, CodeRabbit 4112187237: dividend_action's own
-        # LEAN cross-check is deferred, not skipped, while a fill is
-        # pending -- it must run for real once the fill is drained, and a
-        # genuine, unrelated desync must still stop the run.
+        # dividend_action's own LEAN cross-check is deferred, not skipped,
+        # while a fill is pending -- it must run for real once the fill is
+        # drained, and a genuine, unrelated desync must still stop the run.
         self.ratio = 56
         algo = self.start()
         self.feed(algo, 9, [order_fixtures.trade_proposal(
@@ -342,3 +341,31 @@ class DividendTests(OrderTestCase):
         self.assertTrue(algo.failed)
         self.assertIn("holds 151 raw shares", algo.quit_reason)
         self.assertIn("after this session's fills", algo.quit_reason)
+
+    def test_a_flat_dividend_with_a_pending_entry_fill_is_reconciled_after_the_drain(self):
+        # Nothing was held at the dividend's effective time, so nothing is
+        # published; but this session's entry fill is still queued, so what
+        # LEAN holds is checked once it is drained. Holding exactly what the
+        # fill explains passes; one raw share more stops the run (ADR 0019).
+        for held, fails in ((100, False), (101, True)):
+            with self.subTest(held=held):
+                self.ratio = 56
+                algo = self.start()
+                self.feed(algo, 9, [order_fixtures.trade_proposal(
+                    9, entry_level=0.875, quantity=5600, n=0.05)])
+                self.feed(algo, 10)
+                [entry] = self.tickets(algo)
+                self.fill(algo, entry, 11, entry.StopPrice + 0.1)
+                algo.Portfolio.holdings["AAPL"] = held
+                algo.client.reply_overrides = {
+                    "execution.fill": {"payload": {"decisions": [
+                        order_fixtures.campaign_opened(campaign_n=0.05),
+                        order_fixtures.exit_order_set(11, level=0.8, quantity=5600)]}}}
+                b = bar(11)
+                algo.History = lambda *a, **k: Frame(b.EndTime, ratio=self.ratio)
+                algo.OnData(scaffold.slice_of({"AAPL": b}, dividends={"AAPL": types.SimpleNamespace(
+                    Distribution=0.25, Time=datetime(2014, 6, 11))}))
+                self.assertEqual(self.sent(algo, "market.corporate-action"), [])
+                self.assertEqual(algo.failed, fails, getattr(algo, "quit_reason", ""))
+                if fails:
+                    self.assertIn("holds {} raw shares".format(held), algo.quit_reason)

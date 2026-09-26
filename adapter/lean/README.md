@@ -186,7 +186,7 @@ and Session-close decisions (ADRs 0010/0021), including when LEAN delivers
 the dividend in a slice with no bar. A dividend while flat is logged and
 not published: there is no open Campaign to credit.
 
-**A same-day fill (Greptile 4112071877).** LEAN reports a session's own
+**A same-day fill.** LEAN reports a session's own
 fills before delivering that session's data at all, so by the time
 `OnData` runs, LEAN's `Portfolio` can already reflect a fill the engine has
 not yet been told of — an Add, a new entry, or a stop that closes the

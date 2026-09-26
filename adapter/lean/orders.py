@@ -534,13 +534,12 @@ class OrderDesk:
         # Whether the last require_split_applied call deferred its holding
         # and Exit Order checks (this session's own fill was still queued);
         # OnData calls it again after drain_order_events only when this is
-        # true (Greptile 4112182821, CodeRabbit 4112187237).
+        # true.
         self.split_check_deferred = False
         # A dividend's own effective_at when its entitlement was taken from
         # the engine's Units alone because this session's fill was still
         # queued (dividend_action); None otherwise. require_dividend_reconciled
-        # checks it once that fill is drained (Greptile 4112182821,
-        # CodeRabbit 4112187237).
+        # checks it once that fill is drained.
         self.dividend_to_reconcile = None
         # Actual instrument bars, never fill times or deferred snapshots.
         # ADR 0011 gives fill-chained Adds one additional observed session.
@@ -789,7 +788,7 @@ class OrderDesk:
 
     def _fills_pending(self):
         """Whether this session's own fills are still queued, undelivered to
-        the engine (Greptile 4112071877).
+        the engine.
 
         A split or dividend is now published before drain_order_events, so
         that its effective time, strictly between Sessions, precedes this
@@ -808,15 +807,15 @@ class OrderDesk:
         """State the dividend on the raw shares held at its effective time
         (ADRs 0004, 0024): the engine's Units before this session's own
         fills, its ex-date entitlement, never a live LEAN figure a same-day
-        fill may already have moved (Greptile 4112071877).
+        fill may already have moved.
 
         Exit Orders mirror the engine's held Units. Once nothing from this
         session is still queued, their raw quantities are required to match
         LEAN's own exactly; a dividend cannot explain a share difference
         otherwise (ADR 0019). Flat holdings have no Campaign to credit.
         """
-        # CodeRabbit 4112019881: validated before the flat return below, so an
-        # invalid distribution stops the run whether or not shares are held.
+        # Validated before the flat return below, so an invalid distribution
+        # stops the run whether or not shares are held.
         if not isfinite(distribution) or distribution <= 0:
             raise Uncertain("dividend distribution must be positive and finite (ADR 0024)")
         pending = self._fills_pending()
@@ -825,6 +824,12 @@ class OrderDesk:
                 # Whatever LEAN now holds was acquired only this session,
                 # after the dividend's own effective time; nothing was held
                 # then, so this is the same case as an ordinary flat holding.
+                # The fill itself is not yet applied, though, so what it
+                # ought to leave LEAN holding is checked once it is
+                # (require_dividend_reconciled): a genuine disagreement,
+                # such as LEAN holding one more raw share than the fill
+                # explains, must still stop the run.
+                self.dividend_to_reconcile = effective_at
                 return None
             holding = _whole(self.algorithm.Portfolio[self.symbol].Quantity)
             if holding == 0:
@@ -849,10 +854,10 @@ class OrderDesk:
                                               self.algorithm.Portfolio[self.symbol].Quantity,
                                               sum(quantities), ratio))
         else:
-            # Deferred, not skipped (Greptile 4112182821, CodeRabbit
-            # 4112187237): LEAN's own holding cannot be trusted against the
-            # engine's Units until this session's fill is drained and
-            # applied, so require_dividend_reconciled checks it then.
+            # Deferred, not skipped: LEAN's own holding cannot be trusted
+            # against the engine's Units until this session's fill is
+            # drained and applied, so require_dividend_reconciled checks it
+            # then.
             self.dividend_to_reconcile = effective_at
         cash = float(Decimal(str(distribution)) * holding)
         if not isfinite(cash) or cash <= 0:
@@ -874,10 +879,9 @@ class OrderDesk:
                     ("instrument_id", "effective_at", "cash_amount", "currency")}
         expected.update(campaign_id=next(iter(campaigns)), corporate_action_id=action_id,
                         rule="campaign.dividend.credited-as-cash", adr="0024")
-        # CodeRabbit 4112019884: a bool is an int in Python (True == 1 and
-        # isinstance(True, int)), and a loosely truthy id (a number, a list)
-        # is not a decision identifier, so each is checked by exact type, not
-        # value alone.
+        # A bool is an int in Python (True == 1 and isinstance(True, int)),
+        # and a loosely truthy id (a number, a list) is not a decision
+        # identifier, so each is checked by exact type, not value alone.
         unexpected = not isinstance(decision, dict) or \
             decision.get("type") != "strategy.campaign.dividend" or \
             type(decision.get("schema_version")) is not int or decision.get("schema_version") != 1 or \
@@ -891,8 +895,7 @@ class OrderDesk:
     def require_dividend_reconciled(self):
         """After this session's fills are drained, verify a dividend whose
         entitlement came from the engine's Units alone against LEAN's own,
-        now-current holding (ADR 0019; Greptile 4112182821, CodeRabbit
-        4112187237).
+        now-current holding (ADR 0019).
 
         A no-op unless dividend_action deferred exactly this check because a
         fill was still queued when the dividend was published. Reuses
@@ -1014,11 +1017,12 @@ class OrderDesk:
         raw holding is the sum of their quantities at the ratio in force.
 
         Skipped while this session's own fill is still queued, undelivered to
-        the engine (Greptile 4112071877): a split is now checked before
-        drain_order_events, so LEAN's Portfolio can already reflect a fill
-        the engine's Units do not yet, and the two cannot be compared until
-        it is drained (dividend_action's own doc comment states the same
-        rule for a dividend).
+        the engine: a split is now checked before drain_order_events, so
+        LEAN's Portfolio can already reflect a fill the engine's Units do
+        not yet, and the two cannot be compared until it is drained
+        (dividend_action's own doc comment states the same rule for a
+        dividend). The caller re-checks this once the fill is drained
+        (require_split_applied, require_dividend_reconciled).
         """
         if self._fills_pending():
             return []
@@ -1034,12 +1038,12 @@ class OrderDesk:
         no stop, whatever the holding says.
 
         Skipped while this session's own fill is still queued, undelivered to
-        the engine (Greptile 4112071877): a Unit's own stop can be exactly
-        such a fill, already Filled at LEAN but not yet reported to the
-        engine, which would otherwise read as a missing stop rather than the
-        ordinary close this check runs to catch problems the fill itself
-        does not already explain (_holding_problems' own doc comment states
-        the same rule).
+        the engine: a Unit's own stop can be exactly such a fill, already
+        Filled at LEAN but not yet reported to the engine, which would
+        otherwise read as a missing stop rather than the ordinary close this
+        check runs to catch problems the fill itself does not already
+        explain (_holding_problems' own doc comment states the same rule,
+        including the re-check once the fill is drained).
         """
         if self._fills_pending():
             return []
@@ -1067,10 +1071,10 @@ class OrderDesk:
         time step and before the next session's fills; then again, final, at
         the next slice's start, as a second line.
 
-        Deferred, not skipped, while this session's own fill is still queued
-        (Greptile 4112182821, CodeRabbit 4112187237): the holding and Exit
-        Order checks below stand down rather than compare against a LEAN
-        figure the engine's Units do not yet reflect, but split_to_check
+        Deferred, not skipped, while this session's own fill is still queued:
+        the holding and Exit Order checks below stand down rather than
+        compare against a LEAN figure the engine's Units do not yet reflect,
+        but split_to_check
         stays set so this same check runs again, for real, once OnData has
         drained the queue and the engine's Units are current. Only that
         later, fully-checked call clears it. self.split_check_deferred
@@ -1132,7 +1136,7 @@ class OrderDesk:
         else:
             # split_to_check is still set: the holding and Exit Order checks
             # were deferred (this session's own fill is still queued), so
-            # this is not yet a full reconciliation (Greptile 4112182821).
+            # this is not yet a full reconciliation.
             self.algorithm.Log("adapter: split at {} {}: this session's own fill is still queued, "
                                "so the holding and Exit Order checks are deferred until it is "
                                "drained".format(split_at, when))
