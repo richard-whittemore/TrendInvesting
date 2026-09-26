@@ -264,8 +264,24 @@ type Reducer struct {
 	// for it or any earlier period end. sessionDelistedBars names the open
 	// Session's bars for delisted instruments, which decide nothing but are
 	// still bars the close must name.
+	//
+	// sessionGeneration counts every Session that has ever OPENED (its first
+	// bar), 1 for the first one, incremented in admitToSession — never reset,
+	// never decremented, and untouched by a Session's own close. Unlike
+	// sessionPeriodEnd, comparing generations survives a fill whose own
+	// FilledAt is not literally the Session's period end: a live venue
+	// reports a fill at its own execution instant, which precedes the
+	// Session's close by however long the trading day still had left, and a
+	// backtest's open-instant fill is stamped at the NEW Session's period end
+	// while delivered before that Session has even opened. unit_caps.go's
+	// protectedSessionGeneration is the one place that turns "when did this
+	// fill happen" into "which Session's decisions must still count it as
+	// committed", and it reads only sessionOpen/sessionGeneration/
+	// hasClosedSession/lastClosedSession — never a fill's own timestamp
+	// against sessionPeriodEnd.
 	sessionOpen         bool
 	sessionPeriodEnd    time.Time
+	sessionGeneration   int
 	hasClosedSession    bool
 	lastClosedSession   time.Time
 	sessionDelistedBars []string
@@ -376,29 +392,37 @@ type instrumentState struct {
 	// across a later Campaign's whole life: see
 	// checkBarConfirmsCampaignClosing (campaign.go) for why that is safe.
 	lastClosingFillAt time.Time
-	// unitsFreedThisSession and unitsFreedThisSessionClassification
-	// accumulate every Unit a stop or exit fill has closed for this
-	// instrument's Campaign since the Session ending unitsFreedThisSessionAt
-	// began — partial or full — together with the classification those
-	// Units counted against (ADR 0008). ADR 0010's Unit-cap headroom is
-	// "known at the previous close": a Unit a Session's own fill frees must
-	// still count as committed for every decision that SAME session-close
-	// pass makes (unit_caps.go's instrumentUnits/groupUnits), whether the
-	// closing fill was delivered before the pass — a stop gapping through at
-	// the Session's own open, internal/fills.RunSession's own open-instant
-	// pass — or during it. Every fill this instrument sees within one
-	// Session shares that Session's own period end as its FilledAt (fills.go
-	// stamps every fill at its bar's period end), so comparing FilledAt
-	// against the stored unitsFreedThisSessionAt is what tells "another fill
-	// in the SAME Session" apart from "the first fill of a LATER one": a
-	// later value starts the count over rather than adding to it.
-	// unit_caps.go's freedThisSessionUnits reads these only while the
-	// Session they were recorded in is still the one being decided
-	// (transition.sessionPeriodEnd), so a Unit freed on Session t is
-	// available again on Session t+1, exactly once (ADR 0010).
+	// unitsFreedThisSession, unitsFreedThisSessionClassification and
+	// unitsFreedThisSessionGeneration accumulate every Unit a stop or exit
+	// fill has closed for this instrument's Campaign since the Session
+	// identified by unitsFreedThisSessionGeneration began — partial or full —
+	// together with the classification those Units counted against (ADR
+	// 0008). ADR 0010's Unit-cap headroom is "known at the previous close": a
+	// Unit a Session's own fill frees must still count as committed for
+	// every decision that SAME session-close pass makes (unit_caps.go's
+	// instrumentUnits/groupUnits), whether the closing fill was delivered
+	// before the pass — a stop gapping through at the Session's own open,
+	// internal/fills.RunSession's own open-instant pass, or a live fill
+	// reported at its own execution instant before that day's bar and close
+	// (ADR 0021 §6's amendment) — or during it.
+	//
+	// The Session is identified by Reducer.sessionGeneration, not by
+	// comparing a fill's own FilledAt against sessionPeriodEnd: a backtest's
+	// open-instant fill IS stamped at the new Session's own period end
+	// (fills.go), but a live fill's FilledAt is its real execution instant,
+	// earlier than the Session's close by however much of the trading day
+	// was still ahead of it, and an intrabar fill within the Session that is
+	// currently open must be protected regardless of how early or late its
+	// own timestamp falls within that Session. unit_caps.go's
+	// protectedSessionGeneration derives the right generation to record
+	// against from Reducer's own session bookkeeping, never from the fill.
+	// freedThisSessionUnits reads these only while the Session identified by
+	// unitsFreedThisSessionGeneration is still the CURRENT one
+	// (Reducer.sessionGeneration), so a Unit freed on Session t is available
+	// again on Session t+1, exactly once (ADR 0010).
 	unitsFreedThisSession               int
 	unitsFreedThisSessionClassification classification
-	unitsFreedThisSessionAt             time.Time
+	unitsFreedThisSessionGeneration     int
 	// lastSplitAt is the EffectiveAt of the last split applied to this
 	// instrument, and the zero time before any: each split applies once, in
 	// order, so a redelivered one can never reduce a Unit twice (split.go;

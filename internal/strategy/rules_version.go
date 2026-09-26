@@ -282,21 +282,36 @@ package strategy
 //
 // Bumped 1.17.0 -> 1.18.0 (ADR 0010, ADR 0008's RulesVersion 1.10.0
 // note, ADR 0020's own amendment "a proposal reserves its cash and its cap
-// headroom"): a Campaign closed by a stop or exit fill delivered DURING a
-// Session still counts as committed for every ADR 0008 cap it counted
-// towards, for the REST of that SAME Session's own Add and entry checks
-// (unit_caps.go's instrumentUnits/groupUnits, fed by the new
-// instrumentState.unitsFreedThisSession bookkeeping, recorded at the same
-// point applyStopFill and applyExitFill already close a Campaign). Before,
-// those two functions read only the CURRENTLY open Campaign's Units, so a
-// Campaign closed ahead of its own Session's market.session.closed — a stop
-// gapping through at the Session's own open, exactly what
-// internal/fills.RunSession's own open-instant pass delivers before that
-// Session's bars — silently dropped out of every cap it counted towards one
-// full Session early. Cash was never affected: ADR 0020's ledger already
-// credits nothing from a sell fill within the bar it happens in, only
-// through a later account.snapshot, so this is a changed PREDICATE for cap
-// headroom alone, mirroring the shape of the 1.9.0 and 1.10.0 bumps above.
+// headroom"): a Campaign closed by a stop or exit fill still counts as
+// committed for every ADR 0008 cap it counted towards, for the REST of the
+// Session that fill belongs to (unit_caps.go's instrumentUnits/groupUnits,
+// fed by the new instrumentState.unitsFreedThisSession bookkeeping, recorded
+// at the same point applyStopFill and applyExitFill already close a
+// Campaign). Before, those two functions read only the CURRENTLY open
+// Campaign's Units, so a Campaign closed ahead of its own Session's
+// market.session.closed — a stop gapping through at the Session's own open,
+// exactly what internal/fills.RunSession's own open-instant pass delivers
+// before that Session's bars — silently dropped out of every cap it counted
+// towards one full Session early.
+//
+// Which Session a fill belongs to is decided by Reducer.sessionGeneration
+// (session.go's admitToSession, incremented once per Session opened), never
+// by comparing the fill's own FilledAt against the Session's own period end:
+// a backtest's open-instant fill happens to share that period end, but a
+// live venue reports a fill at its own execution instant — earlier than the
+// Session's close by however much of the trading day remained — and ADR
+// 0021 §6's amendment delivers "this Session's fills" ahead of "this
+// Session's bar, and its market.session.closed" in a live per-slice order.
+// unit_caps.go's protectedSessionGeneration is the one place that turns a
+// fill's arrival, relative to what this reducer has already decided, into
+// the Session it must still be counted against; a fill needing no
+// protection at all (one whose own Session already ran its Adds and
+// entries, exactly internal/fills.RunSession's own intrabar-fixpoint shape)
+// leaves the bookkeeping untouched. Cash was never affected: ADR 0020's
+// ledger already credits nothing from a sell fill within the bar it happens
+// in, only through a later account.snapshot, so this is a changed PREDICATE
+// for cap headroom alone, mirroring the shape of the 1.9.0 and 1.10.0 bumps
+// above.
 //
 // Given the same inputs, a run with an open Campaign whose stop or exit gaps
 // through on the SAME Session another instrument's own entry or Add is

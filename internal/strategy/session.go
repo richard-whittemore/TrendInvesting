@@ -55,6 +55,11 @@ func (r *transition) admitToSession(bar event.CompletedBarPayload) error {
 	}
 	r.sessionOpen = true
 	r.sessionPeriodEnd = bar.PeriodEnd
+	// Every Session that ever opens gets the next generation, once, here —
+	// the one place unit_caps.go's protectedSessionGeneration and
+	// freedThisSessionUnits both read (Reducer.sessionGeneration's own doc
+	// comment).
+	r.sessionGeneration++
 	return nil
 }
 

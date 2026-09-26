@@ -2,8 +2,10 @@ package strategy_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/sizing"
 )
 
 // This file holds ADR 0010's own previous-close basis, extended by the
@@ -204,5 +206,140 @@ func TestEntryMayUseCapHeadroomFreedByAnExitOnTheFollowingSession(t *testing.T) 
 	}
 	if declines := proposalDeclinedFor(t, emitted, "NEW"); len(declines) != 0 {
 		t.Fatalf("got %d decline(s) for NEW, want 0", len(declines))
+	}
+}
+
+// TestEntryCannotUseCapHeadroomFreedByAnExitTimestampedBeforeThePeriodEnd is
+// the live-trading shape of the same rule: a stop or exit fill's own FilledAt
+// is its real execution instant, not the Session's own close (ADR 0021 §6's
+// amendment: a live adapter reports "this Session's fills" ahead of "this
+// Session's bar, and its market.session.closed"). Comparing a fill's FilledAt
+// against the Session's own period end — rather than against which Session
+// is actually open — would miss this shape entirely: the fill is delivered
+// WHILE the Session is already open (its own bar has arrived), but its own
+// timestamp is hours earlier than the Session's close. OLD's Unit must still
+// be committed for NEW's own entry, decided at that SAME Session's close.
+func TestEntryCannotUseCapHeadroomFreedByAnExitTimestampedBeforeThePeriodEnd(t *testing.T) {
+	t.Parallel()
+
+	cfg := headroomCapConfig()
+	s, campaignID, unitID, quantity, newBars := buildOldCampaignAndSharedSessionBreakout(t, cfg)
+	priorBar := newBars[len(newBars)-2]
+	breakoutBar := newBars[len(newBars)-1]
+	s.bar(priorBar)
+
+	// The Session is opened by NEW's own bar FIRST, so it is already open —
+	// sessionOpen is true — when OLD's stop fill arrives. That fill's own
+	// FilledAt is hours before the Session's own period end, exactly what a
+	// live venue reports for an intraday execution, and unlike every other
+	// fixture in this file it is NOT equal to breakoutBar.PeriodEnd.
+	stop := event.FillPayload{
+		InstrumentID: "OLD",
+		Kind:         event.FillKindStop,
+		CampaignID:   campaignID,
+		FillID:       "old-fill-stop-intraday",
+		UnitIDs:      []string{unitID},
+		Direction:    event.DirectionLong,
+		Quantity:     quantity,
+		Price:        1,
+		FilledAt:     breakoutBar.PeriodEnd.Add(-4 * time.Hour),
+	}
+
+	emitted := s.barOnly(breakoutBar).fill(stop).closeSession(breakoutBar.PeriodEnd, "NEW").mustRun()
+
+	if exited := envelopesOfType(emitted, event.CampaignExitedEventType); len(exited) != 1 {
+		t.Fatalf("fixture error: got %d campaign-exited event(s) for OLD, want exactly 1", len(exited))
+	}
+	if proposals := tradeProposalsFor(t, emitted, "NEW"); len(proposals) != 0 {
+		t.Fatalf("got %d trade proposal(s) for NEW, want 0: OLD's Unit is still committed for the Session that was already open when its exit fill arrived, whatever that fill's own timestamp says (ADR 0010)", len(proposals))
+	}
+	declines := proposalDeclinedFor(t, emitted, "NEW")
+	if len(declines) != 1 {
+		t.Fatalf("got %d decline(s), want exactly 1, for NEW", len(declines))
+	}
+	if declines[0].Cap != event.CapTotalLong || declines[0].PostTradeExposure != oldMaxUnitsTotalLong+1 {
+		t.Errorf("decline = %+v, want the total-long cap exceeded by OLD's still-committed Unit plus NEW's own", declines[0])
+	}
+}
+
+// TestTwoClosingFillsInOneSessionAtDifferentTimestampsBothStayCommitted pins
+// the accumulation half of the same mechanism: a two-Unit Campaign closed by
+// TWO separate stop fills within one Session — Unit 1 first, Unit 2 a few
+// hours later — must keep BOTH Units committed for that Session's own
+// decisions, not just the most recently recorded one. A reset keyed to
+// timestamp EQUALITY (rather than to which Session's decisions the fill
+// belongs to) would silently forget Unit 1's the moment Unit 2's
+// differently-timestamped closing fill arrived.
+func TestTwoClosingFillsInOneSessionAtDifferentTimestampsBothStayCommitted(t *testing.T) {
+	t.Parallel()
+
+	// The per-instrument cap must allow 2 Units so OLD can hold both before
+	// either closes; total-long is what this test actually binds, at 2 —
+	// OLD's own two Units alone spend it.
+	cfg := compactChannelConfig(2, 1_000_000, 1_000_000, 2)
+
+	proposal, oldPeriodEnd := probeCompactEntryFull(t, cfg)
+	unit1ID := "old-two-fill-unit1"
+	oldFill := compactEntryFill("OLD", oldPeriodEnd, unit1ID, proposal.Quantity, proposal.EntryLevel)
+	oldCampaignID := testDecisionID("campaign", "OLD", oldPeriodEnd)
+
+	// Unit 2, added the day after OLD opens, at the rung ADR 0006's Add
+	// Ladder arithmetic actually produces from Unit 1's own fill — computed,
+	// never hand-typed, so this fixture cannot silently drift from the
+	// production arithmetic it depends on (add_test.go's own discipline).
+	// addOpportunityBar's own fixed Low/Close (150) belongs to the unrelated
+	// breakoutBars price scale (entries near 200); this fixture's own compact
+	// scale (entries near 120) needs its own bar, with a Low comfortably
+	// above the compact fixture's warmed-up Exit Channel (100) and below the
+	// rung, so the bar reaches the Add opportunity without also breaching the
+	// Exit Channel.
+	rung2, err := sizing.NextAddLevel(proposal.EntryLevel, proposal.N, sizing.DirectionLong)
+	if err != nil {
+		t.Fatalf("NextAddLevel() error = %v", err)
+	}
+	addBar := completedBar("OLD", oldPeriodEnd.AddDate(0, 0, 1), rung2+1, 115, 115)
+	unit2ID := "old-two-fill-unit2"
+	unit2Fill := addFill("OLD", oldCampaignID, 2, addBar.PeriodEnd, unit2ID, rung2, proposal.Quantity, addBar.PeriodEnd)
+
+	s := newStream(t, cfg).bars(compactEntryBars("OLD", 0)).fill(oldFill).bar(addBar).fill(unit2Fill)
+
+	newBars := compactEntryBars("NEW", compactEntryStride)
+	for _, b := range newBars[:len(newBars)-2] {
+		s.bar(b)
+	}
+	priorBar := newBars[len(newBars)-2]
+	breakoutBar := newBars[len(newBars)-1]
+	s.bar(priorBar)
+
+	// Both of OLD's Units close in the Session shared with NEW's own
+	// breakout, delivered — as internal/fills.RunSession's own open-instant
+	// pass would deliver a gapped stop — before that Session's own bar and
+	// close, each timestamped hours apart from the other.
+	stop1 := stopFillForUnits("OLD", oldCampaignID, "old-two-fill-stop1", []string{unit1ID}, 1, proposal.Quantity, breakoutBar.PeriodEnd.Add(-3*time.Hour))
+	stop2 := stopFillForUnits("OLD", oldCampaignID, "old-two-fill-stop2", []string{unit2ID}, 1, proposal.Quantity, breakoutBar.PeriodEnd.Add(-1*time.Hour))
+
+	emitted := s.fill(stop1).fill(stop2).barOnly(breakoutBar).closeSession(breakoutBar.PeriodEnd, "NEW").mustRun()
+
+	stopped := envelopesOfType(emitted, event.CampaignUnitsStoppedEventType)
+	if len(stopped) != 2 {
+		t.Fatalf("fixture error: got %d units-stopped event(s) for OLD, want exactly 2 (one per fill)", len(stopped))
+	}
+	if exited := envelopesOfType(emitted, event.CampaignExitedEventType); len(exited) != 1 {
+		t.Fatalf("fixture error: got %d campaign-exited event(s) for OLD, want exactly 1 (the second, closing fill)", len(exited))
+	}
+
+	if proposals := tradeProposalsFor(t, emitted, "NEW"); len(proposals) != 0 {
+		t.Fatalf("got %d trade proposal(s) for NEW, want 0: BOTH of OLD's Units, closed minutes apart in the SAME Session, are still committed for it", len(proposals))
+	}
+	declines := proposalDeclinedFor(t, emitted, "NEW")
+	if len(declines) != 1 {
+		t.Fatalf("got %d decline(s), want exactly 1, for NEW", len(declines))
+	}
+	// Both of OLD's Units, still committed, plus NEW's own proposed one: 3,
+	// one past the cap of 2. A reset-on-timestamp-mismatch bug would instead
+	// see only Unit 2 (the most recently recorded fill), giving 2 — which
+	// does not exceed the cap and would wrongly propose NEW's entry.
+	if declines[0].Cap != event.CapTotalLong || declines[0].PostTradeExposure != 3 {
+		t.Errorf("decline = %+v, want the total-long cap exceeded with PostTradeExposure 3 (OLD's two still-committed Units plus NEW's own)", declines[0])
 	}
 }
