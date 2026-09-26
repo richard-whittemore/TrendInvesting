@@ -209,6 +209,22 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             return
         try:
             self.desk.require_cancels_confirmed("before the next session's bar", requested_earlier)
+            # Deferred, not skipped (Greptile 4112182821, CodeRabbit
+            # 4112187237): the checks above ran before this session's own
+            # fill was drained, so a split's or a dividend's holding and
+            # Exit Order comparison against LEAN, if it stood down because
+            # that fill was still queued, runs for real now that it is
+            # applied and the engine's Units are current.
+            # require_split_applied is called again only when its own first
+            # call this slice actually deferred (split_check_deferred) --
+            # never unconditionally, since a split just detected this same
+            # slice (apply_split, above) has not yet reached its own
+            # scheduled check and must not be verified "final" here.
+            # require_dividend_reconciled is its own no-op unless
+            # dividend_action deferred.
+            if self.desk.split_check_deferred:
+                self.desk.require_split_applied("after this session's fills", final=True)
+            self.desk.require_dividend_reconciled()
         except Exception as err:
             self.stop("order state uncertain: {}".format(err))
             return

@@ -306,3 +306,39 @@ class DividendTests(OrderTestCase):
         self.assertEqual(action["payload"]["cash_amount"], 25)
         algo.OnEndOfAlgorithm()
         self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+
+    def test_a_genuine_post_drain_holding_mismatch_with_a_pending_fill_stops(self):
+        # Greptile 4112182821, CodeRabbit 4112187237: dividend_action's own
+        # LEAN cross-check is deferred, not skipped, while a fill is
+        # pending -- it must run for real once the fill is drained, and a
+        # genuine, unrelated desync must still stop the run.
+        self.ratio = 56
+        algo = self.start()
+        self.feed(algo, 9, [order_fixtures.trade_proposal(
+            9, entry_level=0.875, quantity=5600, n=0.05)])
+        [entry] = self.tickets(algo)
+        self.fill(algo, entry, 10, entry.StopPrice + 0.1)
+        add = order_fixtures.add_proposal(9, unit_index=2, level=0.9, quantity=2800,
+                                          campaign_n=0.05, previous_unit_fill=0.875,
+                                          valid_for_sessions=2)
+        self.feed(algo, 10, replies={"execution.fill": {"payload": {"decisions": [
+            order_fixtures.campaign_opened(campaign_n=0.05),
+            order_fixtures.exit_order_set(10, level=0.8, quantity=5600), add]}}})
+        [add_ticket] = [t for t in self.tickets(algo) if t.Tag == add["id"]]
+        self.fill(algo, add_ticket, 11, 50.5, fee=1)
+        algo.Portfolio.Cash += -(50 * 50.5) - 1 + 25
+        # A genuine, unrelated desync: LEAN holds one raw share more than
+        # the Add's own fill (100 + 50 = 150) explains.
+        algo.Portfolio.holdings["AAPL"] = 151
+        algo.client.reply_overrides = {
+            "market.corporate-action": dividend_reply,
+            "execution.fill": {"payload": {"decisions": [
+                order_fixtures.unit_added(11, unit_index=2, quantity=2800),
+                order_fixtures.exit_order_set(11, unit_index=2, level=0.8, quantity=2800)]}}}
+        b = bar(11)
+        algo.History = lambda *a, **k: Frame(b.EndTime, ratio=self.ratio)
+        algo.OnData(scaffold.slice_of({"AAPL": b}, dividends={"AAPL": types.SimpleNamespace(
+            Distribution=0.25, Time=datetime(2014, 6, 11))}))
+        self.assertTrue(algo.failed)
+        self.assertIn("holds 151 raw shares", algo.quit_reason)
+        self.assertIn("after this session's fills", algo.quit_reason)

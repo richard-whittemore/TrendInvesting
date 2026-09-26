@@ -531,6 +531,17 @@ class OrderDesk:
         # When a split LEAN applied to a position or order is still to be
         # checked (require_split_applied); None otherwise.
         self.split_to_check = None
+        # Whether the last require_split_applied call deferred its holding
+        # and Exit Order checks (this session's own fill was still queued);
+        # OnData calls it again after drain_order_events only when this is
+        # true (Greptile 4112182821, CodeRabbit 4112187237).
+        self.split_check_deferred = False
+        # A dividend's own effective_at when its entitlement was taken from
+        # the engine's Units alone because this session's fill was still
+        # queued (dividend_action); None otherwise. require_dividend_reconciled
+        # checks it once that fill is drained (Greptile 4112182821,
+        # CodeRabbit 4112187237).
+        self.dividend_to_reconcile = None
         # Actual instrument bars, never fill times or deferred snapshots.
         # ADR 0011 gives fill-chained Adds one additional observed session.
         self.bar_ends = []
@@ -837,6 +848,12 @@ class OrderDesk:
                                 "0019)".format(self.instrument, effective_at,
                                               self.algorithm.Portfolio[self.symbol].Quantity,
                                               sum(quantities), ratio))
+        else:
+            # Deferred, not skipped (Greptile 4112182821, CodeRabbit
+            # 4112187237): LEAN's own holding cannot be trusted against the
+            # engine's Units until this session's fill is drained and
+            # applied, so require_dividend_reconciled checks it then.
+            self.dividend_to_reconcile = effective_at
         cash = float(Decimal(str(distribution)) * holding)
         if not isfinite(cash) or cash <= 0:
             raise Uncertain("dividend cash amount must be positive and finite (ADR 0024)")
@@ -870,6 +887,29 @@ class OrderDesk:
         if unexpected:
             raise Uncertain("unexpected dividend reply for {} at {}: expected {} (ADR 0024)".format(
                 self.instrument, action["effective_at"], expected))
+
+    def require_dividend_reconciled(self):
+        """After this session's fills are drained, verify a dividend whose
+        entitlement came from the engine's Units alone against LEAN's own,
+        now-current holding (ADR 0019; Greptile 4112182821, CodeRabbit
+        4112187237).
+
+        A no-op unless dividend_action deferred exactly this check because a
+        fill was still queued when the dividend was published. Reuses
+        _holding_problems, the same comparison a split's final verification
+        makes, since both rest on the identical invariant: LEAN's raw
+        holding is the engine's Units at the ratio in force. This does not
+        touch the cash ledger; require_dividend_cash still checks that
+        independently at the next close.
+        """
+        effective_at = self.dividend_to_reconcile
+        if effective_at is None:
+            return
+        self.dividend_to_reconcile = None
+        problems = self._holding_problems()
+        if problems:
+            raise Uncertain("dividend of {} at {}, after this session's fills: {} (ADR "
+                            "0019)".format(self.instrument, effective_at, "; ".join(problems)))
 
     def split_decisions(self, decisions, action):
         """Carry the engine's reply to a published split into this desk (ADR 0023).
@@ -1026,11 +1066,26 @@ class OrderDesk:
         it yet. Run first by the adapter's scheduled check, after the split's
         time step and before the next session's fills; then again, final, at
         the next slice's start, as a second line.
+
+        Deferred, not skipped, while this session's own fill is still queued
+        (Greptile 4112182821, CodeRabbit 4112187237): the holding and Exit
+        Order checks below stand down rather than compare against a LEAN
+        figure the engine's Units do not yet reflect, but split_to_check
+        stays set so this same check runs again, for real, once OnData has
+        drained the queue and the engine's Units are current. Only that
+        later, fully-checked call clears it. self.split_check_deferred
+        records whether THIS call deferred, so OnData knows to call again
+        after the drain and never mistakes a split just detected this same
+        slice (apply_split, running after this method's own first call) for
+        one whose check was deferred.
         """
+        self.split_check_deferred = False
         split_at = self.split_to_check
         if split_at is None:
             return
-        if final:
+        if final and self._fills_pending():
+            self.split_check_deferred = True
+        elif final:
             self.split_to_check = None
         ratio = self.ratio
         tick = float(self.algorithm.Securities[self.symbol].SymbolProperties.MinimumPriceVariation)
@@ -1070,9 +1125,17 @@ class OrderDesk:
             raise Uncertain("after the split of {} at {}, at {} split-adjusted shares per raw "
                             "share, {}: {}".format(self.instrument, split_at, ratio, when,
                                                    "; ".join(problems)))
-        self.algorithm.Log("adapter: split at {} reconciled {}: LEAN holds {} raw shares and "
-                           "works {} order(s), as the engine's figures are at split ratio {}".format(
-                               split_at, when, holding, len(self._open_tickets()), ratio))
+        if self.split_to_check is None:
+            self.algorithm.Log("adapter: split at {} reconciled {}: LEAN holds {} raw shares and "
+                               "works {} order(s), as the engine's figures are at split ratio "
+                               "{}".format(split_at, when, holding, len(self._open_tickets()), ratio))
+        else:
+            # split_to_check is still set: the holding and Exit Order checks
+            # were deferred (this session's own fill is still queued), so
+            # this is not yet a full reconciliation (Greptile 4112182821).
+            self.algorithm.Log("adapter: split at {} {}: this session's own fill is still queued, "
+                               "so the holding and Exit Order checks are deferred until it is "
+                               "drained".format(split_at, when))
 
     def _amend_split_quantities(self, ratio):
         """Place the engine's quantities in LEAN's split orders (ADR 0023).
