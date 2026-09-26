@@ -13,8 +13,8 @@ kind (entry, add, stop, exit), quantity and price, all in the split-adjusted
 view (ADR 0004), which is also the view the research algorithm's
 SplitAdjusted subscription trades in.
 
-Fills are grouped by (session date, kind), since the two sides split the
-same trade differently: the Go engine reports an Exit Channel exit as one
+Fills are grouped by (session date, symbol, kind), since the two sides
+split the same trade differently: the Go engine reports an Exit Channel exit as one
 fill for every Unit it closes, where the research algorithm rests one Exit
 Order per Unit. A group matches when both sides have it, their total
 quantities agree within --quantity-tolerance (a fraction) and their
@@ -43,8 +43,8 @@ def research_kind(tag):
 
 
 def load_research_fills(backtest_dir):
-    """[(date, kind, quantity, price)] for every fill LEAN reported, in
-    order. quantity is unsigned."""
+    """[(date, symbol, kind, quantity, price)] for every fill LEAN reported,
+    in order. quantity is unsigned."""
     events_path = _one(backtest_dir, "*-order-events.json")
     result_path = [p for p in glob.glob(os.path.join(backtest_dir, "*.json"))
                    if p[-5:] == ".json" and "-" not in os.path.basename(p)[:-5]]
@@ -60,8 +60,8 @@ def load_research_fills(backtest_dir):
             continue
         order = orders.get(str(event["orderId"]), {})
         when = datetime.fromtimestamp(event["time"], tz=timezone.utc).date()
-        fills.append((when, research_kind(order.get("tag")), abs(float(event["fillQuantity"])),
-                      float(event["fillPrice"])))
+        fills.append((when, event["symbolValue"], research_kind(order.get("tag")),
+                      abs(float(event["fillQuantity"])), float(event["fillPrice"])))
     return fills
 
 
@@ -100,7 +100,7 @@ def measure(marks):
 
 def load_go(journal_path):
     """(fills, statistics) from a Go engine journal: fills as
-    [(date, kind, quantity, price)]; statistics from its account.snapshot
+    [(date, symbol, kind, quantity, price)]; statistics from its account.snapshot
     equity marks from the run's own start (its configuration's event
     time) onward, with ADR 0012's CAGR and max drawdown."""
     fills, marks, start = [], [], None
@@ -112,20 +112,25 @@ def load_go(journal_path):
             if kind == "strategy.configuration":
                 start = envelope["event_time"]
             elif kind == "execution.fill":
-                fills.append((_date(payload["filled_at"]), payload["kind"],
+                fills.append((_date(payload["filled_at"]), payload["instrument_id"], payload["kind"],
                               float(payload["quantity"]), float(payload["price"])))
             elif kind == "account.snapshot" and (start is None or envelope["event_time"] >= start):
                 marks.append((_instant(envelope["event_time"]), float(payload["equity"])))
     return fills, measure(marks)
 
 
+def _order(key):
+    """Date, then symbol, then kind in KINDS order."""
+    return key[0], key[1], KINDS.index(key[2]) if key[2] in KINDS else 9
+
+
 def group(fills):
-    """OrderedDict (date, kind) -> [count, total quantity, value], in date
-    order."""
+    """OrderedDict (date, symbol, kind) -> [count, total quantity, value],
+    in date order. A stock's per-Unit exits on one date form one group;
+    two stocks never share one."""
     groups = OrderedDict()
-    for when, kind, quantity, price in sorted(fills, key=lambda f: (f[0], KINDS.index(f[1])
-                                                                     if f[1] in KINDS else 9)):
-        entry = groups.setdefault((when, kind), [0, 0.0, 0.0])
+    for when, symbol, kind, quantity, price in sorted(fills, key=_order):
+        entry = groups.setdefault((when, symbol, kind), [0, 0.0, 0.0])
         entry[0] += 1
         entry[1] += quantity
         entry[2] += quantity * price
@@ -136,8 +141,7 @@ def compare(research, go, price_tolerance, quantity_tolerance):
     """[(key, research group or None, go group or None, verdict)] over the
     union of both sides' groups, in date order."""
     r_groups, g_groups = group(research), group(go)
-    keys = sorted(set(r_groups) | set(g_groups),
-                  key=lambda k: (k[0], KINDS.index(k[1]) if k[1] in KINDS else 9))
+    keys = sorted(set(r_groups) | set(g_groups), key=_order)
     rows = []
     for key in keys:
         r, g = r_groups.get(key), g_groups.get(key)
@@ -175,15 +179,17 @@ def main(argv=None):
     rows = compare(research, go, args.price_tolerance, args.quantity_tolerance)
 
     def counts(fills):
-        return " ".join("{}={}".format(k, sum(1 for f in fills if f[1] == k))
+        return " ".join("{}={}".format(k, sum(1 for f in fills if f[2] == k))
                         for k in KINDS + ("other",))
 
     print("fills: research {} ({})".format(len(research), counts(research)))
     print("fills: go       {} ({})".format(len(go), counts(go)))
-    print("{:<10} {:<5} {:>34}   {:>34}   {}".format("date", "kind", "research", "go", "verdict"))
+    print("{:<10} {:<6} {:<5} {:>34}   {:>34}   {}".format("date", "symbol", "kind", "research",
+                                                             "go", "verdict"))
     for index, (key, r, g, verdict) in enumerate(rows):
         if index < args.show or verdict != "match":
-            print("{} {:<5} {}   {}   {}".format(key[0], key[1], _fmt_group(r), _fmt_group(g), verdict))
+            print("{} {:<6} {:<5} {}   {}   {}".format(key[0], key[1], key[2], _fmt_group(r),
+                                                     _fmt_group(g), verdict))
     matched = sum(1 for row in rows if row[3] == "match")
     print("groups: {} matched of {} ({} research-only, {} go-only, {} mismatched)".format(
         matched, len(rows), sum(1 for row in rows if row[3] == "only-research"),

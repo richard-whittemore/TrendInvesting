@@ -153,20 +153,35 @@ def _classification_groups(fine):
     return industry, sector
 
 
-def _adr_0005_fill_model(slippage_model):
+def _adr_0005_fill_model(slippage_model, fill_prices):
     """A subclass of LEAN's own EquityFillModel that replaces StopLimitFill
     for a BUY only (ADR 0005, as amended). Every other order (a sell, or a
     stop-market Add/entry, which this algorithm never places) keeps
-    EquityFillModel's own fill."""
+    EquityFillModel's own fill. Every fill's price is recorded in
+    ``fill_prices`` by order id, for the fee model: LEAN's fee-model
+    parameters carry only the order and the security, and an order's own
+    Price reads 0 when its fill is being charged (observed on the pinned
+    image)."""
 
     class Adr0005FillModel(EquityFillModel):
         def __init__(self):
             super().__init__()
             self.failure = None
 
+        def StopMarketFill(self, asset, order):
+            return self._record(order, super().StopMarketFill(asset, order))
+
+        def MarketFill(self, asset, order):
+            return self._record(order, super().MarketFill(asset, order))
+
+        def _record(self, order, fill):
+            if fill.FillQuantity:
+                fill_prices[order.Id] = float(fill.FillPrice)
+            return fill
+
         def StopLimitFill(self, asset, order):
             if order.Direction != OrderDirection.Buy:
-                return super().StopLimitFill(asset, order)
+                return self._record(order, super().StopLimitFill(asset, order))
             fill = OrderEvent(order, Extensions.ConvertToUtc(asset.LocalTime, asset.Exchange.TimeZone),
                               OrderFee.Zero)
             if order.Status == OrderStatus.Canceled or not self.IsExchangeOpen(asset, False):
@@ -187,24 +202,28 @@ def _adr_0005_fill_model(slippage_model):
                 fill.Status = OrderStatus.Filled
                 fill.FillQuantity = order.Quantity
                 fill.FillPrice = price
-            return fill
+            return self._record(order, fill)
 
     return Adr0005FillModel
 
 
-def _raw_share_fee_model(ratio_of):
+def _raw_share_fee_model(ratio_of, fill_prices):
     """LEAN's own InteractiveBrokersFeeModel charges per share of the order
     as stated, and this algorithm's orders are stated in split-adjusted
     shares -- 56 times the raw count for AAPL in 2003 -- so it overcharged
     by as much. This charges the same schedule on the raw shares the order
     is (ADR 0004: a per-share cost is raw; ADR 0013;
     rules.lean_ib_commission), which is what the Go engine's LEAN runs are
-    charged. ``ratio_of(symbol)`` is the symbol's current split ratio."""
+    charged. ``ratio_of(symbol)`` is the symbol's current split ratio. The
+    cap is a fraction of the trade's value at its fill price, recorded by
+    the fill model; before a fill (LEAN's buying-power checks) it is
+    valued at the security's price."""
 
     class RawShareFeeModel(FeeModel):
         def GetOrderFee(self, parameters):
             security, order = parameters.Security, parameters.Order
-            fee = rules.lean_ib_commission(float(order.AbsoluteQuantity), float(security.Price),
+            price = fill_prices.get(order.Id, float(security.Price))
+            fee = rules.lean_ib_commission(float(order.AbsoluteQuantity), price,
                                            ratio_of(security.Symbol) or 1.0)
             return OrderFee(CashAmount(fee, "USD"))
 
@@ -420,8 +439,9 @@ class TurtleBaselineResearch(QCAlgorithm):
         # while it works towards resolving.
         self._partial_fill_logged = set()
         self.slippage_model = _n_slippage_model(self.n_by_order_id)
-        self.fill_model = _adr_0005_fill_model(self.slippage_model)()
-        self.fee_model = _raw_share_fee_model(self.split_ratio.get)
+        fill_prices = {}                # order id -> its fill price
+        self.fill_model = _adr_0005_fill_model(self.slippage_model, fill_prices)()
+        self.fee_model = _raw_share_fee_model(self.split_ratio.get, fill_prices)
 
         self.equity_curve = []           # (utc datetime, equity), once per Session
         self.closed_campaigns = []       # list of dicts: {r_multiple, win}
@@ -525,6 +545,8 @@ class TurtleBaselineResearch(QCAlgorithm):
             if is_new:
                 self.symbol_state[security.Symbol] = _SymbolState()
                 self.split_ratio[security.Symbol] = self._read_split_ratio(security.Symbol)
+                if self.split_ratio[security.Symbol] is None:
+                    self._count_decline("ratio: unreadable when added")
             if is_new and self.FIXED_SYMBOLS is None:
                 # A stock the universe selects only after the algorithm's
                 # own start has none of its own history yet, so it could
@@ -585,8 +607,9 @@ class TurtleBaselineResearch(QCAlgorithm):
     def _read_split_ratio(self, symbol):
         """The symbol's split ratio now (rules.split_ratio): its last
         completed bar's raw close over its split-adjusted one, or None
-        without one (an entry then declines: its whole shares and tick
-        cannot be stated)."""
+        without one. None is read again at the symbol's next breakout
+        (_decide_entry), which declines only while it stays unreadable:
+        its whole shares and tick cannot be stated."""
         closes = []
         for mode in (DataNormalizationMode.Raw, DataNormalizationMode.SplitAdjusted):
             history = self.History([symbol], 1, Resolution.Daily, dataNormalizationMode=mode)
@@ -809,10 +832,15 @@ class TurtleBaselineResearch(QCAlgorithm):
         # price floor is raw, where a split-adjusted one would read a
         # stock that later split often as a penny stock), 20-day median
         # dollar volume >= $5M, and >= 250 completed bars of history.
-        ratio = self.split_ratio.get(symbol)
+        if self.split_ratio.get(symbol) is None:
+            self.split_ratio[symbol] = self._read_split_ratio(symbol)
+        ratio = self.split_ratio[symbol]
+        if ratio is None:
+            self._count_decline("entry: split ratio unreadable")
+            return
         dv_value, dv_ready = rules.median_dollar_volume(state.raw_closes, state.raw_volumes)
-        eligible = ratio is not None and (self.FIXED_SYMBOLS is not None or (dv_ready and rules.is_eligible(
-            float(self.Securities[symbol].Price) * ratio, dv_value, state.bars_seen, is_common_stock=True)))
+        eligible = self.FIXED_SYMBOLS is not None or (dv_ready and rules.is_eligible(
+            float(self.Securities[symbol].Price) * ratio, dv_value, state.bars_seen, is_common_stock=True))
         if not eligible:
             self._count_decline("entry: ineligible")
             return

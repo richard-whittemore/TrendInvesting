@@ -23,23 +23,35 @@ class CompareFillsTests(unittest.TestCase):
         self.assertEqual(compare_fills.research_kind(None), "other")
 
     def test_one_exit_per_unit_matches_one_exit_for_every_unit(self):
-        research = [(D2, "exit", 100, 0.36), (D2, "exit", 100, 0.36), (D2, "exit", 100, 0.36)]
-        go = [(D2, "exit", 300, 0.36)]
+        research = [(D2, "AAPL", "exit", 100, 0.36)] * 3
+        go = [(D2, "AAPL", "exit", 300, 0.36)]
         rows = compare_fills.compare(research, go, 0.002, 0.0)
         self.assertEqual([row[3] for row in rows], ["match"])
 
     def test_quantity_price_and_missing_groups_are_reported(self):
-        research = [(D1, "entry", 505985, 0.31), (D2, "stop", 100, 0.40)]
-        go = [(D1, "entry", 505960, 0.31), (D2, "exit", 100, 0.40)]
+        research = [(D1, "AAPL", "entry", 505985, 0.31), (D2, "AAPL", "stop", 100, 0.40)]
+        go = [(D1, "AAPL", "entry", 505960, 0.31), (D2, "AAPL", "exit", 100, 0.40)]
         verdicts = {row[0]: row[3] for row in compare_fills.compare(research, go, 0.002, 0.0)}
-        self.assertEqual(verdicts[(D1, "entry")], "mismatch:quantity")
-        self.assertEqual(verdicts[(D2, "stop")], "only-research")
-        self.assertEqual(verdicts[(D2, "exit")], "only-go")
+        self.assertEqual(verdicts[(D1, "AAPL", "entry")], "mismatch:quantity")
+        self.assertEqual(verdicts[(D2, "AAPL", "stop")], "only-research")
+        self.assertEqual(verdicts[(D2, "AAPL", "exit")], "only-go")
+
+    def test_two_stocks_on_one_date_are_separate_groups(self):
+        # Each side holds the same total quantity at the same average
+        # price on the day, but split across the two stocks differently:
+        # grouped by date and kind alone, the two would wrongly match.
+        research = [(D1, "AAPL", "entry", 100, 1.0), (D1, "MSFT", "entry", 300, 1.0)]
+        go = [(D1, "AAPL", "entry", 300, 1.0), (D1, "MSFT", "entry", 100, 1.0)]
+        verdicts = {row[0]: row[3] for row in compare_fills.compare(research, go, 0.002, 0.0)}
+        self.assertEqual(verdicts, {(D1, "AAPL", "entry"): "mismatch:quantity",
+                                    (D1, "MSFT", "entry"): "mismatch:quantity"})
 
     def test_prices_within_tolerance_match(self):
-        rows = compare_fills.compare([(D1, "add", 10, 1.0001)], [(D1, "add", 10, 1.0)], 0.002, 0.0)
+        rows = compare_fills.compare([(D1, "AAPL", "add", 10, 1.0001)], [(D1, "AAPL", "add", 10, 1.0)],
+                                     0.002, 0.0)
         self.assertEqual(rows[0][3], "match")
-        rows = compare_fills.compare([(D1, "add", 10, 1.01)], [(D1, "add", 10, 1.0)], 0.002, 0.0)
+        rows = compare_fills.compare([(D1, "AAPL", "add", 10, 1.01)], [(D1, "AAPL", "add", 10, 1.0)],
+                                     0.002, 0.0)
         self.assertEqual(rows[0][3], "mismatch:price")
 
     def test_measure_states_net_profit_cagr_and_drawdown(self):

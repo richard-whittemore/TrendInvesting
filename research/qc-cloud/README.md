@@ -512,12 +512,18 @@ is hidden; each names the ADR it touches.
     trades in that view, so quantity x price is the same money as the raw
     trade. What is not invariant is read in the raw view, through each
     symbol's split ratio (split-adjusted shares per raw share, read from
-    History when the symbol is added and moved by each split LEAN reports):
+    History when the symbol is added and moved by each split LEAN reports;
+    a symbol with no completed bar to read it from yet is counted as
+    `Decline ratio: unreadable when added`, read again at each later
+    breakout, and its entry declined as `Decline entry: split ratio
+    unreadable` only while it stays unreadable):
     a Unit is rounded down to whole raw shares (`rules.whole_raw_shares`); a
     stop is placed at the nearest raw cent and a stop-limit's limit at the
     raw cent at or below its cap (`rules.raw_tick_round`,
     `rules.raw_tick_floor`), declining a proposal whose limit falls below
-    its stop; commission is charged on raw shares (#7); and ADR 0009's $5
+    its stop; commission is charged on raw shares, its 0.5% cap valued at
+    the fill's own price, which the fill model records since LEAN's
+    fee-model parameters carry none (#7); and ADR 0009's $5
     floor reads the raw price. This is exactly how the Go engine's adapter
     places the engine's orders over its raw subscription. An earlier
     version rounded every order price down to the cent in the
