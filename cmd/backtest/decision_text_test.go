@@ -208,7 +208,7 @@ func TestDecisionLogMixedGolden(t *testing.T) {
 	if err := run(context.Background(), []string{"-decisions", path}, &out); err != nil {
 		t.Fatal(err)
 	}
-	const want = `2026-01-22T00:00:00Z [decision 65] AAPL: Signal long because high 129.01 exceeded Entry Channel 127.01; N was 1 (rule entry.channel.breakout; ADR 0002).
+	const want = `2026-01-22T00:00:00Z [decision 128] AAPL: Signal long because high 129.01 exceeded Entry Channel 127.01; N was 1 (rule entry.channel.breakout; ADR 0002).
 2026-01-22T00:00:00Z [decision 23] MSFT: declined entry proposal because insufficient-cash: one Unit cannot be funded; Signal "signal:MSFT"; required cash 20615 exceeded available cash 20614.99 (rule not recorded; ADR not recorded).
 `
 	if out.String() != want {

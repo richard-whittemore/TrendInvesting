@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -114,9 +115,10 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 		if err := json.Unmarshal(reply.Payload, &closeDecisions); err != nil {
 			t.Fatalf("bar %d: decode session-close decisions: %v", day, err)
 		}
-		if reply.CausationID != closed.ID || len(closeDecisions.Decisions) != 0 {
-			t.Fatalf("bar %d: session close answered %q with %d decisions, want its own causation and none (a flat bar never signals)", day, reply.CausationID, len(closeDecisions.Decisions))
+		if reply.CausationID != closed.ID || len(closeDecisions.Decisions) != 1 {
+			t.Fatalf("bar %d: session close answered %q with %d decisions, want its own causation and one empty Watchlist", day, reply.CausationID, len(closeDecisions.Decisions))
 		}
+		assertEmptyWatchlist(t, closeDecisions.Decisions[0], bar.PeriodEnd)
 	}
 
 	if err := client.Close(); err != nil {
@@ -169,16 +171,16 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 	if inputs[0].Type != event.ConfigurationEventType {
 		t.Errorf("journal's first input is %q, want %q", inputs[0].Type, event.ConfigurationEventType)
 	}
-	// One setup-evaluated decision per bar; the configuration input itself
-	// produces none (internal/strategy/reducer.go's applyConfiguration
-	// returns (nil, nil)).
-	if len(decisions) != barCount {
-		t.Errorf("journal holds %d decision(s), want %d (one per bar)", len(decisions), barCount)
+	// One Setup evaluation per bar and one Watchlist per Session close
+	// (ADR 0011); the configuration input itself produces none.
+	if len(decisions) != 2*barCount {
+		t.Fatalf("journal holds %d decision(s), want %d (Setup and Watchlist per Session)", len(decisions), 2*barCount)
 	}
-	for i, decision := range decisions {
-		if decision.Type != event.SetupEvaluatedEventType {
-			t.Errorf("decision %d type = %q, want %q", i, decision.Type, event.SetupEvaluatedEventType)
+	for day := range barCount {
+		if decision := decisions[2*day]; decision.Type != event.SetupEvaluatedEventType {
+			t.Errorf("decision %d type = %q, want %q", 2*day, decision.Type, event.SetupEvaluatedEventType)
 		}
+		assertEmptyWatchlist(t, decisions[2*day+1], flatBar(instrument, day).PeriodEnd)
 	}
 
 	// The check this whole ticket is about: the journal must replay, not
@@ -360,5 +362,24 @@ func TestRunReportsAJournalWriteFailureRatherThanExitingClean(t *testing.T) {
 
 	if _, err := os.Stat(outPath); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a journal file exists at %s despite the write being refused", outPath)
+	}
+}
+
+// assertEmptyWatchlist checks ADR 0011's explicit record that a completed
+// Session has no rankable Tier A or Tier B Setups.
+func assertEmptyWatchlist(t *testing.T, envelope event.Envelope, periodEnd time.Time) {
+	t.Helper()
+	if envelope.Type != event.WatchlistPublishedEventType {
+		t.Fatalf("decision type = %q, want %q", envelope.Type, event.WatchlistPublishedEventType)
+	}
+	var payload event.WatchlistPublishedPayload
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		t.Fatalf("decode Watchlist: %v", err)
+	}
+	if err := payload.Validate(); err != nil {
+		t.Fatalf("invalid Watchlist: %v", err)
+	}
+	if !payload.PeriodEnd.Equal(periodEnd) || len(payload.Entries) != 0 {
+		t.Fatalf("Watchlist = %+v, want no entries at %v", payload, periodEnd)
 	}
 }

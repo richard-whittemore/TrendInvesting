@@ -41,8 +41,8 @@
   },
   "artefacts": {
     "journal_path": "../journal.golden.jsonl",
-    "record_count": 353,
-    "final_record_hash": "sha256:f06d16a44653a0b824c5db50ad80a690e57cb60e13e2069b9cf03b4bba275706"
+    "record_count": 427,
+    "final_record_hash": "sha256:dcaf186aed04581e779cf67284310887ccf549ffd3ff9f0bd372a948232c0340"
   },
   "detail": ""
 }

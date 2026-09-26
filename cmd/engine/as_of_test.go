@@ -118,8 +118,14 @@ func TestAsOfMakesJournalDeterministic(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(inputs) != 1+2*tc.bars || len(decisions) != tc.bars {
+				if len(inputs) != 1+2*tc.bars || len(decisions) != 2*tc.bars {
 					t.Fatalf("unexpected inputs/decisions: %d/%d", len(inputs), len(decisions))
+				}
+				for day := range tc.bars {
+					if decision := decisions[2*day]; decision.Type != event.SetupEvaluatedEventType {
+						t.Errorf("decision %d type = %q, want %q", 2*day, decision.Type, event.SetupEvaluatedEventType)
+					}
+					assertEmptyWatchlist(t, decisions[2*day+1], flatBar("TEST", day).PeriodEnd)
 				}
 				configuration := inputs[0]
 				if configuration.Type != event.ConfigurationEventType ||

@@ -36,7 +36,7 @@ func TestDecisionLogGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "2026-01-22T00:00:00Z [decision 65] AAPL: Signal long because high 129.01 exceeded Entry Channel 127.01; N was 1 (rule entry.channel.breakout; ADR 0002).\n"
+	const want = "2026-01-22T00:00:00Z [decision 128] AAPL: Signal long because high 129.01 exceeded Entry Channel 127.01; N was 1 (rule entry.channel.breakout; ADR 0002).\n"
 	if out.String() != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", &out, want)
 	}
@@ -172,7 +172,7 @@ func TestDecisionDateUsesUTCEventTime(t *testing.T) {
 	if err := run(context.Background(), []string{"-decisions", path, "-date", "2026-01-22"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(out.String(), "2026-01-22T00:00:00Z [decision 65]") {
+	if !strings.HasPrefix(out.String(), "2026-01-22T00:00:00Z [decision 128]") {
 		t.Fatal(&out)
 	}
 }

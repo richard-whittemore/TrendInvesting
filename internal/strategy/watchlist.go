@@ -44,11 +44,10 @@ type watchlistCandidate struct {
 // a Signal (ADR 0010, as amended 2026-09-25) — see ADR 0011's own amendment,
 // "Watchlist emission timing and unrankable Setups".
 //
-// It returns no emission at all, rather than one with an empty Entries list,
-// when no live instrument qualifies: nothing else this reducer emits states
-// an empty per-Session fact (there is no "zero Adds this Session" event
-// either), and WatchlistPublishedPayload.Validate refuses an empty Entries
-// list for the same reason.
+// It publishes exactly one decision per Session close, with empty Entries
+// when no live instrument qualifies. The empty Watchlist records that the
+// Session was evaluated and nothing qualified (ADR 0011's amendment,
+// accepted by the owner on 2026-09-26).
 //
 // This is read-only: it neither sets nor clears anything evaluateAdd,
 // sizeUnit or a cap check reads, so nothing about the Adds and entries
@@ -80,10 +79,6 @@ func (r *transition) emitWatchlist(live []string, input event.Envelope) ([]event
 			distance: state.lastSetupDistanceToEntryInN,
 		})
 	}
-	if len(candidates) == 0 {
-		return nil, nil
-	}
-
 	rankings := make([]signalRanking, len(candidates))
 	byID := make(map[string]watchlistCandidate, len(candidates))
 	for i, c := range candidates {

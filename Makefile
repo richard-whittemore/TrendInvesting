@@ -3,7 +3,7 @@ export GOTOOLCHAIN := local
 COVERAGE_MIN ?= 80.0
 COVERAGE_PROFILE ?= coverage.out
 
-.PHONY: adapter-test build check coverage deps fmt fmt-check golangci lint staticcheck test vet vuln
+.PHONY: adapter-test build check coverage deps fmt fmt-check golangci lint research-test staticcheck test vet vuln
 
 build:
 	go build ./...
@@ -48,4 +48,12 @@ deps:
 adapter-test:
 	cd adapter/lean && python3 -m unittest discover -s tests
 
-check: deps lint coverage vuln build adapter-test
+# research/qc-cloud's rule core (rules.py): standard-library Python only,
+# no QuantConnect imports, so it runs here without any LEAN environment.
+# main.py (the QuantConnect algorithm that drives it) is checked separately
+# by CI for a clean compile, since it cannot be imported outside
+# QuantConnect's own AlgorithmImports environment.
+research-test:
+	cd research/qc-cloud && python3 -m unittest discover -s . -p "test_*.py"
+
+check: deps lint coverage vuln build adapter-test research-test

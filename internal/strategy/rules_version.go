@@ -267,17 +267,16 @@ package strategy
 // Session evaluated to Tier A or Tier B (CONTEXT.md: "Watchlist"), sharing
 // its ranking with rankSignals (session.go: rankSignal). It is emitted once
 // per Session immediately after the universe evaluation and before that
-// Session's Adds and entries, and omitted, rather than emitted empty, for a
-// Session with no rankable Tier A or Tier B Setup. It is pure observability
-// in the Baseline (ADR 0011, decision 3): it decides nothing, and every
-// other decision from the same inputs — proposals, declines, Adds, caps,
-// sizing, and their order — is unchanged (see
-// TestWatchlistEmissionChangesNoOtherDecision, watchlist_test.go). But every
-// journal with at least one Tier A or Tier B Setup this Session now gains
+// Session's Adds and entries, including an empty Watchlist for a Session
+// with no rankable Tier A or Tier B Setup (ADR 0011, as amended 2026-09-26).
+// It is pure observability in the Baseline (ADR 0011, decision 3): it
+// decides nothing, and every other decision from the same inputs —
+// proposals, declines, Adds, caps,
+// sizing, and their order — is unchanged. Every completed Session now gains
 // one decision it did not have before, so the two builds do not replay each
 // other's journals byte-identically. No configuration schema changes:
 // ConfigurationPayload.TierBDistanceInN, the "configured distance in N" for
-// Tier B ADR 0011 asks for, already existed (#9). Two new declared Rule*/ADR*
+// Tier B ADR 0011 asks for, already existed. Two new declared Rule*/ADR*
 // constants, event.RuleWatchlistRankedByStrength and
 // event.ADRWatchlistRankedByStrength, move the rule surface fingerprint.
 const RulesVersion = "1.17.0"

@@ -57,8 +57,9 @@ type WatchlistEntry struct {
 // 3): nothing in the reducer ever reads a Watchlist entry to decide whether
 // a Tier A Setup becomes a Campaign — only a Unit cap or the cash rule does
 // that (strategy.proposal.declined names the one that bound). A Session with
-// no rankable Tier A or Tier B Setup publishes no Watchlist at all, rather
-// than one with an empty Entries list — see Validate.
+// no rankable Tier A or Tier B Setup publishes an empty Entries list: an
+// explicit record that the Session was evaluated and nothing qualified
+// (ADR 0011's amendment, accepted by the owner on 2026-09-26).
 type WatchlistPublishedPayload struct {
 	PeriodEnd time.Time        `json:"period_end"`
 	Rule      string           `json:"rule"`
@@ -67,13 +68,13 @@ type WatchlistPublishedPayload struct {
 }
 
 // Validate checks that the payload identifies a period, names its rule and
-// ADR, carries at least one entry (an empty Watchlist is never published,
-// only omitted — see the type's own doc comment), that every entry
+// ADR, and permits empty Entries (ADR 0011, as amended 2026-09-26).
+// For non-empty Entries, it checks that every entry
 // identifies an instrument, with no instrument named twice, that Tier is
 // TierA or TierB (never TierNone), that Tier and DistanceToEntryInN agree
 // exactly as SetupEvaluatedPayload's own doc comment states (TierA strictly
 // negative, TierB non-negative), that Strength is finite, and that Entries
-// is sorted by Strength, descending. The total order's remaining tie-breaks
+// is sorted by non-increasing Strength. The total order's remaining tie-breaks
 // (20-day median dollar volume, instrument ID; ADR 0010) are not carried on
 // the wire, so only the primary key's own ordering is checked here.
 func (p WatchlistPublishedPayload) Validate() error {
@@ -90,10 +91,6 @@ func (p WatchlistPublishedPayload) Validate() error {
 	if p.ADR == "" {
 		errs = append(errs, errors.New("adr is required"))
 	}
-	if len(p.Entries) == 0 {
-		errs = append(errs, errors.New("entries must not be empty: an empty watchlist is never published, only omitted"))
-	}
-
 	seen := make(map[string]bool, len(p.Entries))
 	var previousStrength float64
 	for i, e := range p.Entries {

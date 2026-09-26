@@ -65,13 +65,14 @@ still fills covered chained rungs intrabar (ADR 0005), so this lifetime
 extension must not change its trading decisions. Schema and version
 propagation are separately accounted for in the evidence.
 
-## Amendment: Watchlist emission timing and unrankable Setups (Proposed, 2026-09-25)
+## Amendment: Watchlist emission timing and unrankable Setups (Accepted, 2026-09-26)
 
 Decision 2 declares the Watchlist a first-class observable, ranked by
 Strength, but does not say when it is published or what happens to a Setup
-this Session cannot rank at all. Implementing #35 needs both answers; this
-amendment states the conservative reading taken, pending the owner's
-confirmation.
+this Session cannot rank at all. Richard's owner decision on 2026-09-26
+accepts the publication timing and omission of unrankable Setups, and
+requires an empty Watchlist when no Setup qualifies. This supersedes the
+2026-09-25 proposal to omit publication in that case.
 
 1. **The Watchlist is published once per Session, at the session-close pass,
    immediately after ADR 0009's universe evaluation and before that
@@ -93,18 +94,16 @@ confirmation.
    an entry the Watchlist cannot rank is not observable in a way that is
    consistent with everything ranked beside it, so it is omitted rather than
    given an arbitrary position or a placeholder Strength.
-3. **A Session with no rankable Tier A or Tier B Setup publishes no
-   Watchlist at all, rather than one with an empty Entries list.** Nothing
-   else this reducer emits states an empty per-Session fact — there is no
-   "zero Adds this Session" decision either — and `WatchlistPublishedPayload`
-   requires at least one entry (Validate) for the identical reason. The
-   alternative, publishing an empty Watchlist every Session including every
-   warm-up bar before any instrument is ready, was rejected as pure
-   decision-stream noise with no reader ever needing to distinguish it from
-   "no Watchlist decision was recorded for this Session."
+3. **A Session with no rankable Tier A or Tier B Setup publishes an empty
+   Watchlist.** The empty Entries list explicitly records that the Session
+   was evaluated and nothing qualified, including warm-up Sessions and
+   Sessions whose only Setups cannot be ranked. It distinguishes that
+   outcome from a Session for which no Watchlist decision was recorded.
+   `WatchlistPublishedPayload.Validate` therefore accepts empty Entries
+   while retaining all per-entry rules and non-increasing Strength order.
 
-Both (2) and (3) are conservative in the sense that they change nothing about
-which Signals are funded (ADR 0010's own Item 2, already resolved): they only
+Both (2) and (3) change nothing about which Signals are funded (ADR 0010's
+own Item 2, already resolved): they only
 decide what the Watchlist itself — a purely observational decision — reports,
 never a proposal, a decline, or a cap check. RulesVersion moves from 1.16.0 to
 1.17.0 for the new decision type alone; no numeric rule constant, ladder, or

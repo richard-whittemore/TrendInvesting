@@ -7,7 +7,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
 
-// This file holds #35's tests: ADR 0011's Watchlist, the ranked set of every
+// This file tests ADR 0011's Watchlist, the ranked set of every
 // Setup a Session evaluates to Tier A or Tier B, sharing its ranking with
 // rankSignals (session.go) and never gating a Baseline entry.
 
@@ -52,9 +52,9 @@ func watchlistFixtureBars(instrumentID string) []event.CompletedBarPayload {
 	return out
 }
 
-// TestWatchlistMovesASetupFromTierBToTierA is the ticket's first named case:
-// a Setup moving B -> A. AAPL's Watchlist Session shows it at Tier B, and
-// the very next Session — the breakout — shows it at Tier A, with nothing
+// TestWatchlistMovesASetupFromTierBToTierA checks a Setup moving B -> A.
+// AAPL's Watchlist Session shows it at Tier B, and the very next Session —
+// the breakout — shows it at Tier A, with nothing
 // carried over: Tier B is memoryless (ADR 0011; CONTEXT.md: "Tier"), so each
 // Watchlist is built solely from that Session's own Setup-evaluated
 // decision.
@@ -65,12 +65,14 @@ func TestWatchlistMovesASetupFromTierBToTierA(t *testing.T) {
 	bars := watchlistFixtureBars("AAPL")
 	emitted := newStream(t, cfg).bars(bars).mustRun()
 
-	watchlists := envelopesOfType(emitted, event.WatchlistPublishedEventType)
-	if len(watchlists) != 2 {
-		t.Fatalf("got %d Watchlist(s), want exactly 2: the Tier B Session and the breakout's Tier A Session (every earlier warm-up bar is Tier None and publishes none at all)", len(watchlists))
+	watchlists := watchlistsForSessions(t, emitted, bars)
+	for _, watchlist := range watchlists[:len(watchlists)-2] {
+		if len(watchlist.Entries) != 0 {
+			t.Fatalf("warm-up Watchlist at %v has entries: %+v", watchlist.PeriodEnd, watchlist.Entries)
+		}
 	}
 
-	tierBWatchlist := decodeWatchlistPublished(t, watchlists[0])
+	tierBWatchlist := watchlists[len(watchlists)-2]
 	if len(tierBWatchlist.Entries) != 1 {
 		t.Fatalf("Tier B Watchlist has %d entries, want 1", len(tierBWatchlist.Entries))
 	}
@@ -82,7 +84,7 @@ func TestWatchlistMovesASetupFromTierBToTierA(t *testing.T) {
 		t.Fatalf("Tier B Watchlist DistanceToEntryInN = %v, want within [0, %v]", tierBEntry.DistanceToEntryInN, cfg.TierBDistanceInN)
 	}
 
-	tierAWatchlist := decodeWatchlistPublished(t, watchlists[1])
+	tierAWatchlist := watchlists[len(watchlists)-1]
 	if len(tierAWatchlist.Entries) != 1 {
 		t.Fatalf("Tier A Watchlist has %d entries, want 1", len(tierAWatchlist.Entries))
 	}
@@ -110,9 +112,8 @@ func TestWatchlistMovesASetupFromTierBToTierA(t *testing.T) {
 	}
 }
 
-// TestWatchlistEntryForASetupEnteringTierADirectly is the ticket's second
-// named case: a Setup can enter Tier A directly, without ever having been
-// Tier B.
+// TestWatchlistEntryForASetupEnteringTierADirectly checks ADR 0011's rule:
+// a Setup can enter Tier A directly, without ever having been Tier B.
 func TestWatchlistEntryForASetupEnteringTierADirectly(t *testing.T) {
 	t.Parallel()
 
@@ -120,11 +121,13 @@ func TestWatchlistEntryForASetupEnteringTierADirectly(t *testing.T) {
 	bars := breakoutBars("MSFT")
 	emitted := newStream(t, cfg).bars(bars).mustRun()
 
-	watchlists := envelopesOfType(emitted, event.WatchlistPublishedEventType)
-	if len(watchlists) != 1 {
-		t.Fatalf("got %d Watchlist(s), want exactly 1 (the breakout Session): MSFT never touched Tier B", len(watchlists))
+	watchlists := watchlistsForSessions(t, emitted, bars)
+	for _, watchlist := range watchlists[:len(watchlists)-1] {
+		if len(watchlist.Entries) != 0 {
+			t.Fatalf("warm-up Watchlist at %v has entries: %+v; MSFT never touched Tier B", watchlist.PeriodEnd, watchlist.Entries)
+		}
 	}
-	watchlist := decodeWatchlistPublished(t, watchlists[0])
+	watchlist := watchlists[len(watchlists)-1]
 	if len(watchlist.Entries) != 1 {
 		t.Fatalf("Watchlist has %d entries, want 1", len(watchlist.Entries))
 	}
@@ -147,8 +150,8 @@ func TestWatchlistEntryForASetupEnteringTierADirectly(t *testing.T) {
 	}
 }
 
-// TestWatchlistPersistsThroughACapDecline is the ticket's third named case: a
-// Tier A Setup blocked by a cap still appears on the Watchlist — proving the
+// TestWatchlistPersistsThroughACapDecline checks that a Tier A Setup blocked
+// by a cap still appears on the Watchlist — proving the
 // Watchlist is observability, never a filter (ADR 0011, decision 3) — and
 // the journal separately names the binding cap in the decline.
 func TestWatchlistPersistsThroughACapDecline(t *testing.T) {
@@ -158,9 +161,11 @@ func TestWatchlistPersistsThroughACapDecline(t *testing.T) {
 	// is under test — the identical fixture unit_caps_test.go's own
 	// TestTwoEntriesInOneSessionCloseShareTheTotalLongCap uses.
 	cfg := compactChannelConfig(1_000_000, 1_000_000, 1_000_000, 1)
-	emitted := newStream(t, cfg).lockstep(compactEntryBars("MMM", 0), compactEntryBars("NNN", 0)).mustRun()
+	bars := compactEntryBars("MMM", 0)
+	emitted := newStream(t, cfg).lockstep(bars, compactEntryBars("NNN", 0)).mustRun()
 
-	watchlist := decodeWatchlistPublished(t, onlyEnvelopeOfType(t, emitted, event.WatchlistPublishedEventType))
+	watchlists := watchlistsForSessions(t, emitted, bars)
+	watchlist := watchlists[len(watchlists)-1]
 	if len(watchlist.Entries) != 2 {
 		t.Fatalf("Watchlist has %d entries, want 2: the cap decides which Signal is FUNDED, never which Setup is OBSERVED", len(watchlist.Entries))
 	}
@@ -186,8 +191,8 @@ func TestWatchlistPersistsThroughACapDecline(t *testing.T) {
 }
 
 // TestATierASetupNotEnteredDoesNotReappearOnTheWatchlistWithoutRequalifying
-// is the ticket's fourth named case: a Tier A Setup that is not entered does
-// not reappear as a live Signal — or on the Watchlist — the next bar unless
+// checks that a Tier A Setup that is not entered does not reappear as a
+// live Signal — or on the Watchlist — the next bar unless
 // it re-qualifies (ADR 0011, decision 4).
 func TestATierASetupNotEnteredDoesNotReappearOnTheWatchlistWithoutRequalifying(t *testing.T) {
 	t.Parallel()
@@ -202,13 +207,13 @@ func TestATierASetupNotEnteredDoesNotReappearOnTheWatchlistWithoutRequalifying(t
 	if got := len(envelopesOfType(emitted, event.CampaignOpenedEventType)); got != 0 {
 		t.Fatalf("got %d Campaign(s), want 0: no fill arrived", got)
 	}
-	watchlists := envelopesOfType(emitted, event.WatchlistPublishedEventType)
-	if len(watchlists) != 1 {
-		t.Fatalf("got %d Watchlist(s), want exactly 1 (only the breakout Session): AAPL does not requalify for either Tier the next Session, so it does not reappear", len(watchlists))
+	watchlists := watchlistsForSessions(t, emitted, append(bars, quietBar("AAPL")))
+	breakout := watchlists[len(watchlists)-2]
+	if len(breakout.Entries) != 1 || breakout.Entries[0].InstrumentID != "AAPL" || breakout.Entries[0].Tier != event.TierA {
+		t.Fatalf("breakout Watchlist = %+v, want AAPL at Tier A", breakout.Entries)
 	}
-	only := decodeWatchlistPublished(t, watchlists[0])
-	if len(only.Entries) != 1 || only.Entries[0].InstrumentID != "AAPL" || only.Entries[0].Tier != event.TierA {
-		t.Fatalf("the one Watchlist = %+v, want AAPL's breakout Session alone", only.Entries)
+	if next := watchlists[len(watchlists)-1]; len(next.Entries) != 0 {
+		t.Fatalf("next Session's Watchlist = %+v, want no entries: AAPL did not requalify", next.Entries)
 	}
 }
 
@@ -216,9 +221,9 @@ func TestATierASetupNotEnteredDoesNotReappearOnTheWatchlistWithoutRequalifying(t
 // ("Watchlist emission timing and unrankable Setups"): a Setup this Session
 // cannot rank at all (fewer than indicator.StrengthLookbackBars+1
 // split-adjusted closes) is left off the Watchlist entirely, and a Session
-// whose only candidate is unrankable publishes no Watchlist at all — the
-// identical fixture TestReducerEmitsExactlyOneSignalOnBreakoutBar already
-// uses, which is unmodified by #35 for exactly this reason.
+// whose only candidate is unrankable publishes an empty Watchlist (owner's
+// decision of 2026-09-26). The Signal still fires and is declined for
+// insufficient history, as ADR 0010 requires.
 func TestWatchlistOmitsAnInstrumentItCannotRank(t *testing.T) {
 	t.Parallel()
 
@@ -229,8 +234,15 @@ func TestWatchlistOmitsAnInstrumentItCannotRank(t *testing.T) {
 	if got := len(envelopesOfType(emitted, event.SignalEventType)); got != 1 {
 		t.Fatalf("got %d Signal(s), want exactly 1: the Tier A Signal still fires", got)
 	}
-	if got := len(envelopesOfType(emitted, event.WatchlistPublishedEventType)); got != 0 {
-		t.Fatalf("got %d Watchlist(s), want 0: AAPL is the Session's only Tier A/B Setup and cannot be ranked, so nothing is left to publish", got)
+	watchlists := envelopesOfType(emitted, event.WatchlistPublishedEventType)
+	if len(watchlists) != len(highs) {
+		t.Fatalf("got %d Watchlist(s), want %d: one per Session, including the unrankable breakout", len(watchlists), len(highs))
+	}
+	for i, envelope := range watchlists {
+		watchlist := decodeWatchlistPublished(t, envelope)
+		if !watchlist.PeriodEnd.Equal(day(i+1)) || len(watchlist.Entries) != 0 {
+			t.Fatalf("Session %d Watchlist = %+v, want an empty Watchlist at %v", i+1, watchlist, day(i+1))
+		}
 	}
 	if got := len(envelopesOfType(emitted, event.ProposalDeclinedEventType)); got != 1 {
 		t.Fatalf("got %d decline(s), want exactly 1 (insufficient history)", got)
@@ -256,7 +268,8 @@ func TestWatchlistEntriesAreRankedByStrengthDescending(t *testing.T) {
 	}
 	emitted := newStream(t, cfg).lockstep(lowVolumeBars, highVolumeBars).mustRun()
 
-	watchlist := decodeWatchlistPublished(t, onlyEnvelopeOfType(t, emitted, event.WatchlistPublishedEventType))
+	watchlists := watchlistsForSessions(t, emitted, lowVolumeBars)
+	watchlist := watchlists[len(watchlists)-1]
 	if len(watchlist.Entries) != 2 {
 		t.Fatalf("Watchlist has %d entries, want 2", len(watchlist.Entries))
 	}
@@ -275,12 +288,52 @@ func TestWatchlistPublishedPayloadFromReducerValidates(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
-	emitted := newStream(t, cfg).bars(breakoutBars("AAPL")).mustRun()
+	bars := breakoutBars("AAPL")
+	emitted := newStream(t, cfg).bars(bars).mustRun()
+	for _, watchlist := range watchlistsForSessions(t, emitted, bars) {
+		if err := watchlist.Validate(); err != nil {
+			t.Fatalf("Watchlist at %v fails its own Validate(): %v", watchlist.PeriodEnd, err)
+		}
+	}
+}
+
+// A delisted instrument is not a Setup (ADR 0009). ADR 0011's amendment,
+// accepted 2026-09-26, still requires an explicit empty Watchlist at close.
+func TestSessionWithNoSetupsPublishesExactlyOneEmptyWatchlist(t *testing.T) {
+	t.Parallel()
+
+	bar := completedBar("AAPL", day(1), 110, 100, 105)
+	emitted := newStream(t, validConfigurationPayload()).
+		corporateAction(delistingAction("AAPL", day(0))).bar(bar).mustRun()
+	if got := len(envelopesOfType(emitted, event.SetupEvaluatedEventType)); got != 0 {
+		t.Fatalf("got %d Setup evaluations, want none for the delisted instrument", got)
+	}
 	watchlist := decodeWatchlistPublished(t, onlyEnvelopeOfType(t, emitted, event.WatchlistPublishedEventType))
+	if len(watchlist.Entries) != 0 {
+		t.Fatalf("Watchlist has %d entries, want zero", len(watchlist.Entries))
+	}
+	if !watchlist.PeriodEnd.Equal(bar.PeriodEnd) {
+		t.Fatalf("Watchlist PeriodEnd = %v, want %v", watchlist.PeriodEnd, bar.PeriodEnd)
+	}
 	if err := watchlist.Validate(); err != nil {
-		t.Fatalf("Watchlist fails its own Validate(): %v", err)
+		t.Fatalf("empty Watchlist fails Validate(): %v", err)
 	}
-	if !watchlist.PeriodEnd.Equal(day(56)) {
-		t.Fatalf("PeriodEnd = %v, want %v", watchlist.PeriodEnd, day(56))
+}
+
+// watchlistsForSessions checks ADR 0011's one-publication-per-Session rule.
+// The bars represent one instrument's chronological series, including warm-up.
+func watchlistsForSessions(t *testing.T, emitted []event.Envelope, bars []event.CompletedBarPayload) []event.WatchlistPublishedPayload {
+	t.Helper()
+	watchlists := envelopesOfType(emitted, event.WatchlistPublishedEventType)
+	if len(watchlists) != len(bars) {
+		t.Fatalf("got %d Watchlist(s), want %d: exactly one per Session", len(watchlists), len(bars))
 	}
+	payloads := make([]event.WatchlistPublishedPayload, len(watchlists))
+	for i, envelope := range watchlists {
+		payloads[i] = decodeWatchlistPublished(t, envelope)
+		if !payloads[i].PeriodEnd.Equal(bars[i].PeriodEnd) {
+			t.Fatalf("Watchlist %d PeriodEnd = %v, want %v", i, payloads[i].PeriodEnd, bars[i].PeriodEnd)
+		}
+	}
+	return payloads
 }

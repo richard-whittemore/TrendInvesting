@@ -57,9 +57,12 @@ func TestWatchlistPublishedPayloadValidate(t *testing.T) {
 			wantErr: "adr is required",
 		},
 		{
-			name:    "empty entries is never published, only omitted",
-			mutate:  func(p *event.WatchlistPublishedPayload) { p.Entries = nil },
-			wantErr: "entries must not be empty",
+			name:   "valid, nil entries record a Session with no ranked Setups",
+			mutate: func(p *event.WatchlistPublishedPayload) { p.Entries = nil },
+		},
+		{
+			name:   "valid, empty entries record a Session with no ranked Setups",
+			mutate: func(p *event.WatchlistPublishedPayload) { p.Entries = []event.WatchlistEntry{} },
 		},
 		{
 			name: "missing instrument id",
