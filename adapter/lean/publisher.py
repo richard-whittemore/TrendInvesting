@@ -22,8 +22,7 @@ ORDER_LIFECYCLE_SCHEMA_VERSION = 1
 # event.MarketCorporateActionEventType / MarketCorporateActionSchemaVersion
 # (internal/event/corporate_action.go); ADR 0015. Schema 2 carries a split's
 # cash in lieu (ADR 0023). Schema 3 adds a symbol-change and a dividend kind
-# (ADR 0024); this adapter still publishes only splits (#28 tracks the rest),
-# but every corporate action it sends must be labelled with the CURRENT
+# (ADR 0024). Every corporate action must be labelled with the CURRENT
 # schema so a build that no longer knows schema 2 does not refuse it.
 CORPORATE_ACTION_EVENT_TYPE = "market.corporate-action"
 CORPORATE_ACTION_SCHEMA_VERSION = 3
@@ -163,10 +162,10 @@ class Publisher:
                              payload["filled_at"])
 
     def publish_corporate_action(self, payload):
-        """Report a split LEAN applied to a held position as
-        market.corporate-action (event.CorporateActionPayload; ADR 0023),
-        stamped at the split's own effective time. The desk derives the
-        payload (OrderDesk.apply_split); this adds no figure of its own."""
+        """Report a split or dividend on a held position as
+        market.corporate-action (ADRs 0023/0024), stamped at the action's
+        own effective time. The desk derives the payload; this adds no
+        figure of its own."""
         return self._publish(CORPORATE_ACTION_EVENT_TYPE, CORPORATE_ACTION_SCHEMA_VERSION,
                              "corporate-action", payload, payload["effective_at"])
 

@@ -123,7 +123,7 @@ at the split's reference price times the factor, so the holding can fall one
 raw share short of the engine's Units at the exact ratio: 3,516 raw shares
 became 24,611 and cash, where the Units are 24,612. While LEAN holds a
 position across a split, the adapter publishes a `market.corporate-action` of
-kind `split` (schema 2), stamped at the split's own time, stating the ratio,
+kind `split` (schema 3), stamped at the split's own time, stating the ratio,
 the split-adjusted shares a raw share now is, the raw shares lost and the cash
 paid. It accepts the shortfall only when:
 
@@ -160,6 +160,39 @@ LEAN refuses when asked or when it processes it, or a quantity that is not the
 engine's by the next slice stops the run, and the failure names LEAN's own
 `ErrorCode` and `ErrorMessage`. A `strategy.campaign.cash-in-lieu` arriving
 other than in reply to a split stops the run too.
+
+**Dividends (ADRs 0004, 0024).** An entry in `data.Dividends` for the traded
+symbol publishes `market.corporate-action` of kind `dividend` (schema 3)
+while the engine holds Units. Its `cash_amount` is LEAN's `Distribution`
+per share times the **raw shares actually held**, checked against the
+engine's split-adjusted Units at the current split ratio. Its currency is
+USD. `effective_at` is the dividend's own LEAN `Time`, converted from New
+York time to UTC, never moved to fit a bar. The event follows the previous
+close's snapshot and any split in that slice, and precedes its completed
+bar and Session-close decisions (ADRs 0010/0021), including when LEAN
+delivers the dividend in a slice with no bar. A dividend while flat is
+logged and not published: there is no open Campaign to credit.
+
+The reply must contain exactly one `strategy.campaign.dividend` at schema 1,
+naming the held Campaign and the published action and restating its exact
+cash, currency and effective time. An engine refusal, unexpected reply,
+invalid distribution or disagreement about holdings stops the run. No
+order or Unit changes, and the adapter never adds cash to LEAN's portfolio.
+
+Before accepting the next close, the adapter checks `Portfolio.Cash`
+against the preceding close's cash plus the accepted execution proceeds or
+costs, commissions, split cash in lieu and dividends since that reading.
+It uses decimal arithmetic for this comparison and stops with a
+`dividend cash mismatch` diagnostic if the residual exceeds one cent in
+either direction or cash is non-finite (ADR 0019). The next ordinary
+snapshot reports LEAN's own cash, including its dividend credit; the
+credit cannot fund the dividend bar's decisions (ADR 0020). A dividend
+with no subsequent close stops the run, since no snapshot could state
+the credit (ADR 0024). These checks cover this backtest dividend path;
+they do not implement ADR 0019's full broker reconciliation or clear a
+live-trading gate. The Python fakes exercise these cases and the Go
+contract validator accepts the exact published payload. A LEAN acceptance
+run remains separate from these tests.
 
 After each bar's decisions have been received, the adapter reads one
 `account.snapshot` from `Portfolio.TotalPortfolioValue` (equity) and

@@ -776,6 +776,54 @@ class OrderDesk:
                 "new_shares": n, "old_shares": 1, "engine_shares_per_raw_share": ratio,
                 "raw_shares_lost": lost, "cash_in_lieu": cash, "currency": _USD}
 
+    def dividend_action(self, distribution, effective_at):
+        """State the dividend on actual raw shares (ADRs 0004, 0024).
+
+        Exit Orders mirror the engine's held Units. Require their raw
+        quantities to match LEAN exactly; a dividend cannot explain a share
+        difference (ADR 0019). Flat holdings have no Campaign to credit.
+        """
+        holding = _whole(self.algorithm.Portfolio[self.symbol].Quantity)
+        if not self.exit_orders and holding == 0:
+            return None
+        ratio = self._require_ratio()
+        quantities = [order["quantity"] for order in self.exit_orders.values()]
+        if holding is None or holding <= 0 or not quantities or \
+                any(q <= 0 or q % ratio for q in quantities) or sum(quantities) != holding * ratio:
+            raise Uncertain("dividend of {} at {}: LEAN holds {} raw shares but the engine's "
+                            "Units hold {} split-adjusted shares at ratio {} (ADR 0019)".format(
+                                self.instrument, effective_at,
+                                self.algorithm.Portfolio[self.symbol].Quantity,
+                                sum(quantities), ratio))
+        if not isfinite(distribution) or distribution <= 0:
+            raise Uncertain("dividend distribution must be positive and finite (ADR 0024)")
+        cash = float(Decimal(str(distribution)) * holding)
+        if not isfinite(cash) or cash <= 0:
+            raise Uncertain("dividend cash amount must be positive and finite (ADR 0024)")
+        return {"instrument_id": self.instrument, "kind": "dividend",
+                "effective_at": effective_at, "cash_amount": cash, "currency": _USD}
+
+    def dividend_decisions(self, decisions, action, action_id):
+        """Require exactly the cash-only acknowledgment ADR 0024 specifies.
+
+        Nothing is filtered as informational here: any other decision or
+        Campaign, currency, amount or cause is an unexpected reply.
+        """
+        campaigns = {campaign for campaign, _ in self.exit_orders}
+        if len(campaigns) != 1 or len(decisions) != 1:
+            raise Uncertain("unexpected dividend reply: require one held Campaign and one decision")
+        decision = decisions[0]
+        expected = {key: action[key] for key in
+                    ("instrument_id", "effective_at", "cash_amount", "currency")}
+        expected.update(campaign_id=next(iter(campaigns)), corporate_action_id=action_id,
+                        rule="campaign.dividend.credited-as-cash", adr="0024")
+        if not isinstance(decision, dict) or \
+                decision.get("type") != "strategy.campaign.dividend" or \
+                decision.get("schema_version") != 1 or decision.get("envelope_version") != 1 or \
+                not decision.get("id") or decision.get("payload") != expected:
+            raise Uncertain("unexpected dividend reply for {} at {}: expected {} (ADR 0024)".format(
+                self.instrument, action["effective_at"], expected))
+
     def split_decisions(self, decisions, action):
         """Carry the engine's reply to a published split into this desk (ADR 0023).
 
