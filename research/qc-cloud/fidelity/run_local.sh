@@ -24,5 +24,8 @@ fi
 
 (cd "$workspace" && .venv/bin/lean backtest "$project" --image "$image" --no-update)
 
-latest=$(ls -td "$workspace/$project"/backtests/*/ | head -n 1)
+# LEAN names each run's folder by its start time, so the last in glob
+# order is the run just made.
+latest=
+for dir in "$workspace/$project"/backtests/*/; do latest=$dir; done
 python3 "$here/compare_fills.py" "$latest" "$journal"
