@@ -136,6 +136,18 @@ func (r *transition) applySessionClosed(envelope event.Envelope) ([]event.Envelo
 	}
 	emissions = append(emissions, universeEmissions...)
 
+	// ADR 0011's Watchlist: the ranked set of every Setup this Session
+	// evaluated to Tier A or Tier B — the pre-image of the entries decided
+	// below, and the first thing reviewed each day (CONTEXT.md:
+	// "Watchlist"). Built and emitted before this Session's Adds and
+	// entries, but it is pure observability: nothing decided below reads it,
+	// and it reads nothing they decide (ADR 0011, decision 3).
+	watchlistEmissions, err := r.emitWatchlist(live, envelope)
+	if err != nil {
+		return nil, err
+	}
+	emissions = append(emissions, watchlistEmissions...)
+
 	for _, id := range live {
 		if !r.peekInstrument(id).addDue {
 			continue

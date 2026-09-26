@@ -216,6 +216,18 @@ func decodeSignal(t *testing.T, envelope event.Envelope) event.SignalPayload {
 	return payload
 }
 
+func decodeWatchlistPublished(t *testing.T, envelope event.Envelope) event.WatchlistPublishedPayload {
+	t.Helper()
+	if envelope.Type != event.WatchlistPublishedEventType {
+		t.Fatalf("envelope.Type = %q, want %q", envelope.Type, event.WatchlistPublishedEventType)
+	}
+	var payload event.WatchlistPublishedPayload
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(payload) error = %v", err)
+	}
+	return payload
+}
+
 // runReducerOverHighs replays a configuration event (payload cfg) followed by
 // one bar per entry in highs for instrumentID, and returns every envelope the
 // engine emitted. Each bar's split-adjusted High is exactly highs[i], with
@@ -424,8 +436,8 @@ func TestReducerEmitsOneSetupEvaluatedPerBarWithExpectedNAndReadiness(t *testing
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if len(emitted) != len(trs) {
-		t.Fatalf("len(emitted) = %d, want %d (one per bar, none for the configuration event)", len(emitted), len(trs))
+	if len(emitted) != 2*len(trs) {
+		t.Fatalf("len(emitted) = %d, want %d (Setup and Watchlist per Session, none for configuration)", len(emitted), 2*len(trs))
 	}
 
 	// Evaluate-then-add (CONTEXT.md: "Completed bar"): the N a bar is decided against is
@@ -444,7 +456,11 @@ func TestReducerEmitsOneSetupEvaluatedPerBarWithExpectedNAndReadiness(t *testing
 		9.479784375, // bar 25
 	}
 
-	for i, decision := range emitted {
+	setups := envelopesOfType(emitted, event.SetupEvaluatedEventType)
+	if len(setups) != len(trs) {
+		t.Fatalf("got %d Setup evaluations, want %d: one per completed bar", len(setups), len(trs))
+	}
+	for i, decision := range setups {
 		barNumber := i + 1
 
 		if decision.Source != "reducer" {
@@ -535,11 +551,11 @@ func TestReducerUsesSplitAdjustedViewOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if len(emitted) != bars {
-		t.Fatalf("len(emitted) = %d, want %d", len(emitted), bars)
+	if len(emitted) != 2*bars {
+		t.Fatalf("len(emitted) = %d, want %d", len(emitted), 2*bars)
 	}
 
-	last := decodeSetupEvaluated(t, emitted[len(emitted)-1])
+	last := decodeSetupEvaluated(t, emitted[len(emitted)-2])
 	if !last.NReady {
 		t.Fatalf("NReady = false on bar %d, want true", bars)
 	}
@@ -582,16 +598,16 @@ func TestReducerKeepsSeparateStatePerInstrument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if len(emitted) != aaplBars+1 {
-		t.Fatalf("len(emitted) = %d, want %d", len(emitted), aaplBars+1)
+	if len(emitted) != 2*(aaplBars+1) {
+		t.Fatalf("len(emitted) = %d, want %d", len(emitted), 2*(aaplBars+1))
 	}
 
-	aaplLast := decodeSetupEvaluated(t, emitted[aaplBars-1])
+	aaplLast := decodeSetupEvaluated(t, emitted[2*(aaplBars-1)])
 	if aaplLast.InstrumentID != "AAPL" || !aaplLast.NReady {
 		t.Fatalf("AAPL on bar %d: InstrumentID=%q NReady=%v, want AAPL, true", aaplBars, aaplLast.InstrumentID, aaplLast.NReady)
 	}
 
-	msftFirst := decodeSetupEvaluated(t, emitted[aaplBars])
+	msftFirst := decodeSetupEvaluated(t, emitted[2*aaplBars])
 	if msftFirst.InstrumentID != "MSFT" {
 		t.Fatalf("InstrumentID = %q, want MSFT", msftFirst.InstrumentID)
 	}
@@ -636,11 +652,11 @@ func TestReducerBarCountWarmupIgnoresCalendarSpacing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if len(emitted) != bars {
-		t.Fatalf("len(emitted) = %d, want %d", len(emitted), bars)
+	if len(emitted) != 2*bars {
+		t.Fatalf("len(emitted) = %d, want %d", len(emitted), 2*bars)
 	}
 
-	last := decodeSetupEvaluated(t, emitted[len(emitted)-1])
+	last := decodeSetupEvaluated(t, emitted[len(emitted)-2])
 	if last.NReady {
 		t.Fatalf("NReady = true after %d completed bars spanning %d calendar days, want false (warm-up must count bars, not calendar days)", bars, 1+(bars-1)*3)
 	}
@@ -1196,12 +1212,12 @@ func TestReducerFlatInstrumentStaysNotReadyUntilNonZeroTrueRange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if len(emitted) != 22 {
-		t.Fatalf("len(emitted) = %d, want 22", len(emitted))
+	if len(emitted) != 44 {
+		t.Fatalf("len(emitted) = %d, want 44 (Setup and Watchlist per Session)", len(emitted))
 	}
 
 	for i := 0; i < 21; i++ {
-		payload := decodeSetupEvaluated(t, emitted[i])
+		payload := decodeSetupEvaluated(t, emitted[2*i])
 		if payload.NReady {
 			t.Fatalf("bar %d: NReady = true for a flat instrument, want false (warm-up complete but N is not a usable reading)", i+1)
 		}
@@ -1210,7 +1226,7 @@ func TestReducerFlatInstrumentStaysNotReadyUntilNonZeroTrueRange(t *testing.T) {
 		}
 	}
 
-	last := decodeSetupEvaluated(t, emitted[21])
+	last := decodeSetupEvaluated(t, emitted[42])
 	if !last.NReady {
 		t.Fatal("bar 22: NReady = false, want true: True Range was non-zero on bar 21")
 	}
@@ -1254,19 +1270,17 @@ func TestReducerEmitsExactlyOneSignalOnBreakoutBar(t *testing.T) {
 	highs := breakoutFixtureHighs()
 	emitted := runReducerOverHighs(t, "AAPL", highs, cfg)
 
-	// 55 warm-up bars each emit one Setup-evaluated event (no breakout: the
-	// channel is not ready until bar 55 has been added, i.e. when
-	// evaluating bar 56); bar 56 emits a Setup-evaluated event, a Signal,
-	// and the Signal's outcome at the Session's close.
-	if len(emitted) != len(highs)+2 {
-		t.Fatalf("len(emitted) = %d, want %d (55 bars x 1 event, plus bar 56's 3 events)", len(emitted), len(highs)+2)
+	// Each warm-up Session emits a Setup evaluation and an empty Watchlist
+	// (ADR 0011). Bar 56 additionally emits a Signal and its outcome at close.
+	if len(emitted) != 2*len(highs)+2 {
+		t.Fatalf("len(emitted) = %d, want %d (55 Sessions x 2 events, plus bar 56's 4 events)", len(emitted), 2*len(highs)+2)
 	}
 	// 56 closes are fewer than the 64 Strength needs, so the Signal cannot
-	// be ranked and bar 56's third emission is its insufficient-history
+	// be ranked and bar 56's fourth emission is its insufficient-history
 	// decline, not a proposal (ADR 0010, as amended 2026-09-25).
 	last := emitted[len(emitted)-1]
 	if last.Type != event.ProposalDeclinedEventType {
-		t.Fatalf("bar 56's third emission is %s, want %s", last.Type, event.ProposalDeclinedEventType)
+		t.Fatalf("bar 56's fourth emission is %s, want %s", last.Type, event.ProposalDeclinedEventType)
 	}
 	var declined event.ProposalDeclinedPayload
 	if err := json.Unmarshal(last.Payload, &declined); err != nil {
@@ -1335,11 +1349,10 @@ func TestReducerEmitsExactlyOneSignalOnBreakoutBar(t *testing.T) {
 
 	// The Setup-evaluated event on the same bar must report Tier A and the
 	// same channel high, and the Signal must be emitted strictly after it
-	// in the returned slice (Apply returns [setup-evaluated, signal,
-	// proposal] since #10; TestReducerEmitsTradeProposalOnSignal asserts the
-	// third).
-	setupIndex := len(emitted) - 3
-	signalIndex := len(emitted) - 2
+	// in the returned slice: Setup, Signal, Watchlist, decline. ADR 0011
+	// publishes the Watchlist before ADR 0010's entry decision at close.
+	setupIndex := len(emitted) - 4
+	signalIndex := len(emitted) - 3
 	if emitted[setupIndex].Type != event.SetupEvaluatedEventType {
 		t.Fatalf("emitted[%d].Type = %q, want %q", setupIndex, emitted[setupIndex].Type, event.SetupEvaluatedEventType)
 	}
@@ -1448,8 +1461,8 @@ func TestReducerTieAtChannelHighIsTierBNotABreakout(t *testing.T) {
 	highs := append(append([]float64{}, warmupHighs...), 155) // tie: bar 56's high == channel high
 
 	emitted := runReducerOverHighs(t, "AAPL", highs, cfg)
-	if len(emitted) != len(highs) {
-		t.Fatalf("len(emitted) = %d, want %d (a tie is not a breakout, so no Signal)", len(emitted), len(highs))
+	if len(emitted) != 2*len(highs) {
+		t.Fatalf("len(emitted) = %d, want %d (a tie is not a breakout, so no Signal)", len(emitted), 2*len(highs))
 	}
 	for _, e := range emitted {
 		if e.Type == event.SignalEventType {
@@ -1457,7 +1470,7 @@ func TestReducerTieAtChannelHighIsTierBNotABreakout(t *testing.T) {
 		}
 	}
 
-	last := decodeSetupEvaluated(t, emitted[len(emitted)-1])
+	last := decodeSetupEvaluated(t, emitted[len(emitted)-2])
 	if last.EntryChannelHigh != 155 {
 		t.Fatalf("EntryChannelHigh = %v, want 155", last.EntryChannelHigh)
 	}
@@ -1512,8 +1525,8 @@ func TestReducerTierBAndTierNoneBasedOnConfiguredDistance(t *testing.T) {
 			}
 
 			emitted := runReducerOverHighs(t, "AAPL", highs, cfg)
-			if len(emitted) != len(highs) {
-				t.Fatalf("len(emitted) = %d, want %d (no Signal expected for this bar)", len(emitted), len(highs))
+			if len(emitted) != 2*len(highs) {
+				t.Fatalf("len(emitted) = %d, want %d (no Signal expected for this bar)", len(emitted), 2*len(highs))
 			}
 			for _, e := range emitted {
 				if e.Type == event.SignalEventType {
@@ -1521,7 +1534,7 @@ func TestReducerTierBAndTierNoneBasedOnConfiguredDistance(t *testing.T) {
 				}
 			}
 
-			got := decodeSetupEvaluated(t, emitted[len(emitted)-1])
+			got := decodeSetupEvaluated(t, emitted[len(emitted)-2])
 			if got.Tier != last.tier {
 				t.Fatalf("Tier = %q, want %q", got.Tier, last.tier)
 			}
@@ -1551,8 +1564,8 @@ func TestReducerNoSignalWhileNNotReady(t *testing.T) {
 
 	highs := []float64{101, 102, 103, 104, 105, 200} // channel ready at bar 6 (5 warm-up + this one); N needs 20
 	emitted := runReducerOverHighs(t, "AAPL", highs, cfg)
-	if len(emitted) != len(highs) {
-		t.Fatalf("len(emitted) = %d, want %d (no Signal: N is not ready)", len(emitted), len(highs))
+	if len(emitted) != 2*len(highs) {
+		t.Fatalf("len(emitted) = %d, want %d (no Signal: N is not ready)", len(emitted), 2*len(highs))
 	}
 	for _, e := range emitted {
 		if e.Type == event.SignalEventType {
@@ -1560,7 +1573,7 @@ func TestReducerNoSignalWhileNNotReady(t *testing.T) {
 		}
 	}
 
-	last := decodeSetupEvaluated(t, emitted[len(emitted)-1])
+	last := decodeSetupEvaluated(t, emitted[len(emitted)-2])
 	if last.NReady {
 		t.Fatal("NReady = true after 6 bars, want false (N needs 20)")
 	}
@@ -1637,8 +1650,8 @@ func TestReducerNoSignalWhileEntryChannelNotReady(t *testing.T) {
 	}
 
 	emitted := runReducerOverHighs(t, "AAPL", highs, cfg)
-	if len(emitted) != len(highs) {
-		t.Fatalf("len(emitted) = %d, want %d", len(emitted), len(highs))
+	if len(emitted) != 2*len(highs) {
+		t.Fatalf("len(emitted) = %d, want %d", len(emitted), 2*len(highs))
 	}
 	for _, e := range emitted {
 		if e.Type == event.SignalEventType {
@@ -1646,7 +1659,7 @@ func TestReducerNoSignalWhileEntryChannelNotReady(t *testing.T) {
 		}
 	}
 
-	last := decodeSetupEvaluated(t, emitted[len(emitted)-1])
+	last := decodeSetupEvaluated(t, emitted[len(emitted)-2])
 	if !last.NReady {
 		t.Fatal("NReady = false after 25 bars, want true")
 	}
@@ -1742,7 +1755,7 @@ func TestReducerKeepsSeparateEntryChannelPerInstrument(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	msftDecision := decodeSetupEvaluated(t, emitted[len(emitted)-1])
+	msftDecision := decodeSetupEvaluated(t, emitted[len(emitted)-2])
 	if msftDecision.InstrumentID != "MSFT" {
 		t.Fatalf("InstrumentID = %q, want MSFT", msftDecision.InstrumentID)
 	}
@@ -1752,8 +1765,10 @@ func TestReducerKeepsSeparateEntryChannelPerInstrument(t *testing.T) {
 	if msftDecision.Tier != event.TierNone {
 		t.Fatalf("MSFT Tier = %q on its first bar, want %q", msftDecision.Tier, event.TierNone)
 	}
-	if emitted[len(emitted)-1].Type == event.SignalEventType {
-		t.Fatal("unexpected Signal emitted for MSFT's first bar")
+	for _, signal := range envelopesOfType(emitted, event.SignalEventType) {
+		if signal.EventTime.Equal(msftBar.PeriodEnd) {
+			t.Fatal("unexpected Signal emitted for MSFT's first bar")
+		}
 	}
 }
 
@@ -1904,26 +1919,33 @@ func TestReducerEmitsTradeProposalOnSignal(t *testing.T) {
 
 	cfg := validConfigurationPayload()
 	// breakoutBars, not breakoutFixtureHighs directly: the breakout Signal
-	// needs #34's 64-close history to be ranked at all (ADR 0010, as amended
+	// needs 64-close history to be ranked at all (ADR 0010, as amended
 	// 2026-09-25), which breakoutBars' own history preamble supplies without
 	// moving the breakout off day(56) or changing N (breakoutBars' own doc
 	// comment).
 	bars := breakoutBars("AAPL")
 	emitted := runReducerOverBars(t, cfg, bars)
 
-	// Every non-breakout bar emits one Setup-evaluated event each; the
-	// breakout bar emits three (Setup-evaluated, Signal, Proposal).
-	if len(emitted) != len(bars)+2 {
-		t.Fatalf("len(emitted) = %d, want %d (%d x 1, plus the breakout bar's 3)", len(emitted), len(bars)+2, len(bars)-1)
+	// Every non-breakout Session emits a Setup evaluation and a Watchlist; the
+	// breakout bar emits four (Setup-evaluated, Signal, Watchlist, Proposal)
+	// — ADR 0011's Watchlist is built and emitted at the Session's close,
+	// after the Signal that fired at the bar and before the entry it is the
+	// pre-image of.
+	if len(emitted) != 2*len(bars)+2 {
+		t.Fatalf("len(emitted) = %d, want %d (%d x 2, plus the breakout bar's 4)", len(emitted), 2*len(bars)+2, len(bars)-1)
 	}
 
-	setupIndex, signalIndex, proposalIndex := len(emitted)-3, len(emitted)-2, len(emitted)-1
-	wantOrder := []string{event.SetupEvaluatedEventType, event.SignalEventType, event.TradeProposalEventType}
+	setupIndex, signalIndex, watchlistIndex, proposalIndex := len(emitted)-4, len(emitted)-3, len(emitted)-2, len(emitted)-1
+	wantOrder := []string{event.SetupEvaluatedEventType, event.SignalEventType, event.WatchlistPublishedEventType, event.TradeProposalEventType}
 	for offset, want := range wantOrder {
 		index := setupIndex + offset
 		if emitted[index].Type != want {
-			t.Fatalf("emitted[%d].Type = %q, want %q (emission order must be Setup-evaluated, Signal, Proposal)", index, emitted[index].Type, want)
+			t.Fatalf("emitted[%d].Type = %q, want %q (emission order must be Setup-evaluated, Signal, Watchlist, Proposal)", index, emitted[index].Type, want)
 		}
+	}
+	watchlist := decodeWatchlistPublished(t, emitted[watchlistIndex])
+	if len(watchlist.Entries) != 1 || watchlist.Entries[0].InstrumentID != "AAPL" || watchlist.Entries[0].Tier != event.TierA {
+		t.Fatalf("Watchlist entries = %+v, want exactly one Tier A entry for AAPL", watchlist.Entries)
 	}
 
 	proposalEnvelope := emitted[proposalIndex]
@@ -2109,8 +2131,8 @@ func TestReducerDeclinesWhenTheAccountIsTooSmallForOneShare(t *testing.T) {
 	bars := breakoutBars("AAPL")
 	emitted := runReducerOverBars(t, cfg, bars)
 
-	if len(emitted) != len(bars)+2 {
-		t.Fatalf("len(emitted) = %d, want %d (%d x 1, plus the breakout bar's Setup-evaluated, Signal and decline)", len(emitted), len(bars)+2, len(bars)-1)
+	if len(emitted) != 2*len(bars)+2 {
+		t.Fatalf("len(emitted) = %d, want %d (%d x 2, plus the breakout bar's Setup-evaluated, Signal, Watchlist and decline)", len(emitted), 2*len(bars)+2, len(bars)-1)
 	}
 	if got := len(envelopesOfType(emitted, event.SignalEventType)); got != 1 {
 		t.Fatalf("got %d Signal(s), want exactly 1: sizing declines the trade, it does not suppress the Signal", got)

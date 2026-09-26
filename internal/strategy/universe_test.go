@@ -380,6 +380,19 @@ func TestAnIneligibleInstrumentsSignalIsDeclinedInsteadOfProposed(t *testing.T) 
 	if decline.Strength != 0 {
 		t.Errorf("decline.Strength = %v, want exactly 0 (ranking never ran for an instrument excluded before rankSignals)", decline.Strength)
 	}
+	// The Watchlist lists only Setups the universe admits: an instrument the
+	// gate excludes is no Setup at all (ADR 0009, ADR 0011).
+	for _, w := range envelopesOfType(emitted, event.WatchlistPublishedEventType) {
+		var payload event.WatchlistPublishedPayload
+		if err := json.Unmarshal(w.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range payload.Entries {
+			if entry.InstrumentID == "BBB" {
+				t.Errorf("Watchlist at %s lists BBB, which the universe excludes", payload.PeriodEnd)
+			}
+		}
+	}
 	if decline.Kind != event.ProposalDeclinedKindEntry {
 		t.Errorf("decline.Kind = %q, want %q", decline.Kind, event.ProposalDeclinedKindEntry)
 	}

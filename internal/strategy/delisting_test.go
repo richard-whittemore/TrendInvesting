@@ -864,7 +864,10 @@ func TestABarAfterADelistingEvaluatesNoSetup(t *testing.T) {
 
 	for _, envelope := range emitted {
 		if envelope.EventTime.Equal(staleBar.PeriodEnd) {
-			t.Errorf("emission %q of type %q is attributed to the bar after the delisting; a delisted instrument decides nothing", envelope.ID, envelope.Type)
+			watchlist := decodeWatchlistPublished(t, envelope)
+			if len(watchlist.Entries) != 0 {
+				t.Errorf("Watchlist after the delisting = %+v, want empty", watchlist.Entries)
+			}
 		}
 	}
 	if got := len(envelopesOfType(emitted, event.CampaignOpenedEventType)); got != 1 {
@@ -873,20 +876,26 @@ func TestABarAfterADelistingEvaluatesNoSetup(t *testing.T) {
 }
 
 // TestADelistingForAnInstrumentNeverTradedBarsItFromBeingEnteredAtAll is the
-// third case: the ticket's own no-op criterion still holds — no event and no
-// error for an instrument this reducer has never seen — but the fact is
-// nonetheless recorded, so the bars that follow it are never evaluated.
+// third case: ADR 0009's delisting records an instrument this reducer has
+// never seen, so later bars never evaluate a Setup. ADR 0011 still records
+// each Session's empty Watchlist.
 func TestADelistingForAnInstrumentNeverTradedBarsItFromBeingEnteredAtAll(t *testing.T) {
 	t.Parallel()
 
 	cfg := validConfigurationPayload()
+	bars := breakoutBars("AAPL")
 	emitted := newStream(t, cfg).
 		corporateAction(delistingAction("AAPL", day(1))).
-		bars(breakoutBars("AAPL")).
+		bars(bars).
 		mustRun()
 
-	if len(emitted) != 0 {
-		t.Fatalf("got %d emission(s) after a delisting for an instrument never traded, want 0: %v", len(emitted), emitted)
+	if len(emitted) != len(bars) {
+		t.Fatalf("got %d emission(s) after a delisting for an instrument never traded, want %d empty Watchlists", len(emitted), len(bars))
+	}
+	for _, watchlist := range watchlistsForSessions(t, emitted, bars) {
+		if len(watchlist.Entries) != 0 {
+			t.Errorf("Watchlist after the delisting = %+v, want empty", watchlist.Entries)
+		}
 	}
 }
 
@@ -916,7 +925,10 @@ func TestDelistingForAnIdleKnownInstrumentStillRecordsTheTombstone(t *testing.T)
 
 	for _, envelope := range emitted {
 		if envelope.EventTime.Equal(staleBar.PeriodEnd) {
-			t.Errorf("emission %q of type %q is attributed to the bar after the idle delisting notice; a delisted instrument decides nothing", envelope.ID, envelope.Type)
+			watchlist := decodeWatchlistPublished(t, envelope)
+			if len(watchlist.Entries) != 0 {
+				t.Errorf("Watchlist after the idle delisting = %+v, want empty", watchlist.Entries)
+			}
 		}
 	}
 }

@@ -217,6 +217,14 @@ func decisionSentence(e event.Envelope) (string, error) {
 		return renderDecision(e, event.EngineStateSchemaVersion, func(p event.EngineStatePayload) string {
 			return fmt.Sprintf("engine became %s because %s: %s", logText(p.State), logText(p.Reason), logText(p.Detail))
 		})
+	case event.WatchlistPublishedEventType:
+		return renderDecision(e, event.WatchlistPublishedSchemaVersion, func(p event.WatchlistPublishedPayload) string {
+			entries := make([]string, len(p.Entries))
+			for i, entry := range p.Entries {
+				entries[i] = fmt.Sprintf("%s Tier %s (distance %s N, strength %s)", logText(entry.InstrumentID), entry.Tier, decisionNumber(entry.DistanceToEntryInN), decisionNumber(entry.Strength))
+			}
+			return fmt.Sprintf("published Watchlist of %d Setup(s), ranked by Strength: %s", len(p.Entries), strings.Join(entries, "; "))
+		})
 	default:
 		return "", fmt.Errorf("unsupported decision type %q", e.Type)
 	}

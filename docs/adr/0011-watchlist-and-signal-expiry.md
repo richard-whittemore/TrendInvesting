@@ -64,3 +64,47 @@ RulesVersion changes from 1.10.0 to 1.11.0 (ADR 0016). The reference backtest
 still fills covered chained rungs intrabar (ADR 0005), so this lifetime
 extension must not change its trading decisions. Schema and version
 propagation are separately accounted for in the evidence.
+
+## Amendment: Watchlist emission timing and unrankable Setups (Accepted, 2026-09-26)
+
+Decision 2 declares the Watchlist a first-class observable, ranked by
+Strength, but does not say when it is published or what happens to a Setup
+this Session cannot rank at all. Richard's owner decision on 2026-09-26
+accepts the publication timing and omission of unrankable Setups, and
+requires an empty Watchlist when no Setup qualifies. This supersedes the
+2026-09-25 proposal to omit publication in that case.
+
+1. **The Watchlist is published once per Session, at the session-close pass,
+   immediately after ADR 0009's universe evaluation and before that
+   Session's Adds and entries are decided.** Ranking needs Strength, which
+   reads a completed bar's own close and N (ADR 0010, as amended
+   2026-09-25) and — for the dollar-volume tie-break — the same shared
+   ranking rankSignals already uses (session.go: rankSignal). Both are only
+   available once the Session's bars have all been evaluated, so "every bar"
+   in #35's acceptance criteria is read as "every Session" (CONTEXT.md:
+   "Session" already stands in for "day" throughout this project's
+   vocabulary), matching where ADR 0021 decides everything else that needs
+   more than one instrument's own bar.
+2. **A Setup this Session cannot rank at all — fewer than
+   `indicator.StrengthLookbackBars+1` split-adjusted closes or fewer than
+   `indicator.DollarVolumeWindow` raw closes/volumes — is left off the
+   Watchlist entirely, never ranked last.** This extends ADR 0010's own rule
+   for an unrankable Signal (declined rather than ranked last, since "an
+   incomparable instrument has no place in a total order") to the Watchlist:
+   an entry the Watchlist cannot rank is not observable in a way that is
+   consistent with everything ranked beside it, so it is omitted rather than
+   given an arbitrary position or a placeholder Strength.
+3. **A Session with no rankable Tier A or Tier B Setup publishes an empty
+   Watchlist.** The empty Entries list explicitly records that the Session
+   was evaluated and nothing qualified, including warm-up Sessions and
+   Sessions whose only Setups cannot be ranked. It distinguishes that
+   outcome from a Session for which no Watchlist decision was recorded.
+   `WatchlistPublishedPayload.Validate` therefore accepts empty Entries
+   while retaining all per-entry rules and non-increasing Strength order.
+
+Both (2) and (3) change nothing about which Signals are funded (ADR 0010's
+own Item 2, already resolved): they only
+decide what the Watchlist itself — a purely observational decision — reports,
+never a proposal, a decline, or a cap check. RulesVersion moves from 1.16.0 to
+1.17.0 for the new decision type alone; no numeric rule constant, ladder, or
+cap changes.

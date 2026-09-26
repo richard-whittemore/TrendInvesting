@@ -261,7 +261,25 @@ package strategy
 // at MarketCorporateActionSchemaVersion 2 (it now names 3, not 2), which is
 // why TestDelistingWithWrongSchemaVersionFailsClosed's pinned decision moves
 // too, even though a delisting itself is unchanged.
-const RulesVersion = "1.16.0"
+//
+// Bumped 1.16.0 -> 1.17.0 for ADR 0011: the session-close pass now also
+// publishes strategy.watchlist.published, the ranked set of every Setup that
+// Session evaluated to Tier A or Tier B (CONTEXT.md: "Watchlist"), sharing
+// its ranking with rankSignals (session.go: rankSignal). It is emitted once
+// per Session immediately after the universe evaluation and before that
+// Session's Adds and entries, including an empty Watchlist for a Session
+// with no rankable Tier A or Tier B Setup (ADR 0011, as amended 2026-09-26).
+// It is pure observability in the Baseline (ADR 0011, decision 3): it
+// decides nothing, and every other decision from the same inputs —
+// proposals, declines, Adds, caps,
+// sizing, and their order — is unchanged. Every completed Session now gains
+// one decision it did not have before, so the two builds do not replay each
+// other's journals byte-identically. No configuration schema changes:
+// ConfigurationPayload.TierBDistanceInN, the "configured distance in N" for
+// Tier B ADR 0011 asks for, already existed. Two new declared Rule*/ADR*
+// constants, event.RuleWatchlistRankedByStrength and
+// event.ADRWatchlistRankedByStrength, move the rule surface fingerprint.
+const RulesVersion = "1.17.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -398,4 +416,8 @@ var RuleSurfaceFingerprints = map[string]string{
 	// and event.RuleSymbolChangeCarriesInstrumentState/
 	// ADRSymbolChangeCarriesInstrumentState.
 	"1.16.0": "a7ea62fb2097265f8b8b78bbe9a03d72a29d35f464713c4ac78db8268eb4ba70",
+	// Changed from 1.16.0 by ADR 0011's two new declared Rule*/ADR*
+	// constants: event.RuleWatchlistRankedByStrength and
+	// event.ADRWatchlistRankedByStrength.
+	"1.17.0": "098a5deb54040e34e28724bfbd3ad9984c737b7bf7be3739fc6f2d5ed1dc2920",
 }

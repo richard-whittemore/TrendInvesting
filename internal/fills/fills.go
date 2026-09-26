@@ -379,7 +379,8 @@ func (s *Simulator) observe(envelope event.Envelope, ref reference) error {
 	// Listed one by one rather than caught by a default branch, so that a
 	// NEW event type reaches the error below and is considered rather than
 	// absorbed.
-	case event.SetupEvaluatedEventType, // a Setup was evaluated; no order
+	case event.WatchlistPublishedEventType, // ADR 0011: observability only, never a resting-order effect
+		event.SetupEvaluatedEventType,              // a Setup was evaluated; no order
 		event.SignalEventType,                      // a Signal fired; the proposal that follows is the order
 		event.ProposalDeclinedEventType,            // a Signal produced no position, so no order
 		event.CampaignEvaluatedEventType,           // the levels in force; the orders come from the exit-order-set events

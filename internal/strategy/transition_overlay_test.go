@@ -298,8 +298,14 @@ func TestASessionCloseCopiesOnlyTheInstrumentsItProposesFor(t *testing.T) {
 		}
 		return out, err
 	})
-	if err != nil || len(out) != 1 || out[0].Type != event.TradeProposalEventType {
-		t.Fatalf("session close = %v, %v; want I0003's one trade proposal", out, err)
+	// ADR 0011's Watchlist is built and emitted before the Adds/entries pass
+	// (session.go's applySessionClosed), so this Session's two emissions are
+	// the Watchlist (all five instruments: I0003 at Tier A, the rest at Tier
+	// B) and then I0003's one trade proposal. Building the Watchlist reads
+	// every instrument through peekInstrument (rankSignal), never the
+	// copy-on-write accessor, so it must not add anything to touched.
+	if err != nil || len(out) != 2 || out[0].Type != event.WatchlistPublishedEventType || out[1].Type != event.TradeProposalEventType {
+		t.Fatalf("session close = %v, %v; want the Watchlist then I0003's one trade proposal", out, err)
 	}
 	if !reflect.DeepEqual(touched, []string{"I0003"}) {
 		t.Fatalf("the session close copied %v, want only I0003", touched)

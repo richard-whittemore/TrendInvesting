@@ -689,17 +689,25 @@
       "file": "internal/strategy/session.go",
       "function": "(*transition).applySessionClosed",
       "statement": "return nil, err",
-      "occurrence": 5,
+      "occurrence": 6,
       "category": "unreachable-by-construction",
-      "reason": "Propagates decline (via stampDecline) for a Signal rankSignal reports as insufficient history: the same validated-payload-json guarantee as every other stampDecline call site in this package \u2014 the payload's Reason is one of this package's own constants, Strength is exactly zero, and the remaining fields come from the bar under decision, already validated."
+      "reason": "Propagates decline (via stampDecline) for a Signal rankSignal reports as insufficient history: the same validated-payload-json guarantee as every other stampDecline call site in this package \u2014 the payload's Reason is one of this package's own constants, Strength is exactly zero, and the remaining fields come from the bar under decision, already validated. #35's Watchlist emission call (occurrence 3) shifted this from occurrence 5."
     },
     {
       "file": "internal/strategy/session.go",
       "function": "(*transition).applySessionClosed",
       "statement": "return nil, err",
-      "occurrence": 7,
+      "occurrence": 8,
       "category": "unreachable-by-construction",
-      "reason": "Propagates rememberPendingProposal, whose only failure is its own excluded decode of the trade proposal sizeUnit marshalled from a validated payload a statement earlier."
+      "reason": "Propagates rememberPendingProposal, whose only failure is its own excluded decode of the trade proposal sizeUnit marshalled from a validated payload a statement earlier. #35's Watchlist emission call (occurrence 3) shifted this from occurrence 7."
+    },
+    {
+      "file": "internal/strategy/session.go",
+      "function": "(*transition).applySessionClosed",
+      "statement": "return nil, err",
+      "occurrence": 3,
+      "category": "unreachable-by-construction",
+      "reason": "Propagates emitWatchlist (ADR 0011's Watchlist, #35), whose own two failure paths (Validate and json.Marshal) are themselves unreachable by construction (this list's emitWatchlist entries): every Tier and DistanceToEntryInN it carries was already checked for that same consistency when the identical values built this Session's SetupEvaluatedPayload a few bars earlier, every InstrumentID comes from sessionLiveInstruments' own de-duplicated set, every Strength is one rankSignal only returns alongside ranked=true, and rankSignals' own sort guarantees the descending order Validate checks."
     },
     {
       "file": "internal/strategy/session.go",
@@ -763,9 +771,23 @@
       "file": "internal/strategy/session.go",
       "function": "(*transition).applySessionClosed",
       "statement": "return nil, err",
-      "occurrence": 4,
+      "occurrence": 5,
       "category": "unreachable-by-construction",
-      "reason": "Propagates decline (via stampDecline) for a Signal ADR 0009's monthly universe evaluation found ineligible: the same validated-payload-json guarantee as this function's own insufficient-history decline call a few lines below \u2014 the payload's Reason is one of this package's own constants, Strength is exactly zero, and the remaining fields come from the bar under decision, already validated."
+      "reason": "Propagates decline (via stampDecline) for a Signal ADR 0009's monthly universe evaluation found ineligible: the same validated-payload-json guarantee as this function's own insufficient-history decline call a few lines below \u2014 the payload's Reason is one of this package's own constants, Strength is exactly zero, and the remaining fields come from the bar under decision, already validated. #35's Watchlist emission call (occurrence 3) shifted this from occurrence 4."
+    },
+    {
+      "file": "internal/strategy/watchlist.go",
+      "function": "(*transition).emitWatchlist",
+      "statement": "return nil, fmt.Errorf(\"strategy: built invalid watchlist published payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "WatchlistPublishedPayload.Validate on a payload assembled entirely from already-validated sources: PeriodEnd is r.sessionPeriodEnd, stamped on every other decision this same session-close pass emits; Rule and ADR are this package's own declared constants; each entry's InstrumentID comes from live (sessionLiveInstruments), which de-duplicates by construction; each Tier and DistanceToEntryInN are the exact values that built this Session's own SetupEvaluatedPayload a few bars earlier and already passed ITS Tier/distance consistency check; each Strength is one rankSignal returned alongside ranked=true, which only happens once indicator.Strength has produced a finite value; and rankSignals' own descending sort is what orders Entries, so the sequence Validate checks is guaranteed by the sort, not asserted independently."
+    },
+    {
+      "file": "internal/strategy/watchlist.go",
+      "function": "(*transition).emitWatchlist",
+      "statement": "return nil, fmt.Errorf(\"strategy: marshal watchlist published payload: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; this payload passed Validate immediately before json.Marshal."
     },
     {
       "file": "internal/strategy/universe.go",

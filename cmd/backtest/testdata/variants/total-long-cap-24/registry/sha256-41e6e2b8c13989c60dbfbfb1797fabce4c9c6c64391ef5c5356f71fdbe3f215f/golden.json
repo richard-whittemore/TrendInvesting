@@ -4,7 +4,7 @@
   "run_id": "golden",
   "variant": "total-long-cap-24",
   "status": "completed",
-  "strategy_version": "total-long-cap-24/1.16.0+test",
+  "strategy_version": "total-long-cap-24/1.17.0+test",
   "span_start": "2026-01-02T00:00:00Z",
   "span_end": "2026-02-02T00:00:00Z",
   "configuration": {
@@ -41,8 +41,8 @@
   },
   "artefacts": {
     "journal_path": "../journal.golden.jsonl",
-    "record_count": 352,
-    "final_record_hash": "sha256:ddd32004eb954fcc9724bced47730926672454010975d63b5cea201e667e5e53"
+    "record_count": 427,
+    "final_record_hash": "sha256:f133dcbc89e8bdf9eb455863731da20cf27a4e0c4de7cfda70a364785a657e5b"
   },
   "detail": ""
 }
