@@ -323,7 +323,7 @@ class TurtleBaselineResearch(QCAlgorithm):
         self.UniverseSettings.Leverage = 1.0
         # ADR 0004: signals run on split-adjusted prices, which is also the
         # view this repository's own reference engine prices every fill in
-        # (see README.md, "Deviations", #18, "Price views"). Splits are neutral;
+        # (see README.md, "Deviations", "Price views"). Splits are neutral;
         # dividends still arrive as cash into the account separately, never
         # folded into this series.
         self.UniverseSettings.DataNormalizationMode = DataNormalizationMode.SplitAdjusted
