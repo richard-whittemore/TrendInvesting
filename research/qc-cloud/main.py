@@ -418,10 +418,27 @@ class TurtleBaselineResearch(QCAlgorithm):
         if first_kept or dropped:
             self.Log("research: universe common-stock filter (SecurityType=='ST00000001') kept {} "
                      "dropped {} of {} fine candidates this month".format(kept, dropped, kept + dropped))
-        return selected
+        # Losing eligibility never closes or disturbs an open Campaign
+        # (ADR 0009): a stock this script holds, or has an order working
+        # in, stays subscribed until that is resolved. Dropping it would
+        # let LEAN cancel its Exit Orders and leave its sale proceeds
+        # unsettled.
+        retained = {sym for sym, st in self.symbol_state.items()
+                    if st.campaign is not None or st.entry_ticket is not None
+                    or st.add_ticket is not None}
+        retained.update(o.Symbol for o in self.Transactions.GetOpenOrders())
+        chosen = set(selected)
+        return selected + [sym for sym in retained if sym not in chosen and sym != self.spy]
 
     def OnSecuritiesChanged(self, changes):
         for security in changes.AddedSecurities:
+            # LEAN settles a cash account's sale proceeds only while the
+            # security is still subscribed, so proceeds from a stock that
+            # then leaves the universe would never become spendable; over
+            # a multi-decade run that starved the account of cash. A US
+            # cash account may buy with unsettled proceeds, so proceeds are
+            # treated as spendable at once (see README.md, "Deviations").
+            security.SetSettlementModel(ImmediateSettlementModel())
             security.SetSlippageModel(self.slippage_model)
             security.SetFeeModel(InteractiveBrokersFeeModel())
             security.SetFillModel(self.fill_model)
@@ -724,7 +741,16 @@ class TurtleBaselineResearch(QCAlgorithm):
                 self.n_by_order_id[ticket.OrderId] = campaign.campaign_n
                 self.order_kind[ticket.OrderId] = "exit"
                 state.unit_tickets[index] = ticket
-            else:
+            elif ticket.Status in (OrderStatus.Canceled, OrderStatus.Invalid):
+                # LEAN itself cancelled this Exit Order (for example on a
+                # delisting); a Unit still held needs a working stop, so a
+                # new one replaces it rather than updating a closed order.
+                tag = "exit:{}".format(symbol_tag)
+                ticket = self.StopMarketOrder(campaign.symbol, -campaign.unit_quantity, level, tag=tag)
+                self.n_by_order_id[ticket.OrderId] = campaign.campaign_n
+                self.order_kind[ticket.OrderId] = "exit"
+                state.unit_tickets[index] = ticket
+            elif ticket.Status != OrderStatus.Filled:
                 fields = UpdateOrderFields()
                 fields.StopPrice = level
                 ticket.Update(fields)
