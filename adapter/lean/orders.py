@@ -776,27 +776,67 @@ class OrderDesk:
                 "new_shares": n, "old_shares": 1, "engine_shares_per_raw_share": ratio,
                 "raw_shares_lost": lost, "cash_in_lieu": cash, "currency": _USD}
 
-    def dividend_action(self, distribution, effective_at):
-        """State the dividend on actual raw shares (ADRs 0004, 0024).
+    def _fills_pending(self):
+        """Whether this session's own fills are still queued, undelivered to
+        the engine (Greptile 4112071877).
 
-        Exit Orders mirror the engine's held Units. Require their raw
-        quantities to match LEAN exactly; a dividend cannot explain a share
-        difference (ADR 0019). Flat holdings have no Campaign to credit.
+        A split or dividend is now published before drain_order_events, so
+        that its effective time, strictly between Sessions, precedes this
+        session's own fills in the engine's stream (ADRs 0010/0021, 0023,
+        0024). LEAN's Portfolio already reflects any of those fills the
+        instant they execute, before OnData is even called, regardless of
+        when the adapter drains them; a corporate action's own holding must
+        therefore come from the engine's Units, not from LEAN's, whenever a
+        fill from this exact session is still sitting in the queue.
         """
-        holding = _whole(self.algorithm.Portfolio[self.symbol].Quantity)
-        if not self.exit_orders and holding == 0:
-            return None
-        ratio = self._require_ratio()
-        quantities = [order["quantity"] for order in self.exit_orders.values()]
-        if holding is None or holding <= 0 or not quantities or \
-                any(q <= 0 or q % ratio for q in quantities) or sum(quantities) != holding * ratio:
-            raise Uncertain("dividend of {} at {}: LEAN holds {} raw shares but the engine's "
-                            "Units hold {} split-adjusted shares at ratio {} (ADR 0019)".format(
-                                self.instrument, effective_at,
-                                self.algorithm.Portfolio[self.symbol].Quantity,
-                                sum(quantities), ratio))
+        status = self.lean.OrderStatus
+        return any(record["status"] in (status.Filled, status.PartiallyFilled)
+                  for record in self.algorithm.order_events)
+
+    def dividend_action(self, distribution, effective_at):
+        """State the dividend on the raw shares held at its effective time
+        (ADRs 0004, 0024): the engine's Units before this session's own
+        fills, its ex-date entitlement, never a live LEAN figure a same-day
+        fill may already have moved (Greptile 4112071877).
+
+        Exit Orders mirror the engine's held Units. Once nothing from this
+        session is still queued, their raw quantities are required to match
+        LEAN's own exactly; a dividend cannot explain a share difference
+        otherwise (ADR 0019). Flat holdings have no Campaign to credit.
+        """
+        # CodeRabbit 4112019881: validated before the flat return below, so an
+        # invalid distribution stops the run whether or not shares are held.
         if not isfinite(distribution) or distribution <= 0:
             raise Uncertain("dividend distribution must be positive and finite (ADR 0024)")
+        pending = self._fills_pending()
+        if not self.exit_orders:
+            if pending:
+                # Whatever LEAN now holds was acquired only this session,
+                # after the dividend's own effective time; nothing was held
+                # then, so this is the same case as an ordinary flat holding.
+                return None
+            holding = _whole(self.algorithm.Portfolio[self.symbol].Quantity)
+            if holding == 0:
+                return None
+            raise Uncertain("dividend of {} at {}: LEAN holds {} raw shares but the engine holds "
+                            "no open Campaign in it (ADR 0019)".format(
+                                self.instrument, effective_at,
+                                self.algorithm.Portfolio[self.symbol].Quantity))
+        ratio = self._require_ratio()
+        quantities = [order["quantity"] for order in self.exit_orders.values()]
+        if any(q <= 0 or q % ratio for q in quantities):
+            raise Uncertain("dividend of {} at {}: the engine's Units are {} split-adjusted "
+                            "shares, not a whole number of raw shares at ratio {} (ADR "
+                            "0019)".format(self.instrument, effective_at, quantities, ratio))
+        holding = sum(quantities) // ratio
+        if not pending:
+            actual = _whole(self.algorithm.Portfolio[self.symbol].Quantity)
+            if actual is None or actual != holding:
+                raise Uncertain("dividend of {} at {}: LEAN holds {} raw shares but the engine's "
+                                "Units hold {} split-adjusted shares at ratio {} (ADR "
+                                "0019)".format(self.instrument, effective_at,
+                                              self.algorithm.Portfolio[self.symbol].Quantity,
+                                              sum(quantities), ratio))
         cash = float(Decimal(str(distribution)) * holding)
         if not isfinite(cash) or cash <= 0:
             raise Uncertain("dividend cash amount must be positive and finite (ADR 0024)")
@@ -817,10 +857,17 @@ class OrderDesk:
                     ("instrument_id", "effective_at", "cash_amount", "currency")}
         expected.update(campaign_id=next(iter(campaigns)), corporate_action_id=action_id,
                         rule="campaign.dividend.credited-as-cash", adr="0024")
-        if not isinstance(decision, dict) or \
-                decision.get("type") != "strategy.campaign.dividend" or \
-                decision.get("schema_version") != 1 or decision.get("envelope_version") != 1 or \
-                not decision.get("id") or decision.get("payload") != expected:
+        # CodeRabbit 4112019884: a bool is an int in Python (True == 1 and
+        # isinstance(True, int)), and a loosely truthy id (a number, a list)
+        # is not a decision identifier, so each is checked by exact type, not
+        # value alone.
+        unexpected = not isinstance(decision, dict) or \
+            decision.get("type") != "strategy.campaign.dividend" or \
+            type(decision.get("schema_version")) is not int or decision.get("schema_version") != 1 or \
+            type(decision.get("envelope_version")) is not int or decision.get("envelope_version") != 1 or \
+            not isinstance(decision.get("id"), str) or not decision.get("id") or \
+            decision.get("payload") != expected
+        if unexpected:
             raise Uncertain("unexpected dividend reply for {} at {}: expected {} (ADR 0024)".format(
                 self.instrument, action["effective_at"], expected))
 
@@ -924,7 +971,17 @@ class OrderDesk:
 
     def _holding_problems(self):
         """Every held Unit rests one Exit Order (ADR 0005's amendment), so LEAN's
-        raw holding is the sum of their quantities at the ratio in force."""
+        raw holding is the sum of their quantities at the ratio in force.
+
+        Skipped while this session's own fill is still queued, undelivered to
+        the engine (Greptile 4112071877): a split is now checked before
+        drain_order_events, so LEAN's Portfolio can already reflect a fill
+        the engine's Units do not yet, and the two cannot be compared until
+        it is drained (dividend_action's own doc comment states the same
+        rule for a dividend).
+        """
+        if self._fills_pending():
+            return []
         protected = sum(order["quantity"] for order in self.exit_orders.values()) // self.ratio
         holding = self.algorithm.Portfolio[self.symbol].Quantity
         if holding != protected:
@@ -934,7 +991,18 @@ class OrderDesk:
 
     def _exit_orders_not_working(self):
         """Each stored Exit Order whose LEAN order no longer works: its Unit has
-        no stop, whatever the holding says."""
+        no stop, whatever the holding says.
+
+        Skipped while this session's own fill is still queued, undelivered to
+        the engine (Greptile 4112071877): a Unit's own stop can be exactly
+        such a fill, already Filled at LEAN but not yet reported to the
+        engine, which would otherwise read as a missing stop rather than the
+        ordinary close this check runs to catch problems the fill itself
+        does not already explain (_holding_problems' own doc comment states
+        the same rule).
+        """
+        if self._fills_pending():
+            return []
         problems = []
         for unit, order in sorted(self.exit_orders.items(), key=lambda item: str(item[0])):
             tickets = self._tickets(lambda t, oid=order["order_id"]: t.OrderId == oid)

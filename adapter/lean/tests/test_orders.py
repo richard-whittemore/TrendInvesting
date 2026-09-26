@@ -2205,6 +2205,29 @@ class SplitTests(OrderTestCase):
         self.assertAlmostEqual(algo.security.slippage_model.GetSlippageApproximation(
             algo.security, types.SimpleNamespace(Tag=sell.Tag)), 0.05 * 0.05 * 28)
 
+    def test_a_stop_fill_in_the_splits_final_verification_slice_is_not_a_missing_stop(self):
+        # Greptile 4112071877: require_split_applied's own "final" check now
+        # runs before this slice's fills are drained, exactly like a
+        # dividend or a new split, so LEAN's Portfolio and order book can
+        # already reflect this session's own stop fill, closing the Unit,
+        # before the engine has even been told of it. Reading the still-open
+        # (pre-fill) Exit Order as a missing stop, or the still-unreduced
+        # (pre-fill) engine Units as disagreeing with LEAN's now-flat
+        # holding, would both be false: the fill fully explains both, once
+        # drained.
+        algo, sell = self.held()
+        self.split(algo, 11)
+        self.ratio = 28
+        self.fill(algo, sell, 11, 22.5, fee=1)
+        # The existing order fake changes shares but leaves cash to its
+        # caller: 200 raw shares sold at 22.5.
+        algo.Portfolio.Cash += 200 * 22.5 - 1
+        self.feed(algo, 11, replies={"execution.fill": {"payload": {"decisions": [
+            units_stopped(11, fill_id="lean:1:2"), campaign_exited(11)]}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        stop = self.sent(algo, "execution.fill")[-1]["payload"]
+        self.assertEqual((stop["kind"], stop["quantity"]), ("stop", 5600))
+
     def test_an_entry_order_working_across_a_split_fills_as_the_same_unit(self):
         algo = self.start()
         self.feed(algo, 9, [trade_proposal(9, entry_level=0.875, quantity=5600, n=0.05)])

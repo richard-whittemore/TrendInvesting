@@ -181,6 +181,25 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         try:
             self.desk.require_cancels_confirmed("before this session's fills", requested_earlier,
                                                 self.order_events)
+            # A split or dividend takes effect between Sessions, strictly
+            # before this session's own fills (ADRs 0010/0021), so it must
+            # reach the engine before them too: delivered after, the
+            # reducer's chronology guard refuses one effective on the same
+            # day as an accepted fill (it cannot predate a fill the Campaign
+            # has already accepted; ADR 0023, ADR 0024), and a same-day full
+            # exit would leave the Campaign looking already closed before its
+            # corporate action is even considered. require_split_applied runs
+            # first, exactly as it always has, so an older split still being
+            # finalised is checked before this slice's own action is detected
+            # (its "final" check happens once, before anything new this slice
+            # can set split_to_check again).
+            self.desk.require_split_applied("before this session's fills", final=True)
+            split = data.Splits.get(self.symbol)
+            if split is not None and split.Type == SplitType.SplitOccurred:
+                self.publish_split(split)
+            dividend = data.Dividends.get(self.symbol)
+            if dividend is not None:
+                self.publish_dividend(dividend)
         except Exception as err:
             self.stop("order state uncertain: {}".format(err))
             return
@@ -190,15 +209,6 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             return
         try:
             self.desk.require_cancels_confirmed("before the next session's bar", requested_earlier)
-            # The second line behind verify_split: the split's changes to open
-            # orders are checked again, final, before the next bar is sent.
-            self.desk.require_split_applied("before the next session's bar", final=True)
-            split = data.Splits.get(self.symbol)
-            if split is not None and split.Type == SplitType.SplitOccurred:
-                self.publish_split(split)
-            dividend = data.Dividends.get(self.symbol)
-            if dividend is not None:
-                self.publish_dividend(dividend)
         except Exception as err:
             self.stop("order state uncertain: {}".format(err))
             return

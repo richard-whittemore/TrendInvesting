@@ -47,8 +47,11 @@ class DividendTests(OrderTestCase):
         start = len(algo.client.sent)
         self.pay(algo, with_bar=True)
         self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        # Published before this session's fills are drained (Greptile
+        # 4112071877), so it now precedes the previous close's own snapshot,
+        # not just the bar it affects.
         self.assertEqual(self.types_sent(algo, start), [
-            "account.snapshot", "market.corporate-action", "market.bar.completed",
+            "market.corporate-action", "account.snapshot", "market.bar.completed",
             "market.session.closed"])
         action = self.sent(algo, "market.corporate-action")[0]
         self.assertEqual(action["schema_version"], 3)
@@ -118,6 +121,12 @@ class DividendTests(OrderTestCase):
             lambda r: r["payload"]["decisions"].append(copy.deepcopy(r["payload"]["decisions"][0])),
             lambda r: r["payload"]["decisions"][0].update(type="strategy.engine.state"),
             lambda r: r["payload"]["decisions"][0].update(schema_version=2),
+            # CodeRabbit 4112019884: a bool is an int in Python (True == 1),
+            # and a non-empty non-str id must not be accepted as one.
+            lambda r: r["payload"]["decisions"][0].update(schema_version=True),
+            lambda r: r["payload"]["decisions"][0].update(envelope_version=True),
+            lambda r: r["payload"]["decisions"][0].update(id=""),
+            lambda r: r["payload"]["decisions"][0].update(id=123),
         ]
         for key, value in (("cash_amount", 26), ("currency", "EUR"),
                            ("instrument_id", "MSFT"), ("campaign_id", "other"),
@@ -188,6 +197,17 @@ class DividendTests(OrderTestCase):
                 self.assertTrue(algo.failed)
                 self.assertEqual(self.sent(algo, "market.corporate-action"), [])
 
+    def test_invalid_distribution_while_flat_still_stops(self):
+        # CodeRabbit 4112019881: the flat check must not short-circuit past
+        # an invalid distribution, since the run stops on either fact.
+        self.ratio = 1
+        for distribution in (0, -1, float("nan"), float("inf")):
+            with self.subTest(distribution=distribution):
+                algo = self.start()
+                self.pay(algo, credit=0, distribution=distribution)
+                self.assertTrue(algo.failed)
+                self.assertEqual(self.sent(algo, "market.corporate-action"), [])
+
     def test_terminal_dividend_without_a_later_close_stops(self):
         algo, _ = self.held()
         self.pay(algo)
@@ -219,3 +239,70 @@ class DividendTests(OrderTestCase):
                          ["split", "dividend"])
         self.assertEqual(self.sent(algo, "account.snapshot")[-1]["payload"]["available_cash"],
                          before + 50)
+
+    def test_an_add_fill_on_the_dividends_effective_date_is_credited_and_reconciled(self):
+        # Greptile 4112071877: LEAN reports a same-day fill before OnData, so
+        # its Portfolio already holds the Add's shares by the time the
+        # dividend is considered. The entitlement must stay the ex-date
+        # holding (Unit 1 alone), and the same-day fill must not trip the
+        # reducer's chronology guard (it must reach the engine first).
+        self.ratio = 56
+        algo = self.start()
+        self.feed(algo, 9, [order_fixtures.trade_proposal(
+            9, entry_level=0.875, quantity=5600, n=0.05)])
+        [entry] = self.tickets(algo)
+        self.fill(algo, entry, 10, entry.StopPrice + 0.1)
+        add = order_fixtures.add_proposal(9, unit_index=2, level=0.9, quantity=2800,
+                                          campaign_n=0.05, previous_unit_fill=0.875,
+                                          valid_for_sessions=2)
+        self.feed(algo, 10, replies={"execution.fill": {"payload": {"decisions": [
+            order_fixtures.campaign_opened(campaign_n=0.05),
+            order_fixtures.exit_order_set(10, level=0.8, quantity=5600), add]}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [add_ticket] = [t for t in self.tickets(algo) if t.Tag == add["id"]]
+        self.fill(algo, add_ticket, 11, 50.5, fee=1)
+        # The existing order fake changes shares but leaves cash to its
+        # caller: 50 raw shares bought at 50.5, plus the dividend's own
+        # credit, already posted by LEAN (self.pay's own convention).
+        algo.Portfolio.Cash += -(50 * 50.5) - 1 + 25
+        algo.client.reply_overrides = {
+            "market.corporate-action": dividend_reply,
+            "execution.fill": {"payload": {"decisions": [
+                order_fixtures.unit_added(11, unit_index=2, quantity=2800),
+                order_fixtures.exit_order_set(11, unit_index=2, level=0.8, quantity=2800)]}}}
+        b = bar(11)
+        algo.History = lambda *a, **k: Frame(b.EndTime, ratio=self.ratio)
+        algo.OnData(scaffold.slice_of({"AAPL": b}, dividends={"AAPL": types.SimpleNamespace(
+            Distribution=0.25, Time=datetime(2014, 6, 11))}))
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [action] = self.sent(algo, "market.corporate-action")
+        # Only Unit 1's 100 raw shares were held at the dividend's effective
+        # time; Unit 2's 50 raw shares were bought only this same session.
+        self.assertEqual(action["payload"]["cash_amount"], 25)
+        algo.OnEndOfAlgorithm()
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+
+    def test_a_full_exit_in_the_dividends_slice_still_credits_it(self):
+        # Greptile 4112071877: LEAN's holding already reads flat by the time
+        # the dividend is considered, since its exit fill is reported before
+        # OnData, but the shares WERE held at the dividend's effective time
+        # and the dividend must still be credited, not dropped as flat.
+        algo, sell = self.held()
+        self.fill(algo, sell, 11, 44.8, fee=1)
+        # The existing order fake changes shares but leaves cash to its
+        # caller, plus the dividend's own credit, already posted by LEAN
+        # (self.pay's own convention).
+        algo.Portfolio.Cash += 100 * 44.8 - 1 + 25
+        algo.client.reply_overrides = {
+            "market.corporate-action": dividend_reply,
+            "execution.fill": {"payload": {"decisions": [
+                units_stopped(11), campaign_exited(11)]}}}
+        b = bar(11)
+        algo.History = lambda *a, **k: Frame(b.EndTime, ratio=self.ratio)
+        algo.OnData(scaffold.slice_of({"AAPL": b}, dividends={"AAPL": types.SimpleNamespace(
+            Distribution=0.25, Time=datetime(2014, 6, 11))}))
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [action] = self.sent(algo, "market.corporate-action")
+        self.assertEqual(action["payload"]["cash_amount"], 25)
+        algo.OnEndOfAlgorithm()
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
