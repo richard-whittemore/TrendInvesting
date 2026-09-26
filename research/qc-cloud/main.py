@@ -244,6 +244,11 @@ class _SymbolState:
 # =============================================================================
 
 
+
+def _fmt(value):
+    """A summary figure to four decimals, or "n/a" when it is undefined."""
+    return "n/a" if value is None else "{:.4f}".format(value)
+
 class TurtleBaselineResearch(QCAlgorithm):
     """A thin QCAlgorithm driving rules.py's Baseline Turtle rule core over
     a broad, point-in-time US equity universe (ADR 0009), 1998 to today, on
@@ -351,6 +356,10 @@ class TurtleBaselineResearch(QCAlgorithm):
         self.equity_curve = []           # (utc datetime, equity), once per Session
         self.closed_campaigns = []       # list of dicts: {r_multiple, win}
         self.total_commission = 0.0
+        # Declines are counted, not logged: the Free plan allows 10 KB of
+        # log per backtest, and the closing summary is what matters.
+        self.decline_counts = {}
+        self._filter_logged = False
 
         # ADR 0012's seven Regime Windows: [start, next-year-start) UTC.
         self.regime_windows = {
@@ -404,8 +413,13 @@ class TurtleBaselineResearch(QCAlgorithm):
             # OnOrderEvent) -- never re-read by an already-open Campaign.
             self._classification[f.Symbol] = _classification_groups(f)
             selected.append(f.Symbol)
-        self.Log("research: universe common-stock filter (SecurityType=='ST00000001') kept {} "
-                 "dropped {} of {} fine candidates this month".format(kept, dropped, kept + dropped))
+        # The Free plan allows 10 KB of log per backtest, so this line is
+        # written once, at the first month with candidates, and afterwards
+        # only when the filter actually drops something.
+        if (kept and not self._filter_logged) or dropped:
+            self._filter_logged = True
+            self.Log("research: universe common-stock filter (SecurityType=='ST00000001') kept {} "
+                     "dropped {} of {} fine candidates this month".format(kept, dropped, kept + dropped))
         return selected
 
     def OnSecuritiesChanged(self, changes):
@@ -605,6 +619,13 @@ class TurtleBaselineResearch(QCAlgorithm):
     # -------------------------------------------------------------------
 
     def _decide_add(self, state, symbol, rung, ledger):
+        # The Campaign that offered this rung can close between collecting
+        # the Session's Add opportunities and deciding them (an exit order
+        # settled in the meantime); a closed Campaign takes no Add
+        # (ADR 0006).
+        if state.campaign is None:
+            self._count_decline("add: campaign closed before the add was decided")
+            return
         n = state.campaign.campaign_n
         quantity = state.campaign.unit_quantity
         cap = rules.price_cap(rung, n)
@@ -617,7 +638,7 @@ class TurtleBaselineResearch(QCAlgorithm):
         accepted, reason = ledger.try_reserve(str(symbol), industry, sector, quantity, cap, slip,
                                               1.0, commission)
         if not accepted:
-            self.Log("research: {} add declined at rung {:.4f}: {}".format(symbol, rung, reason))
+            self._count_decline("add: " + str(reason))
             return
         tag = "add:{}".format(symbol)
         ticket = self.StopLimitOrder(symbol, quantity, rung, self._round_tick(symbol, cap), tag=tag)
@@ -636,7 +657,7 @@ class TurtleBaselineResearch(QCAlgorithm):
         eligible = dv_ready and rules.is_eligible(
             float(self.Securities[symbol].Price), dv_value, state.bars_seen, is_common_stock=True)
         if not eligible:
-            self.Log("research: {} entry declined: ineligible".format(symbol))
+            self._count_decline("entry: ineligible")
             return
         # PR #253 review, Greptile main.py:603: decline BEFORE placing an
         # order whose own fill would leave rules.protective_stop_level
@@ -647,14 +668,12 @@ class TurtleBaselineResearch(QCAlgorithm):
         # be checked here, before submission, never left to raise inside
         # OnOrderEvent, which would abort the whole backtest.
         if entry_level - rules.STOP_MULTIPLE * n <= 0:
-            self.Log("research: {} entry declined: level {:.4f} minus {}xN ({:.4f}) is not "
-                     "positive".format(symbol, entry_level, rules.STOP_MULTIPLE,
-                                       rules.STOP_MULTIPLE * n))
+            self._count_decline("entry: stop at or below zero")
             return
         notional = self.notional_account.current
         quantity = rules.unit_quantity(notional, rules.UNIT_VOLATILITY_FRACTION, n)
         if quantity <= 0:
-            self.Log("research: {} entry declined: sizes to fewer than one share".format(symbol))
+            self._count_decline("entry: fewer than one share")
             return
         cap = rules.price_cap(entry_level, n)
         slip = rules.slippage(n)
@@ -667,7 +686,7 @@ class TurtleBaselineResearch(QCAlgorithm):
         accepted, reason = ledger.try_reserve(str(symbol), industry, sector, quantity, cap, slip,
                                               1.0, commission)
         if not accepted:
-            self.Log("research: {} entry declined at level {:.4f}: {}".format(symbol, entry_level, reason))
+            self._count_decline("entry: " + str(reason))
             return
         tag = "entry:{}:{}".format(symbol, n)
         ticket = self.StopLimitOrder(symbol, quantity, entry_level, self._round_tick(symbol, cap), tag=tag)
@@ -1050,6 +1069,15 @@ class TurtleBaselineResearch(QCAlgorithm):
     # The closing summary (issue's own required output).
     # -------------------------------------------------------------------
 
+    def _count_decline(self, reason):
+        self.decline_counts[reason] = self.decline_counts.get(reason, 0) + 1
+
+    def _publish(self, key, value):
+        """Report one summary figure both as a runtime statistic, which the
+        backtest result carries with no size limit, and as a log line."""
+        self.SetRuntimeStatistic(key, str(value))
+        self.Log("research: {} = {}".format(key, value))
+
     def OnEndOfAlgorithm(self):
         self._log_span("OVERALL", self.equity_curve)
         for name, (start, end) in self.regime_windows.items():
@@ -1062,15 +1090,17 @@ class TurtleBaselineResearch(QCAlgorithm):
         win_rate = (len(wins) / count) if count else None
         avg_win = (sum(wins) / len(wins)) if wins else None
         avg_loss = (sum(losses) / len(losses)) if losses else None
-        self.Log("research: campaigns={} win_rate={} avg_win_R={} avg_loss_R={}".format(
-            count, win_rate, avg_win, avg_loss))
-        self.Log("research: total_commission={:.2f}".format(self.total_commission))
+        self._publish("Campaigns", "{} win_rate={} avg_win_R={} avg_loss_R={}".format(
+            count, _fmt(win_rate), _fmt(avg_win), _fmt(avg_loss)))
+        self._publish("Commission", "{:.2f}".format(self.total_commission))
+        self._publish("Declines", "; ".join("{}={}".format(k, v) for k, v in
+                                            sorted(self.decline_counts.items())) or "none")
 
         self._log_span("SPY BUY-AND-HOLD", self.spy_curve)
 
     def _log_span(self, label, curve):
         if len(curve) < 2:
-            self.Log("research: {}: no-data (fewer than two marks)".format(label))
+            self._publish(label, "no-data")
             return
         start_time, start_equity = curve[0]
         end_time, end_equity = curve[-1]
@@ -1078,5 +1108,5 @@ class TurtleBaselineResearch(QCAlgorithm):
         cagr = rules.annualised_return(start_equity, end_equity, elapsed_days)
         mdd = rules.max_drawdown([e for _, e in curve])
         ratio = rules.cagr_over_max_drawdown(cagr, mdd)
-        self.Log("research: {}: start={} end={} CAGR={} max_drawdown={} CAGR/MaxDD={}".format(
-            label, start_time.date(), end_time.date(), cagr, mdd, ratio))
+        self._publish(label, "{}..{} CAGR={} MaxDD={} Ratio={}".format(
+            start_time.date(), end_time.date(), _fmt(cagr), _fmt(mdd), _fmt(ratio)))
