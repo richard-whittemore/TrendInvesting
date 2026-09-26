@@ -279,7 +279,52 @@ package strategy
 // Tier B ADR 0011 asks for, already existed. Two new declared Rule*/ADR*
 // constants, event.RuleWatchlistRankedByStrength and
 // event.ADRWatchlistRankedByStrength, move the rule surface fingerprint.
-const RulesVersion = "1.17.0"
+//
+// Bumped 1.17.0 -> 1.18.0 (ADR 0010, ADR 0008's RulesVersion 1.10.0
+// note, ADR 0020's own amendment "a proposal reserves its cash and its cap
+// headroom"): a Campaign closed by a stop or exit fill still counts as
+// committed for every ADR 0008 cap it counted towards, for the REST of the
+// Session that fill belongs to (unit_caps.go's instrumentUnits/groupUnits,
+// fed by the new instrumentState.unitsFreedThisSession bookkeeping, recorded
+// at the same point applyStopFill and applyExitFill already close a
+// Campaign). Before, those two functions read only the CURRENTLY open
+// Campaign's Units, so a Campaign closed ahead of its own Session's
+// market.session.closed — a stop gapping through at the Session's own open,
+// exactly what internal/fills.RunSession's own open-instant pass delivers
+// before that Session's bars — silently dropped out of every cap it counted
+// towards one full Session early.
+//
+// Which Session a fill belongs to is decided by Reducer.sessionGeneration
+// (session.go's admitToSession, incremented once per Session opened), never
+// by comparing the fill's own FilledAt against the Session's own period end:
+// a backtest's open-instant fill happens to share that period end, but a
+// live venue reports a fill at its own execution instant — earlier than the
+// Session's close by however much of the trading day remained — and ADR
+// 0021 §6's amendment delivers "this Session's fills" ahead of "this
+// Session's bar, and its market.session.closed" in a live per-slice order.
+// unit_caps.go's protectedSessionGeneration is the one place that turns a
+// fill's arrival, relative to what this reducer has already decided, into
+// the Session it must still be counted against; a fill needing no
+// protection at all (one whose own Session already ran its Adds and
+// entries, exactly internal/fills.RunSession's own intrabar-fixpoint shape)
+// leaves the bookkeeping untouched. Cash was never affected: ADR 0020's
+// ledger already credits nothing from a sell fill within the bar it happens
+// in, only through a later account.snapshot, so this is a changed PREDICATE
+// for cap headroom alone, mirroring the shape of the 1.9.0 and 1.10.0 bumps
+// above.
+//
+// Given the same inputs, a run with an open Campaign whose stop or exit gaps
+// through on the SAME Session another instrument's own entry or Add is
+// decided, while both count towards a shared cap that Session's post-trade
+// exposure would otherwise clear, now declines what the older build
+// proposed — exactly the corpus scenario this bump adds
+// (same_session_headroom_test.go). A run with no such same-Session,
+// shared-cap collision — every scenario the corpus already pinned — decides
+// exactly as before, which the unchanged hashes for every pre-existing
+// scenario in this bump's own corpus file confirm directly. No Rule*, ADR*,
+// or declared numeric rule constant changes and no payload schema moves, so
+// the rule surface fingerprint is unchanged from 1.17.0's.
+const RulesVersion = "1.18.0"
 
 // RuleSurfaceFingerprints records, for every RulesVersion this package has
 // ever declared, a SHA-256 hash (hex-encoded) over the module's declared
@@ -420,4 +465,9 @@ var RuleSurfaceFingerprints = map[string]string{
 	// constants: event.RuleWatchlistRankedByStrength and
 	// event.ADRWatchlistRankedByStrength.
 	"1.17.0": "098a5deb54040e34e28724bfbd3ad9984c737b7bf7be3739fc6f2d5ed1dc2920",
+	// Unchanged from 1.17.0: the 1.18.0 change is a changed predicate (what
+	// unit_caps.go counts as committed for a Campaign closed during the
+	// Session it is deciding), not a changed or new Rule*, ADR*, or declared
+	// numeric rule constant.
+	"1.18.0": "098a5deb54040e34e28724bfbd3ad9984c737b7bf7be3739fc6f2d5ed1dc2920",
 }

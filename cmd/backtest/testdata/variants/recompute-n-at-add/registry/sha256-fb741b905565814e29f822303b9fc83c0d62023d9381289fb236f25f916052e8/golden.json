@@ -4,7 +4,7 @@
   "run_id": "golden",
   "variant": "recompute-n-at-add",
   "status": "completed",
-  "strategy_version": "recompute-n-at-add/1.17.0+test",
+  "strategy_version": "recompute-n-at-add/1.18.0+test",
   "span_start": "2026-01-02T00:00:00Z",
   "span_end": "2026-02-02T00:00:00Z",
   "configuration": {
@@ -42,7 +42,7 @@
   "artefacts": {
     "journal_path": "../journal.golden.jsonl",
     "record_count": 407,
-    "final_record_hash": "sha256:dfbe7c54a3f4a39f220391fb08edd119cdb48be465f9c34934e6c1bc88263c6d"
+    "final_record_hash": "sha256:bed5bae84df388c757003881a136b6c299b1586c0f5dadb87dfb581cc48557bb"
   },
   "detail": ""
 }

@@ -2080,6 +2080,11 @@ func (r *transition) applyStopFill(state *instrumentState, fill event.FillPayloa
 	campaign.lastCloseFillAt = fill.FilledAt
 	campaign.removeUnits(closingUnits)
 	r.recordAcceptedFill(fill.FillID, acceptedFillFromPayload(fill))
+	// The Units this fill just closed still count towards every ADR 0008 cap
+	// they counted towards for the REST of the Session this fill belongs to,
+	// whether the close is partial or full (unit_caps.go's own doc comment;
+	// instrumentState.unitsFreedThisSession's own).
+	r.recordUnitsFreedThisSession(state, campaign.classification, len(closingUnits), fill.FilledAt)
 
 	emissions := []event.Envelope{r.stamp(
 		decisionID(fmt.Sprintf("units-stopped-%s", fill.FillID), fill.InstrumentID, fill.FilledAt),
@@ -2286,6 +2291,11 @@ func (r *transition) applyExitFill(state *instrumentState, fill event.FillPayloa
 	// Update candidate state; transact commits the closing fill and holdings
 	// together (CONTEXT.md: "Campaign").
 	r.recordAcceptedFill(fill.FillID, acceptedFillFromPayload(fill))
+	// The Units this fill closes — every Unit the Campaign still held, an
+	// exit fill always closing all of them — still count towards every ADR
+	// 0008 cap they counted towards for the REST of this Session (identical
+	// to applyStopFill's own recording, before campaign.units is gone).
+	r.recordUnitsFreedThisSession(state, campaign.classification, len(campaign.units), fill.FilledAt)
 	// The instrument is a Setup again (CONTEXT.md), the same consequence
 	// applyStopFill's own closing has; and the exit proposal this fill
 	// executed is resolved, so a later bar does not try to expire it again.

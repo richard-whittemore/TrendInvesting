@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
@@ -69,33 +70,119 @@ func (r *transition) classificationOf(instrumentID string) classification {
 	return unclassifiedClassification
 }
 
+// protectedSessionGeneration reports which Session's own decisions a fill
+// timestamped filledAt must still count its closed Units towards (ADR 0010),
+// and whether any protection is owed at all.
+//
+// A Session's own generation (Reducer.sessionGeneration) is assigned when its
+// FIRST bar arrives (admitToSession) and is fixed from then on — never
+// derived from any fill's own timestamp, which a live venue reports at the
+// fill's real execution instant and a backtest stamps at the bar's own
+// period end (two different conventions this function must not have to
+// know about):
+//
+//   - A Session is currently open: filledAt's own Campaign closed while
+//     SOME Session's bars have already been decided but its own close has
+//     not — whatever filledAt says, ADR 0021's own ordering (a Session's
+//     fills are always delivered no later than its own bar and close, both
+//     for a backtest's open-instant pass and for a live adapter's per-slice
+//     order) means this fill belongs to the OPEN Session. Protect through
+//     its own generation.
+//   - No Session is open, and filledAt is after the last CLOSED Session (or
+//     none has ever closed): this fill precedes a Session that has not
+//     opened yet — the backtest open-instant case, and the identical live
+//     case of a fill reported ahead of its own day's bar. Protect through
+//     the UPCOMING Session, one generation ahead of the last one closed.
+//   - No Session is open, and filledAt is at or before the last CLOSED
+//     Session: this fill's own Session already ran its Adds and entries
+//     using the CORRECT, still-open Campaign — nothing to protect. This is
+//     the ordinary case of a fill in internal/fills.RunSession's own
+//     intrabar fixpoint, which runs strictly after its Session's own close
+//     (RunSession's own doc comment): ADR 0010 already frees such a Unit for
+//     the Session that opens next, and protecting it a second time would be
+//     optimistic in the wrong direction — one Session too conservative.
+func (r *transition) protectedSessionGeneration(filledAt time.Time) (generation int, ok bool) {
+	if r.sessionOpen {
+		return r.sessionGeneration, true
+	}
+	if !r.hasClosedSession || filledAt.After(r.lastClosedSession) {
+		return r.sessionGeneration + 1, true
+	}
+	return 0, false
+}
+
+// recordUnitsFreedThisSession accumulates n Units, classified as c, that a
+// stop or exit fill closed on instrumentID's Campaign at filledAt —
+// protectedSessionGeneration's own doc comment says which Session's
+// decisions they must still count towards, and instrumentState.
+// unitsFreedThisSession's doc comment says why that is a generation, not
+// filledAt itself. A generation that differs from what state already holds
+// means a LATER Session's own first closing fill for this instrument has
+// arrived, and the count starts over rather than adding to a stale one — the
+// same "compare, don't merely set" discipline lastClosingFillAt's own
+// callers already apply elsewhere. A fill needing no protection at all
+// (protectedSessionGeneration's own third case) leaves state untouched: its
+// Campaign is already, correctly, excluded from the live count it closed.
+func (r *transition) recordUnitsFreedThisSession(state *instrumentState, c classification, n int, filledAt time.Time) {
+	generation, ok := r.protectedSessionGeneration(filledAt)
+	if !ok {
+		return
+	}
+	if state.unitsFreedThisSessionGeneration != generation {
+		state.unitsFreedThisSession = 0
+	}
+	state.unitsFreedThisSession += n
+	state.unitsFreedThisSessionClassification = c
+	state.unitsFreedThisSessionGeneration = generation
+}
+
+// freedThisSessionUnits returns the Units state's Campaign has had a stop or
+// exit fill close that must still count towards the Session this transition
+// is currently deciding (Reducer.sessionGeneration) — still committed for
+// that Session's own Add and entry checks (ADR 0010: Unit-cap headroom is
+// "known at the previous close"). Answers 0 once a LATER Session's
+// generation has moved past the one that froze them
+// (instrumentState.unitsFreedThisSession's own doc comment); 0 is also what
+// a Unit whose fill needed no protection at all leaves recorded, since
+// generation 0 can never equal a real Session's (sessionGeneration starts at
+// 1, admitToSession).
+func (r *transition) freedThisSessionUnits(state *instrumentState) int {
+	if state == nil || state.unitsFreedThisSessionGeneration != r.sessionGeneration {
+		return 0
+	}
+	return state.unitsFreedThisSession
+}
+
 // instrumentUnits returns the Units instrumentID's own open Campaign
 // currently holds, or 0 if it has none, plus the Units standing holds
-// reserve for it.
+// reserve for it, plus any Units a fill closed for it THIS Session (see
+// freedThisSessionUnits' own doc comment).
 func (r *transition) instrumentUnits(instrumentID string) int {
 	reserved := r.reservedUnits(func(h hold) bool { return h.instrumentID == instrumentID })
 	state := r.peekInstrument(instrumentID)
+	committed := reserved + r.freedThisSessionUnits(state)
 	if state == nil || state.campaign == nil {
-		return reserved
+		return committed
 	}
-	return len(state.campaign.units) + reserved
+	return committed + len(state.campaign.units)
 }
 
 // groupUnits sums the Units held across every open Campaign, over every
-// instrument this transaction can see, whose classification matches, and
-// the Units every standing hold whose classification matches reserves. It
-// reads with peekInstrument (docs/development.md: reducer transactions), so
-// checking a cap never copies an instrument this transaction is not already
-// proposing for.
+// instrument this transaction can see, whose classification matches, the
+// Units every standing hold whose classification matches reserves, and any
+// Units a fill closed THIS Session whose classification matches (see
+// freedThisSessionUnits' own doc comment). It reads with peekInstrument
+// (docs/development.md: reducer transactions), so checking a cap never
+// copies an instrument this transaction is not already proposing for.
 func (r *transition) groupUnits(matches func(classification) bool) int {
 	total := r.reservedUnits(func(h hold) bool { return matches(h.classification) })
 	for _, id := range r.instrumentIDs() {
 		state := r.peekInstrument(id)
-		if state == nil || state.campaign == nil {
-			continue
-		}
-		if matches(state.campaign.classification) {
+		if state != nil && state.campaign != nil && matches(state.campaign.classification) {
 			total += len(state.campaign.units)
+		}
+		if n := r.freedThisSessionUnits(state); n > 0 && matches(state.unitsFreedThisSessionClassification) {
+			total += n
 		}
 	}
 	return total
