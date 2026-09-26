@@ -67,6 +67,8 @@ func contract(eventType string) (uint32, any, bool) {
 		return event.CampaignExitedSchemaVersion, &event.CampaignExitedPayload{}, true
 	case event.CampaignCashInLieuEventType:
 		return event.CampaignCashInLieuSchemaVersion, &event.CampaignCashInLieuPayload{}, true
+	case event.CampaignDividendEventType:
+		return event.CampaignDividendSchemaVersion, &event.CampaignDividendPayload{}, true
 	// The decisions below carry no order of their own; orders.py's
 	// OrderDesk.act ignores them (they are not in SCHEMA_VERSIONS). They are
 	// still checked here so a fixture exists for every decision type the

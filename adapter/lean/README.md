@@ -116,6 +116,17 @@ split-adjusted view being adjusted for splits after the run's end, which a
 backtest's factor file provides and a live run cannot; live trading needs the
 broker's own cash-in-lieu statement journalled as the corporate action first.
 
+The "next slice's start" check now runs before that slice's own fills are
+drained (**Where each input falls**, above; ADRs 0023, 0024) — the same
+reordering a dividend's own publish needed — so a same-day stop fill closing
+the Unit that split, or an entry/Add fill for a different Unit, can already
+show at LEAN before the engine has been told of it. It is skipped, exactly
+like a dividend's own holding check, while such a fill is still queued,
+undelivered: reading the still-open (pre-fill) Exit Order as a missing stop,
+or the still-unreduced (pre-fill) engine Units as disagreeing with LEAN's
+holding, would both be false, since the fill fully explains either once
+delivered and applied.
+
 **Cash in lieu at a split (ADR 0023).** LEAN's factor file rounds each split
 factor (AAPL's 7-for-1 of 2014-06-09 is `0.1428572`, not 1/7). LEAN divides
 the holding by it, truncates it to whole shares and pays the fraction as cash
@@ -123,7 +134,7 @@ at the split's reference price times the factor, so the holding can fall one
 raw share short of the engine's Units at the exact ratio: 3,516 raw shares
 became 24,611 and cash, where the Units are 24,612. While LEAN holds a
 position across a split, the adapter publishes a `market.corporate-action` of
-kind `split` (schema 2), stamped at the split's own time, stating the ratio,
+kind `split` (schema 3), stamped at the split's own time, stating the ratio,
 the split-adjusted shares a raw share now is, the raw shares lost and the cash
 paid. It accepts the shortfall only when:
 
@@ -160,6 +171,60 @@ LEAN refuses when asked or when it processes it, or a quantity that is not the
 engine's by the next slice stops the run, and the failure names LEAN's own
 `ErrorCode` and `ErrorMessage`. A `strategy.campaign.cash-in-lieu` arriving
 other than in reply to a split stops the run too.
+
+**Dividends (ADRs 0004, 0024).** An entry in `data.Dividends` for the traded
+symbol publishes `market.corporate-action` of kind `dividend` (schema 3)
+while the engine holds Units. Its `cash_amount` is LEAN's `Distribution`
+per share times the **raw shares actually held at the dividend's effective
+time** — the ex-date entitlement, from the engine's own Units, not a live
+LEAN figure a same-day fill may already have moved (below). Its currency is
+USD. `effective_at` is the dividend's own LEAN `Time`, converted from New
+York time to UTC, never moved to fit a bar. The event is published before
+this slice's own fills are drained and before the previous close's
+snapshot and any split in the same slice, and precedes its completed bar
+and Session-close decisions (ADRs 0010/0021), including when LEAN delivers
+the dividend in a slice with no bar. A dividend while flat is logged and
+not published: there is no open Campaign to credit.
+
+**A same-day fill.** LEAN reports a session's own
+fills before delivering that session's data at all, so by the time
+`OnData` runs, LEAN's `Portfolio` can already reflect a fill the engine has
+not yet been told of — an Add, a new entry, or a stop that closes the
+Campaign outright. Publishing the dividend before draining that fill
+(**Where each input falls**, above) keeps two things true at once: the
+reducer never sees the dividend arrive after a fill it should have
+preceded, and the cash credited is the holding as it stood before that
+fill, not after it. While such a fill is still queued, undelivered,
+`dividend_action` takes its holding from the engine's own Units alone and
+skips comparing them with LEAN's live figure, since the two cannot be
+compared until the fill is delivered and applied; a Campaign that looks
+flat only because of a same-day fill is not treated as flat. Once nothing
+from this session is pending, the comparison against LEAN's own holding
+runs exactly as before, so a genuine disagreement still stops the run.
+`apply_split`'s equivalent check, and `require_split_applied`'s own
+verification of an older split, apply the identical rule for the same
+reason.
+
+The reply must contain exactly one `strategy.campaign.dividend` at schema 1,
+naming the held Campaign and the published action and restating its exact
+cash, currency and effective time. An engine refusal, unexpected reply,
+invalid distribution or disagreement about holdings stops the run. No
+order or Unit changes, and the adapter never adds cash to LEAN's portfolio.
+
+Before accepting the next close, the adapter checks `Portfolio.Cash`
+against the preceding close's cash plus the accepted execution proceeds or
+costs, commissions, split cash in lieu and dividends since that reading.
+It uses decimal arithmetic for this comparison and stops with a
+`dividend cash mismatch` diagnostic if the residual exceeds one cent in
+either direction or cash is non-finite (ADR 0019). The next ordinary
+snapshot reports LEAN's own cash, including its dividend credit; the
+credit cannot fund the dividend bar's decisions (ADR 0020). A dividend
+with no subsequent close stops the run, since no snapshot could state
+the credit (ADR 0024). These checks cover this backtest dividend path;
+they do not implement ADR 0019's full broker reconciliation or clear a
+live-trading gate. The Python fakes exercise these cases and the Go
+contract validator accepts the exact published payload. A LEAN acceptance
+run remains separate from these tests.
 
 After each bar's decisions have been received, the adapter reads one
 `account.snapshot` from `Portfolio.TotalPortfolioValue` (equity) and
@@ -517,10 +582,30 @@ empty.
   order, the fill price, the limit and the slippage, and the fill is never
   sent to the engine.
 - **Where each input falls.** A slice is: reports LEAN made after the last
-  slice (confirmed cancellations and amendments); this session's fills, and
-  what acting on them placed; the previous Session's `account.snapshot`; this
-  Session's bar and `market.session.closed`; then reports of what acting on
-  those decisions placed or cancelled. So:
+  slice (confirmed cancellations and amendments); a split or dividend due
+  this slice; this session's fills, and what acting on them placed; the
+  previous Session's `account.snapshot`; this Session's bar and
+  `market.session.closed`; then reports of what acting on those decisions
+  placed or cancelled. So:
+  - **a corporate action precedes this session's own fills**, not only its
+    bar. A split or dividend takes effect between Sessions, strictly before
+    the session it opens (ADRs 0010/0021), but LEAN reports a same-day fill
+    (a gap-filled entry, an Add, a stop) before delivering that session's
+    data too. Sent after such a fill, the reducer's own chronology guard
+    refuses the corporate action for predating a fill the Campaign has
+    already accepted (ADR 0023, ADR 0024) — and a same-day fill that closes
+    the Campaign entirely would otherwise look flat to a dividend, dropping
+    a payment on shares genuinely held at its effective time. Publishing
+    first keeps both the engine's chronology and the entitlement itself
+    correct: the desk's own Units, read before the fill is drained, are the
+    holding as it stood at the corporate action's effective time — LEAN's
+    Portfolio already reflects the fill regardless of when the adapter
+    reads it, since LEAN applies a fill the instant it executes, before
+    `OnData` is even called. `apply_split` and `dividend_action`'s own
+    holding checks, and `require_split_applied`'s, skip comparing against
+    LEAN's live figure while any such fill is still queued, undelivered
+    (`_fills_pending`); once nothing is pending, the comparison runs exactly
+    as before.
   - **a session's fills precede its bar.** A proposal stays outstanding until
     the instrument's next bar expires it (ADR 0011); a fill sent after that
     bar would name a proposal the engine no longer offers, and the engine

@@ -421,10 +421,11 @@ algorithm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(algorithm)
 
 
-def slice_of(bars=None, delistings=None, changes=None, splits=None):
-    """A LEAN data slice: LEAN always provides all four collections."""
+def slice_of(bars=None, delistings=None, changes=None, splits=None, dividends=None):
+    """A LEAN data slice: LEAN always provides these collections."""
     return types.SimpleNamespace(Bars=bars or {}, Delistings=delistings or {},
-                                 SymbolChangedEvents=changes or {}, Splits=splits or {})
+                                 SymbolChangedEvents=changes or {}, Splits=splits or {},
+                                 Dividends=dividends or {})
 
 
 class AlgorithmTests(unittest.TestCase):

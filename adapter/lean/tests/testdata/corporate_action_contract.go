@@ -1,5 +1,5 @@
 // Command corporate_action_contract checks adapter output against the Go
-// market.corporate-action contract (ADR 0015, ADR 0023): the envelope, its
+// market.corporate-action contract (ADRs 0015, 0023, 0024): the envelope, its
 // schema version, and the payload read strictly through the payload's own
 // upcaster, so a field Go does not define fails. Python tests feed the exact
 // wire JSON on stdin.
@@ -23,7 +23,7 @@ func main() {
 	payload, err := event.UpcastCorporateActionPayload(envelope.SchemaVersion, envelope.Payload)
 	must(err)
 	if !payload.EffectiveAt.Equal(envelope.EventTime) {
-		must(fmt.Errorf("event time %s is not the split's effective time %s", envelope.EventTime, payload.EffectiveAt))
+		must(fmt.Errorf("event time %s is not the action's effective time %s", envelope.EventTime, payload.EffectiveAt))
 	}
 }
 

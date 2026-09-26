@@ -3,6 +3,7 @@ from AlgorithmImports import *  # noqa: F401,F403
 
 # Bind stdlib names after AlgorithmImports: its datetime.time shadows time.
 from datetime import datetime, timezone
+from decimal import Decimal
 from json import load
 from math import isfinite
 from os import environ
@@ -62,6 +63,10 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         self.order_events = []
         # The last Session's close, read but not yet sent (flush_snapshot).
         self.pending_snapshot = None
+        self.pending_dividend = None
+        # A dividend LEAN reported while nothing was held: its effective
+        # time, until the next close confirms no credit arrived for it.
+        self.flat_dividend = None
         self.history_ms = []
         try:
             settings = load_settings()
@@ -81,6 +86,7 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             if type(cash) not in (int, float) or not isfinite(cash) or cash <= 0:
                 raise ValueError("cash must be a finite positive number")
             self.SetCash(cash)
+            self.expected_cash = Decimal(str(cash))
             # The exact engine image the run was executed under, never a
             # default: pinning by digest is what makes a run evidence (ADR
             # 0012, ADR 0017) rather than a result tied to whichever image
@@ -178,6 +184,25 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         try:
             self.desk.require_cancels_confirmed("before this session's fills", requested_earlier,
                                                 self.order_events)
+            # A split or dividend takes effect between Sessions, strictly
+            # before this session's own fills (ADRs 0010/0021), so it must
+            # reach the engine before them too: delivered after, the
+            # reducer's chronology guard refuses one effective on the same
+            # day as an accepted fill (it cannot predate a fill the Campaign
+            # has already accepted; ADR 0023, ADR 0024), and a same-day full
+            # exit would leave the Campaign looking already closed before its
+            # corporate action is even considered. require_split_applied runs
+            # first, exactly as it always has, so an older split still being
+            # finalised is checked before this slice's own action is detected
+            # (its "final" check happens once, before anything new this slice
+            # can set split_to_check again).
+            self.desk.require_split_applied("before this session's fills", final=True)
+            split = data.Splits.get(self.symbol)
+            if split is not None and split.Type == SplitType.SplitOccurred:
+                self.publish_split(split)
+            dividend = data.Dividends.get(self.symbol)
+            if dividend is not None:
+                self.publish_dividend(dividend)
         except Exception as err:
             self.stop("order state uncertain: {}".format(err))
             return
@@ -187,12 +212,21 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             return
         try:
             self.desk.require_cancels_confirmed("before the next session's bar", requested_earlier)
-            # The second line behind verify_split: the split's changes to open
-            # orders are checked again, final, before the next bar is sent.
-            self.desk.require_split_applied("before the next session's bar", final=True)
-            split = data.Splits.get(self.symbol)
-            if split is not None and split.Type == SplitType.SplitOccurred:
-                self.publish_split(split)
+            # Deferred, not skipped: the checks above ran before this
+            # session's own fill was drained, so a split's or a dividend's
+            # holding and Exit Order comparison against LEAN, if it stood
+            # down because that fill was still queued, runs for real now
+            # that it is applied and the engine's Units are current.
+            # require_split_applied is called again only when its own first
+            # call this slice actually deferred (split_check_deferred) --
+            # never unconditionally, since a split just detected this same
+            # slice (apply_split, above) has not yet reached its own
+            # scheduled check and must not be verified "final" here.
+            # require_dividend_reconciled is its own no-op unless
+            # dividend_action deferred.
+            if self.desk.split_check_deferred:
+                self.desk.require_split_applied("after this session's fills", final=True)
+            self.desk.require_dividend_reconciled()
         except Exception as err:
             self.stop("order state uncertain: {}".format(err))
             return
@@ -254,6 +288,52 @@ class CompletedBarsAlgorithm(QCAlgorithm):
                  "decisions={}".format(self.instrument, action["raw_shares_lost"],
                                        action["cash_in_lieu"], action["currency"], len(decisions)))
         self.desk.split_decisions(decisions, action)
+        self.expected_cash += Decimal(str(action["cash_in_lieu"]))
+
+    def publish_dividend(self, dividend):
+        """Publish before the bar, at LEAN's true effective time (ADR 0024).
+
+        Like a split, a dividend is a between-Session corporate action
+        (ADRs 0010/0021). LEAN supplies local New York time, including DST.
+        The adapter records the payment but never credits LEAN itself.
+        """
+        effective = dividend.Time.replace(tzinfo=ZoneInfo("America/New_York")).astimezone(timezone.utc)
+        action = self.desk.dividend_action(float(dividend.Distribution),
+                                           effective.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        if action is None:
+            self.Log("adapter: dividend of {} at {} while flat; nothing published (ADR 0024)".format(
+                self.instrument, effective))
+            # Nothing is owed, so the next close must show no credit for it:
+            # checked like a published dividend, with nothing added to
+            # expected_cash (ADR 0019).
+            self.flat_dividend = effective.strftime("%Y-%m-%dT%H:%M:%SZ")
+            return
+        decisions = self.publisher.publish_corporate_action(action)
+        action_id = "{}:corporate-action:{}".format(self.publisher.run_id, self.publisher.sequence)
+        self.desk.dividend_decisions(decisions, action, action_id)
+        self.decision_count += len(decisions)
+        self.expected_cash += Decimal(str(action["cash_amount"]))
+        self.pending_dividend = action
+        self.Log("adapter: dividend of {} at {} published: {} USD".format(
+            self.instrument, action["effective_at"], action["cash_amount"]))
+
+    def require_dividend_cash(self, cash):
+        """Check the next close independently before adopting its cash (ADR 0019).
+
+        The prior close plus accepted fills, fees and corporate-action cash
+        must explain LEAN's credit within one cent. Reporting LEAN's own
+        reading through the ordinary next snapshot preserves ADR 0020.
+        """
+        action = self.pending_dividend
+        if action is None and self.flat_dividend is not None:
+            action = {"effective_at": self.flat_dividend, "cash_amount": 0}
+        if action is not None and (not isfinite(cash) or
+                                    abs(Decimal(str(cash)) - self.expected_cash) > Decimal("0.01")):
+            raise ValueError("dividend cash mismatch for {} at {}: published {} USD; "
+                             "expected Portfolio.Cash {}, LEAN reports {} "
+                             "(difference exceeds one cent; ADR 0019)".format(
+                                 self.instrument, action["effective_at"], action["cash_amount"],
+                                 self.expected_cash, cash))
 
     def verify_split(self):
         """The 00:01 scheduled check: after a split, LEAN's position and orders,
@@ -347,6 +427,12 @@ class CompletedBarsAlgorithm(QCAlgorithm):
                 return
             decisions = self.publisher.publish_fill(payload)
             self.desk.delivered(order_ids)
+            # Quantity times price is invariant across the split views
+            # (ADR 0004); commission is already USD. Enumerate accepted
+            # executions so they cannot mask a dividend discrepancy.
+            value = Decimal(str(payload["price"])) * payload["quantity"]
+            self.expected_cash += -value if payload["kind"] in ("entry", "add") else value
+            self.expected_cash -= Decimal(str(payload["commission"]))
             self.fill_count += 1
             self.decision_count += len(decisions)
             self.Log("adapter: fill {} {} {} @ {} at {} level={} slippage={} commission={} "
@@ -421,6 +507,12 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         if self.failed or self.client is None or self.publisher.completed \
                 or self.publisher.last_event_time is None:
             return
+        # ADR 0024: a terminal credit with no later close cannot reach a
+        # snapshot; ending cleanly would leave its account effect unstated.
+        if self.pending_dividend is not None:
+            self.stop("dividend of {} has no subsequent close for its account snapshot "
+                      "(ADR 0024)".format(self.instrument))
+            return
         try:
             self.decision_count += len(self.publisher.publish_run_completed())
         except Exception as err:
@@ -438,6 +530,7 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         # a warm-up bar is never acted on (OrderDesk.act).
         warming = self.IsWarmingUp
         try:
+            self.require_dividend_cash(float(self.Portfolio.Cash))
             started = perf_counter()
             history = self.History([self.symbol], 1, Resolution.Daily,
                                    dataNormalizationMode=DataNormalizationMode.SplitAdjusted)
@@ -460,6 +553,10 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.pending_snapshot = (SimpleNamespace(
                 TotalPortfolioValue=float(self.Portfolio.TotalPortfolioValue),
                 Cash=float(self.Portfolio.Cash)), period_end, warming)
+            self.require_dividend_cash(self.pending_snapshot[0].Cash)
+            self.expected_cash = Decimal(str(self.pending_snapshot[0].Cash))
+            self.pending_dividend = None
+            self.flat_dividend = None
             self.bar_count += 1
             self.warmup_seen += int(warming)
             self.decision_count += len(decisions)

@@ -59,7 +59,7 @@ var wireCovered = map[string]string{
 	"execution.fill":            "execution_contract.go (test_orders.py InputContractTests)",
 	"execution.order.lifecycle": "execution_contract.go (test_orders.py InputContractTests)",
 	"replay.run.completed":      "run_completed_contract.go (test_publisher.py)",
-	"market.corporate-action":   "corporate_action_contract.go (test_orders.py CashInLieuTests)",
+	"market.corporate-action":   "corporate_action_contract.go (test_orders.py CashInLieuTests, test_dividends.py)",
 	// Decisions orders.py acts on (SCHEMA_VERSIONS).
 	"strategy.trade.proposed":         "order_decisions_contract.go (test_orders.py FixtureContractTests)",
 	"strategy.add.proposed":           "order_decisions_contract.go (test_orders.py FixtureContractTests)",
@@ -71,6 +71,7 @@ var wireCovered = map[string]string{
 	"strategy.campaign.units-stopped": "order_decisions_contract.go (test_orders.py FixtureContractTests)",
 	"strategy.campaign.exited":        "order_decisions_contract.go (test_orders.py FixtureContractTests)",
 	"strategy.campaign.cash-in-lieu":  "order_decisions_contract.go (test_orders.py FixtureContractTests, CashInLieuTests)",
+	"strategy.campaign.dividend":      "order_decisions_contract.go (test_dividends.py)",
 	// Decisions the adapter receives but never acts on (README.md's decision
 	// table; ADR 0022's discipline applied to the adapter's own boundary).
 	"strategy.campaign.evaluated":             "order_decisions_contract.go (test_orders.py IgnoredDecisionTests)",
@@ -107,14 +108,9 @@ var notYetCrossed = map[string]string{
 	// above does, so it stays here alongside it rather than moving to
 	// wireCovered's "ignored decision" group on its own.
 	"strategy.universe.eligibility": "no provider-backed universe port yet; the adapter never receives this decision",
-	// ADR 0024 adds these two market.corporate-action kinds and their own
-	// decisions in the Go domain. Publishing a symbol change or a dividend
-	// FROM LEAN is #28, deliberately out of scope here: this adapter still
-	// carries only a split's cash in lieu across the wire (corporate_action_contract.go),
-	// so a fixture proving the adapter sends or acts on either of these would
-	// be fiction rather than evidence of anything it does today.
-	"strategy.instrument.symbol-changed": "LEAN publishing of symbol changes is #28, not yet built",
-	"strategy.campaign.dividend":         "LEAN publishing of dividends is #28, not yet built",
+	// ADR 0024: the adapter keeps instrument_id constant across ticker
+	// changes, so it logs those changes without publishing an action.
+	"strategy.instrument.symbol-changed": "the adapter retains a stable instrument_id across ticker changes",
 	// ADR 0011's Watchlist is a per-Session observability decision the
 	// reducer journals; nothing wires it to the LEAN adapter yet, and it
 	// never will need to be acted on (it is not one of orders.py's

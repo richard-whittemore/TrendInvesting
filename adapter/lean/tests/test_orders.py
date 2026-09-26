@@ -2205,6 +2205,78 @@ class SplitTests(OrderTestCase):
         self.assertAlmostEqual(algo.security.slippage_model.GetSlippageApproximation(
             algo.security, types.SimpleNamespace(Tag=sell.Tag)), 0.05 * 0.05 * 28)
 
+    def test_a_stop_fill_in_the_splits_final_verification_slice_is_not_a_missing_stop(self):
+        # require_split_applied's own "final" check now
+        # runs before this slice's fills are drained, exactly like a
+        # dividend or a new split, so LEAN's Portfolio and order book can
+        # already reflect this session's own stop fill, closing the Unit,
+        # before the engine has even been told of it. Reading the still-open
+        # (pre-fill) Exit Order as a missing stop, or the still-unreduced
+        # (pre-fill) engine Units as disagreeing with LEAN's now-flat
+        # holding, would both be false: the fill fully explains both, once
+        # drained.
+        algo, sell = self.held()
+        self.split(algo, 11)
+        self.ratio = 28
+        self.fill(algo, sell, 11, 22.5, fee=1)
+        # The existing order fake changes shares but leaves cash to its
+        # caller: 200 raw shares sold at 22.5.
+        algo.Portfolio.Cash += 200 * 22.5 - 1
+        self.feed(algo, 11, replies={"execution.fill": {"payload": {"decisions": [
+            units_stopped(11, fill_id="lean:1:2"), campaign_exited(11)]}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        stop = self.sent(algo, "execution.fill")[-1]["payload"]
+        self.assertEqual((stop["kind"], stop["quantity"]), ("stop", 5600))
+
+    def test_a_genuine_holding_mismatch_with_a_pending_fill_still_stops_after_the_drain(self):
+        # The holding check must
+        # be deferred, not skipped, while this session's own fill is
+        # queued. An unrelated, genuine desync -- LEAN holds a raw share the
+        # fill does not explain -- must still stop the run, once the fill is
+        # drained and the comparison runs for real.
+        algo, sell = self.held()
+        self.split(algo, 11)
+        self.ratio = 28
+        self.fill(algo, sell, 11, 22.5, fee=1)
+        algo.Portfolio.Cash += 200 * 22.5 - 1
+        # The fill above already zeroed the holding (self.fill mutates
+        # Portfolio.holdings); this extra share is unexplained by anything.
+        algo.Portfolio.holdings["AAPL"] = 1
+        self.feed(algo, 11, replies={"execution.fill": {"payload": {"decisions": [
+            units_stopped(11, fill_id="lean:1:2"), campaign_exited(11)]}}})
+        self.assertTrue(algo.failed)
+        self.assertIn("holds 1 raw shares", algo.quit_reason)
+        self.assertIn("after this session's fills", algo.quit_reason)
+
+    def test_a_dropped_exit_order_with_a_pending_fill_still_stops_after_the_drain(self):
+        # The Exit Order check must run even when the pending fill concerns
+        # a different Unit. Unit 1's stop fires
+        # (the pending fill); Unit 2's own Exit Order is separately dropped
+        # by LEAN and must still be caught, once the fill is drained.
+        algo, sell1 = self.held()
+        add = add_proposal(11, unit_index=2, level=0.9, quantity=2800,
+                           campaign_n=0.05, previous_unit_fill=0.875)
+        self.feed(algo, 11, close_decisions=[add])
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        [add_ticket] = [t for t in self.tickets(algo) if t.Tag == add["id"]]
+        self.fill(algo, add_ticket, 12, add_ticket.StopPrice + 0.1)
+        self.feed(algo, 12, replies={"execution.fill": {"payload": {"decisions": [
+            unit_added(12, unit_index=2, quantity=2800),
+            exit_order_set(12, unit_index=2, level=0.8, quantity=2800)]}}})
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        sell1, sell2 = self.sells(algo)
+        self.split(algo, 13)
+        self.assertFalse(algo.failed, getattr(algo, "quit_reason", ""))
+        self.ratio = 28
+        sell2.Status = "canceled"
+        self.fill(algo, sell1, 13, 22.5, fee=1)
+        algo.Portfolio.Cash += 200 * 22.5 - 1
+        self.feed(algo, 13, replies={"execution.fill": {"payload": {"decisions": [
+            units_stopped(13, fill_id="lean:1:2", unit_indexes=(1,), remaining=1)]}}})
+        self.assertTrue(algo.failed)
+        self.assertIn("unit 2's Exit Order is not working", algo.quit_reason)
+        self.assertIn("after this session's fills", algo.quit_reason)
+
     def test_an_entry_order_working_across_a_split_fills_as_the_same_unit(self):
         algo = self.start()
         self.feed(algo, 9, [trade_proposal(9, entry_level=0.875, quantity=5600, n=0.05)])

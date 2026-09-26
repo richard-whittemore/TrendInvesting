@@ -531,6 +531,16 @@ class OrderDesk:
         # When a split LEAN applied to a position or order is still to be
         # checked (require_split_applied); None otherwise.
         self.split_to_check = None
+        # Whether the last require_split_applied call deferred its holding
+        # and Exit Order checks (this session's own fill was still queued);
+        # OnData calls it again after drain_order_events only when this is
+        # true.
+        self.split_check_deferred = False
+        # A dividend's own effective_at when its entitlement was taken from
+        # the engine's Units alone because this session's fill was still
+        # queued (dividend_action); None otherwise. require_dividend_reconciled
+        # checks it once that fill is drained.
+        self.dividend_to_reconcile = None
         # Actual instrument bars, never fill times or deferred snapshots.
         # ADR 0011 gives fill-chained Adds one additional observed session.
         self.bar_ends = []
@@ -776,6 +786,137 @@ class OrderDesk:
                 "new_shares": n, "old_shares": 1, "engine_shares_per_raw_share": ratio,
                 "raw_shares_lost": lost, "cash_in_lieu": cash, "currency": _USD}
 
+    def _fills_pending(self):
+        """Whether this session's own fills are still queued, undelivered to
+        the engine.
+
+        A split or dividend is now published before drain_order_events, so
+        that its effective time, strictly between Sessions, precedes this
+        session's own fills in the engine's stream (ADRs 0010/0021, 0023,
+        0024). LEAN's Portfolio already reflects any of those fills the
+        instant they execute, before OnData is even called, regardless of
+        when the adapter drains them; a corporate action's own holding must
+        therefore come from the engine's Units, not from LEAN's, whenever a
+        fill from this exact session is still sitting in the queue.
+        """
+        status = self.lean.OrderStatus
+        return any(record["status"] in (status.Filled, status.PartiallyFilled)
+                  for record in self.algorithm.order_events)
+
+    def dividend_action(self, distribution, effective_at):
+        """State the dividend on the raw shares held at its effective time
+        (ADRs 0004, 0024): the engine's Units before this session's own
+        fills, its ex-date entitlement, never a live LEAN figure a same-day
+        fill may already have moved.
+
+        Exit Orders mirror the engine's held Units. Once nothing from this
+        session is still queued, their raw quantities are required to match
+        LEAN's own exactly; a dividend cannot explain a share difference
+        otherwise (ADR 0019). Flat holdings have no Campaign to credit.
+        """
+        # Validated before the flat return below, so an invalid distribution
+        # stops the run whether or not shares are held.
+        if not isfinite(distribution) or distribution <= 0:
+            raise Uncertain("dividend distribution must be positive and finite (ADR 0024)")
+        pending = self._fills_pending()
+        if not self.exit_orders:
+            if pending:
+                # Whatever LEAN now holds was acquired only this session,
+                # after the dividend's own effective time; nothing was held
+                # then, so this is the same case as an ordinary flat holding.
+                # The fill itself is not yet applied, though, so what it
+                # ought to leave LEAN holding is checked once it is
+                # (require_dividend_reconciled): a genuine disagreement,
+                # such as LEAN holding one more raw share than the fill
+                # explains, must still stop the run.
+                self.dividend_to_reconcile = effective_at
+                return None
+            holding = _whole(self.algorithm.Portfolio[self.symbol].Quantity)
+            if holding == 0:
+                return None
+            raise Uncertain("dividend of {} at {}: LEAN holds {} raw shares but the engine holds "
+                            "no open Campaign in it (ADR 0019)".format(
+                                self.instrument, effective_at,
+                                self.algorithm.Portfolio[self.symbol].Quantity))
+        ratio = self._require_ratio()
+        quantities = [order["quantity"] for order in self.exit_orders.values()]
+        if any(q <= 0 or q % ratio for q in quantities):
+            raise Uncertain("dividend of {} at {}: the engine's Units are {} split-adjusted "
+                            "shares, not a whole number of raw shares at ratio {} (ADR "
+                            "0019)".format(self.instrument, effective_at, quantities, ratio))
+        holding = sum(quantities) // ratio
+        if not pending:
+            actual = _whole(self.algorithm.Portfolio[self.symbol].Quantity)
+            if actual is None or actual != holding:
+                raise Uncertain("dividend of {} at {}: LEAN holds {} raw shares but the engine's "
+                                "Units hold {} split-adjusted shares at ratio {} (ADR "
+                                "0019)".format(self.instrument, effective_at,
+                                              self.algorithm.Portfolio[self.symbol].Quantity,
+                                              sum(quantities), ratio))
+        else:
+            # Deferred, not skipped: LEAN's own holding cannot be trusted
+            # against the engine's Units until this session's fill is
+            # drained and applied, so require_dividend_reconciled checks it
+            # then.
+            self.dividend_to_reconcile = effective_at
+        cash = float(Decimal(str(distribution)) * holding)
+        if not isfinite(cash) or cash <= 0:
+            raise Uncertain("dividend cash amount must be positive and finite (ADR 0024)")
+        return {"instrument_id": self.instrument, "kind": "dividend",
+                "effective_at": effective_at, "cash_amount": cash, "currency": _USD}
+
+    def dividend_decisions(self, decisions, action, action_id):
+        """Require exactly the cash-only acknowledgment ADR 0024 specifies.
+
+        Nothing is filtered as informational here: any other decision or
+        Campaign, currency, amount or cause is an unexpected reply.
+        """
+        campaigns = {campaign for campaign, _ in self.exit_orders}
+        if len(campaigns) != 1 or len(decisions) != 1:
+            raise Uncertain("unexpected dividend reply: require one held Campaign and one decision")
+        decision = decisions[0]
+        expected = {key: action[key] for key in
+                    ("instrument_id", "effective_at", "cash_amount", "currency")}
+        expected.update(campaign_id=next(iter(campaigns)), corporate_action_id=action_id,
+                        rule="campaign.dividend.credited-as-cash", adr="0024")
+        # A bool is an int in Python (True == 1 and isinstance(True, int)),
+        # and a loosely truthy id (a number, a list) is not a decision
+        # identifier, so each is checked by exact type, not value alone.
+        unexpected = not isinstance(decision, dict) or \
+            decision.get("type") != "strategy.campaign.dividend" or \
+            type(decision.get("schema_version")) is not int or decision.get("schema_version") != 1 or \
+            type(decision.get("envelope_version")) is not int or decision.get("envelope_version") != 1 or \
+            not isinstance(decision.get("id"), str) or not decision.get("id") or \
+            decision.get("payload") != expected
+        if unexpected:
+            raise Uncertain("unexpected dividend reply for {} at {}: expected {} (ADR 0024)".format(
+                self.instrument, action["effective_at"], expected))
+
+    def require_dividend_reconciled(self):
+        """After this session's fills are drained, verify a dividend whose
+        entitlement came from the engine's Units alone against LEAN's own,
+        now-current holding (ADR 0019).
+
+        A no-op unless dividend_action deferred exactly this check because a
+        fill was still queued when the dividend was published. Reuses
+        _holding_problems and _exit_orders_not_working, the same comparisons
+        a split's final verification makes, since both rest on the identical
+        invariants: LEAN's raw holding is the engine's Units at the ratio in
+        force, and every held Unit has a working Exit Order. This does not
+        touch the cash ledger; require_dividend_cash still checks that
+        independently at the next close.
+        """
+        effective_at = self.dividend_to_reconcile
+        if effective_at is None:
+            return
+        self.dividend_to_reconcile = None
+        # The share count alone is not enough: a held Unit whose Exit Order
+        # LEAN no longer works has no stop, whatever the holding says.
+        problems = self._holding_problems() + self._exit_orders_not_working()
+        if problems:
+            raise Uncertain("dividend of {} at {}, after this session's fills: {} (ADR "
+                            "0019)".format(self.instrument, effective_at, "; ".join(problems)))
+
     def split_decisions(self, decisions, action):
         """Carry the engine's reply to a published split into this desk (ADR 0023).
 
@@ -876,7 +1017,18 @@ class OrderDesk:
 
     def _holding_problems(self):
         """Every held Unit rests one Exit Order (ADR 0005's amendment), so LEAN's
-        raw holding is the sum of their quantities at the ratio in force."""
+        raw holding is the sum of their quantities at the ratio in force.
+
+        Skipped while this session's own fill is still queued, undelivered to
+        the engine: a split is now checked before drain_order_events, so
+        LEAN's Portfolio can already reflect a fill the engine's Units do
+        not yet, and the two cannot be compared until it is drained
+        (dividend_action's own doc comment states the same rule for a
+        dividend). The caller re-checks this once the fill is drained
+        (require_split_applied, require_dividend_reconciled).
+        """
+        if self._fills_pending():
+            return []
         protected = sum(order["quantity"] for order in self.exit_orders.values()) // self.ratio
         holding = self.algorithm.Portfolio[self.symbol].Quantity
         if holding != protected:
@@ -886,7 +1038,18 @@ class OrderDesk:
 
     def _exit_orders_not_working(self):
         """Each stored Exit Order whose LEAN order no longer works: its Unit has
-        no stop, whatever the holding says."""
+        no stop, whatever the holding says.
+
+        Skipped while this session's own fill is still queued, undelivered to
+        the engine: a Unit's own stop can be exactly such a fill, already
+        Filled at LEAN but not yet reported to the engine, which would
+        otherwise read as a missing stop rather than the ordinary close this
+        check runs to catch problems the fill itself does not already
+        explain (_holding_problems' own doc comment states the same rule,
+        including the re-check once the fill is drained).
+        """
+        if self._fills_pending():
+            return []
         problems = []
         for unit, order in sorted(self.exit_orders.items(), key=lambda item: str(item[0])):
             tickets = self._tickets(lambda t, oid=order["order_id"]: t.OrderId == oid)
@@ -910,11 +1073,26 @@ class OrderDesk:
         it yet. Run first by the adapter's scheduled check, after the split's
         time step and before the next session's fills; then again, final, at
         the next slice's start, as a second line.
+
+        Deferred, not skipped, while this session's own fill is still queued:
+        the holding and Exit Order checks below stand down rather than
+        compare against a LEAN figure the engine's Units do not yet reflect,
+        but split_to_check
+        stays set so this same check runs again, for real, once OnData has
+        drained the queue and the engine's Units are current. Only that
+        later, fully-checked call clears it. self.split_check_deferred
+        records whether THIS call deferred, so OnData knows to call again
+        after the drain and never mistakes a split just detected this same
+        slice (apply_split, running after this method's own first call) for
+        one whose check was deferred.
         """
+        self.split_check_deferred = False
         split_at = self.split_to_check
         if split_at is None:
             return
-        if final:
+        if final and self._fills_pending():
+            self.split_check_deferred = True
+        elif final:
             self.split_to_check = None
         ratio = self.ratio
         tick = float(self.algorithm.Securities[self.symbol].SymbolProperties.MinimumPriceVariation)
@@ -954,9 +1132,17 @@ class OrderDesk:
             raise Uncertain("after the split of {} at {}, at {} split-adjusted shares per raw "
                             "share, {}: {}".format(self.instrument, split_at, ratio, when,
                                                    "; ".join(problems)))
-        self.algorithm.Log("adapter: split at {} reconciled {}: LEAN holds {} raw shares and "
-                           "works {} order(s), as the engine's figures are at split ratio {}".format(
-                               split_at, when, holding, len(self._open_tickets()), ratio))
+        if self.split_to_check is None:
+            self.algorithm.Log("adapter: split at {} reconciled {}: LEAN holds {} raw shares and "
+                               "works {} order(s), as the engine's figures are at split ratio "
+                               "{}".format(split_at, when, holding, len(self._open_tickets()), ratio))
+        else:
+            # split_to_check is still set: the holding and Exit Order checks
+            # were deferred (this session's own fill is still queued), so
+            # this is not yet a full reconciliation.
+            self.algorithm.Log("adapter: split at {} {}: this session's own fill is still queued, "
+                               "so the holding and Exit Order checks are deferred until it is "
+                               "drained".format(split_at, when))
 
     def _amend_split_quantities(self, ratio):
         """Place the engine's quantities in LEAN's split orders (ADR 0023).
