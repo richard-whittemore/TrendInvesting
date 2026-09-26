@@ -64,6 +64,9 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         # The last Session's close, read but not yet sent (flush_snapshot).
         self.pending_snapshot = None
         self.pending_dividend = None
+        # A dividend LEAN reported while nothing was held: its effective
+        # time, until the next close confirms no credit arrived for it.
+        self.flat_dividend = None
         self.history_ms = []
         try:
             settings = load_settings()
@@ -300,6 +303,10 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         if action is None:
             self.Log("adapter: dividend of {} at {} while flat; nothing published (ADR 0024)".format(
                 self.instrument, effective))
+            # Nothing is owed, so the next close must show no credit for it:
+            # checked like a published dividend, with nothing added to
+            # expected_cash (ADR 0019).
+            self.flat_dividend = effective.strftime("%Y-%m-%dT%H:%M:%SZ")
             return
         decisions = self.publisher.publish_corporate_action(action)
         action_id = "{}:corporate-action:{}".format(self.publisher.run_id, self.publisher.sequence)
@@ -318,6 +325,8 @@ class CompletedBarsAlgorithm(QCAlgorithm):
         reading through the ordinary next snapshot preserves ADR 0020.
         """
         action = self.pending_dividend
+        if action is None and self.flat_dividend is not None:
+            action = {"effective_at": self.flat_dividend, "cash_amount": 0}
         if action is not None and (not isfinite(cash) or
                                     abs(Decimal(str(cash)) - self.expected_cash) > Decimal("0.01")):
             raise ValueError("dividend cash mismatch for {} at {}: published {} USD; "
@@ -547,6 +556,7 @@ class CompletedBarsAlgorithm(QCAlgorithm):
             self.require_dividend_cash(self.pending_snapshot[0].Cash)
             self.expected_cash = Decimal(str(self.pending_snapshot[0].Cash))
             self.pending_dividend = None
+            self.flat_dividend = None
             self.bar_count += 1
             self.warmup_seen += int(warming)
             self.decision_count += len(decisions)

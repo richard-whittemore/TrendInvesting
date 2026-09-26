@@ -355,7 +355,10 @@ class DividendTests(OrderTestCase):
                     9, entry_level=0.875, quantity=5600, n=0.05)])
                 self.feed(algo, 10)
                 [entry] = self.tickets(algo)
-                self.fill(algo, entry, 11, entry.StopPrice + 0.1)
+                price = entry.StopPrice + 0.1
+                self.fill(algo, entry, 11, price)
+                # LEAN's own cash moves by the fill it reports; nothing else.
+                algo.Portfolio.Cash -= 100 * price + 1  # the fixture's default fee
                 algo.Portfolio.holdings["AAPL"] = held
                 algo.client.reply_overrides = {
                     "execution.fill": {"payload": {"decisions": [
@@ -369,3 +372,47 @@ class DividendTests(OrderTestCase):
                 self.assertEqual(algo.failed, fails, getattr(algo, "quit_reason", ""))
                 if fails:
                     self.assertIn("holds {} raw shares".format(held), algo.quit_reason)
+
+    def test_an_unexplained_credit_after_a_flat_dividend_stops_at_the_next_close(self):
+        # Nothing was held, so nothing is published and nothing is owed; a
+        # cash credit LEAN makes anyway is unexplained (ADR 0019) and must
+        # not be adopted into the next snapshot.
+        self.ratio = 1
+        algo = self.start()
+        self.pay(algo, credit=25, with_bar=True)
+        self.assertTrue(algo.failed)
+        self.assertIn("cash mismatch", algo.quit_reason)
+
+    def test_a_dropped_exit_order_after_a_deferred_dividend_check_stops(self):
+        # The holding reconciles after the drain, but a held Unit whose Exit
+        # Order LEAN no longer works has no stop; the deferred check must
+        # catch that too, not only the share count (ADR 0019).
+        self.ratio = 56
+        algo = self.start()
+        self.feed(algo, 9, [order_fixtures.trade_proposal(
+            9, entry_level=0.875, quantity=5600, n=0.05)])
+        [entry] = self.tickets(algo)
+        self.fill(algo, entry, 10, entry.StopPrice + 0.1)
+        add = order_fixtures.add_proposal(9, unit_index=2, level=0.9, quantity=2800,
+                                          campaign_n=0.05, previous_unit_fill=0.875,
+                                          valid_for_sessions=2)
+        self.feed(algo, 10, replies={"execution.fill": {"payload": {"decisions": [
+            order_fixtures.campaign_opened(campaign_n=0.05),
+            order_fixtures.exit_order_set(10, level=0.8, quantity=5600), add]}}})
+        [add_ticket] = [t for t in self.tickets(algo) if t.Tag == add["id"]]
+        self.fill(algo, add_ticket, 11, 50.5, fee=1)
+        algo.Portfolio.Cash += -(50 * 50.5) - 1 + 25
+        algo.Portfolio.holdings["AAPL"] = 150
+        [unit1_stop] = [t for t in self.sells(algo)]
+        unit1_stop.Status = "canceled"
+        algo.client.reply_overrides = {
+            "market.corporate-action": dividend_reply,
+            "execution.fill": {"payload": {"decisions": [
+                order_fixtures.unit_added(11, unit_index=2, quantity=2800),
+                order_fixtures.exit_order_set(11, unit_index=2, level=0.8, quantity=2800)]}}}
+        b = bar(11)
+        algo.History = lambda *a, **k: Frame(b.EndTime, ratio=self.ratio)
+        algo.OnData(scaffold.slice_of({"AAPL": b}, dividends={"AAPL": types.SimpleNamespace(
+            Distribution=0.25, Time=datetime(2014, 6, 11))}))
+        self.assertTrue(algo.failed)
+        self.assertIn("after this session's fills", algo.quit_reason)

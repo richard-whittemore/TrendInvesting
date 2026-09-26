@@ -899,9 +899,10 @@ class OrderDesk:
 
         A no-op unless dividend_action deferred exactly this check because a
         fill was still queued when the dividend was published. Reuses
-        _holding_problems, the same comparison a split's final verification
-        makes, since both rest on the identical invariant: LEAN's raw
-        holding is the engine's Units at the ratio in force. This does not
+        _holding_problems and _exit_orders_not_working, the same comparisons
+        a split's final verification makes, since both rest on the identical
+        invariants: LEAN's raw holding is the engine's Units at the ratio in
+        force, and every held Unit has a working Exit Order. This does not
         touch the cash ledger; require_dividend_cash still checks that
         independently at the next close.
         """
@@ -909,7 +910,9 @@ class OrderDesk:
         if effective_at is None:
             return
         self.dividend_to_reconcile = None
-        problems = self._holding_problems()
+        # The share count alone is not enough: a held Unit whose Exit Order
+        # LEAN no longer works has no stop, whatever the holding says.
+        problems = self._holding_problems() + self._exit_orders_not_working()
         if problems:
             raise Uncertain("dividend of {} at {}, after this session's fills: {} (ADR "
                             "0019)".format(self.instrument, effective_at, "; ".join(problems)))
