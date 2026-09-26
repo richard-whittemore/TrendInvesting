@@ -153,20 +153,35 @@ def _classification_groups(fine):
     return industry, sector
 
 
-def _adr_0005_fill_model(slippage_model):
+def _adr_0005_fill_model(slippage_model, fill_prices):
     """A subclass of LEAN's own EquityFillModel that replaces StopLimitFill
     for a BUY only (ADR 0005, as amended). Every other order (a sell, or a
     stop-market Add/entry, which this algorithm never places) keeps
-    EquityFillModel's own fill."""
+    EquityFillModel's own fill. Every fill's price is recorded in
+    ``fill_prices`` by order id, for the fee model: LEAN's fee-model
+    parameters carry only the order and the security, and an order's own
+    Price reads 0 when its fill is being charged (observed on the pinned
+    image)."""
 
     class Adr0005FillModel(EquityFillModel):
         def __init__(self):
             super().__init__()
             self.failure = None
 
+        def StopMarketFill(self, asset, order):
+            return self._record(order, super().StopMarketFill(asset, order))
+
+        def MarketFill(self, asset, order):
+            return self._record(order, super().MarketFill(asset, order))
+
+        def _record(self, order, fill):
+            if fill.FillQuantity:
+                fill_prices[order.Id] = float(fill.FillPrice)
+            return fill
+
         def StopLimitFill(self, asset, order):
             if order.Direction != OrderDirection.Buy:
-                return super().StopLimitFill(asset, order)
+                return self._record(order, super().StopLimitFill(asset, order))
             fill = OrderEvent(order, Extensions.ConvertToUtc(asset.LocalTime, asset.Exchange.TimeZone),
                               OrderFee.Zero)
             if order.Status == OrderStatus.Canceled or not self.IsExchangeOpen(asset, False):
@@ -187,9 +202,32 @@ def _adr_0005_fill_model(slippage_model):
                 fill.Status = OrderStatus.Filled
                 fill.FillQuantity = order.Quantity
                 fill.FillPrice = price
-            return fill
+            return self._record(order, fill)
 
     return Adr0005FillModel
+
+
+def _raw_share_fee_model(ratio_of, fill_prices):
+    """LEAN's own InteractiveBrokersFeeModel charges per share of the order
+    as stated, and this algorithm's orders are stated in split-adjusted
+    shares -- 56 times the raw count for AAPL in 2003 -- so it overcharged
+    by as much. This charges the same schedule on the raw shares the order
+    is (ADR 0004: a per-share cost is raw; ADR 0013;
+    rules.lean_ib_commission), which is what the Go engine's LEAN runs are
+    charged. ``ratio_of(symbol)`` is the symbol's current split ratio. The
+    cap is a fraction of the trade's value at its fill price, recorded by
+    the fill model; before a fill (LEAN's buying-power checks) it is
+    valued at the security's price."""
+
+    class RawShareFeeModel(FeeModel):
+        def GetOrderFee(self, parameters):
+            security, order = parameters.Security, parameters.Order
+            price = fill_prices.get(order.Id, float(security.Price))
+            fee = rules.lean_ib_commission(float(order.AbsoluteQuantity), price,
+                                           ratio_of(security.Symbol) or 1.0)
+            return OrderFee(CashAmount(fee, "USD"))
+
+    return RawShareFeeModel()
 
 
 # =============================================================================
@@ -204,7 +242,7 @@ class _SymbolState:
 
     __slots__ = ("n", "entry_channel", "exit_channel", "closes", "raw_closes", "raw_volumes",
                  "bars_seen", "previous_close", "last_bar_date", "campaign", "entry_ticket",
-                 "add_ticket", "unit_tickets")
+                 "add_ticket", "add_placed", "unit_tickets", "last_high")
 
     def __init__(self):
         self.n = rules.WilderN()
@@ -227,6 +265,8 @@ class _SymbolState:
         self.campaign = None            # rules.Campaign, or None
         self.entry_ticket = None        # the resting entry stop-limit order
         self.add_ticket = None          # the resting Add stop-limit order
+        self.add_placed = None          # self.Time when add_ticket was placed
+        self.last_high = None           # the last advanced bar's high
         self.unit_tickets = []          # one resting sell order per open Unit
 
     def record_close(self, raw_close, raw_volume, split_adjusted_close):
@@ -268,10 +308,29 @@ class TurtleBaselineResearch(QCAlgorithm):
 
     STARTING_CASH = 1_000_000.0
 
+    # A fixed-universe switch for local fidelity runs (README.md, "Checking
+    # fidelity against the Go engine"). None, the default and the only
+    # setting the cloud research check uses, selects the monthly ADR 0009
+    # universe. A tuple of tickers instead subscribes exactly those, by
+    # AddEquity, for the whole run, and skips ADR 0009's eligibility test:
+    # the list itself is the universe, as a single-instrument Go engine run
+    # has no eligibility input either. Local LEAN data carries no coarse or
+    # fine universe files, so this is how a run there trades at all.
+    FIXED_SYMBOLS = None
+    # The run's span: (year, month, day), and None for END_DATE means today.
+    START_DATE = (1998, 1, 1)
+    END_DATE = None
+    # Warm-up in daily bars, before START_DATE and for a new selection's
+    # History backfill (WARMUP_BARS, above).
+    WARMUP_BARS = WARMUP_BARS
+
     def Initialize(self):
-        self.SetStartDate(1998, 1, 1)
-        today = datetime.now(timezone.utc).date()
-        self.SetEndDate(today.year, today.month, today.day)
+        self.SetStartDate(*self.START_DATE)
+        end = self.END_DATE
+        if end is None:
+            today = datetime.now(timezone.utc).date()
+            end = (today.year, today.month, today.day)
+        self.SetEndDate(*end)
         self.SetCash(self.STARTING_CASH)
         self.SetTimeZone(TimeZones.NewYork)
         # ADR 0010: no partial Units, no borrowing -- a cash account makes
@@ -283,11 +342,21 @@ class TurtleBaselineResearch(QCAlgorithm):
         self.UniverseSettings.Leverage = 1.0
         # ADR 0004: signals run on split-adjusted prices, which is also the
         # view this repository's own reference engine prices every fill in
-        # (see README.md, "Deviations", "Price view"). Splits are neutral;
+        # (see README.md, "Deviations", "Price views"). Splits are neutral;
         # dividends still arrive as cash into the account separately, never
         # folded into this series.
         self.UniverseSettings.DataNormalizationMode = DataNormalizationMode.SplitAdjusted
-        self.AddUniverse(self.CoarseSelectionFunction, self.FineSelectionFunction)
+        # A fill-forward bar repeats the last one on a day the instrument
+        # did not trade; it is not a completed bar (CONTEXT.md), and would
+        # decay N and stretch the channels. The Go engine's adapter
+        # subscribes with fill-forward off for the same reason.
+        self.UniverseSettings.FillForward = False
+        if self.FIXED_SYMBOLS is None:
+            self.AddUniverse(self.CoarseSelectionFunction, self.FineSelectionFunction)
+        else:
+            for ticker in self.FIXED_SYMBOLS:
+                self.AddEquity(ticker, Resolution.Daily, fillForward=False,
+                               dataNormalizationMode=DataNormalizationMode.SplitAdjusted)
 
         # SPY, for the buy-and-hold comparison the closing summary reports.
         # This is the one series in this script priced on QuantConnect's
@@ -302,6 +371,29 @@ class TurtleBaselineResearch(QCAlgorithm):
         self.spy_curve = []
 
         self.symbol_state = {}
+        # symbol -> split-adjusted shares per raw share (rules.split_ratio):
+        # the subscription trades in split-adjusted prices and shares, and
+        # whole shares, the tick, per-share commission and the $5 floor are
+        # raw (ADR 0004, as amended). Read once from History when a symbol
+        # is added, then moved by each split LEAN reports (OnData).
+        self.split_ratio = {}
+        # ADR 0010 and ADR 0020: an entry or Add is funded from the cash
+        # known at the previous close, less buy fills since and the holds
+        # of orders still working. Each Session's cash is read before that
+        # Session moves anything, as (cash, fill debits so far); it becomes
+        # the basis only from the next Session on (_spendable_cash).
+        self._pending_cash = (self.STARTING_CASH, 0.0)
+        self._basis_cash = None
+        self._fill_debits = 0.0
+        self._holds = {}                # entry/Add order id -> worst-case cost
+        # LEAN can fill an amended order while the amendment is being made,
+        # calling OnOrderEvent from inside this algorithm's own loops over
+        # a Campaign's Units. Events are therefore queued and handled one
+        # at a time, only once no Session or other event is being handled
+        # (OnOrderEvent, _drain_order_events).
+        self._order_events = []
+        self._handling = False
+        self._exit_levels = {}          # Exit Order id -> the level it rests at
         self._last_eligibility_month = None
         # symbol -> (industry, sector), from Morningstar classification
         # (ADR 0008; _classification_groups), refreshed every month
@@ -347,7 +439,9 @@ class TurtleBaselineResearch(QCAlgorithm):
         # while it works towards resolving.
         self._partial_fill_logged = set()
         self.slippage_model = _n_slippage_model(self.n_by_order_id)
-        self.fill_model = _adr_0005_fill_model(self.slippage_model)()
+        fill_prices = {}                # order id -> its fill price
+        self.fill_model = _adr_0005_fill_model(self.slippage_model, fill_prices)()
+        self.fee_model = _raw_share_fee_model(self.split_ratio.get, fill_prices)
 
         self.equity_curve = []           # (utc datetime, equity), once per Session
         self.closed_campaigns = []       # list of dicts: {r_multiple, win}
@@ -368,7 +462,7 @@ class TurtleBaselineResearch(QCAlgorithm):
             "2022 correction": (date(2022, 1, 1), date(2023, 1, 1)),
         }
 
-        self.SetWarmUp(WARMUP_BARS, Resolution.Daily)
+        self.SetWarmUp(self.WARMUP_BARS, Resolution.Daily)
 
     # -------------------------------------------------------------------
     # Universe (ADR 0009): coarse dollar-volume/price filter, refreshed
@@ -418,22 +512,50 @@ class TurtleBaselineResearch(QCAlgorithm):
         if first_kept or dropped:
             self.Log("research: universe common-stock filter (SecurityType=='ST00000001') kept {} "
                      "dropped {} of {} fine candidates this month".format(kept, dropped, kept + dropped))
-        return selected
+        # Losing eligibility never closes or disturbs an open Campaign
+        # (ADR 0009): a stock this script holds, or has an order working
+        # in, stays subscribed until that is resolved. Dropping it would
+        # let LEAN cancel its Exit Orders and leave its sale proceeds
+        # unsettled.
+        retained = {sym for sym, st in self.symbol_state.items()
+                    if st.campaign is not None or st.entry_ticket is not None
+                    or st.add_ticket is not None}
+        retained.update(o.Symbol for o in self.Transactions.GetOpenOrders())
+        chosen = set(selected)
+        return selected + [sym for sym in retained if sym not in chosen and sym != self.spy]
 
     def OnSecuritiesChanged(self, changes):
         for security in changes.AddedSecurities:
+            if security.Symbol == self.spy:
+                # The buy-and-hold benchmark, on its own Adjusted view, is
+                # never a traded or signalled instrument (README.md,
+                # "Deviations").
+                continue
+            # LEAN settles a cash account's sale proceeds only while the
+            # security is still subscribed, so proceeds from a stock that
+            # then leaves the universe would never become spendable; over
+            # a multi-decade run that starved the account of cash. A US
+            # cash account may buy with unsettled proceeds, so proceeds are
+            # treated as spendable at once (see README.md, "Deviations").
+            security.SetSettlementModel(ImmediateSettlementModel())
             security.SetSlippageModel(self.slippage_model)
-            security.SetFeeModel(InteractiveBrokersFeeModel())
+            security.SetFeeModel(self.fee_model)
             security.SetFillModel(self.fill_model)
             is_new = security.Symbol not in self.symbol_state
             if is_new:
                 self.symbol_state[security.Symbol] = _SymbolState()
+                self.split_ratio[security.Symbol] = self._read_split_ratio(security.Symbol)
+                if self.split_ratio[security.Symbol] is None:
+                    self._count_decline("ratio: unreadable when added")
+            if is_new and self.FIXED_SYMBOLS is None:
                 # A stock the universe selects only after the algorithm's
                 # own start has none of its own history yet, so it could
                 # never clear ADR 0009's >= 250-bar requirement, or warm
                 # up N or the channels, however long it then remains
                 # selected. Backfill it immediately with QuantConnect's
-                # own History.
+                # own History. A FIXED_SYMBOLS symbol is subscribed from
+                # the first warm-up bar, so SetWarmUp alone gives it
+                # exactly WARMUP_BARS; a backfill would double them.
                 self._warm_up_new_symbol(security.Symbol)
         for security in changes.RemovedSecurities:
             state = self.symbol_state.get(security.Symbol)
@@ -469,7 +591,7 @@ class TurtleBaselineResearch(QCAlgorithm):
         skipped rather than counted twice.
         """
         state = self.symbol_state[symbol]
-        history = self.History([symbol], WARMUP_BARS, Resolution.Daily,
+        history = self.History([symbol], self.WARMUP_BARS, Resolution.Daily,
                                dataNormalizationMode=DataNormalizationMode.SplitAdjusted)
         if history is None or len(history) == 0:
             return
@@ -482,6 +604,18 @@ class TurtleBaselineResearch(QCAlgorithm):
                                   Close=float(row["close"]), Volume=float(row.get("volume", 0.0)))
             self._advance(state, bar, bar_time.date())
 
+    def _read_split_ratio(self, symbol):
+        """The symbol's split ratio now (rules.split_ratio): its last
+        completed bar's raw close over its split-adjusted one, or None
+        without one. None is read again at the symbol's next breakout
+        (_decide_entry), which declines only while it stays unreadable:
+        its whole shares and tick cannot be stated."""
+        closes = []
+        for mode in (DataNormalizationMode.Raw, DataNormalizationMode.SplitAdjusted):
+            history = self.History([symbol], 1, Resolution.Daily, dataNormalizationMode=mode)
+            closes.append(float(history["close"].iloc[-1]) if history is not None and len(history) else 0.0)
+        return rules.split_ratio(*closes)
+
     # -------------------------------------------------------------------
     # The daily Session (ADR 0021): QuantConnect delivers every security's
     # bar for one trading day in a single Slice, so the Slice itself IS
@@ -493,6 +627,38 @@ class TurtleBaselineResearch(QCAlgorithm):
     # -------------------------------------------------------------------
 
     def OnData(self, slice_):
+        self._handling = True
+        try:
+            self._session(slice_)
+        finally:
+            self._drain_order_events()
+
+    def _session(self, slice_):
+        # ADR 0004: a split moves the raw view, never the split-adjusted
+        # one; LEAN reports it in a slice of its own, before the Session.
+        for symbol, split in slice_.Splits.items():
+            ratio = self.split_ratio.get(symbol)
+            if ratio and split.Type == SplitType.SplitOccurred:
+                self.split_ratio[symbol] = rules.ratio_after_split(ratio, float(split.SplitFactor))
+        # ADR 0024: a dividend is cash on the shares held. LEAN has already
+        # credited the distribution times the split-adjusted shares held,
+        # which for a raw distribution is the split ratio times too much
+        # (AAPL in 2012: 28 times); the difference is taken back here.
+        for symbol, dividend in slice_.Dividends.items():
+            state, held = self.symbol_state.get(symbol), float(self.Portfolio[symbol].Quantity)
+            if state is not None and held and state.previous_close:
+                paid = held * float(dividend.Distribution)
+                due = rules.dividend_cash(held, float(dividend.Distribution),
+                                          float(dividend.ReferencePrice), state.previous_close)
+                self.Portfolio.CashBook["USD"].AddAmount(due - paid)
+        if not slice_.Bars:
+            return
+        # The cash this Session's decisions are funded from is the last
+        # Session's reading (ADR 0010, ADR 0020); this Session's is read now,
+        # before any order of this Session moves it.
+        self._basis_cash, self._pending_cash = self._pending_cash, (
+            float(self.Portfolio.Cash), self._fill_debits)
+
         # Read now, appended later (after the warm-up check) so the SPY
         # curve covers exactly the Sessions equity_curve does -- both, or
         # neither: SPY marks are only recorded once warm-up ends.
@@ -515,7 +681,8 @@ class TurtleBaselineResearch(QCAlgorithm):
         # observes this LEAN ordering too), so an entry_ticket/add_ticket
         # still set here did NOT fill against this Session's bar and must
         # now expire, rather than rest indefinitely at an increasingly
-        # stale level.
+        # stale level. A fill-chained Add placed during this Session's own
+        # fills (_chain_add) has one Session more (ADR 0011, as amended).
         for symbol, bar in slice_.Bars.items():
             state = self.symbol_state.get(symbol)
             if state is None:
@@ -523,7 +690,7 @@ class TurtleBaselineResearch(QCAlgorithm):
             if state.entry_ticket is not None:
                 self._cancel_ticket(state.entry_ticket)
                 state.entry_ticket = None
-            if state.add_ticket is not None:
+            if state.add_ticket is not None and state.add_placed < self.Time:
                 self._cancel_ticket(state.add_ticket)
                 state.add_ticket = None
 
@@ -544,9 +711,16 @@ class TurtleBaselineResearch(QCAlgorithm):
                           and state.campaign is None)
 
             if state.campaign is not None:
-                self._maintain_exit_orders(state, exit_extreme if exit_ready else None)
+                # A breached Exit Channel raises every Exit Order to it; LEAN
+                # evaluates an amended order against the bar it was amended
+                # after, so the exit fills in this same bar, as the Go engine's
+                # does. No Add is decided in a bar that proposes an exit
+                # (ADR 0010: exits take precedence).
+                breach = rules.exit_channel_breach(float(bar.Low), exit_extreme, exit_ready)
+                self._maintain_exit_orders(state, breach)
                 rung = state.campaign.next_add_rung()
-                if rung is not None and state.add_ticket is None and float(bar.High) >= rung:
+                if (rung is not None and breach is None and state.add_ticket is None
+                        and float(bar.High) >= rung):
                     add_opportunities.append((symbol, state, rung))
 
             self._advance(state, bar, bar_date)
@@ -565,8 +739,7 @@ class TurtleBaselineResearch(QCAlgorithm):
                                        rules.Signal(key, strength_value, dv_value))
                 # else: cannot be ranked; the Signal is declined (ADR 0010).
 
-        available_cash = float(self.Portfolio.Cash)
-        ledger = rules.SessionLedger(available_cash, self.unit_caps)
+        ledger = rules.SessionLedger(self._spendable_cash(), self.unit_caps)
 
         # 1. Adds, ascending symbol order (ADR 0021 section 3, step 1).
         for symbol, state, rung in add_opportunities:
@@ -584,6 +757,13 @@ class TurtleBaselineResearch(QCAlgorithm):
         self.equity_curve.append((self.Time, equity))
         if spy_bar is not None:
             self.spy_curve.append((self.Time, float(spy_bar.Close)))
+
+    def _spendable_cash(self):
+        """ADR 0010/0020: the previous close's cash, less every buy fill's
+        cost since that reading and every working entry's or Add's hold.
+        Sale proceeds count only from the next reading on."""
+        cash, debits = self._basis_cash or self._pending_cash
+        return cash - (self._fill_debits - debits) - sum(self._holds.values())
 
     def _advance(self, state, bar, bar_date):
         # Refuse a bar dated on or before the last one already advanced,
@@ -604,6 +784,7 @@ class TurtleBaselineResearch(QCAlgorithm):
         raw_volume = float(getattr(bar, "Volume", 0.0))
         state.record_close(raw_close, raw_volume, close)
         state.previous_close = close
+        state.last_high = high
         state.bars_seen += 1
         state.last_bar_date = bar_date
 
@@ -618,39 +799,48 @@ class TurtleBaselineResearch(QCAlgorithm):
         # the Session's Add opportunities and deciding them (an exit order
         # settled in the meantime); a closed Campaign takes no Add
         # (ADR 0006).
-        if state.campaign is None:
+        campaign = state.campaign
+        if campaign is None:
             self._count_decline("add: campaign closed before the add was decided")
             return
-        n = state.campaign.campaign_n
-        quantity = state.campaign.unit_quantity
-        cap = rules.price_cap(rung, n)
-        slip = rules.slippage(n)
-        commission = rules.commission_estimate(quantity, cap)
         # ADR 0008: an Add checks against the CAMPAIGN's own frozen
         # industry/sector, never a fresh classification lookup -- the same
         # freeze-at-entry discipline ADR 0006 applies to N and Unit size.
-        industry, sector = state.campaign.industry, state.campaign.sector
-        accepted, reason = ledger.try_reserve(str(symbol), industry, sector, quantity, cap, slip,
-                                              1.0, commission)
-        if not accepted:
-            self._count_decline("add: " + str(reason))
-            return
-        tag = "add:{}".format(symbol)
-        ticket = self.StopLimitOrder(symbol, quantity, rung, self._round_tick(symbol, cap), tag=tag)
-        self.n_by_order_id[ticket.OrderId] = n
-        self.order_kind[ticket.OrderId] = "add"
-        self.reservations_by_order_id[ticket.OrderId] = (str(symbol), industry, sector)
-        self.requested_quantity_by_order_id[ticket.OrderId] = quantity
-        state.add_ticket = ticket
+        ticket = self._place_buy(symbol, "add", campaign.unit_quantity, rung, campaign.campaign_n,
+                                 campaign.industry, campaign.sector, ledger)
+        if ticket is not None:
+            state.add_ticket, state.add_placed = ticket, self.Time
+
+    def _chain_add(self, state, symbol):
+        """ADR 0011 and ADR 0021 section 7, as amended: once a Unit fills,
+        the next rung is measured from that fill and decided against the
+        last completed bar, the bar that proposed the Unit just filled. If
+        its high already reached the rung, the Add is proposed now and may
+        fill in the Session after this one; it survives this Session's own
+        expiry (OnData). Mirrors internal/strategy's evaluateAdd chain from
+        openCampaign and applyAddFill."""
+        campaign = state.campaign
+        rung = campaign.next_add_rung() if campaign is not None else None
+        if rung is not None and state.add_ticket is None and state.last_high >= rung:
+            self._decide_add(state, symbol, rung, rules.SessionLedger(self._spendable_cash(),
+                                                                      self.unit_caps))
 
     def _decide_entry(self, state, symbol, entry_level, n, ledger):
         # ADR 0009's eligibility test: common stock (best effort -- see
         # README.md, "Deviations"; FineSelectionFunction already filtered
-        # by security type), price >= $5, 20-day median dollar volume >=
-        # $5M, and >= 250 completed bars of history.
+        # by security type), a RAW price >= $5 (ADR 0004: an absolute
+        # price floor is raw, where a split-adjusted one would read a
+        # stock that later split often as a penny stock), 20-day median
+        # dollar volume >= $5M, and >= 250 completed bars of history.
+        if self.split_ratio.get(symbol) is None:
+            self.split_ratio[symbol] = self._read_split_ratio(symbol)
+        ratio = self.split_ratio[symbol]
+        if ratio is None:
+            self._count_decline("entry: split ratio unreadable")
+            return
         dv_value, dv_ready = rules.median_dollar_volume(state.raw_closes, state.raw_volumes)
-        eligible = dv_ready and rules.is_eligible(
-            float(self.Securities[symbol].Price), dv_value, state.bars_seen, is_common_stock=True)
+        eligible = self.FIXED_SYMBOLS is not None or (dv_ready and rules.is_eligible(
+            float(self.Securities[symbol].Price) * ratio, dv_value, state.bars_seen, is_common_stock=True))
         if not eligible:
             self._count_decline("entry: ineligible")
             return
@@ -666,37 +856,49 @@ class TurtleBaselineResearch(QCAlgorithm):
             self._count_decline("entry: stop at or below zero")
             return
         notional = self.notional_account.current
-        quantity = rules.unit_quantity(notional, rules.UNIT_VOLATILITY_FRACTION, n)
+        quantity = rules.whole_raw_shares(
+            rules.unit_quantity(notional, rules.UNIT_VOLATILITY_FRACTION, n), ratio)
         if quantity <= 0:
             self._count_decline("entry: fewer than one share")
             return
-        cap = rules.price_cap(entry_level, n)
-        slip = rules.slippage(n)
-        commission = rules.commission_estimate(quantity, cap)
         # ADR 0008: the classification read HERE, at proposal time, is the
         # one the resulting Campaign freezes at its fill (OnOrderEvent) --
         # one reading, via classification_by_order_id, never two separate
         # lookups a mid-flight monthly reclassification could pull apart.
         industry, sector = self._classification.get(symbol, (None, None))
+        ticket = self._place_buy(symbol, "entry", quantity, entry_level, n, industry, sector, ledger)
+        if ticket is not None:
+            self.classification_by_order_id[ticket.OrderId] = (industry, sector)
+            state.entry_ticket = ticket
+
+    def _place_buy(self, symbol, kind, quantity, level, n, industry, sector, ledger):
+        """An entry or Add: a stop-limit buy at ``level`` capped at level +
+        k x N (ADR 0005), reserving its Unit-cap headroom and worst-case
+        cost (ADR 0008, ADR 0020). The stop is placed at the nearest raw
+        tick and the limit at the raw tick at or below the cap, as the Go
+        engine's adapter places them (ADR 0004); a limit that falls below
+        the stop could never fill, so the proposal is declined. Returns the
+        ticket, or None when declined."""
+        ratio = self.split_ratio[symbol]
+        cap, slip = rules.price_cap(level, n), rules.slippage(n)
+        stop, limit = rules.raw_tick_round(level, ratio), rules.raw_tick_floor(cap, ratio)
+        if limit < stop:
+            self._count_decline(kind + ": limit below stop at the tick")
+            return None
+        commission = rules.commission_estimate(quantity, cap)
         accepted, reason = ledger.try_reserve(str(symbol), industry, sector, quantity, cap, slip,
                                               1.0, commission)
         if not accepted:
-            self._count_decline("entry: " + str(reason))
-            return
-        tag = "entry:{}:{}".format(symbol, n)
-        ticket = self.StopLimitOrder(symbol, quantity, entry_level, self._round_tick(symbol, cap), tag=tag)
-        self.n_by_order_id[ticket.OrderId] = n
-        self.order_kind[ticket.OrderId] = "entry"
-        self.classification_by_order_id[ticket.OrderId] = (industry, sector)
-        self.reservations_by_order_id[ticket.OrderId] = (str(symbol), industry, sector)
-        self.requested_quantity_by_order_id[ticket.OrderId] = quantity
-        state.entry_ticket = ticket
-
-    def _round_tick(self, symbol, price):
-        tick = float(self.Securities[symbol].SymbolProperties.MinimumPriceVariation)
-        if tick <= 0:
-            return price
-        return (int(price / tick)) * tick
+            self._count_decline("{}: {}".format(kind, reason))
+            return None
+        ticket = self.StopLimitOrder(symbol, quantity, stop, limit, tag="{}:{}".format(kind, symbol))
+        order_id = ticket.OrderId
+        self.n_by_order_id[order_id] = n
+        self.order_kind[order_id] = kind
+        self.reservations_by_order_id[order_id] = (str(symbol), industry, sector)
+        self.requested_quantity_by_order_id[order_id] = quantity
+        self._holds[order_id] = rules.affordable_quantity(quantity, cap, slip, 1.0, commission, 0.0)[1]
+        return ticket
 
     # -------------------------------------------------------------------
     # Exit Orders (ADR 0005's amendment): one resting sell order per Unit,
@@ -704,30 +906,40 @@ class TurtleBaselineResearch(QCAlgorithm):
     # exit is available, the Exit Channel level.
     # -------------------------------------------------------------------
 
-    def _maintain_exit_orders(self, state, exit_extreme):
+    def _maintain_exit_orders(self, state, exit_level):
+        """Place or amend each Unit's Exit Order at its own Protective Stop,
+        or at ``exit_level``, a breached Exit Channel
+        (rules.exit_channel_breach), when that is higher. The level is
+        placed at the nearest raw tick, as the Go engine's adapter places
+        it (ADR 0004). An order is amended only when its level moves."""
         campaign = state.campaign
         while len(state.unit_tickets) < len(campaign.units):
             state.unit_tickets.append(None)
-        symbol_tag = getattr(campaign.symbol, "Value", campaign.symbol)
+        symbol = campaign.symbol
+        ratio = self.split_ratio[symbol]
         for index, unit in enumerate(campaign.units):
-            level = rules.exit_order_level(unit["stop"], exit_extreme)
-            level = self._round_tick(campaign.symbol, level)
+            level = rules.exit_order_level(unit["stop"], exit_level)
+            # The tag is a label for LEAN's own order blotter only, naming
+            # which level the order rests at: WHICH Unit an exit order
+            # belongs to is looked up by OrderId (_unit_index_for_order),
+            # never parsed back out of this string.
+            tag = "{}:{}".format("stop" if level == unit["stop"] else "exit",
+                                 getattr(symbol, "Value", symbol))
+            level = rules.raw_tick_round(level, ratio)
             ticket = state.unit_tickets[index]
-            if ticket is None:
-                # The tag is a label for LEAN's own order blotter only:
-                # WHICH Unit an exit order belongs to is looked up by
-                # OrderId (_unit_index_for_order), never parsed back out of
-                # this string, so a later index shift (a Unit closing)
-                # cannot make it stale.
-                tag = "exit:{}".format(symbol_tag)
-                ticket = self.StopMarketOrder(campaign.symbol, -campaign.unit_quantity, level, tag=tag)
+            if ticket is None or ticket.Status in (OrderStatus.Canceled, OrderStatus.Invalid):
+                # A new Unit, or one whose Exit Order LEAN itself cancelled
+                # (for example on a delisting): a Unit still held needs a
+                # working stop, so a new order is placed.
+                ticket = self.StopMarketOrder(symbol, -campaign.unit_quantity, level, tag=tag)
                 self.n_by_order_id[ticket.OrderId] = campaign.campaign_n
                 self.order_kind[ticket.OrderId] = "exit"
                 state.unit_tickets[index] = ticket
-            else:
+            elif ticket.Status != OrderStatus.Filled and self._exit_levels.get(ticket.OrderId) != level:
                 fields = UpdateOrderFields()
-                fields.StopPrice = level
+                fields.StopPrice, fields.Tag = level, tag
                 ticket.Update(fields)
+            self._exit_levels[ticket.OrderId] = level
 
     def _unit_index_for_order(self, state, order_id):
         """Which of campaign.units (by position) this order_id's resting
@@ -772,7 +984,9 @@ class TurtleBaselineResearch(QCAlgorithm):
     def _release_reservation(self, order_id):
         """Give back the Unit-cap headroom order_id's reservation was
         holding, if any. Idempotent (pop-based): calling it twice for the
-        same order, from two different code paths, is harmless."""
+        same order, from two different code paths, is harmless. Its cash
+        hold goes with it (ADR 0020)."""
+        self._holds.pop(order_id, None)
         entry = self.reservations_by_order_id.pop(order_id, None)
         if entry is not None:
             symbol, industry, sector = entry
@@ -783,7 +997,9 @@ class TurtleBaselineResearch(QCAlgorithm):
         a real, committed Unit: stop tracking it as a pending reservation
         (so a later, unrelated cancellation can never release it), but do
         NOT call unit_caps.remove -- the Unit stays counted in unit_caps
-        until its own exit (_handle_unit_exit) releases it."""
+        until its own exit (_handle_unit_exit) releases it. Its cash hold
+        is replaced by the fill's own debit (ADR 0020)."""
+        self._holds.pop(order_id, None)
         self.reservations_by_order_id.pop(order_id, None)
 
     # -------------------------------------------------------------------
@@ -793,6 +1009,25 @@ class TurtleBaselineResearch(QCAlgorithm):
     # -------------------------------------------------------------------
 
     def OnOrderEvent(self, order_event):
+        """Queue the event, and handle the queue unless a Session or an
+        earlier event is being handled, in which case that handling drains
+        it once done. LEAN calls this from inside an order call (an
+        amended Exit Order can fill while it is being amended), and acting
+        on it there would change a Campaign's Units under the loop that
+        made the call."""
+        self._order_events.append(order_event)
+        if not self._handling:
+            self._handling = True
+            self._drain_order_events()
+
+    def _drain_order_events(self):
+        try:
+            while self._order_events:
+                self._handle_order_event(self._order_events.pop(0))
+        finally:
+            self._handling = False
+
+    def _handle_order_event(self, order_event):
         """PartiallyFilled is treated as an ANOMALY, not a routine case to
         build accumulation machinery for: on daily equity data, this
         algorithm's own ADR 0005 buy fill model
@@ -818,7 +1053,12 @@ class TurtleBaselineResearch(QCAlgorithm):
             # PartiallyFilled, or the last increment of a Canceled order);
             # the fee LEAN charged for it is real regardless of what
             # happens to the rest of the order.
-            self.total_commission += float(order_event.OrderFee.Value.Amount)
+            fee = float(order_event.OrderFee.Value.Amount)
+            self.total_commission += fee
+            if order_event.FillQuantity > 0:
+                # ADR 0020: a buy's fill debit, against the previous
+                # close's cash until the next reading (_spendable_cash).
+                self._fill_debits += float(order_event.FillQuantity) * float(order_event.FillPrice) + fee
 
         if status == OrderStatus.Invalid:
             # LEAN refused the order outright -- its own affordability or
@@ -950,6 +1190,7 @@ class TurtleBaselineResearch(QCAlgorithm):
         self._commit_reservation(order_id)
         state.unit_tickets = []
         self._maintain_exit_orders(state, None)
+        self._chain_add(state, symbol)
 
     def _settle_add(self, state, symbol, order_id, quantity, price):
         state.add_ticket = None
@@ -970,6 +1211,7 @@ class TurtleBaselineResearch(QCAlgorithm):
             campaign.add_unit(price)
             self._commit_reservation(order_id)
             self._maintain_exit_orders(state, None)
+            self._chain_add(state, symbol)
             return
         # The Campaign this Add was meant for has already fully closed, or
         # already stopped a Unit out, since the order was placed -- a

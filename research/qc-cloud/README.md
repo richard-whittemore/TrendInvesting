@@ -17,8 +17,8 @@ locally-installed tools and no API key. It makes no claim of bit-for-bit
 parity with the Go engine. Every place the two disagree is listed under
 "Deviations" below, and none of them is hidden.
 
-**No market data is committed to this repository.** This folder is four
-text files; QuantConnect supplies the price history when you run a backtest
+**No market data is committed to this repository.** This folder is text
+files only; QuantConnect supplies the price history when you run a backtest
 on their servers.
 
 ## Files
@@ -46,6 +46,14 @@ on their servers.
   32,000-character limit, that both compile, and that `test_rules.py`'s own
   full suite still passes against the stripped `rules.py`. Also run by
   `make research-test`.
+- `fidelity/` -- the local check that this algorithm reproduces the Go
+  engine's trades (see "Checking fidelity against the Go engine", below):
+  `lean_main.py`, a LEAN entry point that runs `main.py` unchanged on one
+  instrument; `run_local.sh`, which runs it on local LEAN; and
+  `compare_fills.py`, which diffs the run's fills against a Go engine
+  journal. Standard library only; not part of the upload.
+- `test_compare_fills.py` -- unit tests for `compare_fills.py`'s matching,
+  on synthetic fills. Also run by `make research-test`.
 - `README.md` -- this file.
 
 ## How to run it on QuantConnect (step by step, for a non-programmer)
@@ -201,13 +209,17 @@ is hidden; each names the ADR it touches.
    Add at a Session's close, and LEAN can fill it only in the next
    session"). It very occasionally delays or entirely skips an
    entry/Add that a same-bar chain would have taken.
-2. **Proposal expiry is one bar, uniformly (ADR 0011).** The Go engine
-   gives a fill-chained Add two Sessions to fill rather than one, because a
-   live adapter must relay fills asynchronously. This script never
-   distinguishes a fill-chained Add from an ordinary one (it never attempts
-   the same-bar chaining #1 describes in the first place), so every entry
-   and Add proposal gets exactly one Session to fill before it expires --
-   the ordinary-case rule, applied uniformly.
+2. **Proposal expiry (ADR 0011), as the Go engine's LEAN runs have it.**
+   An entry or ordinary Add proposal gets one Session to fill. When a Unit
+   fills, the next rung is measured from that fill and decided against the
+   last completed bar, the one that proposed the Unit just filled; if its
+   high already reached the rung, the Add is proposed at once and is not
+   expired by that Session's own close, so it has the Session after it to
+   fill (`_chain_add`; internal/strategy's `evaluateAdd` chain from
+   `openCampaign` and `applyAddFill`, and ADR 0021 section 7). What remains
+   of #1 is that neither this script nor a LEAN run of the Go engine can
+   fill the chained Add inside the bar that proposed it, as cmd/backtest
+   does.
 3. **Classification uses QuantConnect's free Morningstar codes, mapped
    onto ADR 0008's two levels by hierarchy depth, not by an exact label
    match.** The Go engine has no classification input even in the
@@ -262,13 +274,13 @@ is hidden; each names the ADR it touches.
    is a size/liquidity pre-filter only; the eligibility rule that actually
    gates a new Campaign is ADR 0009's own, computed exactly as `rules.py`
    states it.
-6. **Cash resets every Session; Unit-cap reservations have their own
-   per-order lifetime (ADR 0020).** `rules.SessionLedger`'s *cash* side is
-   rebuilt fresh every trading day from that day's actual `Portfolio.Cash`
-   -- it never carries a stale cash hold forward, and it never needs a
-   multi-day cash lifetime of its own, since deviation #2 means no
-   proposal here ever survives past its own next Session. Its *Unit-cap*
-   side is different, and tracked explicitly:
+6. **Cash holds and Unit-cap reservations each have a per-order
+   lifetime (ADR 0020).** `rules.SessionLedger` is rebuilt every trading
+   day from the previous-close cash basis #10 describes, which already
+   subtracts the hold of every entry or Add order still working (a
+   fill-chained Add, #2, can outlive the Session that proposed it); each
+   hold is released when its order fills, is cancelled or is refused. Its
+   *Unit-cap* side is tracked explicitly too:
    `TurtleBaselineResearch.reservations_by_order_id` records exactly which
    order reserved which instrument/industry/sector/total-long headroom at
    placement, and releases it the moment that order resolves with nothing
@@ -289,18 +301,24 @@ is hidden; each names the ADR it touches.
    cancellation, so unfilled proposals silently exhausted every cap over
    the life of a run; that was fixed before this research check was ever
    run for real.)
-7. **Approximate commission for the affordability check, real commission
-   for the trade.** `rules.commission_estimate` (ADR 0013) estimates
-   commission for the pre-trade cash check using the IBKR Pro Fixed
-   schedule `cmd/backtest/testdata/configuration.json` states (per-share
-   rate, $1 minimum, 1% cap). The commission actually *charged*, on every
-   real fill, is QuantConnect's own `InteractiveBrokersFeeModel` --
-   observed by this repository's own LEAN adapter to differ from that
-   schedule (a $1.00 minimum per order versus the same $1.00 minimum but a
-   0.5%-of-trade-value cap rather than 1%; see
-   `adapter/lean/orders.py`'s own `fill_model_report`, "commission"). The
-   `total_commission` the closing summary reports is the real, charged
-   figure, never the estimate.
+7. **Approximate commission for the affordability check, LEAN's schedule
+   on raw shares for the trade.** `rules.commission_estimate` (ADR 0013)
+   estimates commission for the pre-trade cash check using the IBKR Pro
+   Fixed schedule `cmd/backtest/testdata/configuration.json` states
+   (per-share rate, $1 minimum, 1% cap), on split-adjusted shares, exactly
+   as the Go engine's hold does. The commission actually *charged* is
+   `main.py`'s `RawShareFeeModel`: the schedule QuantConnect's own
+   `InteractiveBrokersFeeModel` was observed to charge ($0.005 a share, a
+   $1.00 minimum that wins over a 0.5%-of-value cap;
+   `adapter/lean/orders.py`'s `fill_model_report`, "commission"), applied to
+   the RAW shares an order is (`rules.lean_ib_commission`). LEAN's own model
+   charges per share of the order as stated, and this script's orders are
+   stated in split-adjusted shares -- 56 times the raw count for AAPL in
+   2003 -- so using it directly overcharged by up to that factor (an
+   earlier version did: $46,877 of commission on the AAPL check below,
+   where the Go engine's LEAN run paid $3,683). The `total_commission` the
+   closing summary reports is the real, charged figure, never the
+   estimate.
 8. **R-multiple accounting is this script's own convention.** "Campaign
    count, win rate, average win and loss in R" is not itself a quantity any
    ADR defines. `rules.Campaign` accumulates each closed Unit's own
@@ -319,31 +337,37 @@ is hidden; each names the ADR it touches.
    `test_rules.py`. This aggregate-R convention is a standard,
    widely-used way to compare trades of different sizes, chosen for this
    script's reporting only.
-9. **No corporate-action handling beyond what QuantConnect's own
-   split-adjusted data already neutralises.** ADR 0023 (a split's cash in
+9. **Corporate actions: splits by the split-adjusted subscription,
+   dividends corrected, no cash in lieu.** ADR 0023 (a split's cash in
    lieu) and ADR 0024 (symbol changes, dividends as cash events) exist in
-   the Go engine as explicit, journalled corporate-action facts. This
-   script relies entirely on QuantConnect's own `SplitAdjusted` data
-   normalisation to neutralise splits in the price series it reads (exactly
-   as `adapter/lean/algorithm.py`'s own subscription does, for the same
-   reason -- ADR 0004), and on QuantConnect crediting real dividend cash
-   into the account automatically for a long equity holding. Cash in lieu
-   of a fractional fill and any need to resize a resting Exit Order at the
-   moment of a split are not separately modelled; they are expected to be
-   small and infrequent enough not to change the overall research
-   conclusion, but they are not proven to be.
-10. **A daily, single-institution research view of "previous close"
-    cash.** ADR 0020's own cash ledger tracks fill debits and standing
-    holds explicitly, event by event, and is provably deterministic under
-    replay. This script instead reads `self.Portfolio.Cash` directly from
-    QuantConnect at the moment `OnData` is called for a Session -- which,
-    per QuantConnect's own documented ordering (and this repository's own
-    LEAN adapter's observation of it: "LEAN reports a session's fills
-    before it delivers that session's bar"), already reflects that
-    Session's own fills but none of this Session's about-to-be-decided
-    orders. This is the same basis ADR 0010/0020 describe, read from
-    QuantConnect's own account state rather than rebuilt from first
-    principles.
+   the Go engine as explicit, journalled corporate-action facts, over a
+   raw LEAN subscription. This script instead subscribes `SplitAdjusted`,
+   so splits are already neutral in the prices and share counts it trades
+   (#18). Two consequences are handled explicitly:
+   - **Dividends.** LEAN credits a dividend's raw per-share distribution on
+     the split-adjusted share count held -- 28 times too much for AAPL in
+     2012. `OnData` takes the excess back, paying the distribution on the
+     raw shares held (`rules.dividend_cash`), which is what the Go engine
+     books. An earlier version did not, and on the AAPL check below ended
+     about $1.1M richer than the Go engine from 2012's dividends on.
+   - **Cash in lieu is not modelled.** A raw holding the split ratio does
+     not divide into whole new shares loses the fraction to cash in lieu;
+     here the holding simply continues. On AAPL's 7-for-1 of 2014-06-09 the
+     Go engine's run lost one raw share (4 split-adjusted shares) to $91.21
+     of cash in lieu, the one fill difference the AAPL check below
+     reports.
+10. **"Previous close" cash, read from QuantConnect's account (ADR 0010,
+    ADR 0020).** The Go engine funds an entry or Add from the cash its last
+    `account.snapshot` stated, less every buy fill's cost since and every
+    working order's hold; a sale's proceeds count only from the next
+    snapshot. This script reads `Portfolio.Cash` at the start of each
+    Session's `OnData`, before that Session moves anything, and uses it as
+    the basis from the NEXT Session on, less buy fill debits since the
+    reading and the holds #6 describes (`_spendable_cash`) -- the same
+    figures the Go engine's LEAN runs are given, read from QuantConnect's
+    account rather than from a journal. An earlier version funded a
+    Session from its own current cash, including that Session's sale
+    proceeds.
 11. **No Watchlist, no Tier B (ADR 0011).** The Go engine tracks every
     Eligible instrument's Tier (B: approaching entry; A: entry condition
     met) as a first-class, always-on observable. This script only ever
@@ -365,7 +389,11 @@ is hidden; each names the ADR it touches.
 13. **The SPY comparison uses a dividend-adjusted, total-return basis,
     deliberately unlike the strategy's own SplitAdjusted instruments (ADR
     0004).** SPY exists only for the closing summary's buy-and-hold line,
-    never as a traded or signalled instrument, so ADR 0004's
+    never as a traded or signalled instrument: `OnSecuritiesChanged` gives
+    it no symbol state and none of the strategy's models. (An earlier
+    version did, and traded it as a strategy instrument in its dividend-
+    adjusted view: the fills at about $60 in the first cloud run of the
+    AAPL check.) So ADR 0004's
     split-adjusted-signals rule does not apply to it. It is subscribed on
     QuantConnect's `DataNormalizationMode.Adjusted` (split AND dividend
     adjusted), and its curve is recorded only from the same Session
@@ -476,7 +504,173 @@ is hidden; each names the ADR it touches.
     delivery also covers is skipped rather than counted twice -- which an
     earlier version of this backfill did not guard against, silently
     distorting N and the channels and potentially satisfying the 250-bar
-    floor before 250 distinct bars had actually been observed.
+    floor before 250 distinct bars had actually been observed. A
+    `FIXED_SYMBOLS` symbol (#21) is not backfilled: it is subscribed from
+    the first warm-up bar, so `SetWarmUp` alone gives it `WARMUP_BARS`.
+18. **Price views (ADR 0004, as amended).** Signals, levels and a
+    Campaign's money are split-adjusted, and this script's subscription
+    trades in that view, so quantity x price is the same money as the raw
+    trade. What is not invariant is read in the raw view, through each
+    symbol's split ratio (split-adjusted shares per raw share, read from
+    History when the symbol is added and moved by each split LEAN reports;
+    a symbol with no completed bar to read it from yet is counted as
+    `Decline ratio: unreadable when added`, read again at each later
+    breakout, and its entry declined as `Decline entry: split ratio
+    unreadable` only while it stays unreadable):
+    a Unit is rounded down to whole raw shares (`rules.whole_raw_shares`); a
+    stop is placed at the nearest raw cent and a stop-limit's limit at the
+    raw cent at or below its cap (`rules.raw_tick_round`,
+    `rules.raw_tick_floor`), declining a proposal whose limit falls below
+    its stop; commission is charged on raw shares, its 0.5% cap valued at
+    the fill's own price, which the fill model records since LEAN's
+    fee-model parameters carry none (#7); and ADR 0009's $5
+    floor reads the raw price. This is exactly how the Go engine's adapter
+    places the engine's orders over its raw subscription. An earlier
+    version rounded every order price down to the cent in the
+    split-adjusted view -- AAPL's 2003 Protective Stops, at $0.3132 in the
+    Go engine, rested at $0.30, more than 1N lower -- and read the $5 floor from split-adjusted prices, which excluded any
+    stock that later split often (AAPL traded at $0.31 split-adjusted, $17
+    raw) from the early years of a run.
+19. **Sale proceeds settle immediately.** Every traded security gets
+    QuantConnect's `ImmediateSettlementModel`. LEAN settles a cash
+    account's sale proceeds only while the security stays subscribed, so
+    proceeds from a stock that then left the universe never became
+    spendable, and over a multi-decade run starved the account. A US cash
+    account may buy with unsettled proceeds; free-riding rules (selling a
+    stock bought with unsettled funds before they settle) are not
+    modelled. The Go engine does not model settlement either.
+20. **An Exit-Channel exit moves the Exit Orders only when the channel is
+    breached (ADR 0002; ADR 0005's amendment).** Each Unit's Exit Order
+    rests at its own Protective Stop. When a Session's low is strictly
+    below the Exit Channel as it stood before that Session
+    (`rules.exit_channel_breach`), every Exit Order is raised to the
+    channel in that Session's `OnData`; LEAN evaluates an amended order
+    against the bar it was amended after, so the exit fills in that same
+    bar, at the channel or the bar's open if lower, less slippage. The Go
+    engine's adapter relies on the same LEAN behaviour. No Add is decided
+    in a Session that proposes an exit (ADR 0010). An earlier version
+    rested every Exit Order at the channel as it stood one Session
+    earlier. An Exit Order is amended only when its level moves, and LEAN's
+    order events are queued and handled after the loop that caused them:
+    an amendment can fill while it is being made, and handling that fill
+    inside the loop once corrupted a Campaign's Units (the cloud run's
+    sells of shares it no longer held, a negative account and the
+    "equity must be finite and positive" stop).
+21. **A fixed universe for local checks.** `FIXED_SYMBOLS` (default
+    `None`) replaces the monthly ADR 0009 universe with a fixed list of
+    tickers subscribed by `AddEquity` and skips ADR 0009's eligibility
+    test, as a single-instrument Go engine run has none; `START_DATE`,
+    `END_DATE` and `WARMUP_BARS` set the run's span and warm-up. The cloud
+    research check uses none of them. Subscriptions are daily bars with
+    fill-forward off in both modes: a fill-forward bar is not a completed
+    bar (CONTEXT.md), and the Go engine's adapter subscribes the same way.
+
+## Checking fidelity against the Go engine
+
+This script's rules are only worth trusting if it trades as the production
+Go engine does. The check runs it on local LEAN, on one instrument, and
+compares its fills with the journal of the Go engine's own LEAN run over
+the same span. It is free: it uses the pinned LEAN image and the market
+data already on the machine, and never pulls either.
+
+**Running it.** From a LEAN workspace whose `data/` holds US equity daily
+data (the Go engine's acceptance runs use one), with a Go engine journal
+of the same instrument and span:
+
+```
+research/qc-cloud/fidelity/run_local.sh <lean-workspace> <journal.jsonl>
+```
+
+`run_local.sh` copies `fidelity/lean_main.py` into the workspace's
+`research-fidelity` project as `main.py`, beside `main.py` (as
+`research_main.py`) and `rules.py`; runs `lean backtest` on the pinned
+image with `--no-update`; and then runs `compare_fills.py` on the
+backtest it wrote. `lean_main.py` subclasses this script's algorithm and
+sets only `FIXED_SYMBOLS = ("AAPL",)`, the 2003-01-01 to 2014-12-31 span
+and `WARMUP_BARS = 60` (the Go run's `warmup_bars`). The comparison alone:
+
+```
+python3 research/qc-cloud/fidelity/compare_fills.py \
+    <lean-workspace>/research-fidelity/backtests/<run> <journal.jsonl> [--show 10]
+```
+
+It reads LEAN's orders and order events and the journal's
+`execution.fill` envelopes (split-adjusted, like this script's orders),
+groups each side's fills by session date and kind (entry, add, stop,
+exit), and reports each group as `match`, `mismatch:quantity|price`,
+`only-research` or `only-go`, then net profit, CAGR and max drawdown for
+both, measured the same way from each side's daily equity. Its exit status
+is 0 only when every group matches. It is not part of `make check`, since
+it needs LEAN; its matching logic is unit-tested (`test_compare_fills.py`).
+
+**Result: AAPL, 2003-01-01 to 2014-12-31, $1,000,000.** Against the Go
+engine's run with the Baseline configuration
+(`turtle-baseline/1.18.0+dev`, 60 warm-up bars):
+
+| | Research | Go engine |
+| --- | --- | --- |
+| Fills | 192 (35 entries, 61 Adds, 37 stops, 59 per-Unit exits) | 153 (35 entries, 61 Adds, 37 stops, 20 exits) |
+| Fill groups matching | 140 of 141 | |
+| Net profit | 195.351% | 195.351% |
+| CAGR (LEAN's statistic) | 9.439% | 9.439% |
+| Max drawdown | 33.704% | 33.704% |
+| End equity | $2,953,514.42 | $2,953,509.22 |
+| Commission | $3,683.26 | $3,683.26 |
+| Declines for insufficient cash | 258 | 258 |
+
+Every entry, Add, stop and exit falls on the same date, in the same
+quantity, and at a price within 2.4e-6 of the Go engine's. The first ten
+groups:
+
+| Date | Kind | Research | Go engine |
+| --- | --- | --- | --- |
+| 2003-05-07 | entry | 505,960 @ 0.30995764 | 505,960 @ 0.30995838 |
+| 2003-05-08 | add | 505,960 @ 0.31710048 | 505,960 @ 0.31710124 |
+| 2003-05-09 | add | 505,960 @ 0.32763617 | 505,960 @ 0.32763695 |
+| 2003-05-12 | add | 505,960 @ 0.33299410 | 505,960 @ 0.33299410 |
+| 2003-05-30 | stop | 505,960 @ 0.31272019 | 505,960 @ 0.31272019 |
+| 2003-06-02 | stop | 505,960 @ 0.31236305 | 505,960 @ 0.31236305 |
+| 2003-06-03 | stop | 2 x 505,960 @ 0.30557733 | 2 x 505,960 @ 0.30557733 |
+| 2003-06-19 | entry | 423,472 @ 0.34630381 | 423,472 @ 0.34630464 |
+| 2003-07-08 | add | 423,472 @ 0.35273321 | 423,472 @ 0.35273321 |
+| 2003-07-09 | add | 423,472 @ 0.36148235 | 423,472 @ 0.36148321 |
+
+**The differences that remain, each explained:**
+
+- **2014-10-15's exit: 110,040 shares against 110,036.** The Go engine's
+  run holds raw shares, and at AAPL's 7-for-1 of 2014-06-09 lost one raw
+  share (4 split-adjusted shares) of that Campaign to $91.21 of cash in
+  lieu (ADR 0023), which this script does not model (Deviations, #9).
+  With `--quantity-tolerance 0.0001` every group matches. The two splits'
+  cash in lieu ($2.73 in 2005, $91.21 in 2014) and the price rounding
+  below make up the $5.20 end-equity difference.
+- **Prices within 2.4e-6.** A fill at the open is priced from LEAN's
+  split-adjusted bar, which LEAN scales by the factor file's rounded
+  factor (0.0178571 for 1/56); the Go engine's is LEAN's raw price divided
+  by the whole ratio. Fills at a level agree exactly.
+- **Exits are counted per Unit.** The Go engine reports an Exit-Channel
+  exit as one fill for all its Units; this script rests one Exit Order
+  per Unit (Deviations, #20), so its 59 exit fills are the Go engine's 20.
+  `compare_fills.py` compares them as groups.
+- **Warm-up.** The Go run warmed up on 60 bars, so the check does too.
+  The cloud research check warms up on 250 (`WARMUP_BARS`: ADR 0009's
+  250-bar history floor, which a fixed universe does not apply), which
+  seeds N from an earlier start; N converges within a few dozen bars, but
+  on another span or instrument a different warm-up can move a Unit by a
+  share count or two.
+- **Fill model.** Both runs fill through LEAN with the same ADR 0005
+  stop-limit fill model, slippage and fee schedule, so neither shares
+  cmd/backtest's same-bar fills (Deviations, #1).
+
+**What the check found.** The first cloud run of this script on AAPL
+alone lost 107% and stopped on 2007-10-23 with "equity must be finite and
+positive". Its causes, each fixed and each named in Deviations: SPY, the
+benchmark, traded as a strategy instrument (#13); order prices rounded to
+the cent in the split-adjusted view (#18); commission charged on
+split-adjusted shares (#7); a fill during an Exit Order amendment handled
+inside the loop making it (#20); dividends credited on split-adjusted
+shares (#9); and the Exit Channel, Add chaining and cash basis departing
+from the Go engine (#20, #2, #10).
 
 ## Reading the results against costs, in plain words
 
