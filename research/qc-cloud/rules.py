@@ -804,6 +804,120 @@ def slippage(n, slippage_n=SLIPPAGE_N):
 
 
 # ---------------------------------------------------------------------------
+# ADR 0004 (as amended 2026-09-17): the two price views. Signals, levels and
+# a Campaign's money are split-adjusted; whole shares, the tick and every
+# per-share cost are raw. The ratio between them is the number of
+# split-adjusted shares one raw share is.
+# ---------------------------------------------------------------------------
+
+#: The US equity minimum price variation, in raw dollars: the broker rounds
+#: every raw order price to it.
+RAW_TICK = 0.01
+
+#: How far a raw-to-split-adjusted price ratio may miss a whole number and
+#: still be that whole split ratio: factor files state each cumulative
+#: factor to about seven significant digits (AAPL's 1/56 is 0.0178571).
+SPLIT_RATIO_TOLERANCE = 1e-4
+
+#: LEAN's InteractiveBrokersFeeModel for US equities, as observed on the
+#: pinned image (adapter/lean/README.md, "Observed LEAN behaviour"): $0.005
+#: per raw share, a $1.00 minimum per order that wins over a cap of 0.5% of
+#: the order's value. It is the commission the Go engine's LEAN runs are
+#: charged (ADR 0013's working assumption, with the fee-model gap the
+#: adapter's fill_model_report states).
+LEAN_IB_PER_SHARE = 0.005
+LEAN_IB_MINIMUM = 1.0
+LEAN_IB_MAX_FRACTION_OF_VALUE = 0.005
+
+
+def _whole_if_close(ratio):
+    whole = round(ratio)
+    if whole >= 1 and abs(ratio - whole) <= SPLIT_RATIO_TOLERANCE * whole:
+        return whole
+    return ratio
+
+
+def split_ratio(raw_price, split_adjusted_price):
+    """ADR 0004: split-adjusted shares per raw share, from one bar's raw and
+    split-adjusted prices -- a whole number when the two are a whole split
+    ratio apart within a factor file's rounding, else the exact quotient
+    (a 3-for-2 after the bar gives 1.5). None when either price is not a
+    finite positive number, so no view is ever guessed."""
+    if not all(isfinite(p) and p > 0 for p in (raw_price, split_adjusted_price)):
+        return None
+    return _whole_if_close(raw_price / split_adjusted_price)
+
+
+def ratio_after_split(ratio, split_factor):
+    """ADR 0004: the ratio once a split takes effect. LEAN's split factor is
+    the new share price over the old (0.5 for a 2-for-1), so one raw share
+    now carries that fraction of the split-adjusted shares it did."""
+    return _whole_if_close(ratio * split_factor)
+
+
+def whole_raw_shares(quantity, ratio):
+    """ADR 0003 and ADR 0010 (no partial Units): a Unit of ``quantity``
+    split-adjusted shares, rounded down to the whole raw shares a broker
+    trades, restated in split-adjusted shares -- never more than the Unit
+    sized. Mirrors adapter/lean/orders.py, which places ``quantity //
+    ratio`` raw shares for the Go engine."""
+    raw = floor(quantity / ratio + 1e-9)
+    return int(floor(raw * ratio + 1e-9))
+
+
+def raw_tick_round(price, ratio, tick=RAW_TICK):
+    """A split-adjusted order price placed at the nearest raw tick, restated
+    split-adjusted: the level a broker holds for a stop (adapter/lean/
+    orders.py places the Go engine's levels this way, and LEAN rounds a raw
+    stop to the nearest cent)."""
+    return round(round(price * ratio / tick) * tick, 10) / ratio
+
+
+def raw_tick_floor(price, ratio, tick=RAW_TICK):
+    """A split-adjusted price rounded DOWN to a whole raw tick, restated
+    split-adjusted: a stop-limit's limit, so rounding never lets it exceed
+    the price cap the hold was computed from (ADR 0005, ADR 0020)."""
+    ticks = floor(round(price * ratio / tick, 9))
+    return round(ticks * tick, 10) / ratio
+
+
+def lean_ib_commission(quantity, price, ratio):
+    """ADR 0013: the commission LEAN's InteractiveBrokersFeeModel charges
+    for an order of ``quantity`` split-adjusted shares at the split-adjusted
+    ``price``, charged on the raw shares it is (ADR 0004: a per-share cost
+    is raw). The minimum wins over the cap."""
+    fee = abs(quantity) / ratio * LEAN_IB_PER_SHARE
+    if fee < LEAN_IB_MINIMUM:
+        return LEAN_IB_MINIMUM
+    return min(fee, LEAN_IB_MAX_FRACTION_OF_VALUE * abs(quantity) * price)
+
+
+def dividend_cash(quantity, distribution, reference_price, held_view_close):
+    """ADR 0024: a dividend is cash, the distribution times the shares held.
+    ``quantity`` is held in the view ``held_view_close`` (the last close
+    before the ex-date) is in; ``distribution`` is per share of the view
+    ``reference_price`` (the same close, as the dividend states it) is in.
+    Restating the distribution in the held view by the ratio of those two
+    closes pays a raw distribution on raw shares whichever view each
+    figure arrives in. 0 when nothing is held or no reference is given."""
+    if not quantity or not (reference_price > 0 and held_view_close > 0):
+        return 0.0
+    return quantity * distribution * held_view_close / reference_price
+
+
+def exit_channel_breach(low, exit_channel_extreme, ready):
+    """ADR 0002 and ADR 0005's amendment: the Exit Channel level when this
+    bar's low is STRICTLY below it (the channel as it stood before the bar,
+    evaluate-then-add), which proposes the Campaign's Exit-Channel exit and
+    raises each Unit's Exit Order to it; otherwise None, and every Exit
+    Order rests at its Unit's own Protective Stop (mirrors
+    internal/strategy's evaluateCampaign, ``view.Low < exitChannelLow``)."""
+    if ready and low < exit_channel_extreme:
+        return exit_channel_extreme
+    return None
+
+
+# ---------------------------------------------------------------------------
 # ADR 0010 / ADR 0020: previous-close cash and Unit-cap headroom.
 # ---------------------------------------------------------------------------
 

@@ -607,5 +607,96 @@ class MetricTests(unittest.TestCase):
         self.assertAlmostEqual(rules.cagr_over_max_drawdown(0.20, 0.10), 2.0)
 
 
+class PriceViewTests(unittest.TestCase):
+    """ADR 0004, as amended: a split-adjusted view for signals and a
+    Campaign's money, and the raw view for whole shares, the tick and
+    per-share costs. The figures are the ones adapter/lean/README.md
+    records from the pinned LEAN image on real AAPL bars."""
+
+    def test_split_ratio_reads_a_factor_file_rounding_as_the_whole_ratio(self):
+        # AAPL on 2005-02-22: 85.38 raw, 1.524639198 split-adjusted,
+        # 56.000134 apart -- the factor file's rounded 1/56.
+        self.assertEqual(rules.split_ratio(85.38, 1.524639198), 56)
+
+    def test_split_ratio_keeps_a_ratio_that_is_not_whole(self):
+        # A 3-for-2 after the bar: 1.5 split-adjusted shares per raw share.
+        self.assertAlmostEqual(rules.split_ratio(30.0, 20.0), 1.5)
+
+    def test_split_ratio_is_none_without_two_positive_prices(self):
+        self.assertIsNone(rules.split_ratio(0.0, 1.0))
+        self.assertIsNone(rules.split_ratio(10.0, float("nan")))
+
+    def test_ratio_after_split_applies_lean_split_factor(self):
+        # AAPL's 2-for-1 of 2005-02-28, factor 0.4999986: 56 -> 28.
+        self.assertEqual(rules.ratio_after_split(56, 0.49999860000056007), 28)
+
+    def test_whole_raw_shares_rounds_a_unit_down_to_whole_raw_shares(self):
+        # A 2003 proposal of 615,898 split-adjusted shares filled as 10,998
+        # raw ones, 615,888 split-adjusted.
+        self.assertEqual(rules.whole_raw_shares(615898, 56), 615888)
+        self.assertEqual(rules.whole_raw_shares(55, 56), 0)
+        self.assertEqual(rules.whole_raw_shares(100, 1), 100)
+
+    def test_whole_raw_shares_never_exceeds_the_unit_for_a_fractional_ratio(self):
+        self.assertEqual(rules.whole_raw_shares(100, 1.5), 99)
+
+    def test_raw_tick_round_places_a_stop_at_the_nearest_raw_cent(self):
+        # LEAN rounded a raw stop of 15.29996328 to 15.30.
+        self.assertAlmostEqual(rules.raw_tick_round(15.29996328 / 56, 56), 15.30 / 56, places=12)
+        self.assertAlmostEqual(rules.raw_tick_round(15.304, 1), 15.30, places=12)
+
+    def test_raw_tick_floor_never_raises_a_limit_above_its_cap(self):
+        self.assertAlmostEqual(rules.raw_tick_floor(15.309 / 56, 56), 15.30 / 56, places=12)
+        # A price that is a whole number of ticks is not floored a tick lower.
+        self.assertAlmostEqual(rules.raw_tick_floor(0.29, 1), 0.29, places=12)
+
+    def test_lean_commission_is_charged_on_raw_shares(self):
+        # 10,998 raw shares: $54.99, however many split-adjusted shares
+        # (615,888 at 56 per raw share) the order is stated in.
+        self.assertAlmostEqual(rules.lean_ib_commission(615888, 0.30, 56), 54.99)
+        self.assertAlmostEqual(rules.lean_ib_commission(10998, 16.80, 1), 54.99)
+
+    def test_lean_commission_minimum_wins_over_its_cap(self):
+        # 50 shares: $1.00; 1 share at $12.01: $1.00, not a capped $0.06.
+        self.assertAlmostEqual(rules.lean_ib_commission(50, 20.0, 1), 1.0)
+        self.assertAlmostEqual(rules.lean_ib_commission(1, 12.01, 1), 1.0)
+
+    def test_lean_commission_is_capped_at_half_a_percent_of_value(self):
+        # 10,000 shares at $0.50: $50 per share-rate, capped at $25.
+        self.assertAlmostEqual(rules.lean_ib_commission(10000, 0.50, 1), 25.0)
+
+
+class ExitChannelBreachTests(unittest.TestCase):
+    """ADR 0002 and ADR 0005's amendment: an Exit-Channel exit is proposed
+    only by a bar whose low is strictly below the channel, and only then
+    does a Unit's Exit Order move up to the channel."""
+
+    def test_a_strictly_lower_low_proposes_the_exit_at_the_channel(self):
+        self.assertEqual(rules.exit_channel_breach(9.99, 10.0, True), 10.0)
+
+    def test_a_touch_is_not_a_breach(self):
+        self.assertIsNone(rules.exit_channel_breach(10.0, 10.0, True))
+
+    def test_a_channel_not_yet_ready_proposes_nothing(self):
+        self.assertIsNone(rules.exit_channel_breach(5.0, 10.0, False))
+
+
+class DividendCashTests(unittest.TestCase):
+    """ADR 0024: a dividend is cash on the raw shares held."""
+
+    def test_a_raw_distribution_is_paid_on_raw_shares(self):
+        # 886 raw AAPL shares, held as 24,808 split-adjusted ones at 28 per
+        # raw share, $2.65 a raw share, reference close $620 raw: $2,347.90,
+        # not 28 times as much.
+        self.assertAlmostEqual(rules.dividend_cash(24808, 2.65, 620.0, 620.0 / 28), 2347.9)
+
+    def test_a_distribution_already_in_the_held_view_is_paid_as_is(self):
+        self.assertAlmostEqual(rules.dividend_cash(24808, 2.65 / 28, 620.0 / 28, 620.0 / 28), 2347.9)
+
+    def test_nothing_is_paid_on_nothing_held_or_without_a_reference(self):
+        self.assertEqual(rules.dividend_cash(0, 2.65, 620.0, 22.0), 0.0)
+        self.assertEqual(rules.dividend_cash(100, 2.65, 0.0, 22.0), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
