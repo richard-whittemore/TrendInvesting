@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
@@ -69,33 +70,75 @@ func (r *transition) classificationOf(instrumentID string) classification {
 	return unclassifiedClassification
 }
 
+// recordUnitsFreedThisSession accumulates n Units, classified as c, that a
+// stop or exit fill just closed on instrumentID's Campaign, timestamped
+// filledAt (instrumentState.unitsFreedThisSession's own doc comment: ADR
+// 0010's Unit-cap headroom stays committed for the rest of the Session that
+// freed it). Every fill this instrument sees within one Session shares that
+// Session's own period end (fills.go stamps every fill at its bar's period
+// end), so a filledAt that differs from what state already holds means a
+// LATER Session's own first closing fill has arrived, and the count starts
+// over rather than adding to a stale one — the same "compare, don't merely
+// set" discipline lastClosingFillAt's own callers already apply elsewhere.
+func (r *transition) recordUnitsFreedThisSession(state *instrumentState, c classification, n int, filledAt time.Time) {
+	if !state.unitsFreedThisSessionAt.Equal(filledAt) {
+		state.unitsFreedThisSession = 0
+	}
+	state.unitsFreedThisSession += n
+	state.unitsFreedThisSessionClassification = c
+	state.unitsFreedThisSessionAt = filledAt
+}
+
+// freedThisSessionUnits returns the Units state's Campaign has had a stop or
+// exit fill close DURING the Session this transition is currently deciding
+// (transition.sessionPeriodEnd, session.go) — still committed for that
+// Session's own Add and entry checks (ADR 0010: Unit-cap headroom is "known
+// at the previous close"), whether the closing fill was delivered before the
+// session-close pass (a stop gapping through at the Session's own open,
+// internal/fills.RunSession's own open-instant pass) or during it. Answers 0
+// outside an open Session, and 0 again once a LATER Session has moved past
+// the one that froze them (instrumentState.unitsFreedThisSession's own doc
+// comment).
+func (r *transition) freedThisSessionUnits(state *instrumentState) int {
+	if state == nil || !r.sessionOpen || state.unitsFreedThisSessionAt.IsZero() {
+		return 0
+	}
+	if !state.unitsFreedThisSessionAt.Equal(r.sessionPeriodEnd) {
+		return 0
+	}
+	return state.unitsFreedThisSession
+}
+
 // instrumentUnits returns the Units instrumentID's own open Campaign
 // currently holds, or 0 if it has none, plus the Units standing holds
-// reserve for it.
+// reserve for it, plus any Units a fill closed for it THIS Session (see
+// freedThisSessionUnits' own doc comment).
 func (r *transition) instrumentUnits(instrumentID string) int {
 	reserved := r.reservedUnits(func(h hold) bool { return h.instrumentID == instrumentID })
 	state := r.peekInstrument(instrumentID)
+	committed := reserved + r.freedThisSessionUnits(state)
 	if state == nil || state.campaign == nil {
-		return reserved
+		return committed
 	}
-	return len(state.campaign.units) + reserved
+	return committed + len(state.campaign.units)
 }
 
 // groupUnits sums the Units held across every open Campaign, over every
-// instrument this transaction can see, whose classification matches, and
-// the Units every standing hold whose classification matches reserves. It
-// reads with peekInstrument (docs/development.md: reducer transactions), so
-// checking a cap never copies an instrument this transaction is not already
-// proposing for.
+// instrument this transaction can see, whose classification matches, the
+// Units every standing hold whose classification matches reserves, and any
+// Units a fill closed THIS Session whose classification matches (see
+// freedThisSessionUnits' own doc comment). It reads with peekInstrument
+// (docs/development.md: reducer transactions), so checking a cap never
+// copies an instrument this transaction is not already proposing for.
 func (r *transition) groupUnits(matches func(classification) bool) int {
 	total := r.reservedUnits(func(h hold) bool { return matches(h.classification) })
 	for _, id := range r.instrumentIDs() {
 		state := r.peekInstrument(id)
-		if state == nil || state.campaign == nil {
-			continue
-		}
-		if matches(state.campaign.classification) {
+		if state != nil && state.campaign != nil && matches(state.campaign.classification) {
 			total += len(state.campaign.units)
+		}
+		if n := r.freedThisSessionUnits(state); n > 0 && matches(state.unitsFreedThisSessionClassification) {
+			total += n
 		}
 	}
 	return total

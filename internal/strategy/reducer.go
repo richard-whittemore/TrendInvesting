@@ -376,6 +376,29 @@ type instrumentState struct {
 	// across a later Campaign's whole life: see
 	// checkBarConfirmsCampaignClosing (campaign.go) for why that is safe.
 	lastClosingFillAt time.Time
+	// unitsFreedThisSession and unitsFreedThisSessionClassification
+	// accumulate every Unit a stop or exit fill has closed for this
+	// instrument's Campaign since the Session ending unitsFreedThisSessionAt
+	// began — partial or full — together with the classification those
+	// Units counted against (ADR 0008). ADR 0010's Unit-cap headroom is
+	// "known at the previous close": a Unit a Session's own fill frees must
+	// still count as committed for every decision that SAME session-close
+	// pass makes (unit_caps.go's instrumentUnits/groupUnits), whether the
+	// closing fill was delivered before the pass — a stop gapping through at
+	// the Session's own open, internal/fills.RunSession's own open-instant
+	// pass — or during it. Every fill this instrument sees within one
+	// Session shares that Session's own period end as its FilledAt (fills.go
+	// stamps every fill at its bar's period end), so comparing FilledAt
+	// against the stored unitsFreedThisSessionAt is what tells "another fill
+	// in the SAME Session" apart from "the first fill of a LATER one": a
+	// later value starts the count over rather than adding to it.
+	// unit_caps.go's freedThisSessionUnits reads these only while the
+	// Session they were recorded in is still the one being decided
+	// (transition.sessionPeriodEnd), so a Unit freed on Session t is
+	// available again on Session t+1, exactly once (ADR 0010).
+	unitsFreedThisSession               int
+	unitsFreedThisSessionClassification classification
+	unitsFreedThisSessionAt             time.Time
 	// lastSplitAt is the EffectiveAt of the last split applied to this
 	// instrument, and the zero time before any: each split applies once, in
 	// order, so a redelivered one can never reduce a Unit twice (split.go;
