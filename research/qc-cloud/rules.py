@@ -395,13 +395,11 @@ class Campaign:
         # Frozen at construction (ADR 0006), for entry_price()'s own use --
         # never re-derived from self.units[0], which after a partial
         # stop-out is whichever Unit SURVIVED, not necessarily the
-        # Campaign's own first one (PR #253 review, Greptile: main.py:649).
+        # Campaign's own first one.
         self._original_entry_price = entry_fill_price
         # The sum of every CLOSED Unit's own (exit - fill) price distance
         # (close_units), so the Campaign's own r_multiple() reflects EVERY
-        # Unit it ever held, not only the last one to close (PR #253
-        # review, Greptile: main.py:649 -- "Campaign results omit earlier
-        # Units").
+        # Unit it ever held, not only the last one to close.
         self.realized_price_pnl = 0.0
         # The Baseline never re-adds once any Unit has been stopped out
         # (The Turtle Rules p.23-24's Whipsaw re-entry alternative is a
@@ -466,7 +464,7 @@ class Campaign:
         into the Campaign's running realized_price_pnl, THEN remove them
         (remove_units) -- so a Campaign's eventual r_multiple() reflects
         every Unit it ever held, not only whichever one happens to close
-        last (PR #253 review, Greptile: main.py:649). ``indices`` are
+        last. ``indices`` are
         positions in the CURRENT self.units list, exactly as remove_units
         already requires; each Unit may exit at its own price (its own
         stop, or its own Exit Order's fill), so this takes one exit_price
@@ -495,8 +493,7 @@ class Campaign:
         """The Campaign's own ORIGINAL entry: Unit 1's own fill price,
         frozen at construction (ADR 0006), for reporting. Never
         self.units[0], which after a partial stop-out is whichever Unit
-        SURVIVED, not necessarily the Campaign's own first one (PR #253
-        review, Greptile: main.py:649)."""
+        SURVIVED, not necessarily the Campaign's own first one."""
         return self._original_entry_price
 
 

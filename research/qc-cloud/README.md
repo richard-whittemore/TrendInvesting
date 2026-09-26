@@ -35,6 +35,17 @@ on their servers.
   `make research-test` from the repository root.
 - `main.py` -- the thin QuantConnect algorithm (`QCAlgorithm` subclass) that
   drives `rules.py` over a broad, point-in-time US equity universe.
+- `build_upload.py` -- writes stripped copies of `main.py`/`rules.py` (every
+  module/class/function docstring and comment removed, via `ast`) to
+  `dist/`, the two files that actually fit QuantConnect's Free-plan
+  32,000-character-per-file limit. See "How to run it", below. Standard
+  library only; run with `python3 research/qc-cloud/build_upload.py`.
+- `dist/` -- `build_upload.py`'s output. Git-ignored: a build artifact,
+  regenerated on demand, never the source of truth for comments or tests.
+- `test_build_upload.py` -- checks that both stripped files stay under the
+  32,000-character limit, that both compile, and that `test_rules.py`'s own
+  full suite still passes against the stripped `rules.py`. Also run by
+  `make research-test`.
 - `README.md` -- this file.
 
 ## How to run it on QuantConnect (step by step, for a non-programmer)
@@ -48,77 +59,102 @@ on their servers.
 4. QuantConnect creates the project with one file, usually called
    `main.py`, already open, containing a default example strategy. You are
    going to replace its contents and add a second file.
-5. **Replace `main.py`:**
+5. **Build the two files you will actually paste.** QuantConnect's Free
+   plan caps each file at 32,000 characters; `main.py` and `rules.py`, as
+   committed, are both over that once every comment and docstring is
+   counted. From the repository root, run:
+
+   ```
+   python3 research/qc-cloud/build_upload.py
+   ```
+
+   This writes stripped copies -- comments and docstrings removed, the
+   rules and behaviour identical -- to `research/qc-cloud/dist/main.py` and
+   `research/qc-cloud/dist/rules.py`, and fails with a clear error if either
+   one is still at or over the limit. **Paste the two files from `dist/`,
+   never the originals** -- QuantConnect will reject (or silently truncate)
+   a file at or over 32,000 characters.
+6. **Replace `main.py`:**
    - Select all the text already in `main.py` (click inside the editor,
      then Ctrl+A / Cmd+A) and delete it.
-   - Open this repository's `research/qc-cloud/main.py` in any text editor,
-     select all its text, copy it, and paste it into QuantConnect's
+   - Open this repository's `research/qc-cloud/dist/main.py` in any text
+     editor, select all its text, copy it, and paste it into QuantConnect's
      `main.py` editor.
-6. **Add `rules.py` as a second file:**
+7. **Add `rules.py` as a second file:**
    - In QuantConnect's file panel (usually on the left of the code editor,
      above or beside `main.py`), find the button to add a new file --
      usually a small **+** icon or a right-click menu offering **New
      File**.
    - Name the new file exactly `rules.py`.
-   - Open this repository's `research/qc-cloud/rules.py`, select all,
+   - Open this repository's `research/qc-cloud/dist/rules.py`, select all,
      copy, and paste its contents into the new file.
-   - You do **not** need to add `test_rules.py` or `README.md` to the
-     QuantConnect project -- they exist for testing and reading on your own
-     computer, not for the backtest itself.
-7. Save the project (usually Ctrl+S / Cmd+S, or an explicit **Save**
+   - You do **not** need to add `test_rules.py`, `build_upload.py`, or
+     `README.md` to the QuantConnect project -- they exist for building the
+     upload copies and for testing and reading on your own computer, not
+     for the backtest itself.
+8. Save the project (usually Ctrl+S / Cmd+S, or an explicit **Save**
    button).
-8. Click **Backtest** (or **Build** then **Backtest** -- QuantConnect's
+9. Click **Backtest** (or **Build** then **Backtest** -- QuantConnect's
    button layout changes from time to time; look for a button that starts a
    backtest, sometimes shown as a play-button icon).
-9. QuantConnect compiles the project and runs it. This scans roughly 200
-   stocks a day over nearly three decades, so it can take several minutes;
-   let it run.
-10. If QuantConnect reports a compile error, it is almost certainly a
+10. QuantConnect compiles the project and runs it. This scans roughly 200
+    stocks a day over nearly three decades, so it can take several minutes;
+    let it run.
+11. If QuantConnect reports a compile error, it is almost certainly a
     paste problem (a missing line, or the two files' contents merged into
-    one) -- re-copy the two files exactly as they are in this repository,
-    with nothing added or removed, and try again. If an error persists,
-    save the exact error text and bring it back to this project's tracker;
-    do not try to "fix" the strategy code yourself, since the error is more
-    likely a QuantConnect API detail than a rule mistake.
+    one) -- re-run `build_upload.py` and re-copy the two files from `dist/`
+    exactly as it produced them, with nothing added or removed, and try
+    again. If an error persists, save the exact error text and bring it
+    back to this project's tracker; do not try to "fix" the strategy code
+    yourself, since the error is more likely a QuantConnect API detail than
+    a rule mistake.
 
 ## How to find the results
 
-QuantConnect shows an equity curve and standard statistics automatically.
-The numbers this issue asked for are printed as **log lines**, in the
-**Logs** tab (sometimes called **Log** or shown as a console icon) once the
-backtest finishes. Look for lines starting `research:` -- for example:
+**Read the results from the backtest's own statistics panel, not the
+Logs tab.** QuantConnect's Free plan caps a backtest's log output at 10 KB
+(and 10 KB a day, total) -- easily exhausted well before a nearly-thirty-year
+run finishes (see "Deviations" below for how this script keeps the log
+itself from doing that on its own). Every closing figure this script
+reports is therefore published twice, by `_publish` (`main.py`): once as a
+**runtime statistic** (`SetRuntimeStatistic`), which the backtest result
+carries with no size limit and is what you should actually read, and once
+as an ordinary **log line**, which may be truncated or missing if the log
+budget ran out first.
 
-```
-research: OVERALL: start=1998-01-02 end=2026-09-01 CAGR=0.0842 max_drawdown=0.31 CAGR/MaxDD=0.27
-research: REGIME 2008-09 crash: start=2008-01-02 end=2009-12-31 CAGR=-0.05 max_drawdown=0.22 CAGR/MaxDD=-0.23
-research: campaigns=1842 win_rate=0.38 avg_win_R=1.9 avg_loss_R=-0.6
-research: total_commission=48213.10
-research: SPY BUY-AND-HOLD: start=1998-01-02 end=2026-09-01 CAGR=0.081 max_drawdown=0.55 CAGR/MaxDD=0.147
-```
+**In the statistics panel**, once the backtest finishes, look for these
+keys (QuantConnect's own CAGR/Sharpe/etc. sit alongside them; these are the
+ones this script itself adds):
 
-(The numbers above are illustrative formatting only -- they are not a
-prediction of what your own run will show.)
+- `OVERALL` -- CAGR, max drawdown, and CAGR ÷ max drawdown (ADR 0012's
+  primary metric) over the whole run.
+- `REGIME ...`, one per named Regime Window (ADR 0012): `REGIME 1998-2000
+  late bull`, `REGIME 2000-02 bear`, `REGIME 2003-07 bull`, `REGIME 2008-09
+  crash`, `REGIME 2009-19 bull`, `REGIME 2020 COVID`, `REGIME 2022
+  correction`. A window with fewer than two equity marks (for example, if
+  the backtest failed before reaching it) reads `no-data` instead of
+  numbers, rather than a misleading zero.
+- `Campaigns` -- how many Campaigns closed, the fraction that were
+  winners, and the average win and average loss, each expressed in "R" --
+  multiples of the Campaign's own initial 1-Unit risk (Stop Multiple × N).
+  R is the standard way to compare trades of different sizes; it is this
+  script's own reporting convention, not itself a quantity any ADR names.
+- `Commission` -- total commission paid over the run, in dollars, as
+  charged by LEAN's own `InteractiveBrokersFeeModel`.
+- `Declines` -- a `reason=count` tally of every proposal this script
+  declined (an ineligible entry, an exhausted Unit cap, insufficient cash,
+  and so on), counted rather than logged one line per decline, which is
+  exactly what would exhaust the log budget by early in the run (see
+  "Deviations").
+- `SPY BUY-AND-HOLD` -- CAGR/max drawdown, in the same format as
+  `OVERALL`, so the Baseline's own numbers can be read next to simply
+  buying and holding the S&P 500 ETF over the identical span.
 
-You should see, in order:
-
-1. One `OVERALL` line: CAGR, max drawdown, and CAGR ÷ max drawdown over the
-   whole run (ADR 0012's primary metric).
-2. One `REGIME ...` line per named Regime Window (ADR 0012): 1998-2000 late
-   bull, 2000-02 bear, 2003-07 bull, 2008-09 crash, 2009-19 bull, 2020
-   COVID, 2022 correction. A window with fewer than two equity marks (for
-   example, if the backtest failed before reaching it) prints `no-data`
-   instead of numbers, rather than a misleading zero.
-3. One `campaigns=...` line: how many Campaigns closed, the fraction that
-   were winners, and the average win and average loss, each expressed in
-   "R" -- multiples of the Campaign's own initial 1-Unit risk (Stop
-   Multiple × N). R is the standard way to compare trades of different
-   sizes; it is this script's own reporting convention, not itself a
-   quantity any ADR names.
-4. One `total_commission=...` line: total commission paid over the run,
-   in dollars, as charged by LEAN's own `InteractiveBrokersFeeModel`.
-5. One `SPY BUY-AND-HOLD` line, in the same format as `OVERALL`, so the
-   Baseline's own CAGR/drawdown can be read next to simply buying and
-   holding the S&P 500 ETF over the identical span.
+**In the Logs tab**, the same figures appear as `research: <key> = <value>`
+lines, for a run short enough that the 10 KB budget never binds. On a full
+run they are a convenience, not the record of truth -- a line missing or
+cut off there does not mean the figure is missing from the statistics
+panel, only that the log ran out first.
 
 ## Universe size
 
@@ -249,9 +285,8 @@ is hidden; each names the ADR it touches.
    rather than against a journalled event stream. (An earlier version of
    this script placed an order's reservation and never released it on
    cancellation, so unfilled proposals silently exhausted every cap over
-   the life of a run -- caught in PR #253 review, Greptile rules.py:841
-   and CodeRabbit main.py:411, both Critical, and fixed before this
-   research check was ever run for real.)
+   the life of a run; that was fixed before this research check was ever
+   run for real.)
 7. **Approximate commission for the affordability check, real commission
    for the trade.** `rules.commission_estimate` (ADR 0013) estimates
    commission for the pre-trade cash check using the IBKR Pro Fixed
@@ -277,10 +312,9 @@ is hidden; each names the ADR it touches.
    version of this script did exactly that -- can misreport a Campaign
    that lost money overall as a win, whenever its last Unit happens to
    exit above the original entry while earlier Units were stopped out at a
-   loss (caught in PR #253 review, Greptile main.py:649 and CodeRabbit
-   main.py:649, with the exact scenario transcribed as
+   loss, with the exact scenario transcribed as
    `test_r_multiple_aggregates_every_unit_not_only_the_last_exit` in
-   `test_rules.py`). This aggregate-R convention is a standard,
+   `test_rules.py`. This aggregate-R convention is a standard,
    widely-used way to compare trades of different sizes, chosen for this
    script's reporting only.
 9. **No corporate-action handling beyond what QuantConnect's own
@@ -338,8 +372,8 @@ is hidden; each names the ADR it touches.
     lines are a fair like-for-like comparison. An earlier version of this
     script priced SPY split-adjusted only (omitting dividends, which
     understates a multi-decade buy-and-hold return) and began its curve
-    before warm-up ended (a longer span than the strategy's own) -- both
-    caught in PR #253 review (Greptile and CodeRabbit, main.py:384).
+    before warm-up ended (a longer span than the strategy's own); both are
+    now fixed.
 14. **A `PartiallyFilled` order is treated as an anomaly, not a routine
     case, and is handled by one small, conservative path -- not by
     machinery that tracks a partial fill's progress.** A Unit is
@@ -369,9 +403,8 @@ is hidden; each names the ADR it touches.
       the anomaly is logged loudly rather than guessed at or silently
       absorbed -- this script has no representation for a Unit smaller
       than a whole one, and it does not invent one under pressure from an
-      event it does not expect to see (PR #253 review round 2, CodeRabbit
-      main.py:952: "Do not close a Unit on a partial canceled exit").
-      This can only follow from a cause outside a backtest this script's
+      event it does not expect to see. This can only follow from a cause
+      outside a backtest this script's
       own code fully controls, since this script never itself cancels a
       Unit's own Exit Order.
     - **A Unit-cap reservation is released exactly once, by exactly one
@@ -383,20 +416,17 @@ is hidden; each names the ADR it touches.
       regardless of what had already filled was an earlier version's own
       defect: `_commit_reservation` would then have nothing left to
       commit for shares LEAN really had bought, understating every Unit
-      cap for the rest of the run (PR #253 review round 2, Greptile
-      main.py:726: "Partial fills lose cap reservations").
+      cap for the rest of the run.
 
     Two defects in an earlier, more elaborate version of this handling
     (which accumulated every partial fill's quantity and price itself)
     are also fixed by this simplification: a guard meant to catch "nothing
     filled" treated a Unit's own Exit Order -- always a negative fill
     quantity, since it is a sell -- as no fill at all, so an Exit Order's
-    `Filled` event never actually closed its Unit (Greptile main.py:834:
-    "Exit fills are discarded"); and neither settlement path compared the
-    filled quantity against the quantity actually requested, so a
-    partially-filled-then-cancelled entry or Add could still be recorded
-    as a whole Unit at the wrong size (Greptile main.py:841 and
-    CodeRabbit main.py:875: "partial buys become Units").
+    `Filled` event never actually closed its Unit; and neither settlement
+    path compared the filled quantity against the quantity actually
+    requested, so a partially-filled-then-cancelled entry or Add could
+    still be recorded as a whole Unit at the wrong size.
 15. **An Add fill that arrives with no Campaign left able to take it is
     liquidated immediately, not silently dropped or left to raise.** A
     resting Add order and a Unit's own Exit Order can both be triggered by
@@ -409,8 +439,7 @@ is hidden; each names the ADR it touches.
     further Add once partially stopped), the filled shares are sold back
     out with a market order and logged, rather than either being dropped
     (leaving a real LEAN position this script no longer tracks) or passed
-    to `rules.Campaign.add_unit`, which raises in exactly this situation
-    (caught in PR #253 review, CodeRabbit main.py:612, Critical).
+    to `rules.Campaign.add_unit`, which raises in exactly this situation.
 16. **An entry whose own fill would leave a non-positive initial
     Protective Stop is declined, not allowed to abort the backtest.** The
     Turtle Rules p.22 (via `rules.protective_stop_level`) requires
@@ -422,7 +451,7 @@ is hidden; each names the ADR it touches.
     second line of defence, selling the shares back out immediately if it
     still fails, rather than letting `rules.Campaign`'s own `ValueError`
     propagate out of a fill handler and stop the whole run over one
-    instrument (caught in PR #253 review, Greptile main.py:603).
+    instrument.
 17. **A stock the universe selects only after the algorithm's own start is
     backfilled with QuantConnect's own History, not left permanently
     unable to qualify.** `OnSecuritiesChanged` calls QuantConnect's
@@ -433,8 +462,8 @@ is hidden; each names the ADR it touches.
     (ADR 0004). Before this, a stock the monthly universe refresh only
     began selecting years into a multi-decade run had zero bars of its own
     history and could never clear ADR 0009's 250-bar floor no matter how
-    long it then remained selected (caught in PR #253 review, Greptile
-    main.py:360). This assumes QuantConnect delivers `OnSecuritiesChanged`
+    long it then remained selected. This assumes QuantConnect delivers
+    `OnSecuritiesChanged`
     for a newly added symbol before that same day's own `OnData` bar for
     it -- the ordinary universe-selection ordering, but one this
     repository cannot independently confirm without a live QuantConnect
@@ -445,9 +474,7 @@ is hidden; each names the ADR it touches.
     delivery also covers is skipped rather than counted twice -- which an
     earlier version of this backfill did not guard against, silently
     distorting N and the channels and potentially satisfying the 250-bar
-    floor before 250 distinct bars had actually been observed (caught in
-    PR #253 review round 2, Greptile main.py:413: "Warm-up bars counted
-    twice").
+    floor before 250 distinct bars had actually been observed.
 
 ## Reading the results against costs, in plain words
 
@@ -473,15 +500,15 @@ trade with*, not as a raw dollar figure:
   easier bar. The same formula, run with the account size you actually
   have, is the number to compare against a backtest's own CAGR.
 - **Trading cost as a percentage of account size** = total commission
-  reported by the run (`total_commission`, this script's own log line) ÷
-  starting equity, then annualised by the number of years the backtest
-  covers if you want a rate rather than a lifetime total. QuantConnect's
-  own free 1998-to-date backtest already prices this in: `total_commission`
-  is a real cost the equity curve has already paid, not something to add on
-  top of the reported CAGR -- but it is worth looking at on its own,
-  because a strategy that trades often on a small account can lose a
-  meaningful share of its return to commission alone, even when the equity
-  curve still ends up net positive.
+  reported by the run (the `Commission` runtime statistic, "How to find the
+  results", above) ÷ starting equity, then annualised by the number of
+  years the backtest covers if you want a rate rather than a lifetime
+  total. QuantConnect's own free 1998-to-date backtest already prices this
+  in: `Commission` is a real cost the equity curve has already paid, not
+  something to add on top of the reported CAGR -- but it is worth looking
+  at on its own, because a strategy that trades often on a small account
+  can lose a meaningful share of its return to commission alone, even when
+  the equity curve still ends up net positive.
 - **Putting the two together.** A strategy's own reported CAGR, after both
   of the above have already been paid out of it (trading cost is already
   inside the backtest's CAGR; data cost is not, since QuantConnect's own

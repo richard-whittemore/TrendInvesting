@@ -238,10 +238,9 @@ class CampaignTests(unittest.TestCase):
         self.assertFalse(campaign.partially_stopped)
 
     def test_entry_price_stays_the_original_even_after_a_partial_stop(self):
-        """PR #253 review, Greptile main.py:649: entry_price() must return
-        the Campaign's ORIGINAL entry fill, not self.units[0] -- which,
-        after a partial stop-out, is whichever Unit SURVIVED, not
-        necessarily the Campaign's own first one."""
+        """entry_price() must return the Campaign's ORIGINAL entry fill,
+        not self.units[0] -- which, after a partial stop-out, is whichever
+        Unit SURVIVED, not necessarily the Campaign's own first one."""
         campaign = rules.Campaign("XYZ", entry_fill_price=100.0, campaign_n=2.0, unit_quantity_value=10)
         campaign.add_unit(101.0)
         self.assertEqual(campaign.entry_price(), 100.0)
@@ -251,8 +250,8 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(campaign.entry_price(), 100.0)  # still the ORIGINAL entry
 
     def test_r_multiple_aggregates_every_unit_not_only_the_last_exit(self):
-        """PR #253 review (Greptile, main.py:649): three Units stopped out
-        at a loss, then the LAST Unit exits ABOVE Unit 1's own entry fill.
+        """Three Units stopped out at a loss, then the LAST Unit exits
+        ABOVE Unit 1's own entry fill.
         Comparing only that last exit against Unit 1's entry would score
         the whole Campaign a WIN. Aggregating every Unit's own
         (exit - fill) correctly scores it a LOSS, since the three
