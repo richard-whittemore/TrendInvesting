@@ -48,12 +48,14 @@ deps:
 adapter-test:
 	cd adapter/lean && python3 -m unittest discover -s tests
 
-# research/qc-cloud's rule core (rules.py): standard-library Python only,
-# no QuantConnect imports, so it runs here without any LEAN environment.
-# main.py (the QuantConnect algorithm that drives it) is checked separately
-# by CI for a clean compile, since it cannot be imported outside
-# QuantConnect's own AlgorithmImports environment.
+# The research checks' rule cores (research/qc-cloud for the Turtle
+# Baseline, research/qc-cloud-sublime for the Sublime control): standard-
+# library Python only, no QuantConnect imports, so they run here without any
+# LEAN environment. Each main.py (the QuantConnect algorithm) cannot be
+# imported outside QuantConnect's AlgorithmImports environment; each folder's
+# test_build_upload.py compiles its stripped upload copy instead.
 research-test:
 	cd research/qc-cloud && python3 -m unittest discover -s . -p "test_*.py"
+	cd research/qc-cloud-sublime && python3 -m unittest discover -s . -p "test_*.py"
 
 check: deps lint coverage vuln build adapter-test research-test
