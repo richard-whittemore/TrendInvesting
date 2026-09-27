@@ -1,0 +1,303 @@
+# Sublime research check, on QuantConnect Cloud (Free plan)
+
+## What this is
+
+A **free, research-only** check of one question: does Sublime-style trend
+trading on US stocks beat buying and holding SPY, after realistic costs, over
+QuantConnect's free 1998-to-date US equity history?
+
+It is the Sublime counterpart of `research/qc-cloud/`, the Turtle Baseline
+check. That check matched the production Go engine's fills on AAPL
+2003–2014, and on the top 200 US stocks, 1998–2015, it lost: CAGR −5.7 %
+against SPY's +6.1 %. Variants with a market filter or smaller Units
+reached only about 0 %.
+
+This folder implements **only** the Sublime rules that
+`docs/methodology/Methodology_Analysis.md` records, each with the
+provenance tag the analysis gives it. It has no Go counterpart, so no
+fidelity check exists for it; the local smoke run below is a sanity check,
+not a parity check. No market data is committed here.
+
+## Files
+
+- `rules.py`: the rule core. Pure standard-library Python with no
+  QuantConnect imports; every rule cites the analysis or an ADR.
+- `test_rules.py`: unit tests for `rules.py`, written before it, on synthetic
+  series and on the two golden figures section 9 of the analysis names.
+- `main.py`: the `QCAlgorithm` (`SublimeResearch`) that drives `rules.py`.
+- `build_upload.py`: writes stripped copies of `main.py` and `rules.py` to
+  `dist/` (git-ignored). Each copy stays under the Free plan's
+  32,000-character limit per file.
+- `test_build_upload.py`: checks both stripped files are under the limit and
+  compile, and that `test_rules.py` passes against the stripped `rules.py`.
+- `smoke/lean_main.py`, `smoke/run_local.sh`: the local AAPL smoke run.
+
+`make research-test` (part of `make check`) runs both test files.
+
+## How to run it on QuantConnect
+
+The steps match `research/qc-cloud/README.md`, "How to run it". In short:
+
+1. From the repository root, run `python3 research/qc-cloud-sublime/build_upload.py`.
+   It prints each stripped file's size and fails if either is at or over
+   32,000 characters.
+2. In QuantConnect's Algorithm Lab, create a new Python project. Replace its
+   `main.py` with `research/qc-cloud-sublime/dist/main.py`, then add a file
+   named exactly `rules.py` with `dist/rules.py`'s contents. **Paste the
+   `dist/` copies, never the originals.**
+3. Save the project and click **Backtest**.
+
+To run the in-sample span the Turtle check was judged on, set
+`END_DATE = (2015, 12, 31)` near the top of `SublimeResearch` before building.
+If the run times out, lower `UNIVERSE_SIZE` (200 by default) to 100.
+
+## How to read the results
+
+Read the backtest's **statistics panel**, not the Logs tab: the Free plan
+caps logs at 10 KB. Each figure is a runtime statistic with a short value and
+one key per item. The keys match `research/qc-cloud`'s:
+
+- `OVERALL`: CAGR, max drawdown, and CAGR ÷ max drawdown (ADR 0012's
+  primary metric).
+- `REGIME <window>`: the same, for each of ADR 0012's seven Regime Windows.
+  A window reads `no-data` when it has fewer than two marks.
+- `Campaigns`: the number of closed Campaigns, their win rate, and their
+  average win and average loss in R. R here is a Campaign's money, over
+  every position, divided by the initial risk of its first position.
+- `Signals`: Phase C Signals, and how many were Grade A and Grade B.
+- `Commission`: dollars charged.
+- `Declines`, and one `Decline <reason>` key per reason.
+- `SPY BUY-AND-HOLD`: SPY's total return over the same span, in the same
+  format as `OVERALL`.
+
+**When trading can start.** The rules need five years of each stock's
+history, and SPY's weekly 200 SMA needs 200 weeks. QuantConnect's data
+begins in 1998, so a 1998 start stays in cash until about 2002–2003, and
+`OVERALL` then includes those cash years, 2000–02 bear market among them.
+The Regime Windows from 2003 onward are the fair comparison with SPY.
+
+## The rules, with provenance
+
+Tags follow `Methodology_Analysis.md` section 0. Rule numbers are the ones
+section 3 gives.
+
+### Universe and hard filters
+
+| Rule | Implementation | Tag |
+|---|---|---|
+| Universe | `research/qc-cloud`'s monthly top 200 US common stocks by dollar volume. A held or working symbol stays subscribed. | Carried infrastructure |
+| 3: price ≥ $20 [V 01:13:32] | Raw close at the Signal | DISCLOSED |
+| 3: volume > 1 M shares [V 00:59:58] | 20-day median raw share volume ≥ 1,000,000 | DISCLOSED (window: open question) |
+| 3: 5–10 years of history [M p.54] | ≥ 1,260 completed daily bars (the lower end) | DISCLOSED |
+
+### Market regime (S&P 500, read from SPY)
+
+| Rule | Implementation | Tag |
+|---|---|---|
+| 5: monthly regime [V 00:07:32–00:08:30] | SPY close against last *calendar* year's high and low: bull, bear or sideways | DISCLOSED |
+| 4: bull buys, flat stands aside [V 00:05:09] | No new position unless the month is bull. Long-only: bears are not shorted | DISCLOSED |
+| 6, 7, 8: weekly 200/50, daily 200/50/20, alignment | Each is "SPY close above the SMA". A weekly SMA counts the week in progress | DISCLOSED |
+| 27: risk by conditions [V 00:28:01; R; M p.55] | Full alignment: 1 %. Bull month above the weekly 200 but not fully aligned: 0.5 %. Bull month below the weekly 200: 0.25 % | RECONSTRUCTED map (open question) |
+| 9: never go straight to cash | A regime change never closes a position | DISCLOSED |
+
+### The entry: 4PS second breakout (section 6, Model E)
+
+| Rule | Implementation | Tag |
+|---|---|---|
+| 23: base [2B p.1; section 4.8] | At least 55 completed bars without a new 55-bar high | DISCLOSED (one instance) |
+| 21, 22: Phase A | Close above max(prior 55-bar high, last calendar year's high). That level is the breakout level | PROXY (Model E) |
+| 21: Phase B, the retest | A later low within 1 ATR of the breakout level | PROXY (k₁ = 1: open question) |
+| 21: Phase C, the Signal | A close above the highest high between A and B | PROXY (Model E) |
+| 2: Donchian 20 break and close [V 00:47:53] | Phase C's close must also be above the prior 20-bar high | DISCLOSED |
+| Cancel | A close more than 3 ATR below the level, or more than 55 bars after A | PROXY (k₂ = 3, m = 55: open questions) |
+| 8, 13, 4.7: stock alignment | At the Signal: close above last year's high, the weekly 200 SMA and the daily 200 SMA (§4.7's KISS gate). Daily and weekly trend-filter colour green or dark green | DISCLOSED |
+| 13: trend filter [V 00:31:08–00:38:16] | 20-period SMA of closes with 1σ and 2σ bands (population σ). Colour is by closing price | DISCLOSED |
+| 16: at all-time highs [V 00:52:15] | Grade A: the Signal's close is above every earlier high in the available data | PROXY (history starts at the data) |
+| 18: Tier A before Tier B [V 01:14:41] | Grade B is taken only in a Session with no Grade A Signal (ADR 0011 point 3) | PROXY |
+| Ranking within a Grade | Strength, (close − close 63 bars earlier) / ATR (Turtle p.29, ADR 0010), then median dollar volume, then symbol | PROXY for "best-performing stocks" [V 00:02:31] |
+| 25: order above the breakout bar's high [M p.55] | Stop-limit buy one raw tick above the Signal bar's high, for the next Session only (ADR 0011) | Level DISCLOSED; the offset formula is EXCLUDED, so one tick |
+
+### Sizing, stops, exits, adds, risk ceilings
+
+| Rule | Implementation | Tag |
+|---|---|---|
+| 30: size [M p.56]; ADR 0003's fixed-risk-at-stop | shares = floor(equity × risk / (3 × ATR)), in whole raw shares. Equity is actual, not notional: no drawdown rule is disclosed (section 3.11) | RECONSTRUCTED |
+| 32: initial stop ≈ 3 × ATR [M p.55–56] | 3 × ATR below each position's own fill | DISCLOSED multiple. The ATR period is undisclosed (20: open question) |
+| 34 and §4.6(a): Donchian-20 exit [30 p.7–8] | Each position's Exit Order rests at the higher of its own stop and the 20-bar low, so the channel trails it | DISCLOSED |
+| 38, 39: add to winners, 1 ATR apart [V 01:20:45] | An add is proposed when the close is at least 1 ATR (the newest position's entry ATR) above the newest position's fill | DISCLOSED |
+| 40: only once the first position is risk-free [M p.56] | The first position's Exit Order level is at or above its fill | DISCLOSED |
+| 41: each add sized and stopped separately [M p.56] | An add is sized like an entry at the current regime risk and ATR, has its own 3 × ATR stop, and is ordered one tick above the bar's high | DISCLOSED |
+| 42: maximum adds | Five positions per asset (the e-book's illustration [M p.56–57]) | NOT DISCLOSED (open question) |
+| 29: ceilings [R] | Risk initiated per day ≤ 4 % of equity; aggregate open risk ≤ 10 % (the lower ends) | DISCLOSED ranges (level: open question) |
+| 40: ≤ 2 % at risk on one asset [M p.56] | Checked for every add | DISCLOSED |
+| 31: a stop on every position [R; M p.57] | Every held position rests a stop-market sell at all times; a cancelled one is re-placed | DISCLOSED |
+
+"Risk" everywhere means money at the stop. A position whose Exit Order level
+is at or above its fill contributes nothing (CONTEXT.md "risk-free").
+
+### Not implemented
+
+- **EXCLUDED by the analysis:** round-number and resistance tightening, and
+  overriding an automated exit (rule 36); "what do I not see?" (rule 20);
+  the entry-offset formula (rule 25); the human-in-the-loop selection
+  (rule 44).
+- **Left out for want of data:** the earnings blackout (rule 26) needs an
+  earnings calendar, and the Free plan's data offers none this script can
+  rely on. The results therefore include entries a Sublime trader would
+  have skipped.
+- **Left out because the sources give no threshold:**
+  - Avoiding "uber expensive" mega-caps (rule 3). The top-200 dollar-volume
+    universe is itself mega-cap heavy.
+  - The smooth-history proxies (R², efficiency ratio; rule 15).
+  - Sector strength (rule 19; Model C's k).
+  - Pivot levels (rules 11–12). Grade A implies that price is above every
+    pivot.
+  - The weekly 50-SMA rebalance (rule 6).
+  - Seasonality as a sizing input (rule 10: "whether to encode it is a
+    decision").
+- **Experiments, not the control:** the 3 × ATR chandelier trail (rule 33)
+  and the 50-SMA breach exit (rule 35), per section 4.6.
+- **Sublime has no Unit caps** (section 3.11: no disclosed position limits
+  or correlation control), so ADR 0008's caps are absent. The risk ceilings
+  and cash bind instead.
+
+## Open questions
+
+Each question names the default this check uses. None was chosen by looking
+at a result.
+
+1. **ATR period:** 20, Wilder-smoothed, so that it equals N's arithmetic
+   (the sources give none).
+2. **4PS thresholds:** retest within k₁ = 1 ATR; cancel on a close
+   k₂ = 3 ATR below the level (the point where a first-breakout entry's
+   3 × ATR stop would have been hit); window m = 55 bars.
+   - The base resets on any new 55-bar high, so a V-shaped recovery into
+     last year's high never qualifies. On AAPL, 2003–2014, only three Phase A
+     breakouts occurred.
+   - A Signal whose order does not fill is consumed; it is not carried
+     forward.
+3. **Regime-to-risk map:** 1 %, 0.5 % and 0.25 %. The source's 2 % for
+   "optimal conditions" is unused.
+4. **Ceilings:** the lower ends, 4 % daily and 10 % aggregate. Rule 29
+   raises them when the S&P prints all-time highs, and the sources do not
+   define that measurably.
+5. **Volume floor:** 1 M shares, as a 20-day median. The source allows
+   500 k "at the very least".
+6. **Maximum positions per asset:** 5.
+7. **Adds after a stop-out:** no rule stops them, so one continues when the
+   remaining first position is still risk-free. The AAPL smoke run does this
+   on 2007-08-02.
+8. **Exit on a break, intraday or at the close:** intraday, as a resting
+   stop at the 20-bar low (the analysis calls this the Turtle System-2 exit
+   applied to a stock).
+9. **The initial stop's anchor:** the actual fill (ADR 0006's convention);
+   the source gives none.
+10. **Regime source:** SPY's Adjusted (total-return) closes stand in for the
+    S&P 500 index (next section).
+
+## Deviations from `research/qc-cloud`'s infrastructure
+
+The rest is carried over unchanged:
+- whole raw-share Units at the raw tick;
+- `RawShareFeeModel`;
+- dividends paid on raw shares;
+- queued order events;
+- immediate settlement;
+- retained symbols;
+- re-placed Exit Orders;
+- SPY as a never-traded benchmark;
+- runtime statistics;
+- decline counters;
+- the `FIXED_SYMBOLS`, `START_DATE` and `END_DATE` switches.
+
+What differs:
+
+1. **Cost conventions are in ATR.** The price cap is level + 1 ATR (ADR
+   0005), and slippage is 0.05 ATR per fill (ADR 0013).
+2. **Entries and adds are decided at the close and live one Session.**
+   Sublime decides on completed bars (rule 43), so its orders are not
+   fill-chained (no ADR 0011 amendment).
+3. **Exit Orders rest below the bar they were decided after.** LEAN
+   evaluates an amended order against the bar it was amended after
+   (`research/qc-cloud` Deviations #20). So an amendment only ever raises an
+   Exit Order, and rests it at least a raw tick below that bar's low
+   (`rules.exit_stop_price`). The only effect is on a day that sets the new
+   20-bar low: that evening the order rests one tick under the channel.
+4. **SPY drives the regime from its Adjusted series.** It is subscribed once,
+   Adjusted, for the benchmark. Dividends lower earlier Adjusted prices, so
+   last year's high reads about one year's dividend yield (≈ 2 %) lower than
+   on the index. This slightly favours "bull".
+5. **Volume is raw by the split ratio.** LEAN's split-adjusted volume is raw
+   volume times the split ratio. This was observed on the pinned image:
+   AAPL 2003-05-07 read 1,068,886,829 against 19,087,219 raw shares at a
+   ratio of 56. The volume floor divides by the ratio; the dollar-volume
+   tie-break uses split-adjusted close × volume.
+6. **A holding LEAN no longer has closes its Campaign.** For example, after
+   LEAN liquidates a delisting itself. The Campaign closes at the last
+   close, counted as `Decline exit: holding vanished`.
+7. **The Sublime filters apply in fixed mode too.** They are strategy rules,
+   not universe membership. `research/qc-cloud` skips eligibility in fixed
+   mode only to match a Go run.
+
+## Local smoke run
+
+`smoke/run_local.sh <lean-workspace> [project-dir]` runs the algorithm on
+local LEAN with the pinned image and `--no-update`. It uses only data
+already in the workspace, never pulls an image and never fetches data.
+`smoke/lean_main.py` sets `FIXED_SYMBOLS = ("AAPL",)` and the span
+2003-01-01 to 2014-12-31, and keeps the 1,260-bar warm-up, which reaches back
+to the data's 1998 start.
+
+**Result, AAPL alone, $1,000,000.** It ran cleanly: no errors, no anomalies,
+and no failed data requests.
+
+| | |
+|---|---|
+| `OVERALL` | 2003-01-02..2014-12-31 CAGR = 0.25 %, MaxDD = 9.25 %, Ratio 0.027 |
+| `SPY BUY-AND-HOLD` | CAGR = 9.16 %, MaxDD = 55.17 %, Ratio 0.166 |
+| `REGIME 2003-07 bull` | CAGR = 0.69 %, MaxDD = 8.27 % |
+| `REGIME 2008-09 crash` | flat, in cash |
+| `REGIME 2009-19 bull` (to 2014) | CAGR = −0.07 %, MaxDD = 2.41 % |
+| `Campaigns` | 3, win rate 0.667, average win +1.76 R, average loss −1.79 R |
+| `Signals` | 3, all Grade A |
+| `Declines` | 16: `add: asset-risk` 9, `add: market regime` 7 |
+| `Commission` | $64.92 |
+| LEAN | 18 orders, net profit 3.04 %, end equity $1,030,417.43 |
+
+**Hand-checked trades.** Each check below compares LEAN's order against the
+local raw bars and an offline replay of `rules.py` over the same zips.
+
+- **Entry, 2007-05-08.**
+  - Phase A came on 2007-04-26: the close, 3.5300 split-adjusted, was above
+    max(55-bar high 3.4582, 2006 high 3.3268).
+  - Phase B came on 04-27: a low of 3.4889, within 1 ATR (0.0752) of 3.4582.
+  - Phase C came on 05-07: a close of 3.7114, above the reaction high of
+    3.6507 and the 20-bar high. The stock was aligned and Grade A, and SPY
+    was fully aligned, so risk was 1 %.
+  - The order's stop was the 05-07 raw high, $104.35, plus one tick:
+    $104.36 / 28 = 3.727143. Its limit was that plus 1 ATR (0.0719): 3.7989.
+  - Size: $1,000,000 × 1 % / (3 × 0.0719) = 46,361, rounded down to whole
+    raw shares: 1,655 × 28 = 46,340. LEAN filled 46,340 at 3.727143 +
+    0.05 ATR = 3.730739.
+- **Stop-out, 2007-08-01.** The third add, filled at 4.955037, had its own
+  3 × ATR stop at 4.588571, which is $128.48 raw. The 08-01 low of $127.80
+  went through it, and it filled at the stop less slippage, 4.582465.
+- **Exit, 2007-08-09.** The remaining four positions exited at the 20-bar
+  low, $127.80 raw (4.564286): the 08-01 low. The Exit Orders had trailed
+  up to it.
+- **Entry, 2010-09-21.** The order was one tick above the 09-20 high of
+  $283.78: 10.135357. The size was small, 2,184 shares, for two reasons.
+  SPY was below its weekly 200 SMA, so risk was 0.25 %. And ATR was inflated
+  (0.394) by a bad print in the local data: 2010-08-31's low reads $25.30
+  against a true low of about $241. The same print pins the 20-bar low near
+  0.90 through 2010-09-28.
+
+The strategy barely trades AAPL. It took three Campaigns in twelve years,
+because the 55-bar base rarely forms in a stock that trends strongly (open
+question 2). That is a property of the rules as the analysis records them,
+not a fault in the run.
+
+## Reading the results against costs
+
+`research/qc-cloud/README.md`, "Reading the results against costs", applies
+unchanged. This is not financial advice.
