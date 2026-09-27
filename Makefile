@@ -52,17 +52,22 @@ deps:
 adapter-test: research-test
 	cd adapter/lean && python3 -m unittest discover -s tests
 
-# research/qc-cloud's and research/qc-cloud-futures's rule cores (rules.py):
+# The research checks' rule cores (research/qc-cloud for the Turtle
+# Baseline, research/qc-cloud-sublime for the Sublime control,
+# research/qc-cloud-futures for Faith's own unadapted system on futures):
 # standard-library Python only, no QuantConnect imports, so they run here
-# without any LEAN environment. Each main.py (the QuantConnect algorithm
-# that drives its own rules.py) cannot be imported outside QuantConnect's
-# own AlgorithmImports environment -- neither folder's local LEAN checks
-# have futures data for the second one -- so each is only syntax-checked
-# here with python3 -m py_compile; the owner's first QuantConnect Cloud
-# backtest is the real test of its QuantConnect API calls.
+# without any LEAN environment. Each main.py (the QuantConnect algorithm)
+# cannot be imported outside QuantConnect's own AlgorithmImports
+# environment -- none of the three folders' local LEAN checks have futures
+# data for the third one -- so research/qc-cloud and research/qc-cloud-futures
+# are also syntax-checked here with python3 -m py_compile; every folder's
+# own test_build_upload.py additionally compiles its stripped upload copy.
+# The owner's first QuantConnect Cloud backtest is the real test of each
+# folder's own QuantConnect API calls.
 research-test:
 	cd research/qc-cloud && python3 -m unittest discover -s . -p "test_*.py"
 	python3 -m py_compile research/qc-cloud/main.py
+	cd research/qc-cloud-sublime && python3 -m unittest discover -s . -p "test_*.py"
 	cd research/qc-cloud-futures && python3 -m unittest discover -s . -p "test_*.py"
 	python3 -m py_compile research/qc-cloud-futures/main.py
 

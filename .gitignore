@@ -16,6 +16,7 @@ __pycache__/
 # source of truth for comments or tests.
 /research/qc-cloud/dist/
 /research/qc-cloud-futures/dist/
+/research/qc-cloud-sublime/dist/
 
 # Editors and operating systems
 .DS_Store
