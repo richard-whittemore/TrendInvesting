@@ -18,6 +18,7 @@ parity with the production Go engine.
 """
 
 import unittest
+from datetime import date
 
 import rules
 
@@ -465,6 +466,51 @@ class MetricTests(unittest.TestCase):
 
     def test_ratio_is_null_on_zero_drawdown(self):
         self.assertIsNone(rules.cagr_over_max_drawdown(0.1, 0.0))
+
+
+
+class RollTargetTests(unittest.TestCase):
+    """Which contract to hold next: LEAN's mapped contract once it is
+    later-dated and priced, otherwise, within ROLL_DAYS_BEFORE_EXPIRY of
+    the held contract's expiry, the nearest later-dated priced contract."""
+
+    TODAY = date(2008, 6, 5)
+    HELD = ("M8", date(2008, 6, 20), True)
+
+    def test_first_assignment_takes_the_mapped_contract(self):
+        mapped = ("M8", date(2008, 6, 20), True)
+        self.assertEqual(rules.roll_target(self.TODAY, None, mapped, []), "M8")
+
+    def test_no_roll_when_mapped_is_held_and_expiry_is_far(self):
+        self.assertIsNone(rules.roll_target(self.TODAY, self.HELD, self.HELD, []))
+
+    def test_rolls_to_a_priced_later_mapped_contract(self):
+        mapped = ("U8", date(2008, 9, 19), True)
+        self.assertEqual(rules.roll_target(self.TODAY, self.HELD, mapped, []), "U8")
+
+    def test_waits_while_the_mapped_contract_has_no_price(self):
+        mapped = ("U8", date(2008, 9, 19), False)
+        self.assertIsNone(rules.roll_target(self.TODAY, self.HELD, mapped, []))
+
+    def test_near_expiry_rolls_to_the_nearest_priced_later_contract(self):
+        today = date(2008, 6, 12)
+        candidates = [("Z8", date(2008, 12, 19), True), ("U8", date(2008, 9, 19), True),
+                      ("M8", date(2008, 6, 20), True), ("H8", date(2008, 3, 21), True)]
+        self.assertEqual(rules.roll_target(today, self.HELD, self.HELD, candidates), "U8")
+
+    def test_near_expiry_skips_unpriced_candidates(self):
+        today = date(2008, 6, 12)
+        candidates = [("U8", date(2008, 9, 19), False), ("Z8", date(2008, 12, 19), True)]
+        self.assertEqual(rules.roll_target(today, self.HELD, self.HELD, candidates), "Z8")
+
+    def test_near_expiry_with_no_priced_candidate_stays(self):
+        today = date(2008, 6, 12)
+        candidates = [("U8", date(2008, 9, 19), False)]
+        self.assertIsNone(rules.roll_target(today, self.HELD, self.HELD, candidates))
+
+    def test_never_rolls_back_to_an_earlier_mapped_contract(self):
+        mapped = ("H8", date(2008, 3, 21), True)
+        self.assertIsNone(rules.roll_target(self.TODAY, self.HELD, mapped, []))
 
 
 if __name__ == "__main__":

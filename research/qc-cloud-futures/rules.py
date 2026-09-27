@@ -96,6 +96,14 @@ SLIPPAGE_N = 0.05
 #: Baseline declares k=1.
 GAP_BUFFER_N = 1.0
 
+#: Calendar days before the held contract's expiry at which a roll is
+#: forced if LEAN's own mapping has not moved yet: Faith rolled "a few
+#: weeks before expiration" (The Turtle Rules, "Rolling Expiring
+#: Contracts"), and LEAN's mapping for some markets (ES among them) only
+#: moves on the last trading day, when a market order on the old contract
+#: can no longer fill.
+ROLL_DAYS_BEFORE_EXPIRY = 10
+
 #: The Turtle Rules p.29 / ADR 0010 (as amended): Strength's lookback, in
 #: completed bars -- "(price - price 3 months ago) / N", 63 trading days
 #: standing in for three months, as ADR 0010 already reasons for equities.
@@ -770,3 +778,28 @@ def cagr_over_max_drawdown(cagr, mdd):
     if cagr is None or mdd is None or mdd == 0:
         return None
     return cagr / mdd
+
+
+# ---------------------------------------------------------------------------
+# Rolling (README.md, "Continuous futures and roll handling").
+# ---------------------------------------------------------------------------
+
+
+def roll_target(today, held, mapped, candidates, roll_days=ROLL_DAYS_BEFORE_EXPIRY):
+    """The contract to hold next, or ``None`` to keep the held one.
+
+    Each contract is ``(key, expiry_date, priced)``. With nothing held,
+    take LEAN's mapped contract. Otherwise follow LEAN's mapping once it
+    points at a later-dated contract that already has a price; and within
+    ``roll_days`` of the held contract's expiry, roll to the nearest
+    later-dated priced contract among ``candidates`` rather than be caught
+    by expiry."""
+    if held is None:
+        return mapped[0] if mapped is not None else None
+    held_key, held_expiry, _ = held
+    if mapped is not None and mapped[0] != held_key and mapped[1] > held_expiry and mapped[2]:
+        return mapped[0]
+    if (held_expiry - today).days > roll_days:
+        return None
+    later = sorted((c for c in candidates if c[1] > held_expiry and c[2]), key=lambda c: c[1])
+    return later[0][0] if later else None

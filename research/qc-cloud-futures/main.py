@@ -354,6 +354,12 @@ class TurtleFuturesResearch(QCAlgorithm):
         self.total_commission = 0.0
         self.roll_commission = 0.0
         self.roll_count = 0
+        self.roll_deferrals = 0
+        # Reconciliation: the Campaigns' own dollar P&L (price distance x
+        # quantity x multiplier) against the account's, and fills this
+        # script did not place (LEAN's delisting liquidations).
+        self.campaign_dollars = 0.0
+        self.untracked_fills = 0
         # Declines are counted, not logged: the Free plan allows 10 KB of
         # log per backtest (research/qc-cloud's own documented limit).
         self.decline_counts = {}
@@ -419,10 +425,27 @@ class TurtleFuturesResearch(QCAlgorithm):
             mapped = future.Mapped
             if mapped is None:
                 continue
-            if state.mapped_symbol is None:
-                self._assign_mapped_symbol(state, future.Symbol, mapped)
-            elif mapped != state.mapped_symbol:
-                self._roll_market(state, future.Symbol, state.mapped_symbol, mapped)
+            held = state.mapped_symbol
+            target = rules.roll_target(
+                self.Time.date(), self._contract(held) if held is not None else None,
+                self._contract(mapped),
+                [self._contract(sym) for sym in self.Securities.Keys
+                 if sym.SecurityType == SecurityType.Future and not sym.IsCanonical()
+                 and sym.Canonical == future.Symbol] if held is not None else [])
+            if target is None:
+                if held is not None and mapped != held:
+                    self.roll_deferrals += 1
+                continue
+            if held is None:
+                self._assign_mapped_symbol(state, future.Symbol, target)
+            else:
+                self._roll_market(state, future.Symbol, held, target)
+
+    def _contract(self, symbol):
+        """``(symbol, expiry date, priced)`` for ``rules.roll_target``."""
+        security = self.Securities[symbol] if self.Securities.ContainsKey(symbol) else None
+        priced = security is not None and security.HasData and float(security.Price) > 0
+        return (symbol, symbol.ID.Date.date(), priced)
 
     def _assign_mapped_symbol(self, state, continuous_symbol, mapped):
         state.mapped_symbol = mapped
@@ -810,6 +833,8 @@ class TurtleFuturesResearch(QCAlgorithm):
         self.order_kind.pop(order_id, None)
         quantity = abs(int(ticket.QuantityFilled))
 
+        if kind is None and status == OrderStatus.Filled:
+            self.untracked_fills += 1
         if kind == "roll":
             return  # commission already booked above; no strategy state to settle
 
@@ -884,7 +909,9 @@ class TurtleFuturesResearch(QCAlgorithm):
         state.add_ticket = None
         requested = self.requested_quantity_by_order_id.pop(order_id, None)
         campaign = state.campaign
-        direction = campaign.direction if campaign is not None else 1
+        # The order's own side, never the Campaign's: the Campaign may
+        # already be closed, and an orphaned short Add must be bought back.
+        direction = 1 if self.Transactions.GetOrderTicket(order_id).Quantity > 0 else -1
         if requested is not None and quantity != requested:
             self._release_reservation(order_id)
             self.MarketOrder(mapped_symbol, -direction * quantity,
@@ -921,7 +948,10 @@ class TurtleFuturesResearch(QCAlgorithm):
         state.add_ticket = None
         self.unit_caps.remove(str(continuous_symbol), campaign.closely_group, campaign.loosely_group,
                               campaign.direction, units=1)
+        before = campaign.realized_price_pnl
         campaign.close_units([unit_index], price)
+        self.campaign_dollars += ((campaign.realized_price_pnl - before) * campaign.unit_quantity
+                                  * (state.dollars_per_point or 0.0))
         del state.unit_tickets[unit_index]
         if not campaign.units:
             r_multiple = campaign.r_multiple()
@@ -958,9 +988,14 @@ class TurtleFuturesResearch(QCAlgorithm):
         self._publish("Campaigns", "{} win_rate={} avg_win_R={} avg_loss_R={}".format(
             count, _fmt(win_rate), _fmt(avg_win), _fmt(avg_loss)))
         self._publish("Commission", "{:.2f}".format(self.total_commission))
-        self._publish("Rolls", "{} commission={:.2f}".format(self.roll_count, self.roll_commission))
+        self._publish("Rolls", "{} commission={:.2f} deferred={}".format(
+            self.roll_count, self.roll_commission, self.roll_deferrals))
         if self.unavailable_markets:
             self._publish("Markets unavailable", ",".join(sorted(self.unavailable_markets)))
+        self._publish("Reconcile", "campaigns=${:,.0f} account=${:,.0f} untracked_fills={}".format(
+            self.campaign_dollars,
+            float(self.Portfolio.TotalPortfolioValue) - self.STARTING_CASH + self.total_commission,
+            self.untracked_fills))
         self._publish("Declines", sum(self.decline_counts.values()))
         for reason, count in sorted(self.decline_counts.items()):
             self._publish("Decline " + reason, count)
