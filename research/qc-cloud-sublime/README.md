@@ -284,6 +284,25 @@ the Regime Windows from 2003 onward, since every run is in cash until about
 use `UNIVERSE_SIZE = 400`. Every variant stays well under the Free plan's
 10,000 orders: the control placed 259.
 
+
+### Results (in-sample 1998–2015, run 2026-09-27)
+
+Every run includes the universe re-entry fix. Periods are CAGR; the drawdown is the whole run's maximum. SPY buy-and-hold made +6.07% CAGR with a 55% max drawdown over the same span.
+
+| Variant | CAGR | Max DD | 2003–07 | 2009–15 | Campaigns | Won | Avg win / loss R |
+|---|---|---|---|---|---|---|---|
+| CONTROL | +0.38% | 15.4% | −0.49% | +1.37% | 70 | 23% | 2.73 / −0.76 |
+| CH252 | +1.37% | 18.8% | +4.12% | +0.66% | 103 | 31% | 2.35 / −0.73 |
+| BASE_BELOW | +0.61% | 17.2% | −1.46% | +2.88% | 162 | 33% | 1.43 / −0.75 |
+| RETEST_05 | +0.46% | 12.8% | −0.41% | +1.52% | 69 | 23% | 2.75 / −0.76 |
+| PRICE_CAP | +0.42% | 16.0% | −0.49% | +1.49% | 68 | 21% | 3.05 / −0.73 |
+| RETEST_2 | +0.36% | 15.7% | −0.57% | +1.37% | 71 | 23% | 2.76 / −0.76 |
+| HIST2Y | +0.36% | 16.0% | −0.20% | +1.12% | 74 | 24% | 2.53 / −0.75 |
+| LAST_YEAR | +0.24% | 14.3% | +0.63% | +0.18% | 114 | 36% | 1.43 / −0.85 |
+| WIDE | +0.20% | 18.1% | −2.38% | +2.31% | 112 | 32% | 1.66 / −0.81 |
+| RISK_ATH | −0.29% | 20.7% | +0.17% | −0.84% | 61 | 25% | 2.01 / −0.83 |
+
+**Conclusion.** No variant comes close to SPY. The best, CH252, trails it by 4.7 points a year. The corrected base rules (BASE_BELOW, LAST_YEAR) add trades but cut the average win, and neither reading of "uber expensive" (WIDE, PRICE_CAP) helps. None is promoted to the control: the owner approved promoting a *winner*, and nothing here wins.
 ## Deviations from `research/qc-cloud`'s infrastructure
 
 The rest is carried over unchanged:
