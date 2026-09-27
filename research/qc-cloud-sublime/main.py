@@ -349,26 +349,35 @@ class SublimeResearch(QCAlgorithm):
             snap = self._advance(state, bar, bar_date)
             if state.campaign is not None:
                 self._maintain_exit_orders(state, float(bar.Low))
-                if state.campaign.add_ready(float(bar.Close), state.ind.exit_low()):
+                if state.campaign.add_ready(float(bar.Close)):
                     adds.append((symbol, state, bar))
             elif snap is not None:
                 signal = self._signal(symbol, state, bar, snap)
                 if signal is not None:
-                    signals[signal.symbol] = (symbol, state, bar, signal)
+                    signals[signal.symbol] = (symbol, state, bar, signal, snap)
 
         risk = self._risk_fraction()
         equity = float(self.Portfolio.TotalPortfolioValue)
-        open_risk = sum(st.campaign.open_risk(st.ind.exit_low())
+        open_risk = sum(st.campaign.open_risk()
                         for st in self.symbol_state.values() if st.campaign is not None)
         budget = rules.RiskBudget(equity, open_risk, self._spendable_cash())
         for symbol, state, bar in adds:
             self._decide(symbol, state, bar, "add", risk, budget)
-        for signal in rules.admissible_signals(entry[3] for entry in signals.values()):
-            symbol, state, bar, _ = signals[signal.symbol]
-            self._decide(symbol, state, bar, "entry", risk, budget)
-        passed_over = len(signals) - len(rules.admissible_signals(e[3] for e in signals.values()))
-        if passed_over:
-            self._count_decline("entry: grade B with grade A present", passed_over)
+        all_signals = [entry[3] for entry in signals.values()]
+        admissible = rules.admissible_signals(all_signals)
+        for signal in admissible:
+            symbol, state, bar, _, snap = signals[signal.symbol]
+            # The entry's sizing ATR is the Signal's pre-bar value: the
+            # Snapshot _advance read before the Signal bar was folded into
+            # the indicators (CONTEXT.md "Completed bar"), never the
+            # now-current one.
+            self._decide(symbol, state, bar, "entry", risk, budget, atr=snap.atr)
+        ineligible = sum(1 for s in all_signals if not s.eligible)
+        if ineligible:
+            self._count_decline("entry: ineligible", ineligible)
+        suppressed = len(all_signals) - ineligible - len(admissible)
+        if suppressed > 0:
+            self._count_decline("entry: grade B with grade A present", suppressed)
 
         self.equity_curve.append((self.Time, equity))
         if spy_bar is not None:
@@ -401,8 +410,11 @@ class SublimeResearch(QCAlgorithm):
             rules.above(close, m.daily_sma(rules.SHORT_SMA)))
 
     def _signal(self, symbol, state, bar, snap):
-        """A Phase C Signal, admitted only when the stock is aligned; graded
-        and ranked (rules.stock_aligned, rules.grade, rules.strength)."""
+        """A Phase C Signal, admitted only when the stock is aligned; graded,
+        ranked and marked eligible (rules.stock_aligned, rules.grade,
+        rules.strength, rules.is_eligible), so an ineligible Grade A can
+        never suppress an eligible Grade B (section 3.5 rule 18; ADR 0011
+        point 3; rules.admissible_signals)."""
         ind, close = state.ind, float(bar.Close)
         self.signal_counts["all"] = self.signal_counts.get("all", 0) + 1
         if not rules.stock_aligned(close, snap.last_year_high, ind.weekly_sma(rules.LONG_SMA),
@@ -417,7 +429,10 @@ class SublimeResearch(QCAlgorithm):
                                      rules.VOLUME_WINDOW)[0] or 0.0
         grade = rules.grade(close, snap.all_time_high)
         self.signal_counts[grade] = self.signal_counts.get(grade, 0) + 1
-        return rules.Signal(str(symbol), grade, strength, dollar_volume)
+        ratio = self.split_ratio.get(symbol)
+        volume = rules.median(ind.volumes, rules.VOLUME_WINDOW)[0]
+        eligible = ratio is not None and rules.is_eligible(close * ratio, volume and volume / ratio, ind.bars)
+        return rules.Signal(str(symbol), grade, strength, dollar_volume, eligible)
 
     def _spendable_cash(self):
         cash, debits = self._basis_cash or self._pending_cash
@@ -425,12 +440,13 @@ class SublimeResearch(QCAlgorithm):
 
     # ----- Deciding entries and adds -----------------------------------------
 
-    def _decide(self, symbol, state, bar, kind, risk, budget):
+    def _decide(self, symbol, state, bar, kind, risk, budget, atr=None):
         """One new position, entry or add: sized so its 3 x ATR stop risks
         ``risk`` of equity (rules.position_size), a stop-limit buy one raw
         tick above this bar's high (section 3.6 rule 25), subject to the
-        hard filters (entries), and to the risk ceilings and cash
-        (rules.RiskBudget)."""
+        risk ceilings and cash (rules.RiskBudget). An entry's hard filters
+        are already checked before grading (``_signal``); ``atr`` is its
+        Signal's pre-bar value, or, for an add, the bar just advanced."""
         if risk <= 0:
             self._count_decline(kind + ": market regime")
             return
@@ -441,12 +457,8 @@ class SublimeResearch(QCAlgorithm):
             self._count_decline(kind + ": split ratio unreadable")
             return
         ind = state.ind
-        if kind == "entry":
-            volume = rules.median(ind.volumes, rules.VOLUME_WINDOW)[0]
-            if not rules.is_eligible(float(bar.Close) * ratio, volume and volume / ratio, ind.bars):
-                self._count_decline("entry: ineligible")
-                return
-        atr = ind.atr.value
+        if atr is None:
+            atr = ind.atr.value
         quantity = rules.whole_raw_shares(rules.position_size(budget.equity, risk, atr), ratio)
         if quantity <= 0:
             self._count_decline(kind + ": fewer than one share")
@@ -458,7 +470,7 @@ class SublimeResearch(QCAlgorithm):
             self._count_decline(kind + ": limit below stop at the tick")
             return
         cost = rules.worst_case_cost(quantity, cap, slip, rules.commission_estimate(quantity, cap))
-        asset_risk = state.campaign.open_risk(ind.exit_low()) if kind == "add" else 0.0
+        asset_risk = state.campaign.open_risk() if kind == "add" else 0.0
         accepted, reason = budget.try_reserve(asset_risk, quantity * rules.STOP_ATR * atr, cost)
         if not accepted:
             self._count_decline("{}: {}".format(kind, reason))
@@ -481,7 +493,10 @@ class SublimeResearch(QCAlgorithm):
         its own 3 x ATR stop and the Exit Channel (rules.Campaign). A new
         order rests at that level floored to a raw tick; an amendment only
         ever raises it, and rests below ``bar_low``, the bar it is decided
-        after (rules.exit_stop_price). A cancelled order is re-placed."""
+        after (rules.exit_stop_price). A cancelled order is re-placed. The
+        Campaign records each unit's actual resting price (Campaign.
+        set_resting_stop), since it can sit a raw tick below the theoretical
+        exit_level (README.md, "Deviations")."""
         campaign = state.campaign
         exit_low = state.ind.exit_low()
         ratio = self.split_ratio[campaign.symbol]
@@ -498,6 +513,7 @@ class SublimeResearch(QCAlgorithm):
                 self.order_kind[ticket.OrderId] = "exit"
                 state.unit_tickets[index] = ticket
                 self._exit_prices[ticket.OrderId] = price
+                campaign.set_resting_stop(index, price)
                 continue
             if bar_low is None or ticket.Status == OrderStatus.Filled:
                 continue
@@ -507,6 +523,7 @@ class SublimeResearch(QCAlgorithm):
                 fields.StopPrice, fields.Tag = price, tag
                 ticket.Update(fields)
                 self._exit_prices[ticket.OrderId] = price
+                campaign.set_resting_stop(index, price)
 
     def _close_vanished_campaigns(self):
         """A Campaign whose shares LEAN no longer holds (a delisting LEAN
@@ -608,12 +625,20 @@ class SublimeResearch(QCAlgorithm):
             return
         index = next((i for i, t in enumerate(state.unit_tickets)
                       if t is not None and t.OrderId == order_id), None)
-        if index is None or quantity != campaign.units[index]["quantity"]:
+        if index is None or quantity > campaign.units[index]["quantity"]:
             self.Log("research: ANOMALY: {} exit order {} settled {} shares".format(
                 campaign.symbol, order_id, quantity))
             return
         self._cancel(state.add_ticket)
         state.add_ticket = None
+        if quantity < campaign.units[index]["quantity"]:
+            # A partial fill, then cancelled: reduce the recorded quantity
+            # by exactly what sold, so _maintain_exit_orders re-places the
+            # replacement stop for the shares still held, never for the
+            # original count (README.md, "Deviations"). The ticket stays in
+            # state.unit_tickets so its Canceled status is seen next time.
+            campaign.reduce_unit(index, quantity, price)
+            return
         campaign.close_unit(index, price)
         del state.unit_tickets[index]
         if not campaign.units:

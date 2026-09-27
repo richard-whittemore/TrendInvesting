@@ -466,15 +466,21 @@ def grade(close, prior_all_time_high):
     return "B"
 
 
-Signal = namedtuple("Signal", ["symbol", "grade", "strength", "median_dollar_volume"])
+#: ``eligible`` defaults True: most callers (and every existing test) only
+#: care about grading, not the hard filters.
+Signal = namedtuple("Signal", ["symbol", "grade", "strength", "median_dollar_volume", "eligible"])
+Signal.__new__.__defaults__ = (True,)
 
 
 def admissible_signals(signals):
-    """A Session's Signals in the order they are decided: Grade B only when
-    no Grade A Signal exists (section 3.5 rule 18 [V 01:14:41-01:15:07]; ADR
-    0011 point 3); within a Grade by descending Strength, then descending
-    median dollar volume, then symbol (ADR 0010's tie-breaks)."""
-    signals = list(signals)
+    """A Session's Signals in the order they are decided: an ineligible
+    Signal (rules.is_eligible: price, volume, history floors) is dropped
+    first, so it can never suppress an eligible Grade B; Grade B is then
+    taken only when no Grade A Signal remains (section 3.5 rule 18
+    [V 01:14:41-01:15:07]; ADR 0011 point 3); within a Grade by descending
+    Strength, then descending median dollar volume, then symbol (ADR 0010's
+    tie-breaks)."""
+    signals = [s for s in signals if s.eligible]
     if any(s.grade == "A" for s in signals):
         signals = [s for s in signals if s.grade == "A"]
     return sorted(signals, key=lambda s: (-s.strength, -s.median_dollar_volume, s.symbol))
@@ -553,29 +559,44 @@ class Campaign:
         self._initial_risk = quantity * STOP_ATR * atr
 
     def add_unit(self, fill_price, quantity, atr):
+        stop = initial_stop(fill_price, atr)
+        # resting_stop starts at the initial stop and is kept in sync with
+        # the actual Exit Order price by set_resting_stop, since that order
+        # can rest a raw tick below the theoretical exit_level (README.md
+        # "Deviations").
         self.units.append({"fill_price": fill_price, "quantity": quantity, "atr": atr,
-                           "stop": initial_stop(fill_price, atr)})
+                           "stop": stop, "resting_stop": stop})
 
     def exit_level(self, index, exit_low):
-        """A position's Exit Order level: max(its stop, the Exit Channel)."""
+        """A position's target Exit Order level: max(its stop, the Exit
+        Channel), before main.py places it at a raw tick."""
         stop = self.units[index]["stop"]
         return stop if exit_low is None else max(stop, exit_low)
 
-    def open_risk(self, exit_low):
-        """Money lost if every position exits at its Exit Order level; a
-        position at or above its fill contributes 0 (CONTEXT.md
-        "risk-free")."""
-        return sum(u["quantity"] * max(0.0, u["fill_price"] - self.exit_level(i, exit_low))
-                   for i, u in enumerate(self.units))
+    def set_resting_stop(self, index, price):
+        """Record the price a position's Exit Order actually rests at
+        (main.py's raw-tick floor, and any further tick below the bar it
+        was amended after), for open_risk and add_ready's risk-free check
+        to read instead of the theoretical exit_level (README.md
+        "Deviations")."""
+        self.units[index]["resting_stop"] = price
 
-    def add_ready(self, close, exit_low):
+    def open_risk(self):
+        """Money lost if every position exits at its resting Exit Order
+        price; a position at or above its fill contributes 0 (CONTEXT.md
+        "risk-free")."""
+        return sum(u["quantity"] * max(0.0, u["fill_price"] - u["resting_stop"])
+                   for u in self.units)
+
+    def add_ready(self, close):
         """Whether a further position may be proposed at this close: fewer
-        than the maximum; the first position has no remaining risk (section
-        3.9 rule 40 [M p.56]); and the close is at least 1 ATR above the
-        newest position's fill (rule 39 [V 01:20:45], its ATR at entry)."""
+        than the maximum; the first position's resting Exit Order has no
+        remaining risk (section 3.9 rule 40 [M p.56]); and the close is at
+        least 1 ATR above the newest position's fill (rule 39
+        [V 01:20:45], its ATR at entry)."""
         if len(self.units) >= self.max_positions:
             return False
-        if self.exit_level(0, exit_low) < self.units[0]["fill_price"]:
+        if self.units[0]["resting_stop"] < self.units[0]["fill_price"]:
             return False
         newest = self.units[-1]
         return close >= newest["fill_price"] + ADD_SPACING_ATR * newest["atr"]
@@ -583,6 +604,15 @@ class Campaign:
     def close_unit(self, index, exit_price):
         unit = self.units.pop(index)
         self.realized += unit["quantity"] * (exit_price - unit["fill_price"])
+
+    def reduce_unit(self, index, filled_quantity, exit_price):
+        """A partial fill on the position's Exit Order, then cancelled:
+        realize the shares that sold and reduce the position's recorded
+        quantity by exactly that many, so a replacement stop is never sized
+        for shares no longer held (README.md, "Deviations")."""
+        unit = self.units[index]
+        self.realized += filled_quantity * (exit_price - unit["fill_price"])
+        unit["quantity"] -= filled_quantity
 
     def r_multiple(self):
         """Every closed position's money over the first position's initial

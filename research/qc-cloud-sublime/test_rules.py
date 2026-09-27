@@ -282,6 +282,14 @@ class GradeAndRankingTests(unittest.TestCase):
         self.assertEqual([s.symbol for s in rules.admissible_signals([a1, b1, a2])], ["BBB", "AAA"])
         self.assertEqual([s.symbol for s in rules.admissible_signals([b1])], ["CCC"])
 
+    def test_an_ineligible_grade_a_never_suppresses_an_eligible_grade_b(self):
+        # README.md, "Deviations": the hard filters (rules.is_eligible) are
+        # checked before Grade A's suppression of Grade B, so a Grade A
+        # Signal that fails them can never remove an eligible Grade B one.
+        a1 = rules.Signal("AAA", "A", 5.0, 10.0, eligible=False)
+        b1 = rules.Signal("BBB", "B", 1.0, 10.0, eligible=True)
+        self.assertEqual([s.symbol for s in rules.admissible_signals([a1, b1])], ["BBB"])
+
     def test_ties_break_by_dollar_volume_then_symbol(self):
         s1 = rules.Signal("ZZZ", "A", 1.0, 5.0)
         s2 = rules.Signal("YYY", "A", 1.0, 9.0)
@@ -339,40 +347,55 @@ class CampaignTests(unittest.TestCase):
     def test_initial_stop_is_three_atr_from_the_fill(self):
         campaign = self._campaign()
         self.assertEqual(campaign.units[0]["stop"], 94.0)
-        self.assertEqual(campaign.open_risk(None), 50 * 6.0)
+        self.assertEqual(campaign.open_risk(), 50 * 6.0)
 
-    def test_exit_level_trails_the_20_day_low(self):
+    def test_exit_level_is_the_higher_of_the_stop_and_the_20_day_low(self):
         # [30 p.7-8]: exit on a break of the 4-week low; the initial stop
-        # stays in force below it.
+        # stays in force below it. This is the theoretical level main.py
+        # aims its Exit Order at, before it is placed at a raw tick.
         campaign = self._campaign()
         self.assertEqual(campaign.exit_level(0, 90.0), 94.0)
         self.assertEqual(campaign.exit_level(0, 97.0), 97.0)
-        self.assertEqual(campaign.open_risk(97.0), 50 * 3.0)
-        self.assertEqual(campaign.open_risk(101.0), 0.0)
+
+    def test_open_risk_and_the_risk_free_check_use_the_resting_stop(self):
+        # README.md, "Deviations": the resting Exit Order can sit a raw tick
+        # below the theoretical exit_level (a bar-low adjustment). open_risk
+        # and add_ready's risk-free check must read the actual resting
+        # price, never the higher theoretical one.
+        campaign = self._campaign()
+        campaign.set_resting_stop(0, 99.99)   # exit_level would read 100.0
+        self.assertAlmostEqual(campaign.open_risk(), 50 * 0.01)
+        self.assertFalse(campaign.add_ready(103.0))
+        campaign.set_resting_stop(0, 100.0)
+        self.assertEqual(campaign.open_risk(), 0.0)
+        self.assertTrue(campaign.add_ready(102.0))
 
     def test_add_needs_risk_free_first_position_and_one_atr_profit(self):
         # [M p.56]: only when the first position has no remaining risk;
         # [V 01:20:45]: after the previous one has moved 1 ATR in profit.
         campaign = self._campaign()
-        self.assertFalse(campaign.add_ready(103.0, 99.0))   # not risk-free
-        self.assertFalse(campaign.add_ready(101.9, 100.0))  # risk-free, < 1 ATR
-        self.assertTrue(campaign.add_ready(102.0, 100.0))
+        campaign.set_resting_stop(0, 99.0)
+        self.assertFalse(campaign.add_ready(103.0))   # not risk-free
+        campaign.set_resting_stop(0, 100.0)
+        self.assertFalse(campaign.add_ready(101.9))  # risk-free, < 1 ATR
+        self.assertTrue(campaign.add_ready(102.0))
 
     def test_each_add_is_separately_sized_and_stopped(self):
         # [M p.56]: each addition is a separately sized and stopped position.
         campaign = self._campaign()
         campaign.add_unit(103.0, 40, 2.5)
         self.assertEqual(campaign.units[1], {"fill_price": 103.0, "quantity": 40, "atr": 2.5,
-                                             "stop": 95.5})
+                                             "stop": 95.5, "resting_stop": 95.5})
         self.assertEqual(campaign.units[0]["stop"], 94.0)
+        campaign.set_resting_stop(0, 100.0)
         # The next add is measured from the newest position's fill.
-        self.assertFalse(campaign.add_ready(105.4, 101.0))
-        self.assertTrue(campaign.add_ready(105.5, 101.0))
+        self.assertFalse(campaign.add_ready(105.4))
+        self.assertTrue(campaign.add_ready(105.5))
 
     def test_positions_per_asset_are_capped(self):
         campaign = rules.Campaign("XYZ", 100.0, 50, 2.0, max_positions=2)
         campaign.add_unit(103.0, 40, 2.0)
-        self.assertFalse(campaign.add_ready(200.0, 150.0))
+        self.assertFalse(campaign.add_ready(200.0))
 
     def test_r_multiple_is_all_positions_over_the_first_positions_risk(self):
         campaign = self._campaign()
@@ -381,6 +404,16 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(len(campaign.units), 1)
         campaign.close_unit(0, 106.0)      # +6 x 50 = +300
         self.assertAlmostEqual(campaign.r_multiple(), 220.0 / 300.0)
+
+    def test_reduce_unit_realizes_the_fill_and_shrinks_the_position(self):
+        # main.py "Deviations": a partial fill on a position's Exit Order,
+        # then cancelled, realizes the shares that sold and reduces the
+        # position's recorded quantity by exactly that many, so a
+        # replacement stop is never sized for shares no longer held.
+        campaign = self._campaign()
+        campaign.reduce_unit(0, 20, 96.0)   # 20 of 50 shares sold at 96
+        self.assertEqual(campaign.units[0]["quantity"], 30)
+        self.assertAlmostEqual(campaign.realized, 20 * (96.0 - 100.0))
 
 
 class RiskBudgetTests(unittest.TestCase):

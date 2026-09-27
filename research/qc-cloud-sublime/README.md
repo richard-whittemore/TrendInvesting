@@ -87,7 +87,11 @@ The run covered the top 200 US stocks by dollar volume, with $1M starting capita
 | SPY buy-and-hold, total return | +6.07% | 55% | 0.110 |
 
 - **Campaigns:** 50, of which 26% won. The average win was +3.81R and the average loss −0.77R.
-- **Signals:** 327 (53 Tier A, 152 Tier B), producing 267 orders.
+- **Signals:** 327 Phase C Signals were detected in total. Of those, 122
+  were declined before grading — for the stock not being aligned
+  (`Decline entry: stock not aligned`) or its 63-bar Strength not yet ready
+  (`Decline entry: strength not ready`); see `_signal()` in `main.py`. The
+  remaining 205 were graded: 53 Grade A, 152 Grade B, producing 267 orders.
 - **Late start:** it holds cash from 1998 to 2002, because the prior-year-high and weekly 200-bar rules need about 5 years of history.
 - **By period (CAGR):** 2003–07 +1.92%, 2008–09 −0.85%, 2009–15 +2.44%.
 
@@ -130,7 +134,7 @@ section 3 gives.
 | 8, 13, 4.7: stock alignment | At the Signal: close above last year's high, the weekly 200 SMA and the daily 200 SMA (§4.7's KISS gate). Daily and weekly trend-filter colour green or dark green | DISCLOSED |
 | 13: trend filter [V 00:31:08–00:38:16] | 20-period SMA of closes with 1σ and 2σ bands (population σ). Colour is by closing price | DISCLOSED |
 | 16: at all-time highs [V 00:52:15] | Grade A: the Signal's close is above every earlier high in the available data | PROXY (history starts at the data) |
-| 18: Tier A before Tier B [V 01:14:41] | Grade B is taken only in a Session with no Grade A Signal (ADR 0011 point 3) | PROXY |
+| 18: Grade A before Grade B [V 01:14:41] | Grade B is taken only in a Session with no Grade A Signal, once ineligible Signals are dropped (ADR 0011 point 3) | PROXY |
 | Ranking within a Grade | Strength, (close − close 63 bars earlier) / ATR (Turtle p.29, ADR 0010), then median dollar volume, then symbol | PROXY for "best-performing stocks" [V 00:02:31] |
 | 25: order above the breakout bar's high [M p.55] | Stop-limit buy one raw tick above the Signal bar's high, for the next Session only (ADR 0011) | Level DISCLOSED; the offset formula is EXCLUDED, so one tick |
 
@@ -240,6 +244,10 @@ What differs:
    Exit Order, and rests it at least a raw tick below that bar's low
    (`rules.exit_stop_price`). The only effect is on a day that sets the new
    20-bar low: that evening the order rests one tick under the channel.
+   `Campaign.open_risk` and `add_ready`'s risk-free check read that actual
+   resting price (`Campaign.set_resting_stop`), never the higher theoretical
+   `exit_level`, so a position a tick below its fill is never read as
+   risk-free.
 4. **SPY drives the regime from its Adjusted series.** It is subscribed once,
    Adjusted, for the benchmark. Dividends lower earlier Adjusted prices, so
    last year's high reads about one year's dividend yield (≈ 2 %) lower than
@@ -255,6 +263,11 @@ What differs:
 7. **The Sublime filters apply in fixed mode too.** They are strategy rules,
    not universe membership. `research/qc-cloud` skips eligibility in fixed
    mode only to match a Go run.
+8. **A partial fill on an Exit Order, then cancelled, shrinks the position.**
+   `Campaign.reduce_unit` realizes the shares that sold and reduces the
+   recorded quantity by exactly that many, before `_maintain_exit_orders`
+   re-places the replacement stop, so it is never sized for shares no
+   longer held.
 
 ## Local smoke run
 
