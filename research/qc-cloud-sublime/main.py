@@ -274,7 +274,10 @@ class SublimeResearch(QCAlgorithm):
             # rebuilt from a fresh backfill (README.md, "Deviations"). A held
             # or working symbol is never removed, so it never reaches here.
             state = self.symbol_state.get(security.Symbol)
-            if state is None or (self.FIXED_SYMBOLS is None and state.campaign is None):
+            # Keep a state that still owns a working order: coarse selection
+            # can drop a symbol before FineSelectionFunction retains it.
+            if state is None or (self.FIXED_SYMBOLS is None and state.campaign is None
+                                 and state.entry_ticket is None and state.add_ticket is None):
                 self.symbol_state[security.Symbol] = _SymbolState(self)
                 self.split_ratio[security.Symbol] = self._read_split_ratio(security.Symbol)
                 if self.FIXED_SYMBOLS is None:
