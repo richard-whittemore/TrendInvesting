@@ -36,7 +36,7 @@ be, told apart.
 
 ## Cloud result (in-sample, 1998–2015)
 
-The run started with $1M on QuantConnect Cloud and stopped at 2015-12-31, so everything from 2016 on stays held out. Backtest `5ccf134e03ebe76ecd375a13fa733bc8`, 2026-09-27, on this code after the review fixes. It matches the earlier run `e6ac962a864551841220445e4aec451b` on every headline figure.
+The run started with $1M on QuantConnect Cloud and stopped at 2015-12-31, so everything from 2016 on stays held out. Backtest `5ccf134e03ebe76ecd375a13fa733bc8`, 2026-09-27, on this code after the review fixes (rerun as `cc7d4d3302d72234a9e85318e8967a7f` with roll-leg repair: 1 repair, same figures). It matches the earlier run `e6ac962a864551841220445e4aec451b` on every headline figure.
 
 **Read the data coverage first.** QuantConnect's free continuous-futures data covers far fewer markets than the list below suggests:
 - **1998 to April 2007:** only ES has data.
@@ -280,6 +280,13 @@ matched its books. It then re-rolled every Session and stacked positions:
 backtest `75eea7ea` placed 9,920 roll orders and hit the Free plan's cap of
 10,000 orders. The open leg is placed before the Exit Orders, so LEAN fills
 it first on that open.
+
+**A failed roll leg is repaired.** If either roll order ends Invalid, or
+Canceled without filling in full, the market is flagged for repair. At the
+start of each following Session, once none of that market's roll orders is
+still working, the repair closes whatever the old contract still holds, tops
+the new contract up to the Campaign's size, and re-places the Exit Orders.
+The `Rolls` statistic reports the repair count as `repairs=<n>`.
 
 **Roll cost is counted**: the commission on
 both the closing and the reopening market order is added to `roll_commission`

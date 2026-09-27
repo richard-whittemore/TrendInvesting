@@ -217,6 +217,7 @@ class _SymbolState:
     __slots__ = ("n", "entry_channel", "exit_channel", "closes", "bars_seen", "previous_close",
                  "last_bar_date", "campaign", "entry_tickets", "add_ticket", "add_placed",
                  "unit_tickets", "last_high", "last_low", "mapped_symbol", "dollars_per_point", "last_offset",
+                 "roll_repair",
                  "closely_group", "loosely_group", "display_name")
 
     def __init__(self, closely_group, loosely_group, display_name):
@@ -237,6 +238,7 @@ class _SymbolState:
         self.mapped_symbol = None           # the currently tradable dated contract
         self.dollars_per_point = None       # SymbolProperties.ContractMultiplier of mapped_symbol
         self.last_offset = 0.0              # last known back-adjusted minus raw price
+        self.roll_repair = None             # old contract of a roll with a failed leg
         self.closely_group = closely_group
         self.loosely_group = loosely_group
         self.display_name = display_name
@@ -360,6 +362,8 @@ class TurtleFuturesResearch(QCAlgorithm):
         self.total_commission = 0.0
         self.roll_commission = 0.0
         self.roll_count = 0
+        self.roll_repairs = 0
+        self.roll_leg_state = {}            # working roll order id -> (symbol state, old contract)
         # Reconciliation: the Campaigns' own dollar P&L (price distance x
         # quantity x multiplier) against the account's, and fills this
         # script did not place (LEAN's delisting liquidations).
@@ -431,6 +435,8 @@ class TurtleFuturesResearch(QCAlgorithm):
             mapped = future.Mapped
             if mapped is None:
                 continue
+            if state.roll_repair is not None:
+                self._repair_roll(state, future.Symbol)
             held = state.mapped_symbol
             target = rules.roll_target(
                 self.Time.date(), self._contract(held) if held is not None else None,
@@ -505,14 +511,47 @@ class TurtleFuturesResearch(QCAlgorithm):
                 close_ticket = self.MarketOrder(old_mapped, -held,
                                                 tag="roll-close:{}".format(continuous_symbol))
                 self.order_kind[close_ticket.OrderId] = "roll"
+                self.roll_leg_state[close_ticket.OrderId] = (state, old_mapped)
             open_ticket = self.MarketOrder(new_mapped, total_quantity,
                                            tag="roll-open:{}".format(continuous_symbol))
             self.order_kind[open_ticket.OrderId] = "roll"
+            self.roll_leg_state[open_ticket.OrderId] = (state, old_mapped)
             self.roll_count += 1
 
         self._assign_mapped_symbol(state, continuous_symbol, new_mapped)
         if campaign is not None:
             self._maintain_exit_orders(state, None)
+
+    def _repair_roll(self, state, continuous_symbol):
+        """A roll leg that ended Invalid or Canceled with nothing filled
+        leaves the position split from the Campaign's books. Once no roll
+        order is still working, close whatever the old contract still
+        holds and top the new contract up to the Campaign's size, then
+        re-place the Exit Orders. Runs at the start of every Session until
+        the books and the account agree (README.md, "Continuous futures
+        and roll handling")."""
+        old_mapped = state.roll_repair
+        campaign = state.campaign
+        if any(leg_state is state for leg_state, _ in self.roll_leg_state.values()):
+            return
+        state.roll_repair = None
+        held_old = int(self.Portfolio[old_mapped].Quantity)
+        if held_old:
+            ticket = self.MarketOrder(old_mapped, -held_old,
+                                      tag="roll-repair-close:{}".format(continuous_symbol))
+            self.order_kind[ticket.OrderId] = "roll"
+            self.roll_leg_state[ticket.OrderId] = (state, old_mapped)
+        if campaign is None:
+            return
+        target = campaign.direction * campaign.unit_quantity * campaign.unit_count
+        missing = target - int(self.Portfolio[state.mapped_symbol].Quantity)
+        if missing:
+            ticket = self.MarketOrder(state.mapped_symbol, missing,
+                                      tag="roll-repair-open:{}".format(continuous_symbol))
+            self.order_kind[ticket.OrderId] = "roll"
+            self.roll_leg_state[ticket.OrderId] = (state, old_mapped)
+        self.roll_repairs += 1
+        self._maintain_exit_orders(state, None)
 
     def _offset(self, continuous_symbol):
         """Back-adjusted minus raw price of the mapped contract. Channels,
@@ -598,12 +637,10 @@ class TurtleFuturesResearch(QCAlgorithm):
             self._advance(state, bar, bar_date)
 
             if long_breakout or short_breakout:
-                # Faith's own Strength formula (The Turtle Rules p.29) is
-                # "as of day d" on both sides: close[d] and N[d]. state.closes
-                # already includes today's close (folded in by _advance,
-                # above), so N must be state.n's own post-_advance value here
-                # too, not pre_advance_n -- the pre-breakout N the entry
-                # itself is sized and stopped from.
+                # Strength is close(d) and N(d) as Session d's close leaves
+                # them (ADR 0010, as amended): ranking runs after the Session
+                # closes, so both are completed facts. Entry sizing still
+                # uses pre_advance_n (ADR 0005).
                 strength_value, strength_ready = rules.strength(state.closes, state.n.value)
                 if strength_ready:
                     key = str(symbol)
@@ -841,6 +878,12 @@ class TurtleFuturesResearch(QCAlgorithm):
             if kind == "roll":
                 self.roll_commission += fee
 
+        leg = self.roll_leg_state.pop(order_id, None) if status in (
+            OrderStatus.Filled, OrderStatus.Canceled, OrderStatus.Invalid) else None
+        if leg is not None and (status == OrderStatus.Invalid
+                                or int(ticket.QuantityFilled) != int(ticket.Quantity)):
+            leg[0].roll_repair = leg[1]
+
         if status == OrderStatus.Invalid:
             self._release_reservation(order_id)
             self.order_kind.pop(order_id, None)
@@ -1063,7 +1106,8 @@ class TurtleFuturesResearch(QCAlgorithm):
         self._publish("Campaigns", "{} win_rate={} avg_win_R={} avg_loss_R={}".format(
             count, _fmt(win_rate), _fmt(avg_win), _fmt(avg_loss)))
         self._publish("Commission", "{:.2f}".format(self.total_commission))
-        self._publish("Rolls", "{} commission={:.2f}".format(self.roll_count, self.roll_commission))
+        self._publish("Rolls", "{} commission={:.2f} repairs={}".format(
+            self.roll_count, self.roll_commission, self.roll_repairs))
         if self.unavailable_markets:
             self._publish("Markets unavailable", ",".join(sorted(self.unavailable_markets)))
         self._publish("Reconcile", "campaigns=${:,.0f} account=${:,.0f} untracked_fills={}".format(
