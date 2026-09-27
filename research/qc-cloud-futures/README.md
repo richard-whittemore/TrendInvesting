@@ -162,16 +162,26 @@ not one this repository can verify without a live backtest.
 ## Continuous futures and roll handling
 
 Each market is subscribed with `AddFuture(ticker, Resolution.Daily,
-dataMappingMode=DataMappingMode.LastTradingDay,
+dataMappingMode=DataMappingMode.OpenInterest,
 dataNormalizationMode=DataNormalizationMode.BackwardsPanamaCanal)` and
 `future.SetFilter(0, 182)` (`main.py`'s `Initialize`):
 
-- **`DataMappingMode.LastTradingDay`**: LEAN rolls the mapped (tradable)
-  contract forward on the front contract's own last trading day. A simple,
-  deterministic choice; QuantConnect's other modes (`FirstDayMonth`,
-  `OpenInterest`, `OpenInterestAnnual`) roll on a different schedule and are
-  a declared, straightforward Variant to try if the first run's roll
-  frequency or cost looks wrong.
+- **`DataMappingMode.OpenInterest`**: LEAN moves the mapped (tradable)
+  contract forward once the next contract's open interest overtakes the
+  front one's. This is close to Faith's own practice of rolling before
+  expiry, when the new contract becomes the liquid one. An earlier run
+  used `LastTradingDay`, and LEAN force-liquidated 37 expiring positions
+  ("Liquidate from delisting") before the roll could move them. The roll
+  now closes only what is actually held on the old contract, so an
+  already-liquidated position can't be closed twice into the opposite
+  direction.
+- **Orders rest at raw contract prices.** Channels, N and Campaign levels
+  come from the back-adjusted series, but every order rests on the raw
+  mapped contract. Each level has the adjusted-minus-raw offset subtracted
+  on the way out, and each fill price has it added back. Without this,
+  stops and breakouts triggered at the wrong prices: the first cloud run
+  placed a 2003 ES entry near 1,754 when the raw contract traded near
+  1,000.
 - **`DataNormalizationMode.BackwardsPanamaCanal`**: additive back-adjustment.
   True Range and the Donchian channels are absolute price *differences*; an
   additive adjustment preserves those differences across a market's own many

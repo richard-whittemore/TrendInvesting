@@ -305,7 +305,7 @@ class TurtleFuturesResearch(QCAlgorithm):
             try:
                 future = self.AddFuture(
                     ticker, Resolution.Daily, extendedMarketHours=False,
-                    dataMappingMode=DataMappingMode.LastTradingDay,
+                    dataMappingMode=DataMappingMode.OpenInterest,
                     # Back-adjusted (additive/"Panama Canal"): True Range and
                     # the Donchian channels are absolute price differences,
                     # which an additive back-adjustment preserves across
@@ -450,11 +450,16 @@ class TurtleFuturesResearch(QCAlgorithm):
                 self._cancel_ticket(ticket)
             state.unit_tickets = []
             total_quantity = campaign.direction * campaign.unit_quantity * campaign.unit_count
-            close_ticket = self.MarketOrder(old_mapped, -total_quantity,
-                                            tag="roll-close:{}".format(continuous_symbol))
+            # Close what is actually held: an expiring contract LEAN has
+            # already liquidated holds nothing, and a blind close would
+            # open the opposite position.
+            held = int(self.Portfolio[old_mapped].Quantity)
+            if held:
+                close_ticket = self.MarketOrder(old_mapped, -held,
+                                                tag="roll-close:{}".format(continuous_symbol))
+                self.order_kind[close_ticket.OrderId] = "roll"
             open_ticket = self.MarketOrder(new_mapped, total_quantity,
                                            tag="roll-open:{}".format(continuous_symbol))
-            self.order_kind[close_ticket.OrderId] = "roll"
             self.order_kind[open_ticket.OrderId] = "roll"
             self.roll_count += 1
 
