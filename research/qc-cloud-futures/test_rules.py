@@ -524,6 +524,16 @@ class RollTargetTests(unittest.TestCase):
         candidates = [("U8", date(2008, 9, 19), False)]
         self.assertIsNone(rules.roll_target(today, self.HELD, self.HELD, candidates))
 
+    def test_near_expiry_prefers_the_most_open_interest(self):
+        # Silver lists thin serial months between its active ones; rolling
+        # into the nearest (June) rather than the liquid July contract
+        # traded against stale, gapped prices.
+        today = date(2013, 5, 20)
+        held = ("K13", date(2013, 5, 29), True, 900)
+        candidates = [("M13", date(2013, 6, 26), True, 40), ("N13", date(2013, 7, 29), True, 80000),
+                      ("U13", date(2013, 9, 26), True, 9000)]
+        self.assertEqual(rules.roll_target(today, held, held, candidates), "N13")
+
     def test_never_rolls_back_to_an_earlier_mapped_contract(self):
         mapped = ("H8", date(2008, 3, 21), True)
         self.assertIsNone(rules.roll_target(self.TODAY, self.HELD, mapped, []))

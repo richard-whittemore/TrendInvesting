@@ -787,18 +787,22 @@ def cagr_over_max_drawdown(cagr, mdd):
 def roll_target(today, held, mapped, candidates, roll_days=ROLL_DAYS_BEFORE_EXPIRY):
     """The contract to hold next, or ``None`` to keep the held one.
 
-    Each contract is ``(key, expiry_date, priced)``. With nothing held,
-    take LEAN's mapped contract. Otherwise follow LEAN's mapping once it
-    points at a later-dated contract that already has a price; and within
-    ``roll_days`` of the held contract's expiry, roll to the nearest
-    later-dated priced contract among ``candidates`` rather than be caught
-    by expiry."""
+    Each contract is ``(key, expiry_date, priced)`` or ``(key,
+    expiry_date, priced, open_interest)``. With nothing held, take LEAN's
+    mapped contract. Otherwise follow LEAN's mapping once it points at a
+    later-dated contract that already has a price; and within
+    ``roll_days`` of the held contract's expiry, roll to the later-dated
+    priced contract with the most open interest (nearest expiry on a tie),
+    rather than be caught by expiry or land in a thin serial month."""
     if held is None:
         return mapped[0] if mapped is not None else None
-    held_key, held_expiry, _ = held
+    held_key, held_expiry = held[0], held[1]
     if mapped is not None and mapped[0] != held_key and mapped[1] > held_expiry and mapped[2]:
         return mapped[0]
     if (held_expiry - today).days > roll_days:
         return None
-    later = sorted((c for c in candidates if c[1] > held_expiry and c[2]), key=lambda c: c[1])
-    return later[0][0] if later else None
+    later = [c for c in candidates if c[1] > held_expiry and c[2]]
+    if not later:
+        return None
+    open_interest = lambda c: c[3] if len(c) > 3 else 0
+    return min(later, key=lambda c: (-open_interest(c), c[1]))[0]

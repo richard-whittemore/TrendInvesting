@@ -358,6 +358,7 @@ class TurtleFuturesResearch(QCAlgorithm):
         # quantity x multiplier) against the account's, and fills this
         # script did not place (LEAN's delisting liquidations).
         self.campaign_dollars = 0.0
+        self.campaign_dollars_by_market = {}
         self.untracked_fills = 0
         # Declines are counted, not logged: the Free plan allows 10 KB of
         # log per backtest (research/qc-cloud's own documented limit).
@@ -439,10 +440,12 @@ class TurtleFuturesResearch(QCAlgorithm):
                 self._roll_market(state, future.Symbol, held, target)
 
     def _contract(self, symbol):
-        """``(symbol, expiry date, priced)`` for ``rules.roll_target``."""
+        """``(symbol, expiry date, priced, open interest)`` for
+        ``rules.roll_target``."""
         security = self.Securities[symbol] if self.Securities.ContainsKey(symbol) else None
         priced = security is not None and security.HasData and float(security.Price) > 0
-        return (symbol, symbol.ID.Date.date(), priced)
+        open_interest = float(security.OpenInterest) if security is not None else 0.0
+        return (symbol, symbol.ID.Date.date(), priced, open_interest)
 
     def _assign_mapped_symbol(self, state, continuous_symbol, mapped):
         state.mapped_symbol = mapped
@@ -947,8 +950,11 @@ class TurtleFuturesResearch(QCAlgorithm):
                               campaign.direction, units=1)
         before = campaign.realized_price_pnl
         campaign.close_units([unit_index], price)
-        self.campaign_dollars += ((campaign.realized_price_pnl - before) * campaign.unit_quantity
-                                  * (state.dollars_per_point or 0.0))
+        dollars = ((campaign.realized_price_pnl - before) * campaign.unit_quantity
+                   * (state.dollars_per_point or 0.0))
+        self.campaign_dollars += dollars
+        root = str(continuous_symbol).lstrip("/")
+        self.campaign_dollars_by_market[root] = self.campaign_dollars_by_market.get(root, 0.0) + dollars
         del state.unit_tickets[unit_index]
         if not campaign.units:
             r_multiple = campaign.r_multiple()
@@ -992,6 +998,8 @@ class TurtleFuturesResearch(QCAlgorithm):
             self.campaign_dollars,
             float(self.Portfolio.TotalPortfolioValue) - self.STARTING_CASH + self.total_commission,
             self.untracked_fills))
+        for market, dollars in sorted(self.campaign_dollars_by_market.items()):
+            self._publish("Campaign $ " + market, "{:.0f}".format(dollars))
         self._publish("Declines", sum(self.decline_counts.values()))
         for reason, count in sorted(self.decline_counts.items()):
             self._publish("Decline " + reason, count)
