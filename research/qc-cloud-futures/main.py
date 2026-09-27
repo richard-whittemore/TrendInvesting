@@ -216,7 +216,7 @@ class _SymbolState:
 
     __slots__ = ("n", "entry_channel", "exit_channel", "closes", "bars_seen", "previous_close",
                  "last_bar_date", "campaign", "entry_tickets", "add_ticket", "add_placed",
-                 "unit_tickets", "last_high", "last_low", "mapped_symbol", "dollars_per_point",
+                 "unit_tickets", "last_high", "last_low", "mapped_symbol", "dollars_per_point", "last_offset",
                  "closely_group", "loosely_group", "display_name")
 
     def __init__(self, closely_group, loosely_group, display_name):
