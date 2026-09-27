@@ -65,7 +65,19 @@ def strip_source(source):
     tree = ast.parse(source)
     _strip_docstrings(tree)
     ast.fix_missing_locations(tree)
-    return ast.unparse(tree)
+    return _compact_indentation(ast.unparse(tree))
+
+
+def _compact_indentation(source):
+    """Re-indent ``ast.unparse`` output at one space per level instead of
+    four. Safe because ``ast.unparse`` writes one statement per line and
+    renders every string with ``repr`` (no literal newlines inside a
+    string), so leading spaces are always indentation."""
+    lines = []
+    for line in source.split("\n"):
+        stripped = line.lstrip(" ")
+        lines.append(" " * ((len(line) - len(stripped)) // 4) + stripped)
+    return "\n".join(lines)
 
 
 def build():

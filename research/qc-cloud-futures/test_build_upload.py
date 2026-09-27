@@ -39,6 +39,13 @@ class BuildUploadTests(unittest.TestCase):
         source = (DIST / "rules.py").read_text()
         compile(source, str(DIST / "rules.py"), "exec")
 
+    def test_indentation_is_compacted_to_one_space_per_level(self):
+        # Four-space indentation alone costs thousands of characters
+        # against the Free-plan limit; one space per level is still valid.
+        source = "class A:\n    def f(self):\n        if self:\n            return 'a    b'\n"
+        self.assertEqual(build_upload.strip_source(source),
+                         "class A:\n\n def f(self):\n  if self:\n   return 'a    b'")
+
     def test_full_rules_suite_passes_against_the_built_rules_py(self):
         # Run test_rules.py's own, unmodified suite against dist/rules.py,
         # never the original: copy both into an isolated temporary
