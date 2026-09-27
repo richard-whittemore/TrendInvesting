@@ -125,9 +125,10 @@ class _SymbolState:
 
     __slots__ = ("ind", "setup", "campaign", "entry_ticket", "add_ticket", "unit_tickets")
 
-    def __init__(self):
-        self.ind = rules.Indicators()
-        self.setup = rules.FourPhaseSetup()
+    def __init__(self, algo):
+        self.ind = rules.Indicators(algo.BREAKOUT_CHANNEL)
+        self.setup = rules.FourPhaseSetup(retest_atr=algo.RETEST_ATR, level_rule=algo.BREAKOUT_LEVEL,
+                                          base_rule=algo.BASE_RULE)
         self.campaign = None
         self.entry_ticket = None
         self.add_ticket = None
@@ -144,6 +145,16 @@ class SublimeResearch(QCAlgorithm):
 
     UNIVERSE_SIZE = 200
     STARTING_CASH = 1_000_000.0
+    # Sensitivity variants (README.md, "Sensitivity variants"). Each default
+    # is the control; a variant run changes only the constants its row lists.
+    UNIVERSE_SKIP = 0           # the largest N by dollar volume left out
+    MAX_SHARE_PRICE = None      # the other reading of [M p.54]'s "uber expensive": a raw share-price cap
+    BREAKOUT_CHANNEL = rules.BREAKOUT_CHANNEL
+    BREAKOUT_LEVEL = rules.LEVEL_CHANNEL_AND_LAST_YEAR
+    BASE_RULE = rules.BASE_NO_NEW_CHANNEL_HIGH
+    RETEST_ATR = rules.RETEST_ATR
+    MIN_HISTORY_BARS = rules.MIN_HISTORY_BARS
+    RISK_UPPER_AT_SPY_ATH = False
     # A tuple of tickers replaces the monthly universe (local runs; local
     # data has no universe files). The span is (year, month, day); None for
     # END_DATE means today.
@@ -228,9 +239,10 @@ class SublimeResearch(QCAlgorithm):
             return Universe.Unchanged
         self._last_eligibility_month = current
         filtered = [c for c in coarse
-                    if c.HasFundamentalData and c.Price >= 5.0 and c.DollarVolume >= 5_000_000.0]
+                    if c.HasFundamentalData and c.Price >= 5.0 and c.DollarVolume >= 5_000_000.0
+                    and (self.MAX_SHARE_PRICE is None or c.Price <= self.MAX_SHARE_PRICE)]
         filtered.sort(key=lambda c: c.DollarVolume, reverse=True)
-        return [c.Symbol for c in filtered[:self.UNIVERSE_SIZE]]
+        return [c.Symbol for c in filtered[self.UNIVERSE_SKIP:self.UNIVERSE_SKIP + self.UNIVERSE_SIZE]]
 
     def FineSelectionFunction(self, fine):
         selected = [f.Symbol for f in fine
@@ -257,8 +269,16 @@ class SublimeResearch(QCAlgorithm):
             security.SetSlippageModel(self.slippage_model)
             security.SetFeeModel(self.fee_model)
             security.SetFillModel(self.fill_model)
-            if security.Symbol not in self.symbol_state:
-                self.symbol_state[security.Symbol] = _SymbolState()
+            # A symbol re-entering the universe missed every bar and split
+            # while it was out, so its indicators, Setup and split ratio are
+            # rebuilt from a fresh backfill (README.md, "Deviations"). A held
+            # or working symbol is never removed, so it never reaches here.
+            state = self.symbol_state.get(security.Symbol)
+            # Keep a state that still owns a working order: coarse selection
+            # can drop a symbol before FineSelectionFunction retains it.
+            if state is None or (self.FIXED_SYMBOLS is None and state.campaign is None
+                                 and state.entry_ticket is None and state.add_ticket is None):
+                self.symbol_state[security.Symbol] = _SymbolState(self)
                 self.split_ratio[security.Symbol] = self._read_split_ratio(security.Symbol)
                 if self.FIXED_SYMBOLS is None:
                     self._warm_up_new_symbol(security.Symbol)
@@ -356,11 +376,14 @@ class SublimeResearch(QCAlgorithm):
                 if signal is not None:
                     signals[signal.symbol] = (symbol, state, bar, signal, snap)
 
-        risk = self._risk_fraction()
+        at_ath = self.RISK_UPPER_AT_SPY_ATH and rules.printing_all_time_highs(
+            self.market.high_20.extreme()[0], self.market.all_time_high)
+        risk = self._risk_fraction(at_ath)
         equity = float(self.Portfolio.TotalPortfolioValue)
         open_risk = sum(st.campaign.open_risk()
                         for st in self.symbol_state.values() if st.campaign is not None)
-        budget = rules.RiskBudget(equity, open_risk, self._spendable_cash())
+        daily, aggregate = rules.risk_ceilings(at_ath, risk == rules.RISK_FULL_BLOOM_AT_ATH)
+        budget = rules.RiskBudget(equity, open_risk, self._spendable_cash(), daily, aggregate)
         for symbol, state, bar in adds:
             self._decide(symbol, state, bar, "add", risk, budget)
         all_signals = [entry[3] for entry in signals.values()]
@@ -391,13 +414,14 @@ class SublimeResearch(QCAlgorithm):
         high, low, close = float(bar.High), float(bar.Low), float(bar.Close)
         if not state.ind.advance(bar_date, high, low, close, float(bar.Volume)):
             return None
-        signal = state.setup.step(high, low, close, snap.atr, snap.prior_55_high, snap.prior_20_high,
+        signal = state.setup.step(high, low, close, snap.atr, snap.prior_channel_high, snap.prior_20_high,
                                   snap.last_year_high, active=state.campaign is None
                                   and state.entry_ticket is None)
         return snap if signal else None
 
-    def _risk_fraction(self):
-        """Per-position risk from the S&P regime (rules.market_risk_fraction)."""
+    def _risk_fraction(self, at_ath=False):
+        """Per-position risk from the S&P regime (rules.market_risk_fraction);
+        ``at_ath`` only in the RISK_UPPER_AT_SPY_ATH variant."""
         m = self.market
         close = m.previous_close
         if close is None:
@@ -407,7 +431,7 @@ class SublimeResearch(QCAlgorithm):
             rules.monthly_regime(close, high, low),
             rules.above(close, m.weekly_sma(rules.LONG_SMA)), rules.above(close, m.weekly_sma(rules.MID_SMA)),
             rules.above(close, m.daily_sma(rules.LONG_SMA)), rules.above(close, m.daily_sma(rules.MID_SMA)),
-            rules.above(close, m.daily_sma(rules.SHORT_SMA)))
+            rules.above(close, m.daily_sma(rules.SHORT_SMA)), at_ath)
 
     def _signal(self, symbol, state, bar, snap):
         """A Phase C Signal, admitted only when the stock is aligned; graded,
@@ -431,7 +455,8 @@ class SublimeResearch(QCAlgorithm):
         self.signal_counts[grade] = self.signal_counts.get(grade, 0) + 1
         ratio = self._split_ratio_for(symbol)
         volume = rules.median(ind.volumes, rules.VOLUME_WINDOW)[0]
-        eligible = ratio is not None and rules.is_eligible(close * ratio, volume and volume / ratio, ind.bars)
+        eligible = ratio is not None and rules.is_eligible(close * ratio, volume and volume / ratio, ind.bars,
+                                                           self.MIN_HISTORY_BARS)
         return rules.Signal(str(symbol), grade, strength, dollar_volume, eligible)
 
     def _split_ratio_for(self, symbol):
@@ -673,6 +698,10 @@ class SublimeResearch(QCAlgorithm):
         self.Log("research: {} = {}".format(key, value))
 
     def OnEndOfAlgorithm(self):
+        # The run's variant switches, so a result names its configuration.
+        self._publish("Config", "n={} skip={} maxpx={} ch={} lvl={} base={} rt={} hist={} ath={}".format(
+            self.UNIVERSE_SIZE, self.UNIVERSE_SKIP, self.MAX_SHARE_PRICE, self.BREAKOUT_CHANNEL, self.BREAKOUT_LEVEL,
+            self.BASE_RULE, self.RETEST_ATR, self.MIN_HISTORY_BARS, self.RISK_UPPER_AT_SPY_ATH))
         self._log_span("OVERALL", self.equity_curve)
         for name, (start, end) in self.regime_windows.items():
             self._log_span("REGIME " + name, [(t, e) for t, e in self.equity_curve if start <= t.date() < end])

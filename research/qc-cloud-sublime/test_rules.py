@@ -155,6 +155,24 @@ class MarketRegimeTests(unittest.TestCase):
         self.assertEqual(rules.market_risk_fraction(None, True, True, True, True, True), 0.0)
         self.assertEqual(rules.market_risk_fraction("bull", None, True, True, True, True), 0.0)
 
+    def test_spy_at_an_all_time_high_in_full_bloom_is_the_upper_end(self):
+        # [R]: the top of each range when the S&P prints all-time highs and
+        # is in full bloom; the lower end otherwise.
+        self.assertEqual(rules.market_risk_fraction("bull", True, True, True, True, True,
+                                                    at_all_time_high=True), 0.02)
+        self.assertEqual(rules.market_risk_fraction("bull", True, False, True, True, True,
+                                                    at_all_time_high=True), 0.005)
+        self.assertEqual(rules.risk_ceilings(False, False), (0.04, 0.10))
+        self.assertEqual(rules.risk_ceilings(True, True), (0.08, 0.20))
+        # [R]'s upper end needs BOTH an all-time high and full bloom.
+        self.assertEqual(rules.risk_ceilings(True, False), (0.04, 0.10))
+        self.assertEqual(rules.risk_ceilings(False, True), (0.04, 0.10))
+
+    def test_printing_all_time_highs_means_one_within_the_last_20_bars(self):
+        self.assertTrue(rules.printing_all_time_highs(120.0, 120.0))
+        self.assertFalse(rules.printing_all_time_highs(119.0, 120.0))
+        self.assertFalse(rules.printing_all_time_highs(None, 120.0))
+
     def test_above_is_none_when_not_ready(self):
         self.assertIsNone(rules.above(10.0, None))
         self.assertTrue(rules.above(10.0, 9.0))
@@ -266,6 +284,44 @@ class FourPhaseSetupTests(unittest.TestCase):
         self.assertEqual((setup.base_length, setup.retest_atr, setup.cancel_atr, setup.window),
                          (55, 1.0, 3.0, 55))
 
+    def test_default_rules_are_the_control(self):
+        setup = rules.FourPhaseSetup()
+        self.assertEqual((setup.level_rule, setup.base_rule),
+                         (rules.LEVEL_CHANNEL_AND_LAST_YEAR, rules.BASE_NO_NEW_CHANNEL_HIGH))
+
+    def test_last_year_level_ignores_the_channel(self):
+        # README.md "Sensitivity variants": the webinar's breakout is a move
+        # above last calendar year's high [V 00:45:49-00:46:24].
+        setup = rules.FourPhaseSetup(base_length=3, retest_atr=1.0, cancel_atr=3.0, window=10,
+                                     level_rule=rules.LEVEL_LAST_YEAR)
+        for _ in range(3):
+            setup.step(99.0, 98.0, 98.5, self.ATR, 100.0, 99.5, 99.0)
+        # Close 99.5 is above last year's high (99) but not the channel (100).
+        setup.step(99.8, 98.5, 99.5, self.ATR, 100.0, 99.5, 99.0)
+        self.assertEqual(setup.phase, rules.FourPhaseSetup.BREAKOUT)
+        self.assertEqual(setup.level, 99.0)
+
+    def test_closes_below_level_base_survives_new_channel_highs(self):
+        # A rally inside the range sets new channel highs but stays below
+        # the level (last year's high, 110): it is still consolidation.
+        setup = rules.FourPhaseSetup(base_length=3, retest_atr=1.0, cancel_atr=3.0, window=10,
+                                     base_rule=rules.BASE_CLOSES_BELOW_LEVEL)
+        for i in range(3):
+            setup.step(101.0 + i, 99.0, 100.5 + i, self.ATR, 100.0 + i, 100.0 + i, 110.0)
+        self.assertEqual(setup.sessions_in_base, 3)
+        setup.step(111.0, 108.0, 110.5, self.ATR, 103.0, 103.0, 110.0)
+        self.assertEqual(setup.phase, rules.FourPhaseSetup.BREAKOUT)
+        self.assertEqual(setup.level, 110.0)
+
+    def test_closes_below_level_base_resets_on_a_close_above_the_level(self):
+        setup = rules.FourPhaseSetup(base_length=3, retest_atr=1.0, cancel_atr=3.0, window=10,
+                                     base_rule=rules.BASE_CLOSES_BELOW_LEVEL)
+        setup.step(99.0, 98.0, 98.5, self.ATR, 100.0, 99.5, 100.0)
+        setup.step(101.0, 98.0, 100.5, self.ATR, 100.0, 99.5, 100.0)
+        self.assertEqual(setup.sessions_in_base, 0)
+        setup.step(99.0, 98.0, 98.5, self.ATR, None, None, None)
+        self.assertEqual(setup.sessions_in_base, 0)
+
 
 class GradeAndRankingTests(unittest.TestCase):
     def test_grade_a_is_a_close_above_every_earlier_high(self):
@@ -311,6 +367,7 @@ class EligibilityTests(unittest.TestCase):
         self.assertFalse(rules.is_eligible(19.99, 1_000_000, 1260))
         self.assertFalse(rules.is_eligible(20.0, 999_999, 1260))
         self.assertFalse(rules.is_eligible(20.0, 1_000_000, 1259))
+        self.assertTrue(rules.is_eligible(20.0, 1_000_000, 504, min_history_bars=504))
 
     def test_median_of_an_even_window(self):
         self.assertEqual(rules.median([4.0, 1.0, 3.0, 2.0], 4), (2.5, True))
@@ -458,11 +515,19 @@ class IndicatorsTests(unittest.TestCase):
         for i in range(60):
             ind.advance(date.fromordinal(start + i), 10.0 + i, 9.0 + i, 9.5 + i, 1000.0)
         snap = ind.snapshot(date.fromordinal(start + 60))
-        self.assertEqual(snap.prior_55_high, 69.0)
+        self.assertEqual(snap.prior_channel_high, 69.0)
         self.assertEqual(snap.prior_20_high, 69.0)
         self.assertEqual(snap.all_time_high, 69.0)
         self.assertEqual(ind.bars, 60)
         self.assertEqual(ind.exit_low(), 49.0)
+
+    def test_breakout_channel_length_is_a_parameter(self):
+        ind = rules.Indicators(breakout_channel=3)
+        start = date(2024, 1, 1).toordinal()
+        for i, high in enumerate((50.0, 12.0, 11.0, 10.0)):
+            ind.advance(date.fromordinal(start + i), high, 9.0, 9.5, 1000.0)
+        self.assertEqual(ind.snapshot(date.fromordinal(start + 4)).prior_channel_high, 12.0)
+        self.assertEqual(rules.Indicators().high_channel.length, 55)
 
     def test_a_bar_dated_on_or_before_the_last_is_ignored(self):
         ind = rules.Indicators()
