@@ -429,10 +429,20 @@ class SublimeResearch(QCAlgorithm):
                                      rules.VOLUME_WINDOW)[0] or 0.0
         grade = rules.grade(close, snap.all_time_high)
         self.signal_counts[grade] = self.signal_counts.get(grade, 0) + 1
-        ratio = self.split_ratio.get(symbol)
+        ratio = self._split_ratio_for(symbol)
         volume = rules.median(ind.volumes, rules.VOLUME_WINDOW)[0]
         eligible = ratio is not None and rules.is_eligible(close * ratio, volume and volume / ratio, ind.bars)
         return rules.Signal(str(symbol), grade, strength, dollar_volume, eligible)
+
+    def _split_ratio_for(self, symbol):
+        """The cached split ratio, refreshed by one retry read when it is
+        still unset (a transient History failure at OnSecuritiesChanged must
+        not permanently suppress the symbol's eligibility or sizing;
+        README.md, "Deviations")."""
+        ratio = self.split_ratio.get(symbol)
+        if ratio is None:
+            ratio = self.split_ratio[symbol] = self._read_split_ratio(symbol)
+        return ratio
 
     def _spendable_cash(self):
         cash, debits = self._basis_cash or self._pending_cash
@@ -450,9 +460,7 @@ class SublimeResearch(QCAlgorithm):
         if risk <= 0:
             self._count_decline(kind + ": market regime")
             return
-        if self.split_ratio.get(symbol) is None:
-            self.split_ratio[symbol] = self._read_split_ratio(symbol)
-        ratio = self.split_ratio[symbol]
+        ratio = self._split_ratio_for(symbol)
         if ratio is None:
             self._count_decline(kind + ": split ratio unreadable")
             return
@@ -521,9 +529,13 @@ class SublimeResearch(QCAlgorithm):
             if price > self._exit_prices.get(ticket.OrderId, 0.0) + 1e-12:
                 fields = UpdateOrderFields()
                 fields.StopPrice, fields.Tag = price, tag
-                ticket.Update(fields)
-                self._exit_prices[ticket.OrderId] = price
-                campaign.set_resting_stop(index, price)
+                response = ticket.Update(fields)
+                # LEAN can reject an amendment (fail closed: never record a
+                # resting stop that was not actually accepted). The order
+                # keeps resting at its last recorded price on a rejection.
+                if getattr(response, "IsSuccess", False):
+                    self._exit_prices[ticket.OrderId] = price
+                    campaign.set_resting_stop(index, price)
 
     def _close_vanished_campaigns(self):
         """A Campaign whose shares LEAN no longer holds (a delisting LEAN

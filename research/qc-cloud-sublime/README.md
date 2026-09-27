@@ -268,6 +268,15 @@ What differs:
    recorded quantity by exactly that many, before `_maintain_exit_orders`
    re-places the replacement stop, so it is never sized for shares no
    longer held.
+9. **A cached split ratio is refreshed by one retry read when unset.**
+   `_split_ratio_for` re-reads it in `_signal` and `_decide` alike, so a
+   transient `History` failure at `OnSecuritiesChanged` cannot permanently
+   suppress a symbol's eligibility or sizing.
+10. **A rejected Exit Order amendment leaves the resting stop unchanged.**
+    `_maintain_exit_orders` only records the new price
+    (`Campaign.set_resting_stop`) once `ticket.Update`'s response reports
+    success; open_risk and add_ready never rely on a stop that LEAN did not
+    actually place.
 
 ## Local smoke run
 
