@@ -24,13 +24,15 @@ directions and for futures' own contract mechanics from the start, and
 
 **No market data is committed to this repository.** This folder is text
 files only; QuantConnect supplies the price history when you run a backtest
-on their servers. This work was done, and this README written, without
-fetching any market data or any external documentation -- every QuantConnect
-API name below is written from this repository's own prior verified use of
-LEAN's Python API (`research/qc-cloud/main.py`, `adapter/lean/`) and this
-project's best understanding of LEAN's documented continuous-futures
-support, not from a live lookup. "Uncertain about the API", below, names
-every place that could be wrong, and how to tell.
+on their servers. The original version of this script and README was
+written without fetching any market data or any external documentation --
+every QuantConnect API name was drawn from this repository's own prior
+verified use of LEAN's Python API (`research/qc-cloud/main.py`,
+`adapter/lean/`) and this project's best understanding of LEAN's documented
+continuous-futures support, not from a live lookup. The cloud result below
+records that this has since compiled and run; "Uncertain about the API"
+still names what was originally uncertain and how each item was, or would
+be, told apart.
 
 ## Cloud result (in-sample, 1998–2015)
 
@@ -216,11 +218,11 @@ dataNormalizationMode=DataNormalizationMode.BackwardsPanamaCanal)` and
   - LEAN's mapping for ES moved only on the last trading day, so the roll-close never filled and LEAN liquidated the position at delisting.
   - QuantConnect's data for some contracts (silver K13, for example) stops weeks before expiry.
   - A price counts as fresh when its bar is at most 5 days old. Offsets are computed from fresh raw prices only.
-- **Back-adjusted prices can be zero or negative.** HO and ZS run below zero in 2007. The rule core accepts any finite level; `main.py` still refuses an order whose *raw* stop is at or below zero.
+- **Back-adjusted prices can be zero or negative.** HO and ZS run below zero in 2007. The rule core accepts any finite level; `main.py` still refuses an order whose *raw* stop is at or below zero. `_offset` does not treat a zero *adjusted* price as unavailable either, for the same reason -- only the raw mapped contract's own freshness decides that.
 - **Reconciliation.**
   - `Reconcile` compares the Campaigns' own dollar P&L (price distance × quantity × multiplier) with the account's gross P&L.
   - `Campaign $ <market>` gives the same figure per market.
-  - `untracked_fills` counts fills this script did not place, such as LEAN's delisting liquidations.
+  - `untracked_fills` counts fills this script did not place, such as LEAN's delisting liquidations; `main.py`'s own liquidations (an ANOMALY decline, an orphaned Add, a second same-bar entry) are tagged `order_kind` `"liquidate"` and excluded, exactly as a `"roll"`-tagged fill is.
   - `EXCLUDED_MARKETS` drops markets for a diagnostic run.
 
 - **`DataNormalizationMode.BackwardsPanamaCanal`**: additive back-adjustment.
@@ -263,14 +265,17 @@ never per-Unit, a deliberate simplification to keep the roll's own
 commission and order count small and to keep this script's own code simple,
 since Faith's Units are a position-*sizing* construct, not an execution
 requirement that the roll transaction itself must preserve. Each Unit's own
-resting Exit Order is then re-placed on the new contract at its existing
-(unchanged) stop level -- the stop levels themselves need no translation
-between contracts, because the back-adjusted continuous series and the
-currently-mapped contract's own raw price are, by the back-adjustment
-convention, identical for the *current*, most-recent segment (the
-adjustment is pushed into the historical segments behind older rolls, never
-into the present one). **This is an assumption this repository cannot
-verify without a live run** (see "Uncertain about the API").
+resting Exit Order is then re-placed at its existing (unchanged)
+back-adjusted stop level, translated to whichever contract now holds the
+position by the same adjusted-minus-raw offset every other level crosses
+(see "Orders rest at raw contract prices", above) -- but only once the
+account's own holding on the new contract actually matches the Campaign's
+total Unit count. Neither market order is guaranteed to fill: on an
+unfilled or rejected leg (thin or stale data), the Campaign's Exit Orders
+are instead re-instated on whichever contract still holds the matching
+quantity, and the next Session's own `roll_target` call retries the whole
+roll, rather than move a stop onto a contract this Campaign does not, or no
+longer, actually hold.
 
 **Roll cost is counted**: the commission on
 both the closing and the reopening market order is added to `roll_commission`
@@ -298,20 +303,18 @@ similarly modelled in `rules.py`).
 ## Start date
 
 `TurtleFuturesResearch.START_DATE` is set to `(1998, 1, 1)` -- the same
-provisional figure `research/qc-cloud` uses for its own equity history --
-**as a placeholder, not a verified figure**. This repository has not run a
-QuantConnect backtest and cannot query QuantConnect's own futures data
-coverage without network access, which this work was expressly asked not to
-do. **On the first cloud run, check each market's own actual data start**
-(QuantConnect's own project data explorer, or simply how far back each
-`AddFuture` subscription actually delivers bars) and set `START_DATE` to the
-true earliest date the run's own markets support, then report that date
-back rather than trusting this placeholder. A market whose own history
-starts later than the run's `START_DATE` is not a failure: `WARMUP_BARS`
-and the ordinary evaluate-then-add discipline mean it simply is not ready to
-trade (no breakout, no N) until it has accumulated enough of its own bars,
-exactly as a stock added to the equity Baseline's universe mid-run is
-handled there.
+provisional figure `research/qc-cloud` uses for its own equity history. The
+first cloud run (`e6ac962a864551841220445e4aec451b`, see "Cloud result"
+above) has since reported each market's own actual data start: only ES has
+data before April 2007, most other markets start mid-2007, HG/SI/GC start
+in 2012-13, and SB/KC/CC/CT never traded on QuantConnect's Free plan.
+`START_DATE` stays `1998` regardless, because a market whose own history
+starts later is not a failure: `WARMUP_BARS` and the ordinary
+evaluate-then-add discipline mean it simply is not ready to trade (no
+breakout, no N) until it has accumulated enough of its own bars, exactly as
+a stock added to the equity Baseline's universe mid-run is handled there --
+this is also why 1998-2007 is a single-market S&P Turtle rather than a
+diversified futures test (see "Cloud result").
 
 ## Files
 
@@ -443,52 +446,60 @@ budget). The keys this script adds:
    market data to run LEAN against even if there were. Only `test_rules.py`
    (pure Python, no LEAN) and `python3 -m py_compile` (syntax only, no
    QuantConnect imports resolved) can run locally; `make research-test`
-   runs both. **The owner's first QuantConnect Cloud backtest is the real
-   test** of every API call this file makes.
+   runs both. The recorded backtest (see "Cloud result", above) is the real
+   test of every API call this file makes, and it compiled and ran.
 
 ## Uncertain about the API
 
-Everything below is written from this repository's own prior confirmed
-LEAN usage and its best understanding of LEAN's documented Python API,
-without a live QuantConnect session or network access to verify it. If the
-first cloud run's compile step fails, look here first, in roughly the order
-a compile error is likely to name them:
+Everything below was written, before the first cloud run, from this
+repository's own prior confirmed LEAN usage and its best understanding of
+LEAN's documented Python API, without a live QuantConnect session or
+network access to verify it. The recorded backtest (see "Cloud result",
+above) has since compiled and run this file as committed, confirming the
+items below it exercised; each entry says so. If a future change to this
+file's QuantConnect API calls fails to compile, this list is still the
+right place to start:
 
 1. **`FutureFillModel`'s exact class name and namespace.** This script
    subclasses it (`main.py`'s `_stop_limit_fill_model`) by direct analogy
-   with `research/qc-cloud`'s own confirmed `EquityFillModel` subclass. If
-   QuantConnect's Python bindings expose it under a different name, the
-   compile step will name it; substitute the correct class and keep the
-   method bodies (`StopMarketFill`/`MarketFill`/`StopLimitFill`) unchanged,
-   since their logic does not depend on the base class's name.
+   with `research/qc-cloud`'s own confirmed `EquityFillModel` subclass.
+   **Confirmed**: the recorded backtest compiled this subclass.
 2. **`AddFuture`'s exact keyword names** (`dataMappingMode`,
    `dataNormalizationMode`, `extendedMarketHours`) and whether
    `DataNormalizationMode.BackwardsPanamaCanal` and
-   `DataMappingMode.LastTradingDay` are the exact enum member spellings.
+   `DataMappingMode.OpenInterest` are the exact enum member spellings.
+   **Confirmed**: the recorded backtest ran with both. (An earlier run used
+   `DataMappingMode.LastTradingDay`, also a valid spelling, but the wrong
+   choice -- see "Continuous futures and roll handling", above.)
 3. **`future.SetFilter(0, 182)`'s exact overload** -- whether it accepts
    plain integers (interpreted as days) or requires `timedelta`/`TimeSpan`
-   values.
+   values. **Confirmed**: the recorded backtest ran with plain integers.
 4. **`future.Mapped`'s exact property name and its timing** -- whether it
    is populated during `SetWarmUp`'s own historical delivery, and whether it
    reflects the NEW contract already on the very Session a roll occurs
-   (`_refresh_mapped_symbols` assumes both).
+   (`_refresh_mapped_symbols` assumes both). **Confirmed**: the recorded
+   backtest completed 266 rolls this way.
 5. **Whether `SymbolProperties.ContractMultiplier` is populated for every
    security type this script AddFuture's**, and whether it is available
    immediately once a contract becomes `Mapped` or only after its first bar
-   arrives.
+   arrives. **Confirmed**: every market that opened a Campaign in the
+   recorded backtest sized it in dollars.
 6. **Whether `StopLimitOrder` accepts a negative quantity** (a short
    entry/Add) with `limitPrice` below `stopPrice`, the configuration this
    script relies on for a short's stop-limit sell, symmetric to a long's
    stop-limit buy. `research/qc-cloud` has only ever exercised the long
-   (buy) case.
+   (buy) case. **Confirmed**: the recorded backtest traded both directions.
 7. **The back-adjustment continuity assumption** in "Continuous futures and
-   roll handling": that the back-adjusted continuous series and the
-   currently-mapped contract's raw price coincide for the present segment,
-   so a Unit's stop level needs no translation across a roll. If the first
-   run's equity curve shows an unexplained jump exactly on a roll date, this
-   assumption is the first thing to check.
+   roll handling", originally: that the back-adjusted continuous series and
+   the currently-mapped contract's raw price coincide for the present
+   segment, so a Unit's stop level needs no translation across a roll. This
+   turned out **not** to hold -- the first cloud run placed a 2003 ES entry
+   near 1,754 when the raw contract traded near 1,000 (see "Orders rest at
+   raw contract prices", above) -- so every level is now translated by
+   `_offset` instead, and this item is resolved by that fix, not by the
+   original assumption.
 
-None of the above is guessed at random: each is this script's own
-considered choice, documented so the owner's first cloud run can confirm or
-correct it cheaply, rather than the run failing on an unexplained compile
-error with no record of what was assumed.
+None of the above was guessed at random: each was this script's own
+considered choice at the time, documented so the owner's first cloud run
+could confirm or correct it cheaply, rather than the run failing on an
+unexplained compile error with no record of what was assumed.

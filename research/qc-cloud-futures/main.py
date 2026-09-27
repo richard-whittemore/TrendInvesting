@@ -272,12 +272,14 @@ class TurtleFuturesResearch(QCAlgorithm):
     #: trades both directions; True skips every short breakout.
     LONG_ONLY = False
 
-    #: The run's span: (year, month, day); None for END_DATE means today.
-    #: README.md, "Start date", explains why 1998 is provisional pending
-    #: the first cloud run's own report of what QuantConnect's futures
-    #: history actually covers for every market in CORRELATION_GROUPS.
+    #: The run's span: (year, month, day). README.md, "Start date", explains
+    #: why 1998 is provisional pending the first cloud run's own report of
+    #: what QuantConnect's futures history actually covers for every market
+    #: in CORRELATION_GROUPS. README.md, "Cloud result", records the
+    #: in-sample run through this same END_DATE; 2016 onward is the held-out
+    #: period and stays out of sample unless this is changed with intent.
     START_DATE = (1998, 1, 1)
-    END_DATE = None
+    END_DATE = (2015, 12, 31)
     #: Tickers to leave out of CORRELATION_GROUPS for a diagnostic run.
     EXCLUDED_MARKETS = ()
 
@@ -474,7 +476,17 @@ class TurtleFuturesResearch(QCAlgorithm):
         one opening market order (their commission is this run's own "roll
         cost", reported separately from ordinary trading commission), and
         re-place each Unit's own Exit Order on the NEW contract at its
-        existing (unchanged) stop level."""
+        existing (unchanged) stop level.
+
+        Neither market order is guaranteed to fill the whole requested
+        quantity (thin or stale contract data, README.md, "Known remaining
+        gap"). This method only moves the Campaign onto the NEW contract,
+        and its Exit Orders with it, once the account's own holdings there
+        actually match the Campaign's books; otherwise it re-instates the
+        Exit Orders wherever the position actually still is and leaves the
+        next Session's own roll_target call to retry -- never moving a
+        stop onto a contract this Campaign does not yet, or no longer,
+        hold."""
         for direction in (1, -1):
             self._cancel_ticket(state.entry_tickets[direction])
             state.entry_tickets[direction] = None
@@ -482,37 +494,57 @@ class TurtleFuturesResearch(QCAlgorithm):
         state.add_ticket = None
 
         campaign = state.campaign
-        if campaign is not None:
-            for ticket in state.unit_tickets:
-                self._cancel_ticket(ticket)
-            state.unit_tickets = []
-            total_quantity = campaign.direction * campaign.unit_quantity * campaign.unit_count
-            # Close what is actually held: an expiring contract LEAN has
-            # already liquidated holds nothing, and a blind close would
-            # open the opposite position.
-            held = int(self.Portfolio[old_mapped].Quantity)
-            if held:
-                close_ticket = self.MarketOrder(old_mapped, -held,
-                                                tag="roll-close:{}".format(continuous_symbol))
-                self.order_kind[close_ticket.OrderId] = "roll"
-            open_ticket = self.MarketOrder(new_mapped, total_quantity,
-                                           tag="roll-open:{}".format(continuous_symbol))
-            self.order_kind[open_ticket.OrderId] = "roll"
-            self.roll_count += 1
+        if campaign is None:
+            self._assign_mapped_symbol(state, continuous_symbol, new_mapped)
+            return
 
-        self._assign_mapped_symbol(state, continuous_symbol, new_mapped)
-        if campaign is not None:
+        for ticket in state.unit_tickets:
+            self._cancel_ticket(ticket)
+        state.unit_tickets = []
+        total_quantity = campaign.direction * campaign.unit_quantity * campaign.unit_count
+        # Close what is actually held: an expiring contract LEAN has
+        # already liquidated holds nothing, and a blind close would
+        # open the opposite position.
+        held = int(self.Portfolio[old_mapped].Quantity)
+        if held:
+            close_ticket = self.MarketOrder(old_mapped, -held,
+                                            tag="roll-close:{}".format(continuous_symbol))
+            self.order_kind[close_ticket.OrderId] = "roll"
+        open_ticket = self.MarketOrder(new_mapped, total_quantity,
+                                       tag="roll-open:{}".format(continuous_symbol))
+        self.order_kind[open_ticket.OrderId] = "roll"
+        self.roll_count += 1
+
+        if int(self.Portfolio[new_mapped].Quantity) == total_quantity:
+            self._assign_mapped_symbol(state, continuous_symbol, new_mapped)
             self._maintain_exit_orders(state, None)
+            return
+        self.Log("research: {} roll from {} to {} did not fill both legs; retrying next "
+                 "Session".format(continuous_symbol, old_mapped, new_mapped))
+        if int(self.Portfolio[old_mapped].Quantity) == total_quantity:
+            # The close leg did not fill: the Campaign is still exactly
+            # where it was. Protect it there again rather than leave it
+            # naked until the next Session's retry.
+            self._maintain_exit_orders(state, None)
+        # else: neither contract's own holding matches the Campaign's own
+        # books (a partial fill on one or both legs). Refusing to guess
+        # which Exit Orders to place mirrors _handle_unit_exit's own
+        # "refusing to guess" anomaly handling below; the next Session's
+        # roll_target call retries the whole roll.
 
     def _offset(self, continuous_symbol):
         """Back-adjusted minus raw price of the mapped contract. Channels,
         N and Campaign levels live in the back-adjusted series; orders
         rest on the raw mapped contract, so every level crosses this
-        offset on the way out and every fill price on the way back."""
+        offset on the way out and every fill price on the way back. The
+        back-adjusted (continuous) price is not itself checked against
+        zero: README.md, "Continuous futures and roll handling", "Back-
+        adjusted prices can be zero or negative" -- only the RAW mapped
+        contract's own freshness decides whether a price is available."""
         state = self.symbol_state[continuous_symbol]
         adjusted = float(self.Securities[continuous_symbol].Price)
         held = self.Securities[state.mapped_symbol] if state.mapped_symbol else None
-        if adjusted == 0.0 or not self._fresh(held):
+        if not self._fresh(held):
             return None
         return adjusted - float(held.Price)
 
@@ -584,7 +616,13 @@ class TurtleFuturesResearch(QCAlgorithm):
             self._advance(state, bar, bar_date)
 
             if long_breakout or short_breakout:
-                strength_value, strength_ready = rules.strength(state.closes, pre_advance_n)
+                # Faith's own Strength formula (The Turtle Rules p.29) is
+                # "as of day d" on both sides: close[d] and N[d]. state.closes
+                # already includes today's close (folded in by _advance,
+                # above), so N must be state.n's own post-_advance value here
+                # too, not pre_advance_n -- the pre-breakout N the entry
+                # itself is sized and stopped from.
+                strength_value, strength_ready = rules.strength(state.closes, state.n.value)
                 if strength_ready:
                     key = str(symbol)
                     if long_breakout:
@@ -849,10 +887,20 @@ class TurtleFuturesResearch(QCAlgorithm):
 
         if kind is None and status == OrderStatus.Filled:
             self.untracked_fills += 1
-        if kind == "roll":
-            return  # commission already booked above; no strategy state to settle
+        if kind in ("roll", "liquidate"):
+            # Commission already booked above; no strategy state to settle
+            # -- README.md, "Reconciliation": untracked_fills counts fills
+            # this script did not place, and this script placed both of
+            # these kinds itself.
+            return
 
         if quantity == 0:
+            # LEAN can cancel a resting Entry or Add order this script
+            # never asked to cancel (a delisting contract, for example):
+            # release its Unit-cap reservation here too, not only in
+            # _cancel_ticket's own cancel path. _release_reservation pops,
+            # so this is safe even when _cancel_ticket already released it.
+            self._release_reservation(order_id)
             self._forget_ticket(order_event.Symbol, order_id)
             return
 
@@ -886,20 +934,42 @@ class TurtleFuturesResearch(QCAlgorithm):
             self._handle_unit_exit(state, continuous_symbol, order_id, quantity, price)
 
     def _settle_entry(self, state, continuous_symbol, mapped_symbol, order_id, quantity, price):
-        direction = 1
-        for d in (1, -1):
-            ticket = state.entry_tickets[d]
-            if ticket is not None and ticket.OrderId == order_id:
-                state.entry_tickets[d] = None
-                direction = d
+        # The order's own side, never a slot lookup: a single bar can break
+        # both the entry channel's high and low at once (Lines 565-569
+        # above check entry_tickets per direction only, so both a long and
+        # a short Entry Order can rest at the same time), and the fill
+        # model can then fill both on the next bar. _settle_add already
+        # derives direction this same way for the identical reason.
+        direction = 1 if self.Transactions.GetOrderTicket(order_id).Quantity > 0 else -1
+        state.entry_tickets[direction] = None
+        opposite = state.entry_tickets[-direction]
+        if opposite is not None:
+            self._cancel_ticket(opposite)
+            state.entry_tickets[-direction] = None
         requested = self.requested_quantity_by_order_id.pop(order_id, None)
         n = self.n_by_order_id.pop(order_id, None)
+        if state.campaign is not None:
+            # A Campaign already opened -- from the other direction's fill
+            # on this same bar, or otherwise -- since this order was
+            # placed: this fill cannot open a second one. Liquidate it and
+            # leave the existing Campaign untouched, rather than overwrite
+            # it and orphan its own open Exit Orders and Unit-cap slots.
+            self._release_reservation(order_id)
+            liquidate_ticket = self.MarketOrder(
+                mapped_symbol, -direction * quantity,
+                tag="entry-conflict-liquidate:{}".format(continuous_symbol))
+            self.order_kind[liquidate_ticket.OrderId] = "liquidate"
+            self.Log("research: {} entry order {} filled after a Campaign was already open; "
+                     "liquidated".format(continuous_symbol, order_id))
+            return
         if requested is not None and quantity != requested:
             # ANOMALY: never open a Unit smaller than the one this
             # proposal's Unit-cap reservation was sized for.
             self._release_reservation(order_id)
-            self.MarketOrder(mapped_symbol, -direction * quantity,
-                             tag="entry-partial-liquidate:{}".format(continuous_symbol))
+            liquidate_ticket = self.MarketOrder(
+                mapped_symbol, -direction * quantity,
+                tag="entry-partial-liquidate:{}".format(continuous_symbol))
+            self.order_kind[liquidate_ticket.OrderId] = "liquidate"
             self.Log("research: ANOMALY: {} entry order {} filled {} of {} requested; declined and "
                      "liquidated".format(continuous_symbol, order_id, quantity, requested))
             return
@@ -907,8 +977,10 @@ class TurtleFuturesResearch(QCAlgorithm):
         raw_price = price - (state.last_offset if offset is None else offset)
         if n is None or raw_price - direction * rules.STOP_MULTIPLE * n <= 0:
             self._release_reservation(order_id)
-            self.MarketOrder(mapped_symbol, -direction * quantity,
-                             tag="entry-declined-liquidate:{}".format(continuous_symbol))
+            liquidate_ticket = self.MarketOrder(
+                mapped_symbol, -direction * quantity,
+                tag="entry-declined-liquidate:{}".format(continuous_symbol))
+            self.order_kind[liquidate_ticket.OrderId] = "liquidate"
             self.Log("research: {} entry fill at {} could not open a Campaign (N={}); "
                      "liquidated".format(continuous_symbol, price, n))
             return
@@ -928,8 +1000,10 @@ class TurtleFuturesResearch(QCAlgorithm):
         direction = 1 if self.Transactions.GetOrderTicket(order_id).Quantity > 0 else -1
         if requested is not None and quantity != requested:
             self._release_reservation(order_id)
-            self.MarketOrder(mapped_symbol, -direction * quantity,
-                             tag="add-partial-liquidate:{}".format(continuous_symbol))
+            liquidate_ticket = self.MarketOrder(
+                mapped_symbol, -direction * quantity,
+                tag="add-partial-liquidate:{}".format(continuous_symbol))
+            self.order_kind[liquidate_ticket.OrderId] = "liquidate"
             self.Log("research: ANOMALY: {} Add order {} filled {} of {} requested; declined and "
                      "liquidated".format(continuous_symbol, order_id, quantity, requested))
             return
@@ -942,8 +1016,10 @@ class TurtleFuturesResearch(QCAlgorithm):
         # The Campaign this Add was meant for has already fully closed, or
         # already had a Unit stopped out, since the order was placed.
         self._release_reservation(order_id)
-        self.MarketOrder(mapped_symbol, -direction * quantity,
-                         tag="add-orphan-liquidate:{}".format(continuous_symbol))
+        liquidate_ticket = self.MarketOrder(
+            mapped_symbol, -direction * quantity,
+            tag="add-orphan-liquidate:{}".format(continuous_symbol))
+        self.order_kind[liquidate_ticket.OrderId] = "liquidate"
         self.Log("research: {} Add fill at {} arrived with no Campaign able to take it; "
                  "liquidated".format(continuous_symbol, price))
 

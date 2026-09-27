@@ -44,8 +44,12 @@ deps:
 # The LEAN adapter's suite, standard-library Python only. It includes the
 # Go-to-Python decision contract and an end-to-end run against cmd/engine,
 # so a Go change to an event the adapter reads fails here, not in LEAN.
-# The arm64 CI job, which does not run make check, runs this target itself.
-adapter-test:
+# The arm64 CI job, which does not run make check, runs this target itself,
+# so it depends on research-test too, rather than skip the research rule
+# cores on that job. `check`'s own explicit research-test prerequisite,
+# below, does not run it twice: make only remakes a phony target once per
+# invocation.
+adapter-test: research-test
 	cd adapter/lean && python3 -m unittest discover -s tests
 
 # research/qc-cloud's and research/qc-cloud-futures's rule cores (rules.py):
