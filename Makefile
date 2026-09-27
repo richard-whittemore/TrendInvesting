@@ -48,12 +48,18 @@ deps:
 adapter-test:
 	cd adapter/lean && python3 -m unittest discover -s tests
 
-# research/qc-cloud's rule core (rules.py): standard-library Python only,
-# no QuantConnect imports, so it runs here without any LEAN environment.
-# main.py (the QuantConnect algorithm that drives it) is checked separately
-# by CI for a clean compile, since it cannot be imported outside
-# QuantConnect's own AlgorithmImports environment.
+# research/qc-cloud's and research/qc-cloud-futures's rule cores (rules.py):
+# standard-library Python only, no QuantConnect imports, so they run here
+# without any LEAN environment. Each main.py (the QuantConnect algorithm
+# that drives its own rules.py) cannot be imported outside QuantConnect's
+# own AlgorithmImports environment -- neither folder's local LEAN checks
+# have futures data for the second one -- so each is only syntax-checked
+# here with python3 -m py_compile; the owner's first QuantConnect Cloud
+# backtest is the real test of its QuantConnect API calls.
 research-test:
 	cd research/qc-cloud && python3 -m unittest discover -s . -p "test_*.py"
+	python3 -m py_compile research/qc-cloud/main.py
+	cd research/qc-cloud-futures && python3 -m unittest discover -s . -p "test_*.py"
+	python3 -m py_compile research/qc-cloud-futures/main.py
 
 check: deps lint coverage vuln build adapter-test research-test
