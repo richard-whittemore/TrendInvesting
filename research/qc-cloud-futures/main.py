@@ -478,15 +478,13 @@ class TurtleFuturesResearch(QCAlgorithm):
         re-place each Unit's own Exit Order on the NEW contract at its
         existing (unchanged) stop level.
 
-        Neither market order is guaranteed to fill the whole requested
-        quantity (thin or stale contract data, README.md, "Known remaining
-        gap"). This method only moves the Campaign onto the NEW contract,
-        and its Exit Orders with it, once the account's own holdings there
-        actually match the Campaign's books; otherwise it re-instates the
-        Exit Orders wherever the position actually still is and leaves the
-        next Session's own roll_target call to retry -- never moving a
-        stop onto a contract this Campaign does not yet, or no longer,
-        hold."""
+        The Campaign moves onto the NEW contract in the same Session the
+        roll orders are placed. At daily resolution both market orders fill
+        at the next open, so the roll can't be confirmed from holdings
+        here: holding back until the account matched the books re-rolled
+        every Session and stacked positions (README.md, "Continuous
+        futures and roll handling"). The open leg is placed before the
+        Exit Orders, so LEAN fills it first on that open."""
         for direction in (1, -1):
             self._cancel_ticket(state.entry_tickets[direction])
             state.entry_tickets[direction] = None
@@ -494,43 +492,27 @@ class TurtleFuturesResearch(QCAlgorithm):
         state.add_ticket = None
 
         campaign = state.campaign
-        if campaign is None:
-            self._assign_mapped_symbol(state, continuous_symbol, new_mapped)
-            return
+        if campaign is not None:
+            for ticket in state.unit_tickets:
+                self._cancel_ticket(ticket)
+            state.unit_tickets = []
+            total_quantity = campaign.direction * campaign.unit_quantity * campaign.unit_count
+            # Close what is actually held: an expiring contract LEAN has
+            # already liquidated holds nothing, and a blind close would
+            # open the opposite position.
+            held = int(self.Portfolio[old_mapped].Quantity)
+            if held:
+                close_ticket = self.MarketOrder(old_mapped, -held,
+                                                tag="roll-close:{}".format(continuous_symbol))
+                self.order_kind[close_ticket.OrderId] = "roll"
+            open_ticket = self.MarketOrder(new_mapped, total_quantity,
+                                           tag="roll-open:{}".format(continuous_symbol))
+            self.order_kind[open_ticket.OrderId] = "roll"
+            self.roll_count += 1
 
-        for ticket in state.unit_tickets:
-            self._cancel_ticket(ticket)
-        state.unit_tickets = []
-        total_quantity = campaign.direction * campaign.unit_quantity * campaign.unit_count
-        # Close what is actually held: an expiring contract LEAN has
-        # already liquidated holds nothing, and a blind close would
-        # open the opposite position.
-        held = int(self.Portfolio[old_mapped].Quantity)
-        if held:
-            close_ticket = self.MarketOrder(old_mapped, -held,
-                                            tag="roll-close:{}".format(continuous_symbol))
-            self.order_kind[close_ticket.OrderId] = "roll"
-        open_ticket = self.MarketOrder(new_mapped, total_quantity,
-                                       tag="roll-open:{}".format(continuous_symbol))
-        self.order_kind[open_ticket.OrderId] = "roll"
-        self.roll_count += 1
-
-        if int(self.Portfolio[new_mapped].Quantity) == total_quantity:
-            self._assign_mapped_symbol(state, continuous_symbol, new_mapped)
+        self._assign_mapped_symbol(state, continuous_symbol, new_mapped)
+        if campaign is not None:
             self._maintain_exit_orders(state, None)
-            return
-        self.Log("research: {} roll from {} to {} did not fill both legs; retrying next "
-                 "Session".format(continuous_symbol, old_mapped, new_mapped))
-        if int(self.Portfolio[old_mapped].Quantity) == total_quantity:
-            # The close leg did not fill: the Campaign is still exactly
-            # where it was. Protect it there again rather than leave it
-            # naked until the next Session's retry.
-            self._maintain_exit_orders(state, None)
-        # else: neither contract's own holding matches the Campaign's own
-        # books (a partial fill on one or both legs). Refusing to guess
-        # which Exit Orders to place mirrors _handle_unit_exit's own
-        # "refusing to guess" anomaly handling below; the next Session's
-        # roll_target call retries the whole roll.
 
     def _offset(self, continuous_symbol):
         """Back-adjusted minus raw price of the mapped contract. Channels,

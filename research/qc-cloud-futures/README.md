@@ -36,7 +36,7 @@ be, told apart.
 
 ## Cloud result (in-sample, 1998–2015)
 
-The run started with $1M on QuantConnect Cloud and stopped at 2015-12-31, so everything from 2016 on stays held out. Backtest `e6ac962a864551841220445e4aec451b`, 2026-09-27.
+The run started with $1M on QuantConnect Cloud and stopped at 2015-12-31, so everything from 2016 on stays held out. Backtest `5ccf134e03ebe76ecd375a13fa733bc8`, 2026-09-27, on this code after the review fixes. It matches the earlier run `e6ac962a864551841220445e4aec451b` on every headline figure.
 
 **Read the data coverage first.** QuantConnect's free continuous-futures data covers far fewer markets than the list below suggests:
 - **1998 to April 2007:** only ES has data.
@@ -60,7 +60,11 @@ So 1998–2007 is a single-market S&P Turtle, not a diversified futures test. On
 - **Rolls:** 266, costing $18.5k in commission. Total commission was $57k.
 - **Excluding SI:** CAGR is −2.6% and 2009–15 is +8.4% (backtest `53ae9c60`). QuantConnect's SI data stops weeks before contract expiry before 2014, so treat SI as unreliable.
 
-**Known remaining gap.** The `Reconcile` statistic shows the account doing worse than the Campaigns' own P&L: without SI, the Campaigns made +$20k while the account lost $318k gross. Per market the gap is about ±$50–150k, mostly in currencies, HG and NG. The likely cause is roll legs filling at sparse or stale contract prices. Until this is closed, the 2009–15 figures carry a drag of roughly 1.5–2% a year that isn't the strategy's.
+**Known remaining gap: this result is not yet trustworthy.** The `Reconcile` statistic compares the Campaigns' own dollar P&L with the account's gross P&L, and they disagree badly:
+- **All markets:** the Campaigns made +$746,720 while the account lost $419,491, a gap of about $1.17M.
+- **Without SI:** the Campaigns made +$20k while the account lost $318k (backtest `53ae9c60`). Per market the gap is about ±$50–150k, mostly in currencies, HG and NG.
+
+The likely cause is roll legs filling at sparse or stale contract prices, and SI's data before 2014 is the worst case. Until this gap is closed, don't read the account figures above as the strategy's own performance, in either direction.
 
 ## The rules, and their citations
 
@@ -268,14 +272,14 @@ requirement that the roll transaction itself must preserve. Each Unit's own
 resting Exit Order is then re-placed at its existing (unchanged)
 back-adjusted stop level, translated to whichever contract now holds the
 position by the same adjusted-minus-raw offset every other level crosses
-(see "Orders rest at raw contract prices", above) -- but only once the
-account's own holding on the new contract actually matches the Campaign's
-total Unit count. Neither market order is guaranteed to fill: on an
-unfilled or rejected leg (thin or stale data), the Campaign's Exit Orders
-are instead re-instated on whichever contract still holds the matching
-quantity, and the next Session's own `roll_target` call retries the whole
-roll, rather than move a stop onto a contract this Campaign does not, or no
-longer, actually hold.
+(see "Orders rest at raw contract prices", above), in the same Session the
+roll orders are placed. At daily resolution both market orders fill at the
+next open, so the roll can't be confirmed from holdings when it is placed.
+An earlier version held the Campaign on the old contract until the account
+matched its books. It then re-rolled every Session and stacked positions:
+backtest `75eea7ea` placed 9,920 roll orders and hit the Free plan's cap of
+10,000 orders. The open leg is placed before the Exit Orders, so LEAN fills
+it first on that open.
 
 **Roll cost is counted**: the commission on
 both the closing and the reopening market order is added to `roll_commission`
