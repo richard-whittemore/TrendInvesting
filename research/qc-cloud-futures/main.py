@@ -354,7 +354,6 @@ class TurtleFuturesResearch(QCAlgorithm):
         self.total_commission = 0.0
         self.roll_commission = 0.0
         self.roll_count = 0
-        self.roll_deferrals = 0
         # Reconciliation: the Campaigns' own dollar P&L (price distance x
         # quantity x multiplier) against the account's, and fills this
         # script did not place (LEAN's delisting liquidations).
@@ -433,8 +432,6 @@ class TurtleFuturesResearch(QCAlgorithm):
                  if sym.SecurityType == SecurityType.Future and not sym.IsCanonical()
                  and sym.Canonical == future.Symbol] if held is not None else [])
             if target is None:
-                if held is not None and mapped != held:
-                    self.roll_deferrals += 1
                 continue
             if held is None:
                 self._assign_mapped_symbol(state, future.Symbol, target)
@@ -988,8 +985,7 @@ class TurtleFuturesResearch(QCAlgorithm):
         self._publish("Campaigns", "{} win_rate={} avg_win_R={} avg_loss_R={}".format(
             count, _fmt(win_rate), _fmt(avg_win), _fmt(avg_loss)))
         self._publish("Commission", "{:.2f}".format(self.total_commission))
-        self._publish("Rolls", "{} commission={:.2f} deferred={}".format(
-            self.roll_count, self.roll_commission, self.roll_deferrals))
+        self._publish("Rolls", "{} commission={:.2f}".format(self.roll_count, self.roll_commission))
         if self.unavailable_markets:
             self._publish("Markets unavailable", ",".join(sorted(self.unavailable_markets)))
         self._publish("Reconcile", "campaigns=${:,.0f} account=${:,.0f} untracked_fills={}".format(

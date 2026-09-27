@@ -220,9 +220,25 @@ class ProtectiveStopGoldenTests(unittest.TestCase):
     def test_raised_stop_formula_short_is_lowered(self):
         self.assertAlmostEqual(rules.raised_stop(30.70, 1.20, direction=-1), 30.10)
 
-    def test_rejects_a_stop_at_or_below_zero(self):
+    def test_back_adjusted_prices_may_be_zero_or_negative(self):
+        # Levels live in the additive back-adjusted series, which runs
+        # below zero for a contango market far enough back (HO and ZS in
+        # 2007). Only the raw contract price must be positive, and main.py
+        # checks that before every order.
+        self.assertAlmostEqual(rules.protective_stop_level(-0.5, 0.1, direction=1), -0.7)
+        self.assertAlmostEqual(rules.next_add_level(-0.5, 0.1, direction=1), -0.45)
+        self.assertAlmostEqual(rules.raised_stop(-0.7, 0.1, direction=1), -0.65)
+        campaign = rules.Campaign("HO", direction=-1, entry_fill_price=-0.2, campaign_n=0.1,
+                                  unit_quantity_value=3, closely_group="g", loosely_group="l")
+        self.assertAlmostEqual(campaign.protective_stop(), 0.0)
+
+    def test_rejects_a_non_finite_price(self):
         with self.assertRaises(ValueError):
-            rules.protective_stop_level(1.0, 10.0, direction=1, stop_multiple=rules.STOP_MULTIPLE)
+            rules.protective_stop_level(float("nan"), 1.0, direction=1)
+        with self.assertRaises(ValueError):
+            rules.next_add_level(float("inf"), 1.0, direction=1)
+        with self.assertRaises(ValueError):
+            rules.raised_stop(float("nan"), 1.0, direction=1)
 
 
 class CampaignTests(unittest.TestCase):

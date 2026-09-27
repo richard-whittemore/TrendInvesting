@@ -300,8 +300,8 @@ def next_add_level(previous_fill, campaign_n, direction, spacing_n=ADD_SPACING_N
     symmetric mirror image: the rung sits BELOW). ``campaign_n`` is the
     Campaign's FROZEN N (ADR 0006, unchanged for futures).
     """
-    if not (isfinite(previous_fill) and previous_fill > 0):
-        raise ValueError("previous_fill must be finite and positive")
+    if not isfinite(previous_fill):
+        raise ValueError("previous_fill must be finite")
     if not (isfinite(campaign_n) and campaign_n > 0):
         raise ValueError("campaign_n must be finite and positive")
     if direction not in (1, -1):
@@ -322,18 +322,17 @@ def protective_stop_level(entry_price, campaign_n, direction, stop_multiple=STOP
     than 2%" [T p.22] does not depend on which side of the market the trade
     is on.
     """
-    if not (isfinite(entry_price) and entry_price > 0):
-        raise ValueError("entry_price must be finite and positive")
+    if not isfinite(entry_price):
+        raise ValueError("entry_price must be finite")
     if not (isfinite(campaign_n) and campaign_n > 0):
         raise ValueError("campaign_n must be finite and positive")
     if not (isfinite(stop_multiple) and stop_multiple > 0):
         raise ValueError("stop_multiple must be finite and positive")
     if direction not in (1, -1):
         raise ValueError("direction must be 1 (long) or -1 (short)")
-    level = entry_price - direction * stop_multiple * campaign_n
-    if level <= 0:
-        raise ValueError("derived protective stop level is not positive")
-    return level
+    # No sign check: prices here are back-adjusted and may be zero or
+    # negative; main.py checks the RAW stop before placing an order.
+    return entry_price - direction * stop_multiple * campaign_n
 
 
 def raised_stop(previous_stop, campaign_n, direction, spacing_n=ADD_SPACING_N):
@@ -345,8 +344,8 @@ def raised_stop(previous_stop, campaign_n, direction, spacing_n=ADD_SPACING_N):
     diverging per Unit when a later Unit fills away from its rung). For a
     short, this module's mirror LOWERS the stop by the same distance.
     """
-    if not (isfinite(previous_stop) and previous_stop > 0):
-        raise ValueError("previous_stop must be finite and positive")
+    if not isfinite(previous_stop):
+        raise ValueError("previous_stop must be finite")
     if not (isfinite(campaign_n) and campaign_n > 0):
         raise ValueError("campaign_n must be finite and positive")
     if direction not in (1, -1):
