@@ -76,6 +76,23 @@ begins in 1998, so a 1998 start stays in cash until about 2002–2003, and
 `OVERALL` then includes those cash years, 2000–02 bear market among them.
 The Regime Windows from 2003 onward are the fair comparison with SPY.
 
+## Cloud result (in-sample, 1998–2015)
+
+The run covered the top 200 US stocks by dollar volume, with $1M starting capital, on QuantConnect Cloud. It stopped at 2015-12-31, so everything from 2016 on stays held out. Backtest `00f865ad3335ec1f38de8fc5990c9547`, 2026-09-26.
+
+| Run | CAGR | Max drawdown | Return / drawdown |
+|---|---|---|---|
+| Sublime control (this folder) | +1.36% | 13.6% | 0.0996 |
+| Turtle Baseline (`research/qc-cloud`) | −5.74% | 87% | — |
+| SPY buy-and-hold, total return | +6.07% | 55% | 0.110 |
+
+- **Campaigns:** 50, of which 26% won. The average win was +3.81R and the average loss −0.77R.
+- **Signals:** 327 (53 Tier A, 152 Tier B), producing 267 orders.
+- **Late start:** it holds cash from 1998 to 2002, because the prior-year-high and weekly 200-bar rules need about 5 years of history.
+- **By period (CAGR):** 2003–07 +1.92%, 2008–09 −0.85%, 2009–15 +2.44%.
+
+It beats every Turtle stock variant on both return and drawdown, but still trails SPY by about 4.7 points a year. That's mostly because it rarely has much capital invested. Sublime's proprietary pieces are proxies here (see the provenance tags below), so read this as a lower bound on the real methodology rather than a verdict on it.
+
 ## The rules, with provenance
 
 Tags follow `Methodology_Analysis.md` section 0. Rule numbers are the ones
