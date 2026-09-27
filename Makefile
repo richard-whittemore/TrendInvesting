@@ -44,18 +44,31 @@ deps:
 # The LEAN adapter's suite, standard-library Python only. It includes the
 # Go-to-Python decision contract and an end-to-end run against cmd/engine,
 # so a Go change to an event the adapter reads fails here, not in LEAN.
-# The arm64 CI job, which does not run make check, runs this target itself.
-adapter-test:
+# The arm64 CI job, which does not run make check, runs this target itself,
+# so it depends on research-test too, rather than skip the research rule
+# cores on that job. `check`'s own explicit research-test prerequisite,
+# below, does not run it twice: make only remakes a phony target once per
+# invocation.
+adapter-test: research-test
 	cd adapter/lean && python3 -m unittest discover -s tests
 
 # The research checks' rule cores (research/qc-cloud for the Turtle
-# Baseline, research/qc-cloud-sublime for the Sublime control): standard-
-# library Python only, no QuantConnect imports, so they run here without any
-# LEAN environment. Each main.py (the QuantConnect algorithm) cannot be
-# imported outside QuantConnect's AlgorithmImports environment; each folder's
-# test_build_upload.py compiles its stripped upload copy instead.
+# Baseline, research/qc-cloud-sublime for the Sublime control,
+# research/qc-cloud-futures for Faith's own unadapted system on futures):
+# standard-library Python only, no QuantConnect imports, so they run here
+# without any LEAN environment. Each main.py (the QuantConnect algorithm)
+# cannot be imported outside QuantConnect's own AlgorithmImports
+# environment -- none of the three folders' local LEAN checks have futures
+# data for the third one -- so research/qc-cloud and research/qc-cloud-futures
+# are also syntax-checked here with python3 -m py_compile; every folder's
+# own test_build_upload.py additionally compiles its stripped upload copy.
+# The owner's first QuantConnect Cloud backtest is the real test of each
+# folder's own QuantConnect API calls.
 research-test:
 	cd research/qc-cloud && python3 -m unittest discover -s . -p "test_*.py"
+	python3 -m py_compile research/qc-cloud/main.py
 	cd research/qc-cloud-sublime && python3 -m unittest discover -s . -p "test_*.py"
+	cd research/qc-cloud-futures && python3 -m unittest discover -s . -p "test_*.py"
+	python3 -m py_compile research/qc-cloud-futures/main.py
 
 check: deps lint coverage vuln build adapter-test research-test
