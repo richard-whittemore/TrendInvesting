@@ -257,7 +257,12 @@ class SublimeResearch(QCAlgorithm):
             security.SetSlippageModel(self.slippage_model)
             security.SetFeeModel(self.fee_model)
             security.SetFillModel(self.fill_model)
-            if security.Symbol not in self.symbol_state:
+            # A symbol re-entering the universe missed every bar and split
+            # while it was out, so its indicators, Setup and split ratio are
+            # rebuilt from a fresh backfill (README.md, "Deviations"). A held
+            # or working symbol is never removed, so it never reaches here.
+            state = self.symbol_state.get(security.Symbol)
+            if state is None or (self.FIXED_SYMBOLS is None and state.campaign is None):
                 self.symbol_state[security.Symbol] = _SymbolState()
                 self.split_ratio[security.Symbol] = self._read_split_ratio(security.Symbol)
                 if self.FIXED_SYMBOLS is None:

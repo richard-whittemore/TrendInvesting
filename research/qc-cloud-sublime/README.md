@@ -126,13 +126,13 @@ section 3 gives.
 |---|---|---|
 | 23: base [2B p.1; section 4.8] | At least 55 completed bars without a new 55-bar high | DISCLOSED (one instance) |
 | 21, 22: Phase A | Close above max(prior 55-bar high, last calendar year's high). That level is the breakout level | PROXY (Model E) |
-| 21: Phase B, the retest | A later low within 1 ATR of the breakout level | PROXY (k₁ = 1: open question) |
+| 21: Phase B, the retest | A later low at or below the breakout level + 1 ATR. A deeper undercut also counts; only the cancel rule's close guards the downside (Model E) | PROXY (k₁ = 1: open question) |
 | 21: Phase C, the Signal | A close above the highest high between A and B | PROXY (Model E) |
 | 2: Donchian 20 break and close [V 00:47:53] | Phase C's close must also be above the prior 20-bar high | DISCLOSED |
 | Cancel | A close more than 3 ATR below the level, or more than 55 bars after A | PROXY (k₂ = 3, m = 55: open questions) |
 | 8, 13, 4.7: stock alignment | At the Signal: close above last year's high, the weekly 200 SMA and the daily 200 SMA (§4.7's KISS gate). Daily and weekly trend-filter colour green or dark green | DISCLOSED |
 | 13: trend filter [V 00:31:08–00:38:16] | 20-period SMA of closes with 1σ and 2σ bands (population σ). Colour is by closing price | DISCLOSED |
-| 16: at all-time highs [V 00:52:15] | Grade A: the Signal's close is above every earlier high in the available data | PROXY (history starts at the data) |
+| 16: at all-time highs [V 00:52:15] | Grade A: the Signal's close is above every earlier high the symbol's indicators hold: its 1,260-bar backfill when it joined the universe, plus every bar since | PROXY (a 5-year high for most symbols, not a true all-time high) |
 | 18: Grade A before Grade B [V 01:14:41] | Grade B is taken only in a Session with no Grade A Signal, once ineligible Signals are dropped (ADR 0011 point 3) | PROXY |
 | Ranking within a Grade | Strength, (close − close 63 bars earlier) / ATR (Turtle p.29, ADR 0010), then median dollar volume, then symbol | PROXY for "best-performing stocks" [V 00:02:31] |
 | 25: order above the breakout bar's high [M p.55] | Stop-limit buy one raw tick above the Signal bar's high, for the next Session only (ADR 0011) | Level DISCLOSED; the offset formula is EXCLUDED, so one tick |
@@ -276,6 +276,12 @@ What differs:
     (`Campaign.set_resting_stop`) once `ticket.Update`'s response reports
     success; open_risk and add_ready never rely on a stop that LEAN did not
     actually place.
+11. **A symbol that re-enters the universe is rebuilt from a fresh
+    backfill.** LEAN delivers no bars and no split events for a symbol
+    while it is out of the universe. Reusing its old state would run the
+    channels, the base count and the Setup over a gap, and would keep a
+    split ratio that a missed split made stale. A symbol with a Campaign is
+    never removed (it is retained), so only idle symbols are rebuilt.
 
 ## Local smoke run
 
