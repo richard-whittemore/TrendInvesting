@@ -278,6 +278,8 @@ class TurtleFuturesResearch(QCAlgorithm):
     #: history actually covers for every market in CORRELATION_GROUPS.
     START_DATE = (1998, 1, 1)
     END_DATE = None
+    #: Tickers to leave out of CORRELATION_GROUPS for a diagnostic run.
+    EXCLUDED_MARKETS = ()
 
     WARMUP_BARS = WARMUP_BARS
 
@@ -302,6 +304,8 @@ class TurtleFuturesResearch(QCAlgorithm):
         self.continuous_by_mapped = {}
         self.unavailable_markets = []
         for ticker, (display_name, closely_group, loosely_group) in CORRELATION_GROUPS.items():
+            if ticker in self.EXCLUDED_MARKETS:
+                continue
             try:
                 future = self.AddFuture(
                     ticker, Resolution.Daily, extendedMarketHours=False,
@@ -439,11 +443,21 @@ class TurtleFuturesResearch(QCAlgorithm):
             else:
                 self._roll_market(state, future.Symbol, held, target)
 
+    def _fresh(self, security):
+        """A price this script may trade against: present, positive, and
+        from a bar at most five calendar days old. QuantConnect's data for
+        some contracts stops weeks before expiry, and a market order there
+        fills at the last, stale price."""
+        if security is None or not security.HasData or float(security.Price) <= 0:
+            return False
+        last = security.GetLastData()
+        return last is not None and (self.Time - last.EndTime).days <= 5
+
     def _contract(self, symbol):
         """``(symbol, expiry date, priced, open interest)`` for
         ``rules.roll_target``."""
         security = self.Securities[symbol] if self.Securities.ContainsKey(symbol) else None
-        priced = security is not None and security.HasData and float(security.Price) > 0
+        priced = self._fresh(security)
         open_interest = float(security.OpenInterest) if security is not None else 0.0
         return (symbol, symbol.ID.Date.date(), priced, open_interest)
 
@@ -497,10 +511,10 @@ class TurtleFuturesResearch(QCAlgorithm):
         offset on the way out and every fill price on the way back."""
         state = self.symbol_state[continuous_symbol]
         adjusted = float(self.Securities[continuous_symbol].Price)
-        raw = float(self.Securities[state.mapped_symbol].Price) if state.mapped_symbol else 0.0
-        if adjusted == 0.0 or raw <= 0.0:
+        held = self.Securities[state.mapped_symbol] if state.mapped_symbol else None
+        if adjusted == 0.0 or not self._fresh(held):
             return None
-        return adjusted - raw
+        return adjusted - float(held.Price)
 
     def _session(self, slice_):
         if not slice_.Bars:

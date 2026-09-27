@@ -791,7 +791,8 @@ def roll_target(today, held, mapped, candidates, roll_days=ROLL_DAYS_BEFORE_EXPI
     expiry_date, priced, open_interest)``. With nothing held, take LEAN's
     mapped contract. Otherwise follow LEAN's mapping once it points at a
     later-dated contract that already has a price; and within
-    ``roll_days`` of the held contract's expiry, roll to the later-dated
+    ``roll_days`` of the held contract's expiry, or as soon as the held
+    contract's own price goes stale, roll to the later-dated
     priced contract with the most open interest (nearest expiry on a tie),
     rather than be caught by expiry or land in a thin serial month."""
     if held is None:
@@ -799,7 +800,7 @@ def roll_target(today, held, mapped, candidates, roll_days=ROLL_DAYS_BEFORE_EXPI
     held_key, held_expiry = held[0], held[1]
     if mapped is not None and mapped[0] != held_key and mapped[1] > held_expiry and mapped[2]:
         return mapped[0]
-    if (held_expiry - today).days > roll_days:
+    if held[2] and (held_expiry - today).days > roll_days:
         return None
     later = [c for c in candidates if c[1] > held_expiry and c[2]]
     if not later:

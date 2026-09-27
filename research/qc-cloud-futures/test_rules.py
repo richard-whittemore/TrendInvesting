@@ -534,6 +534,14 @@ class RollTargetTests(unittest.TestCase):
                       ("U13", date(2013, 9, 26), True, 9000)]
         self.assertEqual(rules.roll_target(today, held, held, candidates), "N13")
 
+    def test_a_stale_held_contract_rolls_even_far_from_expiry(self):
+        # QuantConnect's silver K13 last traded weeks before expiry; its
+        # stale price mis-priced the offset and filled the roll-close at a
+        # month-old level.
+        held = ("M8", date(2008, 6, 20), False)
+        candidates = [("U8", date(2008, 9, 19), True, 500), ("Z8", date(2008, 12, 19), True, 100)]
+        self.assertEqual(rules.roll_target(date(2008, 4, 1), held, held, candidates), "U8")
+
     def test_never_rolls_back_to_an_earlier_mapped_contract(self):
         mapped = ("H8", date(2008, 3, 21), True)
         self.assertIsNone(rules.roll_target(self.TODAY, self.HELD, mapped, []))
