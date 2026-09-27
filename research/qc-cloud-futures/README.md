@@ -182,6 +182,19 @@ dataNormalizationMode=DataNormalizationMode.BackwardsPanamaCanal)` and
   stops and breakouts triggered at the wrong prices: the first cloud run
   placed a 2003 ES entry near 1,754 when the raw contract traded near
   1,000.
+- **Which contract is held** (`rules.roll_target`):
+  - LEAN's mapping is followed once it points at a later contract with a fresh price.
+  - Within 10 calendar days of expiry, or as soon as the held contract's price goes stale, the position rolls to the later contract with the most open interest.
+  - LEAN's mapping for ES moved only on the last trading day, so the roll-close never filled and LEAN liquidated the position at delisting.
+  - QuantConnect's data for some contracts (silver K13, for example) stops weeks before expiry.
+  - A price counts as fresh when its bar is at most 5 days old. Offsets are computed from fresh raw prices only.
+- **Back-adjusted prices can be zero or negative.** HO and ZS run below zero in 2007. The rule core accepts any finite level; `main.py` still refuses an order whose *raw* stop is at or below zero.
+- **Reconciliation.**
+  - `Reconcile` compares the Campaigns' own dollar P&L (price distance × quantity × multiplier) with the account's gross P&L.
+  - `Campaign $ <market>` gives the same figure per market.
+  - `untracked_fills` counts fills this script did not place, such as LEAN's delisting liquidations.
+  - `EXCLUDED_MARKETS` drops markets for a diagnostic run.
+
 - **`DataNormalizationMode.BackwardsPanamaCanal`**: additive back-adjustment.
   True Range and the Donchian channels are absolute price *differences*; an
   additive adjustment preserves those differences across a market's own many
