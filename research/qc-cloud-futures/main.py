@@ -236,6 +236,7 @@ class _SymbolState:
         self.last_low = None
         self.mapped_symbol = None           # the currently tradable dated contract
         self.dollars_per_point = None       # SymbolProperties.ContractMultiplier of mapped_symbol
+        self.last_offset = 0.0              # last known back-adjusted minus raw price
         self.closely_group = closely_group
         self.loosely_group = loosely_group
         self.display_name = display_name
@@ -461,6 +462,18 @@ class TurtleFuturesResearch(QCAlgorithm):
         if campaign is not None:
             self._maintain_exit_orders(state, None)
 
+    def _offset(self, continuous_symbol):
+        """Back-adjusted minus raw price of the mapped contract. Channels,
+        N and Campaign levels live in the back-adjusted series; orders
+        rest on the raw mapped contract, so every level crosses this
+        offset on the way out and every fill price on the way back."""
+        state = self.symbol_state[continuous_symbol]
+        adjusted = float(self.Securities[continuous_symbol].Price)
+        raw = float(self.Securities[state.mapped_symbol].Price) if state.mapped_symbol else 0.0
+        if adjusted == 0.0 or raw <= 0.0:
+            return None
+        return adjusted - raw
+
     def _session(self, slice_):
         if not slice_.Bars:
             return
@@ -614,7 +627,11 @@ class TurtleFuturesResearch(QCAlgorithm):
     def _decide_entry(self, state, symbol, direction, entry_level, n, ledger):
         # Decline BEFORE placing an order whose own fill would leave the
         # initial Protective Stop non-positive (The Turtle Rules p.22).
-        if entry_level - direction * rules.STOP_MULTIPLE * n <= 0:
+        offset = self._offset(symbol)
+        if offset is None:
+            self._count_decline("entry: mapped contract price unavailable")
+            return
+        if entry_level - offset - direction * rules.STOP_MULTIPLE * n <= 0:
             self._count_decline("entry: stop at or below zero")
             return
         multiplier = state.dollars_per_point
@@ -637,12 +654,17 @@ class TurtleFuturesResearch(QCAlgorithm):
         level +/- k x N (ADR 0005), on the market's CURRENTLY MAPPED
         contract, reserving its Unit-cap headroom. Returns the ticket, or
         None when declined."""
+        offset = self._offset(continuous_symbol)
+        if offset is None:
+            self._count_decline("{}: mapped contract price unavailable".format(kind))
+            return None
         accepted, reason = ledger.try_reserve(str(continuous_symbol), closely_group, loosely_group,
                                               direction)
         if not accepted:
             self._count_decline("{}: {}".format(kind, reason))
             return None
         state = self.symbol_state[continuous_symbol]
+        level -= offset
         cap = rules.price_cap(level, n, direction)
         signed_quantity = direction * quantity
         ticket = self.StopLimitOrder(state.mapped_symbol, signed_quantity, level, cap,
@@ -667,10 +689,15 @@ class TurtleFuturesResearch(QCAlgorithm):
             state.unit_tickets.append(None)
         mapped = state.mapped_symbol
         close_quantity = -campaign.direction * campaign.unit_quantity
+        offset = self._offset(self.continuous_by_mapped[mapped])
+        if offset is None:
+            offset = state.last_offset
+        state.last_offset = offset
         for index, unit in enumerate(campaign.units):
-            level = rules.exit_order_level(campaign.direction, unit["stop"], exit_level)
-            tag = "{}:{}".format("stop" if level == unit["stop"] else "exit",
+            adjusted_level = rules.exit_order_level(campaign.direction, unit["stop"], exit_level)
+            tag = "{}:{}".format("stop" if adjusted_level == unit["stop"] else "exit",
                                  getattr(mapped, "Value", mapped))
+            level = adjusted_level - offset
             ticket = state.unit_tickets[index]
             if ticket is None or ticket.Status in (OrderStatus.Canceled, OrderStatus.Invalid):
                 ticket = self.StopMarketOrder(mapped, close_quantity, level, tag=tag)
@@ -786,6 +813,11 @@ class TurtleFuturesResearch(QCAlgorithm):
             return
 
         price = float(ticket.AverageFillPrice)
+        continuous = self.continuous_by_mapped.get(order_event.Symbol)
+        offset = self._offset(continuous) if continuous is not None else None
+        if offset is None and continuous in self.symbol_state:
+            offset = self.symbol_state[continuous].last_offset
+        price += offset or 0.0
         try:
             self._settle_order(order_event, kind, quantity, price)
         except Exception as err:
@@ -827,7 +859,9 @@ class TurtleFuturesResearch(QCAlgorithm):
             self.Log("research: ANOMALY: {} entry order {} filled {} of {} requested; declined and "
                      "liquidated".format(continuous_symbol, order_id, quantity, requested))
             return
-        if n is None or price - direction * rules.STOP_MULTIPLE * n <= 0:
+        offset = self._offset(continuous_symbol)
+        raw_price = price - (state.last_offset if offset is None else offset)
+        if n is None or raw_price - direction * rules.STOP_MULTIPLE * n <= 0:
             self._release_reservation(order_id)
             self.MarketOrder(mapped_symbol, -direction * quantity,
                              tag="entry-declined-liquidate:{}".format(continuous_symbol))
