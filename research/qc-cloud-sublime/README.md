@@ -278,6 +278,7 @@ the Regime Windows from 2003 onward, since every run is in cash until about
 | `WIDE` | `UNIVERSE_SIZE = 500`, `UNIVERSE_SKIP = 50` | Does dropping the 50 largest by dollar volume, over a wider pool, help (audit 2)? |
 | `HIST2Y` | `MIN_HISTORY_BARS = 504` | Does the 5-year floor exclude young leaders? The stock's own weekly 200 SMA still needs about 3.9 years |
 | `RISK_ATH` | `RISK_UPPER_AT_SPY_ATH = True` | Does [R]'s upper end (2 % a position, 8 % a day, 20 % in aggregate), used when SPY set an all-time high within 20 sessions and is in full bloom, deploy more capital without a worse drawdown? |
+| `PRICE_CAP` | `MAX_SHARE_PRICE = 200` | The other reading of [M p.54]'s "uber expensive stocks like Amazon": a high *share price* rather than a large company. Stocks above $200 (raw) are left out of the monthly universe; the $200 line is a judgement, since the source gives no number. |
 
 `WIDE` subscribes 2.5 times as many symbols as the control. If it times out,
 use `UNIVERSE_SIZE = 400`. Every variant stays well under the Free plan's

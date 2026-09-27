@@ -148,6 +148,7 @@ class SublimeResearch(QCAlgorithm):
     # Sensitivity variants (README.md, "Sensitivity variants"). Each default
     # is the control; a variant run changes only the constants its row lists.
     UNIVERSE_SKIP = 0           # the largest N by dollar volume left out
+    MAX_SHARE_PRICE = None      # the other reading of [M p.54]'s "uber expensive": a raw share-price cap
     BREAKOUT_CHANNEL = rules.BREAKOUT_CHANNEL
     BREAKOUT_LEVEL = rules.LEVEL_CHANNEL_AND_LAST_YEAR
     BASE_RULE = rules.BASE_NO_NEW_CHANNEL_HIGH
@@ -238,7 +239,8 @@ class SublimeResearch(QCAlgorithm):
             return Universe.Unchanged
         self._last_eligibility_month = current
         filtered = [c for c in coarse
-                    if c.HasFundamentalData and c.Price >= 5.0 and c.DollarVolume >= 5_000_000.0]
+                    if c.HasFundamentalData and c.Price >= 5.0 and c.DollarVolume >= 5_000_000.0
+                    and (self.MAX_SHARE_PRICE is None or c.Price <= self.MAX_SHARE_PRICE)]
         filtered.sort(key=lambda c: c.DollarVolume, reverse=True)
         return [c.Symbol for c in filtered[self.UNIVERSE_SKIP:self.UNIVERSE_SKIP + self.UNIVERSE_SIZE]]
 
@@ -694,8 +696,8 @@ class SublimeResearch(QCAlgorithm):
 
     def OnEndOfAlgorithm(self):
         # The run's variant switches, so a result names its configuration.
-        self._publish("Config", "n={} skip={} ch={} lvl={} base={} rt={} hist={} ath={}".format(
-            self.UNIVERSE_SIZE, self.UNIVERSE_SKIP, self.BREAKOUT_CHANNEL, self.BREAKOUT_LEVEL,
+        self._publish("Config", "n={} skip={} maxpx={} ch={} lvl={} base={} rt={} hist={} ath={}".format(
+            self.UNIVERSE_SIZE, self.UNIVERSE_SKIP, self.MAX_SHARE_PRICE, self.BREAKOUT_CHANNEL, self.BREAKOUT_LEVEL,
             self.BASE_RULE, self.RETEST_ATR, self.MIN_HISTORY_BARS, self.RISK_UPPER_AT_SPY_ATH))
         self._log_span("OVERALL", self.equity_curve)
         for name, (start, end) in self.regime_windows.items():
