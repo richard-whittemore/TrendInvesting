@@ -265,7 +265,7 @@ class constants changed in `main.py`. Every run, the control included, sets
 `END_DATE = (2015, 12, 31)`: nothing from 2016 onward is run or read. Rerun
 the control first, because Deviations 11 changes it. Compare the variants on
 the Regime Windows from 2003 onward, since every run is in cash until about
-2002 (Fidelity audit 5). All eight were chosen before any of them was run.
+2002 (Fidelity audit 5). The first eight were chosen before any of them was run; PRICE_CAP, the ninth, was added afterwards to test the other reading of "uber expensive".
 
 | Name | Constants | Question it answers |
 |---|---|---|

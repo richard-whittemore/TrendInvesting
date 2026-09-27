@@ -379,7 +379,7 @@ class SublimeResearch(QCAlgorithm):
         equity = float(self.Portfolio.TotalPortfolioValue)
         open_risk = sum(st.campaign.open_risk()
                         for st in self.symbol_state.values() if st.campaign is not None)
-        daily, aggregate = rules.risk_ceilings(at_ath)
+        daily, aggregate = rules.risk_ceilings(at_ath, risk == rules.RISK_FULL_BLOOM_AT_ATH)
         budget = rules.RiskBudget(equity, open_risk, self._spendable_cash(), daily, aggregate)
         for symbol, state, bar in adds:
             self._decide(symbol, state, bar, "add", risk, budget)

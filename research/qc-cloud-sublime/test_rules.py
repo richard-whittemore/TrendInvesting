@@ -162,8 +162,11 @@ class MarketRegimeTests(unittest.TestCase):
                                                     at_all_time_high=True), 0.02)
         self.assertEqual(rules.market_risk_fraction("bull", True, False, True, True, True,
                                                     at_all_time_high=True), 0.005)
-        self.assertEqual(rules.risk_ceilings(False), (0.04, 0.10))
-        self.assertEqual(rules.risk_ceilings(True), (0.08, 0.20))
+        self.assertEqual(rules.risk_ceilings(False, False), (0.04, 0.10))
+        self.assertEqual(rules.risk_ceilings(True, True), (0.08, 0.20))
+        # [R]'s upper end needs BOTH an all-time high and full bloom.
+        self.assertEqual(rules.risk_ceilings(True, False), (0.04, 0.10))
+        self.assertEqual(rules.risk_ceilings(False, True), (0.04, 0.10))
 
     def test_printing_all_time_highs_means_one_within_the_last_20_bars(self):
         self.assertTrue(rules.printing_all_time_highs(120.0, 120.0))

@@ -395,10 +395,12 @@ def market_risk_fraction(monthly, weekly_200, weekly_50, daily_200, daily_50, da
     return RISK_BELOW_WEEKLY_200
 
 
-def risk_ceilings(at_all_time_high=False):
+def risk_ceilings(at_all_time_high=False, full_bloom=False):
     """(daily-initiated, aggregate) risk ceilings [R], section 3.7 rule 29:
-    the lower ends, or the upper ends when the S&P prints all-time highs."""
-    if at_all_time_high:
+    the lower ends, or the upper ends only when the S&P prints all-time
+    highs AND every timeframe is aligned (full bloom) -- the same condition
+    under which market_risk_fraction returns RISK_FULL_BLOOM_AT_ATH."""
+    if at_all_time_high and full_bloom:
         return DAILY_RISK_CEILING_AT_ATH, AGGREGATE_RISK_CEILING_AT_ATH
     return DAILY_RISK_CEILING, AGGREGATE_RISK_CEILING
 
