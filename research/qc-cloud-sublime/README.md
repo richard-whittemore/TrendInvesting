@@ -84,6 +84,9 @@ The run covered the top 200 US stocks by dollar volume, with $1M starting capita
 |---|---|---|---|
 | Sublime control (this folder) | +1.45% | 13.6% | 0.107 |
 | Turtle Baseline (`research/qc-cloud`) | −5.74% | 87% | — |
+| Turtle + SPY above its 200-day SMA | −0.35% | 52% | — |
+| Turtle, 0.1% Unit Volatility Fraction | −0.26% | 36% | — |
+| Turtle, both of the above | −1.26% | 31% | — |
 | SPY buy-and-hold, total return | +6.07% | 55% | 0.110 |
 
 - **Campaigns:** 48, of which 27% won. The average win was +3.83R and the average loss −0.77R.
@@ -91,7 +94,7 @@ The run covered the top 200 US stocks by dollar volume, with $1M starting capita
 - **Late start:** it holds cash from 1998 to 2002, because the prior-year-high and weekly 200-bar rules need about 5 years of history.
 - **By period (CAGR):** 2003–07 +1.98%, 2008–09 −0.85%, 2009–15 +2.63%.
 
-It beats every Turtle stock variant on both return and drawdown, but still trails SPY by about 4.6 points a year. That's mostly because it rarely has much capital invested. Sublime's proprietary pieces are proxies here (see the provenance tags below), so read this as a lower bound on the real methodology rather than a verdict on it.
+It beats every Turtle stock variant in the table on both return and drawdown (the Turtle variants were temporary cloud builds of `research/qc-cloud`, run on the same universe and span, 2026-09-26), but still trails SPY by about 4.6 points a year. That's mostly because it rarely has much capital invested. Sublime's proprietary pieces are proxies here (see the provenance tags below), so read this as a lower bound on the real methodology rather than a verdict on it.
 
 ## The rules, with provenance
 
