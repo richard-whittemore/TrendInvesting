@@ -263,6 +263,24 @@ class CommandLineTests(unittest.TestCase):
             self.assertIn("Reconcile", report)
             self.assertIn("OK", report)
 
+    def test_warns_when_a_hinted_markets_last_settle_looks_like_the_alternate_scale(self):
+        # SI (silver) is TO-VERIFY for price_units: markets.py assumes $ per
+        # troy oz, but Pinnacle's file might use cents per oz instead
+        # (loader.PRICE_SCALE_HINTS). A file whose last close is 2450.0 --
+        # $24.50/oz in cents -- should trip the warning, not the run.
+        with tempfile.TemporaryDirectory() as directory:
+            rows = FLAT + [(2449.0, 2451.0, 2448.0, 2450.0)]
+            with open(os.path.join(directory, "SI.TXT"), "w") as handle:
+                for bar in _bars(rows):
+                    handle.write("{:%Y%m%d},{},{},{},{},0,0\n".format(bar.date, bar.open, bar.high, bar.low,
+                                                                      bar.close))
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = backtest.main(["--data-dir", directory, "--start", "1990-01-01", "--markets", "SI"])
+            self.assertEqual(code, 0)
+            self.assertIn("SI", err.getvalue())
+            self.assertIn("alternate", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

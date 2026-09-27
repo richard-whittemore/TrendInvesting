@@ -74,30 +74,26 @@ The data hadn't arrived when this was written, so the file layout is unknown. Ch
    - HG, HO and HU in dollars, not cents;
    - KC, SB and CT in cents per pound.
 
-   A units mismatch scales every Unit size and every dollar of P&L by the same factor.
+   A units mismatch scales every Unit size and every dollar of P&L by the same factor. `loader.classify_price_scale(symbol, price)` and `loader.check_series_scale(symbol, bars)` automate a first pass at this: they compare one real settle against the plausible 1980-2015 range for `markets.py`'s assumed unit and, where `markets.py`'s own comment names one, the alternate unit (`loader.PRICE_SCALE_HINTS`). `backtest.py`'s command line runs this automatically on each hinted market's last loaded bar and prints a warning -- never an error -- if it looks like the alternate unit or neither. It only flags a mismatch; it does not resolve one.
 5. **Back-adjustment.** Use the *back-adjusted* (additive) series, not ratio-adjusted or unadjusted. Negative prices are expected in it and are accepted.
 6. **Settle outside the day's range.** The loader rejects an open or settle outside high-low. If Pinnacle's files contain such rows, look at how many before deciding how to treat them; the loader never repairs data silently.
 7. **Roll dates.** If Pinnacle documents its own roll schedule, replace the approximate `roll_months` and `roll_day` in `markets.py` with it.
 
 ## TO-VERIFY
 
-Every market's `file_stem` and `roll_months` are unverified. Beyond those:
+Every market's `file_stem` and `roll_months` are unverified -- Pinnacle's own file names and roll dates need the real data, not exchange research. A pass against CME Group, ICE, CBOT and Federal Reserve sources settled most of the rest; `markets.py`'s per-market comments cite the source for each. What's left, and why:
 
-| Market | Also unverified |
-| --- | --- |
-| US | price units |
-| TY | price units, tick size |
-| ED | tick size |
-| TB | tick size, trade window (does Pinnacle carry it at all?) |
-| DM | trade window (stops at the end of 1998) |
-| FR | multiplier, tick size, price units, trade window |
-| EC | tick size, trade window (starts 1999) |
-| BP | multiplier (GBP 25,000 in its early years) |
-| JY | price units, tick size |
-| CD | tick size |
-| SP | multiplier schedule ($500 to $250 on 1997-11-03), tick size |
-| SI, HG, HO | price units (HG also tick size) |
-| HU | price units, trade window (unleaded gas, then RBOB) |
+| Market | Still unverified | Why |
+| --- | --- | --- |
+| US, TY | price units | Exchange convention (32nds) is confirmed and cited, but whether Pinnacle's file uses it or plain decimal is Pinnacle's own choice, not the exchange's -- needs a real bar. |
+| TB | trade window | Confirmed to have traded well past Faith's era at very low volume, but no source gives the exact year it stopped, or whether Pinnacle carries it at all. |
+| FR | multiplier, tick size, price units | Genuinely unconfirmed: no CME rulebook chapter or spec page for the historical French franc contract could be found (CME Group's site blocks automated fetches; third-party archives cover only currencies still traded today). |
+| BP | multiplier | The GBP 25,000 early contract size, and when it changed to 62,500, could not be sourced. |
+| JY, SI, HO, HU | price units | Same Pinnacle-scaling caveat as US/TY (per yen vs. per 100 yen; dollars vs. cents). |
+| HG | price units, tick size | Same caveat; COMEX's own quote convention for copper is cents per lb (unlike gold and silver), so this one needs the real data more than most. |
+| HU | trade window | Whether Pinnacle's file splices unleaded gas and its 2005-2006 RBOB successor into one series, or covers only one, is unknown. |
+
+`loader.classify_price_scale` / `loader.check_series_scale` (above, "Price units") automate the price-unit checks once the files arrive; nothing here can be resolved further without them.
 
 `python3 -c "import markets; print('\n'.join(markets.to_verify_report()))"`, run in this folder, prints the same list from the table itself.
 

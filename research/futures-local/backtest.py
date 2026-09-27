@@ -715,6 +715,16 @@ def main(argv=None):
             continue
         universe[market.symbol] = market
         series[market.symbol] = loader.load_series(path)
+        scale = loader.check_series_scale(market.symbol, series[market.symbol])
+        if scale == "alternate":
+            print("backtest: {}: last settle {} looks like the alternate price scale markets.py's "
+                  "comment names, not the one its multiplier assumes -- check price_units before "
+                  "trusting this run".format(market.symbol, series[market.symbol][-1].close),
+                  file=sys.stderr)
+        elif scale == "unknown":
+            print("backtest: {}: last settle {} matches neither price scale markets.py "
+                  "considers -- check price_units before trusting this run".format(
+                      market.symbol, series[market.symbol][-1].close), file=sys.stderr)
     if not series:
         print("backtest: no market files found", file=sys.stderr)
         return 1

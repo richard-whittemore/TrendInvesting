@@ -253,6 +253,91 @@ def _parse_row(fields, index, date_format, century_pivot):
                values["volume"], values["open_interest"])
 
 
+# -----------------------------------------------------------------------------
+# Price-scale sanity check (markets.py's "Important caveat": Pinnacle's own
+# price scaling may not match the unit its multiplier assumes, and this
+# can't be resolved by exchange-spec research alone -- it takes one real
+# bar). This never guesses which unit is right; it only flags whether a
+# real settle price is consistent with the assumed unit, the one named
+# alternative markets.py's comments call out, or neither.
+# -----------------------------------------------------------------------------
+
+#: For each market whose ``price_units`` is still TO-VERIFY in markets.py,
+#: the settle-price range Pinnacle's file should show under markets.py's
+#: assumed unit, and under the one alternate unit its comment names (cents
+#: instead of dollars, or per-100-yen instead of per-yen). Both ranges are
+#: wide enough to cover the market's actual 1980-2015 history under that
+#: hypothesis; a real settle should fall inside one of them, not between.
+#: ``None`` for the alternate means the two units land in the same broad
+#: range and can't be told apart this way (US and TY: a decimal point and
+#: a 32nd-as-decimal-fraction are both small numbers near 100); the check
+#: still catches a much coarser error there, such as ticks stored as an
+#: integer count.
+PRICE_SCALE_HINTS = {
+    # 30-year T-bond futures settle, 1980-2015: roughly 55 (early-1980s
+    # double-digit yields) to 175 (2015, near-zero yields), in decimal
+    # points (CME Group, "The basics of U.S. Treasury futures").
+    "US": ((55.0, 175.0), None),
+    # 10-year T-note futures settle over the same span, decimal points.
+    "TY": ((55.0, 145.0), None),
+    # $ per yen (markets.py's assumed unit) vs. $ per 100 yen (the common
+    # vendor alternative markets.py's own comment names). USD/JPY ranged
+    # roughly 75-280 over 1980-2015.
+    "JY": ((1.0 / 280, 1.0 / 75), (100.0 / 280, 100.0 / 75)),
+    # $ per troy oz (assumed) vs. cents per troy oz. COMEX silver ranged
+    # roughly $3.50-$50/oz over 1980-2015.
+    "SI": ((3.0, 55.0), (300.0, 5500.0)),
+    # $ per lb (assumed) vs. cents per lb. COMEX copper ranged roughly
+    # $0.50-$4.60/lb over 1980-2015.
+    "HG": ((0.5, 5.0), (50.0, 500.0)),
+    # $ per gallon (assumed) vs. cents per gallon. NYMEX heating oil ranged
+    # roughly $0.25-$4.50/gal over 1980-2015.
+    "HO": ((0.25, 4.5), (25.0, 450.0)),
+    # Same hint as HO: unleaded gasoline and its RBOB successor are also
+    # quoted $ per gallon (README.md, "Verify the real files first").
+    "HU": ((0.25, 4.5), (25.0, 450.0)),
+}
+
+
+def classify_price_scale(symbol, price):
+    """Whether ``price`` -- one real settle from Pinnacle's file for
+    ``symbol`` -- looks like markets.py's assumed unit, the one named
+    alternate, or neither.
+
+    Returns ``"assumed"``, ``"alternate"``, ``"unknown"`` (outside both
+    ranges -- something else is wrong, not just a units mismatch), or
+    ``None`` when ``symbol`` has no hint (either its units are already
+    settled, or it isn't marked TO-VERIFY for ``price_units``).
+
+    This resolves nothing by itself: it is a check to run by hand on one
+    real bar per hinted market once Pinnacle's files arrive (markets.py's
+    "Important caveat"), never a guess at which unit is correct.
+    """
+    hints = PRICE_SCALE_HINTS.get(symbol)
+    if hints is None:
+        return None
+    assumed, alternate = hints
+    if assumed[0] <= price <= assumed[1]:
+        return "assumed"
+    if alternate is not None and alternate[0] <= price <= alternate[1]:
+        return "alternate"
+    return "unknown"
+
+
+def check_series_scale(symbol, bars):
+    """``classify_price_scale`` on the *last* bar's close in ``bars``, or
+    ``None`` for an empty series or a symbol with no hint.
+
+    The last bar is the one to check: a back-adjusted continuous series
+    matches the real, un-adjusted price only at its most recent date, and
+    diverges further back as each roll's adjustment accumulates (README.md,
+    "Back-adjustment"). Checking an older bar this way would be meaningless.
+    """
+    if not bars:
+        return None
+    return classify_price_scale(symbol, bars[-1].close)
+
+
 def find_market_file(directory, stem):
     """The one file in ``directory`` whose name is ``stem`` plus one of
     ``DATA_EXTENSIONS`` (case-insensitive), or ``None`` when there is none.
