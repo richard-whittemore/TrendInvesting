@@ -32,6 +32,34 @@ project's best understanding of LEAN's documented continuous-futures
 support, not from a live lookup. "Uncertain about the API", below, names
 every place that could be wrong, and how to tell.
 
+## Cloud result (in-sample, 1998–2015)
+
+The run started with $1M on QuantConnect Cloud and stopped at 2015-12-31, so everything from 2016 on stays held out. Backtest `e6ac962a864551841220445e4aec451b`, 2026-09-27.
+
+**Read the data coverage first.** QuantConnect's free continuous-futures data covers far fewer markets than the list below suggests:
+- **1998 to April 2007:** only ES has data.
+- **Most other markets:** they start in mid-2007.
+- **HG, SI and GC:** they start in 2012–13.
+- **SB, KC, CC and CT:** never traded.
+
+So 1998–2007 is a single-market S&P Turtle, not a diversified futures test. Only 2007–2015 says anything about Turtle on futures.
+
+| Period | CAGR |
+|---|---|
+| Overall, 1998–2015 | −3.5% (max drawdown 84%) |
+| 1998–2000, ES only | −14.1% |
+| 2000–02, ES only | −7.8% |
+| 2003–07, ES only until mid-2007 | −16.9% |
+| 2008–09 | +0.1% |
+| 2009–15 | +5.7% |
+| SPY buy-and-hold, 1998–2015 | +6.07% (max drawdown 55%) |
+
+- **Campaigns:** 459, of which 21% won. The average win was +9.2R and the average loss −1.8R.
+- **Rolls:** 266, costing $18.5k in commission. Total commission was $57k.
+- **Excluding SI:** CAGR is −2.6% and 2009–15 is +8.4% (backtest `53ae9c60`). QuantConnect's SI data stops weeks before contract expiry before 2014, so treat SI as unreliable.
+
+**Known remaining gap.** The `Reconcile` statistic shows the account doing worse than the Campaigns' own P&L: without SI, the Campaigns made +$20k while the account lost $318k gross. Per market the gap is about ±$50–150k, mostly in currencies, HG and NG. The likely cause is roll legs filling at sparse or stale contract prices. Until this is closed, the 2009–15 figures carry a drag of roughly 1.5–2% a year that isn't the strategy's.
+
 ## The rules, and their citations
 
 Every rule is Faith's own, from *The Original Turtle Trading Rules* (Curtis
