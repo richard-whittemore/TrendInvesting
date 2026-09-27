@@ -302,6 +302,8 @@ Every run includes the universe re-entry fix. Periods are CAGR; the drawdown is 
 | WIDE | +0.20% | 18.1% | −2.38% | +2.31% | 112 | 32% | 1.66 / −0.81 |
 | RISK_ATH | −0.29% | 20.7% | +0.17% | −0.84% | 61 | 25% | 2.01 / −0.83 |
 
+RISK_ATH was rerun (backtest `e252031b`) after its upper risk ceilings were restricted to an all-time high in full bloom. Every figure was identical, so the looser gating never bound in this run.
+
 **Conclusion.** No variant comes close to SPY. The best, CH252, trails it by 4.7 points a year. The corrected base rules (BASE_BELOW, LAST_YEAR) add trades but cut the average win, and neither reading of "uber expensive" (WIDE, PRICE_CAP) helps. None is promoted to the control: the owner approved promoting a *winner*, and nothing here wins.
 ## Deviations from `research/qc-cloud`'s infrastructure
 
