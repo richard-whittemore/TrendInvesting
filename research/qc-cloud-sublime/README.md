@@ -78,24 +78,20 @@ The Regime Windows from 2003 onward are the fair comparison with SPY.
 
 ## Cloud result (in-sample, 1998–2015)
 
-The run covered the top 200 US stocks by dollar volume, with $1M starting capital, on QuantConnect Cloud. It stopped at 2015-12-31, so everything from 2016 on stays held out. Backtest `00f865ad3335ec1f38de8fc5990c9547`, 2026-09-26.
+The run covered the top 200 US stocks by dollar volume, with $1M starting capital, on QuantConnect Cloud. It stopped at 2015-12-31, so everything from 2016 on stays held out. Backtest `e947267a6cb9dfaec6badf86e3a5e56f`, 2026-09-27, run on this code after the review fixes. An earlier run on the pre-fix code, backtest `00f865ad3335ec1f38de8fc5990c9547`, gave +1.36% CAGR with a 13.6% max drawdown.
 
 | Run | CAGR | Max drawdown | Return / drawdown |
 |---|---|---|---|
-| Sublime control (this folder) | +1.36% | 13.6% | 0.0996 |
+| Sublime control (this folder) | +1.45% | 13.6% | 0.107 |
 | Turtle Baseline (`research/qc-cloud`) | −5.74% | 87% | — |
 | SPY buy-and-hold, total return | +6.07% | 55% | 0.110 |
 
-- **Campaigns:** 50, of which 26% won. The average win was +3.81R and the average loss −0.77R.
-- **Signals:** 327 Phase C Signals were detected in total. Of those, 122
-  were declined before grading — for the stock not being aligned
-  (`Decline entry: stock not aligned`) or its 63-bar Strength not yet ready
-  (`Decline entry: strength not ready`); see `_signal()` in `main.py`. The
-  remaining 205 were graded: 53 Grade A, 152 Grade B, producing 267 orders.
+- **Campaigns:** 48, of which 27% won. The average win was +3.83R and the average loss −0.77R.
+- **Signals:** 327 Phase C Signals were detected. 122 were declined before grading because the stock wasn't aligned (`Decline entry: stock not aligned`; see `_signal()` in `main.py`). The remaining 205 were graded: 53 Grade A and 152 Grade B, producing 259 orders.
 - **Late start:** it holds cash from 1998 to 2002, because the prior-year-high and weekly 200-bar rules need about 5 years of history.
-- **By period (CAGR):** 2003–07 +1.92%, 2008–09 −0.85%, 2009–15 +2.44%.
+- **By period (CAGR):** 2003–07 +1.98%, 2008–09 −0.85%, 2009–15 +2.63%.
 
-It beats every Turtle stock variant on both return and drawdown, but still trails SPY by about 4.7 points a year. That's mostly because it rarely has much capital invested. Sublime's proprietary pieces are proxies here (see the provenance tags below), so read this as a lower bound on the real methodology rather than a verdict on it.
+It beats every Turtle stock variant on both return and drawdown, but still trails SPY by about 4.6 points a year. That's mostly because it rarely has much capital invested. Sublime's proprietary pieces are proxies here (see the provenance tags below), so read this as a lower bound on the real methodology rather than a verdict on it.
 
 ## The rules, with provenance
 
