@@ -69,6 +69,7 @@ one key per item. The keys match `research/qc-cloud`'s:
 - `Declines`, and one `Decline <reason>` key per reason.
 - `SPY BUY-AND-HOLD`: SPY's total return over the same span, in the same
   format as `OVERALL`.
+- `Config`: the run's sensitivity-variant switches ("Sensitivity variants").
 
 **When trading can start.** The rules need five years of each stock's
 history, and SPY's weekly 200 SMA needs 200 weeks. QuantConnect's data
@@ -214,6 +215,73 @@ at a result.
    the source gives none.
 10. **Regime source:** SPY's Adjusted (total-return) closes stand in for the
     S&P 500 index (next section).
+
+## Fidelity audit (2026-09-27)
+
+The rules above were checked against the code and against the sources
+themselves: the webinar transcript, [M], [R], [4PS], [2B], [30] and [KISS].
+The code does what the tables say. Where the sources and this control
+differ, the difference comes from Model E's thresholds or from the
+universe, not from the sources:
+
+1. **The base (changes results a lot).** The sources define consolidation as
+   time spent below the level that is later broken. That is the range
+   "between the high and the low of last year" [V 00:46:00], or a base
+   lasting months or years under a prior high (CBOE 2018 to July 2023 and
+   PGR April to October 2023 [4PS]). Model E's base instead resets on any
+   new 55-bar high. A rally inside the range therefore resets it, and so
+   does an intraday poke above the range. This is why AAPL gave only three
+   Phase A breakouts in twelve years.
+2. **The universe (changes results a lot).** Sublime scans more than 10,000
+   assets and rejects "uber expensive stocks like Amazon" in favour of
+   "cheap stocks creating new ATHs" [M p.54]. The top 200 by dollar volume
+   is the opposite: it is mostly mega-caps.
+3. **Breakout timeframes (matches the sources).** All three phases are read
+   on daily bars ("We look for these 3 mini phases on the daily timeframe"
+   [4PS]). The level combines the 55-bar high with last calendar year's
+   high, the monthly-chart level. The all-time high only grades a Signal,
+   and the weekly timeframe only gates alignment. The sources name last
+   year's high [V 00:46:20], the all-time high [V 00:51:14; M p.55] and the
+   consolidation's resistance [4PS; 30 p.5]. None of them names a 55-bar
+   high: [2B]'s 55 days is a length, not a channel.
+4. **Retest (changes results a little to a lot).** A Phase A close is
+   usually within 1 ATR of the level, so the next bar's low nearly always
+   "retests" it. Phase B is then close to automatic.
+5. **History (a little).** A stock needs 5 years of history, which the
+   sources disclose [M p.54]. The 1998–2002 cash spell comes from SPY's
+   weekly 200 SMA (200 weeks from QuantConnect's 1998 data start), not from
+   the stock floor, so no stock-side variant can move it.
+6. **Risk (a little to a lot).** The control always sits at [R]'s lower
+   end. [R] moves to the upper end (2 %, 8 %, 20 %) when the S&P prints
+   all-time highs in full bloom.
+7. **Alignment (a little).** The webinar also requires the stock to be above
+   its weekly 50 SMA and its daily 50 and 20 SMAs [V 00:46:24, 00:44:35].
+   The control uses §4.7's minimal KISS gate.
+
+## Sensitivity variants
+
+Each variant is a copy of the control with only the listed `SublimeResearch`
+class constants changed in `main.py`. Every run, the control included, sets
+`END_DATE = (2015, 12, 31)`: nothing from 2016 onward is run or read. Rerun
+the control first, because Deviations 11 changes it. Compare the variants on
+the Regime Windows from 2003 onward, since every run is in cash until about
+2002 (Fidelity audit 5). All eight were chosen before any of them was run.
+
+| Name | Constants | Question it answers |
+|---|---|---|
+| Control | defaults | The baseline, rerun with the re-add fix |
+| `LAST_YEAR` | `BREAKOUT_LEVEL = rules.LEVEL_LAST_YEAR`, `BASE_RULE = rules.BASE_CLOSES_BELOW_LEVEL` | Is the webinar's breakout (55 closes under last year's high, then a close above it) better than Model E's? |
+| `BASE_BELOW` | `BASE_RULE = rules.BASE_CLOSES_BELOW_LEVEL` | How much does the new-55-bar-high base reset starve the control of Signals (audit 1)? |
+| `CH252` | `BREAKOUT_CHANNEL = 252` | Does a 1-year channel, the top of a longer base, beat the 55-bar one? |
+| `RETEST_05` | `RETEST_ATR = 0.5` | Does requiring a deeper pullback (a real retest) help (audit 4)? |
+| `RETEST_2` | `RETEST_ATR = 2.0` | Does a looser retest help? |
+| `WIDE` | `UNIVERSE_SIZE = 500`, `UNIVERSE_SKIP = 50` | Does dropping the 50 largest by dollar volume, over a wider pool, help (audit 2)? |
+| `HIST2Y` | `MIN_HISTORY_BARS = 504` | Does the 5-year floor exclude young leaders? The stock's own weekly 200 SMA still needs about 3.9 years |
+| `RISK_ATH` | `RISK_UPPER_AT_SPY_ATH = True` | Does [R]'s upper end (2 % a position, 8 % a day, 20 % in aggregate), used when SPY set an all-time high within 20 sessions and is in full bloom, deploy more capital without a worse drawdown? |
+
+`WIDE` subscribes 2.5 times as many symbols as the control. If it times out,
+use `UNIVERSE_SIZE = 400`. Every variant stays well under the Free plan's
+10,000 orders: the control placed 259.
 
 ## Deviations from `research/qc-cloud`'s infrastructure
 
