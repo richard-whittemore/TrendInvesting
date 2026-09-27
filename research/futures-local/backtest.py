@@ -28,7 +28,7 @@ import math
 import os
 import sys
 from collections import namedtuple
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -41,6 +41,7 @@ if _HERE not in sys.path:
 import rules  # noqa: E402  (research/qc-cloud-futures/rules.py)
 import loader  # noqa: E402
 import markets as market_table  # noqa: E402
+import rates  # noqa: E402
 
 DEFAULT_START = date(1980, 1, 1)
 DEFAULT_END = date(2015, 12, 31)
@@ -73,6 +74,11 @@ class Config:
     #: main.py's LONG_ONLY comparison switch.
     long_only: bool = False
     charge_rolls: bool = True
+    #: A ``rates.RateCurve``, or ``None`` (the default) to credit no
+    #: interest at all (README.md, "Switchable"). With ``None``,
+    #: ``Backtester._credit_interest`` is a no-op and every result is
+    #: exactly what it was before this feature existed.
+    interest_rates: object = None
 
 
 def check_dates(config):
@@ -120,7 +126,12 @@ Reconcile = namedtuple("Reconcile", ["account_pnl", "campaign_pnl", "difference"
 
 #: Reconciliation tolerance, in dollars: float rounding only. The two sides
 #: are computed independently (daily variation margin on the account side,
-#: fill-to-exit distance on the Campaign side).
+#: fill-to-exit distance on the Campaign side). ``account_pnl`` is
+#: deliberately trading-only: interest (README.md, "Reconcile check") is
+#: credited to the same cash balance but subtracted back out of this side
+#: before the comparison, so the invariant holds exactly whether or not
+#: interest is switched on, and ``result.total_interest`` is the account's
+#: own separate line, never folded into either side here.
 RECONCILE_TOLERANCE = 0.01
 
 
@@ -199,6 +210,9 @@ class Result:
         self.total_commission = 0.0
         self.total_roll_cost = 0.0
         self.roll_count = 0
+        #: Interest credited to the account's cash equity (README.md,
+        #: "Accrual"), zero when ``Config.interest_rates`` is ``None``.
+        self.total_interest = 0.0
         self.pnl_by_market = {}
         self.declines = {}
         self.reconcile = None
@@ -230,6 +244,10 @@ class Backtester:
         self.result = Result()
         self.result.starting_equity = float(config.starting_equity)
         self.result.markets = sorted(self.states)
+        #: The date interest has been credited through (README.md,
+        #: "Accrual"); starts at ``config.start`` so the first Session
+        #: credits nothing (no calendar day has elapsed yet).
+        self._last_interest_date = config.start
 
     # --- the Session loop --------------------------------------------------
 
@@ -256,6 +274,7 @@ class Backtester:
         the close, exits are proposed, Adds decided in ascending symbol
         order, and entries decided ranked by Strength (The Turtle Rules
         p.27-29; ADR 0010, ADR 0021). Returns False once equity is gone."""
+        self._credit_interest(session_date)
         for symbol, bar in today:
             self._fill_phase(symbol, self.states[symbol], bar, session_date)
         self._decide(session_date, today)
@@ -501,6 +520,35 @@ class Backtester:
 
     # --- money ---------------------------------------------------------------
 
+    def _credit_interest(self, session_date):
+        """Credit interest on the whole cash equity, ``self.cash``, for
+        every calendar day since the previous Session (README.md,
+        "Accrual"): before 2009, futures margin itself earned the
+        prevailing T-bill rate for most traders, not just uninvested cash,
+        so the credit is on the whole account, not a separate sleeve.
+        ``rates.RateCurve.accrued_fraction`` supplies the day-by-day
+        fraction, including carry-forward and any rate change inside a
+        multi-day gap (a weekend, when the balance itself does not
+        change); a no-op when ``Config.interest_rates`` is ``None``.
+
+        This makes the credited interest compound into the Notional
+        Account (``self.notional.observe`` below reads ``self.cash``
+        after this), and so into next Unit's size, exactly as real
+        interest income would have (README.md, "Accrual"). ``_finish``
+        subtracts ``result.total_interest`` back out of the reconcile's
+        account side, so this never disturbs the Campaign-vs-account
+        invariant (README.md, "Reconcile check")."""
+        curve = self.config.interest_rates
+        if curve is None:
+            return
+        fraction = curve.accrued_fraction(self._last_interest_date, session_date)
+        self._last_interest_date = session_date
+        if fraction == 0.0:
+            return
+        interest = self.cash * fraction
+        self.cash += interest
+        self.result.total_interest += interest
+
     def _mark(self, state, bar):
         """Daily variation margin: every open Unit settles to today's close."""
         if state.position is None:
@@ -566,7 +614,11 @@ class Backtester:
                 gross, position.commission, position.roll_cost, net))
             result.pnl_by_market[symbol] = result.pnl_by_market.get(symbol, 0.0) + net
         result.final_equity = self.cash
-        account = self.cash - result.starting_equity
+        # Trading-only: interest is a separate account line (README.md,
+        # "Reconcile check"), so it is credited to self.cash but excluded
+        # here -- self.cash - starting - total_interest is the account's
+        # own trading P&L, comparable to the Campaign side unchanged.
+        account = self.cash - result.starting_equity - result.total_interest
         campaigns = sum(c.net_pnl for c in result.campaigns) + sum(c.net_pnl for c in result.open_campaigns)
         difference = account - campaigns
         result.reconcile = Reconcile(account, campaigns, difference, abs(difference) <= RECONCILE_TOLERANCE)
@@ -597,10 +649,27 @@ def span_cagr(curve, starting_equity, first, last):
     return rules.annualised_return(start_equity, end_equity, (end_date - start_date).days)
 
 
+#: The report's fixed windows (README.md, "Per-period CAGR"): everything
+#: through 1989; the 1990s; 2000 through the 2008 crisis; the post-crisis
+#: 2009-2015 span; and 2003-2015 -- from Faith's own publication of these
+#: rules (docs/methodology/Methodology_Analysis.md, source T: *The
+#: Original Turtle Trading Rules*, Curtis Faith, OriginalTurtles.org,
+#: 2003) through the end of the in-sample span, i.e. only the years in
+#: which anyone outside the original Turtles could have traded the
+#: published rules.
+REPORT_PERIODS = (
+    ("start-1989", date.min, date(1989, 12, 31)),
+    ("1990-1999", date(1990, 1, 1), date(1999, 12, 31)),
+    ("2000-2008", date(2000, 1, 1), date(2008, 12, 31)),
+    ("2009-2015", date(2009, 1, 1), date(2015, 12, 31)),
+    ("2003-2015 (published)", date(2003, 1, 1), date(2015, 12, 31)),
+)
+
+
 def metrics(result):
     curve = result.equity_curve
-    out = {"cagr": None, "max_drawdown": None, "ratio": None, "decades": [], "campaigns": len(result.campaigns),
-           "win_rate": None, "avg_win_r": None, "avg_loss_r": None}
+    out = {"cagr": None, "max_drawdown": None, "ratio": None, "decades": [], "periods": [],
+           "campaigns": len(result.campaigns), "win_rate": None, "avg_win_r": None, "avg_loss_r": None}
     if curve:
         out["cagr"] = span_cagr(curve, result.starting_equity, curve[0][0], curve[-1][0])
         out["max_drawdown"] = rules.max_drawdown([result.starting_equity] + [e for _, e in curve])
@@ -608,6 +677,8 @@ def metrics(result):
         for decade in range(curve[0][0].year // 10 * 10, curve[-1][0].year + 1, 10):
             first, last = date(decade, 1, 1), date(decade + 9, 12, 31)
             out["decades"].append(("{}s".format(decade), span_cagr(curve, result.starting_equity, first, last)))
+        for label, first, last in REPORT_PERIODS:
+            out["periods"].append((label, span_cagr(curve, result.starting_equity, first, last)))
     wins = [c.r_multiple for c in result.campaigns if c.r_multiple > 0]
     losses = [c.r_multiple for c in result.campaigns if c.r_multiple <= 0]
     if result.campaigns:
@@ -642,11 +713,19 @@ def format_report(config, result):
         _pct(m["cagr"]), _share(m["max_drawdown"]), _num(m["ratio"])))
     for label, value in m["decades"]:
         lines.append("  {} CAGR {}".format(label, _pct(value)))
+    lines.append("Per-period CAGR:")
+    for label, value in m["periods"]:
+        lines.append("  {} CAGR {}".format(label, _pct(value)))
     lines.append("Campaigns {} (open at end {})  win rate {}  avg win {}R  avg loss {}R".format(
         m["campaigns"], len(result.open_campaigns), _share(m["win_rate"]), _num(m["avg_win_r"]),
         _num(m["avg_loss_r"])))
     lines.append("Commission ${:,.2f}  Roll cost ${:,.2f} ({} rolls)".format(
         result.total_commission, result.total_roll_cost, result.roll_count))
+    if config.interest_rates is not None:
+        lines.append("Interest earned ${:,.2f} (haircut {:.2f}%/yr)".format(
+            result.total_interest, 100 * config.interest_rates.haircut))
+    else:
+        lines.append("Interest earned $0.00 (no --interest-rates: idle cash and margin earn nothing)")
     lines.append("P&L by market (net of costs, open Campaigns marked to the last settle):")
     for symbol, pnl in sorted(result.pnl_by_market.items(), key=lambda item: -item[1]):
         lines.append("  {:<4} ${:>16,.2f}".format(symbol, pnl))
@@ -683,15 +762,30 @@ def _parser():
     parser.add_argument("--equity", type=float, default=1_000_000.0)
     parser.add_argument("--long-only", action="store_true")
     parser.add_argument("--no-roll-costs", action="store_true")
+    parser.add_argument("--interest-rates", default=None,
+                        help="path to a date,rate (annual %%) CSV of the 3-month T-bill rate, e.g. FRED's "
+                             "TB3MS or DTB3 download (README.md, 'Rate source'); omit for no interest at all")
+    parser.add_argument("--interest-haircut", type=float, default=0.0,
+                        help="annual rate (fraction, e.g. 0.01 for 1%%) subtracted from the loaded curve "
+                             "before crediting -- a broker's spread")
     return parser
 
 
 def main(argv=None):
     args = _parser().parse_args(argv)
+    interest_curve = None
+    if args.interest_rates:
+        try:
+            interest_curve = rates.RateCurve(rates.load_rate_series(args.interest_rates),
+                                             haircut=args.interest_haircut)
+        except (OSError, ValueError) as err:
+            print("backtest: --interest-rates {}: {}".format(args.interest_rates, err), file=sys.stderr)
+            return 1
     config = Config(start=args.start, end=args.end, allow_holdout=args.allow_holdout,
                     starting_equity=args.equity, unit_volatility_fraction=args.unit_fraction,
                     commission_per_contract=args.commission, slippage_n=args.slippage_n,
-                    long_only=args.long_only, charge_rolls=not args.no_roll_costs)
+                    long_only=args.long_only, charge_rolls=not args.no_roll_costs,
+                    interest_rates=interest_curve)
     try:
         check_dates(config)
     except ValueError as err:
@@ -729,8 +823,25 @@ def main(argv=None):
         print("backtest: no market files found", file=sys.stderr)
         return 1
     result = run_backtest(config, universe, series)
-    print(format_report(config, result))
-    return 0 if result.reconcile.ok else 1
+    ok = result.reconcile.ok
+    if interest_curve is None:
+        print(format_report(config, result))
+    else:
+        # Requirement (README.md, "Switchable"): report CAGR with and
+        # without interest side by side, from two full runs -- interest
+        # compounds into the Notional Account and so into Unit sizing
+        # (Backtester._credit_interest), so the two runs can differ in
+        # more than just the account's cash line, not only in a simple
+        # post-hoc subtraction of the interest credited.
+        baseline_config = replace(config, interest_rates=None)
+        baseline_result = run_backtest(baseline_config, universe, series)
+        ok = ok and baseline_result.reconcile.ok
+        print("=== Without interest ===")
+        print(format_report(baseline_config, baseline_result))
+        print()
+        print("=== With interest ===")
+        print(format_report(config, result))
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

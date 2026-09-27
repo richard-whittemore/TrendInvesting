@@ -20,6 +20,7 @@ from datetime import date, timedelta
 import backtest
 import loader
 import markets
+import rates
 
 DAY0 = date(1990, 1, 1)
 MULTIPLIER = 1000.0
@@ -280,6 +281,123 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("SI", err.getvalue())
             self.assertIn("alternate", err.getvalue())
+
+
+class InterestTests(unittest.TestCase):
+    """research/futures-local/README.md, "Accrual": interest on the whole
+    cash equity, actual/360, with carry-forward of missing dates, zero
+    before the first available rate, and no effect at all when
+    ``Config.interest_rates`` is left at its default of ``None``.
+    """
+
+    def test_no_interest_rates_configured_leaves_the_account_untouched(self):
+        # FLAT never breaks out, so this isolates the interest code path
+        # from any trading: with no curve, total_interest must be exactly
+        # zero and equity must not move a cent (README.md, "Switchable").
+        result = _run({"TST": FLAT[:10]})
+        self.assertEqual(result.total_interest, 0.0)
+        self.assertEqual(result.final_equity, 1_000_000.0)
+        self.assertTrue(result.reconcile.ok)
+
+    def test_accrual_arithmetic_over_a_known_period(self):
+        # A flat 7.2%/year rate from day 0, actual/360 (rates.RateCurve.
+        # DAY_COUNT): 9 daily credits (day 0 itself credits nothing -- no
+        # day has elapsed yet), each compounding the prior day's balance.
+        curve = rates.RateCurve([rates.Rate(DAY0, 0.072)])
+        result = _run({"TST": FLAT[:10]}, config=_config(interest_rates=curve))
+        self.assertEqual(result.fills, [])
+        cash, expected = 1_000_000.0, 0.0
+        for _ in range(9):
+            credit = cash * 0.072 / 360
+            expected += credit
+            cash += credit
+        self.assertAlmostEqual(result.total_interest, expected, places=6)
+        self.assertAlmostEqual(result.final_equity, 1_000_000.0 + expected, places=6)
+        self.assertTrue(result.reconcile.ok)
+
+    def test_carry_forward_of_a_missing_rate_across_a_mid_run_change(self):
+        # Only two rows: 7.2% from day 0, 14.4% from day 5. Every other
+        # day's rate is carried forward from the last one on or before it.
+        curve = rates.RateCurve([rates.Rate(DAY0, 0.072), rates.Rate(DAY0 + timedelta(days=5), 0.144)])
+        result = _run({"TST": FLAT[:10]}, config=_config(interest_rates=curve))
+        cash, expected = 1_000_000.0, 0.0
+        for day_index in range(1, 10):
+            rate = 0.072 if day_index < 5 else 0.144
+            credit = cash * rate / 360
+            expected += credit
+            cash += credit
+        self.assertAlmostEqual(result.total_interest, expected, places=6)
+        self.assertTrue(result.reconcile.ok)
+
+    def test_zero_credit_before_the_first_available_rate_with_a_warning(self):
+        # The curve's first rate starts after this whole run ends: every
+        # Session's credit must be zero, and the "before the first
+        # available rate" warning must fire (rates.py, RateCurve.rate_on).
+        curve = rates.RateCurve([rates.Rate(DAY0 + timedelta(days=30), 0.10)])
+        err = io.StringIO()
+        with redirect_stderr(err):
+            result = _run({"TST": FLAT[:10]}, config=_config(interest_rates=curve))
+        self.assertEqual(result.total_interest, 0.0)
+        self.assertEqual(result.final_equity, 1_000_000.0)
+        self.assertIn("before the first available rate", err.getvalue())
+
+    def test_reconcile_holds_with_interest_credited_and_a_haircut(self):
+        # The three-market ReconcileTests fixture, with interest and a
+        # haircut switched on: the account/campaign sides must still tie
+        # out exactly, and total_interest must be the account's own
+        # separate line (README.md, "Reconcile check") -- confirmed
+        # algebraically, not just by the reconcile flag.
+        series = {"AAA": _random_walk(1, 500, 20.0), "BBB": _random_walk(2, 500, 5.0, skip_every=7),
+                  "CCC": _random_walk(3, 500, 50.0)}
+        universe = {"AAA": _market("AAA", (3, 6, 9, 12), 10, "g1", "L1"),
+                    "BBB": _market("BBB", (2, 5, 8, 11), 20, "g1", "L1"),
+                    "CCC": _market("CCC", (1, 4, 7, 10), 15, "g2", "L2")}
+        curve = rates.RateCurve([rates.Rate(DAY0, 0.05)], haircut=0.01)
+        result = backtest.run_backtest(_config(interest_rates=curve), universe, series)
+        self.assertGreater(result.total_interest, 0.0)
+        self.assertTrue(result.reconcile.ok, result.reconcile)
+        self.assertLess(abs(result.reconcile.difference), 0.01)
+        self.assertAlmostEqual(
+            result.final_equity,
+            result.starting_equity + result.reconcile.account_pnl + result.total_interest, places=4)
+
+    def test_command_line_reports_both_with_and_without_interest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = FLAT[:20]
+            with open(os.path.join(directory, "GC.TXT"), "w") as handle:
+                for bar in _bars(rows):
+                    handle.write("{:%Y%m%d},{},{},{},{},0,0\n".format(bar.date, bar.open, bar.high, bar.low,
+                                                                      bar.close))
+            rate_path = os.path.join(directory, "TB3MS.csv")
+            with open(rate_path, "w") as handle:
+                handle.write("DATE,TB3MS\n{:%Y-%m-%d},5.00\n".format(DAY0))
+            out = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                code = backtest.main(["--data-dir", directory, "--start", "1990-01-01", "--markets", "GC",
+                                      "--interest-rates", rate_path])
+            self.assertEqual(code, 0)
+            report = out.getvalue()
+            self.assertIn("Without interest", report)
+            self.assertIn("With interest", report)
+            self.assertIn("Interest earned $0.00", report)
+            self.assertNotIn("Interest earned $0.00 (haircut", report)
+
+
+class PerPeriodCagrTests(unittest.TestCase):
+    """research/futures-local/README.md, "Per-period CAGR"."""
+
+    def test_report_periods_cover_the_five_required_windows(self):
+        result = backtest.Result()
+        result.starting_equity = 1_000_000.0
+        result.equity_curve = [
+            (date(1985, 1, 1), 1_000_000.0), (date(1989, 12, 31), 1_500_000.0),
+            (date(1999, 12, 31), 2_000_000.0), (date(2008, 12, 31), 2_500_000.0),
+            (date(2015, 12, 31), 3_000_000.0)]
+        m = backtest.metrics(result)
+        labels = [label for label, _ in m["periods"]]
+        self.assertEqual(labels, ["start-1989", "1990-1999", "2000-2008", "2009-2015", "2003-2015 (published)"])
+        for label, value in m["periods"]:
+            self.assertIsNotNone(value, label)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ It exists because the QuantConnect Cloud run in `research/qc-cloud-futures` was 
 | --- | --- |
 | `loader.py` | Reads one Pinnacle CLC text or CSV file. It detects the delimiter, header and date format, and rejects bad rows loudly. |
 | `markets.py` | Faith's portfolio [T p.10-11], with each market's multiplier, tick size, correlation groups, roll months and the fields still TO-VERIFY. |
+| `rates.py` | Reads a 3-month T-bill rate CSV and looks up the prevailing rate on any date, with carry-forward ("Interest on idle cash" below). |
 | `backtest.py` | The event loop, costs, metrics, reconcile check and command line. |
 | `test_*.py` | Unit tests on synthetic fixtures. They run in `make research-test`. |
 
@@ -48,6 +49,8 @@ Useful flags:
 | `--equity` | `1000000` | Starting equity. |
 | `--long-only` | off | Skip every short breakout. |
 | `--no-roll-costs` | off | Don't charge rolls. |
+| `--interest-rates` | off (no interest) | Path to a 3-month T-bill rate CSV ("Interest on idle cash" below). With it, the report runs and prints the backtest twice, with and without interest. |
+| `--interest-haircut` | `0.0` | Annual rate (fraction, e.g. `0.01` for 1%) subtracted from the loaded curve before crediting -- a broker's spread. Only meaningful with `--interest-rates`. |
 
 A market with no file is skipped with a warning; the run continues. The report gives:
 
@@ -135,11 +138,27 @@ The roll months approximate each contract's delivery cycle, not Pinnacle's actua
 
 **P&L** is points × multiplier throughout. No percentage is ever taken from a back-adjusted price level, which can be zero or negative. A market's multiplier on the entry date is frozen for its Campaign, like N and the Unit size (ADR 0006). This matters only for the S&P 500's 1997 change.
 
-**Reconcile.** The account side is daily variation margin, less commission and roll costs. The Campaign side is `rules.Campaign`'s own fill-to-exit price distance × Unit size × multiplier, less the same costs, plus open Campaigns marked to the last settle. The two are computed independently and must agree to within $0.01.
+**Reconcile.** The account side is daily variation margin, less commission and roll costs. The Campaign side is `rules.Campaign`'s own fill-to-exit price distance × Unit size × multiplier, less the same costs, plus open Campaigns marked to the last settle. The two are computed independently and must agree to within $0.01. **Interest is excluded from both sides** ("Interest on idle cash" below): it is a separate account line, not part of Campaign P&L, so the invariant holds exactly whether or not interest is switched on.
 
 **Tradable window.** `markets.tradable` stops new Campaigns in the Deutschmark and French franc after 1998, and in the euro before 1999. Open Campaigns are never closed for leaving the window (CONTEXT.md, "Eligible").
 
 **Ruin.** If equity reaches zero, the run stops and the report says so.
+
+## Interest on idle cash
+
+Before 2009, a futures account earned Treasury-bill interest on its whole balance -- not just uninvested cash, but the margin backing open positions too -- and that interest was a large share of trend followers' returns. This is optional here, off by default, so results can be reported with and without it.
+
+**Rate source.** This backtester never fetches market or economic data itself, and none is committed to the repository. Get the rate from FRED yourself:
+
+1. Open <https://fred.stlouisfed.org/series/TB3MS> ("3-Month Treasury Bill Secondary Market Rate, Discount Basis", monthly) and download its CSV. (`DTB3`, the daily version at <https://fred.stlouisfed.org/series/DTB3>, works too -- `rates.load_rate_series` reads either shape.)
+2. Save it to `~/Desktop/Trend_Investing/data/rates/TB3MS.csv`. FRED's own TB3MS download has the header `observation_date,TB3MS`, one row per month dated the first of the month (e.g. `1934-01-01,0.72`), the rate in annual percent, and `.` for a missing observation.
+3. Pass `--interest-rates ~/Desktop/Trend_Investing/data/rates/TB3MS.csv` on the command line.
+
+**Accrual.** `rates.RateCurve.rate_on(day)` looks up the latest rate dated on or before `day` -- a missing date (every day between TB3MS's monthly rows, or a FRED `.` placeholder) carries the last known rate forward, never zero and never interpolated. Before the series' first date there is no rate to carry forward, so the credit is zero and a one-time warning prints to stderr. `Backtester._credit_interest` credits the account's *whole* cash equity (`self.cash`), not a separate uninvested-cash sleeve, for every calendar day since the previous Session -- including a weekend or holiday gap, using each of those days' own rate (`rates.RateCurve.accrued_fraction`), because the cash balance itself does not change while no Session runs. The day-count convention is **actual/360**: FRED's `DTB3`/`TB3MS` both quote the T-bill's own bank-discount rate, which the Treasury and the money market quote on a 360-day year, so 360 matches the rate's own quoting convention (365 would understate the daily accrual a quoted annual rate implies). An optional `--interest-haircut` (default 0) subtracts a spread, in the same annual-rate units, from the loaded curve before crediting -- what a broker or futures commission merchant kept rather than passing through -- but never from the zero credited before the curve's first date.
+
+Because the credited interest lands in `self.cash`, it compounds into the Notional Account and so into the next Unit's size, exactly as real interest income would have. This means a run with interest is not simply the no-interest run's cash plus interest bolted on afterward; it can trade slightly differently. The report therefore runs the whole backtest twice when `--interest-rates` is given -- once with the curve, once without -- and prints both, along with the total interest earned.
+
+**Per-period CAGR.** Every report additionally breaks the CAGR down into five fixed windows, independent of whether interest is switched on: everything through 1989, the 1990s, 2000 through the 2008 crisis, the post-crisis 2009-2015 span, and 2003-2015 -- from Faith's own publication of these rules (*The Original Turtle Trading Rules*, Curtis Faith, OriginalTurtles.org, 2003; `docs/methodology/Methodology_Analysis.md`, source T) through the end of the in-sample span, i.e. only the years in which anyone outside the original Turtles could have traded the published rules.
 
 ## Differences from main.py
 
@@ -162,6 +181,8 @@ make research-test
 
 `test_markets.py` checks the table's integrity and its agreement with `main.py`'s correlation groups.
 
+`test_rates.py` covers the rate loader and lookup: FRED's own header and percent-to-fraction conversion, the `.` missing-observation placeholder, carry-forward, the zero-with-one-warning credit before the first available rate, the haircut, and the actual/360 accrued-fraction arithmetic (including across a rate change).
+
 `test_backtest.py` covers:
 - a hand-computed long Campaign: entry, Add, stop-out, P&L and R;
 - gap-through-stop fills on both sides;
@@ -170,4 +191,6 @@ make research-test
 - the roll cost;
 - no trading before the start date;
 - the reconcile invariant on a three-market synthetic run;
-- the holdout refusal, in both the API and the command line.
+- the holdout refusal, in both the API and the command line;
+- interest: accrual arithmetic over a known period, carry-forward across a mid-run rate change, zero credit before the first available rate, the flag off leaving results unchanged, the reconcile invariant with interest and a haircut on, and the command line's side-by-side with/without report;
+- the five per-period CAGR windows.
