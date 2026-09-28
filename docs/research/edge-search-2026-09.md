@@ -213,14 +213,14 @@ Moskowitz, Ooi & Pedersen's 2012 paper), 41 markets, 1985–2015, scaled to a
 
 | Metric | Value |
 | --- | --- |
-| CAGR / Max drawdown | +13.9% / 17.0% |
-| Sharpe ratio (return per unit of risk) | 0.94 |
+| CAGR / Max drawdown | +13.85% / 17.1% |
+| Sharpe ratio (return per unit of risk) | 0.97 |
 | Correlation with the S&P 500 | About 0 |
 | 2009–2015 only | +5.7% |
 
 *Futures figures reflect the corrected local backtester (PR #269): monthly
 T-bill rates are applied from the following month (no look-ahead), the TSMOM
-10% overlay is measured on the realised book, and contract sizing uses the
+10% overlay is measured on the realised book (active days only), and contract sizing uses the
 fill date's multiplier. These corrections moved the numbers slightly; none
 changed a conclusion.*
 
@@ -242,7 +242,7 @@ tuned against.
 | Momentum + trend filter | +13.9% / 46.9% | — | Close to SPY's return, worse drawdown |
 | RSI-2 | +4.57% / 9.5% | 0.48 | 11% of days invested |
 | Risk parity, 10% vol target | +7.67% / 20.9% | 0.37 | −11.2% in 2022 |
-| TSMOM (2016 to 2025-10) | +2.62% / 26.1% | Sharpe 0.09 | About the same as holding cash; +13.5% in March 2020 |
+| TSMOM (2016 to 2025-10) | +3.71% / 19.3% | Sharpe 0.20 | Barely above holding cash; +14.1% in March 2020 |
 | Turtle futures, 1% Unit (2015-01 to 2025-10) | −12.4% / 93% | — | Confirms the in-sample futures breakdown |
 | Turtle futures, 0.25% Unit | +0.4% / 46% | — | Barely positive, at much smaller size |
 
