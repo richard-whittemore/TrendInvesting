@@ -351,8 +351,12 @@ class Backtester:
             for symbol in sorted(by_date[day]):
                 self._bar(self.states[symbol], day, trading)
             # Uses whatever weights were active BEFORE today's decision (if
-            # any) -- appended before _decide below may replace them.
-            self._book_history.append((day, self._unscaled_book_return(day)))
+            # any) -- appended before _decide below may replace them. Days
+            # with no active book are not recorded: counting them as 0.0
+            # would understate volatility and oversize the first scaled
+            # positions (README.md, "Optional 10% portfolio target").
+            if self._active_weights:
+                self._book_history.append((day, self._unscaled_book_return(day)))
             if trading:
                 self.result.equity_curve.append((day, self.cash))
             following = calendar[i + 1] if i + 1 < len(calendar) else None

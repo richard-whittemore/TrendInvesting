@@ -283,6 +283,44 @@ class MultiplierMidPeriodTests(unittest.TestCase):
 
 
 class PortfolioOverlayTests(unittest.TestCase):
+    def test_the_overlay_ignores_days_before_the_book_was_active(self):
+        # Days before any weights were decided carry no book return at all;
+        # counting them as 0.0 would shrink the measured volatility and
+        # oversize the first scaled positions (a review finding). Each
+        # scale must come from active days only, and needs at least
+        # PORTFOLIO_VOL_MIN_OBS of them.
+        universe, series = _two_markets(900)
+        config = _config(portfolio_target=0.10)
+        result = tsmom.run_backtest(config, universe, series)
+
+        returns = {}
+        for symbol, rows in series.items():
+            by_date, prev = {}, None
+            for row in rows:
+                if prev is not None:
+                    by_date[row.date] = tsmom.daily_return(prev, row)
+                prev = row
+            returns[symbol] = by_date
+        calendar = sorted({r.date for rows in series.values() for r in rows})
+        decisions_by_date = {d.date: d for d in result.decisions}
+        active, book = {}, []
+        checked = 0
+        for day in calendar:
+            if active:
+                book.append(sum(w * returns[s].get(day, 0.0) for s, w in active.items()))
+            decision = decisions_by_date.get(day)
+            if decision is not None:
+                if decision.weights:
+                    window = book[-tsmom.PORTFOLIO_VOL_WINDOW:]
+                    expected = tsmom.portfolio_scale(window, config.portfolio_target)
+                    if expected is None:
+                        self.assertIsNone(decision.scale)
+                    else:
+                        self.assertAlmostEqual(decision.scale, expected, places=9)
+                    checked += 1
+                active = decision.weights
+        self.assertGreaterEqual(checked, 2)
+
     def test_the_overlay_uses_the_realised_book_not_this_months_new_weights(self):
         # The 10% overlay's trailing vol must come from each PAST day's
         # ACTIVE (already-decided) weights times that day's own realised
@@ -308,14 +346,20 @@ class PortfolioOverlayTests(unittest.TestCase):
         calendar = sorted({r.date for rows in series.values() for r in rows})
         decisions_by_date = {d.date: d for d in result.decisions}
         active, book = {}, []
+        book_until = {}
         for day in calendar:
-            book.append(sum(w * returns[s].get(day, 0.0) for s, w in active.items()))
+            if active:
+                book.append(sum(w * returns[s].get(day, 0.0) for s, w in active.items()))
+            book_until[day] = len(book)
             if day in decisions_by_date:
                 active = decisions_by_date[day].weights
 
-        second = non_trivial[1]
+        # The first decision with enough ACTIVE book days to be scaled.
+        second = next(d for d in non_trivial[1:]
+                      if book_until[d.date] >= tsmom.PORTFOLIO_VOL_MIN_OBS)
         idx = calendar.index(second.date)
-        window = book[max(0, idx + 1 - tsmom.PORTFOLIO_VOL_WINDOW):idx + 1]
+        end = book_until[second.date]
+        window = book[max(0, end - tsmom.PORTFOLIO_VOL_WINDOW):end]
         expected_scale = tsmom.portfolio_scale(window, config.portfolio_target)
         self.assertIsNotNone(expected_scale)
         self.assertAlmostEqual(second.scale, expected_scale, places=9)
