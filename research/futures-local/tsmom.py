@@ -223,6 +223,16 @@ def contracts(equity, weight, price, multiplier):
     return int(math.copysign(math.floor(abs(raw) + 0.5), raw))
 
 
+def trailing_book_returns(history, calendar, index, window=PORTFOLIO_VOL_WINDOW):
+    """The book returns recorded within the last ``window`` sessions of the
+    run's own calendar, ending at ``calendar[index]``. The window is measured
+    in sessions, not in recorded (active) days, so returns from before a long
+    inactive gap drop out of it (README.md, "Optional 10% portfolio target")."""
+    first = calendar[max(0, index + 1 - window)]
+    last = calendar[index]
+    return [r for d, r in history if first <= d <= last]
+
+
 def portfolio_scale(book_returns, target, min_obs=PORTFOLIO_VOL_MIN_OBS):
     """``target`` over the annualised sample volatility of the unscaled
     book's daily returns over a trailing window, or ``None`` with too few
@@ -305,6 +315,7 @@ class Result:
         self.starting_equity = None
         self.final_equity = None
         self.markets = []
+        self.book_history = []      # [(date, unscaled book return)] the overlay measured
 
     def positions_on(self, day):
         """Contracts held at the close of ``day``, from the fills."""
@@ -334,6 +345,7 @@ class Backtester:
         #: today's brand-new weights against a year of past returns, which
         #: is not the book that was actually held.
         self._active_weights = {}
+        self._next_weights = None   # decided, not yet filled (promoted after the fill day)
         self._book_history = []     # [(date, unscaled book return)]
 
     def run(self):
@@ -357,11 +369,16 @@ class Backtester:
             # positions (README.md, "Optional 10% portfolio target").
             if self._active_weights:
                 self._book_history.append((day, self._unscaled_book_return(day)))
+            # A decision fills at the NEXT session's settle, so that
+            # session's return still belongs to the weights held before it;
+            # the decided weights take over only after it is recorded.
+            if self._next_weights is not None:
+                self._active_weights, self._next_weights = self._next_weights, None
             if trading:
                 self.result.equity_curve.append((day, self.cash))
             following = calendar[i + 1] if i + 1 < len(calendar) else None
             if following is not None and following.month != day.month and following >= self.config.start:
-                self._decide(day)
+                self._decide(day, i)
         self._finish()
         return self.result
 
@@ -489,7 +506,7 @@ class Backtester:
 
     # --- the month-end decision ----------------------------------------------
 
-    def _decide(self, day):
+    def _decide(self, day, index):
         signals = {}
         for symbol, state in self.states.items():
             if not state.alive or state.prev is None or state.last_date <= day:
@@ -512,7 +529,7 @@ class Backtester:
             # that day, never today's brand-new ``weights`` applied
             # retroactively to a year of history that was never actually
             # held at these weights (a review finding).
-            book = [r for _, r in self._book_history[-PORTFOLIO_VOL_WINDOW:]]
+            book = trailing_book_returns(self._book_history, self.calendar, index)
             scale = portfolio_scale(book, self.config.portfolio_target) if weights else None
         equity = self.cash
         targets = {}
@@ -536,7 +553,7 @@ class Backtester:
             targets[symbol] = contracts(equity, effective, state.prev.non, multiplier)
             state.pending = Pending(equity, effective, state.prev.non)
         self.result.decisions.append(Decision(day, equity, len(signals), scale, targets, weights))
-        self._active_weights = weights
+        self._next_weights = weights
 
     # --- money -----------------------------------------------------------------
 
@@ -559,6 +576,7 @@ class Backtester:
             result.gross_by_market[symbol] = state.pnl()
             result.pnl_by_market[symbol] = state.net()
         result.final_equity = self.cash
+        result.book_history = list(self._book_history)
         account = self.cash - result.starting_equity - result.total_interest
         positions = math.fsum(result.pnl_by_market.values())
         difference = account - positions

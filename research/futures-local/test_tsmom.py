@@ -282,7 +282,53 @@ class MultiplierMidPeriodTests(unittest.TestCase):
         self.assertTrue(result.reconcile.ok, result.reconcile)
 
 
+def _realised_book(series, decisions, end=None):
+    """Rebuild the overlay's realised book the way the execution contract
+    defines it: a decision on day d fills at the next session's settle, so
+    day d+1's return still belongs to the weights held BEFORE the decision,
+    and days with no active weights are not part of the book at all."""
+    returns = {}
+    for symbol, rows in series.items():
+        by_date, prev = {}, None
+        for row in rows:
+            if prev is not None:
+                by_date[row.date] = tsmom.daily_return(prev, row)
+            prev = row
+        returns[symbol] = by_date
+    calendar = sorted({r.date for rows in series.values() for r in rows if end is None or r.date <= end})
+    decisions_by_date = {d.date: d for d in decisions}
+    active, pending, book = {}, None, []
+    for day in calendar:
+        if active:
+            book.append((day, sum(w * returns[s].get(day, 0.0) for s, w in active.items())))
+        if pending is not None:
+            active, pending = pending, None
+        if day in decisions_by_date:
+            pending = decisions_by_date[day].weights
+    return calendar, returns, book
+
+
 class PortfolioOverlayTests(unittest.TestCase):
+    def test_a_decisions_weights_start_counting_the_day_after_its_fill_day(self):
+        # A decision at day d fills at day d+1's settle; the d+1 return was
+        # earned by the OLD exposure (a review finding).
+        universe, series = _two_markets(900)
+        result = tsmom.run_backtest(_config(portfolio_target=0.10), universe, series)
+        _, _, expected = _realised_book(series, result.decisions, _config().end)
+        self.assertEqual(len(result.book_history), len(expected))
+        for (d1, r1), (d2, r2) in zip(result.book_history, expected):
+            self.assertEqual(d1, d2)
+            self.assertAlmostEqual(r1, r2, places=12)
+
+    def test_the_overlay_window_is_the_last_year_of_sessions_not_of_active_days(self):
+        # After a long inactive gap, returns from before the gap must not
+        # stay in the trailing window (a review finding).
+        day0 = date(2020, 1, 1)
+        calendar = [day0 + timedelta(days=i) for i in range(400)]
+        history = [(calendar[i], 0.01) for i in range(0, 100)] + [(calendar[i], 0.001) for i in range(300, 400)]
+        window = tsmom.trailing_book_returns(history, calendar, 399, tsmom.PORTFOLIO_VOL_WINDOW)
+        self.assertEqual(window, [0.001] * 100)
+
     def test_the_overlay_ignores_days_before_the_book_was_active(self):
         # Days before any weights were decided carry no book return at all;
         # counting them as 0.0 would shrink the measured volatility and
@@ -292,86 +338,46 @@ class PortfolioOverlayTests(unittest.TestCase):
         universe, series = _two_markets(900)
         config = _config(portfolio_target=0.10)
         result = tsmom.run_backtest(config, universe, series)
-
-        returns = {}
-        for symbol, rows in series.items():
-            by_date, prev = {}, None
-            for row in rows:
-                if prev is not None:
-                    by_date[row.date] = tsmom.daily_return(prev, row)
-                prev = row
-            returns[symbol] = by_date
-        calendar = sorted({r.date for rows in series.values() for r in rows})
-        decisions_by_date = {d.date: d for d in result.decisions}
-        active, book = {}, []
+        calendar, _, book = _realised_book(series, result.decisions, config.end)
+        self.assertFalse(any(d < result.decisions[0].date for d, _ in book))
         checked = 0
-        for day in calendar:
-            if active:
-                book.append(sum(w * returns[s].get(day, 0.0) for s, w in active.items()))
-            decision = decisions_by_date.get(day)
-            if decision is not None:
-                if decision.weights:
-                    window = book[-tsmom.PORTFOLIO_VOL_WINDOW:]
-                    expected = tsmom.portfolio_scale(window, config.portfolio_target)
-                    if expected is None:
-                        self.assertIsNone(decision.scale)
-                    else:
-                        self.assertAlmostEqual(decision.scale, expected, places=9)
-                    checked += 1
-                active = decision.weights
+        for decision in result.decisions:
+            if not decision.weights:
+                continue
+            window = tsmom.trailing_book_returns(book, calendar, calendar.index(decision.date))
+            expected = tsmom.portfolio_scale(window, config.portfolio_target)
+            if expected is None:
+                self.assertIsNone(decision.scale)
+            else:
+                self.assertAlmostEqual(decision.scale, expected, places=9)
+            checked += 1
         self.assertGreaterEqual(checked, 2)
 
     def test_the_overlay_uses_the_realised_book_not_this_months_new_weights(self):
         # The 10% overlay's trailing vol must come from each PAST day's
-        # ACTIVE (already-decided) weights times that day's own realised
+        # ACTIVE (already-filled) weights times that day's own realised
         # return -- never today's brand-new weights re-applied to a whole
         # year of history that was never actually held at those weights
         # (a review finding).
         universe, series = _two_markets(900)
         config = _config(portfolio_target=0.10)
         result = tsmom.run_backtest(config, universe, series)
-        non_trivial = [d for d in result.decisions if d.weights]
-        self.assertGreaterEqual(len(non_trivial), 2)
+        calendar, returns, book = _realised_book(series, result.decisions, config.end)
+        scaled = [d for d in result.decisions if d.weights and d.scale is not None]
+        self.assertGreaterEqual(len(scaled), 1)
+        decision = scaled[0]
+        idx = calendar.index(decision.date)
+        window = tsmom.trailing_book_returns(book, calendar, idx)
+        self.assertAlmostEqual(decision.scale, tsmom.portfolio_scale(window, config.portfolio_target), places=9)
 
-        # Reconstruct each market's own daily return exactly as tsmom does.
-        returns = {}
-        for symbol, rows in series.items():
-            by_date, prev = {}, None
-            for row in rows:
-                if prev is not None:
-                    by_date[row.date] = tsmom.daily_return(prev, row)
-                prev = row
-            returns[symbol] = by_date
-
-        calendar = sorted({r.date for rows in series.values() for r in rows})
-        decisions_by_date = {d.date: d for d in result.decisions}
-        active, book = {}, []
-        book_until = {}
-        for day in calendar:
-            if active:
-                book.append(sum(w * returns[s].get(day, 0.0) for s, w in active.items()))
-            book_until[day] = len(book)
-            if day in decisions_by_date:
-                active = decisions_by_date[day].weights
-
-        # The first decision with enough ACTIVE book days to be scaled.
-        second = next(d for d in non_trivial[1:]
-                      if book_until[d.date] >= tsmom.PORTFOLIO_VOL_MIN_OBS)
-        idx = calendar.index(second.date)
-        end = book_until[second.date]
-        window = book[max(0, end - tsmom.PORTFOLIO_VOL_WINDOW):end]
-        expected_scale = tsmom.portfolio_scale(window, config.portfolio_target)
-        self.assertIsNotNone(expected_scale)
-        self.assertAlmostEqual(second.scale, expected_scale, places=9)
-
-        # The naive (ex-ante) method the bug used -- today's own new
-        # weights applied across the whole window -- must give a
-        # DIFFERENT number here, or this scenario doesn't exercise the fix.
-        naive_window = [sum(w * returns[s].get(d, 0.0) for s, w in second.weights.items())
-                        for d in calendar[max(0, idx + 1 - tsmom.PORTFOLIO_VOL_WINDOW):idx + 1]]
+        # The naive (ex-ante) method -- this decision's own new weights
+        # applied across the whole window -- must give a DIFFERENT number,
+        # or this scenario doesn't exercise the fix.
+        first = max(0, idx + 1 - tsmom.PORTFOLIO_VOL_WINDOW)
+        naive_window = [sum(w * returns[s].get(d, 0.0) for s, w in decision.weights.items())
+                        for d in calendar[first:idx + 1]]
         naive_scale = tsmom.portfolio_scale(naive_window, config.portfolio_target)
-        self.assertNotAlmostEqual(second.scale, naive_scale, places=6)
-
+        self.assertNotAlmostEqual(decision.scale, naive_scale, places=6)
 
 class RollAndReconcileTests(unittest.TestCase):
     def test_a_roll_charges_every_open_position_one_round_trip(self):
