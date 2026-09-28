@@ -187,7 +187,7 @@ would not reconcile. This is why the Pinnacle CLC database was purchased.
 
 | Period | CAGR |
 | --- | --- |
-| Overall, 1980–2015 | +10.1% (87 pts max drawdown: 99.5%) |
+| Overall, 1980–2015 | +10.1% (max drawdown 99.5%) |
 | 1980s | +86%/yr |
 | 1990s | +11.5%/yr |
 | 2000–2008 | −17.6%/yr |
@@ -272,8 +272,8 @@ drawdown (34.5% vs. SPY's 33.7%).
   even though their holdout returns fell short of SPY.
 - **Momentum with a trend filter** was the single strongest in-sample
   factor result, robust across nearby settings, and came reasonably close
-  to SPY on the holdout (+13.9% vs. +14.95%) — a near-miss, not a clear
-  failure.
+  to SPY's return on the holdout (+13.9% vs. +14.95%), but with a much
+  deeper drawdown (46.9% vs. 33.7%), so it still did worse than SPY on risk.
 - **RSI-2** was robust across a range of entry/exit settings in-sample and
   kept a low drawdown on the holdout, at the cost of a lower return.
 - **"Boost" (SPY + RSI-2 leverage overlay)** is the one strategy that beat
