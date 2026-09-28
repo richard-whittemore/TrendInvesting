@@ -198,3 +198,113 @@ make research-test
 - interest: accrual arithmetic over a known period, carry-forward across a mid-run rate change, zero credit before the first available rate, the flag off leaving results unchanged, the reconcile invariant with interest and a haircut on, and the command line's side-by-side with/without report;
 - the five per-period CAGR windows;
 - the command line's end-date clipping, excluded-market note, scale check on `_NON`, and the price-only benchmark.
+
+# Time-series momentum (TSMOM): a second, independent strategy
+
+`tsmom.py` backtests the core strategy of Moskowitz, Ooi & Pedersen (2012), "Time Series Momentum", *Journal of Financial Economics* 104(2), 228-250 ("MOP"), on the same Pinnacle files. It shares only `loader.py`, `rates.py` and a few helpers from `backtest.py`; it has no Turtle rules in it.
+
+| File | What it does |
+| --- | --- |
+| `tsmom_markets.py` | The universe: 41 USD-settled Pinnacle markets, each with dollars per point and tick, sourced; and `EXCLUDED`, every other Pinnacle symbol with the reason. |
+| `tsmom.py` | Signal, EWMA volatility, sizing, the daily loop, costs, reconcile, metrics and command line. |
+| `test_tsmom.py` | Synthetic-data tests, in `make research-test`. |
+
+## The rules (MOP)
+
+- **Signal.** At the last session of each month, the sign of the market's past 12-month return (MOP Section 4). The daily return is the `_REV` change divided by the previous day's `_NON` settle, and the 12-month return compounds those. **No return is ever taken relative to a `_REV` level**, so negative back-adjusted levels (US, ZH, ZB, the grains) are harmless. The `_NON` price is always positive in-sample; a non-positive one stops the run.
+- **Volatility.** An exponentially weighted variance of daily returns, centre of mass 60 days, annualised by 261 (MOP eq. 1), with the weights normalised by their sum.
+- **Sizing.** Each position's notional is sign × 40% / σ × equity / N, with N the markets that have a signal that month (MOP eq. 5). Whole contracts, rounded half away from zero, priced at the `_NON` settle × dollars per point.
+- **Optional 10% portfolio target.** The whole book is also scaled by 10% / (the trailing one-year realised volatility of the current unscaled book's daily returns), using only sessions up to the decision day.
+- **Execution.** Each market trades to its target at its own next session's `_REV` settle.
+- **Costs.**
+  - Commission: $2.50 per contract per side.
+  - Slippage: one tick per contract per side.
+  - Rolls: one round trip per open contract on every roll. A roll is any day on which `_REV` minus `_NON` steps, read straight off the files, the same way `markets.py` found its roll months.
+- **A file that ends** before the run does (RL in 2008) is flattened on its last bar.
+- **The SP contract change** of November 1997 closes and reopens the position at the new size.
+- **Reconcile.**
+  - The account side is daily variation margin, less costs, with interest as a separate line.
+  - The position side is each market's cash-flow ledger of fills, plus the open position at its last settle, less that market's costs.
+  - The two must agree to within $0.01.
+- **Held-out period.** `--allow-holdout` is required for any `--end` in 2016 or later (ADR 0012), exactly as in `backtest.py`.
+
+## The universe
+
+41 markets, preferring Pinnacle's composite or electronic symbol (Appendix B-1):
+
+- **Equity:** SP, EN, MD, YM, RL, NK.
+- **Bonds:** US, TY, FB, TU.
+- **Currencies:** AN, BN, CN, JN, SN, FN, MP.
+- **Energy:** ZU, ZH, ZB, ZN, BC, BG.
+- **Metals:** ZG, ZI, ZK, ZA, ZP.
+- **Grains:** ZC, ZS, ZL, ZM, ZW, KW.
+- **Livestock:** ZT, ZZ, ZF.
+- **Softs:** SB, KC, CC, CT.
+
+Dollars per point is Min $ Move ÷ tick. Two cases where the manual's own columns disagree with the files:
+- ZI's BigPoint (5000) is per dollar, not per cent.
+- YM's "$10" is CBOT's $5 mini Dow; the price level × $5 gives the real notional.
+
+Excluded (full list and reasons in `tsmom_markets.EXCLUDED`):
+
+- **Non-USD, not converted:** SPI 200, DAX, CAC 40, Euro STOXX 50, STOXX 50, FTSE 100, Hang Seng, Bund, Bobl, Schatz, Long Gilt, Short Sterling, Canadian 10-year.
+- **Duplicates of an included market:** day-session and pit versions, ES/SC, ND, DJ/ZD.
+- **Baskets:** DX, CRB, GSCI.
+- **Thin:** Fed Funds, Minneapolis wheat, oats, rice, orange juice, lumber, milk.
+- **ER:** a corrupt in-sample row.
+- **The Eurodollar (EC).** MOP trade no short-rate futures. Near the zero bound its ex-ante volatility fell to 0.04% a year, so 40%/σ asked for about 25 times equity in notional (1,719 contracts at $1M). A $1M, 40%-per-market run with it included: CAGR +10.73%, Sharpe 0.89, MaxDD 22.42%.
+
+## In-sample result (2026-09-28)
+
+```sh
+python3 research/futures-local/tsmom.py --interest-rates ~/Desktop/Trend_Investing/data/rates/TB3MS.csv
+```
+
+1985-01-02 to 2015-12-31, all costs, reconcile OK in all eight runs. The Sharpe ratio is the monthly return in excess of T-bills; without interest the return is already an excess return.
+
+| Run | CAGR | Vol | Sharpe | MaxDD | CAGR/DD | 1985-89 | 1990-99 | 2000-08 | 2009-15 | 2003-15 | 2008 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| $1M, 40%/mkt, no interest | 10.33% | 12.4% | 0.86 | 24.5% | 0.42 | 13.96% | 12.91% | 10.08% | 4.62% | 5.57% | +21.9% |
+| $1M, 40%/mkt, interest | 14.19% | 12.5% | 0.85 | 24.4% | 0.58 | 21.23% | 18.60% | 13.37% | 4.62% | 6.82% | +23.4% |
+| $1M, 10% target, no interest | 10.98% | 11.3% | 0.98 | 21.5% | 0.51 | 12.89% | 14.08% | 10.26% | 6.28% | 6.57% | +20.4% |
+| $1M, 10% target, interest | 15.03% | 11.3% | 0.99 | 16.5% | 0.91 | 20.77% | 20.07% | 13.54% | 6.26% | 7.83% | +21.8% |
+| $10M, 40%/mkt, no interest | 10.32% | 12.4% | 0.86 | 24.4% | 0.42 | 13.89% | 12.97% | 10.06% | 4.58% | 5.51% | +21.8% |
+| $10M, 40%/mkt, interest | 14.32% | 12.5% | 0.86 | 24.2% | 0.59 | 21.96% | 18.64% | 13.38% | 4.65% | 6.86% | +23.5% |
+| $10M, 10% target, no interest | 10.99% | 11.2% | 0.99 | 21.6% | 0.51 | 12.99% | 14.15% | 10.20% | 6.22% | 6.48% | +20.3% |
+| $10M, 10% target, interest | 15.03% | 11.3% | 0.99 | 16.5% | 0.91 | 21.04% | 19.90% | 13.55% | 6.30% | 7.85% | +21.9% |
+
+**Against the S&P** (SP_NON, price only):
+
+- The correlation of monthly returns is −0.03 to −0.04.
+- In the S&P's 10 worst months, which averaged −12.2%, TSMOM averaged +3.3% to +3.7%. Examples:
+  - October 1987: 0%, against −20.4%.
+  - October 2008: +6.6%, against −17.1%.
+  - August 1998: +8.0%, against −15.1%.
+
+**Markets** ($1M, 40% per market, no interest):
+
+- **Top five:** TU, JN, ZG, ZH, SP, each +$1.3M to +$1.7M.
+- **Bottom five:** CC −$1.7M, KC −$0.9M, ZS, SN, ZC.
+- **No market dominates.** The largest is 6-7% of all positive market P&L, and every sector is positive.
+
+**Costs** ($1M, 40% per market, no interest): commission $0.13M, slippage $0.60M, and roll $1.99M over 6,051 rolls, against a net P&L of $20.1M. Costs cut the CAGR by about 1.4 points a year: with no costs at $10M it is 11.72%.
+
+**Against MOP.** Gross of every cost, 1985-2009, $10M, 40% per market:
+
+| | This run | MOP |
+| --- | --- | --- |
+| Sharpe | 1.09 | "1+" gross |
+| Volatility | 11.7% | about 12% |
+| Correlation with the S&P | −0.11 | low |
+| 2008 | +21.9% net ($1M, 40%/mkt) | strongly positive |
+
+Net of costs over the same span, the Sharpe is 0.97. The remaining gap has three sources:
+- a smaller, US-only universe: 41 markets, not 58, with no non-USD equity indices or bonds;
+- the costs;
+- whole-contract rounding, which costs little: the $1M and $10M runs agree to within 0.15 point of CAGR.
+
+**Read.** The edge is real in-sample but decays after 2008:
+- 2009-2015 returns only 4.6-6.3% a year without interest.
+- Losing years: 2005 (−5.1%), 2006 (−6.5%), 2009 (−7.3%), 2011 (−3.3%) and 2012 (−7.6%), at $1M, 40% per market, no interest. 2013-2015 recovered (+20%, +16%, +14%).
+
+This is consistent with the published post-2009 weakness of trend following. The held-out run (2016 on) has not been done.
