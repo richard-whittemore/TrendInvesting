@@ -4,10 +4,11 @@ This report is written for the project owner, not for a quant. It avoids
 jargon where it can and explains the terms it has to use. The code behind
 almost every number is in `research/edge-search/` (see that folder's own
 `README.md` for how to run each script on QuantConnect Cloud); this report
-states the numbers, not the code. The one exception is the "Boost" re-test
-with realistic margin rates: its script embedded a table of FRED TB3MS
-rates, which is not committed (the repository never stores market data), so
-that result is reproducible only by rebuilding the table from FRED.
+states the numbers, not the code. The "Boost" re-test with realistic margin rates is rebuilt, rather than
+stored, because its rate table is FRED data and the repository never
+stores market data: run `research/edge-search/timing/build_realistic_boost.py`
+with a local copy of FRED's TB3MS CSV to regenerate the exact script
+variant used (see that file for the recipe).
 
 ## Purpose
 
@@ -345,9 +346,11 @@ way.
   account, so after strong gains total exposure can creep above 100% on
   the margin account. The factor results therefore describe a drifting,
   sometimes slightly levered portfolio, not a strict monthly equal-weight
-  one. Any such leverage would flatter those results, which strengthens,
-  rather than weakens, the conclusion that none of them beat SPY on the
-  holdout.
+  one. Exposure above 100% amplifies both gains and losses, so the drift
+  could have pushed these results in either direction; without re-running
+  the factors with strict rebalancing, its net effect is unknown. The
+  factor conclusions rest mainly on the held-out and equal-weight-control
+  comparisons, not on the exact in-sample figures.
 - **The risk-parity volatility window can be one day short** when an asset
   has exactly 60 closes (its first months of data); the completed runs were
   unaffected in practice, but the script is not hardened against it.

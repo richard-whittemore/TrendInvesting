@@ -127,7 +127,7 @@ class TimingResearch(QCAlgorithm):
         self.spy_curve.append((self.Time, float(bar.Close)))
         self.equity_curve.append((self.Time, float(self.Portfolio.TotalPortfolioValue)))
         self.days_total += 1
-        if self.Portfolio[self.spy].Invested:
+        if self.MODE not in ("core_rsi2", "boost") and self.Portfolio[self.spy].Invested:
             self.days_in += 1
 
         if self.MODE == "overnight":
@@ -158,9 +158,10 @@ class TimingResearch(QCAlgorithm):
             if getattr(self, "_last_want", None) != want:
                 self.SetHoldings([PortfolioTarget(self.shy, shy_w), PortfolioTarget(self.spy, spy_w)])
                 self._last_want = want
-            # days_in here counts signal days only; the generic "SPY held"
-            # count above would be every day in these modes.
-            self.days_in += (1 if self._sig else 0) - (1 if self.Portfolio[self.spy].Invested else 0)
+            # In these modes SPY is held every day, so days_in counts
+            # signal days only.
+            if self._sig:
+                self.days_in += 1
             borrowed = max(0.0, float(self.Portfolio.TotalHoldingsValue) - float(self.Portfolio.TotalPortfolioValue))
             cost = borrowed * self.FINANCING_RATE / 252.0
             if cost > 0:
