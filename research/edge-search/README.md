@@ -161,3 +161,5 @@ python3 -m py_compile research/edge-search/bh-rsp/main.py
 
 QuantConnect Cloud's own compile step, on the first paste of each script,
 is the real test of its QuantConnect API calls.
+
+Results and caveats: `docs/research/edge-search-2026-09.md`.
