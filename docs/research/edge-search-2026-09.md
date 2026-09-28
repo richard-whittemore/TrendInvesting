@@ -213,7 +213,7 @@ Moskowitz, Ooi & Pedersen's 2012 paper), 41 markets, 1985–2015, scaled to a
 
 | Metric | Value |
 | --- | --- |
-| CAGR / Max drawdown | +13.74% / 17.2% |
+| CAGR / Max drawdown | +13.73% / 17.2% |
 | Sharpe ratio (return per unit of risk) | 0.96 |
 | Correlation with the S&P 500 | About 0 |
 | 2009–2015 only | +5.6% |
@@ -242,7 +242,7 @@ tuned against.
 | Momentum + trend filter | +13.9% / 46.9% | — | Close to SPY's return, worse drawdown |
 | RSI-2 | +4.57% / 9.5% | 0.48 | 11% of days invested |
 | Risk parity, 10% vol target | +7.67% / 20.9% | 0.37 | −11.2% in 2022 |
-| TSMOM (2016 to 2025-10) | +3.58% / 19.0% | Sharpe 0.19 | Barely above holding cash; +14.0% in March 2020 |
+| TSMOM (2016 to 2025-10) | +3.59% / 19.0% | Sharpe 0.19 | Barely above holding cash; +14.0% in March 2020 |
 | Turtle futures, 1% Unit (2015-01 to 2025-10) | −12.4% / 93% | — | Confirms the in-sample futures breakdown |
 | Turtle futures, 0.25% Unit | +0.4% / 46% | — | Barely positive, at much smaller size |
 
