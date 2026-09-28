@@ -183,6 +183,20 @@ class EndDateTests(LoaderTestCase):
         self.assertRejected("20151231,1,2,0.5,1.5,0,0\n"
                             "20160104,1,0.5,2,1.5,0,0\n", "line 2")
 
+    def test_bad_bytes_after_the_end_do_not_abort_the_run(self):
+        # A held-out row that is not even valid UTF-8 must not raise --
+        # load_series must stop reading (not just stop validating) at the
+        # first row after ``end``, so undecodable bytes further down the
+        # file are never reached (README.md, "Data problems found").
+        path = _write("20151230,1,2,0.5,1.5,0,0\n"
+                      "20151231,1,2,0.5,1.5,0,0\n"
+                      "20160104,1,2,0.5,1.5,0,0\n")
+        self.addCleanup(os.remove, path)
+        with open(path, "ab") as handle:
+            handle.write(b"\xff\xfe not valid utf-8 at all\n")
+        bars = loader.load_series(path, end=date(2015, 12, 31))
+        self.assertEqual([bar.date for bar in bars], [date(2015, 12, 30), date(2015, 12, 31)])
+
 
 class PriceScaleTests(unittest.TestCase):
     """classify_price_scale/check_series_scale on synthetic settle prices

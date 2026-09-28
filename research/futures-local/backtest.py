@@ -815,8 +815,7 @@ def main(argv=None):
     interest_curve = None
     if args.interest_rates:
         try:
-            interest_curve = rates.RateCurve(rates.load_rate_series(args.interest_rates),
-                                             haircut=args.interest_haircut)
+            interest_curve = rates.load_rate_curve(args.interest_rates, haircut=args.interest_haircut)
         except (OSError, ValueError) as err:
             print("backtest: --interest-rates {}: {}".format(args.interest_rates, err), file=sys.stderr)
             return 1

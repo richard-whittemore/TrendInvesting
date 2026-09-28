@@ -89,8 +89,18 @@ RECONCILE_TOLERANCE = backtest.RECONCILE_TOLERANCE
 
 Row = namedtuple("Row", ["date", "rev", "non"])
 Fill = namedtuple("Fill", ["date", "symbol", "delta", "price", "kind"])
-Decision = namedtuple("Decision", ["date", "equity", "n_markets", "scale", "targets"])
+#: ``weights`` is the raw, pre-overlay MOP weight (sign x target_vol / sigma
+#: / n) decided that day for each symbol with a signal -- the "unscaled
+#: book" the portfolio-target overlay is measured against (README.md,
+#: "Optional 10% portfolio target").
+Decision = namedtuple("Decision", ["date", "equity", "n_markets", "scale", "targets", "weights"])
 Reconcile = namedtuple("Reconcile", ["account_pnl", "position_pnl", "difference", "ok"])
+#: A month-end decision not yet turned into a contract count: ``equity``
+#: and ``price`` are frozen at decision time (MOP eq. 5's own timing), but
+#: the multiplier is deliberately NOT -- it is looked up again at fill
+#: time, from the fill date, not the decision date (a review finding: the
+#: SP 1997 change falls between a decision and its fill more than once).
+Pending = namedtuple("Pending", ["equity", "weight", "price"])
 
 
 @dataclass(frozen=True)
@@ -257,7 +267,7 @@ class _Market:
         self.history = []           # (date, cumulative index)
         self.returns = {}           # date -> daily return
         self.ewma = EwmaVariance()
-        self.pending = None         # target contracts to trade at the next bar
+        self.pending = None         # a Pending, resolved to contracts at fill time
         self.alive = True
         # Position and its ledger.
         self.quantity = 0
@@ -318,6 +328,13 @@ class Backtester:
         self.result.starting_equity = float(config.starting_equity)
         self.result.markets = sorted(self.states)
         self._last_interest_date = config.start
+        #: The most recent decision's raw, pre-overlay weights, applied to
+        #: each day's own realised return to build the REALISED unscaled
+        #: book (README.md, "Optional 10% portfolio target") -- never
+        #: today's brand-new weights against a year of past returns, which
+        #: is not the book that was actually held.
+        self._active_weights = {}
+        self._book_history = []     # [(date, unscaled book return)]
 
     def run(self):
         check_dates(self.config)
@@ -333,13 +350,25 @@ class Backtester:
                 self._credit_interest(day)
             for symbol in sorted(by_date[day]):
                 self._bar(self.states[symbol], day, trading)
+            # Uses whatever weights were active BEFORE today's decision (if
+            # any) -- appended before _decide below may replace them.
+            self._book_history.append((day, self._unscaled_book_return(day)))
             if trading:
                 self.result.equity_curve.append((day, self.cash))
             following = calendar[i + 1] if i + 1 < len(calendar) else None
             if following is not None and following.month != day.month and following >= self.config.start:
-                self._decide(day, i)
+                self._decide(day)
         self._finish()
         return self.result
+
+    def _unscaled_book_return(self, day):
+        """Today's return of the currently active, unscaled MOP book: each
+        symbol's last-decided raw weight times its OWN realised return
+        today. Only ever uses weights already decided (no look-ahead)."""
+        if not self._active_weights:
+            return 0.0
+        return sum(w * self.states[s].returns.get(day, 0.0)
+                  for s, w in self._active_weights.items() if s in self.states)
 
     # --- one market's bar ---------------------------------------------------
 
@@ -354,16 +383,35 @@ class Backtester:
         state.history.append((day, state.index))
         if trading and state.alive:
             if state.quantity and prev is not None:
-                # Daily variation margin on the account side.
+                # Daily variation margin on the account side, still at
+                # whatever quantity and multiplier were held coming into
+                # today's close.
                 self.cash += state.quantity * (row.rev - prev.rev) * state.multiplier
                 if self.config.charge_rolls and self._is_roll(state, prev, row):
                     self._charge_roll(state)
+            if state.quantity:
+                # A contract-size change (module docstring, "The SP
+                # contract change"), applied at today's close -- resizes
+                # through the same costed close-then-reopen trade as any
+                # other multiplier change, so today's mark above still used
+                # the OLD basis and the reconcile invariant holds exactly.
+                self._resize_for_multiplier_change(state, row)
             state.last_price = row.rev
             if state.pending is not None:
-                self._fill(state, state.pending, row, "rebalance")
+                # Size at the FILL date's multiplier, not the decision
+                # date's (a review finding: they can differ, e.g. across
+                # the SP 1997 change).
+                multiplier = tsmom_markets.dollars_per_point(state.market, row.date)
+                target = contracts(state.pending.equity, state.pending.weight, state.pending.price, multiplier)
+                self._fill(state, target, row, "rebalance")
                 state.pending = None
-            if day == state.last_date and day < self.config.end:
-                # The file ends (the contract moved or was delisted): flatten.
+            if day == state.last_date and day < self.calendar[-1]:
+                # The file genuinely ends before the run's own last traded
+                # day (the contract moved or was delisted): flatten. Compare
+                # against the run's own last date, not ``config.end``
+                # directly -- a weekend or holiday ``--end`` (never itself a
+                # trading day) would otherwise make every still-live market
+                # look delisted on its last real bar before that date.
                 self._fill(state, 0, row, "delist")
                 state.alive = False
         state.prev = row
@@ -380,6 +428,36 @@ class Backtester:
         state.roll_cost += cost
         self.result.total_roll_cost += cost
         self.result.roll_count += 1
+
+    def _resize_for_multiplier_change(self, state, row):
+        """The exchange's own contract redefinition (the module docstring,
+        "The SP contract change", 1997) changes the dollars-per-point
+        multiplier on a fixed date, independent of any rebalance. Left
+        alone until the next rebalance -- up to a month away -- mark to
+        market would keep using the stale multiplier, and every
+        per-contract cost (commission, slippage, a roll) would be charged
+        on the stale, un-resized quantity (a review finding).
+
+        Handled the same way ``_fill`` already handled it at a rebalance
+        (below): close the old-size position and reopen the equivalent
+        notional at the new size, both at today's close, through the same
+        ``_trade`` the account side's daily mark already assumes for any
+        quantity change. A "free" resize that only relabelled ``quantity``
+        and ``multiplier`` without going through a trade would look
+        reconciled in the common case, but whole-contract rounding of the
+        new size cannot in general preserve ``quantity x multiplier``
+        exactly, and that residual notional would otherwise silently leak
+        out of the reconcile invariant every day afterwards. Routing it
+        through ``_trade`` (paying commission and slippage once, like any
+        other rebalance) keeps the reconcile exact by construction."""
+        multiplier = tsmom_markets.dollars_per_point(state.market, row.date)
+        if multiplier == state.multiplier:
+            return
+        old_quantity, old_multiplier = state.quantity, state.multiplier
+        new_quantity = int(round(old_quantity * old_multiplier / multiplier))
+        self._trade(state, -old_quantity, row, "resize")
+        state.multiplier = multiplier
+        self._trade(state, new_quantity, row, "resize")
 
     def _fill(self, state, target, row, kind):
         multiplier = tsmom_markets.dollars_per_point(state.market, row.date)
@@ -407,7 +485,7 @@ class Backtester:
 
     # --- the month-end decision ----------------------------------------------
 
-    def _decide(self, day, calendar_index):
+    def _decide(self, day):
         signals = {}
         for symbol, state in self.states.items():
             if not state.alive or state.prev is None or state.last_date <= day:
@@ -424,8 +502,13 @@ class Backtester:
         weights = target_weights(signals, self.config.target_vol)
         scale = 1.0
         if self.config.portfolio_target is not None:
-            window = self.calendar[max(0, calendar_index + 1 - PORTFOLIO_VOL_WINDOW):calendar_index + 1]
-            book = [sum(w * self.states[s].returns.get(d, 0.0) for s, w in weights.items()) for d in window]
+            # The REALISED unscaled book's own trailing return history
+            # (README.md, "Optional 10% portfolio target"): each past
+            # day's return under whatever weights were actually active
+            # that day, never today's brand-new ``weights`` applied
+            # retroactively to a year of history that was never actually
+            # held at these weights (a review finding).
+            book = [r for _, r in self._book_history[-PORTFOLIO_VOL_WINDOW:]]
             scale = portfolio_scale(book, self.config.portfolio_target) if weights else None
         equity = self.cash
         targets = {}
@@ -434,13 +517,22 @@ class Backtester:
                 continue
             weight = weights.get(symbol, 0.0)
             if weight == 0.0 or scale is None:
+                # No signal (or no scale): flat, and -- like the signals
+                # loop above -- never touch state.prev.non, since a market
+                # that has not started trading yet (state.prev is None)
+                # can only land here (it never gets a signal).
                 targets[symbol] = 0
+                state.pending = Pending(equity, 0.0, 1.0)
                 continue
+            effective = scale * weight
+            # This multiplier is only for the informational Decision.targets
+            # figure below; the actual fill is sized at the fill date's own
+            # multiplier (state.pending, resolved in _bar).
             multiplier = tsmom_markets.dollars_per_point(state.market, day)
-            targets[symbol] = contracts(equity, scale * weight, state.prev.non, multiplier)
-        for symbol, target in targets.items():
-            self.states[symbol].pending = target
-        self.result.decisions.append(Decision(day, equity, len(signals), scale, targets))
+            targets[symbol] = contracts(equity, effective, state.prev.non, multiplier)
+            state.pending = Pending(equity, effective, state.prev.non)
+        self.result.decisions.append(Decision(day, equity, len(signals), scale, targets, weights))
+        self._active_weights = weights
 
     # --- money -----------------------------------------------------------------
 
@@ -532,9 +624,17 @@ def correlation(a, b):
 
 
 def metrics(config, result, benchmark=None):
-    """The report's numbers. ``benchmark`` is {(year, month): return}."""
+    """The report's numbers. ``benchmark`` is {(year, month): return}.
+    ``result.equity_curve`` is empty when no market has a bar inside the
+    run's own span (README.md): every number is then ``None`` rather than
+    an ``IndexError`` on the first mark."""
     curve = result.equity_curve
     out = {}
+    if not curve:
+        out.update(cagr=None, max_drawdown=None, ratio=None, vol=None, sharpe=None,
+                    periods=[(label, None) for label, _, _ in REPORT_PERIODS],
+                    year_2008=None, months={}, avg_markets=None, scale_range=None)
+        return out
     first, last = curve[0][0], curve[-1][0]
     out["cagr"] = backtest.span_cagr(curve, result.starting_equity, first, last)
     out["max_drawdown"] = rules.max_drawdown([result.starting_equity] + [e for _, e in curve])
@@ -594,6 +694,14 @@ def format_report(config, result, benchmark=None, universe=None):
     m = metrics(config, result, benchmark)
     curve = result.equity_curve
     lines = ["TSMOM (MOP 2012) -- {}".format(label(config))]
+    if not curve:
+        # No market had a bar inside start..end (README.md): nothing to
+        # mark to market, but the reconcile (trivially 0 == 0) still holds.
+        lines.append("No bars in {}..{}: nothing to report.".format(config.start, config.end))
+        r = result.reconcile
+        lines.append("Reconcile {}: account ${:,.2f}  positions ${:,.2f}  difference ${:,.4f}".format(
+            "OK" if r.ok else "FAILED", r.account_pnl, r.position_pnl, r.difference))
+        return "\n".join(lines), m
     lines.append("Span {}..{}  markets {}  final ${:,.0f}".format(curve[0][0], curve[-1][0], len(result.markets),
                                                                   result.final_equity))
     lines.append("CAGR {}  vol {}  Sharpe {}  MaxDD {}  CAGR/MaxDD {}  2008 {}".format(
@@ -675,7 +783,11 @@ def main(argv=None, universe=None):
         return 2
     curve = None
     if args.interest_rates:
-        curve = rates.RateCurve(rates.load_rate_series(args.interest_rates))
+        try:
+            curve = rates.load_rate_curve(args.interest_rates)
+        except (OSError, ValueError) as err:
+            print("tsmom: --interest-rates {}: {}".format(args.interest_rates, err), file=sys.stderr)
+            return 1
     if not os.path.isdir(args.data_dir):
         print("tsmom: no data directory {}".format(args.data_dir), file=sys.stderr)
         return 1

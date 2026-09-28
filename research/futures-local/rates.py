@@ -73,6 +73,42 @@ def load_rate_series(path):
     return rows
 
 
+def _looks_monthly(rows):
+    """Whether ``rows`` are TB3MS's own shape: more than one row, every one
+    dated the first of its month. A lone row is left alone (ambiguous, and
+    matches a single DTB3 observation too); DTB3's daily dates are almost
+    never all first-of-month, so this does not misfire on the daily series
+    (module docstring, "TB3MS", "DTB3")."""
+    return len(rows) > 1 and all(row.date.day == 1 for row in rows)
+
+
+def _add_one_month(day):
+    if day.month == 12:
+        return day.replace(year=day.year + 1, month=1)
+    return day.replace(month=day.month + 1)
+
+
+def _shift_one_month_forward(rows):
+    return [Rate(_add_one_month(row.date), row.annual_rate) for row in rows]
+
+
+def load_rate_curve(path, haircut=0.0):
+    """Load ``path`` (README.md, "Rate source") into a ``RateCurve``,
+    correcting TB3MS's own mild look-ahead: FRED dates a monthly TB3MS row
+    the first of the month, but the value it reports is that whole
+    month's *average* rate, which is not knowable until the month is over
+    (README.md, "Accrual"). Using it from day one of its own month is a
+    small look-ahead, so a monthly row is shifted one calendar month
+    forward before the curve is built -- a day in month M then carries
+    month M-1's rate, never its own month's still-unknown average. DTB3's
+    daily rows are dated the day they were actually observed and are used
+    exactly as loaded, unshifted."""
+    rows = load_rate_series(path)
+    if _looks_monthly(rows):
+        rows = _shift_one_month_forward(rows)
+    return RateCurve(rows, haircut=haircut)
+
+
 class RateCurve:
     """The prevailing 3-month T-bill rate on any date, with carry-forward
     of missing dates, an optional haircut spread, and a day-count
@@ -92,7 +128,8 @@ class RateCurve:
         ordered = sorted(rates, key=lambda row: row.date)
         self._dates = [row.date for row in ordered]
         self._rates = [row.annual_rate for row in ordered]
-        #: Dollars per year of spread subtracted from the quoted rate
+        #: Annual rate, a fraction (e.g. 0.01 for 1%, the same units as
+        #: ``annual_rate``) of spread subtracted from the quoted rate
         #: before crediting (README.md, "Accrual"): what a broker or
         #: futures commission merchant kept rather than passing through.
         self.haircut = haircut
@@ -103,12 +140,15 @@ class RateCurve:
         ``day``: the latest rate dated on or before ``day``
         (carry-forward). Before the series' first date there is no rate to
         carry forward, so this returns 0.0 -- never the haircut applied to
-        nothing -- and prints a one-time warning to stderr."""
+        nothing -- and prints a one-time warning to stderr. A haircut
+        larger than the quoted rate floors the net credited rate at 0.0
+        rather than crediting a negative rate (paying the broker out of
+        principal is not modelled)."""
         index = bisect.bisect_right(self._dates, day) - 1
         if index < 0:
             self._warn_before_first(day)
             return 0.0
-        return self._rates[index] - self.haircut
+        return max(0.0, self._rates[index] - self.haircut)
 
     def _warn_before_first(self, day):
         if self._warned_before_first:

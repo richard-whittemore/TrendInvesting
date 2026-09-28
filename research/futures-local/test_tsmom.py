@@ -194,10 +194,139 @@ class TimingTests(unittest.TestCase):
         self.assertEqual(match.targets, decision.targets)
         self.assertEqual(match.equity, decision.equity)
 
+    def test_a_market_that_has_not_started_trading_yet_does_not_crash_the_decision(self):
+        # A market that joins the universe partway through the run (its
+        # first bar is after several decisions have already happened) has
+        # no signal and no state.prev yet on those earlier decision days;
+        # it must be skipped, not crash on state.prev.non.
+        universe, series = _two_markets(900)
+        late_start = DAY0 + timedelta(days=400)
+        universe["LATE"] = _market("LATE")
+        series["LATE"] = _rows(_trend(200), day0=late_start)
+        result = tsmom.run_backtest(_config(), universe, series)
+        self.assertTrue(result.reconcile.ok, result.reconcile)
+
     def test_nothing_fills_before_the_start(self):
         universe, series = _two_markets()
         result = tsmom.run_backtest(_config(), universe, series)
         self.assertTrue(all(f.date >= _config().start for f in result.fills))
+
+
+class MultiplierTimingTests(unittest.TestCase):
+    def test_sizing_uses_the_fill_dates_multiplier_not_the_decision_dates(self):
+        # The SP 1997 change can fall between a decision (month end) and its
+        # fill (the next session); the CONTRACT COUNT traded must be sized
+        # with the fill date's multiplier, not the decision date's (a
+        # review finding).
+        n = 700
+        universe = {"UP": _market("UP")}
+        series = {"UP": _rows(_trend(n))}
+        probe = tsmom.run_backtest(_config(), universe, series)
+        self.assertTrue(probe.decisions)
+        decision = probe.decisions[0]
+        calendar = sorted({r.date for r in series["UP"]})
+        fill_date = calendar[calendar.index(decision.date) + 1]
+
+        old_multiplier, new_multiplier = 1000.0, 400.0
+        universe["UP"] = _market("UP", multiplier=((date(1900, 1, 1), old_multiplier),
+                                                     (fill_date, new_multiplier)))
+        result = tsmom.run_backtest(_config(), universe, series)
+        d = result.decisions[0]
+        self.assertEqual(d.date, decision.date)
+        row = next(r for r in series["UP"] if r.date == d.date)
+        expected = tsmom.contracts(d.equity, d.weights["UP"], row.non, new_multiplier)
+        wrong = tsmom.contracts(d.equity, d.weights["UP"], row.non, old_multiplier)
+        self.assertNotEqual(expected, wrong)  # the schedule must actually bite
+        self.assertEqual(result.positions_on(fill_date)["UP"], expected)
+
+
+class MultiplierMidPeriodTests(unittest.TestCase):
+    def test_a_multiplier_change_mid_period_resizes_and_reprices_costs(self):
+        # Between two rebalances, a contract-size change (SP, 1997) must
+        # resize the held position and be used for every subsequent
+        # per-contract cost (here, a roll) straight away -- not only at the
+        # next rebalance, up to a month later (a review finding).
+        n = 900
+        universe = {"UP": _market("UP")}
+        series = {"UP": _rows(_trend(n))}
+        probe = tsmom.run_backtest(_config(), universe, series)
+        calendar = sorted({r.date for r in series["UP"]})
+        d0, d1 = probe.decisions[0], probe.decisions[1]
+        fill0 = calendar[calendar.index(d0.date) + 1]
+        fill1 = calendar[calendar.index(d1.date) + 1]
+        initial_quantity = probe.positions_on(fill0)["UP"]
+        self.assertNotEqual(initial_quantity, 0)
+
+        between = [d for d in calendar if fill0 < d < fill1]
+        self.assertGreater(len(between), 10)
+        change_date = between[len(between) // 3]
+        roll_date = between[len(between) // 3 + 5]
+        self.assertLess(roll_date, fill1)
+
+        basis = [3.0 if r.date >= roll_date else 0.0 for r in series["UP"]]
+        rolled_series = {"UP": _rows(_trend(n), basis=basis)}
+        old_multiplier, new_multiplier = 1000.0, 400.0
+        schedule_market = _market("UP", multiplier=((date(1900, 1, 1), old_multiplier),
+                                                     (change_date, new_multiplier)))
+        result = tsmom.run_backtest(_config(), {"UP": schedule_market}, rolled_series)
+
+        resized_quantity = int(round(initial_quantity * old_multiplier / new_multiplier))
+        self.assertEqual(result.positions_on(change_date)["UP"], resized_quantity)
+        self.assertEqual(result.roll_count, 1)
+        expected_roll_cost = tsmom.roll_cost(resized_quantity, tsmom.backtest.DEFAULT_COMMISSION, 1.0,
+                                             schedule_market.tick_size, new_multiplier)
+        wrong_roll_cost = tsmom.roll_cost(initial_quantity, tsmom.backtest.DEFAULT_COMMISSION, 1.0,
+                                          schedule_market.tick_size, old_multiplier)
+        self.assertNotEqual(round(expected_roll_cost, 6), round(wrong_roll_cost, 6))
+        self.assertAlmostEqual(result.total_roll_cost, expected_roll_cost, places=6)
+        self.assertTrue(result.reconcile.ok, result.reconcile)
+
+
+class PortfolioOverlayTests(unittest.TestCase):
+    def test_the_overlay_uses_the_realised_book_not_this_months_new_weights(self):
+        # The 10% overlay's trailing vol must come from each PAST day's
+        # ACTIVE (already-decided) weights times that day's own realised
+        # return -- never today's brand-new weights re-applied to a whole
+        # year of history that was never actually held at those weights
+        # (a review finding).
+        universe, series = _two_markets(900)
+        config = _config(portfolio_target=0.10)
+        result = tsmom.run_backtest(config, universe, series)
+        non_trivial = [d for d in result.decisions if d.weights]
+        self.assertGreaterEqual(len(non_trivial), 2)
+
+        # Reconstruct each market's own daily return exactly as tsmom does.
+        returns = {}
+        for symbol, rows in series.items():
+            by_date, prev = {}, None
+            for row in rows:
+                if prev is not None:
+                    by_date[row.date] = tsmom.daily_return(prev, row)
+                prev = row
+            returns[symbol] = by_date
+
+        calendar = sorted({r.date for rows in series.values() for r in rows})
+        decisions_by_date = {d.date: d for d in result.decisions}
+        active, book = {}, []
+        for day in calendar:
+            book.append(sum(w * returns[s].get(day, 0.0) for s, w in active.items()))
+            if day in decisions_by_date:
+                active = decisions_by_date[day].weights
+
+        second = non_trivial[1]
+        idx = calendar.index(second.date)
+        window = book[max(0, idx + 1 - tsmom.PORTFOLIO_VOL_WINDOW):idx + 1]
+        expected_scale = tsmom.portfolio_scale(window, config.portfolio_target)
+        self.assertIsNotNone(expected_scale)
+        self.assertAlmostEqual(second.scale, expected_scale, places=9)
+
+        # The naive (ex-ante) method the bug used -- today's own new
+        # weights applied across the whole window -- must give a
+        # DIFFERENT number here, or this scenario doesn't exercise the fix.
+        naive_window = [sum(w * returns[s].get(d, 0.0) for s, w in second.weights.items())
+                        for d in calendar[max(0, idx + 1 - tsmom.PORTFOLIO_VOL_WINDOW):idx + 1]]
+        naive_scale = tsmom.portfolio_scale(naive_window, config.portfolio_target)
+        self.assertNotAlmostEqual(second.scale, naive_scale, places=6)
 
 
 class RollAndReconcileTests(unittest.TestCase):
@@ -238,6 +367,19 @@ class RollAndReconcileTests(unittest.TestCase):
         self.assertEqual(result.positions_on(last)["DN"], 0)
         self.assertTrue(result.reconcile.ok)
 
+    def test_a_weekend_end_date_is_not_treated_as_a_delisting(self):
+        # Both markets' real data run well past the chosen --end; a Friday
+        # right before a weekend --end must not be read as "the file ends
+        # here" just because clipping made it the last bar.
+        universe, series = _two_markets(920)
+        weekdays = sorted({r.date for rows in series.values() for r in rows})
+        friday = next(d for d in weekdays[400:-10] if d.weekday() == 4)
+        saturday = friday + timedelta(days=1)  # a weekend date, no bar of its own
+        self.assertEqual(saturday.weekday(), 5)
+        result = tsmom.run_backtest(_config(end=saturday), universe, series)
+        self.assertFalse(any(f.kind == "delist" for f in result.fills))
+        self.assertTrue(result.reconcile.ok, result.reconcile)
+
     def test_interest_is_credited_but_kept_out_of_the_reconcile(self):
         universe, series = _two_markets()
         curve = rates.RateCurve([rates.Rate(date(1980, 1, 1), 0.036)])
@@ -246,6 +388,24 @@ class RollAndReconcileTests(unittest.TestCase):
         self.assertGreater(with_interest.total_interest, 0)
         self.assertEqual(without.total_interest, 0)
         self.assertTrue(with_interest.reconcile.ok)
+
+
+class EmptySpanTests(unittest.TestCase):
+    def test_metrics_and_the_report_handle_a_span_with_no_bars(self):
+        # A run whose start..end has no bar for any market (e.g. every
+        # market file starts after the requested span) must not crash the
+        # report on an empty equity_curve's curve[0].
+        universe, series = _two_markets(50)
+        config = _config(start=date(1960, 1, 1), end=date(1960, 12, 31))
+        result = tsmom.run_backtest(config, universe, series)
+        self.assertEqual(result.equity_curve, [])
+        m = tsmom.metrics(config, result)
+        self.assertIsNone(m["cagr"])
+        self.assertIsNone(m["max_drawdown"])
+        self.assertIsNone(m["sharpe"])
+        text, m2 = tsmom.format_report(config, result)
+        self.assertIn("No bars", text)
+        self.assertIn("Reconcile", text)
 
 
 class HoldoutTests(unittest.TestCase):
@@ -283,6 +443,28 @@ class CommandLineTests(unittest.TestCase):
         text = out.getvalue()
         self.assertIn("Reconcile OK", text)
         self.assertIn("Sharpe", text)
+
+    def test_a_bad_interest_rates_file_is_caught_not_a_crash(self):
+        # Mirrors backtest.main's own --interest-rates error handling: print
+        # a message and exit 1, rather than letting the exception propagate.
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_path = os.path.join(tmp, "rates.csv")
+            with open(bad_path, "w") as handle:
+                handle.write("DATE,RATE\nnot-a-date,5.0\n")
+            err = io.StringIO()
+            with redirect_stderr(err), redirect_stdout(io.StringIO()):
+                code = tsmom.main(["--data-dir", tmp, "--interest-rates", bad_path])
+        self.assertEqual(code, 1)
+        self.assertIn(bad_path, err.getvalue())
+
+    def test_a_missing_interest_rates_file_is_caught_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_path = os.path.join(tmp, "nonexistent.csv")
+            err = io.StringIO()
+            with redirect_stderr(err), redirect_stdout(io.StringIO()):
+                code = tsmom.main(["--data-dir", tmp, "--interest-rates", missing_path])
+        self.assertEqual(code, 1)
+        self.assertIn(missing_path, err.getvalue())
 
 
 class MarketTableTests(unittest.TestCase):

@@ -64,6 +64,11 @@ DATA_EXTENSIONS = ("", ".txt", ".csv", ".asc", ".prn", ".dat")
 
 Bar = namedtuple("Bar", ["date", "open", "high", "low", "close", "volume", "open_interest"])
 
+#: A leading UTF-8 byte-order mark, stripped from the file's first line
+#: only (``load_series`` used to rely on the ``"utf-8-sig"`` codec for
+#: this; reading raw bytes line by line does it by hand instead).
+_UTF8_BOM = b"\xef\xbb\xbf"
+
 
 class LoaderError(ValueError):
     """A file this loader refuses to read, with the path and line number."""
@@ -191,62 +196,93 @@ def load_series(path, columns=None, date_format=None, century_pivot=CENTURY_PIVO
     exactly (module docstring).
 
     ``end`` (a ``date``) stops reading at the first row dated after it:
-    that row and every later one are neither validated nor returned. The
-    real Pinnacle files carry corrupt rows long after the in-sample end
-    (README.md, "Data problems found"), and a run should never read the
-    held-out period at all. A row whose date itself cannot be parsed is
+    that row and every later one are neither validated nor returned --
+    and, because the file is streamed line by line rather than read whole
+    up front, never even decoded. The real Pinnacle files carry corrupt
+    rows, including bytes that are not valid UTF-8, long after the
+    in-sample end (README.md, "Data problems found"), and a run should
+    never read the held-out period at all: a bad byte out there must not
+    abort an in-sample run. A row whose date itself cannot be parsed is
     still an error, since its place in time is unknown."""
-    with open(path, "r", encoding="utf-8-sig", errors="strict") as handle:
-        lines = [(number, raw.rstrip("\r\n")) for number, raw in enumerate(handle, start=1)]
-    lines = [(number, text) for number, text in lines if text.strip() and not text.lstrip().startswith("#")]
-    if not lines:
-        raise LoaderError(path, None, "no data rows")
+    with open(path, "rb") as handle:
 
-    delimiter = detect_delimiter(lines[0][1])
-    first_fields = _split(lines[0][1], delimiter)
-    if columns is None and detect_date_format(first_fields[0]) is None:
-        columns = columns_from_header(first_fields, path)
-        lines = lines[1:]
-    elif columns is None:
-        columns = HEADERLESS_COLUMNS
-    columns = tuple(columns)
-    _check_layout(columns, path)
-    if not lines:
-        raise LoaderError(path, None, "no data rows after the header")
+        def _rows():
+            # Binary mode, decoded one line at a time: a buffered reader may
+            # still pull many kilobytes of raw bytes ahead of whatever line
+            # was actually asked for, but that is harmless undecoded data.
+            # Decoding (where a bad byte would raise) happens here, per
+            # line, only for a line this generator is actually asked to
+            # produce -- so a ``break`` below, once a row after ``end`` is
+            # seen, guarantees no later line's bytes are ever decoded.
+            first = True
+            for number, raw in enumerate(handle, start=1):
+                if first:
+                    if raw.startswith(_UTF8_BOM):
+                        raw = raw[len(_UTF8_BOM):]
+                    first = False
+                try:
+                    text = raw.decode("utf-8").rstrip("\r\n")
+                except UnicodeDecodeError as err:
+                    raise LoaderError(path, number, "not valid utf-8: {}".format(err)) from None
+                if text.strip() and not text.lstrip().startswith("#"):
+                    yield number, text
 
-    index = {field: position for position, field in enumerate(columns) if field is not None}
-    expected_count = None
-    bars = []
-    for number, text in lines:
-        fields = _split(text, delimiter)
-        if expected_count is None:
-            expected_count = len(fields)
-            if expected_count < len(columns):
-                raise LoaderError(path, number, "{} fields, but the column layout needs {}".format(
-                    expected_count, len(columns)))
-            if date_format is None:
-                date_format = detect_date_format(fields[index["date"]])
-                if date_format is None:
-                    raise LoaderError(path, number, "unrecognised date {!r}; pass date_format".format(
-                        fields[index["date"]]))
-        if end is not None and len(fields) > index["date"]:
+        row_iter = _rows()
+        try:
+            number, text = next(row_iter)
+        except StopIteration:
+            raise LoaderError(path, None, "no data rows") from None
+
+        delimiter = detect_delimiter(text)
+        first_fields = _split(text, delimiter)
+        if columns is None and detect_date_format(first_fields[0]) is None:
+            columns = columns_from_header(first_fields, path)
             try:
-                row_date = parse_date(fields[index["date"]], date_format, century_pivot)
+                number, text = next(row_iter)
+            except StopIteration:
+                raise LoaderError(path, None, "no data rows after the header") from None
+        elif columns is None:
+            columns = HEADERLESS_COLUMNS
+        columns = tuple(columns)
+        _check_layout(columns, path)
+
+        index = {field: position for position, field in enumerate(columns) if field is not None}
+        expected_count = None
+        bars = []
+        while True:
+            fields = _split(text, delimiter)
+            if expected_count is None:
+                expected_count = len(fields)
+                if expected_count < len(columns):
+                    raise LoaderError(path, number, "{} fields, but the column layout needs {}".format(
+                        expected_count, len(columns)))
+                if date_format is None:
+                    date_format = detect_date_format(fields[index["date"]])
+                    if date_format is None:
+                        raise LoaderError(path, number, "unrecognised date {!r}; pass date_format".format(
+                            fields[index["date"]]))
+            if end is not None and len(fields) > index["date"]:
+                try:
+                    row_date = parse_date(fields[index["date"]], date_format, century_pivot)
+                except ValueError as err:
+                    raise LoaderError(path, number, str(err)) from None
+                if row_date > end:
+                    break
+            if len(fields) != expected_count:
+                raise LoaderError(path, number, "{} fields, expected {} (a missing field?)".format(
+                    len(fields), expected_count))
+            try:
+                bar = _parse_row(fields, index, date_format, century_pivot)
             except ValueError as err:
                 raise LoaderError(path, number, str(err)) from None
-            if row_date > end:
+            if bars and bar.date <= bars[-1].date:
+                raise LoaderError(path, number, "dates are not strictly monotonic: {} follows {}".format(
+                    bar.date, bars[-1].date))
+            bars.append(bar)
+            try:
+                number, text = next(row_iter)
+            except StopIteration:
                 break
-        if len(fields) != expected_count:
-            raise LoaderError(path, number, "{} fields, expected {} (a missing field?)".format(
-                len(fields), expected_count))
-        try:
-            bar = _parse_row(fields, index, date_format, century_pivot)
-        except ValueError as err:
-            raise LoaderError(path, number, str(err)) from None
-        if bars and bar.date <= bars[-1].date:
-            raise LoaderError(path, number, "dates are not strictly monotonic: {} follows {}".format(
-                bar.date, bars[-1].date))
-        bars.append(bar)
     return bars
 
 

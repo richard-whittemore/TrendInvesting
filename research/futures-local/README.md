@@ -133,11 +133,13 @@ Before 2009, a futures account earned Treasury-bill interest on its whole balanc
 
 **Rate source.** This backtester never fetches market or economic data itself, and none is committed to the repository. Get the rate from FRED yourself:
 
-1. Open <https://fred.stlouisfed.org/series/TB3MS> ("3-Month Treasury Bill Secondary Market Rate, Discount Basis", monthly) and download its CSV. (`DTB3`, the daily version at <https://fred.stlouisfed.org/series/DTB3>, works too -- `rates.load_rate_series` reads either shape.)
+1. Open <https://fred.stlouisfed.org/series/TB3MS> ("3-Month Treasury Bill Secondary Market Rate, Discount Basis", monthly) and download its CSV. (`DTB3`, the daily version at <https://fred.stlouisfed.org/series/DTB3>, works too -- `rates.load_rate_curve` reads either shape.)
 2. Save it to `~/Desktop/Trend_Investing/data/rates/TB3MS.csv`. FRED's own TB3MS download has the header `observation_date,TB3MS`, one row per month dated the first of the month (e.g. `1934-01-01,0.72`), the rate in annual percent, and `.` for a missing observation.
 3. Pass `--interest-rates ~/Desktop/Trend_Investing/data/rates/TB3MS.csv` on the command line.
 
-**Accrual.** `rates.RateCurve.rate_on(day)` looks up the latest rate dated on or before `day` -- a missing date (every day between TB3MS's monthly rows, or a FRED `.` placeholder) carries the last known rate forward, never zero and never interpolated. Before the series' first date there is no rate to carry forward, so the credit is zero and a one-time warning prints to stderr. `Backtester._credit_interest` credits the account's *whole* cash equity (`self.cash`), not a separate uninvested-cash sleeve, for every calendar day since the previous Session -- including a weekend or holiday gap, using each of those days' own rate (`rates.RateCurve.accrued_fraction`), because the cash balance itself does not change while no Session runs. The day-count convention is **actual/360**: FRED's `DTB3`/`TB3MS` both quote the T-bill's own bank-discount rate, which the Treasury and the money market quote on a 360-day year, so 360 matches the rate's own quoting convention (365 would understate the daily accrual a quoted annual rate implies). An optional `--interest-haircut` (default 0) subtracts a spread, in the same annual-rate units, from the loaded curve before crediting -- what a broker or futures commission merchant kept rather than passing through -- but never from the zero credited before the curve's first date.
+**A monthly rate is dated the start of the month it AVERAGES, not observes.** TB3MS's row for, say, January is dated 1934-01-01, but the value is that whole month's average rate -- not knowable until the month is over. Crediting it from day one of January would be a mild look-ahead. `rates.load_rate_curve` detects a monthly-shaped file (every row dated the first of its month) and shifts each row one calendar month forward before building the curve, so a day in February carries January's rate, never February's own still-unknown average; `DTB3`'s daily rows, dated the day actually observed, are used unshifted. Call `rates.load_rate_series` directly (skipping this shift) only to inspect the raw file as downloaded.
+
+**Accrual.** `rates.RateCurve.rate_on(day)` looks up the latest rate dated on or before `day` -- a missing date (every day between TB3MS's monthly rows, or a FRED `.` placeholder) carries the last known rate forward, never zero and never interpolated. Before the series' first date there is no rate to carry forward, so the credit is zero and a one-time warning prints to stderr. `Backtester._credit_interest` credits the account's *whole* cash equity (`self.cash`), not a separate uninvested-cash sleeve, for every calendar day since the previous Session -- including a weekend or holiday gap, using each of those days' own rate (`rates.RateCurve.accrued_fraction`), because the cash balance itself does not change while no Session runs. The day-count convention is **actual/360**: FRED's `DTB3`/`TB3MS` both quote the T-bill's own bank-discount rate, which the Treasury and the money market quote on a 360-day year, so 360 matches the rate's own quoting convention (365 would understate the daily accrual a quoted annual rate implies). An optional `--interest-haircut` (default 0) subtracts a spread, in the same annual-rate units (never dollars), from the loaded curve before crediting -- what a broker or futures commission merchant kept rather than passing through -- but never from the zero credited before the curve's first date, and the net credited rate is floored at 0.0 (a haircut larger than the rate credits nothing, never a negative rate paid out of principal).
 
 Because the credited interest lands in `self.cash`, it compounds into the Notional Account and so into the next Unit's size, exactly as real interest income would have. This means a run with interest is not simply the no-interest run's cash plus interest bolted on afterward; it can trade slightly differently. The report therefore runs the whole backtest twice when `--interest-rates` is given -- once with the curve, once without -- and prints both, along with the total interest earned.
 
@@ -145,23 +147,40 @@ Because the credited interest lands in `self.cash`, it compounds into the Notion
 
 ## In-sample result (2026-09-28)
 
-The command in "How to run it": 19 markets, 1980-01-02 to 2015-12-31, $1M, Faith's 1% Unit, default costs. Reconcile OK in both runs.
+The command in "How to run it": 19 markets, 1980-01-02 to 2015-12-31, $1M, Faith's 1% Unit, default costs. Reconcile OK in both runs. Re-run 2026-09-28 after the rates.py fixes below (the zero floor on a haircut and TB3MS's own look-ahead correction); the "No interest" column is unaffected (it never reads rates.py's curve) and unchanged from before the fix, while "With T-bill interest" moved from +10.11% / 99.53% (Sharpe not reported for the Turtle backtester) to the figures below -- higher, not lower, since fewer of the early, higher-rate months land in this window once TB3MS's monthly rows are shifted one month later.
 
 | | No interest | With T-bill interest | S&P price only (SP_NON, no dividends, from 1982-04-21) |
 | --- | --- | --- | --- |
-| CAGR | +5.83% | +10.11% | +8.83% |
-| Max drawdown | 99.75% | 99.53% | 57.12% |
-| CAGR ÷ MaxDD | 0.058 | 0.102 | 0.155 |
-| start-1989 | +70.82% | +86.18% | +15.53% |
-| 1990-1999 | +11.62% | +11.54% | +15.33% |
-| 2000-2008 | -22.61% | -17.60% | -5.40% |
-| 2009-2015 | -25.95% | -25.83% | +12.37% |
-| 2003-2015 | -23.91% | -22.13% | +6.67% |
+| CAGR | +5.83% | +10.36% | +8.83% |
+| Max drawdown | 99.75% | 99.49% | 57.12% |
+| CAGR ÷ MaxDD | 0.058 | 0.104 | 0.155 |
+| start-1989 | +70.82% | +86.45% | +15.53% |
+| 1990-1999 | +11.62% | +11.57% | +15.33% |
+| 2000-2008 | -22.61% | -17.04% | -5.40% |
+| 2009-2015 | -25.95% | -25.81% | +12.37% |
+| 2003-2015 | -23.91% | -22.70% | +6.67% |
 
 Without interest: 2,095 Campaigns, a 21.7% win rate, an average win of +7.88R and an average loss of -1.55R. Commission was $133.5M and roll cost $602.9M over 1,213 rolls.
 
 - **The dollar figures are dominated by the 1990s.** Equity compounded to $3.1B by May 1997, so later Unit sizes are far beyond real liquidity: 36% of entries would put 4 Units above 10% of the contract's open interest. Percentages are scale-free; dollars by market are not.
 - **Volatility is the story.** At 1% per Unit, with Faith's caps allowing up to 12 Units a side, the daily equity series has about 64% annualised volatility, and single days of -20% to -24% occur (1987-10-20, 2000-09-22, 2006-03-16, 2008-09-19). Diagnostics only, not a variant to adopt: with no costs at all the 1% run still returns -18.6% a year over 2003-2015, and a 0.25% Unit returns -3.5% a year over 2003-2015 with costs.
+
+## Held-out result (2015-01-02 to 2025-10-31, `--allow-holdout`, 2026-09-28)
+
+```sh
+python3 research/futures-local/backtest.py --start 2015-01-01 --end 2025-10-31 --allow-holdout \
+  --interest-rates ~/Desktop/Trend_Investing/data/rates/TB3MS.csv --benchmark SP
+```
+
+Reconcile OK in both runs.
+
+| | No interest | With T-bill interest | S&P price only (2015-01-02..2021-09-17, SP's Pinnacle history ends there) |
+| --- | --- | --- | --- |
+| CAGR | -13.39% | -12.43% | +12.17% |
+| Max drawdown | 93.65% | 93.42% | 34.45% |
+| CAGR ÷ MaxDD | -0.143 | -0.133 | 0.353 |
+
+With interest was previously reported at -12.25% / 93.40%; the small change (to -12.43% / 93.42%) is the same rates.py fix as the in-sample table -- TB3MS's monthly rows shifted one month later before crediting.
 
 ## Differences from main.py
 
@@ -213,15 +232,15 @@ make research-test
 
 - **Signal.** At the last session of each month, the sign of the market's past 12-month return (MOP Section 4). The daily return is the `_REV` change divided by the previous day's `_NON` settle, and the 12-month return compounds those. **No return is ever taken relative to a `_REV` level**, so negative back-adjusted levels (US, ZH, ZB, the grains) are harmless. The `_NON` price is always positive in-sample; a non-positive one stops the run.
 - **Volatility.** An exponentially weighted variance of daily returns, centre of mass 60 days, annualised by 261 (MOP eq. 1), with the weights normalised by their sum.
-- **Sizing.** Each position's notional is sign × 40% / σ × equity / N, with N the markets that have a signal that month (MOP eq. 5). Whole contracts, rounded half away from zero, priced at the `_NON` settle × dollars per point.
-- **Optional 10% portfolio target.** The whole book is also scaled by 10% / (the trailing one-year realised volatility of the current unscaled book's daily returns), using only sessions up to the decision day.
+- **Sizing.** Each position's notional is sign × 40% / σ × equity / N, with N the markets that have a signal that month (MOP eq. 5). Whole contracts, rounded half away from zero, priced at the decision day's `_NON` settle × dollars per point **as of the fill date**, not the decision date: a market's multiplier is looked up again when the fill actually happens (the next session), since the two can differ across a contract-size change (below) that falls between them.
+- **Optional 10% portfolio target.** The whole book is also scaled by 10% / (the trailing one-year annualised volatility of the REALISED, unscaled book's own daily returns) -- each past day's return under whatever weights were actually decided and active that day, never today's brand-new weights re-applied to a year of history that was never actually held at them. (The alternative, ex-ante approach many practitioners use -- apply the CURRENT month's weights to the historical return series, estimating what today's book's risk would have been -- was considered and rejected here in favour of the realised book: it is at least as easy to compute from data already tracked, and avoids a subtle inconsistency between what the overlay measures and what was actually traded.)
 - **Execution.** Each market trades to its target at its own next session's `_REV` settle.
 - **Costs.**
   - Commission: $2.50 per contract per side.
   - Slippage: one tick per contract per side.
   - Rolls: one round trip per open contract on every roll. A roll is any day on which `_REV` minus `_NON` steps, read straight off the files, the same way `markets.py` found its roll months.
-- **A file that ends** before the run does (RL in 2008) is flattened on its last bar.
-- **The SP contract change** of November 1997 closes and reopens the position at the new size.
+- **A file that ends** before the run does (RL in 2008) is flattened on its last bar. This is judged against the run's own last traded day (the last date any market in the run has a bar), not `--end` directly: a weekend or holiday `--end` (never itself a trading day) would otherwise make every still-live market look delisted on its last real bar before that date.
+- **The SP contract change** of November 1997 is handled on its own effective date, independent of any rebalance: the position is closed and reopened at the new size (like a rebalance's own contract-size change, below) as soon as the multiplier itself changes, not deferred to the next rebalance -- up to a month later, during which mark-to-market and every per-contract cost would otherwise silently use the stale multiplier and the stale, un-resized quantity.
 - **Reconcile.**
   - The account side is daily variation margin, less costs, with interest as a separate line.
   - The position side is each market's cash-flow ledger of fills, plus the open position at its last settle, less that market's costs.
@@ -262,32 +281,34 @@ python3 research/futures-local/tsmom.py --interest-rates ~/Desktop/Trend_Investi
 
 1985-01-02 to 2015-12-31, all costs, reconcile OK in all eight runs. The Sharpe ratio is the monthly return in excess of T-bills; without interest the return is already an excess return.
 
+(Re-run after the fixes below: fill-date sizing, the SP multiplier change handled on its own effective date, TB3MS's look-ahead corrected, and the 10% overlay switched to the realised book. See "Differences from the review that produced this fix" -- these are the four line items that move the numbers; the rest of the findings are correctness/robustness-only and do not change any figure here.)
+
 | Run | CAGR | Vol | Sharpe | MaxDD | CAGR/DD | 1985-89 | 1990-99 | 2000-08 | 2009-15 | 2003-15 | 2008 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| $1M, 40%/mkt, no interest | 10.33% | 12.4% | 0.86 | 24.5% | 0.42 | 13.96% | 12.91% | 10.08% | 4.62% | 5.57% | +21.9% |
-| $1M, 40%/mkt, interest | 14.19% | 12.5% | 0.85 | 24.4% | 0.58 | 21.23% | 18.60% | 13.37% | 4.62% | 6.82% | +23.4% |
-| $1M, 10% target, no interest | 10.98% | 11.3% | 0.98 | 21.5% | 0.51 | 12.89% | 14.08% | 10.26% | 6.28% | 6.57% | +20.4% |
-| $1M, 10% target, interest | 15.03% | 11.3% | 0.99 | 16.5% | 0.91 | 20.77% | 20.07% | 13.54% | 6.26% | 7.83% | +21.8% |
-| $10M, 40%/mkt, no interest | 10.32% | 12.4% | 0.86 | 24.4% | 0.42 | 13.89% | 12.97% | 10.06% | 4.58% | 5.51% | +21.8% |
-| $10M, 40%/mkt, interest | 14.32% | 12.5% | 0.86 | 24.2% | 0.59 | 21.96% | 18.64% | 13.38% | 4.65% | 6.86% | +23.5% |
-| $10M, 10% target, no interest | 10.99% | 11.2% | 0.99 | 21.6% | 0.51 | 12.99% | 14.15% | 10.20% | 6.22% | 6.48% | +20.3% |
-| $10M, 10% target, interest | 15.03% | 11.3% | 0.99 | 16.5% | 0.91 | 21.04% | 19.90% | 13.55% | 6.30% | 7.85% | +21.9% |
+| $1M, 40%/mkt, no interest | 10.33% | 12.4% | 0.86 | 24.5% | 0.42 | 13.96% | 12.93% | 10.07% | 4.62% | 5.57% | +21.9% |
+| $1M, 40%/mkt, interest | 14.19% | 12.5% | 0.85 | 24.5% | 0.58 | 21.22% | 18.60% | 13.41% | 4.58% | 6.81% | +23.7% |
+| $1M, 10% target, no interest | 9.95% | 10.8% | 0.94 | 21.1% | 0.47 | 13.70% | 12.44% | 8.60% | 5.64% | 5.45% | +15.7% |
+| $1M, 10% target, interest | 13.91% | 10.8% | 0.94 | 17.0% | 0.82 | 21.81% | 17.98% | 11.87% | 5.70% | 6.73% | +17.2% |
+| $10M, 40%/mkt, no interest | 10.32% | 12.4% | 0.86 | 24.4% | 0.42 | 13.89% | 12.97% | 10.06% | 4.57% | 5.51% | +21.8% |
+| $10M, 40%/mkt, interest | 14.35% | 12.5% | 0.86 | 24.2% | 0.59 | 21.96% | 18.67% | 13.44% | 4.65% | 6.87% | +23.8% |
+| $10M, 10% target, no interest | 9.81% | 10.7% | 0.93 | 21.2% | 0.46 | 13.12% | 12.32% | 8.57% | 5.63% | 5.41% | +15.4% |
+| $10M, 10% target, interest | 13.85% | 10.8% | 0.93 | 17.1% | 0.81 | 21.28% | 17.99% | 11.94% | 5.70% | 6.77% | +17.3% |
 
 **Against the S&P** (SP_NON, price only):
 
-- The correlation of monthly returns is −0.03 to −0.04.
-- In the S&P's 10 worst months, which averaged −12.2%, TSMOM averaged +3.3% to +3.7%. Examples:
-  - October 1987: 0%, against −20.4%.
-  - October 2008: +6.6%, against −17.1%.
-  - August 1998: +8.0%, against −15.1%.
+- The correlation of monthly returns is −0.02 to −0.04.
+- In the S&P's 10 worst months, which averaged −12.2%, TSMOM averaged +2.9% to +3.7%. Examples:
+  - October 1987: −0.1% ($1M, 40%/mkt), against −20.4%.
+  - October 2008: +6.6% ($1M, 40%/mkt), against −17.1%.
+  - August 1998: +8.0% ($1M, 40%/mkt), against −15.1%.
 
 **Markets** ($1M, 40% per market, no interest):
 
 - **Top five:** TU, JN, ZG, ZH, SP, each +$1.3M to +$1.7M.
 - **Bottom five:** CC −$1.7M, KC −$0.9M, ZS, SN, ZC.
-- **No market dominates.** The largest is 6-7% of all positive market P&L, and every sector is positive.
+- **No market dominates.** The largest (TU) is 6.9% of all positive market P&L, and every sector is positive.
 
-**Costs** ($1M, 40% per market, no interest): commission $0.13M, slippage $0.60M, and roll $1.99M over 6,051 rolls, against a net P&L of $20.1M. Costs cut the CAGR by about 1.4 points a year: with no costs at $10M it is 11.72%.
+**Costs** ($1M, 40% per market, no interest): commission $0.13M, slippage $0.60M, and roll $1.99M over 6,051 rolls, against a net P&L of $20.1M.
 
 **Against MOP.** Gross of every cost, 1985-2009, $10M, 40% per market:
 
@@ -296,15 +317,37 @@ python3 research/futures-local/tsmom.py --interest-rates ~/Desktop/Trend_Investi
 | Sharpe | 1.09 | "1+" gross |
 | Volatility | 11.7% | about 12% |
 | Correlation with the S&P | −0.11 | low |
-| 2008 | +21.9% net ($1M, 40%/mkt) | strongly positive |
+| 2008 | +21.8% net ($1M, 40%/mkt) | strongly positive |
 
-Net of costs over the same span, the Sharpe is 0.97. The remaining gap has three sources:
+Net of costs over the same span ($10M, 40% per market, no interest), the Sharpe is 0.97 -- both figures unchanged by the fixes below, since this particular comparison has no interest and no portfolio-target overlay. The remaining gap has three sources:
 - a smaller, US-only universe: 41 markets, not 58, with no non-USD equity indices or bonds;
 - the costs;
-- whole-contract rounding, which costs little: the $1M and $10M runs agree to within 0.15 point of CAGR.
+- whole-contract rounding, which costs little: the $1M and $10M runs agree to within 0.2 point of CAGR.
 
-**Read.** The edge is real in-sample but decays after 2008:
-- 2009-2015 returns only 4.6-6.3% a year without interest.
-- Losing years: 2005 (−5.1%), 2006 (−6.5%), 2009 (−7.3%), 2011 (−3.3%) and 2012 (−7.6%), at $1M, 40% per market, no interest. 2013-2015 recovered (+20%, +16%, +14%).
+**Read.** The edge is real in-sample but decays after 2008: 2009-2015 CAGR is 4.6-5.7% a year without interest, well below every earlier window in the table above. This is consistent with the published post-2009 weakness of trend following. The held-out run (2016 on, `--allow-holdout`) has been done (below).
 
-This is consistent with the published post-2009 weakness of trend following. The held-out run (2016 on) has not been done.
+### Differences from the review that produced this fix (2026-09-28)
+
+Four fixes change these numbers from the previous in-sample table (10% target, with interest, was previously 15.03% CAGR / 16.5% MaxDD / Sharpe 0.99; it is now 13.91% / 17.0% / 0.94):
+
+- **Fill-date sizing.** A position's contract count is now sized with the multiplier in effect on its *fill* date, not its decision date -- they can differ across the SP 1997 change.
+- **The SP multiplier change** is now handled on its own effective date (closed and reopened at the new size there), not deferred to the next rebalance.
+- **TB3MS's own look-ahead.** A monthly rate is dated the first of the month it *averages*, which is not knowable until the month is over; `rates.load_rate_curve` now shifts a detected monthly file one month forward before crediting (README.md, "Interest on idle cash"). Every "with interest" figure moves a little as a result -- each day now accrues the PRIOR month's rate rather than its own, which raises or lowers the credit depending on whether rates were rising or falling that month.
+- **The 10% overlay** now scales off the REALISED unscaled book's own trailing volatility (each past day's ACTIVE weights on that day's own return), not this month's brand-new weights re-applied to a year of history that was never actually held at them (README.md, "Optional 10% portfolio target"). This is the largest single driver of the 10% target rows' change, since the two methods can disagree substantially in months right after the signal set turns over.
+
+### Held-out result (2016-01-04 to 2025-10-31, `--allow-holdout`)
+
+```sh
+python3 research/futures-local/tsmom.py --start 2016-01-01 --end 2025-10-31 \
+  --equity 1000000 --portfolio-target 0.10 \
+  --interest-rates ~/Desktop/Trend_Investing/data/rates/TB3MS.csv --allow-holdout
+```
+
+| | No interest | With T-bill interest |
+| --- | --- | --- |
+| CAGR | −0.77% | +2.62% |
+| Vol | 10.3% | 10.8% |
+| Sharpe | −0.02 | 0.09 |
+| MaxDD | 28.0% | 26.1% |
+
+Reconcile OK in both runs. The edge that was strong in-sample is close to flat post-2015: essentially no CAGR without interest, and a small positive with it. The S&P correlation stays low (−0.23), and TSMOM was still positive in the S&P's worst holdout month (March 2020: +13.4% against −12.9%), so the diversification property held even as the standalone return did not.

@@ -151,6 +151,60 @@ class RateCurveTests(unittest.TestCase):
             fraction = curve.accrued_fraction(date(1979, 12, 31), date(1980, 1, 5))
         self.assertAlmostEqual(fraction, 3 * 0.10 / 360, places=12)
 
+    def test_a_haircut_larger_than_the_rate_floors_at_zero_not_negative(self):
+        # A 5% haircut against a 1% rate must credit 0%, never -4%
+        # (README.md, "Accrual"; paying the broker out of principal is not
+        # modelled).
+        curve = rates.RateCurve([rates.Rate(date(1980, 1, 1), 0.01)], haircut=0.05)
+        self.assertEqual(curve.rate_on(date(1980, 1, 1)), 0.0)
+
+    def test_the_zero_floor_does_not_affect_a_haircut_smaller_than_the_rate(self):
+        curve = rates.RateCurve([rates.Rate(date(1980, 1, 1), 0.10)], haircut=0.02)
+        self.assertAlmostEqual(curve.rate_on(date(1980, 1, 1)), 0.08)
+
+
+class LoadRateCurveTests(unittest.TestCase):
+    def test_monthly_rows_are_shifted_one_month_so_a_day_uses_the_prior_months_value(self):
+        # TB3MS dates a row the 1st of the month it AVERAGES -- that average
+        # isn't knowable until the month is over, so using it from day one
+        # of its own month is a mild look-ahead (README.md, "Accrual").
+        with tempfile.TemporaryDirectory() as directory:
+            path = _write(directory, "TB3MS.csv", [
+                "observation_date,TB3MS", "1980-01-01,10.0", "1980-02-01,12.0", "1980-03-01,14.0"])
+            curve = rates.load_rate_curve(path)
+        # A day in February must use January's rate (10%), not February's
+        # own, still-unknown 12% average.
+        self.assertAlmostEqual(curve.rate_on(date(1980, 2, 15)), 0.10)
+        self.assertAlmostEqual(curve.rate_on(date(1980, 3, 15)), 0.12)
+        # January itself has no prior month in this fixture: zero credit,
+        # with the before-first warning.
+        with redirect_stderr(io.StringIO()) as err:
+            value = curve.rate_on(date(1980, 1, 15))
+        self.assertEqual(value, 0.0)
+        self.assertIn("before the first available rate", err.getvalue())
+
+    def test_daily_rows_are_used_as_is_not_shifted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = _write(directory, "DTB3.csv", ["DATE,DTB3", "1980-01-02,10.0", "1980-01-03,10.5"])
+            curve = rates.load_rate_curve(path)
+        self.assertAlmostEqual(curve.rate_on(date(1980, 1, 2)), 0.10)
+        self.assertAlmostEqual(curve.rate_on(date(1980, 1, 3)), 0.105)
+
+    def test_a_single_monthly_shaped_row_is_left_unshifted(self):
+        # One row dated the first of the month is ambiguous on its own
+        # (a lone DTB3 observation looks the same); with nothing to compare
+        # it to, it is used as loaded.
+        with tempfile.TemporaryDirectory() as directory:
+            path = _write(directory, "r.csv", ["DATE,RATE", "1980-01-01,10.0"])
+            curve = rates.load_rate_curve(path)
+        self.assertAlmostEqual(curve.rate_on(date(1980, 1, 1)), 0.10)
+
+    def test_haircut_is_forwarded_to_the_curve(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = _write(directory, "r.csv", ["DATE,RATE", "1980-01-02,10.0"])
+            curve = rates.load_rate_curve(path, haircut=0.02)
+        self.assertAlmostEqual(curve.rate_on(date(1980, 1, 2)), 0.08)
+
 
 if __name__ == "__main__":
     unittest.main()
