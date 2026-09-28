@@ -345,7 +345,7 @@ class Backtester:
         #: today's brand-new weights against a year of past returns, which
         #: is not the book that was actually held.
         self._active_weights = {}
-        self._next_weights = None   # decided, not yet filled (promoted after the fill day)
+        self._next_weights = {}     # symbol -> decided weight not yet filled (promoted after that market's fill day)
         self._book_history = []     # [(date, unscaled book return)]
 
     def run(self):
@@ -369,11 +369,17 @@ class Backtester:
             # positions (README.md, "Optional 10% portfolio target").
             if self._active_weights:
                 self._book_history.append((day, self._unscaled_book_return(day)))
-            # A decision fills at the NEXT session's settle, so that
-            # session's return still belongs to the weights held before it;
-            # the decided weights take over only after it is recorded.
-            if self._next_weights is not None:
-                self._active_weights, self._next_weights = self._next_weights, None
+            # A decision fills at each market's NEXT session's settle, so
+            # that session's return still belongs to the weight held before
+            # it; a market's decided weight takes over only after the day
+            # it trades is recorded. Markets fill on their own sessions
+            # (exchange holidays differ), so this is per market.
+            for symbol in [s for s in self._next_weights if s in by_date[day]]:
+                weight = self._next_weights.pop(symbol)
+                if weight:
+                    self._active_weights[symbol] = weight
+                else:
+                    self._active_weights.pop(symbol, None)
             if trading:
                 self.result.equity_curve.append((day, self.cash))
             following = calendar[i + 1] if i + 1 < len(calendar) else None
@@ -553,7 +559,7 @@ class Backtester:
             targets[symbol] = contracts(equity, effective, state.prev.non, multiplier)
             state.pending = Pending(equity, effective, state.prev.non)
         self.result.decisions.append(Decision(day, equity, len(signals), scale, targets, weights))
-        self._next_weights = weights
+        self._next_weights = {s: weights.get(s, 0.0) for s in set(self._active_weights) | set(weights)}
 
     # --- money -----------------------------------------------------------------
 

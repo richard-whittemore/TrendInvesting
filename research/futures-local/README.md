@@ -287,12 +287,12 @@ python3 research/futures-local/tsmom.py --interest-rates ~/Desktop/Trend_Investi
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | $1M, 40%/mkt, no interest | 10.33% | 12.4% | 0.86 | 24.5% | 0.42 | 13.96% | 12.93% | 10.07% | 4.62% | 5.57% | +21.9% |
 | $1M, 40%/mkt, interest | 14.19% | 12.5% | 0.85 | 24.5% | 0.58 | 21.22% | 18.60% | 13.41% | 4.58% | 6.81% | +23.7% |
-| $1M, 10% target, no interest | 9.88% | 10.3% | 0.97 | 21.3% | 0.46 | 13.55% | 12.30% | 8.63% | 5.59% | 5.43% | +16.2% |
-| $1M, 10% target, interest | 13.74% | 10.3% | 0.96 | 17.2% | 0.80 | 21.14% | 17.82% | 11.92% | 5.56% | 6.69% | +17.6% |
+| $1M, 10% target, no interest | 9.88% | 10.3% | 0.97 | 21.2% | 0.47 | 13.56% | 12.31% | 8.64% | 5.58% | 5.42% | +16.1% |
+| $1M, 10% target, interest | 13.73% | 10.3% | 0.96 | 17.2% | 0.80 | 21.14% | 17.80% | 11.94% | 5.56% | 6.70% | +17.6% |
 | $10M, 40%/mkt, no interest | 10.32% | 12.4% | 0.86 | 24.4% | 0.42 | 13.89% | 12.97% | 10.06% | 4.57% | 5.51% | +21.8% |
 | $10M, 40%/mkt, interest | 14.35% | 12.5% | 0.86 | 24.2% | 0.59 | 21.96% | 18.67% | 13.44% | 4.65% | 6.87% | +23.8% |
-| $10M, 10% target, no interest | 9.67% | 10.2% | 0.96 | 21.3% | 0.45 | 12.44% | 12.31% | 8.59% | 5.47% | 5.33% | +15.6% |
-| $10M, 10% target, interest | 13.66% | 10.3% | 0.95 | 17.1% | 0.80 | 20.37% | 17.91% | 11.95% | 5.56% | 6.70% | +17.4% |
+| $10M, 10% target, no interest | 9.67% | 10.2% | 0.96 | 21.2% | 0.46 | 12.44% | 12.30% | 8.60% | 5.47% | 5.33% | +15.6% |
+| $10M, 10% target, interest | 13.65% | 10.3% | 0.95 | 17.1% | 0.80 | 20.37% | 17.90% | 11.94% | 5.56% | 6.70% | +17.4% |
 
 **Against the S&P** (SP_NON, price only):
 
@@ -328,14 +328,14 @@ Net of costs over the same span ($10M, 40% per market, no interest), the Sharpe 
 
 ### Differences from the review that produced this fix (2026-09-28)
 
-Four fixes change these numbers from the previous in-sample table (10% target, with interest, was previously 15.03% CAGR / 16.5% MaxDD / Sharpe 0.99; it is now 13.74% / 17.2% / 0.96):
+Four fixes change these numbers from the previous in-sample table (10% target, with interest, was previously 15.03% CAGR / 16.5% MaxDD / Sharpe 0.99; it is now 13.73% / 17.2% / 0.96):
 
 - **Fill-date sizing.** A position's contract count is now sized with the multiplier in effect on its *fill* date, not its decision date -- they can differ across the SP 1997 change.
 - **The SP multiplier change** is now handled on its own effective date (closed and reopened at the new size there), not deferred to the next rebalance.
 - **TB3MS's own look-ahead.** A monthly rate is dated the first of the month it *averages*, which is not knowable until the month is over; `rates.load_rate_curve` now shifts a detected monthly file one month forward before crediting (README.md, "Interest on idle cash"). Every "with interest" figure moves a little as a result -- each day now accrues the PRIOR month's rate rather than its own, which raises or lowers the credit depending on whether rates were rising or falling that month.
 - **The 10% overlay** now scales off the REALISED unscaled book's own trailing volatility (each past day's ACTIVE weights on that day's own return), not this month's brand-new weights re-applied to a year of history that was never actually held at them (README.md, "Optional 10% portfolio target"). This is the largest single driver of the 10% target rows' change, since the two methods can disagree substantially in months right after the signal set turns over.
 - **Only active book days count toward the overlay.** Before the first signal there is no book, and those days are no longer recorded as zero returns (which understated volatility and oversized the first scaled positions). The overlay needs 60 active days before it scales; until then the book stays flat. This matters most for runs that start cold, such as the held-out run.
-- **A decision's weights start counting after its fill.** A month-end decision fills at the next session's settle, so that session's return belongs to the weights held before it; the new weights enter the overlay's book only afterwards.
+- **A decision's weights start counting after its fill, market by market.** A month-end decision fills at each market's next session's settle, so that session's return belongs to the weight held before it; each market's new weight enters the overlay's book only after that market has traded (exchange holidays differ).
 - **The overlay window is the last 261 sessions of the calendar,** not the last 261 recorded (active) days, so returns from before a long gap in signals drop out.
 
 ### Held-out result (2016-01-04 to 2025-10-31, `--allow-holdout`)
@@ -348,9 +348,9 @@ python3 research/futures-local/tsmom.py --start 2016-01-01 --end 2025-10-31 \
 
 | | No interest | With T-bill interest |
 | --- | --- | --- |
-| CAGR | +1.69% | +3.58% |
+| CAGR | +1.69% | +3.59% |
 | Vol | 9.7% | 9.9% |
 | Sharpe | 0.22 | 0.19 |
-| MaxDD | 21.9% | 19.0% |
+| MaxDD | 21.3% | 19.0% |
 
 Reconcile OK in both runs. The edge that was strong in-sample is close to flat post-2015: about 1.7% a year without interest and 3.6% with it, barely above T-bills. The S&P correlation stays low (−0.21), and TSMOM was still positive in the S&P's worst holdout month (March 2020: +14.0% against −12.9%), so the diversification property held even as the standalone return did not.

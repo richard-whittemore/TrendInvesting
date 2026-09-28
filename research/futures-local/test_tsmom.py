@@ -297,14 +297,22 @@ def _realised_book(series, decisions, end=None):
         returns[symbol] = by_date
     calendar = sorted({r.date for rows in series.values() for r in rows if end is None or r.date <= end})
     decisions_by_date = {d.date: d for d in decisions}
-    active, pending, book = {}, None, []
+    traded = {s: {r.date for r in rows} for s, rows in series.items()}
+    active, pending, book = {}, {}, []
     for day in calendar:
         if active:
             book.append((day, sum(w * returns[s].get(day, 0.0) for s, w in active.items())))
-        if pending is not None:
-            active, pending = pending, None
+        # Each market's new weight takes over only once THAT market has
+        # traded (filled) after the decision.
+        for s in [s for s in pending if day in traded[s]]:
+            w = pending.pop(s)
+            if w:
+                active[s] = w
+            else:
+                active.pop(s, None)
         if day in decisions_by_date:
-            pending = decisions_by_date[day].weights
+            new = decisions_by_date[day].weights
+            pending = {s: new.get(s, 0.0) for s in set(active) | set(new)}
     return calendar, returns, book
 
 
@@ -318,6 +326,26 @@ class PortfolioOverlayTests(unittest.TestCase):
         self.assertEqual(len(result.book_history), len(expected))
         for (d1, r1), (d2, r2) in zip(result.book_history, expected):
             self.assertEqual(d1, d2)
+            self.assertAlmostEqual(r1, r2, places=12)
+
+    def test_a_market_that_misses_the_fill_session_keeps_its_old_weight_until_it_trades(self):
+        # DN has no bar on the first session of each month, so it fills a
+        # session later than UP; its pre-fill return must still carry its
+        # OLD weight (a review finding).
+        universe, series = _two_markets(900)
+        firsts = set()
+        seen = set()
+        for row in series["UP"]:
+            key = (row.date.year, row.date.month)
+            if key not in seen:
+                seen.add(key)
+                firsts.add(row.date)
+        series["DN"] = [r for r in series["DN"] if r.date not in firsts]
+        config = _config(portfolio_target=0.10)
+        result = tsmom.run_backtest(config, universe, series)
+        _, _, expected = _realised_book(series, result.decisions, config.end)
+        self.assertEqual([d for d, _ in result.book_history], [d for d, _ in expected])
+        for (_, r1), (_, r2) in zip(result.book_history, expected):
             self.assertAlmostEqual(r1, r2, places=12)
 
     def test_the_overlay_window_is_the_last_year_of_sessions_not_of_active_days(self):
