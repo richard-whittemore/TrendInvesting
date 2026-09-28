@@ -191,12 +191,12 @@ would not reconcile. This is why the Pinnacle CLC database was purchased.
 
 | Period | CAGR |
 | --- | --- |
-| Overall, 1980–2015 | +10.1% (max drawdown 99.5%) |
+| Overall, 1980–2015 | +10.4% (max drawdown 99.5%) |
 | 1980s | +86%/yr |
-| 1990s | +11.5%/yr |
-| 2000–2008 | −17.6%/yr |
+| 1990s | +11.6%/yr |
+| 2000–2008 | −17.0%/yr |
 | 2009–2015 | −25.8%/yr |
-| 2003–2015 | −22.1%/yr |
+| 2003–2015 | −22.7%/yr |
 | S&P 500 price-only, 2003–2015 (comparison) | +6.7% |
 
 The overall 1980–2015 number is dominated by the 1980s; every later period
@@ -213,14 +213,20 @@ Moskowitz, Ooi & Pedersen's 2012 paper), 41 markets, 1985–2015, scaled to a
 
 | Metric | Value |
 | --- | --- |
-| CAGR / Max drawdown | +15.0% / 16.5% |
-| Sharpe ratio (return per unit of risk) | 0.99 |
+| CAGR / Max drawdown | +13.9% / 17.0% |
+| Sharpe ratio (return per unit of risk) | 0.94 |
 | Correlation with the S&P 500 | About 0 |
-| 2009–2015 only | +6.3% |
+| 2009–2015 only | +5.7% |
+
+*Futures figures reflect the corrected local backtester (PR #269): monthly
+T-bill rates are applied from the following month (no look-ahead), the TSMOM
+10% overlay is measured on the realised book, and contract sizing uses the
+fill date's multiplier. These corrections moved the numbers slightly; none
+changed a conclusion.*
 
 TSMOM's full-period number is strong and, importantly, close to unrelated
 to the stock market's own ups and downs. But its more recent sub-period
-(2009–2015, +6.3%) is much weaker than the full-period average, an early
+(2009–2015, +5.7%) is much weaker than the full-period average, an early
 warning echoed by the holdout result below.
 
 ## Held-out scorecard, 2016 to mid-2026
@@ -236,8 +242,8 @@ tuned against.
 | Momentum + trend filter | +13.9% / 46.9% | — | Close to SPY's return, worse drawdown |
 | RSI-2 | +4.57% / 9.5% | 0.48 | 11% of days invested |
 | Risk parity, 10% vol target | +7.67% / 20.9% | 0.37 | −11.2% in 2022 |
-| TSMOM (2016 to 2025-10) | +2.93% / 23.4% | Sharpe 0.12 | About the same as holding cash; +8.5% in March 2020 |
-| Turtle futures, 1% Unit (2015-01 to 2025-10) | −12.3% / 93% | — | Confirms the in-sample futures breakdown |
+| TSMOM (2016 to 2025-10) | +2.62% / 26.1% | Sharpe 0.09 | About the same as holding cash; +13.5% in March 2020 |
+| Turtle futures, 1% Unit (2015-01 to 2025-10) | −12.4% / 93% | — | Confirms the in-sample futures breakdown |
 | Turtle futures, 0.25% Unit | +0.4% / 46% | — | Barely positive, at much smaller size |
 
 **None of the single strategies above beat SPY's return on the holdout.**
