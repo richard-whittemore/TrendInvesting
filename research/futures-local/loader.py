@@ -1,9 +1,8 @@
 """A tolerant, fail-loud reader for Pinnacle Data CLC continuous-futures
 files (ASCII text or CSV, one file per market).
 
-The real files had not arrived when this was written, so nothing here
-hard-codes a guess about their layout beyond the one clearly marked
-default below. The loader detects:
+The purchased CLC files (checked 2026-09-28) are headerless CSV, dated
+MM/DD/YYYY, in ``HEADERLESS_COLUMNS`` order. The loader still detects:
 
 - the delimiter: comma, tab, semicolon, pipe, or runs of whitespace;
 - a header row, whose column names are mapped through ``HEADER_ALIASES``;
@@ -14,7 +13,9 @@ It never repairs a bad row. Any of these raises ``LoaderError``, naming the
 file and line: dates that are not strictly increasing, high below low, an
 open or settle outside the bar's own high-low range, a missing or
 non-numeric price field, a row with a different field count from the
-first, or a date format that differs from the first row's.
+first, or a date format that differs from the first row's. With ``end``,
+rows after that date are never read, so corrupt rows in the held-out
+period cannot stop an in-sample run.
 
 Back-adjusted prices can legitimately be zero or negative, so no sign
 check is made on any price.
@@ -29,12 +30,11 @@ from collections import namedtuple
 from datetime import date
 
 # =============================================================================
-# THE COLUMN LAYOUT -- confirm against the real Pinnacle files first
-# (README.md, "Verify the real files first"). For a headerless file this
-# tuple names each column in order; ``None`` ignores a column. If the real
-# files differ, this line is the one change to make (or pass ``columns=``).
-# Default: Pinnacle's historical CLC ASCII order, Date, Open, High, Low,
-# Settle, Volume, Open Interest -- UNVERIFIED against the purchased files.
+# THE COLUMN LAYOUT. For a headerless file this tuple names each column in
+# order; ``None`` ignores a column (or pass ``columns=``). Confirmed on the
+# purchased CLC files: Date, Open, High, Low, Settle, Volume, Open Interest
+# (e.g. US_NON's first row, 01/03/1978, 99.3125, 99.3125, 98.875, 98.875,
+# 148, 2878).
 # =============================================================================
 HEADERLESS_COLUMNS = ("date", "open", "high", "low", "close", "volume", "open_interest")
 
@@ -182,13 +182,20 @@ def _number(text, field, required):
 # -----------------------------------------------------------------------------
 
 
-def load_series(path, columns=None, date_format=None, century_pivot=CENTURY_PIVOT):
+def load_series(path, columns=None, date_format=None, century_pivot=CENTURY_PIVOT, end=None):
     """Read one market's file into a list of ``Bar``, oldest first.
 
     ``columns`` overrides both the header row and ``HEADERLESS_COLUMNS``;
     ``date_format`` (one of YYYYMMDD, YYYY-MM-DD, MM/DD/YYYY, MM/DD/YY)
     overrides detection. Raises ``LoaderError`` on anything it cannot read
-    exactly (module docstring)."""
+    exactly (module docstring).
+
+    ``end`` (a ``date``) stops reading at the first row dated after it:
+    that row and every later one are neither validated nor returned. The
+    real Pinnacle files carry corrupt rows long after the in-sample end
+    (README.md, "Data problems found"), and a run should never read the
+    held-out period at all. A row whose date itself cannot be parsed is
+    still an error, since its place in time is unknown."""
     with open(path, "r", encoding="utf-8-sig", errors="strict") as handle:
         lines = [(number, raw.rstrip("\r\n")) for number, raw in enumerate(handle, start=1)]
     lines = [(number, text) for number, text in lines if text.strip() and not text.lstrip().startswith("#")]
@@ -222,6 +229,13 @@ def load_series(path, columns=None, date_format=None, century_pivot=CENTURY_PIVO
                 if date_format is None:
                     raise LoaderError(path, number, "unrecognised date {!r}; pass date_format".format(
                         fields[index["date"]]))
+        if end is not None and len(fields) > index["date"]:
+            try:
+                row_date = parse_date(fields[index["date"]], date_format, century_pivot)
+            except ValueError as err:
+                raise LoaderError(path, number, str(err)) from None
+            if row_date > end:
+                break
         if len(fields) != expected_count:
             raise LoaderError(path, number, "{} fields, expected {} (a missing field?)".format(
                 len(fields), expected_count))
@@ -262,56 +276,55 @@ def _parse_row(fields, index, date_format, century_pivot):
 # alternative markets.py's comments call out, or neither.
 # -----------------------------------------------------------------------------
 
-#: For each market whose ``price_units`` is still TO-VERIFY in markets.py,
-#: the settle-price range Pinnacle's file should show under markets.py's
-#: assumed unit, and under the one alternate unit its comment names (cents
-#: instead of dollars, or per-100-yen instead of per-yen). Both ranges are
-#: wide enough to cover the market's actual 1980-2015 history under that
-#: hypothesis; a real settle should fall inside one of them, not between.
-#: ``None`` for the alternate means the two units land in the same broad
-#: range and can't be told apart this way (US and TY: a decimal point and
-#: a 32nd-as-decimal-fraction are both small numbers near 100); the check
-#: still catches a much coarser error there, such as ticks stored as an
-#: integer count.
+#: For each traded market, the settle-price range Pinnacle's non-adjusted
+#: (``_NON``) file shows in its own units -- confirmed against the real
+#: files (markets.py, [F]) -- and the one alternate unit a mis-scaled file
+#: would show instead, usually the exchange's own quote (dollars where
+#: Pinnacle stores cents; dollars per unit where Pinnacle scales a currency
+#: up). Both ranges cover the market's 1980-2015 history. ``None`` for the
+#: alternate means no plausible mis-scaling lands in a distinct range.
 PRICE_SCALE_HINTS = {
-    # 30-year T-bond futures settle, 1980-2015: roughly 55 (early-1980s
-    # double-digit yields) to 175 (2015, near-zero yields), in decimal
-    # points (CME Group, "The basics of U.S. Treasury futures").
+    # Decimal points: 55 (early-1980s yields) to 175 (2015).
     "US": ((55.0, 175.0), None),
-    # 10-year T-note futures settle over the same span, decimal points.
     "TY": ((55.0, 145.0), None),
-    # $ per yen (markets.py's assumed unit) vs. $ per 100 yen (the common
-    # vendor alternative markets.py's own comment names). USD/JPY ranged
-    # roughly 75-280 over 1980-2015.
-    "JY": ((1.0 / 280, 1.0 / 75), (100.0 / 280, 100.0 / 75)),
-    # $ per troy oz (assumed) vs. cents per troy oz. COMEX silver ranged
-    # roughly $3.50-$50/oz over 1980-2015.
-    "SI": ((3.0, 55.0), (300.0, 5500.0)),
-    # $ per lb (assumed) vs. cents per lb. COMEX copper ranged roughly
-    # $0.50-$4.60/lb over 1980-2015.
-    "HG": ((0.5, 5.0), (50.0, 500.0)),
-    # $ per gallon (assumed) vs. cents per gallon. NYMEX heating oil ranged
-    # roughly $0.25-$4.50/gal over 1980-2015.
-    "HO": ((0.25, 4.5), (25.0, 450.0)),
-    # Same hint as HO: unleaded gasoline and its RBOB successor are also
-    # quoted $ per gallon (README.md, "Verify the real files first").
-    "HU": ((0.25, 4.5), (25.0, 450.0)),
+    # 100 minus a 0.1%-20% rate.
+    "ED": ((79.0, 100.0), None),
+    # Cents per franc / mark-then-euro / pound / Canadian dollar vs dollars.
+    "SF": ((25.0, 130.0), (0.25, 1.30)),
+    "EC": ((28.0, 165.0), (0.28, 1.65)),
+    "BP": ((100.0, 250.0), (1.0, 2.5)),
+    "CD": ((60.0, 112.0), (0.60, 1.12)),
+    # Dollars per yen x 10,000 vs dollars per yen: USDJPY ran 75-280.
+    "JY": ((10000.0 / 280, 10000.0 / 75), (1.0 / 280, 1.0 / 75)),
+    # Index points.
+    "SP": ((100.0, 2200.0), None),
+    # Dollars per troy oz.
+    "GC": ((250.0, 1950.0), None),
+    # Cents per troy oz vs dollars: silver ran $3.50-$50.
+    "SI": ((300.0, 5500.0), (3.0, 55.0)),
+    # Cents per lb vs dollars: copper ran $0.50-$4.60.
+    "HG": ((50.0, 500.0), (0.5, 5.0)),
+    # Dollars per barrel.
+    "CL": ((9.0, 150.0), None),
+    # Cents per gallon vs dollars: $0.25-$4.50.
+    "HO": ((25.0, 450.0), (0.25, 4.5)),
+    "HU": ((25.0, 450.0), (0.25, 4.5)),
+    # Cents per lb (sugar, coffee, cotton); dollars per metric ton (cocoa).
+    "SB": ((2.0, 50.0), None),
+    "KC": ((40.0, 340.0), None),
+    "CC": ((650.0, 4500.0), None),
+    "CT": ((25.0, 220.0), None),
 }
 
 
 def classify_price_scale(symbol, price):
-    """Whether ``price`` -- one real settle from Pinnacle's file for
-    ``symbol`` -- looks like markets.py's assumed unit, the one named
+    """Whether ``price`` -- one real settle from Pinnacle's non-adjusted
+    file for ``symbol`` -- looks like markets.py's unit, the one named
     alternate, or neither.
 
     Returns ``"assumed"``, ``"alternate"``, ``"unknown"`` (outside both
     ranges -- something else is wrong, not just a units mismatch), or
-    ``None`` when ``symbol`` has no hint (either its units are already
-    settled, or it isn't marked TO-VERIFY for ``price_units``).
-
-    This resolves nothing by itself: it is a check to run by hand on one
-    real bar per hinted market once Pinnacle's files arrive (markets.py's
-    "Important caveat"), never a guess at which unit is correct.
+    ``None`` when ``symbol`` has no hint. It flags; it never guesses.
     """
     hints = PRICE_SCALE_HINTS.get(symbol)
     if hints is None:
@@ -328,10 +341,10 @@ def check_series_scale(symbol, bars):
     """``classify_price_scale`` on the *last* bar's close in ``bars``, or
     ``None`` for an empty series or a symbol with no hint.
 
-    The last bar is the one to check: a back-adjusted continuous series
-    matches the real, un-adjusted price only at its most recent date, and
-    diverges further back as each roll's adjustment accumulates (README.md,
-    "Back-adjustment"). Checking an older bar this way would be meaningless.
+    Pass the non-adjusted (``_NON``) series, clipped at the run's end: its
+    every settle is a real price. A back-adjusted series matches the real
+    price only at the file's own last date, which is in the held-out
+    period.
     """
     if not bars:
         return None

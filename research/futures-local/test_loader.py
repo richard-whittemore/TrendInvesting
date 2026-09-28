@@ -160,65 +160,86 @@ class BadRowTests(LoaderTestCase):
         self.assertTrue(error.path.endswith(".txt"))
 
 
+class EndDateTests(LoaderTestCase):
+    """``load_series(end=...)``: rows dated after ``end`` are neither
+    validated nor returned. Pinnacle's real files carry corrupt rows long
+    after the 2015 in-sample end (a high below the low, a close outside the
+    range); they must not stop an in-sample run, and the held-out period
+    is never read at all (README.md, "Data problems found")."""
+
+    def test_a_corrupt_row_after_the_end_is_ignored(self):
+        bars = self.load("20151230,1,2,0.5,1.5,0,0\n"
+                         "20151231,1,2,0.5,1.5,0,0\n"
+                         "20160104,1,0.5,2,1.5,0,0\n"      # high below low
+                         "20160105,1,2,0.5,9.5,0,0\n",     # close outside the range
+                         end=date(2015, 12, 31))
+        self.assertEqual([bar.date for bar in bars], [date(2015, 12, 30), date(2015, 12, 31)])
+
+    def test_a_corrupt_row_on_or_before_the_end_still_raises(self):
+        self.assertRejected("20151230,1,2,0.5,1.5,0,0\n"
+                            "20151231,1,0.5,2,1.5,0,0\n", "high", end=date(2015, 12, 31))
+
+    def test_without_an_end_every_row_is_validated(self):
+        self.assertRejected("20151231,1,2,0.5,1.5,0,0\n"
+                            "20160104,1,0.5,2,1.5,0,0\n", "line 2")
+
+
 class PriceScaleTests(unittest.TestCase):
     """classify_price_scale/check_series_scale on synthetic settle prices
     only (never real Pinnacle data, per AGENTS.md and README.md's "No
-    market data"). These are the plausible-range sanity check markets.py's
-    docstring and README.md's "Verify the real files first" call for: a
-    market whose ``price_units`` is TO-VERIFY because Pinnacle's own
-    scaling is unknown (research/futures-local/README.md)."""
+    market data"). The assumed unit is now Pinnacle's own, confirmed
+    against the real files (markets.py): cents for silver, copper, heating
+    oil and gasoline; currencies scaled up (the yen x 10,000, the others x
+    100). The alternate is the exchange-quote unit a mis-scaled file would
+    show instead. The check runs on the non-adjusted (``_NON``) series,
+    whose every settle is a real price."""
 
-    def test_yen_at_assumed_dollars_per_yen_scale(self):
-        # USDJPY ~110 in the mid-1990s -> $1/110 per yen ~= 0.0091.
-        self.assertEqual(loader.classify_price_scale("JY", 0.0091), "assumed")
+    def test_yen_at_pinnacles_scale(self):
+        # USDJPY ~110 -> $0.0091 per yen, stored x 10,000 as 90.91.
+        self.assertEqual(loader.classify_price_scale("JY", 90.91), "assumed")
 
-    def test_yen_at_alternate_per_100_yen_scale(self):
-        # The same day's price if Pinnacle quotes per 100 yen instead.
-        self.assertEqual(loader.classify_price_scale("JY", 0.91), "alternate")
+    def test_yen_at_the_exchange_dollars_per_yen_scale(self):
+        self.assertEqual(loader.classify_price_scale("JY", 0.0091), "alternate")
 
-    def test_silver_at_assumed_dollars_per_ounce_scale(self):
-        self.assertEqual(loader.classify_price_scale("SI", 24.50), "assumed")
+    def test_silver_in_cents_per_ounce(self):
+        self.assertEqual(loader.classify_price_scale("SI", 2450.0), "assumed")
 
-    def test_silver_at_alternate_cents_per_ounce_scale(self):
-        self.assertEqual(loader.classify_price_scale("SI", 2450.0), "alternate")
+    def test_silver_in_dollars_per_ounce_is_the_alternate(self):
+        self.assertEqual(loader.classify_price_scale("SI", 24.50), "alternate")
 
-    def test_copper_at_assumed_dollars_per_pound_scale(self):
-        self.assertEqual(loader.classify_price_scale("HG", 3.50), "assumed")
+    def test_copper_in_cents_per_pound(self):
+        self.assertEqual(loader.classify_price_scale("HG", 350.0), "assumed")
+        self.assertEqual(loader.classify_price_scale("HG", 3.50), "alternate")
 
-    def test_copper_at_alternate_cents_per_pound_scale(self):
-        self.assertEqual(loader.classify_price_scale("HG", 350.0), "alternate")
+    def test_heating_oil_and_gasoline_in_cents_per_gallon(self):
+        for symbol in ("HO", "HU"):
+            self.assertEqual(loader.classify_price_scale(symbol, 210.0), "assumed")
+            self.assertEqual(loader.classify_price_scale(symbol, 2.10), "alternate")
 
-    def test_heating_oil_at_assumed_dollars_per_gallon_scale(self):
-        self.assertEqual(loader.classify_price_scale("HO", 2.10), "assumed")
-
-    def test_heating_oil_at_alternate_cents_per_gallon_scale(self):
-        self.assertEqual(loader.classify_price_scale("HO", 210.0), "alternate")
-
-    def test_unleaded_gasoline_uses_the_same_hint_as_heating_oil(self):
-        self.assertEqual(loader.classify_price_scale("HU", 2.10), "assumed")
-        self.assertEqual(loader.classify_price_scale("HU", 210.0), "alternate")
+    def test_swiss_franc_in_cents_per_franc(self):
+        self.assertEqual(loader.classify_price_scale("SF", 100.5), "assumed")
+        self.assertEqual(loader.classify_price_scale("SF", 1.005), "alternate")
 
     def test_treasury_note_has_only_an_assumed_range_no_alternate(self):
-        # Decimal points and 32nds-as-decimal both land in the same broad
-        # range, so this hint can't tell them apart (markets.py's own
-        # docstring on the caveat); it only catches a coarser error.
         self.assertEqual(loader.classify_price_scale("TY", 95.0), "assumed")
         self.assertIsNone(loader.PRICE_SCALE_HINTS["TY"][1])
+
+    def test_every_traded_market_has_a_hint(self):
+        import markets
+        for symbol, market in markets.MARKETS.items():
+            if market.excluded is None:
+                self.assertIn(symbol, loader.PRICE_SCALE_HINTS)
 
     def test_a_price_outside_every_hinted_range_is_unknown(self):
         self.assertEqual(loader.classify_price_scale("SI", 999999.0), "unknown")
 
     def test_a_symbol_with_no_hint_returns_none(self):
-        self.assertIsNone(loader.classify_price_scale("GC", 1800.0))
+        self.assertIsNone(loader.classify_price_scale("XX", 1800.0))
 
     def test_check_series_scale_uses_the_last_bars_close(self):
-        # The most recent bar of a back-adjusted continuous series is the
-        # least distorted by back-adjustment (README.md, "Back-adjustment"),
-        # so it is the one bar that should equal the real, un-adjusted
-        # price on that date.
         bars = [
             loader.Bar(date(2015, 12, 30), 1.0, 1.0, 1.0, 1.0, None, None),
-            loader.Bar(date(2015, 12, 31), 24.0, 24.5, 23.5, 24.50, None, None),
+            loader.Bar(date(2015, 12, 31), 2400.0, 2460.0, 2390.0, 2450.0, None, None),
         ]
         self.assertEqual(loader.check_series_scale("SI", bars), "assumed")
 

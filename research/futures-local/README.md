@@ -18,31 +18,32 @@ It exists because the QuantConnect Cloud run in `research/qc-cloud-futures` was 
 
 | File | What it does |
 | --- | --- |
-| `loader.py` | Reads one Pinnacle CLC text or CSV file. It detects the delimiter, header and date format, and rejects bad rows loudly. |
-| `markets.py` | Faith's portfolio [T p.10-11], with each market's multiplier, tick size, correlation groups, roll months and the fields still TO-VERIFY. |
+| `loader.py` | Reads one Pinnacle CLC text or CSV file, clipped at the run's end date. It detects the delimiter, header and date format, and rejects bad rows loudly. |
+| `markets.py` | Faith's portfolio [T p.10-11]: each market's Pinnacle file stem, dollars per point in Pinnacle's units, tick size, correlation groups and roll months, each with its source. |
 | `rates.py` | Reads a 3-month T-bill rate CSV and looks up the prevailing rate on any date, with carry-forward ("Interest on idle cash" below). |
 | `backtest.py` | The event loop, costs, metrics, reconcile check and command line. |
 | `test_*.py` | Unit tests on synthetic fixtures. They run in `make research-test`. |
 
 ## How to run it
 
-1. Put Pinnacle's back-adjusted files in `~/Desktop/Trend_Investing/data/pinnacle/`, one file per market.
-2. Work through "Verify the real files first" below.
-3. Run the in-sample default, 1980 to 2015:
+The Pinnacle CLC files live in `~/Desktop/Trend_Investing/data/pinnacle/DATA/CLCDATA/`, outside the repository. Run the in-sample default, 1980 to 2015, with and without T-bill interest and with the S&P benchmark:
 
-   ```sh
-   python3 research/futures-local/backtest.py
-   ```
+```sh
+python3 research/futures-local/backtest.py \
+  --interest-rates ~/Desktop/Trend_Investing/data/rates/TB3MS.csv --benchmark SP
+```
 
 Useful flags:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--data-dir` | `~/Desktop/Trend_Investing/data/pinnacle` | Where the files are. |
-| `--start`, `--end` | `1980-01-01`, `2015-12-31` | The span. Bars before `--start` warm up N, the channels and Strength, but trade nothing. |
+| `--data-dir` | `~/Desktop/Trend_Investing/data/pinnacle/DATA/CLCDATA` | Where the files are. |
+| `--start`, `--end` | `1980-01-01`, `2015-12-31` | The span. Bars before `--start` warm up N, the channels and Strength, but trade nothing. Every file is read only up to `--end`. |
 | `--allow-holdout` | off | **Required** for any `--end` in 2016 or later. Without it the run refuses to start (exit code 2). |
-| `--markets` | all in `markets.py` | A comma-separated list, e.g. `GC,SI,CL`. |
-| `--file-template` | `{stem}` | The file name without extension. `{stem}` and `{symbol}` are substituted, e.g. `{stem}_B` for a suffix. |
+| `--markets` | all in `markets.py` | A comma-separated list of `markets.py` symbols, e.g. `GC,SI,CL`. Excluded markets are skipped with a note. |
+| `--file-template` | `{stem}_REV` | The traded, back-adjusted file, without extension. `{stem}` and `{symbol}` are substituted. |
+| `--scale-template` | `{stem}_NON` | The non-adjusted file, used by the price-scale check and `--benchmark`. |
+| `--benchmark` | off | A `markets.py` symbol whose non-adjusted close is reported as price-only buy and hold, e.g. `SP`. **Dividends are excluded.** |
 | `--commission` | `2.50` | Dollars per contract per side. |
 | `--slippage-n` | `0.05` | Slippage per fill, in N (ADR 0013). |
 | `--unit-fraction` | `0.01` | Faith's 1%. Use `0.005` for the equity Baseline's figure. |
@@ -54,7 +55,7 @@ Useful flags:
 
 A market with no file is skipped with a warning; the run continues. The report gives:
 
-- CAGR, max drawdown, CAGR ÷ max drawdown, and CAGR per decade;
+- CAGR, max drawdown, CAGR ÷ max drawdown, and CAGR per decade and per report period;
 - the number of Campaigns, win rate, and average win and loss in R;
 - P&L per market, net of costs, with open Campaigns marked to the last settle;
 - total commission, and total roll cost with the number of rolls;
@@ -63,42 +64,25 @@ A market with no file is skipped with a warning; the run continues. The report g
 
 The exit code is 1 if the reconcile check fails.
 
-## Verify the real files first
+## The Pinnacle files (checked 2026-09-28)
 
-The data hadn't arrived when this was written, so the file layout is unknown. Check each item on one or two real files before trusting a result.
+- **Layout.** Headerless CSV, `MM/DD/YYYY,Open,High,Low,Close,Volume,OpenInterest`, one file per market and adjustment: `<SYM>_REV.CSV` back-adjusted, `<SYM>_NON.CSV` non-adjusted, `<SYM>_RAD.CSV` ratio-adjusted. The backtester trades `_REV` and checks price scale on `_NON`.
+- **Units and dollars per point.** `markets.py` cites, per market, Pinnacle's manual (Appendix B-1) and a check against the files. The manual's "BigPoint Value" column is not always in the file's units (ZI, silver, says 5000, but the file quotes cents: the right figure is $50). So dollars per 1.00 of the file's price is derived as the manual's Min $ Move ÷ tick size, and checked by multiplying a real `_NON` settle by it to get the contract's notional value. Pinnacle quotes silver, copper, heating oil and gasoline in cents, and scales the currencies up (the yen × 10,000, the rest × 100).
+- **Roll dates.** Pinnacle's back-adjustment steps only on a roll, so its roll dates are the days on which `_REV` minus `_NON` changes. `markets.py`'s `roll_months` and `roll_day` come from those days, 1990-2015, and agree with the manual's "RollOverDate" column.
+- **Splices.** FN is the Deutschmark to March 1999, then the euro; ZB is NYMEX unleaded gas, then RBOB from 2006. Each splice shows up as one step in `_REV` minus `_NON`, like a roll, so `_REV` has no false jump. The Deutschmark and euro are therefore one market (`EC`), not two with trade windows.
+- **Not available.** Pinnacle's CLC database has no 90-day T-bill or French franc contract. `TB` and `FR` stay in `markets.py` with `excluded` set.
+- **Short histories.** Copper (ZK) starts in 1989, crude (ZU) in 1984, gasoline (ZB) in 1985, the 10-year note in 1983, the Eurodollar (Pinnacle's EC) in 1982 and the S&P 500 in April 1982. SP ends in 2021 and the Eurodollar in 2023.
 
-1. **Column order.** `loader.HEADERLESS_COLUMNS` assumes Date, Open, High, Low, Settle, Volume, Open Interest, Pinnacle's historical CLC order. If the files have a header row, `HEADER_ALIASES` maps it instead. Check which of Pinnacle's fields (Open Interest, Total Volume, Total Open Interest) sits in which column. If the order differs, change that one line.
-2. **Date format.** The loader accepts YYYYMMDD, YYYY-MM-DD, MM/DD/YYYY and MM/DD/YY. Two-digit years of 50 and above are 19xx, and below 50 are 20xx (`CENTURY_PIVOT`). It refuses to guess a six-digit YYMMDD or MMDDYY date; pass `date_format` if the files use one.
-3. **File names.** Every `file_stem` in `markets.py` is a placeholder, the market's own short code. Pinnacle may add a suffix for the adjustment type; `--file-template` handles that without editing the table.
-4. **Price units: the most important check.** For each market, compare one day's settle with the exchange's quote for the same contract. The multiplier assumes these units:
-   - US and TY in decimal points, not 32nds;
-   - JY in dollars per yen, not per 100 yen;
-   - SI in dollars per ounce, not cents;
-   - HG, HO and HU in dollars, not cents;
-   - KC, SB and CT in cents per pound.
+## Data problems found
 
-   A units mismatch scales every Unit size and every dollar of P&L by the same factor. `loader.classify_price_scale(symbol, price)` and `loader.check_series_scale(symbol, bars)` automate a first pass at this: they compare one real settle against the plausible 1980-2015 range for `markets.py`'s assumed unit and, where `markets.py`'s own comment names one, the alternate unit (`loader.PRICE_SCALE_HINTS`). `backtest.py`'s command line runs this automatically on each hinted market's last loaded bar and prints a warning -- never an error -- if it looks like the alternate unit or neither. It only flags a mismatch; it does not resolve one.
-5. **Back-adjustment.** Use the *back-adjusted* (additive) series, not ratio-adjusted or unadjusted. Negative prices are expected in it and are accepted.
-6. **Settle outside the day's range.** The loader rejects an open or settle outside high-low. If Pinnacle's files contain such rows, look at how many before deciding how to treat them; the loader never repairs data silently.
-7. **Roll dates.** If Pinnacle documents its own roll schedule, replace the approximate `roll_months` and `roll_day` in `markets.py` with it.
+- **Corrupt rows, all after 2015.** ZI (silver, December 2025: a high of -942 against a low of 5,266), ZK (copper, from January 2026, and a close near 20 cents in September 2026) and SB (sugar, November 2025: the close above the high) have rows the loader rejects. All are in the held-out period, so `loader.load_series(end=...)` stops reading at the run's end date: those rows are never validated or read. A bad row on or before the end still stops the run.
+- **In-sample, 1980-2015, all 19 traded files load cleanly.** A scan for daily moves above 6N found only real events, such as the October 1987 crash, the September 1985 Plaza Accord in the yen, the September 1999 Washington Agreement in gold and the Swiss franc's January 2015 de-pegging.
 
 ## TO-VERIFY
 
-Every market's `file_stem` and `roll_months` are unverified -- Pinnacle's own file names and roll dates need the real data, not exchange research. A pass against CME Group, ICE, CBOT and Federal Reserve sources settled most of the rest; `markets.py`'s per-market comments cite the source for each. What's left, and why:
+Only one item is left. The IMM British pound contract was reportedly GBP 25,000 before the mid-1980s, not today's 62,500, and no source dates the change. The error changes only how many whole contracts a Unit rounds to, not the dollars per point per pound.
 
-| Market | Still unverified | Why |
-| --- | --- | --- |
-| US, TY | price units | Exchange convention (32nds) is confirmed and cited, but whether Pinnacle's file uses it or plain decimal is Pinnacle's own choice, not the exchange's -- needs a real bar. |
-| TB | trade window | Confirmed to have traded well past Faith's era at very low volume, but no source gives the exact year it stopped, or whether Pinnacle carries it at all. |
-| FR | multiplier, tick size, price units | Genuinely unconfirmed: no CME rulebook chapter or spec page for the historical French franc contract could be found (CME Group's site blocks automated fetches; third-party archives cover only currencies still traded today). |
-| BP | multiplier | The GBP 25,000 early contract size, and when it changed to 62,500, could not be sourced. |
-| JY, SI, HO, HU | price units | Same Pinnacle-scaling caveat as US/TY (per yen vs. per 100 yen; dollars vs. cents). |
-| HG | price units, tick size | Same caveat; COMEX's own quote convention for copper is cents per lb (unlike gold and silver), so this one needs the real data more than most. |
-| HU | trade window | Whether Pinnacle's file splices unleaded gas and its 2005-2006 RBOB successor into one series, or covers only one, is unknown. |
-
-`loader.classify_price_scale` / `loader.check_series_scale` (above, "Price units") automate the price-unit checks once the files arrive; nothing here can be resolved further without them.
-
-`python3 -c "import markets; print('\n'.join(markets.to_verify_report()))"`, run in this folder, prints the same list from the table itself.
+`python3 -c "import markets; print('\n'.join(markets.to_verify_report()))"`, run in this folder, prints each market's stem and anything unverified or excluded.
 
 ## Assumptions and how the loop works
 
@@ -129,10 +113,9 @@ Each Session is one date in the union of every market's dates. A market with no 
 contracts x 2 x (commission + 0.05N x multiplier)
 ```
 
-The roll months approximate each contract's delivery cycle, not Pinnacle's actual roll dates (TO-VERIFY):
+The roll months and days are Pinnacle's own, read off the files ("The Pinnacle files" above):
 - quarterly for financials and currencies;
-- six times a year for gold;
-- five times for silver, copper, coffee and cocoa;
+- five times a year for gold (Pinnacle skips the October contract), silver, copper, coffee and cocoa;
 - four times for sugar and cotton;
 - monthly for energy.
 
@@ -140,7 +123,7 @@ The roll months approximate each contract's delivery cycle, not Pinnacle's actua
 
 **Reconcile.** The account side is daily variation margin, less commission and roll costs. The Campaign side is `rules.Campaign`'s own fill-to-exit price distance × Unit size × multiplier, less the same costs, plus open Campaigns marked to the last settle. The two are computed independently and must agree to within $0.01. **Interest is excluded from both sides** ("Interest on idle cash" below): it is a separate account line, not part of Campaign P&L, so the invariant holds exactly whether or not interest is switched on.
 
-**Tradable window.** `markets.tradable` stops new Campaigns in the Deutschmark and French franc after 1998, and in the euro before 1999. Open Campaigns are never closed for leaving the window (CONTEXT.md, "Eligible").
+**Tradable window.** `markets.tradable` stops new Campaigns outside a market's `trade_from`..`trade_until`. No traded market has one now: Pinnacle's FN splices the Deutschmark and the euro into one series. Open Campaigns are never closed for leaving a window (CONTEXT.md, "Eligible").
 
 **Ruin.** If equity reaches zero, the run stops and the report says so.
 
@@ -160,6 +143,26 @@ Because the credited interest lands in `self.cash`, it compounds into the Notion
 
 **Per-period CAGR.** Every report additionally breaks the CAGR down into five fixed windows, independent of whether interest is switched on: everything through 1989, the 1990s, 2000 through the 2008 crisis, the post-crisis 2009-2015 span, and 2003-2015 -- from Faith's own publication of these rules (*The Original Turtle Trading Rules*, Curtis Faith, OriginalTurtles.org, 2003; `docs/methodology/Methodology_Analysis.md`, source T) through the end of the in-sample span, i.e. only the years in which anyone outside the original Turtles could have traded the published rules.
 
+## In-sample result (2026-09-28)
+
+The command in "How to run it": 19 markets, 1980-01-02 to 2015-12-31, $1M, Faith's 1% Unit, default costs. Reconcile OK in both runs.
+
+| | No interest | With T-bill interest | S&P price only (SP_NON, no dividends, from 1982-04-21) |
+| --- | --- | --- | --- |
+| CAGR | +5.83% | +10.11% | +8.83% |
+| Max drawdown | 99.75% | 99.53% | 57.12% |
+| CAGR ÷ MaxDD | 0.058 | 0.102 | 0.155 |
+| start-1989 | +70.82% | +86.18% | +15.53% |
+| 1990-1999 | +11.62% | +11.54% | +15.33% |
+| 2000-2008 | -22.61% | -17.60% | -5.40% |
+| 2009-2015 | -25.95% | -25.83% | +12.37% |
+| 2003-2015 | -23.91% | -22.13% | +6.67% |
+
+Without interest: 2,095 Campaigns, a 21.7% win rate, an average win of +7.88R and an average loss of -1.55R. Commission was $133.5M and roll cost $602.9M over 1,213 rolls.
+
+- **The dollar figures are dominated by the 1990s.** Equity compounded to $3.1B by May 1997, so later Unit sizes are far beyond real liquidity: 36% of entries would put 4 Units above 10% of the contract's open interest. Percentages are scale-free; dollars by market are not.
+- **Volatility is the story.** At 1% per Unit, with Faith's caps allowing up to 12 Units a side, the daily equity series has about 64% annualised volatility, and single days of -20% to -24% occur (1987-10-20, 2000-09-22, 2006-03-16, 2008-09-19). Diagnostics only, not a variant to adopt: with no costs at all the 1% run still returns -18.6% a year over 2003-2015, and a 0.25% Unit returns -3.5% a year over 2003-2015 with costs.
+
 ## Differences from main.py
 
 - **One series per market.** Signals, fills and P&L all use the back-adjusted series. There are no dated contracts, no raw-price offsets and no roll orders, so `main.py`'s raw-stop-at-or-below-zero decline doesn't apply.
@@ -177,9 +180,9 @@ Because the credited interest lands in `self.cash`, it compounds into the Notion
 make research-test
 ```
 
-`test_loader.py` covers delimiters, headers, every date format and the century rule, and every rejection.
+`test_loader.py` covers delimiters, headers, every date format and the century rule, every rejection, clipping at the end date, and the price-scale hints in Pinnacle's units.
 
-`test_markets.py` checks the table's integrity and its agreement with `main.py`'s correlation groups.
+`test_markets.py` checks the table's integrity, its agreement with `main.py`'s correlation groups, and the Pinnacle mapping: each stem and dollars per point, the excluded markets, and the Deutschmark-euro splice.
 
 `test_rates.py` covers the rate loader and lookup: FRED's own header and percent-to-fraction conversion, the `.` missing-observation placeholder, carry-forward, the zero-with-one-warning credit before the first available rate, the haircut, and the actual/360 accrued-fraction arithmetic (including across a rate change).
 
@@ -193,4 +196,5 @@ make research-test
 - the reconcile invariant on a three-market synthetic run;
 - the holdout refusal, in both the API and the command line;
 - interest: accrual arithmetic over a known period, carry-forward across a mid-run rate change, zero credit before the first available rate, the flag off leaving results unchanged, the reconcile invariant with interest and a haircut on, and the command line's side-by-side with/without report;
-- the five per-period CAGR windows.
+- the five per-period CAGR windows;
+- the command line's end-date clipping, excluded-market note, scale check on `_NON`, and the price-only benchmark.

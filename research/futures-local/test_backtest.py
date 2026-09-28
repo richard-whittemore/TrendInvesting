@@ -251,7 +251,7 @@ class CommandLineTests(unittest.TestCase):
     def test_runs_on_files_in_a_data_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             rows = FLAT + [LONG_BREAKOUT, LONG_ENTRY_FILL, ADD_SIGNAL, ADD_FILL, (99.5, 99.8, 98.0, 98.2)]
-            with open(os.path.join(directory, "GC.TXT"), "w") as handle:
+            with open(os.path.join(directory, "ZG_REV.TXT"), "w") as handle:
                 for bar in _bars(rows):
                     handle.write("{:%Y%m%d},{},{},{},{},0,0\n".format(bar.date, bar.open, bar.high, bar.low,
                                                                       bar.close))
@@ -264,23 +264,79 @@ class CommandLineTests(unittest.TestCase):
             self.assertIn("Reconcile", report)
             self.assertIn("OK", report)
 
-    def test_warns_when_a_hinted_markets_last_settle_looks_like_the_alternate_scale(self):
-        # SI (silver) is TO-VERIFY for price_units: markets.py assumes $ per
-        # troy oz, but Pinnacle's file might use cents per oz instead
-        # (loader.PRICE_SCALE_HINTS). A file whose last close is 2450.0 --
-        # $24.50/oz in cents -- should trip the warning, not the run.
+    def test_warns_when_a_markets_non_adjusted_settle_looks_like_the_alternate_scale(self):
+        # Pinnacle stores silver in cents per troy oz (markets.py). The
+        # scale check reads the non-adjusted _NON file, whose settles are
+        # real prices; a last in-sample close of 24.50 -- dollars, not
+        # cents -- should trip the warning, not the run.
         with tempfile.TemporaryDirectory() as directory:
-            rows = FLAT + [(2449.0, 2451.0, 2448.0, 2450.0)]
-            with open(os.path.join(directory, "SI.TXT"), "w") as handle:
-                for bar in _bars(rows):
-                    handle.write("{:%Y%m%d},{},{},{},{},0,0\n".format(bar.date, bar.open, bar.high, bar.low,
-                                                                      bar.close))
+            _write_bars(os.path.join(directory, "ZI_REV.TXT"), _bars(FLAT))
+            _write_bars(os.path.join(directory, "ZI_NON.TXT"), _bars(FLAT[:-1] + [(24.0, 24.6, 23.9, 24.5)]))
             out, err = io.StringIO(), io.StringIO()
             with redirect_stdout(out), redirect_stderr(err):
                 code = backtest.main(["--data-dir", directory, "--start", "1990-01-01", "--markets", "SI"])
             self.assertEqual(code, 0)
             self.assertIn("SI", err.getvalue())
             self.assertIn("alternate", err.getvalue())
+
+    def test_a_corrupt_row_after_the_end_does_not_stop_the_run(self):
+        # Pinnacle's ZK (copper) file has corrupt rows in 2026, long after
+        # the in-sample end; the run clips each file at --end before
+        # validating it.
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "ZG_REV.TXT")
+            _write_bars(path, _bars(FLAT))
+            with open(path, "a") as handle:
+                handle.write("20260105,435.0,24.34,16.94,19.99,0,0\n")  # high below low
+            out = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                code = backtest.main(["--data-dir", directory, "--start", "1990-01-01", "--markets", "GC"])
+            self.assertEqual(code, 0)
+            self.assertIn("Reconcile OK", out.getvalue())
+
+    def test_an_excluded_market_is_skipped_with_a_note(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _write_bars(os.path.join(directory, "ZG_REV.TXT"), _bars(FLAT))
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                code = backtest.main(["--data-dir", directory, "--start", "1990-01-01", "--markets", "GC,TB"])
+            self.assertEqual(code, 0)
+            self.assertIn("TB", err.getvalue())
+            self.assertIn("excluded", err.getvalue())
+
+    def test_benchmark_reports_price_only_buy_and_hold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _write_bars(os.path.join(directory, "ZG_REV.TXT"), _bars(FLAT))
+            _write_bars(os.path.join(directory, "SP_NON.TXT"), _bars(FLAT))
+            out = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                code = backtest.main(["--data-dir", directory, "--start", "1990-01-01", "--markets", "GC",
+                                      "--benchmark", "SP"])
+            self.assertEqual(code, 0)
+            self.assertIn("Benchmark SP", out.getvalue())
+            self.assertIn("dividends excluded", out.getvalue())
+
+
+class BenchmarkTests(unittest.TestCase):
+    def test_price_only_buy_and_hold_from_the_first_in_span_close(self):
+        # 100 -> 121 over two years is about 10% a year; the
+        # 80 dip is a 20% drawdown from the 100 start. Bars before the
+        # start and after the end are ignored.
+        bars = [loader.Bar(date(1989, 12, 29), 50.0, 50.0, 50.0, 50.0, None, None),
+                loader.Bar(date(1990, 1, 1), 100.0, 100.0, 100.0, 100.0, None, None),
+                loader.Bar(date(1990, 6, 1), 80.0, 80.0, 80.0, 80.0, None, None),
+                loader.Bar(date(1991, 12, 31), 121.0, 121.0, 121.0, 121.0, None, None),
+                loader.Bar(date(1992, 1, 2), 500.0, 500.0, 500.0, 500.0, None, None)]
+        result = backtest.benchmark_result(bars, date(1990, 1, 1), date(1991, 12, 31))
+        m = backtest.metrics(result)
+        self.assertAlmostEqual(m["cagr"], 0.10, places=3)  # 729 days / 365.25
+        self.assertAlmostEqual(m["max_drawdown"], 0.20, places=6)
+
+
+def _write_bars(path, bars):
+    with open(path, "w") as handle:
+        for bar in bars:
+            handle.write("{:%Y%m%d},{},{},{},{},0,0\n".format(bar.date, bar.open, bar.high, bar.low, bar.close))
 
 
 class InterestTests(unittest.TestCase):
@@ -364,7 +420,7 @@ class InterestTests(unittest.TestCase):
     def test_command_line_reports_both_with_and_without_interest(self):
         with tempfile.TemporaryDirectory() as directory:
             rows = FLAT[:20]
-            with open(os.path.join(directory, "GC.TXT"), "w") as handle:
+            with open(os.path.join(directory, "ZG_REV.TXT"), "w") as handle:
                 for bar in _bars(rows):
                     handle.write("{:%Y%m%d},{},{},{},{},0,0\n".format(bar.date, bar.open, bar.high, bar.low,
                                                                       bar.close))

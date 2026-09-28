@@ -52,7 +52,11 @@ HOLDOUT_START = date(2016, 1, 1)
 #: futures broker's all-in commission and exchange fees (ADR 0013 names
 #: the Interactive Brokers model, which LEAN supplied in the cloud version).
 DEFAULT_COMMISSION = 2.50
-DEFAULT_DATA_DIR = os.path.expanduser("~/Desktop/Trend_Investing/data/pinnacle")
+DEFAULT_DATA_DIR = os.path.expanduser("~/Desktop/Trend_Investing/data/pinnacle/DATA/CLCDATA")
+#: Pinnacle CLC file names: <stem>_REV is back-adjusted (traded), <stem>_NON
+#: non-adjusted (real prices: the scale check and the benchmark).
+DEFAULT_FILE_TEMPLATE = "{stem}_REV"
+DEFAULT_SCALE_TEMPLATE = "{stem}_NON"
 
 
 class HoldoutError(ValueError):
@@ -688,6 +692,35 @@ def metrics(result):
     return out
 
 
+def benchmark_result(bars, start, end):
+    """A price-only buy-and-hold ``Result`` from ``bars`` (a non-adjusted
+    series, e.g. Pinnacle's SP_NON as an S&P 500 proxy): equity is the
+    starting equity scaled by close / first in-span close, over the bars
+    dated ``start``..``end``. Dividends are excluded, so it understates a
+    total-return index such as SPY by roughly the dividend yield."""
+    inside = [bar for bar in bars if start <= bar.date <= end]
+    result = Result()
+    result.starting_equity = 1_000_000.0
+    if inside:
+        first = inside[0].close
+        result.equity_curve = [(bar.date, result.starting_equity * bar.close / first) for bar in inside]
+        result.final_equity = result.equity_curve[-1][1]
+    return result
+
+
+def format_benchmark(symbol, result):
+    m = metrics(result)
+    curve = result.equity_curve
+    span = "{}..{}".format(curve[0][0], curve[-1][0]) if curve else "no bars"
+    lines = ["Benchmark {}: buy and hold of the non-adjusted close, price only, dividends excluded ({})".format(
+        symbol, span)]
+    lines.append("CAGR {}  MaxDD {}  CAGR/MaxDD {}".format(
+        _pct(m["cagr"]), _share(m["max_drawdown"]), _num(m["ratio"])))
+    for label, value in m["periods"]:
+        lines.append("  {} CAGR {}".format(label, _pct(value)))
+    return "\n".join(lines)
+
+
 def _pct(value):
     return "n/a" if value is None else "{:+.2f}%".format(100 * value)
 
@@ -754,8 +787,14 @@ def _parser():
     parser.add_argument("--allow-holdout", action="store_true",
                         help="permit an end date in the held-out period (2016 on)")
     parser.add_argument("--markets", default=None, help="comma-separated symbols from markets.py")
-    parser.add_argument("--file-template", default="{stem}",
-                        help="file name without extension; {stem} and {symbol} are substituted")
+    parser.add_argument("--file-template", default=DEFAULT_FILE_TEMPLATE,
+                        help="traded (back-adjusted) file name without extension; {stem} and {symbol} "
+                             "are substituted")
+    parser.add_argument("--scale-template", default=DEFAULT_SCALE_TEMPLATE,
+                        help="non-adjusted file name for the price-scale check and --benchmark")
+    parser.add_argument("--benchmark", default=None,
+                        help="a markets.py symbol whose non-adjusted close is reported as price-only "
+                             "buy and hold, e.g. SP")
     parser.add_argument("--commission", type=float, default=DEFAULT_COMMISSION, help="$ per contract per side")
     parser.add_argument("--slippage-n", type=float, default=rules.SLIPPAGE_N)
     parser.add_argument("--unit-fraction", type=float, default=rules.UNIT_VOLATILITY_FRACTION)
@@ -801,6 +840,9 @@ def main(argv=None):
         if market is None:
             print("backtest: unknown market {}".format(symbol), file=sys.stderr)
             return 1
+        if market.excluded:
+            print("backtest: {}: excluded ({}); skipped".format(market.symbol, market.excluded), file=sys.stderr)
+            continue
         stem = args.file_template.format(stem=market.file_stem, symbol=market.symbol)
         path = loader.find_market_file(args.data_dir, stem)
         if path is None:
@@ -808,22 +850,21 @@ def main(argv=None):
                   file=sys.stderr)
             continue
         universe[market.symbol] = market
-        series[market.symbol] = loader.load_series(path)
-        scale = loader.check_series_scale(market.symbol, series[market.symbol])
-        if scale == "alternate":
-            print("backtest: {}: last settle {} looks like the alternate price scale markets.py's "
-                  "comment names, not the one its multiplier assumes -- check price_units before "
-                  "trusting this run".format(market.symbol, series[market.symbol][-1].close),
-                  file=sys.stderr)
-        elif scale == "unknown":
-            print("backtest: {}: last settle {} matches neither price scale markets.py "
-                  "considers -- check price_units before trusting this run".format(
-                      market.symbol, series[market.symbol][-1].close), file=sys.stderr)
+        # Clipped at the end: never read the held-out period, and corrupt
+        # rows after the end cannot stop the run (README.md, "Data problems
+        # found").
+        series[market.symbol] = loader.load_series(path, end=config.end)
+        _check_scale(args, market, config.end)
     if not series:
         print("backtest: no market files found", file=sys.stderr)
         return 1
     result = run_backtest(config, universe, series)
     ok = result.reconcile.ok
+    benchmark = None
+    if args.benchmark:
+        benchmark = _load_benchmark(args, config)
+        if benchmark is None:
+            return 1
     if interest_curve is None:
         print(format_report(config, result))
     else:
@@ -841,7 +882,43 @@ def main(argv=None):
         print()
         print("=== With interest ===")
         print(format_report(config, result))
+    if benchmark is not None:
+        print()
+        print(benchmark)
     return 0 if ok else 1
+
+
+def _check_scale(args, market, end):
+    """Warn -- never fail -- when the market's last in-sample non-adjusted
+    settle is not in the unit markets.py's multiplier assumes."""
+    stem = args.scale_template.format(stem=market.file_stem, symbol=market.symbol)
+    path = loader.find_market_file(args.data_dir, stem)
+    if path is None:
+        return
+    bars = loader.load_series(path, end=end)
+    scale = loader.check_series_scale(market.symbol, bars)
+    if scale == "alternate":
+        print("backtest: {}: non-adjusted settle {} on {} looks like the alternate price scale, not the one "
+              "markets.py's multiplier assumes -- check price_units before trusting this run".format(
+                  market.symbol, bars[-1].close, bars[-1].date), file=sys.stderr)
+    elif scale == "unknown":
+        print("backtest: {}: non-adjusted settle {} on {} matches neither price scale -- check price_units "
+              "before trusting this run".format(market.symbol, bars[-1].close, bars[-1].date), file=sys.stderr)
+
+
+def _load_benchmark(args, config):
+    market = market_table.MARKETS.get(args.benchmark)
+    if market is None:
+        print("backtest: unknown benchmark {}".format(args.benchmark), file=sys.stderr)
+        return None
+    stem = args.scale_template.format(stem=market.file_stem, symbol=market.symbol)
+    path = loader.find_market_file(args.data_dir, stem)
+    if path is None:
+        print("backtest: benchmark {}: no file {}.* in {}".format(market.symbol, stem, args.data_dir),
+              file=sys.stderr)
+        return None
+    bars = loader.load_series(path, end=config.end)
+    return format_benchmark(market.symbol, benchmark_result(bars, config.start, config.end))
 
 
 if __name__ == "__main__":
