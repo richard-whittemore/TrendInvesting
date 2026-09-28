@@ -31,10 +31,13 @@ class TimingResearch(QCAlgorithm):
       "halloween" Bouman & Jacobsen (2002): SPY November through April, SHY
                   May through October.
       "faber_lev" Faber's 10-month SMA rule on SPY/EFA/IEF/VNQ/DBC with gross
-                  exposure LEVERAGE; borrowing costs come from LEAN's margin
-                  model (not modelled), so a financing charge of
-                  FINANCING_SPREAD over the 3-month T-bill proxy (SHY yield is
-                  unavailable) is deducted daily as a fixed annual rate.
+                  exposure LEVERAGE; a flat FINANCING_RATE a year is deducted
+                  daily on borrowed exposure (LEAN's margin model charges no
+                  interest by default).
+      "core_rsi2" CORE of equity always in SPY; the rest is an RSI-2 sleeve,
+                  otherwise SHY.
+      "boost"     100% SPY, BOOST_SIZE while RSI-2 signals; FINANCING_RATE on
+                  borrowed exposure.
     """
 
     MODE = "rsi2"
@@ -155,8 +158,9 @@ class TimingResearch(QCAlgorithm):
             if getattr(self, "_last_want", None) != want:
                 self.SetHoldings([PortfolioTarget(self.shy, shy_w), PortfolioTarget(self.spy, spy_w)])
                 self._last_want = want
-            if self._sig:
-                self.days_in += 1
+            # days_in here counts signal days only; the generic "SPY held"
+            # count above would be every day in these modes.
+            self.days_in += (1 if self._sig else 0) - (1 if self.Portfolio[self.spy].Invested else 0)
             borrowed = max(0.0, float(self.Portfolio.TotalHoldingsValue) - float(self.Portfolio.TotalPortfolioValue))
             cost = borrowed * self.FINANCING_RATE / 252.0
             if cost > 0:

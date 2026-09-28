@@ -2,9 +2,12 @@
 
 This report is written for the project owner, not for a quant. It avoids
 jargon where it can and explains the terms it has to use. The code behind
-every number is in `research/edge-search/` (see that folder's own
+almost every number is in `research/edge-search/` (see that folder's own
 `README.md` for how to run each script on QuantConnect Cloud); this report
-states the numbers, not the code.
+states the numbers, not the code. The one exception is the "Boost" re-test
+with realistic margin rates: its script embedded a table of FRED TB3MS
+rates, which is not committed (the repository never stores market data), so
+that result is reproducible only by rebuilding the table from FRED.
 
 ## Purpose
 
@@ -332,6 +335,22 @@ way.
   below).
 
 ## Caveats
+
+- **The stock-factor scripts let weights drift and do not cap gross
+  exposure.** To stay inside QuantConnect's 10,000-order limit, the factor
+  runs (momentum, momentum with trend filter, value, quality, low
+  volatility, and the equal-weight control) trade only names entering or
+  leaving the portfolio. Continuing holdings are not trimmed back to equal
+  weight, and a new entry is sized at its target weight of the whole
+  account, so after strong gains total exposure can creep above 100% on
+  the margin account. The factor results therefore describe a drifting,
+  sometimes slightly levered portfolio, not a strict monthly equal-weight
+  one. Any such leverage would flatter those results, which strengthens,
+  rather than weakens, the conclusion that none of them beat SPY on the
+  holdout.
+- **The risk-parity volatility window can be one day short** when an asset
+  has exactly 60 closes (its first months of data); the completed runs were
+  unaffected in practice, but the script is not hardened against it.
 
 - **Taxes are not modelled anywhere in this report.** Every return figure
   is pre-tax. A strategy that trades often (RSI-2, "Core," "Boost") would
