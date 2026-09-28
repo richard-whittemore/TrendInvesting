@@ -8,7 +8,7 @@ states the numbers, not the code. The "Boost" re-test with realistic margin rate
 stored, because its rate table is FRED data and the repository never
 stores market data: run `research/edge-search/timing/build_realistic_boost.py`
 with a local copy of FRED's TB3MS CSV to regenerate the exact script
-variant used (see that file for the recipe).
+variant used (see that file for the recipe). That run charged each month its own average T-bill rate from the first day of the month, a tiny use of future information in the financing cost only; the builder's `--prior-month` option avoids it. Re-run that way on the holdout, the result is unchanged: +16.18% a year, with financing of $61,074 against $61,034.
 
 ## Purpose
 

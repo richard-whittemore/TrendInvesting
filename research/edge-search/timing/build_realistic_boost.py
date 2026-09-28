@@ -7,12 +7,18 @@ table is generated here from a local copy of FRED's TB3MS monthly CSV
 Recipe, exactly as used for the reported +6.85% (1999-2015) and +16.18%
 (2016 to mid-2026) runs:
   * RATES maps YYYYMM -> that month's TB3MS value / 100, for 1998 onward;
-    a missing month uses the latest earlier month.
+    a missing month uses the latest earlier month. TB3MS is the average of
+    the month's daily rates, so charging it from the first day of that month
+    uses a little future information. The reported runs did exactly this.
+    The effect on the results is tiny: financing totalled about $53k and
+    $61k, and the month-to-month change in the rate is a small fraction of
+    that. Pass --prior-month to charge each month the previous month's
+    average instead, which uses only data available at the time.
   * The daily financing charge on borrowed exposure is
     borrowed * (RATES[month] + MARGIN_SPREAD) / 252, MARGIN_SPREAD = 1.5%.
   * Everything else is main.py in MODE "boost" (BOOST_SIZE 1.5).
 
-Usage: python3 build_realistic_boost.py TB3MS.csv > boost_realistic.py
+Usage: python3 build_realistic_boost.py TB3MS.csv [--prior-month] > boost_realistic.py
        (add START_DATE/END_DATE/MEASURE_FROM edits for the held-out run).
 """
 import csv
@@ -23,15 +29,18 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def build(tb3ms_path):
+def build(tb3ms_path, prior_month=False):
     rates = {}
     with open(tb3ms_path) as f:
         for row in csv.reader(f):
             if not row or row[0].startswith("observation") or row[1] == ".":
                 continue
             year, month, _ = row[0].split("-")
-            if int(year) >= 1998:
-                rates[int(year) * 100 + int(month)] = float(row[1]) / 100
+            if int(year) >= 1998 or (prior_month and int(year) == 1997 and int(month) == 12):
+                y, m = int(year), int(month)
+                if prior_month:
+                    y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+                rates[y * 100 + m] = float(row[1]) / 100
     src = open(os.path.join(HERE, "main.py")).read()
     table = "RATES = {" + ", ".join("{}: {:.4f}".format(k, v) for k, v in sorted(rates.items())) + "}\n"
     src = src.replace("class TimingResearch(QCAlgorithm):",
@@ -52,6 +61,7 @@ def build(tb3ms_path):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    args = [a for a in sys.argv[1:] if a != "--prior-month"]
+    if len(args) != 1:
         raise SystemExit(__doc__)
-    sys.stdout.write(build(sys.argv[1]))
+    sys.stdout.write(build(args[0], prior_month="--prior-month" in sys.argv[1:]))
