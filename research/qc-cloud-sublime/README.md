@@ -69,6 +69,7 @@ one key per item. The keys match `research/qc-cloud`'s:
 - `Declines`, and one `Decline <reason>` key per reason.
 - `SPY BUY-AND-HOLD`: SPY's total return over the same span, in the same
   format as `OVERALL`.
+- `Config`: the run's sensitivity-variant switches ("Sensitivity variants").
 
 **When trading can start.** The rules need five years of each stock's
 history, and SPY's weekly 200 SMA needs 200 weeks. QuantConnect's data
@@ -126,13 +127,13 @@ section 3 gives.
 |---|---|---|
 | 23: base [2B p.1; section 4.8] | At least 55 completed bars without a new 55-bar high | DISCLOSED (one instance) |
 | 21, 22: Phase A | Close above max(prior 55-bar high, last calendar year's high). That level is the breakout level | PROXY (Model E) |
-| 21: Phase B, the retest | A later low within 1 ATR of the breakout level | PROXY (k₁ = 1: open question) |
+| 21: Phase B, the retest | A later low at or below the breakout level + 1 ATR. A deeper undercut also counts; only the cancel rule's close guards the downside (Model E) | PROXY (k₁ = 1: open question) |
 | 21: Phase C, the Signal | A close above the highest high between A and B | PROXY (Model E) |
 | 2: Donchian 20 break and close [V 00:47:53] | Phase C's close must also be above the prior 20-bar high | DISCLOSED |
 | Cancel | A close more than 3 ATR below the level, or more than 55 bars after A | PROXY (k₂ = 3, m = 55: open questions) |
 | 8, 13, 4.7: stock alignment | At the Signal: close above last year's high, the weekly 200 SMA and the daily 200 SMA (§4.7's KISS gate). Daily and weekly trend-filter colour green or dark green | DISCLOSED |
 | 13: trend filter [V 00:31:08–00:38:16] | 20-period SMA of closes with 1σ and 2σ bands (population σ). Colour is by closing price | DISCLOSED |
-| 16: at all-time highs [V 00:52:15] | Grade A: the Signal's close is above every earlier high in the available data | PROXY (history starts at the data) |
+| 16: at all-time highs [V 00:52:15] | Grade A: the Signal's close is above every earlier high the symbol's indicators hold: its 1,260-bar backfill when it joined the universe, plus every bar since | PROXY (a 5-year high for most symbols, not a true all-time high) |
 | 18: Grade A before Grade B [V 01:14:41] | Grade B is taken only in a Session with no Grade A Signal, once ineligible Signals are dropped (ADR 0011 point 3) | PROXY |
 | Ranking within a Grade | Strength, (close − close 63 bars earlier) / ATR (Turtle p.29, ADR 0010), then median dollar volume, then symbol | PROXY for "best-performing stocks" [V 00:02:31] |
 | 25: order above the breakout bar's high [M p.55] | Stop-limit buy one raw tick above the Signal bar's high, for the next Session only (ADR 0011) | Level DISCLOSED; the offset formula is EXCLUDED, so one tick |
@@ -215,6 +216,95 @@ at a result.
 10. **Regime source:** SPY's Adjusted (total-return) closes stand in for the
     S&P 500 index (next section).
 
+## Fidelity audit (2026-09-27)
+
+The rules above were checked against the code and against the sources
+themselves: the webinar transcript, [M], [R], [4PS], [2B], [30] and [KISS].
+The code does what the tables say. Where the sources and this control
+differ, the difference comes from Model E's thresholds or from the
+universe, not from the sources:
+
+1. **The base (changes results a lot).** The sources define consolidation as
+   time spent below the level that is later broken. That is the range
+   "between the high and the low of last year" [V 00:46:00], or a base
+   lasting months or years under a prior high (CBOE 2018 to July 2023 and
+   PGR April to October 2023 [4PS]). Model E's base instead resets on any
+   new 55-bar high. A rally inside the range therefore resets it, and so
+   does an intraday poke above the range. This is why AAPL gave only three
+   Phase A breakouts in twelve years.
+2. **The universe (changes results a lot).** Sublime scans more than 10,000
+   assets and rejects "uber expensive stocks like Amazon" in favour of
+   "cheap stocks creating new ATHs" [M p.54]. The top 200 by dollar volume
+   is the opposite: it is mostly mega-caps.
+3. **Breakout timeframes (matches the sources).** All three phases are read
+   on daily bars ("We look for these 3 mini phases on the daily timeframe"
+   [4PS]). The level combines the 55-bar high with last calendar year's
+   high, the monthly-chart level. The all-time high only grades a Signal,
+   and the weekly timeframe only gates alignment. The sources name last
+   year's high [V 00:46:20], the all-time high [V 00:51:14; M p.55] and the
+   consolidation's resistance [4PS; 30 p.5]. None of them names a 55-bar
+   high: [2B]'s 55 days is a length, not a channel.
+4. **Retest (changes results a little to a lot).** A Phase A close is
+   usually within 1 ATR of the level, so the next bar's low nearly always
+   "retests" it. Phase B is then close to automatic.
+5. **History (a little).** A stock needs 5 years of history, which the
+   sources disclose [M p.54]. The 1998–2002 cash spell comes from SPY's
+   weekly 200 SMA (200 weeks from QuantConnect's 1998 data start), not from
+   the stock floor, so no stock-side variant can move it.
+6. **Risk (a little to a lot).** The control always sits at [R]'s lower
+   end. [R] moves to the upper end (2 %, 8 %, 20 %) when the S&P prints
+   all-time highs in full bloom.
+7. **Alignment (a little).** The webinar also requires the stock to be above
+   its weekly 50 SMA and its daily 50 and 20 SMAs [V 00:46:24, 00:44:35].
+   The control uses §4.7's minimal KISS gate.
+
+## Sensitivity variants
+
+Each variant is a copy of the control with only the listed `SublimeResearch`
+class constants changed in `main.py`. Every run, the control included, sets
+`END_DATE = (2015, 12, 31)`: nothing from 2016 onward is run or read. Rerun
+the control first, because Deviations 11 changes it. Compare the variants on
+the Regime Windows from 2003 onward, since every run is in cash until about
+2002 (Fidelity audit 5). The first eight were chosen before any of them was run; PRICE_CAP, the ninth, was added afterwards to test the other reading of "uber expensive".
+
+| Name | Constants | Question it answers |
+|---|---|---|
+| Control | defaults | The baseline, rerun with the re-add fix |
+| `LAST_YEAR` | `BREAKOUT_LEVEL = rules.LEVEL_LAST_YEAR`, `BASE_RULE = rules.BASE_CLOSES_BELOW_LEVEL` | Is the webinar's breakout (55 closes under last year's high, then a close above it) better than Model E's? |
+| `BASE_BELOW` | `BASE_RULE = rules.BASE_CLOSES_BELOW_LEVEL` | How much does the new-55-bar-high base reset starve the control of Signals (audit 1)? |
+| `CH252` | `BREAKOUT_CHANNEL = 252` | Does a 1-year channel, the top of a longer base, beat the 55-bar one? |
+| `RETEST_05` | `RETEST_ATR = 0.5` | Does requiring a deeper pullback (a real retest) help (audit 4)? |
+| `RETEST_2` | `RETEST_ATR = 2.0` | Does a looser retest help? |
+| `WIDE` | `UNIVERSE_SIZE = 500`, `UNIVERSE_SKIP = 50` | Does dropping the 50 largest by dollar volume, over a wider pool, help (audit 2)? |
+| `HIST2Y` | `MIN_HISTORY_BARS = 504` | Does the 5-year floor exclude young leaders? The stock's own weekly 200 SMA still needs about 3.9 years |
+| `RISK_ATH` | `RISK_UPPER_AT_SPY_ATH = True` | Does [R]'s upper end (2 % a position, 8 % a day, 20 % in aggregate), used when SPY set an all-time high within 20 sessions and is in full bloom, deploy more capital without a worse drawdown? |
+| `PRICE_CAP` | `MAX_SHARE_PRICE = 200` | The other reading of [M p.54]'s "uber expensive stocks like Amazon": a high *share price* rather than a large company. Stocks above $200 (raw) are left out of the monthly universe; the $200 line is a judgement, since the source gives no number. |
+
+`WIDE` subscribes 2.5 times as many symbols as the control. If it times out,
+use `UNIVERSE_SIZE = 400`. Every variant stays well under the Free plan's
+10,000 orders: the control placed 259.
+
+
+### Results (in-sample 1998–2015, run 2026-09-27)
+
+Every run includes the universe re-entry fix. Periods are CAGR; the drawdown is the whole run's maximum. SPY buy-and-hold made +6.07% CAGR with a 55% max drawdown over the same span.
+
+| Variant | CAGR | Max DD | 2003–07 | 2009–15 | Campaigns | Won | Avg win / loss R |
+|---|---|---|---|---|---|---|---|
+| CONTROL | +0.38% | 15.4% | −0.49% | +1.37% | 70 | 23% | 2.73 / −0.76 |
+| CH252 | +1.37% | 18.8% | +4.12% | +0.66% | 103 | 31% | 2.35 / −0.73 |
+| BASE_BELOW | +0.61% | 17.2% | −1.46% | +2.88% | 162 | 33% | 1.43 / −0.75 |
+| RETEST_05 | +0.46% | 12.8% | −0.41% | +1.52% | 69 | 23% | 2.75 / −0.76 |
+| PRICE_CAP | +0.42% | 16.0% | −0.49% | +1.49% | 68 | 21% | 3.05 / −0.73 |
+| RETEST_2 | +0.36% | 15.7% | −0.57% | +1.37% | 71 | 23% | 2.76 / −0.76 |
+| HIST2Y | +0.36% | 16.0% | −0.20% | +1.12% | 74 | 24% | 2.53 / −0.75 |
+| LAST_YEAR | +0.24% | 14.3% | +0.63% | +0.18% | 114 | 36% | 1.43 / −0.85 |
+| WIDE | +0.20% | 18.1% | −2.38% | +2.31% | 112 | 32% | 1.66 / −0.81 |
+| RISK_ATH | −0.29% | 20.7% | +0.17% | −0.84% | 61 | 25% | 2.01 / −0.83 |
+
+RISK_ATH was rerun (backtest `e252031b`) after its upper risk ceilings were restricted to an all-time high in full bloom. Every reported figure was identical. The run does not publish ceiling-rejection counts, so this shows only that the change made no difference to the results, not that the ceilings never bound.
+
+**Conclusion.** No variant comes close to SPY. The best, CH252, trails it by 4.7 points a year. The corrected base rules (BASE_BELOW, LAST_YEAR) add trades but cut the average win, and neither reading of "uber expensive" (WIDE, PRICE_CAP) helps. None is promoted to the control: the owner approved promoting a *winner*, and nothing here wins.
 ## Deviations from `research/qc-cloud`'s infrastructure
 
 The rest is carried over unchanged:
@@ -276,6 +366,12 @@ What differs:
     (`Campaign.set_resting_stop`) once `ticket.Update`'s response reports
     success; open_risk and add_ready never rely on a stop that LEAN did not
     actually place.
+11. **A symbol that re-enters the universe is rebuilt from a fresh
+    backfill.** LEAN delivers no bars and no split events for a symbol
+    while it is out of the universe. Reusing its old state would run the
+    channels, the base count and the Setup over a gap, and would keep a
+    split ratio that a missed split made stale. A symbol with a Campaign is
+    never removed (it is retained), so only idle symbols are rebuilt.
 
 ## Local smoke run
 

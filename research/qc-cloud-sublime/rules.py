@@ -45,6 +45,14 @@ RISK_FULL_BLOOM = 0.01
 RISK_NOT_ALIGNED = 0.005
 RISK_BELOW_WEEKLY_200 = 0.0025
 
+#: [R]: the top of each range when the S&P prints all-time highs "and the
+#: market is in full bloom". A sensitivity variant only (README.md,
+#: "Sensitivity variants"); "printing all-time highs" is our reading: an
+#: all-time high within the last SCAN_CHANNEL bars. RECONSTRUCTED.
+RISK_FULL_BLOOM_AT_ATH = 0.02
+DAILY_RISK_CEILING_AT_ATH = 0.08
+AGGREGATE_RISK_CEILING_AT_ATH = 0.20
+
 #: Portfolio ceilings [R], section 3.7 rule 29 and section 4.5: risk
 #: initiated per day 4-8 %, aggregate open risk 10-20 %; the lower ends,
 #: whatever the S&P is doing (open question). No more than 2 % at risk on
@@ -71,6 +79,18 @@ VOLUME_WINDOW = 20
 #: m. Open questions.
 BREAKOUT_CHANNEL = 55
 BASE_LENGTH = 55
+
+#: The Phase A level and the base, as FourPhaseSetup options. The control is
+#: Model E: the level is max(prior channel high, last calendar year's high)
+#: and the base is BASE_LENGTH bars without a new channel high. The
+#: alternatives are README.md "Sensitivity variants": the level as last
+#: calendar year's high alone, the webinar's breakout [V 00:45:49-00:46:24];
+#: and the base as BASE_LENGTH consecutive closes at or below the level, the
+#: consolidation "between the high and the low of last year" [V 00:46:00].
+LEVEL_CHANNEL_AND_LAST_YEAR = "channel-and-last-year"
+LEVEL_LAST_YEAR = "last-year"
+BASE_NO_NEW_CHANNEL_HIGH = "no-new-channel-high"
+BASE_CLOSES_BELOW_LEVEL = "closes-below-level"
 RETEST_ATR = 1.0
 CANCEL_ATR = 3.0
 RETEST_WINDOW = 55
@@ -263,7 +283,7 @@ class CalendarYearRange:
         return entry[0], entry[1]
 
 
-Snapshot = namedtuple("Snapshot", ["prior_55_high", "prior_20_high", "all_time_high", "atr",
+Snapshot = namedtuple("Snapshot", ["prior_channel_high", "prior_20_high", "all_time_high", "atr",
                                    "last_year_high", "last_year_low"])
 
 
@@ -274,9 +294,9 @@ class Indicators:
     or before the last one advanced is ignored, so a History backfill and a
     live delivery of the same day are never both counted."""
 
-    def __init__(self):
+    def __init__(self, breakout_channel=BREAKOUT_CHANNEL):
         self.atr = WilderAverage()
-        self.high_55 = Channel(BREAKOUT_CHANNEL)
+        self.high_channel = Channel(breakout_channel)
         self.high_20 = Channel(SCAN_CHANNEL)
         self.low_20 = Channel(EXIT_CHANNEL, highest=False)
         self.closes = deque(maxlen=LONG_SMA)
@@ -289,10 +309,10 @@ class Indicators:
         self.bars = 0
 
     def snapshot(self, bar_date):
-        high_55, ready_55 = self.high_55.extreme()
+        high_ch, ready_ch = self.high_channel.extreme()
         high_20, ready_20 = self.high_20.extreme()
         last_high, last_low = self.years.previous_year(bar_date)
-        return Snapshot(high_55 if ready_55 else None, high_20 if ready_20 else None,
+        return Snapshot(high_ch if ready_ch else None, high_20 if ready_20 else None,
                         self.all_time_high, self.atr.value if self.atr.ready else None,
                         last_high, last_low)
 
@@ -301,7 +321,7 @@ class Indicators:
         if self.last_date is not None and bar_date <= self.last_date:
             return False
         self.atr.add(true_range(high, low, self.previous_close))
-        self.high_55.add(high)
+        self.high_channel.add(high)
         self.high_20.add(high)
         self.low_20.add(low)
         self.closes.append(close)
@@ -350,7 +370,8 @@ def monthly_regime(close, last_year_high, last_year_low):
     return "sideways"
 
 
-def market_risk_fraction(monthly, weekly_200, weekly_50, daily_200, daily_50, daily_20):
+def market_risk_fraction(monthly, weekly_200, weekly_50, daily_200, daily_50, daily_20,
+                         at_all_time_high=False):
     """Per-position risk for a new position given the S&P regime (section
     3.2 rules 4-8, section 3.7 rule 27, section 4.5; the map RECONSTRUCTED).
     Each weekly/daily argument says whether the index closed above that
@@ -358,7 +379,8 @@ def market_risk_fraction(monthly, weekly_200, weekly_50, daily_200, daily_50, da
 
     - Not a bull month: 0, stand aside (rule 4 [V 00:05:09-00:05:19]; shorts
       are out of scope).
-    - Every timeframe aligned ("full bloom", rule 8): RISK_FULL_BLOOM.
+    - Every timeframe aligned ("full bloom", rule 8): RISK_FULL_BLOOM, or
+      RISK_FULL_BLOOM_AT_ATH when ``at_all_time_high`` [R].
     - Above the weekly 200 but otherwise not aligned: RISK_NOT_ALIGNED.
     - Below the weekly 200: RISK_BELOW_WEEKLY_200.
 
@@ -367,10 +389,26 @@ def market_risk_fraction(monthly, weekly_200, weekly_50, daily_200, daily_50, da
     if monthly != "bull" or any(flag is None for flag in inputs):
         return 0.0
     if all(inputs):
-        return RISK_FULL_BLOOM
+        return RISK_FULL_BLOOM_AT_ATH if at_all_time_high else RISK_FULL_BLOOM
     if weekly_200:
         return RISK_NOT_ALIGNED
     return RISK_BELOW_WEEKLY_200
+
+
+def risk_ceilings(at_all_time_high=False, full_bloom=False):
+    """(daily-initiated, aggregate) risk ceilings [R], section 3.7 rule 29:
+    the lower ends, or the upper ends only when the S&P prints all-time
+    highs AND every timeframe is aligned (full bloom) -- the same condition
+    under which market_risk_fraction returns RISK_FULL_BLOOM_AT_ATH."""
+    if at_all_time_high and full_bloom:
+        return DAILY_RISK_CEILING_AT_ATH, AGGREGATE_RISK_CEILING_AT_ATH
+    return DAILY_RISK_CEILING, AGGREGATE_RISK_CEILING
+
+
+def printing_all_time_highs(recent_high, all_time_high):
+    """Whether the index set its all-time high within the recent window:
+    ``recent_high`` is the SCAN_CHANNEL-bar high including the last bar."""
+    return recent_high is not None and all_time_high is not None and recent_high >= all_time_high
 
 
 def stock_aligned(close, prev_year_high, weekly_sma200, daily_sma200, daily_colour, weekly_colour):
@@ -394,10 +432,13 @@ class FourPhaseSetup:
     """Section 6 Model E, the PROXY for the 4PS entry (section 3.6 rules
     21-23 [4PS p.2-3; V 00:45:49-00:47:32; 2B p.1]):
 
-    - BASE: at least ``base_length`` completed bars without a new 55-bar high.
-    - Phase A: close above max(prior 55-bar high, last calendar year's high);
+    - BASE: at least ``base_length`` completed bars without a new channel
+      high (``base_rule`` BASE_CLOSES_BELOW_LEVEL: closes at or below the
+      level instead).
+    - Phase A: close above max(prior channel high, last calendar year's
+      high), or last year's high alone with ``level_rule`` LEVEL_LAST_YEAR;
       that level is the breakout level.
-    - Phase B: a low within ``retest_atr`` ATR of the level.
+    - Phase B: a low at or below the level + ``retest_atr`` ATR.
     - Phase C, the Signal: a close above the highest high between A and B,
       that is also a break and close above the prior 20-bar high (rule 2).
     - Cancel: a close more than ``cancel_atr`` ATR below the level, or more
@@ -409,8 +450,10 @@ class FourPhaseSetup:
     IDLE, BREAKOUT, RETESTED = "idle", "phase-a", "phase-b"
 
     def __init__(self, base_length=BASE_LENGTH, retest_atr=RETEST_ATR, cancel_atr=CANCEL_ATR,
-                 window=RETEST_WINDOW):
+                 window=RETEST_WINDOW, level_rule=LEVEL_CHANNEL_AND_LAST_YEAR,
+                 base_rule=BASE_NO_NEW_CHANNEL_HIGH):
         self.base_length = base_length
+        self.level_rule, self.base_rule = level_rule, base_rule
         self.retest_atr = retest_atr
         self.cancel_atr = cancel_atr
         self.window = window
@@ -422,18 +465,27 @@ class FourPhaseSetup:
         self.level = self.reaction_high = None
         self.sessions_since_breakout = 0
 
-    def step(self, high, low, close, atr, prior_55_high, prior_20_high, last_year_high, active=True):
+    def _candidate_level(self, prior_channel_high, last_year_high):
+        if self.level_rule == LEVEL_LAST_YEAR:
+            return last_year_high
+        if prior_channel_high is None or last_year_high is None:
+            return None
+        return max(prior_channel_high, last_year_high)
+
+    def step(self, high, low, close, atr, prior_channel_high, prior_20_high, last_year_high,
+             active=True):
         """Advance by one completed bar; True when it is the Signal. With
         ``active`` False (the instrument is in a Campaign, so not a Setup:
         CONTEXT.md) only the base is counted."""
         signal = False
+        candidate = self._candidate_level(prior_channel_high, last_year_high)
         if not active:
             self.reset()
         elif self.phase == self.IDLE:
-            if (self.sessions_in_base >= self.base_length and atr and prior_55_high is not None
-                    and last_year_high is not None and close > max(prior_55_high, last_year_high)):
+            if (self.sessions_in_base >= self.base_length and atr and candidate is not None
+                    and close > candidate):
                 self.phase = self.BREAKOUT
-                self.level = max(prior_55_high, last_year_high)
+                self.level = candidate
                 self.reaction_high = high
                 self.sessions_since_breakout = 0
         else:
@@ -449,7 +501,11 @@ class FourPhaseSetup:
                   and close > prior_20_high):
                 signal = True
                 self.reset()
-        if prior_55_high is None or high > prior_55_high:
+        if self.base_rule == BASE_CLOSES_BELOW_LEVEL:
+            broken = candidate is None or close > candidate
+        else:
+            broken = prior_channel_high is None or high > prior_channel_high
+        if broken:
             self.sessions_in_base = 0
         else:
             self.sessions_in_base += 1
@@ -507,11 +563,12 @@ def median(values, window):
     return (ordered[mid - 1] + ordered[mid]) / 2.0, True
 
 
-def is_eligible(raw_price, median_volume, history_bars):
+def is_eligible(raw_price, median_volume, history_bars, min_history_bars=MIN_HISTORY_BARS):
     """Section 3.1 rule 3's hard filters, DISCLOSED: raw price >= $20, median
-    raw share volume >= 1 M, >= 5 years of completed bars."""
+    raw share volume >= 1 M, >= 5 years of completed bars (fewer only as a
+    README.md "Sensitivity variants" run)."""
     return (raw_price >= MIN_PRICE and median_volume is not None
-            and median_volume >= MIN_VOLUME and history_bars >= MIN_HISTORY_BARS)
+            and median_volume >= MIN_VOLUME and history_bars >= min_history_bars)
 
 
 # ---------------------------------------------------------------------------
