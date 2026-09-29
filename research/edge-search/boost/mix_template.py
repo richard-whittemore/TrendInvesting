@@ -63,14 +63,10 @@ class BoostResearch(QCAlgorithm):
         self.last_month = None
         self.prev_close = None
         self.prev_w = 0.0
-        self.prev_boosted = False
         self.financing = 0.0
         self.episodes = 0
         self.w_sum = 0.0
         self.days = 0
-        self.boost_days = 0
-        self.boost_ret = 0.0
-        self.norm_ret = 0.0
 
     def OnData(self, data):
         bar = data.Bars.get(self.sym)
@@ -80,16 +76,9 @@ class BoostResearch(QCAlgorithm):
             return
         close = float(bar.Close)
         equity = float(self.Portfolio.TotalPortfolioValue)
-        if self.prev_close:
-            r = close / self.prev_close - 1.0
-            # A boosted day is one after a day spent at the boost size. In
-            # "mix" the overlay's own leverage is not a boost, so the flag
-            # records whether the boosted SPY position was in force.
-            if self.prev_boosted:
-                self.boost_days += 1
-                self.boost_ret += r
-            else:
-                self.norm_ret += r
+        # No boosted-day return attribution here: in a blend the overlay's
+        # own leverage and the Boost sleeve cannot be told apart from the
+        # holdings alone. boost/template.py reports it for the one-ETF runs.
         self.prev_close = close
         self.curve.append((self.Time, equity))
         self.px.append((self.Time, close))
@@ -127,17 +116,6 @@ class BoostResearch(QCAlgorithm):
 
         held = float(self.Portfolio.TotalHoldingsValue) if self.MODE == "mix" else float(self.Portfolio[self.sym].HoldingsValue)
         self.prev_w = held / equity if equity > 0 else 0.0
-        if self.MODE == "mix":
-            # Boosted when the SPY target in force is the boosted one AND the
-            # SPY position actually held is at least halfway from the
-            # unboosted weight to it (an unfilled or partly filled boost
-            # order does not count).
-            base = self.WEIGHTS.get(self.TICKER, 0.0)
-            spy_share = float(self.Portfolio[self.sym].HoldingsValue) / equity if equity > 0 else 0.0
-            self.prev_boosted = (self.BOOST and self.last_want is not None and self.last_want > base
-                                 and spy_share >= 0.98 * (base + self.last_want) / 2)
-        else:
-            self.prev_boosted = self.prev_w > 1.2
         self.w_sum += self.prev_w
         self.days += 1
         borrowed = max(0.0, held - equity)
@@ -179,8 +157,5 @@ class BoostResearch(QCAlgorithm):
         for label, a, b in spans:
             self.SetRuntimeStatistic("S " + label, self._stats(self.curve, a, b))
             self.SetRuntimeStatistic("B " + label, self._stats(self.px, a, b))
-        n = max(1, self.days - self.boost_days)
-        self.SetRuntimeStatistic("Mode", "{} {} avgW={:.3f} boostDays={} eps={} fin={:.0f}".format(
-            self.MODE, self.TICKER, self.w_sum / max(1, self.days), self.boost_days, self.episodes, self.financing))
-        self.SetRuntimeStatistic("Edge", "boostBp={:.1f} normBp={:.1f}".format(
-            1e4 * self.boost_ret / max(1, self.boost_days), 1e4 * self.norm_ret / n))
+        self.SetRuntimeStatistic("Mode", "{} {} avgW={:.3f} eps={} fin={:.0f}".format(
+            self.MODE, self.TICKER, self.w_sum / max(1, self.days), self.episodes, self.financing))

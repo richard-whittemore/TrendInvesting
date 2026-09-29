@@ -211,42 +211,21 @@ class MixTemplateTest(unittest.TestCase):
         self.assertEqual(algo.orders, [])
 
 
-class MixBoostDayTest(unittest.TestCase):
-    def test_the_overlays_own_leverage_is_not_counted_as_a_boost(self):
+class MixStatisticsTest(unittest.TestCase):
+    def test_a_blend_reports_no_boosted_day_attribution(self):
         module = _load_template(self, "boost/mix_template.py", {"MODE": "mix", "BOOST": True,
                                                                  "WEIGHTS": {"SPY": 1.0, "DBMF": 0.5}})
         algo = _algorithm(module, "BoostResearch", names=("SPY", "DBMF"))
-        _day(algo)
-        _day(algo, 100.5, when=_dt.datetime(1992, 1, 16))
-        self.assertEqual((algo.boost_days, algo.prev_boosted), (0, False))
-        algo.rsi2 = _Indicator(5.0)
-        _day(algo, 100.5, when=_dt.datetime(1992, 1, 17))
-        _day(algo, 101.0, when=_dt.datetime(1992, 1, 20))
-        self.assertEqual(algo.boost_days, 1)
-
-    def test_a_boost_smaller_than_1_2x_is_still_counted(self):
-        module = _load_template(self, "boost/mix_template.py", {"MODE": "mix", "BOOST": True, "BOOST_SIZE": 1.1,
-                                                                 "WEIGHTS": {"SPY": 1.0, "DBMF": 0.5}})
-        algo = _algorithm(module, "BoostResearch", names=("SPY", "DBMF"))
+        stats = {}
+        algo.SetRuntimeStatistic = stats.__setitem__
+        algo.START, algo.END = (1992, 1, 1), (1992, 12, 31)
         _day(algo)
         algo.rsi2 = _Indicator(5.0)
         _day(algo, 100.5, when=_dt.datetime(1992, 1, 16))
-        _day(algo, 100.5, when=_dt.datetime(1992, 1, 17))
-        self.assertEqual((algo.orders[-1], algo.boost_days), ({"SPY": 1.078}, 1))
-
-
-    def test_an_unfilled_boost_order_is_not_counted(self):
-        module = _load_template(self, "boost/mix_template.py", {"MODE": "mix", "BOOST": True,
-                                                                 "WEIGHTS": {"SPY": 1.0, "DBMF": 0.5}})
-        algo = _algorithm(module, "BoostResearch", names=("SPY", "DBMF"))
-        _day(algo)
-        fills = algo.SetHoldings
-        algo.SetHoldings = lambda target, size=None: algo.orders.append({target: size})   # never fills
-        algo.rsi2 = _Indicator(5.0)
-        _day(algo, 100.5, when=_dt.datetime(1992, 1, 16))
-        _day(algo, 100.5, when=_dt.datetime(1992, 1, 17))
-        self.assertEqual((algo.orders[-1], algo.boost_days), ({"SPY": 1.47}, 0))
-        algo.SetHoldings = fills
+        algo.OnEndOfAlgorithm()
+        self.assertNotIn("Edge", stats)
+        self.assertNotIn("boostDays", stats["Mode"])
+        self.assertEqual(algo.orders[-1], {"SPY": 1.47})
 
 
 class LongShortTest(unittest.TestCase):
