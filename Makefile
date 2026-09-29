@@ -66,12 +66,18 @@ adapter-test: research-test
 # own test_build_upload.py additionally compiles its stripped upload copy.
 # The owner's first QuantConnect Cloud backtest is the real test of each
 # folder's own QuantConnect API calls.
+# research/edge-search is syntax-checked the same way; its timing script is
+# also run against a stand-in AlgorithmImports (research/edge-search/README.md).
 research-test:
 	cd research/qc-cloud && python3 -m unittest discover -s . -p "test_*.py"
 	python3 -m py_compile research/qc-cloud/main.py
 	cd research/qc-cloud-sublime && python3 -m unittest discover -s . -p "test_*.py"
 	cd research/qc-cloud-futures && python3 -m unittest discover -s . -p "test_*.py"
 	python3 -m py_compile research/qc-cloud-futures/main.py
+	cd research/edge-search/timing && python3 -m unittest discover -s . -p "test_*.py"
+	python3 -m py_compile research/edge-search/etf-trend/main.py research/edge-search/etf-trend/main_oos.py \
+		research/edge-search/factors/main.py research/edge-search/timing/main.py \
+		research/edge-search/riskparity/main.py research/edge-search/bh-rsp/main.py
 	cd research/futures-local && python3 -m unittest discover -s . -p "test_*.py"
 
 check: deps lint coverage vuln build adapter-test research-test
