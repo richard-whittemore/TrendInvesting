@@ -224,6 +224,16 @@ class MixBoostDayTest(unittest.TestCase):
         _day(algo, 101.0, when=_dt.datetime(1992, 1, 20))
         self.assertEqual(algo.boost_days, 1)
 
+    def test_a_boost_smaller_than_1_2x_is_still_counted(self):
+        module = _load_template(self, "boost/mix_template.py", {"MODE": "mix", "BOOST": True, "BOOST_SIZE": 1.1,
+                                                                 "WEIGHTS": {"SPY": 1.0, "DBMF": 0.5}})
+        algo = _algorithm(module, "BoostResearch", names=("SPY", "DBMF"))
+        _day(algo)
+        algo.rsi2 = _Indicator(5.0)
+        _day(algo, 100.5, when=_dt.datetime(1992, 1, 16))
+        _day(algo, 100.5, when=_dt.datetime(1992, 1, 17))
+        self.assertEqual((algo.orders[-1], algo.boost_days), ({"SPY": 1.078}, 1))
+
 
 class LongShortTest(unittest.TestCase):
     def setUp(self):

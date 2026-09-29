@@ -8,7 +8,7 @@
 #
 # Provenance: mom_ls, mom_130: PUBLISHED, ADAPTED -- 12-1 momentum
 #   (Jegadeesh & Titman 1993) as a market-neutral long/short and as 130/30,
-#   25 names a side, a 2% annual borrow fee on shorts. Unlike
+#   TOP_N names a side (default 50; 25 in every reported run), a 2% annual borrow fee on shorts. Unlike
 #   research/edge-search/factors/main.py, every mode here also resizes a
 #   held name once it drifts 25% from its target weight (REBALANCE_BAND).
 from AlgorithmImports import *
