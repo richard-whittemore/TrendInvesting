@@ -68,6 +68,20 @@ backtest runs on their servers.
   control that isolates the equal-weight effect from the factor tilts in
   `factors/main.py`.
 
+**Follow-up (`docs/research/boost-followup-2026-09.md`):**
+
+- `boost/` — `template.py` (Boost, a constant-leverage control and
+  buy-and-hold on one ETF) and `mix_template.py` (fixed-weight blends of
+  SPY with managed-futures ETFs, optionally with Boost on the SPY part).
+- `shorting/` — `trend_template.py` (a 200-day trend rule going to cash or
+  short) and `factors_ls.py` (the factor script with long/short and 130/30
+  momentum modes and a borrow fee).
+- `build_variants.py` — writes all 43 follow-up variants exactly as run,
+  from these templates and a local TB3MS CSV.
+- `futures/` — `carry.py` and `blend.py`, local studies on the
+  `research/futures-local` engine and the Pinnacle files, which are not in
+  the repository.
+
 ## How each script is run on QuantConnect Cloud
 
 Each script is a single self-contained `QCAlgorithm`. There is no
@@ -171,7 +185,14 @@ a single holdout run, and what it means for a holdout to be "spent" — is in
   `--prior-month` shift, the T-bill-plus-spread charge, and the refusal to
   build a `--prior-month` table without December 1997.
 
+- **`test_followup.py`** covers the follow-up code: `build_variants.py`
+  (the rate table, the settings, every variant building to valid Python),
+  the templates' daily rules against the same kind of stand-in (Boost
+  on/off, monthly constant leverage, the margin charge, blends, going short
+  with a borrow fee), and the carry measure in `futures/carry.py`.
+
 QuantConnect Cloud's own compile step, on the first paste of each script,
 is the real test of its QuantConnect API calls.
 
-Results and caveats: `docs/research/edge-search-2026-09.md`.
+Results and caveats: `docs/research/edge-search-2026-09.md` and
+`docs/research/boost-followup-2026-09.md`.
