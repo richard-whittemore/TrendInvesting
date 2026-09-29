@@ -211,6 +211,73 @@ class MixTemplateTest(unittest.TestCase):
         self.assertEqual(algo.orders, [])
 
 
+class MixBoostDayTest(unittest.TestCase):
+    def test_the_overlays_own_leverage_is_not_counted_as_a_boost(self):
+        module = _load_template(self, "boost/mix_template.py", {"MODE": "mix", "BOOST": True,
+                                                                 "WEIGHTS": {"SPY": 1.0, "DBMF": 0.5}})
+        algo = _algorithm(module, "BoostResearch", names=("SPY", "DBMF"))
+        _day(algo)
+        _day(algo, 100.5, when=_dt.datetime(1992, 1, 16))
+        self.assertEqual((algo.boost_days, algo.prev_boosted), (0, False))
+        algo.rsi2 = _Indicator(5.0)
+        _day(algo, 100.5, when=_dt.datetime(1992, 1, 17))
+        _day(algo, 101.0, when=_dt.datetime(1992, 1, 20))
+        self.assertEqual(algo.boost_days, 1)
+
+
+class LongShortTest(unittest.TestCase):
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "shorting/factors_ls.py", {"TOP_N": 3})
+
+    def _algo(self, mode):
+        algo = self.module.FactorResearch()
+        algo.MODE, algo.TOP_N = mode, 3
+        algo.resizes = 0
+        algo.orders = []
+        return algo
+
+    def test_market_neutral_is_49_percent_long_the_best_and_49_short_the_worst(self):
+        targets = self._algo("mom_ls")._targets(list("abcdefg"))
+        self.assertEqual(sorted(targets), list("abcefg"))
+        self.assertAlmostEqual(sum(w for w in targets.values() if w > 0), 0.49)
+        self.assertAlmostEqual(sum(w for w in targets.values() if w < 0), -0.49)
+        self.assertTrue(all(targets[s] < 0 for s in "efg"))
+
+    def test_130_30_holds_its_stated_sides(self):
+        targets = self._algo("mom_130")._targets(list("abcdef"))
+        self.assertAlmostEqual(sum(w for w in targets.values() if w > 0), 1.27)
+        self.assertAlmostEqual(sum(w for w in targets.values() if w < 0), -0.29)
+
+    def test_too_few_names_for_two_separate_lists_keeps_last_months_book(self):
+        self.assertIsNone(self._algo("mom_ls")._targets(list("abcde")))
+
+    def test_long_only_momentum_is_equal_weight_top_n(self):
+        self.assertEqual(self._algo("mom")._targets(list("abcde")), dict.fromkeys("abc", 0.98 / 3))
+
+    def test_trading_resizes_only_beyond_the_band_and_flips_or_drops_the_rest(self):
+        algo = self._algo("mom_ls")
+        held = {"a": 0.10, "b": 0.12, "c": -0.10, "x": 0.05}      # fractions of equity
+
+        class Book(dict):
+            TotalPortfolioValue = 1_000_000.0
+
+            def __iter__(self):
+                return iter([types.SimpleNamespace(Key=k, Value=self[k]) for k in held])
+
+        book = Book({k: types.SimpleNamespace(Invested=True, IsLong=v > 0, IsShort=v < 0,
+                                              HoldingsValue=v * 1_000_000.0) for k, v in held.items()})
+        book["d"] = types.SimpleNamespace(Invested=False, IsLong=False, IsShort=False, HoldingsValue=0.0)
+        algo.Portfolio = book
+        algo.SetHoldings = lambda s, w: algo.orders.append((s, w))
+        algo.Liquidate = lambda s: algo.orders.append((s, 0))
+        # a: within 25% of 0.11, kept; b: 0.12 vs 0.09 target, resized;
+        # c: short now wanted long, flipped; d: new; x: not a target, sold.
+        algo._trade({"a": 0.11, "b": 0.09, "c": 0.05, "d": -0.05})
+        self.assertEqual(sorted(algo.orders), [("b", 0.09), ("c", 0.05), ("d", -0.05), ("x", 0)])
+        self.assertEqual(algo.resizes, 1)
+
+
 class TrendTemplateTest(unittest.TestCase):
     def setUp(self):
         self.module = _load_template(self, "shorting/trend_template.py", {"MODE": "trend_short"})

@@ -8,8 +8,9 @@
 #
 # Provenance: mom_ls, mom_130: PUBLISHED, ADAPTED -- 12-1 momentum
 #   (Jegadeesh & Titman 1993) as a market-neutral long/short and as 130/30,
-#   25 names a side, a 2% annual borrow fee on shorts. Other modes: as
-#   research/edge-search/factors/main.py.
+#   25 names a side, a 2% annual borrow fee on shorts. Unlike
+#   research/edge-search/factors/main.py, every mode here also resizes a
+#   held name once it drifts 25% from its target weight (REBALANCE_BAND).
 from AlgorithmImports import *
 from datetime import date
 import numpy as np
@@ -45,6 +46,7 @@ class FactorResearch(QCAlgorithm):
     TOP_N = 50
     TREND_ASSET = "IEF"
     TREND_DAYS = 200
+    REBALANCE_BAND = 0.25         # resize a held name once it is 25% off its target weight
     BORROW_FEE = 0.02             # annual fee on short market value (losers are often costly to borrow)
 
     def Initialize(self):
@@ -70,6 +72,8 @@ class FactorResearch(QCAlgorithm):
         self.risk_off_months = 0
         self.names_held = 0
         self.borrow_paid = 0.0
+        self.resizes = 0
+        self.skipped = 0
         self.Schedule.On(self.DateRules.MonthStart(self.spy), self.TimeRules.At(8, 0), self.Rebalance)
 
     def Coarse(self, coarse):
@@ -190,35 +194,53 @@ class FactorResearch(QCAlgorithm):
         if not scores:
             return
 
+        if risk_off:
+            targets = {self.bond: 0.98}
+        else:
+            targets = self._targets(sorted(scores, key=lambda s: scores[s], reverse=True))
+            if targets is None:
+                self.skipped += 1
+                return
+            self.names_held += self.TOP_N
         self.rebalances += 1
         if risk_off:
             self.risk_off_months += 1
-            targets = {self.bond: 0.98}
-        else:
-            ranked = sorted(scores, key=lambda s: scores[s], reverse=True)
-            picks = ranked[:self.TOP_N]
-            if self.MODE == "mom_ls":
-                # Market neutral: long the winners, short the losers, 50% each.
-                targets = {s: 0.49 / len(picks) for s in picks}
-                targets.update({s: -0.49 / self.TOP_N for s in ranked[-self.TOP_N:]})
-            elif self.MODE == "mom_130":
-                # 130/30: 127% long the winners, 29% short the losers.
-                targets = {s: 1.27 / len(picks) for s in picks}
-                targets.update({s: -0.29 / self.TOP_N for s in ranked[-self.TOP_N:]})
-            else:
-                w = 0.98 / len(picks)
-                targets = {s: w for s in picks}
-            self.names_held += len(picks)
-        # Trade only names entering or leaving: a continuing holding drifts
-        # rather than being trimmed back to equal weight each month, which
-        # keeps the run inside the Free plan's 10,000-order cap.
+        self._trade(targets)
+
+    def _targets(self, ranked):
+        """Target weights from names ranked best first: the top TOP_N long,
+        and in the long/short modes the bottom TOP_N short. None when the
+        long/short modes have fewer than 2 x TOP_N names, since the two
+        lists would overlap (last month's book is then kept)."""
+        picks = ranked[:self.TOP_N]
+        if self.MODE in ("mom_ls", "mom_130"):
+            if len(ranked) < 2 * self.TOP_N:
+                return None
+            # mom_ls: market neutral, 49% long the winners and 49% short the
+            # losers. mom_130: 127% long the winners, 29% short the losers.
+            long_w, short_w = (0.49, 0.49) if self.MODE == "mom_ls" else (1.27, 0.29)
+            targets = dict.fromkeys(picks, long_w / self.TOP_N)
+            targets.update(dict.fromkeys(ranked[-self.TOP_N:], -short_w / self.TOP_N))
+            return targets
+        return dict.fromkeys(picks, 0.98 / len(picks))
+
+    def _trade(self, targets):
+        """Names entering or leaving trade every month. A continuing holding
+        is resized only once it has drifted more than REBALANCE_BAND (as a
+        fraction of its target) from its target, so each side keeps its
+        stated allocation within the band while the run stays inside the
+        Free plan's 10,000-order cap."""
         for kvp in self.Portfolio:
             if kvp.Value.Invested and kvp.Key not in targets:
                 self.Liquidate(kvp.Key)
+        equity = float(self.Portfolio.TotalPortfolioValue)
         for sym, w in targets.items():
             h = self.Portfolio[sym]
             if not h.Invested or (h.IsLong and w < 0) or (h.IsShort and w > 0):
                 self.SetHoldings(sym, w)
+            elif equity > 0 and abs(float(h.HoldingsValue) / equity - w) > self.REBALANCE_BAND * abs(w):
+                self.SetHoldings(sym, w)
+                self.resizes += 1
 
     def _stats(self, curve, start, end):
         pts = [(t, v) for t, v in curve if start <= t.date() <= end and v > 0]
@@ -248,5 +270,6 @@ class FactorResearch(QCAlgorithm):
         self.SetRuntimeStatistic("Mode", "{} n={} top={} rebalances={} risk_off={} orders={}".format(
             self.MODE, self.UNIVERSE_SIZE, self.TOP_N, self.rebalances, self.risk_off_months,
             self.Transactions.OrdersCount))
-        self.SetRuntimeStatistic("Borrow", "{:.0f}".format(self.borrow_paid))
+        self.SetRuntimeStatistic("Borrow", "{:.0f} resizes={} skipped={}".format(
+            self.borrow_paid, self.resizes, self.skipped))
         self.SetRuntimeStatistic("Fundamentals", "reads={} hits={}".format(self.fund_reads, self.fund_hits))

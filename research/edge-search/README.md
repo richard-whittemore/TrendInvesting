@@ -34,11 +34,15 @@ not follow TDD; the one strategy that beat buy-and-hold out of sample
 (Boost, in `timing/`) now has behavioural tests after the fact (see
 "Testing", below), and the others have only a syntax check.
 
-**They cannot be run or imported outside QuantConnect.** Every script
-starts `from AlgorithmImports import *`, a module QuantConnect's own cloud
-environment supplies; it does not exist on this machine or in CI. Locally, each
-file is syntax-checked, and `timing/main.py` runs against a small stand-in
-for that module (see "Testing", below).
+**The QuantConnect scripts cannot be run outside QuantConnect.** Every
+algorithm script and template (each `main.py`, `boost/*.py`, `shorting/*.py`)
+starts `from AlgorithmImports import *`, a module only QuantConnect's own
+cloud environment supplies; it does not exist on this machine or in CI.
+Locally each is syntax-checked, and the timing script and the follow-up
+templates run against a small stand-in for that module (see "Testing",
+below). The builders (`timing/build_realistic_boost.py`,
+`build_variants.py`) and the futures studies (`futures/*.py`) are ordinary
+local Python.
 
 **No market data is committed to this repository.** These are text files
 only; QuantConnect supplies the price and fundamentals history when a

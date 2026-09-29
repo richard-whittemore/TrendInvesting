@@ -63,6 +63,7 @@ class BoostResearch(QCAlgorithm):
         self.last_month = None
         self.prev_close = None
         self.prev_w = 0.0
+        self.prev_boosted = False
         self.financing = 0.0
         self.episodes = 0
         self.w_sum = 0.0
@@ -81,7 +82,11 @@ class BoostResearch(QCAlgorithm):
         equity = float(self.Portfolio.TotalPortfolioValue)
         if self.prev_close:
             r = close / self.prev_close - 1.0
-            if self.prev_w > 1.2:
+            # A boosted day is one after a day spent at the boost size. In
+            # "mix" the overlay's own leverage is not a boost, so the SPY
+            # weight is compared with its unboosted level instead of the
+            # account's total exposure.
+            if self.prev_boosted:
                 self.boost_days += 1
                 self.boost_ret += r
             else:
@@ -123,6 +128,9 @@ class BoostResearch(QCAlgorithm):
 
         held = float(self.Portfolio.TotalHoldingsValue) if self.MODE == "mix" else float(self.Portfolio[self.sym].HoldingsValue)
         self.prev_w = held / equity if equity > 0 else 0.0
+        spy_share = float(self.Portfolio[self.sym].HoldingsValue) / equity if equity > 0 else 0.0
+        base = 0.98 * (self.WEIGHTS.get(self.TICKER, 0.0) if self.MODE == "mix" else 1.0)
+        self.prev_boosted = base > 0 and spy_share > 1.2 * base
         self.w_sum += self.prev_w
         self.days += 1
         borrowed = max(0.0, held - equity)

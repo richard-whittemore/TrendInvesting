@@ -32,13 +32,18 @@ data, with the limits listed under "Caveats".
   look good mainly because of 2022. WTMF, the one fund with a longer
   record (2011 onward), added nothing.
 - **Futures carry** worked from 1985 to 2015 and then failed after 2016.
-- **Shorting did not help** in any form tried.
+- **Shorting did not clearly help.** Shorting the index lost money against
+  cash. 130/30 stock momentum beat long-only on the tuning years, but with
+  deeper drawdowns and more leverage, and it has not been tested on the
+  held-out years.
 
 ## Protocol
 
 As in the main report:
 
-- Rules are tuned only on 1998–2015 (1985–2015 for futures).
+- Rules are tuned only on 1998–2015 (1985–2015 for futures). 1998 is the
+  indicators' warm-up year, so every stock and ETF figure labelled
+  "in-sample" or "1999–2015" below is measured from January 1999.
 - Nearby settings are checked on the same years.
 - The held-out years (2016 to mid-2026, or to October 2025 for the futures
   files) are run once, with settings fixed beforehand.
@@ -97,7 +102,7 @@ The same rule, unchanged, was run on five other ETFs from their
 QuantConnect start dates. Buy-and-hold figures are each ETF's own total
 return.
 
-| ETF | 1998–2015: Boost / buy-and-hold | 2016–mid-2026: Boost / buy-and-hold |
+| ETF | 1999–2015: Boost / buy-and-hold | 2016–mid-2026: Boost / buy-and-hold |
 | --- | --- | --- |
 | QQQ (Nasdaq-100) | 7.53% / 5.37% | 21.88% / 20.81% |
 | IWM (Russell 2000) | 8.87% / 7.35% | 11.93% / 11.48% |
@@ -112,7 +117,7 @@ tuned to fit SPY.
 
 ### Is it one lucky setting?
 
-All runs are on SPY, 1998–2015 only, with SPY buy-and-hold at 4.91%.
+All runs are on SPY and end in 2015, measured 1999–2015; SPY buy-and-hold over the same years is 4.91%.
 
 | Change | CAGR per year |
 | --- | --- |
@@ -129,10 +134,10 @@ protocol guards against. A larger boost also means more leverage risk.
 
 ### Trading costs and margin rates
 
-Both tables are on SPY, compared with SPY buy-and-hold (1998–2015: 4.91%;
+Both tables are on SPY, compared with SPY buy-and-hold (1999–2015: 4.91%;
 2016–mid-2026: 15.19%).
 
-| Slippage per fill | 1998–2015 | 2016–mid-2026 |
+| Slippage per fill | 1999–2015 | 2016–mid-2026 |
 | --- | --- | --- |
 | None (base) | 6.86% | 16.43% |
 | 0.05% | 6.47% | 15.96% |
@@ -141,7 +146,7 @@ Both tables are on SPY, compared with SPY buy-and-hold (1998–2015: 4.91%;
 SPY's actual bid-ask spread is around 0.005% or less, so 0.05% and 0.10%
 per fill are deliberately generous.
 
-| Margin rate | 1998–2015 | 2016–mid-2026 | Financing paid, 1998–2026, $1M start |
+| Margin rate | 1999–2015 | 2016–mid-2026 | Financing paid, 1998–2026, $1M start |
 | --- | --- | --- | --- |
 | Futures-style (T-bill + 0.4) | 6.91% | 16.49% | $0.21M |
 | T-bill + 1.5 (base) | 6.86% | 16.43% | $0.28M |
@@ -308,9 +313,9 @@ carry lost money relative to cash, and the combination did slightly worse
 than momentum alone. Like the other futures factors in this study, carry
 has faded since about 2009.
 
-## 4. Shorting (QuantConnect, 1998–2015 only)
+## 4. Shorting (QuantConnect, tuning years only, measured 1999–2015)
 
-Shorting failed on the tuning years, so no holdout was spent on it.
+Shorting did not clearly help on the tuning years, so no holdout was spent on it.
 
 | Rule | CAGR | Worst drawdown | 2008 |
 | --- | --- | --- | --- |
@@ -319,16 +324,31 @@ Shorting failed on the tuning years, so no holdout was spent on it.
 | SPY: long above, **short** below | 2.11% | 39.9% | +34.0% |
 | QQQ: long above, cash below | 3.37% | 51.4% | |
 | QQQ: long above, **short** below | −6.27% | 84.3% | |
-| Stocks: long the 25 strongest (12-1 momentum) | 7.32% | 72.8% | |
-| Stocks: long 25 strongest, short 25 weakest, market-neutral | 4.24% | 62.1% | |
-| Stocks: 130% long strongest, 30% short weakest | 7.69% | 81.7% | |
+| Stocks: long the 25 strongest (12-1 momentum) | 9.06% | 63.7% | |
+| Stocks: long 25 strongest, short 25 weakest, market-neutral | 4.41% | 55.7% | |
+| Stocks: 130% long strongest, 30% short weakest | 10.31% | 72.8% | |
 
 - **Shorting the index in downtrends** paid off hugely in 2008 but lost more
   on false signals the rest of the time.
 - **Shorting the weakest stocks** hurt badly in 2009. As markets turn up,
   the most beaten-down stocks rebound first: the "momentum crash" of
-  Daniel & Moskowitz (2016). The market-neutral version lost money over
-  2009–2015 once a 2% annual borrow fee on the shorts was paid.
+  Daniel & Moskowitz (2016).
+  - The market-neutral version earned 4.41% a year with a 55.7% drawdown.
+    It lost 23% a year over 2008–09 and 1.0% a year over 2009–2015, after a
+    2% annual borrow fee on the shorts.
+  - 130/30 beat long-only by 1.25 points a year, but with a deeper drawdown
+    (72.8% against 63.7%) and 127% long exposure, so part of that gain is
+    simply leverage.
+  - It is a mixed result, not a case for shorting, and no holdout was spent
+    on it.
+- **How the stock books were traded:** every month, names entering or
+  leaving the lists trade, and a continuing holding is resized once it
+  drifts 25% from its target weight. That keeps each side near its stated
+  allocation within the Free plan's order cap.
+  - A first version traded only entries and exits, so continuing holdings
+    drifted. It reported 7.32%, 4.24% and 7.69%.
+  - The long and short lists never overlapped: at least 50 names had a
+    score every month.
 
 The cash in the trend rules earns no interest here, which understates both
 of them a little.
