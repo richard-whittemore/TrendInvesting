@@ -34,11 +34,15 @@ not follow TDD; the one strategy that beat buy-and-hold out of sample
 (Boost, in `timing/`) now has behavioural tests after the fact (see
 "Testing", below), and the others have only a syntax check.
 
-**They cannot be run or imported outside QuantConnect.** Every script
-starts `from AlgorithmImports import *`, a module QuantConnect's own cloud
-environment supplies; it does not exist on this machine or in CI. Locally, each
-file is syntax-checked, and `timing/main.py` runs against a small stand-in
-for that module (see "Testing", below).
+**The QuantConnect scripts cannot be run outside QuantConnect.** Every
+algorithm script and template (each `main.py`, `boost/*.py`, `shorting/*.py`)
+starts `from AlgorithmImports import *`, a module only QuantConnect's own
+cloud environment supplies; it does not exist on this machine or in CI.
+Locally each is syntax-checked, and the timing script and the follow-up
+templates run against a small stand-in for that module (see "Testing",
+below). The builders (`timing/build_realistic_boost.py`,
+`build_variants.py`) and the futures studies (`futures/*.py`) are ordinary
+local Python.
 
 **No market data is committed to this repository.** These are text files
 only; QuantConnect supplies the price and fundamentals history when a
@@ -67,6 +71,20 @@ backtest runs on their servers.
 - `bh-rsp/` — `main.py`. Buy-and-hold RSP (equal-weight S&P 500), the
   control that isolates the equal-weight effect from the factor tilts in
   `factors/main.py`.
+
+**Follow-up (`docs/research/boost-followup-2026-09.md`):**
+
+- `boost/` — `template.py` (Boost, a constant-leverage control and
+  buy-and-hold on one ETF) and `mix_template.py` (fixed-weight blends of
+  SPY with managed-futures ETFs, optionally with Boost on the SPY part).
+- `shorting/` — `trend_template.py` (a 200-day trend rule going to cash or
+  short) and `factors_ls.py` (the factor script with long/short and 130/30
+  momentum modes and a borrow fee).
+- `build_variants.py` — writes all 43 follow-up variants exactly as run,
+  from these templates and a local TB3MS CSV.
+- `futures/` — `carry.py` and `blend.py`, local studies on the
+  `research/futures-local` engine and the Pinnacle files, which are not in
+  the repository.
 
 ## How each script is run on QuantConnect Cloud
 
@@ -171,7 +189,14 @@ a single holdout run, and what it means for a holdout to be "spent" — is in
   `--prior-month` shift, the T-bill-plus-spread charge, and the refusal to
   build a `--prior-month` table without December 1997.
 
+- **`test_followup.py`** covers the follow-up code: `build_variants.py`
+  (the rate table, the settings, every variant building to valid Python),
+  the templates' daily rules against the same kind of stand-in (Boost
+  on/off, monthly constant leverage, the margin charge, blends, going short
+  with a borrow fee), and the carry measure in `futures/carry.py`.
+
 QuantConnect Cloud's own compile step, on the first paste of each script,
 is the real test of its QuantConnect API calls.
 
-Results and caveats: `docs/research/edge-search-2026-09.md`.
+Results and caveats: `docs/research/edge-search-2026-09.md` and
+`docs/research/boost-followup-2026-09.md`.

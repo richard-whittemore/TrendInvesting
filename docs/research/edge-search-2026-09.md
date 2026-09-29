@@ -10,6 +10,10 @@ stores market data: run `research/edge-search/timing/build_realistic_boost.py`
 with a local copy of FRED's TB3MS CSV to regenerate the exact script
 variant used (see that file for the recipe). That run charged each month its own average T-bill rate from the first day of the month, a tiny use of future information in the financing cost only; the builder's `--prior-month` option avoids it. Re-run that way on the holdout, the result is unchanged: +16.18% a year. The `--prior-month` run paid $61,074 in financing; the same-month run in the results table below paid $61,034.
 
+**Follow-up:** `docs/research/boost-followup-2026-09.md` (2026-09-29) takes
+a closer look at Boost and covers futures overlays, carry, shorting,
+managed-futures ETFs and Boost's real-world costs.
+
 ## Purpose
 
 The engine and ticket work on this project was postponed on 2026-09-27
