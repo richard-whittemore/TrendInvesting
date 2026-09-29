@@ -8,14 +8,14 @@ states the numbers, not the code. The "Boost" re-test with realistic margin rate
 stored, because its rate table is FRED data and the repository never
 stores market data: run `research/edge-search/timing/build_realistic_boost.py`
 with a local copy of FRED's TB3MS CSV to regenerate the exact script
-variant used (see that file for the recipe). That run charged each month its own average T-bill rate from the first day of the month, a tiny use of future information in the financing cost only; the builder's `--prior-month` option avoids it. Re-run that way on the holdout, the result is unchanged: +16.18% a year, with financing of $61,074 against $61,034.
+variant used (see that file for the recipe). That run charged each month its own average T-bill rate from the first day of the month, a tiny use of future information in the financing cost only; the builder's `--prior-month` option avoids it. Re-run that way on the holdout, the result is unchanged: +16.18% a year. The `--prior-month` run paid $61,074 in financing; the same-month run in the results table below paid $61,034.
 
 ## Purpose
 
 The engine and ticket work on this project was postponed on 2026-09-27
 until a strategy is shown to beat simply buying and holding the market
 ("Prove an edge first"). This is that investigation. It asks one question,
-across a wide range of published, source-verified trading rules: **does
+across a wide range of published trading rules (sources below): **does
 anything here reliably do better than buying and holding the S&P 500, on
 data the rule was never tuned against?**
 
@@ -25,6 +25,49 @@ So every strategy below is tested three ways: first tuned freely against
 older data, then checked for whether nearby settings still work (not just
 one lucky combination), and finally run once, unchanged, on newer data it
 never saw during tuning.
+
+## Sources for the rules
+
+Each rule comes from a published source. Each script's header states how it
+was adapted (universe, ETFs in place of indexes, rebalance timing), and the
+Caveats below list where the implementation departs from the source.
+
+- **Turtle rules:** Curtis Faith, *The Original Turtle Trading Rules*
+  (2003) and *Way of the Turtle* (2007); the project's
+  `docs/methodology/Methodology_Analysis.md` has the page-cited rule list.
+- **Sublime:** the reconstruction in
+  `docs/methodology/Methodology_Analysis.md`, where each rule is tagged
+  disclosed, reconstructed, proxy or excluded.
+- **Faber rotation:** Mebane Faber, "A Quantitative Approach to Tactical
+  Asset Allocation", *Journal of Wealth Management* (2007).
+- **GEM:** Gary Antonacci, *Dual Momentum Investing* (2014).
+- **Momentum:** Jegadeesh & Titman, "Returns to Buying Winners and Selling
+  Losers", *Journal of Finance* (1993); the trend filter follows the crash
+  evidence in Daniel & Moskowitz, "Momentum Crashes", *Journal of Financial
+  Economics* (2016).
+- **Low volatility:** Baker, Bradley & Wurgler, "Benchmarks as Limits to
+  Arbitrage", *Financial Analysts Journal* (2011); Frazzini & Pedersen,
+  "Betting Against Beta", *Journal of Financial Economics* (2014).
+- **Quality:** Novy-Marx, "The Other Side of Value: The Gross Profitability
+  Premium", *Journal of Financial Economics* (2013).
+- **Value:** Fama & French, "The Cross-Section of Expected Stock Returns",
+  *Journal of Finance* (1992).
+- **RSI-2:** Connors & Alvarez, *Short Term Trading Strategies That Work*
+  (2008).
+- **Turn of the month:** Ariel, "A Monthly Effect in Stock Returns",
+  *Journal of Financial Economics* (1987); McConnell & Xu, "Equity Returns
+  at the Turn of the Month", *Financial Analysts Journal* (2008).
+- **Overnight:** Cliff, Cooper & Gulen, "Return Differences between
+  Trading and Non-trading Hours: Like Night and Day" (working paper, 2008).
+- **Halloween:** Bouman & Jacobsen, "The Halloween Indicator, 'Sell in May
+  and Go Away'", *American Economic Review* (2002).
+- **Risk parity:** Qian, "Risk Parity Portfolios" (PanAgora, 2005);
+  Asness, Frazzini & Pedersen, "Leverage Aversion and Risk Parity",
+  *Financial Analysts Journal* (2012).
+- **Time-series momentum (futures):** Moskowitz, Ooi & Pedersen, "Time
+  Series Momentum", *Journal of Financial Economics* (2012).
+- **Core and Boost** are this project's own combinations of RSI-2 with
+  buy-and-hold SPY; they have no published source.
 
 ## Protocol
 
@@ -310,7 +353,9 @@ about 6.7% in mid-2023, moving with the T-bill rate over the rest of the
 span. The FRED rate table itself is not committed to this repository (see
 "Caveats," below); the script variant with the table embedded is not
 committed either — only the original flat-rate `boost` mode in
-`research/edge-search/timing/main.py` is preserved here.
+`research/edge-search/timing/main.py` is preserved here. The table below is
+that same-month run; the `--prior-month` holdout re-run (see the top of this
+report) also returned +16.18%, with $61,074 of financing.
 
 **Results:**
 

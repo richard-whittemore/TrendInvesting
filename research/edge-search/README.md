@@ -18,9 +18,12 @@ parity, and combinations — asking one question before any more money or
 engine work is spent: **does anything here beat buy-and-hold, out of
 sample?** (`docs/research/edge-search-2026-09.md`, "Purpose".)
 
-Each script is copied here **unchanged apart from a header comment** noting
-its purpose and how it fits the report. No rule inside a script was edited
-for this commit. These are research scripts, not production code: no ADR
+Each script was first copied here **unchanged apart from a header comment**
+noting its purpose and how it fits the report. Since then only
+`timing/` has changed: `main.py`'s docstring now describes every mode and
+its `days_in` statistic counts signal days in the "Core" and "Boost" modes
+(no trading rule changed), and `build_realistic_boost.py` and
+`test_timing.py` were added. These are research scripts, not production code: no ADR
 citations and no fidelity check against the Go engine. They were written
 before their tests, so they did not follow TDD; the one strategy that beat
 buy-and-hold out of sample (Boost, in `timing/`) now has behavioural tests
@@ -107,7 +110,11 @@ limit, so it is pasted as-is.
   rate plus 1.5 points, charged daily; that variant (with the rate table
   embedded) is **not** committed here, since it would mean committing the
   FRED rate data alongside it — only this flat-rate `boost` mode is
-  preserved. `START_DATE`/`END_DATE`/`MEASURE_FROM` set the
+  preserved. `timing/build_realistic_boost.py` regenerates it from a local
+  TB3MS CSV. By default it charges each month that month's own average
+  T-bill rate from the month's first day (a small look-ahead, and what the
+  reported runs used); `--prior-month` charges the previous month's
+  average instead, which uses only data available at the time. `START_DATE`/`END_DATE`/`MEASURE_FROM` set the
   span; the committed file runs 1998–2015 in-sample, measured from 1999.
 - **`riskparity/main.py`** — `TARGET_VOL`: `None` for the unlevered run, or
   a fraction (e.g. `0.10`) to scale the book to that annualised volatility,

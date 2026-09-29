@@ -180,11 +180,11 @@ class StatsTest(unittest.TestCase):
 class BuilderTest(unittest.TestCase):
     ROWS = ["observation_date,TB3MS", "1997-12-01,5.00", "1998-01-01,4.00", "1998-02-01,.", "1998-03-01,3.00"]
 
-    def _built(self, prior_month=False, rows=None):
+    def _built(self, prior_month=False, rows=None, **kwargs):
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as f:
             f.write("\n".join(rows or self.ROWS) + "\n")
         self.addCleanup(os.remove, f.name)
-        src = build_realistic_boost.build(f.name, prior_month=prior_month)
+        src = build_realistic_boost.build(f.name, prior_month=prior_month, **kwargs)
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as g:
             g.write(src)
         self.addCleanup(os.remove, g.name)
@@ -216,6 +216,17 @@ class BuilderTest(unittest.TestCase):
     def test_prior_month_without_december_1997_is_refused(self):
         with self.assertRaises(SystemExit):
             self._built(prior_month=True, rows=self.ROWS[:1] + self.ROWS[2:])
+
+    def test_a_held_out_only_file_is_accepted_for_a_held_out_first_month(self):
+        rows = ["observation_date,TB3MS", "2015-12-01,0.20", "2016-01-01,0.25"]
+        self.assertEqual(self._built(prior_month=True, rows=rows, first_month=201601).RATES,
+                         {201601: 0.002, 201602: 0.0025})
+        self.assertEqual(self._built(rows=rows, first_month=201601).RATES, {201601: 0.0025})
+
+    def test_a_file_without_the_run_s_first_month_is_refused(self):
+        rows = ["observation_date,TB3MS", "2016-02-01,0.30"]
+        with self.assertRaises(SystemExit):
+            self._built(rows=rows, first_month=201601)
 
 
 if __name__ == "__main__":

@@ -18,8 +18,11 @@ Recipe, exactly as used for the reported +6.85% (1999-2015) and +16.18%
     borrowed * (RATES[month] + MARGIN_SPREAD) / 252, MARGIN_SPREAD = 1.5%.
   * Everything else is main.py in MODE "boost" (BOOST_SIZE 1.5).
 
-Usage: python3 build_realistic_boost.py TB3MS.csv [--prior-month] > boost_realistic.py
+Usage: python3 build_realistic_boost.py TB3MS.csv [--prior-month] [--first-month YYYYMM] > boost_realistic.py
        (add START_DATE/END_DATE/MEASURE_FROM edits for the held-out run).
+       --first-month is the run's first month (default 199801). The table
+       starts there, and a CSV without a rate for it is refused; pass
+       201601 to build the held-out run from a 2015-onward download.
 """
 import csv
 import os
@@ -27,27 +30,27 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FIRST_MONTH = 199801                 # the first month of the backtests
+FIRST_MONTH = 199801                 # the in-sample backtests' first month
 
 
-def build(tb3ms_path, prior_month=False):
+def build(tb3ms_path, prior_month=False, first_month=FIRST_MONTH):
     rates = {}
     with open(tb3ms_path) as f:
         for row in csv.reader(f):
             if not row or row[0].startswith("observation") or row[1] == ".":
                 continue
             year, month, _ = row[0].split("-")
-            if int(year) >= 1998 or (prior_month and int(year) == 1997 and int(month) == 12):
-                y, m = int(year), int(month)
-                if prior_month:
-                    y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+            y, m = int(year), int(month)
+            if prior_month:
+                y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+            if y * 100 + m >= first_month:
                 rates[y * 100 + m] = float(row[1]) / 100
-    if FIRST_MONTH not in rates:
-        # The backtests start in January 1998; with --prior-month that month
-        # needs December 1997's average, and the generated lookup has no
+    if first_month not in rates:
+        # The run starts in first_month; with --prior-month that month needs
+        # the previous month's average, and the generated lookup has no
         # earlier month to fall back on.
         raise SystemExit("TB3MS has no rate for {} (with --prior-month, the CSV must include "
-                         "1997-12); download it from 1997 or earlier".format(FIRST_MONTH))
+                         "the month before); download it from earlier".format(first_month))
     with open(os.path.join(HERE, "main.py")) as f:
         src = f.read()
     table = "RATES = {" + ", ".join("{}: {:.4f}".format(k, v) for k, v in sorted(rates.items())) + "}\n"
@@ -70,6 +73,13 @@ def build(tb3ms_path, prior_month=False):
 
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if a != "--prior-month"]
+    first = FIRST_MONTH
+    if "--first-month" in args:
+        i = args.index("--first-month")
+        if i + 1 >= len(args) or not re.fullmatch(r"\d{6}", args[i + 1]):
+            raise SystemExit(__doc__)
+        first = int(args[i + 1])
+        del args[i:i + 2]
     if len(args) != 1:
         raise SystemExit(__doc__)
-    sys.stdout.write(build(args[0], prior_month="--prior-month" in sys.argv[1:]))
+    sys.stdout.write(build(args[0], prior_month="--prior-month" in sys.argv[1:], first_month=first))
