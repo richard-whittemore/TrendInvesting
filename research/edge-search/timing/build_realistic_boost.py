@@ -27,6 +27,7 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+FIRST_MONTH = 199801                 # the first month of the backtests
 
 
 def build(tb3ms_path, prior_month=False):
@@ -41,7 +42,14 @@ def build(tb3ms_path, prior_month=False):
                 if prior_month:
                     y, m = (y + 1, 1) if m == 12 else (y, m + 1)
                 rates[y * 100 + m] = float(row[1]) / 100
-    src = open(os.path.join(HERE, "main.py")).read()
+    if FIRST_MONTH not in rates:
+        # The backtests start in January 1998; with --prior-month that month
+        # needs December 1997's average, and the generated lookup has no
+        # earlier month to fall back on.
+        raise SystemExit("TB3MS has no rate for {} (with --prior-month, the CSV must include "
+                         "1997-12); download it from 1997 or earlier".format(FIRST_MONTH))
+    with open(os.path.join(HERE, "main.py")) as f:
+        src = f.read()
     table = "RATES = {" + ", ".join("{}: {:.4f}".format(k, v) for k, v in sorted(rates.items())) + "}\n"
     src = src.replace("class TimingResearch(QCAlgorithm):",
                       "# Monthly 3-month T-bill rate (FRED TB3MS), for margin financing only.\n"

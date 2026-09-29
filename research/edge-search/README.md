@@ -20,16 +20,18 @@ sample?** (`docs/research/edge-search-2026-09.md`, "Purpose".)
 
 Each script is copied here **unchanged apart from a header comment** noting
 its purpose and how it fits the report. No rule inside a script was edited
-for this commit. These are research scripts, not production code: no TDD,
-no ADR citations, no fidelity check against the Go engine, no unit tests of
-their own.
+for this commit. These are research scripts, not production code: no ADR
+citations and no fidelity check against the Go engine. They were written
+before their tests, so they did not follow TDD; the one strategy that beat
+buy-and-hold out of sample (Boost, in `timing/`) now has behavioural tests
+after the fact (see "Testing", below), and the others have only a syntax
+check.
 
 **They cannot be run or imported outside QuantConnect.** Every script
 starts `from AlgorithmImports import *`, a module QuantConnect's own cloud
-environment supplies; it does not exist on this machine or in CI. The only
-local check possible is that each file parses as valid Python
-(`python3 -m py_compile <file>`), which `make research-test` does not cover
-(see "Testing", below) but was run by hand before this commit.
+environment supplies; it does not exist on this machine or in CI. Locally, each
+file is syntax-checked, and `timing/main.py` runs against a small stand-in
+for that module (see "Testing", below).
 
 **No market data is committed to this repository.** These are text files
 only; QuantConnect supplies the price and fundamentals history when a
@@ -141,23 +143,22 @@ a single holdout run, and what it means for a holdout to be "spent" — is in
 
 ## Testing
 
-`make research-test` does not run against this folder: every script here
-imports `AlgorithmImports`, which does not exist outside QuantConnect's own
-Free-plan cloud environment, so none of them can be imported, executed, or
-unit tested locally (`research/qc-cloud` and its siblings avoid this by
-splitting rule logic into a separate, standard-library-only `rules.py`;
-these research scripts do not, since they are one-off searches, not a
-production or fidelity-checked strategy). The only local check is that each
-file is syntactically valid Python:
+`make research-test` covers this folder in two ways:
 
-```
-python3 -m py_compile research/edge-search/etf-trend/main.py
-python3 -m py_compile research/edge-search/etf-trend/main_oos.py
-python3 -m py_compile research/edge-search/factors/main.py
-python3 -m py_compile research/edge-search/timing/main.py
-python3 -m py_compile research/edge-search/riskparity/main.py
-python3 -m py_compile research/edge-search/bh-rsp/main.py
-```
+- **Every script is syntax-checked** (`python3 -m py_compile`). None can be
+  run locally, since each imports `AlgorithmImports`, which only
+  QuantConnect's cloud supplies. (`research/qc-cloud` and its siblings
+  avoid this by keeping their rules in a standard-library-only `rules.py`;
+  these one-off searches do not.)
+- **`timing/test_timing.py`** covers the Boost strategy and the
+  realistic-margin builder. It installs a minimal stand-in for
+  `AlgorithmImports` (only the names `main.py` uses, and an algorithm that
+  records orders rather than trading), then drives `OnData` with synthetic
+  values. It tests the Boost entry, hold and exit, the 200-day filter, the
+  daily financing charge, RSI-2 entry and exit with SHY parking, the CAGR
+  and drawdown statistics, and the builder's rate table, its
+  `--prior-month` shift, the T-bill-plus-spread charge, and the refusal to
+  build a `--prior-month` table without December 1997.
 
 QuantConnect Cloud's own compile step, on the first paste of each script,
 is the real test of its QuantConnect API calls.
