@@ -30,8 +30,10 @@ __pycache__/
 *.pem
 *.key
 
-# Runtime data
+# Runtime data. research/futures-local reads Pinnacle's files from outside
+# the repository; never commit market data.
 /data/
+/research/futures-local/data/
 /logs/
 
 # Third-party source material is never committed: the Sublime recording,

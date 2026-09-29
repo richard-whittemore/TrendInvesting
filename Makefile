@@ -54,7 +54,9 @@ adapter-test: research-test
 
 # The research checks' rule cores (research/qc-cloud for the Turtle
 # Baseline, research/qc-cloud-sublime for the Sublime control,
-# research/qc-cloud-futures for Faith's own unadapted system on futures):
+# research/qc-cloud-futures for Faith's own unadapted system on futures,
+# and research/futures-local, the local Pinnacle CLC backtester that
+# imports research/qc-cloud-futures/rules.py):
 # standard-library Python only, no QuantConnect imports, so they run here
 # without any LEAN environment. Each main.py (the QuantConnect algorithm)
 # cannot be imported outside QuantConnect's own AlgorithmImports
@@ -70,5 +72,6 @@ research-test:
 	cd research/qc-cloud-sublime && python3 -m unittest discover -s . -p "test_*.py"
 	cd research/qc-cloud-futures && python3 -m unittest discover -s . -p "test_*.py"
 	python3 -m py_compile research/qc-cloud-futures/main.py
+	cd research/futures-local && python3 -m unittest discover -s . -p "test_*.py"
 
 check: deps lint coverage vuln build adapter-test research-test
