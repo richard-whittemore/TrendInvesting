@@ -23,7 +23,11 @@ noting its purpose and how it fits the report. Since then only
 `timing/` has changed: `main.py`'s docstring now describes every mode and
 its `days_in` statistic counts signal days in the "Core" and "Boost" modes
 (no trading rule changed), and `build_realistic_boost.py` and
-`test_timing.py` were added. These are research scripts, not production code: no ADR
+`test_timing.py` were added, and each script's header gained a provenance
+tag per rule (published, adapted, or the project's own; references in the
+report). If any rule here becomes a candidate for the Go engine, its rules
+go into `docs/methodology/Methodology_Analysis.md` with page-level
+citations first, as AGENTS.md requires of every declared strategy. These are research scripts, not production code: no ADR
 citations and no fidelity check against the Go engine. They were written
 before their tests, so they did not follow TDD; the one strategy that beat
 buy-and-hold out of sample (Boost, in `timing/`) now has behavioural tests

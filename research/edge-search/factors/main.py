@@ -9,6 +9,17 @@
 # (START_DATE/END_DATE/MEASURE_FROM below), MODE one of "mom", "mom_trend",
 # "lowvol", "quality", "value", "mom_qual", "ew". See
 # research/edge-search/README.md for the switches.
+#
+# Provenance (PUBLISHED: the rule of a named source; ADAPTED: changed as
+# stated; PROJECT: this project's own). Full references are in
+# docs/research/edge-search-2026-09.md, "Sources for the rules". Page-level
+# citations are not given: the sources were not transcribed page by page.
+# mom, lowvol, quality, value: PUBLISHED, ADAPTED -- the sort variable of
+#   each named paper, applied to a top-500-by-dollar-volume universe, top 50
+#   equal weight, monthly.
+# mom_trend: PROJECT -- the 200-day SPY filter is this project's crash
+#   filter, motivated by Daniel & Moskowitz (2016), not their rule.
+# mom_qual, ew: PROJECT -- a combination and a control, no published source.
 from AlgorithmImports import *
 from datetime import date
 import numpy as np

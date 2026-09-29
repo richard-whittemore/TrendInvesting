@@ -7,6 +7,15 @@
 #
 # In-sample run: 1998-01-01 to 2015-12-31 (START_DATE/END_DATE below), MODE
 # "faber" or "gem". See research/edge-search/README.md for the switches.
+#
+# Provenance (PUBLISHED: the rule of a named source; ADAPTED: changed as
+# stated; PROJECT: this project's own). Full references are in
+# docs/research/edge-search-2026-09.md, "Sources for the rules". Page-level
+# citations are not given: the sources were not transcribed page by page.
+# faber: PUBLISHED, ADAPTED -- Faber (2007) rule as published; ETFs stand in
+#   for his asset-class indexes, SHY for cash.
+# gem: PUBLISHED, ADAPTED -- Antonacci (2014) rule; SHY stands in for
+#   T-bills, AGG (IEF before AGG existed) for bonds.
 from AlgorithmImports import *
 
 

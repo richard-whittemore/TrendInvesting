@@ -8,6 +8,12 @@
 # Fixed run: 2003-05-01 to 2015-12-31, no switches. Buy-and-hold RSP
 # (equal-weight S&P 500) as the control that isolates the equal-weight
 # effect from the factor tilts in research/edge-search/factors/main.py.
+#
+# Provenance (PUBLISHED: the rule of a named source; ADAPTED: changed as
+# stated; PROJECT: this project's own). Full references are in
+# docs/research/edge-search-2026-09.md, "Sources for the rules". Page-level
+# citations are not given: the sources were not transcribed page by page.
+# PROJECT -- a buy-and-hold control, not a strategy rule.
 from AlgorithmImports import *
 from datetime import date
 

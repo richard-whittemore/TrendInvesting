@@ -9,6 +9,14 @@
 # (START_DATE/END_DATE/MEASURE_FROM below); TARGET_VOL None for the
 # unlevered run, 0.10 for the 10%-vol-target run. See
 # research/edge-search/README.md for the switches.
+#
+# Provenance (PUBLISHED: the rule of a named source; ADAPTED: changed as
+# stated; PROJECT: this project's own). Full references are in
+# docs/research/edge-search-2026-09.md, "Sources for the rules". Page-level
+# citations are not given: the sources were not transcribed page by page.
+# PUBLISHED, ADAPTED -- inverse-volatility weights in the spirit of Qian
+#   (2005) and Asness, Frazzini & Pedersen (2012); the ETF list, window and
+#   volatility target are this project's choices.
 from AlgorithmImports import *
 from datetime import date
 import numpy as np

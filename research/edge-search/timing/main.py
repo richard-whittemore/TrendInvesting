@@ -10,6 +10,17 @@
 # "overnight", "halloween", "faber_lev", "core_rsi2", "boost". See
 # research/edge-search/README.md for the switches, including the "Core" and
 # "Boost" combinations and their held-out runs.
+#
+# Provenance (PUBLISHED: the rule of a named source; ADAPTED: changed as
+# stated; PROJECT: this project's own). Full references are in
+# docs/research/edge-search-2026-09.md, "Sources for the rules". Page-level
+# citations are not given: the sources were not transcribed page by page.
+# rsi2, tom, overnight, halloween: PUBLISHED, ADAPTED -- rules of the named
+#   sources, traded in SPY with idle money in SHY.
+# faber_lev: PUBLISHED, ADAPTED -- Faber (2007) with leverage and a flat
+#   financing charge added by this project.
+# core_rsi2, boost: PROJECT -- this project's combinations of RSI-2 with
+#   buy-and-hold SPY.
 from AlgorithmImports import *
 from datetime import date, timedelta
 

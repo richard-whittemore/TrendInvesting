@@ -9,6 +9,12 @@
 # run once, with the in-sample-fixed settings, and never re-tuned against
 # this span. See research/edge-search/README.md and
 # docs/research/edge-search-2026-09.md ("the holdout is spent").
+#
+# Provenance (PUBLISHED: the rule of a named source; ADAPTED: changed as
+# stated; PROJECT: this project's own). Full references are in
+# docs/research/edge-search-2026-09.md, "Sources for the rules". Page-level
+# citations are not given: the sources were not transcribed page by page.
+# Same rules and tags as etf-trend/main.py; only the dates differ.
 from AlgorithmImports import *
 
 
