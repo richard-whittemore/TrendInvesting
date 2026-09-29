@@ -84,7 +84,7 @@ class BoostResearch(QCAlgorithm):
             r = close / self.prev_close - 1.0
             # A boosted day is one after a day spent at the boost size. In
             # "mix" the overlay's own leverage is not a boost, so the flag
-            # records whether the boosted SPY target was in force.
+            # records whether the boosted SPY position was in force.
             if self.prev_boosted:
                 self.boost_days += 1
                 self.boost_ret += r
@@ -128,9 +128,14 @@ class BoostResearch(QCAlgorithm):
         held = float(self.Portfolio.TotalHoldingsValue) if self.MODE == "mix" else float(self.Portfolio[self.sym].HoldingsValue)
         self.prev_w = held / equity if equity > 0 else 0.0
         if self.MODE == "mix":
-            # Boosted when the SPY target in force is the boosted one.
-            self.prev_boosted = (self.BOOST and self.last_want is not None
-                                 and self.last_want > self.WEIGHTS.get(self.TICKER, 0.0))
+            # Boosted when the SPY target in force is the boosted one AND the
+            # SPY position actually held is at least halfway from the
+            # unboosted weight to it (an unfilled or partly filled boost
+            # order does not count).
+            base = self.WEIGHTS.get(self.TICKER, 0.0)
+            spy_share = float(self.Portfolio[self.sym].HoldingsValue) / equity if equity > 0 else 0.0
+            self.prev_boosted = (self.BOOST and self.last_want is not None and self.last_want > base
+                                 and spy_share >= 0.98 * (base + self.last_want) / 2)
         else:
             self.prev_boosted = self.prev_w > 1.2
         self.w_sum += self.prev_w

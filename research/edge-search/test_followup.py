@@ -235,6 +235,20 @@ class MixBoostDayTest(unittest.TestCase):
         self.assertEqual((algo.orders[-1], algo.boost_days), ({"SPY": 1.078}, 1))
 
 
+    def test_an_unfilled_boost_order_is_not_counted(self):
+        module = _load_template(self, "boost/mix_template.py", {"MODE": "mix", "BOOST": True,
+                                                                 "WEIGHTS": {"SPY": 1.0, "DBMF": 0.5}})
+        algo = _algorithm(module, "BoostResearch", names=("SPY", "DBMF"))
+        _day(algo)
+        fills = algo.SetHoldings
+        algo.SetHoldings = lambda target, size=None: algo.orders.append({target: size})   # never fills
+        algo.rsi2 = _Indicator(5.0)
+        _day(algo, 100.5, when=_dt.datetime(1992, 1, 16))
+        _day(algo, 100.5, when=_dt.datetime(1992, 1, 17))
+        self.assertEqual((algo.orders[-1], algo.boost_days), ({"SPY": 1.47}, 0))
+        algo.SetHoldings = fills
+
+
 class LongShortTest(unittest.TestCase):
     def setUp(self):
         sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
