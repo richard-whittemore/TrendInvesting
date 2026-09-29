@@ -380,6 +380,13 @@ class Backtester:
                     self._active_weights[symbol] = weight
                 else:
                     self._active_weights.pop(symbol, None)
+            # A market flattened on its final bar (its file ends before the
+            # run does) leaves the book: with no more bars its weight could
+            # never be replaced, and it would keep adding zero-return days.
+            for symbol in [s for s in list(self._active_weights) + list(self._next_weights)
+                           if not self.states[s].alive]:
+                self._active_weights.pop(symbol, None)
+                self._next_weights.pop(symbol, None)
             if trading:
                 self.result.equity_curve.append((day, self.cash))
             following = calendar[i + 1] if i + 1 < len(calendar) else None

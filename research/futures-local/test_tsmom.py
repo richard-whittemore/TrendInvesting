@@ -298,18 +298,23 @@ def _realised_book(series, decisions, end=None):
     calendar = sorted({r.date for rows in series.values() for r in rows if end is None or r.date <= end})
     decisions_by_date = {d.date: d for d in decisions}
     traded = {s: {r.date for r in rows} for s, rows in series.items()}
+    last = {s: max(d for d in traded[s] if d in set(calendar)) for s in series}
     active, pending, book = {}, {}, []
     for day in calendar:
         if active:
             book.append((day, sum(w * returns[s].get(day, 0.0) for s, w in active.items())))
         # Each market's new weight takes over only once THAT market has
-        # traded (filled) after the decision.
+        # traded (filled) after the decision. A market whose data has ended
+        # (flattened on its last bar) leaves the book entirely.
         for s in [s for s in pending if day in traded[s]]:
             w = pending.pop(s)
             if w:
                 active[s] = w
             else:
                 active.pop(s, None)
+        for s in [s for s in list(active) + list(pending) if last[s] <= day < calendar[-1]]:
+            active.pop(s, None)
+            pending.pop(s, None)
         if day in decisions_by_date:
             new = decisions_by_date[day].weights
             pending = {s: new.get(s, 0.0) for s in set(active) | set(new)}
@@ -347,6 +352,25 @@ class PortfolioOverlayTests(unittest.TestCase):
         self.assertEqual([d for d, _ in result.book_history], [d for d, _ in expected])
         for (_, r1), (_, r2) in zip(result.book_history, expected):
             self.assertAlmostEqual(r1, r2, places=12)
+
+    def test_a_market_whose_data_ends_leaves_the_overlay_book(self):
+        # A market whose file ends mid-run is flattened on its final bar,
+        # and its weight must not keep adding zero-return days to the book
+        # (a review finding).
+        # UP is the only market with a signal and its file ends at bar 600;
+        # FLAT (constant price, so no volatility and never a signal) keeps
+        # the calendar running. After UP's last bar the book must be
+        # inactive, not a run of zero-return "active" days.
+        universe = {"UP": _market("UP"), "FLAT": _market("FLAT")}
+        series = {"UP": _rows(_trend(900))[:600], "FLAT": _rows([100.0] * 900)}
+        config = _config(portfolio_target=0.10)
+        result = tsmom.run_backtest(config, universe, series)
+        _, _, expected = _realised_book(series, result.decisions, config.end)
+        self.assertEqual([d for d, _ in result.book_history], [d for d, _ in expected])
+        for (_, r1), (_, r2) in zip(result.book_history, expected):
+            self.assertAlmostEqual(r1, r2, places=12)
+        up_last = series["UP"][-1].date
+        self.assertFalse(any(d > up_last for d, _ in result.book_history))
 
     def test_the_overlay_window_is_the_last_year_of_sessions_not_of_active_days(self):
         # After a long inactive gap, returns from before the gap must not
