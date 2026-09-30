@@ -32,10 +32,14 @@ data, with the limits listed under "Caveats".
   look good mainly because of 2022. WTMF, the one fund with a longer
   record (2011 onward), added nothing.
 - **Futures carry** worked from 1985 to 2015 and then failed after 2016.
-- **Shorting did not clearly help.** Shorting the index lost money against
-  cash. 130/30 stock momentum beat long-only on the tuning years, but with
-  deeper drawdowns and more leverage, and it has not been tested on the
-  held-out years.
+- **Shorting the index did not help.** It lost money against simply
+  moving to cash.
+- **Concentrated stock momentum was the strongest result of the whole
+  search, but also the riskiest.** Long the 25 strongest stocks, rebalanced
+  monthly, returned 27.6% a year on the held-out years after 0.2% slippage
+  per trade, against SPY's 15.2%. 130/30 returned 31.1%. On the tuning
+  years it beat SPY by only about 4 points, with 64–73% drawdowns, so the
+  held-out years were an unusually good period for it (section 4).
 
 ## Protocol
 
@@ -315,7 +319,10 @@ has faded since about 2009.
 
 ## 4. Shorting (QuantConnect, tuning years only, measured 1999–2015)
 
-Shorting did not clearly help on the tuning years, so no holdout was spent on it.
+The index and stock-momentum rules were first run on the tuning years
+only. After the owner asked, the two stock-momentum books that beat SPY
+there (long-only and 130/30) were then run once on the held-out years, with
+the settings unchanged ("Stock momentum on the held-out years", below).
 
 | Rule | CAGR | Worst drawdown | 2008 |
 | --- | --- | --- | --- |
@@ -339,8 +346,8 @@ Shorting did not clearly help on the tuning years, so no holdout was spent on it
   - 130/30 beat long-only by 1.25 points a year, but with a deeper drawdown
     (72.8% against 63.7%) and 127% long exposure, so part of that gain is
     simply leverage.
-  - It is a mixed result, not a case for shorting, and no holdout was spent
-    on it.
+  - On the tuning years alone that was a mixed result, not a case for
+    shorting.
 - **How the stock books were traded:** every month, names entering or
   leaving the lists trade, and a continuing holding is resized once it
   drifts 25% from its target weight. That keeps each side near its stated
@@ -352,6 +359,63 @@ Shorting did not clearly help on the tuning years, so no holdout was spent on it
 
 The cash in the trend rules earns no interest here, which understates both
 of them a little.
+
+### Stock momentum on the held-out years
+
+The rules and settings are exactly those of the tuning-year runs above:
+- 25 names a side, and the 25% rebalancing band
+- for 130/30, a 2% borrow fee
+
+Each run starts in January 2015 so that the indicators warm up, and
+returns are measured from January 2016. Each was run once. The cost-stress
+runs then re-ran the same fixed rules with a fixed slippage on every fill
+and, for 130/30, a 5% borrow fee. That changes only the assumed costs, not
+the rules.
+
+| 2016–mid-2026 | CAGR | Worst drawdown |
+| --- | --- | --- |
+| SPY | 15.19% | 33.7% |
+| Long the 25 strongest | 29.50% | 38.7% |
+| … with 0.1% / 0.2% slippage per fill | 28.56% / 27.61% | 39.8% / 40.3% |
+| 130/30 | 34.99% | 47.7% |
+| … with 0.1% / 0.2% slippage and a 5% borrow fee | 32.43% / 31.08% | 47.8% / 47.0% |
+
+| Calendar-year return | 2016 | 2017 | 2018 | 2019 | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 H1 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Long the 25 strongest | +8.9% | +8.2% | −10.1% | +32.0% | +78.4% | +18.0% | +2.2% | +29.9% | +40.0% | +53.8% | +74.6% |
+| 130/30 | −1.2% | +5.9% | −12.6% | +35.7% | +95.8% | +11.5% | +26.6% | +21.7% | +58.3% | +62.0% | +110.4% |
+
+(Calendar years are from each run's daily equity curve, without slippage.)
+
+**What drove it.** The 130/30 run's gain came from 846 different stocks.
+The biggest single contributor (Bloom Energy) was about 9% of the total.
+The leaders were the period's actual momentum winners: Micron, Seagate,
+SanDisk and Lumentum in the 2025–26 memory and optical boom, and AppLovin,
+Palantir, Robinhood, Rocket Lab, Carvana and MicroStrategy. No single
+stock or data error explains the result.
+
+**How much weight to put on it:**
+
+- **It beat SPY on both sets of years and survives realistic trading costs,
+  in line with decades of published momentum research.**
+- **The held-out years were unusually good for momentum.** The speculative
+  and AI-led markets of 2019–2026 gave +78% in 2020 and +75% in the first
+  half of 2026, for long-only. On the tuning years the same rule beat SPY by
+  about 4 points a year (9.06% against 4.91%), with a 64% drawdown and a
+  −31% a year 2008–09. A long-run expectation should sit much nearer the
+  tuning-year result than the held-out one.
+- **The result depends heavily on design.** The main report's momentum rule
+  held 50 names, traded only entries and exits, and moved to bonds when
+  SPY was below its 200-day average. It earned 13.9% on these same held-out
+  years. This study has not yet measured how much of the gap comes from
+  the number of names, the rebalancing and the filter; that belongs on the
+  tuning years, not here.
+- **Practical costs.**
+  - Monthly turnover makes nearly all gains short-term in a taxable
+    account.
+  - 130/30 needs a margin account and shares to borrow. Some of its shorts
+    (MSTR, the quantum-computing and space names) have at times cost far
+    more than 5% a year to borrow.
 
 ## 5. What running Boost would take
 
@@ -425,7 +489,7 @@ backtests cannot test.
 - **QuantConnect scripts.** Templates are in `research/edge-search/boost/`
   (`template.py`, `mix_template.py`) and `research/edge-search/shorting/`
   (`trend_template.py`, `factors_ls.py`).
-  - `research/edge-search/build_variants.py TB3MS.csv OUT_DIR` writes all 43
+  - `research/edge-search/build_variants.py TB3MS.csv OUT_DIR` writes all 49
     variants exactly as run, one `OUT_DIR/<name>/main.py` each, filling
     in each run's settings and the margin-rate table from a local FRED
     TB3MS file.
