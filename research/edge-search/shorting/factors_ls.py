@@ -46,6 +46,7 @@ class FactorResearch(QCAlgorithm):
     TOP_N = 50
     TREND_ASSET = "IEF"
     TREND_DAYS = 200
+    SLIPPAGE = 0.0                # fraction of price per fill; 0 = none (every reported 1999-2015 run)
     REBALANCE_BAND = 0.25         # resize a held name once it is 25% off its target weight
     BORROW_FEE = 0.02             # annual fee on short market value (losers are often costly to borrow)
 
@@ -124,6 +125,13 @@ class FactorResearch(QCAlgorithm):
             keep.append(f.Symbol)
         self.members = keep
         return keep
+
+    def OnSecuritiesChanged(self, changes):
+        # A fixed slippage (fraction of price per fill) on every stock that
+        # enters the universe; 0 keeps LEAN's default of none.
+        if self.SLIPPAGE:
+            for sec in changes.AddedSecurities:
+                sec.SetSlippageModel(ConstantSlippageModel(self.SLIPPAGE))
 
     def OnData(self, data):
         bar = data.Bars.get(self.spy)

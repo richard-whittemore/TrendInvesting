@@ -37,6 +37,7 @@ def _load_template(test, template, params):
     stub = types.ModuleType("AlgorithmImports")
     stub.QCAlgorithm = type("QCAlgorithm", (), {})
     stub.PortfolioTarget = _Target
+    stub.ConstantSlippageModel = lambda fraction: ("slippage", fraction)
     for name in ("Resolution", "MovingAverageType", "BrokerageName", "AccountType"):
         setattr(stub, name, types.SimpleNamespace())
     sys.modules["AlgorithmImports"] = stub
@@ -279,6 +280,23 @@ class LongShortTest(unittest.TestCase):
         algo._trade({"a": 0.11, "b": 0.09, "c": 0.05, "d": -0.05})
         self.assertEqual(sorted(algo.orders), [("b", 0.09), ("c", 0.05), ("d", -0.05), ("x", 0)])
         self.assertEqual(algo.resizes, 1)
+
+
+class LongShortCostsTest(unittest.TestCase):
+    def test_slippage_is_set_on_every_added_stock_only_when_configured(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        module = _load_template(self, "shorting/factors_ls.py", {"SLIPPAGE": 0.002})
+        algo = module.FactorResearch()
+        added = [types.SimpleNamespace(model=None) for _ in range(2)]
+        for sec in added:
+            sec.SetSlippageModel = lambda m, sec=sec: setattr(sec, "model", m)
+        algo.OnSecuritiesChanged(types.SimpleNamespace(AddedSecurities=added))
+        self.assertEqual([sec.model for sec in added], [("slippage", 0.002)] * 2)
+        algo.SLIPPAGE = 0.0
+        fresh = types.SimpleNamespace(model=None)
+        fresh.SetSlippageModel = lambda m: setattr(fresh, "model", m)
+        algo.OnSecuritiesChanged(types.SimpleNamespace(AddedSecurities=[fresh]))
+        self.assertIsNone(fresh.model)
 
 
 class TrendTemplateTest(unittest.TestCase):

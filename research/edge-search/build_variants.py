@@ -22,6 +22,7 @@ PLACEHOLDER = "RATES = __RATES__"
 
 IS_END = (2015, 12, 31)
 _MIX = {"MODE": "mix"}
+_OOS = {"START_DATE": (2015, 1, 1), "END_DATE": (2026, 6, 30), "MEASURE_FROM": (2016, 1, 1), "TOP_N": 25}
 _D11, _D19, _D21, _D22, _D23 = (2011, 3, 1), (2019, 7, 1), (2021, 2, 1), (2022, 5, 1), (2023, 11, 1)
 
 #: variant -> (template, {class constant: value}), exactly as run.
@@ -58,6 +59,13 @@ VARIANTS = {
     "SH_MOM_LONG25": ("shorting/factors_ls.py", {"MODE": "mom", "TOP_N": 25}),
     "SH_MOM_LS": ("shorting/factors_ls.py", {"MODE": "mom_ls", "TOP_N": 25}),
     "SH_MOM_130": ("shorting/factors_ls.py", {"MODE": "mom_130", "TOP_N": 25}),
+    # Momentum held-out runs (2016 on, run once with the 1999-2015 settings), and cost stress
+    "OOS_MOM_130": ("shorting/factors_ls.py", dict(_OOS, MODE="mom_130")),
+    "OOS_MOM_LONG25": ("shorting/factors_ls.py", dict(_OOS, MODE="mom")),
+    "OOS_130_S10_B5": ("shorting/factors_ls.py", dict(_OOS, MODE="mom_130", SLIPPAGE=0.001, BORROW_FEE=0.05)),
+    "OOS_130_S20_B5": ("shorting/factors_ls.py", dict(_OOS, MODE="mom_130", SLIPPAGE=0.002, BORROW_FEE=0.05)),
+    "OOS_L25_S10": ("shorting/factors_ls.py", dict(_OOS, MODE="mom", SLIPPAGE=0.001)),
+    "OOS_L25_S20": ("shorting/factors_ls.py", dict(_OOS, MODE="mom", SLIPPAGE=0.002)),
     # Managed-futures ETFs
     "M_DBMF": ("boost/mix_template.py", dict(_MIX, START=_D19, WEIGHTS={"DBMF": 1.0}, TICKER="SPY")),
     "M_8020_DBMF": ("boost/mix_template.py", dict(_MIX, START=_D19, WEIGHTS={"SPY": 0.8, "DBMF": 0.2})),

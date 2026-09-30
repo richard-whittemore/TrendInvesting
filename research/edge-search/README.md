@@ -80,7 +80,7 @@ backtest runs on their servers.
 - `shorting/` — `trend_template.py` (a 200-day trend rule going to cash or
   short) and `factors_ls.py` (the factor script with long/short and 130/30
   momentum modes and a borrow fee).
-- `build_variants.py` — writes all 43 follow-up variants exactly as run,
+- `build_variants.py` — writes all 49 follow-up variants exactly as run,
   from these templates and a local TB3MS CSV.
 - `futures/` — `carry.py` and `blend.py`, local studies on the
   `research/futures-local` engine and the Pinnacle files, which are not in
