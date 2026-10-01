@@ -40,6 +40,13 @@ data, with the limits listed under "Caveats".
   per trade, against SPY's 15.2%. 130/30 returned 31.1%. On the tuning
   years it beat SPY by only about 4 points, with 64–73% drawdowns, so the
   held-out years were an unusually good period for it (section 4).
+  - **25 names is a stable choice:** 15 and 50 give similar results.
+  - **A bond filter changes which period it does well in.** Moving to bonds
+    whenever SPY is below its 200-day average lifted the tuning years to
+    21% a year, but on the held-out years it fell to 17.3% against 29.5%
+    without the filter.
+  - **A volatility crash guard** cut drawdowns but cost more return than
+    it saved.
 
 ## Protocol
 
@@ -417,12 +424,99 @@ stock or data error explains the result.
     (MSTR, the quantum-computing and space names) have at times cost far
     more than 5% a year to borrow.
 
+### Momentum robustness and a crash guard (tuning years first)
+
+The owner asked whether 25 names was a stable choice or a lucky one, and
+whether a crash guard helps. Every run below is on the tuning years only,
+1998–2015 measured from 1999 (SPY: 4.91%, worst drawdown 55.2%), except the
+single held-out run at the end of this section. The template is
+`research/edge-search/momentum/momentum.py`: `shorting/factors_ls.py` plus
+two switches, so the earlier runs keep their own unchanged file. Its 25-name
+banded run reproduces the earlier 9.06% exactly.
+
+**Names held, rebalancing and the bond filter** (long-only; CAGR / worst
+drawdown). "Band" resizes a held name once it is 25% off target; "entries
+and exits" never resizes. "Bond filter": when SPY closed the month below its
+200-day average, the whole book went to IEF (7–10-year Treasuries) for the
+month.
+
+| Names | Band, no filter | Entries and exits, no filter | Band + bond filter | Entries and exits + bond filter |
+| --- | --- | --- | --- | --- |
+| 15 | 6.37% / 67.5% | 4.73% / 75.2% | 19.54% / 48.5% | 19.01% / 47.8% |
+| 25 | 9.06% / 63.7% | 7.32% / 72.8% | **21.28% / 44.6%** | 20.64% / 50.9% |
+| 50 | 8.55% / 61.3% | 7.02% / 72.7% | 18.48% / 42.6% | 18.45% / 49.2% |
+
+- **The number of names matters little.** 25 is slightly best in every
+  column, but 15 and 50 are close, so 25 is not a lucky outlier.
+- **The band adds about 1.5 points** a year and trims the drawdown.
+- **The bond filter dominated the tuning years.** It added 10–14 points a
+  year and cut the worst drawdown by about a third.
+  - It sat in bonds for 59 of the 204 months, mostly 2000–02 and 2008–09.
+  - That turned −25% to −41% a year over 2008–09 into +6% to +13%.
+- **Cross-check:** the 50-name entries-and-exits run with the filter
+  reproduces the main report's "Momentum + trend filter" (18.45% / 49%)
+  exactly, and its no-filter twin reproduces that report's 7.0%.
+
+**Crash guard (volatility scaling).** Each month the book was scaled down
+so that its trailing six-month volatility was at most 20% or 30% a year,
+and never scaled above 1. This follows the spirit of Barroso & Santa-Clara
+(2015), "Momentum has its moments", *Journal of Financial Economics*. The
+volatility was measured on the book about to be held, not on the factor's
+past returns.
+
+| 25 names, banded | No guard | Guard at 30% | Guard at 20% |
+| --- | --- | --- | --- |
+| Long-only | 9.06% / 63.7% | 7.00% / 53.2% | 5.73% / 43.5% |
+| 130/30 | 10.31% / 72.8% | 8.60% / 58.5% | 7.05% / 44.0% |
+
+The guard did cut the drawdown: 2008–09 went from −31.5% to −16.4% a year
+for long-only at 20%. But it cost more return than it saved.
+- The cash it frees earns nothing in these runs. At about 30% of the book
+  in cash on average, that costs well under a point a year, which does not
+  close the gap.
+- The bond filter did better on both return and drawdown, so it is the
+  better tuning-year choice.
+
+**The tuning-year winner on the held-out years (run once).** Under the
+protocol, the best tuning-year setting (25 names, band, bond filter) was
+run once on 2016 to mid-2026, unchanged.
+
+| 2016–mid-2026 | CAGR | Worst drawdown | 2018 | 2019 | 2020 | 2022 | 2025 | 2026 H1 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| SPY | 15.19% | 33.7% | | | | −18.8% | | |
+| 25 names, band, **bond filter** | 17.34% | 46.8% | −10.3% | +1.6% | +79.2% | −21.7% | +19.4% | +36.0% |
+| 25 names, band, no filter (above) | 29.50% | 38.7% | −10.1% | +32.0% | +78.4% | +2.2% | +53.8% | +74.6% |
+
+**The filter hurt on the held-out years** by 12 points a year, and its
+drawdown was deeper.
+- **Why the filter helped before 2016:** the tuning years' bear markets
+  (2000–02 and 2008–09) were long and slow. A monthly 200-day test gets out
+  early and stays out.
+- **Why it hurt after:** the held-out years' sell-offs were fast and
+  V-shaped (late 2018, March 2020, 2022, April 2025). The filter sold after
+  the fall, sat in bonds through the rebound, and in 2022 the bonds fell
+  too.
+- **What this means:** the filter is a bet on the kind of bear market to
+  come, not a free improvement.
+
+**Over the whole span,** compounding the two periods' rates (17 years, then
+10.5) gives a rough picture:
+
+| 1999–mid-2026, roughly | Per year | Worst drawdown in either period |
+| --- | --- | --- |
+| Momentum with the bond filter | about 19.7% | 46.8% |
+| Momentum without the filter | about 16.4% | 63.7% |
+| SPY | about 8.7% | 55.2% |
+
+Both momentum versions beat SPY by a wide margin over the full 27 years.
+Neither dominates in both periods.
+
 ## 5. What running Boost would take
 
 This section gathers facts for the owner's own decision. It is not a
 recommendation.
 
-**Two ways to hold the extra 50%:**
+**Three ways to hold the extra 50%:**
 
 1. **A margin account with SPY.** Buy the extra shares on a signal and sell
    those same lots on the exit.
@@ -443,6 +537,28 @@ recommendation.
      extra rather than 50%.
    - Some brokers allow futures in an IRA, with higher margin
      requirements.
+3. **Boost without borrowing: a leveraged S&P 500 fund** (QuantConnect,
+   `boost/lev_etf_template.py`).
+   - On a signal, swap part of the SPY position into a fund that returns 2×
+     (SSO) or 3× (UPRO) the index each day: 49% of the account into SSO, or
+     24.5% into UPRO. Either gives the same 147% index exposure as
+     borrowing. Swap back on the exit.
+   - Nothing is borrowed, so an IRA could hold it, if its broker allows
+     these funds.
+   - The rule is otherwise identical. Each fund is tested from shortly
+     after it launched, against margin Boost and SPY over the same span:
+
+   | Span | Boost with the fund | Boost on margin (T-bill + 1.5) | SPY |
+   | --- | --- | --- | --- |
+   | SSO, Jul 2006–mid-2026 | 12.07% | 12.84% | 11.25% |
+   | … of which 2016 on | 16.12% | 16.43% | 15.19% |
+   | UPRO, Jul 2009–mid-2026 | 16.29% | 16.75% | 15.12% |
+
+   - The fund route keeps roughly half (SSO since 2006) to three-quarters
+     (UPRO since 2009) of margin Boost's edge over SPY.
+   - The rest goes to the funds' fees and to their daily reset, which costs
+     a little on volatile days.
+   - Drawdowns were the same as margin Boost.
 
 **Taxes (general rules, not tax advice).**
 
@@ -489,7 +605,7 @@ backtests cannot test.
 - **QuantConnect scripts.** Templates are in `research/edge-search/boost/`
   (`template.py`, `mix_template.py`) and `research/edge-search/shorting/`
   (`trend_template.py`, `factors_ls.py`).
-  - `research/edge-search/build_variants.py TB3MS.csv OUT_DIR` writes all 49
+  - `research/edge-search/build_variants.py TB3MS.csv OUT_DIR` writes all 70
     variants exactly as run, one `OUT_DIR/<name>/main.py` each, filling
     in each run's settings and the margin-rate table from a local FRED
     TB3MS file.

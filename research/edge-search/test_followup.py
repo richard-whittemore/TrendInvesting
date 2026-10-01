@@ -132,6 +132,10 @@ class BuilderTest(unittest.TestCase):
         self.assertIn("    MODE = 'bh'", out)
         self.assertIn("    SPREAD = 0.015", out)
 
+    def test_a_second_placeholder_is_refused(self):
+        with self.assertRaises(SystemExit):
+            build_variants.render("# RATES = __RATES__\nRATES = __RATES__\n", {}, {199201: 0.04})
+
     def test_an_unknown_constant_is_refused(self):
         with self.assertRaises(SystemExit):
             build_variants.render("class A:\n    MODE = 1\n", {"NOPE": 2}, {})
@@ -297,6 +301,74 @@ class LongShortCostsTest(unittest.TestCase):
         fresh.SetSlippageModel = lambda m: setattr(fresh, "model", m)
         algo.OnSecuritiesChanged(types.SimpleNamespace(AddedSecurities=[fresh]))
         self.assertIsNone(fresh.model)
+
+
+class LeveragedFundBoostTest(unittest.TestCase):
+    def setUp(self):
+        self.module = _load_template(self, "boost/lev_etf_template.py", {"MODE": "boost_etf"})
+
+    def _algo(self, factor=2.0):
+        algo = _algorithm(self.module, "BoostResearch", names=("SPY", "SSO"))
+        algo.lev, algo.LEV_FACTOR = "SSO", factor
+        return algo
+
+    def test_a_signal_swaps_spy_into_the_fund_for_the_same_147_percent_exposure(self):
+        algo = self._algo()
+        _day(algo)
+        algo.rsi2 = _Indicator(5.0)
+        _day(algo)
+        self.assertEqual(algo.orders, [{"SSO": 0.0, "SPY": 0.98}, {"SSO": 0.49, "SPY": 0.49}])
+        self.assertAlmostEqual(algo.prev_w, 0.49 + 2 * 0.49)
+
+    def test_a_3x_fund_needs_a_quarter_of_the_account(self):
+        algo = self._algo(3.0)
+        algo.rsi2 = _Indicator(5.0)
+        _day(algo)
+        self.assertEqual(algo.orders, [{"SSO": 0.245, "SPY": 0.735}])
+
+    def test_nothing_is_borrowed_so_no_margin_interest_is_charged(self):
+        algo = self._algo()
+        algo.rsi2 = _Indicator(5.0)
+        _day(algo)
+        _day(algo, when=_dt.datetime(1992, 1, 16))
+        self.assertEqual(algo.financing, 0.0)
+
+
+class MomentumRobustnessTest(unittest.TestCase):
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/momentum.py", {"TOP_N": 3})
+
+    def test_book_scale_caps_at_one_and_scales_a_volatile_book_down(self):
+        calm = {"a": [100.0, 100.1, 100.0, 100.1, 100.0]}
+        self.assertEqual(self.module.book_scale(calm, {"a": 1.0}, 0.20), 1.0)
+        wild = {"a": [100.0, 110.0, 99.0, 108.9, 98.01]}          # +10%, -10% each day
+        scale = self.module.book_scale(wild, {"a": 1.0}, 0.20)
+        self.assertAlmostEqual(scale, 0.20 / (0.10 * 252 ** 0.5))
+
+    def test_book_scale_nets_longs_against_shorts_and_skips_missing_prices(self):
+        nan = float("nan")
+        prices = {"a": [100.0, 110.0, 99.0], "b": [100.0, 110.0, 99.0], "c": [nan, nan, 50.0]}
+        # a long and b short of the same moves cancel; c has no returns yet.
+        self.assertEqual(self.module.book_scale(prices, {"a": 0.5, "b": -0.5, "c": 0.3}, 0.20), 1.0)
+
+    def test_without_a_band_a_drifted_holding_is_left_alone(self):
+        algo = self.module.MomentumResearch()
+        algo.MODE, algo.TOP_N, algo.REBALANCE_BAND, algo.resizes = "mom", 3, None, 0
+        orders = []
+
+        class Book(dict):
+            TotalPortfolioValue = 1_000_000.0
+
+            def __iter__(self):
+                return iter([types.SimpleNamespace(Key=k, Value=v) for k, v in dict.items(self)])
+
+        algo.Portfolio = Book(a=types.SimpleNamespace(Invested=True, IsLong=True, IsShort=False,
+                                                      HoldingsValue=600_000.0))
+        algo.SetHoldings = lambda sym, w: orders.append((sym, w))
+        algo.Liquidate = lambda sym: orders.append((sym, 0))
+        algo._trade({"a": 0.33})
+        self.assertEqual(orders, [])
 
 
 class TrendTemplateTest(unittest.TestCase):

@@ -80,8 +80,13 @@ backtest runs on their servers.
 - `shorting/` — `trend_template.py` (a 200-day trend rule going to cash or
   short) and `factors_ls.py` (the factor script with long/short and 130/30
   momentum modes and a borrow fee).
-- `build_variants.py` — writes all 49 follow-up variants exactly as run,
+- `build_variants.py` — writes all 70 follow-up variants exactly as run,
   from these templates and a local TB3MS CSV.
+- `momentum/` — `momentum.py`, the long/short factor script plus a switch
+  for entries-and-exits-only trading and a volatility-scaling crash guard,
+  for the momentum robustness grid.
+- `boost/lev_etf_template.py` — Boost with the extra exposure from a 2x or
+  3x S&P 500 fund instead of borrowing (an IRA cannot borrow).
 - `futures/` — `carry.py` and `blend.py`, local studies on the
   `research/futures-local` engine and the Pinnacle files, which are not in
   the repository.

@@ -66,6 +66,34 @@ VARIANTS = {
     "OOS_130_S20_B5": ("shorting/factors_ls.py", dict(_OOS, MODE="mom_130", SLIPPAGE=0.002, BORROW_FEE=0.05)),
     "OOS_L25_S10": ("shorting/factors_ls.py", dict(_OOS, MODE="mom", SLIPPAGE=0.001)),
     "OOS_L25_S20": ("shorting/factors_ls.py", dict(_OOS, MODE="mom", SLIPPAGE=0.002)),
+    # Boost without borrowing (a leveraged S&P 500 fund in place of margin), and
+    # margin Boost over the same spans for comparison
+    "BE_SSO": ("boost/lev_etf_template.py", {"MODE": "boost_etf", "START": (2006, 7, 1)}),
+    "BE_SPY_06": ("boost/lev_etf_template.py", {"START": (2006, 7, 1)}),
+    "BE_UPRO": ("boost/lev_etf_template.py", {"MODE": "boost_etf", "START": (2009, 7, 1),
+                                             "LEV_ETF": "UPRO", "LEV_FACTOR": 3.0}),
+    "BE_SPY_09": ("boost/lev_etf_template.py", {"START": (2009, 7, 1)}),
+    # Momentum robustness, tuning years only: names x band (B) or entries/exits
+    # only (N) x trend filter (T), long-only; MG_25_B reproduces SH_MOM_LONG25
+    "MG_15_B": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 15}),
+    "MG_15_BT": ("momentum/momentum.py", {"MODE": "mom_trend", "TOP_N": 15}),
+    "MG_15_N": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 15, "REBALANCE_BAND": None}),
+    "MG_15_NT": ("momentum/momentum.py", {"MODE": "mom_trend", "TOP_N": 15, "REBALANCE_BAND": None}),
+    "MG_25_B": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 25}),
+    "MG_25_BT": ("momentum/momentum.py", {"MODE": "mom_trend", "TOP_N": 25}),
+    "MG_25_N": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 25, "REBALANCE_BAND": None}),
+    "MG_25_NT": ("momentum/momentum.py", {"MODE": "mom_trend", "TOP_N": 25, "REBALANCE_BAND": None}),
+    "MG_50_B": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 50}),
+    "MG_50_BT": ("momentum/momentum.py", {"MODE": "mom_trend", "TOP_N": 50}),
+    "MG_50_N": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 50, "REBALANCE_BAND": None}),
+    "MG_50_NT": ("momentum/momentum.py", {"MODE": "mom_trend", "TOP_N": 50, "REBALANCE_BAND": None}),
+    # The tuning-year winner of the grid above, run once on the held-out years
+    "OOS_MG_25_BT": ("momentum/momentum.py", dict(_OOS, MODE="mom_trend")),
+    # Momentum crash guard (volatility scaling), tuning years only
+    "MV_L25_20": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 25, "VOL_TARGET": 0.20}),
+    "MV_L25_30": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 25, "VOL_TARGET": 0.30}),
+    "MV_130_20": ("momentum/momentum.py", {"MODE": "mom_130", "TOP_N": 25, "VOL_TARGET": 0.20}),
+    "MV_130_30": ("momentum/momentum.py", {"MODE": "mom_130", "TOP_N": 25, "VOL_TARGET": 0.30}),
     # Managed-futures ETFs
     "M_DBMF": ("boost/mix_template.py", dict(_MIX, START=_D19, WEIGHTS={"DBMF": 1.0}, TICKER="SPY")),
     "M_8020_DBMF": ("boost/mix_template.py", dict(_MIX, START=_D19, WEIGHTS={"SPY": 0.8, "DBMF": 0.2})),
@@ -102,6 +130,8 @@ def prior_month_rates(tb3ms_path, first_month=FIRST_MONTH):
 
 def render(template_src, params, rates):
     src = template_src
+    if src.count(PLACEHOLDER) > 1:
+        raise SystemExit("the rate placeholder appears more than once; only the table line may carry it")
     if PLACEHOLDER in src:
         table = "{" + ", ".join("%d: %.4f" % (k, v) for k, v in sorted(rates.items())) + "}"
         src = src.replace(PLACEHOLDER, "RATES = " + table, 1)
