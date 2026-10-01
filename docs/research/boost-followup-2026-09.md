@@ -46,7 +46,13 @@ data, with the limits listed under "Caveats".
     21% a year, but on the held-out years it fell to 17.3% against 29.5%
     without the filter.
   - **A volatility crash guard** cut drawdowns but cost more return than
-    it saved.
+    it saved. Sector caps did the same.
+  - **Moving half the book to bonds in a downtrend** was the best balance.
+    It made 15.6% on the tuning years and 23.6% on the held-out years, with
+    40–46% drawdowns.
+  - **The fixed combination** (sector cap 3, inverse-volatility weights and
+    the half filter) had the shallowest losses: 31% and 28% worst
+    drawdowns, below SPY's, while making 10.5% and 18.8% a year.
 
 ## Protocol
 
@@ -469,10 +475,15 @@ past returns.
 
 | 25 names, banded | No guard | Guard at 30% | Guard at 20% |
 | --- | --- | --- | --- |
-| Long-only | 9.06% / 63.7% | 7.00% / 53.2% | 5.73% / 43.5% |
-| 130/30 | 10.31% / 72.8% | 8.60% / 58.5% | 7.05% / 44.0% |
+| Long-only | 9.06% / 63.7% | 6.97% / 52.4% | 5.72% / 44.8% |
+| 130/30 | 10.31% / 72.8% | 8.74% / 58.7% | 6.89% / 44.3% |
 
-The guard did cut the drawdown: 2008–09 went from −31.5% to −16.4% a year
+A scale change of 10% or more from the one last applied resizes every
+holding, so the guard caps the book actually held. A first version left
+continuing holdings to the 25% band; its figures were within 0.2 points of
+these.
+
+The guard did cut the drawdown: 2008–09 went from −31.5% to −16.0% a year
 for long-only at 20%. But it cost more return than it saved.
 - The cash it frees earns nothing in these runs. At about 30% of the book
   in cash on average, that costs well under a point a year, which does not
@@ -513,6 +524,99 @@ drawdown was deeper.
 
 Both momentum versions beat SPY by a wide margin over the full 27 years.
 Neither dominates in both periods.
+
+### Momentum with less drawdown
+
+The owner asked whether choosing across sectors, or anything else, could
+avoid momentum's deep drawdowns. The template is
+`research/edge-search/momentum/defensive.py`. Each control is a switch that
+is off by default; with all of them off it reproduces the 9.06% base
+exactly. Results are long-only, 25 names, banded, on the tuning years
+(1999–2015; SPY 4.91% / 55.2%).
+
+| Control | CAGR | Worst drawdown | 2008–09 a year |
+| --- | --- | --- | --- |
+| None (base) | 9.06% | 63.7% | −31.5% |
+| At most 3 names per Morningstar sector | 5.50% | 57.4% | −25.0% |
+| At most 2 names per sector | 5.79% | 56.5% | −21.5% |
+| Rank by return over volatility | 9.65% | 62.7% | −30.7% |
+| Inverse-volatility weights | 10.19% | 63.0% | −30.7% |
+| A name below its own 200-day average holds bonds | 11.47% | 64.2% | −16.1% |
+| 50% SPY, 50% momentum | 7.54% | 59.2% | −20.7% |
+| **Half filter:** half the book to bonds when SPY is below its 200-day average | **15.60%** | **45.8%** | −10.6% |
+| **Combination** (sector cap 3 + inverse volatility + half filter), fixed in advance | **10.46%** | **31.1%** | −6.2% |
+| *Full filter (grid above)* | *21.28%* | *44.6%* | *+11.2%* |
+
+**What the tuning years showed:**
+- **Sector caps cut the drawdown only a little, at a large cost.** They
+  forced the book out of the leading sector in the 1999 technology run
+  (−5% a year over 1999–2002).
+- **Weighting and ranking changes add up to a point of return** but leave
+  the drawdown where it was.
+- **Only moving to bonds in a downtrend shrinks the drawdown materially.**
+  The combination has the smallest drawdown by far.
+
+**The two leaders on the held-out years (2016 to mid-2026, each run once).**
+- The combination was declared before any result was seen, so its run is a
+  clean test.
+- The half filter was chosen after the full filter's held-out run had shown
+  the whipsaw problem, so its result is weaker evidence.
+
+| 2016–mid-2026 | CAGR | Worst drawdown | 2018 | 2020 | 2022 | 2025 | 2026 H1 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SPY | 15.19% | 33.7% | | | −18.8% | | |
+| No filter (above) | 29.50% | 38.7% | −10.1% | +78.4% | +2.2% | +53.8% | +74.6% |
+| Full filter (above; a repeat run matched at 17.33%) | 17.34% | 46.8% | −10.3% | +79.2% | −21.7% | +19.4% | +36.0% |
+| **Half filter** | **23.61%** | **40.4%** | −10.1% | +79.1% | −10.6% | +37.2% | +54.9% |
+| **Combination** | **18.80%** | **27.7%** | −2.6% | +49.0% | −14.4% | +21.9% | +11.2% |
+
+- **The combination** beat SPY by about 3.6 points a year with a smaller
+  worst drawdown than SPY itself.
+- **The half filter** kept most of the no-filter return, and its drawdown
+  was close to the no-filter version's.
+
+| 1999–mid-2026, roughly (compounding the two periods' rates) | Per year | Worst drawdown in either period |
+| --- | --- | --- |
+| Combination | about 13.6% | 31.1% |
+| Half filter | about 18.6% | 45.8% |
+| Full filter | about 19.7% | 46.8% |
+| No filter | about 16.4% | 63.7% |
+| SPY | about 8.7% | 55.2% |
+
+On these two periods the half filter is the steadier choice than either
+extreme, and the combination trades return for the shallowest losses.
+
+**A data glitch, caught.** The first re-run of the full-filter held-out run
+returned 14.58%, having made only 105 of its 138 monthly rebalances. Its
+history requests evidently came back empty for 33 months. A repeat made all
+138 and returned 17.33%, so the 14.58% run is disregarded. Every result here
+was checked for its full count of rebalances: 203 on the tuning years, 138
+on the held-out years.
+
+### Other candidates (tuning years)
+
+Each was tested on the tuning years first (1999–2015; SPY 4.91% / 55.2%).
+
+| Candidate | Source | CAGR | Worst drawdown |
+| --- | --- | --- | --- |
+| Momentum ranked by closeness to the 52-week high | George & Hwang (2004) | 3.28% | 46.9% |
+| Intermediate momentum (12 to 7 months ago) | Novy-Marx (2012) | 11.21% | 65.6% |
+| "Frog in the pan": steadier winners preferred | Da, Gurun & Warachka (2014) | 6.36% | 70.4% |
+| Residual (market-adjusted) momentum | after Blitz, Huij & Martens (2011) | 7.94% | 62.6% |
+| Sector ETF rotation: top 3 of 9 by 3/6/12-month return | Faber (2010) | 5.03% | 44.2% |
+| … with each ETF's own 10-month trend check | Faber (2010) | 5.89% | 31.3% |
+| 2× SPY on margin above its 200-day average, else bonds | Gayed & Bilello (2016) | 5.52% | 47.9% |
+| 1× of the same | | 4.60% | 26.3% |
+
+- **None beat the momentum variants above.** The momentum rankings are in
+  `momentum/scores.py`; their all-off control reproduces 9.06%.
+- **Intermediate momentum** added return but no drawdown relief.
+- **The 52-week-high ranking** cut the drawdown but fell below SPY.
+- **Sector rotation with a trend check** had a shallow drawdown but beat
+  SPY by only about a point.
+- **The leveraged trend rule** was close to SPY once margin interest was
+  paid.
+- None of these went on to a held-out run.
 
 ## 5. What running Boost would take
 
@@ -608,7 +712,7 @@ backtests cannot test.
 - **QuantConnect scripts.** Templates are in `research/edge-search/boost/`
   (`template.py`, `mix_template.py`) and `research/edge-search/shorting/`
   (`trend_template.py`, `factors_ls.py`).
-  - `research/edge-search/build_variants.py TB3MS.csv OUT_DIR` writes all 70
+  - `research/edge-search/build_variants.py TB3MS.csv OUT_DIR` writes all 90
     variants exactly as run, one `OUT_DIR/<name>/main.py` each, filling
     in each run's settings and the margin-rate table from a local FRED
     TB3MS file.

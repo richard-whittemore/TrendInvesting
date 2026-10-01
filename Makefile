@@ -79,7 +79,9 @@ research-test:
 	python3 -m py_compile research/edge-search/boost/template.py research/edge-search/boost/mix_template.py \
 		research/edge-search/shorting/trend_template.py research/edge-search/shorting/factors_ls.py \
 		research/edge-search/futures/carry.py research/edge-search/futures/blend.py \
-		research/edge-search/momentum/momentum.py research/edge-search/boost/lev_etf_template.py
+		research/edge-search/momentum/momentum.py research/edge-search/boost/lev_etf_template.py \
+		research/edge-search/momentum/defensive.py research/edge-search/momentum/scores.py \
+		research/edge-search/etf/rotation.py
 	python3 -m py_compile research/edge-search/etf-trend/main.py research/edge-search/etf-trend/main_oos.py \
 		research/edge-search/factors/main.py research/edge-search/timing/main.py \
 		research/edge-search/riskparity/main.py research/edge-search/bh-rsp/main.py

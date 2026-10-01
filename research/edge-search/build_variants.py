@@ -101,6 +101,10 @@ VARIANTS = {
     "D_SPY50": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25, "SPY_BLEND": 0.5}),
     "D_COMBO": ("momentum/defensive.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
                                          "INV_VOL": True, "RISK_OFF_FRACTION": 0.5}),
+    # The two drawdown-control leaders, run once on the held-out years
+    "OOS_D_COMBO": ("momentum/defensive.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                  RISK_OFF_FRACTION=0.5)),
+    "OOS_D_HALF": ("momentum/defensive.py", dict(_OOS, MODE="mom_trend", RISK_OFF_FRACTION=0.5)),
     # Other candidates, tuning years only. S_BASE must reproduce MG_25_B.
     "S_BASE": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25}),
     "S_HIGH52": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "high52"}),
