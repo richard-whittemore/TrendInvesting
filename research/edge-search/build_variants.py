@@ -89,6 +89,28 @@ VARIANTS = {
     "MG_50_NT": ("momentum/momentum.py", {"MODE": "mom_trend", "TOP_N": 50, "REBALANCE_BAND": None}),
     # The tuning-year winner of the grid above, run once on the held-out years
     "OOS_MG_25_BT": ("momentum/momentum.py", dict(_OOS, MODE="mom_trend")),
+    # Momentum with drawdown controls, tuning years only, 25 names, banded;
+    # D_BASE has every control off and must reproduce MG_25_B
+    "D_BASE": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25}),
+    "D_SEC3": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25, "SECTOR_CAP": 3}),
+    "D_SEC2": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25, "SECTOR_CAP": 2}),
+    "D_RISKADJ": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "ret_vol"}),
+    "D_INVVOL": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25, "INV_VOL": True}),
+    "D_STOCK200": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25, "STOCK_TREND_DAYS": 200}),
+    "D_HALF": ("momentum/defensive.py", {"MODE": "mom_trend", "TOP_N": 25, "RISK_OFF_FRACTION": 0.5}),
+    "D_SPY50": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25, "SPY_BLEND": 0.5}),
+    "D_COMBO": ("momentum/defensive.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                         "INV_VOL": True, "RISK_OFF_FRACTION": 0.5}),
+    # Other candidates, tuning years only. S_BASE must reproduce MG_25_B.
+    "S_BASE": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25}),
+    "S_HIGH52": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "high52"}),
+    "S_INTER": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "inter"}),
+    "S_FIP": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "fip"}),
+    "S_RESID": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "resid"}),
+    "E_SECROT": ("etf/rotation.py", {"MODE": "sector_rot"}),
+    "E_SECROT_T": ("etf/rotation.py", {"MODE": "sector_rot", "SMA_MONTHS": 10}),
+    "E_LEV2": ("etf/rotation.py", {"MODE": "lev_trend", "LEVERAGE": 2.0}),
+    "E_LEV1": ("etf/rotation.py", {"MODE": "lev_trend", "LEVERAGE": 1.0}),
     # Momentum crash guard (volatility scaling), tuning years only
     "MV_L25_20": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 25, "VOL_TARGET": 0.20}),
     "MV_L25_30": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 25, "VOL_TARGET": 0.30}),

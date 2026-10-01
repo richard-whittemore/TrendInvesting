@@ -1,18 +1,23 @@
 # Research script, not production code: no ADR citations, no fidelity check
-# against the Go engine. Run on QuantConnect Cloud for the momentum
-# robustness study in docs/research/boost-followup-2026-09.md ("Momentum
-# robustness and a crash guard, tuning years only"). It cannot be imported
-# outside QuantConnect (AlgorithmImports); research/edge-search/README.md
-# explains the stand-in used to test it locally.
+# against the Go engine. Run on QuantConnect Cloud for "Other candidates" in
+# docs/research/boost-followup-2026-09.md (tuning years first). It cannot be
+# imported outside QuantConnect (AlgorithmImports); research/edge-search/
+# README.md explains the stand-in used to test it.
 #
-# Provenance: shorting/factors_ls.py (12-1 momentum, Jegadeesh & Titman
-#   1993; long/short and 130/30 books) plus two switches. REBALANCE_BAND None
-#   trades entries and exits only (a continuing holding drifts). VOL_TARGET
-#   scales the whole book so the current book's trailing VOL_DAYS volatility
-#   is at most VOL_TARGET: volatility scaling in the spirit of Barroso &
-#   Santa-Clara (2015), "Momentum has its moments", Journal of Financial
-#   Economics, using the book about to be held rather than the factor's past
-#   returns, and never above 1 (no added leverage).
+# Provenance: momentum/defensive.py (12-1 momentum, Jegadeesh & Titman 1993,
+#   long-only book) with other published ways to rank the winners (SCORE):
+#   - "high52": price over its 52-week high (George & Hwang 2004, "The 52-Week
+#     High and Momentum Investing", Journal of Finance).
+#   - "inter": the return from 12 to 7 months ago (Novy-Marx 2012, "Is
+#     momentum really momentum?", Journal of Financial Economics).
+#   - "fip": the top FIP_POOL names by 12-1 return, ranked by how gradually
+#     they rose ("frog in the pan": Da, Gurun & Warachka 2014, Review of
+#     Financial Studies), using their information-discreteness measure.
+#   - "resid": 12-1 return after removing SPY's part (beta x SPY's return),
+#     over its volatility, in the spirit of Blitz, Huij & Martens 2011,
+#     "Residual momentum", Journal of Empirical Finance. ADAPTED: one market
+#     factor and the same 12 months to estimate beta, not their three
+#     factors and 36 months.
 from AlgorithmImports import *
 from datetime import date
 import numpy as np
@@ -44,7 +49,81 @@ def book_scale(prices, weights, target, periods=252):
     return min(1.0, target / vol) if vol > 0 else 1.0
 
 
-class MomentumResearch(QCAlgorithm):
+def info_discreteness(prices):
+    """Da, Gurun & Warachka's ID = sign(return) x (% days down - % days up)
+    over ``prices``; lower means the move came more gradually."""
+    rets = [b / a - 1.0 for a, b in zip(prices, prices[1:]) if a > 0]
+    if not rets or prices[0] <= 0:
+        return None
+    total = prices[-1] / prices[0] - 1.0
+    up = sum(1 for r in rets if r > 0) / len(rets)
+    down = sum(1 for r in rets if r < 0) / len(rets)
+    return (1.0 if total > 0 else -1.0 if total < 0 else 0.0) * (down - up)
+
+
+def residual_score(stock, market):
+    """Market-adjusted 12-1 momentum: the daily residuals e = r - beta x r_m
+    (beta from the same window), summed and divided by their standard
+    deviation times sqrt(n). Two equal-length price lists, oldest first. With
+    only one window, the intercept is left in the residual: fitted inside the
+    window it would make the residuals sum to zero."""
+    rs = [b / a - 1.0 for a, b in zip(stock, stock[1:])]
+    rm = [b / a - 1.0 for a, b in zip(market, market[1:])]
+    n = len(rs)
+    if n < 20 or len(rm) != n:
+        return None
+    ms, mm = sum(rs) / n, sum(rm) / n
+    var = sum((x - mm) ** 2 for x in rm)
+    beta = sum((x - mm) * (y - ms) for x, y in zip(rm, rs)) / var if var > 0 else 0.0
+    res = [y - beta * x for x, y in zip(rm, rs)]
+    mean = sum(res) / n
+    sd = (sum((e - mean) ** 2 for e in res) / n) ** 0.5
+    return sum(res) / (sd * n ** 0.5) if sd > 1e-12 else None
+
+
+def defensive_book(ranked, top_n, invested=0.98, sector=None, sector_cap=None, vol=None,
+                   inv_vol=False, above=None, risk_off=False, risk_off_fraction=1.0,
+                   spy_blend=0.0, bond="IEF", spy="SPY"):
+    """Target weights for the long-only book. ``ranked`` is best first.
+
+    The SPY_BLEND share goes to ``spy``; when ``risk_off`` the
+    ``risk_off_fraction`` share of the rest goes to ``bond``. The momentum part
+    is split over the first ``top_n`` ranked names allowed by ``sector_cap``
+    (names with no sector are uncapped), equally or by inverse ``vol``. A
+    pick not ``above`` its own average keeps its weight in ``bond`` instead."""
+    targets = {}
+    equity = invested * (1.0 - spy_blend)
+    if spy_blend:
+        targets[spy] = invested * spy_blend
+    part = equity * (1.0 - risk_off_fraction) if risk_off else equity
+    to_bond = equity - part
+    picks, counts = [], {}
+    for name in ranked:
+        if len(picks) == top_n:
+            break
+        sec = sector.get(name) if sector else None
+        if sector_cap and sec is not None and counts.get(sec, 0) >= sector_cap:
+            continue
+        picks.append(name)
+        if sec is not None:
+            counts[sec] = counts.get(sec, 0) + 1
+    if picks and part > 0:
+        raw = {n: (1.0 / vol[n] if inv_vol and vol and vol.get(n) else 1.0) for n in picks}
+        total = sum(raw.values())
+        for n in picks:
+            w = part * raw[n] / total
+            if above is not None and not above.get(n, False):
+                to_bond += w
+            else:
+                targets[n] = targets.get(n, 0.0) + w
+    elif part > 0:
+        to_bond += part
+    if to_bond > 1e-12:
+        targets[bond] = targets.get(bond, 0.0) + to_bond
+    return targets
+
+
+class MomentumScoresResearch(QCAlgorithm):
     """Published US stock factor strategies, research only, monthly rebalance.
 
     Universe: each month, the largest UNIVERSE_SIZE US common stocks by
@@ -75,6 +154,13 @@ class MomentumResearch(QCAlgorithm):
     TREND_ASSET = "IEF"
     TREND_DAYS = 200
     SLIPPAGE = 0.0                # fraction of price per fill; 0 = none (every reported 1999-2015 run)
+    SECTOR_CAP = None             # at most this many names per Morningstar sector
+    SCORE = "ret"                 # "ret", "ret_vol", "high52", "inter", "fip" or "resid"
+    FIP_POOL = 100                # fip: rank only the top this many by 12-1 return
+    INV_VOL = False               # weight names by inverse volatility
+    STOCK_TREND_DAYS = 0          # 0 = off; else a name below its own N-day average goes to bonds
+    RISK_OFF_FRACTION = 1.0       # mom_trend: share of the book moved to bonds when SPY is below its 200-day average
+    SPY_BLEND = 0.0               # share of the account held in SPY instead of momentum
     VOL_TARGET = None             # e.g. 0.20: scale the book down to this annualised volatility
     VOL_DAYS = 126                # trailing sessions for that volatility
     REBALANCE_BAND = 0.25         # resize a held name once it is 25% off its target weight
@@ -94,6 +180,7 @@ class MomentumResearch(QCAlgorithm):
         self.AddUniverse(self.Coarse, self.Fine)
         self.members = []
         self.fundamentals = {}
+        self.sectors = {}
         self.last_month = None
         self.equity_curve = []
         self.spy_curve = []
@@ -151,6 +238,9 @@ class MomentumResearch(QCAlgorithm):
                 ey = 1.0 / ey
             self.fund_reads += 1
             self.fund_hits += int(gp is not None and ta is not None) + int(ey is not None)
+            sec = self._get(f, "AssetClassification.MorningstarSectorCode",
+                            "asset_classification.morningstar_sector_code")
+            self.sectors[f.Symbol] = int(sec) if sec is not None else None
             self.fundamentals[f.Symbol] = {
                 "quality": gp / ta if gp is not None and ta and ta > 0 else None,
                 "value": ey,
@@ -199,7 +289,7 @@ class MomentumResearch(QCAlgorithm):
         if self.MODE == "mom_trend" and len(spy) >= self.TREND_DAYS:
             risk_off = spy.iloc[-1] < spy.iloc[-self.TREND_DAYS:].mean()
 
-        mom, vol = {}, {}
+        mom, vol, above = {}, {}, {}
         for sym in self.members:
             if sym not in closes.columns:
                 continue
@@ -209,10 +299,16 @@ class MomentumResearch(QCAlgorithm):
             mom[sym] = px.iloc[-22] / px.iloc[-253] - 1.0
             rets = px.pct_change().dropna().iloc[-252:]
             vol[sym] = float(np.std(rets))
+            if self.STOCK_TREND_DAYS:
+                above[sym] = px.iloc[-1] > px.iloc[-self.STOCK_TREND_DAYS:].mean()
 
         scores = {}
         if self.MODE in ("mom", "mom_trend"):
             scores = mom
+            if self.SCORE == "ret_vol":
+                scores = {s: m / vol[s] for s, m in mom.items() if vol.get(s, 0) > 0}
+            elif self.SCORE in ("high52", "inter", "fip", "resid"):
+                scores = self._alt_scores(mom, closes)
         elif self.MODE == "lowvol":
             scores = {s: -v for s, v in vol.items() if v > 0}
         elif self.MODE in ("quality", "value"):
@@ -235,7 +331,16 @@ class MomentumResearch(QCAlgorithm):
         if not scores:
             return
 
-        if risk_off:
+        if self.MODE in ("mom", "mom_trend"):
+            ranked = sorted(scores, key=lambda s: scores[s], reverse=True)
+            targets = defensive_book(
+                ranked, self.TOP_N, sector=self.sectors if self.SECTOR_CAP else None,
+                sector_cap=self.SECTOR_CAP, vol=vol, inv_vol=self.INV_VOL,
+                above=above if self.STOCK_TREND_DAYS else None, risk_off=risk_off,
+                risk_off_fraction=self.RISK_OFF_FRACTION, spy_blend=self.SPY_BLEND,
+                bond=self.bond, spy=self.spy)
+            self.names_held += self.TOP_N
+        elif risk_off:
             targets = {self.bond: 0.98}
         else:
             targets = self._targets(sorted(scores, key=lambda s: scores[s], reverse=True))
@@ -282,6 +387,30 @@ class MomentumResearch(QCAlgorithm):
         if self.resize_all:
             self.applied_scale = scale
         return {s: w * scale for s, w in targets.items()}
+
+    def _alt_scores(self, mom, closes):
+        """The SCORE ranking for names that have a 12-1 return."""
+        out = {}
+        spy = [float(x) for x in closes[self.spy].ffill().iloc[-253:-21]]
+        pool = set(sorted(mom, key=lambda s: mom[s], reverse=True)[:self.FIP_POOL])
+        for sym in mom:
+            px = [float(x) for x in closes[sym].dropna().iloc[-253:]]
+            if len(px) < 253:
+                continue
+            if self.SCORE == "high52":
+                out[sym] = px[-1] / max(px)
+            elif self.SCORE == "inter":
+                out[sym] = px[-148] / px[0] - 1.0
+            elif self.SCORE == "fip":
+                if sym in pool:
+                    d = info_discreteness(px[:-21])
+                    if d is not None:
+                        out[sym] = -d
+            else:
+                r = residual_score(px[:-21], spy) if len(spy) == len(px[:-21]) else None
+                if r is not None:
+                    out[sym] = r
+        return out
 
     def _trade(self, targets):
         """Names entering or leaving trade every month. A continuing holding

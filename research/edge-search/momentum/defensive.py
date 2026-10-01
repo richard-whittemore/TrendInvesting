@@ -1,18 +1,24 @@
 # Research script, not production code: no ADR citations, no fidelity check
-# against the Go engine. Run on QuantConnect Cloud for the momentum
-# robustness study in docs/research/boost-followup-2026-09.md ("Momentum
-# robustness and a crash guard, tuning years only"). It cannot be imported
-# outside QuantConnect (AlgorithmImports); research/edge-search/README.md
-# explains the stand-in used to test it locally.
+# against the Go engine. Run on QuantConnect Cloud for "Momentum with less
+# drawdown" in docs/research/boost-followup-2026-09.md (tuning years only).
+# It cannot be imported outside QuantConnect (AlgorithmImports);
+# research/edge-search/README.md explains the stand-in used to test it.
 #
-# Provenance: shorting/factors_ls.py (12-1 momentum, Jegadeesh & Titman
-#   1993; long/short and 130/30 books) plus two switches. REBALANCE_BAND None
-#   trades entries and exits only (a continuing holding drifts). VOL_TARGET
-#   scales the whole book so the current book's trailing VOL_DAYS volatility
-#   is at most VOL_TARGET: volatility scaling in the spirit of Barroso &
-#   Santa-Clara (2015), "Momentum has its moments", Journal of Financial
-#   Economics, using the book about to be held rather than the factor's past
-#   returns, and never above 1 (no added leverage).
+# Provenance: momentum/momentum.py (12-1 momentum, Jegadeesh & Titman 1993)
+#   plus drawdown controls for the long-only book, each a switch, all off by
+#   default (defensive_book below):
+#   - SECTOR_CAP: at most this many names per Morningstar sector (industry
+#     concentration drives much of momentum's risk: Moskowitz & Grinblatt
+#     1999, "Do industries explain momentum?", Journal of Finance).
+#   - SCORE "ret_vol": rank by 12-1 return over 12-month volatility
+#     (risk-adjusted momentum). PROJECT choice of formula.
+#   - INV_VOL: weight names by inverse volatility instead of equally.
+#   - STOCK_TREND_DAYS: a name below its own N-day average is not bought;
+#     its slot goes to the bond fund (absolute momentum per stock, in the
+#     spirit of Antonacci 2014).
+#   - RISK_OFF_FRACTION: with MODE "mom_trend", the share of the book moved
+#     to the bond fund when SPY is below its 200-day average (1 = all).
+#   - SPY_BLEND: the share of the account held in SPY instead of momentum.
 from AlgorithmImports import *
 from datetime import date
 import numpy as np
@@ -42,6 +48,48 @@ def book_scale(prices, weights, target, periods=252):
     mean = sum(book) / len(book)
     vol = (sum((x - mean) ** 2 for x in book) / len(book)) ** 0.5 * periods ** 0.5
     return min(1.0, target / vol) if vol > 0 else 1.0
+
+
+def defensive_book(ranked, top_n, invested=0.98, sector=None, sector_cap=None, vol=None,
+                   inv_vol=False, above=None, risk_off=False, risk_off_fraction=1.0,
+                   spy_blend=0.0, bond="IEF", spy="SPY"):
+    """Target weights for the long-only book. ``ranked`` is best first.
+
+    The SPY_BLEND share goes to ``spy``; when ``risk_off`` the
+    ``risk_off_fraction`` share of the rest goes to ``bond``. The momentum part
+    is split over the first ``top_n`` ranked names allowed by ``sector_cap``
+    (names with no sector are uncapped), equally or by inverse ``vol``. A
+    pick not ``above`` its own average keeps its weight in ``bond`` instead."""
+    targets = {}
+    equity = invested * (1.0 - spy_blend)
+    if spy_blend:
+        targets[spy] = invested * spy_blend
+    part = equity * (1.0 - risk_off_fraction) if risk_off else equity
+    to_bond = equity - part
+    picks, counts = [], {}
+    for name in ranked:
+        if len(picks) == top_n:
+            break
+        sec = sector.get(name) if sector else None
+        if sector_cap and sec is not None and counts.get(sec, 0) >= sector_cap:
+            continue
+        picks.append(name)
+        if sec is not None:
+            counts[sec] = counts.get(sec, 0) + 1
+    if picks and part > 0:
+        raw = {n: (1.0 / vol[n] if inv_vol and vol and vol.get(n) else 1.0) for n in picks}
+        total = sum(raw.values())
+        for n in picks:
+            w = part * raw[n] / total
+            if above is not None and not above.get(n, False):
+                to_bond += w
+            else:
+                targets[n] = targets.get(n, 0.0) + w
+    elif part > 0:
+        to_bond += part
+    if to_bond > 1e-12:
+        targets[bond] = targets.get(bond, 0.0) + to_bond
+    return targets
 
 
 class MomentumResearch(QCAlgorithm):
@@ -75,6 +123,12 @@ class MomentumResearch(QCAlgorithm):
     TREND_ASSET = "IEF"
     TREND_DAYS = 200
     SLIPPAGE = 0.0                # fraction of price per fill; 0 = none (every reported 1999-2015 run)
+    SECTOR_CAP = None             # at most this many names per Morningstar sector
+    SCORE = "ret"                 # "ret": 12-1 return; "ret_vol": that over 12-month volatility
+    INV_VOL = False               # weight names by inverse volatility
+    STOCK_TREND_DAYS = 0          # 0 = off; else a name below its own N-day average goes to bonds
+    RISK_OFF_FRACTION = 1.0       # mom_trend: share of the book moved to bonds when SPY is below its 200-day average
+    SPY_BLEND = 0.0               # share of the account held in SPY instead of momentum
     VOL_TARGET = None             # e.g. 0.20: scale the book down to this annualised volatility
     VOL_DAYS = 126                # trailing sessions for that volatility
     REBALANCE_BAND = 0.25         # resize a held name once it is 25% off its target weight
@@ -94,6 +148,7 @@ class MomentumResearch(QCAlgorithm):
         self.AddUniverse(self.Coarse, self.Fine)
         self.members = []
         self.fundamentals = {}
+        self.sectors = {}
         self.last_month = None
         self.equity_curve = []
         self.spy_curve = []
@@ -151,6 +206,9 @@ class MomentumResearch(QCAlgorithm):
                 ey = 1.0 / ey
             self.fund_reads += 1
             self.fund_hits += int(gp is not None and ta is not None) + int(ey is not None)
+            sec = self._get(f, "AssetClassification.MorningstarSectorCode",
+                            "asset_classification.morningstar_sector_code")
+            self.sectors[f.Symbol] = int(sec) if sec is not None else None
             self.fundamentals[f.Symbol] = {
                 "quality": gp / ta if gp is not None and ta and ta > 0 else None,
                 "value": ey,
@@ -199,7 +257,7 @@ class MomentumResearch(QCAlgorithm):
         if self.MODE == "mom_trend" and len(spy) >= self.TREND_DAYS:
             risk_off = spy.iloc[-1] < spy.iloc[-self.TREND_DAYS:].mean()
 
-        mom, vol = {}, {}
+        mom, vol, above = {}, {}, {}
         for sym in self.members:
             if sym not in closes.columns:
                 continue
@@ -209,10 +267,14 @@ class MomentumResearch(QCAlgorithm):
             mom[sym] = px.iloc[-22] / px.iloc[-253] - 1.0
             rets = px.pct_change().dropna().iloc[-252:]
             vol[sym] = float(np.std(rets))
+            if self.STOCK_TREND_DAYS:
+                above[sym] = px.iloc[-1] > px.iloc[-self.STOCK_TREND_DAYS:].mean()
 
         scores = {}
         if self.MODE in ("mom", "mom_trend"):
             scores = mom
+            if self.SCORE == "ret_vol":
+                scores = {s: m / vol[s] for s, m in mom.items() if vol.get(s, 0) > 0}
         elif self.MODE == "lowvol":
             scores = {s: -v for s, v in vol.items() if v > 0}
         elif self.MODE in ("quality", "value"):
@@ -235,7 +297,16 @@ class MomentumResearch(QCAlgorithm):
         if not scores:
             return
 
-        if risk_off:
+        if self.MODE in ("mom", "mom_trend"):
+            ranked = sorted(scores, key=lambda s: scores[s], reverse=True)
+            targets = defensive_book(
+                ranked, self.TOP_N, sector=self.sectors if self.SECTOR_CAP else None,
+                sector_cap=self.SECTOR_CAP, vol=vol, inv_vol=self.INV_VOL,
+                above=above if self.STOCK_TREND_DAYS else None, risk_off=risk_off,
+                risk_off_fraction=self.RISK_OFF_FRACTION, spy_blend=self.SPY_BLEND,
+                bond=self.bond, spy=self.spy)
+            self.names_held += self.TOP_N
+        elif risk_off:
             targets = {self.bond: 0.98}
         else:
             targets = self._targets(sorted(scores, key=lambda s: scores[s], reverse=True))

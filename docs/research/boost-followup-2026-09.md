@@ -414,9 +414,12 @@ stock or data error explains the result.
 - **The result depends heavily on design.** The main report's momentum rule
   held 50 names, traded only entries and exits, and moved to bonds when
   SPY was below its 200-day average. It earned 13.9% on these same held-out
-  years. This study has not yet measured how much of the gap comes from
-  the number of names, the rebalancing and the filter; that belongs on the
-  tuning years, not here.
+  years. "Momentum robustness and a crash guard" (below) measures each
+  design choice on the tuning years:
+  - The number of names and the rebalancing matter little.
+  - The bond filter matters a great deal, in opposite directions before
+    and after 2016. Its single held-out run (17.34% against 29.50%
+    without it) accounts for most of the gap.
 - **Practical costs.**
   - Monthly turnover makes nearly all gains short-term in a taxable
     account.
