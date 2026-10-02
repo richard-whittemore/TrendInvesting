@@ -586,6 +586,17 @@ exactly. Results are long-only, 25 names, banded, on the tuning years
 On these two periods the half filter is the steadier choice than either
 extreme, and the combination trades return for the shallowest losses.
 
+**Bonds before July 2002.** Every "to bonds" rule here holds IEF (7–10-year
+Treasuries), which began trading on July 22, 2002. QuantConnect's ETF data
+has no Treasury fund before then.
+- **What that means:** in risk-off months before mid-2002, the bond share
+  sat in cash earning nothing. That was much of 2000–02, when SPY was
+  mostly below its 200-day average.
+- **Which way it biases the results:** 7–10-year Treasuries gained in each
+  of those years, so the tuning-year figures for the full and half filters
+  and the combination are, if anything, understated.
+- **Unaffected:** the held-out runs (2016 on).
+
 **A data glitch, caught.** The first re-run of the full-filter held-out run
 returned 14.58%, having made only 105 of its 138 monthly rebalances. Its
 history requests evidently came back empty for 33 months. A repeat made all
@@ -605,8 +616,8 @@ Each was tested on the tuning years first (1999–2015; SPY 4.91% / 55.2%).
 | Residual (market-adjusted) momentum | after Blitz, Huij & Martens (2011) | 7.94% | 62.6% |
 | Sector ETF rotation: top 3 of 9 by 3/6/12-month return | Faber (2010) | 5.03% | 44.2% |
 | … with each ETF's own 10-month trend check | Faber (2010) | 5.89% | 31.3% |
-| 2× SPY on margin above its 200-day average, else bonds | Gayed & Bilello (2016) | 5.52% | 47.9% |
-| 1× of the same | | 4.60% | 26.3% |
+| 2× SPY on margin above its 200-day average, else bonds; reset to 2× monthly | Gayed & Bilello (2016) | 5.69% | 47.9% |
+| 1× of the same | | 4.95% | 25.4% |
 
 - **None beat the momentum variants above.** The momentum rankings are in
   `momentum/scores.py`; their all-off control reproduces 9.06%.

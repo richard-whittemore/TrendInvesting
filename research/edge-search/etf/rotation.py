@@ -15,7 +15,10 @@
 #     Long Run", SSRN: hold LEVERAGE x SPY while SPY closes above its
 #     TREND_DAYS average, else the bond fund; checked daily, traded at the next
 #     open. Leverage here is margin on SPY at the prior month's T-bill rate +
-#     SPREAD (no leveraged fund existed before 2006).
+#     SPREAD (no leveraged fund existed before 2006), reset to the target
+#     monthly; the paper's funds reset daily.
+#   Both modes hold IEF as "bonds". IEF began trading in July 2002: before
+#   then a bond allocation stays in cash, earning nothing.
 from AlgorithmImports import *
 from datetime import date
 
@@ -24,6 +27,21 @@ from datetime import date
 RATES = __RATES__
 
 SECTORS = ["XLB", "XLE", "XLF", "XLI", "XLK", "XLP", "XLU", "XLV", "XLY"]
+
+
+def lev_trend_action(on, last_on, month, last_month, bond_ready, bond_held):
+    """What lev_trend does today: "on" (SPY at the leverage target), "off"
+    (the bond fund) or None. A signal change always trades. While on, the
+    position is reset to the target once a month, so leverage does not
+    drift with prices; while off, the bond target is retried once the bond
+    fund has a price, since before July 2002 it had none."""
+    if on != last_on:
+        return "on" if on else "off"
+    if on and month != last_month:
+        return "on"
+    if not on and bond_ready and not bond_held:
+        return "off"
+    return None
 
 
 def rotation_targets(scores, top, invested=0.98, above=None, bond="IEF"):
@@ -65,6 +83,7 @@ class EtfRotationResearch(QCAlgorithm):
         self.financing = 0.0
         self.switches = 0
         self.last_on = None
+        self.last_lev_month = None
         if self.MODE == "sector_rot":
             self.Schedule.On(self.DateRules.MonthStart(self.spy), self.TimeRules.At(8, 0), self.Rotate)
 
@@ -103,13 +122,18 @@ class EtfRotationResearch(QCAlgorithm):
         self.px.append((self.Time, float(bar.Close)))
         if self.MODE == "lev_trend" and self.sma.IsReady:
             on = float(bar.Close) > self.sma.Current.Value
+            month = (self.Time.year, self.Time.month)
+            bond = self.Securities[self.bond]
+            action = lev_trend_action(on, self.last_on, month, self.last_lev_month,
+                                      bond.HasData and bond.Price > 0, self.Portfolio[self.bond].Invested)
+            if action == "on":
+                self.SetHoldings([PortfolioTarget(self.bond, 0), PortfolioTarget(self.spy, 0.98 * self.LEVERAGE)])
+                self.last_lev_month = month
+            elif action == "off":
+                self.SetHoldings([PortfolioTarget(self.spy, 0), PortfolioTarget(self.bond, 0.98)])
             if on != self.last_on:
-                if on:
-                    self.SetHoldings([PortfolioTarget(self.bond, 0), PortfolioTarget(self.spy, 0.98 * self.LEVERAGE)])
-                else:
-                    self.SetHoldings([PortfolioTarget(self.spy, 0), PortfolioTarget(self.bond, 0.98)])
-                self.last_on = on
                 self.switches += 1
+            self.last_on = on
         borrowed = max(0.0, float(self.Portfolio.TotalHoldingsValue) - equity)
         if borrowed > 0:
             key = self.Time.year * 100 + self.Time.month

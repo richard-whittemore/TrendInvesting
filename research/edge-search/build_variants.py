@@ -169,9 +169,20 @@ def render(template_src, params, rates):
     return src
 
 
+#: Templates whose long-only modes ignore VOL_TARGET: their book comes from
+#: defensive_book, which has no volatility scaling.
+NO_VOL_TARGET = ("momentum/defensive.py", "momentum/scores.py")
+
+
+def check_variant(template, params):
+    if template in NO_VOL_TARGET and params.get("VOL_TARGET") and params.get("MODE", "mom") in ("mom", "mom_trend"):
+        raise SystemExit("{} ignores VOL_TARGET in mode {}".format(template, params.get("MODE", "mom")))
+
+
 def build_all(tb3ms_path, out_dir):
     rates = prior_month_rates(tb3ms_path)
     for name, (template, params) in VARIANTS.items():
+        check_variant(template, params)
         with open(os.path.join(HERE, template)) as f:
             src = render(f.read(), params, rates)
         os.makedirs(os.path.join(out_dir, name), exist_ok=True)

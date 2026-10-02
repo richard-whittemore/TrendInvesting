@@ -276,8 +276,9 @@ class MomentumResearch(QCAlgorithm):
         scale = book_scale(prices, targets, self.VOL_TARGET)
         self.scales.append(scale)
         # A scale that moved 10% or more from the one last applied to the whole
-        # book resizes every continuing holding (_trade), so the guard caps the
-        # book actually held rather than only the names the band would trade.
+        # book resizes every continuing holding (_trade). Smaller moves are left
+        # to the band, so continuing holdings can sit up to about 10% (relative)
+        # above the current scale until the next full resize.
         self.resize_all = abs(scale - self.applied_scale) >= SCALE_MOVE * self.applied_scale
         if self.resize_all:
             self.applied_scale = scale

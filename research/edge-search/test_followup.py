@@ -136,6 +136,11 @@ class BuilderTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             build_variants.render("# RATES = __RATES__\nRATES = __RATES__\n", {}, {199201: 0.04})
 
+    def test_vol_target_is_refused_where_it_would_be_ignored(self):
+        with self.assertRaises(SystemExit):
+            build_variants.check_variant("momentum/defensive.py", {"MODE": "mom", "VOL_TARGET": 0.2})
+        build_variants.check_variant("momentum/momentum.py", {"MODE": "mom", "VOL_TARGET": 0.2})
+
     def test_an_unknown_constant_is_refused(self):
         with self.assertRaises(SystemExit):
             build_variants.render("class A:\n    MODE = 1\n", {"NOPE": 2}, {})
@@ -502,6 +507,24 @@ class EtfRotationTest(unittest.TestCase):
         targets = rot(scores, 3, above={"XLK": True, "XLE": False, "XLV": False})
         self.assertAlmostEqual(targets["XLK"], 0.98 / 3)
         self.assertAlmostEqual(targets["IEF"], 2 * 0.98 / 3)
+
+
+class LeveragedTrendTest(unittest.TestCase):
+    def setUp(self):
+        self.act = _load_template(self, "etf/rotation.py", {}).lev_trend_action
+
+    def test_a_signal_change_trades(self):
+        self.assertEqual(self.act(True, False, (2000, 1), None, True, True), "on")
+        self.assertEqual(self.act(False, True, (2000, 1), (2000, 1), True, False), "off")
+
+    def test_a_lasting_uptrend_resets_leverage_once_a_month(self):
+        self.assertIsNone(self.act(True, True, (2000, 1), (2000, 1), True, False))
+        self.assertEqual(self.act(True, True, (2000, 2), (2000, 1), True, False), "on")
+
+    def test_risk_off_retries_the_bond_fund_once_it_trades(self):
+        self.assertIsNone(self.act(False, False, (2000, 1), None, False, False))     # no IEF yet
+        self.assertEqual(self.act(False, False, (2002, 8), None, True, False), "off")
+        self.assertIsNone(self.act(False, False, (2002, 9), None, True, True))
 
 
 class TrendTemplateTest(unittest.TestCase):
