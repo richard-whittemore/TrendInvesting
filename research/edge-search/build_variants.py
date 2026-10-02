@@ -66,6 +66,60 @@ VARIANTS = {
     "OOS_130_S20_B5": ("shorting/factors_ls.py", dict(_OOS, MODE="mom_130", SLIPPAGE=0.002, BORROW_FEE=0.05)),
     "OOS_L25_S10": ("shorting/factors_ls.py", dict(_OOS, MODE="mom", SLIPPAGE=0.001)),
     "OOS_L25_S20": ("shorting/factors_ls.py", dict(_OOS, MODE="mom", SLIPPAGE=0.002)),
+    # Boost without borrowing (a leveraged S&P 500 fund in place of margin), and
+    # margin Boost over the same spans for comparison
+    "BE_SSO": ("boost/lev_etf_template.py", {"MODE": "boost_etf", "START": (2006, 7, 1)}),
+    "BE_SPY_06": ("boost/lev_etf_template.py", {"START": (2006, 7, 1)}),
+    "BE_UPRO": ("boost/lev_etf_template.py", {"MODE": "boost_etf", "START": (2009, 7, 1),
+                                             "LEV_ETF": "UPRO", "LEV_FACTOR": 3.0}),
+    "BE_SPY_09": ("boost/lev_etf_template.py", {"START": (2009, 7, 1)}),
+    # Momentum robustness, tuning years only: names x band (B) or entries/exits
+    # only (N) x trend filter (T), long-only; MG_25_B reproduces SH_MOM_LONG25
+    "MG_15_B": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 15}),
+    "MG_15_BT": ("momentum/momentum.py", {"MODE": "mom_trend", "TOP_N": 15}),
+    "MG_15_N": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 15, "REBALANCE_BAND": None}),
+    "MG_15_NT": ("momentum/momentum.py", {"MODE": "mom_trend", "TOP_N": 15, "REBALANCE_BAND": None}),
+    "MG_25_B": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 25}),
+    "MG_25_BT": ("momentum/momentum.py", {"MODE": "mom_trend", "TOP_N": 25}),
+    "MG_25_N": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 25, "REBALANCE_BAND": None}),
+    "MG_25_NT": ("momentum/momentum.py", {"MODE": "mom_trend", "TOP_N": 25, "REBALANCE_BAND": None}),
+    "MG_50_B": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 50}),
+    "MG_50_BT": ("momentum/momentum.py", {"MODE": "mom_trend", "TOP_N": 50}),
+    "MG_50_N": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 50, "REBALANCE_BAND": None}),
+    "MG_50_NT": ("momentum/momentum.py", {"MODE": "mom_trend", "TOP_N": 50, "REBALANCE_BAND": None}),
+    # The tuning-year winner of the grid above, run once on the held-out years
+    "OOS_MG_25_BT": ("momentum/momentum.py", dict(_OOS, MODE="mom_trend")),
+    # Momentum with drawdown controls, tuning years only, 25 names, banded;
+    # D_BASE has every control off and must reproduce MG_25_B
+    "D_BASE": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25}),
+    "D_SEC3": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25, "SECTOR_CAP": 3}),
+    "D_SEC2": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25, "SECTOR_CAP": 2}),
+    "D_RISKADJ": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "ret_vol"}),
+    "D_INVVOL": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25, "INV_VOL": True}),
+    "D_STOCK200": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25, "STOCK_TREND_DAYS": 200}),
+    "D_HALF": ("momentum/defensive.py", {"MODE": "mom_trend", "TOP_N": 25, "RISK_OFF_FRACTION": 0.5}),
+    "D_SPY50": ("momentum/defensive.py", {"MODE": "mom", "TOP_N": 25, "SPY_BLEND": 0.5}),
+    "D_COMBO": ("momentum/defensive.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                         "INV_VOL": True, "RISK_OFF_FRACTION": 0.5}),
+    # The two drawdown-control leaders, run once on the held-out years
+    "OOS_D_COMBO": ("momentum/defensive.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                  RISK_OFF_FRACTION=0.5)),
+    "OOS_D_HALF": ("momentum/defensive.py", dict(_OOS, MODE="mom_trend", RISK_OFF_FRACTION=0.5)),
+    # Other candidates, tuning years only. S_BASE must reproduce MG_25_B.
+    "S_BASE": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25}),
+    "S_HIGH52": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "high52"}),
+    "S_INTER": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "inter"}),
+    "S_FIP": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "fip"}),
+    "S_RESID": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "resid"}),
+    "E_SECROT": ("etf/rotation.py", {"MODE": "sector_rot", "MEASURE_FROM": (2000, 1, 1)}),
+    "E_SECROT_T": ("etf/rotation.py", {"MODE": "sector_rot", "SMA_MONTHS": 10, "MEASURE_FROM": (2000, 1, 1)}),
+    "E_LEV2": ("etf/rotation.py", {"MODE": "lev_trend", "LEVERAGE": 2.0}),
+    "E_LEV1": ("etf/rotation.py", {"MODE": "lev_trend", "LEVERAGE": 1.0}),
+    # Momentum crash guard (volatility scaling), tuning years only
+    "MV_L25_20": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 25, "VOL_TARGET": 0.20}),
+    "MV_L25_30": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 25, "VOL_TARGET": 0.30}),
+    "MV_130_20": ("momentum/momentum.py", {"MODE": "mom_130", "TOP_N": 25, "VOL_TARGET": 0.20}),
+    "MV_130_30": ("momentum/momentum.py", {"MODE": "mom_130", "TOP_N": 25, "VOL_TARGET": 0.30}),
     # Managed-futures ETFs
     "M_DBMF": ("boost/mix_template.py", dict(_MIX, START=_D19, WEIGHTS={"DBMF": 1.0}, TICKER="SPY")),
     "M_8020_DBMF": ("boost/mix_template.py", dict(_MIX, START=_D19, WEIGHTS={"SPY": 0.8, "DBMF": 0.2})),
@@ -102,6 +156,8 @@ def prior_month_rates(tb3ms_path, first_month=FIRST_MONTH):
 
 def render(template_src, params, rates):
     src = template_src
+    if src.count(PLACEHOLDER) > 1:
+        raise SystemExit("the rate placeholder appears more than once; only the table line may carry it")
     if PLACEHOLDER in src:
         table = "{" + ", ".join("%d: %.4f" % (k, v) for k, v in sorted(rates.items())) + "}"
         src = src.replace(PLACEHOLDER, "RATES = " + table, 1)
@@ -113,9 +169,20 @@ def render(template_src, params, rates):
     return src
 
 
+#: Templates whose long-only modes ignore VOL_TARGET: their book comes from
+#: defensive_book, which has no volatility scaling.
+NO_VOL_TARGET = ("momentum/defensive.py", "momentum/scores.py")
+
+
+def check_variant(template, params):
+    if template in NO_VOL_TARGET and params.get("VOL_TARGET") and params.get("MODE", "mom") in ("mom", "mom_trend"):
+        raise SystemExit("{} ignores VOL_TARGET in mode {}".format(template, params.get("MODE", "mom")))
+
+
 def build_all(tb3ms_path, out_dir):
     rates = prior_month_rates(tb3ms_path)
     for name, (template, params) in VARIANTS.items():
+        check_variant(template, params)
         with open(os.path.join(HERE, template)) as f:
             src = render(f.read(), params, rates)
         os.makedirs(os.path.join(out_dir, name), exist_ok=True)

@@ -132,6 +132,15 @@ class BuilderTest(unittest.TestCase):
         self.assertIn("    MODE = 'bh'", out)
         self.assertIn("    SPREAD = 0.015", out)
 
+    def test_a_second_placeholder_is_refused(self):
+        with self.assertRaises(SystemExit):
+            build_variants.render("# RATES = __RATES__\nRATES = __RATES__\n", {}, {199201: 0.04})
+
+    def test_vol_target_is_refused_where_it_would_be_ignored(self):
+        with self.assertRaises(SystemExit):
+            build_variants.check_variant("momentum/defensive.py", {"MODE": "mom", "VOL_TARGET": 0.2})
+        build_variants.check_variant("momentum/momentum.py", {"MODE": "mom", "VOL_TARGET": 0.2})
+
     def test_an_unknown_constant_is_refused(self):
         with self.assertRaises(SystemExit):
             build_variants.render("class A:\n    MODE = 1\n", {"NOPE": 2}, {})
@@ -297,6 +306,232 @@ class LongShortCostsTest(unittest.TestCase):
         fresh.SetSlippageModel = lambda m: setattr(fresh, "model", m)
         algo.OnSecuritiesChanged(types.SimpleNamespace(AddedSecurities=[fresh]))
         self.assertIsNone(fresh.model)
+
+
+class _Iloc:
+    """Just enough of a DataFrame's .iloc[-n:].ffill() for _vol_scaled."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def __getitem__(self, sl):
+        cut = {k: v[sl] for k, v in self.data.items()}
+        return types.SimpleNamespace(ffill=lambda: cut)
+
+
+class LeveragedFundBoostTest(unittest.TestCase):
+    def setUp(self):
+        self.module = _load_template(self, "boost/lev_etf_template.py", {"MODE": "boost_etf"})
+
+    def _algo(self, factor=2.0):
+        algo = _algorithm(self.module, "BoostResearch", names=("SPY", "SSO"))
+        algo.lev, algo.LEV_FACTOR = "SSO", factor
+        return algo
+
+    def test_a_signal_swaps_spy_into_the_fund_for_the_same_147_percent_exposure(self):
+        algo = self._algo()
+        _day(algo)
+        algo.rsi2 = _Indicator(5.0)
+        _day(algo)
+        self.assertEqual(algo.orders, [{"SSO": 0.0, "SPY": 0.98}, {"SSO": 0.49, "SPY": 0.49}])
+        self.assertAlmostEqual(algo.prev_w, 0.49 + 2 * 0.49)
+
+    def test_a_3x_fund_needs_a_quarter_of_the_account(self):
+        algo = self._algo(3.0)
+        algo.rsi2 = _Indicator(5.0)
+        _day(algo)
+        self.assertEqual(algo.orders, [{"SSO": 0.245, "SPY": 0.735}])
+
+    def test_nothing_is_borrowed_so_no_margin_interest_is_charged(self):
+        algo = self._algo()
+        algo.rsi2 = _Indicator(5.0)
+        _day(algo)
+        _day(algo, when=_dt.datetime(1992, 1, 16))
+        self.assertEqual(algo.financing, 0.0)
+
+
+class MomentumRobustnessTest(unittest.TestCase):
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/momentum.py", {"TOP_N": 3})
+
+    def test_book_scale_caps_at_one_and_scales_a_volatile_book_down(self):
+        calm = {"a": [100.0, 100.1, 100.0, 100.1, 100.0]}
+        self.assertEqual(self.module.book_scale(calm, {"a": 1.0}, 0.20), 1.0)
+        wild = {"a": [100.0, 110.0, 99.0, 108.9, 98.01]}          # +10%, -10% each day
+        scale = self.module.book_scale(wild, {"a": 1.0}, 0.20)
+        self.assertAlmostEqual(scale, 0.20 / (0.10 * 252 ** 0.5))
+
+    def test_book_scale_nets_longs_against_shorts_and_skips_missing_prices(self):
+        nan = float("nan")
+        prices = {"a": [100.0, 110.0, 99.0], "b": [100.0, 110.0, 99.0], "c": [nan, nan, 50.0]}
+        # a long and b short of the same moves cancel; c has no returns yet.
+        self.assertEqual(self.module.book_scale(prices, {"a": 0.5, "b": -0.5, "c": 0.3}, 0.20), 1.0)
+
+    def _trading_algo(self, held):
+        algo = self.module.MomentumResearch()
+        algo.MODE, algo.TOP_N, algo.REBALANCE_BAND, algo.resizes = "mom", 3, 0.25, 0
+        algo.applied_scale, algo.resize_all, algo.scales = 1.0, False, []
+        orders = []
+
+        class Book(dict):
+            TotalPortfolioValue = 1_000_000.0
+
+            def __iter__(self):
+                return iter([types.SimpleNamespace(Key=k, Value=v) for k, v in dict.items(self)])
+
+        algo.Portfolio = Book({k: types.SimpleNamespace(Invested=True, IsLong=True, IsShort=False,
+                                                        HoldingsValue=v * 1_000_000.0) for k, v in held.items()})
+        algo.SetHoldings = lambda sym, w: orders.append((sym, round(w, 6)))
+        algo.Liquidate = lambda sym: orders.append((sym, 0))
+        return algo, orders
+
+    def _scale_to(self, algo, target_vol):
+        wild = {"a": [100.0, 110.0, 99.0, 108.9, 98.01]}         # 10% daily moves
+        algo.VOL_TARGET, algo.VOL_DAYS = target_vol, 4
+
+        class Closes:
+            columns = ["a"]
+
+            def __getitem__(self, names):
+                return types.SimpleNamespace(iloc=_Iloc({n: wild[n] for n in names}))
+
+        return algo._vol_scaled({"a": 0.98}, Closes())
+
+    def test_a_scale_cut_of_10_percent_or_more_resizes_every_holding(self):
+        algo, orders = self._trading_algo({"a": 0.98})
+        targets = self._scale_to(algo, 0.20 * 0.8 * 0.10 * 252 ** 0.5 / 0.20)  # a scale of 0.8
+        self.assertTrue(algo.resize_all)
+        algo._trade(targets)
+        # The book (98% in a) is scaled to 0.8 x its volatility: an 18% cut, inside
+        # the 25% band, and still traded because the scale moved by more than 10%.
+        self.assertEqual(orders, [("a", 0.8)])
+        self.assertFalse(algo.resize_all)
+        self.assertAlmostEqual(algo.applied_scale, 0.8 / 0.98)
+
+    def test_a_small_scale_change_leaves_the_band_in_charge(self):
+        algo, orders = self._trading_algo({"a": 0.98})
+        algo.applied_scale = 0.84
+        self._scale_to(algo, 0.20 * 0.8 * 0.10 * 252 ** 0.5 / 0.20)   # 0.8 is under 10% from 0.84
+        self.assertFalse(algo.resize_all)
+        self.assertAlmostEqual(algo.applied_scale, 0.84)
+
+    def test_without_a_band_a_drifted_holding_is_left_alone(self):
+        algo = self.module.MomentumResearch()
+        algo.MODE, algo.TOP_N, algo.REBALANCE_BAND, algo.resizes = "mom", 3, None, 0
+        algo.resize_all = False
+        orders = []
+
+        class Book(dict):
+            TotalPortfolioValue = 1_000_000.0
+
+            def __iter__(self):
+                return iter([types.SimpleNamespace(Key=k, Value=v) for k, v in dict.items(self)])
+
+        algo.Portfolio = Book(a=types.SimpleNamespace(Invested=True, IsLong=True, IsShort=False,
+                                                      HoldingsValue=600_000.0))
+        algo.SetHoldings = lambda sym, w: orders.append((sym, w))
+        algo.Liquidate = lambda sym: orders.append((sym, 0))
+        algo._trade({"a": 0.33})
+        self.assertEqual(orders, [])
+
+
+class DefensiveBookTest(unittest.TestCase):
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.book = _load_template(self, "momentum/defensive.py", {}).defensive_book
+
+    def test_all_switches_off_is_equal_weight_top_n(self):
+        self.assertEqual(self.book(list("abcde"), 3), dict.fromkeys("abc", 0.98 / 3))
+
+    def test_a_sector_cap_skips_to_the_next_name_from_another_sector(self):
+        sector = {"a": 1, "b": 1, "c": 1, "d": 2, "e": None}
+        targets = self.book(list("abcde"), 3, sector=sector, sector_cap=2)
+        self.assertEqual(sorted(targets), ["a", "b", "d"])
+
+    def test_inverse_volatility_weights(self):
+        targets = self.book(["a", "b"], 2, vol={"a": 0.01, "b": 0.02}, inv_vol=True)
+        self.assertAlmostEqual(targets["a"], 0.98 * 2 / 3)
+        self.assertAlmostEqual(targets["b"], 0.98 / 3)
+
+    def test_a_pick_below_its_own_average_holds_bonds_in_its_slot(self):
+        targets = self.book(list("abc"), 2, above={"a": True, "b": False, "c": True})
+        self.assertEqual(sorted(targets), ["IEF", "a"])
+        self.assertAlmostEqual(targets["IEF"], 0.49)
+
+    def test_half_risk_off_and_a_spy_blend(self):
+        targets = self.book(list("ab"), 2, risk_off=True, risk_off_fraction=0.5, spy_blend=0.5)
+        self.assertAlmostEqual(targets["SPY"], 0.49)
+        self.assertAlmostEqual(targets["IEF"], 0.245)
+        self.assertAlmostEqual(targets["a"] + targets["b"], 0.245)
+        self.assertAlmostEqual(sum(targets.values()), 0.98)
+
+    def test_full_risk_off_is_all_bonds(self):
+        self.assertEqual(self.book(list("ab"), 2, risk_off=True), {"IEF": 0.98})
+
+
+class AlternativeScoresTest(unittest.TestCase):
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/scores.py", {})
+
+    def test_a_steady_rise_is_less_discrete_than_a_jump(self):
+        steady = [100.0 + i for i in range(11)]                 # up every day
+        jumpy = [100.0] + [99.9 - 0.1 * i for i in range(9)] + [110.0]   # down 9 days, one big jump
+        d = self.module.info_discreteness
+        self.assertAlmostEqual(d(steady), -1.0)
+        self.assertGreater(d(jumpy), d(steady))
+
+    def test_residual_score_removes_the_market_part(self):
+        moves = [0.01 if i % 3 else -0.012 for i in range(29)]
+        market, follower = [100.0], [50.0]
+        for m in moves:
+            market.append(market[-1] * (1 + m))
+            follower.append(follower[-1] * (1 + 2 * m))           # exactly 2x the market's daily return
+        self.assertIsNone(self.module.residual_score(follower, market))   # no residual left
+        drift = [m * (1.0 + 0.002 * i + (0.001 if i % 2 else -0.001)) for i, m in enumerate(market)]
+        self.assertGreater(self.module.residual_score(drift, market), 0)
+
+    def test_returns_pair_the_same_sessions_when_a_stock_has_a_gap(self):
+        nan = float("nan")
+        rows = [(10.0, 100.0), (nan, 101.0), (11.0, 102.0), (12.0, 103.0), (13.0, 104.0)]
+        stock, market = self.module.paired_window(rows, skip=1, min_rows=3)
+        self.assertEqual((stock, market), ([10.0, 11.0, 12.0], [100.0, 102.0, 103.0]))
+        self.assertEqual(self.module.paired_window(rows, skip=1, min_rows=5), ([], []))
+
+    def test_too_short_a_window_has_no_score(self):
+        self.assertIsNone(self.module.residual_score([1.0, 1.1], [1.0, 1.1]))
+
+
+class EtfRotationTest(unittest.TestCase):
+    def setUp(self):
+        self.module = _load_template(self, "etf/rotation.py", {})
+
+    def test_top_picks_equal_weight_and_a_failed_trend_check_holds_bonds(self):
+        rot = self.module.rotation_targets
+        scores = {"XLK": 0.3, "XLE": 0.2, "XLV": 0.1, "XLU": -0.1}
+        self.assertEqual(rot(scores, 2), {"XLK": 0.49, "XLE": 0.49})
+        targets = rot(scores, 3, above={"XLK": True, "XLE": False, "XLV": False})
+        self.assertAlmostEqual(targets["XLK"], 0.98 / 3)
+        self.assertAlmostEqual(targets["IEF"], 2 * 0.98 / 3)
+
+
+class LeveragedTrendTest(unittest.TestCase):
+    def setUp(self):
+        self.act = _load_template(self, "etf/rotation.py", {}).lev_trend_action
+
+    def test_a_signal_change_trades(self):
+        self.assertEqual(self.act(True, False, (2000, 1), None, True, True), "on")
+        self.assertEqual(self.act(False, True, (2000, 1), (2000, 1), True, False), "off")
+
+    def test_a_lasting_uptrend_resets_leverage_once_a_month(self):
+        self.assertIsNone(self.act(True, True, (2000, 1), (2000, 1), True, False))
+        self.assertEqual(self.act(True, True, (2000, 2), (2000, 1), True, False), "on")
+
+    def test_risk_off_retries_the_bond_fund_once_it_trades(self):
+        self.assertIsNone(self.act(False, False, (2000, 1), None, False, False))     # no IEF yet
+        self.assertEqual(self.act(False, False, (2002, 8), None, True, False), "off")
+        self.assertIsNone(self.act(False, False, (2002, 9), None, True, True))
 
 
 class TrendTemplateTest(unittest.TestCase):
