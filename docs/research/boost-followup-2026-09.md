@@ -613,9 +613,9 @@ Each was tested on the tuning years first (1999–2015; SPY 4.91% / 55.2%).
 | Momentum ranked by closeness to the 52-week high | George & Hwang (2004) | 3.28% | 46.9% |
 | Intermediate momentum (12 to 7 months ago) | Novy-Marx (2012) | 11.21% | 65.6% |
 | "Frog in the pan": steadier winners preferred | Da, Gurun & Warachka (2014) | 6.36% | 70.4% |
-| Residual (market-adjusted) momentum | after Blitz, Huij & Martens (2011) | 7.94% | 62.6% |
-| Sector ETF rotation: top 3 of 9 by 3/6/12-month return | Faber (2010) | 5.03% | 44.2% |
-| … with each ETF's own 10-month trend check | Faber (2010) | 5.89% | 31.3% |
+| Residual (market-adjusted) momentum, returns paired by session | after Blitz, Huij & Martens (2011) | 7.95% | 62.6% |
+| Sector ETF rotation: top 3 of 9 by 3/6/12-month return, **2000–2015** (SPY 4.04% / 55.2%) | Faber (2010) | 5.47% | 44.2% |
+| … with each ETF's own 10-month trend check, **2000–2015** | Faber (2010) | 6.39% | 31.0% |
 | 2× SPY on margin above its 200-day average, else bonds; reset to 2× monthly | Gayed & Bilello (2016) | 5.69% | 47.9% |
 | 1× of the same | | 4.95% | 25.4% |
 
@@ -623,8 +623,10 @@ Each was tested on the tuning years first (1999–2015; SPY 4.91% / 55.2%).
   `momentum/scores.py`; their all-off control reproduces 9.06%.
 - **Intermediate momentum** added return but no drawdown relief.
 - **The 52-week-high ranking** cut the drawdown but fell below SPY.
-- **Sector rotation with a trend check** had a shallow drawdown but beat
-  SPY by only about a point.
+- **Sector rotation** is measured from 2000. The sector ETFs began trading
+  in December 1998, and the rule needs a year of closes, so 1999 would be
+  mostly cash. With the trend check it had a shallow drawdown but beat SPY
+  by only about 2 points.
 - **The leveraged trend rule** was close to SPY once margin interest was
   paid.
 - None of these went on to a held-out run.

@@ -10,7 +10,9 @@
 #     hold the TOP sector ETFs by the average of their 3-, 6- and 12-month
 #     returns; with SMA_MONTHS set, a pick below its own SMA_MONTHS-month
 #     average holds the bond fund instead. The nine original Select Sector
-#     SPDRs, so the universe is fixed from 1999.
+#     SPDRs, so the universe is fixed. They began trading in December 1998
+#     and a 12-month return needs a year of closes, so the reported
+#     sector_rot runs are measured from January 2000 (MEASURE_FROM).
 #   lev_trend: PUBLISHED, ADAPTED -- Gayed & Bilello (2016), "Leverage for the
 #     Long Run", SSRN: hold LEVERAGE x SPY while SPY closes above its
 #     TREND_DAYS average, else the bond fund; checked daily, traded at the next

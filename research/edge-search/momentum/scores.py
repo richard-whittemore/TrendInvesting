@@ -81,6 +81,19 @@ def residual_score(stock, market):
     return sum(res) / (sd * n ** 0.5) if sd > 1e-12 else None
 
 
+def paired_window(rows, skip=21, min_rows=200):
+    """(stock closes, market closes) from ``rows`` of same-session
+    (stock, market) pairs, oldest first: sessions where either is missing are
+    dropped (so each return pairs the same two sessions), then the last
+    ``skip`` sessions are left out (the 12-1 window). Empty lists when fewer
+    than ``min_rows`` sessions remain."""
+    pairs = [(float(a), float(b)) for a, b in rows if a == a and b == b and a is not None and b is not None]
+    if len(pairs) < min_rows:
+        return [], []
+    pairs = pairs[:-skip] if skip else pairs
+    return [a for a, _ in pairs], [b for _, b in pairs]
+
+
 def defensive_book(ranked, top_n, invested=0.98, sector=None, sector_cap=None, vol=None,
                    inv_vol=False, above=None, risk_off=False, risk_off_fraction=1.0,
                    spy_blend=0.0, bond="IEF", spy="SPY"):
@@ -391,7 +404,6 @@ class MomentumScoresResearch(QCAlgorithm):
     def _alt_scores(self, mom, closes):
         """The SCORE ranking for names that have a 12-1 return."""
         out = {}
-        spy = [float(x) for x in closes[self.spy].ffill().iloc[-253:-21]]
         pool = set(sorted(mom, key=lambda s: mom[s], reverse=True)[:self.FIP_POOL])
         for sym in mom:
             px = [float(x) for x in closes[sym].dropna().iloc[-253:]]
@@ -407,7 +419,9 @@ class MomentumScoresResearch(QCAlgorithm):
                     if d is not None:
                         out[sym] = -d
             else:
-                r = residual_score(px[:-21], spy) if len(spy) == len(px[:-21]) else None
+                rows = list(zip(closes[sym].iloc[-253:], closes[self.spy].iloc[-253:]))
+                stock, market = paired_window(rows)
+                r = residual_score(stock, market)
                 if r is not None:
                     out[sym] = r
         return out

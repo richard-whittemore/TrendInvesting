@@ -492,6 +492,13 @@ class AlternativeScoresTest(unittest.TestCase):
         drift = [m * (1.0 + 0.002 * i + (0.001 if i % 2 else -0.001)) for i, m in enumerate(market)]
         self.assertGreater(self.module.residual_score(drift, market), 0)
 
+    def test_returns_pair_the_same_sessions_when_a_stock_has_a_gap(self):
+        nan = float("nan")
+        rows = [(10.0, 100.0), (nan, 101.0), (11.0, 102.0), (12.0, 103.0), (13.0, 104.0)]
+        stock, market = self.module.paired_window(rows, skip=1, min_rows=3)
+        self.assertEqual((stock, market), ([10.0, 11.0, 12.0], [100.0, 102.0, 103.0]))
+        self.assertEqual(self.module.paired_window(rows, skip=1, min_rows=5), ([], []))
+
     def test_too_short_a_window_has_no_score(self):
         self.assertIsNone(self.module.residual_score([1.0, 1.1], [1.0, 1.1]))
 

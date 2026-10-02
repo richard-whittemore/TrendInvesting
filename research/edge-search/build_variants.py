@@ -111,8 +111,8 @@ VARIANTS = {
     "S_INTER": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "inter"}),
     "S_FIP": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "fip"}),
     "S_RESID": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "resid"}),
-    "E_SECROT": ("etf/rotation.py", {"MODE": "sector_rot"}),
-    "E_SECROT_T": ("etf/rotation.py", {"MODE": "sector_rot", "SMA_MONTHS": 10}),
+    "E_SECROT": ("etf/rotation.py", {"MODE": "sector_rot", "MEASURE_FROM": (2000, 1, 1)}),
+    "E_SECROT_T": ("etf/rotation.py", {"MODE": "sector_rot", "SMA_MONTHS": 10, "MEASURE_FROM": (2000, 1, 1)}),
     "E_LEV2": ("etf/rotation.py", {"MODE": "lev_trend", "LEVERAGE": 2.0}),
     "E_LEV1": ("etf/rotation.py", {"MODE": "lev_trend", "LEVERAGE": 1.0}),
     # Momentum crash guard (volatility scaling), tuning years only
