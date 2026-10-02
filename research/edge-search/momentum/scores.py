@@ -86,7 +86,8 @@ def paired_window(rows, skip=21, min_rows=200):
     (stock, market) pairs, oldest first: sessions where either is missing are
     dropped (so each return pairs the same two sessions), then the last
     ``skip`` sessions are left out (the 12-1 window). Empty lists when fewer
-    than ``min_rows`` sessions remain."""
+    than ``min_rows`` paired sessions exist before that cut, so a non-empty
+    result has at least ``min_rows - skip`` sessions."""
     pairs = [(float(a), float(b)) for a, b in rows if a == a and b == b and a is not None and b is not None]
     if len(pairs) < min_rows:
         return [], []
