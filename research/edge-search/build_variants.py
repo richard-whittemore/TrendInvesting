@@ -105,6 +105,18 @@ VARIANTS = {
     "OOS_D_COMBO": ("momentum/defensive.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
                                                   RISK_OFF_FRACTION=0.5)),
     "OOS_D_HALF": ("momentum/defensive.py", dict(_OOS, MODE="mom_trend", RISK_OFF_FRACTION=0.5)),
+    # The unpriced-buy fix (momentum/defensive_v2.py): the headline momentum
+    # variants re-run, tuning years and held-out years
+    "F_NOFILTER": ("momentum/defensive_v2.py", {"MODE": "mom", "TOP_N": 25}),
+    "F_FULL": ("momentum/defensive_v2.py", {"MODE": "mom_trend", "TOP_N": 25}),
+    "F_HALF": ("momentum/defensive_v2.py", {"MODE": "mom_trend", "TOP_N": 25, "RISK_OFF_FRACTION": 0.5}),
+    "F_COMBO": ("momentum/defensive_v2.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                            "INV_VOL": True, "RISK_OFF_FRACTION": 0.5}),
+    "OOS_F_NOFILTER": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom")),
+    "OOS_F_FULL": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_trend")),
+    "OOS_F_HALF": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_trend", RISK_OFF_FRACTION=0.5)),
+    "OOS_F_COMBO": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                    RISK_OFF_FRACTION=0.5)),
     # Other candidates, tuning years only. S_BASE must reproduce MG_25_B.
     "S_BASE": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25}),
     "S_HIGH52": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "high52"}),
@@ -171,7 +183,7 @@ def render(template_src, params, rates):
 
 #: Templates whose long-only modes ignore VOL_TARGET: their book comes from
 #: defensive_book, which has no volatility scaling.
-NO_VOL_TARGET = ("momentum/defensive.py", "momentum/scores.py")
+NO_VOL_TARGET = ("momentum/defensive.py", "momentum/defensive_v2.py", "momentum/scores.py")
 
 
 def check_variant(template, params):
