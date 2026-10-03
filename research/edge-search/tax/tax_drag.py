@@ -149,12 +149,59 @@ def after_tax(run, start_year, st_rate=0.22, lt_rate=0.15, method="fifo",
             "tax_drag": pre - post, "unrealized_share": unrealized / last_e if last_e else 0.0}
 
 
-def main(path):
-    raw = json.load(open(path))
-    if isinstance(raw, str):
-        raw = json.loads(raw)
-    return raw
+#: (label, run name, first measured year, lot method, dividend yield taxed
+#: yearly, ignore fills). SPY buy-and-hold's monthly 98% re-sizing is not a
+#: real investor's behaviour, so its fills are ignored: only dividends are
+#: taxed until a final sale. 1.7% is roughly SPY's average yield since 1999.
+CASES = [
+    ("Momentum, half filter", "OOS_F_HALF", 2016, "fifo", 0.0, False),
+    ("Momentum, combination", "OOS_F_COMBO", 2016, "fifo", 0.0, False),
+    ("Momentum, no filter", "OOS_F_NOFILTER", 2016, "fifo", 0.0, False),
+    ("Momentum, full filter", "OOS_F_FULL", 2016, "fifo", 0.0, False),
+    ("Momentum, half filter", "F_HALF", 1999, "fifo", 0.0, False),
+    ("Momentum, combination", "F_COMBO", 1999, "fifo", 0.0, False),
+    ("Momentum, no filter", "F_NOFILTER", 1999, "fifo", 0.0, False),
+    ("Momentum, full filter", "F_FULL", 1999, "fifo", 0.0, False),
+    ("Boost on margin", "BX_SPY", 1999, "lifo", 0.017, False),
+    ("SPY buy-and-hold", "BX_SPY_BH", 1999, "fifo", 0.017, True),
+]
+RATES = [(0.22, 0.15), (0.24, 0.15), (0.12, 0.0)]
+
+
+def load(*paths):
+    """Merge exports: each maps run name -> {"fills", "equity"}."""
+    runs = {}
+    for path in paths:
+        with open(path) as f:
+            raw = json.load(f)
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        runs.update(raw)
+    return runs
+
+
+def main(*paths):
+    runs = load(*paths)
+    for st_rate, lt_rate in RATES:
+        print("\nfederal rates: short-term {:.0%}, long-term and dividends {:.0%}".format(st_rate, lt_rate))
+        print("{:<30} {:>6} {:>9} {:>8} {:>9} {:>8}".format("strategy", "from", "pre-tax", "taxable", "sold-end", "drag"))
+        for label, name, year, method, dy, no_fills in CASES:
+            if name not in runs:
+                continue
+            if not no_fills and not runs[name]["fills"]:
+                raise SystemExit("{}: no fills in the export; re-export it (an empty export would read as no tax)".format(name))
+            if not runs[name]["equity"]:
+                raise SystemExit("{}: no equity curve in the export".format(name))
+            run = {"fills": [] if no_fills else runs[name]["fills"], "equity": runs[name]["equity"]}
+            diag = {}
+            realized_by_year(run["fills"], method, diag)
+            r = after_tax(run, year, st_rate, lt_rate, method, dy, lt_rate)
+            print("{:<30} {:>6} {:>8.2f}% {:>7.2f}% {:>8.2f}% {:>7.2f}{}".format(
+                label, year, 100 * r["pre"], 100 * r["after"], 100 * r["after_sold"],
+                100 * (r["pre"] - r["after"]), "  (unmatched sells!)" if diag.get("unmatched") else ""))
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    if len(sys.argv) < 2:
+        raise SystemExit("usage: tax_drag.py EXPORT.json [EXPORT.json ...]")
+    main(*sys.argv[1:])
