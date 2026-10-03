@@ -534,6 +534,65 @@ class LeveragedTrendTest(unittest.TestCase):
         self.assertIsNone(self.act(False, False, (2002, 9), None, True, True))
 
 
+class UnpricedBuyTest(unittest.TestCase):
+    """momentum/defensive_v2.py: a target with no price yet waits, then is bought."""
+
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/defensive_v2.py", {})
+
+    def _algo(self, priced):
+        algo = self.module.MomentumResearch()
+        algo.MODE, algo.TOP_N, algo.REBALANCE_BAND = "mom", 2, 0.25
+        algo.resizes, algo.resize_all, algo.retried = 0, False, 0
+        algo.pending, algo.cash_sum, algo.cash_days = {}, 0.0, 0
+        algo.BORROW_FEE = 0.0
+        algo.spy = "SPY"
+        algo.spy_curve, algo.equity_curve = [], []
+        algo.Time = _dt.datetime(2000, 1, 3)
+        orders = []
+
+        class Securities(dict):
+            def ContainsKey(self, k):
+                return k in self
+
+        algo.Securities = Securities({k: types.SimpleNamespace(HasData=v, Price=100.0 if v else 0.0)
+                                      for k, v in priced.items()})
+
+        class Book(dict):
+            TotalPortfolioValue = 1_000_000.0
+            Cash = 500_000.0
+
+            def __iter__(self):
+                return iter([])
+
+            def __getitem__(self, k):
+                return types.SimpleNamespace(Invested=False, IsLong=False, IsShort=False, HoldingsValue=0.0)
+
+        algo.Portfolio = Book()
+        algo.SetHoldings = lambda sym, w: orders.append((sym, w))
+        algo.Liquidate = lambda sym: orders.append((sym, 0))
+        return algo, orders
+
+    def test_an_unpriced_target_waits_and_is_bought_once_priced(self):
+        algo, orders = self._algo({"a": True, "b": False})
+        algo._trade({"a": 0.49, "b": 0.49})
+        self.assertEqual(orders, [("a", 0.49)])
+        self.assertEqual(algo.pending, {"b": 0.49})
+        algo.Securities["b"] = types.SimpleNamespace(HasData=True, Price=50.0)
+        algo.OnData(types.SimpleNamespace(Bars={"SPY": types.SimpleNamespace(Close=100.0)}))
+        self.assertEqual(orders, [("a", 0.49), ("b", 0.49)])
+        self.assertEqual((algo.pending, algo.retried), ({}, 1))
+        self.assertAlmostEqual(algo.cash_sum, 0.5)
+
+    def test_a_new_rebalance_replaces_what_was_waiting(self):
+        algo, orders = self._algo({"a": False, "c": True})
+        algo._trade({"a": 0.98})
+        algo._trade({"c": 0.98})
+        self.assertEqual(algo.pending, {})
+        self.assertEqual(orders, [("c", 0.98)])
+
+
 class TrendTemplateTest(unittest.TestCase):
     def setUp(self):
         self.module = _load_template(self, "shorting/trend_template.py", {"MODE": "trend_short"})
