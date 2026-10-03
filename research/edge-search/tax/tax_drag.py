@@ -164,9 +164,13 @@ def after_tax(run, start_year, st_rate=0.22, lt_rate=0.15, method="fifo",
     years = (last_t - first_t) / (365.25 * SECONDS_PER_DAY)
     first_year = min([year_of(f[0]) for f in fills] + [start_year])
     factor, carry_st, carry_lt, dividend_basis = 1.0, 0.0, 0.0, 0.0
-    for year in sorted(y for y in ends if y >= first_year):
+    # Every year with a mark or a realized result, so a loss realized in a
+    # year the equity curve does not reach still carries forward.
+    for year in sorted(y for y in set(ends) | set(realized) if y >= first_year):
         st, lt = realized.get(year, (0.0, 0.0))
         tax, carry_st, carry_lt = year_tax(st, lt, carry_st, carry_lt, st_rate, lt_rate)
+        if year not in ends:
+            continue
         dividends = ends[year] * dividend_base * dividend_yield
         tax += dividends * dividend_rate
         dividend_basis += dividends

@@ -545,7 +545,7 @@ class UnpricedBuyTest(unittest.TestCase):
         algo = self.module.MomentumResearch()
         algo.MODE, algo.TOP_N, algo.REBALANCE_BAND = "mom", 2, 0.25
         algo.resizes, algo.resize_all, algo.retried = 0, False, 0
-        algo.pending, algo.cash_sum, algo.cash_days = {}, 0.0, 0
+        algo.pending, algo.pending_tickets, algo.cash_sum, algo.cash_days = {}, {}, 0.0, 0
         algo.BORROW_FEE = 0.0
         algo.spy = "SPY"
         algo.spy_curve, algo.equity_curve = [], []
@@ -584,7 +584,15 @@ class UnpricedBuyTest(unittest.TestCase):
 
         algo.Portfolio = Book()
         algo.Transactions = types.SimpleNamespace(GetOpenOrders=lambda sym: [1] if sym in algo.open_orders else [])
-        algo.SetHoldings = lambda sym, w: orders.append((sym, w))
+        algo.tickets = []
+
+        def set_holdings(sym, w):
+            orders.append((sym, w))
+            ticket = types.SimpleNamespace(Quantity=100, QuantityFilled=0)
+            algo.tickets.append(ticket)
+            return [ticket]
+
+        algo.SetHoldings = set_holdings
         algo.Liquidate = lambda sym: orders.append((sym, 0))
         return algo, orders
 
@@ -603,7 +611,8 @@ class UnpricedBuyTest(unittest.TestCase):
         algo.open_orders = {"b"}                      # working, not yet filled
         self._day(algo)                               # no duplicate
         self.assertEqual(len(orders), 2)
-        algo.held = {"b"}
+        algo.held, algo.open_orders = {"b"}, set()
+        algo.tickets[-1].QuantityFilled = 100
         self._day(algo)
         self.assertEqual((algo.pending, algo.retried), ({}, 1))
         self.assertAlmostEqual(algo.cash_sum, 1.5)
@@ -616,6 +625,19 @@ class UnpricedBuyTest(unittest.TestCase):
         self._day(algo)
         self.assertEqual(orders, [("b", 0.49), ("b", 0.49)])
         self.assertEqual(algo.retried, 2)
+
+    def test_a_partly_filled_retry_is_topped_up_after_the_rest_is_cancelled(self):
+        algo, orders = self._algo({"b": True})
+        algo.pending = {"b": 0.49}
+        self._day(algo)                               # submitted
+        algo.tickets[-1].QuantityFilled = 40          # 40 of 100 filled, the rest cancelled
+        algo.held = {"b"}
+        self._day(algo)                               # held, but short of the target: again
+        self.assertEqual(orders, [("b", 0.49), ("b", 0.49)])
+        self.assertEqual(algo.pending, {"b": 0.49})
+        algo.tickets[-1].QuantityFilled = 100
+        self._day(algo)
+        self.assertEqual(algo.pending, {})
 
     def test_a_new_rebalance_replaces_what_was_waiting(self):
         algo, orders = self._algo({"a": False, "c": True})

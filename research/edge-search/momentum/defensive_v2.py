@@ -10,9 +10,9 @@
 #   LEAN skips set_holdings on it ("The security does not have an accurate
 #   price as it has not yet received a bar of data"), leaving its weight in
 #   cash until the next month. Here such a target waits in PENDING and is
-#   bought on the first day the stock has a price, and stays pending until it
-#   is actually held, so an order that is cancelled or rejected is submitted
-#   again; the bond fund before July 2002 waits the same way. At the end each
+#   bought on the first day the stock has a price, and stays pending until its
+#   order has filled in full, so an order that is cancelled, rejected or only
+#   partly filled is submitted again; the bond fund before July 2002 waits the same way. At the end each
 #   open position's last price is recorded (End1, End2, ...) for the tax study. defensive.py keeps the original behaviour so its
 #   recorded runs still reproduce.
 from AlgorithmImports import *
@@ -157,6 +157,7 @@ class MomentumResearch(QCAlgorithm):
         self.resizes = 0
         self.scales = []
         self.pending = {}             # symbol -> target weight waiting for a first price
+        self.pending_tickets = {}     # symbol -> the order tickets of its latest retry
         self.retried = 0
         self.cash_sum = 0.0
         self.cash_days = 0
@@ -240,12 +241,25 @@ class MomentumResearch(QCAlgorithm):
                 self.cash_sum += float(self.Portfolio.Cash) / equity
                 self.cash_days += 1
         for sym, w in list(self.pending.items()):
-            if self.Portfolio[sym].Invested:
-                del self.pending[sym]          # bought: the wait is over
-            elif self._priced(sym) and not self.Transactions.GetOpenOrders(sym):
+            if self.Transactions.GetOpenOrders(sym):
+                continue                       # an order is still working
+            tickets = self.pending_tickets.get(sym)
+            if tickets is None:
+                done = self.Portfolio[sym].Invested
+            else:
+                done = all(abs(t.QuantityFilled) >= abs(t.Quantity) for t in tickets)
+            if done:
+                del self.pending[sym]          # bought in full: the wait is over
+                self.pending_tickets.pop(sym, None)
+            elif self._priced(sym):
                 # Priced and nothing working: submit (again, if an earlier
-                # order was cancelled or rejected). It stays pending until held.
-                self.SetHoldings(sym, w)
+                # order was cancelled, rejected or only partly filled; on a
+                # partial holding SetHoldings tops up to the target).
+                placed = self.SetHoldings(sym, w)
+                if placed is None:             # no tickets returned: judge by holdings
+                    self.pending_tickets.pop(sym, None)
+                else:
+                    self.pending_tickets[sym] = list(placed)
                 self.retried += 1
 
     @staticmethod
@@ -379,7 +393,7 @@ class MomentumResearch(QCAlgorithm):
         for kvp in self.Portfolio:
             if kvp.Value.Invested and kvp.Key not in targets:
                 self.Liquidate(kvp.Key)
-        self.pending = {}
+        self.pending, self.pending_tickets = {}, {}
         equity = float(self.Portfolio.TotalPortfolioValue)
         for sym, w in targets.items():
             h = self.Portfolio[sym]

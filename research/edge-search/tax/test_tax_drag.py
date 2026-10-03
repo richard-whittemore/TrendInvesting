@@ -129,6 +129,14 @@ class FinalSaleTest(unittest.TestCase):
         # 3,000 deducted in 1999, 2,000 carried: 2000 pays 22% on 3,000 (660), not on 5,000.
         self.assertAlmostEqual(95_000 * (1 + r["after"]) ** r["years"], 100_000 * (1 - 660 / 100_000), places=4)
 
+    def test_a_loss_in_a_year_without_an_equity_mark_still_carries(self):
+        # The equity curve starts in 2000, but a 1999 trade realized -5,000.
+        fills = [(T0 - 300 * DAY, "A", 100, 100.0, 0.0), (T0 - 200 * DAY, "A", -100, 50.0, 0.0),
+                 (T0 + 10 * DAY, "B", 100, 100.0, 0.0), (T0 + 20 * DAY, "B", -100, 150.0, 0.0)]
+        equity = [(T0, 95_000.0), (T0 + 364 * DAY, 100_000.0), (T0 + 800 * DAY, 100_000.0)]
+        r = td.after_tax({"fills": fills, "equity": equity}, 2000, capital=100_000.0)
+        self.assertAlmostEqual(95_000 * (1 + r["after"]) ** r["years"], 100_000 * (1 - 660 / 100_000), places=4)
+
 
 if __name__ == "__main__":
     unittest.main()
