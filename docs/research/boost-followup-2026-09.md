@@ -670,7 +670,9 @@ is bought on the first day the stock has one, normally the next day. The
 bond fund waits the same way until IEF began trading in July 2002. Each
 run now reports its average cash share: about 3% on the held-out years.
 The tuning years show 9–18%, because their bond share before July 2002
-had no fund to go to.
+had no fund to go to. A retried order now waits until the position is
+actually held, so a fill that is still pending is never ordered twice. All
+eight runs were re-run with that change and gave identical results.
 
 | Headline version, fixed | 1999–2015 CAGR / worst drawdown | 2016–mid-2026 CAGR / worst drawdown | As originally run (1999–2015; 2016+) |
 | --- | --- | --- | --- |
@@ -727,9 +729,10 @@ Each strategy's own CAGR is shown below, less its tax cost.
 | Boost on margin, 1999–mid-2026 | 10.32% | 9.59% | 0.72 |
 | SPY buy-and-hold, 1999–mid-2026 | 8.46% | 8.18% | 0.28 |
 
-- **Selling everything at the end** adds up to about 0.8 points more for
-  momentum (little on the tuning years, which end mostly realized), and
-  about 0.5–0.6 for Boost and SPY, whose gains have built up untaxed.
+- **Selling everything at the end**, each open lot taxed on its own gain
+  and holding period, costs 0.2–0.9 points more for momentum on the
+  held-out years (nothing on the tuning years, which end fully realized),
+  and about 0.4–0.5 for Boost and SPY, whose gains have built up untaxed.
 - **At 24% / 15%** the costs rise by about 0.3 points.
 - **At 12% / 0%** (a lower bracket) they roughly halve: momentum 0.8–2.0,
   Boost 0.2, SPY 0.
@@ -745,7 +748,7 @@ Each strategy's own CAGR is shown below, less its tax cost.
 - Margin Boost needs a taxable account, and its tax cost is small.
 - The leveraged-fund version of Boost fits an IRA.
 
-## 5. What running Boost would take## 5. What running Boost would take
+## 5. What running Boost would take
 
 This section gathers facts for the owner's own decision. It is not a
 recommendation.
@@ -858,6 +861,11 @@ backtests cannot test.
   - Export the fills from each run's orders (every order: QuantConnect may
     return an empty first page until it has prepared them).
   - Export the equity from its "Strategy Equity" chart.
+  - Export the end prices from the run's `End1`, `End2`, … statistics
+    (`defensive_v2.py` writes each open position as `security id=price`),
+    as `end_prices` keyed the same way as the fills. Open lots at those
+    prices should add up to the run's reported holdings; they do to the
+    cent in all eight momentum runs.
   - The script refuses a run with no fills, so an empty export cannot read
     as no tax.
 - **Tests.** `make research-test` runs `research/edge-search/test_followup.py`,

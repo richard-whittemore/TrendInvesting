@@ -10,8 +10,10 @@
 #   LEAN skips set_holdings on it ("The security does not have an accurate
 #   price as it has not yet received a bar of data"), leaving its weight in
 #   cash until the next month. Here such a target waits in PENDING and is
-#   bought on the first day the stock has a price; the bond fund before July
-#   2002 waits the same way. defensive.py keeps the original behaviour so its
+#   bought on the first day the stock has a price, and stays pending until it
+#   is actually held, so an order that is cancelled or rejected is submitted
+#   again; the bond fund before July 2002 waits the same way. At the end each
+#   open position's last price is recorded (End1, End2, ...) for the tax study. defensive.py keeps the original behaviour so its
 #   recorded runs still reproduce.
 from AlgorithmImports import *
 from datetime import date
@@ -238,9 +240,12 @@ class MomentumResearch(QCAlgorithm):
                 self.cash_sum += float(self.Portfolio.Cash) / equity
                 self.cash_days += 1
         for sym, w in list(self.pending.items()):
-            if self._priced(sym):
+            if self.Portfolio[sym].Invested:
+                del self.pending[sym]          # bought: the wait is over
+            elif self._priced(sym) and not self.Transactions.GetOpenOrders(sym):
+                # Priced and nothing working: submit (again, if an earlier
+                # order was cancelled or rejected). It stays pending until held.
                 self.SetHoldings(sym, w)
-                del self.pending[sym]
                 self.retried += 1
 
     @staticmethod
@@ -403,6 +408,18 @@ class MomentumResearch(QCAlgorithm):
             cagr, mdd, "{:.4f}".format(cagr / mdd) if mdd else "n/a")
 
     def OnEndOfAlgorithm(self):
+        # Each open position's last price, so a tax study can value every open
+        # lot at the end ("End1", "End2", ...: "<security id>=<price>;" pairs).
+        pairs = ["{}={:.6f}".format(kvp.Key.ID, float(self.Securities[kvp.Key].Price))
+                 for kvp in self.Portfolio if kvp.Value.Invested]
+        chunk, n = [], 1
+        for pair in pairs:
+            if len(";".join(chunk + [pair])) > 180:
+                self.SetRuntimeStatistic("End{}".format(n), ";".join(chunk))
+                chunk, n = [], n + 1
+            chunk.append(pair)
+        if chunk:
+            self.SetRuntimeStatistic("End{}".format(n), ";".join(chunk))
         spans = [("OVERALL", date(*self.MEASURE_FROM), date(*self.END_DATE)),
                  ("1999-02", date(1999, 1, 1), date(2002, 12, 31)),
                  ("2003-07", date(2003, 1, 1), date(2007, 12, 31)),

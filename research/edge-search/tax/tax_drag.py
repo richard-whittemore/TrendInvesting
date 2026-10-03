@@ -11,16 +11,21 @@ Model, deliberately simple and stated in the report:
   * Lots are matched FIFO (the brokers' default) or LIFO (the newest lots
     first, which is how Boost sells only its extra shares and keeps the core
     position). Fees are added to cost or taken from proceeds.
-  * Held more than 365 days is long-term, otherwise short-term.
+  * Long-term means held more than one year by the calendar (IRS Publication
+    550: a sale on the anniversary is still short-term).
   * Each year's short- and long-term results are netted the IRS way: within
     each kind, then across; a net loss deducts up to LOSS_LIMIT against
     ordinary income and the rest carries forward with its character.
   * Tax is paid from the account at each year end, so after-tax wealth is the
     pre-tax path times the product over years of (1 - tax / year-end equity).
   * Prices are dividend-adjusted, so a sale's gain includes the dividends
-    received while held; an unsold position's dividends are untaxed here
-    unless DIVIDEND_YIELD is set, which taxes that yield on the year-end value
-    of the positions still held at the dividend rate (used for SPY).
+    received while held. For SPY (Boost and buy-and-hold) a dividend yield is
+    taxed each year on the SPY held (98% of equity) and added to the cost
+    basis, so the final sale does not tax it again. For momentum stocks no
+    separate dividend is modelled: their dividends ride inside the sale gains.
+  * A run's open lots are valued at its recorded end prices, or, for a
+    single-symbol run, at the price implied by its final holdings (equity
+    less cash, cash net of any financing paid outside the fills).
 """
 import json
 import sys
@@ -35,12 +40,25 @@ def year_of(t):
     return datetime.fromtimestamp(t, tz=timezone.utc).year
 
 
+def long_term(bought, sold):
+    """IRS Publication 550: long-term if held more than one year, counting
+    from the day after purchase, so a sale on the purchase date's anniversary
+    is still short-term. A February 29 purchase's anniversary is February 28."""
+    a = datetime.fromtimestamp(bought, tz=timezone.utc).date()
+    b = datetime.fromtimestamp(sold, tz=timezone.utc).date()
+    try:
+        anniversary = a.replace(year=a.year + 1)
+    except ValueError:
+        anniversary = a.replace(year=a.year + 1, day=28)
+    return b > anniversary
+
+
 def realized_by_year(fills, method="fifo", diag=None):
     """{year: [short-term gain, long-term gain]} from signed fills
-    (time, symbol, qty, price, fee), and {symbol: open lots} at the end.
+    (time, symbol, qty, price, fee, ...), and {symbol: open lots} at the end.
     Long positions only: a sell beyond the lots held is ignored (short sales
     are not modelled); its quantity is added to ``diag["unmatched"]`` when a
-    ``diag`` dict is given, so an export keyed by a changing ticker shows up."""
+    ``diag`` dict is given, and main() refuses such a run."""
     lots = defaultdict(deque)          # symbol -> deque of [qty, unit cost, time]
     out = defaultdict(lambda: [0.0, 0.0])
     for fill in sorted(fills, key=lambda f: f[0]):
@@ -55,8 +73,7 @@ def realized_by_year(fills, method="fifo", diag=None):
             lot = book[-1] if method == "lifo" else book[0]
             take = min(remaining, lot[0])
             gain = take * (price - unit_fee - lot[1])
-            long_term = (t - lot[2]) > 365 * SECONDS_PER_DAY
-            out[year_of(t)][1 if long_term else 0] += gain
+            out[year_of(t)][1 if long_term(lot[2], t) else 0] += gain
             lot[0] -= take
             remaining -= take
             if lot[0] <= 1e-9:
@@ -107,14 +124,37 @@ def year_end_equity(equity):
     return out
 
 
+def end_prices_for(run, lots, last_e, capital):
+    """{symbol: last price} for the open lots: the run's recorded end prices,
+    or for a single-symbol run the price implied by its holdings (final
+    equity less cash, where cash is the fills' cash less any financing the
+    run paid outside its fills)."""
+    if run.get("end_prices"):
+        return run["end_prices"]
+    open_syms = {sym: sum(q for q, _, _ in book) for sym, book in lots.items()
+                 if sum(q for q, _, _ in book) > 1e-9}
+    if not open_syms:
+        return {}
+    if len(open_syms) > 1:
+        raise SystemExit("open lots in several symbols and no recorded end prices")
+    (sym, qty), = open_syms.items()
+    cash = cash_at_end(run["fills"], capital) - run.get("financing", 0.0)
+    return {sym: (last_e - cash) / qty}
+
+
 def after_tax(run, start_year, st_rate=0.22, lt_rate=0.15, method="fifo",
-              dividend_yield=0.0, dividend_rate=0.15, capital=1_000_000.0):
+              dividend_yield=0.0, dividend_rate=0.15, capital=1_000_000.0, dividend_base=1.0):
     """Pre- and after-tax CAGR from ``start_year`` to the run's last mark:
     "after" keeps holding at the end (unrealized gains untaxed), "after_sold"
-    sells everything at the end. ``capital`` is the run's starting cash: the
-    unrealized gain at the end is the final equity less that capital and
-    every realized gain, split short/long by the cost of the open lots older
-    than a year."""
+    sells everything at the end, each open lot at its own gain and holding
+    period. Tax years from the run's first trade are processed so a loss in a
+    warm-up year carries forward; only years from ``start_year`` count.
+
+    Dividends (``dividend_yield`` x ``dividend_base`` x year-end equity, the
+    base being the share of equity in the dividend payer) are taxed each year
+    and, being reinvested, added to the cost basis, so the final sale does not
+    tax them again (prices are dividend-adjusted, so they are inside the sale
+    price)."""
     fills, equity = run["fills"], run["equity"]
     realized, lots = realized_by_year(fills, method)
     ends = year_end_equity(equity)
@@ -122,37 +162,43 @@ def after_tax(run, start_year, st_rate=0.22, lt_rate=0.15, method="fifo",
     first_t, first_e = marks[0]
     last_t, last_e = marks[-1]
     years = (last_t - first_t) / (365.25 * SECONDS_PER_DAY)
-    factor, carry_st, carry_lt = 1.0, 0.0, 0.0
-    for year in sorted(y for y in ends if y >= start_year):
+    first_year = min([year_of(f[0]) for f in fills] + [start_year])
+    factor, carry_st, carry_lt, dividend_basis = 1.0, 0.0, 0.0, 0.0
+    for year in sorted(y for y in ends if y >= first_year):
         st, lt = realized.get(year, (0.0, 0.0))
         tax, carry_st, carry_lt = year_tax(st, lt, carry_st, carry_lt, st_rate, lt_rate)
-        if dividend_yield:
-            tax += ends[year] * dividend_yield * dividend_rate
-        if ends[year] > 0:
+        dividends = ends[year] * dividend_base * dividend_yield
+        tax += dividends * dividend_rate
+        dividend_basis += dividends
+        if year >= start_year and ends[year] > 0:
             factor *= max(0.0, 1.0 - tax / ends[year])
-    unrealized = last_e - capital - sum(a + b for a, b in realized.values())
-    old = young = 0.0
-    for book in lots.values():
+    prices = end_prices_for(run, lots, last_e, capital)
+    st_u = lt_u = 0.0
+    for sym, book in lots.items():
         for qty, cost, t in book:
-            if qty > 1e-9:
-                if (last_t - t) > 365 * SECONDS_PER_DAY:
-                    old += qty * cost
-                else:
-                    young += qty * cost
-    share_lt = old / (old + young) if old + young > 0 else 1.0
-    final_tax, _, _ = year_tax(unrealized * (1 - share_lt), unrealized * share_lt,
-                               carry_st, carry_lt, st_rate, lt_rate, loss_limit=0.0)
+            if qty <= 1e-9:
+                continue
+            if sym not in prices:
+                raise SystemExit("no end price for open lot in {}".format(sym))
+            gain = qty * (prices[sym] - cost)
+            if long_term(t, last_t):
+                lt_u += gain
+            else:
+                st_u += gain
+    lt_u -= dividend_basis
+    final_tax, _, _ = year_tax(st_u, lt_u, carry_st, carry_lt, st_rate, lt_rate, loss_limit=0.0)
     pre = (last_e / first_e) ** (1 / years) - 1
     post = (last_e * factor / first_e) ** (1 / years) - 1
     post_sold = (factor * (last_e - max(0.0, final_tax)) / first_e) ** (1 / years) - 1
     return {"pre": pre, "after": post, "after_sold": post_sold, "years": years,
-            "tax_drag": pre - post, "unrealized_share": unrealized / last_e if last_e else 0.0}
+            "tax_drag": pre - post}
 
 
 #: (label, run name, first measured year, lot method, dividend yield taxed
-#: yearly, ignore fills). SPY buy-and-hold's monthly 98% re-sizing is not a
-#: real investor's behaviour, so its fills are ignored: only dividends are
-#: taxed until a final sale. 1.7% is roughly SPY's average yield since 1999.
+#: yearly, initial purchase only). SPY buy-and-hold's monthly 98% re-sizing is
+#: not a real investor's behaviour, so only its first purchase is kept: one
+#: lot, taxed on dividends yearly and on its gain at the final sale. 1.7% is
+#: roughly SPY's average yield since 1999.
 CASES = [
     ("Momentum, half filter", "OOS_F_HALF", 2016, "fifo", 0.0, False),
     ("Momentum, combination", "OOS_F_COMBO", 2016, "fifo", 0.0, False),
@@ -188,17 +234,23 @@ def main(*paths):
         for label, name, year, method, dy, no_fills in CASES:
             if name not in runs:
                 continue
-            if not no_fills and not runs[name]["fills"]:
+            if not runs[name]["fills"]:
                 raise SystemExit("{}: no fills in the export; re-export it (an empty export would read as no tax)".format(name))
             if not runs[name]["equity"]:
                 raise SystemExit("{}: no equity curve in the export".format(name))
-            run = {"fills": [] if no_fills else runs[name]["fills"], "equity": runs[name]["equity"]}
+            fills = sorted(runs[name]["fills"], key=lambda f: f[0])
+            run = {"fills": fills[:1] if no_fills else fills, "equity": runs[name]["equity"]}
             diag = {}
             realized_by_year(run["fills"], method, diag)
-            r = after_tax(run, year, st_rate, lt_rate, method, dy, lt_rate)
-            print("{:<30} {:>6} {:>8.2f}% {:>7.2f}% {:>8.2f}% {:>7.2f}{}".format(
-                label, year, 100 * r["pre"], 100 * r["after"], 100 * r["after_sold"],
-                100 * (r["pre"] - r["after"]), "  (unmatched sells!)" if diag.get("unmatched") else ""))
+            if diag.get("unmatched"):
+                raise SystemExit("{}: {:.0f} shares sold with no matching purchase; reconcile the export first".format(
+                    name, diag["unmatched"]))
+            for key in ("end_prices", "financing"):
+                if key in runs[name]:
+                    run[key] = runs[name][key]
+            r = after_tax(run, year, st_rate, lt_rate, method, dy, lt_rate, dividend_base=0.98 if dy else 1.0)
+            print("{:<30} {:>6} {:>8.2f}% {:>7.2f}% {:>8.2f}% {:>7.2f}".format(
+                label, year, 100 * r["pre"], 100 * r["after"], 100 * r["after_sold"], 100 * (r["pre"] - r["after"])))
 
 
 if __name__ == "__main__":

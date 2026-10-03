@@ -42,6 +42,18 @@ class RealizedTest(unittest.TestCase):
         self.assertEqual(lots["A"][0][0], 3)
 
 
+class HoldingPeriodTest(unittest.TestCase):
+    def test_the_anniversary_is_still_short_term(self):
+        bought = td.datetime(2021, 2, 5, tzinfo=td.timezone.utc).timestamp()
+        self.assertFalse(td.long_term(bought, td.datetime(2022, 2, 5, tzinfo=td.timezone.utc).timestamp()))
+        self.assertTrue(td.long_term(bought, td.datetime(2022, 2, 6, tzinfo=td.timezone.utc).timestamp()))
+
+    def test_a_leap_day_purchase(self):
+        bought = td.datetime(2024, 2, 29, tzinfo=td.timezone.utc).timestamp()
+        self.assertFalse(td.long_term(bought, td.datetime(2025, 2, 28, tzinfo=td.timezone.utc).timestamp()))
+        self.assertTrue(td.long_term(bought, td.datetime(2025, 3, 1, tzinfo=td.timezone.utc).timestamp()))
+
+
 class YearTaxTest(unittest.TestCase):
     def test_gains_of_both_kinds(self):
         self.assertEqual(td.year_tax(1000, 2000, 0, 0, 0.22, 0.15), (220 + 300, 0.0, 0.0))
@@ -80,6 +92,42 @@ class AfterTaxTest(unittest.TestCase):
     def test_an_ira_is_the_pre_tax_result(self):
         r = td.after_tax(self._run(100), 2000, st_rate=0.0, lt_rate=0.0)
         self.assertAlmostEqual(r["after"], r["pre"])
+
+
+class FinalSaleTest(unittest.TestCase):
+    def test_each_open_lot_is_taxed_on_its_own_gain_and_holding_period(self):
+        # Old lot: 900 shares at 100, worth 100 (no gain). Young lot: 100 shares at 100, worth 200.
+        end = T0 + 800 * DAY
+        fills = [(T0, "OLD", 900, 100.0, 0.0), (end - 30 * DAY, "NEW", 100, 100.0, 0.0)]
+        run = {"fills": fills, "equity": [(T0, 100_000.0), (end, 110_000.0)],
+               "end_prices": {"OLD": 100.0, "NEW": 200.0}}
+        r = td.after_tax(run, 2000, st_rate=0.22, lt_rate=0.15, capital=100_000.0)
+        # All 10,000 of gain is short-term: 2,200 of tax on the final sale.
+        self.assertAlmostEqual(110_000 * (1 + r["after_sold"]) ** r["years"] / (1 + r["after"]) ** r["years"],
+                               110_000 - 2_200, places=0)
+
+    def test_a_single_symbol_run_is_valued_from_its_holdings_net_of_financing(self):
+        fills = [(T0, "SPY", 1000, 100.0, 0.0)]
+        run = {"fills": fills, "equity": [(T0, 100_000.0), (T0 + 800 * DAY, 140_000.0)], "financing": 10_000.0}
+        prices = td.end_prices_for(run, td.realized_by_year(fills)[1], 140_000.0, 100_000.0)
+        # Cash is 0 from the fills, -10,000 after financing: holdings are worth 150,000.
+        self.assertAlmostEqual(prices["SPY"], 150.0)
+
+    def test_dividends_are_taxed_yearly_and_not_again_on_the_final_sale(self):
+        fills = [(T0, "SPY", 1000, 100.0, 0.0)]
+        equity = [(T0, 100_000.0), (T0 + 364 * DAY, 100_000.0), (T0 + 800 * DAY, 100_000.0)]
+        run = {"fills": fills, "equity": equity, "end_prices": {"SPY": 100.0}}
+        r = td.after_tax(run, 2000, dividend_yield=0.02, dividend_rate=0.15, capital=100_000.0, dividend_base=1.0)
+        self.assertLess(r["after"], r["pre"])
+        self.assertGreaterEqual(r["after_sold"], r["after"] - 1e-12)   # no gain left to tax at the end
+
+    def test_a_warm_up_year_loss_carries_into_the_first_measured_year(self):
+        fills = [(T0 - 300 * DAY, "A", 100, 100.0, 0.0), (T0 - 200 * DAY, "A", -100, 50.0, 0.0),     # 1999: -5,000
+                 (T0 + 10 * DAY, "B", 100, 100.0, 0.0), (T0 + 20 * DAY, "B", -100, 150.0, 0.0)]      # 2000: +5,000
+        equity = [(T0 - 300 * DAY, 100_000.0), (T0, 95_000.0), (T0 + 364 * DAY, 100_000.0), (T0 + 800 * DAY, 100_000.0)]
+        r = td.after_tax({"fills": fills, "equity": equity}, 2000, capital=100_000.0)
+        # 3,000 deducted in 1999, 2,000 carried: 2000 pays 22% on 3,000 (660), not on 5,000.
+        self.assertAlmostEqual(95_000 * (1 + r["after"]) ** r["years"], 100_000 * (1 - 660 / 100_000), places=4)
 
 
 if __name__ == "__main__":

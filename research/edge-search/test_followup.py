@@ -569,21 +569,53 @@ class UnpricedBuyTest(unittest.TestCase):
             def __getitem__(self, k):
                 return types.SimpleNamespace(Invested=False, IsLong=False, IsShort=False, HoldingsValue=0.0)
 
+        algo.held, algo.open_orders = set(), set()
+
+        class Book(dict):
+            TotalPortfolioValue = 1_000_000.0
+            Cash = 500_000.0
+
+            def __iter__(self):
+                return iter([])
+
+            def __getitem__(self, k):
+                return types.SimpleNamespace(Invested=k in algo.held, IsLong=k in algo.held, IsShort=False,
+                                             HoldingsValue=0.0)
+
         algo.Portfolio = Book()
+        algo.Transactions = types.SimpleNamespace(GetOpenOrders=lambda sym: [1] if sym in algo.open_orders else [])
         algo.SetHoldings = lambda sym, w: orders.append((sym, w))
         algo.Liquidate = lambda sym: orders.append((sym, 0))
         return algo, orders
 
-    def test_an_unpriced_target_waits_and_is_bought_once_priced(self):
+    def _day(self, algo):
+        algo.OnData(types.SimpleNamespace(Bars={"SPY": types.SimpleNamespace(Close=100.0)}))
+
+    def test_an_unpriced_target_waits_until_priced_and_then_until_held(self):
         algo, orders = self._algo({"a": True, "b": False})
         algo._trade({"a": 0.49, "b": 0.49})
         self.assertEqual(orders, [("a", 0.49)])
         self.assertEqual(algo.pending, {"b": 0.49})
         algo.Securities["b"] = types.SimpleNamespace(HasData=True, Price=50.0)
-        algo.OnData(types.SimpleNamespace(Bars={"SPY": types.SimpleNamespace(Close=100.0)}))
+        self._day(algo)                               # priced: submitted
         self.assertEqual(orders, [("a", 0.49), ("b", 0.49)])
+        self.assertEqual(algo.pending, {"b": 0.49})
+        algo.open_orders = {"b"}                      # working, not yet filled
+        self._day(algo)                               # no duplicate
+        self.assertEqual(len(orders), 2)
+        algo.held = {"b"}
+        self._day(algo)
         self.assertEqual((algo.pending, algo.retried), ({}, 1))
-        self.assertAlmostEqual(algo.cash_sum, 0.5)
+        self.assertAlmostEqual(algo.cash_sum, 1.5)
+
+    def test_a_cancelled_retry_is_submitted_again(self):
+        algo, orders = self._algo({"b": True})
+        algo.pending = {"b": 0.49}
+        algo.open_orders = set()                      # the earlier order died, nothing held
+        self._day(algo)
+        self._day(algo)
+        self.assertEqual(orders, [("b", 0.49), ("b", 0.49)])
+        self.assertEqual(algo.retried, 2)
 
     def test_a_new_rebalance_replaces_what_was_waiting(self):
         algo, orders = self._algo({"a": False, "c": True})
