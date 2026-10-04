@@ -670,9 +670,11 @@ is bought on the first day the stock has one, normally the next day. The
 bond fund waits the same way until IEF began trading in July 2002. Each
 run now reports its average cash share: about 3% on the held-out years.
 The tuning years show 9–18%, because their bond share before July 2002
-had no fund to go to. A retried order now waits until the position is
-actually held, so a fill that is still pending is never ordered twice. All
-eight runs were re-run with that change and gave identical results.
+had no fund to go to. A retried target now stays on the list until its
+order has filled in full, so a fill that is still pending is never ordered
+twice, and a partly filled order is topped up. All eight runs were re-run
+with each of these changes and gave identical results, to the cent of
+their final holdings.
 
 | Headline version, fixed | 1999–2015 CAGR / worst drawdown | 2016–mid-2026 CAGR / worst drawdown | As originally run (1999–2015; 2016+) |
 | --- | --- | --- | --- |
