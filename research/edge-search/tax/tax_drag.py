@@ -170,6 +170,9 @@ def after_tax(run, start_year, st_rate=0.22, lt_rate=0.15, method="fifo",
         st, lt = realized.get(year, (0.0, 0.0))
         tax, carry_st, carry_lt = year_tax(st, lt, carry_st, carry_lt, st_rate, lt_rate)
         if year not in ends:
+            if year >= start_year:
+                raise SystemExit("no equity mark in {}, a measured year with trades; "
+                                 "re-export the equity curve".format(year))
             continue
         dividends = ends[year] * dividend_base * dividend_yield
         tax += dividends * dividend_rate

@@ -584,13 +584,26 @@ class UnpricedBuyTest(unittest.TestCase):
 
         algo.Portfolio = Book()
         algo.Transactions = types.SimpleNamespace(GetOpenOrders=lambda sym: [1] if sym in algo.open_orders else [])
-        algo.tickets = []
+        algo.tickets, algo.shares = [], {}         # shares: symbol -> quantity held
+        algo.target_shares = 100                     # what each target weight comes to
 
         def set_holdings(sym, w):
+            # Like LEAN: order the difference between the target and what is held;
+            # nothing to order returns no tickets.
             orders.append((sym, w))
-            ticket = types.SimpleNamespace(Quantity=100, QuantityFilled=0)
+            missing = algo.target_shares - algo.shares.get(sym, 0)
+            if missing == 0:
+                return []
+            ticket = types.SimpleNamespace(Quantity=missing, QuantityFilled=0)
             algo.tickets.append(ticket)
             return [ticket]
+
+        def fill(sym, qty):
+            algo.tickets[-1].QuantityFilled = qty
+            algo.shares[sym] = algo.shares.get(sym, 0) + qty
+            algo.held.add(sym)
+
+        algo.fill = fill
 
         algo.SetHoldings = set_holdings
         algo.Liquidate = lambda sym: orders.append((sym, 0))
@@ -611,8 +624,8 @@ class UnpricedBuyTest(unittest.TestCase):
         algo.open_orders = {"b"}                      # working, not yet filled
         self._day(algo)                               # no duplicate
         self.assertEqual(len(orders), 2)
-        algo.held, algo.open_orders = {"b"}, set()
-        algo.tickets[-1].QuantityFilled = 100
+        algo.open_orders = set()
+        algo.fill("b", 100)
         self._day(algo)
         self.assertEqual((algo.pending, algo.retried), ({}, 1))
         self.assertAlmostEqual(algo.cash_sum, 1.5)
@@ -629,15 +642,24 @@ class UnpricedBuyTest(unittest.TestCase):
     def test_a_partly_filled_retry_is_topped_up_after_the_rest_is_cancelled(self):
         algo, orders = self._algo({"b": True})
         algo.pending = {"b": 0.49}
-        self._day(algo)                               # submitted
-        algo.tickets[-1].QuantityFilled = 40          # 40 of 100 filled, the rest cancelled
-        algo.held = {"b"}
+        self._day(algo)                               # submitted for 100
+        algo.fill("b", 40)                            # 40 filled, the rest cancelled
         self._day(algo)                               # held, but short of the target: again
         self.assertEqual(orders, [("b", 0.49), ("b", 0.49)])
+        self.assertEqual(algo.tickets[-1].Quantity, 60)   # only the missing shares
         self.assertEqual(algo.pending, {"b": 0.49})
-        algo.tickets[-1].QuantityFilled = 100
+        algo.fill("b", 60)
         self._day(algo)
         self.assertEqual(algo.pending, {})
+
+    def test_a_retry_that_places_no_order_stays_pending_until_held(self):
+        algo, orders = self._algo({"b": True})
+        algo.pending = {"b": 0.49}
+        algo.target_shares = 0                        # the target rounds to no shares yet
+        self._day(algo)
+        self._day(algo)
+        self.assertEqual(algo.pending, {"b": 0.49})   # not dropped: nothing was bought
+        self.assertEqual(len(orders), 2)
 
     def test_a_new_rebalance_replaces_what_was_waiting(self):
         algo, orders = self._algo({"a": False, "c": True})

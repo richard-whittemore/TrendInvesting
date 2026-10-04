@@ -244,7 +244,7 @@ class MomentumResearch(QCAlgorithm):
             if self.Transactions.GetOpenOrders(sym):
                 continue                       # an order is still working
             tickets = self.pending_tickets.get(sym)
-            if tickets is None:
+            if not tickets:                    # never ordered, or no order placed
                 done = self.Portfolio[sym].Invested
             else:
                 done = all(abs(t.QuantityFilled) >= abs(t.Quantity) for t in tickets)
@@ -255,11 +255,7 @@ class MomentumResearch(QCAlgorithm):
                 # Priced and nothing working: submit (again, if an earlier
                 # order was cancelled, rejected or only partly filled; on a
                 # partial holding SetHoldings tops up to the target).
-                placed = self.SetHoldings(sym, w)
-                if placed is None:             # no tickets returned: judge by holdings
-                    self.pending_tickets.pop(sym, None)
-                else:
-                    self.pending_tickets[sym] = list(placed)
+                self.pending_tickets[sym] = list(self.SetHoldings(sym, w) or [])
                 self.retried += 1
 
     @staticmethod

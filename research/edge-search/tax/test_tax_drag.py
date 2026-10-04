@@ -137,6 +137,13 @@ class FinalSaleTest(unittest.TestCase):
         r = td.after_tax({"fills": fills, "equity": equity}, 2000, capital=100_000.0)
         self.assertAlmostEqual(95_000 * (1 + r["after"]) ** r["years"], 100_000 * (1 - 660 / 100_000), places=4)
 
+    def test_a_measured_year_without_an_equity_mark_is_refused(self):
+        # A 2001 gain, but the equity curve skips 2001: its tax could not be applied.
+        fills = [(T0 + 400 * DAY, "A", 100, 100.0, 0.0), (T0 + 410 * DAY, "A", -100, 150.0, 0.0)]
+        equity = [(T0, 100_000.0), (T0 + 364 * DAY, 100_000.0), (T0 + 800 * DAY, 105_000.0)]
+        with self.assertRaises(SystemExit):
+            td.after_tax({"fills": fills, "equity": equity}, 2000, capital=100_000.0)
+
 
 if __name__ == "__main__":
     unittest.main()
