@@ -76,12 +76,13 @@ research-test:
 	python3 -m py_compile research/qc-cloud-futures/main.py
 	cd research/edge-search/timing && python3 -m unittest discover -s . -p "test_*.py"
 	cd research/edge-search && python3 -m unittest test_followup
+	cd research/edge-search/tax && python3 -m unittest test_tax_drag
 	python3 -m py_compile research/edge-search/boost/template.py research/edge-search/boost/mix_template.py \
 		research/edge-search/shorting/trend_template.py research/edge-search/shorting/factors_ls.py \
 		research/edge-search/futures/carry.py research/edge-search/futures/blend.py \
 		research/edge-search/momentum/momentum.py research/edge-search/boost/lev_etf_template.py \
 		research/edge-search/momentum/defensive.py research/edge-search/momentum/scores.py \
-		research/edge-search/etf/rotation.py
+		research/edge-search/etf/rotation.py research/edge-search/momentum/defensive_v2.py
 	python3 -m py_compile research/edge-search/etf-trend/main.py research/edge-search/etf-trend/main_oos.py \
 		research/edge-search/factors/main.py research/edge-search/timing/main.py \
 		research/edge-search/riskparity/main.py research/edge-search/bh-rsp/main.py

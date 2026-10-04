@@ -34,6 +34,18 @@ data, with the limits listed under "Caveats".
 - **Futures carry** worked from 1985 to 2015 and then failed after 2016.
 - **Shorting the index did not help.** It lost money against simply
   moving to cash.
+- **A correction (October 2026): every stock-picking figure below was
+  understated.** The backtests skipped buying any stock that joined the
+  universe on the rebalance day, so that money sat in cash; in about a
+  third of months the book was 20–40% cash. The fixed figures for the
+  headline momentum versions are in "The unpriced-buy fix" (section 4).
+  The conclusions below hold, with somewhat higher returns and deeper
+  drawdowns. Tables elsewhere in section 4 keep the figures as originally
+  run.
+- **Taxes:** in a taxable account the momentum versions lose about 2–4
+  percentage points a year to federal tax (most gains are short-term),
+  Boost about 0.7 and SPY buy-and-hold about 0.3. In an IRA there is no
+  such cost ("Taxes: taxable account or IRA").
 - **Concentrated stock momentum was the strongest result of the whole
   search, but also the riskiest.** Long the 25 strongest stocks, rebalanced
   monthly, returned 27.6% a year on the held-out years after 0.2% slippage
@@ -631,6 +643,113 @@ Each was tested on the tuning years first (1999–2015; SPY 4.91% / 55.2%).
   paid.
 - None of these went on to a held-out run.
 
+### The unpriced-buy fix
+
+**What went wrong.** Each stock-picking script rebalances at 8:00 on the
+first trading day of the month, from a universe chosen that same day. A
+stock that joined the universe that morning has no price yet, and LEAN
+skips the order ("The security does not have an accurate price as it has
+not yet received a bar of data"). Its weight then sat in cash, earning
+nothing, until the next month.
+
+Rebuilding the holdings from the fills shows how often this happened:
+- the 1999–2015 no-filter run held 15–20 names with 20–40% cash in 62 of
+  its 203 months;
+- the 2016+ half-filter run did so in 39 of 138.
+
+No order was rejected; the orders were simply never placed.
+
+**Affected:** every stock-universe result in this report and the main
+report. That covers momentum, the factors, the long/short books, the
+drawdown controls and the alternative rankings. Boost, the ETF rules and
+the futures studies trade instruments that always have a price, so they
+are unaffected. The original scripts and figures stay as they ran.
+
+**The fix:** `momentum/defensive_v2.py`. A target with no price waits and
+is bought on the first day the stock has one, normally the next day. The
+bond fund waits the same way until IEF began trading in July 2002. Each
+run now reports its average cash share: about 3% on the held-out years.
+The tuning years show 9–18%, because their bond share before July 2002
+had no fund to go to. A retried target now stays on the list until its
+order has filled in full, so a fill that is still pending is never ordered
+twice, and a partly filled order is topped up. All eight runs were re-run
+with each of these changes and gave identical results, to the cent of
+their final holdings.
+
+| Headline version, fixed | 1999–2015 CAGR / worst drawdown | 2016–mid-2026 CAGR / worst drawdown | As originally run (1999–2015; 2016+) |
+| --- | --- | --- | --- |
+| No filter | 9.95% / 67.9% | 30.05% / 44.2% | 9.06% / 63.7%; 29.50% / 38.7% |
+| Full filter | 22.80% / 49.5% | 17.00% / 53.2% | 21.28% / 44.6%; 17.34% / 46.8% |
+| **Half filter** | **16.96% / 49.4%** | **23.87% / 45.3%** | 15.60% / 45.8%; 23.61% / 40.4% |
+| **Combination** | **11.25% / 34.0%** | **20.85% / 31.0%** | 10.46% / 31.1%; 18.80% / 27.7% |
+
+SPY over the same spans: 4.91% / 55.2% and 15.19% / 33.7%.
+
+Compounding the two periods gives a rough 1999–mid-2026 figure for each:
+
+| Version | Per year | Worst drawdown in either period |
+| --- | --- | --- |
+| Full filter | about 20.6% | 53.2% |
+| Half filter | about 19.6% | 49.4% |
+| No filter | about 17.2% | 67.9% |
+| Combination | about 14.8% | 34.0% |
+| SPY | about 8.7% | 55.2% |
+
+**What changed:** fully invested, every version earns more and has deeper
+drawdowns. The ranking among them is unchanged, and the combination's
+worst drawdown on the held-out years (31.0%) is still below SPY's.
+
+## Taxes: taxable account or IRA
+
+The owner asked which account each strategy belongs in. This section
+estimates the US federal income tax each strategy would have cost in a
+taxable account, computed from its own fills by
+`research/edge-search/tax/tax_drag.py`. It is not tax advice.
+
+**The method:**
+- **Matching sales to purchases:** first in, first out for momentum. For
+  Boost, the newest lots are sold first, which is how its extra shares
+  would be sold while the core SPY is kept.
+- **Holding period:** held more than a year is long-term.
+- **Netting:** each year's results are netted by the IRS rules, with the
+  $3,000 loss deduction and carryforward.
+- **Paying the tax:** it comes out of the account each year end.
+- **SPY's dividends** (about 1.7% a year) are taxed yearly for Boost and
+  buy-and-hold.
+- **Not modelled:** state tax, the 3.8% net investment income tax, and
+  wash sales.
+
+Each strategy's own CAGR is shown below, less its tax cost.
+
+| Federal rates: short-term 22%, long-term 15% | Before tax (= Roth) | Taxable, still holding | Tax cost (percentage points a year) |
+| --- | --- | --- | --- |
+| Momentum, half filter, 2016+ | 23.87% | 20.35% | 3.52 |
+| Momentum, combination, 2016+ | 20.85% | 17.08% | 3.77 |
+| Momentum, no filter, 2016+ | 30.05% | 25.72% | 4.33 |
+| Momentum, half filter, 1999–2015 | 16.96% | 14.06% | 2.90 |
+| Momentum, combination, 1999–2015 | 11.25% | 9.12% | 2.13 |
+| Boost on margin, 1999–mid-2026 | 10.32% | 9.59% | 0.72 |
+| SPY buy-and-hold, 1999–mid-2026 | 8.46% | 8.18% | 0.28 |
+
+- **Selling everything at the end**, each open lot taxed on its own gain
+  and holding period, costs 0.2–0.9 points more for momentum on the
+  held-out years (nothing on the tuning years, which end fully realized),
+  and about 0.4–0.5 for Boost and SPY, whose gains have built up untaxed.
+- **At 24% / 15%** the costs rise by about 0.3 points.
+- **At 12% / 0%** (a lower bracket) they roughly halve: momentum 0.8–2.0,
+  Boost 0.2, SPY 0.
+- **The momentum cost is mostly short-term tax.** Most positions are held
+  under a year: the monthly ranking replaces names, and the band resizes
+  them.
+- **Boost keeps its edge after tax** (9.59% against SPY's 8.18%), because
+  only its short-lived extra shares are sold.
+
+**For the account choice (general rules, not advice):**
+- In a Roth IRA, momentum's whole tax cost disappears. It needs no margin
+  or shorting, so it fits there.
+- Margin Boost needs a taxable account, and its tax cost is small.
+- The leveraged-fund version of Boost fits an IRA.
+
 ## 5. What running Boost would take
 
 This section gathers facts for the owner's own decision. It is not a
@@ -725,7 +844,7 @@ backtests cannot test.
 - **QuantConnect scripts.** Templates are in `research/edge-search/boost/`
   (`template.py`, `mix_template.py`) and `research/edge-search/shorting/`
   (`trend_template.py`, `factors_ls.py`).
-  - `research/edge-search/build_variants.py TB3MS.csv OUT_DIR` writes all 90
+  - `research/edge-search/build_variants.py TB3MS.csv OUT_DIR` writes all 98
     variants exactly as run, one `OUT_DIR/<name>/main.py` each, filling
     in each run's settings and the margin-rate table from a local FRED
     TB3MS file.
@@ -738,6 +857,19 @@ backtests cannot test.
   - They need the Pinnacle CLC files (`PINNACLE_DIR`) and a TB3MS CSV
     (`TB3MS_CSV`). Neither is in the repository.
   - `carry.py --holdout` runs the single held-out carry run.
+- **Taxes.** `research/edge-search/tax/tax_drag.py EXPORT.json ...` prints
+  the tax tables from a JSON export of each run's fills and equity. The
+  export is not committed because it is derived from market data.
+  - Export the fills from each run's orders (every order: QuantConnect may
+    return an empty first page until it has prepared them).
+  - Export the equity from its "Strategy Equity" chart.
+  - Export the end prices from the run's `End1`, `End2`, … statistics
+    (`defensive_v2.py` writes each open position as `security id=price`),
+    as `end_prices` keyed the same way as the fills. Open lots at those
+    prices should add up to the run's reported holdings; they do to the
+    cent in all eight momentum runs.
+  - The script refuses a run with no fills, so an empty export cannot read
+    as no tax.
 - **Tests.** `make research-test` runs `research/edge-search/test_followup.py`,
   which covers:
   - the builder
