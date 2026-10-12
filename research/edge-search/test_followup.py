@@ -157,6 +157,14 @@ class BuilderTest(unittest.TestCase):
                 for key, value in params.items():
                     self.assertIn("    {} = {!r}".format(key, value), src, name)
 
+    def test_the_fixed_130_30_runs_keep_the_original_settings_and_differ_only_in_the_template(self):
+        pairs = {"F_130": "SH_MOM_130", "OOS_F_130": "OOS_MOM_130",
+                 "OOS_F_130_S10_B5": "OOS_130_S10_B5", "OOS_F_130_S20_B5": "OOS_130_S20_B5"}
+        for fixed, original in pairs.items():
+            template, params = build_variants.VARIANTS[fixed]
+            self.assertEqual(template, "momentum/defensive_v2.py", fixed)
+            self.assertEqual(params, build_variants.VARIANTS[original][1], fixed)
+
 
 class BoostTemplateTest(unittest.TestCase):
     def setUp(self):
@@ -660,6 +668,15 @@ class UnpricedBuyTest(unittest.TestCase):
         self._day(algo)
         self.assertEqual(algo.pending, {"b": 0.49})   # not dropped: nothing was bought
         self.assertEqual(len(orders), 2)
+
+    def test_an_unpriced_short_waits_until_priced(self):
+        algo, orders = self._algo({"a": True, "z": False})
+        algo._trade({"a": 1.27 / 25, "z": -0.29 / 25})
+        self.assertEqual(orders, [("a", 1.27 / 25)])
+        self.assertEqual(algo.pending, {"z": -0.29 / 25})
+        algo.Securities["z"] = types.SimpleNamespace(HasData=True, Price=20.0)
+        self._day(algo)
+        self.assertEqual(orders[-1], ("z", -0.29 / 25))
 
     def test_a_new_rebalance_replaces_what_was_waiting(self):
         algo, orders = self._algo({"a": False, "c": True})

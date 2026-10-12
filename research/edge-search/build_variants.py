@@ -117,6 +117,12 @@ VARIANTS = {
     "OOS_F_HALF": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_trend", RISK_OFF_FRACTION=0.5)),
     "OOS_F_COMBO": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
                                                     RISK_OFF_FRACTION=0.5)),
+    # 130/30 re-run with the fix: the same settings as SH_MOM_130, OOS_MOM_130
+    # and its two cost-stress runs, on the fixed template
+    "F_130": ("momentum/defensive_v2.py", {"MODE": "mom_130", "TOP_N": 25}),
+    "OOS_F_130": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_130")),
+    "OOS_F_130_S10_B5": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_130", SLIPPAGE=0.001, BORROW_FEE=0.05)),
+    "OOS_F_130_S20_B5": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_130", SLIPPAGE=0.002, BORROW_FEE=0.05)),
     # Other candidates, tuning years only. S_BASE must reproduce MG_25_B.
     "S_BASE": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25}),
     "S_HIGH52": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "high52"}),
