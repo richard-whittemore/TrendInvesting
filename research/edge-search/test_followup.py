@@ -33,6 +33,23 @@ class _Target:
         self.Symbol, self.Quantity = symbol, quantity
 
 
+def _class_constants(template, params):
+    """{NAME: value} of the algorithm class's literal constants in the
+    rendered template."""
+    with open(os.path.join(HERE, template)) as f:
+        src = build_variants.render(f.read(), params, {199201: 0.03})
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ClassDef):
+            found = {}
+            for stmt in node.body:
+                if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                        and isinstance(stmt.targets[0], ast.Name) and stmt.targets[0].id.isupper()):
+                    found[stmt.targets[0].id] = ast.literal_eval(stmt.value)
+            if found:
+                return found
+    raise AssertionError("no class constants in " + template)
+
+
 def _load_template(test, template, params):
     stub = types.ModuleType("AlgorithmImports")
     stub.QCAlgorithm = type("QCAlgorithm", (), {})
@@ -158,12 +175,21 @@ class BuilderTest(unittest.TestCase):
                     self.assertIn("    {} = {!r}".format(key, value), src, name)
 
     def test_the_fixed_130_30_runs_keep_the_original_settings_and_differ_only_in_the_template(self):
+        # Compares the effective class constants of the rendered scripts, the
+        # templates' defaults included, not just the overrides in VARIANTS.
         pairs = {"F_130": "SH_MOM_130", "OOS_F_130": "OOS_MOM_130",
                  "OOS_F_130_S10_B5": "OOS_130_S10_B5", "OOS_F_130_S20_B5": "OOS_130_S20_B5"}
+        # The fixed template's own switches, all off for 130/30 (RISK_OFF_FRACTION
+        # acts only in mom_trend, VOL_DAYS only with a VOL_TARGET).
+        neutral = {"VOL_TARGET": None, "VOL_DAYS": 126, "RISK_OFF_FRACTION": 1.0, "STOCK_TREND_DAYS": 0,
+                   "SECTOR_CAP": None, "SCORE": "ret", "SPY_BLEND": 0.0, "INV_VOL": False}
         for fixed, original in pairs.items():
             template, params = build_variants.VARIANTS[fixed]
             self.assertEqual(template, "momentum/defensive_v2.py", fixed)
-            self.assertEqual(params, build_variants.VARIANTS[original][1], fixed)
+            new = _class_constants(template, params)
+            old = _class_constants(*build_variants.VARIANTS[original])
+            self.assertEqual({k: new[k] for k in old}, old, fixed)
+            self.assertEqual({k: v for k, v in new.items() if k not in old}, neutral, fixed)
 
 
 class BoostTemplateTest(unittest.TestCase):
@@ -599,7 +625,8 @@ class UnpricedBuyTest(unittest.TestCase):
             # Like LEAN: order the difference between the target and what is held;
             # nothing to order returns no tickets.
             orders.append((sym, w))
-            missing = algo.target_shares - algo.shares.get(sym, 0)
+            target = algo.target_shares if w >= 0 else -algo.target_shares
+            missing = target - algo.shares.get(sym, 0)
             if missing == 0:
                 return []
             ticket = types.SimpleNamespace(Quantity=missing, QuantityFilled=0)
@@ -675,8 +702,14 @@ class UnpricedBuyTest(unittest.TestCase):
         self.assertEqual(orders, [("a", 1.27 / 25)])
         self.assertEqual(algo.pending, {"z": -0.29 / 25})
         algo.Securities["z"] = types.SimpleNamespace(HasData=True, Price=20.0)
-        self._day(algo)
+        self._day(algo)                               # priced: shorted
         self.assertEqual(orders[-1], ("z", -0.29 / 25))
+        self.assertEqual(algo.tickets[-1].Quantity, -100)
+        algo.fill("z", -100)                          # the short fills in full
+        self._day(algo)
+        self._day(algo)
+        self.assertEqual(algo.pending, {})
+        self.assertEqual(len(orders), 2)              # no second short
 
     def test_a_new_rebalance_replaces_what_was_waiting(self):
         algo, orders = self._algo({"a": False, "c": True})
