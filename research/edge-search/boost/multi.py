@@ -50,7 +50,8 @@ class BoostMulti(QCAlgorithm):
     target on the first trading day of each month; between resets only a
     fund whose signal changed is traded. MODE "bh" holds the shares without
     the rule, reset monthly. Nothing is bought until every fund has a price
-    and its indicators are warm. Borrowed exposure pays the prior month's
+    and its indicators are warm, and a monthly reset waits for a session in
+    which every fund has a bar. Borrowed exposure pays the prior month's
     T-bill rate + SPREAD daily."""
 
     SLEEVES = {"SPY": 1, "MDY": 1, "IWM": 1}
@@ -113,6 +114,9 @@ class BoostMulti(QCAlgorithm):
     def OnData(self, data):
         if self.IsWarmingUp:
             return
+        # Signals run from the first warm bar, so each fund's state is right
+        # when the blend starts; an entry counts only once the blend trades.
+        ready = self._ready()
         changed = {}
         for name, sym in self.syms.items():
             bar = data.Bars.get(sym)
@@ -123,14 +127,16 @@ class BoostMulti(QCAlgorithm):
                                       self._value(exit_sma), self.RSI_ENTRY)
             if self.MODE == "boost" and sig != self.sigs[name]:
                 changed[name] = sig
-            if entered and self.MODE == "boost":
+            if entered and ready and self.MODE == "boost":
                 self.episodes[name] += 1
             self.sigs[name] = sig if self.MODE == "boost" else False
-        if not self._ready():
+        if not ready:
             return
         month = (self.Time.year, self.Time.month)
         targets = sleeve_targets(self.SLEEVES, self.sigs, self.BOOST_SIZE)
-        if month != self.last_month:
+        if month != self.last_month and all(data.Bars.get(s) is not None for s in self.syms.values()):
+            # The monthly reset waits for a session with a bar for every fund,
+            # so no fund is sized on a stale price and none misses the reset.
             self._trade(targets)
             self.last_month = month
         elif changed:

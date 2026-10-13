@@ -1138,11 +1138,11 @@ def _multi(module, sleeves, mode="boost"):
     return algo
 
 
-def _multi_day(algo, when=None, **closes):
+def _multi_day(algo, when=None, missing=(), **closes):
     if when:
         algo.Time = when
     algo.refresh()
-    bars = {n: types.SimpleNamespace(Close=closes.get(n, 100.0)) for n in algo.SLEEVES}
+    bars = {n: types.SimpleNamespace(Close=closes.get(n, 100.0)) for n in algo.SLEEVES if n not in missing}
     algo.OnData(types.SimpleNamespace(Bars=bars))
 
 
@@ -1214,6 +1214,34 @@ class MultiBoostTradingTest(unittest.TestCase):
         algo.ind["EFA"][0].IsReady = True
         _multi_day(algo, when=_dt.datetime(1992, 1, 17))
         self.assertEqual(algo.orders, [[("EFA", 0.49), ("SPY", 0.49)]])
+
+    def test_a_signal_before_the_blend_can_trade_is_not_counted_as_an_episode(self):
+        algo = _multi(self.module, {"SPY": 1, "EFA": 1})
+        algo.ind["EFA"][0].IsReady = False
+        algo.ind["SPY"][1].Current.Value = 5.0
+        _multi_day(algo)
+        self.assertEqual(algo.sigs["SPY"], True)              # the state still runs
+        self.assertEqual(algo.episodes, {"SPY": 0, "EFA": 0})
+        algo.ind["EFA"][0].IsReady = True
+        _multi_day(algo, when=_dt.datetime(1992, 1, 16))
+        self.assertEqual(algo.orders, [[("EFA", 0.49), ("SPY", 0.735)]])
+        self.assertEqual(algo.episodes, {"SPY": 0, "EFA": 0})
+
+    def test_the_monthly_reset_waits_for_a_bar_for_every_fund(self):
+        for mode in ("boost", "bh"):
+            algo = _multi(self.module, {"SPY": 1, "MDY": 1}, mode=mode)
+            _multi_day(algo, missing=("MDY",))
+            self.assertEqual(algo.orders, [], mode)
+            self.assertEqual(len(algo.curve), 1, mode)        # the day is still booked
+            _multi_day(algo, when=_dt.datetime(1992, 1, 16))
+            self.assertEqual(algo.orders, [[("MDY", 0.49), ("SPY", 0.49)]], mode)
+
+    def test_a_signal_change_trades_even_when_another_fund_has_no_bar(self):
+        algo = _multi(self.module, {"SPY": 1, "MDY": 1})
+        _multi_day(algo)
+        algo.ind["SPY"][1].Current.Value = 5.0
+        _multi_day(algo, when=_dt.datetime(1992, 1, 16), missing=("MDY",))
+        self.assertEqual(algo.orders[-1], [("SPY", 0.735)])
 
     def test_bh_never_boosts_and_trades_once_a_month(self):
         algo = _multi(self.module, {"SPY": 1, "MDY": 1}, mode="bh")
