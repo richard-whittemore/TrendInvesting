@@ -1304,8 +1304,17 @@ class CountryRotationTest(unittest.TestCase):
 
     def test_the_tuning_runs_end_with_the_tuning_years(self):
         for variant, (template, params) in build_variants.VARIANTS.items():
-            if params.get("MODE") == "country_rot":
+            if params.get("MODE") == "country_rot" and "_OOS_" not in variant:
                 self.assertEqual(_class_constants(template, params)["END"], (2015, 12, 31), variant)
+
+    def test_the_held_out_runs_measure_2016_on_with_a_year_of_closes_before(self):
+        for variant in ("E_CTRY_OOS_T5_S10", "E_CTRY_OOS_EW"):
+            template, params = build_variants.VARIANTS[variant]
+            c = _class_constants(template, params)
+            self.assertEqual((c["START"], c["MEASURE_FROM"], c["END"]), ((2015, 1, 1), (2016, 1, 1), (2026, 6, 30)))
+        tuned = build_variants.VARIANTS["E_CTRY_T5_S10"][1]
+        held = build_variants.VARIANTS["E_CTRY_OOS_T5_S10"][1]
+        self.assertEqual((held["TOP"], held["SMA_MONTHS"]), (tuned["TOP"], tuned["SMA_MONTHS"]))
 
 
 if __name__ == "__main__":

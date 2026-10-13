@@ -26,6 +26,7 @@ _OOS = {"START_DATE": (2015, 1, 1), "END_DATE": (2026, 6, 30), "MEASURE_FROM": (
 _HALF = {"MODE": "mom_trend", "TOP_N": 25, "RISK_OFF_FRACTION": 0.5}
 _COMBO = dict(_HALF, SECTOR_CAP=3, INV_VOL=True)
 _M1 = {"SPREAD": 0.022, "FEES": "none"}
+_CTRY_OOS = {"MODE": "country_rot", "START": (2015, 1, 1), "END": (2026, 6, 30), "MEASURE_FROM": (2016, 1, 1)}
 _US3X = {"SPY": 1, "MDY": 1, "IWM": 1, "EFA": 1}
 _D11, _D19, _D21, _D22, _D23 =(2011, 3, 1), (2019, 7, 1), (2021, 2, 1), (2022, 5, 1), (2023, 11, 1)
 
@@ -168,6 +169,9 @@ VARIANTS = {
     "E_CTRY_T3_S10": ("etf/rotation.py", {"MODE": "country_rot", "TOP": 3, "SMA_MONTHS": 10}),
     "E_CTRY_T5_S10": ("etf/rotation.py", {"MODE": "country_rot", "TOP": 5, "SMA_MONTHS": 10}),
     "E_CTRY_EW": ("etf/rotation.py", {"MODE": "country_rot", "TOP": 17}),
+    # Country momentum, held-out years: the tuning years' best setting, run once
+    "E_CTRY_OOS_T5_S10": ("etf/rotation.py", dict(_CTRY_OOS, TOP=5, SMA_MONTHS=10)),
+    "E_CTRY_OOS_EW": ("etf/rotation.py", dict(_CTRY_OOS, TOP=17)),
     # Momentum crash guard (volatility scaling), tuning years only
     "MV_L25_20": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 25, "VOL_TARGET": 0.20}),
     "MV_L25_30": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 25, "VOL_TARGET": 0.30}),

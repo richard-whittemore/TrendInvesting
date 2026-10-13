@@ -146,6 +146,43 @@ edge on boosted days was also the weakest measured (+0.057% a day against
 +0.031%). The rule looks like a property of US stock indexes, not something
 tuned to fit SPY.
 
+### Boost across several markets at once (`boost/multi.py`, #284)
+
+The owner asked whether Boost could be spread across US large, mid and
+small caps, and possibly international stocks. The rule ran unchanged on
+each fund of an equal-weight blend:
+- each fund boosted on its own signal;
+- every fund reset to its share monthly;
+- margin interest at the T-bill rate + 1.5%.
+
+Nothing was tuned, so both periods are reported. They start in September
+2002, when the international fund (EFA) had a year of prices. SPY alone was
+run the same way, over the same dates.
+
+| Blend | Sep 2002–2015: Boost / held | 2016–mid-2026: Boost / held | Worst drawdown, Boost / held |
+| --- | --- | --- | --- |
+| SPY alone | 10.36% / 8.48% | **16.43%** / 14.86% | 53.8% / 54.3% |
+| SPY + MDY + IWM (US large, mid, small) | 11.46% / 9.62% | 13.94% / 12.67% | 56.2% / 55.3% |
+| … + EFA (developed ex-US) | **11.66%** / 9.01% | 12.72% / 11.80% | 56.8% / 56.2% |
+
+- **Boost added return to every blend in both periods,** by 0.9–2.6 points
+  a year.
+- **The blend mattered more than Boost did.** The US blend beat SPY before
+  2016 and trailed it after, held or boosted. That is the large-company lead
+  since 2016, not the rule.
+- **Spreading it out did not reduce losses.** Drawdowns were as deep or a
+  little deeper, because the funds fell together (2008: −34% to −36% for
+  every blend).
+- **The signals cluster.** In the US blend:
+  - about a third of the boosted days (380 of 1,120) had all three funds
+    boosted at once;
+  - total exposure peaked at 1.61× (1.47× for SPY alone).
+
+  With EFA, all four were boosted at once on 228 of 1,300 boosted days.
+- **More trading:** the US blend made about 84 trades a year against SPY's
+  28. That means more commissions, and more short-term gains in a taxable
+  account.
+
 ### Is it one lucky setting?
 
 All runs are on SPY and end in 2015, measured 1999–2015; SPY buy-and-hold over the same years is 4.91%.
@@ -645,6 +682,35 @@ Each was tested on the tuning years first (1999–2015; SPY 4.91% / 55.2%).
   paid.
 - None of these went on to a held-out run.
 
+#### Country momentum (tuning years, #284)
+
+The owner asked whether momentum works outside the US. The test used the
+17 iShares single-country funds outside the US that began trading in
+March 1996 (`etf/rotation.py`, `country_rot`). Each month it held the top
+3 or 5 by the average of their 3-, 6- and 12-month returns, the sector
+rotation's rule. It ran with and without each fund's own 10-month trend
+check (a fund below it holds bonds instead).
+
+Measured 1999–2015 (SPY 4.91% / 55.2%):
+
+| Rule | CAGR | Worst drawdown | 2008–09 |
+| --- | --- | --- | --- |
+| All 17 held equally, reset monthly | 5.76% | 61.6% | −10.9% a year |
+| Top 3 | 5.59% | 57.4% | −13.2% |
+| Top 5 | 5.01% | 62.2% | −14.7% |
+| Top 3, trend check | 6.73% | **42.2%** | +2.8% |
+| **Top 5, trend check** | **6.81%** | 47.8% | +5.4% |
+
+- **Ranking alone added nothing.** Holding the leaders did no better than
+  holding all 17.
+- **The trend check did the work.** It added about a point a year and cut
+  about 15 points of drawdown, mostly by moving to bonds in 2008.
+- **The edge is far smaller than US stock momentum's** (16.96% on the same
+  years for the half filter).
+- **Top 5 with the trend check is the setting carried forward,** on the
+  highest tuning-year return, as for the momentum variants. It runs once on
+  2016 onward.
+
 ### The unpriced-buy fix
 
 **What went wrong.** Each stock-picking script rebalances at 8:00 on the
@@ -1013,9 +1079,9 @@ be. The baselines are the recorded runs, which trade on the first session.
 ## Reproducing these runs
 
 - **QuantConnect scripts.** Templates are in `research/edge-search/boost/`
-  (`template.py`, `mix_template.py`) and `research/edge-search/shorting/`
+  (`template.py`, `mix_template.py`, `multi.py`) and `research/edge-search/shorting/`
   (`trend_template.py`, `factors_ls.py`).
-  - `research/edge-search/build_variants.py TB3MS.csv OUT_DIR` writes all 114
+  - `research/edge-search/build_variants.py TB3MS.csv OUT_DIR` writes all 127
     variants exactly as run, one `OUT_DIR/<name>/main.py` each, filling
     in each run's settings and the margin-rate table from a local FRED
     TB3MS file.
