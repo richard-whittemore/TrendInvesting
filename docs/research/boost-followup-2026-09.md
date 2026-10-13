@@ -51,8 +51,8 @@ data, with the limits listed under "Caveats".
   monthly, returned 27.6% a year on the held-out years after 0.2% slippage
   per trade, against SPY's 15.2%. 130/30 returned 31.1% after 0.2%
   slippage and a 5% borrow fee; re-run with the fix, that is 30.4%, and
-  35.4% without the extra costs ("130/30, re-run with the fix"). On the
-  tuning years it beat SPY by only about 4 points, with 64–73% drawdowns, so the
+  35.4% without the extra costs ("130/30, re-run with the fix"). As
+  originally run, on the tuning years it beat SPY by only about 4 points, with 64–73% drawdowns, so the
   held-out years were an unusually good period for it (section 4).
   - **25 names is a stable choice:** 15 and 50 give similar results.
   - **A bond filter changes which period it does well in.** Moving to bonds
