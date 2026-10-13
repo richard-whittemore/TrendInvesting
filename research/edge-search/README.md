@@ -103,6 +103,11 @@ backtest runs on their servers.
   close, with each broker's margin spread and commissions; and
   `defensive_v2.py`'s book traded some sessions after it is computed (a
   change made by hand).
+- `boost/multi.py` — Boost's rule, unchanged, on each fund of a blend at
+  once (US large, mid and small caps, optionally with developed markets
+  outside the US), each fund boosted on its own signal; `bh` is the same
+  blend without the rule. `etf/rotation.py`'s `country_rot` mode ranks
+  17 single-country funds outside the US the same way as `sector_rot`.
 - `futures/` — `carry.py` and `blend.py`, local studies on the
   `research/futures-local` engine and the Pinnacle files, which are not in
   the repository.
