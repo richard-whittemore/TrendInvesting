@@ -21,7 +21,7 @@ class MonthEndTest(unittest.TestCase):
         self.assertEqual(blend.month_ends(pts), {(2020, 1): 110.0, (2020, 2): 120.0})
 
     def test_a_depleted_account_is_an_error_not_a_dropped_mark(self):
-        for bad in (0.0, -5.0, None):
+        for bad in (0.0, -5.0, None, float("inf"), float("nan")):
             with self.assertRaises(ValueError):
                 blend.month_ends([[_t(2020, 1, 2), 100.0], [_t(2020, 2, 28), bad]])
 
@@ -32,6 +32,12 @@ class MonthEndTest(unittest.TestCase):
     def test_a_missing_month_is_an_error(self):
         with self.assertRaises(ValueError):
             blend.growth({(2020, 1): 1.0, (2020, 3): 2.0}, blend.span((2020, 1), (2020, 3)))
+
+    def test_a_month_outside_1_to_12_is_rejected(self):
+        with self.assertRaises(ValueError):
+            blend.span((2020, 13), (2021, 1))
+        with self.assertRaises(ValueError):
+            blend.span((2020, 1), (2020, 0))
 
     def test_the_span_crosses_a_year_end(self):
         self.assertEqual(blend.span((2019, 11), (2020, 2)), [(2019, 11), (2019, 12), (2020, 1), (2020, 2)])

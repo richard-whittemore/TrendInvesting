@@ -1147,9 +1147,10 @@ be. The baselines are the recorded runs, which trade on the first session.
     variants exactly as run, one `OUT_DIR/<name>/main.py` each, filling
     in each run's settings and the margin-rate table from a local FRED
     TB3MS file.
-  - `research/edge-search/portfolio/blend.py strategies_together.json
-    EXPORT_DIR` rebuilds the table in "The strategies together". The spec
-    (committed next to it) names each period, book and weight, and the
+  - `python3 research/edge-search/portfolio/blend.py
+    research/edge-search/portfolio/strategies_together.json EXPORT_DIR`,
+    from the repository root, rebuilds the table in "The strategies
+    together". The spec names each period, book and weight, and the
     backtest behind each curve. `EXPORT_DIR` holds those backtests'
     "Strategy Equity" exports, which are not committed.
   - Paste each into a QuantConnect project and run it. The results are in

@@ -27,9 +27,10 @@ def month_ends(points):
         if t > MAX_SECONDS:
             raise ValueError("timestamp {} looks like milliseconds; export unix seconds".format(t))
         d = datetime.fromtimestamp(t, tz=timezone.utc)
-        if v is None or v <= 0:
-            raise ValueError("equity {} on {}: a depleted account cannot be blended".format(v, d.date()))
-        out[(d.year, d.month)] = float(v)
+        value = float(v) if v is not None else float("nan")
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("equity {} on {}: only a positive, finite mark can be blended".format(v, d.date()))
+        out[(d.year, d.month)] = value
     return out
 
 
@@ -93,6 +94,8 @@ def longest_behind(path, benchmark):
 
 def span(first, last):
     """Every (year, month) from ``first`` to ``last`` inclusive."""
+    if not (1 <= first[1] <= 12 and 1 <= last[1] <= 12):
+        raise ValueError("months must be 1..12: {}..{}".format(first, last))
     y, m = first
     out = []
     while (y, m) <= last:
