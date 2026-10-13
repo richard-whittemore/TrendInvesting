@@ -711,6 +711,68 @@ Measured 1999–2015 (SPY 4.91% / 55.2%):
   highest tuning-year return, as for the momentum variants. It runs once on
   2016 onward.
 
+**Held-out years (2016–mid-2026), run once with settings fixed:**
+
+| Rule | CAGR | Worst drawdown |
+| --- | --- | --- |
+| **Top 5, trend check** | **9.54%** | **23.4%** |
+| All 17 held equally | 9.16% | 37.7% |
+| SPY | 15.19% | 33.7% |
+
+- It kept a small edge over holding every country (0.4 points a year) and
+  a much shallower drawdown.
+- It trailed SPY by more than 5 points a year, the cost of being outside
+  the US while US stocks led.
+- It is a diversifier, not a return source; see the next section.
+
+#### The strategies together (`portfolio/blend.py`, #284)
+
+How the strategies combine, as separate accounts split at the start and
+never rebalanced into one another (an IRA's money cannot move to a taxable
+account and back). Built from each run's daily equity, measured at month
+ends:
+- **Momentum:** the fixed-script `F_COMBO_R4` / `F_HALF_R4` (tuning years)
+  and `OOS_F_COMBO_R4` / `OOS_F_HALF_R4` (held out).
+- **Boost and SPY:** `MB_SPY` and `MB_SPY_BH`.
+- **US-blend Boost:** `MB_US3`.
+- **Country momentum:** the top-5 trend-check runs above.
+
+Month-end drawdowns miss falls that recovered within a month (March
+2020), so they are shallower than the daily figures elsewhere. "Months
+behind" is the longest stretch the book spent below its best level
+relative to SPY.
+
+| Book | Sep 2002–2015: CAGR / worst DD / months behind | 2016–mid-2026 |
+| --- | --- | --- |
+| SPY held | 8.20% / 48.9% / — | 14.47% / 22.8% / — |
+| Boost (SPY) | 10.08% / 48.9% / 21 | 16.04% / 24.0% / 37 |
+| Momentum, combination | 13.13% / 28.0% / 59 | 20.24% / 24.0% / 44 |
+| Momentum, half filter | 13.34% / 34.1% / 54 | **22.73%** / 30.7% / 56 |
+| Country momentum | 10.71% / 25.0% / 82 | 9.36% / 21.9% / 124 |
+| 50% combination + 50% SPY | 11.00% / 37.2% / 59 | 17.69% / 21.2% / 44 |
+| 50% combination + 50% Boost | 11.73% / 37.7% / 54 | 18.32% / 21.7% / 44 |
+| 50% half filter + 50% Boost | 11.86% / 40.3% / 53 | 19.82% / 23.7% / 55 |
+| 40% combination + 40% Boost + 20% country | 11.54% / 32.0% / 82 | 16.98% / 21.3% / 44 |
+| 50% combination + 50% US-blend Boost | 12.24% / 38.3% / 27 | 17.34% / 22.6% / 46 |
+
+Monthly-return correlations:
+- **Momentum and SPY or Boost:** about 0.6.
+- **Country momentum:** 0.4–0.6 with everything.
+- **Boost and SPY:** 0.99.
+- **The two momentum versions:** 0.90–0.93.
+
+- **Momentum is the diversifier** in this set. Pairing it with Boost or
+  SPY cut the tuning-year drawdown from 49% to about 37–38%, and kept most
+  of momentum's return.
+- **Boost adds return, not diversification.** It is SPY with timed extra
+  exposure (0.99 correlation), so swapping SPY for Boost in a blend added
+  about 0.6–0.7 points a year at the same drawdown.
+- **A 20% country slice** cut the tuning-year drawdown further (32%) but
+  cost about 1.3 points a year on the held-out years. It also has the
+  longest stretches behind SPY.
+- **Every book with momentum spent 2–5 years behind SPY** at some point in
+  each period. Anyone holding it has to expect that.
+
 ### The unpriced-buy fix
 
 **What went wrong.** Each stock-picking script rebalances at 8:00 on the
@@ -1085,6 +1147,12 @@ be. The baselines are the recorded runs, which trade on the first session.
     variants exactly as run, one `OUT_DIR/<name>/main.py` each, filling
     in each run's settings and the margin-rate table from a local FRED
     TB3MS file.
+  - `python3 research/edge-search/portfolio/blend.py
+    research/edge-search/portfolio/strategies_together.json EXPORT_DIR`,
+    from the repository root, rebuilds the table in "The strategies
+    together". The spec names each period, book and weight, and the
+    backtest behind each curve. `EXPORT_DIR` holds those backtests'
+    "Strategy Equity" exports, which are not committed.
   - Paste each into a QuantConnect project and run it. The results are in
     each backtest's runtime statistics: `S …` for the strategy, `B …` for
     buy-and-hold of the traded ETF, with the span in each value.
