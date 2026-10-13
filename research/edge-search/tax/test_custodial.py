@@ -28,6 +28,23 @@ class KiddieTaxTest(unittest.TestCase):
         middle_pref = 3350.0 - 2000.0                    # taxed at 0%
         self.assertAlmostEqual(tax, above + max(0.0, middle_ord) * 0.10 + middle_pref * 0.0)
 
+    def test_the_middle_tier_never_holds_more_than_its_room(self):
+        # 2007: 850 deduction, middle tier room 850. 1,000 ordinary and 10,000
+        # long-term: 150 ordinary left; 9,300 above the threshold. Proportionally
+        # 845 of that would be ordinary, but only 150 is left: all of it goes
+        # above, the rest above is long-term, and the middle tier is exactly
+        # 850 of long-term income at 5%.
+        tax = cu.kiddie_tax(2007, 1000.0, 10_000.0)
+        self.assertAlmostEqual(tax, 150.0 * 0.22 + 9150.0 * 0.15 + 850.0 * 0.05)
+
+    def test_every_dollar_is_counted_once(self):
+        for ordinary, preferential in ((1000.0, 10_000.0), (10_000.0, 1000.0), (5000.0, 5000.0), (100.0, 2000.0)):
+            flat = cu.kiddie_tax(2007, ordinary, preferential, 1.0, 1.0)
+            # With every rate 1, the tax is the income above the deduction less
+            # the middle tier's untaxed share; here the middle rates are 10% / 5%.
+            self.assertLessEqual(flat, ordinary + preferential - 850.0 + 1e-9)
+            self.assertGreaterEqual(flat, ordinary + preferential - 1700.0 - 1e-9)
+
     def test_large_income_approaches_the_parents_flat_rates(self):
         tax = cu.kiddie_tax(2025, 1e6, 0.0)
         self.assertAlmostEqual(tax / 1e6, 0.22, places=2)
@@ -83,6 +100,14 @@ class CustodialTest(unittest.TestCase):
         run["fills"][1][3] = 1000.0 - 50.0             # year 1: a 50,000 short-term loss on $1M
         r = cu.custodial(run, 2006, 1_000_000, "fifo", dividend_yield=0.0)
         self.assertEqual(r["tax_paid"], 0.0)            # 10,000 gain in year 2 is under the carryover
+
+    def test_an_incomplete_export_is_refused(self):
+        run = _run(gain_per_year=0.0)
+        run["fills"] = run["fills"][1:]                 # a sale whose purchase is missing
+        with self.assertRaises(SystemExit):
+            cu.custodial(run, 2006, 50_000, "fifo")
+        with self.assertRaises(SystemExit):
+            cu.custodial({"fills": [], "equity": run["equity"]}, 2006, 50_000, "fifo")
 
     def test_hold_one_lot_buys_98_percent_once(self):
         run = {"equity": [[T0, 100.0], [T0 + DAY, 200.0], [T0 + 2 * DAY, 300.0]]}

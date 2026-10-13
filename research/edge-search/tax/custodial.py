@@ -74,10 +74,12 @@ def kiddie_tax(year, ordinary, preferential, parent_ordinary=0.22, parent_prefer
     ord_left = ordinary - min(ordinary, deduction)
     pref_left = preferential - min(preferential, max(0.0, deduction - ordinary))
     above = max(0.0, total - threshold)
-    ord_share = ordinary / total
-    above_ord, above_pref = above * ord_share, above * (1.0 - ord_share)
-    mid_ord = max(0.0, ord_left - above_ord)
-    mid_pref = max(0.0, pref_left - above_pref)
+    # Split the part above the threshold by the income's character, but never
+    # more of one kind than is left after the deduction; the rest is the other.
+    above_ord = min(ord_left, above * ordinary / total)
+    above_pref = min(pref_left, above - above_ord)
+    above_ord = above - above_pref
+    mid_ord, mid_pref = ord_left - above_ord, pref_left - above_pref
     return (above_ord * parent_ordinary + above_pref * parent_preferential
             + mid_ord * CHILD_ORDINARY + mid_pref * child_preferential(year))
 
@@ -89,7 +91,13 @@ def custodial(run, start_year, start_value, method="lifo", dividend_yield=0.017,
     each year's kiddie tax paid from the account at year end; open lots are
     held at the end (the child decides later when to sell)."""
     fills, equity = run["fills"], run["equity"]
-    realized, _ = td.realized_by_year(fills, method)
+    if not fills or not equity:
+        raise SystemExit("no fills or no equity curve in the export; re-export it")
+    diag = {}
+    realized, _ = td.realized_by_year(fills, method, diag)
+    if diag.get("unmatched"):
+        raise SystemExit("{:.0f} shares sold with no matching purchase; reconcile the export first".format(
+            diag["unmatched"]))
     ends = td.year_end_equity(equity)
     marks = [(t, e) for t, e in sorted(equity) if td.year_of(t) >= start_year]
     first_t, first_e = marks[0]
