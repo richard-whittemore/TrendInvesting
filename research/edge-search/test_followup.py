@@ -1098,5 +1098,215 @@ class MomentumExecutionTest(unittest.TestCase):
         self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
 
 
+def _multi(module, sleeves, mode="boost"):
+    """A BoostMulti built without Initialize(): every fund priced at 100,
+    above its 200-day SMA (90), RSI(2) neutral (50), below its 5-day SMA
+    (101), every holding flat."""
+    algo = module.BoostMulti()
+    algo.SLEEVES, algo.MODE = sleeves, mode
+    algo.IsWarmingUp = False
+    algo.Time = _dt.datetime(1992, 1, 15)
+    algo.syms = {n: n for n in sleeves}
+    algo.ind = {n: (_Indicator(90.0), _Indicator(50.0), _Indicator(101.0)) for n in sleeves}
+    algo.Securities = {n: types.SimpleNamespace(Price=100.0) for n in sleeves}
+    algo.holdings = {n: 0.0 for n in sleeves}
+    algo.equity = 1_000_000.0
+    cash = _Cash()
+    algo.orders = []
+
+    class _Book(dict):
+        def __getitem__(self, name):
+            return types.SimpleNamespace(HoldingsValue=algo.holdings[name])
+
+    def refresh():
+        book = _Book()
+        book.TotalPortfolioValue = algo.equity
+        book.TotalHoldingsValue = sum(algo.holdings.values())
+        book.CashBook = {"USD": cash}
+        algo.Portfolio = book
+
+    def set_holdings(targets):
+        algo.orders.append([(t.Symbol, round(t.Quantity, 6)) for t in targets])
+        for t in targets:
+            algo.holdings[t.Symbol] = t.Quantity * algo.equity
+        refresh()
+
+    algo.SetHoldings = set_holdings
+    algo.refresh = refresh
+    refresh()
+    algo._reset_state()
+    return algo
+
+
+def _multi_day(algo, when=None, missing=(), **closes):
+    if when:
+        algo.Time = when
+    algo.refresh()
+    bars = {n: types.SimpleNamespace(Close=closes.get(n, 100.0)) for n in algo.SLEEVES if n not in missing}
+    algo.OnData(types.SimpleNamespace(Bars=bars))
+
+
+class MultiBoostRuleTest(unittest.TestCase):
+    def setUp(self):
+        self.module = _load_template(self, "boost/multi.py", {})
+
+    def test_the_signal_enters_on_a_low_rsi_above_the_trend_and_leaves_above_the_exit_average(self):
+        step = self.module.boost_step
+        self.assertEqual(step(False, 100.0, 90.0, 5.0, 101.0, 10), (True, True))
+        self.assertEqual(step(False, 100.0, 110.0, 5.0, 101.0, 10), (False, False))   # below its trend
+        self.assertEqual(step(False, 100.0, 90.0, 15.0, 101.0, 10), (False, False))   # RSI not low
+        self.assertEqual(step(False, 100.0, None, 5.0, 101.0, 10), (False, False))    # trend not ready
+        self.assertEqual(step(True, 100.0, 90.0, 50.0, 101.0, 10), (True, False))     # held below the exit
+        self.assertEqual(step(True, 102.0, 90.0, 50.0, 101.0, 10), (False, False))    # leaves above it
+        self.assertEqual(step(True, 102.0, 90.0, 5.0, None, 10), (True, False))       # exit not ready
+
+    def test_weights_are_relative_shares_of_98_percent_and_a_signal_scales_only_its_fund(self):
+        targets = self.module.sleeve_targets({"SPY": 1, "MDY": 1, "IWM": 2}, {"MDY": True}, 1.5)
+        self.assertAlmostEqual(targets["SPY"], 0.245)
+        self.assertAlmostEqual(targets["MDY"], 0.3675)
+        self.assertAlmostEqual(targets["IWM"], 0.49)
+
+    def test_reductions_are_ordered_before_increases(self):
+        ordered = self.module.sells_first({"A": 0.5, "B": 0.2, "C": 0.4}, {"A": 0.3, "B": 0.4, "C": 0.4})
+        self.assertEqual([n for n, _ in ordered], ["B", "C", "A"])
+
+
+class MultiBoostTradingTest(unittest.TestCase):
+    def setUp(self):
+        self.module = _load_template(self, "boost/multi.py", {})
+
+    def test_the_month_starts_at_the_shares_then_only_a_fund_whose_signal_changed_trades(self):
+        algo = _multi(self.module, {"SPY": 1, "MDY": 1})
+        _multi_day(algo)
+        algo.ind["MDY"][1].Current.Value = 5.0
+        _multi_day(algo, when=_dt.datetime(1992, 1, 16))
+        algo.ind["MDY"][1].Current.Value = 50.0
+        _multi_day(algo, when=_dt.datetime(1992, 1, 17), MDY=102.0)
+        self.assertEqual(algo.orders, [[("MDY", 0.49), ("SPY", 0.49)], [("MDY", 0.735)], [("MDY", 0.49)]])
+        self.assertEqual(algo.episodes, {"SPY": 0, "MDY": 1})
+
+    def test_each_fund_follows_its_own_indicators(self):
+        algo = _multi(self.module, {"SPY": 1, "IWM": 1})
+        algo.ind["SPY"][1].Current.Value = 5.0
+        algo.ind["IWM"][0].Current.Value = 120.0      # IWM below its trend: no boost
+        algo.ind["IWM"][1].Current.Value = 5.0
+        _multi_day(algo)
+        self.assertEqual(algo.sigs, {"SPY": True, "IWM": False})
+        self.assertEqual(algo.orders, [[("IWM", 0.49), ("SPY", 0.735)]])
+
+    def test_a_new_month_resets_every_fund_keeping_a_boost_that_is_still_on(self):
+        algo = _multi(self.module, {"SPY": 1, "MDY": 1})
+        algo.ind["SPY"][1].Current.Value = 5.0
+        _multi_day(algo)
+        algo.holdings["SPY"] = 800_000.0                 # drifted above its 0.735 target
+        _multi_day(algo, when=_dt.datetime(1992, 2, 3))
+        self.assertEqual(algo.orders[-1], [("SPY", 0.735), ("MDY", 0.49)])   # the sale first
+
+    def test_nothing_is_bought_until_every_fund_has_a_price_and_warm_indicators(self):
+        algo = _multi(self.module, {"SPY": 1, "EFA": 1})
+        algo.Securities["EFA"].Price = 0.0
+        _multi_day(algo)
+        algo.Securities["EFA"].Price = 100.0
+        algo.ind["EFA"][0].IsReady = False
+        _multi_day(algo, when=_dt.datetime(1992, 1, 16))
+        self.assertEqual(algo.orders, [])
+        self.assertEqual(algo.curve, [])
+        algo.ind["EFA"][0].IsReady = True
+        _multi_day(algo, when=_dt.datetime(1992, 1, 17))
+        self.assertEqual(algo.orders, [[("EFA", 0.49), ("SPY", 0.49)]])
+
+    def test_a_signal_before_the_blend_can_trade_is_not_counted_as_an_episode(self):
+        algo = _multi(self.module, {"SPY": 1, "EFA": 1})
+        algo.ind["EFA"][0].IsReady = False
+        algo.ind["SPY"][1].Current.Value = 5.0
+        _multi_day(algo)
+        self.assertEqual(algo.sigs["SPY"], True)              # the state still runs
+        self.assertEqual(algo.episodes, {"SPY": 0, "EFA": 0})
+        algo.ind["EFA"][0].IsReady = True
+        _multi_day(algo, when=_dt.datetime(1992, 1, 16))
+        self.assertEqual(algo.orders, [[("EFA", 0.49), ("SPY", 0.735)]])
+        self.assertEqual(algo.episodes, {"SPY": 0, "EFA": 0})
+
+    def test_the_monthly_reset_waits_for_a_bar_for_every_fund(self):
+        for mode in ("boost", "bh"):
+            algo = _multi(self.module, {"SPY": 1, "MDY": 1}, mode=mode)
+            _multi_day(algo, missing=("MDY",))
+            self.assertEqual(algo.orders, [], mode)
+            self.assertEqual(len(algo.curve), 1, mode)        # the day is still booked
+            _multi_day(algo, when=_dt.datetime(1992, 1, 16))
+            self.assertEqual(algo.orders, [[("MDY", 0.49), ("SPY", 0.49)]], mode)
+
+    def test_a_signal_change_trades_even_when_another_fund_has_no_bar(self):
+        algo = _multi(self.module, {"SPY": 1, "MDY": 1})
+        _multi_day(algo)
+        algo.ind["SPY"][1].Current.Value = 5.0
+        _multi_day(algo, when=_dt.datetime(1992, 1, 16), missing=("MDY",))
+        self.assertEqual(algo.orders[-1], [("SPY", 0.735)])
+
+    def test_bh_never_boosts_and_trades_once_a_month(self):
+        algo = _multi(self.module, {"SPY": 1, "MDY": 1}, mode="bh")
+        algo.ind["SPY"][1].Current.Value = 5.0
+        _multi_day(algo)
+        _multi_day(algo, when=_dt.datetime(1992, 1, 16))
+        _multi_day(algo, when=_dt.datetime(1992, 2, 3))
+        self.assertEqual(algo.orders, [[("MDY", 0.49), ("SPY", 0.49)]] * 2)
+        self.assertEqual(algo.episodes, {"SPY": 0, "MDY": 0})
+
+    def test_borrowing_across_funds_pays_the_months_rate_plus_the_spread(self):
+        algo = _multi(self.module, {"SPY": 1, "MDY": 1})
+        algo.ind["SPY"][1].Current.Value = 5.0
+        algo.ind["MDY"][1].Current.Value = 5.0
+        _multi_day(algo)
+        self.assertAlmostEqual(algo.financing, 470_000.0 * (0.03 + 0.015) / 252.0)
+        self.assertAlmostEqual(algo.gross_max, 1.47)
+        self.assertEqual(algo.boosted, {2: 1})
+
+    def test_the_end_statistics_report_episodes_and_overlap(self):
+        algo = _multi(self.module, {"SPY": 1, "MDY": 1})
+        stats = {}
+        algo.SetRuntimeStatistic = stats.__setitem__
+        algo.ind["SPY"][1].Current.Value = 5.0
+        _multi_day(algo)
+        algo.OnEndOfAlgorithm()
+        self.assertEqual(stats["Episodes"], "SPY=1 MDY=0")
+        self.assertEqual(stats["Boosted"], "1:1")
+        self.assertIn("SPY/MDY", stats["Mode"])
+
+    def test_the_rule_settings_match_the_one_fund_boost(self):
+        single = _class_constants("boost/template.py", {})
+        multi = _class_constants("boost/multi.py", {})
+        for name in ("BOOST_SIZE", "RSI_ENTRY", "TREND_DAYS", "EXIT_SMA", "SPREAD", "CASH"):
+            self.assertEqual(multi[name], single[name], name)
+        for variant, (template, params) in build_variants.VARIANTS.items():
+            if template == "boost/multi.py":
+                self.assertFalse(set(params) - {"SLEEVES", "MODE"}, variant)
+
+
+class CountryRotationTest(unittest.TestCase):
+    def setUp(self):
+        self.module = _load_template(self, "etf/rotation.py", {})
+
+    def test_the_country_universe_is_seventeen_distinct_funds_and_sectors_are_unchanged(self):
+        countries = self.module.UNIVERSES["country_rot"]
+        self.assertEqual(len(set(countries)), 17)
+        self.assertNotIn("SPY", countries)
+        self.assertEqual(self.module.UNIVERSES["sector_rot"], self.module.SECTORS)
+        self.assertEqual(len(self.module.SECTORS), 9)
+
+    def test_the_benchmark_variant_holds_every_country_equally(self):
+        countries = self.module.COUNTRIES
+        _, params = build_variants.VARIANTS["E_CTRY_EW"]
+        self.assertEqual(params["TOP"], len(countries))
+        targets = self.module.rotation_targets({c: i * 0.01 for i, c in enumerate(countries)}, params["TOP"])
+        self.assertEqual(set(targets), set(countries))
+        for w in targets.values():
+            self.assertAlmostEqual(w, 0.98 / 17)
+
+    def test_the_tuning_runs_end_with_the_tuning_years(self):
+        for variant, (template, params) in build_variants.VARIANTS.items():
+            if params.get("MODE") == "country_rot":
+                self.assertEqual(_class_constants(template, params)["END"], (2015, 12, 31), variant)
+
+
 if __name__ == "__main__":
     unittest.main()

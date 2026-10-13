@@ -26,6 +26,7 @@ _OOS = {"START_DATE": (2015, 1, 1), "END_DATE": (2026, 6, 30), "MEASURE_FROM": (
 _HALF = {"MODE": "mom_trend", "TOP_N": 25, "RISK_OFF_FRACTION": 0.5}
 _COMBO = dict(_HALF, SECTOR_CAP=3, INV_VOL=True)
 _M1 = {"SPREAD": 0.022, "FEES": "none"}
+_US3X = {"SPY": 1, "MDY": 1, "IWM": 1, "EFA": 1}
 _D11, _D19, _D21, _D22, _D23 =(2011, 3, 1), (2019, 7, 1), (2021, 2, 1), (2022, 5, 1), (2023, 11, 1)
 
 #: variant -> (template, {class constant: value}), exactly as run.
@@ -40,6 +41,13 @@ VARIANTS = {
     "BX_DIA": ("boost/template.py", {"TICKER": "DIA"}),
     "BX_EFA": ("boost/template.py", {"TICKER": "EFA"}),
     "BX_MDY": ("boost/template.py", {"TICKER": "MDY"}),
+    # Boost across several markets: the rule unchanged, no tuning
+    "MB_US3": ("boost/multi.py", {}),
+    "MB_US3_BH": ("boost/multi.py", {"MODE": "bh"}),
+    "MB_US3X": ("boost/multi.py", {"SLEEVES": _US3X}),
+    "MB_US3X_BH": ("boost/multi.py", {"SLEEVES": _US3X, "MODE": "bh"}),
+    "MB_SPY": ("boost/multi.py", {"SLEEVES": {"SPY": 1}}),
+    "MB_SPY_BH": ("boost/multi.py", {"SLEEVES": {"SPY": 1}, "MODE": "bh"}),
     "BX_SLIP5": ("boost/template.py", {"SLIPPAGE": 0.0005}),
     "BX_SLIP10": ("boost/template.py", {"SLIPPAGE": 0.001}),
     "BX_SPR3": ("boost/template.py", {"SPREAD": 0.03}),
@@ -154,6 +162,12 @@ VARIANTS = {
     "E_SECROT_T": ("etf/rotation.py", {"MODE": "sector_rot", "SMA_MONTHS": 10, "MEASURE_FROM": (2000, 1, 1)}),
     "E_LEV2": ("etf/rotation.py", {"MODE": "lev_trend", "LEVERAGE": 2.0}),
     "E_LEV1": ("etf/rotation.py", {"MODE": "lev_trend", "LEVERAGE": 1.0}),
+    # Country momentum, tuning years (1999-2015)
+    "E_CTRY_T3": ("etf/rotation.py", {"MODE": "country_rot", "TOP": 3}),
+    "E_CTRY_T5": ("etf/rotation.py", {"MODE": "country_rot", "TOP": 5}),
+    "E_CTRY_T3_S10": ("etf/rotation.py", {"MODE": "country_rot", "TOP": 3, "SMA_MONTHS": 10}),
+    "E_CTRY_T5_S10": ("etf/rotation.py", {"MODE": "country_rot", "TOP": 5, "SMA_MONTHS": 10}),
+    "E_CTRY_EW": ("etf/rotation.py", {"MODE": "country_rot", "TOP": 17}),
     # Momentum crash guard (volatility scaling), tuning years only
     "MV_L25_20": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 25, "VOL_TARGET": 0.20}),
     "MV_L25_30": ("momentum/momentum.py", {"MODE": "mom", "TOP_N": 25, "VOL_TARGET": 0.30}),

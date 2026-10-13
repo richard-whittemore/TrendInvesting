@@ -19,7 +19,16 @@
 #     open. Leverage here is margin on SPY at the prior month's T-bill rate +
 #     SPREAD (no leveraged fund existed before 2006), reset to the target
 #     monthly; the paper's funds reset daily.
-#   Both modes hold IEF as "bonds". IEF began trading in July 2002: before
+#   country_rot: PUBLISHED, ADAPTED -- momentum across national stock markets
+#     (Asness, Liew & Stevens 1997, "Parallels Between the Cross-Sectional
+#     Predictability of Stock and Country Returns", Journal of Portfolio
+#     Management), traded with sector_rot's ranking and trend check (PROJECT
+#     combination) over the iShares MSCI single-country ETFs that began
+#     trading in March 1996 (COUNTRIES, all outside the US), so the universe
+#     is fixed; all of them still trade. With TOP = len(COUNTRIES) and no
+#     trend check it holds them all equally, reset monthly: the equal-weight
+#     benchmark.
+#   All modes hold IEF as "bonds". IEF began trading in July 2002: before
 #   then a bond allocation stays in cash, earning nothing.
 from AlgorithmImports import *
 from datetime import date
@@ -29,6 +38,12 @@ from datetime import date
 RATES = __RATES__
 
 SECTORS = ["XLB", "XLE", "XLF", "XLI", "XLK", "XLP", "XLU", "XLV", "XLY"]
+#: Australia, Austria, Belgium, Canada, France, Germany, Hong Kong, Italy,
+#: Japan, Malaysia, Mexico, the Netherlands, Singapore, Spain, Sweden,
+#: Switzerland and the UK.
+COUNTRIES = ["EWA", "EWO", "EWK", "EWC", "EWQ", "EWG", "EWH", "EWI", "EWJ", "EWM", "EWW", "EWN", "EWS",
+             "EWP", "EWD", "EWL", "EWU"]
+UNIVERSES = {"sector_rot": SECTORS, "country_rot": COUNTRIES}
 
 
 def lev_trend_action(on, last_on, month, last_month, bond_ready, bond_held):
@@ -63,7 +78,7 @@ class EtfRotationResearch(QCAlgorithm):
     MEASURE_FROM = (1999, 1, 1)
     MODE = "sector_rot"
     TOP = 3
-    SMA_MONTHS = 0            # sector_rot: 0 = off, else the per-ETF trend check
+    SMA_MONTHS = 0            # rotations: 0 = off, else the per-ETF trend check
     LEVERAGE = 2.0            # lev_trend
     TREND_DAYS = 200          # lev_trend
     BOND = "IEF"
@@ -78,7 +93,7 @@ class EtfRotationResearch(QCAlgorithm):
         self.Settings.MinimumOrderMarginPortfolioPercentage = 0
         self.spy = self.AddEquity("SPY", Resolution.Daily, leverage=4).Symbol
         self.bond = self.AddEquity(self.BOND, Resolution.Daily).Symbol
-        self.sym = {n: self.AddEquity(n, Resolution.Daily).Symbol for n in SECTORS} if self.MODE == "sector_rot" else {}
+        self.sym = {n: self.AddEquity(n, Resolution.Daily).Symbol for n in UNIVERSES.get(self.MODE, [])}
         self.sma = self.SMA(self.spy, self.TREND_DAYS, Resolution.Daily)
         self.SetWarmUp(self.TREND_DAYS + 10, Resolution.Daily)
         self.curve, self.px = [], []
@@ -86,7 +101,7 @@ class EtfRotationResearch(QCAlgorithm):
         self.switches = 0
         self.last_on = None
         self.last_lev_month = None
-        if self.MODE == "sector_rot":
+        if self.MODE in UNIVERSES:
             self.Schedule.On(self.DateRules.MonthStart(self.spy), self.TimeRules.At(8, 0), self.Rotate)
 
     def Rotate(self):
