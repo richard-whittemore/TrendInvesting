@@ -7,6 +7,7 @@ Standard library only; synthetic values, no market data.
 """
 import ast
 import datetime as _dt
+import difflib
 import importlib.util
 import os
 import sys
@@ -190,6 +191,18 @@ class BuilderTest(unittest.TestCase):
             old = _class_constants(*build_variants.VARIANTS[original])
             self.assertEqual({k: new[k] for k in old}, old, fixed)
             self.assertEqual({k: v for k, v in new.items() if k not in old}, neutral, fixed)
+
+    def test_the_execution_runs_keep_their_baselines_settings_plus_the_delay(self):
+        pairs = {"XF_HALF_D3": "F_HALF", "XF_COMBO_D3": "F_COMBO",
+                 "OOS_XF_HALF_D1": "OOS_F_HALF", "OOS_XF_HALF_D3": "OOS_F_HALF",
+                 "OOS_XF_COMBO_D1": "OOS_F_COMBO", "OOS_XF_COMBO_D3": "OOS_F_COMBO"}
+        for late, baseline in pairs.items():
+            template, params = build_variants.VARIANTS[late]
+            self.assertEqual(template, "momentum/execution.py", late)
+            new = _class_constants(template, params)
+            delay = new.pop("EXEC_DELAY")
+            self.assertEqual(new, _class_constants(*build_variants.VARIANTS[baseline]), late)
+            self.assertEqual(delay, int(late[-1]), late)
 
 
 class BoostTemplateTest(unittest.TestCase):
@@ -769,6 +782,243 @@ class CarryTest(unittest.TestCase):
         rows = [self.Row(d, 100.0, 100.0), self.Row(d + _dt.timedelta(1), 100.0, 101.0),
                 self.Row(d + _dt.timedelta(10), 100.0, 99.0)]
         self.assertEqual(self._carry().carry_series(rows), [])
+
+
+class _Clock:
+    """A Securities stand-in whose SPY price the test sets."""
+
+    def __init__(self):
+        self.price = 100.0
+
+    def __getitem__(self, name):
+        return types.SimpleNamespace(Price=self.price)
+
+
+def _boost_execution(module, decisions=None, **settings):
+    """boost/execution.py's algorithm built without Initialize(). With
+    ``decisions``, each decision returns the next of those weights instead of
+    applying the rule; orders are recorded as ("market", weight) or
+    ("moc", shares)."""
+    algo = module.BoostExecution()
+    for name, value in settings.items():
+        setattr(algo, name, value)
+    algo.sym = "SPY"
+    algo.rsi2 = module.Wilder(2)
+    algo.trend = module.Average(algo.TREND_DAYS) if algo.TREND_DAYS else None
+    algo.exit_sma = module.Average(algo.EXIT_SMA)
+    algo._reset_state()
+    algo.IsWarmingUp = False
+    algo.Time = _dt.datetime(1992, 1, 15)
+    algo.Securities = _Clock()
+    algo.orders = []
+    algo.held, algo.equity = 0.0, 1_000_000.0
+    algo.SetHoldings = lambda sym, w: algo.orders.append(("market", w))
+    algo.CalculateOrderQuantity = lambda sym, w: round(w * 1000) - round(algo.held / 100.0)
+    algo.MarketOnCloseOrder = lambda sym, qty: algo.orders.append(("moc", qty))
+    cash = _Cash()
+
+    class Book(dict):
+        CashBook = {"USD": cash}
+
+        @property
+        def TotalPortfolioValue(self):
+            return algo.equity
+
+        def __getitem__(self, name):
+            return types.SimpleNamespace(HoldingsValue=algo.held)
+
+    algo.Portfolio = Book()
+    if decisions is not None:
+        queue = list(decisions)
+        algo._decide = lambda price: queue.pop(0)
+    return algo
+
+
+#: Closes rising 10 a day from 10 to 300: RSI(2) 100, far above every average.
+_RISE = tuple(float(c) for c in range(10, 310, 10))
+
+
+def _close(algo, close):
+    algo.OnDailyBar(types.SimpleNamespace(Close=close))
+
+
+class BoostExecutionTest(unittest.TestCase):
+    """boost/execution.py: the rule of boost/template.py, decided and filled
+    at M1's or Interactive Brokers' times."""
+
+    def setUp(self):
+        self.module = _load_template(self, "boost/execution.py", {})
+
+    def test_wilder_rsi_seeds_with_simple_averages_then_smooths(self):
+        rsi = self.module.Wilder(2)
+        for close in (10.0, 11.0, 10.5):
+            rsi.update(close)
+        # Changes +1, -0.5 seed gain 0.5, loss 0.25; then +1.5 gives gain
+        # (0.5 + 1.5) / 2 = 1.0 and loss 0.25 / 2 = 0.125: RS 8.
+        self.assertAlmostEqual(rsi.peek(12.0), 100.0 - 100.0 / 9.0)
+        self.assertAlmostEqual(rsi.peek(12.0), 100.0 - 100.0 / 9.0)   # peeking stores nothing
+        rsi.update(12.0)
+        self.assertAlmostEqual(rsi._value(rsi.gain, rsi.loss), 100.0 - 100.0 / 9.0)
+
+    def test_an_rsi_with_no_losses_is_100_and_none_before_it_is_seeded(self):
+        rsi = self.module.Wilder(2)
+        self.assertIsNone(rsi.peek(1.0))
+        rsi.update(10.0)
+        self.assertIsNone(rsi.peek(11.0))
+        rsi.update(11.0)
+        self.assertEqual(rsi.peek(12.0), 100.0)
+
+    def test_the_average_counts_the_provisional_close_with_the_last_closes(self):
+        avg = self.module.Average(3)
+        avg.update(1.0)
+        self.assertIsNone(avg.peek(10.0))
+        for close in (2.0, 3.0, 4.0):
+            avg.update(close)
+        self.assertAlmostEqual(avg.peek(10.0), (3.0 + 4.0 + 10.0) / 3)
+
+    def test_the_rule_enters_on_a_low_rsi_above_the_trend_and_leaves_above_the_exit_average(self):
+        algo = _boost_execution(self.module, TREND_DAYS=20)
+        for close in _RISE:
+            _close(algo, close)
+        self.assertAlmostEqual(algo.queue[-1], 0.98)
+        _close(algo, 290.0)      # RSI 50: no entry
+        _close(algo, 280.0)      # RSI 25: no entry
+        self.assertAlmostEqual(algo.queue[-1], 0.98)
+        _close(algo, 260.0)      # RSI 8.3, well above the 20-day average: boost
+        self.assertAlmostEqual(algo.queue[-1], 0.98 * 1.5)
+        self.assertEqual(algo.episodes, 1)
+        _close(algo, 255.0)      # below the 5-day average (277): still boosted
+        self.assertAlmostEqual(algo.queue[-1], 0.98 * 1.5)
+        _close(algo, 300.0)      # above it: back to 98%
+        self.assertAlmostEqual(algo.queue[-1], 0.98)
+
+    def test_no_entry_below_the_trend_average(self):
+        algo = _boost_execution(self.module, TREND_DAYS=3)
+        for close in (120.0, 110.0, 100.0, 90.0):
+            _close(algo, close)
+        self.assertTrue(all(w == 0.98 for w in algo.queue))
+        self.assertEqual(algo.episodes, 0)
+
+    def test_a_decision_on_a_provisional_close_matches_one_on_that_final_close(self):
+        on_close = _boost_execution(self.module, TREND_DAYS=20)
+        intraday = _boost_execution(self.module, TREND_DAYS=20, EXEC="moc")
+        for close in _RISE + (290.0, 280.0):
+            _close(on_close, close)
+            _close(intraday, close)
+        _close(on_close, 260.0)
+        intraday.Securities.price = 260.0
+        intraday.DecideIntraday()
+        self.assertEqual(intraday.orders, [("moc", round(0.98 * 1.5 * 1000))])
+        self.assertAlmostEqual(on_close.queue[-1], 0.98 * 1.5)
+
+    def test_next_open_trades_a_close_decision_at_the_next_morning(self):
+        algo = _boost_execution(self.module, decisions=[1.47])
+        _close(algo, 100.0)
+        self.assertEqual(algo.orders, [])
+        algo.TradeDue()
+        self.assertEqual(algo.orders, [("market", 1.47)])
+
+    def test_a_delay_holds_each_decision_one_more_session(self):
+        algo = _boost_execution(self.module, decisions=[1.47, 0.98], EXEC_DELAY=1)
+        _close(algo, 100.0)
+        algo.TradeDue()
+        self.assertEqual(algo.orders, [])
+        _close(algo, 100.0)
+        algo.TradeDue()
+        self.assertEqual(algo.orders, [("market", 1.47)])
+        algo.TradeDue()
+        self.assertEqual(algo.orders, [("market", 1.47)])   # the second waits for the next session's decision
+
+    def test_the_afternoon_window_trades_the_same_days_decision(self):
+        algo = _boost_execution(self.module, decisions=[1.47], EXEC="afternoon")
+        algo.DecideIntraday()
+        self.assertEqual(algo.orders, [])
+        algo.TradeDue()
+        self.assertEqual(algo.orders, [("market", 1.47)])
+
+    def test_moc_sends_the_share_difference_to_the_close(self):
+        algo = _boost_execution(self.module, decisions=[1.47, 1.47, 0.98], EXEC="moc")
+        algo.held = 98_000.0                     # 980 shares at 100
+        algo.DecideIntraday()
+        self.assertEqual(algo.orders, [("moc", 1470 - 980)])
+        algo.held = 147_000.0
+        algo.DecideIntraday()                    # unchanged: no order
+        algo.DecideIntraday()
+        self.assertEqual(algo.orders, [("moc", 490), ("moc", 980 - 1470)])
+
+    def test_moc_with_a_delay_sends_the_previous_sessions_decision(self):
+        algo = _boost_execution(self.module, decisions=[1.47, 0.98], EXEC="moc", EXEC_DELAY=1)
+        algo.DecideIntraday()
+        self.assertEqual(algo.orders, [])
+        algo.DecideIntraday()
+        self.assertEqual(algo.orders, [("moc", 1470)])
+
+    def test_nothing_is_decided_or_traded_while_warming_up(self):
+        algo = _boost_execution(self.module, decisions=[1.47], EXEC="moc")
+        algo.IsWarmingUp = True
+        algo.DecideIntraday()
+        _close(algo, 100.0)
+        algo.TradeDue()
+        self.assertEqual((algo.orders, algo.decisions, algo.curve), ([], 0, []))
+        self.assertEqual(algo.exit_sma.peek(100.0), None)
+        self.assertEqual(list(algo.exit_sma.closes), [100.0])   # the indicators still warm up
+
+    def test_buy_and_hold_rebalances_to_98_percent_once_a_month(self):
+        algo = _boost_execution(self.module, MODE="bh")
+        for day in (_dt.datetime(1992, 1, 15), _dt.datetime(1992, 1, 16), _dt.datetime(1992, 2, 3)):
+            algo.Time = day
+            _close(algo, 100.0)
+            algo.TradeDue()
+        self.assertEqual(algo.orders, [("market", 0.98), ("market", 0.98)])
+
+    def test_borrowing_pays_the_months_rate_plus_the_spread(self):
+        algo = _boost_execution(self.module, decisions=[1.47], SPREAD=0.022)
+        algo.held = 1_470_000.0
+        _close(algo, 100.0)
+        self.assertAlmostEqual(algo.financing, 470_000.0 * (0.03 + 0.022) / 252.0)
+        self.assertAlmostEqual(algo.Portfolio.CashBook["USD"].added, -algo.financing)
+
+
+class MomentumExecutionTest(unittest.TestCase):
+    """momentum/execution.py: the month's book traded EXEC_DELAY sessions late."""
+
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/execution.py", {})
+
+    def _algo(self, delay):
+        algo = self.module.MomentumResearch()
+        algo.EXEC_DELAY, algo.queued, algo.late_trades = delay, None, 0
+        algo.traded = []
+        algo._trade = algo.traded.append
+        return algo
+
+    def test_without_a_delay_the_book_trades_when_computed(self):
+        algo = self._algo(0)
+        algo._submit({"A": 0.49})
+        self.assertEqual(algo.traded, [{"A": 0.49}])
+
+    def test_with_a_delay_the_book_waits_for_the_later_session_once(self):
+        algo = self._algo(3)
+        algo._submit({"A": 0.49})
+        self.assertEqual(algo.traded, [])
+        algo.TradeQueued()
+        algo.TradeQueued()
+        self.assertEqual(algo.traded, [{"A": 0.49}])
+        self.assertEqual(algo.late_trades, 1)
+
+    def test_the_template_only_adds_to_defensive_v2(self):
+        # Every code line of defensive_v2.py is kept, in order; only comment
+        # lines may change. With EXEC_DELAY 0 the added branch passes the book
+        # straight to _trade, as defensive_v2 does.
+        with open(os.path.join(HERE, "momentum", "defensive_v2.py")) as f:
+            old = f.read().splitlines()
+        with open(os.path.join(HERE, "momentum", "execution.py")) as f:
+            new = f.read().splitlines()
+        matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+        removed = [line for tag, i1, i2, _, _ in matcher.get_opcodes() if tag in ("replace", "delete")
+                   for line in old[i1:i2]]
+        self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
 
 
 if __name__ == "__main__":

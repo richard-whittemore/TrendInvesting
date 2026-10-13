@@ -97,6 +97,12 @@ backtest runs on their servers.
   account, from a run's fills and equity (export not committed).
 - `boost/lev_etf_template.py` — Boost with the extra exposure from a 2x or
   3x S&P 500 fund instead of borrowing (an IRA cannot borrow).
+- `boost/execution.py` and `momentum/execution.py` — the execution test
+  (M1 against Interactive Brokers). Boost's rule on SPY minute data, decided
+  and filled at M1's morning or afternoon window or at Interactive Brokers'
+  close, with each broker's margin spread and commissions; and
+  `defensive_v2.py`'s book traded some sessions after it is computed (a
+  change made by hand).
 - `futures/` — `carry.py` and `blend.py`, local studies on the
   `research/futures-local` engine and the Pinnacle files, which are not in
   the repository.
