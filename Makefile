@@ -77,6 +77,7 @@ research-test:
 	cd research/edge-search/timing && python3 -m unittest discover -s . -p "test_*.py"
 	cd research/edge-search && python3 -m unittest test_followup
 	cd research/edge-search/tax && python3 -m unittest test_tax_drag test_custodial
+	cd research/edge-search/portfolio && python3 -m unittest test_blend
 	python3 -m py_compile research/edge-search/boost/template.py research/edge-search/boost/mix_template.py \
 		research/edge-search/shorting/trend_template.py research/edge-search/shorting/factors_ls.py \
 		research/edge-search/futures/carry.py research/edge-search/futures/blend.py \
