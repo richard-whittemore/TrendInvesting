@@ -49,9 +49,10 @@ data, with the limits listed under "Caveats".
 - **Concentrated stock momentum was the strongest result of the whole
   search, but also the riskiest.** Long the 25 strongest stocks, rebalanced
   monthly, returned 27.6% a year on the held-out years after 0.2% slippage
-  per trade, against SPY's 15.2%. 130/30 returned 31.1% (30.4% re-run
-  with the fix, "130/30, re-run with the fix"). On the tuning
-  years it beat SPY by only about 4 points, with 64–73% drawdowns, so the
+  per trade, against SPY's 15.2%. 130/30 returned 31.1% after 0.2%
+  slippage and a 5% borrow fee; re-run with the fix, that is 30.4%, and
+  35.4% without the extra costs ("130/30, re-run with the fix"). On the
+  tuning years it beat SPY by only about 4 points, with 64–73% drawdowns, so the
   held-out years were an unusually good period for it (section 4).
   - **25 names is a stable choice:** 15 and 50 give similar results.
   - **A bond filter changes which period it does well in.** Moving to bonds
@@ -707,6 +708,10 @@ the fixed template with every setting unchanged: 25 names a side, the 25%
 band, 127% long and 29% short, and a 2% borrow fee (5% in the cost-stress
 runs). Each run was made once, after the change was reviewed
 (`F_130`, `OOS_F_130`, `OOS_F_130_S10_B5`, `OOS_F_130_S20_B5`).
+Before the runs, `build_variants.py` was re-run from the reviewed commit
+and each of the four generated scripts was byte-identical (`cmp`) to the
+file uploaded to QuantConnect; for `F_130` the project's `main.py` was
+also read back while it ran and matched.
 
 | 130/30 | Fixed: CAGR / worst drawdown | As originally run |
 | --- | --- | --- |
@@ -731,9 +736,13 @@ Against the fixed long-only book (no filter: 9.95% / 67.9% and
   the long-only book's 30.05% without slippage. The long-only cost-stress
   runs were not re-run on the fixed template; as originally run, slippage
   cost the long-only book about 1–2 points a year.
-- The fix moved 130/30 about as much as the long-only book, so the
-  comparison between them is essentially unchanged. Average cash was 2.5%
-  on the held-out years and 9.2% on the tuning years.
+- **What the fix changed:** on the held-out years it moved both books by
+  similar amounts, so the comparison there is unchanged. On the tuning
+  years it lifted the long-only book more (9.06% to 9.95%) than 130/30
+  (10.31% to 10.54%), so 130/30's lead there roughly halved, from 1.25 to
+  0.59 points a year.
+- Average cash was 2.5% on the held-out years and 9.2% on the tuning
+  years.
 
 ## Taxes: taxable account or IRA
 
