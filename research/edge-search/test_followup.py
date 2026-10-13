@@ -842,12 +842,60 @@ def _close(algo, close):
     algo.OnDailyBar(types.SimpleNamespace(Close=close))
 
 
+def _wire_initialize(module, algo):
+    """Stand-ins for what Initialize() calls; returns the list that records
+    each scheduled event as (date rule, time rule, callback name) and the
+    fee models set."""
+    events, fees = [], []
+    module.BrokerageName = types.SimpleNamespace(InteractiveBrokersBrokerage="IB")
+    module.AccountType = types.SimpleNamespace(Margin="margin")
+    module.Resolution = types.SimpleNamespace(Daily="daily", Minute="minute")
+    module.ConstantFeeModel = lambda fee: ("fee", fee)
+    for name in ("SetStartDate", "SetEndDate", "SetCash", "SetBrokerageModel", "AddUniverse", "SetWarmUp",
+                 "Consolidate"):
+        setattr(algo, name, lambda *a, **k: None)
+    algo.Settings = types.SimpleNamespace()
+    algo.UniverseSettings = types.SimpleNamespace()
+    algo.AddEquity = lambda ticker, *a, **k: types.SimpleNamespace(
+        Symbol=ticker, SetFeeModel=fees.append)
+    algo.DateRules = types.SimpleNamespace(
+        MonthStart=lambda sym, offset=0: ("month_start", sym, offset),
+        EveryDay=lambda sym: ("every_day", sym))
+    algo.TimeRules = types.SimpleNamespace(
+        At=lambda h, m: ("at", h, m),
+        AfterMarketOpen=lambda sym, minutes: ("after_open", minutes),
+        BeforeMarketClose=lambda sym, minutes: ("before_close", minutes))
+    algo.Schedule = types.SimpleNamespace(
+        On=lambda date_rule, time_rule, callback: events.append((date_rule, time_rule, callback.__name__)))
+    return events, fees
+
+
 class BoostExecutionTest(unittest.TestCase):
     """boost/execution.py: the rule of boost/template.py, decided and filled
     at M1's or Interactive Brokers' times."""
 
     def setUp(self):
         self.module = _load_template(self, "boost/execution.py", {})
+
+
+    def _schedule(self, **settings):
+        algo = self.module.BoostExecution()
+        for name, value in settings.items():
+            setattr(algo, name, value)
+        events, fees = _wire_initialize(self.module, algo)
+        algo.Initialize()
+        return events, fees
+
+    def test_each_window_is_scheduled_at_its_time(self):
+        day = ("every_day", "SPY")
+        self.assertEqual(self._schedule(EXEC="next_open")[0], [(day, ("after_open", 1), "TradeDue")])
+        self.assertEqual(self._schedule(EXEC="afternoon")[0],
+                         [(day, ("before_close", 70), "DecideIntraday"), (day, ("before_close", 60), "TradeDue")])
+        self.assertEqual(self._schedule(EXEC="moc")[0], [(day, ("before_close", 16), "DecideIntraday")])
+
+    def test_m1_runs_charge_no_commission_and_ib_runs_keep_leans(self):
+        self.assertEqual(self._schedule(FEES="none")[1], [("fee", 0)])
+        self.assertEqual(self._schedule(FEES="ib")[1], [])
 
     def test_wilder_rsi_seeds_with_simple_averages_then_smooths(self):
         rsi = self.module.Wilder(2)
@@ -988,24 +1036,53 @@ class MomentumExecutionTest(unittest.TestCase):
 
     def _algo(self, delay):
         algo = self.module.MomentumResearch()
-        algo.EXEC_DELAY, algo.queued, algo.late_trades = delay, None, 0
+        algo.EXEC_DELAY, algo.queued, algo.queued_day, algo.wait, algo.late_trades = delay, None, None, 0, 0
+        algo.Time = _dt.datetime(2000, 2, 1, 8, 0)
         algo.traded = []
         algo._trade = algo.traded.append
         return algo
+
+    def _session(self, algo, day):
+        algo.Time = _dt.datetime(2000, 2, day, 8, 0)
+        algo.TradeQueued()
 
     def test_without_a_delay_the_book_trades_when_computed(self):
         algo = self._algo(0)
         algo._submit({"A": 0.49})
         self.assertEqual(algo.traded, [{"A": 0.49}])
 
-    def test_with_a_delay_the_book_waits_for_the_later_session_once(self):
+    def test_with_a_delay_the_book_trades_on_the_third_later_session_once(self):
         algo = self._algo(3)
         algo._submit({"A": 0.49})
+        algo.TradeQueued()               # the same session, either side of the computation
+        self._session(algo, 2)
+        self._session(algo, 3)
         self.assertEqual(algo.traded, [])
-        algo.TradeQueued()
-        algo.TradeQueued()
+        self._session(algo, 4)
+        self._session(algo, 7)
         self.assertEqual(algo.traded, [{"A": 0.49}])
         self.assertEqual(algo.late_trades, 1)
+
+    def test_the_count_does_not_depend_on_which_8am_event_runs_first(self):
+        early = self._algo(1)
+        early.TradeQueued()              # the daily event before the month's computation
+        early._submit({"A": 0.49})
+        late = self._algo(1)
+        late._submit({"A": 0.49})
+        late.TradeQueued()               # after it
+        for algo in (early, late):
+            self.assertEqual(algo.traded, [])
+            self._session(algo, 2)
+            self.assertEqual(algo.traded, [{"A": 0.49}])
+
+    def test_the_delay_adds_one_daily_event_and_keeps_the_month_start_one(self):
+        for delay, extra in ((0, []), (1, [(("every_day", "SPY"), ("at", 8, 0), "TradeQueued")]),
+                             (3, [(("every_day", "SPY"), ("at", 8, 0), "TradeQueued")])):
+            algo = self.module.MomentumResearch()
+            algo.EXEC_DELAY = delay
+            events, _ = _wire_initialize(self.module, algo)
+            algo.Initialize()
+            self.assertEqual(events, [(("month_start", "SPY", 0), ("at", 8, 0), "Rebalance")] + extra, delay)
 
     def test_the_template_only_adds_to_defensive_v2(self):
         # Every code line of defensive_v2.py is kept, in order; only comment

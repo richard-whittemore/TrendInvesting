@@ -170,11 +170,15 @@ class MomentumResearch(QCAlgorithm):
         self.resize_all = False
         self.skipped = 0
         self.queued = None            # a computed book waiting EXEC_DELAY sessions
+        self.queued_day = None        # the session it was computed on
+        self.wait = 0                 # sessions still to wait
         self.late_trades = 0
         self.Schedule.On(self.DateRules.MonthStart(self.spy), self.TimeRules.At(8, 0), self.Rebalance)
         if self.EXEC_DELAY:
-            self.Schedule.On(self.DateRules.MonthStart(self.spy, self.EXEC_DELAY), self.TimeRules.At(8, 0),
-                             self.TradeQueued)
+            # Every session at 8:00. It counts only sessions after the one the
+            # book was computed on, so it works whichever of the two 8:00
+            # events LEAN runs first on the first session of the month.
+            self.Schedule.On(self.DateRules.EveryDay(self.spy), self.TimeRules.At(8, 0), self.TradeQueued)
 
     def Coarse(self, coarse):
         month = (self.Time.year, self.Time.month)
@@ -357,13 +361,17 @@ class MomentumResearch(QCAlgorithm):
         """Trade the month's book now, or hold it for TradeQueued when
         EXEC_DELAY is set."""
         if self.EXEC_DELAY:
-            self.queued = targets
+            self.queued, self.queued_day, self.wait = targets, self.Time.date(), self.EXEC_DELAY
         else:
             self._trade(targets)
 
     def TradeQueued(self):
-        """Trade the book computed at the start of the month, if any."""
-        if self.queued is None:
+        """Each session: trade the month's book on the EXEC_DELAY-th
+        session after the one it was computed on."""
+        if self.queued is None or self.Time.date() == self.queued_day:
+            return
+        self.wait -= 1
+        if self.wait > 0:
             return
         targets, self.queued = self.queued, None
         self.late_trades += 1
