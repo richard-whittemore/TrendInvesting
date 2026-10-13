@@ -1312,9 +1312,14 @@ class CountryRotationTest(unittest.TestCase):
             template, params = build_variants.VARIANTS[variant]
             c = _class_constants(template, params)
             self.assertEqual((c["START"], c["MEASURE_FROM"], c["END"]), ((2015, 1, 1), (2016, 1, 1), (2026, 6, 30)))
-        tuned = build_variants.VARIANTS["E_CTRY_T5_S10"][1]
-        held = build_variants.VARIANTS["E_CTRY_OOS_T5_S10"][1]
-        self.assertEqual((held["TOP"], held["SMA_MONTHS"]), (tuned["TOP"], tuned["SMA_MONTHS"]))
+        dates = ("START", "END", "MEASURE_FROM")
+        for held, tuned in (("E_CTRY_OOS_T5_S10", "E_CTRY_T5_S10"), ("E_CTRY_OOS_EW", "E_CTRY_EW")):
+            h = _class_constants(*build_variants.VARIANTS[held])
+            t = _class_constants(*build_variants.VARIANTS[tuned])
+            for name in dates:
+                h.pop(name)
+                t.pop(name)
+            self.assertEqual(h, t, held)
 
 
 if __name__ == "__main__":
