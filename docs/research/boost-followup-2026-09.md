@@ -795,6 +795,50 @@ Each strategy's own CAGR is shown below, less its tax cost.
 - Margin Boost needs a taxable account, and its tax cost is small.
 - The leveraged-fund version of Boost fits an IRA.
 
+### Boost in a child's custodial account (kiddie tax)
+
+The owner asked about running Boost in the custodial account. It can't
+borrow, so only the no-borrowing version applies: part of the SPY is
+swapped into SSO (2x S&P 500) during a boost (`BE_SSO_F`, July 2006 to
+mid-2026). The tax is computed from that run's own fills by
+`research/edge-search/tax/custodial.py`, using the kiddie-tax tiers
+(IRS Publication 929):
+- the child's standard deduction covers the first half of each year's
+  threshold ($1,350 of $2,700 in 2025);
+- the rest up to the threshold is taxed at the child's rates (10%, and 0%
+  on dividends and long-term gains; 5% before 2008);
+- income above the threshold is taxed at the parents' rates (22% / 15%).
+
+The tiers are in dollars, so the run is scaled to each starting size.
+The tax is paid from the account each year, and the account is still
+held at the end. The control holds SPY as one lot.
+
+| Starting July 2006 | Boost via SSO, after tax | SPY held, after tax | Boost in 2026 | SPY in 2026 |
+| --- | --- | --- | --- | --- |
+| $10,000 | 11.31% | 11.02% | $85,000 | $81,000 |
+| $25,000 | 10.90% | 11.02% | $198,000 | $202,000 |
+| $50,000 | 10.66% | 10.97% | $379,000 | $401,000 |
+| $100,000 | 10.54% | 10.90% | $742,000 | $791,000 |
+
+Before tax: Boost via SSO 12.06% a year, SPY 11.02%. The table sells the
+newest lots first. Selling the oldest first (FIFO) costs about 1 point a
+year more: 10.49%, 9.89%, 9.61% and 9.48%.
+
+- **Why the cost is high.** Each boost sells about half the SPY to buy
+  SSO and buys it back when the boost ends, about ten times a year. That
+  half of the SPY is never held a year, so its gains are taxed as
+  short-term income every year (about 4% of the account), plus about 2%
+  from the SSO trades. Margin Boost avoids this because it sells only the
+  extra shares it borrowed for.
+- **The tiers run out quickly.** At about 6% of the account in short-term
+  income a year, the threshold is passed at around $40,000. Above that the
+  gains are taxed at the parents' 22%.
+- **The result:** the SSO version beats simply holding SPY only in an
+  account that stays small. Not modelled: wash sales (SPY sold at a loss
+  and bought back within days), which would make losing years slightly
+  worse; state tax; and the child's later sale of the held SPY, possibly
+  at 0%.
+
 ## 5. What running Boost would take
 
 This section gathers facts for the owner's own decision. It is not a
@@ -861,6 +905,88 @@ recommendation.
 reliably, including early in a real bear market (2008, 2022), is the part
 backtests cannot test.
 
+## 6. Execution: M1 against Interactive Brokers
+
+The owner chose:
+- momentum (half filter or combination) in the Traditional and Roth IRAs;
+- margin Boost in the joint taxable account;
+- all at M1 Finance.
+
+Every earlier run assumed Interactive Brokers-style execution. This test
+(issue #280) measures what M1's mechanics cost. Settings were fixed before
+the runs, and each run was made once.
+
+**M1's mechanics, as modelled** ([how M1 trades](https://help.m1.com/en/articles/9331916-how-m1-trades)):
+- market orders only, in a morning window around 9:30 ET;
+- an afternoon window around 3:00 ET for accounts with $25,000 or more
+  invested (the joint account qualifies);
+- no commissions and no API, so changes are made by hand;
+- margin at 5.90% (September 2026), about T-bill + 2.2%.
+
+Interactive Brokers was modelled as:
+- orders placed by program, so no delay;
+- market-on-close orders;
+- margin about T-bill + 1.5%;
+- LEAN's per-share commissions.
+
+### Boost (SPY minute data, `boost/execution.py`)
+
+The rule is unchanged. The indicators are computed from the daily
+closes, so a decision made before the close uses that minute's price as
+a provisional close.
+
+| Execution | 1999–2015 | 2016–mid-2026 | 1999–mid-2026 | Worst drawdown |
+| --- | --- | --- | --- | --- |
+| IB: decided 15:44, market-on-close (`BE_IB_MOC`) | 6.55% | 16.86% | 10.31% | 54.5% |
+| IB: decided on the close, filled 9:31 next session (`BE_IB_OPEN`) | 6.69% | 16.26% | 10.19% | 53.5% |
+| **M1 morning window** (`BE_M1_AM`) | **6.70%** | **16.23%** | **10.18%** | 53.5% |
+| M1 afternoon window: decided 14:50, filled 15:00 (`BE_M1_PM`) | 5.93% | 16.41% | 9.75% | 54.0% |
+| M1 morning window, one session late (`BE_M1_AM_D1`) | 6.57% | 17.05% | 10.39% | 53.6% |
+| SPY held at 98%, same setup (`BE_BH`) | 4.82% | 14.86% | 8.49% | 54.3% |
+
+- **M1's morning window keeps the whole edge:** about 1.7 points a year
+  over SPY. It matches Interactive Brokers trading at the same time. M1's
+  higher margin rate is about offset by its lack of commissions.
+- **Trading at the close adds only about 0.1 point a year overall.** It
+  was behind on the tuning years and ahead on the held-out years. That's
+  not a reason to change brokers.
+- **The afternoon window was worst on the tuning years** (0.8 points
+  behind the morning window), so the morning window is the one to use.
+- **A day's delay did not hurt** (it was ahead after 2016). That is most
+  likely noise, but there's no need to rush when a signal fires.
+- **Comparison with the recorded daily run:** `BE_IB_OPEN` is close to
+  `BX_SPY` (6.9% and 16.4%). The small gap is a 9:31 fill instead of the
+  official open, and a 1998 start for the minute data.
+
+### Momentum (`momentum/execution.py`)
+
+The month's book is computed as before, from the last close of the month.
+It is then traded 1 or 3 sessions late, as a change made by hand might
+be. The baselines are the recorded runs, which trade on the first session.
+
+| Version | First session (recorded) | 1 session late | 3 sessions late |
+| --- | --- | --- | --- |
+| Half filter, 1999–2015 | 16.96% / 49.4% | | 13.44% / 50.3% |
+| Half filter, 2016–mid-2026 | 23.87% / 45.3% | 22.70% / 44.8% | 22.44% / 42.7% |
+| Combination, 1999–2015 | 11.25% / 34.0% | | 11.08% / 37.0% |
+| Combination, 2016–mid-2026 | 20.85% / 31.0% | 20.28% / 31.1% | 19.96% / 31.5% |
+
+(CAGR / worst drawdown.)
+
+- **Late trading costs momentum, sometimes a lot.**
+  - Half filter: 1.2–1.4 points a year on the held-out years, and 3.5
+    points on the tuning years.
+  - Combination: 0.2–0.9 points.
+  - The half filter's cost is the larger, probably because its move into
+    bonds happens late too, in the fast markets of 2000–02 and 2008.
+- **At M1 the delay can be zero.** The book depends only on the last close
+  of the month. The pie can be updated that evening or weekend, so it
+  trades in the first session's morning window. That is what the baselines
+  assume.
+- **Interactive Brokers' advantage is automation:** the trade happens on
+  time without anyone remembering to make it. M1 and IBKR Lite both trade
+  stocks commission-free, and the IRAs need no margin.
+
 ## Caveats
 
 - **SPY's held-out years have been examined repeatedly,** so the SPY
@@ -889,7 +1015,7 @@ backtests cannot test.
 - **QuantConnect scripts.** Templates are in `research/edge-search/boost/`
   (`template.py`, `mix_template.py`) and `research/edge-search/shorting/`
   (`trend_template.py`, `factors_ls.py`).
-  - `research/edge-search/build_variants.py TB3MS.csv OUT_DIR` writes all 98
+  - `research/edge-search/build_variants.py TB3MS.csv OUT_DIR` writes all 114
     variants exactly as run, one `OUT_DIR/<name>/main.py` each, filling
     in each run's settings and the margin-rate table from a local FRED
     TB3MS file.
@@ -915,6 +1041,9 @@ backtests cannot test.
     cent in all eight momentum runs.
   - The script refuses a run with no fills, so an empty export cannot read
     as no tax.
+  - `research/edge-search/tax/custodial.py SSO_EXPORT.json BOOST_SPY_EXPORT.json`
+    prints the custodial-account table, from `BE_SSO_F`'s export and
+    `BX_SPY_BH`'s, which supplies the SPY control.
 - **Tests.** `make research-test` runs `research/edge-search/test_followup.py`,
   which covers:
   - the builder

@@ -23,7 +23,10 @@ PLACEHOLDER = "RATES = __RATES__"
 IS_END = (2015, 12, 31)
 _MIX = {"MODE": "mix"}
 _OOS = {"START_DATE": (2015, 1, 1), "END_DATE": (2026, 6, 30), "MEASURE_FROM": (2016, 1, 1), "TOP_N": 25}
-_D11, _D19, _D21, _D22, _D23 = (2011, 3, 1), (2019, 7, 1), (2021, 2, 1), (2022, 5, 1), (2023, 11, 1)
+_HALF = {"MODE": "mom_trend", "TOP_N": 25, "RISK_OFF_FRACTION": 0.5}
+_COMBO = dict(_HALF, SECTOR_CAP=3, INV_VOL=True)
+_M1 = {"SPREAD": 0.022, "FEES": "none"}
+_D11, _D19, _D21, _D22, _D23 =(2011, 3, 1), (2019, 7, 1), (2021, 2, 1), (2022, 5, 1), (2023, 11, 1)
 
 #: variant -> (template, {class constant: value}), exactly as run.
 VARIANTS = {
@@ -123,6 +126,24 @@ VARIANTS = {
     "OOS_F_130": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_130")),
     "OOS_F_130_S10_B5": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_130", SLIPPAGE=0.001, BORROW_FEE=0.05)),
     "OOS_F_130_S20_B5": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_130", SLIPPAGE=0.002, BORROW_FEE=0.05)),
+    # Execution test (M1 against Interactive Brokers): the half-filter and
+    # combination books of F_HALF / F_COMBO and their held-out runs, traded
+    # 1 or 3 sessions after the month's book is computed.
+    "XF_HALF_D3": ("momentum/execution.py", dict(_HALF, EXEC_DELAY=3)),
+    "XF_COMBO_D3": ("momentum/execution.py", dict(_COMBO, EXEC_DELAY=3)),
+    "OOS_XF_HALF_D1": ("momentum/execution.py", dict(_OOS, **_HALF, EXEC_DELAY=1)),
+    "OOS_XF_HALF_D3": ("momentum/execution.py", dict(_OOS, **_HALF, EXEC_DELAY=3)),
+    "OOS_XF_COMBO_D1": ("momentum/execution.py", dict(_OOS, **_COMBO, EXEC_DELAY=1)),
+    "OOS_XF_COMBO_D3": ("momentum/execution.py", dict(_OOS, **_COMBO, EXEC_DELAY=3)),
+    # Boost on SPY minute data: when each decision is made and filled, the
+    # margin spread (IB about 1.5%, M1 5.90% less the T-bill, about 2.2%)
+    # and commissions (IB's, or none at M1).
+    "BE_IB_MOC": ("boost/execution.py", {"EXEC": "moc"}),
+    "BE_IB_OPEN": ("boost/execution.py", {"EXEC": "next_open"}),
+    "BE_M1_AM": ("boost/execution.py", dict(_M1, EXEC="next_open")),
+    "BE_M1_PM": ("boost/execution.py", dict(_M1, EXEC="afternoon")),
+    "BE_M1_AM_D1": ("boost/execution.py", dict(_M1, EXEC="next_open", EXEC_DELAY=1)),
+    "BE_BH": ("boost/execution.py", {"MODE": "bh"}),
     # Other candidates, tuning years only. S_BASE must reproduce MG_25_B.
     "S_BASE": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25}),
     "S_HIGH52": ("momentum/scores.py", {"MODE": "mom", "TOP_N": 25, "SCORE": "high52"}),
