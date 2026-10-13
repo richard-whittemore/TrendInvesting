@@ -1,0 +1,122 @@
+{
+ "_runs": "QuantConnect project 37096083: F_COMBO_R4 24bdb0a9, F_HALF_R4 4270416e, OOS_F_COMBO_R4 dd45f8ec, OOS_F_HALF_R4 7b48232b, MB_SPY_R1 4fbcdf7b, MB_SPY_BH_R1 08e1ecfa, MB_US3_R1 018d70bf, E_CTRY_T5_S10_R1 6701d6cd, E_CTRY_OOS_T5_S10_R1 d68f951a. Each file is that backtest's 'Strategy Equity' chart, Equity series, as [[unix seconds, close], ...].",
+ "curves": {
+  "MOM_IS": "eq_F_COMBO_R4.json",
+  "HALF_IS": "eq_F_HALF_R4.json",
+  "MOM_OOS": "eq_OOS_F_COMBO_R4.json",
+  "HALF_OOS": "eq_OOS_F_HALF_R4.json",
+  "BOOST": "eq_MB_SPY_R1.json",
+  "SPY": "eq_MB_SPY_BH_R1.json",
+  "US3B": "eq_MB_US3_R1.json",
+  "CTRY_IS": "eq_E_CTRY_T5_S10_R1.json",
+  "CTRY_OOS": "eq_E_CTRY_OOS_T5_S10_R1.json"
+ },
+ "periods": [
+  [
+   "Tuning years",
+   [
+    2002,
+    8
+   ],
+   [
+    2015,
+    12
+   ],
+   {
+    "SPY": "SPY",
+    "MOM": "MOM_IS",
+    "HALF": "HALF_IS",
+    "BOOST": "BOOST",
+    "CTRY": "CTRY_IS",
+    "US3B": "US3B"
+   }
+  ],
+  [
+   "Held-out years",
+   [
+    2015,
+    12
+   ],
+   [
+    2026,
+    6
+   ],
+   {
+    "SPY": "SPY",
+    "MOM": "MOM_OOS",
+    "HALF": "HALF_OOS",
+    "BOOST": "BOOST",
+    "CTRY": "CTRY_OOS",
+    "US3B": "US3B"
+   }
+  ]
+ ],
+ "books": [
+  [
+   "SPY held",
+   {
+    "SPY": 1
+   }
+  ],
+  [
+   "Boost (SPY)",
+   {
+    "BOOST": 1
+   }
+  ],
+  [
+   "Momentum, combination",
+   {
+    "MOM": 1
+   }
+  ],
+  [
+   "Momentum, half filter",
+   {
+    "HALF": 1
+   }
+  ],
+  [
+   "Country momentum",
+   {
+    "CTRY": 1
+   }
+  ],
+  [
+   "50% combination + 50% SPY",
+   {
+    "MOM": 1,
+    "SPY": 1
+   }
+  ],
+  [
+   "50% combination + 50% Boost",
+   {
+    "MOM": 1,
+    "BOOST": 1
+   }
+  ],
+  [
+   "50% half filter + 50% Boost",
+   {
+    "HALF": 1,
+    "BOOST": 1
+   }
+  ],
+  [
+   "40% comb. + 40% Boost + 20% country",
+   {
+    "MOM": 2,
+    "BOOST": 2,
+    "CTRY": 1
+   }
+  ],
+  [
+   "50% combination + 50% US3 Boost",
+   {
+    "MOM": 1,
+    "US3B": 1
+   }
+  ]
+ ]
+}

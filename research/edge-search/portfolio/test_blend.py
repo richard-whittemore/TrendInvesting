@@ -1,5 +1,8 @@
 """Tests for blend.py: synthetic curves only, no market data."""
+import contextlib
+import io
 import json
+import math
 import os
 import tempfile
 import unittest
@@ -14,8 +17,17 @@ def _t(y, m, d):
 
 class MonthEndTest(unittest.TestCase):
     def test_the_last_value_of_each_month_is_kept_whatever_the_input_order(self):
-        pts = [[_t(2020, 1, 31), 110.0], [_t(2020, 1, 2), 100.0], [_t(2020, 2, 3), 120.0], [_t(2020, 2, 28), 0.0]]
+        pts = [[_t(2020, 1, 31), 110.0], [_t(2020, 1, 2), 100.0], [_t(2020, 2, 3), 120.0]]
         self.assertEqual(blend.month_ends(pts), {(2020, 1): 110.0, (2020, 2): 120.0})
+
+    def test_a_depleted_account_is_an_error_not_a_dropped_mark(self):
+        for bad in (0.0, -5.0, None):
+            with self.assertRaises(ValueError):
+                blend.month_ends([[_t(2020, 1, 2), 100.0], [_t(2020, 2, 28), bad]])
+
+    def test_millisecond_timestamps_are_rejected(self):
+        with self.assertRaises(ValueError):
+            blend.month_ends([[_t(2020, 1, 2) * 1000, 100.0]])
 
     def test_a_missing_month_is_an_error(self):
         with self.assertRaises(ValueError):
@@ -45,6 +57,20 @@ class MeasureTest(unittest.TestCase):
     def test_correlation_of_opposite_returns_is_minus_one(self):
         self.assertAlmostEqual(blend.correlation([0.1, -0.1, 0.2], [-0.1, 0.1, -0.2]), -1.0)
 
+    def test_correlation_of_fewer_than_two_returns_is_undefined(self):
+        self.assertTrue(math.isnan(blend.correlation([], [])))
+        self.assertTrue(math.isnan(blend.correlation([0.1], [0.2])))
+
+    def test_a_report_rejects_a_one_month_period_a_missing_curve_and_a_zero_book(self):
+        months = blend.span((2020, 1), (2020, 3))
+        spy = {m: 1.0 for m in months}
+        with self.assertRaises(ValueError):
+            blend.report({"SPY": spy}, [("x", {"SPY": 1})], (2020, 1), (2020, 1))
+        with self.assertRaises(ValueError):
+            blend.report({"SPY": spy}, [("x", {"SPY": 1, "MOM": 1})], (2020, 1), (2020, 3))
+        with self.assertRaises(ValueError):
+            blend.report({"SPY": spy}, [("x", {"SPY": 0})], (2020, 1), (2020, 3))
+
     def test_months_behind_counts_the_longest_stretch_below_the_best_relative_level(self):
         bench = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
         path = [1.0, 1.2, 1.1, 1.0, 1.3, 1.25]
@@ -68,12 +94,23 @@ class MainTest(unittest.TestCase):
             pts = [[_t(2020, m, 28), 100.0 + m] for m in range(1, 13)]
             with open(os.path.join(d, "a.json"), "w") as f:
                 json.dump(pts, f)
-            spec = {"curves": {"A": os.path.join(d, "a.json")},
+            spec = {"curves": {"A": "a.json"},
                     "periods": [["P", [2020, 1], [2020, 12], {"SPY": "A"}]],
                     "books": [["SPY held", {"SPY": 1}]]}
             with open(os.path.join(d, "spec.json"), "w") as f:
                 json.dump(spec, f)
-            blend.main(os.path.join(d, "spec.json"))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                blend.main(os.path.join(d, "spec.json"), d)
+            self.assertIn("SPY held", out.getvalue())
+
+    def test_the_recorded_spec_names_a_curve_for_every_book_in_every_period(self):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "strategies_together.json")) as f:
+            spec = json.load(f)
+        for label, _, _, use in spec["periods"]:
+            self.assertTrue(set(use.values()) <= set(spec["curves"]), label)
+            for book, parts in spec["books"]:
+                self.assertTrue(set(parts) <= set(use), (label, book))
 
 
 if __name__ == "__main__":
