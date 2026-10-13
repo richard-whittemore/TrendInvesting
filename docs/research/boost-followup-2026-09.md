@@ -49,7 +49,8 @@ data, with the limits listed under "Caveats".
 - **Concentrated stock momentum was the strongest result of the whole
   search, but also the riskiest.** Long the 25 strongest stocks, rebalanced
   monthly, returned 27.6% a year on the held-out years after 0.2% slippage
-  per trade, against SPY's 15.2%. 130/30 returned 31.1%. On the tuning
+  per trade, against SPY's 15.2%. 130/30 returned 31.1% (30.4% re-run
+  with the fix, "130/30, re-run with the fix"). On the tuning
   years it beat SPY by only about 4 points, with 64–73% drawdowns, so the
   held-out years were an unusually good period for it (section 4).
   - **25 names is a stable choice:** 15 and 50 give similar results.
@@ -698,6 +699,41 @@ Compounding the two periods gives a rough 1999–mid-2026 figure for each:
 **What changed:** fully invested, every version earns more and has deeper
 drawdowns. The ranking among them is unchanged, and the combination's
 worst drawdown on the held-out years (31.0%) is still below SPY's.
+
+#### 130/30, re-run with the fix
+
+The 130/30 book from "Stock momentum on the held-out years" was re-run on
+the fixed template with every setting unchanged: 25 names a side, the 25%
+band, 127% long and 29% short, and a 2% borrow fee (5% in the cost-stress
+runs). Each run was made once, after the change was reviewed
+(`F_130`, `OOS_F_130`, `OOS_F_130_S10_B5`, `OOS_F_130_S20_B5`).
+
+| 130/30 | Fixed: CAGR / worst drawdown | As originally run |
+| --- | --- | --- |
+| 1999–2015 | 10.54% / 77.7% | 10.31% / 72.8% |
+| 2016–mid-2026 | 35.38% / 49.4% | 34.99% / 47.7% |
+| … with 0.1% slippage and a 5% borrow fee | 32.18% / 51.1% | 32.43% / 47.8% |
+| … with 0.2% slippage and a 5% borrow fee | 30.38% / 50.9% | 31.08% / 47.0% |
+
+| Calendar-year return, fixed | 2016 | 2017 | 2018 | 2019 | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 H1 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 130/30 | −7.1% | +11.7% | −13.5% | +46.1% | +89.4% | +17.7% | +20.0% | +22.6% | +74.0% | +33.2% | +130.5% |
+
+(Calendar years are from the run's daily equity chart, without slippage.)
+
+Against the fixed long-only book (no filter: 9.95% / 67.9% and
+30.05% / 44.2%):
+- **1999–2015:** 130/30 adds about 0.6 points a year, with a worst
+  drawdown about 10 points deeper. On the tuning years that is still not a
+  case for shorting.
+- **2016–mid-2026:** it adds about 5 points a year, with a drawdown 5–7
+  points deeper. With the stressed costs it earns 30.4–32.2%, still above
+  the long-only book's 30.05% without slippage. The long-only cost-stress
+  runs were not re-run on the fixed template; as originally run, slippage
+  cost the long-only book about 1–2 points a year.
+- The fix moved 130/30 about as much as the long-only book, so the
+  comparison between them is essentially unchanged. Average cash was 2.5%
+  on the held-out years and 9.2% on the tuning years.
 
 ## Taxes: taxable account or IRA
 
