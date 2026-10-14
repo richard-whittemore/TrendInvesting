@@ -1,10 +1,19 @@
 # Momentum plus bonds in a retirement account (2026-10)
 
 Issue #289. The IRAs are to run momentum (the combination: half filter,
-sector cap 3, inverse volatility), which holds only stocks. A retirement
-account usually holds more bonds as its owner ages. This study measures what
-a bond fund in the same account costs in return and saves in drawdown, at
-the mixes a glide path passes through.
+sector cap 3, inverse volatility), which is mostly stocks: while SPY closes
+below its 200-day average its half filter already moves half the book into
+IEF (`momentum/momentum.py`, `mom_trend` with `RISK_OFF_FRACTION` 0.5). A
+retirement account usually holds more bonds as its owner ages. This study
+measures what a separate bond sleeve in the same account costs in return
+and saves in drawdown, at the mixes a glide path passes through.
+
+The mix percentages are the sleeve's share, not the account's total bond
+share. In risk-off months a 70% combination / 30% IEF mix holds about 65%
+bonds (30% + half of 70%), before cash; in risk-on months it holds 30%. A
+glide path set on these mixes holds more bonds than its label in
+downtrends, and SPY plus bonds, which has no filter, always holds exactly
+its label.
 
 ## Set-up (declared in #289 before any run)
 
@@ -71,16 +80,31 @@ years, +0.10 held out (SPY with IEF: −0.26, then +0.07).
    larger held out. 70/30 momentum/IEF returned at least as much as SPY
    alone in both periods (11.00% against 8.20%, 14.83% against 14.47%),
    with about a third of SPY's tuning-years drop.
-5. **The trend filter is not a substitute for bonds.** Momentum alone fell
-   24–28%; the filter acts after a fall begins. Bonds lower the drop that
-   happens before it reacts.
+5. **The trend filter is not a substitute for a bond sleeve.** Momentum
+   alone fell 24–28%, even though the filter moves half the book into IEF
+   once SPY is below its 200-day average: it acts only after a fall begins.
+   A sleeve held all the time lowers the drop that comes before it reacts.
+   Because the filter also uses IEF, in 2022 it moved into a fund that was
+   itself falling.
 
 ## Reproduction
 
-```
-python3 research/edge-search/build_variants.py TB3MS.csv OUT_DIR   # MB_IEF_BH, MB_TLT_BH, MB_SHY_BH
-python3 research/edge-search/portfolio/blend.py research/edge-search/portfolio/bonds.json EXPORT_DIR
-```
+From the repository root:
 
-EXPORT_DIR holds each run's exported "Strategy Equity" chart (not
-committed), named as in `bonds.json`.
+1. `python3 research/edge-search/build_variants.py TB3MS.csv OUT_DIR`
+   writes every variant as `OUT_DIR/<name>/main.py`, from a local FRED
+   TB3MS file. The bond holds are `MB_IEF_BH`, `MB_TLT_BH` and `MB_SHY_BH`;
+   the momentum and SPY runs are `F_COMBO_R4`, `OOS_F_COMBO_R4`, `F_HALF_R4`,
+   `OOS_F_HALF_R4` and `MB_SPY_BH`.
+2. Paste each `main.py` into a QuantConnect project and run a backtest.
+3. Export each backtest's "Strategy Equity" chart, Equity series, as a JSON
+   list of `[unix seconds, equity]` (for example from QuantConnect's
+   `backtests/chart/read` API with `name: "Strategy Equity"`, keeping each
+   point's time and close), into one EXPORT_DIR. Name each file as
+   `bonds.json`'s `curves` names it: `eq_F_COMBO_R4.json`,
+   `eq_OOS_F_COMBO_R4.json`, `eq_F_HALF_R4.json`, `eq_OOS_F_HALF_R4.json`,
+   `eq_MB_SPY_BH_R1.json`, `eq_MB_IEF_BH.json`, `eq_MB_TLT_BH.json`,
+   `eq_MB_SHY_BH.json`. The exports are not committed.
+4. `python3 research/edge-search/portfolio/blend.py
+   research/edge-search/portfolio/bonds.json EXPORT_DIR` prints both
+   periods' tables.
