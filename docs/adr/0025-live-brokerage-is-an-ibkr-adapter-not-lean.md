@@ -59,6 +59,23 @@ application and replace LEAN for live trading only.
      unverifiable evidence or an unbounded difference puts it in
      **Halted**. What counts as risk-reducing for a target-weight strategy
      is defined in that strategy's own ADR.
+   - **How far back the executions reach.** Through IB Gateway, the TWS
+     API's `reqExecutions` returns only executions since midnight, and
+     Gateway cannot extend that (IBKR's TWS API documentation, "Executions
+     and Commissions"). So:
+     - if the journal's last reconciled state is from the same day, the
+       session's executions are complete evidence;
+     - if it is older (an outage across midnight), the missing executions
+       come from IBKR's Flex Web Service trade-confirmation report, a
+       durable record of the account's activity, before the account may
+       leave Halted. Until that report covers the gap, the evidence is
+       `unverifiable` and the account is Halted;
+     - the scheduled nightly Gateway restart is set after the day's
+       reconciliation and outside trading hours, so a normal restart never
+       crosses an open order.
+   - The coverage is tested against the pinned `ibapi` and Gateway
+     versions in the paper account, and a version change repeats that
+     test.
 6. **IB Gateway runs headless under IBC** on the Lightsail server, with a
    nightly restart and a weekly second-factor approval on the owner's
    phone. Credentials live only in IBC's configuration on that server.
