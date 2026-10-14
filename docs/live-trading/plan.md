@@ -202,7 +202,7 @@ so Pro's margin rate does not help them.
 
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
-| 0 | Owner decisions D2–D3, D5 confirmed with IBKR; ADR for the broker adapter; this plan reviewed | Plan merged |
+| 0 | Owner decisions D2–D3, D5 confirmed with IBKR; ADR for the broker adapter; this plan reviewed | Plan merged and the broker-adapter ADR accepted. D2, D3 and D5 must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
 | 1 | Universe parity study (research, QuantConnect free) | Overlap good enough, or a data source chosen |
 | 2 | Go strategy modules and risk limits, test first; backtest parity | Parity passes |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
