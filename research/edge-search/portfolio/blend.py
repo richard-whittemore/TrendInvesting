@@ -1,6 +1,9 @@
-"""Combine strategies' QuantConnect equity curves into one portfolio, as
-separate accounts that are never rebalanced into one another (an IRA's money
-cannot move to a taxable account and back), and measure the result.
+"""Combine strategies' QuantConnect equity curves into one portfolio and
+measure the result. By default the parts are separate accounts that are
+never rebalanced into one another (an IRA's money cannot move to a taxable
+account and back); a book marked "monthly" is instead one account whose
+parts are reset to their weights at every month-end, as an automated IRA
+holding a strategy and a bond fund would be.
 
 Research only (docs/research/boost-followup-2026-09.md, "The strategies
 together"). Inputs are exported "Strategy Equity" charts, one JSON list of
@@ -49,6 +52,24 @@ def combine(paths, weights):
     each part compounds on its own path."""
     total = float(sum(weights))
     return [sum(w / total * p[i] for p, w in zip(paths, weights)) for i in range(len(paths[0]))]
+
+
+def rebalanced(paths, weights):
+    """Value of a book reset to ``weights`` at every month-end: each month it
+    earns the weighted average of the parts' returns that month. The resets
+    are free here: each curve carries its own trading costs, but not the
+    trades that move money between parts, and each part is assumed to earn
+    the same return whatever capital it is given. Read the results as an
+    upper bound on running the mix in one account."""
+    total = float(sum(weights))
+    out = [1.0]
+    for i in range(1, len(paths[0])):
+        out.append(out[-1] * sum(w / total * p[i] / p[i - 1] for p, w in zip(paths, weights)))
+    return out
+
+
+#: How a book's parts are combined: never rebalanced, or reset every month.
+REBALANCE = {"never": combine, "monthly": rebalanced}
 
 
 def cagr(path, months):
@@ -112,13 +133,16 @@ def report(curves, books, first, last, benchmark="SPY"):
     bench = paths[benchmark]
     n = len(months) - 1
     rows = []
-    for label, parts in books:
+    for label, parts, *how in books:
+        if len(how) > 1 or (how and (not isinstance(how[0], str) or how[0] not in REBALANCE)):
+            raise ValueError("book {!r}: rebalance must be one of {}".format(label, ", ".join(REBALANCE)))
+        merge = REBALANCE[how[0] if how else "never"]
         missing = [k for k in parts if k not in paths]
         if missing:
             raise ValueError("book {!r} names curves not loaded for this period: {}".format(label, ", ".join(missing)))
         if sum(parts.values()) <= 0:
             raise ValueError("book {!r} has no positive total weight".format(label))
-        path = combine([paths[k] for k in parts], list(parts.values()))
+        path = merge([paths[k] for k in parts], list(parts.values()))
         rows.append((label, cagr(path, n), max_drawdown(path), longest_behind(path, bench)))
     corr = {}
     names = list(curves)
@@ -136,13 +160,14 @@ def load(path):
 def main(spec_path, export_dir):
     """``spec_path``: JSON {"curves": {name: file in ``export_dir``},
     "periods": [[label, [y, m], [y, m], {book name: curve name}]], "books":
-    [[label, {book name: weight}]]}. The first month of a period is the base
+    [[label, {book name: weight}] or [label, {book name: weight}, "monthly"]]}.
+    The first month of a period is the base
     month-end; its returns start the month after."""
     with open(spec_path) as f:
         spec = json.load(f)
     for label, first, last, use in spec["periods"]:
         curves = {name: load(os.path.join(export_dir, spec["curves"][src])) for name, src in use.items()}
-        rows, corr = report(curves, [(b, w) for b, w in spec["books"]], tuple(first), tuple(last))
+        rows, corr = report(curves, [tuple(book) for book in spec["books"]], tuple(first), tuple(last))
         print("\n{} ({}-{:02d} to {}-{:02d})".format(label, first[0], first[1], last[0], last[1]))
         print("{:<44} {:>8} {:>9} {:>14}".format("book", "CAGR", "worst DD", "months behind"))
         for name, c, dd, behind in rows:

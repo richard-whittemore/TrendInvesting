@@ -1243,6 +1243,15 @@ class MultiBoostTradingTest(unittest.TestCase):
         _multi_day(algo, when=_dt.datetime(1992, 1, 16), missing=("MDY",))
         self.assertEqual(algo.orders[-1], [("SPY", 0.735)])
 
+    def test_bh_holds_a_fund_whose_indicators_are_still_cold(self):
+        # A fund listed after the start date has a price long before 200
+        # bars: "bh" holds it at once, "boost" waits for the warm trend.
+        for mode, expected in (("bh", [[("IEF", 0.98)]]), ("boost", [])):
+            algo = _multi(self.module, {"IEF": 1}, mode=mode)
+            algo.ind["IEF"][0].IsReady = False
+            _multi_day(algo)
+            self.assertEqual(algo.orders, expected, mode)
+
     def test_bh_never_boosts_and_trades_once_a_month(self):
         algo = _multi(self.module, {"SPY": 1, "MDY": 1}, mode="bh")
         algo.ind["SPY"][1].Current.Value = 5.0

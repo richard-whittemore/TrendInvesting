@@ -49,6 +49,11 @@ VARIANTS = {
     "MB_US3X_BH": ("boost/multi.py", {"SLEEVES": _US3X, "MODE": "bh"}),
     "MB_SPY": ("boost/multi.py", {"SLEEVES": {"SPY": 1}}),
     "MB_SPY_BH": ("boost/multi.py", {"SLEEVES": {"SPY": 1}, "MODE": "bh"}),
+    # Bond funds held, for momentum-plus-bonds retirement mixes (portfolio/bonds.json):
+    # the multi-fund holder with one sleeve, no rule to tune
+    "MB_IEF_BH": ("boost/multi.py", {"SLEEVES": {"IEF": 1}, "MODE": "bh"}),
+    "MB_TLT_BH": ("boost/multi.py", {"SLEEVES": {"TLT": 1}, "MODE": "bh"}),
+    "MB_SHY_BH": ("boost/multi.py", {"SLEEVES": {"SHY": 1}, "MODE": "bh"}),
     "BX_SLIP5": ("boost/template.py", {"SLIPPAGE": 0.0005}),
     "BX_SLIP10": ("boost/template.py", {"SLIPPAGE": 0.001}),
     "BX_SPR3": ("boost/template.py", {"SPREAD": 0.03}),
