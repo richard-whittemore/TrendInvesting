@@ -88,7 +88,7 @@ changes. That is an architecture change and needs an ADR before code.
 ```text
 Lightsail VM (Ubuntu, $12/month, US East)
   IB Gateway, kept logged in by IBC (nightly restart, weekly 2FA on the phone)
-  broker adapter (Python, ib_async): market data, orders, fills, positions
+  broker adapter (Python, IBKR's TWS API client; ADR 0025): market data, orders, fills, positions
      -> same envelope transport as today (Unix socket, NDJSON; ADR 0014)
   decision core (Go): momentum, Boost, glide path, risk checks, journal
   reporter: daily summary, equity against SPY, alerts
