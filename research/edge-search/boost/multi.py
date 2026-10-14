@@ -50,8 +50,9 @@ class BoostMulti(QCAlgorithm):
     target on the first trading day of each month; between resets only a
     fund whose signal changed is traded. MODE "bh" holds the shares without
     the rule, reset monthly. Nothing is bought until every fund has a price
-    and its indicators are warm, and a monthly reset waits for a session in
-    which every fund has a bar. Borrowed exposure pays the prior month's
+    and, in "boost", its indicators are warm ("bh" uses none, so a fund
+    listed after START, such as IEF in July 2002, is held from its first
+    bar); a monthly reset waits for a session in which every fund has a bar. Borrowed exposure pays the prior month's
     T-bill rate + SPREAD daily."""
 
     SLEEVES = {"SPY": 1, "MDY": 1, "IWM": 1}
@@ -99,8 +100,8 @@ class BoostMulti(QCAlgorithm):
         return float(indicator.Current.Value) if indicator.IsReady else None
 
     def _ready(self):
-        return all(self.Securities[s].Price > 0 for s in self.syms.values()) and all(
-            all(i.IsReady for i in self.ind[n]) for n in self.SLEEVES)
+        return all(self.Securities[s].Price > 0 for s in self.syms.values()) and (self.MODE == "bh" or all(
+            all(i.IsReady for i in self.ind[n]) for n in self.SLEEVES))
 
     def _weights(self):
         equity = float(self.Portfolio.TotalPortfolioValue)

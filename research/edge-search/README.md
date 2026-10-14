@@ -94,9 +94,11 @@ backtest runs on their servers.
   left in cash for a month. Every other stock-universe script keeps the
   original behaviour so its recorded runs reproduce.
 - `portfolio/blend.py` — several runs' equity curves combined as separate,
-  never-rebalanced accounts: CAGR, month-end drawdown, correlations and the
-  longest stretch behind SPY; `strategies_together.json` is the recorded
-  spec (exports not committed).
+  never-rebalanced accounts, or as one account reset to its weights every
+  month (a book marked `"monthly"`): CAGR, month-end drawdown, correlations
+  and the longest stretch behind SPY; `strategies_together.json` and
+  `bonds.json` (momentum with a bond fund, for retirement accounts) are the
+  recorded specs (exports not committed).
 - `tax/tax_drag.py` — the federal tax cost of a strategy in a taxable
   account, from a run's fills and equity (export not committed).
 - `boost/lev_etf_template.py` — Boost with the extra exposure from a 2x or
@@ -110,7 +112,8 @@ backtest runs on their servers.
 - `boost/multi.py` — Boost's rule, unchanged, on each fund of a blend at
   once (US large, mid and small caps, optionally with developed markets
   outside the US), each fund boosted on its own signal; `bh` is the same
-  blend without the rule. `etf/rotation.py`'s `country_rot` mode ranks
+  blend without the rule, and with one bond fund (IEF, TLT, SHY) it is the
+  bond holding for `portfolio/bonds.json`. `etf/rotation.py`'s `country_rot` mode ranks
   17 single-country funds outside the US the same way as `sector_rot`.
 - `futures/` — `carry.py` and `blend.py`, local studies on the
   `research/futures-local` engine and the Pinnacle files, which are not in
