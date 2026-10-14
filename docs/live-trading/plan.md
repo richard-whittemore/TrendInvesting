@@ -13,7 +13,7 @@ gates).
 
 | Account (IBKR) | Size at start | Strategy | Source of the rule |
 | --- | --- | --- | --- |
-| Roth IRA (Roth 401(k) rollover) | ~$80k | Momentum + bond sleeve on a glide path | `research/edge-search/momentum/defensive_v2.py` as configured by `F_COMBO` in `research/edge-search/build_variants.py`; bond sleeve: `docs/research/retirement-bonds-2026-10.md` (PR #291, not yet merged) |
+| Roth IRA (Roth 401(k) rollover) | ~$80k | Momentum + bond sleeve on a glide path | `research/edge-search/momentum/defensive_v2.py` as configured by `F_COMBO` in `research/edge-search/build_variants.py`; bond sleeve: `docs/research/retirement-bonds-2026-10.md` (PRs #291, #295) |
 | Traditional IRA (401(k) rollover) | ~$30k | Same as the Roth IRA | Same |
 | Joint taxable, margin | ~$4k | Boost on SPY | `research/edge-search/boost/template.py`; execution study `BE_IB_OPEN` |
 
@@ -59,8 +59,10 @@ reset monthly):
 - Both sleeves are reset to 1 − *b* and *b* at the month's rebalance.
 - When both hold the same fund, the account holds one position, the sum of
   the two targets; the journal records each sleeve's share.
-**Decision D2**: the fund (IEF, SHY or half each; #292 pending) and the
-schedule. Illustration: 0–10% until 2028, rising evenly to 40–50% by 2053.
+**Decision D2**: the fund is **half IEF, half SHY** (decided 2026-10-14;
+tested in `docs/research/retirement-bonds-2026-10.md`). The schedule by
+year is still open. Illustration: 0–10% until 2028, rising evenly to
+40–50% by 2053.
 The schedule is configuration with its own hash (ADR 0016), so a change is
 recorded, never silent.
 
@@ -73,7 +75,9 @@ TREND_DAYS 200, EXIT_SMA 5):
   the whole edge this way (`BE_IB_OPEN` 10.19% a year against 10.31% for
   market-on-close), and the decision uses final closes, not a provisional
   15:44 price.
-- **Decision D3**: margin Boost or Boost through SSO (no borrowing).
+- **Decision D3**: **margin Boost** (decided 2026-10-14), not SSO. The
+  joint account borrows for the step to 147%; the 150% hard limit
+  (section 5) applies.
 
 ## 3. Architecture
 
@@ -125,14 +129,39 @@ Lightsail VM (Ubuntu, $12/month, US East)
 - **Universe parity study first** (research, before any build): for each
   month of 2016–2026, compare the 25 names this approach would pick with
   the backtest's own picks, and the return difference.
+- **Where dated holdings come from** (checked 2026-10-14):
+  - iShares' site now offers only three holdings dates (the latest, the
+    last month-end and the last year-end), and its old dated-download link
+    returns the fund page, not a file. It serves live trading, not the
+    study.
+  - QuantConnect's US ETF Constituents dataset includes IWB: daily from
+    January 2015, monthly from June 2009 to 2014. It is free for universe
+    selection in QuantConnect Cloud, so the study runs there, comparing a
+    universe built from IWB's holdings on each date with the backtest's own
+    selection. Both use QuantConnect's Morningstar sectors. Downloading the
+    files for local use costs money; the study does not need that.
+  - QuantConnect says the dataset may lag the sponsor's files by up to a
+    week, and documents no separate availability date. So each month's
+    universe uses the latest holdings dated at least 7 calendar days before
+    the rebalance, never a later one. That snapshot is older than the
+    previous day's iShares file live trading reads; the study reports how
+    much the result moves with a 1-day lag instead.
+  - SEC EDGAR has IWB's own holdings every quarter (series S000004347):
+    N-PORT (CUSIP, shares, value) from September 2019, N-Q and N-CSR
+    schedules from 2006. It is a free, independent check of the
+    QuantConnect data at a few quarter-ends.
+  - None of these settles the sector difference: live trading gets GICS
+    sectors from the iShares file, the backtest used Morningstar. The study
+    measures it separately, comparing the two labels for today's holdings
+    and rerunning the cap with GICS where they differ.
   - It needs each month's holdings and sectors as published at the time. A
     current holdings file would leave out companies that have since gone
     and include others before they joined, which flatters the match.
-  - Obtaining dated monthly holdings files (iShares publishes holdings by
-    as-of date) is therefore a prerequisite. If they reach back only part
-    of the way, the study covers only those months and says so. If the overlap is
-  poor, the fallback is a paid data source (cost to be priced against the
-  edge, `cost-constraint`).
+  - The study runs from January 2016 to September 2026, the last full
+    month before it was planned (2026-10-14); QuantConnect's dataset covers
+    that span, so it needs no purchased data. Later months are not added.
+    If the overlap is poor, the fallback is a paid data source (cost to be
+    priced against the edge, `cost-constraint`).
 
 ## 5. Safety
 
@@ -202,7 +231,7 @@ so Pro's margin rate does not help them.
 
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
-| 0 | Owner decisions D2–D3, D5 confirmed with IBKR; ADR for the broker adapter; this plan reviewed | Plan merged and the broker-adapter ADR accepted. D2, D3 and D5 must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
+| 0 | Owner decisions: D2's schedule, D5 confirmed with IBKR; ADR for the broker adapter; this plan reviewed | Plan merged and the broker-adapter ADR accepted. D2's schedule and D5 must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
 | 1 | Universe parity study (research, QuantConnect free) | Overlap good enough, or a data source chosen |
 | 2 | Go strategy modules and risk limits, test first; backtest parity | Parity passes |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
@@ -215,9 +244,10 @@ only after CodeRabbit and Greptile findings are addressed.
 ## 10. Owner decisions
 
 - **D1** Momentum version: **combination** (decided 2026-10-14).
-- **D2** Glide path: bond fund (after #292) and the schedule by year, for
+- **D2** Glide path: **half IEF, half SHY** (decided 2026-10-14); still
+  open: the schedule by year, for
   each of the two of you.
-- **D3** Joint account: margin Boost or SSO Boost.
+- **D3** Joint account: **margin Boost** (decided 2026-10-14).
 - **D4** Architecture: **Go decision core with a Python broker adapter**
   (decided 2026-10-14).
 - **D5** **IBKR Lite for every account**, if IBKR allows it and its API
