@@ -33,6 +33,12 @@ application and replace LEAN for live trading only.
    which adapter it is talking to.
 3. **LEAN stays for backtests** and research. The LEAN adapter is
    unchanged.
+   - **Only one adapter can drive a live engine.** A live engine's
+     configuration names its adapter (`ibkr`), and that name is part of the
+     configuration hash (ADR 0016). The adapter states its name in its first
+     envelope; the engine refuses any other, and refuses a second connection
+     while one is open. LEAN is not installed on the live server, and the
+     live socket path is not one the LEAN container mounts.
 4. **The client library is IBKR's own TWS API Python client (`ibapi`)**,
    pinned to one released version and its published checksum, vendored
    from IBKR's distribution because the PyPI package lags it. It has no
@@ -47,7 +53,12 @@ application and replace LEAN for live trading only.
      (ADR 0022);
    - on every start and reconnect, before any order is accepted, the
      account's open orders, the session's executions, positions and cash.
-     A difference the journal cannot explain halts the account (ADR 0019).
+     Differences are classified as ADR 0019 (as amended) sets out: an
+     unexplained difference the evidence bounds puts the account in
+     **Degraded** (no new risk; risk-reducing orders continue), and only
+     unverifiable evidence or an unbounded difference puts it in
+     **Halted**. What counts as risk-reducing for a target-weight strategy
+     is defined in that strategy's own ADR.
 6. **IB Gateway runs headless under IBC** on the Lightsail server, with a
    nightly restart and a weekly second-factor approval on the owner's
    phone. Credentials live only in IBC's configuration on that server.
