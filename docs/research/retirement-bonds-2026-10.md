@@ -12,8 +12,8 @@ The mix percentages are the sleeve's share, not the account's total bond
 share. In risk-off months a 70% combination / 30% IEF mix holds about 65%
 bonds (30% + half of 70%), before cash; in risk-on months it holds 30%. A
 glide path set on these mixes holds more bonds than its label in
-downtrends, and SPY plus bonds, which has no filter, always holds exactly
-its label.
+downtrends. SPY plus bonds, which has no filter, resets to its label at
+each month-end; its weights drift with the market between resets.
 
 ## Set-up (declared in #289 before any run)
 
