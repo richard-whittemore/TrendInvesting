@@ -138,3 +138,11 @@ The bond sleeve is split equally between IEF and SHY, all reset monthly
   (rising rates).
 - Against IEF alone at 70/30 it cost about 0.5 points a year in the tuning
   years and cut the held-out drop by about 2 points.
+
+Reproduction: step 4 above with the follow-up spec, from the same
+EXPORT_DIR (it reads only `eq_F_COMBO_R4.json`, `eq_OOS_F_COMBO_R4.json`,
+`eq_MB_SPY_BH_R1.json`, `eq_MB_IEF_BH.json` and `eq_MB_SHY_BH.json`):
+
+```
+python3 research/edge-search/portfolio/blend.py research/edge-search/portfolio/bonds_blend.json EXPORT_DIR
+```
