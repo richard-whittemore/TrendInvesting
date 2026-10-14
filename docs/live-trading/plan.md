@@ -140,6 +140,12 @@ Lightsail VM (Ubuntu, $12/month, US East)
     universe built from IWB's holdings on each date with the backtest's own
     selection. Both use QuantConnect's Morningstar sectors. Downloading the
     files for local use costs money; the study does not need that.
+  - QuantConnect says the dataset may lag the sponsor's files by up to a
+    week, and documents no separate availability date. So each month's
+    universe uses the latest holdings dated at least 7 calendar days before
+    the rebalance, never a later one. That is staler than live trading,
+    which reads the previous day's iShares file, so it errs against the
+    match rather than for it.
   - SEC EDGAR has IWB's own holdings every quarter (series S000004347):
     N-PORT (CUSIP, shares, value) from September 2019, N-Q and N-CSR
     schedules from 2006. It is a free, independent check of the
@@ -151,10 +157,11 @@ Lightsail VM (Ubuntu, $12/month, US East)
   - It needs each month's holdings and sectors as published at the time. A
     current holdings file would leave out companies that have since gone
     and include others before they joined, which flatters the match.
-  - QuantConnect's dataset covers all of 2016–2026, so the study needs no
-    purchased data. If the overlap is
-  poor, the fallback is a paid data source (cost to be priced against the
-  edge, `cost-constraint`).
+  - The study runs from January 2016 to September 2026, the last full
+    month before it was planned (2026-10-14); QuantConnect's dataset covers
+    that span, so it needs no purchased data. Later months are not added.
+    If the overlap is poor, the fallback is a paid data source (cost to be
+    priced against the edge, `cost-constraint`).
 
 ## 5. Safety
 
