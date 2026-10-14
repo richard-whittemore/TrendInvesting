@@ -94,8 +94,9 @@ From the repository root:
 1. `python3 research/edge-search/build_variants.py TB3MS.csv OUT_DIR`
    writes every variant as `OUT_DIR/<name>/main.py`, from a local FRED
    TB3MS file. The bond holds are `MB_IEF_BH`, `MB_TLT_BH` and `MB_SHY_BH`;
-   the momentum and SPY runs are `F_COMBO_R4`, `OOS_F_COMBO_R4`, `F_HALF_R4`,
-   `OOS_F_HALF_R4` and `MB_SPY_BH`.
+   the momentum and SPY variants are `F_COMBO`, `OOS_F_COMBO`, `F_HALF`,
+   `OOS_F_HALF` and `MB_SPY_BH`. The recorded backtests were named with a
+   run suffix (`_R4`, `_R1`), which the export filenames below keep.
 2. Paste each `main.py` into a QuantConnect project and run a backtest.
 3. Export each backtest's "Strategy Equity" chart, Equity series, as a JSON
    list of `[unix seconds, equity]` (for example from QuantConnect's
