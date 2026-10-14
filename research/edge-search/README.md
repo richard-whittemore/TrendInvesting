@@ -96,9 +96,10 @@ backtest runs on their servers.
 - `portfolio/blend.py` — several runs' equity curves combined as separate,
   never-rebalanced accounts, or as one account reset to its weights every
   month (a book marked `"monthly"`): CAGR, month-end drawdown, correlations
-  and the longest stretch behind SPY; `strategies_together.json` and
-  `bonds.json` (momentum with a bond fund, for retirement accounts) are the
-  recorded specs (exports not committed).
+  and the longest stretch behind SPY. The recorded specs (exports not
+  committed) are `strategies_together.json`, `bonds.json` (momentum with a
+  bond fund, for retirement accounts) and `bonds_blend.json` (the same with
+  short and intermediate bonds together).
 - `tax/tax_drag.py` — the federal tax cost of a strategy in a taxable
   account, from a run's fills and equity (export not committed).
 - `boost/lev_etf_template.py` — Boost with the extra exposure from a 2x or

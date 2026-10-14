@@ -153,7 +153,7 @@ class MainTest(unittest.TestCase):
 
     def test_each_recorded_spec_names_a_curve_for_every_book_in_every_period(self):
         here = os.path.dirname(os.path.abspath(__file__))
-        for name in ("strategies_together.json", "bonds.json"):
+        for name in ("strategies_together.json", "bonds.json", "bonds_blend.json"):
             with open(os.path.join(here, name)) as f:
                 spec = json.load(f)
             for label, _, _, use in spec["periods"]:
