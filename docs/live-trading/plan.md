@@ -143,9 +143,9 @@ Lightsail VM (Ubuntu, $12/month, US East)
   - QuantConnect says the dataset may lag the sponsor's files by up to a
     week, and documents no separate availability date. So each month's
     universe uses the latest holdings dated at least 7 calendar days before
-    the rebalance, never a later one. That is staler than live trading,
-    which reads the previous day's iShares file, so it errs against the
-    match rather than for it.
+    the rebalance, never a later one. That snapshot is older than the
+    previous day's iShares file live trading reads; the study reports how
+    much the result moves with a 1-day lag instead.
   - SEC EDGAR has IWB's own holdings every quarter (series S000004347):
     N-PORT (CUSIP, shares, value) from September 2019, N-Q and N-CSR
     schedules from 2006. It is a free, independent check of the
