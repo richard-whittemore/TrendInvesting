@@ -1,5 +1,5 @@
 {
- "_runs": "QuantConnect project 37096083: F_COMBO_R4 24bdb0a9, F_HALF_R4 4270416e, OOS_F_COMBO_R4 dd45f8ec, OOS_F_HALF_R4 7b48232b, MB_SPY_BH_R1 08e1ecfa; MB_IEF_BH, MB_TLT_BH, MB_SHY_BH ids recorded after their runs. Each file is that backtest's 'Strategy Equity' chart, Equity series, as [[unix seconds, close], ...]. IEF is the predeclared bond fund; TLT and SHY are a check on that choice, not a tuning step.",
+ "_runs": "QuantConnect project 37096083: F_COMBO_R4 24bdb0a9, F_HALF_R4 4270416e, OOS_F_COMBO_R4 dd45f8ec, OOS_F_HALF_R4 7b48232b, MB_SPY_BH_R1 08e1ecfa; MB_IEF_BH 9dfd703e, MB_TLT_BH 82361132, MB_SHY_BH 6b4d77d3 (each first holds its fund on 2002-07-29). Each file is that backtest's 'Strategy Equity' chart, Equity series, as [[unix seconds, close], ...]. IEF is the predeclared bond fund; TLT and SHY are a check on that choice, not a tuning step.",
  "curves": {
   "MOM_IS": "eq_F_COMBO_R4.json",
   "HALF_IS": "eq_F_HALF_R4.json",
