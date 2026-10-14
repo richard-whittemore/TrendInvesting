@@ -13,7 +13,7 @@ gates).
 
 | Account (IBKR) | Size at start | Strategy | Source of the rule |
 | --- | --- | --- | --- |
-| Roth IRA (Roth 401(k) rollover) | ~$80k | Momentum + bond sleeve on a glide path | `research/edge-search/momentum/defensive_v2.py` (F_COMBO or F_HALF); `docs/research/retirement-bonds-2026-10.md` |
+| Roth IRA (Roth 401(k) rollover) | ~$80k | Momentum + bond sleeve on a glide path | `research/edge-search/momentum/defensive_v2.py` as configured by `F_COMBO` in `research/edge-search/build_variants.py`; bond sleeve: `docs/research/retirement-bonds-2026-10.md` (PR #291, not yet merged) |
 | Traditional IRA (401(k) rollover) | ~$30k | Same as the Roth IRA | Same |
 | Joint taxable, margin | ~$4k | Boost on SPY | `research/edge-search/boost/template.py`; execution study `BE_IB_OPEN` |
 
@@ -26,8 +26,15 @@ The live rules must be the backtested rules. Each is restated from its
 source file, and a parity test (section 6) checks the live code against the
 backtest's own decisions.
 
-**Momentum, combination** (`defensive_v2.py`, `mom_trend`, TOP_N 25,
-RISK_OFF_FRACTION 0.5, SECTOR_CAP 3, INV_VOL):
+**Momentum, combination** (chosen, D1). `defensive_v2.py` as configured by
+the `F_COMBO` variant in `build_variants.py` (`mom_trend`, TOP_N 25,
+RISK_OFF_FRACTION 0.5, SECTOR_CAP 3, INV_VOL; the file's own defaults
+differ). Provenance: 12-1 momentum, Jegadeesh & Titman 1993; the trend
+filter, motivated by Daniel & Moskowitz 2016; the half fraction, sector cap
+and inverse volatility are this project's research settings, chosen on
+1999–2015 and checked once on 2016–mid-2026
+(`docs/research/boost-followup-2026-09.md`). Recorded runs: F_COMBO_R4
+24bdb0a9, OOS_F_COMBO_R4 dd45f8ec.
 - On the first session of each month, before the open, using closes up to
   the last session of the previous month.
 - Universe: the 500 largest US common stocks by dollar volume, price at
@@ -38,11 +45,20 @@ RISK_OFF_FRACTION 0.5, SECTOR_CAP 3, INV_VOL):
 - If SPY closed below its 200-day average, half of the book goes to IEF
   instead.
 - A held name is resized only when it is more than 25% off its target.
-- The half filter is the same without the sector cap and inverse
-  volatility. **Decision D1**: combination or half filter.
+- The half filter (`F_HALF`) is the same without the sector cap and
+  inverse volatility. It is not to be built.
 
-**Bond sleeve and glide path**: a fixed share of each IRA held in a bond
-fund, reset monthly with the rest, set from a schedule by year.
+**Bond sleeve and glide path**: a share *b* of each IRA, set from a
+schedule by year, held in a bond fund; the rest, 1 − *b*, is the momentum
+sleeve. This is exactly what the research measured (two curves weighted and
+reset monthly):
+- The momentum sleeve runs the rule above on its own 1 − *b* of the
+  account, keeping its own 98% invested and its own risk-off IEF. Risk-off
+  IEF counts toward the momentum sleeve, not toward *b*.
+- The bond sleeve holds 98% of *b* in its fund.
+- Both sleeves are reset to 1 − *b* and *b* at the month's rebalance.
+- When both hold the same fund, the account holds one position, the sum of
+  the two targets; the journal records each sleeve's share.
 **Decision D2**: the fund (IEF, SHY or half each; #292 pending) and the
 schedule. Illustration: 0–10% until 2028, rising evenly to 40–50% by 2053.
 The schedule is configuration with its own hash (ADR 0016), so a change is
@@ -92,7 +108,7 @@ Lightsail VM (Ubuntu, $12/month, US East)
   account until a person clears it.
 - **Alternative considered**: one standalone Python program. Faster to
   write, but it would duplicate the journal and replay guarantees the
-  repository already tests. **Decision D4**.
+  repository already tests. The owner chose the Go core (D4).
 
 ## 4. Data
 
@@ -108,7 +124,13 @@ Lightsail VM (Ubuntu, $12/month, US East)
   names the sector cap allows.
 - **Universe parity study first** (research, before any build): for each
   month of 2016–2026, compare the 25 names this approach would pick with
-  the backtest's own picks, and the return difference. If the overlap is
+  the backtest's own picks, and the return difference.
+  - It needs each month's holdings and sectors as published at the time. A
+    current holdings file would leave out companies that have since gone
+    and include others before they joined, which flatters the match.
+  - Obtaining dated monthly holdings files (iShares publishes holdings by
+    as-of date) is therefore a prerequisite. If they reach back only part
+    of the way, the study covers only those months and says so. If the overlap is
   poor, the fallback is a paid data source (cost to be priced against the
   edge, `cost-constraint`).
 
@@ -121,8 +143,17 @@ Lightsail VM (Ubuntu, $12/month, US East)
   never on margin; joint account at most 150%; at most N orders per run; no
   order larger than a set share of the account; a price-sanity band per
   order.
-- **Idempotent orders**: every order carries an ID derived from the
-  decision, so a restart cannot send it twice.
+- **No order sent twice**: a stable ID derived from the decision is only a
+  label. What prevents a resend is that:
+  - every order is written to the journal before it is sent, and its
+    acknowledgement and fills are written as they arrive (ADR 0022);
+  - the decision's tag is kept separate from IBKR's own order ID, as the
+    existing contract does;
+  - on every start and every reconnect, IBKR's open orders, executions of
+    the session and positions are read and matched to the journal before
+    anything is sent. An order IBKR has but the journal lacks (a crash after
+    IBKR accepted it), or the other way round, halts the account (ADR
+    0019).
 - **Sell before buy** in the IRAs (no margin to cover the gap).
 - **Kill switch**: a file or command that stops all new orders.
 - **Modes**: dry-run (decide and journal, send nothing) → IBKR paper →
@@ -162,7 +193,8 @@ Lightsail VM (Ubuntu, $12/month, US East)
 | IBKR data for US stocks on IBKR Pro, if required for API bars | about $10/month unless waived by commissions; to confirm |
 | Commissions | Lite: $0. Pro: ~$28 for Boost, and for momentum's ~25 names a month perhaps $100–200 per IRA |
 
-**Decision D5**: IBKR Lite or Pro per account. Momentum's monthly trades
+**Decision D5**: the owner chose IBKR Lite for every account, if IBKR
+allows it; to confirm that Lite accounts get the API data the system needs. Momentum's monthly trades
 make Pro's $1 minimum matter for the smaller IRA, and the IRAs never borrow,
 so Pro's margin rate does not help them.
 
@@ -170,24 +202,25 @@ so Pro's margin rate does not help them.
 
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
-| 0 | Owner decisions D1–D5; ADR for the broker adapter; this plan reviewed | Plan merged |
+| 0 | Owner decisions D2–D3, D5 confirmed with IBKR; ADR for the broker adapter; this plan reviewed | Plan merged |
 | 1 | Universe parity study (research, QuantConnect free) | Overlap good enough, or a data source chosen |
 | 2 | Go strategy modules and risk limits, test first; backtest parity | Parity passes |
-| 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month |
+| 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
 | 4 | IBKR paper trading | 2–3 clean months |
 | 5 | Limited live, one account at a time | A clean month each |
 
 Each phase is a ticket with its own work log, worked test-first and merged
 only after CodeRabbit and Greptile findings are addressed.
 
-## 10. Decisions needed from the owner
+## 10. Owner decisions
 
-- **D1** Momentum version: combination (leaning) or half filter.
+- **D1** Momentum version: **combination** (decided 2026-10-14).
 - **D2** Glide path: bond fund (after #292) and the schedule by year, for
   each of the two of you.
 - **D3** Joint account: margin Boost or SSO Boost.
-- **D4** Architecture: Go decision core with a Python broker adapter
-  (recommended) or a standalone Python program.
-- **D5** IBKR Lite or Pro, per account.
+- **D4** Architecture: **Go decision core with a Python broker adapter**
+  (decided 2026-10-14).
+- **D5** **IBKR Lite for every account**, if IBKR allows it and its API
+  data suffices (decided 2026-10-14; to confirm with IBKR).
 - Account opening, funding, rollovers and the Lightsail sign-up are the
   owner's to do; nothing here signs up for or pays for anything.
