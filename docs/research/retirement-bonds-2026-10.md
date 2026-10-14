@@ -109,3 +109,32 @@ From the repository root:
 4. `python3 research/edge-search/portfolio/blend.py
    research/edge-search/portfolio/bonds.json EXPORT_DIR` prints both
    periods' tables.
+
+## Follow-up: short and intermediate bonds together
+
+Declared in #289 before running, but after the held-out IEF and SHY results
+above were seen, so the held-out figures here are not an independent test.
+The bond sleeve is split equally between IEF and SHY, all reset monthly
+(`portfolio/bonds_blend.json`); same curves, no new backtests.
+
+| Book | Tuning CAGR | Tuning worst DD | Held-out CAGR | Held-out worst DD |
+| --- | --- | --- | --- | --- |
+| 50% IEF + 50% SHY, reset monthly | 3.56% | 3.7% | 1.44% | 13.2% |
+| 90% combination + 10% IEF/SHY | 12.28% | 24.6% | 18.50% | 22.6% |
+| 80% combination + 20% IEF/SHY | 11.41% | 21.1% | 16.72% | 21.2% |
+| 70% combination + 30% IEF/SHY | 10.51% | 17.5% | 14.91% | 19.8% |
+| 60% combination + 40% IEF/SHY | 9.59% | 13.7% | 13.06% | 18.4% |
+| 50% combination + 50% IEF/SHY | 8.64% | 10.1% | 11.19% | 17.0% |
+| 70% combination + 30% IEF (above) | 11.00% | 16.8% | 14.83% | 21.9% |
+| 70% combination + 30% SHY (above) | 10.02% | 18.3% | 14.97% | 17.6% |
+
+- **The split lands between the two funds, as it should.** In the tuning
+  years it gives up about half of IEF's return advantage over SHY; in the
+  held-out years its drops are about halfway between IEF's and SHY's.
+- **It never was the best in either period on its own**: IEF returned most
+  in 2002–2015, SHY fell least in 2016–2026. What the split buys is that it
+  was never the worst by much in either, which matters when nobody knows
+  whether the next 25 years look more like 2008 (falling rates) or 2022
+  (rising rates).
+- Against IEF alone at 70/30 it cost about 0.5 points a year in the tuning
+  years and cut the held-out drop by about 2 points.
