@@ -97,7 +97,7 @@ class MeasureTest(unittest.TestCase):
     def test_a_report_rejects_an_unknown_rebalance(self):
         months = blend.span((2020, 1), (2020, 3))
         spy = {m: 1.0 for m in months}
-        for bad in (("x", {"SPY": 1}, "yearly"), ("x", {"SPY": 1}, "monthly", "extra")):
+        for bad in (("x", {"SPY": 1}, "yearly"), ("x", {"SPY": 1}, "monthly", "extra"), ("x", {"SPY": 1}, ["monthly"])):
             with self.assertRaises(ValueError):
                 blend.report({"SPY": spy}, [bad], (2020, 1), (2020, 3))
 
@@ -134,6 +134,23 @@ class MainTest(unittest.TestCase):
                 blend.main(os.path.join(d, "spec.json"), d)
             self.assertIn("SPY held", out.getvalue())
 
+    def test_main_reads_a_monthly_book_from_the_spec(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name, values in (("a.json", [1.0, 2.0, 2.0]), ("b.json", [1.0, 0.5, 1.0])):
+                with open(os.path.join(d, name), "w") as f:
+                    json.dump([[_t(2020, m + 1, 28), v] for m, v in enumerate(values)], f)
+            spec = {"curves": {"A": "a.json", "B": "b.json"},
+                    "periods": [["P", [2020, 1], [2020, 3], {"SPY": "B", "A": "A"}]],
+                    "books": [["held", {"A": 1, "SPY": 1}], ["reset", {"A": 1, "SPY": 1}, "monthly"]]}
+            with open(os.path.join(d, "spec.json"), "w") as f:
+                json.dump(spec, f)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                blend.main(os.path.join(d, "spec.json"), d)
+        text = out.getvalue()
+        self.assertIn("{:>7.2f}%".format(100 * (1.5 ** 6 - 1)), text.split("held")[1].splitlines()[0])
+        self.assertIn("{:>7.2f}%".format(100 * (1.875 ** 6 - 1)), text.split("reset")[1].splitlines()[0])
+
     def test_each_recorded_spec_names_a_curve_for_every_book_in_every_period(self):
         here = os.path.dirname(os.path.abspath(__file__))
         for name in ("strategies_together.json", "bonds.json"):
@@ -143,6 +160,7 @@ class MainTest(unittest.TestCase):
                 self.assertTrue(set(use.values()) <= set(spec["curves"]), (name, label))
                 for book, parts, *how in spec["books"]:
                     self.assertTrue(set(parts) <= set(use), (name, label, book))
+                    self.assertLessEqual(len(how), 1, (name, book))
                     self.assertTrue(set(how) <= set(blend.REBALANCE), (name, book))
 
 

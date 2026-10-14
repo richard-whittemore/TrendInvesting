@@ -56,7 +56,11 @@ def combine(paths, weights):
 
 def rebalanced(paths, weights):
     """Value of a book reset to ``weights`` at every month-end: each month it
-    earns the weighted average of the parts' returns that month."""
+    earns the weighted average of the parts' returns that month. The resets
+    are free here: each curve carries its own trading costs, but not the
+    trades that move money between parts, and each part is assumed to earn
+    the same return whatever capital it is given. Read the results as an
+    upper bound on running the mix in one account."""
     total = float(sum(weights))
     out = [1.0]
     for i in range(1, len(paths[0])):
@@ -130,7 +134,7 @@ def report(curves, books, first, last, benchmark="SPY"):
     n = len(months) - 1
     rows = []
     for label, parts, *how in books:
-        if len(how) > 1 or (how and how[0] not in REBALANCE):
+        if len(how) > 1 or (how and (not isinstance(how[0], str) or how[0] not in REBALANCE)):
             raise ValueError("book {!r}: rebalance must be one of {}".format(label, ", ".join(REBALANCE)))
         merge = REBALANCE[how[0] if how else "never"]
         missing = [k for k in parts if k not in paths]
