@@ -2,11 +2,11 @@
 
 ## Decision boundary
 
-The system deliberately separates trading decisions from market and brokerage mechanics.
+The system deliberately separates trading decisions from market and brokerage mechanics. LEAN owns market data for backtests; the IBKR adapter owns live market data and brokerage (ADR 0025). Both speak the same transport, and the Go application cannot tell which one it is talking to.
 
 ```text
-LEAN container
-  -> thin Python adapter
+LEAN container (backtests) or IB Gateway (live, ADR 0025)
+  -> thin Python adapter (LEAN adapter or IBKR adapter)
   -> versioned, transport-neutral messages
   -> Go application
        - strategy modules
@@ -14,7 +14,7 @@ LEAN container
        - decision and reconciliation state machine
        - durable event journal and projections
        - structured telemetry
-  -> trade proposals returned to LEAN
+  -> trade proposals returned to LEAN or IBKR
   -> orders and fill events returned to Go
 ```
 

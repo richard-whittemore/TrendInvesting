@@ -1,6 +1,6 @@
 # TrendInvesting — agent instructions
 
-A research and trading platform that evaluates three declared strategies on US equities: a source-verified **Turtle** control, a rules-based **Sublime** control, and predeclared **hybrid** experiments. Go owns strategy, risk, and replay; LEAN owns market data and brokerage; a thin Python adapter joins them.
+A research and trading platform that evaluates three declared strategies on US equities: a source-verified **Turtle** control, a rules-based **Sublime** control, and predeclared **hybrid** experiments. Go owns strategy, risk, and replay; LEAN owns market data for backtests; the IBKR adapter owns live market data and brokerage (ADR 0025); thin Python adapters join them to Go.
 
 **This system will trade real money.** Correctness and auditability outrank speed and cleverness in every trade-off.
 

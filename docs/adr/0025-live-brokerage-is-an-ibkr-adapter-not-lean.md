@@ -1,6 +1,6 @@
 # ADR 0025: Live brokerage goes through our own IBKR adapter, not LEAN
 
-- Status: Proposed
+- Status: Accepted (2026-10-15, by the owner)
 - Date: 2026-10-14
 
 ## Context
@@ -84,7 +84,7 @@ application and replace LEAN for live trading only.
 ## Consequences
 
 - AGENTS.md's summary line and `docs/architecture.md`'s boundary diagram
-  are amended, when this ADR is accepted, to read "LEAN owns market data
+  are amended, now that this ADR is accepted, to read "LEAN owns market data
   for backtests; the IBKR adapter owns live market data and brokerage."
   That edit is the only change to either file this ADR makes.
 - The new adapter gets its own test suite in `make check` beside
