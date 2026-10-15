@@ -2,11 +2,11 @@
 
 ## Decision boundary
 
-The system deliberately separates trading decisions from market and brokerage mechanics.
+The system deliberately separates trading decisions from market and brokerage mechanics. LEAN owns market data for backtests; the IBKR adapter owns live market data and brokerage (ADR 0025). Both use the same transport and envelope contract. ADR 0025 adds an identity check, not yet built: a live engine will refuse any adapter but the one its configuration names.
 
 ```text
-LEAN container
-  -> thin Python adapter
+LEAN container (backtests) or IB Gateway (live, ADR 0025)
+  -> thin Python adapter (LEAN adapter or IBKR adapter)
   -> versioned, transport-neutral messages
   -> Go application
        - strategy modules
@@ -14,7 +14,8 @@ LEAN container
        - decision and reconciliation state machine
        - durable event journal and projections
        - structured telemetry
-  -> trade proposals returned to LEAN
+  -> trade proposals returned to the same Python adapter
+  -> the adapter submits orders to LEAN or IBKR
   -> orders and fill events returned to Go
 ```
 
@@ -99,8 +100,10 @@ The following are intentionally not selected in the initial scaffold:
 
 - PostgreSQL schema and migration tool;
 - observability vendor;
-- cloud provider and deployment topology;
-- brokerage; and
+- cloud provider and deployment topology; and
 - Kubernetes or service decomposition.
+
+Brokerage is no longer deferred: Interactive Brokers, through our own
+adapter (ADR 0025).
 
 These decisions require evidence from the corresponding GitHub issues (see #4 and `docs/agents/issue-tracker.md`).
