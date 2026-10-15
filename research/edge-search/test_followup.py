@@ -1331,5 +1331,161 @@ class CountryRotationTest(unittest.TestCase):
             self.assertEqual(h, t, held)
 
 
+class UniverseParityTest(unittest.TestCase):
+    """momentum/universe_parity.py: the F_COMBO book picked from an ETF's
+    holdings as they stood ETF_LAG_DAYS earlier, with each month's picks
+    logged for the comparison (docs/live-trading/plan.md, section 4)."""
+
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/universe_parity.py", {})
+        self.module.Universe = types.SimpleNamespace(Unchanged="UNCHANGED")
+
+    def _algo(self, source="etf", lag=7):
+        algo = self.module.MomentumResearch()
+        algo.UNIVERSE_SOURCE, algo.ETF_LAG_DAYS, algo.UNIVERSE_SIZE = source, lag, 2
+        algo.LOG_PICKS = False
+        algo.last_month, algo.etf_snapshots, algo.no_holdings = None, [], 0
+        algo.Time = _dt.datetime(2016, 2, 1)
+        return algo
+
+    @staticmethod
+    def _row(symbol, dollar_volume, price=10.0, fundamentals=True):
+        return types.SimpleNamespace(Symbol=symbol, DollarVolume=dollar_volume, Price=price,
+                                     HasFundamentalData=fundamentals)
+
+    def test_the_holdings_used_are_the_latest_at_least_the_lag_old(self):
+        d = _dt.date
+        snaps = [(d(2016, 1, 20), {"a"}), (d(2016, 1, 25), {"b"}), (d(2016, 1, 26), {"c"})]
+        lagged = self.module.lagged_holdings
+        self.assertEqual(lagged(snaps, d(2016, 2, 1), 7), {"b"})      # 1-25 is 7 days old; 1-26 too new
+        self.assertEqual(lagged(snaps, d(2016, 2, 1), 1), {"c"})
+        self.assertIsNone(lagged(snaps, d(2016, 1, 26), 7))            # nothing old enough yet
+        self.assertIsNone(lagged([], d(2016, 2, 1), 7))
+
+    def test_the_etf_universe_is_its_holdings_ranked_by_dollar_volume(self):
+        algo = self._algo()
+        algo.etf_snapshots = [(_dt.date(2016, 1, 20), {"a", "b", "c"})]
+        rows = [self._row("a", 1.0), self._row("x", 99.0), self._row("b", 3.0), self._row("c", 2.0),
+                self._row("p", 50.0, price=4.0)]
+        self.assertEqual(algo.Coarse(rows), ["b", "c"])                # x is not held by the fund
+        self.assertEqual(algo.Coarse(rows), "UNCHANGED")              # once a month
+
+    def test_a_month_with_no_holdings_old_enough_waits_and_tries_again(self):
+        algo = self._algo()
+        algo.etf_snapshots = [(_dt.date(2016, 1, 28), {"a"})]
+        rows = [self._row("a", 1.0)]
+        self.assertEqual(algo.Coarse(rows), "UNCHANGED")
+        self.assertEqual((algo.last_month, algo.no_holdings), (None, 1))
+        algo.Time = _dt.datetime(2016, 2, 4)
+        self.assertEqual(algo.Coarse(rows), ["a"])
+
+    def test_the_coarse_source_is_the_backtests_own_universe(self):
+        algo = self._algo(source="coarse")
+        rows = [self._row("a", 1.0), self._row("x", 99.0), self._row("b", 3.0)]
+        self.assertEqual(algo.Coarse(rows), ["x", "b"])
+
+    def test_each_day_the_funds_holdings_are_recorded_and_nothing_is_subscribed(self):
+        algo = self._algo()
+        held = [types.SimpleNamespace(Symbol="a"), types.SimpleNamespace(Symbol="b")]
+        self.assertEqual(algo.EtfHoldings(held), [])
+        self.assertEqual(algo.etf_snapshots, [(_dt.date(2016, 2, 1), {"a", "b"})])
+        algo.etf_snapshots.insert(0, (_dt.date(2015, 11, 1), {"old"}))
+        algo.Time = _dt.datetime(2016, 2, 2)
+        algo.EtfHoldings(held)
+        self.assertEqual([day for day, _ in algo.etf_snapshots], [_dt.date(2016, 2, 1), _dt.date(2016, 2, 2)])
+
+    def test_the_template_only_adds_to_defensive_v2(self):
+        # Every code line of defensive_v2.py is kept, in order; only comment
+        # lines may change, so with UNIVERSE_SOURCE "coarse" it trades as
+        # defensive_v2 does.
+        with open(os.path.join(HERE, "momentum", "defensive_v2.py")) as f:
+            old = f.read().splitlines()
+        with open(os.path.join(HERE, "momentum", "universe_parity.py")) as f:
+            new = f.read().splitlines()
+        matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+        removed = [line for tag, i1, i2, _, _ in matcher.get_opcodes() if tag in ("replace", "delete")
+                   for line in old[i1:i2]]
+        self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
+
+    def test_the_parity_runs_keep_the_combinations_settings(self):
+        base = _class_constants(*build_variants.VARIANTS["OOS_F_COMBO"])
+        base["END_DATE"] = (2026, 9, 30)
+        expected = {"OOS_P_COARSE": ("coarse", 7), "OOS_P_IWB7": ("etf", 7), "OOS_P_IWB1": ("etf", 1)}
+        for name, (source, lag) in expected.items():
+            template, params = build_variants.VARIANTS[name]
+            self.assertEqual(template, "momentum/universe_parity.py", name)
+            c = _class_constants(template, params)
+            own = {k: c.pop(k) for k in ("UNIVERSE_SOURCE", "ETF_TICKER", "ETF_LAG_DAYS", "SNAPSHOT_DAYS")}
+            self.assertEqual(c, base, name)
+            self.assertEqual(own, {"UNIVERSE_SOURCE": source, "ETF_TICKER": "IWB", "ETF_LAG_DAYS": lag,
+                                   "SNAPSHOT_DAYS": 45}, name)
+
+
+class ParityCompareTest(unittest.TestCase):
+    """momentum/parity_compare.py: month-by-month overlap of two runs'
+    holdings, rebuilt from their fills."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location(
+            "parity_compare", os.path.join(HERE, "momentum", "parity_compare.py"))
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+
+    @staticmethod
+    def _t(y, m, d):
+        return _dt.datetime(y, m, d, 13, tzinfo=_dt.timezone.utc).timestamp()
+
+    def test_the_months_run_from_the_first_to_the_last_inclusive(self):
+        self.assertEqual(self.module.months("2015-11", "2016-02"), ["2015-11", "2015-12", "2016-01", "2016-02"])
+
+    def test_holdings_after_each_months_fills_carry_into_quiet_months(self):
+        t = self._t
+        fills = [[t(2016, 1, 4), "A", 10, 1.0, 0], [t(2016, 1, 4), "B", 5, 1.0, 0],
+                 [t(2016, 1, 6), "C", 3, 1.0, 0],                         # a late buy in the same month
+                 [t(2016, 3, 1), "B", -5, 1.0, 0], [t(2016, 3, 1), "IEF", 7, 1.0, 0]]
+        held = self.module.holdings_by_month(fills, ["2016-01", "2016-02", "2016-03"])
+        self.assertEqual(held["2016-01"], ({"A", "B", "C"}, False))
+        self.assertEqual(held["2016-02"], ({"A", "B", "C"}, False))     # no trades: unchanged
+        self.assertEqual(held["2016-03"], ({"A", "C"}, True))           # the bond fund is held
+
+    def test_fills_before_the_study_count_and_after_it_do_not(self):
+        t = self._t
+        fills = [[t(2015, 6, 1), "A", 10, 1.0, 0], [t(2016, 2, 1), "A", -10, 1.0, 0]]
+        self.assertEqual(self.module.holdings_by_month(fills, ["2016-01"]), {"2016-01": ({"A"}, False)})
+
+    def test_the_bond_fund_is_recognised_by_ticker_or_by_security_id(self):
+        # The tax study's export names each security by QuantConnect's
+        # security ID, "<ticker at first listing> <code>".
+        t = self._t
+        fills = [[t(2016, 1, 4), "IEF SGNUDG1YI9ID", 7, 1.0, 0], [t(2016, 1, 4), "AAPL R735QTJ8XC9X", 3, 1.0, 0],
+                 [t(2016, 1, 4), "IEFA VFL8MXEK1IP1", 2, 1.0, 0]]
+        held = self.module.holdings_by_month(fills, ["2016-01"])
+        self.assertEqual(held["2016-01"], ({"AAPL R735QTJ8XC9X", "IEFA VFL8MXEK1IP1"}, True))
+
+    def test_a_month_with_nothing_held_is_refused(self):
+        # An export that lost its early orders would otherwise look like an
+        # empty book and lower the overlap without saying so.
+        t = self._t
+        fills = [[t(2016, 2, 1), "A", 10, 1.0, 0]]
+        with self.assertRaises(ValueError):
+            self.module.holdings_by_month(fills, ["2016-01", "2016-02"])
+
+    def test_overlap_counts_shared_stocks_and_risk_off_agreement(self):
+        a = {"2016-01": ({"A", "B"}, False), "2016-02": ({"A"}, True)}
+        b = {"2016-01": ({"A", "C"}, False), "2016-02": ({"A"}, False)}
+        rows = self.module.compare(a, b)
+        self.assertEqual([(r["month"], r["common"], r["stocks_a"], r["stocks_b"], r["same_risk_off"])
+                          for r in rows], [("2016-01", 1, 2, 2, True), ("2016-02", 1, 1, 1, False)])
+
+    def test_the_summary_reports_the_mean_and_worst_month(self):
+        rows = [{"month": "2016-02", "common": 20, "stocks_a": 25, "stocks_b": 25, "same_risk_off": True},
+                {"month": "2016-03", "common": 10, "stocks_a": 25, "stocks_b": 25, "same_risk_off": False}]
+        s = self.module.summary(rows)
+        self.assertEqual((s["months"], s["worst_month"], s["risk_off_differs"]), (2, "2016-03", 1))
+        self.assertAlmostEqual(s["mean_common_share"], 0.6)
+        self.assertAlmostEqual(s["worst_common_share"], 0.4)
+
+
 if __name__ == "__main__":
     unittest.main()
