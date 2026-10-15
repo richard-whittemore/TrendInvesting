@@ -118,6 +118,11 @@ backtest runs on their servers.
   runs' holdings month by month from their fills (the tax study's export
   format; the Free plan's 10 KB logs are too small for ten years of picks),
   and reports the stocks the books share and whether both were risk-off.
+- `sectors/` — the sector-label check (`docs/live-trading/plan.md`,
+  section 4). `snapshot.py`, run once on QuantConnect, logs the backtest's
+  universe on one date with each stock's Morningstar sector; `compare.py`,
+  local, sets those against the GICS sectors in an iShares holdings file
+  and lists the disagreements. Tested by `sectors/test_sectors.py`.
 - `boost/multi.py` — Boost's rule, unchanged, on each fund of a blend at
   once (US large, mid and small caps, optionally with developed markets
   outside the US), each fund boosted on its own signal; `bh` is the same
