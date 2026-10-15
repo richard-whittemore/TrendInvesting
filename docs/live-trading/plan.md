@@ -203,11 +203,18 @@ Lightsail VM (Ubuntu, $12/month, US East)
     reason (the reconciliation difference or the missing evidence);
   - an alert when the automatic flatten is sent, and another when it fills
     or fails;
-  - the flatten is sell-only and sized from IBKR's own reported position
-    and net liquidation value, never the journal's (which is what is in
-    doubt). It sells no more than IBKR reports held, so it cannot go short.
-    If IBKR's position or account values cannot be read, no order is sent
-    and the urgent alert asks the owner to act by hand;
+  - the flatten is sell-only and sized from IBKR's own figures, never the
+    journal's (which is what is in doubt): the smaller of what reaches 98%
+    of IBKR's net liquidation value and IBKR's reported holding minus every
+    working or pending sell IBKR reports, ours or unknown. So no
+    combination of fills can open a short;
+  - if IBKR's holding, account values or open orders cannot be read, or a
+    working sell is one the journal does not recognise, no order is sent
+    and the urgent alert asks the owner to act by hand. It is attempted
+    once per incident, never retried automatically;
+  - this is the one exception to ADR 0019's "no order changes" while
+    Halted, recorded as an amendment to ADR 0019 (2026-10-15), so the
+    target-weight strategy ADR has a single order rule to follow;
   - it is journalled like any other order, and the account stays Halted
     afterwards until the owner clears it.
 - **Alternative considered**: one standalone Python program. Faster to
