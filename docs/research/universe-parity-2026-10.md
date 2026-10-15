@@ -44,10 +44,14 @@ pick the same stocks as the backtest, month by month?
 | Months compared | 129 | 129 |
 | Mean share of the backtest's stocks also held | 62.3% | 62.8% |
 | Worst month | 2021-03, 20% | 2021-03, 20% |
-| Months where risk-off differed | 0 | 0 |
+| Months where holding IEF differed | 0 | 0 |
 
 By year, 7-day lag: 2016 75%, 2017 64%, 2018 72%, 2019 68%, 2020 59%,
 2021 39%, 2022 77%, 2023 76%, 2024 61%, 2025 49%, 2026 37%.
+
+IEF is held only in risk-off months, so the last row is a proxy for
+risk-off agreement, measured from holdings; each run's own count of risk-off
+rebalances (its `Mode` statistic) is 25 in all three.
 
 **The lag barely matters** (62.3% against 62.8%). **The fund does.** The
 stocks the backtest held most often that the IWB run could not, by months
