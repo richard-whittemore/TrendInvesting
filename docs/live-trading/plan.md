@@ -49,7 +49,7 @@ and inverse volatility are this project's research settings, chosen on
   inverse volatility. It is not to be built.
 
 **Bond sleeve and glide path**: a share *b* of each IRA, set from a
-schedule by year, held in a bond fund; the rest, 1 − *b*, is the momentum
+schedule based on the owner's age, held in a bond fund; the rest, 1 − *b*, is the momentum
 sleeve. This is exactly what the research measured (two curves weighted and
 reset monthly):
 - The momentum sleeve runs the rule above on its own 1 − *b* of the
