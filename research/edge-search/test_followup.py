@@ -1487,5 +1487,95 @@ class ParityCompareTest(unittest.TestCase):
         self.assertAlmostEqual(s["worst_common_share"], 0.4)
 
 
+class GlidePathTest(unittest.TestCase):
+    """momentum/glide_path.py: the combination plus a half-IEF/SHY bond
+    sleeve whose share follows the owner's age schedule or stays fixed
+    (docs/live-trading/plan.md, section 2)."""
+
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/glide_path.py", {})
+
+    def test_the_schedule_meets_its_anchor_points(self):
+        g = self.module.glide_share
+        for age, share in ((37, 0.0), (38, 0.0), (45.5, 0.154), (53, 0.308), (59, 0.404), (65, 0.50),
+                           (68.5, 0.60), (72, 0.70), (80, 0.70)):
+            self.assertAlmostEqual(g(age), share, places=6, msg=age)
+
+    def test_the_schedule_never_holds_more_bonds_than_the_straight_line_through_vanguards_points(self):
+        def vanguard(age):
+            if age <= 40:
+                return 0.10
+            if age <= 65:
+                return 0.10 + 0.016 * (age - 40)
+            return min(0.70, 0.50 + 0.20 * (age - 65) / 7)
+        for months in range(38 * 12, 80 * 12):
+            age = months / 12
+            self.assertLessEqual(self.module.glide_share(age), vanguard(age) + 1e-9, age)
+
+    def test_age_counts_whole_months_from_the_measurement_start(self):
+        age = self.module.age_on
+        start = _dt.date(2002, 8, 1)
+        self.assertEqual(age(_dt.date(2002, 8, 1), 38.0, start), 38.0)
+        self.assertEqual(age(_dt.date(2002, 8, 31), 38.0, start), 38.0)     # not yet a month
+        self.assertEqual(age(_dt.date(2002, 9, 3), 38.0, start), 38.0 + 1 / 12)
+        self.assertEqual(age(_dt.date(2003, 8, 1), 53.0, start), 54.0)
+        self.assertEqual(age(_dt.date(2002, 7, 1), 38.0, start), 38.0 - 1 / 12)  # warm-up
+
+    def test_the_bond_sleeve_takes_its_share_and_merges_with_risk_off_ief(self):
+        book = {"A": 0.49, "IEF": 0.49}                 # a risk-off month's momentum book
+        out = self.module.with_bond_sleeve(book, 0.30, {"IEF": 0.5, "SHY": 0.5})
+        self.assertAlmostEqual(out["A"], 0.49 * 0.7)
+        self.assertAlmostEqual(out["IEF"], 0.49 * 0.7 + 0.98 * 0.3 * 0.5)  # one position, both sleeves
+        self.assertAlmostEqual(out["SHY"], 0.98 * 0.3 * 0.5)
+        self.assertAlmostEqual(sum(out.values()), 0.98)
+
+    def test_no_bond_share_leaves_the_book_unchanged(self):
+        book = {"A": 0.5, "B": 0.48}
+        self.assertEqual(self.module.with_bond_sleeve(book, 0.0, {"IEF": 0.5, "SHY": 0.5}), book)
+
+    def test_the_share_used_each_month(self):
+        algo = self.module.MomentumResearch()
+        algo.MEASURE_FROM, algo.PATH_START_AGE = (2002, 8, 1), 53.0
+        algo.Time = _dt.datetime(2008, 8, 1, 8)
+        algo.GLIDE, algo.BOND_SHARE = "path", 0.0
+        self.assertAlmostEqual(algo._bond_share(), 0.308 + 0.016 * 6)
+        algo.GLIDE, algo.BOND_SHARE = "fixed", 0.6
+        self.assertAlmostEqual(algo._bond_share(), 0.6)
+        algo.GLIDE = "none"
+        self.assertEqual(algo._bond_share(), 0.0)
+
+    def test_the_template_only_adds_to_defensive_v2(self):
+        with open(os.path.join(HERE, "momentum", "defensive_v2.py")) as f:
+            old = f.read().splitlines()
+        with open(os.path.join(HERE, "momentum", "glide_path.py")) as f:
+            new = f.read().splitlines()
+        matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+        removed = [line for tag, i1, i2, _, _ in matcher.get_opcodes() if tag in ("replace", "delete")
+                   for line in old[i1:i2]]
+        self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
+
+    def test_the_glide_runs_keep_the_combinations_settings_and_name_their_windows(self):
+        combo = _class_constants(*build_variants.VARIANTS["F_COMBO"])
+        windows = {"G_IS": ((2001, 8, 1), (2002, 8, 1), (2015, 12, 31)),
+                   "G_OOS": ((2015, 1, 1), (2016, 1, 1), (2026, 9, 30))}
+        expected = {"P38": ("path", 0.0, 38.0), "P53": ("path", 0.0, 53.0), "P65": ("path", 0.0, 65.0),
+                    "F00": ("fixed", 0.0, 38.0), "F30": ("fixed", 0.3, 38.0), "F50": ("fixed", 0.5, 38.0),
+                    "F60": ("fixed", 0.6, 38.0), "F70": ("fixed", 0.7, 38.0)}
+        names = [n for n in build_variants.VARIANTS if n.startswith("G_")]
+        self.assertEqual(len(names), 15)
+        for name in names:
+            window, kind = name.rsplit("_", 1)
+            template, params = build_variants.VARIANTS[name]
+            self.assertEqual(template, "momentum/glide_path.py", name)
+            c = _class_constants(template, params)
+            self.assertEqual((c.pop("START_DATE"), c.pop("MEASURE_FROM"), c.pop("END_DATE")), windows[window], name)
+            self.assertEqual((c.pop("GLIDE"), c.pop("BOND_SHARE"), c.pop("PATH_START_AGE")), expected[kind], name)
+            self.assertEqual(c.pop("BOND_FUNDS"), {"IEF": 0.5, "SHY": 0.5}, name)
+            self.assertEqual(c, {k: v for k, v in combo.items() if k not in ("START_DATE", "MEASURE_FROM", "END_DATE")},
+                             name)
+        self.assertNotIn("G_OOS_F60", build_variants.VARIANTS)       # no 2016 run reaches 60% bonds
+
+
 if __name__ == "__main__":
     unittest.main()

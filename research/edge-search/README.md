@@ -118,6 +118,11 @@ backtest runs on their servers.
   runs' holdings month by month from their fills (the tax study's export
   format; the Free plan's 10 KB logs are too small for ten years of picks),
   and reports the stocks the books share and whether both were risk-off.
+- `momentum/glide_path.py` — the glide-path backtest
+  (`docs/live-trading/plan.md`, section 2). `defensive_v2.py` with additions
+  only: the combination plus a half-IEF/SHY bond sleeve in one account. Its
+  share follows the owner's age schedule from a chosen starting age, or is
+  held fixed for the comparison mixes.
 - `boost/multi.py` — Boost's rule, unchanged, on each fund of a blend at
   once (US large, mid and small caps, optionally with developed markets
   outside the US), each fund boosted on its own signal; `bh` is the same
