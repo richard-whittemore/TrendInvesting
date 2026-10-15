@@ -1,6 +1,6 @@
-# Live trading plan (draft for review, 2026-10-14)
+# Live trading plan (reviewed 2026-10-15)
 
-Status: **proposed**. Nothing here is built. Owner decisions are marked
+Status: **reviewed** by the owner and independently (2026-10-15). Nothing here is built. Owner decisions are marked
 **Decision** and are listed together at the end.
 
 This plan moves the strategies the research kept from QuantConnect
@@ -35,16 +35,30 @@ and inverse volatility are this project's research settings, chosen on
 1999–2015 and checked once on 2016–mid-2026
 (`docs/research/boost-followup-2026-09.md`). Recorded runs: F_COMBO_R4
 24bdb0a9, OOS_F_COMBO_R4 dd45f8ec.
+- **How clean that check is.** The combination was declared before its own
+  held-out run, but after the full filter's held-out run had shown the
+  whipsaw problem that the half fraction answers. So its held-out result is
+  weaker evidence than a blind test. Any threshold for "the live strategy
+  is not behaving as expected" is set from the tuning years' figures, not
+  the held-out ones.
 - On the first session of each month, before the open, using closes up to
   the last session of the previous month.
-- Universe: the 500 largest US common stocks by dollar volume, price at
-  least $5, with fundamental data.
-- Rank by 12-1 momentum (return from 12 months ago to 1 month ago).
-- Take the top 25, at most 3 per Morningstar sector, weighted by inverse
-  volatility; 98% invested in total.
-- If SPY closed below its 200-day average, half of the book goes to IEF
-  instead.
+- Universe: the 500 largest US common stocks by one day's dollar volume
+  (QuantConnect's coarse `DollarVolume`, `defensive_v2.py:174-176`), price
+  at least $5, with fundamental data.
+- Momentum is counted in sessions: the close 21 sessions back over the
+  close 252 sessions back, minus one (`px.iloc[-22] / px.iloc[-253]`,
+  `defensive_v2.py:289`). A stock with fewer than 253 closes is left out, so
+  a listing under a year old cannot be picked (287-288).
+- Take the top 25, at most 3 per Morningstar sector (a stock with no sector
+  is not capped, `defensive_book`, 69-73), weighted by inverse volatility:
+  the population standard deviation of the last 252 daily returns (291);
+  98% invested in total.
+- Risk-off: SPY's last close below the mean of its last 200 closes, that
+  close included (280). Half of the book then goes to IEF.
 - A held name is resized only when it is more than 25% off its target.
+- The live module reproduces each of these exactly; the golden tests and
+  the parity backtest (section 6) check them one by one.
 - The half filter (`F_HALF`) is the same without the sector cap and
   inverse volatility. It is not to be built.
 
@@ -57,10 +71,15 @@ reset monthly):
   IEF counts toward the momentum sleeve, not toward *b*.
 - The bond sleeve holds 98% of *b* in its fund.
 - Both sleeves are reset to 1 − *b* and *b* at the month's rebalance.
+  The 25% band applies to the account's holdings after the two sleeves'
+  targets are summed: IEF, which both sleeves can hold, is one position
+  with one target, resized only past the band like any other.
 - When both hold the same fund, the account holds one position, the sum of
   the two targets; the journal records each sleeve's share.
 **Decision D2**: the fund is **half IEF, half SHY** (decided 2026-10-14;
-tested in `docs/research/retirement-bonds-2026-10.md`). The schedule
+tested in `docs/research/retirement-bonds-2026-10.md`, whose held-out
+figures for the split are not independent of the IEF and SHY runs they
+blend). The schedule
 (decided 2026-10-15) sets *b* by the owner's age, since both IRAs are in
 his name. From age 53 it is a straight-line version of Vanguard's
 target-date glide path through its published anchor points (90% stocks
@@ -92,13 +111,17 @@ Vanguard's anchors, which is 10% until 40 and 30.8% at 53.
 - Not tested as a path: the research measured fixed mixes (100/0, 90/10,
   70/30, 50/50), and the schedule moves between them. Mixes beyond 50%
   bonds, reached after 65, were not measured. So the schedule gets its own
-  backtest before any IRA trades live: the blend of the momentum and
-  half-IEF/SHY curves, reset monthly with *b* from this schedule, run on
-  2002–2015 and on 2016–September 2026. Each window is a run of 10–14
-  years and the path spans 34, so each window is run three times, starting
-  the path at age 38, 53 and 65 on its first date, and compared with the
-  fixed mixes. It is a gate in section 6 and
-  Phase 2, and its result is recorded whether or not it flatters the path.
+  backtest before any IRA trades live. It runs as one QuantConnect account
+  (the combination plus a bond sleeve, with the band as above), not as two
+  curves blended outside it, on 2002–2015 and on 2016–September 2026.
+  Each window is a run of 10–14 years and the path spans 34, so each
+  window is run three times, starting the path at age 38, 53 and 65 on its
+  first date, and compared with the fixed mixes either side of it. It is a
+  gate in section 6 and Phase 2. Its result is recorded whether or not it
+  flatters the path, and it **fails** if, in either window, the path's
+  return per year is below both bracketing fixed mixes' or its worst drop is
+  deeper than both. A failure goes back to the owner before any IRA
+  trades.
 
 The schedule is configuration with its own hash (ADR 0016), so a change is
 recorded, never silent.
@@ -112,19 +135,24 @@ TREND_DAYS 200, EXIT_SMA 5):
   the whole edge this way (`BE_IB_OPEN` 10.19% a year against 10.31% for
   market-on-close), and the decision uses final closes, not a provisional
   15:44 price.
+- Whether a boost is on is state (`sig` latches in
+  `boost/template.py:89-94`). After a restart it is recovered from the
+  journal, never recomputed; a missing daily bar fails closed rather than
+  computing RSI across the gap.
+- The joint account is taxable: its tax lot method is set to LIFO at IBKR
+  before the first trade, so a boost's exit sells the shares it bought days
+  earlier, not the core holding (the tax study's assumption,
+  `research/edge-search/tax/tax_drag.py`).
 - **Decision D3**: **margin Boost** (decided 2026-10-14), not SSO. The
-  joint account borrows for the step to 147%; the 150% hard limit
-  (section 5) applies.
+  joint account borrows for the step to 147%; the 150% limit (section 5)
+  applies.
 
 ## 3. Architecture
 
-**Today's architecture** (docs/architecture.md): LEAN owns market data and
-brokerage, a thin Python adapter talks to the Go application, which owns
-decisions, the journal and replay. LEAN cannot be used live without a paid
-QuantConnect license (its IBKR connector checks one), so the brokerage side
-changes. That is an architecture change and needs an ADR before code.
-
-**Proposed** (ADR to follow on approval):
+LEAN cannot be used live without a paid QuantConnect license (its IBKR
+connector checks one), so the brokerage side changes. ADR 0025 records that
+decision (accepted 2026-10-15) and `docs/architecture.md` now reflects it:
+LEAN for backtests, our own IBKR adapter for live trading.
 
 ```text
 Lightsail VM (Ubuntu, $12/month, US East)
@@ -144,9 +172,16 @@ Lightsail VM (Ubuntu, $12/month, US East)
 - **The broker adapter replaces LEAN for live trading only.** LEAN stays for
   backtests. It has no strategy logic: it turns envelopes into IBKR orders
   and IBKR events into envelopes.
-- **Reconciliation is an input** (ADR 0019): every morning the adapter
-  reports IBKR's positions and cash; an unexplained difference halts that
-  account until a person clears it.
+- **Reconciliation is an input** (ADR 0019, as amended): every morning the
+  adapter reports IBKR's positions and cash. A difference the evidence
+  bounds puts the account in **Degraded**: no new risk, risk-reducing orders
+  continue. Unverifiable evidence or an unbounded difference puts it in
+  **Halted** until a person clears it. For these strategies, which have no
+  stops, a **risk-reducing order** is one that moves the account's
+  exposure toward 98% or lower: Boost's exit, and a momentum or bond sell.
+  The target-weight strategy ADR (ADR 0025, Consequences) adopts this
+  definition. Whether a Halted joint account may still flatten to 98% on
+  its own is decision D6.
 - **Alternative considered**: one standalone Python program. Faster to
   write, but it would duplicate the journal and replay guarantees the
   repository already tests. The owner chose the Go core (D4).
@@ -206,9 +241,19 @@ Lightsail VM (Ubuntu, $12/month, US East)
   reconciliation differences, an order rejected or partly filled, a
   restarted gateway mid-rebalance.
 - **Hard limits outside the strategy code**: IRA exposure at most 100% and
-  never on margin; joint account at most 150%; at most N orders per run; no
-  order larger than a set share of the account; a price-sanity band per
-  order.
+  never on margin; at most N orders per run; no order larger than a set
+  share of the account; a price-sanity band per order.
+- **The joint account's 150% is a pre-trade check**: an order is refused if
+  the exposure it would leave, valued at the previous close, exceeds 150%.
+  Held exposure is not capped. After a buy to 147%, a fall of about 4% in
+  SPY takes held exposure past 150% by itself (147(1 − x)/(100 − 147x) =
+  1.5 at x ≈ 4.1%), in exactly the dips Boost buys, and selling there would
+  not be the backtested rule.
+- **A margin-cushion alarm**, separate from that check: the adapter reads
+  IBKR's Excess Liquidity for the joint account every few minutes while the
+  market is open. An alert goes to the phone below a set share of equity,
+  and an urgent one if IBKR's margin call level comes near. The runbook
+  covers what to do.
 - **No order sent twice**: a stable ID derived from the decision is only a
   label. What prevents a resend is that:
   - every order is written to the journal before it is sent, and its
@@ -220,7 +265,27 @@ Lightsail VM (Ubuntu, $12/month, US East)
     anything is sent. An order IBKR has but the journal lacks (a crash after
     IBKR accepted it), or the other way round, halts the account (ADR
     0019).
-- **Sell before buy** in the IRAs (no margin to cover the gap).
+- **IRA execution** (not settled by the backtest, which ran as a margin
+  account, `defensive_v2.py:137-139`, to avoid settlement lag):
+  - sells go first; buys are sent only once the sells have filled, and
+    are sized from the cash actually realised, so they execute after the
+    open, not at it. The parity backtest is rerun with that delay
+    (`momentum/execution.py`'s one-session delay is the nearest measured
+    case);
+  - the IBKR IRA account type, and whether it lets a buy use unsettled sale
+    proceeds, are confirmed with IBKR (D5);
+  - **whole shares**: on the ~$30k IRA a name gets about $1,000. A stock
+    priced above its target cannot be held, and one priced at a large share
+    of it cannot be kept within the band. Decision D7: fractional shares
+    through the API, if IBKR offers them for IRAs on Lite, or else a
+    minimum-lot rule (for example, skip a name whose one share exceeds its
+    target and give the weight to the next eligible name). Whichever is
+    chosen goes into the parity backtest.
+- **Pattern-day-trader rule**: the joint account is a margin account under
+  $25,000. Boost's normal round trip (buy at one open, sell at a later
+  open) is not a day trade, but an emergency same-day sell after a morning
+  buy is. The margin runbook counts day trades and keeps to at most three
+  in five sessions.
 - **Kill switch**: a file or command that stops all new orders.
 - **Modes**: dry-run (decide and journal, send nothing) → IBKR paper →
   live, set per account in configuration.
@@ -258,11 +323,20 @@ Lightsail VM (Ubuntu, $12/month, US East)
 | --- | --- |
 | Lightsail 2 GB plan, snapshots | ~$170 |
 | Tailscale, Healthchecks.io, ntfy (free tiers) | $0 |
-| IBKR data for US stocks on IBKR Pro, if required for API bars | about $10/month unless waived by commissions; to confirm |
+| IBKR market data for API bars, if required | about $10/month (~$120/year). Lite pays no commissions, so no commission waiver applies; budget it unless IBKR confirms the bars are free |
 | Commissions | Lite: $0. Pro: ~$28 for Boost, and for momentum's ~25 names a month perhaps $100–200 per IRA |
 
 **Decision D5**: the owner chose IBKR Lite for every account, if IBKR
-allows it; to confirm that Lite accounts get the API data the system needs. Momentum's monthly trades
+allows it. To confirm with IBKR:
+- that Lite is allowed on both IRAs and on a joint margin account;
+- what the API's daily bars cost on Lite;
+- that the three accounts can be linked under one username, so one IB
+  Gateway and one weekly 2FA serve them all. Otherwise it is three
+  gateways, three 2FA prompts and possibly three data subscriptions;
+- the IRA account type, settlement of sale proceeds, and fractional shares
+  through the API (D7).
+
+Momentum's monthly trades
 make Pro's $1 minimum matter for the smaller IRA, and the IRAs never borrow,
 so Pro's margin rate does not help them.
 
@@ -270,9 +344,9 @@ so Pro's margin rate does not help them.
 
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
-| 0 | Owner decisions: D5 confirmed with IBKR; ADR for the broker adapter; this plan reviewed | Plan merged and the broker-adapter ADR accepted. D5 must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
+| 0 | Owner decisions D5–D7; the broker-adapter ADR (0025, accepted 2026-10-15); this plan reviewed (owner, and an independent review on 2026-10-15) | Done except D5–D7, which must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
 | 1 | Universe parity study (research, QuantConnect free) | Overlap good enough, or a data source chosen |
-| 2 | Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest is recorded |
+| 2 | The target-weight strategy ADR (decision contract, risk limits, the risk-reducing definition in section 3); Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest passes its stated test |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
 | 4 | IBKR paper trading | 2–3 clean months |
 | 5 | Limited live, one account at a time | A clean month each |
@@ -291,5 +365,10 @@ only after CodeRabbit and Greptile findings are addressed.
   (decided 2026-10-14).
 - **D5** **IBKR Lite for every account**, if IBKR allows it and its API
   data suffices (decided 2026-10-14; to confirm with IBKR).
+- **D6** A Halted joint account: may it still flatten to 98% by itself
+  (an automatic, journalled risk-reducing sell), or does it alert the owner
+  to flatten by hand the same day? Open.
+- **D7** Whole shares in the IRAs: fractional shares through the API, or a
+  minimum-lot rule (section 5). Open; depends on what IBKR confirms.
 - Account opening, funding, rollovers and the Lightsail sign-up are the
   owner's to do; nothing here signs up for or pays for anything.
