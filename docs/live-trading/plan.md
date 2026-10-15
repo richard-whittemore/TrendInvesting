@@ -62,21 +62,25 @@ reset monthly):
 **Decision D2**: the fund is **half IEF, half SHY** (decided 2026-10-14;
 tested in `docs/research/retirement-bonds-2026-10.md`). The schedule
 (decided 2026-10-15) sets *b* by the owner's age, since both IRAs are in
-his name. From age 53 it is Vanguard's target-date glide path (90% stocks
+his name. From age 53 it is a straight-line version of Vanguard's
+target-date glide path through its published anchor points (90% stocks
 until 25 years before retirement, 50% at retirement, 30% seven years later;
-Vanguard, "Target-date fund glide path", workplace.vanguard.com). Before
-53 it starts lower, at 0%, and rises evenly to meet Vanguard's path there,
-as the owner asked:
+Vanguard, "Target-date fund glide path", workplace.vanguard.com). Vanguard
+does not publish a straight line between those points, and its funds' own
+mix at a given age differs a little (for example 40% conventional bonds at
+60, against 42% here) and includes short-term TIPS later on; this schedule
+does not copy those details. Before 53 it starts lower, at 0%, and rises
+evenly to meet the straight-line path there, as the owner asked:
 
 | Owner's age | *b* (bonds) | Momentum, 1 − *b* |
 | --- | --- | --- |
 | 38 to 53 | rises evenly, 0% to 30.8% (about 2.05 points a year) | 100% to 69.2% |
-| 53 to 65 | Vanguard: rises evenly, 30.8% to 50% (1.6 points a year) | 69.2% to 50% |
-| 65 to 72 | Vanguard: rises evenly, 50% to 70% (about 2.9 points a year) | 50% to 30% |
+| 53 to 65 | Vanguard anchors: rises evenly, 30.8% to 50% (1.6 points a year) | 69.2% to 50% |
+| 65 to 72 | Vanguard anchors: rises evenly, 50% to 70% (about 2.9 points a year) | 50% to 30% |
 | 72 and over | 70% | 30% |
 
-At every age it holds no more bonds than Vanguard's path, which is 10%
-until 40 and 30.8% at 53.
+At every age it holds no more bonds than the straight-line path through
+Vanguard's anchors, which is 10% until 40 and 30.8% at 53.
 
 - Age is counted in whole months on the rebalance date, and *b* is
   interpolated linearly within each stretch, so it changes a little each
@@ -87,7 +91,14 @@ until 40 and 30.8% at 53.
   configuration on the server, not of this repository.
 - Not tested as a path: the research measured fixed mixes (100/0, 90/10,
   70/30, 50/50), and the schedule moves between them. Mixes beyond 50%
-  bonds, reached after 65, were not measured.
+  bonds, reached after 65, were not measured. So the schedule gets its own
+  backtest before any IRA trades live: the blend of the momentum and
+  half-IEF/SHY curves, reset monthly with *b* from this schedule, run on
+  2002–2015 and on 2016–September 2026. Each window is a run of 10–14
+  years and the path spans 34, so each window is run three times, starting
+  the path at age 38, 53 and 65 on its first date, and compared with the
+  fixed mixes. It is a gate in section 6 and
+  Phase 2, and its result is recorded whether or not it flatters the path.
 
 The schedule is configuration with its own hash (ADR 0016), so a change is
 recorded, never silent.
@@ -221,6 +232,8 @@ Lightsail VM (Ubuntu, $12/month, US East)
 2. **Backtest parity**: feed the Go strategy the same daily data the
    research used for a stretch of months and require the same targets as
    the QuantConnect run, month by month (momentum) and day by day (Boost).
+   The glide path, untested as a path, has its own backtest (section 2)
+   before any IRA trades live.
 3. **Dry-run on live data**: 1 month for Boost, 2 rebalances for momentum.
 4. **IBKR paper trading**: 2–3 months, all three accounts, with daily
    reconciliation and the dashboard. Gate: no unexplained difference, no
@@ -259,7 +272,7 @@ so Pro's margin rate does not help them.
 | --- | --- | --- |
 | 0 | Owner decisions: D5 confirmed with IBKR; ADR for the broker adapter; this plan reviewed | Plan merged and the broker-adapter ADR accepted. D5 must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
 | 1 | Universe parity study (research, QuantConnect free) | Overlap good enough, or a data source chosen |
-| 2 | Go strategy modules and risk limits, test first; backtest parity | Parity passes |
+| 2 | Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest is recorded |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
 | 4 | IBKR paper trading | 2–3 clean months |
 | 5 | Limited live, one account at a time | A clean month each |
