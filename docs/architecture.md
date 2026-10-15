@@ -99,8 +99,10 @@ The following are intentionally not selected in the initial scaffold:
 
 - PostgreSQL schema and migration tool;
 - observability vendor;
-- cloud provider and deployment topology;
-- brokerage; and
+- cloud provider and deployment topology; and
 - Kubernetes or service decomposition.
+
+Brokerage is no longer deferred: Interactive Brokers, through our own
+adapter (ADR 0025).
 
 These decisions require evidence from the corresponding GitHub issues (see #4 and `docs/agents/issue-tracker.md`).

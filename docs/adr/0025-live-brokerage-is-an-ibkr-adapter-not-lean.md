@@ -86,7 +86,8 @@ application and replace LEAN for live trading only.
 - AGENTS.md's summary line and `docs/architecture.md`'s boundary diagram
   are amended, now that this ADR is accepted, to read "LEAN owns market data
   for backtests; the IBKR adapter owns live market data and brokerage."
-  That edit is the only change to either file this ADR makes.
+  architecture.md's list of deferred decisions also drops brokerage. Those
+  are the only changes to either file this ADR makes.
 - The new adapter gets its own test suite in `make check` beside
   `make adapter-test`:
   - unit tests against recorded TWS API callbacks;
