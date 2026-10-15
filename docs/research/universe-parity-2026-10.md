@@ -32,7 +32,7 @@ pick the same stocks as the backtest, month by month?
 
 ## Results
 
-| 2016–Sep 2026 | Return per year | Worst drop (daily) |
+| 2016–Sep 2026 | Return per year | Worst drop, peak to trough, on daily equity |
 | --- | --- | --- |
 | SPY | 15.07% | 33.7% |
 | Backtest's universe | 20.10% | 31.0% |
