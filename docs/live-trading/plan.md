@@ -49,7 +49,7 @@ and inverse volatility are this project's research settings, chosen on
   inverse volatility. It is not to be built.
 
 **Bond sleeve and glide path**: a share *b* of each IRA, set from a
-schedule by year, held in a bond fund; the rest, 1 − *b*, is the momentum
+schedule based on the owner's age, held in a bond fund; the rest, 1 − *b*, is the momentum
 sleeve. This is exactly what the research measured (two curves weighted and
 reset monthly):
 - The momentum sleeve runs the rule above on its own 1 − *b* of the
@@ -60,9 +60,46 @@ reset monthly):
 - When both hold the same fund, the account holds one position, the sum of
   the two targets; the journal records each sleeve's share.
 **Decision D2**: the fund is **half IEF, half SHY** (decided 2026-10-14;
-tested in `docs/research/retirement-bonds-2026-10.md`). The schedule by
-year is still open. Illustration: 0–10% until 2028, rising evenly to
-40–50% by 2053.
+tested in `docs/research/retirement-bonds-2026-10.md`). The schedule
+(decided 2026-10-15) sets *b* by the owner's age, since both IRAs are in
+his name. From age 53 it is a straight-line version of Vanguard's
+target-date glide path through its published anchor points (90% stocks
+until 25 years before retirement, 50% at retirement, 30% seven years later;
+Vanguard, "Target-date fund glide path", workplace.vanguard.com). Vanguard
+does not publish a straight line between those points, and its funds' own
+mix at a given age differs a little (for example 40% conventional bonds at
+60, against 42% here) and includes short-term TIPS later on; this schedule
+does not copy those details. Before 53 it starts lower, at 0%, and rises
+evenly to meet the straight-line path there, as the owner asked:
+
+| Owner's age | *b* (bonds) | Momentum, 1 − *b* |
+| --- | --- | --- |
+| 38 to 53 | rises evenly, 0% to 30.8% (about 2.05 points a year) | 100% to 69.2% |
+| 53 to 65 | Vanguard anchors: rises evenly, 30.8% to 50% (1.6 points a year) | 69.2% to 50% |
+| 65 to 72 | Vanguard anchors: rises evenly, 50% to 70% (about 2.9 points a year) | 50% to 30% |
+| 72 and over | 70% | 30% |
+
+At every age it holds no more bonds than the straight-line path through
+Vanguard's anchors, which is 10% until 40 and 30.8% at 53.
+
+- Age is counted in whole months on the rebalance date, and *b* is
+  interpolated linearly within each stretch, so it changes a little each
+  month rather than in steps.
+- The first stretch starts from age 38, not from the first live
+  rebalance, so trading that starts later starts above 0%.
+- Retirement is taken as age 65. The birth date is part of the account
+  configuration on the server, not of this repository.
+- Not tested as a path: the research measured fixed mixes (100/0, 90/10,
+  70/30, 50/50), and the schedule moves between them. Mixes beyond 50%
+  bonds, reached after 65, were not measured. So the schedule gets its own
+  backtest before any IRA trades live: the blend of the momentum and
+  half-IEF/SHY curves, reset monthly with *b* from this schedule, run on
+  2002–2015 and on 2016–September 2026. Each window is a run of 10–14
+  years and the path spans 34, so each window is run three times, starting
+  the path at age 38, 53 and 65 on its first date, and compared with the
+  fixed mixes. It is a gate in section 6 and
+  Phase 2, and its result is recorded whether or not it flatters the path.
+
 The schedule is configuration with its own hash (ADR 0016), so a change is
 recorded, never silent.
 
@@ -195,6 +232,8 @@ Lightsail VM (Ubuntu, $12/month, US East)
 2. **Backtest parity**: feed the Go strategy the same daily data the
    research used for a stretch of months and require the same targets as
    the QuantConnect run, month by month (momentum) and day by day (Boost).
+   The glide path, untested as a path, has its own backtest (section 2)
+   before any IRA trades live.
 3. **Dry-run on live data**: 1 month for Boost, 2 rebalances for momentum.
 4. **IBKR paper trading**: 2–3 months, all three accounts, with daily
    reconciliation and the dashboard. Gate: no unexplained difference, no
@@ -231,9 +270,9 @@ so Pro's margin rate does not help them.
 
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
-| 0 | Owner decisions: D2's schedule, D5 confirmed with IBKR; ADR for the broker adapter; this plan reviewed | Plan merged and the broker-adapter ADR accepted. D2's schedule and D5 must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
+| 0 | Owner decisions: D5 confirmed with IBKR; ADR for the broker adapter; this plan reviewed | Plan merged and the broker-adapter ADR accepted. D5 must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
 | 1 | Universe parity study (research, QuantConnect free) | Overlap good enough, or a data source chosen |
-| 2 | Go strategy modules and risk limits, test first; backtest parity | Parity passes |
+| 2 | Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest is recorded |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
 | 4 | IBKR paper trading | 2–3 clean months |
 | 5 | Limited live, one account at a time | A clean month each |
@@ -244,9 +283,9 @@ only after CodeRabbit and Greptile findings are addressed.
 ## 10. Owner decisions
 
 - **D1** Momentum version: **combination** (decided 2026-10-14).
-- **D2** Glide path: **half IEF, half SHY** (decided 2026-10-14); still
-  open: the schedule by year, for
-  each of the two of you.
+- **D2** Glide path: **half IEF, half SHY** (decided 2026-10-14), on a
+  schedule by the owner's age: 0% at 38 rising to meet Vanguard's glide
+  path at 53, then Vanguard's (decided 2026-10-15; section 2).
 - **D3** Joint account: **margin Boost** (decided 2026-10-14).
 - **D4** Architecture: **Go decision core with a Python broker adapter**
   (decided 2026-10-14).
