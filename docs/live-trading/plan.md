@@ -60,9 +60,28 @@ reset monthly):
 - When both hold the same fund, the account holds one position, the sum of
   the two targets; the journal records each sleeve's share.
 **Decision D2**: the fund is **half IEF, half SHY** (decided 2026-10-14;
-tested in `docs/research/retirement-bonds-2026-10.md`). The schedule by
-year is still open. Illustration: 0–10% until 2028, rising evenly to
-40–50% by 2053.
+tested in `docs/research/retirement-bonds-2026-10.md`). The schedule
+(decided 2026-10-15) sets *b* by the owner's age, since both IRAs are in
+his name. It has the shape of Vanguard's target-date glide path (90%
+stocks until 25 years before retirement, 50% at retirement, 30% seven years
+later; Vanguard, "Target-date fund glide path", workplace.vanguard.com),
+with 10 points less in bonds from retirement on, as the owner asked for a
+slightly less conservative path:
+
+| Owner's age | *b* (bonds) | Momentum, 1 − *b* |
+| --- | --- | --- |
+| under 40 | 10% | 90% |
+| 40 to 65 | rises evenly, 10% to 40% (1.2 points a year) | 90% to 60% |
+| 65 to 72 | rises evenly, 40% to 60% (about 2.9 points a year) | 60% to 40% |
+| 72 and over | 60% | 40% |
+
+- Age is counted in whole months on the rebalance date, and *b* is
+  interpolated linearly within each stretch, so it changes a little each
+  month rather than in steps.
+- Retirement is taken as age 65. The birth date is part of the account
+  configuration on the server, not of this repository.
+- Not tested as a path: the research measured fixed mixes (90/10, 70/30,
+  50/50), and the schedule moves between them.
 The schedule is configuration with its own hash (ADR 0016), so a change is
 recorded, never silent.
 
@@ -231,7 +250,7 @@ so Pro's margin rate does not help them.
 
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
-| 0 | Owner decisions: D2's schedule, D5 confirmed with IBKR; ADR for the broker adapter; this plan reviewed | Plan merged and the broker-adapter ADR accepted. D2's schedule and D5 must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
+| 0 | Owner decisions: D5 confirmed with IBKR; ADR for the broker adapter; this plan reviewed | Plan merged and the broker-adapter ADR accepted. D5 must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
 | 1 | Universe parity study (research, QuantConnect free) | Overlap good enough, or a data source chosen |
 | 2 | Go strategy modules and risk limits, test first; backtest parity | Parity passes |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
@@ -244,9 +263,9 @@ only after CodeRabbit and Greptile findings are addressed.
 ## 10. Owner decisions
 
 - **D1** Momentum version: **combination** (decided 2026-10-14).
-- **D2** Glide path: **half IEF, half SHY** (decided 2026-10-14); still
-  open: the schedule by year, for
-  each of the two of you.
+- **D2** Glide path: **half IEF, half SHY** (decided 2026-10-14), on a
+  schedule by the owner's age, slightly less conservative than Vanguard's
+  (decided 2026-10-15; section 2).
 - **D3** Joint account: **margin Boost** (decided 2026-10-14).
 - **D4** Architecture: **Go decision core with a Python broker adapter**
   (decided 2026-10-14).
