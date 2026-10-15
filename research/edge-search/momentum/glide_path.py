@@ -225,6 +225,16 @@ class MomentumResearch(QCAlgorithm):
         rows.sort(key=lambda c: c.DollarVolume, reverse=True)
         return [c.Symbol for c in rows[:self.UNIVERSE_SIZE]]
 
+    def _glide_targets(self, targets):
+        """The month's momentum book with the bond sleeve added (unchanged
+        when GLIDE is "none"); the share used is recorded once measuring."""
+        if self.GLIDE == "none":
+            return targets
+        b = self._bond_share()
+        if self.Time.date() >= date(*self.MEASURE_FROM):
+            self.b_used.append(b)
+        return with_bond_sleeve(targets, b, {self.bond_syms[t]: w for t, w in self.BOND_FUNDS.items()})
+
     def _bond_share(self):
         if self.GLIDE == "fixed":
             return self.BOND_SHARE
@@ -384,12 +394,7 @@ class MomentumResearch(QCAlgorithm):
                 above=above if self.STOCK_TREND_DAYS else None, risk_off=risk_off,
                 risk_off_fraction=self.RISK_OFF_FRACTION, spy_blend=self.SPY_BLEND,
                 bond=self.bond, spy=self.spy)
-            if self.GLIDE != "none":
-                b = self._bond_share()
-                if self.Time.date() >= date(*self.MEASURE_FROM):
-                    self.b_used.append(b)
-                targets = with_bond_sleeve(
-                    targets, b, {self.bond_syms[t]: w for t, w in self.BOND_FUNDS.items()})
+            targets = self._glide_targets(targets)
             self.names_held += self.TOP_N
         elif risk_off:
             targets = {self.bond: 0.98}
@@ -502,6 +507,7 @@ class MomentumResearch(QCAlgorithm):
         for label, a, b in spans:
             if a > date(*self.END_DATE) or b < date(*self.MEASURE_FROM):
                 continue
+            a = max(a, date(*self.MEASURE_FROM))   # no span reaches into the warm-up
             self.SetRuntimeStatistic(label, self._stats(self.equity_curve, a, b))
             self.SetRuntimeStatistic("SPY " + label, self._stats(self.spy_curve, a, b))
         self.SetRuntimeStatistic("Mode", "{} n={} top={} rebalances={} risk_off={} orders={}".format(

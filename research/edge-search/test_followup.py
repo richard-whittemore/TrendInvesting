@@ -1545,6 +1545,63 @@ class GlidePathTest(unittest.TestCase):
         algo.GLIDE = "none"
         self.assertEqual(algo._bond_share(), 0.0)
 
+    def _trading_algo(self, held):
+        """An algorithm whose _trade can run: ``held`` maps symbol -> held
+        fraction of a $1m account; every symbol is priced."""
+        algo = self.module.MomentumResearch()
+        algo.REBALANCE_BAND, algo.resizes, algo.resize_all = 0.25, 0, False
+        algo.pending, algo.pending_tickets = {}, {}
+        equity = 1_000_000.0
+
+        class Securities(dict):
+            def ContainsKey(self, k):
+                return True
+
+            def __getitem__(self, k):
+                return types.SimpleNamespace(HasData=True, Price=100.0)
+
+        class Book(dict):
+            TotalPortfolioValue = equity
+
+            def __iter__(self):
+                return iter([])
+
+            def __getitem__(self, k):
+                w = held.get(k, 0.0)
+                return types.SimpleNamespace(Invested=bool(w), IsLong=w > 0, IsShort=w < 0,
+                                             HoldingsValue=w * equity)
+
+        algo.Securities, algo.Portfolio = Securities(), Book()
+        algo.orders = []
+        algo.SetHoldings = lambda sym, w: algo.orders.append((sym, round(w, 6)))
+        algo.Liquidate = lambda sym: algo.orders.append((sym, 0))
+        return algo
+
+    def test_the_sleeve_reaches_trading_as_one_ief_target_and_the_band_uses_it(self):
+        algo = self._trading_algo({"A": 0.343, "IEF": 0.49})
+        algo.GLIDE, algo.BOND_SHARE, algo.MEASURE_FROM = "fixed", 0.30, (2002, 8, 1)
+        algo.Time = _dt.datetime(2010, 3, 1, 8)
+        algo.bond_syms, algo.b_used = {"IEF": "IEF", "SHY": "SHY"}, []
+        book = algo._glide_targets({"A": 0.49, "IEF": 0.49})       # a risk-off month
+        self.assertAlmostEqual(book["IEF"], 0.49)                  # 0.343 + 0.147, one target
+        algo._trade(book)
+        # IEF held at 0.49 is on its summed target, A on its scaled one: only
+        # SHY, not yet held, is bought. Against momentum's IEF share alone
+        # (0.343) the held 0.49 would be 43% off and resized.
+        self.assertEqual(algo.orders, [("SHY", 0.147)])
+        self.assertEqual(algo.b_used, [0.30])
+
+    def test_rebalance_passes_its_book_through_the_sleeve_before_trading(self):
+        import inspect
+        src = inspect.getsource(self.module.MomentumResearch.Rebalance)
+        self.assertLess(src.index("self._glide_targets(targets)"), src.index("self._trade(targets)"))
+
+    def test_without_a_glide_the_book_is_untouched(self):
+        algo = self.module.MomentumResearch()
+        algo.GLIDE = "none"
+        book = {"A": 0.98}
+        self.assertIs(algo._glide_targets(book), book)
+
     def test_the_template_only_adds_to_defensive_v2(self):
         with open(os.path.join(HERE, "momentum", "defensive_v2.py")) as f:
             old = f.read().splitlines()
