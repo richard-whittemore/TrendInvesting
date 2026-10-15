@@ -259,7 +259,19 @@ Lightsail VM (Ubuntu, $12/month, US East)
     history covers (24 for a two-year history), and each month's 500 names
     are compared with QuantConnect's coarse universe for the same month.
     This replaces the IWB comparison above for the chosen approach; Phase 1
-    stays open until it is done;
+    stays open until it is done. Every input must be as of the tested
+    month, never today's:
+    - which stocks existed and traded: that session's market-wide daily
+      bars, which hold only the stocks that traded that day;
+    - which were common stock: a listing or classification snapshot dated
+      that month. Nasdaq Trader's files are current only, so they cannot
+      serve. The candidate is the data service's reference list of tickers
+      as of a given date (its type field separates common stock, ADRs and
+      funds), to be confirmed when the source is chosen;
+    - if no dated classification is available, the comparison covers only
+      months from the start of a daily archive of Nasdaq Trader's files,
+      which the system keeps from the day it starts, and says so. The
+      comparison is not used as the gate until it rests on dated inputs;
   - **checked continuously**: during dry-run and paper trading, each
     month's live universe and picks are compared with a QuantConnect
     backtest of the same rule run to that month (free), and the
