@@ -110,6 +110,13 @@ backtest runs on their servers.
   close, with each broker's margin spread and commissions; and
   `defensive_v2.py`'s book traded some sessions after it is computed (a
   change made by hand).
+- `momentum/universe_parity.py` and `momentum/parity_compare.py` — the
+  universe parity study (`docs/live-trading/plan.md`, section 4).
+  `defensive_v2.py` with additions only: the month's universe can be limited
+  to IWB's holdings at least `ETF_LAG_DAYS` old (QuantConnect's US ETF
+  Constituents data, free in its cloud), and each month's targets are
+  logged. `parity_compare.py` reads two runs' logs and reports, month by
+  month, the stocks the books share and their weight overlap.
 - `boost/multi.py` — Boost's rule, unchanged, on each fund of a blend at
   once (US large, mid and small caps, optionally with developed markets
   outside the US), each fund boosted on its own signal; `bh` is the same

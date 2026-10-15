@@ -26,6 +26,9 @@ _OOS = {"START_DATE": (2015, 1, 1), "END_DATE": (2026, 6, 30), "MEASURE_FROM": (
 _HALF = {"MODE": "mom_trend", "TOP_N": 25, "RISK_OFF_FRACTION": 0.5}
 _COMBO = dict(_HALF, SECTOR_CAP=3, INV_VOL=True)
 _M1 = {"SPREAD": 0.022, "FEES": "none"}
+# Universe parity (docs/live-trading/plan.md, section 4): the combination's
+# held-out settings, run to September 2026, its picks logged.
+_PARITY = dict(_OOS, **_COMBO, END_DATE=(2026, 9, 30), LOG_PICKS=True, ETF_TICKER="IWB")
 _CTRY_OOS = {"MODE": "country_rot", "START": (2015, 1, 1), "END": (2026, 6, 30), "MEASURE_FROM": (2016, 1, 1)}
 _US3X = {"SPY": 1, "MDY": 1, "IWM": 1, "EFA": 1}
 _D11, _D19, _D21, _D22, _D23 =(2011, 3, 1), (2019, 7, 1), (2021, 2, 1), (2022, 5, 1), (2023, 11, 1)
@@ -152,6 +155,11 @@ VARIANTS = {
     # Boost on SPY minute data: when each decision is made and filled, the
     # margin spread (IB about 1.5%, M1 5.90% less the T-bill, about 2.2%)
     # and commissions (IB's, or none at M1).
+    # Universe parity: the backtest's own universe, then IWB's holdings at
+    # least 7 days old and, for the sensitivity, 1 day old.
+    "OOS_P_COARSE": ("momentum/universe_parity.py", dict(_PARITY, UNIVERSE_SOURCE="coarse", ETF_LAG_DAYS=7)),
+    "OOS_P_IWB7": ("momentum/universe_parity.py", dict(_PARITY, UNIVERSE_SOURCE="etf", ETF_LAG_DAYS=7)),
+    "OOS_P_IWB1": ("momentum/universe_parity.py", dict(_PARITY, UNIVERSE_SOURCE="etf", ETF_LAG_DAYS=1)),
     "BE_IB_MOC": ("boost/execution.py", {"EXEC": "moc"}),
     "BE_IB_OPEN": ("boost/execution.py", {"EXEC": "next_open"}),
     "BE_M1_AM": ("boost/execution.py", dict(_M1, EXEC="next_open")),
