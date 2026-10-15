@@ -228,12 +228,66 @@ Lightsail VM (Ubuntu, $12/month, US East)
   dividends) for SPY, IEF, SHY and the universe. About 520 symbols a month
   at IBKR's pacing limits takes well under an hour, done overnight.
 - **Universe** (the hard part): IBKR gives no ready "500 largest by dollar
-  volume with fundamentals" list. Proposed: take the holdings file of a
-  broad US index fund (iShares IWB, Russell 1000, published daily and free),
-  drop non-common shares, rank by dollar volume from IBKR bars, keep 500.
-- **Sectors**: the backtest used Morningstar sectors; the holdings file
-  gives GICS sectors. They differ for some companies, which changes which
-  names the sector cap allows.
+  volume with fundamentals" list. The first proposal, IWB's holdings, failed
+  the parity study (62% overlap, `docs/research/universe-parity-2026-10.md`).
+  **Decision D8** (2026-10-15): build the universe as the backtest does,
+  from every US-listed common stock:
+  - **listings**: Nasdaq Trader's free daily symbol directory
+    (`nasdaqlisted.txt`, `otherlisted.txt`); funds and test issues dropped by
+    their `ETF` and `Test Issue` fields, preferred shares, warrants, units
+    and rights by security name. Companies headquartered outside the US
+    with US listings stay in, as in the backtest;
+  - **rank**: one session's dollar volume (close × volume), the last session
+    before the rebalance, as QuantConnect's coarse `DollarVolume` is; price
+    at least $5 on that close; keep the top 500. Ranking and the $5 test use
+    the **unadjusted** trade close and volume (for IBKR, `TRADES` bars, not
+    `ADJUSTED_LAST`), since an adjusted close can move a stock across $5 or
+    in and out of the top 500. The momentum, volatility and trend
+    calculations keep using split- and dividend-adjusted closes;
+  - **data source** for that one session's close and volume for every
+    listed stock, still to choose: IBKR's own historical bars (free with the
+    account, but one request per stock, several thousand a month; whether
+    that fits IBKR's pacing limits is unconfirmed, IBKR questions 5–6), or a
+    market-data service
+    whose one request returns every stock's day (an account the owner
+    opens; terms and cost checked first);
+  - **known gaps**: QuantConnect's `HasFundamentalData` (Morningstar
+    coverage) has no free equivalent and is left out, so a few extra names
+    may enter; the sector cap's Morningstar labels need a source (below).
+  - **checked against the backtest before Phase 2**: once the data source
+    exists, the rule is run on as many recent months as the source's free
+    history covers (24 for a two-year history), and each month's 500 names
+    are compared with QuantConnect's coarse universe for the same month.
+    This replaces the IWB comparison above for the chosen approach; Phase 1
+    stays open until it is done. Every input must be as of the tested
+    month, never today's:
+    - which stocks existed and traded: that session's market-wide daily
+      bars, which hold only the stocks that traded that day;
+    - which were common stock: a listing or classification snapshot dated
+      that month. Nasdaq Trader's files are current only, so they cannot
+      serve. The candidate is the data service's reference list of tickers
+      as of a given date (its type field separates common stock, ADRs and
+      funds), to be confirmed when the source is chosen;
+    - if no dated classification is available, the comparison covers only
+      months from the start of a daily archive of Nasdaq Trader's files,
+      which the system keeps from the day it starts, and says so. The
+      comparison is not used as the gate until it rests on dated inputs;
+  - **checked continuously**: during dry-run and paper trading, each
+    month's live universe and picks are compared with a QuantConnect
+    backtest of the same rule run to that month (free), and the
+    differences are recorded. A large or growing difference stops the move
+    to live trading.
+- **Sectors**: the backtest's cap (at most 3 per sector) used Morningstar
+  sectors, and no free source gives them. Free candidates, each to be
+  compared with Morningstar on today's universe before one is chosen:
+  - the GICS sectors in iShares' daily holdings files (IWV covers most US
+    companies, but not those headquartered abroad);
+  - the SEC's industry code (SIC) for every company that files with it,
+    including foreign issuers, mapped to sectors.
+  Labels that differ change which names the cap allows; the comparison
+  measures how often that changes a month's picks. A paid fundamentals
+  source (which would also close the `HasFundamentalData` gap) is the
+  fallback.
 - **Universe parity study first** (research, before any build): for each
   month of 2016–2026, compare the 25 names this approach would pick with
   the backtest's own picks, and the return difference.
@@ -411,7 +465,7 @@ so Pro's margin rate does not help them.
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
 | 0 | Owner decisions D5 and D7 (D6 decided 2026-10-15); the broker-adapter ADR (0025, accepted 2026-10-15); this plan reviewed (owner, and an independent review on 2026-10-15) | Done except D5 and D7, which must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
-| 1 | Universe parity study (research, QuantConnect free) | Overlap good enough, or a data source chosen |
+| 1 | Universe parity study (research, QuantConnect free) | IWB tested and failed (2026-10-15); D8 builds the universe from all US listings. Open until: the data source is chosen, the D8 rule's recent-months comparison with QuantConnect's universe is recorded (section 4), and the sector check is done |
 | 2 | The target-weight strategy ADR (decision contract, risk limits, the risk-reducing definition in section 3); Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest passes its stated test |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
 | 4 | IBKR paper trading | 2–3 clean months |
@@ -436,5 +490,8 @@ only after CodeRabbit and Greptile findings are addressed.
   or fails (decided 2026-10-15; section 3).
 - **D7** Whole shares in the IRAs: fractional shares through the API, or a
   minimum-lot rule (section 5). Open; depends on what IBKR confirms.
+- **D8** Live universe: **every US-listed common stock ranked by one
+  session's dollar volume, as the backtest does** (decided 2026-10-15;
+  section 4). Its data source is still to choose.
 - Account opening, funding, rollovers and the Lightsail sign-up are the
   owner's to do; nothing here signs up for or pays for anything.
