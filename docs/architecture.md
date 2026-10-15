@@ -2,7 +2,7 @@
 
 ## Decision boundary
 
-The system deliberately separates trading decisions from market and brokerage mechanics. LEAN owns market data for backtests; the IBKR adapter owns live market data and brokerage (ADR 0025). Both speak the same transport, and the Go application cannot tell which one it is talking to.
+The system deliberately separates trading decisions from market and brokerage mechanics. LEAN owns market data for backtests; the IBKR adapter owns live market data and brokerage (ADR 0025). Both use the same transport and envelope contract; the engine checks the adapter's name in its first envelope against its configuration (ADR 0025).
 
 ```text
 LEAN container (backtests) or IB Gateway (live, ADR 0025)

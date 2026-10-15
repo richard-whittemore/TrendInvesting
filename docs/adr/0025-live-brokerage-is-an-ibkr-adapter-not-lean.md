@@ -29,8 +29,9 @@ application and replace LEAN for live trading only.
    decision envelopes into IBKR orders.
 2. **The adapter speaks the existing transport**: a Unix-domain socket
    with newline-delimited JSON, one exchange at a time, and the same
-   `internal/event.Envelope` (ADR 0014, ADR 0015). The Go side cannot tell
-   which adapter it is talking to.
+   `internal/event.Envelope` (ADR 0014, ADR 0015). Strategy, risk and
+   journal code do not depend on which adapter is connected; only the
+   engine's identity check (point 3) looks at it.
 3. **LEAN stays for backtests** and research. The LEAN adapter is
    unchanged.
    - **Only one adapter can drive a live engine.** A live engine's
