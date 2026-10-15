@@ -6,7 +6,9 @@ nothing.
 Input: the tax study's export format (research/edge-search/tax/tax_drag.py),
 kept outside the repository because it is derived from market data: a JSON
 object mapping run name -> {"fills": [[unix time, symbol, signed quantity,
-price, fee], ...]}, built from each backtest's full order list. The order
+price, fee], ...]}, built from each backtest's full order list. Symbols are
+QuantConnect security IDs, the same in every run, so stocks are compared by
+ID and the bond fund is recognised by the ID's ticker part. The order
 list is used rather than the logs because the Free plan caps logs at 10 KB.
 
 For each month of the study it rebuilds what each run held once that
@@ -40,9 +42,17 @@ def _month_of(t):
     return datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m")
 
 
+def _ticker(symbol):
+    """The ticker part of a symbol: the export's QuantConnect security IDs
+    are "<ticker at first listing> <code>"; a bare ticker is itself."""
+    return symbol.split()[0] if symbol.split() else symbol
+
+
 def holdings_by_month(fills, study_months, bonds=("IEF",)):
     """{month: (stocks held, bond fund held)} after each study month's fills,
-    fills before the study included. Refuses a month with nothing held."""
+    fills before the study included. Refuses a month with nothing held.
+    Symbols may be tickers or security IDs; the bond fund is matched by
+    ticker."""
     qty = {}
     ordered = sorted(fills, key=lambda f: f[0])
     i, out = 0, {}
@@ -54,7 +64,8 @@ def holdings_by_month(fills, study_months, bonds=("IEF",)):
         held = {s for s, q in qty.items() if abs(q) > 1e-9}
         if not held:
             raise ValueError("nothing held in {}: the export is incomplete".format(month))
-        out[month] = (held - set(bonds), bool(held & set(bonds)))
+        bond = {s for s in held if _ticker(s) in bonds}
+        out[month] = (held - bond, bool(bond))
     return out
 
 

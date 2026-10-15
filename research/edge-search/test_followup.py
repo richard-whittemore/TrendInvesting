@@ -1454,6 +1454,15 @@ class ParityCompareTest(unittest.TestCase):
         fills = [[t(2015, 6, 1), "A", 10, 1.0, 0], [t(2016, 2, 1), "A", -10, 1.0, 0]]
         self.assertEqual(self.module.holdings_by_month(fills, ["2016-01"]), {"2016-01": ({"A"}, False)})
 
+    def test_the_bond_fund_is_recognised_by_ticker_or_by_security_id(self):
+        # The tax study's export names each security by QuantConnect's
+        # security ID, "<ticker at first listing> <code>".
+        t = self._t
+        fills = [[t(2016, 1, 4), "IEF SGNUDG1YI9ID", 7, 1.0, 0], [t(2016, 1, 4), "AAPL R735QTJ8XC9X", 3, 1.0, 0],
+                 [t(2016, 1, 4), "IEFA VFL8MXEK1IP1", 2, 1.0, 0]]
+        held = self.module.holdings_by_month(fills, ["2016-01"])
+        self.assertEqual(held["2016-01"], ({"AAPL R735QTJ8XC9X", "IEFA VFL8MXEK1IP1"}, True))
+
     def test_a_month_with_nothing_held_is_refused(self):
         # An export that lost its early orders would otherwise look like an
         # empty book and lower the overlap without saying so.
