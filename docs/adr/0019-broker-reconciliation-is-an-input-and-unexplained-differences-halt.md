@@ -1,6 +1,6 @@
 # ADR 0019: Broker reconciliation is an input, and unexplained differences halt
 
-- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery)
+- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts)
 - Date: 2026-09-17
 
 ## In plain English
@@ -225,3 +225,50 @@ The failed run stays intact as evidence, as above.
   - no automatic return to Normal;
   - byte-identical replay of every state transition and every order change made while Degraded.
 - Alerting and the heartbeat monitor are live-readiness prerequisites, alongside the timing bounds. The alert channels are the owner's choice.
+
+## Amendment (2026-10-15): one risk-reducing sale while Halted, for target-weight accounts
+
+The owner decided (decision D6, `docs/live-trading/plan.md`) that a Halted
+margin account running a target-weight strategy may still sell back to its
+unlevered weight by itself. Without it, a Halted account at 147% exposure
+would keep its borrowed exposure until a person acted. This is the one
+exception to "no order changes" in the Halted row above. It does not apply
+to the Turtle reducer, and changes nothing else in this ADR.
+
+- **When:** the strategy's own exit fires, or the margin alarm is urgent
+  (`docs/live-trading/plan.md`, section 5), while the account is Halted.
+- **What:** one sell-only order per instrument, bringing exposure toward
+  98% of net liquidation and never below it.
+- **Sized from the broker, net of every working sell.** The quantity is
+  the smallest of: what reaches 98% of IBKR's reported net liquidation
+  value; and IBKR's reported holding minus the total
+  quantity of every working and pending sell order IBKR reports for the
+  instrument, ours and unknown ones. This keeps the invariant above
+  ("working sell quantity never exceeds the holding"), so no combination of
+  fills can open a short.
+- **One price basis.** The 98% target is computed from a single IBKR
+  account snapshot: its net liquidation value and its current mark for the
+  instrument, taken together, never mixed with the previous close. The
+  shares to keep are 98% of that net liquidation value divided by that
+  mark, rounded up, so the sale itself never targets less than 98%. For
+  example, with 147 shares, $4,700 borrowed and a mark of $90, net
+  liquidation is $8,530; keeping 93 shares ($8,370, 98.1%) means selling
+  54.
+- **Price moves during the sale** shift the result a little either side of
+  98%, because the order executes after the snapshot. That is accepted:
+  the sale is not resized or repeated, and the account stays Halted for a
+  person to review, with the resulting exposure in the fill alert.
+- **No order when it cannot be checked:** if IBKR's holding, net
+  liquidation value or open orders cannot be read, or any working sell is
+  one the journal does not recognise (CONTAINMENT REQUIRED), no order is
+  sent, and the alert asks the owner to act by hand.
+- **Attempted once per incident**, with a client identifier derived from
+  the incident, like a restored stop. A failed or cancelled attempt is not
+  retried automatically.
+- **Alerts** when the account enters Halted, when the sale is sent, and
+  when it fills or fails. It is journalled like any other order, and the
+  account stays Halted until recovery.
+- **Tests** before use: the sale sized net of a working sell; no order with
+  an unknown working sell; no order without readable broker values; one
+  attempt only; byte-identical replay.
+
