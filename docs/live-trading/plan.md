@@ -312,7 +312,14 @@ Lightsail VM (Ubuntu, $12/month, US East)
   $25,000. Boost's normal round trip (buy at one open, sell at a later
   open) is not a day trade, but an emergency same-day sell after a morning
   buy is. The margin runbook counts day trades and keeps to at most three
-  in five sessions.
+  in five sessions, with one exception: **a risk-reducing sale always takes
+  priority** (an urgent Excess Liquidity sale, a halt-driven flatten to
+  98%), even if it is a fourth day trade. A broker's pattern-day-trader
+  restriction limits new buying, not closing sales, so the cost is that
+  Boost stops: the system makes no boost buy while the restriction lasts,
+  and holds SPY at 98%. How long IBKR's restriction lasts and how it is
+  lifted are confirmed with IBKR (D5) and written into the runbook before
+  the joint account goes live.
 - **Kill switch**: a file or command that stops all new orders.
 - **Modes**: dry-run (decide and journal, send nothing) → IBKR paper →
   live, set per account in configuration.
@@ -361,7 +368,9 @@ allows it. To confirm with IBKR:
   Gateway and one weekly 2FA serve them all. Otherwise it is three
   gateways, three 2FA prompts and possibly three data subscriptions;
 - the IRA account type, settlement of sale proceeds, and fractional shares
-  through the API (D7).
+  through the API (D7);
+- how a pattern-day-trader restriction on the joint account works and is
+  lifted (section 5).
 
 Momentum's monthly trades
 make Pro's $1 minimum matter for the smaller IRA, and the IRAs never borrow,
