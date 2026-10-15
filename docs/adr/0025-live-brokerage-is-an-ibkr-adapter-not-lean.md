@@ -31,14 +31,16 @@ application and replace LEAN for live trading only.
    with newline-delimited JSON, one exchange at a time, and the same
    `internal/event.Envelope` (ADR 0014, ADR 0015). Strategy, risk and
    journal code do not depend on which adapter is connected; only the
-   engine's identity check (point 3) looks at it.
+   engine's identity check (point 3), still to be built, will look at it.
 3. **LEAN stays for backtests** and research. The LEAN adapter is
    unchanged.
-   - **Only one adapter can drive a live engine.** A live engine's
+   - **Only one adapter can drive a live engine.** This is new work for
+     the live engine, not something the engine does today: at present
+     `cmd/engine` accepts any envelope with a non-empty source. A live engine's
      configuration names its adapter (`ibkr`), and that name is part of the
      configuration hash (ADR 0016). The adapter states its name in its first
-     envelope; the engine refuses any other, and refuses a second connection
-     while one is open. LEAN is not installed on the live server, and the
+     envelope; the live engine will refuse any other, and a second
+     connection while one is open, with tests before the adapter is used. LEAN is not installed on the live server, and the
      live socket path is not one the LEAN container mounts.
 4. **The client library is IBKR's own TWS API Python client (`ibapi`)**,
    pinned to one released version and its published checksum, vendored
