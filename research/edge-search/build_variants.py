@@ -27,8 +27,8 @@ _HALF = {"MODE": "mom_trend", "TOP_N": 25, "RISK_OFF_FRACTION": 0.5}
 _COMBO = dict(_HALF, SECTOR_CAP=3, INV_VOL=True)
 _M1 = {"SPREAD": 0.022, "FEES": "none"}
 # Universe parity (docs/live-trading/plan.md, section 4): the combination's
-# held-out settings, run to September 2026, its picks logged.
-_PARITY = dict(_OOS, **_COMBO, END_DATE=(2026, 9, 30), LOG_PICKS=True, ETF_TICKER="IWB")
+# held-out settings, run to September 2026.
+_PARITY = dict(_OOS, **_COMBO, END_DATE=(2026, 9, 30), ETF_TICKER="IWB")
 _CTRY_OOS = {"MODE": "country_rot", "START": (2015, 1, 1), "END": (2026, 6, 30), "MEASURE_FROM": (2016, 1, 1)}
 _US3X = {"SPY": 1, "MDY": 1, "IWM": 1, "EFA": 1}
 _D11, _D19, _D21, _D22, _D23 =(2011, 3, 1), (2019, 7, 1), (2021, 2, 1), (2022, 5, 1), (2023, 11, 1)

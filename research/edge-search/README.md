@@ -114,9 +114,10 @@ backtest runs on their servers.
   universe parity study (`docs/live-trading/plan.md`, section 4).
   `defensive_v2.py` with additions only: the month's universe can be limited
   to IWB's holdings at least `ETF_LAG_DAYS` old (QuantConnect's US ETF
-  Constituents data, free in its cloud), and each month's targets are
-  logged. `parity_compare.py` reads two runs' logs and reports, month by
-  month, the stocks the books share and their weight overlap.
+  Constituents data, free in its cloud). `parity_compare.py` rebuilds two
+  runs' holdings month by month from their fills (the tax study's export
+  format; the Free plan's 10 KB logs are too small for ten years of picks),
+  and reports the stocks the books share and whether both were risk-off.
 - `boost/multi.py` — Boost's rule, unchanged, on each fund of a blend at
   once (US large, mid and small caps, optionally with developed markets
   outside the US), each fund boosted on its own signal; `bh` is the same

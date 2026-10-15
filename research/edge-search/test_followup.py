@@ -1395,16 +1395,10 @@ class UniverseParityTest(unittest.TestCase):
         algo.EtfHoldings(held)
         self.assertEqual([day for day, _ in algo.etf_snapshots], [_dt.date(2016, 2, 1), _dt.date(2016, 2, 2)])
 
-    def test_the_picks_line_lists_every_target_by_ticker(self):
-        sym = namedtuple("Sym", "Value")
-        line = self.module.picks_line(_dt.datetime(2016, 3, 1, 8),
-                                      {sym("MSFT"): 0.03, sym("IEF"): 0.49, sym("AAPL"): 0.04}, True)
-        self.assertEqual(line, "PICKS 2016-03-01 risk_off=1 AAPL:0.040000,IEF:0.490000,MSFT:0.030000")
-
     def test_the_template_only_adds_to_defensive_v2(self):
         # Every code line of defensive_v2.py is kept, in order; only comment
-        # lines may change, so with UNIVERSE_SOURCE "coarse" and LOG_PICKS off
-        # it trades as defensive_v2 does.
+        # lines may change, so with UNIVERSE_SOURCE "coarse" it trades as
+        # defensive_v2 does.
         with open(os.path.join(HERE, "momentum", "defensive_v2.py")) as f:
             old = f.read().splitlines()
         with open(os.path.join(HERE, "momentum", "universe_parity.py")) as f:
@@ -1422,15 +1416,15 @@ class UniverseParityTest(unittest.TestCase):
             template, params = build_variants.VARIANTS[name]
             self.assertEqual(template, "momentum/universe_parity.py", name)
             c = _class_constants(template, params)
-            own = {k: c.pop(k) for k in ("UNIVERSE_SOURCE", "ETF_TICKER", "ETF_LAG_DAYS", "LOG_PICKS",
-                                         "SNAPSHOT_DAYS")}
+            own = {k: c.pop(k) for k in ("UNIVERSE_SOURCE", "ETF_TICKER", "ETF_LAG_DAYS", "SNAPSHOT_DAYS")}
             self.assertEqual(c, base, name)
             self.assertEqual(own, {"UNIVERSE_SOURCE": source, "ETF_TICKER": "IWB", "ETF_LAG_DAYS": lag,
-                                   "LOG_PICKS": True, "SNAPSHOT_DAYS": 45}, name)
+                                   "SNAPSHOT_DAYS": 45}, name)
 
 
 class ParityCompareTest(unittest.TestCase):
-    """momentum/parity_compare.py: month-by-month overlap of two runs' picks."""
+    """momentum/parity_compare.py: month-by-month overlap of two runs'
+    holdings, rebuilt from their fills."""
 
     def setUp(self):
         spec = importlib.util.spec_from_file_location(
@@ -1438,40 +1432,50 @@ class ParityCompareTest(unittest.TestCase):
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
 
-    def test_picks_lines_are_read_from_a_log_with_timestamps_and_other_lines(self):
-        log = ["2016-02-01 08:00:00 PICKS 2016-02-01 risk_off=0 A:0.500000,B:0.480000",
-               "2016-02-01 08:00:01 something else",
-               "PICKS 2016-03-01 risk_off=1 A:0.240000,IEF:0.740000"]
-        self.assertEqual(self.module.read_picks(log), {
-            "2016-02": (False, {"A": 0.5, "B": 0.48}),
-            "2016-03": (True, {"A": 0.24, "IEF": 0.74})})
+    @staticmethod
+    def _t(y, m, d):
+        return _dt.datetime(y, m, d, 13, tzinfo=_dt.timezone.utc).timestamp()
 
-    def test_a_month_logged_twice_is_refused(self):
-        log = ["PICKS 2016-02-01 risk_off=0 A:0.98", "PICKS 2016-02-02 risk_off=0 B:0.98"]
+    def test_the_months_run_from_the_first_to_the_last_inclusive(self):
+        self.assertEqual(self.module.months("2015-11", "2016-02"), ["2015-11", "2015-12", "2016-01", "2016-02"])
+
+    def test_holdings_after_each_months_fills_carry_into_quiet_months(self):
+        t = self._t
+        fills = [[t(2016, 1, 4), "A", 10, 1.0, 0], [t(2016, 1, 4), "B", 5, 1.0, 0],
+                 [t(2016, 1, 6), "C", 3, 1.0, 0],                         # a late buy in the same month
+                 [t(2016, 3, 1), "B", -5, 1.0, 0], [t(2016, 3, 1), "IEF", 7, 1.0, 0]]
+        held = self.module.holdings_by_month(fills, ["2016-01", "2016-02", "2016-03"])
+        self.assertEqual(held["2016-01"], ({"A", "B", "C"}, False))
+        self.assertEqual(held["2016-02"], ({"A", "B", "C"}, False))     # no trades: unchanged
+        self.assertEqual(held["2016-03"], ({"A", "C"}, True))           # the bond fund is held
+
+    def test_fills_before_the_study_count_and_after_it_do_not(self):
+        t = self._t
+        fills = [[t(2015, 6, 1), "A", 10, 1.0, 0], [t(2016, 2, 1), "A", -10, 1.0, 0]]
+        self.assertEqual(self.module.holdings_by_month(fills, ["2016-01"]), {"2016-01": ({"A"}, False)})
+
+    def test_a_month_with_nothing_held_is_refused(self):
+        # An export that lost its early orders would otherwise look like an
+        # empty book and lower the overlap without saying so.
+        t = self._t
+        fills = [[t(2016, 2, 1), "A", 10, 1.0, 0]]
         with self.assertRaises(ValueError):
-            self.module.read_picks(log)
+            self.module.holdings_by_month(fills, ["2016-01", "2016-02"])
 
-    def test_overlap_counts_shared_stocks_and_shared_weight(self):
-        a = {"2016-02": (False, {"A": 0.5, "B": 0.48}), "2016-03": (True, {"A": 0.49, "IEF": 0.49})}
-        b = {"2016-02": (False, {"A": 0.3, "C": 0.68}), "2016-03": (True, {"A": 0.49, "IEF": 0.49}),
-             "2016-04": (False, {"A": 0.98})}
-        rows = self.module.compare(a, b, bonds=("IEF",))
-        self.assertEqual([r["month"] for r in rows], ["2016-02", "2016-03"])
-        self.assertEqual((rows[0]["common"], rows[0]["stocks_a"], rows[0]["stocks_b"]), (1, 2, 2))
-        self.assertAlmostEqual(rows[0]["weight_overlap"], 0.3)
-        self.assertEqual((rows[1]["common"], rows[1]["stocks_a"]), (1, 1))   # IEF is not a stock
-        self.assertAlmostEqual(rows[1]["weight_overlap"], 0.98)
-        self.assertEqual(self.module.unmatched(a, b), ([], ["2016-04"]))
+    def test_overlap_counts_shared_stocks_and_risk_off_agreement(self):
+        a = {"2016-01": ({"A", "B"}, False), "2016-02": ({"A"}, True)}
+        b = {"2016-01": ({"A", "C"}, False), "2016-02": ({"A"}, False)}
+        rows = self.module.compare(a, b)
+        self.assertEqual([(r["month"], r["common"], r["stocks_a"], r["stocks_b"], r["same_risk_off"])
+                          for r in rows], [("2016-01", 1, 2, 2, True), ("2016-02", 1, 1, 1, False)])
 
     def test_the_summary_reports_the_mean_and_worst_month(self):
-        rows = [{"month": "2016-02", "common": 20, "stocks_a": 25, "stocks_b": 25, "weight_overlap": 0.8,
-                 "same_risk_off": True},
-                {"month": "2016-03", "common": 10, "stocks_a": 25, "stocks_b": 25, "weight_overlap": 0.4,
-                 "same_risk_off": False}]
+        rows = [{"month": "2016-02", "common": 20, "stocks_a": 25, "stocks_b": 25, "same_risk_off": True},
+                {"month": "2016-03", "common": 10, "stocks_a": 25, "stocks_b": 25, "same_risk_off": False}]
         s = self.module.summary(rows)
         self.assertEqual((s["months"], s["worst_month"], s["risk_off_differs"]), (2, "2016-03", 1))
         self.assertAlmostEqual(s["mean_common_share"], 0.6)
-        self.assertAlmostEqual(s["mean_weight_overlap"], 0.6)
+        self.assertAlmostEqual(s["worst_common_share"], 0.4)
 
 
 if __name__ == "__main__":

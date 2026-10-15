@@ -11,8 +11,9 @@
 # universe is limited to the ETF_TICKER fund's holdings as they stood at
 # least ETF_LAG_DAYS earlier, from QuantConnect's US ETF Constituents data
 # (daily from January 2015; QuantConnect says it may lag the sponsor's files
-# by up to a week, hence the lag), and with LOG_PICKS each month's targets
-# are logged for momentum/parity_compare.py.
+# by up to a week, hence the lag). momentum/parity_compare.py compares two
+# runs' holdings month by month from their order lists (the Free plan's logs
+# are capped at 10 KB, too little for ten years of picks).
 #
 # defensive_v2.py's own header follows.
 #
@@ -66,13 +67,6 @@ def lagged_holdings(snapshots, today, lag_days):
         if (today - day).days >= lag_days and (best is None or day > best[0]):
             best = (day, held)
     return best[1] if best else None
-
-
-def picks_line(when, targets, risk_off):
-    """One log line of a rebalance's targets, by ticker, for parity_compare.py."""
-    names = sorted((str(getattr(sym, "Value", sym)), w) for sym, w in targets.items())
-    return "PICKS {} risk_off={} {}".format(when.strftime("%Y-%m-%d"), int(bool(risk_off)),
-                                            ",".join("{}:{:.6f}".format(n, w) for n, w in names))
 
 
 def defensive_book(ranked, top_n, invested=0.98, sector=None, sector_cap=None, vol=None,
@@ -161,7 +155,6 @@ class MomentumResearch(QCAlgorithm):
     UNIVERSE_SOURCE = "coarse"    # "coarse": as defensive_v2; "etf": only ETF_TICKER's holdings
     ETF_TICKER = "IWB"            # iShares Russell 1000, the fund live trading will read
     ETF_LAG_DAYS = 7              # use holdings at least this many days old
-    LOG_PICKS = False             # log each rebalance's targets (picks_line)
     SNAPSHOT_DAYS = 45            # holdings snapshots older than this are dropped
 
     def Initialize(self):
@@ -384,8 +377,6 @@ class MomentumResearch(QCAlgorithm):
                 above=above if self.STOCK_TREND_DAYS else None, risk_off=risk_off,
                 risk_off_fraction=self.RISK_OFF_FRACTION, spy_blend=self.SPY_BLEND,
                 bond=self.bond, spy=self.spy)
-            if self.LOG_PICKS:
-                self.Log(picks_line(self.Time, targets, risk_off))
             self.names_held += self.TOP_N
         elif risk_off:
             targets = {self.bond: 0.98}
