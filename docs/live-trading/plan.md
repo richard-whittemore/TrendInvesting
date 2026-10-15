@@ -308,7 +308,15 @@ Lightsail VM (Ubuntu, $12/month, US East)
     minimum-lot rule (for example, skip a name whose one share exceeds its
     target and give the weight to the next eligible name). Whichever is
     chosen goes into the parity backtest.
-- **Pattern-day-trader rule**: the joint account is a margin account under
+- **Day-trading margin rules**: which regime applies is to be confirmed
+  with IBKR (D5). FINRA replaced the pattern-day-trader designation and its
+  $25,000 minimum with intraday margin standards in Rule 4210(d)(2),
+  effective 2026-06-04, and lets brokers phase the change in until
+  2027-10-20 (FINRA Regulatory Notice 26-10). Under the new standards the
+  constraint is the account's intraday margin, which the Excess Liquidity
+  alarm above already watches. Under the legacy rule, which IBKR may still
+  apply during the transition, the following holds.
+- **Legacy pattern-day-trader rule**: the joint account is a margin account under
   $25,000. Boost's normal round trip (buy at one open, sell at a later
   open) is not a day trade, but an emergency same-day sell after a morning
   buy is. The margin runbook counts day trades and keeps to at most three
@@ -369,8 +377,10 @@ allows it. To confirm with IBKR:
   gateways, three 2FA prompts and possibly three data subscriptions;
 - the IRA account type, settlement of sale proceeds, and fractional shares
   through the API (D7);
-- how a pattern-day-trader restriction on the joint account works and is
-  lifted (section 5).
+- which day-trading margin regime the joint account is under (legacy
+  pattern-day-trader rule or FINRA's new intraday margin standards), and,
+  under the legacy rule, how a restriction works and is lifted (section 5).
+  This is settled before Phase 2, since the risk limits depend on it.
 
 Momentum's monthly trades
 make Pro's $1 minimum matter for the smaller IRA, and the IRAs never borrow,
