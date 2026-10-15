@@ -116,12 +116,26 @@ Vanguard's anchors, which is 10% until 40 and 30.8% at 53.
   curves blended outside it, on 2002–2015 and on 2016–September 2026.
   Each window is a run of 10–14 years and the path spans 34, so each
   window is run three times, starting the path at age 38, 53 and 65 on its
-  first date, and compared with the fixed mixes either side of it. It is a
-  gate in section 6 and Phase 2. Its result is recorded whether or not it
-  flatters the path, and it **fails** if, in either window, the path's
-  return per year is below both bracketing fixed mixes' or its worst drop is
-  deeper than both. A failure goes back to the owner before any IRA
-  trades.
+  first date. Each run is compared with two fixed mixes, run as the same
+  one-account backtest on the same dates with the same band, worst drop
+  measured on daily equity in all three. The two mixes bracket the bond
+  shares the path passes through: the lower has *b* at the path's starting
+  share rounded down to 10 points, the upper at its ending share rounded up
+  to 10 points.
+
+  | Window | Path starts at age | *b* over the run | Lower mix (bonds) | Upper mix (bonds) |
+  | --- | --- | --- | --- | --- |
+  | 2002–2015 (14 years) | 38 | 0% → 28.7% | 0% | 30% |
+  | 2002–2015 | 53 | 30.8% → 55.7% | 30% | 60% |
+  | 2002–2015 | 65 | 50% → 70% | 50% | 70% |
+  | 2016–Sep 2026 (10.75 years) | 38 | 0% → 22.1% | 0% | 30% |
+  | 2016–Sep 2026 | 53 | 30.8% → 48.0% | 30% | 50% |
+  | 2016–Sep 2026 | 65 | 50% → 70% | 50% | 70% |
+
+  It is a gate in section 6 and Phase 2. Its result is recorded whether or
+  not it flatters the path, and a run **fails** if its return per year is
+  below both of its mixes' or its worst drop is deeper than both. A failure
+  goes back to the owner before any IRA trades.
 
 The schedule is configuration with its own hash (ADR 0016), so a change is
 recorded, never silent.
@@ -179,8 +193,9 @@ Lightsail VM (Ubuntu, $12/month, US East)
   **Halted** until a person clears it. For these strategies, which have no
   stops, a **risk-reducing order** is one that moves the account's
   exposure toward 98% or lower: Boost's exit, and a momentum or bond sell.
-  The target-weight strategy ADR (ADR 0025, Consequences) adopts this
-  definition. Whether a Halted joint account may still flatten to 98% on
+  ADR 0025 does not define this. It requires a separate target-weight
+  strategy ADR before code (its Consequences), a Phase 2 deliverable, and
+  that ADR must adopt this definition or replace it with a stricter one. Whether a Halted joint account may still flatten to 98% on
   its own is decision D6.
 - **Alternative considered**: one standalone Python program. Faster to
   write, but it would duplicate the journal and replay guarantees the
