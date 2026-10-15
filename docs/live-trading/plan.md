@@ -62,26 +62,33 @@ reset monthly):
 **Decision D2**: the fund is **half IEF, half SHY** (decided 2026-10-14;
 tested in `docs/research/retirement-bonds-2026-10.md`). The schedule
 (decided 2026-10-15) sets *b* by the owner's age, since both IRAs are in
-his name. It has the shape of Vanguard's target-date glide path (90%
-stocks until 25 years before retirement, 50% at retirement, 30% seven years
-later; Vanguard, "Target-date fund glide path", workplace.vanguard.com),
-with 10 points less in bonds from retirement on, as the owner asked for a
-slightly less conservative path:
+his name. From age 53 it is Vanguard's target-date glide path (90% stocks
+until 25 years before retirement, 50% at retirement, 30% seven years later;
+Vanguard, "Target-date fund glide path", workplace.vanguard.com). Before
+53 it starts lower, at 0%, and rises evenly to meet Vanguard's path there,
+as the owner asked:
 
 | Owner's age | *b* (bonds) | Momentum, 1 − *b* |
 | --- | --- | --- |
-| under 40 | 10% | 90% |
-| 40 to 65 | rises evenly, 10% to 40% (1.2 points a year) | 90% to 60% |
-| 65 to 72 | rises evenly, 40% to 60% (about 2.9 points a year) | 60% to 40% |
-| 72 and over | 60% | 40% |
+| 38 to 53 | rises evenly, 0% to 30.8% (about 2.05 points a year) | 100% to 69.2% |
+| 53 to 65 | Vanguard: rises evenly, 30.8% to 50% (1.6 points a year) | 69.2% to 50% |
+| 65 to 72 | Vanguard: rises evenly, 50% to 70% (about 2.9 points a year) | 50% to 30% |
+| 72 and over | 70% | 30% |
+
+At every age it holds no more bonds than Vanguard's path, which is 10%
+until 40 and 30.8% at 53.
 
 - Age is counted in whole months on the rebalance date, and *b* is
   interpolated linearly within each stretch, so it changes a little each
   month rather than in steps.
+- The first stretch starts from age 38, not from the first live
+  rebalance, so trading that starts later starts above 0%.
 - Retirement is taken as age 65. The birth date is part of the account
   configuration on the server, not of this repository.
-- Not tested as a path: the research measured fixed mixes (90/10, 70/30,
-  50/50), and the schedule moves between them.
+- Not tested as a path: the research measured fixed mixes (100/0, 90/10,
+  70/30, 50/50), and the schedule moves between them. Mixes beyond 50%
+  bonds, reached after 65, were not measured.
+
 The schedule is configuration with its own hash (ADR 0016), so a change is
 recorded, never silent.
 
@@ -264,8 +271,8 @@ only after CodeRabbit and Greptile findings are addressed.
 
 - **D1** Momentum version: **combination** (decided 2026-10-14).
 - **D2** Glide path: **half IEF, half SHY** (decided 2026-10-14), on a
-  schedule by the owner's age, slightly less conservative than Vanguard's
-  (decided 2026-10-15; section 2).
+  schedule by the owner's age: 0% at 38 rising to meet Vanguard's glide
+  path at 53, then Vanguard's (decided 2026-10-15; section 2).
 - **D3** Joint account: **margin Boost** (decided 2026-10-14).
 - **D4** Architecture: **Go decision core with a Python broker adapter**
   (decided 2026-10-14).
