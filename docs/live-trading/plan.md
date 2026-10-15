@@ -195,8 +195,21 @@ Lightsail VM (Ubuntu, $12/month, US East)
   exposure toward 98% or lower: Boost's exit, and a momentum or bond sell.
   ADR 0025 does not define this. It requires a separate target-weight
   strategy ADR before code (its Consequences), a Phase 2 deliverable, and
-  that ADR must adopt this definition or replace it with a stricter one. Whether a Halted joint account may still flatten to 98% on
-  its own is decision D6.
+  that ADR must adopt this definition or replace it with a stricter one.
+- **Decision D6** (decided 2026-10-15): a Halted joint account still
+  flattens to 98% by itself when Boost's exit fires or the margin alarm is
+  urgent, and the owner is told each step:
+  - an urgent alert when any account enters Degraded or Halted, with the
+    reason (the reconciliation difference or the missing evidence);
+  - an alert when the automatic flatten is sent, and another when it fills
+    or fails;
+  - the flatten is sell-only and sized from IBKR's own reported position
+    and net liquidation value, never the journal's (which is what is in
+    doubt). It sells no more than IBKR reports held, so it cannot go short.
+    If IBKR's position or account values cannot be read, no order is sent
+    and the urgent alert asks the owner to act by hand;
+  - it is journalled like any other order, and the account stays Halted
+    afterwards until the owner clears it.
 - **Alternative considered**: one standalone Python program. Faster to
   write, but it would duplicate the journal and replay guarantees the
   repository already tests. The owner chose the Go core (D4).
@@ -272,9 +285,8 @@ Lightsail VM (Ubuntu, $12/month, US East)
     maintenance requirement it is about 63%, so this needs a deep fall or a
     higher IBKR house requirement. The owner checks the position the same
     day;
-  - **urgent below 20%**: the owner sells back to 98% the same day by hand
-    (or the system does, if D6 allows it), and the sale is journalled like
-    any other order;
+  - **urgent below 20%**: the system sells back to 98% (D6) and alerts the
+    owner; the sale is journalled like any other order;
   - **no reading for 30 minutes** while the market is open counts as
     urgent.
   The thresholds are configuration with their own hash (ADR 0016). The
@@ -390,7 +402,7 @@ so Pro's margin rate does not help them.
 
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
-| 0 | Owner decisions D5–D7; the broker-adapter ADR (0025, accepted 2026-10-15); this plan reviewed (owner, and an independent review on 2026-10-15) | Done except D5–D7, which must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
+| 0 | Owner decisions D5 and D7 (D6 decided 2026-10-15); the broker-adapter ADR (0025, accepted 2026-10-15); this plan reviewed (owner, and an independent review on 2026-10-15) | Done except D5 and D7, which must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
 | 1 | Universe parity study (research, QuantConnect free) | Overlap good enough, or a data source chosen |
 | 2 | The target-weight strategy ADR (decision contract, risk limits, the risk-reducing definition in section 3); Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest passes its stated test |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
@@ -411,9 +423,9 @@ only after CodeRabbit and Greptile findings are addressed.
   (decided 2026-10-14).
 - **D5** **IBKR Lite for every account**, if IBKR allows it and its API
   data suffices (decided 2026-10-14; to confirm with IBKR).
-- **D6** A Halted joint account: may it still flatten to 98% by itself
-  (an automatic, journalled risk-reducing sell), or does it alert the owner
-  to flatten by hand the same day? Open.
+- **D6** A Halted joint account **flattens to 98% by itself**, with an
+  alert when the account freezes, when the sale is sent and when it fills
+  or fails (decided 2026-10-15; section 3).
 - **D7** Whole shares in the IRAs: fractional shares through the API, or a
   minimum-lot rule (section 5). Open; depends on what IBKR confirms.
 - Account opening, funding, rollovers and the Lightsail sign-up are the
