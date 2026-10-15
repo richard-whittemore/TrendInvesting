@@ -239,16 +239,27 @@ Lightsail VM (Ubuntu, $12/month, US East)
     with US listings stay in, as in the backtest;
   - **rank**: one session's dollar volume (close × volume), the last session
     before the rebalance, as QuantConnect's coarse `DollarVolume` is; price
-    at least $5 on that close; keep the top 500;
+    at least $5 on that close; keep the top 500. Ranking and the $5 test use
+    the **unadjusted** trade close and volume (for IBKR, `TRADES` bars, not
+    `ADJUSTED_LAST`), since an adjusted close can move a stock across $5 or
+    in and out of the top 500. The momentum, volatility and trend
+    calculations keep using split- and dividend-adjusted closes;
   - **data source** for that one session's close and volume for every
     listed stock, still to choose: IBKR's own historical bars (free with the
-    account, but one request per stock, several thousand a month, within
-    IBKR's pacing limits; IBKR questions 5–6), or a market-data service
+    account, but one request per stock, several thousand a month; whether
+    that fits IBKR's pacing limits is unconfirmed, IBKR questions 5–6), or a
+    market-data service
     whose one request returns every stock's day (an account the owner
     opens; terms and cost checked first);
   - **known gaps**: QuantConnect's `HasFundamentalData` (Morningstar
     coverage) has no free equivalent and is left out, so a few extra names
     may enter; the sector cap's Morningstar labels need a source (below).
+  - **checked against the backtest before Phase 2**: once the data source
+    exists, the rule is run on as many recent months as the source's free
+    history covers (24 for a two-year history), and each month's 500 names
+    are compared with QuantConnect's coarse universe for the same month.
+    This replaces the IWB comparison above for the chosen approach; Phase 1
+    stays open until it is done;
   - **checked continuously**: during dry-run and paper trading, each
     month's live universe and picks are compared with a QuantConnect
     backtest of the same rule run to that month (free), and the
@@ -442,7 +453,7 @@ so Pro's margin rate does not help them.
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
 | 0 | Owner decisions D5 and D7 (D6 decided 2026-10-15); the broker-adapter ADR (0025, accepted 2026-10-15); this plan reviewed (owner, and an independent review on 2026-10-15) | Done except D5 and D7, which must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
-| 1 | Universe parity study (research, QuantConnect free) | Done 2026-10-15: IWB failed; D8 builds the universe from all US listings. Still to do: choose its data source, and the sector check |
+| 1 | Universe parity study (research, QuantConnect free) | IWB tested and failed (2026-10-15); D8 builds the universe from all US listings. Open until: the data source is chosen, the D8 rule's recent-months comparison with QuantConnect's universe is recorded (section 4), and the sector check is done |
 | 2 | The target-weight strategy ADR (decision contract, risk limits, the risk-reducing definition in section 3); Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest passes its stated test |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
 | 4 | IBKR paper trading | 2–3 clean months |
