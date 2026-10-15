@@ -86,8 +86,21 @@ Momentum picks exactly these in strong trends, so the overlap is lowest in
    does, from a market-wide daily data source: one request a day returns
    every listed stock's volume and close (for example a "grouped daily bars"
    endpoint from a market-data vendor; some have free tiers, which need an
-   account the owner opens). The listing filters (common stock, price at
-   least $5, fundamental data) are applied from free exchange listing files.
+   account the owner opens). The backtest's three filters each need a
+   source:
+   - **common stock**: Nasdaq Trader's free symbol directory
+     (`nasdaqlisted.txt` and `otherlisted.txt`, updated daily), whose `ETF`
+     and `Test Issue` fields drop funds and test symbols; preferred shares,
+     warrants, units and rights are dropped by their security name;
+   - **price at least $5**: the same day's closing price from the daily
+     bars;
+   - **fundamental data**: a **gap**. QuantConnect's `HasFundamentalData`
+     means Morningstar covers the company, and no free source reproduces
+     that screen. Most operating companies pass it, so leaving it out
+     probably admits a few extra names (shell companies, some recent
+     listings). The parity check would measure the effect, and a paid
+     fundamentals source is the fallback if it matters. The same source
+     question applies to the Morningstar sectors the cap uses.
    This is the closest to the backtest. A parity check would measure it
    against `OOS_P_COARSE` before use.
 2. **Accept IWB and treat the result as a new strategy**, with only the
