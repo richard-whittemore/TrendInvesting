@@ -266,9 +266,21 @@ Lightsail VM (Ubuntu, $12/month, US East)
   not be the backtested rule.
 - **A margin-cushion alarm**, separate from that check: the adapter reads
   IBKR's Excess Liquidity for the joint account every few minutes while the
-  market is open. An alert goes to the phone below a set share of equity,
-  and an urgent one if IBKR's margin call level comes near. The runbook
-  covers what to do.
+  market is open, and alerts by Excess Liquidity as a share of the
+  account's net liquidation value:
+  - **warning below 40%**: at 147% exposure under the standard 25%
+    maintenance requirement it is about 63%, so this needs a deep fall or a
+    higher IBKR house requirement. The owner checks the position the same
+    day;
+  - **urgent below 20%**: the owner sells back to 98% the same day by hand
+    (or the system does, if D6 allows it), and the sale is journalled like
+    any other order;
+  - **no reading for 30 minutes** while the market is open counts as
+    urgent.
+  The thresholds are configuration with their own hash (ADR 0016). The
+  runbook, `docs/runbooks/margin-warning.md`, is written in Phase 3 with
+  the action, who acts (the owner), and when the alarm clears (back above
+  40%). It is rehearsed in paper trading before Phase 5.
 - **No order sent twice**: a stable ID derived from the decision is only a
   label. What prevents a resend is that:
   - every order is written to the journal before it is sent, and its
@@ -364,7 +376,7 @@ so Pro's margin rate does not help them.
 | 2 | The target-weight strategy ADR (decision contract, risk limits, the risk-reducing definition in section 3); Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest passes its stated test |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
 | 4 | IBKR paper trading | 2–3 clean months |
-| 5 | Limited live, one account at a time | A clean month each |
+| 5 | Limited live, one account at a time | A clean month each. The joint account goes live only after the margin-warning runbook has been rehearsed in paper trading (an injected low Excess Liquidity reading, handled end to end) |
 
 Each phase is a ticket with its own work log, worked test-first and merged
 only after CodeRabbit and Greptile findings are addressed.
