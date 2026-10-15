@@ -205,7 +205,8 @@ Lightsail VM (Ubuntu, $12/month, US East)
     or fails;
   - the flatten is sell-only and sized from IBKR's own figures, never the
     journal's (which is what is in doubt): the smaller of what reaches 98%
-    of IBKR's net liquidation value and IBKR's reported holding minus every
+    of IBKR's net liquidation value, priced at IBKR's current mark from the
+    same account snapshot, and IBKR's reported holding minus every
     working or pending sell IBKR reports, ours or unknown. So no
     combination of fills can open a short;
   - if IBKR's holding, account values or open orders cannot be read, or a
