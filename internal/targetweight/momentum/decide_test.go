@@ -186,3 +186,51 @@ func TestIsDecisionSession(t *testing.T) {
 		}
 	}
 }
+
+// TestDecideOnACalendarShorterThanTheScoreWindow checks a calendar long
+// enough for the trend test but shorter than the score window: every member
+// is short of history, never an out-of-range read of the calendar.
+func TestDecideOnACalendarShorterThanTheScoreWindow(t *testing.T) {
+	cal := calendar(220)
+	in := momentum.Input{
+		Sessions: cal,
+		Closes: map[string]map[string]float64{
+			"SPY": series(cal, trending(220, 1.001)),
+			"AAA": series(cal, wobbling(220, 1.002, 0.01)),
+		},
+		Universe: momentum.Snapshot{Session: cal[len(cal)-1], Rows: []momentum.Row{
+			{InstrumentID: "AAA", Type: "CS", Close: 50, Volume: 1e6, Sector: "101", SectorSource: "gics-iwv"},
+		}},
+	}
+	d, err := momentum.Decide(momentum.FCombo(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range d.Names {
+		mustEqual(t, n.InstrumentID+" status", n.Status, momentum.StatusShortHistory)
+	}
+}
+
+// TestHelpersRefuseAMalformedConfig checks that Score, EvaluateTrend and
+// RankUniverse validate their configuration, as Decide and SelectBook do,
+// so a direct caller gets an error rather than a panic.
+func TestHelpersRefuseAMalformedConfig(t *testing.T) {
+	cal := calendar(300)
+	closes := series(cal, trending(300, 1.001))
+	noTrend := momentum.FCombo()
+	noTrend.TrendCloses = 0
+	if _, _, err := momentum.EvaluateTrend(noTrend, cal, closes); err == nil {
+		t.Error("EvaluateTrend: want an error")
+	}
+	noSkipRoom := momentum.FCombo()
+	noSkipRoom.ScoreSkip = -1
+	if _, err := momentum.Score(noSkipRoom, cal, closes); err == nil {
+		t.Error("Score: want an error")
+	}
+	noUniverse := momentum.FCombo()
+	noUniverse.UniverseSize = -1
+	rows := []momentum.Row{{InstrumentID: "AAA", Type: "CS", Close: 50, Volume: 1e6}}
+	if _, _, err := momentum.RankUniverse(noUniverse, rows); err == nil {
+		t.Error("RankUniverse: want an error")
+	}
+}

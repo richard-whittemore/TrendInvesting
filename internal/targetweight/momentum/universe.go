@@ -45,8 +45,12 @@ type UniverseCounts struct {
 // (ADR 0026 point 8).
 //
 // The backtest's HasFundamentalData test has no free equivalent and is not
-// applied (plan.md section 4, D8 "known gaps").
+// applied (plan.md section 4, D8 "known gaps"). A configuration that fails
+// Validate is an error.
 func RankUniverse(cfg Config, rows []Row) ([]Member, UniverseCounts, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, UniverseCounts{}, err
+	}
 	counts := UniverseCounts{Rows: len(rows)}
 	seen := make(map[string]bool, len(rows))
 	var kept []Member

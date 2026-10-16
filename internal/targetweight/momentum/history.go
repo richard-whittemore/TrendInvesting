@@ -62,19 +62,23 @@ type History struct {
 //
 // Every close must be dated on a calendar session, finite and positive:
 // a close after the last session would be look-ahead, and anything else is
-// a malformed input, so each is an error rather than a skipped name.
+// a malformed input, so each is an error rather than a skipped name, as
+// is a configuration that fails Validate.
 func Score(cfg Config, sessions []string, closes map[string]float64) (History, error) {
+	if err := cfg.Validate(); err != nil {
+		return History{}, err
+	}
 	if err := checkInputs(sessions, closes); err != nil {
 		return History{}, err
 	}
 	need := cfg.ScoreLookback + 1
 	h := History{Closes: len(closes)}
-	window, ok := lastCloses(sessions, closes, need)
-	switch {
-	case h.Closes < need:
+	if h.Closes < need {
 		h.Status = StatusShortHistory
 		return h, nil
-	case !ok:
+	}
+	window, ok := lastCloses(sessions, closes, need)
+	if !ok {
 		h.Status = StatusGap
 		return h, nil
 	}
@@ -126,8 +130,11 @@ type Trend struct {
 // a missing close in the window, the last included, gives
 // ReasonMissingBars. The backtest treated the first as risk-on and
 // dropped missing closes; live withholds the decision instead (ADR 0026
-// point 5).
+// point 5). A configuration that fails Validate is an error.
 func EvaluateTrend(cfg Config, sessions []string, closes map[string]float64) (Trend, WithheldReason, error) {
+	if err := cfg.Validate(); err != nil {
+		return Trend{}, "", err
+	}
 	if err := checkInputs(sessions, closes); err != nil {
 		return Trend{}, "", err
 	}
