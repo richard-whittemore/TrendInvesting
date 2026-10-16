@@ -58,7 +58,8 @@ the cap may admit or exclude different names in exactly those months.
 
 Limits: it relabels only stocks in today's universe. Stocks that were in
 the universe earlier and differ between the two schemes are not relabelled,
-so it understates the effect in earlier years.
+so the comparison is incomplete for earlier years, in a direction it does
+not establish.
 
 Run `OOS_P_GICS`: the backtest's own universe and rules, 2016 to September
 2026, with the 20 stocks above relabelled their GICS way, compared month by
@@ -87,13 +88,13 @@ and the cap admitted different names.
 
 ## What it means
 
-- **The label source changes about one name a month and, here, not the
-  return.** Most months are identical; the differing months swap one to
-  three of 25 names. Over this window the return is the same to 0.02 points
-  a year.
-- **It understates the effect before about 2024**, since only today's
-  universe was relabelled (above). The years when today's names were not
-  yet in the universe are relabelled less.
+- **The label source changes about one name a month and, here, no material
+  part of the return** (20.08% against 20.10% a year). Most months are
+  identical; the differing months swap one to three of 25 names.
+- **The comparison is incomplete before about 2024**, since only today's
+  universe was relabelled (above): earlier names that the two schemes label
+  differently were not relabelled, and that could move the result either
+  way.
 - **Free GICS labels are an acceptable stand-in for the 475 names iShares
   covers**, with the difference measured rather than assumed. The live
   system records each month's sector source (ADR 0026, point 1), and the
@@ -131,10 +132,27 @@ ticker.
 
 Nasdaq's stock screener (`api.nasdaq.com/api/screener/stocks`, free, no
 account) labels 7,019 US listings, foreign issuers included, with its own
-sector scheme. Its sectors were mapped onto Morningstar's by name (Finance
-to Financial Services, Telecommunications to Communication Services, and so
-on; "Miscellaneous" left unmapped). The download was reduced to symbol,
-sector, industry and country and kept outside the repository.
+sector scheme. The download was reduced to symbol, sector, industry and
+country and kept outside the repository. Its sectors were mapped onto
+Morningstar's codes by name, in full:
+
+| Nasdaq sector | Morningstar sector (code) |
+| --- | --- |
+| Basic Materials | Basic Materials (101) |
+| Consumer Discretionary | Consumer Cyclical (102) |
+| Finance | Financial Services (103) |
+| Real Estate | Real Estate (104) |
+| Consumer Staples | Consumer Defensive (205) |
+| Health Care | Healthcare (206) |
+| Utilities | Utilities (207) |
+| Telecommunications | Communication Services (308) |
+| Energy | Energy (309) |
+| Industrials | Industrials (310) |
+| Technology | Technology (311) |
+| Miscellaneous | none (unmapped) |
+| empty | none (unmapped) |
+
+Only BRK.B fell in an unmapped value (Miscellaneous).
 
 | | All 500 | The 25 outside IWV |
 | --- | --- | --- |
@@ -154,9 +172,21 @@ The best free combination measured:
 - **GICS from iShares IWV** for the names it holds (about 475 of 500;
   95.8% agree with Morningstar, and on the backtest's picks a difference of
   about one name a month with no change in return, part 2);
-- **Nasdaq's screener sector** for the rest (about 25 names, 79% agree).
+- **Nasdaq's screener sector** for the rest (19 of the 25 names it labels,
+  79% agree).
 
-Weighted by coverage, that is about 95% agreement overall. The live system
+Weighted by coverage, that is about 95% agreement over the 494 names either
+source labels, not over all 500.
+
+**Six names had no label from either source:** APGE, ATAI, CRNX, EA, WBD and
+WBS, none of them in the SEC's ticker list under those symbols either, which
+suggests ticker changes or companies no longer listed under them at the
+snapshot. The backtest leaves a stock with no sector uncapped
+(`defensive_v2.py:69-73`), but every stock had a Morningstar sector there,
+so uncapping these would be a different rule. **Fallback:** a stock with no
+label from either source is left out of that month's ranking, the decision
+records it, and an alert names it if it would otherwise have been among the
+top 25. The monthly comparison with QuantConnect measures the effect. The live system
 records each stock's label and its source (ADR 0026, point 1), and the
 monthly comparison with QuantConnect during dry-run and paper trading
 measures the effect on the picks. A paid fundamentals source with

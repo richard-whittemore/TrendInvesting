@@ -290,11 +290,15 @@ Lightsail VM (Ubuntu, $12/month, US East)
   fallback.
   **Measured (2026-10-15, `docs/research/sector-labels-2026-10.md`):**
   GICS from IWV agrees with Morningstar on 95.8% of the names it covers and
-  changes about one pick a month with no change in return; SIC agrees on
-  14 of 20 of the names IWV lacks, Nasdaq's screener sectors on 15 of 19.
+  changes about one pick a month with no material change in return (20.08%
+  against 20.10% a year); SIC agrees on 14 of 20 of the names IWV lacks,
+  Nasdaq's screener sectors on 15 of 19.
   **Chosen:** GICS from IWV where it covers a stock, Nasdaq's screener
   sector otherwise, with each label's source recorded and the effect
-  measured monthly through dry-run and paper trading.
+  measured monthly through dry-run and paper trading. A stock with no label
+  from either source (six at the snapshot: APGE, ATAI, CRNX, EA, WBD, WBS)
+  is left out of that month's ranking, recorded, and alerted if it would
+  otherwise have been among the top 25; it is never left uncapped.
 - **Universe parity study first** (research, before any build): for each
   month of 2016–2026, compare the 25 names this approach would pick with
   the backtest's own picks, and the return difference.
