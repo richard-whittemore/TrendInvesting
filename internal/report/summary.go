@@ -1,0 +1,227 @@
+package report
+
+import (
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/event"
+)
+
+// Engine states a summary reports.
+const (
+	StateNormal   = "normal"
+	StateDegraded = event.EngineStateDegraded
+	StateHalted   = event.EngineStateHalted
+)
+
+// Order statuses: planned, then released or refused by the gate.
+const (
+	OrderPlanned  = "planned"
+	OrderReleased = "released"
+	OrderRefused  = "refused"
+)
+
+// DecisionLine is one strategy.targets.decided record.
+type DecisionLine struct {
+	At             time.Time
+	Outcome        string
+	WithheldReason string
+	Targets        []event.TargetWeight
+}
+
+// OrderLine is one order of the day and what the gate did with it.
+type OrderLine struct {
+	ClientOrderID string
+	InstrumentID  string
+	Side          string
+	Quantity      int64
+	LimitPrice    float64
+	Status        string
+	Reason        string
+	Send          bool
+}
+
+// FillLine is one execution.fill record.
+type FillLine struct {
+	At           time.Time
+	InstrumentID string
+	Quantity     int64
+	Price        float64
+}
+
+// Equity compares the account's net liquidation with the benchmark's close
+// over the points where both are recorded on one date. Returns are simple
+// price returns: the benchmark's dividends are not included.
+type Equity struct {
+	Available          bool
+	StartDate          string
+	AccountReturn      float64
+	BenchmarkReturn    float64
+	Excess             float64
+	DayAccountReturn   float64
+	DayBenchmarkReturn float64
+}
+
+// Summary is one account's day.
+type Summary struct {
+	AccountID      string
+	StrategyID     string
+	Date           string
+	Benchmark      string
+	HaveSnapshot   bool
+	HoldingsAsOf   time.Time
+	NetLiquidation float64
+	Holdings       []event.AccountPosition
+	Decisions      []DecisionLine
+	Orders         []OrderLine
+	Refusals       int
+	Fills          []FillLine
+	EngineState    string
+	Equity         Equity
+}
+
+// Summarize builds the account's summary for the UTC date from the journal's
+// envelopes, in recording order. Holdings, engine state and equity are as of
+// the end of that date; decisions, orders and fills are those of the date.
+// Events after the date are ignored, so a past day's summary does not change
+// when the journal grows.
+func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, error) {
+	end, err := time.Parse(time.DateOnly, date)
+	if err != nil {
+		return Summary{}, fmt.Errorf("report: date %q is not YYYY-MM-DD: %w", date, err)
+	}
+	account, strategy, err := AccountOf(envelopes)
+	if err != nil {
+		return Summary{}, err
+	}
+	end = end.AddDate(0, 0, 1)
+	s := Summary{AccountID: account, StrategyID: strategy, Date: date, Benchmark: benchmark, EngineState: StateNormal}
+	orders := map[string]int{}
+	closes := map[string]float64{}
+	var points []equityPoint
+	netBy := map[string]float64{}
+	for _, e := range envelopes {
+		if !e.EventTime.Before(end) {
+			continue
+		}
+		today := dateOf(e.EventTime) == date
+		switch e.Type {
+		case event.AccountSnapshotEventType:
+			if e.SchemaVersion != event.AccountSnapshotPositionsVersion {
+				continue
+			}
+			var p event.AccountPositionsSnapshotPayload
+			if err := decode(e, &p); err != nil {
+				return Summary{}, err
+			}
+			s.HaveSnapshot, s.HoldingsAsOf, s.NetLiquidation, s.Holdings = true, p.AsOf, p.NetLiquidation, p.Positions
+			netBy[dateOf(p.AsOf)] = p.NetLiquidation
+		case event.CompletedBarEventType:
+			var p event.CompletedBarPayload
+			if err := decode(e, &p); err != nil {
+				return Summary{}, err
+			}
+			if p.InstrumentID == benchmark {
+				closes[dateOf(p.PeriodEnd)] = p.SplitAdjusted.Close
+			}
+		case event.EngineStateEventType:
+			var p event.EngineStatePayload
+			if err := decode(e, &p); err != nil {
+				return Summary{}, err
+			}
+			s.EngineState = p.State
+		case event.TargetsDecidedEventType:
+			if !today {
+				continue
+			}
+			var p event.TargetsDecidedPayload
+			if err := decode(e, &p); err != nil {
+				return Summary{}, err
+			}
+			s.Decisions = append(s.Decisions, DecisionLine{At: e.EventTime, Outcome: p.Outcome, WithheldReason: p.WithheldReason, Targets: p.Targets})
+		case event.OrderPlannedEventType:
+			if !today {
+				continue
+			}
+			var p event.OrderPlannedPayload
+			if err := decode(e, &p); err != nil {
+				return Summary{}, err
+			}
+			orders[p.ClientOrderID] = len(s.Orders)
+			s.Orders = append(s.Orders, OrderLine{ClientOrderID: p.ClientOrderID, InstrumentID: p.InstrumentID, Side: p.Side,
+				Quantity: p.Quantity, LimitPrice: p.LimitPrice, Status: OrderPlanned})
+		case event.OrderReleasedEventType:
+			if !today {
+				continue
+			}
+			var p event.OrderReleasedPayload
+			if err := decode(e, &p); err != nil {
+				return Summary{}, err
+			}
+			line := s.order(orders, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.LimitPrice)
+			line.Status, line.Send = OrderReleased, p.Send
+		case event.OrderRefusedEventType:
+			if !today {
+				continue
+			}
+			var p event.OrderRefusedPayload
+			if err := decode(e, &p); err != nil {
+				return Summary{}, err
+			}
+			line := s.order(orders, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.LimitPrice)
+			line.Status, line.Reason = OrderRefused, p.Reason
+			s.Refusals++
+		case event.FillEventType:
+			if !today {
+				continue
+			}
+			var p event.FillPayload
+			if err := decode(e, &p); err != nil {
+				return Summary{}, err
+			}
+			s.Fills = append(s.Fills, FillLine{At: p.FilledAt, InstrumentID: p.InstrumentID, Quantity: p.Quantity, Price: p.Price})
+		}
+	}
+	for d, net := range netBy {
+		if c, ok := closes[d]; ok && c > 0 && net > 0 {
+			points = append(points, equityPoint{date: d, net: net, benchmark: c})
+		}
+	}
+	sort.Slice(points, func(i, j int) bool { return points[i].date < points[j].date })
+	s.Equity = equityOf(points)
+	return s, nil
+}
+
+// order returns the day's line for a client order ID, adding one when the
+// gate recorded an order the day's plans do not show.
+func (s *Summary) order(index map[string]int, id, instrument, side string, quantity int64, limit float64) *OrderLine {
+	i, ok := index[id]
+	if !ok {
+		i = len(s.Orders)
+		index[id] = i
+		s.Orders = append(s.Orders, OrderLine{ClientOrderID: id, InstrumentID: instrument, Side: side, Quantity: quantity, LimitPrice: limit})
+	}
+	return &s.Orders[i]
+}
+
+type equityPoint struct {
+	date           string
+	net, benchmark float64
+}
+
+func equityOf(points []equityPoint) Equity {
+	if len(points) < 2 {
+		return Equity{}
+	}
+	first, last, prev := points[0], points[len(points)-1], points[len(points)-2]
+	e := Equity{
+		Available: true, StartDate: first.date,
+		AccountReturn:      last.net/first.net - 1,
+		BenchmarkReturn:    last.benchmark/first.benchmark - 1,
+		DayAccountReturn:   last.net/prev.net - 1,
+		DayBenchmarkReturn: last.benchmark/prev.benchmark - 1,
+	}
+	e.Excess = e.AccountReturn - e.BenchmarkReturn
+	return e
+}

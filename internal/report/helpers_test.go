@@ -1,0 +1,100 @@
+package report_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/event"
+)
+
+// day returns the 21:00 UTC session close n sessions after 2024-01-02.
+func day(n int) time.Time {
+	return time.Date(2024, time.January, 2+n, 21, 0, 0, 0, time.UTC)
+}
+
+// stream builds a synthetic envelope stream in recording order.
+type stream struct {
+	t   *testing.T
+	seq uint64
+	out []event.Envelope
+}
+
+func newStream(t *testing.T) *stream {
+	s := &stream{t: t}
+	s.add(event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", day(0).Add(-time.Hour),
+		event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR})
+	return s
+}
+
+func (s *stream) add(eventType string, version uint32, id string, at time.Time, payload any) {
+	s.t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	s.seq++
+	s.out = append(s.out, event.Envelope{
+		ID: id, Type: eventType, EnvelopeVersion: event.CurrentEnvelopeVersion, SchemaVersion: version,
+		EventTime: at, RecordedAt: at, Sequence: s.seq, Source: "test", StrategyVersion: "v", ConfigurationHash: "h",
+		PayloadHash: event.HashPayload(raw), Payload: raw,
+	})
+}
+
+func (s *stream) bar(n int, instrument string, closePrice float64) {
+	view := func(label string) event.PriceView {
+		return event.PriceView{View: label, Open: closePrice, High: closePrice, Low: closePrice, Close: closePrice, Volume: 1}
+	}
+	s.add(event.CompletedBarEventType, event.CompletedBarSchemaVersion, fmt.Sprintf("bar:%d", n), day(n),
+		event.CompletedBarPayload{InstrumentID: instrument, PeriodEnd: day(n), SplitAdjusted: view(event.ViewSplitAdjusted), Raw: view(event.ViewRaw)})
+}
+
+func (s *stream) snapshot(n int, netLiquidation float64, held int64) {
+	p := event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: day(n), Currency: "USD", NetLiquidation: netLiquidation}
+	if held != 0 {
+		p.Positions = []event.AccountPosition{{InstrumentID: "SPY", Quantity: held}}
+	}
+	s.add(event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, fmt.Sprintf("snapshot:%d", n), day(n), p)
+}
+
+func (s *stream) decided(n int, weight float64) {
+	s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, fmt.Sprintf("targets:%d", n), day(n),
+		event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(n), SessionPeriodEnd: day(n),
+			Outcome: event.TargetsOutcomeDecided, Targets: []event.TargetWeight{{InstrumentID: "SPY", Weight: weight}},
+			Boost: event.BoostFigures{InstrumentID: "SPY", Close: 100}})
+}
+
+func (s *stream) withheld(n int, reason string) {
+	s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, fmt.Sprintf("targets:%d", n), day(n),
+		event.TargetsDecidedPayload{AccountID: "joint", StrategyID: event.TargetWeightStrategyBoost, DecisionTime: day(n), SessionPeriodEnd: day(n),
+			Outcome: event.TargetsOutcomeWithheld, WithheldReason: reason, Detail: "detail for " + reason,
+			Boost: event.BoostFigures{InstrumentID: "SPY"}})
+}
+
+func (s *stream) planned(n int, clientID string, quantity int64) {
+	s.add(event.OrderPlannedEventType, event.OrderPlannedSchemaVersion, "plan:"+clientID, day(n),
+		event.OrderPlannedPayload{AccountID: "joint", Tag: fmt.Sprintf("targets:%d", n), ClientOrderID: clientID, InstrumentID: "SPY",
+			Side: event.OrderSideBuy, Phase: event.OrderSideBuy, OrderType: event.OrderTypeLimit, Quantity: quantity, LimitPrice: 101,
+			TargetWeight: 0.98, NetLiquidation: 4000, ReferencePrice: 100, PriceBand: 0.05})
+}
+
+func (s *stream) released(n int, clientID string, quantity int64) {
+	s.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:"+clientID, day(n),
+		event.OrderReleasedPayload{AccountID: "joint", PlanID: "plan:" + clientID, Tag: fmt.Sprintf("targets:%d", n), ClientOrderID: clientID,
+			InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: quantity, LimitPrice: 101, Mode: event.TradingModeDryRun})
+}
+
+func (s *stream) refused(n int, clientID, reason string) {
+	s.add(event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, "refuse:"+clientID, day(n),
+		event.OrderRefusedPayload{AccountID: "joint", PlanID: "plan:" + clientID, Tag: fmt.Sprintf("targets:%d", n), ClientOrderID: clientID,
+			InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 39, LimitPrice: 101, Reason: reason, Detail: "figures"})
+}
+
+func (s *stream) engineState(n int, state, reason string, scope ...string) {
+	p := event.EngineStatePayload{State: state, Reason: reason, Detail: "figures"}
+	if state == event.EngineStateDegraded {
+		p.ScopeInstrumentIDs = scope
+	}
+	s.add(event.EngineStateEventType, event.EngineStateScopedVersion, fmt.Sprintf("state:%d", n), day(n), p)
+}
