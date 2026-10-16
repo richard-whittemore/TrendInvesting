@@ -66,3 +66,19 @@ func TestDemoRefusesToOverwriteAJournal(t *testing.T) {
 		t.Errorf("existing journal = %q, want it unchanged", got)
 	}
 }
+
+// TestWriteNewRemovesAnIncompleteJournal checks that a failed write leaves no
+// partial file behind, so a retry on the same -out path can succeed.
+func TestWriteNewRemovesAnIncompleteJournal(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "boost.journal")
+	failing := func(*os.File, []byte) error { return os.ErrInvalid }
+	if err := writeNewWith(out, []byte("data"), failing); err == nil {
+		t.Fatal("write failure was not reported")
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("incomplete journal left behind: %v", err)
+	}
+	if err := writeNew(out, []byte("data")); err != nil {
+		t.Fatalf("retry on the same path failed: %v", err)
+	}
+}
