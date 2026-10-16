@@ -23,7 +23,8 @@ drop is deeper than both.
   declared in the plan before any run and each run once:
   - tuning window: warm-up from 2001-08, measured 2002-08 to 2015-12 (the bond
     funds start in July 2002);
-  - held-out window: measured 2016-01 to 2026-09.
+  - held-out window: measured 2016-01 to 2026-07-18 (set to run to 2026-09;
+    see the correction below).
 - In a path run the owner's age on the first measured day is the run's
   starting age (38, 53 or 65), and age advances with the calendar from there.
 - Return per year and worst drop are measured on daily equity over the
@@ -65,7 +66,7 @@ drop is deeper than both.
 | **Path from 65** | 50% → 70% (64.7%) | **7.35%** | **10.9%** |
 | Fixed 70% | 70% | 6.65% | 7.9% |
 
-**Held-out window, 2016-01 to 2026-09** (SPY: 15.07% a year, worst drop 33.7%)
+**Held-out window, 2016-01 to 2026-07-18** (SPY: 15.07% a year, worst drop 33.7%)
 
 | Run | *b* over the run (mean) | Return per year | Worst drop |
 | --- | --- | --- | --- |
@@ -109,6 +110,8 @@ between the two mixes, never below or deeper than both.
   against 2.7 points a year for 11.3 points in the tuning years.
 
 ## Notes
+
+- **Correction (2026-10-16):** QuantConnect's US equity data ends on 2026-07-18, so these runs, set to end in September 2026, ended on 2026-07-17 or 2026-07-18 (`docs/research/universe-massive-2026-10.md`). The figures are unchanged; only the label was wrong.
 
 - **Ending shares differ slightly from the plan's table.** The plan's
   table takes each window's full length (14 years for the tuning window);

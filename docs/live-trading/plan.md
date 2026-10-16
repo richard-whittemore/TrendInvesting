@@ -133,6 +133,8 @@ Vanguard's anchors, which is 10% until 40 and 30.8% at 53.
   | 2016–Sep 2026 | 53 | 30.8% → 48.0% | 30% | 50% |
   | 2016–Sep 2026 | 65 | 50% → 70% | 50% | 70% |
 
+  **Correction (2026-10-16):** QuantConnect's US equity data ends on 2026-07-18, so these runs, set to end in September 2026, ended on 2026-07-17 or 2026-07-18 (`docs/research/universe-massive-2026-10.md`). The figures are unchanged; only the label was wrong.
+
   It is a gate in section 6 and Phase 2. Its result is recorded whether or
   not it flatters the path, and a run **fails** if its return per year is
   below both of its mixes' or its worst drop is deeper than both. A failure
@@ -243,7 +245,12 @@ Lightsail VM (Ubuntu, $12/month, US East)
     (`nasdaqlisted.txt`, `otherlisted.txt`); funds and test issues dropped by
     their `ETF` and `Test Issue` fields, preferred shares, warrants, units
     and rights by security name. Companies headquartered outside the US
-    with US listings stay in, as in the backtest;
+    with US listings stay in, as in the backtest. **As built and measured
+    (2026-10-16):** the listing source is Massive's reference tickers dated
+    the ranked session, type CS (common stock). Companies listed directly
+    from abroad (Shopify, Teck) are CS and stay in; ADRs are left out,
+    because QuantConnect's universe leaves them out
+    (`docs/research/universe-massive-2026-10.md`);
   - **rank**: one session's dollar volume (close × volume), the last session
     before the rebalance, as QuantConnect's coarse `DollarVolume` is; price
     at least $5 on that close; keep the top 500. Ranking and the $5 test use
@@ -252,7 +259,9 @@ Lightsail VM (Ubuntu, $12/month, US East)
     in and out of the top 500. The momentum, volatility and trend
     calculations keep using split- and dividend-adjusted closes;
   - **data source** for that one session's close and volume for every
-    listed stock, still to choose: IBKR's own historical bars (free with the
+    listed stock: **chosen 2026-10-16, Massive's free Basic plan** (grouped
+    daily bars, two years of history, individual use; the owner's account,
+    its key in the Keychain). The options weighed were: IBKR's own historical bars (free with the
     account, but one request per stock, several thousand a month; whether
     that fits IBKR's pacing limits is unconfirmed, IBKR questions 5–6), or a
     market-data service
@@ -489,7 +498,7 @@ so Pro's margin rate does not help them.
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
 | 0 | Owner decisions D5 and D7 (D6 decided 2026-10-15); the broker-adapter ADR (0025, accepted 2026-10-15); this plan reviewed (owner, and an independent review on 2026-10-15) | Done except D5 and D7, which must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
-| 1 | Universe parity study (research, QuantConnect free) | IWB tested and failed (2026-10-15); D8 builds the universe from all US listings. Open until: the data source is chosen and the D8 rule's recent-months comparison with QuantConnect's universe is recorded (section 4). The sector check is done (2026-10-15) |
+| 1 | Universe parity study (research, QuantConnect free) | IWB tested and failed (2026-10-15); D8 builds the universe from all US listings. Data source chosen (Massive, 2026-10-16) and the D8 rule's comparison recorded: 96.4% of names shared over 21 months (`docs/research/universe-massive-2026-10.md`). The sector check is done (2026-10-15). Open until: the owner decides the timing question that comparison raised (section 10, D8) |
 | 2 | The target-weight strategy ADR (decision contract, risk limits, the risk-reducing definition in section 3); Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest passes its stated test |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
 | 4 | IBKR paper trading | 2–3 clean months |
@@ -516,6 +525,11 @@ only after CodeRabbit and Greptile findings are addressed.
   minimum-lot rule (section 5). Open; depends on what IBKR confirms.
 - **D8** Live universe: **every US-listed common stock ranked by one
   session's dollar volume, as the backtest does** (decided 2026-10-15;
-  section 4). Its data source is still to choose.
+  section 4). Data source: Massive's free plan (account opened by the owner
+  2026-10-16). Measured against QuantConnect's universe on 21 months: 96.4%
+  of names shared when ranked on the same session
+  (`docs/research/universe-massive-2026-10.md`). **Open for the owner:** in
+  months whose 1st is a Sunday or a Monday, the backtest ranked the previous
+  month's universe; live either ranks the latest session or copies that.
 - Account opening, funding, rollovers and the Lightsail sign-up are the
   owner's to do; nothing here signs up for or pays for anything.

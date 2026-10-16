@@ -50,8 +50,9 @@ class RankTest(unittest.TestCase):
             {"ticker": "PFD", "type": "PFD", "market": "stocks", "locale": "us"},
             {"ticker": "OTC1", "type": "CS", "market": "otc", "locale": "us"},
         ]}, {"results": [{"ticker": "BBB", "type": "CS", "market": "stocks", "locale": "us"}]}, {}]
-        self.assertEqual(massive.common_tickers(pages), {"AAA", "ADR", "BBB"})
-        self.assertEqual(massive.common_tickers(pages, types=("CS",)), {"AAA", "BBB"})
+        # ADRs are left out by default, as QuantConnect's universe leaves them out.
+        self.assertEqual(massive.common_tickers(pages), {"AAA", "BBB"})
+        self.assertEqual(massive.common_tickers(pages, types=("CS", "ADRC")), {"AAA", "ADR", "BBB"})
 
 
 class SessionTest(unittest.TestCase):
