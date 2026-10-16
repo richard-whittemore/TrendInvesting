@@ -9,8 +9,10 @@ installed, this module still imports and IbapiClient() raises
 IbapiUnavailable, so the rest of the adapter and its tests never need it.
 """
 import inspect
+import logging
 import threading
 
+from connection import ConnectFailed
 from sender import LiveSendingDisabled
 from tws import TWSApi
 
@@ -21,6 +23,14 @@ try:
     IBAPI_AVAILABLE = True
 except ImportError:
     IBAPI_AVAILABLE = False
+
+
+log = logging.getLogger("ibkr")
+
+# How long disconnect waits for the old reader thread to exit once its socket
+# is closed. A reader that outlives it can still only reach its own session's
+# Inbox, never a newer one.
+READER_STOP_TIMEOUT = 5.0
 
 
 class IbapiUnavailable(ImportError):
@@ -34,11 +44,14 @@ def _forwarder_class():
     takes_error_time = "errorTime" in inspect.signature(EWrapper.error).parameters
 
     class Forwarder(EWrapper):
-        callbacks = None
+        """Bound to one session's Inbox for its whole life, so a late callback stays in that session."""
+
+        def __init__(self, callbacks):
+            super().__init__()
+            self._callbacks = callbacks
 
         def _send(self, name, *args):
-            if self.callbacks is not None:
-                getattr(self.callbacks, name)(*args)
+            getattr(self._callbacks, name)(*args)
 
         def nextValidId(self, orderId):
             self._send("next_valid_id", orderId)
@@ -102,29 +115,63 @@ class IbapiClient(TWSApi):
     EClient.run, which delivers callbacks, runs on its own daemon thread;
     callbacks only enqueue into the Inbox (tws.py), so no adapter state is
     touched from it.
+
+    Invariant: each connect is a new session with its own EWrapper and
+    EClient, bound to that connect's Inbox. The previous session is
+    disconnected and its reader joined first, and even a reader that fails
+    to stop can only deliver to its own session's Inbox.
     """
 
     def __init__(self, start_reader=True):
         if not IBAPI_AVAILABLE:
             raise IbapiUnavailable("ibapi is not installed; see adapter/ibkr/README.md")
         self._start_reader = start_reader
-        self._wrapper = _forwarder_class()()
-        self._client = EClient(self._wrapper)
+        self._forwarder = _forwarder_class()
+        self._wrapper = None
+        self._client = None
         self._reader = None
 
-    def connect(self, host, port, client_id, callbacks):
-        self._wrapper.callbacks = callbacks
-        self._client.connect(host, port, client_id)
+    def connect(self, host, port, client_id, callbacks, timeout):
+        self.disconnect()
+        self._wrapper = self._forwarder(callbacks)
+        self._client = EClient(self._wrapper)
+        # EClient.connect opens the socket and runs IBKR's handshake
+        # synchronously, with no bound of its own.
+        failure = []
+
+        def open_socket(client=self._client):
+            try:
+                client.connect(host, port, client_id)
+            except Exception as err:  # reported to the caller below
+                failure.append(err)
+        opener = threading.Thread(target=open_socket, name="ibapi-connect", daemon=True)
+        opener.start()
+        opener.join(timeout)
+        if opener.is_alive():
+            # Closing the socket unblocks the opener; it starts no reader.
+            self.disconnect()
+            raise ConnectFailed("socket connect did not finish within {}s".format(timeout))
+        if failure:
+            self.disconnect()
+            raise ConnectFailed("socket connect failed: {}".format(type(failure[0]).__name__))
         if self._start_reader:
             self._reader = threading.Thread(target=self._client.run, name="ibapi-reader",
                                             daemon=True)
             self._reader.start()
 
     def disconnect(self):
-        self._client.disconnect()
+        """Close this session's socket and wait for its reader to exit."""
+        if self._client is not None:
+            self._client.disconnect()
+        reader, self._reader = self._reader, None
+        if reader is not None and reader is not threading.current_thread():
+            reader.join(READER_STOP_TIMEOUT)
+            if reader.is_alive():
+                log.warning("ibkr reader did not stop within %.1fs of disconnect",
+                            READER_STOP_TIMEOUT)
 
     def is_connected(self):
-        return self._client.isConnected()
+        return self._client is not None and self._client.isConnected()
 
     def req_current_time(self):
         self._client.reqCurrentTime()

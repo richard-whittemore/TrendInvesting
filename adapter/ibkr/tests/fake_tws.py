@@ -13,6 +13,7 @@ adapter_dir = str(Path(__file__).resolve().parents[1])
 if adapter_dir not in sys.path:
     sys.path.insert(0, adapter_dir)
 
+from connection import ConnectFailed
 from tws import TWSApi
 
 ACCOUNT = "DU0000001"
@@ -26,16 +27,19 @@ def contract(con_id=756733, symbol="SPY", sec_type="STK", currency="USD", exchan
 
 
 def order(order_ref="tag-1", account=ACCOUNT, action="BUY", total_quantity="10",
-          order_type="MKT", lmt_price=None, aux_price=None, tif="DAY", perm_id=9001):
+          order_type="MKT", lmt_price=None, aux_price=None, tif="DAY", perm_id=9001,
+          client_id=11):
     return SimpleNamespace(orderRef=order_ref, account=account, action=action,
                            totalQuantity=total_quantity, orderType=order_type,
-                           lmtPrice=lmt_price, auxPrice=aux_price, tif=tif, permId=perm_id)
+                           lmtPrice=lmt_price, auxPrice=aux_price, tif=tif, permId=perm_id,
+                           clientId=client_id)
 
 
 def execution(exec_id="0001f4e8.6512a1b2.01.01", order_id=7, perm_id=9001, order_ref="tag-1",
               account=ACCOUNT, side="BOT", shares="4", price=101.25, cum_qty="4",
-              avg_price=101.25, time="20261016 09:30:01 US/Eastern"):
+              avg_price=101.25, time="20261016 09:30:01 US/Eastern", client_id=11):
     return SimpleNamespace(execId=exec_id, orderId=order_id, permId=perm_id, orderRef=order_ref,
+                           clientId=client_id,
                            acctNumber=account, side=side, shares=shares, price=price,
                            cumQty=cum_qty, avgPrice=avg_price, time=time)
 
@@ -44,7 +48,10 @@ class FakeTWS(TWSApi):
     """Records every call and answers from a script.
 
     connect_behaviours is consumed one entry per connect attempt:
-    "ok", "client-id-in-use", "refused" or "silent" (no answer at all).
+    "ok", "client-id-in-use", "refused", "silent" (no answer at all),
+    "hang" (the socket work overran its timeout, as IbapiClient reports it)
+    or "socket-error". connect_hook, if set, runs first, so a test can let
+    the clock move while the socket is being opened.
     """
 
     def __init__(self):
@@ -52,6 +59,8 @@ class FakeTWS(TWSApi):
         self.callbacks = None
         self.connected = False
         self.connect_behaviours = []
+        self.connect_hook = None
+        self.connect_timeouts = []
         self.next_order_id = 7
         self.server_time = SERVER_TIME
         self.answer_current_time = True
@@ -65,10 +74,17 @@ class FakeTWS(TWSApi):
         self.executions = []
 
     # -- connection ------------------------------------------------------
-    def connect(self, host, port, client_id, callbacks):
+    def connect(self, host, port, client_id, callbacks, timeout):
         self.calls.append(("connect", host, port, client_id))
+        self.connect_timeouts.append(timeout)
         self.callbacks = callbacks
+        if self.connect_hook is not None:
+            self.connect_hook()
         behaviour = self.connect_behaviours.pop(0) if self.connect_behaviours else "ok"
+        if behaviour == "hang":
+            raise ConnectFailed("socket connect did not finish within {}s".format(timeout))
+        if behaviour == "socket-error":
+            raise ConnectionRefusedError("synthetic connection refused")
         if behaviour == "ok":
             self.connected = True
             callbacks.next_valid_id(self.next_order_id)

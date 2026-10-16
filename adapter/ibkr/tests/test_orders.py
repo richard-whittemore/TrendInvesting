@@ -19,17 +19,18 @@ from orders import (OrderTracker, OrderStatusReport, OpenOrderRecord, ExecutionR
 STATE = SimpleNamespace(status="Submitted")
 
 
-def status(cb, order_id, ibkr_status, filled, remaining, avg=0.0, last=0.0, perm_id=9001):
+def status(cb, order_id, ibkr_status, filled, remaining, avg=0.0, last=0.0, perm_id=9001,
+           client_id=11):
     cb.order_status(order_id, ibkr_status, Decimal(filled), Decimal(remaining), avg, perm_id,
-                    0, last, 11, "", 0.0)
+                    0, last, client_id, "", 0.0)
 
 
 class Tracked:
-    def __init__(self):
+    def __init__(self, sink=None):
         self.h = Harness()
         self.h.conn.connect()
         self.reports = []
-        self.tracker = OrderTracker(ACCOUNT, self.reports.append)
+        self.tracker = OrderTracker(ACCOUNT, 11, sink or self.reports.append)
         self.h.conn.subscribe(self.tracker.on_event)
         self.cb = self.h.fake.callbacks
 
@@ -151,6 +152,97 @@ class OrderStatusTests(unittest.TestCase):
         t.drain()
         self.assertEqual(len(t.of(ExecutionReport)), 1)
 
+    def test_another_clients_order_with_the_same_id_does_not_hide_this_engines_order(self):
+        # IBKR's orderId is unique only within one client ID; reqAllOpenOrders
+        # also reports other clients' orders, which may reuse it.
+        t = Tracked()
+        t.cb.open_order(7, contract(), order(account=OTHER_ACCOUNT, client_id=12, perm_id=9100),
+                        STATE)
+        status(t.cb, 7, "Submitted", "0", "10", perm_id=9100, client_id=12)
+        t.cb.open_order(7, contract(), order(order_ref="tag-1"), STATE)
+        status(t.cb, 7, "Submitted", "0", "10")
+        t.drain()
+        statuses = t.of(OrderStatusReport)
+        self.assertEqual([(s.client_id, s.perm_id, s.client_order_id) for s in statuses],
+                         [(11, 9001, "tag-1")])
+
+    def test_same_account_orders_from_two_clients_keep_their_own_tags(self):
+        t = Tracked()
+        t.cb.open_order(7, contract(), order(order_ref="tag-1"), STATE)
+        t.cb.open_order(7, contract(), order(order_ref="tag-9", client_id=12, perm_id=9002), STATE)
+        status(t.cb, 7, "Submitted", "0", "10")
+        status(t.cb, 7, "Submitted", "0", "10", perm_id=9002, client_id=12)
+        t.drain()
+        statuses = t.of(OrderStatusReport)
+        self.assertEqual([(s.client_id, s.client_order_id) for s in statuses],
+                         [(11, "tag-1"), (12, "tag-9")])
+
+    def test_a_rejection_belongs_to_this_engines_order_only(self):
+        # error(reqId=orderId) reaches only the client that placed the order,
+        # so a 201 never explains another client's Inactive order.
+        t = Tracked()
+        t.cb.open_order(7, contract(), order(), STATE)
+        t.cb.error(7, 201, "Order rejected - reason:synthetic")
+        status(t.cb, 7, "Inactive", "0", "10", perm_id=9002, client_id=12)
+        with self.assertRaises(UnrecognisedOrderReport):
+            t.drain()
+
+    def test_manual_orders_without_an_order_id_are_told_apart_by_perm_id(self):
+        t = Tracked()
+        t.cb.open_order(0, contract(), order(order_ref="", client_id=0, perm_id=9101), STATE)
+        t.cb.open_order(0, contract(), order(order_ref="", client_id=0, perm_id=9102), STATE)
+        status(t.cb, 0, "Submitted", "0", "10", perm_id=9101, client_id=0)
+        status(t.cb, 0, "Submitted", "0", "10", perm_id=9102, client_id=0)
+        t.drain()
+        self.assertEqual([s.perm_id for s in t.of(OrderStatusReport)], [9101, 9102])
+
+    def test_an_order_with_no_identity_fails_closed(self):
+        t = Tracked()
+        status(t.cb, 0, "Submitted", "0", "10", perm_id=0, client_id=0)
+        with self.assertRaises(UnrecognisedOrderReport):
+            t.drain()
+
+    def test_a_status_the_sink_failed_to_record_is_recorded_on_redelivery(self):
+        failures = [RuntimeError("synthetic journal write failure")]
+        reports = []
+
+        def sink(record):
+            if isinstance(record, OrderStatusReport) and failures:
+                raise failures.pop()
+            reports.append(record)
+        t = Tracked(sink)
+        status(t.cb, 7, "Submitted", "0", "10")
+        with self.assertRaises(RuntimeError):
+            t.drain()
+        status(t.cb, 7, "Submitted", "0", "10")
+        t.drain()
+        self.assertEqual(len([r for r in reports if isinstance(r, OrderStatusReport)]), 1)
+
+    def test_an_execution_the_sink_failed_to_record_is_recorded_on_redelivery(self):
+        failures = [RuntimeError("synthetic journal write failure")]
+        reports = []
+
+        def sink(record):
+            if isinstance(record, ExecutionReport) and failures:
+                raise failures.pop()
+            reports.append(record)
+        t = Tracked(sink)
+        t.cb.exec_details(-1, contract(), execution())
+        with self.assertRaises(RuntimeError):
+            t.drain()
+        t.cb.exec_details(4, contract(), execution())
+        t.drain()
+        self.assertEqual(len([r for r in reports if isinstance(r, ExecutionReport)]), 1)
+
+    def test_an_execution_that_cannot_be_read_is_not_marked_seen(self):
+        t = Tracked()
+        t.cb.exec_details(-1, contract(), execution(exec_id="x.01", time="20261016 09:30:01"))
+        with self.assertRaises(ValueError):
+            t.drain()
+        t.cb.commission_report(SimpleNamespace(execId="x.01", commission=1.0, currency="USD"))
+        t.drain()
+        self.assertEqual(t.reports, [])
+
     def test_execution_time_formats(self):
         self.assertEqual(parse_execution_time("20261016 15:59:59 America/New_York"),
                          datetime(2026, 10, 16, 19, 59, 59, tzinfo=timezone.utc))
@@ -172,13 +264,30 @@ class ReconnectMatchTests(unittest.TestCase):
         broker = collect_broker_orders(h.conn)
         self.assertEqual([o.broker_order_id for o in broker.open_orders], [7, 9])
         match = match_on_reconnect({"tag-1", "tag-2", "tag-3"}, broker)
-        self.assertEqual(match.matched, {"tag-1": 7})
+        self.assertEqual({k: (r.client_id, r.broker_order_id, r.perm_id)
+                          for k, r in match.matched.items()}, {"tag-1": (11, 7, 9001)})
         self.assertEqual(sorted(match.executed), ["tag-2"])
         self.assertEqual(match.missing_at_broker, ("tag-3",))
         self.assertEqual([o.broker_order_id for o in match.unknown_at_broker], [9])
         self.assertFalse(match.clean)
         self.assertEqual(h.fake.called("place_order"), [])
         self.assertEqual(h.fake.called("req_executions")[0][2], ACCOUNT)
+
+    def test_same_id_orders_from_two_clients_are_both_collected(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_orders = [
+            (7, contract(), order(order_ref="tag-1"), STATE),
+            (7, contract(), order(order_ref="", client_id=12, perm_id=9002), STATE),
+            (0, contract(), order(order_ref="", client_id=0, perm_id=9101), STATE),
+            (0, contract(), order(order_ref="", client_id=0, perm_id=9102), STATE),
+        ]
+        broker = collect_broker_orders(h.conn)
+        self.assertEqual(sorted(o.perm_id for o in broker.open_orders),
+                         [9001, 9002, 9101, 9102])
+        match = match_on_reconnect({"tag-1"}, broker)
+        self.assertEqual(match.matched["tag-1"].client_id, 11)
+        self.assertEqual(len(match.unknown_at_broker), 3)
 
     def test_clean_when_everything_is_accounted_for(self):
         h = Harness()

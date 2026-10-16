@@ -45,6 +45,15 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ConfigError):
                 config(**bad)
 
+    def test_timing_values_must_be_finite(self):
+        # NaN and infinity both pass a "> 0" test, and either would switch the
+        # heartbeat deadline or the connect timeout off.
+        for name in ("connect_timeout", "request_timeout", "heartbeat_interval",
+                     "heartbeat_timeout", "restore_timeout", "backoff_initial", "backoff_max"):
+            for bad in (float("nan"), float("inf")):
+                with self.subTest(name=name, value=bad), self.assertRaises(ConfigError):
+                    config(**{name: bad})
+
 
 if __name__ == "__main__":
     unittest.main()

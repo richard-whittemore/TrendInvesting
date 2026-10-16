@@ -20,12 +20,15 @@ class TWSApi:
     """The requests the adapter makes of IB Gateway.
 
     connect hands the Inbox to the client, which delivers every later callback
-    to it, possibly from its own reader thread. place_order exists so the
+    to it, possibly from its own reader thread, and raises ConnectFailed if
+    the socket connect and IBKR's handshake take longer than timeout seconds.
+    Each connect is a new session: no callback of an earlier session may reach
+    its Inbox. place_order exists so the
     order path has a seam; no implementation may send before the paper and
     limited-live gates (AGENTS.md rule 5).
     """
 
-    def connect(self, host, port, client_id, callbacks):
+    def connect(self, host, port, client_id, callbacks, timeout):
         raise NotImplementedError
 
     def disconnect(self):

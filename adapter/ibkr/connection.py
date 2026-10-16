@@ -70,6 +70,9 @@ class Connection:
     Invariant: needs_reconciliation is set on every connect and every
     restoration, and only a caller that has matched IBKR's orders, executions
     and balances to the journal may clear it (ADR 0025 point 5).
+
+    The adapter's loop calls maintain() regularly; it is the one place a lost
+    link is brought back.
     """
 
     def __init__(self, api, config, status_sink, sleep=time.sleep, monotonic=time.monotonic,
@@ -89,6 +92,9 @@ class Connection:
         self.last_server_time = None
         self._probe_sent_at = None
         self._last_probe_at = None
+        # Monotonic time Gateway reported losing IBKR's servers (1100/2110);
+        # None while it has not, or once it is restored or the link is dropped.
+        self._lost_at = None
         self._next_req_id = 1
         self.time_requests = 0
         self.time_answers = 0
@@ -143,10 +149,18 @@ class Connection:
         self._pending.clear()
         self._probe_sent_at = None
         self._last_probe_at = None
+        self._lost_at = None
         self.time_requests = 0
         self.time_answers = 0
-        self.api.connect(cfg.host, cfg.port, cfg.client_id, self.inbox)
+        # One deadline covers the socket connect, IBKR's handshake and the
+        # wait for nextValidId: EClient.connect is synchronous, so a deadline
+        # started after it returns would not bound a stalled socket.
         deadline = self._monotonic() + cfg.connect_timeout
+        try:
+            self.api.connect(cfg.host, cfg.port, cfg.client_id, self.inbox, cfg.connect_timeout)
+        except (ConnectFailed, OSError) as err:
+            self._abandon()
+            raise ConnectFailed("socket connect failed: {}".format(err)) from None
         while True:
             remaining = deadline - self._monotonic()
             event = self.inbox.get(remaining) if remaining > 0 else None
@@ -201,8 +215,30 @@ class Connection:
         self._abandon()
         self.connect_with_backoff()
 
+    def maintain(self):
+        """Keep the link up: probe its heartbeat, and reconnect it once it is lost.
+
+        While Gateway reports it has lost IBKR's servers (1100/2110), Gateway
+        reconnects to them itself, so the adapter waits for its restoration
+        (1101/1102) up to restore_timeout, then drops the link and
+        reconnects. Any other lost link is reconnected at once, with
+        backoff. ClientIdInUse and a give-up propagate: both are a person's
+        call (ADR 0025 point 3).
+        """
+        if self.connected:
+            self.check_heartbeat()
+        if self._lost_at is not None:
+            if self._monotonic() - self._lost_at < self.config.restore_timeout:
+                return
+            self._report("disconnected", "connectivity-not-restored")
+            self.reconnect()
+            return
+        if not self.connected:
+            self.reconnect()
+
     def _abandon(self):
         self.connected = False
+        self._lost_at = None
         try:
             self.api.disconnect()
         except Exception as err:  # the link is being discarded either way
@@ -233,8 +269,9 @@ class Connection:
 
     def _apply(self, event):
         if event.name == "connection_closed":
-            if self.connected:
+            if self.connected or self._lost_at is not None:
                 self.connected = False
+                self._lost_at = None
                 self._report("disconnected", "connection-closed")
         elif event.name == "current_time":
             self.time_answers += 1
@@ -246,15 +283,23 @@ class Connection:
     def _apply_error(self, code):
         if code in (CODE_CONNECTIVITY_LOST, CODE_SERVER_LINK_BROKEN):
             self.connected = False
+            if self._lost_at is None:
+                self._lost_at = self._monotonic()
             self._report("connectivity-lost", "gateway-lost-ibkr", ibkr_code=code)
         elif code in (CODE_RESTORED_DATA_LOST, CODE_RESTORED_DATA_MAINTAINED):
             self.connected = True
             self.needs_reconciliation = True
+            self._lost_at = None
+            # A probe sent before the outage has a deadline that ran out
+            # during it; the restored link gets a fresh probe instead.
+            self._probe_sent_at = None
+            self._last_probe_at = None
             self._report("connected", "restored", ibkr_code=code,
                          data_lost=code == CODE_RESTORED_DATA_LOST)
         elif code in (CODE_NOT_CONNECTED, CODE_SOCKET_PORT_RESET):
-            if self.connected:
+            if self.connected or self._lost_at is not None:
                 self.connected = False
+                self._lost_at = None
                 self._report("disconnected", "not-connected", ibkr_code=code)
 
     # -- heartbeat -------------------------------------------------------

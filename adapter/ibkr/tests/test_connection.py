@@ -16,8 +16,8 @@ from connection import Connection, ClientIdInUse, ConnectFailed, NotConnected
 def config(**overrides):
     values = dict(host="127.0.0.1", port=4002, client_id=11, account_id=ACCOUNT, mode="dry-run",
                   connect_timeout=0.05, request_timeout=0.05, heartbeat_interval=30.0,
-                  heartbeat_timeout=10.0, backoff_initial=1.0, backoff_max=8.0,
-                  max_connect_attempts=5)
+                  heartbeat_timeout=10.0, restore_timeout=60.0, backoff_initial=1.0,
+                  backoff_max=8.0, max_connect_attempts=5)
     values.update(overrides)
     return AdapterConfig.from_mapping(values)
 
@@ -89,6 +89,33 @@ class ConnectTests(unittest.TestCase):
         h.fake.connect_behaviours = ["refused"]
         with self.assertRaises(ConnectFailed):
             h.conn.connect()
+
+    def test_connect_timeout_bounds_the_socket_work_as_well_as_the_handshake(self):
+        h = Harness()
+
+        def slow_socket():
+            h.clock.now += 1.0  # longer than connect_timeout (0.05)
+        h.fake.connect_hook = slow_socket
+        with self.assertRaises(ConnectFailed):
+            h.conn.connect()
+        self.assertEqual(h.fake.connect_timeouts, [0.05])
+        self.assertFalse(h.conn.connected)
+        self.assertEqual(len(h.fake.called("disconnect")), 1)
+
+    def test_a_socket_connect_that_overruns_is_abandoned_and_retried(self):
+        h = Harness()
+        h.fake.connect_behaviours = ["hang", "ok"]
+        h.conn.connect_with_backoff()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 2)
+        self.assertEqual(len(h.fake.called("disconnect")), 1)
+
+    def test_a_socket_error_is_a_failed_connect(self):
+        h = Harness()
+        h.fake.connect_behaviours = ["socket-error"]
+        with self.assertRaises(ConnectFailed):
+            h.conn.connect()
+        self.assertFalse(h.conn.connected)
 
 
 class ReconnectTests(unittest.TestCase):
@@ -186,10 +213,100 @@ class DisconnectDetectionTests(unittest.TestCase):
         self.assertFalse(h.conn.connected)
         self.assertEqual(h.statuses[-1].reason, "heartbeat-timeout")
 
+    def test_restoration_clears_a_probe_left_over_from_before_the_outage(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.answer_current_time = False
+        h.conn.check_heartbeat()
+        h.fake.callbacks.error(-1, 1100, "lost")
+        h.conn.pump(0.01)
+        h.clock.now += 100.0  # the outage outlasts heartbeat_timeout
+        h.fake.callbacks.error(-1, 1102, "Connectivity restored - data maintained.")
+        h.conn.pump(0.01)
+        h.conn.check_heartbeat()
+        self.assertTrue(h.conn.connected)
+        self.assertNotIn("heartbeat-timeout", [s.reason for s in h.statuses])
+        # A fresh probe goes out at once, with its own deadline.
+        self.assertEqual(len(h.fake.called("req_current_time")), 2)
+
     def test_requests_refuse_when_disconnected(self):
         h = Harness()
         with self.assertRaises(NotConnected):
             h.conn.require_connected()
+
+
+class MaintainTests(unittest.TestCase):
+    """maintain() is what brings a lost link back; nothing else reconnects."""
+
+    def test_a_socket_close_is_reconnected(self):
+        h = Harness()
+        h.conn.connect()
+        h.conn.mark_reconciled()
+        h.fake.drop()
+        h.conn.pump(0.01)
+        h.conn.maintain()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual([c[3] for c in h.fake.called("connect")], [11, 11])
+        self.assertTrue(h.conn.needs_reconciliation)
+
+    def test_an_unanswered_heartbeat_is_reconnected(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.answer_current_time = False
+        h.conn.maintain()
+        h.clock.now += 10.0
+        h.conn.maintain()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 2)
+        self.assertEqual(h.states()[-2:], ["disconnected", "connected"])
+
+    def test_lost_ibkr_connectivity_waits_for_gateway_to_restore_it(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.callbacks.error(-1, 2110, "Connectivity between TWS and server is broken.")
+        h.conn.pump(0.01)
+        h.clock.now += 59.0
+        h.conn.maintain()
+        self.assertFalse(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 1)
+        h.fake.callbacks.error(-1, 1101, "Connectivity restored - data lost.")
+        h.conn.pump(0.01)
+        h.clock.now += 120.0
+        h.conn.maintain()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 1)
+
+    def test_connectivity_not_restored_in_time_drops_the_link_and_reconnects(self):
+        h = Harness()
+        h.conn.connect()
+        h.conn.mark_reconciled()
+        h.fake.callbacks.error(-1, 1100, "lost")
+        h.conn.pump(0.01)
+        h.clock.now += 60.0
+        h.conn.maintain()
+        self.assertTrue(h.conn.connected)
+        self.assertEqual(len(h.fake.called("connect")), 2)
+        self.assertEqual(len(h.fake.called("disconnect")), 1)
+        self.assertIn("connectivity-not-restored", [s.reason for s in h.statuses])
+        self.assertTrue(h.conn.needs_reconciliation)
+
+    def test_a_healthy_link_is_left_alone(self):
+        h = Harness()
+        h.conn.connect()
+        h.conn.maintain()
+        h.conn.pump(0.01)
+        h.conn.maintain()
+        self.assertEqual(len(h.fake.called("connect")), 1)
+
+    def test_a_client_id_conflict_on_reconnect_still_fails_closed(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.drop()
+        h.conn.pump(0.01)
+        h.fake.connect_behaviours = ["client-id-in-use"]
+        with self.assertRaises(ClientIdInUse):
+            h.conn.maintain()
+        self.assertEqual(len(h.fake.called("connect")), 2)
 
 
 class LoggingTests(unittest.TestCase):

@@ -7,6 +7,7 @@ signatures IBKR has shipped for EWrapper.error.
 """
 import importlib
 import sys
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -22,21 +23,30 @@ from sender import LiveSendingDisabled
 
 
 class _EClient:
+    # Set to a threading.Event to make connect block until it is set, as a
+    # stalled socket connect or handshake does.
+    connect_gate = None
+
     def __init__(self, wrapper):
         self.wrapper = wrapper
         self.requests = []
+        self._stopped = threading.Event()
 
     def connect(self, host, port, clientId):
         self.requests.append(("connect", host, port, clientId))
+        if _EClient.connect_gate is not None:
+            _EClient.connect_gate.wait(5)
 
     def run(self):
-        pass
+        # The real reader loops until the socket closes.
+        self._stopped.wait(5)
 
     def isConnected(self):
-        return True
+        return not self._stopped.is_set()
 
     def disconnect(self):
         self.requests.append(("disconnect",))
+        self._stopped.set()
 
     def reqCurrentTime(self):
         self.requests.append(("reqCurrentTime",))
@@ -121,19 +131,67 @@ class WithoutIbapiTests(unittest.TestCase):
 
 class ForwardingTests(unittest.TestCase):
     def tearDown(self):
+        _EClient.connect_gate = None
         _uninstall_stub()
         import real_client
         importlib.reload(real_client)
 
-    def build(self, new_error_signature):
+    def module(self, new_error_signature=False):
         _install_stub(new_error_signature)
         import real_client
         real_client = importlib.reload(real_client)
         self.assertTrue(real_client.IBAPI_AVAILABLE)
-        client = real_client.IbapiClient(start_reader=False)
+        return real_client
+
+    def build(self, new_error_signature, start_reader=False):
+        client = self.module(new_error_signature).IbapiClient(start_reader=start_reader)
         inbox = Recorder()
-        client.connect("127.0.0.1", 4002, 11, inbox)
+        client.connect("127.0.0.1", 4002, 11, inbox, 1.0)
         return client, inbox
+
+    def test_a_late_callback_from_an_old_session_never_reaches_the_new_one(self):
+        client, old_inbox = self.build(False)
+        old_wrapper = client._wrapper
+        client.disconnect()
+        new_inbox = Recorder()
+        client.connect("127.0.0.1", 4002, 11, new_inbox, 1.0)
+        old_wrapper.connectionClosed()
+        old_wrapper.nextValidId(99)
+        self.assertEqual(new_inbox.events(), [])
+        self.assertEqual([e.name for e in old_inbox.events()],
+                         ["connection_closed", "next_valid_id"])
+        self.assertIsNot(client._wrapper, old_wrapper)
+
+    def test_disconnect_stops_and_joins_the_reader_before_a_reconnect(self):
+        client, _ = self.build(False, start_reader=True)
+        old_reader = client._reader
+        self.assertTrue(old_reader.is_alive())
+        client.disconnect()
+        self.assertFalse(old_reader.is_alive())
+        client.connect("127.0.0.1", 4002, 11, Recorder(), 1.0)
+        self.assertIsNot(client._reader, old_reader)
+        client.disconnect()
+
+    def test_a_reconnect_without_a_disconnect_still_ends_the_old_session_first(self):
+        client, _ = self.build(False, start_reader=True)
+        old_reader, old_eclient = client._reader, client._client
+        client.connect("127.0.0.1", 4002, 11, Recorder(), 1.0)
+        self.assertFalse(old_reader.is_alive())
+        self.assertIn(("disconnect",), old_eclient.requests)
+        client.disconnect()
+
+    def test_a_stalled_socket_connect_is_bounded_by_the_timeout(self):
+        real_client = self.module()
+        from connection import ConnectFailed
+        _EClient.connect_gate = threading.Event()
+        client = real_client.IbapiClient(start_reader=True)
+        try:
+            with self.assertRaises(ConnectFailed):
+                client.connect("127.0.0.1", 4002, 11, Recorder(), 0.05)
+            self.assertIn(("disconnect",), client._client.requests)
+            self.assertIsNone(client._reader)
+        finally:
+            _EClient.connect_gate.set()
 
     def test_requests_reach_eclient(self):
         client, _ = self.build(False)
@@ -144,13 +202,14 @@ class ForwardingTests(unittest.TestCase):
         client.cancel_account_summary(3)
         client.req_all_open_orders()
         client.req_executions(4, "DU0000001")
+        self.assertTrue(client.is_connected())
         client.disconnect()
         self.assertEqual(client._client.requests, [
             ("connect", "127.0.0.1", 4002, 11), ("reqCurrentTime",), ("reqPositions",),
             ("cancelPositions",), ("reqAccountSummary", 3, "All", "NetLiquidation"),
             ("cancelAccountSummary", 3), ("reqAllOpenOrders",), ("reqExecutions", 4, "DU0000001"),
             ("disconnect",)])
-        self.assertTrue(client.is_connected())
+        self.assertFalse(client.is_connected())
 
     def test_place_order_is_disabled(self):
         client, _ = self.build(False)

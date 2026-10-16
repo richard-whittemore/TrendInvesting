@@ -9,6 +9,11 @@ the client order ID here) is kept separate from it, and on reconnect IBKR's
 open orders and executions are matched to the journal by that tag. Matching
 never resends.
 
+IBKR's orderId is unique only within one API client ID, and reqAllOpenOrders
+reports other clients' and manual orders too, so an order is identified by
+(clientId, orderId), or by permId when it has no positive orderId (a manual
+TWS order); see order_key.
+
 The `updated` status is not produced here: an amendment's acknowledgement
 arrives as a changed openOrder, which needs the order this adapter sent to
 compare against, and there is no sending path yet.
@@ -57,12 +62,12 @@ class BrokerOrdersIncomplete(Exception):
 
 
 OpenOrderRecord = namedtuple("OpenOrderRecord", (
-    "account_id broker_order_id perm_id client_order_id con_id symbol action quantity "
+    "account_id client_id broker_order_id perm_id client_order_id con_id symbol action quantity "
     "order_type limit_price aux_price tif ibkr_status"))
 
 
 class OrderStatusReport(namedtuple("OrderStatusReport", (
-        "broker_order_id perm_id client_order_id ibkr_status lifecycle filled remaining "
+        "client_id broker_order_id perm_id client_order_id ibkr_status lifecycle filled remaining "
         "avg_fill_price last_fill_price ibkr_code reason"))):
     """One order status change; lifecycle is an ADR 0022 status or None (see STATUS_LIFECYCLE)."""
 
@@ -75,7 +80,8 @@ class OrderStatusReport(namedtuple("OrderStatusReport", (
 
 
 ExecutionReport = namedtuple("ExecutionReport", (
-    "account_id exec_id broker_order_id perm_id client_order_id con_id symbol side shares price "
+    "account_id exec_id client_id broker_order_id perm_id client_order_id con_id symbol side "
+    "shares price "
     "cum_qty avg_price time occurred_at"))
 """One execution; time is IBKR's string verbatim and occurred_at its UTC reading."""
 
@@ -87,7 +93,8 @@ ReconnectMatch = namedtuple("ReconnectMatch", (
     "matched executed missing_at_broker unknown_at_broker unknown_executions clean"))
 """IBKR's view of the orders the journal expects, matched by client order ID.
 
-matched: tag to IBKR order ID for an order still open at IBKR. executed: tag
+matched: tag to the OpenOrderRecord still open at IBKR, which carries the
+order's full identity (client ID, IBKR order ID, permId). executed: tag
 to its executions this session. missing_at_broker: tags neither open nor
 executed. unknown_at_broker / unknown_executions: IBKR's orders and
 executions with no expected tag (a manual order, or a crash after IBKR
@@ -96,6 +103,22 @@ carrying an already-matched tag. clean is true only when the last three are
 empty; anything else is for reconciliation to classify (ADR 0019), never a
 reason to resend.
 """
+
+
+def order_key(client_id, order_id, perm_id):
+    """One order's identity across every client of the login.
+
+    IBKR assigns orderId per client ID, so (client_id, order_id) is unique for
+    an API order; a manual TWS order has no positive orderId, and its permId
+    (account-wide) identifies it. An order with neither cannot be told apart
+    from another and fails closed.
+    """
+    if order_id is not None and order_id > 0:
+        return ("order", client_id, order_id)
+    if perm_id:
+        return ("perm", 0, perm_id)
+    raise UnrecognisedOrderReport(
+        "order with client_id {} has neither an orderId nor a permId".format(client_id))
 
 
 def parse_execution_time(text):
@@ -123,7 +146,8 @@ def _price(value, what):
 
 def open_order_record(order_id, contract, order, order_state):
     return OpenOrderRecord(
-        account_id=order.account, broker_order_id=order_id, perm_id=order.permId,
+        account_id=order.account, client_id=order.clientId, broker_order_id=order_id,
+        perm_id=order.permId,
         client_order_id=order.orderRef or None, con_id=contract.conId, symbol=contract.symbol,
         action=order.action, quantity=to_decimal(order.totalQuantity, "totalQuantity"),
         order_type=order.orderType, limit_price=_price(order.lmtPrice, "lmtPrice"),
@@ -133,7 +157,7 @@ def open_order_record(order_id, contract, order, order_state):
 
 def execution_report(contract, execution):
     return ExecutionReport(
-        account_id=execution.acctNumber, exec_id=execution.execId,
+        account_id=execution.acctNumber, exec_id=execution.execId, client_id=execution.clientId,
         broker_order_id=execution.orderId, perm_id=execution.permId,
         client_order_id=execution.orderRef or None, con_id=contract.conId,
         symbol=contract.symbol, side=execution.side,
@@ -149,10 +173,17 @@ class OrderTracker:
     Subscribe on_event to a Connection. Orders and executions of other
     accounts under the same login are skipped. An identical repeat of the
     last status IBKR sent for an order is collapsed, since IBKR repeats them.
+    Per-order state is keyed by order_key; client_id is this engine's own,
+    which an order rejection (error with reqId = orderId) implicitly carries.
+
+    Invariant: a report counts as seen only once sink has accepted it, so a
+    sink that raises (a failed journal write) leaves IBKR's redelivery of the
+    same report free to be recorded.
     """
 
-    def __init__(self, account_id, sink):
+    def __init__(self, account_id, client_id, sink):
         self.account_id = account_id
+        self.client_id = client_id
         self._sink = sink
         self._client_ids = {}
         self._foreign = set()
@@ -167,62 +198,72 @@ class OrderTracker:
 
     def _on_open_order(self, order_id, contract, order, order_state):
         if order.account != self.account_id:
-            self._foreign.add(order_id)
+            if order_id > 0 or order.permId:
+                self._foreign.add(order_key(order.clientId, order_id, order.permId))
             return
+        key = order_key(order.clientId, order_id, order.permId)
         record = open_order_record(order_id, contract, order, order_state)
-        self._client_ids[order_id] = record.client_order_id
         self._sink(record)
+        self._client_ids[key] = record.client_order_id
 
     def _on_order_status(self, order_id, status, filled, remaining, avg_fill_price, perm_id,
                          parent_id, last_fill_price, client_id, why_held, mkt_cap_price):
-        if order_id in self._foreign:
+        key = order_key(client_id, order_id, perm_id)
+        if key in self._foreign:
             return
         code = reason = None
         if status in STATUS_LIFECYCLE:
             lifecycle = STATUS_LIFECYCLE[status]
-        elif status == INACTIVE and order_id in self._rejections:
+        elif status == INACTIVE and key in self._rejections:
             lifecycle = "invalid"
-            code, reason = self._rejections[order_id]
+            code, reason = self._rejections[key]
         else:
             raise UnrecognisedOrderReport(
-                "order {} reported status {!r}".format(order_id, status))
+                "order {} of client {} reported status {!r}".format(order_id, client_id, status))
         report = OrderStatusReport(
-            broker_order_id=order_id, perm_id=perm_id,
-            client_order_id=self._client_ids.get(order_id), ibkr_status=status,
+            client_id=client_id, broker_order_id=order_id, perm_id=perm_id,
+            client_order_id=self._client_ids.get(key), ibkr_status=status,
             lifecycle=lifecycle, filled=to_decimal(filled, "filled"),
             remaining=to_decimal(remaining, "remaining"),
             avg_fill_price=to_decimal(avg_fill_price, "avgFillPrice"),
             last_fill_price=to_decimal(last_fill_price, "lastFillPrice"),
             ibkr_code=code, reason=reason)
-        self._emit(report)
+        self._emit(key, report)
 
     def _on_error(self, req_id, code, message, *_):
-        if code not in REJECTION_CODES or req_id < 0 or req_id in self._foreign:
+        if code not in REJECTION_CODES or req_id <= 0:
             return
-        self._rejections[req_id] = (code, message)
-        previous = self._last.get(req_id)
-        self._emit(OrderStatusReport(
-            broker_order_id=req_id, perm_id=previous.perm_id if previous else None,
-            client_order_id=self._client_ids.get(req_id), ibkr_status=None, lifecycle="invalid",
+        key = order_key(self.client_id, req_id, None)
+        if key in self._foreign:
+            return
+        # IBKR's rejection is remembered even if sink fails below: it is what
+        # classifies the Inactive status that follows it.
+        self._rejections[key] = (code, message)
+        previous = self._last.get(key)
+        self._emit(key, OrderStatusReport(
+            client_id=self.client_id, broker_order_id=req_id,
+            perm_id=previous.perm_id if previous else None,
+            client_order_id=self._client_ids.get(key), ibkr_status=None, lifecycle="invalid",
             filled=previous.filled if previous else None,
             remaining=previous.remaining if previous else None,
             avg_fill_price=None, last_fill_price=None, ibkr_code=code, reason=message))
 
-    def _emit(self, report):
-        previous = self._last.get(report.broker_order_id)
+    def _emit(self, key, report):
+        previous = self._last.get(key)
         if previous is not None:
             if report.lifecycle == "invalid" and previous.lifecycle == "invalid":
                 return
             if report == previous:
                 return
-        self._last[report.broker_order_id] = report
         self._sink(report)
+        self._last[key] = report
 
     def _on_exec_details(self, req_id, contract, execution):
         if execution.acctNumber != self.account_id or execution.execId in self._executions:
             return
+        report = execution_report(contract, execution)
+        self._sink(report)
         self._executions.add(execution.execId)
-        self._sink(execution_report(contract, execution))
 
     def _on_commission_report(self, report):
         # A commission report carries no account; it belongs to this account
@@ -255,7 +296,8 @@ def collect_broker_orders(conn):
         if name == "open_order":
             record = open_order_record(*args)
             if record.account_id == account:
-                open_orders[record.broker_order_id] = record
+                key = order_key(record.client_id, record.broker_order_id, record.perm_id)
+                open_orders[key] = record
         elif name == "open_order_end":
             orders_done = True
         elif name == "exec_details" and args[0] == exec_req:
@@ -288,7 +330,7 @@ def match_on_reconnect(expected_client_order_ids, broker):
     for record in broker.open_orders:
         cid = record.client_order_id
         if cid in expected and cid not in matched:
-            matched[cid] = record.broker_order_id
+            matched[cid] = record
         else:
             unknown.append(record)
     executed = {}
