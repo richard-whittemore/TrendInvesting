@@ -60,12 +60,19 @@ def _is_massive(url):
 
 
 class MassiveOnlyRedirect(urllib.request.HTTPRedirectHandler):
-    """Refuses (as the redirect's HTTP error) any redirect off Massive."""
+    """Refuses (as the redirect's HTTP error) any redirect off Massive. An
+    allowed redirect is one more request, so it waits on the request's
+    ``massive_pace`` (the client's rate limit) and carries it to the next hop."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if not _is_massive(urllib.parse.urljoin(req.full_url, newurl)):
             raise urllib.error.HTTPError(req.full_url, code, "redirect off Massive refused", headers, fp)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        pace = getattr(req, "massive_pace", None)
+        if new is not None and pace is not None:
+            pace()
+            new.massive_pace = pace
+        return new
 
 
 OPENER = urllib.request.build_opener(MassiveOnlyRedirect())
@@ -88,19 +95,24 @@ class Client:
     def __repr__(self):
         return "Client(min_interval={})".format(self.min_interval)
 
+    def _pace(self):
+        """Waits until ``min_interval`` has passed since the last request."""
+        if self._last is not None:
+            wait = self.min_interval - (self._clock() - self._last)
+            if wait > 0:
+                self._sleep(wait)
+        self._last = self._clock()
+
     def get_url(self, url):
         url = _strip_key(url)
         parts = urllib.parse.urlsplit(url)
         if not _is_massive(url):
             raise MarketDataError("refusing a URL outside Massive: {}".format(parts.netloc))
         for attempt in range(1, self.max_attempts + 1):
-            if self._last is not None:
-                wait = self.min_interval - (self._clock() - self._last)
-                if wait > 0:
-                    self._sleep(wait)
-            self._last = self._clock()
+            self._pace()
             log.debug("GET %s attempt %d", parts.path, attempt)
             req = urllib.request.Request(url, headers={"Authorization": "Bearer " + self._key})
+            req.massive_pace = self._pace
             try:
                 with self._opener(req, timeout=60) as resp:
                     body = json.loads(resp.read().decode())

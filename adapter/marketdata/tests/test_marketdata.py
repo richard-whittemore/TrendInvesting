@@ -164,6 +164,22 @@ class ClientTest(unittest.TestCase):
     def test_a_redirect_within_massive_is_followed(self):
         self.assertEqual(self.redirect("https://api.massive.com/v3/y").full_url, "https://api.massive.com/v3/y")
 
+    def test_an_allowed_redirect_is_paced_like_any_request(self):
+        calls = []
+        req = urllib.request.Request("https://api.massive.com/v3/x", headers={"Authorization": "Bearer " + KEY})
+        req.massive_pace = lambda: calls.append(1)
+        new = massive.MassiveOnlyRedirect().redirect_request(req, io.BytesIO(b""), 302, "Found", {},
+                                                             "https://api.massive.com/v3/y")
+        self.assertEqual(calls, [1])
+        self.assertIs(new.massive_pace, req.massive_pace)   # a second hop is paced too
+
+    def test_a_request_carries_the_clients_pacing_for_its_redirects(self):
+        client, opener, clock = make_client(grouped(bar("A")))
+        client.grouped(DAY)
+        opener.requests[0].massive_pace()   # as a redirect would, straight after the request
+        self.assertEqual(len(clock.sleeps), 1)
+        self.assertGreaterEqual(clock.sleeps[0], 12.0)
+
     def test_the_default_opener_uses_the_massive_only_redirect(self):
         handlers = massive.OPENER.handlers
         self.assertTrue(any(isinstance(h, massive.MassiveOnlyRedirect) for h in handlers))
