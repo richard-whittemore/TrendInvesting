@@ -12,6 +12,7 @@ Usage: python3 build_variants.py TB3MS.csv OUT_DIR
        writes OUT_DIR/<variant>/main.py for every variant.
 """
 import csv
+import datetime
 import os
 import re
 import sys
@@ -258,6 +259,25 @@ VARIANTS = {
     "M_BOOST_11": ("boost/mix_template.py", dict(_MIX, START=_D11, WEIGHTS={"SPY": 1.0}, BOOST=True)),
     "M_RSST": ("boost/mix_template.py", dict(_MIX, START=_D23, WEIGHTS={"RSST": 1.0})),
 }
+
+
+def _universe_log_variants(first=(2024, 11), months=24):
+    """Decision D8's comparison (docs/live-trading/plan.md, section 4): the
+    backtest's universe logged for the months Massive's free two-year
+    history covers, two months a run to fit the Free plan's log cap. Each run
+    starts a week before its first month and ends on the 5th of its second."""
+    out, (y, m) = {}, first
+    for _ in range(months // 2):
+        a = (y, m)
+        b = (y + 1, 1) if m == 12 else (y, m + 1)
+        start = datetime.date(*a, 1) - datetime.timedelta(days=7)
+        out["U_LOG_{}_{:02d}".format(*a)] = ("universe/qc_universe.py", {
+            "START": (start.year, start.month, start.day), "END": (b[0], b[1], 5), "MONTHS": (a, b)})
+        y, m = (b[0] + 1, 1) if b[1] == 12 else (b[0], b[1] + 1)
+    return out
+
+
+VARIANTS.update(_universe_log_variants())
 
 
 def prior_month_rates(tb3ms_path, first_month=FIRST_MONTH):
