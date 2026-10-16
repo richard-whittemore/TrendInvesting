@@ -110,11 +110,12 @@ between the two mixes, never below or deeper than both.
 
 ## Notes
 
-- **Ending shares differ slightly from the plan's table.** The plan lists
-  *b* at the end of each window (for example 28.7% for the tuning path from
-  38); the runs report the share at the last monthly rebalance (27.4%),
-  counted from the first measured day. The difference is under 1.5 points
-  in every run and does not change which mixes bracket the path.
+- **Ending shares differ slightly from the plan's table.** The plan's
+  table takes each window's full length (14 years for the tuning window);
+  the runs count age from the first measured day (August 2002 for the
+  tuning window) and report the share at the last monthly rebalance. The
+  largest difference is 1.9 points, for the tuning path from 53 (55.7% in
+  the plan, 53.8% in the run). None changes which mixes bracket the path.
 - **The 60% and 70% mixes are now measured** in one account. The earlier
   study stopped at 50%.
 - **The held-out window is not blind for the combination**
