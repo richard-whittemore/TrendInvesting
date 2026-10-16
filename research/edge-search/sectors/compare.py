@@ -8,7 +8,10 @@ GICS sectors are mapped onto Morningstar's eleven by name. The mapping is a
 judgment, not an official concordance; a disagreement means the cap would
 count that stock in a different sector, which is what the check measures.
 
-Usage: python3 compare.py SNAPSHOT.log ISHARES_HOLDINGS.csv
+Usage: python3 compare.py SNAPSHOT.log ISHARES_HOLDINGS.csv COUNT
+       COUNT is the snapshot run's "Count" runtime statistic; a log that
+       does not hold exactly that many names is refused (the Free plan's
+       log cap can cut it short).
 """
 import csv
 import io
@@ -36,23 +39,34 @@ def norm(ticker):
     return re.sub(r"[^A-Z0-9]", "", ticker.upper())
 
 
-def read_snapshot(lines):
-    """{ticker: Morningstar code or None} from snapshot.py's log lines."""
-    out = {}
+def read_snapshot(lines, expected=None):
+    """({ticker: Morningstar code or None}, items skipped) from snapshot.py's
+    log lines. A malformed item (a line cut mid-item) is skipped and
+    counted. With ``expected``, anything other than exactly that many names
+    is refused."""
+    out, skipped = {}, 0
     for line in lines:
         m = SECT.search(line)
         if not m:
             continue
         for item in filter(None, m.group(1).split(";")):
-            ticker, code = item.rsplit(":", 1)
+            ticker, sep, code = item.rpartition(":")
+            if not sep or not ticker or not (code == "-" or code.isdigit()):
+                skipped += 1
+                continue
             out[norm(ticker)] = None if code == "-" else int(code)
-    return out
+    if expected is not None and (len(out) != expected or skipped):
+        raise ValueError("snapshot holds {} names ({} malformed), expected {}: the log is incomplete"
+                         .format(len(out), skipped, expected))
+    return out, skipped
 
 
 def read_ishares(text):
     """{ticker: GICS sector} for the equity rows of an iShares holdings CSV."""
-    lines = text.splitlines()
-    start = next(i for i, l in enumerate(lines) if l.startswith("Ticker,"))
+    lines = [l.lstrip("\ufeff") for l in text.splitlines()]
+    start = next((i for i, l in enumerate(lines) if l.startswith("Ticker,")), None)
+    if start is None:
+        raise ValueError("no 'Ticker,' header: not an iShares holdings file")
     out = {}
     for row in csv.DictReader(io.StringIO("\n".join(lines[start:]))):
         if row.get("Asset Class") == "Equity" and row.get("Ticker"):
@@ -63,24 +77,33 @@ def read_ishares(text):
 def compare(ms, gics):
     """Agreement between the two labels over the snapshot's universe."""
     both = [t for t in sorted(ms) if t in gics and ms[t] is not None]
-    disagree = [(t, ms[t], gics[t]) for t in both if GICS_TO_MORNINGSTAR.get(gics[t]) != ms[t]]
+    unmapped = [(t, gics[t]) for t in both if gics[t] not in GICS_TO_MORNINGSTAR]
+    mapped = [t for t in both if gics[t] in GICS_TO_MORNINGSTAR]
+    disagree = [(t, ms[t], gics[t]) for t in mapped if GICS_TO_MORNINGSTAR[gics[t]] != ms[t]]
     return {
         "universe": len(ms),
-        "labelled_both": len(both),
-        "agree": len(both) - len(disagree),
+        "labelled_both": len(mapped),
+        "agree": len(mapped) - len(disagree),
         "disagree": disagree,
+        "unmapped": unmapped,
         "not_in_fund": sorted(t for t in ms if t not in gics or ms[t] is None),
     }
 
 
 def main(argv):
-    if len(argv) != 3:
+    if len(argv) != 4:
         raise SystemExit(__doc__)
-    with open(argv[1]) as f:
-        ms = read_snapshot(f)
-    with open(argv[2]) as f:
-        gics = read_ishares(f.read())
+    try:
+        with open(argv[1]) as f:
+            ms, _ = read_snapshot(f, expected=int(argv[3]))
+        with open(argv[2], encoding="utf-8-sig") as f:
+            gics = read_ishares(f.read())
+    except ValueError as e:
+        raise SystemExit("refused: {}".format(e))
     r = compare(ms, gics)
+    if r["unmapped"]:
+        print("GICS labels with no mapping ({}): {}".format(
+            len(r["unmapped"]), ", ".join("{} ({})".format(t, g) for t, g in r["unmapped"])))
     print("universe {universe}, labelled by both {labelled_both}, agree {agree}".format(**r))
     print("not in the fund or no Morningstar sector ({}): {}".format(len(r["not_in_fund"]),
                                                                       " ".join(r["not_in_fund"])))

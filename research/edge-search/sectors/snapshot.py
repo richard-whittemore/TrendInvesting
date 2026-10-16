@@ -41,6 +41,7 @@ class SectorSnapshot(QCAlgorithm):
         self.AddUniverse(self.Coarse, self.Fine)
         self.picked = False
         self.logged = 0
+        self.no_sector = 0
 
     def Coarse(self, coarse):
         if self.picked:
@@ -50,26 +51,33 @@ class SectorSnapshot(QCAlgorithm):
         rows.sort(key=lambda c: c.DollarVolume, reverse=True)
         return [c.Symbol for c in rows[:self.UNIVERSE_SIZE]]
 
+    @staticmethod
+    def sector_of(f):
+        """The Morningstar sector code, trying LEAN's PascalCase and newer
+        snake_case names; None when neither is readable or the code is 0
+        (unclassified)."""
+        for path in ("AssetClassification.MorningstarSectorCode",
+                     "asset_classification.morningstar_sector_code"):
+            cur = f
+            try:
+                for name in path.split("."):
+                    cur = getattr(cur, name)
+                return int(cur) or None
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return None
+
     def Fine(self, fine):
         if self.logged:
             return []
-        pairs = []
-        for f in fine:
-            code = None
-            for path in ("AssetClassification.MorningstarSectorCode",
-                         "asset_classification.morningstar_sector_code"):
-                cur = f
-                try:
-                    for name in path.split("."):
-                        cur = getattr(cur, name)
-                    code = int(cur) or None
-                    break
-                except Exception:
-                    continue
-            pairs.append((f.Symbol.Value, code))
+        pairs = [(f.Symbol.Value, self.sector_of(f)) for f in fine]
         for line in sector_lines(sorted(pairs)):
             self.Log(line)
         self.logged = len(pairs)
+        self.no_sector = sum(1 for _, code in pairs if code is None)
+        # compare.py refuses a log that does not hold exactly Count names; a
+        # NoSector near Count means the attribute names have changed.
         self.SetRuntimeStatistic("Count", str(len(pairs)))
+        self.SetRuntimeStatistic("NoSector", str(self.no_sector))
         self.SetRuntimeStatistic("Date", self.Time.strftime("%Y-%m-%d"))
         return []

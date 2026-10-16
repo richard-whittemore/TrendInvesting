@@ -45,6 +45,41 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(algo.Coarse(rows), ["b", "c"])
         self.assertEqual(algo.Coarse(rows), "UNCHANGED")         # once only
 
+    @staticmethod
+    def _fine(ticker, pascal=None, snake=None):
+        f = types.SimpleNamespace(Symbol=types.SimpleNamespace(Value=ticker))
+        if pascal is not None:
+            f.AssetClassification = types.SimpleNamespace(MorningstarSectorCode=pascal)
+        if snake is not None:
+            f.asset_classification = types.SimpleNamespace(morningstar_sector_code=snake)
+        return f
+
+    def _algo(self):
+        algo = self.m.SectorSnapshot()
+        algo.logged, algo.no_sector = 0, 0
+        algo.Time = __import__("datetime").datetime(2026, 10, 1)
+        algo.logs, algo.stats = [], {}
+        algo.Log = algo.logs.append
+        algo.SetRuntimeStatistic = lambda k, v: algo.stats.__setitem__(k, v)
+        return algo
+
+    def test_fine_logs_every_name_with_either_attribute_spelling_and_counts_the_unlabelled(self):
+        algo = self._algo()
+        fine = [self._fine("MSFT", pascal=311), self._fine("JPM", snake=103),
+                self._fine("NEW"), self._fine("ZERO", pascal=0)]
+        self.assertEqual(algo.Fine(fine), [])
+        body = ";".join(l[5:] for l in algo.logs)
+        self.assertEqual(sorted(body.split(";")), ["JPM:103", "MSFT:311", "NEW:-", "ZERO:-"])
+        self.assertEqual((algo.stats["Count"], algo.stats["NoSector"], algo.stats["Date"]),
+                         ("4", "2", "2026-10-01"))
+
+    def test_fine_runs_once(self):
+        algo = self._algo()
+        algo.Fine([self._fine("MSFT", pascal=311)])
+        algo.Fine([self._fine("AAPL", pascal=311)])
+        self.assertEqual(len(algo.logs), 1)
+        self.assertNotIn("AAPL", algo.logs[0])
+
 
 class CompareTest(unittest.TestCase):
     def setUp(self):
@@ -52,7 +87,20 @@ class CompareTest(unittest.TestCase):
 
     def test_snapshot_lines_are_read_from_a_log(self):
         log = ["2026-10-01 00:00:00 SECT AAPL:311;BRK.B:103", "noise", "SECT XYZ:-"]
-        self.assertEqual(self.m.read_snapshot(log), {"AAPL": 311, "BRKB": 103, "XYZ": None})
+        self.assertEqual(self.m.read_snapshot(log), ({"AAPL": 311, "BRKB": 103, "XYZ": None}, 0))
+        self.assertEqual(self.m.read_snapshot(log, expected=3)[0]["AAPL"], 311)
+
+    def test_an_empty_or_cut_off_snapshot_is_refused_against_its_count(self):
+        with self.assertRaises(ValueError):
+            self.m.read_snapshot([], expected=500)
+        full = ["SECT AAPL:311;MSFT:311", "SECT JPM:103"]
+        with self.assertRaises(ValueError):
+            self.m.read_snapshot(full[:1], expected=3)                 # a whole line lost
+        cut = ["SECT AAPL:311;MSFT:3", "SECT JPM:103;GO"]               # cut mid-item
+        names, skipped = self.m.read_snapshot(cut)
+        self.assertEqual((sorted(names), skipped), (["AAPL", "JPM", "MSFT"], 1))
+        with self.assertRaises(ValueError):
+            self.m.read_snapshot(cut, expected=4)
 
     def test_the_ishares_file_gives_each_equitys_gics_sector(self):
         text = "\n".join([
@@ -63,6 +111,12 @@ class CompareTest(unittest.TestCase):
             '"USD","USD CASH","Cash and/or Derivatives","Cash","1.00"',
             "", "The content contained herein"])
         self.assertEqual(self.m.read_ishares(text), {"AAPL": "Information Technology", "BRKB": "Financials"})
+        self.assertEqual(self.m.read_ishares("\ufeff" + text.split("\n", 3)[3]),
+                         {"AAPL": "Information Technology", "BRKB": "Financials"})
+
+    def test_a_file_without_the_header_is_refused_clearly(self):
+        with self.assertRaises(ValueError):
+            self.m.read_ishares("<!DOCTYPE html><html>not a csv</html>")
 
     def test_tickers_are_compared_without_punctuation(self):
         self.assertEqual(self.m.norm("brk.b"), "BRKB")
@@ -75,6 +129,12 @@ class CompareTest(unittest.TestCase):
         self.assertEqual((r["universe"], r["labelled_both"], r["agree"]), (5, 3, 2))
         self.assertEqual(r["disagree"], [("AMZN", 102, "Information Technology")])
         self.assertEqual(r["not_in_fund"], ["SHOP", "XYZ"])
+        self.assertEqual(r["unmapped"], [])
+
+    def test_an_unknown_gics_label_is_a_mapping_gap_not_a_disagreement(self):
+        r = self.m.compare({"AAPL": 311, "ODD": 310}, {"AAPL": "Information Technology", "ODD": "Other"})
+        self.assertEqual((r["labelled_both"], r["agree"], r["disagree"], r["unmapped"]),
+                         (1, 1, [], [("ODD", "Other")]))
 
     def test_every_gics_sector_has_a_morningstar_counterpart(self):
         self.assertEqual(len(set(self.m.GICS_TO_MORNINGSTAR.values())), 11)
