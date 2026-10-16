@@ -28,9 +28,10 @@ except ImportError:
 
 log = logging.getLogger("ibkr")
 
-# How long disconnect waits for the old reader thread to exit once its socket
-# is closed. A reader that outlives it can still only reach its own session's
-# Inbox, never a newer one.
+# The longest disconnect waits for the old reader thread to exit once its
+# socket is closed (connect waits no longer than its own deadline). A reader
+# that outlives it is kept, blocks every new session until it stops, and can
+# only reach its own session's Inbox.
 READER_STOP_TIMEOUT = 5.0
 
 
@@ -119,8 +120,9 @@ class IbapiClient(TWSApi):
 
     Invariant: each connect is a new session with its own EWrapper and
     EClient, bound to that connect's Inbox. The previous session is
-    disconnected and its reader joined first, and even a reader that fails
-    to stop can only deliver to its own session's Inbox.
+    disconnected and its reader joined first. A reader that fails to stop is
+    kept, and no new session starts until it has stopped; even meanwhile it
+    can only deliver to its own session's Inbox.
 
     Invariant: an attempt abandoned at its timeout never keeps a connection.
     Its opener disconnects its EClient if the socket connect completes late,
@@ -150,7 +152,11 @@ class IbapiClient(TWSApi):
             previous.join(max(deadline - self._monotonic(), 0))
             if previous.is_alive():
                 raise ConnectFailed("an abandoned connect attempt has not finished")
-        self.disconnect()
+        # The previous reader must have stopped before a new session starts;
+        # waiting for it spends the same deadline.
+        if not self._end_session(min(READER_STOP_TIMEOUT,
+                                     max(deadline - self._monotonic(), 0))):
+            raise ConnectFailed("the previous session's reader has not stopped")
         remaining = deadline - self._monotonic()
         if remaining <= 0:
             raise ConnectFailed("no time left within {}s for a new connect attempt".format(timeout))
@@ -192,15 +198,25 @@ class IbapiClient(TWSApi):
             self._reader.start()
 
     def disconnect(self):
-        """Close this session's socket and wait for its reader to exit."""
+        """Close this session's socket and wait for its reader to exit.
+
+        Returns False if the reader is still running. It is kept, so the next
+        connect checks the same reader again and refuses to start a session
+        beside it.
+        """
+        return self._end_session(READER_STOP_TIMEOUT)
+
+    def _end_session(self, wait):
         if self._client is not None:
             self._client.disconnect()
-        reader, self._reader = self._reader, None
+        reader = self._reader
         if reader is not None and reader is not threading.current_thread():
-            reader.join(READER_STOP_TIMEOUT)
+            reader.join(wait)
             if reader.is_alive():
-                log.warning("ibkr reader did not stop within %.1fs of disconnect",
-                            READER_STOP_TIMEOUT)
+                log.warning("ibkr reader did not stop within %.2fs of disconnect", wait)
+                return False
+        self._reader = None
+        return True
 
     def is_connected(self):
         return self._client is not None and self._client.isConnected()

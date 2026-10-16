@@ -29,6 +29,9 @@ class _EClient:
     connect_gate = None
     # Called once a connect stops blocking, so a test can move its clock then.
     after_connect = None
+    # Set to a threading.Event to make the reader ignore its socket closing
+    # until the event is set, as a reader stuck in a callback does.
+    run_gate = None
 
     def __init__(self, wrapper):
         self.wrapper = wrapper
@@ -46,6 +49,9 @@ class _EClient:
 
     def run(self):
         # The real reader loops until the socket closes.
+        if _EClient.run_gate is not None:
+            _EClient.run_gate.wait(5)
+            return
         self._stopped.wait(5)
 
     def isConnected(self):
@@ -148,6 +154,9 @@ class ForwardingTests(unittest.TestCase):
     def tearDown(self):
         _EClient.connect_gate = None
         _EClient.after_connect = None
+        if _EClient.run_gate is not None:
+            _EClient.run_gate.set()
+        _EClient.run_gate = None
         _uninstall_stub()
         import real_client
         importlib.reload(real_client)
@@ -195,6 +204,42 @@ class ForwardingTests(unittest.TestCase):
         self.assertFalse(old_reader.is_alive())
         self.assertIn(("disconnect",), old_eclient.requests)
         client.disconnect()
+
+    def test_a_reader_that_outlives_disconnect_is_kept_and_blocks_every_retry(self):
+        real_client = self.module()
+        from connection import ConnectFailed
+        real_client.READER_STOP_TIMEOUT = 0.01
+        _EClient.run_gate = threading.Event()
+        client = real_client.IbapiClient(start_reader=True)
+        client.connect("127.0.0.1", 4002, 11, Recorder(), 1.0)
+        stuck, old_eclient = client._reader, client._client
+        self.assertFalse(client.disconnect())
+        self.assertIs(client._reader, stuck)
+        for _ in range(2):  # each retry re-checks the same live reader
+            with self.assertRaises(ConnectFailed):
+                client.connect("127.0.0.1", 4002, 11, Recorder(), 1.0)
+            self.assertIs(client._client, old_eclient)  # no new EClient was opened
+            self.assertIs(client._reader, stuck)
+        _EClient.run_gate.set()
+        stuck.join(1.0)
+        _EClient.run_gate = None
+        client.connect("127.0.0.1", 4002, 11, Recorder(), 1.0)
+        self.assertIsNot(client._client, old_eclient)
+        self.assertIsNot(client._reader, stuck)
+        self.assertTrue(client.disconnect())
+        self.assertIsNone(client._reader)
+
+    def test_waiting_for_a_stuck_reader_spends_the_connect_timeout_not_more(self):
+        real_client = self.module()
+        from connection import ConnectFailed
+        self.assertEqual(real_client.READER_STOP_TIMEOUT, 5.0)
+        _EClient.run_gate = threading.Event()
+        client = real_client.IbapiClient(start_reader=True)
+        client.connect("127.0.0.1", 4002, 11, Recorder(), 1.0)
+        started = time.monotonic()
+        with self.assertRaises(ConnectFailed):
+            client.connect("127.0.0.1", 4002, 11, Recorder(), 0.05)
+        self.assertLess(time.monotonic() - started, 2.0)  # not the 5s reader wait
 
     def test_a_stalled_socket_connect_is_bounded_by_the_timeout(self):
         real_client = self.module()

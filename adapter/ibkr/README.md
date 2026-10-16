@@ -12,7 +12,7 @@ an order (AGENTS.md rule 5).
 | Module | What it does |
 | --- | --- |
 | `tws.py` | `TWSApi`, the narrow interface over IBKR's client, and `Inbox`, the thread-safe queue every callback lands in |
-| `real_client.py` | `TWSApi` implemented with IBKR's `ibapi`. The only module that imports it. Each connect is a new session (its own `EWrapper` and `EClient`, bound to that connect's `Inbox`); the old session's reader is joined first, and the socket connect is bounded by `connect_timeout`. `place_order` raises `LiveSendingDisabled` |
+| `real_client.py` | `TWSApi` implemented with IBKR's `ibapi`. The only module that imports it. Each connect is a new session (its own `EWrapper` and `EClient`, bound to that connect's `Inbox`); the old session's reader is joined first, and no new session starts while it is still running; the socket connect is bounded by `connect_timeout`. `place_order` raises `LiveSendingDisabled` |
 | `config.py` | host, port, per-engine client ID, account ID, mode, and the timing bounds. Every value is required. Credential-like keys are refused |
 | `connection.py` | connect, reconnect with capped exponential backoff, disconnect detection (socket close, IBKR codes 1100/1101/1102/2110/504/1300, an unanswered `reqCurrentTime` heartbeat), and `ConnectionStatus` records for ADR 0019's heartbeat. `maintain()`, called from the adapter's loop, is what brings a lost link back: at once after a drop, or after `restore_timeout` if Gateway has lost IBKR's servers (1100/2110) and not restored them |
 | `account.py` | `read_snapshot`: positions, NetLiquidation, TotalCashValue and ExcessLiquidity for the configured account, as exact decimals with currency |
