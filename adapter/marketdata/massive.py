@@ -3,7 +3,10 @@
 The API key is sent only as a bearer header. It is never put in a URL,
 logged, cached, printed or included in an error message. Requests are spaced
 to Massive's Basic plan limit of 5 a minute; a 429 waits a minute and
-retries, and gives up (fail closed) after ``max_attempts``.
+retries, and gives up (fail closed) after ``max_attempts``. A redirect is
+followed only to Massive itself over HTTPS: urllib copies the Authorization
+header onto a redirected request, so a redirect anywhere else would hand
+the key to that host.
 """
 import datetime as dt
 import json
@@ -51,6 +54,23 @@ def load_key(env=None, secrets_file=None, keychain=keychain_key):
     return key
 
 
+def _is_massive(url):
+    parts = urllib.parse.urlsplit(url)
+    return (parts.scheme, parts.netloc) == ("https", urllib.parse.urlsplit(BASE).netloc)
+
+
+class MassiveOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuses (as the redirect's HTTP error) any redirect off Massive."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _is_massive(urllib.parse.urljoin(req.full_url, newurl)):
+            raise urllib.error.HTTPError(req.full_url, code, "redirect off Massive refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+OPENER = urllib.request.build_opener(MassiveOnlyRedirect())
+
+
 def _strip_key(url):
     parts = urllib.parse.urlsplit(url)
     query = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query) if k != "apiKey"]
@@ -59,7 +79,7 @@ def _strip_key(url):
 
 class Client:
     def __init__(self, key, min_interval=12.5, max_attempts=3, retry_wait=60.0,
-                 opener=urllib.request.urlopen, sleep=time.sleep, clock=time.monotonic):
+                 opener=OPENER.open, sleep=time.sleep, clock=time.monotonic):
         self._key = key
         self.min_interval, self.max_attempts, self.retry_wait = min_interval, max_attempts, retry_wait
         self._opener, self._sleep, self._clock = opener, sleep, clock
@@ -71,7 +91,7 @@ class Client:
     def get_url(self, url):
         url = _strip_key(url)
         parts = urllib.parse.urlsplit(url)
-        if (parts.scheme, parts.netloc) != ("https", urllib.parse.urlsplit(BASE).netloc):
+        if not _is_massive(url):
             raise MarketDataError("refusing a URL outside Massive: {}".format(parts.netloc))
         for attempt in range(1, self.max_attempts + 1):
             if self._last is not None:
@@ -103,9 +123,13 @@ class Client:
         return self.get_url(BASE + path + "?" + urllib.parse.urlencode(sorted(params.items())))
 
     def pages(self, path, params):
-        out = [self.get(path, params)]
+        out, seen = [self.get(path, params)], set()
         while out[-1].get("next_url"):
-            out.append(self.get_url(out[-1]["next_url"]))
+            cursor = out[-1]["next_url"]
+            if cursor in seen:
+                raise MarketDataError("pagination of {} repeated a cursor".format(path))
+            seen.add(cursor)
+            out.append(self.get_url(cursor))
         return out
 
     def grouped(self, day):

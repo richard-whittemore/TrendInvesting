@@ -34,3 +34,15 @@ class CalendarTest(unittest.TestCase):
     def test_outside_the_table_fails_closed(self):
         with self.assertRaises(calendar.OutOfRange):
             calendar.is_trading_day(D(2035, 1, 3))
+
+    def test_early_closes_are_at_one_and_other_sessions_at_four_new_york_time(self):
+        for e in ("2025-07-03", "2025-11-28", "2025-12-24", "2026-11-27", "2026-12-24", "2024-07-03"):
+            close = calendar.session_close(D.fromisoformat(e))
+            self.assertEqual((close.hour, close.minute, str(close.tzinfo)), (13, 0, "America/New_York"), e)
+        # July 3 2026 is the observed holiday, so July 2 is a full day; Dec 24 2027 is a holiday.
+        for f in ("2026-03-27", "2026-07-02", "2027-12-23", "2022-07-01"):
+            self.assertEqual(calendar.session_close(D.fromisoformat(f)).hour, 16, f)
+
+    def test_a_closed_day_has_no_close(self):
+        with self.assertRaises(ValueError):
+            calendar.session_close(D(2026, 4, 3))
