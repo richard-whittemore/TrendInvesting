@@ -106,8 +106,9 @@ Vanguard's anchors, which is 10% until 40 and 30.8% at 53.
   month rather than in steps.
 - The first stretch starts from age 38, not from the first live
   rebalance, so trading that starts later starts above 0%.
-- Retirement is taken as age 65. The birth date is part of the account
-  configuration on the server, not of this repository.
+- Retirement is taken as age 65. The owner's birth year and month (never
+  the day, which the schedule does not use) are a configured value on the
+  server, not part of this repository (owner decision 2026-10-16).
 - Not tested as a path: the research measured fixed mixes (100/0, 90/10,
   70/30, 50/50), and the schedule moves between them. Mixes beyond 50%
   bonds, reached after 65, were not measured. So the schedule gets its own
