@@ -22,9 +22,10 @@ import (
 //   - market.session.calendar: the expected sessions. Every session closed
 //     must be on it, and it must name the session after it, so the handler
 //     knows whether that session is the first of a month;
-//   - per session: each instrument's market.bar.completed (the trend
-//     instrument, the risk-off instrument, universe members and holdings),
-//     then market.session.closed naming exactly those instruments;
+//   - per session: each instrument's market.bar.completed version 2 (the
+//     trend instrument, the risk-off instrument, universe members and
+//     holdings; each instrument's bars on one adjusted base), then
+//     market.session.closed naming exactly those instruments;
 //   - market.universe.snapshot, from the configured source, for the session
 //     it ranks;
 //   - account.snapshot version 4 and market.mark.recorded per instrument;
@@ -69,7 +70,8 @@ type momentumRun struct {
 
 	adjusted map[string]map[string]float64 // instrument -> session -> adjusted close
 	raw      map[string]float64            // instrument -> raw close in the last session
-	bars     map[string]event.CompletedBarPayload
+	bars     map[string]event.CompletedBarAdjustedPayload
+	bases    map[string]string // instrument -> its adjusted view's base
 	universe *event.UniverseSnapshotPayload
 	snapshot *event.AccountCashSnapshotPayload
 	marks    map[string]event.MarkRecordedPayload
@@ -123,7 +125,8 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 		h: h, rule: rule, cfg: m, exec: cfg.Execution,
 		window:   max(m.ScoreLookback+1, m.TrendCloses),
 		adjusted: map[string]map[string]float64{},
-		bars:     map[string]event.CompletedBarPayload{},
+		bars:     map[string]event.CompletedBarAdjustedPayload{},
+		bases:    map[string]string{},
 		marks:    map[string]event.MarkRecordedPayload{},
 		orders:   map[string]*trackedOrder{},
 	}
@@ -186,16 +189,19 @@ func within(sorted []string, lo, hi string) []string {
 }
 
 func (r *momentumRun) applyBar(in event.Envelope) error {
-	p, err := decodeInput[event.CompletedBarPayload](in, event.CompletedBarSchemaVersion)
+	p, err := decodeInput[event.CompletedBarAdjustedPayload](in, event.CompletedBarAdjustedVersion)
 	if err != nil {
 		return err
 	}
 	switch _, seen := r.bars[p.InstrumentID]; {
+	case r.bases[p.InstrumentID] != "" && r.bases[p.InstrumentID] != p.AdjustedBase:
+		return fmt.Errorf("targetweight: bar %s is based at %s; %s's bars are based at %s, and levels on two bases cannot be compared", in.ID, p.AdjustedBase, p.InstrumentID, r.bases[p.InstrumentID])
 	case seen:
 		return fmt.Errorf("targetweight: a second bar for %s before its session closed", p.InstrumentID)
 	case !p.PeriodEnd.After(r.lastEnd):
 		return fmt.Errorf("targetweight: bar %s does not follow the last session %s", p.PeriodEnd, r.lastEnd)
 	}
+	r.bases[p.InstrumentID] = p.AdjustedBase
 	r.bars[p.InstrumentID] = p
 	return nil
 }
@@ -272,12 +278,12 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 		if r.adjusted[id] == nil {
 			r.adjusted[id] = map[string]float64{}
 		}
-		// The split-adjusted close stands in for the split- and
-		// dividend-adjusted one, which market.bar.completed does not yet carry.
-		r.adjusted[id][date] = bar.SplitAdjusted.Close
+		// Scores, volatility and the trend read the split- and
+		// dividend-adjusted close (ADR 0026, point 1).
+		r.adjusted[id][date] = bar.Adjusted.Close
 		r.raw[id] = bar.Raw.Close
 	}
-	r.bars = map[string]event.CompletedBarPayload{}
+	r.bars = map[string]event.CompletedBarAdjustedPayload{}
 	r.last, r.lastEnd = date, p.PeriodEnd
 	r.trim(at)
 

@@ -49,7 +49,7 @@ func marshalPayloads() []validatedPayload {
 		validOrderReleased(), validOrderRefused(), validDegradedEngineState(),
 		validMomentumConfiguration(), validMomentumDecided(), validIRARefused(),
 		validUniverseSnapshot(), validSessionCalendar(), validAccountCashSnapshot(),
-		validLimitOrderLifecycle(), validTargetWeightFill(),
+		validLimitOrderLifecycle(), validTargetWeightFill(), validAdjustedBar(),
 	}
 }
 
@@ -234,6 +234,11 @@ func TestPayloadTimestampsAcceptWritableTimes(t *testing.T) {
 							field.Set(reflect.ValueOf(time.Date(year, at.Month(), at.Day(), at.Hour(), at.Minute(), at.Second(), at.Nanosecond(), time.FixedZone("writable", offset))))
 						}
 					})
+					// Keep an adjusted bar's base on or before its moved
+					// session, so only the timestamps are under test.
+					if v.Type() == reflect.TypeFor[event.CompletedBarAdjustedPayload]() {
+						v.FieldByName("AdjustedBase").SetString("0000-01-01")
+					}
 					requirePayloadMarshals(t, v.Interface().(validatedPayload))
 				})
 			}

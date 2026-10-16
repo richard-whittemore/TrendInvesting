@@ -267,12 +267,8 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 				continue
 			}
 			ids = append(ids, n.id)
-			p := prices[n.id]
-			view := func(label string) event.PriceView {
-				return event.PriceView{View: label, Open: p, High: p, Low: p, Close: p, Volume: n.volume}
-			}
-			apply(s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, fmt.Sprintf("bar:%s:%s", n.id, session), end,
-				event.CompletedBarPayload{InstrumentID: n.id, PeriodEnd: end, SplitAdjusted: view(event.ViewSplitAdjusted), Raw: view(event.ViewRaw)}))
+			apply(s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, fmt.Sprintf("bar:%s:%s", n.id, session), end,
+				adjustedBar(n.id, prices[n.id], n.volume, end)))
 		}
 		if !opts.noUniverse && cal[i+1][:7] != session[:7] {
 			snap := event.UniverseSnapshotPayload{Session: session, Source: "fixture-universe"}

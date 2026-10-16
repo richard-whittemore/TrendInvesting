@@ -72,11 +72,23 @@ func (s *stream) envelope(t *testing.T, eventType string, version uint32, id str
 	}
 }
 
-func bar(price float64, at time.Time) event.CompletedBarPayload {
-	view := func(label string) event.PriceView {
-		return event.PriceView{View: label, Open: price, High: price, Low: price, Close: price, Volume: 1e6}
+// bar is SPY's version 2 bar at price in the adjusted and raw views. Its
+// split-adjusted view is a flat decoy, so a handler that read it instead of
+// the adjusted view would see no signal at all.
+func bar(price float64, at time.Time) event.CompletedBarAdjustedPayload {
+	return adjustedBar("SPY", price, 1e6, at)
+}
+
+// adjustedBar is a version 2 bar based at the first synthetic session.
+func adjustedBar(id string, price, volume float64, at time.Time) event.CompletedBarAdjustedPayload {
+	view := func(label string, p float64) event.PriceView {
+		return event.PriceView{View: label, Open: p, High: p, Low: p, Close: p, Volume: volume}
 	}
-	return event.CompletedBarPayload{InstrumentID: "SPY", PeriodEnd: at, SplitAdjusted: view(event.ViewSplitAdjusted), Raw: view(event.ViewRaw)}
+	return event.CompletedBarAdjustedPayload{
+		CompletedBarPayload: event.CompletedBarPayload{InstrumentID: id, PeriodEnd: at, SplitAdjusted: view(event.ViewSplitAdjusted, 77), Raw: view(event.ViewRaw, price)},
+		Adjusted:            view(event.ViewAdjusted, price),
+		AdjustedBase:        "2024-12-31",
+	}
 }
 
 // account simulates the joint account: a released order fills at the next
@@ -178,7 +190,7 @@ func simulate(t *testing.T, opts options) run {
 		acct.fill(price)
 		ids := []string{"SPY"}
 		if !opts.skip[i] {
-			apply(s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, fmt.Sprintf("bar:%d", i), at, bar(price, at)))
+			apply(s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, fmt.Sprintf("bar:%d", i), at, bar(price, at)))
 		} else {
 			ids = nil
 		}
