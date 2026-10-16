@@ -161,3 +161,13 @@ class Client:
         return self.pages("/v3/reference/dividends", {"ticker": ticker, "limit": 1000,
                                                       "ex_dividend_date.gte": first.isoformat(),
                                                       "ex_dividend_date.lte": last.isoformat()})
+
+    def splits(self, first, last):
+        """Every split with an execution date in first..last (all tickers)."""
+        return self.pages("/v3/reference/splits", {"limit": 1000, "execution_date.gte": first.isoformat(),
+                                                   "execution_date.lte": last.isoformat()})
+
+    def all_dividends(self, first, last):
+        """Every cash dividend with an ex-dividend date in first..last (all tickers)."""
+        return self.pages("/v3/reference/dividends", {"limit": 1000, "ex_dividend_date.gte": first.isoformat(),
+                                                      "ex_dividend_date.lte": last.isoformat()})
