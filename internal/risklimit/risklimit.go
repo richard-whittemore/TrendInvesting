@@ -110,6 +110,32 @@ func (g *Gate) RecordDecision(id string) { g.decided[id] = true }
 // State returns the gate's engine state.
 func (g *Gate) State() string { return g.state }
 
+// Scope returns the instruments a Degraded state freezes, ascending.
+func (g *Gate) Scope() []string { return slices.Clone(g.scope) }
+
+// RestoreState reads back a recorded strategy.engine.state with envelope ID
+// id at schemaVersion, so a restart resumes in the same state and scope (ADR
+// 0019, amended 2026-09-24, "The state survives a restart"; ADR 0026,
+// point 5). Leaving Degraded or Halted is never automatic, so a Halted
+// account never returns to Degraded.
+func (g *Gate) RestoreState(id string, p event.EngineStatePayload, schemaVersion uint32) error {
+	if err := p.ValidateSchema(schemaVersion); err != nil {
+		return fmt.Errorf("risklimit: %w", err)
+	}
+	if id == "" {
+		return errors.New("risklimit: a recorded engine state needs its envelope ID")
+	}
+	if g.state == StateHalted && p.State != event.EngineStateHalted {
+		return fmt.Errorf("risklimit: recorded state %s %s follows Halted, which only recovery leaves", id, p.State)
+	}
+	g.state = StateDegraded
+	if p.State == event.EngineStateHalted {
+		g.state = StateHalted
+	}
+	g.scope = slices.Clone(p.ScopeInstrumentIDs)
+	return nil
+}
+
 // Check decides every order of one decision time's plan, or of one phase of
 // it, in plan order, against book. An order that fails its own payload
 // validation, or belongs to another account, is a defect in the caller and

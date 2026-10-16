@@ -92,6 +92,14 @@ type momentumRun struct {
 
 	orders    map[string]*trackedOrder
 	rebalance *rebalance
+
+	// What a restart recovered (momentum_restart.go): sessions up to
+	// quietUntil are never decided again; book is the decision in force.
+	quietUntil   time.Time
+	lastDecision string
+	book         *event.TargetsDecidedPayload
+	bookID       string
+	recorded     map[string]event.OrderPlannedPayload // recorded plans by client order ID
 }
 
 // trackedOrder is one released order and what the venue has reported of it.
@@ -103,6 +111,11 @@ type trackedOrder struct {
 }
 
 // rebalance is the decision time in progress: what its buy phase needs.
+//
+// A rebalance recovered by a restart has no budget until the replayed
+// history reaches its decision session, which gives back the snapshot and the
+// closes it was planned from; until then each change to the budget waits in
+// ledger, in journal order. It is held while the owner has not cleared it.
 type rebalance struct {
 	decisionID   string
 	session      time.Time
@@ -113,6 +126,14 @@ type rebalance struct {
 	sold         map[string]int64
 	sellsPlanned int
 	budget       *orderplan.Budget
+	buysPlanned  bool // the buy phase has been planned
+
+	recovered     bool
+	decision      event.TargetsDecidedPayload
+	recordedSells []event.OrderPlannedPayload
+	ledger        []func(*orderplan.Budget)
+	held          bool
+	abandoned     bool
 }
 
 func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayload, opts Options) (*Handler, error) {
@@ -183,6 +204,8 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 		return r.applyLifecycle(in)
 	case event.FillEventType:
 		return r.applyFill(in)
+	case event.RebalanceClearedEventType:
+		return r.applyCleared(in)
 	case event.RunCompletedEventType:
 		return nil, nil
 	}
@@ -316,8 +339,13 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 	r.last, r.lastEnd = date, p.PeriodEnd
 	r.trim(at)
 
+	if reb := r.rebalance; reb != nil && reb.recovered && reb.budget == nil && p.PeriodEnd.Equal(reb.session) {
+		if err := r.recoverBasis(); err != nil {
+			return nil, err
+		}
+	}
 	decide, _ := momentum.IsDecisionSession(date, r.calendar[at+1]) // both on the validated calendar
-	if !decide || p.PeriodEnd.Before(r.h.decideFrom) {
+	if !decide || p.PeriodEnd.Before(r.h.decideFrom) || !p.PeriodEnd.After(r.quietUntil) {
 		return nil, nil
 	}
 	return r.decide(in, p.PeriodEnd, at)
@@ -447,6 +475,9 @@ func (r *momentumRun) withhold(p event.TargetsDecidedPayload, end time.Time) (re
 			return event.WithheldMissingBars, fmt.Sprintf("no %s bar in the session closing %s; it is held or targeted", id, end.Format(idTime))
 		}
 	}
+	if reb := r.rebalance; reb != nil && reb.held {
+		return event.WithheldRebalanceInProgress, fmt.Sprintf("the rebalance of %s was in progress at a restart and is held until the owner clears it", reb.decisionID)
+	}
 	for _, id := range slices.Sorted(maps.Keys(r.orders)) {
 		if !r.orders[id].terminal {
 			return event.WithheldRebalanceInProgress, fmt.Sprintf("order %s of an earlier rebalance is not terminal", id)
@@ -467,6 +498,7 @@ func (r *momentumRun) cash(s event.AccountCashSnapshotPayload) float64 {
 // then each through the gate, committing what each released buy may cost.
 func (r *momentumRun) planBuys(b *emissions) {
 	reb := r.rebalance
+	reb.buysPlanned = true
 	buys, _ := orderplan.ScaleBuys(reb.buys, reb.budget.Remaining(), r.exec.MaxFeesPerOrder)
 	for _, o := range r.check(b, reb, buys, reb.sellsPlanned) {
 		reb.budget.Release(o.ClientOrderID, orderplan.BuyCost(o, r.exec.MaxFeesPerOrder))
@@ -572,10 +604,10 @@ func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 	if p.Side == event.OrderSideSell {
 		reb.sold[p.InstrumentID] += p.Quantity
 		if r.exec.CashRule == event.CashRuleTotal {
-			reb.budget.AddProceeds(value - p.Commission)
+			reb.budgetDo(func(b *orderplan.Budget) { b.AddProceeds(value - p.Commission) })
 		}
 	} else {
-		reb.budget.Fill(p.ClientOrderID, value+p.Commission)
+		reb.budgetDo(func(b *orderplan.Budget) { b.Fill(p.ClientOrderID, value+p.Commission) })
 	}
 	if o.filled == o.planned.Quantity {
 		return r.terminal(in, o, p.FilledAt)
@@ -584,7 +616,10 @@ func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 }
 
 // terminal marks o terminal and, when it was the last working sell of the
-// rebalance in progress, plans the buy phase, caused by this report.
+// rebalance in progress, plans the buy phase, caused by this report, unless
+// the rebalance is held or abandoned. In the restart prelude it plans
+// nothing: the earlier run planned the buys in this same input, and their
+// records follow.
 //
 // Every order not yet terminal belongs to the rebalance in progress: a new
 // rebalance is planned only once every order is terminal (withhold). And the
@@ -594,17 +629,33 @@ func (r *momentumRun) terminal(in event.Envelope, o *trackedOrder, at time.Time)
 	o.terminal = true
 	reb := r.rebalance
 	if o.planned.Side == event.OrderSideBuy {
-		reb.budget.Close(o.planned.ClientOrderID)
+		reb.budgetDo(func(b *orderplan.Budget) { b.Close(o.planned.ClientOrderID) })
 		return nil, nil
 	}
-	for _, id := range reb.sells {
-		if !r.orders[id].terminal {
-			return nil, nil
-		}
+	if !r.sellsTerminal() || reb.held || reb.abandoned {
+		return nil, nil
+	}
+	if r.h.prelude > 0 {
+		reb.buysPlanned = true
+		return nil, nil
+	}
+	if reb.budget == nil {
+		return nil, fmt.Errorf("targetweight: the buys of %s cannot be planned: the replayed history never reached its decision session", reb.decisionID)
 	}
 	b := &emissions{h: r.h, in: in, at: at}
 	r.planBuys(b)
 	return b.result()
+}
+
+// sellsTerminal reports whether every released sell of the rebalance in
+// progress is terminal.
+func (r *momentumRun) sellsTerminal() bool {
+	for _, id := range r.rebalance.sells {
+		if !r.orders[id].terminal {
+			return false
+		}
+	}
+	return true
 }
 
 // payload maps a momentum decision to strategy.targets.decided.

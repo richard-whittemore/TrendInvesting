@@ -161,12 +161,44 @@ type momentumOptions struct {
 	beforeClose func(session string) []event.Envelope
 	// riskOffJanuary makes SPY fall over January's last six sessions too.
 	riskOffJanuary bool
+	// restartAfter names inputs after which the run restarts: a fresh
+	// handler is fed the configuration and targetweight.RestartInputs of the
+	// journal so far, and the stream continues, the venue keeping its state.
+	restartAfter []string
+	// inject returns inputs to feed straight after the input afterID.
+	inject func(t *testing.T, afterID string, s *stream) []event.Envelope
 }
 
 type momentumResult struct {
 	run
 	venue  []event.Envelope // the venue reports fed
 	stream *stream
+	// earlier holds each run's journal entries before its restart; run is
+	// the last run's.
+	earlier [][]journal.Entry
+	// restartAt is when the last restart happened.
+	restartAt time.Time
+}
+
+// entryEnvelopes returns the envelopes of entries in journal order, the
+// shape targetweight.RestartInputs reads.
+func entryEnvelopes(entries []journal.Entry) []event.Envelope {
+	out := make([]event.Envelope, len(entries))
+	for i, e := range entries {
+		out[i] = e.Envelope
+	}
+	return out
+}
+
+// entryDecisions returns the decisions among entries.
+func entryDecisions(entries []journal.Entry) []event.Envelope {
+	var out []event.Envelope
+	for _, e := range entries {
+		if e.Kind == journal.KindDecision {
+			out = append(out, e.Envelope)
+		}
+	}
+	return out
 }
 
 // simulateMomentum feeds the synthetic run through a journal Recorder
@@ -182,7 +214,8 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 	if opts.decideFrom != "" {
 		from = opts.decideFrom
 	}
-	handler, err := targetweight.New(strategyVersion, cfg, targetweight.Options{DecideFrom: closeOf(from)})
+	runOptions := targetweight.Options{DecideFrom: closeOf(from)}
+	handler, err := targetweight.New(strategyVersion, cfg, runOptions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +223,32 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 	s := &stream{hash: event.TargetWeightConfigurationHash(cfg)}
 	res := momentumResult{run: run{recorder: rec, hash: s.hash}, stream: s}
 	acct := &ira{settled: 10000, held: map[string]int64{}}
-	apply := func(in event.Envelope) []event.Envelope {
+	start := closeOf(cal[0]).Add(-12 * time.Hour)
+	var apply func(in event.Envelope) []event.Envelope
+	fired := map[string]bool{}
+	restart := func(after event.Envelope) {
+		t.Helper()
+		res.earlier = append(res.earlier, rec.Entries())
+		h, err := targetweight.New(strategyVersion, cfg, runOptions)
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := after.RecordedAt.Add(time.Second)
+		res.restartAt = at
+		inputs, err := targetweight.RestartInputs(entryEnvelopes(rec.Entries()), runOptions, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec = journal.NewRecorder(h)
+		res.recorder = rec
+		apply(s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", at, cfg))
+		for _, in := range inputs {
+			s.sequence++
+			in.Sequence = s.sequence
+			apply(in)
+		}
+	}
+	apply = func(in event.Envelope) []event.Envelope {
 		t.Helper()
 		out, err := rec.Apply(context.Background(), in)
 		if err != nil {
@@ -205,9 +263,19 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 				acct.pending = append(acct.pending, p)
 			}
 		}
+		// Each hook fires once per ID: a restart feeds earlier inputs again.
+		if opts.inject != nil && !fired["inject:"+in.ID] {
+			fired["inject:"+in.ID] = true
+			for _, e := range opts.inject(t, in.ID, s) {
+				out = append(out, apply(e)...)
+			}
+		}
+		if slices.Contains(opts.restartAfter, in.ID) && !fired["restart:"+in.ID] {
+			fired["restart:"+in.ID] = true
+			restart(in)
+		}
 		return out
 	}
-	start := closeOf(cal[0]).Add(-12 * time.Hour)
 	apply(s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", start, cfg))
 	apply(s.envelope(t, event.SessionCalendarEventType, event.SessionCalendarSchemaVersion, "calendar", start,
 		event.SessionCalendarPayload{Source: "fixture", Sessions: cal}))

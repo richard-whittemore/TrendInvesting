@@ -123,7 +123,10 @@ type options struct {
 	// run's orders left.
 	snapshots []event.Envelope
 	from      int // first session fed
-	mutate    func(*event.TargetWeightConfigurationPayload)
+	// restart, when set, is fed straight after the configuration:
+	// targetweight.RestartInputs of an earlier run's journal.
+	restart []event.Envelope
+	mutate  func(*event.TargetWeightConfigurationPayload)
 }
 
 type run struct {
@@ -171,6 +174,11 @@ func simulate(t *testing.T, opts options) run {
 		recovered.Sequence = s.sequence
 		recovered.CausationID, recovered.CorrelationID = "", ""
 		apply(recovered)
+	}
+	for _, in := range opts.restart {
+		s.sequence++
+		in.Sequence = s.sequence
+		apply(in)
 	}
 	for i := opts.from; i < len(opts.closes); i++ {
 		at := sessionEnd(i)

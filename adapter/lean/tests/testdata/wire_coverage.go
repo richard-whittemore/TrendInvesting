@@ -131,6 +131,9 @@ var notYetCrossed = map[string]string{
 	"risk.order.refused":                   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 	"market.universe.snapshot":             "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
 	"market.session.calendar":              "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
+	"strategy.run.options":                 "composed by the target-weight engine's own composition root at start-up and restart, not the adapter",
+	"strategy.restart.recovered":           "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	"operator.rebalance.cleared":           "the owner's recorded clearing of a held IRA rebalance; neither LEAN nor the IBKR adapter sends it",
 }
 
 func main() {

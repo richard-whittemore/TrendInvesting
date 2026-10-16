@@ -47,10 +47,14 @@ type Options struct {
 //
 //   - strategy.target-weight.configuration, first and once, matching the
 //     configuration the handler was built with;
-//   - optionally, straight after it, one recorded strategy.targets.decided:
-//     the last decision of an earlier run. A restart recovers the latched
-//     boost and the target in force from it, never by recomputing (ADR 0026,
-//     point 5); sessions up to its session then only feed the indicators,
+//   - optionally, straight after it, strategy.run.options and the restart
+//     prelude it counts (restart.go): the earlier run's decisions and engine
+//     states, from which a restart recovers the latched boost, the target in
+//     force and the gate's state, never by recomputing (ADR 0026, point 5).
+//     Or, as before run options existed, one recorded
+//     strategy.targets.decided, the last decision of an earlier run, which
+//     recovers the latch and the target in force alone. Either way sessions
+//     up to the recovered decision's session then only feed the indicators,
 //     which are rebuilt from the journal's own bars from the warm-up start;
 //   - per session: the Boost instrument's market.bar.completed, account.snapshot
 //     version 3, market.mark.recorded, then market.session.closed, which decides.
@@ -76,6 +80,18 @@ type Handler struct {
 	started    bool // a bar or session has been applied
 	recovered  bool
 	quietUntil time.Time // sessions at or before it only feed the indicators
+
+	// The restart prelude (restart.go): inputs counts the inputs since the
+	// configuration, optioned is set by the run options, prelude counts the
+	// recorded records still to read of preludeTotal, and lastRecovered is
+	// the last recovered decision's ID.
+	inputs        int
+	optioned      bool
+	prelude       int
+	preludeTotal  int
+	restartID     string
+	restartAt     time.Time
+	lastRecovered string
 
 	indicators *boost.Indicators
 	latched    bool
@@ -139,12 +155,19 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 	if !h.configured && in.Type != event.TargetWeightConfigurationEventType {
 		return nil, fmt.Errorf("targetweight: %s %s arrived before the configuration", in.Type, in.ID)
 	}
-	if h.momentum != nil && in.Type != event.TargetWeightConfigurationEventType {
+	if in.Type == event.TargetWeightConfigurationEventType {
+		return nil, h.applyConfiguration(in)
+	}
+	h.inputs++
+	switch {
+	case in.Type == event.RunOptionsEventType:
+		return nil, h.applyRunOptions(in)
+	case h.prelude > 0:
+		return h.applyPrelude(in)
+	case h.momentum != nil:
 		return h.momentum.apply(in)
 	}
 	switch in.Type {
-	case event.TargetWeightConfigurationEventType:
-		return nil, h.applyConfiguration(in)
 	case event.TargetsDecidedEventType:
 		return nil, h.applyRecovery(in)
 	case event.CompletedBarEventType:
@@ -192,23 +215,15 @@ func (h *Handler) applyConfiguration(in event.Envelope) error {
 }
 
 func (h *Handler) applyRecovery(in event.Envelope) error {
-	if h.recovered || h.started {
-		return errors.New("targetweight: a recovered decision comes once, straight after the configuration")
+	if h.recovered || h.started || h.optioned {
+		return errors.New("targetweight: a recovered decision comes once, straight after the configuration, or in the restart prelude the run options count")
 	}
-	p, err := decodeInput[event.TargetsDecidedPayload](in, event.TargetsDecidedSchemaVersion)
+	p, err := h.decodeRecovered(in)
 	if err != nil {
 		return err
 	}
-	if in.ConfigurationHash != h.hash || p.AccountID != h.cfg.AccountID || p.Boost.InstrumentID != h.cfg.Boost.InstrumentID {
-		return fmt.Errorf("targetweight: recovered decision %s belongs to another configuration or account", in.ID)
-	}
 	h.recovered = true
-	h.latched = p.Boost.LatchedAfter
-	h.inForce, h.inForceSet = p.Boost.TargetInForce, p.Boost.TargetInForceSet
-	if p.Outcome == event.TargetsOutcomeDecided {
-		h.inForce, h.inForceSet = p.Targets[0].Weight, true
-	}
-	h.quietUntil = p.SessionPeriodEnd
+	h.recoverDecision(in.ID, p)
 	return nil
 }
 

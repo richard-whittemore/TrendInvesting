@@ -925,6 +925,14 @@
       "occurrence": 2,
       "category": "unreachable-by-construction",
       "reason": "risklimit.NewIRAGate refuses only an empty account, invalid limits, an unknown mode, a max exposure above 1 or a negative or non-finite fee allowance; New calls TargetWeightConfigurationPayload.Validate first, which refuses each of those for a momentum configuration (TestMomentumConfigurationValidate)."
+    },
+    {
+      "file": "internal/targetweight/restart.go",
+      "function": "RestartInputs",
+      "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
+      "occurrence": 2,
+      "category": "unreachable-by-construction",
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; the run options payload passed Validate immediately before json.Marshal."
     }
   ]
 }
