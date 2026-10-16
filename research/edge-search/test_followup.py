@@ -1560,16 +1560,19 @@ class GlidePathTest(unittest.TestCase):
             def __getitem__(self, k):
                 return types.SimpleNamespace(HasData=True, Price=100.0)
 
+        def holding(k):
+            w = held.get(k, 0.0)
+            return types.SimpleNamespace(Invested=bool(w), IsLong=w > 0, IsShort=w < 0, HoldingsValue=w * equity)
+
         class Book(dict):
             TotalPortfolioValue = equity
 
             def __iter__(self):
-                return iter([])
+                # Like LEAN's portfolio: key/value pairs of every holding.
+                return iter([types.SimpleNamespace(Key=k, Value=holding(k)) for k in held])
 
             def __getitem__(self, k):
-                w = held.get(k, 0.0)
-                return types.SimpleNamespace(Invested=bool(w), IsLong=w > 0, IsShort=w < 0,
-                                             HoldingsValue=w * equity)
+                return holding(k)
 
         algo.Securities, algo.Portfolio = Securities(), Book()
         algo.orders = []
@@ -1590,6 +1593,14 @@ class GlidePathTest(unittest.TestCase):
         # (0.343) the held 0.49 would be 43% off and resized.
         self.assertEqual(algo.orders, [("SHY", 0.147)])
         self.assertEqual(algo.b_used, [0.30])
+
+    def test_a_held_stock_the_months_book_drops_is_sold_and_the_sleeve_still_bought(self):
+        algo = self._trading_algo({"A": 0.686, "OLD": 0.30})
+        algo.GLIDE, algo.BOND_SHARE, algo.MEASURE_FROM = "fixed", 0.30, (2002, 8, 1)
+        algo.Time = _dt.datetime(2010, 3, 1, 8)
+        algo.bond_syms, algo.b_used = {"IEF": "IEF", "SHY": "SHY"}, []
+        algo._trade(algo._glide_targets({"A": 0.98}))             # OLD left the momentum book
+        self.assertEqual(algo.orders, [("OLD", 0), ("IEF", 0.147), ("SHY", 0.147)])
 
     def test_rebalance_passes_its_book_through_the_sleeve_before_trading(self):
         import inspect
