@@ -23,8 +23,8 @@ import (
 
 // RulesVersion is the target-weight module's rules version (ADR 0016),
 // bumped only when a rule changes: 1.1.0 adds the glide path to momentum
-// decisions.
-const RulesVersion = "1.1.0"
+// decisions, 1.2.0 D7-L's substitution of an unaffordable pick.
+const RulesVersion = "1.2.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
