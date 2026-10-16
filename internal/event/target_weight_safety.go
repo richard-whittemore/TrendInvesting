@@ -1,0 +1,523 @@
+package event
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"slices"
+	"time"
+)
+
+// KillSwitchEventType identifies the operator's kill switch for one account
+// (ADR 0026, point 3; docs/live-trading/plan.md section 5, "Kill switch"). It
+// is a recorded input, never a live read of a file or command.
+const KillSwitchEventType = "operator.kill-switch"
+
+// KillSwitchSchemaVersion is the current schema version of KillSwitchPayload.
+const KillSwitchSchemaVersion uint32 = 1
+
+// KillSwitchPayload engages or releases the kill switch. While engaged the
+// gate refuses every order except ADR 0019's one sale back to 98% in a
+// margin account; it changes no engine state (owner decision 2026-10-16).
+type KillSwitchPayload struct {
+	AccountID string    `json:"account_id"`
+	AsOf      time.Time `json:"as_of"`
+	Engaged   bool      `json:"engaged"`
+	// Operator names who set the switch; Detail says how and why.
+	Operator string `json:"operator"`
+	Detail   string `json:"detail"`
+}
+
+// Validate checks the account, time, operator and detail.
+func (p KillSwitchPayload) Validate() error {
+	var errs []error
+	if p.AccountID == "" {
+		errs = append(errs, errors.New("account id is required"))
+	}
+	errs = append(errs, requiredTime("as of", p.AsOf)...)
+	if p.Operator == "" {
+		errs = append(errs, errors.New("operator is required"))
+	}
+	if p.Detail == "" {
+		errs = append(errs, errors.New("detail is required"))
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("invalid kill switch payload: %w", err)
+	}
+	return nil
+}
+
+// BrokerSnapshotEventType identifies one IBKR account snapshot: holdings with
+// their marks, net liquidation, Excess Liquidity and every open order, taken
+// together at one time. It is the broker observation ADR 0019's one sale back
+// to 98% is sized from (amended 2026-10-15, "One price basis"), the reading
+// the margin-cushion alarm watches (plan.md section 5), and the broker
+// quantity a Degraded account's sells are sized within (ADR 0019, amended
+// 2026-09-24). It is an input: replay never asks the broker again.
+const BrokerSnapshotEventType = "account.broker.snapshot"
+
+// BrokerSnapshotSchemaVersion is the current schema version of BrokerSnapshotPayload.
+const BrokerSnapshotSchemaVersion uint32 = 1
+
+// The components of a broker snapshot that can be unreadable. An unreadable
+// component is not zero (ADR 0019, "An unavailable balance is not zero"): it
+// carries no value, and a sale that needs it is not sent.
+const (
+	BrokerComponentExcessLiquidity = "excess-liquidity"
+	BrokerComponentNetLiquidation  = "net-liquidation"
+	BrokerComponentOpenOrders      = "open-orders"
+	BrokerComponentPositions       = "positions"
+)
+
+// The statuses of an open broker order that can still execute. A
+// cancel-pending order may still fill, so it counts as working (ADR 0026,
+// point 2.5).
+const (
+	BrokerOrderWorking       = "working"
+	BrokerOrderPending       = "pending"
+	BrokerOrderCancelPending = "cancel-pending"
+)
+
+// BrokerPosition is one holding as IBKR reports it, in raw shares, with
+// IBKR's current mark for it from the same snapshot.
+type BrokerPosition struct {
+	InstrumentID string  `json:"instrument_id"`
+	Quantity     int64   `json:"quantity"`
+	Mark         float64 `json:"mark"`
+	MarkSet      bool    `json:"mark_set"`
+}
+
+// BrokerOrder is one open order IBKR reports, ours or unknown. ClientOrderID
+// is empty when IBKR reports none; an order is recognised only when the
+// journal released its client ID, which the gate decides, never the producer.
+type BrokerOrder struct {
+	BrokerOrderID     string `json:"broker_order_id"`
+	ClientOrderID     string `json:"client_order_id"`
+	InstrumentID      string `json:"instrument_id"`
+	Side              string `json:"side"`
+	Status            string `json:"status"`
+	RemainingQuantity int64  `json:"remaining_quantity"`
+}
+
+// BrokerSnapshotPayload is one IBKR account snapshot at AsOf.
+type BrokerSnapshotPayload struct {
+	AccountID string    `json:"account_id"`
+	AsOf      time.Time `json:"as_of"`
+	// MarketOpen is the producer's record that the market was open at AsOf;
+	// the alarm counts a missing reading as urgent only while it is.
+	MarketOpen bool `json:"market_open"`
+	// Unreadable lists, strictly ascending, the components IBKR could not
+	// supply; each carries no value.
+	Unreadable      []string `json:"unreadable"`
+	NetLiquidation  float64  `json:"net_liquidation"`
+	ExcessLiquidity float64  `json:"excess_liquidity"`
+	// Positions is strictly ascending by instrument, with no zero rows; an
+	// instrument not listed is not held.
+	Positions []BrokerPosition `json:"positions"`
+	// OpenOrders is strictly ascending by broker order ID.
+	OpenOrders []BrokerOrder `json:"open_orders"`
+}
+
+// Readable reports whether component was read.
+func (p BrokerSnapshotPayload) Readable(component string) bool {
+	return !slices.Contains(p.Unreadable, component)
+}
+
+// Position returns the holding of instrumentID and whether one is listed.
+func (p BrokerSnapshotPayload) Position(instrumentID string) (BrokerPosition, bool) {
+	for _, position := range p.Positions {
+		if position.InstrumentID == instrumentID {
+			return position, true
+		}
+	}
+	return BrokerPosition{}, false
+}
+
+// WorkingSells is the total remaining quantity of every working and pending
+// sell IBKR reports for instrumentID, ours and unknown ones, cancel-pending
+// included (ADR 0019, amended 2026-10-15, "Sized from the broker").
+func (p BrokerSnapshotPayload) WorkingSells(instrumentID string) int64 {
+	var total int64
+	for _, o := range p.OpenOrders {
+		if o.InstrumentID == instrumentID && o.Side == OrderSideSell {
+			total += o.RemainingQuantity
+		}
+	}
+	return total
+}
+
+// Validate checks identity, each component's value against its readability,
+// the positions and the open orders.
+func (p BrokerSnapshotPayload) Validate() error {
+	var errs []error
+	if p.AccountID == "" {
+		errs = append(errs, errors.New("account id is required"))
+	}
+	errs = append(errs, requiredTime("as of", p.AsOf)...)
+	for i, c := range p.Unreadable {
+		switch c {
+		case BrokerComponentExcessLiquidity, BrokerComponentNetLiquidation, BrokerComponentOpenOrders, BrokerComponentPositions:
+		default:
+			errs = append(errs, fmt.Errorf("unreadable component %q is not recognised", c))
+		}
+		if i > 0 && c <= p.Unreadable[i-1] {
+			errs = append(errs, fmt.Errorf("unreadable components must be strictly ascending; %q follows %q", c, p.Unreadable[i-1]))
+		}
+	}
+	if p.Readable(BrokerComponentNetLiquidation) {
+		if !isFinite(p.NetLiquidation) || p.NetLiquidation <= 0 {
+			errs = append(errs, errors.New("net liquidation must be finite and positive"))
+		}
+	} else if p.NetLiquidation != 0 {
+		errs = append(errs, errors.New("an unreadable net liquidation carries no value"))
+	}
+	if p.Readable(BrokerComponentExcessLiquidity) {
+		if !isFinite(p.ExcessLiquidity) {
+			errs = append(errs, errors.New("excess liquidity must be finite"))
+		}
+	} else if p.ExcessLiquidity != 0 {
+		errs = append(errs, errors.New("an unreadable excess liquidity carries no value"))
+	}
+	if !p.Readable(BrokerComponentPositions) && len(p.Positions) != 0 {
+		errs = append(errs, errors.New("unreadable positions carry no rows"))
+	}
+	if !p.Readable(BrokerComponentOpenOrders) && len(p.OpenOrders) != 0 {
+		errs = append(errs, errors.New("unreadable open orders carry no rows"))
+	}
+	for i, position := range p.Positions {
+		if position.InstrumentID == "" {
+			errs = append(errs, fmt.Errorf("position %d: instrument id is required", i+1))
+			continue
+		}
+		if position.Quantity == 0 {
+			errs = append(errs, fmt.Errorf("position %s: quantity must not be zero; an empty holding is stated by absence", position.InstrumentID))
+		}
+		switch {
+		case !isFinite(position.Mark) || position.Mark < 0:
+			errs = append(errs, fmt.Errorf("position %s: mark must be finite and not negative", position.InstrumentID))
+		case position.MarkSet && position.Mark == 0:
+			errs = append(errs, fmt.Errorf("position %s: a set mark must be positive", position.InstrumentID))
+		case !position.MarkSet && position.Mark != 0:
+			errs = append(errs, fmt.Errorf("position %s: mark carries a value but none is set", position.InstrumentID))
+		}
+		if i > 0 && position.InstrumentID <= p.Positions[i-1].InstrumentID {
+			errs = append(errs, fmt.Errorf("positions must be strictly ascending by instrument; %q follows %q", position.InstrumentID, p.Positions[i-1].InstrumentID))
+		}
+	}
+	for i, o := range p.OpenOrders {
+		if o.BrokerOrderID == "" {
+			errs = append(errs, fmt.Errorf("open order %d: broker order id is required", i+1))
+		} else if i > 0 && o.BrokerOrderID <= p.OpenOrders[i-1].BrokerOrderID {
+			errs = append(errs, fmt.Errorf("open orders must be strictly ascending by broker order id; %q follows %q", o.BrokerOrderID, p.OpenOrders[i-1].BrokerOrderID))
+		}
+		if o.InstrumentID == "" {
+			errs = append(errs, fmt.Errorf("open order %d: instrument id is required", i+1))
+		}
+		if o.Side != OrderSideBuy && o.Side != OrderSideSell {
+			errs = append(errs, fmt.Errorf("open order %d: side %q is not buy or sell", i+1, o.Side))
+		}
+		switch o.Status {
+		case BrokerOrderWorking, BrokerOrderPending, BrokerOrderCancelPending:
+		default:
+			errs = append(errs, fmt.Errorf("open order %d: status %q is not working, pending or cancel-pending", i+1, o.Status))
+		}
+		if o.RemainingQuantity <= 0 {
+			errs = append(errs, fmt.Errorf("open order %d: remaining quantity must be positive", i+1))
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("invalid broker snapshot payload: %w", err)
+	}
+	return nil
+}
+
+// MarginAlarmEventType identifies a change in the joint account's
+// margin-cushion alarm (plan.md section 5, "A margin-cushion alarm"): Excess
+// Liquidity as a share of net liquidation, warning below 40%, urgent below
+// 20%, and no reading for 30 minutes while the market is open counting as
+// urgent. It is a decision, emitted only when the level changes.
+const MarginAlarmEventType = "risk.margin.alarm"
+
+// MarginAlarmSchemaVersion is the current schema version of MarginAlarmPayload.
+const MarginAlarmSchemaVersion uint32 = 1
+
+// The alarm's levels.
+const (
+	MarginAlarmClear   = "clear"
+	MarginAlarmWarning = "warning"
+	MarginAlarmUrgent  = "urgent"
+)
+
+// The alarm's causes: a reading's ratio, or no reading for the stale period
+// while the market is open.
+const (
+	MarginAlarmCauseRatio     = "ratio"
+	MarginAlarmCauseNoReading = "no-reading"
+)
+
+// MarginAlarmPayload is the alarm's new level, the reading behind it and the
+// configured thresholds, so the journal alone can check it.
+type MarginAlarmPayload struct {
+	AccountID string `json:"account_id"`
+	// SnapshotID is the account.broker.snapshot envelope evaluated.
+	SnapshotID string    `json:"snapshot_id"`
+	AsOf       time.Time `json:"as_of"`
+	Level      string    `json:"level"`
+	Cause      string    `json:"cause"`
+	// The reading, when the snapshot had one; Ratio is ExcessLiquidity over
+	// NetLiquidation.
+	ExcessLiquidity float64 `json:"excess_liquidity"`
+	NetLiquidation  float64 `json:"net_liquidation"`
+	Ratio           float64 `json:"ratio"`
+	ReadingSet      bool    `json:"reading_set"`
+	// LastReadingAt is the last snapshot with a reading, unset when the run
+	// has had none.
+	LastReadingAt  time.Time `json:"last_reading_at"`
+	LastReadingSet bool      `json:"last_reading_set"`
+	Warning        float64   `json:"warning"`
+	Urgent         float64   `json:"urgent"`
+	StaleMinutes   int       `json:"stale_minutes"`
+	Detail         string    `json:"detail"`
+}
+
+// Validate checks identity, level and cause, the reading against the cause,
+// and the thresholds.
+func (p MarginAlarmPayload) Validate() error {
+	var errs []error
+	if p.AccountID == "" {
+		errs = append(errs, errors.New("account id is required"))
+	}
+	if p.SnapshotID == "" {
+		errs = append(errs, errors.New("snapshot id is required"))
+	}
+	errs = append(errs, requiredTime("as of", p.AsOf)...)
+	switch p.Level {
+	case MarginAlarmClear, MarginAlarmWarning, MarginAlarmUrgent:
+	default:
+		errs = append(errs, fmt.Errorf("level %q is not clear, warning or urgent", p.Level))
+	}
+	switch p.Cause {
+	case MarginAlarmCauseRatio:
+		if !p.ReadingSet {
+			errs = append(errs, errors.New("a ratio alarm carries its reading"))
+		}
+	case MarginAlarmCauseNoReading:
+		if p.ReadingSet {
+			errs = append(errs, errors.New("a no-reading alarm carries no reading"))
+		}
+		if p.Level != MarginAlarmUrgent {
+			errs = append(errs, errors.New("no reading while the market is open is urgent"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("cause %q is not ratio or no-reading", p.Cause))
+	}
+	for _, v := range []struct {
+		name  string
+		value float64
+	}{{"excess liquidity", p.ExcessLiquidity}, {"net liquidation", p.NetLiquidation}, {"ratio", p.Ratio}} {
+		if !isFinite(v.value) {
+			errs = append(errs, fmt.Errorf("%s must be finite", v.name))
+		}
+	}
+	switch {
+	case !p.ReadingSet && (p.ExcessLiquidity != 0 || p.NetLiquidation != 0 || p.Ratio != 0):
+		errs = append(errs, errors.New("a reading carries values only when set"))
+	case p.ReadingSet && !(p.NetLiquidation > 0):
+		errs = append(errs, errors.New("a reading's net liquidation must be positive"))
+	case p.ReadingSet && p.Ratio != p.ExcessLiquidity/p.NetLiquidation:
+		// Excess Liquidity can be negative in a margin deficit, so the
+		// ratio is checked by derivation, not by sign.
+		errs = append(errs, errors.New("ratio must be excess liquidity over net liquidation"))
+	}
+	if p.LastReadingSet {
+		if !writableTime(p.LastReadingAt) || p.LastReadingAt.IsZero() {
+			errs = append(errs, errors.New("last reading at must be a writable time when set"))
+		}
+	} else if !p.LastReadingAt.IsZero() {
+		errs = append(errs, errors.New("last reading at carries a value but none is set"))
+	}
+	if !isFinite(p.Warning) || !isFinite(p.Urgent) || !(0 < p.Urgent && p.Urgent < p.Warning && p.Warning < 1) {
+		errs = append(errs, errors.New("thresholds must satisfy 0 < urgent < warning < 1"))
+	}
+	if p.StaleMinutes < 1 {
+		errs = append(errs, errors.New("stale minutes must be at least 1"))
+	}
+	if p.Detail == "" {
+		errs = append(errs, errors.New("detail is required"))
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("invalid margin alarm payload: %w", err)
+	}
+	return nil
+}
+
+// The two kinds of sale back to 98% of net liquidation.
+const (
+	// SaleKindIncident is ADR 0019's one sale (amended 2026-10-15 and
+	// 2026-10-16): attempted once per incident, tagged with the incident.
+	SaleKindIncident = "incident"
+	// SaleKindUrgent is ADR 0026's urgent Excess Liquidity sale in Normal and
+	// Degraded (point 4), tagged with the urgent alarm decision.
+	SaleKindUrgent = "urgent"
+)
+
+// What fired a sale back to 98%: the strategy's own exit, or the margin
+// alarm turning urgent (ADR 0019, amended 2026-10-15, "When").
+const (
+	SaleTriggerExit         = "exit"
+	SaleTriggerMarginUrgent = "margin-urgent"
+)
+
+// SaleFigures are the sizing figures of a sale back to 98%, all from one
+// broker snapshot (ADR 0019, amended 2026-10-15, "Sized from the broker" and
+// "One price basis"). On an OrderPlannedPayload, HeldQuantity is the
+// broker's holding, ReferencePrice the snapshot's mark, NetLiquidation the
+// snapshot's and TargetWeight the unlevered weight.
+//
+//   - KeepShares = ceil(TargetWeight x NetLiquidation / mark), so the sale
+//     never targets less than 98%.
+//   - ToTarget = holding - KeepShares: what reaches 98%.
+//   - WithinHolding = holding - WorkingSells: so no combination of fills can
+//     open a short.
+//   - NeverBelow = holding - WorkingSells - KeepShares: so the sale and every
+//     working sell together never take exposure below 98% ("never below
+//     it"). It is never larger than the other two.
+//
+// The quantity is the smallest of the three.
+type SaleFigures struct {
+	Kind          string `json:"kind"`
+	Trigger       string `json:"trigger"`
+	SnapshotID    string `json:"snapshot_id"`
+	WorkingSells  int64  `json:"working_sells"`
+	KeepShares    int64  `json:"keep_shares"`
+	ToTarget      int64  `json:"to_target"`
+	WithinHolding int64  `json:"within_holding"`
+	NeverBelow    int64  `json:"never_below"`
+}
+
+// KeepShares returns ceil(target x netLiquidation / mark), the shares a sale
+// back to target keeps (ADR 0019, amended 2026-10-15, "One price basis").
+// The product feeds no addition, so it needs no rounding barrier.
+func KeepShares(target, netLiquidation, mark float64) float64 {
+	return math.Ceil(target * netLiquidation / mark)
+}
+
+func (s SaleFigures) set() bool { return s != SaleFigures{} }
+
+// validate checks a sale's figures against the order carrying them.
+func (s SaleFigures) validate(p OrderPlannedPayload) []error {
+	var errs []error
+	if p.Side != OrderSideSell {
+		errs = append(errs, errors.New("a sale back to 98% is a sell"))
+	}
+	switch s.Kind {
+	case SaleKindIncident, SaleKindUrgent:
+	default:
+		errs = append(errs, fmt.Errorf("sale kind %q is not incident or urgent", s.Kind))
+	}
+	switch s.Trigger {
+	case SaleTriggerExit, SaleTriggerMarginUrgent:
+	default:
+		errs = append(errs, fmt.Errorf("sale trigger %q is not exit or margin-urgent", s.Trigger))
+	}
+	if s.SnapshotID == "" {
+		errs = append(errs, errors.New("sale snapshot id is required: the sale is sized from one broker snapshot"))
+	}
+	if s.WorkingSells < 0 {
+		errs = append(errs, errors.New("sale working sells must not be negative"))
+	}
+	if isFinite(p.TargetWeight) && isFinite(p.NetLiquidation) && p.NetLiquidation > 0 && isFinite(p.ReferencePrice) && p.ReferencePrice > 0 {
+		if keep := KeepShares(p.TargetWeight, p.NetLiquidation, p.ReferencePrice); float64(s.KeepShares) != keep {
+			errs = append(errs, fmt.Errorf("sale keep shares %d is not ceil(%v x %v / %v) = %v", s.KeepShares, p.TargetWeight, p.NetLiquidation, p.ReferencePrice, keep))
+		}
+	}
+	if s.ToTarget != p.HeldQuantity-s.KeepShares {
+		errs = append(errs, errors.New("sale to target must be the holding less the shares kept"))
+	}
+	if s.WithinHolding != p.HeldQuantity-s.WorkingSells {
+		errs = append(errs, errors.New("sale within holding must be the holding less every working sell"))
+	}
+	if s.NeverBelow != p.HeldQuantity-s.WorkingSells-s.KeepShares {
+		errs = append(errs, errors.New("sale never below must be the holding less every working sell and the shares kept"))
+	}
+	if p.Quantity != min(s.ToTarget, s.WithinHolding, s.NeverBelow) {
+		errs = append(errs, errors.New("a sale's quantity is the smallest of to target, within holding and never below"))
+	}
+	return errs
+}
+
+// SaleWithheldEventType identifies a sale back to 98% that fired but was not
+// planned, so the alert can ask the owner to act by hand (ADR 0019, amended
+// 2026-10-15, "No order when it cannot be checked").
+const SaleWithheldEventType = "risk.sale.withheld"
+
+// SaleWithheldSchemaVersion is the current schema version of SaleWithheldPayload.
+const SaleWithheldSchemaVersion uint32 = 1
+
+// The closed set of reasons a sale back to 98% is withheld.
+const (
+	// SaleWithheldUnreadable: no broker snapshot, or its holding, net
+	// liquidation, open orders or mark could not be read.
+	SaleWithheldUnreadable = "broker-values-unreadable"
+	// SaleWithheldUnknownWorkingSell: a working sell on the instrument is
+	// not one the journal released (CONTAINMENT REQUIRED).
+	SaleWithheldUnknownWorkingSell = "unknown-working-sell"
+	// SaleWithheldNothingToSell: the holding is already at or below 98%,
+	// net of every working sell.
+	SaleWithheldNothingToSell = "nothing-to-sell"
+)
+
+// SaleWithheldPayload is a sale back to 98% that was not planned, with the
+// client order ID it would have carried, so a later attempt in the same
+// incident is recognised.
+type SaleWithheldPayload struct {
+	AccountID     string `json:"account_id"`
+	Tag           string `json:"tag"`
+	ClientOrderID string `json:"client_order_id"`
+	InstrumentID  string `json:"instrument_id"`
+	Kind          string `json:"kind"`
+	Trigger       string `json:"trigger"`
+	Reason        string `json:"reason"`
+	Detail        string `json:"detail"`
+	// SnapshotID is the broker snapshot consulted; empty when there was none.
+	SnapshotID string `json:"snapshot_id"`
+}
+
+// Validate checks identity, kind, trigger, reason and detail.
+func (p SaleWithheldPayload) Validate() error {
+	var errs []error
+	if p.AccountID == "" {
+		errs = append(errs, errors.New("account id is required"))
+	}
+	if p.Tag == "" {
+		errs = append(errs, errors.New("tag is required"))
+	}
+	if p.ClientOrderID == "" {
+		errs = append(errs, errors.New("client order id is required"))
+	}
+	if p.InstrumentID == "" {
+		errs = append(errs, errors.New("instrument id is required"))
+	}
+	switch p.Kind {
+	case SaleKindIncident, SaleKindUrgent:
+	default:
+		errs = append(errs, fmt.Errorf("kind %q is not incident or urgent", p.Kind))
+	}
+	switch p.Trigger {
+	case SaleTriggerExit, SaleTriggerMarginUrgent:
+	default:
+		errs = append(errs, fmt.Errorf("trigger %q is not exit or margin-urgent", p.Trigger))
+	}
+	switch p.Reason {
+	case SaleWithheldUnreadable, SaleWithheldUnknownWorkingSell, SaleWithheldNothingToSell:
+	default:
+		errs = append(errs, fmt.Errorf("reason %q is not recognised", p.Reason))
+	}
+	if p.Detail == "" {
+		errs = append(errs, errors.New("detail is required"))
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("invalid sale withheld payload: %w", err)
+	}
+	return nil
+}

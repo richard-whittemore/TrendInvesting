@@ -44,13 +44,30 @@ type Options struct {
 //
 //   - strategy.target-weight.configuration, first and once, matching the
 //     configuration the handler was built with;
-//   - optionally, straight after it, one recorded strategy.targets.decided:
-//     the last decision of an earlier run. A restart recovers the latched
-//     boost and the target in force from it, never by recomputing (ADR 0026,
-//     point 5); sessions up to its session then only feed the indicators,
-//     which are rebuilt from the journal's own bars from the warm-up start;
+//   - optionally, before the first bar or session, an earlier run's recorded
+//     decisions: at most one strategy.targets.decided, its last, from which a
+//     restart recovers the latched boost and the target in force, never by
+//     recomputing; and its strategy.engine.state, strategy.order.planned,
+//     risk.order.released, risk.order.refused, risk.sale.withheld and
+//     risk.margin.alarm records, from which the gate recovers the engine
+//     state and scope, the incident, whether the incident's sale was
+//     attempted, the orders it released and the alarm (ADR 0026, point 5).
+//     Sessions up to the recovered decision's session then only feed the
+//     indicators, which are rebuilt from the journal's own bars from the
+//     warm-up start;
 //   - per session: the Boost instrument's market.bar.completed, account.snapshot
-//     version 3, market.mark.recorded, then market.session.closed, which decides.
+//     version 3, market.mark.recorded, then market.session.closed, which decides;
+//   - at any time after the configuration: operator.kill-switch, and
+//     account.broker.snapshot, which also evaluates the margin-cushion alarm.
+//
+// # The sale back to 98%
+//
+// When a session's planned sell is refused (Boost's exit fired, but the
+// account is Halted, Degraded on the instrument, or the kill switch is on),
+// or a broker snapshot turns the margin alarm urgent, the gate decides
+// whether the sale back to the unlevered weight goes (risklimit.Gate.Sale);
+// the sale, or why it was withheld, is journalled, then checked like any
+// other order.
 //
 // # Fail-closed rules
 //
@@ -136,6 +153,13 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 		return nil, h.applyConfiguration(in)
 	case event.TargetsDecidedEventType:
 		return nil, h.applyRecovery(in)
+	case event.EngineStateEventType, event.OrderPlannedEventType, event.OrderReleasedEventType,
+		event.OrderRefusedEventType, event.SaleWithheldEventType, event.MarginAlarmEventType:
+		return nil, h.applyRecorded(in)
+	case event.KillSwitchEventType:
+		return nil, h.applyKillSwitch(in)
+	case event.BrokerSnapshotEventType:
+		return h.applyBrokerSnapshot(in)
 	case event.CompletedBarEventType:
 		return nil, h.applyBar(in)
 	case event.AccountSnapshotEventType:
@@ -182,7 +206,7 @@ func (h *Handler) applyConfiguration(in event.Envelope) error {
 
 func (h *Handler) applyRecovery(in event.Envelope) error {
 	if h.recovered || h.started {
-		return errors.New("targetweight: a recovered decision comes once, straight after the configuration")
+		return errors.New("targetweight: a recovered decision comes once, before the first bar or session")
 	}
 	p, err := decodeInput[event.TargetsDecidedPayload](in, event.TargetsDecidedSchemaVersion)
 	if err != nil {
@@ -317,23 +341,112 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	if !ok {
 		return b.result()
 	}
-	planID := "order-planned:" + order.ClientOrderID
-	b.add(planID, event.OrderPlannedEventType, event.OrderPlannedSchemaVersion, order)
-	gateOrder := risklimit.Order{PlanID: planID, Planned: order}
+	gateOrder := risklimit.Order{Planned: order}
 	if h.mark != nil && !h.mark.AsOf.Before(p.PeriodEnd) {
 		gateOrder.Mark, gateOrder.MarkSet = h.mark.Price, true
 	}
-	outcomes, err := h.gate.Check([]risklimit.Order{gateOrder})
-	b.fail(err)
-	for _, o := range outcomes {
-		if o.Released != nil {
-			b.add("risk-order-released:"+order.ClientOrderID, event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, *o.Released)
-		} else {
-			b.add("risk-order-refused:"+order.ClientOrderID, event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, *o.Refused)
+	if outcome := b.order(gateOrder); order.Side == event.OrderSideSell && outcome.Refused != nil {
+		b.sale(event.SaleTriggerExit)
+	}
+	return b.result()
+}
+
+// applyRecorded reads back an earlier run's recorded gate decision before
+// the first bar or session (ADR 0026, point 5).
+func (h *Handler) applyRecorded(in event.Envelope) error {
+	if h.started {
+		return fmt.Errorf("targetweight: recorded %s %s arrived after the run began; an earlier run's records come first", in.Type, in.ID)
+	}
+	if in.ConfigurationHash != h.hash {
+		return fmt.Errorf("targetweight: recorded %s %s belongs to another configuration", in.Type, in.ID)
+	}
+	switch in.Type {
+	case event.EngineStateEventType:
+		if in.SchemaVersion != event.EngineStateSchemaVersion && in.SchemaVersion != event.EngineStateScopedVersion {
+			return fmt.Errorf("targetweight: %s schema version %d is not one this build reads (ADR 0015)", in.Type, in.SchemaVersion)
 		}
-		if o.State != nil {
-			b.add(fmt.Sprintf("engine-state:%s:%s", h.cfg.AccountID, p.PeriodEnd.UTC().Format(idTime)), event.EngineStateEventType, o.StateSchemaVersion, *o.State)
+		var p event.EngineStatePayload
+		if err := json.Unmarshal(in.Payload, &p); err != nil {
+			return fmt.Errorf("targetweight: decode %s %s: %w", in.Type, in.ID, err)
 		}
+		if err := h.gate.RestoreState(in.ID, p, in.SchemaVersion); err != nil {
+			return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+		}
+	case event.OrderPlannedEventType:
+		p, err := decodeAccount[event.OrderPlannedPayload](h, in, event.OrderPlannedSchemaVersion, func(p event.OrderPlannedPayload) string { return p.AccountID })
+		if err != nil {
+			return err
+		}
+		h.gate.RestorePlanned(p)
+	case event.OrderReleasedEventType:
+		p, err := decodeAccount[event.OrderReleasedPayload](h, in, event.OrderReleasedSchemaVersion, func(p event.OrderReleasedPayload) string { return p.AccountID })
+		if err != nil {
+			return err
+		}
+		h.gate.RestoreReleased(p)
+	case event.OrderRefusedEventType:
+		// A refused order was never sent, so it leaves nothing to recover.
+		_, err := decodeAccount[event.OrderRefusedPayload](h, in, event.OrderRefusedSchemaVersion, func(p event.OrderRefusedPayload) string { return p.AccountID })
+		return err
+	case event.SaleWithheldEventType:
+		p, err := decodeAccount[event.SaleWithheldPayload](h, in, event.SaleWithheldSchemaVersion, func(p event.SaleWithheldPayload) string { return p.AccountID })
+		if err != nil {
+			return err
+		}
+		h.gate.RestoreWithheld(p)
+	default: // event.MarginAlarmEventType
+		p, err := decodeInput[event.MarginAlarmPayload](in, event.MarginAlarmSchemaVersion)
+		if err != nil {
+			return err
+		}
+		if err := h.gate.RestoreAlarm(in.ID, p); err != nil {
+			return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+		}
+	}
+	return nil
+}
+
+// decodeAccount decodes a recorded decision and checks it is this account's.
+func decodeAccount[T interface{ Validate() error }](h *Handler, in event.Envelope, version uint32, account func(T) string) (T, error) {
+	p, err := decodeInput[T](in, version)
+	if err != nil {
+		return p, err
+	}
+	if account(p) != h.cfg.AccountID {
+		return p, fmt.Errorf("targetweight: recorded %s %s is account %q's; this run decides %q", in.Type, in.ID, account(p), h.cfg.AccountID)
+	}
+	return p, nil
+}
+
+func (h *Handler) applyKillSwitch(in event.Envelope) error {
+	p, err := decodeInput[event.KillSwitchPayload](in, event.KillSwitchSchemaVersion)
+	if err != nil {
+		return err
+	}
+	if err := h.gate.SetKillSwitch(in.ID, p); err != nil {
+		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
+	return nil
+}
+
+// applyBrokerSnapshot records the latest broker observation and journals the
+// margin alarm when its level changes; an alarm turning urgent fires the sale
+// back to 98%. Its emissions are timed at the snapshot.
+func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, error) {
+	p, err := decodeInput[event.BrokerSnapshotPayload](in, event.BrokerSnapshotSchemaVersion)
+	if err != nil {
+		return nil, err
+	}
+	obs, err := h.gate.ObserveBroker(in.ID, p)
+	if err != nil {
+		return nil, fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
+	b := &emissions{h: h, in: in, at: p.AsOf}
+	if obs.Alarm != nil {
+		b.add(obs.AlarmID, event.MarginAlarmEventType, event.MarginAlarmSchemaVersion, *obs.Alarm)
+	}
+	if obs.Urgent {
+		b.sale(event.SaleTriggerMarginUrgent)
 	}
 	return b.result()
 }
@@ -415,4 +528,44 @@ func (h *Handler) stamp(id, eventType string, version uint32, at time.Time, in e
 		StrategyVersion: h.strategyVersion, ConfigurationHash: h.hash,
 		PayloadHash: event.HashPayload(raw), Payload: raw,
 	}, nil
+}
+
+// order journals a planned order, checks it with the gate and journals the
+// gate's outcome and any state change, returning the outcome.
+func (b *emissions) order(o risklimit.Order) risklimit.Outcome {
+	o.PlanID = "order-planned:" + o.Planned.ClientOrderID
+	b.add(o.PlanID, event.OrderPlannedEventType, event.OrderPlannedSchemaVersion, o.Planned)
+	// The gate cannot refuse what this handler has validated (a planned
+	// order built from validated inputs), so an error is a defect and leaves
+	// an empty outcome, which journals nothing.
+	outcomes, err := b.h.gate.Check([]risklimit.Order{o})
+	b.fail(err)
+	var out risklimit.Outcome
+	if len(outcomes) == 1 {
+		out = outcomes[0]
+	}
+	if out.Released != nil {
+		b.add("risk-order-released:"+o.Planned.ClientOrderID, event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, *out.Released)
+	} else if out.Refused != nil {
+		b.add("risk-order-refused:"+o.Planned.ClientOrderID, event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, *out.Refused)
+	}
+	if out.State != nil {
+		b.add(out.StateID, event.EngineStateEventType, out.StateSchemaVersion, *out.State)
+	}
+	return out
+}
+
+// sale asks the gate for the sale back to the unlevered weight after
+// trigger, and journals it and its outcome, or why it was withheld.
+func (b *emissions) sale(trigger string) {
+	h := b.h
+	s, ok, err := h.gate.Sale(trigger, h.cfg.Boost.InstrumentID, h.cfg.Boost.InvestedFraction, h.cfg.Limits.PriceBand)
+	b.fail(err)
+	switch {
+	case !ok:
+	case s.Withheld != nil:
+		b.add("sale-withheld:"+s.Withheld.ClientOrderID, event.SaleWithheldEventType, event.SaleWithheldSchemaVersion, *s.Withheld)
+	default:
+		b.order(risklimit.Order{Planned: *s.Order})
+	}
 }

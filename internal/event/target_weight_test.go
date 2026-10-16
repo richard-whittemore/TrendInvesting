@@ -33,6 +33,10 @@ func validTargetWeightConfiguration() event.TargetWeightConfigurationPayload {
 			MaxOrdersPerDecision: 1,
 			MaxOrderFraction:     0.6,
 			PriceBand:            0.05,
+
+			ExcessLiquidityWarning:      0.4,
+			ExcessLiquidityUrgent:       0.2,
+			ExcessLiquidityStaleMinutes: 30,
 		},
 	}
 }
@@ -175,7 +179,7 @@ func TestTargetWeightConfigurationValidate(t *testing.T) {
 // or an encoding change.
 func TestTargetWeightConfigurationHashStability(t *testing.T) {
 	got := event.TargetWeightConfigurationHash(validTargetWeightConfiguration())
-	const want = "sha256:8c690217bd6b1edf6285b9404cadd66d1ad673e463abba4ac0dd5498f3f9450d"
+	const want = "sha256:4ba21c30a973c7d1aee2ff2a5a5a828630a8cc786b3d620acaa5490e28bed80f"
 	if got != want {
 		t.Fatalf("TargetWeightConfigurationHash = %s, want %s", got, want)
 	}
@@ -201,6 +205,9 @@ func TestTargetWeightConfigurationHashChangesWithEveryField(t *testing.T) {
 		"orders":     func(p *P) { p.Limits.MaxOrdersPerDecision = 2 },
 		"fraction":   func(p *P) { p.Limits.MaxOrderFraction = 0.5 },
 		"band":       func(p *P) { p.Limits.PriceBand = 0.04 },
+		"el warning": func(p *P) { p.Limits.ExcessLiquidityWarning = 0.45 },
+		"el urgent":  func(p *P) { p.Limits.ExcessLiquidityUrgent = 0.25 },
+		"el stale":   func(p *P) { p.Limits.ExcessLiquidityStaleMinutes = 20 },
 	} {
 		p := validTargetWeightConfiguration()
 		mutate(&p)

@@ -214,11 +214,16 @@ type OrderPlannedPayload struct {
 	HeldQuantity   int64   `json:"held_quantity"`
 	ReferencePrice float64 `json:"reference_price"`
 	PriceBand      float64 `json:"price_band"`
+	// Sale is set only on a sale back to 98% of net liquidation (ADR 0019,
+	// amended 2026-10-15 and 2026-10-16; ADR 0026, point 4). It is omitted
+	// otherwise, so an ordinary order's bytes do not change.
+	Sale SaleFigures `json:"sale,omitzero"`
 }
 
 // Validate checks identity, side, type, quantity and prices, and that the
 // limit lies on the side of the reference price its order type requires: a
-// buy's limit at or above it, a sell's at or below.
+// buy's limit at or above it, a sell's at or below. A sale back to 98% also
+// checks its sizing figures.
 func (p OrderPlannedPayload) Validate() error {
 	var errs []error
 	errs = append(errs, orderIdentity(p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.LimitPrice)...)
@@ -254,6 +259,9 @@ func (p OrderPlannedPayload) Validate() error {
 		if p.Side == OrderSideSell && p.LimitPrice > p.ReferencePrice {
 			errs = append(errs, errors.New("a sell's limit must not be above its reference price"))
 		}
+	}
+	if p.Sale.set() {
+		errs = append(errs, p.Sale.validate(p)...)
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid order planned payload: %w", err)
@@ -319,6 +327,19 @@ const (
 	RefusedEngineDegraded = "engine-degraded"
 	// RefusedEngineHalted: the account is Halted, which allows no order.
 	RefusedEngineHalted = "engine-halted"
+	// RefusedKillSwitch: the kill switch is engaged, which refuses every
+	// order except ADR 0019's one sale back to 98% in a margin account
+	// (ADR 0026, point 3). It changes no engine state.
+	RefusedKillSwitch = "kill-switch"
+	// RefusedBrokerHolding: a sell exceeds the broker-reported holding net of
+	// every working or pending sell (ADR 0026, point 2.5), or, while Degraded,
+	// there is no broker snapshot to size it from (ADR 0019, amended
+	// 2026-09-24).
+	RefusedBrokerHolding = "broker-holding"
+	// RefusedSaleAttempted: the incident's one sale back to 98% was already
+	// attempted for the instrument, and is never retried automatically
+	// (ADR 0019, amended 2026-10-15).
+	RefusedSaleAttempted = "sale-attempted"
 )
 
 // RiskFigures are the values the gate checked an order against, so the
@@ -333,6 +354,17 @@ type RiskFigures struct {
 	MarkSet          bool    `json:"mark_set"`
 	MarkDeviation    float64 `json:"mark_deviation"`
 	OrdersInDecision int     `json:"orders_in_decision"`
+	// RiskReducing marks an order ADR 0026 point 4 calls risk-reducing: a
+	// sell within the broker-reported holding net of every working or
+	// pending sell. It is exempt from the order count, size and price band.
+	RiskReducing bool `json:"risk_reducing,omitempty"`
+	// The latest broker snapshot's holding and working sells for the
+	// instrument, when the gate had one (BrokerSet). All four fields are
+	// omitted when unset, so figures without a broker snapshot keep their
+	// bytes.
+	BrokerSet     bool  `json:"broker_set,omitempty"`
+	BrokerHolding int64 `json:"broker_holding,omitempty"`
+	WorkingSells  int64 `json:"working_sells,omitempty"`
 }
 
 func (f RiskFigures) validate() []error {
@@ -361,6 +393,15 @@ func (f RiskFigures) validate() []error {
 	}
 	if f.OrdersInDecision < 0 {
 		errs = append(errs, errors.New("figures orders in decision must not be negative"))
+	}
+	if f.WorkingSells < 0 {
+		errs = append(errs, errors.New("figures working sells must not be negative"))
+	}
+	if !f.BrokerSet && (f.BrokerHolding != 0 || f.WorkingSells != 0) {
+		errs = append(errs, errors.New("figures broker holding and working sells carry values but no broker snapshot is set"))
+	}
+	if f.RiskReducing && !f.BrokerSet {
+		errs = append(errs, errors.New("figures risk-reducing needs the broker snapshot it was sized within"))
 	}
 	return errs
 }
@@ -430,7 +471,8 @@ func (p OrderRefusedPayload) Validate() error {
 	}
 	switch p.Reason {
 	case RefusedUndecidedOrder, RefusedMarginExposure, RefusedOrderCount, RefusedOrderSize,
-		RefusedPriceBand, RefusedMissingMark, RefusedEngineDegraded, RefusedEngineHalted:
+		RefusedPriceBand, RefusedMissingMark, RefusedEngineDegraded, RefusedEngineHalted,
+		RefusedKillSwitch, RefusedBrokerHolding, RefusedSaleAttempted:
 	default:
 		errs = append(errs, fmt.Errorf("refusal reason %q is not recognised", p.Reason))
 	}

@@ -41,7 +41,10 @@ func configuration() event.TargetWeightConfigurationPayload {
 			InstrumentID: "SPY", InvestedFraction: 0.98, BoostSize: 1.5, RSIPeriod: 2, RSIEntry: 10,
 			TrendDays: 200, ExitSMA: 5, WarmUpStart: "2024-01-02",
 		},
-		Limits: event.MarginLimits{MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05},
+		Limits: event.MarginLimits{
+			MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05,
+			ExcessLiquidityWarning: 0.4, ExcessLiquidityUrgent: 0.2, ExcessLiquidityStaleMinutes: 30,
+		},
 	}
 }
 

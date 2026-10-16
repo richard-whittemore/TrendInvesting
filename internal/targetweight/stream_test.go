@@ -24,7 +24,10 @@ func testConfiguration() event.TargetWeightConfigurationPayload {
 			InstrumentID: "SPY", InvestedFraction: 0.98, BoostSize: 1.5, RSIPeriod: 2, RSIEntry: 30,
 			TrendDays: 10, ExitSMA: 3, WarmUpStart: "2025-01-02",
 		},
-		Limits: event.MarginLimits{MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05},
+		Limits: event.MarginLimits{
+			MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05,
+			ExcessLiquidityWarning: 0.4, ExcessLiquidityUrgent: 0.2, ExcessLiquidityStaleMinutes: 30,
+		},
 	}
 }
 
@@ -88,6 +91,18 @@ type account struct {
 	pending []event.OrderReleasedPayload
 }
 
+// take queues every order released among out to fill at the next close.
+func (a *account) take(t *testing.T, out []event.Envelope) {
+	t.Helper()
+	for _, d := range out {
+		if d.Type == event.OrderReleasedEventType {
+			var p event.OrderReleasedPayload
+			decode(t, d, &p)
+			a.pending = append(a.pending, p)
+		}
+	}
+}
+
 func (a *account) fill(price float64) {
 	for _, o := range a.pending {
 		quantity := o.Quantity
@@ -98,6 +113,22 @@ func (a *account) fill(price float64) {
 		a.cash -= float64(float64(quantity) * price)
 	}
 	a.pending = nil
+}
+
+// broker is IBKR's view of the simulated account at the close: the holding
+// at its mark, net liquidation, and Excess Liquidity under a synthetic 25%
+// maintenance requirement, with the market open.
+func (a *account) broker(at time.Time, price float64) event.BrokerSnapshotPayload {
+	value := float64(float64(a.held) * price)
+	netLiq := a.cash + value
+	s := event.BrokerSnapshotPayload{
+		AccountID: "joint", AsOf: at, MarketOpen: true,
+		NetLiquidation: netLiq, ExcessLiquidity: netLiq - float64(0.25*value),
+	}
+	if a.held != 0 {
+		s.Positions = []event.BrokerPosition{{InstrumentID: "SPY", Quantity: a.held, Mark: price, MarkSet: true}}
+	}
+	return s
 }
 
 func (a *account) snapshot(at time.Time, price float64) event.AccountPositionsSnapshotPayload {
@@ -124,6 +155,17 @@ type options struct {
 	snapshots []event.Envelope
 	from      int // first session fed
 	mutate    func(*event.TargetWeightConfigurationPayload)
+	// prelude is an earlier run's recorded decisions, fed after the
+	// configuration (and the recovered decision) and before any bar.
+	prelude []event.Envelope
+	// brokers feeds an account.broker.snapshot each session, after the
+	// account snapshot; brokerMutate changes session i's. With snapshots set,
+	// the earlier run's broker snapshots are fed instead.
+	brokers      bool
+	brokerMutate map[int]func(*event.BrokerSnapshotPayload)
+	// kill engages (true) or releases (false) the kill switch at the start
+	// of session i.
+	kill map[int]bool
 }
 
 type run struct {
@@ -172,10 +214,21 @@ func simulate(t *testing.T, opts options) run {
 		recovered.CausationID, recovered.CorrelationID = "", ""
 		apply(recovered)
 	}
+	for _, e := range opts.prelude {
+		recorded := e
+		s.sequence++
+		recorded.Sequence = s.sequence
+		recorded.CausationID, recorded.CorrelationID = "", ""
+		apply(recorded)
+	}
 	for i := opts.from; i < len(opts.closes); i++ {
 		at := sessionEnd(i)
 		price := opts.closes[i]
 		acct.fill(price)
+		if engaged, ok := opts.kill[i]; ok {
+			apply(s.envelope(t, event.KillSwitchEventType, event.KillSwitchSchemaVersion, fmt.Sprintf("kill:%d", i), at.Add(-time.Hour),
+				event.KillSwitchPayload{AccountID: "joint", AsOf: at.Add(-time.Hour), Engaged: engaged, Operator: "owner", Detail: "fixture"}))
+		}
 		ids := []string{"SPY"}
 		if !opts.skip[i] {
 			apply(s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, fmt.Sprintf("bar:%d", i), at, bar(price, at)))
@@ -193,6 +246,26 @@ func simulate(t *testing.T, opts options) run {
 		} else if !opts.noSnap[i] {
 			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, fmt.Sprintf("snapshot:%d", i), at, acct.snapshot(at, price)))
 		}
+		if opts.brokers {
+			var b event.BrokerSnapshotPayload
+			found := false
+			if opts.snapshots != nil {
+				for _, in := range opts.snapshots {
+					if in.ID == fmt.Sprintf("broker:%d", i) {
+						decode(t, in, &b)
+						found = true
+					}
+				}
+			}
+			if !found {
+				b = acct.broker(at, price)
+			}
+			if m := opts.brokerMutate[i]; m != nil {
+				m(&b)
+			}
+			out := apply(s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, fmt.Sprintf("broker:%d", i), b.AsOf, b))
+			acct.take(t, out)
+		}
 		if !opts.noMark[i] {
 			apply(s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("mark:%d", i), at,
 				event.MarkRecordedPayload{InstrumentID: "SPY", AsOf: at, Price: price, Source: event.AdapterIBKR}))
@@ -204,13 +277,7 @@ func simulate(t *testing.T, opts options) run {
 		}
 		out := apply(s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, fmt.Sprintf("session:%d", i), at,
 			event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: ids}))
-		for _, d := range out {
-			if d.Type == event.OrderReleasedEventType {
-				var p event.OrderReleasedPayload
-				decode(t, d, &p)
-				acct.pending = append(acct.pending, p)
-			}
-		}
+		acct.take(t, out)
 	}
 	r.entries = rec.Entries()
 	return r

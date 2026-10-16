@@ -10,7 +10,10 @@ import (
 const tag = "targets-decided:joint:2025-03-04"
 
 func limits() event.MarginLimits {
-	return event.MarginLimits{MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 0.5, PriceBand: 0.05}
+	return event.MarginLimits{
+		MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 0.5, PriceBand: 0.05,
+		ExcessLiquidityWarning: 0.4, ExcessLiquidityUrgent: 0.2, ExcessLiquidityStaleMinutes: 30,
+	}
 }
 
 func gate(t *testing.T, l event.MarginLimits, mode string) *risklimit.Gate {
@@ -196,6 +199,13 @@ func TestDegradedAllowsNoBuyAndFreezesItsScope(t *testing.T) {
 	refusedFor(t, check(t, g, order(event.OrderSideSell, 1, 10))[0], event.RefusedEngineDegraded)
 	other := order(event.OrderSideSell, 1, 10)
 	other.Planned.InstrumentID = "IEF"
+	// A sell elsewhere continues, sized within the broker's holding (ADR
+	// 0019, amended 2026-09-24): first with no broker snapshot to size it
+	// from, then with one.
+	refusedFor(t, check(t, g, other)[0], event.RefusedBrokerHolding)
+	ief := broker(0)
+	ief.Positions = []event.BrokerPosition{{InstrumentID: "IEF", Quantity: 10, Mark: 1, MarkSet: true}}
+	observe(t, g, "broker:1", ief)
 	released(t, check(t, g, other)[0])
 	otherBuy := order(event.OrderSideBuy, 1, 10)
 	otherBuy.Planned.InstrumentID = "IEF"
@@ -205,11 +215,13 @@ func TestDegradedAllowsNoBuyAndFreezesItsScope(t *testing.T) {
 func TestASecondBreachWidensTheDegradedScope(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	check(t, g, order(event.OrderSideBuy, 5001, 0))
+	ief := broker(0)
+	ief.Positions = []event.BrokerPosition{{InstrumentID: "IEF", Quantity: 5, Mark: 1, MarkSet: true}}
+	observe(t, g, "broker:1", ief)
 	o := order(event.OrderSideSell, 10, 100)
 	o.Planned.InstrumentID = "IEF"
-	o.MarkSet, o.Mark = false, 0
 	got := check(t, g, o)[0]
-	refusedFor(t, got, event.RefusedMissingMark)
+	refusedFor(t, got, event.RefusedBrokerHolding)
 	if got.State == nil || len(got.State.ScopeInstrumentIDs) != 2 {
 		t.Fatalf("scope should name IEF and SPY: %+v", got.State)
 	}

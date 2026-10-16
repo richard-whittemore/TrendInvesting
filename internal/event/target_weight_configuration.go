@@ -18,10 +18,11 @@ const TargetWeightConfigurationEventType = "strategy.target-weight.configuration
 // TargetWeightConfigurationPayload.
 //
 //   - Version 1 holds Boost's strategy fields, the margin account's limits and
-//     the account's identity only. Momentum, the glide path, execution (D5,
-//     D7) and the Excess Liquidity thresholds join in later versions, each a
-//     new hash (ADR 0016).
-const TargetWeightConfigurationSchemaVersion uint32 = 1
+//     the account's identity only.
+//   - Version 2 adds the Excess Liquidity thresholds to the limits (ADR 0026,
+//     point 6). Momentum, the glide path and execution (D5, D7) join in later
+//     versions, each a new hash (ADR 0016).
+const TargetWeightConfigurationSchemaVersion uint32 = 2
 
 // TargetWeightStrategyBoost is the only strategy this schema configures:
 // Boost on SPY for the joint margin account (docs/live-trading/plan.md,
@@ -90,6 +91,14 @@ type MarginLimits struct {
 	// the reference price must lie, and the distance of each limit price from
 	// the reference price (ADR 0026, point 2, "Order type and price").
 	PriceBand float64 `json:"price_band"`
+	// The margin-cushion alarm's thresholds (plan.md section 5; ADR 0026,
+	// point 6): Excess Liquidity as a share of net liquidation, a warning
+	// below ExcessLiquidityWarning (0.40), urgent below ExcessLiquidityUrgent
+	// (0.20), and no reading for ExcessLiquidityStaleMinutes (30) while the
+	// market is open counting as urgent.
+	ExcessLiquidityWarning      float64 `json:"excess_liquidity_warning"`
+	ExcessLiquidityUrgent       float64 `json:"excess_liquidity_urgent"`
+	ExcessLiquidityStaleMinutes int     `json:"excess_liquidity_stale_minutes"`
 }
 
 // WarmUpDate returns WarmUpStart parsed as a UTC date.
@@ -162,6 +171,13 @@ func (l MarginLimits) validate() []error {
 	}
 	if !isFinite(l.PriceBand) || l.PriceBand <= 0 || l.PriceBand >= 1 {
 		errs = append(errs, errors.New("limits price band must lie strictly between 0 and 1"))
+	}
+	if !isFinite(l.ExcessLiquidityWarning) || !isFinite(l.ExcessLiquidityUrgent) ||
+		!(0 < l.ExcessLiquidityUrgent && l.ExcessLiquidityUrgent < l.ExcessLiquidityWarning && l.ExcessLiquidityWarning < 1) {
+		errs = append(errs, errors.New("limits excess liquidity thresholds must satisfy 0 < urgent < warning < 1"))
+	}
+	if l.ExcessLiquidityStaleMinutes < 1 {
+		errs = append(errs, errors.New("limits excess liquidity stale minutes must be at least 1"))
 	}
 	return errs
 }
