@@ -280,6 +280,22 @@ class AdjustTest(unittest.TestCase):
         out = [round(c, 9) for _, c in adjust.adjusted_closes(h, "A", split, div)]
         self.assertEqual(out, [48.0, 48.0, 48.0, 48.0])
 
+    def test_dividends_on_one_ex_date_are_summed_into_one_factor(self):
+        # Ordinary 2 and special 3 against a prior close of 100: (100 - 5) / 100,
+        # not 0.98 x 0.97.
+        h = hist(*zip(DAYS, [100.0, 100.0, 95.0, 95.0]))
+        div = [{"id": "D1", "ticker": "A", "ex_dividend_date": "2026-03-04", "cash_amount": 2.0},
+               {"id": "D2", "ticker": "A", "ex_dividend_date": "2026-03-04", "cash_amount": 3.0}]
+        out = [round(c, 9) for _, c in adjust.adjusted_closes(h, "A", [], div)]
+        self.assertEqual(out, [95.0, 95.0, 95.0, 95.0])
+
+    def test_same_date_dividends_summing_to_the_prior_close_fail_closed(self):
+        h = hist(*zip(DAYS, [10.0] * 4))
+        div = [{"ticker": "A", "ex_dividend_date": "2026-03-04", "cash_amount": 6.0},
+               {"ticker": "A", "ex_dividend_date": "2026-03-04", "cash_amount": 4.0}]
+        with self.assertRaises(adjust.CannotAdjust):
+            adjust.adjusted_closes(h, "A", [], div)
+
     def test_non_finite_or_non_positive_inputs_fail_closed(self):
         nan, inf = float("nan"), float("inf")
         for closes in ([10.0, 0.0, 10.0, 10.0], [10.0, -1.0, 10.0, 10.0], [10.0, nan, 10.0, 10.0],

@@ -7,9 +7,10 @@ price factor per event date, and adjusted price = raw price x the product of
 the factors of all events dated after the bar):
 - a split with execution date D has factor split_from / split_to and applies
   to every bar dated before D;
-- a cash dividend with ex-dividend date D has factor
-  (P - cash) / P, where P is the ticker's raw (unadjusted) close of the
-  session immediately before D, and applies to every bar dated before D;
+- the cash dividends with ex-dividend date D (an ordinary and a special
+  dividend can share one) have one factor (P - total cash) / P, where P is
+  the ticker's raw (unadjusted) close of the session immediately before D,
+  and applies to every bar dated before D;
 - bars on or after the last event are unchanged, so the series is adjusted to
   the last recorded session; QuantConnect adjusts to the present, so levels
   differ from its data by a constant factor per ticker while returns, and
@@ -71,6 +72,7 @@ def adjusted_closes(history, ticker, splits, dividends):
             raise CannotAdjust("{} split on {} has ratio {!r}:{!r}".format(ticker, d, frm, to))
         splits_by_date.append((d, frm / to))
     events = list(splits_by_date)   # (date, factor)
+    cash_by_date = {}   # ex-date -> total cash; one factor per date, not one per row
     for r in dividends:
         if r.get("ticker") != ticker:
             continue
@@ -80,6 +82,8 @@ def adjusted_closes(history, ticker, splits, dividends):
         cash = r.get("cash_amount")
         if not _finite(cash) or cash < 0:
             raise CannotAdjust("{} dividend on {} has cash {!r}".format(ticker, d, cash))
+        cash_by_date[d] = cash_by_date.get(d, 0.0) + cash
+    for d, cash in sorted(cash_by_date.items()):
         pos = next(i for i, (day, _) in enumerate(history) if day >= d)   # first session on or after D
         prior_day = history[pos - 1][0] if pos > 0 else None
         if prior_day is None or prior_day not in by_day:
