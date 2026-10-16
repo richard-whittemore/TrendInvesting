@@ -53,6 +53,8 @@ VARIANTS = {
     # Golden cases for the Go module (ADR 0026): BX_SPY unchanged, with each
     # day of three pullback months in uptrends, and the first decision, logged.
     "BX_GOLD": ("boost/golden_log.py", {"GOLDEN_MONTHS": ((2017, 8), (2019, 5), (2024, 4))}),
+    # Months where BX_SPY (b275c80d) exits and buys again the next session, which BX_GOLD's lack.
+    "BX_GOLD_2": ("boost/golden_log.py", {"GOLDEN_MONTHS": ((2023, 10), (2024, 7))}),
     "BX_SPY_C105": ("boost/template.py", {"MODE": "const", "CONST_LEV": 1.055}),
     "BX_SPY_C110": ("boost/template.py", {"MODE": "const", "CONST_LEV": 1.10}),
     "BX_QQQ": ("boost/template.py", {"TICKER": "QQQ"}),

@@ -1850,11 +1850,18 @@ class BoostGoldenLogTest(unittest.TestCase):
                    for line in old[i1:i2]]
         self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
 
-    def test_the_golden_run_keeps_bx_spys_settings(self):
-        c = _class_constants(*build_variants.VARIANTS["BX_GOLD"])
-        months = c.pop("GOLDEN_MONTHS")
-        self.assertEqual(c, _class_constants(*build_variants.VARIANTS["BX_SPY"]))
-        self.assertTrue(1 <= len(months) <= 3)
+    def test_the_golden_runs_keep_bx_spys_settings(self):
+        for name in ("BX_GOLD", "BX_GOLD_2"):
+            c = _class_constants(*build_variants.VARIANTS[name])
+            months = c.pop("GOLDEN_MONTHS")
+            self.assertEqual(c, _class_constants(*build_variants.VARIANTS["BX_SPY"]), name)
+            self.assertTrue(1 <= len(months) <= 3, name)
+
+    def test_the_second_run_holds_the_months_of_bx_spys_next_day_re_entries(self):
+        # BX_SPY (b275c80d) exits and buys again the next session on
+        # 2023-10-02/03 and 2024-07-23/24; BX_GOLD's months hold none.
+        months = _class_constants(*build_variants.VARIANTS["BX_GOLD_2"])["GOLDEN_MONTHS"]
+        self.assertEqual(tuple(map(tuple, months)), ((2023, 10), (2024, 7)))
 
 if __name__ == "__main__":
     unittest.main()
