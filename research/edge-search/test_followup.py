@@ -1679,5 +1679,60 @@ class GlidePathTest(unittest.TestCase):
         self.assertNotIn("G_OOS_F60", build_variants.VARIANTS)       # no 2016 run reaches 60% bonds
 
 
+class GoldenLogTest(unittest.TestCase):
+    """momentum/golden_log.py: defensive_v2.py logging chosen months' full
+    working, for the Go module's golden cases (ADR 0026, point 7)."""
+
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/golden_log.py", {})
+
+    def test_golden_lines_mark_picks_and_capped_names_and_carry_the_weights(self):
+        sym = namedtuple("Sym", "Value")
+        a, b, c, d, ief = sym("A"), sym("B"), sym("C"), sym("D"), sym("IEF")
+        ranked = [a, b, c, d]
+        scores = {a: 0.9, b: 0.8, c: 0.7, d: 0.6}
+        vol = {a: 0.02, b: 0.03, c: 0.01, d: 0.04}
+        sectors = {a: 311, b: 311, c: 311, d: None}
+        targets = {a: 0.2, b: 0.2, d: 0.09, ief: 0.49}
+        lines = self.module.golden_lines(_dt.datetime(2020, 4, 1, 8), True, 250.0, 280.0, 400, 380,
+                                         ranked, scores, vol, sectors, targets, top_k=3, sector_cap=2)
+        self.assertTrue(all(l.startswith("GOLD") and l.endswith("|") and len(l) <= 190 for l in lines))
+        self.assertEqual(lines[0], "GOLDH 2020-04-01 risk_off=1 spy=250.000000 sma=280.000000 members=400 scored=380|")
+        ranks = ";".join(l[l.index(" ", 6) + 1:-1] for l in lines if l.startswith("GOLDR"))
+        self.assertEqual(ranks.split(";"), ["1:A:0.900000:0.020000:311:P", "2:B:0.800000:0.030000:311:P",
+                                            "3:C:0.700000:0.010000:311:C"])
+        weights = ";".join(l[l.index(" ", 6) + 1:-1] for l in lines if l.startswith("GOLDW"))
+        self.assertEqual(weights.split(";"), ["A:0.200000", "B:0.200000", "D:0.090000", "IEF:0.490000"])
+
+    def test_only_the_chosen_months_are_logged(self):
+        algo = self.module.MomentumResearch()
+        algo.GOLDEN_MONTHS = ((2020, 4), (2022, 6))
+        algo.Time = _dt.datetime(2020, 4, 1, 8)
+        self.assertTrue(algo._golden_month())
+        algo.Time = _dt.datetime(2020, 5, 1, 8)
+        self.assertFalse(algo._golden_month())
+
+    def test_the_template_only_adds_to_defensive_v2(self):
+        with open(os.path.join(HERE, "momentum", "defensive_v2.py")) as f:
+            old = f.read().splitlines()
+        with open(os.path.join(HERE, "momentum", "golden_log.py")) as f:
+            new = f.read().splitlines()
+        matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+        removed = [line for tag, i1, i2, _, _ in matcher.get_opcodes() if tag in ("replace", "delete")
+                   for line in old[i1:i2]]
+        self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
+
+    def test_the_golden_runs_keep_the_combinations_settings(self):
+        for name, base in (("OOS_GOLD_A", "OOS_F_COMBO"), ("OOS_GOLD_B", "OOS_F_COMBO"),
+                           ("IS_GOLD_A", "F_COMBO"), ("IS_GOLD_B", "F_COMBO")):
+            template, params = build_variants.VARIANTS[name]
+            self.assertEqual(template, "momentum/golden_log.py")
+            c = _class_constants(template, params)
+            months, k = c.pop("GOLDEN_MONTHS"), c.pop("GOLDEN_TOP_K")
+            self.assertEqual(c, _class_constants(*build_variants.VARIANTS[base]), name)
+            self.assertTrue(1 <= len(months) <= 3 and k == 40, name)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -128,6 +128,11 @@ backtest runs on their servers.
   universe on one date with each stock's Morningstar sector; `compare.py`,
   local, sets those against the GICS sectors in an iShares holdings file
   and lists the disagreements. Tested by `sectors/test_sectors.py`.
+- `momentum/golden_log.py` — golden cases for the Go target-weight module
+  (`docs/adr/0026-*.md`, point 7). `defensive_v2.py` with additions only:
+  for each month in `GOLDEN_MONTHS` it logs the risk-off inputs, the top
+  40 ranked names with score, volatility, sector and cap outcome, and the
+  final weights; the `Golden` statistic counts the lines logged.
 - `boost/multi.py` — Boost's rule, unchanged, on each fund of a blend at
   once (US large, mid and small caps, optionally with developed markets
   outside the US), each fund boosted on its own signal; `bh` is the same
