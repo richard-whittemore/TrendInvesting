@@ -1679,5 +1679,69 @@ class GlidePathTest(unittest.TestCase):
         self.assertNotIn("G_OOS_F60", build_variants.VARIANTS)       # no 2016 run reaches 60% bonds
 
 
+class BoostGoldenLogTest(unittest.TestCase):
+    """boost/golden_log.py: template.py logging each day of chosen months,
+    and its first decision, for the Go module's golden cases (ADR 0026)."""
+
+    def setUp(self):
+        self.module = _load_template(self, "boost/golden_log.py", {})
+
+    def test_the_day_line_carries_the_inputs_and_the_state(self):
+        line = self.module.boost_line(_dt.datetime(2019, 5, 13, 16), 280.5, 6.25, 275.0, 285.0, True, 1.47)
+        self.assertEqual(line, "BGOLD 2019-05-13 close=280.500000 rsi2=6.250000 sma200=275.000000 "
+                               "sma5=285.000000 sig=1 want=1.470000|")
+        self.assertLessEqual(len(line), 190)
+
+    def test_an_indicator_not_ready_is_written_as_a_dash(self):
+        line = self.module.boost_line(_dt.datetime(1993, 9, 1, 16), 45.0, None, None, 44.0, False, 0.98)
+        self.assertIn("rsi2=- sma200=-", line)
+
+    def test_ondata_logs_the_first_decision_and_the_chosen_months_days_only(self):
+        algo = _algorithm(self.module, "BoostResearch")
+        algo.GOLDEN_MONTHS = ((1992, 2),)
+        algo.logs, algo.stats = [], {}
+        algo.Log = algo.logs.append
+        algo.SetRuntimeStatistic = lambda k, v: algo.stats.__setitem__(k, v)
+        algo.IsWarmingUp = True
+        _day(algo, when=_dt.datetime(1992, 1, 2))          # warm-up: nothing
+        algo.IsWarmingUp = False
+        _day(algo, when=_dt.datetime(1992, 1, 15))         # the first decision, outside the months
+        _day(algo, when=_dt.datetime(1992, 1, 16))         # skipped
+        algo.rsi2 = _Indicator(5.0)
+        _day(algo, when=_dt.datetime(1992, 2, 3))          # chosen month: a boost begins
+        self.assertEqual([l.split()[1] for l in algo.logs], ["1992-01-15", "1992-02-03"])
+        self.assertIn("sig=0 want=0.980000|", algo.logs[0])
+        self.assertIn("rsi2=5.000000", algo.logs[1])
+        self.assertIn("sig=1 want=1.470000|", algo.logs[1])
+        self.assertEqual(algo.orders, [{"SPY": 0.98}, {"SPY": 1.47}])   # trading unchanged
+        algo.OnEndOfAlgorithm()
+        self.assertEqual(algo.stats["Golden"], "months=1 lines=2")
+
+    def test_only_chosen_months_and_the_first_decision_are_logged(self):
+        algo = self.module.BoostResearch()
+        algo.GOLDEN_MONTHS = ((2019, 5),)
+        algo.Time = _dt.datetime(2019, 5, 2, 16)
+        self.assertTrue(algo._golden_day(first=False))
+        algo.Time = _dt.datetime(2019, 6, 3, 16)
+        self.assertFalse(algo._golden_day(first=False))
+        self.assertTrue(algo._golden_day(first=True))
+
+    def test_the_template_only_adds_to_template_py(self):
+        with open(os.path.join(HERE, "boost", "template.py")) as f:
+            old = f.read().splitlines()
+        with open(os.path.join(HERE, "boost", "golden_log.py")) as f:
+            new = f.read().splitlines()
+        matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+        removed = [line for tag, i1, i2, _, _ in matcher.get_opcodes() if tag in ("replace", "delete")
+                   for line in old[i1:i2]]
+        self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
+
+    def test_the_golden_run_keeps_bx_spys_settings(self):
+        c = _class_constants(*build_variants.VARIANTS["BX_GOLD"])
+        months = c.pop("GOLDEN_MONTHS")
+        self.assertEqual(c, _class_constants(*build_variants.VARIANTS["BX_SPY"]))
+        self.assertTrue(1 <= len(months) <= 3)
+
+
 if __name__ == "__main__":
     unittest.main()
