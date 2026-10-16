@@ -235,8 +235,21 @@ Lightsail VM (Ubuntu, $12/month, US East)
 
 - **Prices**: daily bars from Massive (#326), not IBKR's historical bars:
   the data step records raw bars and Massive's split adjustment, and
-  derives the dividend-adjusted closes from the raw bars and recorded
-  dividends. SPY, IEF, SHY and the held stocks are fetched per instrument
+  derives the adjusted closes from the raw bars and recorded dividends.
+  Each use has one price series:
+  - **signals** (momentum, volatility, trend) and target-weight weights use
+    split- and dividend-adjusted closes (ADR 0026, point 1), adjusted
+    *forward* from a fixed base date (#343, #363). A later dividend never
+    rewrites a stored level, which is the look-ahead ADR 0004 rules out for
+    a backward-adjusted series, so a replayed decision matches the live one.
+    Its returns match QuantConnect's backward series; its levels differ by
+    a constant, so signals use only ratios. This is a third view beside
+    ADR 0004's split-adjusted and raw views, and the Go core labels it as
+    such;
+  - **orders and the $5 floor** use the raw, unadjusted trade close (ADR
+    0004: raw closes trade), and the account is accounted at raw prices.
+
+  SPY, IEF, SHY and the held stocks are fetched per instrument
   (about three requests each at the free plan's 5 a minute, one overnight
   run); the ranked universe's history comes from the grouped daily bars,
   one request a session, with bulk splits and dividends.
@@ -261,7 +274,8 @@ Lightsail VM (Ubuntu, $12/month, US East)
     the **unadjusted** trade close and volume (for IBKR, `TRADES` bars, not
     `ADJUSTED_LAST`), since an adjusted close can move a stock across $5 or
     in and out of the top 500. The momentum, volatility and trend
-    calculations keep using split- and dividend-adjusted closes;
+    calculations use the split- and dividend-adjusted closes described
+    under Prices;
   - **data source** for that one session's close and volume for every
     listed stock: **chosen 2026-10-16, Massive's free Basic plan** (grouped
     daily bars, two years of history, individual use; the owner's account,
