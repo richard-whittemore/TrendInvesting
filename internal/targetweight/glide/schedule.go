@@ -79,7 +79,10 @@ func AgeMonths(birth string, rebalance time.Time) (int, error) {
 // (glide_path.py:59-71 glide_share, with age = months/12): 0 at or before the
 // first anchor, linear between anchors, the last anchor's share after it.
 // Anchors must have strictly increasing ages, shares in [0, 1] and a first
-// share of 0 (the share is 0 up to the first anchor), else it fails closed.
+// share of 0, else it fails closed. The zero first share is an
+// implementation invariant, not a strategy rule: glide_share returns 0 up to
+// the first anchor (glide_path.py:59-71), so a nonzero first share would make
+// b jump at that age (plan.md section 2: 0% at 38).
 func BondShare(anchors []Anchor, ageMonths int) (float64, error) {
 	if len(anchors) < 2 {
 		return 0, errors.New("glide: need at least two anchors")
