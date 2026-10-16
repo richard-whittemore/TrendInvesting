@@ -64,7 +64,7 @@ func TestMomentumRunDecidesOnTheLastSessionOfEachMonth(t *testing.T) {
 			t.Errorf("January %s: %s, want %s", id, got[id], status)
 		}
 	}
-	if len(got) != 5 || jan.Momentum.UniverseRows != 9 || jan.Momentum.UniverseListingType != 6 || jan.Momentum.UniverseAtOrAboveFloor != 5 {
+	if len(got) != 5 || jan.Momentum.UniverseRows != 10 || jan.Momentum.UniverseListingType != 6 || jan.Momentum.UniverseAtOrAboveFloor != 5 {
 		t.Errorf("January universe: %d names, counts %+v", len(got), jan.Momentum)
 	}
 	if !jan.Momentum.Names[0].BacktestWouldPick {

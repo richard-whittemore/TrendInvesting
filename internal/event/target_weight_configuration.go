@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"time"
 )
@@ -24,9 +25,13 @@ const TargetWeightConfigurationEventType = "strategy.target-weight.configuration
 //     parameters, the universe data source and the sector-label sources) and
 //     Execution (the D5 cash rule, the share quantity rule, the fee
 //     allowance). StrategyID chooses which strategy section is set; the other
-//     is zero. The glide path and the Excess Liquidity thresholds join in
-//     later versions, each a new hash (ADR 0016).
-const TargetWeightConfigurationSchemaVersion uint32 = 2
+//     is zero.
+//   - Version 3 adds Glide, the glide path for an IRA (ADR 0026, point 6,
+//     "Glide path"): the schedule's anchors, the retirement age, the bond
+//     sleeve's split and the owner's birth year and month. A momentum
+//     configuration requires it; a Boost one sets none. The Excess Liquidity
+//     thresholds join in a later version, a new hash (ADR 0016).
+const TargetWeightConfigurationSchemaVersion uint32 = 3
 
 // The strategies this schema configures: Boost on SPY for the joint margin
 // account, and the momentum combination for an IRA (docs/live-trading/plan.md,
@@ -85,6 +90,8 @@ type TargetWeightConfigurationPayload struct {
 	// Momentum holds the momentum rule's parameters, set only for StrategyID
 	// momentum.
 	Momentum MomentumConfiguration `json:"momentum,omitzero"`
+	// Glide holds the IRA's glide path, set only for StrategyID momentum.
+	Glide GlideConfiguration `json:"glide,omitzero"`
 	// Execution holds the IRA execution rules, set only for StrategyID
 	// momentum.
 	Execution ExecutionConfiguration `json:"execution,omitzero"`
@@ -132,6 +139,43 @@ type MomentumConfiguration struct {
 	// order of preference (plan.md section 4, "Sectors", "Chosen": GICS from
 	// IWV, then Nasdaq's screener).
 	SectorSources []string `json:"sector_sources"`
+}
+
+// GlideConfiguration is an IRA's glide path (plan.md section 2, "Bond sleeve
+// and glide path", decision D2; ADR 0026, point 6): the bond share b set by
+// the owner's age in whole months on the rebalance date, held in BondFunds;
+// the momentum sleeve holds the rest. The schedule's arithmetic is
+// internal/targetweight/glide's.
+type GlideConfiguration struct {
+	// Anchors are the schedule's corners in order of age: b is 0 at or
+	// before the first, linear in months between two, and the last's share
+	// after it (plan.md section 2 table: 38/0, 53/0.308, 65/0.5, 72/0.7;
+	// research/edge-search/momentum/glide_path.py:59-71).
+	Anchors []GlideAnchor `json:"anchors"`
+	// RetirementAgeYears is the retirement age the schedule assumes (65,
+	// plan.md section 2), one of the anchors' ages.
+	RetirementAgeYears int `json:"retirement_age_years"`
+	// BondFunds is the bond sleeve's split, in order: IEF 0.5, SHY 0.5 (D2;
+	// glide_path.py:177). Fractions are positive and sum to 1.
+	BondFunds []BondFund `json:"bond_funds"`
+	// Birth is the owner's birth year and month, YYYY-MM, never the day
+	// (owner decision 2026-10-16). Its value is supplied only by the
+	// server's configuration and is never committed to the repository
+	// (plan.md section 2); every value in this repository is synthetic.
+	Birth string `json:"birth"`
+}
+
+// GlideAnchor is one corner of the glide schedule: bond share Share at the
+// owner's age AgeYears whole years.
+type GlideAnchor struct {
+	AgeYears int     `json:"age_years"`
+	Share    float64 `json:"share"`
+}
+
+// BondFund is one fund of the bond sleeve and its fraction of the sleeve.
+type BondFund struct {
+	InstrumentID string  `json:"instrument_id"`
+	Fraction     float64 `json:"fraction"`
 }
 
 // ExecutionConfiguration is an IRA's execution rules (ADR 0026, points 2 and 6).
@@ -198,9 +242,17 @@ func (p TargetWeightConfigurationPayload) Validate() error {
 		if !p.Momentum.isZero() || p.Execution != (ExecutionConfiguration{}) {
 			errs = append(errs, errors.New("a boost configuration sets no momentum or execution section"))
 		}
+		if !p.Glide.isZero() {
+			errs = append(errs, errors.New("a boost configuration sets no glide section"))
+		}
 	case TargetWeightStrategyMomentum:
 		errs = append(errs, p.Momentum.validate()...)
 		errs = append(errs, p.Execution.validate()...)
+		if p.Glide.isZero() {
+			errs = append(errs, errors.New("a momentum configuration's glide path is required"))
+		} else {
+			errs = append(errs, p.Glide.validate()...)
+		}
 		if p.Boost != (BoostConfiguration{}) {
 			errs = append(errs, errors.New("a momentum configuration sets no boost section"))
 		}
@@ -315,6 +367,76 @@ func (c MomentumConfiguration) validate() []error {
 		}
 	}
 	return errs
+}
+
+func (c GlideConfiguration) isZero() bool {
+	return len(c.Anchors) == 0 && c.RetirementAgeYears == 0 && len(c.BondFunds) == 0 && c.Birth == ""
+}
+
+func (c GlideConfiguration) validate() []error {
+	var errs []error
+	if len(c.Anchors) < 2 {
+		errs = append(errs, errors.New("glide path needs at least two anchors"))
+	}
+	retirement := false
+	for i, a := range c.Anchors {
+		switch {
+		case a.AgeYears < 0:
+			errs = append(errs, fmt.Errorf("glide anchor %d age must not be negative", i+1))
+		case i > 0 && a.AgeYears <= c.Anchors[i-1].AgeYears:
+			errs = append(errs, fmt.Errorf("glide anchor %d age does not increase", i+1))
+		}
+		if !isFinite(a.Share) || a.Share < 0 || a.Share > 1 {
+			errs = append(errs, fmt.Errorf("glide anchor %d share must lie in [0, 1]", i+1))
+		}
+		retirement = retirement || a.AgeYears == c.RetirementAgeYears
+	}
+	// The schedule is 0 at or before the first anchor (glide_path.py:62), so
+	// a first anchor with a share would be a step the schedule never takes.
+	if len(c.Anchors) > 0 && c.Anchors[0].Share != 0 {
+		errs = append(errs, errors.New("glide first anchor share must be 0: b is 0 up to it"))
+	}
+	if !retirement {
+		errs = append(errs, fmt.Errorf("glide retirement age %d is not an anchor's age", c.RetirementAgeYears))
+	}
+	if len(c.BondFunds) == 0 {
+		errs = append(errs, errors.New("glide bond fund split is required"))
+	}
+	total := 0.0
+	for i, f := range c.BondFunds {
+		switch {
+		case f.InstrumentID == "":
+			errs = append(errs, fmt.Errorf("glide bond fund %d has an empty instrument id", i+1))
+		case slices.ContainsFunc(c.BondFunds[:i], func(g BondFund) bool { return g.InstrumentID == f.InstrumentID }):
+			errs = append(errs, fmt.Errorf("glide bond fund %s is repeated", f.InstrumentID))
+		}
+		if !isFinite(f.Fraction) || f.Fraction <= 0 {
+			errs = append(errs, fmt.Errorf("glide bond fund %d fraction must be finite and positive", i+1))
+		}
+		total += f.Fraction
+	}
+	if len(c.BondFunds) > 0 && !(math.Abs(total-1) <= 1e-9) {
+		errs = append(errs, errors.New("glide bond fund fractions must sum to 1"))
+	}
+	if !validBirth(c.Birth) {
+		errs = append(errs, errors.New("glide birth value must be YYYY-MM with a month 01-12"))
+	}
+	return errs
+}
+
+// validBirth reports whether s is exactly four digits, a hyphen and a month
+// 01 to 12. The value itself is never echoed into an error.
+func validBirth(s string) bool {
+	if len(s) != 7 || s[4] != '-' {
+		return false
+	}
+	for i, c := range s {
+		if i != 4 && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	month := int(s[5]-'0')*10 + int(s[6]-'0')
+	return month >= 1 && month <= 12
 }
 
 func (c ExecutionConfiguration) validate() []error {
