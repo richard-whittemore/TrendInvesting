@@ -107,3 +107,24 @@ application and replace LEAN for live trading only.
   send a bad order.
 - If QuantConnect's licensing or prices change, this decision can be
   revisited; nothing in the Go application depends on which adapter runs.
+
+## Amendment (2026-10-16): `ibapi` is fetched and verified, not vendored
+
+Point 4 said `ibapi` is "vendored from IBKR's distribution". That is
+withdrawn. This repository is public, and IBKR's TWS API is distributed under
+IBKR's own licence terms, which may not allow publishing its source here.
+
+*Owner decision 2026-10-16 (#327, option b):*
+
+- **What is committed:** one pinned `ibapi` version and the SHA-256 of IBKR's
+  distribution archive for it. No IBKR source is committed.
+- **How it is installed:** a fetch-and-verify step downloads IBKR's archive
+  and refuses to install it unless its SHA-256 equals the committed one. It
+  runs on the live server and on the paper-test machine only.
+- **CI** keeps running against the fake TWS client
+  (`adapter/ibkr/tests/fake_tws.py`), so it needs no `ibapi`.
+- **Unchanged:** the pin to a single released version, IBKR's own client
+  rather than PyPI's lagging package or `ib_async`, and repeating the
+  paper-account coverage test on a version change.
+- **The version and checksum are not chosen here.** They are set, from
+  IBKR's official download page, in #327's next PR.

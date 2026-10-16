@@ -244,7 +244,7 @@ func TestRunRefusesAResumeItCannotHonour(t *testing.T) {
 		}, "configuration input"},
 		"another build": {func(o *options) {
 			o.logPath, o.resumePath, o.build = filepath.Join(dir, "b.log"), firstLog, "other-build"
-		}, "not this run"},
+		}, "does not resume across builds"},
 	} {
 		opts := base
 		opts.outPath = filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".jsonl")
@@ -252,6 +252,72 @@ func TestRunRefusesAResumeItCannotHonour(t *testing.T) {
 		err := run(context.Background(), opts, io.Discard)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: run() = %v, want an error saying %q", name, err, tc.want)
+		}
+	}
+}
+
+// TestAResumeAcrossBuildsNamesTheUpgradeProcedure pins the owner's decision of
+// 2026-10-16 (#337): a build upgrade ends the run at the end of a session and
+// starts a fresh run on the new build, never a resume. The refusal must name
+// both builds and the procedure, and must not be confused with a changed
+// configuration.
+func TestAResumeAcrossBuildsNamesTheUpgradeProcedure(t *testing.T) {
+	cfg := testConfiguration(t)
+	hash := event.ConfigurationHash(cfg)
+	old := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "build-1"))
+	next := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "build-2"))
+	err := checkResumable(journal.Recovery{Header: old}, next, event.Envelope{})
+	if err == nil {
+		t.Fatal("checkResumable accepted a log from another build")
+	}
+	for _, want := range []string{"build-1", "build-2", "2026-10-16", "end of a session", "fresh run", "docs/runbooks/durable-log.md"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q does not say %q", err, want)
+		}
+	}
+
+	// A different configuration is a different refusal: the upgrade
+	// procedure would mislead an operator who changed -config.
+	other := journal.NewLogHeader("sha256:other", next.StrategyVersion)
+	err = checkResumable(journal.Recovery{Header: old}, other, event.Envelope{})
+	if err == nil || strings.Contains(err.Error(), "docs/runbooks/durable-log.md") {
+		t.Fatalf("a changed configuration got %v, want the generic refusal", err)
+	}
+}
+
+// TestTheDurableLogIsRequiredOutsideABacktest pins #336 as the owner decided
+// on 2026-10-16: an engine that serves a dry-run, paper or live session
+// refuses to start without -log, so journal-before-send always holds; a
+// backtest (the default) keeps -log optional.
+func TestTheDurableLogIsRequiredOutsideABacktest(t *testing.T) {
+	dir := t.TempDir()
+	base := options{socketPath: filepath.Join(shortSocketDir(t), "e.sock"), configPath: testConfigPath, asOf: testAsOf, build: "test-build"}
+	for _, mode := range []string{"dry-run", "paper", "live"} {
+		opts := base
+		opts.mode = mode
+		opts.outPath = filepath.Join(dir, mode+".jsonl")
+		err := run(context.Background(), opts, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "-log is required") || !strings.Contains(err.Error(), mode) {
+			t.Errorf("mode %s without -log: run() = %v, want a refusal naming -log and the mode", mode, err)
+		}
+	}
+	opts := base
+	opts.mode, opts.outPath = "sandbox", filepath.Join(dir, "sandbox.jsonl")
+	if err := run(context.Background(), opts, io.Discard); err == nil || !strings.Contains(err.Error(), "-mode") {
+		t.Errorf("an unknown mode: run() = %v, want a refusal naming -mode", err)
+	}
+
+	// With -log a live mode starts; the backtest modes need none.
+	for _, mode := range []string{"", "backtest", "paper"} {
+		socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
+		opts := options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, build: "test-build", mode: mode,
+			outPath: filepath.Join(dir, "ok-"+mode+".jsonl")}
+		if mode == "paper" {
+			opts.logPath = filepath.Join(dir, "ok-paper.log")
+		}
+		stop := startEngine(t, opts)
+		if err := stop(); err != nil {
+			t.Errorf("mode %q: %v", mode, err)
 		}
 	}
 }

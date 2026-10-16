@@ -218,3 +218,26 @@ continues the recovered sequence. A torn input is sent again.
   operator checks, and how a new run is started from a reconciled baseline
   (ADR 0019's recovery procedure).
 - Every existing journal, journal test and replay test is unchanged.
+
+## Proposed addition (owner's decisions of 2026-10-16, #336 and #337)
+
+*This section is added while the ADR is still Proposed and under the owner's
+review. It records two decisions the owner made on 2026-10-16; it does not
+change the ADR's status, and the owner may amend it in that review.*
+
+- **The durable log is mandatory before paper trading (#336).** This replaces
+  the Consequences' statement that `-log` is optional. `cmd/engine` takes
+  `-mode backtest|dry-run|paper|live`, defaulting to `backtest`. In any mode
+  but `backtest` it refuses to start without `-log`. A backtest, including the
+  LEAN adapter's end-to-end test, keeps `-log` optional. The mode is a
+  declaration by the person starting the engine; the live engine's
+  configuration naming its adapter (ADR 0025 point 3, still to be built) is
+  what will later bind a live adapter to a live mode.
+- **A build upgrade starts a fresh run; it never resumes (#337).** This
+  settles the question Consequences leaves open. An upgrade stops the run at
+  the end of a session, with the old log kept as evidence, and starts a fresh
+  run on the new build from a reconciled baseline (ADR 0019 recovery). There
+  is no resume across builds, and the build part of the strategy version is
+  never ignored when comparing decisions. `-resume` therefore refuses a log
+  recorded by another build, and its message names this procedure. The
+  runbook is `docs/runbooks/durable-log.md`.

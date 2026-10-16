@@ -55,6 +55,9 @@ func recoverLogFile(path string) (journal.Recovery, error) {
 // log, so a refused restart leaves nothing new behind.
 func checkResumable(recovery journal.Recovery, logHeader journal.LogHeader, configEnvelope event.Envelope) error {
 	if recovery.Header != logHeader {
+		if err := buildUpgradeRefusal(recovery.Header, logHeader); err != nil {
+			return err
+		}
 		return fmt.Errorf("engine: the durable log was recorded by run %s / %s, not this run %s / %s; a log resumes only under the configuration and build that recorded it",
 			recovery.Header.ConfigurationHash, recovery.Header.StrategyVersion, logHeader.ConfigurationHash, logHeader.StrategyVersion)
 	}
@@ -65,6 +68,24 @@ func checkResumable(recovery journal.Recovery, logHeader journal.LogHeader, conf
 		return errors.New("engine: the durable log opens with a different configuration input from the one this invocation composed; resume with the -config and -as-of the logged run started with")
 	}
 	return nil
+}
+
+// buildUpgradeRefusal reports the refusal for a log that differs from this
+// run only in its build, naming the procedure the owner decided on
+// 2026-10-16 (#337): a run does not resume across builds. It returns nil for
+// any other difference, which keeps the generic refusal.
+func buildUpgradeRefusal(logged, current journal.LogHeader) error {
+	if logged.ConfigurationHash != current.ConfigurationHash {
+		return nil
+	}
+	loggedID, loggedRules, loggedBuild, loggedErr := event.DecomposeStrategyVersion(logged.StrategyVersion)
+	currentID, currentRules, currentBuild, currentErr := event.DecomposeStrategyVersion(current.StrategyVersion)
+	if loggedErr != nil || currentErr != nil || loggedID != currentID || loggedRules != currentRules || loggedBuild == currentBuild {
+		return nil //nolint:nilerr // an unparseable or non-build difference keeps the generic refusal
+	}
+	return fmt.Errorf("engine: the durable log was recorded by build %q, not this build %q, and a run does not resume across builds (ADR 0027, owner decision 2026-10-16); "+
+		"stop the run at the end of a session, keep the old log as evidence, and start a fresh run on the new build from a reconciled baseline (ADR 0019 recovery): see docs/runbooks/durable-log.md",
+		loggedBuild, currentBuild)
 }
 
 // resumeRun rebuilds this process's state from a previous process's durable
