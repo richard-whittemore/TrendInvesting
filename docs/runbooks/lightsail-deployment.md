@@ -79,7 +79,7 @@ Run `deploy/rehearse.sh` (Docker, a clean Ubuntu 24.04 container; about 350 MB o
 - a corrupt cached download is not trusted;
 - the service users are non-root with no login shell; secret files are root:root 0600;
 - the credential renderer writes a fake password (with special characters) verbatim to a 0600 file, prints no credential, and leaves no copy under `/etc` or `/var/log`; it refuses an empty login and an unknown trading mode; the gateway's start exits 78 on an empty login, which the unit does not restart on;
-- `systemd-analyze verify` is clean on every unit;
+- `systemd-analyze verify` is clean on every unit: any diagnostic at all fails the rehearsal, and a deliberately broken unit (an invalid `LoadCredential=` name) shows the check can fail;
 - the three engine client IDs are distinct and differ from the data step's.
 
 **Not rehearsed** (needs the real server or the owner): executing the x86_64 Gateway installer (the arm64 container downloaded and checksum-verified it only), so the install directory layout IBC expects, and the file ownership, are unconfirmed; a running systemd (the container has none, so enabling and starting units, `LoadCredential`, the timers and `Restart=` were checked only by `systemd-analyze verify`); `ufw` and Tailscale sign-in; the Gateway actually starting, IBC logging in and the 2FA prompt (no IBKR login was used, nothing was sent to IBKR); the nightly and Sunday restarts; the restart and reconnect drills above; unattended-upgrades actually applying an update; Lightsail itself. The placeholder units and the engine/adapter integration are unproven until their binaries exist.

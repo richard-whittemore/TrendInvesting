@@ -115,16 +115,30 @@ for b in ti-data ti-engine ti-reporter ti-dashboard; do
 done
 cd /etc/systemd/system
 verify_log=$(mktemp)
+verify_status=0
 systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer \
   ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service \
-  ti-reporter.service ti-reporter.timer ti-dashboard.service 2>&1 | tee "$verify_log"
-# systemd-analyze reports missing unit files for nothing here; any output line
-# naming one of our units is a finding. Warnings about the stand-in binaries
-# being empty are not expected (they are executable).
-if grep -E 'ti-(gateway|data|engine|reporter|dashboard)' "$verify_log" | grep -viE 'ibkr-login|secrets.env|gateway.env|credential'; then
-  fail "systemd-analyze verify reported problems (above)"
+  ti-reporter.service ti-reporter.timer ti-dashboard.service >"$verify_log" 2>&1 || verify_status=$?
+cat "$verify_log"
+# Every line is a finding: no warning is expected in this container (the
+# rehearsal of 2026-10-16 printed none), so nothing is filtered out, and a
+# parser diagnostic such as an invalid LoadCredential= source cannot hide. If
+# a container-only warning ever appears, allow it here by its exact full line
+# (grep -vxF), never by a substring.
+if test "$verify_status" -ne 0 || test -s "$verify_log"; then
+  fail "systemd-analyze verify exited $verify_status or reported problems (above)"
 fi
 pass "systemd-analyze verify clean on all units"
+
+# The check above can fail: a unit with an invalid credential name must
+# produce a diagnostic, or an empty log would prove nothing.
+broken=$(mktemp -d)
+sed 's|^LoadCredential=ibkr-login:|LoadCredential=bad/name:|' ti-gateway.service >"$broken/ti-gateway.service"
+grep -q '^LoadCredential=bad/name:' "$broken/ti-gateway.service" || fail "could not break the test unit"
+systemd-analyze verify "$broken/ti-gateway.service" >"$verify_log" 2>&1 || true
+cat "$verify_log"
+grep -qi 'credential' "$verify_log" || fail "systemd-analyze verify is silent on an invalid LoadCredential= name"
+pass "systemd-analyze verify reports an invalid LoadCredential= name"
 
 # Client IDs are unique and the data step's 10 is not reused.
 ids=$(grep -h '^TI_ADAPTER_CLIENT_ID=' /etc/trend-investing/engines/*.env | sort)
