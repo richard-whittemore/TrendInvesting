@@ -51,6 +51,7 @@ deps:
 # invocation.
 adapter-test: research-test
 	cd adapter/lean && python3 -m unittest discover -s tests
+	cd adapter && python3 -m unittest discover -s marketdata/tests -t .
 
 # The research checks' rule cores (research/qc-cloud for the Turtle
 # Baseline, research/qc-cloud-sublime for the Sublime control,
