@@ -164,8 +164,9 @@ func (l *LogWriter) FinalRecordHash() string { return l.finalHash }
 // group is durable. This is the fsync policy: one flush per input, after the
 // whole group and before any of its decisions may be released (ADR 0027).
 //
-// A group that is not one valid input and its valid decisions is refused
-// before anything is written, and the log stays usable. A write or flush
+// A group that is not one valid input and its valid decisions, or that has
+// a line longer than RecoverLog reads, is refused before anything is
+// written, and the log stays usable. A write or flush
 // that fails returns a *LogFailedError, and every later Append returns it
 // again without touching w.
 func (l *LogWriter) Append(group []Entry) error {
@@ -185,6 +186,12 @@ func (l *LogWriter) Append(group []Entry) error {
 		encoded, err := encodeLine(logLine{Record: &Record{Sequence: sequence, Kind: entry.Kind, Envelope: entry.Envelope, RecordHash: lastHash}})
 		if err != nil {
 			return err
+		}
+		// RecoverLog reads a line under maxLineBytes, so a longer one would
+		// be committed and its decisions released, then the log refused as
+		// damaged on restart. Refuse it here, before anything is written.
+		if length := len(encoded) - 1; length > maxLineBytes {
+			return fmt.Errorf("journal: entry %d of a durable log group encodes to a %d-byte line; recovery reads at most %d bytes a line, so it is not written", sequence-l.sequence, length, maxLineBytes)
 		}
 		buf.Write(encoded)
 	}

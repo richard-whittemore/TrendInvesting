@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -262,6 +263,40 @@ func TestRunRefusesAResumeItCannotHonour(t *testing.T) {
 		err := run(context.Background(), opts, io.Discard)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: run() = %v, want an error saying %q", name, err, tc.want)
+		}
+	}
+}
+
+// TestRunRefusesALogAtTheJournalPath: a log created where the journal is to
+// be installed would take that path for the whole run, and the operator
+// would learn it only when the journal could not be written at shutdown. It
+// is refused at startup, however the same path is spelled, and nothing is
+// created.
+func TestRunRefusesALogAtTheJournalPath(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
+	out := filepath.Join(dir, "run.jsonl")
+	linked := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(dir, linked); err != nil {
+		t.Fatalf("link the journal's directory: %v", err)
+	}
+	for name, logPath := range map[string]string{
+		"through a link":     filepath.Join(linked, "run.jsonl"),
+		"the same path":      out,
+		"the same path, dot": dir + string(filepath.Separator) + "." + string(filepath.Separator) + "run.jsonl",
+		"the same path, up":  filepath.Join(dir, "sub") + string(filepath.Separator) + ".." + string(filepath.Separator) + "run.jsonl",
+	} {
+		opts := options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: out, logPath: logPath, build: "test-build"}
+		// Bounded, so a run that wrongly starts serving fails the test
+		// rather than hanging it.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := run(ctx, opts, io.Discard)
+		cancel()
+		if err == nil || !strings.Contains(err.Error(), "-log and -out") {
+			t.Fatalf("%s: run() = %v, want an error saying -log and -out name one file", name, err)
+		}
+		if _, err := os.Stat(out); !os.IsNotExist(err) {
+			t.Fatalf("%s: %s exists after the refusal (stat error %v), want nothing created", name, out, err)
 		}
 	}
 }

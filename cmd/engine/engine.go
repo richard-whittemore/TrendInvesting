@@ -138,6 +138,11 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	if err := checkJournalPathFree(opts.outPath); err != nil {
 		return err
 	}
+	// A log created at the journal's own path would hold that path for the
+	// whole run, and the journal could then not be installed at shutdown.
+	if opts.logPath != "" && samePath(opts.logPath, opts.outPath) {
+		return fmt.Errorf("engine: -log and -out both name %s: the durable log is streamed during the run and the journal is installed when it stops, so they must be two files", opts.outPath)
+	}
 
 	cfg, err := readConfiguration(opts.configPath)
 	if err != nil {
@@ -466,6 +471,25 @@ func checkJournalPathFree(path string) error {
 		return fmt.Errorf("engine: check the journal path: %w", err)
 	}
 	return nil
+}
+
+// samePath reports whether a and b name one file, however each is spelled:
+// the same name in the same directory, compared by the directories' identity
+// on disk so a symbolic link or a relative spelling is seen through. Neither
+// file need exist yet. A directory that cannot be examined falls back to
+// comparing the cleaned absolute paths.
+func samePath(a, b string) bool {
+	if filepath.Base(filepath.Clean(a)) != filepath.Base(filepath.Clean(b)) {
+		return false
+	}
+	dirA, errA := os.Stat(filepath.Dir(a))
+	dirB, errB := os.Stat(filepath.Dir(b))
+	if errA == nil && errB == nil {
+		return os.SameFile(dirA, dirB)
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	return errA == nil && errB == nil && absA == absB
 }
 
 func journalExistsError(path string) error {
