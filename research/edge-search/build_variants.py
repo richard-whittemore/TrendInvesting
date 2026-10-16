@@ -36,6 +36,11 @@ _GLIDE_OOS = dict(_COMBO, START_DATE=(2015, 1, 1), MEASURE_FROM=(2016, 1, 1), EN
 # Universe parity (docs/live-trading/plan.md, section 4): the combination's
 # held-out settings, run to September 2026.
 _PARITY = dict(_OOS, **_COMBO, END_DATE=(2026, 9, 30), ETF_TICKER="IWB")
+#: Sector check (docs/research/sector-labels-2026-10.md): today's universe
+#: stocks whose GICS sector, mapped onto Morningstar's codes, differs.
+_GICS_RELABEL = {"ADP": 310, "AGNC": 103, "AMCR": 101, "ASTS": 308, "CASY": 205, "CLSK": 311, "CRCL": 311,
+                 "FISV": 103, "HUT": 311, "IREN": 311, "MARA": 311, "MOD": 310, "NXT": 310, "PAYX": 310,
+                 "RIOT": 311, "ROL": 310, "SPCX": 308, "TOST": 103, "UBER": 310, "XYZ": 103}
 _CTRY_OOS = {"MODE": "country_rot", "START": (2015, 1, 1), "END": (2026, 6, 30), "MEASURE_FROM": (2016, 1, 1)}
 _US3X = {"SPY": 1, "MDY": 1, "IWM": 1, "EFA": 1}
 _D11, _D19, _D21, _D22, _D23 =(2011, 3, 1), (2019, 7, 1), (2021, 2, 1), (2022, 5, 1), (2023, 11, 1)
@@ -167,6 +172,11 @@ VARIANTS = {
     "OOS_P_COARSE": ("momentum/universe_parity.py", dict(_PARITY, UNIVERSE_SOURCE="coarse", ETF_LAG_DAYS=7)),
     "OOS_P_IWB7": ("momentum/universe_parity.py", dict(_PARITY, UNIVERSE_SOURCE="etf", ETF_LAG_DAYS=7)),
     "OOS_P_IWB1": ("momentum/universe_parity.py", dict(_PARITY, UNIVERSE_SOURCE="etf", ETF_LAG_DAYS=1)),
+    # Sector check: the backtest's own universe with the 20 stocks whose GICS
+    # sector (iShares IWV, 2026-10-14, mapped onto Morningstar's) differs from
+    # Morningstar's relabelled the GICS way.
+    "OOS_P_GICS": ("momentum/universe_parity.py", dict(_PARITY, UNIVERSE_SOURCE="coarse", ETF_LAG_DAYS=7,
+                                                       SECTOR_OVERRIDE=_GICS_RELABEL)),
     # Glide path: the schedule started at ages 38, 53 and 65 on each window's
     # first date, and the fixed mixes either side of each run (plan section 2).
     "G_IS_P38": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=38.0)),
