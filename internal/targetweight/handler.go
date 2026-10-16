@@ -3,8 +3,9 @@
 // completed bars, the account snapshot and its configuration, and hands each
 // decision to the strategy-independent order planner (internal/orderplan) and
 // the hard-limit gate (internal/risklimit). It shares no state with the
-// Turtle reducer in internal/strategy (AGENTS.md rule 4). Only Boost, for the
-// joint margin account, is decided here.
+// Turtle reducer in internal/strategy (AGENTS.md rule 4). It decides Boost for
+// the joint margin account and the momentum combination for an IRA, one
+// configuration per account.
 package targetweight
 
 import (
@@ -38,9 +39,10 @@ type Options struct {
 	DecideFrom time.Time
 }
 
-// Handler decides Boost for one account.
+// Handler decides one account's target weights: Boost, described here, or
+// momentum (see momentumRun).
 //
-// # Inputs, in stream order
+// # Boost's inputs, in stream order
 //
 //   - strategy.target-weight.configuration, first and once, matching the
 //     configuration the handler was built with;
@@ -84,6 +86,8 @@ type Handler struct {
 	snapshot   *event.AccountPositionsSnapshotPayload
 	mark       *event.MarkRecordedPayload
 	gate       *risklimit.Gate
+
+	momentum *momentumRun // set for a momentum configuration, nil for Boost
 }
 
 // New returns a handler for cfg, deriving its configuration hash itself
@@ -95,10 +99,13 @@ func New(strategyVersion string, cfg event.TargetWeightConfigurationPayload, opt
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("targetweight: %w", err)
 	}
-	warmUp, _ := cfg.Boost.WarmUpDate() // validated above
 	if opts.DecideFrom.IsZero() {
 		return nil, errors.New("targetweight: the first session to decide is required")
 	}
+	if cfg.StrategyID == event.TargetWeightStrategyMomentum {
+		return newMomentum(strategyVersion, cfg, opts)
+	}
+	warmUp, _ := cfg.Boost.WarmUpDate() // validated above
 	params := boost.Parameters{
 		InvestedFraction: cfg.Boost.InvestedFraction, BoostSize: cfg.Boost.BoostSize, RSIEntry: cfg.Boost.RSIEntry,
 		RSIPeriod: cfg.Boost.RSIPeriod, TrendDays: cfg.Boost.TrendDays, ExitSMA: cfg.Boost.ExitSMA,
@@ -130,6 +137,9 @@ func (h *Handler) ConfigurationHash() string { return h.hash }
 func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope, error) {
 	if !h.configured && in.Type != event.TargetWeightConfigurationEventType {
 		return nil, fmt.Errorf("targetweight: %s %s arrived before the configuration", in.Type, in.ID)
+	}
+	if h.momentum != nil && in.Type != event.TargetWeightConfigurationEventType {
+		return h.momentum.apply(in)
 	}
 	switch in.Type {
 	case event.TargetWeightConfigurationEventType:
@@ -323,7 +333,8 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	if h.mark != nil && !h.mark.AsOf.Before(p.PeriodEnd) {
 		gateOrder.Mark, gateOrder.MarkSet = h.mark.Price, true
 	}
-	outcomes, err := h.gate.Check([]risklimit.Order{gateOrder})
+	book := risklimit.Book{Holdings: holdings(snapshot.Positions), Prices: map[string]float64{h.cfg.Boost.InstrumentID: bar.Raw.Close}}
+	outcomes, err := h.gate.Check(book, []risklimit.Order{gateOrder})
 	b.fail(err)
 	for _, o := range outcomes {
 		if o.Released != nil {
@@ -336,6 +347,15 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		}
 	}
 	return b.result()
+}
+
+// holdings maps each position to its quantity.
+func holdings(positions []event.AccountPosition) map[string]int64 {
+	out := make(map[string]int64, len(positions))
+	for _, p := range positions {
+		out[p.InstrumentID] = p.Quantity
+	}
+	return out
 }
 
 // figures are the Boost figures for this session, with latchedBefore and the

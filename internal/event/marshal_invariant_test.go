@@ -47,6 +47,9 @@ func marshalPayloads() []validatedPayload {
 		validTargetWeightConfiguration(), validAccountPositionsSnapshot(), validMarkRecorded(),
 		validTargetsDecided(), validTargetsWithheld(), validOrderPlanned(),
 		validOrderReleased(), validOrderRefused(), validDegradedEngineState(),
+		validMomentumConfiguration(), validMomentumDecided(), validIRARefused(),
+		validUniverseSnapshot(), validSessionCalendar(), validAccountCashSnapshot(),
+		validLimitOrderLifecycle(), validTargetWeightFill(),
 	}
 }
 

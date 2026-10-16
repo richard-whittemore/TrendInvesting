@@ -37,9 +37,22 @@ func order(side string, quantity, held int64) risklimit.Order {
 	}
 }
 
+// bookOf is the book the orders were planned against: each order's held
+// quantity of its instrument at its reference price, and nothing else held.
+func bookOf(plan ...risklimit.Order) risklimit.Book {
+	book := risklimit.Book{Holdings: map[string]int64{}, Prices: map[string]float64{}}
+	for _, o := range plan {
+		if o.Planned.HeldQuantity != 0 {
+			book.Holdings[o.Planned.InstrumentID] = o.Planned.HeldQuantity
+			book.Prices[o.Planned.InstrumentID] = o.Planned.ReferencePrice
+		}
+	}
+	return book
+}
+
 func check(t *testing.T, g *risklimit.Gate, plan ...risklimit.Order) []risklimit.Outcome {
 	t.Helper()
-	outcomes, err := g.Check(plan)
+	outcomes, err := g.Check(bookOf(plan...), plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,22 +260,22 @@ func TestGateRefusesBadConstructionAndInput(t *testing.T) {
 	}
 	g := gate(t, limits(), event.TradingModeDryRun)
 	bad := order(event.OrderSideBuy, 0, 0)
-	if _, err := g.Check([]risklimit.Order{bad}); err == nil {
+	if _, err := g.Check(risklimit.Book{}, []risklimit.Order{bad}); err == nil {
 		t.Error("an invalid planned order must be an error, not a refusal")
 	}
 	wrongAccount := order(event.OrderSideBuy, 1, 0)
 	wrongAccount.Planned.AccountID = "ira"
-	if _, err := g.Check([]risklimit.Order{wrongAccount}); err == nil {
+	if _, err := g.Check(risklimit.Book{}, []risklimit.Order{wrongAccount}); err == nil {
 		t.Error("another account's order must be an error")
 	}
 	noPlan := order(event.OrderSideBuy, 1, 0)
 	noPlan.PlanID = ""
-	if _, err := g.Check([]risklimit.Order{noPlan}); err == nil {
+	if _, err := g.Check(risklimit.Book{}, []risklimit.Order{noPlan}); err == nil {
 		t.Error("an order without its plan ID must be an error")
 	}
 	badMark := order(event.OrderSideBuy, 1, 0)
 	badMark.Mark = -1
-	if _, err := g.Check([]risklimit.Order{badMark}); err == nil {
+	if _, err := g.Check(risklimit.Book{}, []risklimit.Order{badMark}); err == nil {
 		t.Error("a negative recorded mark must be an error")
 	}
 	if g.State() != risklimit.StateNormal {

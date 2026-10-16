@@ -12,7 +12,13 @@ import (
 const TargetsDecidedEventType = "strategy.targets.decided"
 
 // TargetsDecidedSchemaVersion is the current schema version of TargetsDecidedPayload.
-const TargetsDecidedSchemaVersion uint32 = 1
+//
+//   - Version 1 recorded Boost decisions only.
+//   - Version 2 adds momentum decisions: StrategyID momentum, the Momentum
+//     figures, and the withheld reason rebalance-in-progress. Boost is
+//     omitted from a momentum decision and Momentum from a Boost one, so a
+//     Boost decision's payload bytes are version 1's.
+const TargetsDecidedSchemaVersion uint32 = 2
 
 // The two outcomes of a target decision (ADR 0026, point 1).
 const (
@@ -36,6 +42,10 @@ const (
 	WithheldInsufficientTrendHistory = "insufficient-trend-history"
 	// WithheldNoEligibleNames: the ranking left no name to hold.
 	WithheldNoEligibleNames = "no-eligible-names"
+	// WithheldRebalanceInProgress: an order of an earlier decision is not
+	// yet terminal, so no new rebalance is planned until it is (ADR 0026,
+	// point 5: nothing is sent mid-rebalance until the owner clears it).
+	WithheldRebalanceInProgress = "rebalance-in-progress"
 )
 
 // TargetWeight is one instrument's target as a fraction of net liquidation.
@@ -82,7 +92,66 @@ type TargetsDecidedPayload struct {
 	Detail           string    `json:"detail,omitempty"`
 	// Targets is sorted strictly ascending by instrument.
 	Targets []TargetWeight `json:"targets"`
-	Boost   BoostFigures   `json:"boost"`
+	// Boost is set for StrategyID boost and Momentum for momentum; the other
+	// is zero and omitted.
+	Boost    BoostFigures    `json:"boost,omitzero"`
+	Momentum MomentumFigures `json:"momentum,omitzero"`
+}
+
+// MomentumFigures are the figures behind a momentum decision, so the journal
+// alone can check it (ADR 0026, point 1): the session whose closes it used,
+// the risk-off inputs, the universe filter counts and every ranked name.
+// A decision withheld before the ranking records no names.
+type MomentumFigures struct {
+	// CloseSession is the last session before the decision, YYYY-MM-DD.
+	CloseSession string `json:"close_session"`
+	// The trend test: TrendCloses counts the trend instrument's closes,
+	// TrendClose and TrendMean are 0 when it was not computed.
+	TrendInstrument string  `json:"trend_instrument"`
+	TrendCloses     int     `json:"trend_closes"`
+	TrendClose      float64 `json:"trend_close"`
+	TrendMean       float64 `json:"trend_mean"`
+	RiskOff         bool    `json:"risk_off"`
+	// How many universe rows each filter kept: all rows, the listing type,
+	// the price floor, and the members ranked.
+	UniverseRows           int `json:"universe_rows"`
+	UniverseListingType    int `json:"universe_listing_type"`
+	UniverseAtOrAboveFloor int `json:"universe_at_or_above_floor"`
+	UniverseMembers        int `json:"universe_members"`
+	// Names holds every universe member in universe rank order.
+	Names []MomentumName `json:"names"`
+}
+
+// The closed set of MomentumName.Status values: what the rule did with a
+// universe member (internal/targetweight/momentum's Status).
+const (
+	MomentumStatusScored         = "scored"
+	MomentumStatusPicked         = "picked"
+	MomentumStatusSectorCapped   = "sector-capped"
+	MomentumStatusBeyondTopN     = "beyond-top-n"
+	MomentumStatusNoSector       = "no-sector"
+	MomentumStatusZeroVolatility = "zero-volatility"
+	MomentumStatusShortHistory   = "short-history"
+	MomentumStatusGap            = "gap"
+)
+
+// MomentumName is one ranked universe member: its universe rank and dollar
+// volume, sector label and source, what the rule did with it, its closes,
+// score, volatility and score rank (0 when unscored), its weight (0 unless
+// picked; a pick has 0 when the whole book is risk-off) and whether the backtest would have picked it (ADR 0026, point 8).
+type MomentumName struct {
+	InstrumentID      string  `json:"instrument_id"`
+	UniverseRank      int     `json:"universe_rank"`
+	DollarVolume      float64 `json:"dollar_volume"`
+	Sector            string  `json:"sector"`
+	SectorSource      string  `json:"sector_source"`
+	Status            string  `json:"status"`
+	Closes            int     `json:"closes"`
+	Score             float64 `json:"score"`
+	Volatility        float64 `json:"volatility"`
+	ScoreRank         int     `json:"score_rank"`
+	Weight            float64 `json:"weight"`
+	BacktestWouldPick bool    `json:"backtest_would_pick"`
 }
 
 // Validate checks the identity, the outcome and its reason, the targets and
@@ -92,7 +161,19 @@ func (p TargetsDecidedPayload) Validate() error {
 	if p.AccountID == "" {
 		errs = append(errs, errors.New("account id is required"))
 	}
-	if p.StrategyID != TargetWeightStrategyBoost {
+	boost := p.StrategyID == TargetWeightStrategyBoost
+	switch p.StrategyID {
+	case TargetWeightStrategyBoost:
+		errs = append(errs, p.Boost.validate()...)
+		if !p.Momentum.isZero() {
+			errs = append(errs, errors.New("a boost decision carries no momentum figures"))
+		}
+	case TargetWeightStrategyMomentum:
+		errs = append(errs, p.Momentum.validate()...)
+		if p.Boost != (BoostFigures{}) {
+			errs = append(errs, errors.New("a momentum decision carries no boost figures"))
+		}
+	default:
 		errs = append(errs, fmt.Errorf("strategy id %q is not a target-weight strategy this schema records", p.StrategyID))
 	}
 	decisionErrs := requiredTime("decision time", p.DecisionTime)
@@ -110,13 +191,13 @@ func (p TargetsDecidedPayload) Validate() error {
 		if len(p.Targets) == 0 {
 			errs = append(errs, errors.New("a decided outcome carries at least one target"))
 		}
-		if !(p.Boost.Close > 0) {
+		if boost && !(p.Boost.Close > 0) {
 			errs = append(errs, errors.New("a decided Boost outcome carries a positive close"))
 		}
 	case TargetsOutcomeWithheld:
 		switch p.WithheldReason {
 		case WithheldMissingBars, WithheldStaleAccountSnapshot, WithheldMissingUniverse,
-			WithheldInsufficientTrendHistory, WithheldNoEligibleNames:
+			WithheldInsufficientTrendHistory, WithheldNoEligibleNames, WithheldRebalanceInProgress:
 		default:
 			errs = append(errs, fmt.Errorf("withheld reason %q is not recognised", p.WithheldReason))
 		}
@@ -139,11 +220,77 @@ func (p TargetsDecidedPayload) Validate() error {
 			errs = append(errs, fmt.Errorf("target %d: weight must be finite and not negative", i+1))
 		}
 	}
-	errs = append(errs, p.Boost.validate()...)
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid targets decided payload: %w", err)
 	}
 	return nil
+}
+
+func (m MomentumFigures) isZero() bool {
+	return m.CloseSession == "" && m.TrendInstrument == "" && m.TrendCloses == 0 && m.TrendClose == 0 &&
+		m.TrendMean == 0 && !m.RiskOff && m.UniverseRows == 0 && m.UniverseListingType == 0 &&
+		m.UniverseAtOrAboveFloor == 0 && m.UniverseMembers == 0 && len(m.Names) == 0
+}
+
+func (m MomentumFigures) validate() []error {
+	var errs []error
+	if _, err := time.Parse(time.DateOnly, m.CloseSession); err != nil {
+		errs = append(errs, fmt.Errorf("momentum close session %q is not a YYYY-MM-DD date", m.CloseSession))
+	}
+	if m.TrendInstrument == "" {
+		errs = append(errs, errors.New("momentum trend instrument is required"))
+	}
+	for _, v := range []float64{m.TrendClose, m.TrendMean} {
+		if !isFinite(v) || v < 0 {
+			errs = append(errs, errors.New("momentum trend close and mean must be finite and not negative"))
+		}
+	}
+	for _, n := range []int{m.TrendCloses, m.UniverseRows, m.UniverseListingType, m.UniverseAtOrAboveFloor, m.UniverseMembers} {
+		if n < 0 {
+			errs = append(errs, errors.New("momentum counts must not be negative"))
+		}
+	}
+	if len(m.Names) != m.UniverseMembers && len(m.Names) != 0 {
+		errs = append(errs, fmt.Errorf("momentum records %d names for %d universe members", len(m.Names), m.UniverseMembers))
+	}
+	for i, n := range m.Names {
+		errs = append(errs, n.validate(i+1)...)
+	}
+	return errs
+}
+
+func (n MomentumName) validate(rank int) []error {
+	var errs []error
+	if n.InstrumentID == "" {
+		errs = append(errs, fmt.Errorf("momentum name %d: instrument id is required", rank))
+	}
+	if n.UniverseRank != rank {
+		errs = append(errs, fmt.Errorf("momentum name %s: universe rank %d is not its place %d", n.InstrumentID, n.UniverseRank, rank))
+	}
+	switch n.Status {
+	case MomentumStatusScored, MomentumStatusPicked, MomentumStatusSectorCapped, MomentumStatusBeyondTopN,
+		MomentumStatusNoSector, MomentumStatusZeroVolatility, MomentumStatusShortHistory, MomentumStatusGap:
+	default:
+		errs = append(errs, fmt.Errorf("momentum name %s: status %q is not recognised", n.InstrumentID, n.Status))
+	}
+	if (n.Sector == "") != (n.SectorSource == "") {
+		errs = append(errs, fmt.Errorf("momentum name %s: a sector label and its source come together", n.InstrumentID))
+	}
+	if n.Closes < 0 || n.ScoreRank < 0 {
+		errs = append(errs, fmt.Errorf("momentum name %s: closes and score rank must not be negative", n.InstrumentID))
+	}
+	for _, v := range []float64{n.DollarVolume, n.Volatility, n.Weight} {
+		if !isFinite(v) || v < 0 {
+			errs = append(errs, fmt.Errorf("momentum name %s: dollar volume, volatility and weight must be finite and not negative", n.InstrumentID))
+		}
+	}
+	if !isFinite(n.Score) {
+		errs = append(errs, fmt.Errorf("momentum name %s: score must be finite", n.InstrumentID))
+	}
+	if n.Weight > 0 && n.Status != MomentumStatusPicked {
+		errs = append(errs, fmt.Errorf("momentum name %s: only a picked name has a weight", n.InstrumentID))
+	}
+	return errs
 }
 
 func (b BoostFigures) validate() []error {
@@ -293,9 +440,14 @@ const (
 
 // OrderReleasedSchemaVersion and OrderRefusedSchemaVersion are the current
 // schema versions of OrderReleasedPayload and OrderRefusedPayload.
+//
+//   - Version 1 checked the order's own instrument's exposure.
+//   - Version 2 checks account-wide exposure, and adds the IRA's cash check
+//     to RiskFigures (CashChecked, BuyCost, CashAvailable) and its refusal
+//     reasons to the closed set.
 const (
-	OrderReleasedSchemaVersion uint32 = 1
-	OrderRefusedSchemaVersion  uint32 = 1
+	OrderReleasedSchemaVersion uint32 = 2
+	OrderRefusedSchemaVersion  uint32 = 2
 )
 
 // The closed set of reasons the risk gate refuses an order (ADR 0026, point 3).
@@ -319,10 +471,25 @@ const (
 	RefusedEngineDegraded = "engine-degraded"
 	// RefusedEngineHalted: the account is Halted, which allows no order.
 	RefusedEngineHalted = "engine-halted"
+	// RefusedIRAExposure: a buy would leave an IRA's exposure above its
+	// limit, 100% (ADR 0026, point 3).
+	RefusedIRAExposure = "ira-exposure"
+	// RefusedInsufficientCash: a buy's worst-case cost exceeds the IRA's
+	// cash available under D5, net of committed buys; an IRA never borrows.
+	RefusedInsufficientCash = "insufficient-cash"
+	// RefusedSellExceedsHolding: a sell exceeds the holding net of every
+	// working or pending sell (ADR 0019, amended 2026-09-24).
+	RefusedSellExceedsHolding = "sell-exceeds-holding"
+	// RefusedUnvaluedHolding: an exposure-increasing order while a holding
+	// has no reference price, so account-wide exposure cannot be valued.
+	RefusedUnvaluedHolding = "unvalued-holding"
 )
 
 // RiskFigures are the values the gate checked an order against, so the
 // journal alone can check the outcome. Mark is 0 when MarkSet is false.
+// Exposure is account-wide: every holding at its reference price over net
+// liquidation. CashChecked is true for an IRA's buy, whose worst-case BuyCost
+// was checked against CashAvailable; otherwise both are 0.
 type RiskFigures struct {
 	NetLiquidation   float64 `json:"net_liquidation"`
 	ReferencePrice   float64 `json:"reference_price"`
@@ -333,6 +500,9 @@ type RiskFigures struct {
 	MarkSet          bool    `json:"mark_set"`
 	MarkDeviation    float64 `json:"mark_deviation"`
 	OrdersInDecision int     `json:"orders_in_decision"`
+	CashChecked      bool    `json:"cash_checked,omitzero"`
+	BuyCost          float64 `json:"buy_cost,omitzero"`
+	CashAvailable    float64 `json:"cash_available,omitzero"`
 }
 
 func (f RiskFigures) validate() []error {
@@ -361,6 +531,12 @@ func (f RiskFigures) validate() []error {
 	}
 	if f.OrdersInDecision < 0 {
 		errs = append(errs, errors.New("figures orders in decision must not be negative"))
+	}
+	switch {
+	case !isFinite(f.BuyCost) || f.BuyCost < 0 || !isFinite(f.CashAvailable):
+		errs = append(errs, errors.New("figures buy cost must be finite and not negative, and cash available finite"))
+	case !f.CashChecked && (f.BuyCost != 0 || f.CashAvailable != 0):
+		errs = append(errs, errors.New("figures cash carries a value but was not checked"))
 	}
 	return errs
 }
@@ -430,7 +606,8 @@ func (p OrderRefusedPayload) Validate() error {
 	}
 	switch p.Reason {
 	case RefusedUndecidedOrder, RefusedMarginExposure, RefusedOrderCount, RefusedOrderSize,
-		RefusedPriceBand, RefusedMissingMark, RefusedEngineDegraded, RefusedEngineHalted:
+		RefusedPriceBand, RefusedMissingMark, RefusedEngineDegraded, RefusedEngineHalted,
+		RefusedIRAExposure, RefusedInsufficientCash, RefusedSellExceedsHolding, RefusedUnvaluedHolding:
 	default:
 		errs = append(errs, fmt.Errorf("refusal reason %q is not recognised", p.Reason))
 	}

@@ -69,12 +69,12 @@ func Score(cfg Config, sessions []string, closes map[string]float64) (History, e
 	}
 	need := cfg.ScoreLookback + 1
 	h := History{Closes: len(closes)}
-	window, ok := lastCloses(sessions, closes, need)
-	switch {
-	case h.Closes < need:
+	if h.Closes < need {
 		h.Status = StatusShortHistory
 		return h, nil
-	case !ok:
+	}
+	window, ok := lastCloses(sessions, closes, need)
+	if !ok {
 		h.Status = StatusGap
 		return h, nil
 	}

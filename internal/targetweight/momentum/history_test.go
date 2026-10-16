@@ -30,6 +30,19 @@ func TestScoreNeeds253ClosesNot252(t *testing.T) {
 	mustEqual(t, "volatility", full.Volatility, 0.75)
 }
 
+// TestScoreOnACalendarShorterThanTheWindow checks a run whose calendar has
+// fewer sessions than the score window: the name is short of history, never
+// an out-of-range read of the calendar.
+func TestScoreOnACalendarShorterThanTheWindow(t *testing.T) {
+	cal := calendar(210)
+	h, err := momentum.Score(momentum.FCombo(), cal, series(cal, alternating(210)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustEqual(t, "status", h.Status, momentum.StatusShortHistory)
+	mustEqual(t, "closes", h.Closes, 210)
+}
+
 func TestScoreLeavesOutANameWithAGapInItsWindow(t *testing.T) {
 	cfg := momentum.FCombo()
 	cal := calendar(300)
