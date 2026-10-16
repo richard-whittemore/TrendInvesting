@@ -17,9 +17,10 @@ Logging templates: `research/edge-search/momentum/golden_log.py` (PR #310,
 with `GOLDEN_FROM_RANK` from PR #314) and `research/edge-search/boost/golden_log.py`
 (PR #311). Each adds lines only to the recorded strategy file, which a test
 checks, so it trades exactly as the recorded runs do. Each run was made once,
-on QuantConnect project 37096083. "Lines" is the number of GOLD lines in the
-log, and it matches the run's own `Golden` statistic in every run, so no log
-was cut short.
+on QuantConnect project 37096083. "Lines" is the number of GOLD lines kept
+in the log. It matches the run's own `Golden` statistic in every run except
+the two marked as cut, which hit the log limit; each of those needs its `_B`
+run to complete the month.
 
 | Run | Backtest ID | Month(s) | Lines | Risk-off | Names under 253 closes |
 | --- | --- | --- | --- | --- | --- |
@@ -40,7 +41,7 @@ was cut short.
 **Two months logged in two runs.** QuantConnect's Free plan keeps 10 KB of
 log a run. In 2000-03 and 2021-03 the sector cap skipped so many names that
 the ranked list ran past rank 137, and the cap cut the first run before the
-weights (47 of 61 and 49 of 71 lines). Those runs are kept as recorded. Each
+weights (49 of 71 lines in 2000-03, 47 of 61 in 2021-03). Those runs are kept as recorded. Each
 second run (`_B`) writes the ranked list from the next rank, with every
 earlier name still marked as in the full run. Together the two parts are
 contiguous (ranks 1–159 and 1–188), share the same header line, and hold all
