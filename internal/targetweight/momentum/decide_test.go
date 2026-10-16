@@ -206,6 +206,12 @@ func TestDecideOnACalendarShorterThanTheScoreWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mustEqual(t, "outcome", d.Outcome, momentum.OutcomeWithheld)
+	mustEqual(t, "reason", d.Reason, momentum.ReasonNoEligibleNames)
+	if len(d.Names) != 1 {
+		t.Fatalf("names = %+v", d.Names)
+	}
+	mustEqual(t, "name", d.Names[0].InstrumentID, "AAA")
 	for _, n := range d.Names {
 		mustEqual(t, n.InstrumentID+" status", n.Status, momentum.StatusShortHistory)
 	}
