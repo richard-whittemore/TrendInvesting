@@ -263,7 +263,7 @@ class ReconnectMatchTests(unittest.TestCase):
         h.fake.executions = [(contract(), execution(order_id=8, perm_id=9002, order_ref="tag-2"))]
         broker = collect_broker_orders(h.conn)
         self.assertEqual([o.broker_order_id for o in broker.open_orders], [7, 9])
-        match = match_on_reconnect({"tag-1", "tag-2", "tag-3"}, broker)
+        match = match_on_reconnect({"tag-1", "tag-2", "tag-3"}, broker, 11)
         self.assertEqual({k: (r.client_id, r.broker_order_id, r.perm_id)
                           for k, r in match.matched.items()}, {"tag-1": (11, 7, 9001)})
         self.assertEqual(sorted(match.executed), ["tag-2"])
@@ -285,15 +285,30 @@ class ReconnectMatchTests(unittest.TestCase):
         broker = collect_broker_orders(h.conn)
         self.assertEqual(sorted(o.perm_id for o in broker.open_orders),
                          [9001, 9002, 9101, 9102])
-        match = match_on_reconnect({"tag-1"}, broker)
+        match = match_on_reconnect({"tag-1"}, broker, 11)
         self.assertEqual(match.matched["tag-1"].client_id, 11)
         self.assertEqual(len(match.unknown_at_broker), 3)
+
+    def test_another_clients_order_or_execution_with_an_expected_tag_is_not_this_engines(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_orders = [
+            (7, contract(), order(order_ref="tag-1", client_id=12, perm_id=9002), STATE)]
+        h.fake.executions = [(contract(), execution(order_id=8, perm_id=9003, order_ref="tag-2",
+                                                    client_id=12))]
+        match = match_on_reconnect({"tag-1", "tag-2"}, collect_broker_orders(h.conn), 11)
+        self.assertEqual(match.matched, {})
+        self.assertEqual(match.executed, {})
+        self.assertEqual(match.missing_at_broker, ("tag-1", "tag-2"))
+        self.assertEqual(len(match.unknown_at_broker), 1)
+        self.assertEqual(len(match.unknown_executions), 1)
+        self.assertFalse(match.clean)
 
     def test_clean_when_everything_is_accounted_for(self):
         h = Harness()
         h.conn.connect()
         h.fake.open_orders = [(7, contract(), order(order_ref="tag-1"), STATE)]
-        match = match_on_reconnect({"tag-1"}, collect_broker_orders(h.conn))
+        match = match_on_reconnect({"tag-1"}, collect_broker_orders(h.conn), 11)
         self.assertTrue(match.clean)
 
 

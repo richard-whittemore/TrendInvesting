@@ -16,7 +16,7 @@ an order (AGENTS.md rule 5).
 | `config.py` | host, port, per-engine client ID, account ID, mode, and the timing bounds. Every value is required. Credential-like keys are refused |
 | `connection.py` | connect, reconnect with capped exponential backoff, disconnect detection (socket close, IBKR codes 1100/1101/1102/2110/504/1300, an unanswered `reqCurrentTime` heartbeat), and `ConnectionStatus` records for ADR 0019's heartbeat. `maintain()`, called from the adapter's loop, is what brings a lost link back: at once after a drop, or after `restore_timeout` if Gateway has lost IBKR's servers (1100/2110) and not restored them |
 | `account.py` | `read_snapshot`: positions, NetLiquidation, TotalCashValue and ExcessLiquidity for the configured account, as exact decimals with currency |
-| `orders.py` | `OrderTracker`: order status, open-order, execution and commission callbacks as records. `collect_broker_orders` and `match_on_reconnect`: matching by client order ID on reconnect |
+| `orders.py` | `OrderTracker`: order status, open-order, execution and commission callbacks as records. `collect_broker_orders` and `match_on_reconnect`: matching by client order ID, under this engine's own client ID, on reconnect |
 | `sender.py` | `DryRunSender` journals with `send=False` and holds no IBKR client. `make_sender` refuses `paper` and `live` |
 
 ## Rules this code keeps

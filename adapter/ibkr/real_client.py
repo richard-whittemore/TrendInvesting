@@ -120,6 +120,11 @@ class IbapiClient(TWSApi):
     EClient, bound to that connect's Inbox. The previous session is
     disconnected and its reader joined first, and even a reader that fails
     to stop can only deliver to its own session's Inbox.
+
+    Invariant: an attempt abandoned at its timeout never keeps a connection.
+    Its opener disconnects its EClient if the socket connect completes late,
+    and no new attempt starts while that opener may still claim the client
+    ID, so a stray session cannot make IBKR refuse the next one (code 326).
     """
 
     def __init__(self, start_reader=True):
@@ -130,25 +135,44 @@ class IbapiClient(TWSApi):
         self._wrapper = None
         self._client = None
         self._reader = None
+        self._opener = None
 
     def connect(self, host, port, client_id, callbacks, timeout):
+        previous = self._opener
+        if previous is not None and previous.is_alive():
+            # An abandoned attempt is still inside EClient.connect and may yet
+            # take this client ID; wait for it to finish and clean up.
+            previous.join(timeout)
+            if previous.is_alive():
+                raise ConnectFailed("an abandoned connect attempt has not finished")
         self.disconnect()
         self._wrapper = self._forwarder(callbacks)
         self._client = EClient(self._wrapper)
         # EClient.connect opens the socket and runs IBKR's handshake
         # synchronously, with no bound of its own.
         failure = []
+        lock = threading.Lock()
+        attempt = {"abandoned": False}
 
         def open_socket(client=self._client):
             try:
                 client.connect(host, port, client_id)
             except Exception as err:  # reported to the caller below
                 failure.append(err)
+            with lock:
+                if attempt["abandoned"]:
+                    # Completed after its timeout: it must not hold the ID.
+                    client.disconnect()
         opener = threading.Thread(target=open_socket, name="ibapi-connect", daemon=True)
+        self._opener = opener
         opener.start()
         opener.join(timeout)
-        if opener.is_alive():
-            # Closing the socket unblocks the opener; it starts no reader.
+        with lock:
+            timed_out = opener.is_alive()
+            attempt["abandoned"] = timed_out
+        if timed_out:
+            # Closing the socket unblocks the opener; it starts no reader, and
+            # disconnects its client itself if the connect completes later.
             self.disconnect()
             raise ConnectFailed("socket connect did not finish within {}s".format(timeout))
         if failure:

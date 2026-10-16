@@ -36,6 +36,8 @@ class _EClient:
         self.requests.append(("connect", host, port, clientId))
         if _EClient.connect_gate is not None:
             _EClient.connect_gate.wait(5)
+        # The socket is open now, whatever happened while connect was blocked.
+        self._stopped.clear()
 
     def run(self):
         # The real reader loops until the socket closes.
@@ -192,6 +194,37 @@ class ForwardingTests(unittest.TestCase):
             self.assertIsNone(client._reader)
         finally:
             _EClient.connect_gate.set()
+
+    def test_an_abandoned_attempt_that_connects_late_is_disconnected(self):
+        real_client = self.module()
+        _EClient.connect_gate = threading.Event()
+        client = real_client.IbapiClient(start_reader=True)
+        from connection import ConnectFailed
+        with self.assertRaises(ConnectFailed):
+            client.connect("127.0.0.1", 4002, 11, Recorder(), 0.05)
+        abandoned, opener = client._client, client._opener
+        _EClient.connect_gate.set()  # the stalled connect completes after the timeout
+        opener.join(1.0)
+        self.assertFalse(opener.is_alive())
+        self.assertFalse(abandoned.isConnected())
+        self.assertIsNone(client._reader)
+
+    def test_no_new_attempt_starts_while_an_abandoned_one_may_still_claim_the_id(self):
+        real_client = self.module()
+        _EClient.connect_gate = threading.Event()
+        client = real_client.IbapiClient(start_reader=False)
+        from connection import ConnectFailed
+        with self.assertRaises(ConnectFailed):
+            client.connect("127.0.0.1", 4002, 11, Recorder(), 0.05)
+        abandoned = client._client
+        with self.assertRaises(ConnectFailed):
+            client.connect("127.0.0.1", 4002, 11, Recorder(), 0.05)
+        self.assertIs(client._client, abandoned)  # no second EClient was opened
+        _EClient.connect_gate.set()
+        _EClient.connect_gate = None
+        client.connect("127.0.0.1", 4002, 11, Recorder(), 1.0)
+        self.assertFalse(abandoned.isConnected())
+        self.assertTrue(client.is_connected())
 
     def test_requests_reach_eclient(self):
         client, _ = self.build(False)

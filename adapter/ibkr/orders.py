@@ -91,7 +91,7 @@ BrokerOrders = namedtuple("BrokerOrders", "open_orders executions")
 
 ReconnectMatch = namedtuple("ReconnectMatch", (
     "matched executed missing_at_broker unknown_at_broker unknown_executions clean"))
-"""IBKR's view of the orders the journal expects, matched by client order ID.
+"""IBKR's view of the orders the journal expects, matched by client order ID and client ID.
 
 matched: tag to the OpenOrderRecord still open at IBKR, which carries the
 order's full identity (client ID, IBKR order ID, permId). executed: tag
@@ -322,21 +322,27 @@ def collect_broker_orders(conn):
         executions=tuple(executions[k] for k in sorted(executions)))
 
 
-def match_on_reconnect(expected_client_order_ids, broker):
-    """Match IBKR's orders and executions to the journal's expected tags; see ReconnectMatch."""
+def match_on_reconnect(expected_client_order_ids, broker, client_id):
+    """Match IBKR's orders and executions to the journal's expected tags; see ReconnectMatch.
+
+    Only an order or execution placed under this engine's own client_id can
+    be the journal's: collect_broker_orders also returns other clients'
+    orders in the account, and one carrying an expected tag is unknown, not
+    a match, so it can never satisfy reconciliation.
+    """
     expected = set(expected_client_order_ids)
     matched = {}
     unknown = []
     for record in broker.open_orders:
         cid = record.client_order_id
-        if cid in expected and cid not in matched:
+        if record.client_id == client_id and cid in expected and cid not in matched:
             matched[cid] = record
         else:
             unknown.append(record)
     executed = {}
     unknown_execs = []
     for report in broker.executions:
-        if report.client_order_id in expected:
+        if report.client_id == client_id and report.client_order_id in expected:
             executed.setdefault(report.client_order_id, []).append(report)
         else:
             unknown_execs.append(report)
