@@ -1422,6 +1422,8 @@ class UniverseParityTest(unittest.TestCase):
         algo.Fine(rows)
         self.assertEqual({s.Value: c for s, c in algo.sectors.items()}, {"MARA": 311, "JPM": 103})
         self.assertEqual(algo.overridden, 1)
+        algo.Fine(rows)                                        # the next month: same ticker again
+        self.assertEqual((algo.overridden, algo.relabelled), (2, {"MARA"}))
 
     def test_without_an_override_the_sectors_are_morningstars(self):
         algo = self._algo(source="coarse")

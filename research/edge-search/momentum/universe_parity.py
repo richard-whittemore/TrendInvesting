@@ -265,7 +265,8 @@ class MomentumResearch(QCAlgorithm):
             ticker = str(getattr(f.Symbol, "Value", f.Symbol))
             if ticker in self.SECTOR_OVERRIDE:
                 self.sectors[f.Symbol] = self.SECTOR_OVERRIDE[ticker]
-                self.overridden = getattr(self, "overridden", 0) + 1
+                self.overridden = getattr(self, "overridden", 0) + 1      # rows, over all months
+                self.relabelled = getattr(self, "relabelled", set()) | {ticker}
             self.fundamentals[f.Symbol] = {
                 "quality": gp / ta if gp is not None and ta and ta > 0 else None,
                 "value": ey,
@@ -509,5 +510,5 @@ class MomentumResearch(QCAlgorithm):
         self.SetRuntimeStatistic("Fundamentals", "reads={} hits={}".format(self.fund_reads, self.fund_hits))
         self.SetRuntimeStatistic("Universe", "{} {} lag={} waits={}".format(
             self.UNIVERSE_SOURCE, self.ETF_TICKER, self.ETF_LAG_DAYS, self.no_holdings))
-        self.SetRuntimeStatistic("Sectors", "overrides={} relabelled={}".format(
-            len(self.SECTOR_OVERRIDE), getattr(self, "overridden", 0)))
+        self.SetRuntimeStatistic("Sectors", "overrides={} tickers_relabelled={} rows_relabelled={}".format(
+            len(self.SECTOR_OVERRIDE), len(getattr(self, "relabelled", ())), getattr(self, "overridden", 0)))
