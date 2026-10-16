@@ -92,7 +92,7 @@ rebalance (`defensive_v2.py:167`). Current weight wᵢ = qᵢ·pᵢ / V.
 3. Not held, with a target Tᵢ > 0: buy Tᵢ·V / pᵢ, rounded per D7.
 4. Held, with a target: trade only if |wᵢ − Tᵢ| > `REBALANCE_BAND`·Tᵢ
    (strictly greater). Then trade (Tᵢ·V − qᵢ·pᵢ) / pᵢ, rounded toward zero.
-5. A sell never exceeds the broker-reported holding minus every working sell
+5. A sell never exceeds the broker-reported holding minus every working or pending sell (including `cancel-pending` ones, which may still execute)
    (ADR 0019, amended 2026-09-24, "working sell quantity never exceeds the
    holding").
 6. Sells come first, in instrument order. Buys follow, in instrument order.
@@ -193,7 +193,7 @@ the no-short sizing in point 2.5, and the kill switch.
 
 This ADR adopts `plan.md` section 3's definition (lines 193-195), tightened
 by one condition: **a sell that moves the account's exposure toward 98% or
-lower, sized within the broker-reported holding net of every working sell.**
+lower, sized within the broker-reported holding net of every working or pending sell.**
 Examples: Boost's exit, a momentum or bond sale, the urgent Excess Liquidity
 sale (`plan.md` lines 350-351). No buy is risk-reducing, even within a
 rebalance that also sells.
@@ -218,7 +218,7 @@ nothing else. It uses the same sizing rule, adopted by this ADR for these two
 states: one sell-only order bringing exposure toward 98% of net liquidation
 and never below, its quantity the smaller of what reaches 98% at the mark of
 one IBKR account snapshot (shares kept rounded up) and the broker-reported
-holding minus every working sell. A Degraded account whose named instrument
+holding minus every working or pending sell (including `cancel-pending` ones, which may still execute). A Degraded account whose named instrument
 is the one to sell is the open item in point 8.
 
 ### 5. State recovered from the journal on restart, never recomputed
@@ -288,7 +288,8 @@ the module's own rules version and decision corpus (ADR 0016;
    summed across sleeves; sells first; a plan with no sells planning its buys
    at once; buys costed at the band edge plus fees; buy scaling and the
    budget carried through releases and partial fills; both D7 roundings; no
-   sale beyond the holding net of working sells.
+   sale beyond the holding net of working and pending sells, a `cancel-pending`
+   sell included.
 4. **Limits:** each at, below and above its value; the exemptions; a sell
    from 160% to 155% passing the 150% check; the kill switch; the adapter
    refusing the same orders; every backtested order passing.
