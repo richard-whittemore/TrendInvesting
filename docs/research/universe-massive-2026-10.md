@@ -41,7 +41,11 @@ with QuantConnect's own universe for the same months. Massive's free plan
   that session, filtered by type. Responses are cached outside the
   repository (`data/massive/`); none is committed.
 - **Comparison:** `compare.py`: the share of QuantConnect's 500 names that the
-  Massive rule also picks.
+  Massive rule also picks. Columns A, B and C measure **agreement between
+  selections**: each month's Massive list against the selection QuantConnect
+  logged for that month. In the seven months of Finding 2 the backtest's
+  rebalance used the previous month's selection instead; the universe it
+  traded in those months is compared separately there.
 
 ## Results
 
@@ -110,6 +114,24 @@ in those months it is fresher than the backtest. That is why B falls to
 83–88% exactly in those months, and C, on the session QuantConnect used,
 recovers to 96–97%.
 
+**Against the universe the backtest traded** in those seven months (the
+previous month's selection), the Massive rule as written (latest session,
+common stock only) shares 80.1% of names on average (78.8% to 81.4%):
+
+| Month | Shared with the universe traded |
+| --- | --- |
+| 2024-12 | 81.0% |
+| 2025-06 | 81.4% |
+| 2025-09 | 79.8% |
+| 2025-12 | 79.6% |
+| 2026-02 | 79.2% |
+| 2026-03 | 81.0% |
+| 2026-06 | 78.8% |
+
+QuantConnect's own consecutive selections share about the same (77.8% to
+83.4%), so this is the month-to-month change in the top 500, not a defect of
+the Massive rule.
+
 ### Finding 3: what is left
 
 At about 96%, the remaining differences are mostly names near rank 500, which
@@ -120,15 +142,16 @@ EQR, FERG, FLUT). These fit the known gap: QuantConnect's
 
 ## What it means
 
-- **The D8 rule reproduces the backtest's universe closely** once ADRs are
-  left out: 96.4% on average when ranked on the same session.
+- **The D8 rule reproduces QuantConnect's selection closely** once ADRs are
+  left out: 96.4% agreement on average when ranked on the same session. In
+  the other 5 months out of 7 that is also the universe the backtest traded.
 - **A decision is needed on the timing (Finding 2).** ADR 0026 (point 8)
   says no backtest behaviour is copied into live trading without a decision.
   The two choices:
   1. **Live ranks the latest session** (as D8 is written). This is the
-     intended rule, but in about 2 months out of 7 the live universe differs
-     from the backtested one by about 12% of names, and the backtested
-     returns include the stale universe.
+     intended rule, but in about 2 months out of 7 about 20% of the live
+     universe differs from the one the backtest traded (80.1% shared), and
+     the backtested returns include the stale universe.
   2. **Live copies the backtest:** when the month's 1st is a Sunday or a
      Monday, rank using the universe chosen for the previous month. This
      reproduces what was tested, but deliberately uses older data.
