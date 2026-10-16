@@ -119,11 +119,30 @@ func run(args []string, out io.Writer) error {
 		return err
 	}
 	if *outPath != "" {
-		if err := os.WriteFile(*outPath, written.Bytes(), 0o600); err != nil {
+		if err := writeNew(*outPath, written.Bytes()); err != nil {
 			return err
 		}
 	}
 	return replayJournal(written.Bytes(), version, cfg, opts, out)
+}
+
+// writeNew writes data to a file that must not exist yet: the exclusive
+// create refuses an occupied path, so a rerun never replaces an earlier run's
+// journal (AGENTS.md rule 6). The file is synced before it is closed.
+func writeNew(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // replayJournal reads the journal back, verifies its chain and identity, and

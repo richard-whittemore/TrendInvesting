@@ -50,3 +50,19 @@ func TestDemoRefusesBadArguments(t *testing.T) {
 		}
 	}
 }
+
+// TestDemoRefusesToOverwriteAJournal checks that -out never replaces an
+// existing file, so a rerun cannot destroy recorded evidence (AGENTS.md
+// rule 6).
+func TestDemoRefusesToOverwriteAJournal(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "boost.journal")
+	if err := os.WriteFile(out, []byte("earlier run"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-sessions", "320", "-out", out}, &bytes.Buffer{}); err == nil {
+		t.Fatal("run() wrote over an existing journal, want a refusal")
+	}
+	if got, _ := os.ReadFile(out); string(got) != "earlier run" {
+		t.Errorf("existing journal = %q, want it unchanged", got)
+	}
+}
