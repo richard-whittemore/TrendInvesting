@@ -136,6 +136,9 @@ Vanguard's anchors, which is 10% until 40 and 30.8% at 53.
   not it flatters the path, and a run **fails** if its return per year is
   below both of its mixes' or its worst drop is deeper than both. A failure
   goes back to the owner before any IRA trades.
+  **Result (2026-10-16): all six runs pass**, return and worst drop
+  between the two mixes in every case
+  (`docs/research/glide-path-2026-10.md`).
 
 The schedule is configuration with its own hash (ADR 0016), so a change is
 recorded, never silent.
@@ -424,8 +427,8 @@ Lightsail VM (Ubuntu, $12/month, US East)
 2. **Backtest parity**: feed the Go strategy the same daily data the
    research used for a stretch of months and require the same targets as
    the QuantConnect run, month by month (momentum) and day by day (Boost).
-   The glide path, untested as a path, has its own backtest (section 2)
-   before any IRA trades live.
+   The glide path has its own backtest (section 2) before any IRA trades
+   live; it passed on 2026-10-16 (`docs/research/glide-path-2026-10.md`).
 3. **Dry-run on live data**: 1 month for Boost, 2 rebalances for momentum.
 4. **IBKR paper trading**: 2–3 months, all three accounts, with daily
    reconciliation and the dashboard. Gate: no unexplained difference, no
