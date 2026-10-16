@@ -54,6 +54,8 @@ VARIANTS = {
     # Golden cases for the Go module (ADR 0026): BX_SPY unchanged, with each
     # day of three pullback months in uptrends, and the first decision, logged.
     "BX_GOLD": ("boost/golden_log.py", {"GOLDEN_MONTHS": ((2017, 8), (2019, 5), (2024, 4))}),
+    # Months where BX_SPY (b275c80d) exits and buys again the next session, which BX_GOLD's lack.
+    "BX_GOLD_2": ("boost/golden_log.py", {"GOLDEN_MONTHS": ((2023, 10), (2024, 7))}),
     "BX_SPY_C105": ("boost/template.py", {"MODE": "const", "CONST_LEV": 1.055}),
     "BX_SPY_C110": ("boost/template.py", {"MODE": "const", "CONST_LEV": 1.10}),
     "BX_QQQ": ("boost/template.py", {"TICKER": "QQQ"}),
@@ -214,6 +216,11 @@ VARIANTS = {
     "IS_GOLD_2008_11": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2008, 11),), END_DATE=(2008, 11, 30))),
     "IS_GOLD_2009_06": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2009, 6),), END_DATE=(2009, 6, 30))),
     "IS_GOLD_2013_05": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2013, 5),), END_DATE=(2013, 5, 31))),
+    # Second parts of the two months the 10 KB log cap cut, from the rank after the last one logged.
+    "OOS_GOLD_2021_03_B": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2021, 3),), END_DATE=(2021, 3, 31),
+                                                          GOLDEN_FROM_RANK=139)),
+    "IS_GOLD_2000_03_B": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2000, 3),), END_DATE=(2000, 3, 31),
+                                                         GOLDEN_FROM_RANK=145)),
     "BE_IB_MOC": ("boost/execution.py", {"EXEC": "moc"}),
     "BE_IB_OPEN": ("boost/execution.py", {"EXEC": "next_open"}),
     "BE_M1_AM": ("boost/execution.py", dict(_M1, EXEC="next_open")),

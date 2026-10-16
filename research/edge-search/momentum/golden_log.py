@@ -70,13 +70,14 @@ def _chunk(prefix, items, width=190):
 
 
 def golden_lines(when, risk_off, spy_close, spy_mean, members, scored, ranked, scores, vol, sectors,
-                 targets, top_k=40, sector_cap=None, top_n=25, short=()):
+                 targets, top_k=40, sector_cap=None, top_n=25, short=(), from_rank=1):
     """Log lines for one rebalance: a header; the ranked names marked P
     (picked), C (skipped by the sector cap) or - (beyond ``top_n`` picks),
     at least ``top_k`` of them and always as far as the last pick; every
     target weight by ticker; and the stocks left out for too short a
     history, with their close counts. Numbers are written with repr, so
-    they round-trip exactly."""
+    they round-trip exactly. Ranks before ``from_rank`` are marked but not
+    written, so a month too long for one log can be logged in two runs."""
     day = when.strftime("%Y-%m-%d")
     name = lambda sym: str(getattr(sym, "Value", sym))
     num = lambda x: repr(float(x))
@@ -96,6 +97,8 @@ def golden_lines(when, risk_off, spy_close, spy_mean, members, scored, ranked, s
             picks += 1
             if sec is not None:
                 counts[sec] = counts.get(sec, 0) + 1
+        if i < from_rank:
+            continue
         items.append("{}:{}:{}:{}:{}:{}".format(
             i, name(sym), num(scores[sym]), num(vol.get(sym, 0.0)), "-" if sec is None else sec, mark))
     lines += _chunk("GOLDR {} ".format(day), items)
@@ -191,6 +194,7 @@ class MomentumResearch(QCAlgorithm):
     BORROW_FEE = 0.02             # annual fee on short market value (losers are often costly to borrow)
     GOLDEN_MONTHS = ()            # (year, month) rebalances whose full working is logged
     GOLDEN_TOP_K = 40             # ranked names logged per golden month
+    GOLDEN_FROM_RANK = 1          # first rank written; later, for a second run of a month cut by the log cap
 
     def Initialize(self):
         self.SetStartDate(*self.START_DATE)
@@ -401,7 +405,7 @@ class MomentumResearch(QCAlgorithm):
                                          len(self.members), len(scores), ranked, scores, vol,
                                          self.sectors if self.SECTOR_CAP else None, targets,
                                          top_k=self.GOLDEN_TOP_K, sector_cap=self.SECTOR_CAP,
-                                         top_n=self.TOP_N, short=short):
+                                         top_n=self.TOP_N, short=short, from_rank=self.GOLDEN_FROM_RANK):
                     self.Log(line)
                     self.golden_logged = getattr(self, "golden_logged", 0) + 1
             self.names_held += self.TOP_N
