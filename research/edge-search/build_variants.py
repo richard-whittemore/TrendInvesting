@@ -197,10 +197,11 @@ VARIANTS = {
     # Golden cases for the Go module (ADR 0026): the combination, trading
     # exactly as recorded, with chosen months' working logged. Months chosen
     # for a risk-off month, a binding sector cap and a recovery.
-    # At most three months per run, so each run's log stays inside the Free
-    # plan's 10 KB cap.
-    "OOS_GOLD_A": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2016, 2), (2020, 4), (2021, 3)))),
-    "OOS_GOLD_B": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2022, 6), (2024, 3)))),
+    # At most two months per run (about 3 KB each at full precision), so each
+    # run's log stays inside the Free plan's 10 KB cap.
+    "OOS_GOLD_A": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2016, 2), (2020, 4)))),
+    "OOS_GOLD_B": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2021, 3), (2022, 6)))),
+    "OOS_GOLD_C": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2024, 3),))),
     "IS_GOLD_A": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2000, 3), (2008, 11)))),
     "IS_GOLD_B": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2009, 6), (2013, 5)))),
     "BE_IB_MOC": ("boost/execution.py", {"EXEC": "moc"}),

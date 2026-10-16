@@ -1,9 +1,11 @@
 # Research script, not production code. Run on QuantConnect Cloud to record
 # golden cases for the Go target-weight module (docs/adr/0026, point 7): for
 # each month in GOLDEN_MONTHS it logs the rebalance's full working, the
-# risk-off inputs, the top GOLDEN_TOP_K ranked names with score, volatility,
-# sector and whether the cap picked or skipped them, and the final weights.
-# Lines are "GOLDH|GOLDR|GOLDW <date> ...|" (the "|" marks a line not cut
+# risk-off inputs, the ranked names (at least GOLDEN_TOP_K, and as far as the
+# last pick) with score, volatility, sector and whether the cap picked or
+# skipped them, the final weights, and the stocks left out for too short a
+# history. Numbers round-trip exactly (repr).
+# Lines are "GOLDH|GOLDR|GOLDW|GOLDS <date> ...|" (the "|" marks a line not cut
 # short), sized for the Free plan's 10 KB log cap. It cannot be imported
 # outside QuantConnect (AlgorithmImports); research/edge-search/README.md
 # explains the stand-in used to test it.
@@ -68,16 +70,22 @@ def _chunk(prefix, items, width=190):
 
 
 def golden_lines(when, risk_off, spy_close, spy_mean, members, scored, ranked, scores, vol, sectors,
-                 targets, top_k=40, sector_cap=None, top_n=25):
-    """Log lines for one rebalance: a header, the top ``top_k`` ranked
-    names marked P (picked), C (skipped by the sector cap) or - (beyond
-    ``top_n`` picks), and every target weight by ticker."""
+                 targets, top_k=40, sector_cap=None, top_n=25, short=()):
+    """Log lines for one rebalance: a header; the ranked names marked P
+    (picked), C (skipped by the sector cap) or - (beyond ``top_n`` picks),
+    at least ``top_k`` of them and always as far as the last pick; every
+    target weight by ticker; and the stocks left out for too short a
+    history, with their close counts. Numbers are written with repr, so
+    they round-trip exactly."""
     day = when.strftime("%Y-%m-%d")
     name = lambda sym: str(getattr(sym, "Value", sym))
-    lines = ["GOLDH {} risk_off={} spy={:.6f} sma={:.6f} members={} scored={}|".format(
-        day, int(bool(risk_off)), spy_close, spy_mean, members, scored)]
+    num = lambda x: repr(float(x))
+    lines = ["GOLDH {} risk_off={} spy={} sma={} members={} scored={}|".format(
+        day, int(bool(risk_off)), num(spy_close), num(spy_mean), members, scored)]
     picks, counts, items = 0, {}, []
-    for i, sym in enumerate(ranked[:top_k], 1):
+    for i, sym in enumerate(ranked, 1):
+        if i > top_k and picks >= top_n:
+            break
         sec = sectors.get(sym) if sectors else None
         if picks >= top_n:
             mark = "-"
@@ -88,11 +96,13 @@ def golden_lines(when, risk_off, spy_close, spy_mean, members, scored, ranked, s
             picks += 1
             if sec is not None:
                 counts[sec] = counts.get(sec, 0) + 1
-        items.append("{}:{}:{:.6f}:{:.6f}:{}:{}".format(
-            i, name(sym), scores[sym], vol.get(sym, 0.0), "-" if sec is None else sec, mark))
+        items.append("{}:{}:{}:{}:{}:{}".format(
+            i, name(sym), num(scores[sym]), num(vol.get(sym, 0.0)), "-" if sec is None else sec, mark))
     lines += _chunk("GOLDR {} ".format(day), items)
     lines += _chunk("GOLDW {} ".format(day),
-                    ["{}:{:.6f}".format(n, w) for n, w in sorted((name(k), v) for k, v in targets.items())])
+                    ["{}:{}".format(n, num(w)) for n, w in sorted((name(k), v) for k, v in targets.items())])
+    if short:
+        lines += _chunk("GOLDS {} ".format(day), ["{}:{}".format(name(s), n) for s, n in short])
     return lines
 
 
@@ -335,11 +345,14 @@ class MomentumResearch(QCAlgorithm):
             risk_off = spy.iloc[-1] < spy.iloc[-self.TREND_DAYS:].mean()
 
         mom, vol, above = {}, {}, {}
+        short = []                    # (symbol, closes available) left out for too short a history
         for sym in self.members:
             if sym not in closes.columns:
+                short.append((sym, 0))
                 continue
             px = closes[sym].dropna()
             if len(px) < 253:
+                short.append((sym, len(px)))
                 continue
             mom[sym] = px.iloc[-22] / px.iloc[-253] - 1.0
             rets = px.pct_change().dropna().iloc[-252:]
@@ -388,7 +401,7 @@ class MomentumResearch(QCAlgorithm):
                                          len(self.members), len(scores), ranked, scores, vol,
                                          self.sectors if self.SECTOR_CAP else None, targets,
                                          top_k=self.GOLDEN_TOP_K, sector_cap=self.SECTOR_CAP,
-                                         top_n=self.TOP_N):
+                                         top_n=self.TOP_N, short=short):
                     self.Log(line)
                     self.golden_logged = getattr(self, "golden_logged", 0) + 1
             self.names_held += self.TOP_N

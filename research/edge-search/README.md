@@ -80,7 +80,7 @@ backtest runs on their servers.
 - `shorting/` — `trend_template.py` (a 200-day trend rule going to cash or
   short) and `factors_ls.py` (the factor script with long/short and 130/30
   momentum modes and a borrow fee).
-- `build_variants.py` — writes all 98 follow-up variants exactly as run,
+- `build_variants.py` — writes every follow-up variant exactly as run,
   from these templates and a local TB3MS CSV.
 - `momentum/` — `momentum.py`, the long/short factor script plus a switch
   for entries-and-exits-only trading and a volatility-scaling crash guard,
