@@ -25,6 +25,10 @@ def _canonical(record):
 
 
 def filename(record):
+    """kind_session.json; a record covering a window (``from``) is named
+    kind_from_session.json."""
+    if record.get("from"):
+        return "{}_{}_{}.json".format(record["kind"], record["from"], record["session"])
     return "{}_{}.json".format(record["kind"], record["session"])
 
 
