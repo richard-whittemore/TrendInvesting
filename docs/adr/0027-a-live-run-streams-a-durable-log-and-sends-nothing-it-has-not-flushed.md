@@ -227,9 +227,11 @@ change the ADR's status, and the owner may amend it in that review.*
 
 - **The durable log is mandatory before paper trading (#336).** This replaces
   the Consequences' statement that `-log` is optional. `cmd/engine` takes
-  `-mode backtest|dry-run|paper|live`, defaulting to `backtest`. In any mode
-  but `backtest` it refuses to start without `-log`. A backtest, including the
-  LEAN adapter's end-to-end test, keeps `-log` optional. The mode is a
+  `-mode backtest|dry-run|paper|live`, which is required and has no default,
+  so a live run that forgets it is refused rather than run without the log. In
+  any mode but `backtest` it refuses to start without `-log`. A backtest,
+  including the LEAN adapter's end-to-end test (which passes `-mode backtest`),
+  keeps `-log` optional. The mode is a
   declaration by the person starting the engine; the live engine's
   configuration naming its adapter (ADR 0025 point 3, still to be built) is
   what will later bind a live adapter to a live mode.

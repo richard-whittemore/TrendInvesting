@@ -41,12 +41,21 @@ func testIdentity(t *testing.T) (strategyVersion, configurationHash string) {
 // on disk already: journal-before-send, observed from the adapter's side.
 func driveSessions(t *testing.T, socketPath, logPath string, from, to int) {
 	t.Helper()
-	strategyVersion, configurationHash := testIdentity(t)
 	client, err := transport.Dial(socketPath)
 	if err != nil {
 		t.Fatalf("dial the engine: %v", err)
 	}
 	defer func() { _ = client.Close() }()
+	driveSessionsOn(t, client, logPath, from, to)
+}
+
+// driveSessionsOn drives sessions over a connection the caller already holds.
+// The engine admits one connection at a time, and frees the slot only once it
+// notices the previous one closed, so a test that closes a connection and
+// dials another at once can be refused (an EOF on its first call).
+func driveSessionsOn(t *testing.T, client *transport.Client, logPath string, from, to int) {
+	t.Helper()
+	strategyVersion, configurationHash := testIdentity(t)
 	for day := from; day < to; day++ {
 		for _, input := range sessionInputs(t, day, strategyVersion, configurationHash) {
 			reply, err := client.Decide(context.Background(), input)
@@ -108,7 +117,7 @@ func uninterruptedJournal(t *testing.T, to int) []byte {
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	out := filepath.Join(dir, "journal.jsonl")
-	stop := startEngine(t, options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: out, build: "test-build"})
+	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: out, build: "test-build"})
 	driveSessions(t, socketPath, "", 0, to)
 	if err := stop(); err != nil {
 		t.Fatalf("the uninterrupted run: %v", err)
@@ -124,7 +133,7 @@ func TestARestartResumesFromTheDurableLog(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	firstLog := filepath.Join(dir, "first.log")
-	stop := startEngine(t, options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
+	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
 	driveSessions(t, socketPath, firstLog, 0, 4)
 	if err := stop(); err != nil {
 		t.Fatalf("the first run: %v", err)
@@ -132,7 +141,7 @@ func TestARestartResumesFromTheDurableLog(t *testing.T) {
 
 	secondLog := filepath.Join(dir, "second.log")
 	secondOut := filepath.Join(dir, "second.jsonl")
-	report := resumeEngine(t, options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: secondOut, logPath: secondLog, resumePath: firstLog, build: "test-build"})
+	report := resumeEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: secondOut, logPath: secondLog, resumePath: firstLog, build: "test-build"})
 	driveSessions(t, socketPath, secondLog, 4, 8)
 	if err := report.stop(); err != nil {
 		t.Fatalf("the resumed run: %v", err)
@@ -173,7 +182,7 @@ func TestARestartAfterACrashMidWriteResumesFromTheLastCommit(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	firstLog := filepath.Join(dir, "first.log")
-	stop := startEngine(t, options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
+	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
 	driveSessions(t, socketPath, firstLog, 0, 3)
 	if err := stop(); err != nil {
 		t.Fatalf("the first run: %v", err)
@@ -189,7 +198,7 @@ func TestARestartAfterACrashMidWriteResumesFromTheLastCommit(t *testing.T) {
 
 	secondOut := filepath.Join(dir, "second.jsonl")
 	secondLog := filepath.Join(dir, "second.log")
-	report := resumeEngine(t, options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: secondOut, logPath: secondLog, resumePath: torn, build: "test-build"})
+	report := resumeEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: secondOut, logPath: secondLog, resumePath: torn, build: "test-build"})
 	strategyVersion, configurationHash := testIdentity(t)
 	client, err := transport.Dial(socketPath)
 	if err != nil {
@@ -198,8 +207,9 @@ func TestARestartAfterACrashMidWriteResumesFromTheLastCommit(t *testing.T) {
 	if _, err := client.Decide(context.Background(), sessionInputs(t, 2, strategyVersion, configurationHash)[1]); err != nil {
 		t.Fatalf("resend the torn input: %v", err)
 	}
+	// The same connection continues: the engine admits one at a time.
+	driveSessionsOn(t, client, secondLog, 3, 5)
 	_ = client.Close()
-	driveSessions(t, socketPath, secondLog, 3, 5)
 	if err := report.stop(); err != nil {
 		t.Fatalf("the resumed run: %v", err)
 	}
@@ -218,7 +228,7 @@ func TestRunRefusesAResumeItCannotHonour(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	firstLog := filepath.Join(dir, "first.log")
-	stop := startEngine(t, options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
+	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
 	driveSessions(t, socketPath, firstLog, 0, 1)
 	if err := stop(); err != nil {
 		t.Fatalf("the first run: %v", err)
@@ -228,7 +238,7 @@ func TestRunRefusesAResumeItCannotHonour(t *testing.T) {
 		t.Fatalf("write the damaged log: %v", err)
 	}
 
-	base := options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, build: "test-build"}
+	base := options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, build: "test-build"}
 	for name, tc := range map[string]struct {
 		mutate func(*options)
 		want   string
@@ -291,7 +301,7 @@ func TestAResumeAcrossBuildsNamesTheUpgradeProcedure(t *testing.T) {
 // backtest (the default) keeps -log optional.
 func TestTheDurableLogIsRequiredOutsideABacktest(t *testing.T) {
 	dir := t.TempDir()
-	base := options{socketPath: filepath.Join(shortSocketDir(t), "e.sock"), configPath: testConfigPath, asOf: testAsOf, build: "test-build"}
+	base := options{mode: modeBacktest, socketPath: filepath.Join(shortSocketDir(t), "e.sock"), configPath: testConfigPath, asOf: testAsOf, build: "test-build"}
 	for _, mode := range []string{"dry-run", "paper", "live"} {
 		opts := base
 		opts.mode = mode
@@ -302,13 +312,18 @@ func TestTheDurableLogIsRequiredOutsideABacktest(t *testing.T) {
 		}
 	}
 	opts := base
+	opts.mode, opts.outPath = "", filepath.Join(dir, "none.jsonl")
+	if err := run(context.Background(), opts, io.Discard); err == nil || !strings.Contains(err.Error(), "-mode is required") {
+		t.Errorf("no mode: run() = %v, want a refusal saying -mode is required", err)
+	}
+	opts = base
 	opts.mode, opts.outPath = "sandbox", filepath.Join(dir, "sandbox.jsonl")
 	if err := run(context.Background(), opts, io.Discard); err == nil || !strings.Contains(err.Error(), "-mode") {
 		t.Errorf("an unknown mode: run() = %v, want a refusal naming -mode", err)
 	}
 
 	// With -log a live mode starts; the backtest modes need none.
-	for _, mode := range []string{"", "backtest", "paper"} {
+	for _, mode := range []string{"backtest", "paper"} {
 		socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 		opts := options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, build: "test-build", mode: mode,
 			outPath: filepath.Join(dir, "ok-"+mode+".jsonl")}

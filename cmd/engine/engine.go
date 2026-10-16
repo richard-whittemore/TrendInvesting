@@ -80,8 +80,8 @@ type options struct {
 	logPath    string
 	resumePath string
 	asOf       string
-	// mode is what the adapter on the socket does with the decisions: ""
-	// or modeBacktest (decisions are simulated), or a mode that can reach a
+	// mode is required and is what the adapter on the socket does with the
+	// decisions: modeBacktest (decisions are simulated), or a mode that can reach a
 	// broker. A mode other than backtest requires logPath (#336).
 	mode            string
 	build           string
@@ -93,8 +93,8 @@ type options struct {
 // mode serves an adapter whose orders can reach a broker, or rehearses
 // doing so, and so must hold journal-before-send (ADR 0019 amended
 // 2026-09-24; ADR 0026 §3; ADR 0027). The owner's decision of 2026-10-16
-// (#336). The empty string is a backtest, so a LEAN backtest invocation is
-// unchanged.
+// (#336). There is no default: an empty mode is refused, so forgetting -mode
+// can never run a live engine without the log.
 const (
 	modeBacktest = "backtest"
 	modeDryRun   = "dry-run"
@@ -126,7 +126,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 		missing = append(missing, errors.New("the running build must be identified; it is part of every envelope's strategy version (ADR 0016)"))
 	}
 	switch opts.mode {
-	case "", modeBacktest:
+	case modeBacktest:
+	case "":
+		missing = append(missing, fmt.Errorf("-mode is required: %s, %s, %s or %s; there is no default, so a live run cannot start without the durable log by forgetting it (owner decision 2026-10-16)", modeBacktest, modeDryRun, modePaper, modeLive))
 	case modeDryRun, modePaper, modeLive:
 		if opts.logPath == "" {
 			missing = append(missing, fmt.Errorf("-log is required in -mode %s: orders that can reach a broker are sent only after they are flushed to a durable log (ADR 0027; owner decision 2026-10-16)", opts.mode))
