@@ -157,6 +157,8 @@ class BuilderTest(unittest.TestCase):
     def test_vol_target_is_refused_where_it_would_be_ignored(self):
         with self.assertRaises(SystemExit):
             build_variants.check_variant("momentum/defensive.py", {"MODE": "mom", "VOL_TARGET": 0.2})
+        with self.assertRaises(SystemExit):
+            build_variants.check_variant("momentum/fresh_universe.py", {"MODE": "mom_trend", "VOL_TARGET": 0.2})
         build_variants.check_variant("momentum/momentum.py", {"MODE": "mom", "VOL_TARGET": 0.2})
 
     def test_an_unknown_constant_is_refused(self):

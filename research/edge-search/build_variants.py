@@ -329,7 +329,8 @@ def render(template_src, params, rates):
 
 #: Templates whose long-only modes ignore VOL_TARGET: their book comes from
 #: defensive_book, which has no volatility scaling.
-NO_VOL_TARGET = ("momentum/defensive.py", "momentum/defensive_v2.py", "momentum/scores.py")
+NO_VOL_TARGET = ("momentum/defensive.py", "momentum/defensive_v2.py", "momentum/scores.py",
+                 "momentum/fresh_universe.py")
 
 
 def check_variant(template, params):
