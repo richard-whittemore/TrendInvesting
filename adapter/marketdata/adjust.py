@@ -53,12 +53,14 @@ def adjusted_closes(history, ticker, splits, dividends):
     for i, (day, bars) in enumerate(history):
         for row in bars:
             if row.get("T") == ticker:
+                if closes and closes[-1][0] == i:
+                    raise CannotAdjust("{} has more than one bar on {}".format(ticker, day))
                 if not _finite(row.get("c")) or row["c"] <= 0:
                     raise CannotAdjust("{} has close {!r} on {}".format(ticker, row.get("c"), day))
                 closes.append((i, day, row["c"]))
     if not closes:
         raise CannotAdjust("{} has no bars in the history".format(ticker))
-    if len(closes) != closes[-1][0] - closes[0][0] + 1:
+    if [i for i, _, _ in closes] != list(range(closes[0][0], closes[-1][0] + 1)):
         raise CannotAdjust("{} is missing sessions between its first and last bar".format(ticker))
     first_day, last_day = history[0][0], history[-1][0]
     by_day = {day: (i, c) for i, day, c in closes}

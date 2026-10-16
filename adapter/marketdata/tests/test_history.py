@@ -264,6 +264,16 @@ class AdjustTest(unittest.TestCase):
         with self.assertRaises(adjust.CannotAdjust):
             adjust.adjusted_closes(h, "A", [], [])
 
+    def test_a_duplicate_bar_plus_an_empty_session_cannot_pass_as_complete(self):
+        h = [(DAYS[0], [bar("A", 10.0), bar("A", 10.5)]), (DAYS[1], []), (DAYS[2], [bar("A", 11.0)])]
+        with self.assertRaises(adjust.CannotAdjust):
+            adjust.adjusted_closes(h, "A", [], [])
+
+    def test_a_duplicate_bar_within_one_session_fails_closed(self):
+        h = [(DAYS[0], [bar("A", 10.0)]), (DAYS[1], [bar("A", 11.0), bar("A", 11.0)])]
+        with self.assertRaises(adjust.CannotAdjust):
+            adjust.adjusted_closes(h, "A", [], [])
+
     def test_sessions_before_the_first_or_after_the_last_bar_are_allowed(self):
         h = [(DAYS[0], [bar("B", 1.0)]), (DAYS[1], [bar("A", 10.0)]), (DAYS[2], [bar("A", 11.0)]),
              (DAYS[3], [bar("B", 1.0)])]
