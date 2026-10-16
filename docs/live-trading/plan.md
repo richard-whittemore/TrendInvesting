@@ -406,10 +406,11 @@ Lightsail VM (Ubuntu, $12/month, US East)
   - **whole shares**: on the ~$30k IRA a name gets about $1,000. A stock
     priced above its target cannot be held, and one priced at a large share
     of it cannot be kept within the band. Decision D7: fractional shares
-    through the API, if IBKR offers them for IRAs on Lite, or else a
+    through the API, if IBKR offers them for IRAs, or else a
     minimum-lot rule (for example, skip a name whose one share exceeds its
     target and give the weight to the next eligible name). Whichever is
-    chosen goes into the parity backtest.
+    chosen goes into the parity backtest. **Decided 2026-10-16: the
+    minimum-lot rule** (section 10, D7).
 - **Day-trading margin rules**: which regime applies is to be confirmed
   with IBKR (D5). FINRA replaced the pattern-day-trader designation and its
   $25,000 minimum with intraday margin standards in Rule 4210(d)(2),
@@ -472,11 +473,12 @@ Lightsail VM (Ubuntu, $12/month, US East)
 | --- | --- |
 | Lightsail 2 GB plan, snapshots | ~$170 |
 | Tailscale, Healthchecks.io, ntfy (free tiers) | $0 |
-| IBKR market data for API bars, if required | about $10/month (~$120/year). Lite pays no commissions, so no commission waiver applies; budget it unless IBKR confirms the bars are free |
-| Commissions | Lite: $0. Pro: ~$28 for Boost, and for momentum's ~25 names a month perhaps $100–200 per IRA |
+| IBKR market data for API bars, if required | about $10/month (~$120/year); daily bars come from Massive (#326), so a subscription may be needed only for the marks the price band checks; budget it until paper trading shows otherwise |
+| Commissions | Pro (every account, since Lite has no API access; D5 revised 2026-10-16): ~$28 for Boost, and for momentum's ~25 names a month perhaps $100–200 per IRA |
 
-**Decision D5**: the owner chose IBKR Lite for every account, if IBKR
-allows it. To confirm with IBKR:
+**Decision D5** (revised 2026-10-16; section 10): **IBKR Pro for every
+account**, since Lite has no API access, and margin IRAs. The original
+questions, kept for the record (answers in #331):
 - that Lite is allowed on both IRAs and on a joint margin account;
 - what the API's daily bars cost on Lite;
 - that the three accounts can be linked under one username, so one IB
@@ -497,7 +499,7 @@ so Pro's margin rate does not help them.
 
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
-| 0 | Owner decisions D5 and D7 (D6 decided 2026-10-15); the broker-adapter ADR (0025, accepted 2026-10-15); this plan reviewed (owner, and an independent review on 2026-10-15) | Done except D5 and D7, which must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
+| 0 | Owner decisions D5 and D7 (D6 decided 2026-10-15); the broker-adapter ADR (0025, accepted 2026-10-15); this plan reviewed (owner, and an independent review on 2026-10-15) | Done: D5 revised and D7 decided 2026-10-16 (section 10); the remaining IBKR confirmations (#331) are settled in paper trading |
 | 1 | Universe parity study (research, QuantConnect free) | IWB tested and failed (2026-10-15); D8 builds the universe from all US listings. Data source chosen (Massive, 2026-10-16) and the D8 rule's comparison recorded: 96.4% agreement with QuantConnect's selection over 21 months (`docs/research/universe-massive-2026-10.md`). The sector check is done (2026-10-15). Timing decided 2026-10-16: live ranks the latest session (section 10, D8); its effect on returns is being measured |
 | 2 | The target-weight strategy ADR (decision contract, risk limits, the risk-reducing definition in section 3); Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest passes its stated test |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
@@ -516,13 +518,23 @@ only after CodeRabbit and Greptile findings are addressed.
 - **D3** Joint account: **margin Boost** (decided 2026-10-14).
 - **D4** Architecture: **Go decision core with a Python broker adapter**
   (decided 2026-10-14).
-- **D5** **IBKR Lite for every account**, if IBKR allows it and its API
-  data suffices (decided 2026-10-14; to confirm with IBKR).
+- **D5** **IBKR Pro for every account** (revised 2026-10-16; owner: "yes"):
+  IBKR Lite has no API access (IBKR's TWS API requirements page names a
+  funded IBKR Pro account), so the 2026-10-14 choice of Lite cannot hold.
+  **Both IRAs are opened as margin IRAs** (owner decision 2026-10-16): a
+  margin IRA never borrows but may buy with unsettled sale proceeds, while
+  a cash IRA risks a 90-day free-riding restriction for the same buy. The
+  planner's cash rule is therefore `total-cash` for the IRAs. Still to
+  confirm with IBKR (#331): the joint account's day-trading regime and its
+  switch date, SPY's house margin, and that each IRA's paper account is the
+  same type. Research with sources: #331.
 - **D6** A Halted joint account **flattens to 98% by itself**, with an
   alert when the account freezes, when the sale is sent and when it fills
   or fails (decided 2026-10-15; section 3).
-- **D7** Whole shares in the IRAs: fractional shares through the API, or a
-  minimum-lot rule (section 5). Open; depends on what IBKR confirms.
+- **D7** **Whole shares in the IRAs, with the minimum-lot rule** (D7-L;
+  decided 2026-10-16, owner: "yes"; section 5): IBKR's FAQ says fractional
+  orders are not supported through the TWS API. Fractional (D7-F) stays
+  built as configuration and is confirmed unavailable in paper trading.
 - **D8** Live universe: **every US-listed common stock ranked by one
   session's dollar volume, as the backtest does** (decided 2026-10-15;
   section 4). Data source: Massive's free plan (account opened by the owner
