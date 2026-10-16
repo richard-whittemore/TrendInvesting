@@ -213,6 +213,11 @@ VARIANTS = {
     "IS_GOLD_2008_11": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2008, 11),), END_DATE=(2008, 11, 30))),
     "IS_GOLD_2009_06": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2009, 6),), END_DATE=(2009, 6, 30))),
     "IS_GOLD_2013_05": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2013, 5),), END_DATE=(2013, 5, 31))),
+    # Second parts of the two months the 10 KB log cap cut, from the rank after the last one logged.
+    "OOS_GOLD_2021_03_B": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2021, 3),), END_DATE=(2021, 3, 31),
+                                                          GOLDEN_FROM_RANK=139)),
+    "IS_GOLD_2000_03_B": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2000, 3),), END_DATE=(2000, 3, 31),
+                                                         GOLDEN_FROM_RANK=145)),
     "BE_IB_MOC": ("boost/execution.py", {"EXEC": "moc"}),
     "BE_IB_OPEN": ("boost/execution.py", {"EXEC": "next_open"}),
     "BE_M1_AM": ("boost/execution.py", dict(_M1, EXEC="next_open")),

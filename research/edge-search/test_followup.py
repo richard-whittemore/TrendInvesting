@@ -1718,6 +1718,23 @@ class GoldenLogTest(unittest.TestCase):
         # T0 picked; T1-T3 capped; T4 (rank 5, past top_k 2) is the second pick.
         self.assertEqual([r.split(":")[-1] for r in ranks], ["P", "C", "C", "C", "P"])
 
+    def test_from_rank_drops_earlier_ranks_but_keeps_their_marks_and_the_rest(self):
+        sym = namedtuple("Sym", "Value")
+        names = [sym("T%d" % i) for i in range(6)]
+        scores = {s: 1.0 - i / 10 for i, s in enumerate(names)}
+        sectors = {s: 311 for s in names[:4]}
+        sectors.update({names[4]: 101, names[5]: 102})
+        args = (_dt.datetime(2020, 4, 1, 8), False, 1.0, 1.0, 6, 6, names, scores,
+                {s: 0.01 for s in names}, sectors, {names[0]: 0.49, names[4]: 0.49})
+        full = self.module.golden_lines(*args, top_k=2, sector_cap=1, top_n=2)
+        part = self.module.golden_lines(*args, top_k=2, sector_cap=1, top_n=2, from_rank=4)
+        ranks = lambda ls: ";".join(l[l.index(" ", 6) + 1:-1] for l in ls if l.startswith("GOLDR")).split(";")
+        # Ranks 4 and 5 keep the marks they get in the full log (T4 is still the second pick).
+        self.assertEqual(ranks(part), ranks(full)[3:])
+        self.assertEqual(part[0], full[0])
+        self.assertEqual([l for l in part if not l.startswith("GOLDR")],
+                         [l for l in full if not l.startswith("GOLDR")])
+
     def test_numbers_round_trip_beyond_six_decimals(self):
         sym = namedtuple("Sym", "Value")
         a = sym("A")
@@ -1748,7 +1765,8 @@ class GoldenLogTest(unittest.TestCase):
 
     def test_the_golden_runs_keep_the_combinations_settings_and_end_after_their_month(self):
         import calendar
-        names = [n for n in build_variants.VARIANTS if "_GOLD_" in n and n.split("_")[0] in ("OOS", "IS")]
+        names = [n for n in build_variants.VARIANTS if "_GOLD_" in n and n.split("_")[0] in ("OOS", "IS")
+                 and not n.endswith("_B")]
         self.assertEqual(len(names), 9)
         for name in names:
             template, params = build_variants.VARIANTS[name]
@@ -1756,12 +1774,22 @@ class GoldenLogTest(unittest.TestCase):
             base = "OOS_F_COMBO" if name.startswith("OOS") else "F_COMBO"
             c = _class_constants(template, params)
             months, k, end = c.pop("GOLDEN_MONTHS"), c.pop("GOLDEN_TOP_K"), c.pop("END_DATE")
+            self.assertEqual(c.pop("GOLDEN_FROM_RANK"), 1, name)
             expected = _class_constants(*build_variants.VARIANTS[base])
             expected.pop("END_DATE")
             self.assertEqual(c, expected, name)
             (y, m), = months
             self.assertEqual(end, (y, m, calendar.monthrange(y, m)[1]), name)
             self.assertEqual(k, 40, name)
+
+    def test_each_second_part_is_its_cut_run_starting_after_the_last_rank_logged(self):
+        # The 10 KB log cap cut these two runs after these ranks.
+        for name, start in (("OOS_GOLD_2021_03", 139), ("IS_GOLD_2000_03", 145)):
+            first = _class_constants(*build_variants.VARIANTS[name])
+            second = _class_constants(*build_variants.VARIANTS[name + "_B"])
+            self.assertEqual(second.pop("GOLDEN_FROM_RANK"), start, name)
+            first.pop("GOLDEN_FROM_RANK", None)
+            self.assertEqual(second, first, name)
 
 
 
