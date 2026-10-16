@@ -1740,6 +1740,31 @@ class GoldenLogTest(unittest.TestCase):
         with open(os.path.join(HERE, "momentum", "defensive_v2.py")) as f:
             old = f.read().splitlines()
         with open(os.path.join(HERE, "momentum", "golden_log.py")) as f:
+            new = f.read().splitlines()
+        matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+        removed = [line for tag, i1, i2, _, _ in matcher.get_opcodes() if tag in ("replace", "delete")
+                   for line in old[i1:i2]]
+        self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
+
+    def test_the_golden_runs_keep_the_combinations_settings_and_end_after_their_month(self):
+        import calendar
+        names = [n for n in build_variants.VARIANTS if "_GOLD_" in n and n.split("_")[0] in ("OOS", "IS")]
+        self.assertEqual(len(names), 9)
+        for name in names:
+            template, params = build_variants.VARIANTS[name]
+            self.assertEqual(template, "momentum/golden_log.py")
+            base = "OOS_F_COMBO" if name.startswith("OOS") else "F_COMBO"
+            c = _class_constants(template, params)
+            months, k, end = c.pop("GOLDEN_MONTHS"), c.pop("GOLDEN_TOP_K"), c.pop("END_DATE")
+            expected = _class_constants(*build_variants.VARIANTS[base])
+            expected.pop("END_DATE")
+            self.assertEqual(c, expected, name)
+            (y, m), = months
+            self.assertEqual(end, (y, m, calendar.monthrange(y, m)[1]), name)
+            self.assertEqual(k, 40, name)
+
+
+
 class BoostGoldenLogTest(unittest.TestCase):
     """boost/golden_log.py: template.py logging each day of chosen months,
     and its first decision, for the Go module's golden cases (ADR 0026)."""
@@ -1797,28 +1822,11 @@ class BoostGoldenLogTest(unittest.TestCase):
                    for line in old[i1:i2]]
         self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
 
-    def test_the_golden_runs_keep_the_combinations_settings_and_end_after_their_month(self):
-        import calendar
-        names = [n for n in build_variants.VARIANTS if "_GOLD_" in n and n.split("_")[0] in ("OOS", "IS")]
-        self.assertEqual(len(names), 9)
-        for name in names:
-            template, params = build_variants.VARIANTS[name]
-            self.assertEqual(template, "momentum/golden_log.py")
-            base = "OOS_F_COMBO" if name.startswith("OOS") else "F_COMBO"
-            c = _class_constants(template, params)
-            months, k, end = c.pop("GOLDEN_MONTHS"), c.pop("GOLDEN_TOP_K"), c.pop("END_DATE")
-            expected = _class_constants(*build_variants.VARIANTS[base])
-            expected.pop("END_DATE")
-            self.assertEqual(c, expected, name)
-            (y, m), = months
-            self.assertEqual(end, (y, m, calendar.monthrange(y, m)[1]), name)
-            self.assertEqual(k, 40, name)
     def test_the_golden_run_keeps_bx_spys_settings(self):
         c = _class_constants(*build_variants.VARIANTS["BX_GOLD"])
         months = c.pop("GOLDEN_MONTHS")
         self.assertEqual(c, _class_constants(*build_variants.VARIANTS["BX_SPY"]))
         self.assertTrue(1 <= len(months) <= 3)
-
 
 if __name__ == "__main__":
     unittest.main()
