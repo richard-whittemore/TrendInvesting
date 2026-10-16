@@ -408,6 +408,14 @@ func (s *Server) decideWithTimeout(bar event.Envelope) (event.Envelope, error) {
 	}()
 	select {
 	case result := <-results:
+		// Close cancels the lifetime and only then closes the connections, so
+		// a decision can finish after shutdown has begun and still reach the
+		// select first (both cases ready, chosen at random). It is not
+		// delivered: an engine that is going away fails closed, and the
+		// adapter refuses to trade (ADR 0014).
+		if err := s.lifetime.Err(); err != nil {
+			return event.Envelope{}, fmt.Errorf("transport: decision finished during shutdown: %w", err)
+		}
 		return result.decision, result.err
 	case <-ctx.Done():
 		return event.Envelope{}, fmt.Errorf("transport: decision abandoned: %w", ctx.Err())
