@@ -259,6 +259,16 @@ class AdjustTest(unittest.TestCase):
         with self.assertRaises(adjust.CannotAdjust):
             adjust.adjusted_closes(h, "A", [], div)
 
+    def test_a_session_missing_between_the_first_and_last_bar_fails_closed(self):
+        h = [(DAYS[0], [bar("A", 10.0)]), (DAYS[1], [bar("B", 10.0)]), (DAYS[2], [bar("A", 11.0)])]
+        with self.assertRaises(adjust.CannotAdjust):
+            adjust.adjusted_closes(h, "A", [], [])
+
+    def test_sessions_before_the_first_or_after_the_last_bar_are_allowed(self):
+        h = [(DAYS[0], [bar("B", 1.0)]), (DAYS[1], [bar("A", 10.0)]), (DAYS[2], [bar("A", 11.0)]),
+             (DAYS[3], [bar("B", 1.0)])]
+        self.assertEqual([c for _, c in adjust.adjusted_closes(h, "A", [], [])], [10.0, 11.0])
+
     def test_a_dividend_at_or_above_the_prior_close_fails_closed(self):
         h = hist(*zip(DAYS, [10.0] * 4))
         div = [{"ticker": "A", "ex_dividend_date": "2026-03-04", "cash_amount": 10.0}]

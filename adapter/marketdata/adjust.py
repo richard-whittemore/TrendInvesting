@@ -58,6 +58,8 @@ def adjusted_closes(history, ticker, splits, dividends):
                 closes.append((i, day, row["c"]))
     if not closes:
         raise CannotAdjust("{} has no bars in the history".format(ticker))
+    if len(closes) != closes[-1][0] - closes[0][0] + 1:
+        raise CannotAdjust("{} is missing sessions between its first and last bar".format(ticker))
     first_day, last_day = history[0][0], history[-1][0]
     by_day = {day: (i, c) for i, day, c in closes}
     splits_by_date = []   # (date, factor)
