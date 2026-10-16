@@ -39,7 +39,7 @@ func momentumConfiguration() event.TargetWeightConfigurationPayload {
 			BondFunds:          []event.BondFund{{InstrumentID: "IEF", Fraction: 0.5}, {InstrumentID: "SHY", Fraction: 0.5}},
 			Birth:              "1995-06",
 		},
-		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityWhole, MaxFeesPerOrder: 1},
+		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityMinimumLot, MaxFeesPerOrder: 1},
 		Limits:    event.MarginLimits{MaxExposure: 1, MaxOrdersPerDecision: 10, MaxOrderFraction: 0.9, PriceBand: 0.05},
 	}
 }
@@ -166,6 +166,9 @@ type momentumOptions struct {
 	withdrawFill map[string]float64 // instrument -> settled cash withdrawn as its sell fills, in a snapshot as of the fill
 	// riskOffJanuary makes SPY fall over January's last six sessions too.
 	riskOffJanuary bool
+	// rawScale multiplies an instrument's raw close, leaving its adjusted
+	// close, as an unadjusted split would: a stock dear by the share.
+	rawScale map[string]float64
 }
 
 type momentumResult struct {
@@ -297,11 +300,15 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			}
 			ids = append(ids, n.id)
 			p := prices[n.id]
-			view := func(label string) event.PriceView {
+			view := func(label string, p float64) event.PriceView {
 				return event.PriceView{View: label, Open: p, High: p, Low: p, Close: p, Volume: n.volume}
 			}
+			raw := p
+			if k, ok := opts.rawScale[n.id]; ok {
+				raw = float64(p * k)
+			}
 			apply(s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, fmt.Sprintf("bar:%s:%s", n.id, session), end,
-				event.CompletedBarPayload{InstrumentID: n.id, PeriodEnd: end, SplitAdjusted: view(event.ViewSplitAdjusted), Raw: view(event.ViewRaw)}))
+				event.CompletedBarPayload{InstrumentID: n.id, PeriodEnd: end, SplitAdjusted: view(event.ViewSplitAdjusted, p), Raw: view(event.ViewRaw, raw)}))
 		}
 		if !opts.noUniverse && cal[i+1][:7] != session[:7] {
 			snap := event.UniverseSnapshotPayload{Session: session, Source: "fixture-universe"}

@@ -28,6 +28,38 @@ type RankedName struct {
 	// decision (ADR 0026 point 8; plan.md section 4, "Sectors": alerted if
 	// it would otherwise have been among the top 25).
 	BacktestWouldPick bool
+	// OneShare and TargetValue are set when Status is StatusUnaffordable:
+	// its previous raw close, and the target value it exceeded on the pass
+	// that skipped it.
+	OneShare    float64
+	TargetValue float64
+}
+
+// MinimumLot is what D7-L's substitution values each pick against (ADR
+// 0026, point 2, "D7-L"): net liquidation V and the raw closes of the
+// previous session, the valuation basis the planner sizes orders from (ADR
+// 0026, point 2, "Valuation basis"), and Scale, the momentum sleeve's share
+// of the account, 1 - b (plan.md section 2, "Bond sleeve and glide path").
+// A pick's target value is its weight x Scale x V.
+type MinimumLot struct {
+	NetLiquidation float64
+	Scale          float64
+	Prices         map[string]float64
+}
+
+func (l MinimumLot) validate(candidates []Candidate) error {
+	switch {
+	case !finite(l.NetLiquidation) || l.NetLiquidation <= 0:
+		return fmt.Errorf("momentum: minimum lot net liquidation %v must be finite and positive", l.NetLiquidation)
+	case !finite(l.Scale) || l.Scale <= 0 || l.Scale > 1:
+		return fmt.Errorf("momentum: minimum lot scale %v outside (0, 1]", l.Scale)
+	}
+	for _, c := range candidates {
+		if p, ok := l.Prices[c.InstrumentID]; !ok || !finite(p) || p <= 0 {
+			return fmt.Errorf("momentum: minimum lot has no finite, positive price for %s", c.InstrumentID)
+		}
+	}
+	return nil
 }
 
 // Target is one instrument's target weight, a fraction of the account.
@@ -66,6 +98,34 @@ type Book struct {
 // The inverse volatilities are summed in pick order, as Python summed its
 // dict's values, so the weights can match the backtest's to the last bit.
 func SelectBook(cfg Config, candidates []Candidate, riskOff bool) (Book, error) {
+	return selectBook(cfg, candidates, riskOff, nil)
+}
+
+// SelectBookWithMinimumLot is SelectBook under D7-L, whole shares (ADR 0026,
+// point 2, "D7-L"; plan.md section 5, "whole shares"; the owner's choice for
+// the IRAs, 2026-10-16): before the book is final, a pick whose one share at
+// its previous raw close exceeds its target value is recorded
+// StatusUnaffordable and skipped, and the next eligible ranked name, within
+// the sector cap, takes its place. A skipped name holds no place in the book
+// or its sector.
+//
+// A target value depends on the weights, which depend on the picks, so the
+// substitution is a fixed point, reached by repeating the selection: each
+// pass selects from every name not yet skipped, weights the picks, and skips
+// every pick then above its target. A name once skipped stays skipped, so
+// each pass that changes the book skips at least one more name, and the
+// passes end, after at most one per candidate, when no pick's one share
+// exceeds its target. Every pick of the final book is affordable at its final
+// weight. The backtest had no such rule, so BacktestWouldPick ignores it and
+// the parity rerun measures it.
+func SelectBookWithMinimumLot(cfg Config, candidates []Candidate, riskOff bool, lot MinimumLot) (Book, error) {
+	if err := lot.validate(candidates); err != nil {
+		return Book{}, err
+	}
+	return selectBook(cfg, candidates, riskOff, &lot)
+}
+
+func selectBook(cfg Config, candidates []Candidate, riskOff bool, lot *MinimumLot) (Book, error) {
 	if err := cfg.Validate(); err != nil {
 		return Book{}, err
 	}
@@ -88,13 +148,40 @@ func SelectBook(cfg Config, candidates []Candidate, riskOff bool) (Book, error) 
 		return ranked[i].InstrumentID < ranked[j].InstrumentID
 	})
 
+	skipped := map[string]bool{}
+	for {
+		targets, picks := pickAndWeigh(cfg, ranked, riskOff, skipped)
+		more := false
+		for _, i := range picks {
+			r := &ranked[i]
+			if lot == nil {
+				break
+			}
+			value := float64(float64(r.Weight*lot.Scale) * lot.NetLiquidation)
+			if price := lot.Prices[r.InstrumentID]; price > value {
+				skipped[r.InstrumentID], more = true, true
+				r.OneShare, r.TargetValue = price, value
+			}
+		}
+		if !more {
+			return Book{Ranked: ranked, Targets: targets}, nil
+		}
+	}
+}
+
+// pickAndWeigh runs one selection pass over ranked, in score order: it sets
+// each name's rank, status and weight, leaving the names in skipped
+// StatusUnaffordable, and returns the targets and the picks' indices.
+func pickAndWeigh(cfg Config, ranked []RankedName, riskOff bool, skipped map[string]bool) (targets []Target, picks []int) {
 	live, backtest := capper{cfg: cfg}, capper{cfg: cfg}
-	var picks []int
 	for i := range ranked {
 		r := &ranked[i]
 		r.ScoreRank = i + 1
+		r.Weight = 0
 		r.BacktestWouldPick = backtest.take(r.Sector)
 		switch {
+		case skipped[r.InstrumentID]:
+			r.Status = StatusUnaffordable
 		case r.Sector == "":
 			r.Status = StatusNoSector
 		case r.Volatility == 0:
@@ -115,7 +202,6 @@ func SelectBook(cfg Config, candidates []Candidate, riskOff bool) (Book, error) 
 		part = float64(equity * (1 - cfg.RiskOffFraction))
 	}
 	toBond := equity - part
-	var targets []Target
 	if len(picks) == 0 {
 		toBond = equity
 	} else {
@@ -132,7 +218,7 @@ func SelectBook(cfg Config, candidates []Candidate, riskOff bool) (Book, error) 
 	if toBond > 0 {
 		targets = append(targets, Target{InstrumentID: cfg.RiskOffInstrument, Weight: toBond})
 	}
-	return Book{Ranked: ranked, Targets: targets}, nil
+	return targets, picks
 }
 
 // capper counts picks per sector label for one pass of the pick loop.

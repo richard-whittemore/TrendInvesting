@@ -28,7 +28,10 @@ import (
 //     (ADR 0015), so a journal written under 1.0.0 does not replay.
 //   - 1.2.0 adds the glide path to momentum decisions (configuration
 //     schema version 3, targets.decided schema version 3; ADR 0026).
-const RulesVersion = "1.2.0"
+//   - 1.3.0 adds D7-L's substitution of an unaffordable pick and records
+//     skipped trades (configuration schema version 4, targets.decided
+//     schema version 4).
+const RulesVersion = "1.3.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"

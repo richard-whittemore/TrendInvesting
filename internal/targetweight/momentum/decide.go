@@ -50,6 +50,9 @@ type Input struct {
 	// (ADR 0026 point 1, "Weights use split- and dividend-adjusted
 	// closes").
 	Closes map[string]map[string]float64
+	// MinimumLot, when set, applies D7-L's substitution
+	// (SelectBookWithMinimumLot); nil selects the book as the backtest did.
+	MinimumLot *MinimumLot
 }
 
 // NameRecord is the decision's record of one universe member.
@@ -70,6 +73,9 @@ type NameRecord struct {
 	ScoreRank         int
 	Weight            float64
 	BacktestWouldPick bool
+	// OneShare and TargetValue are set for an unaffordable name (D7-L).
+	OneShare    float64
+	TargetValue float64
 }
 
 // Decision is one momentum decision with the figures behind it, so the
@@ -150,7 +156,12 @@ func Decide(cfg Config, in Input) (Decision, error) {
 		}
 	}
 
-	book, err := SelectBook(cfg, candidates, trend.RiskOff)
+	var book Book
+	if in.MinimumLot != nil {
+		book, err = SelectBookWithMinimumLot(cfg, candidates, trend.RiskOff, *in.MinimumLot)
+	} else {
+		book, err = SelectBook(cfg, candidates, trend.RiskOff)
+	}
 	if err != nil {
 		return Decision{}, err
 	}
@@ -163,6 +174,7 @@ func Decide(cfg Config, in Input) (Decision, error) {
 		n.ScoreRank = r.ScoreRank
 		n.Weight = r.Weight
 		n.BacktestWouldPick = r.BacktestWouldPick
+		n.OneShare, n.TargetValue = r.OneShare, r.TargetValue
 		picked = picked || r.Status == StatusPicked
 	}
 	if !picked {

@@ -371,9 +371,11 @@ func (r *momentumRun) missed(b *emissions, at int) error {
 				session, end.Format(idTime)),
 			Momentum: event.MomentumFigures{CloseSession: session, TrendInstrument: r.rule.TrendInstrument},
 		}
-		if err := r.applyGlide(&p, momentum.Decision{}, r.calendar[k+1]); err != nil {
+		figures, err := r.glideFigures(r.calendar[k+1])
+		if err != nil {
 			return fmt.Errorf("targetweight: decision for %s: %w", session, err)
 		}
+		r.applyGlide(&p, momentum.Decision{}, figures)
 		b.add(fmt.Sprintf("targets-decided:%s:missed:%s", r.h.cfg.AccountID, session), event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, p)
 	}
 	return nil
@@ -404,14 +406,25 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int) ([]event.Envel
 	if r.universe != nil && r.universe.Session == r.last {
 		input.Universe = momentum.Snapshot{Session: r.universe.Session, Rows: rows(r.universe.Rows)}
 	}
+	figures, err := r.glideFigures(r.calendar[at+1])
+	if err != nil {
+		return nil, fmt.Errorf("targetweight: decision at %s: %w", end.Format(idTime), err)
+	}
+	lot, lotSet := r.minimumLot(end, figures.BondShare)
+	if lotSet {
+		input.MinimumLot = &lot
+	}
 	// Decide cannot refuse what this run has validated: the configuration,
-	// a calendar of distinct dates, closes on its sessions, validated rows.
+	// a calendar of distinct dates, closes on its sessions, validated rows,
+	// and under D7-L a raw close for every scored member, whose window ends
+	// with a bar in this session.
 	d, err := momentum.Decide(r.rule, input)
 	b.fail(err)
 	p := r.payload(d, end)
-	if err := r.applyGlide(&p, d, r.calendar[at+1]); err != nil {
-		return nil, fmt.Errorf("targetweight: decision at %s: %w", end.Format(idTime), err)
+	if lotSet {
+		p.Momentum.MinimumLot = event.MinimumLotFigures{NetLiquidation: lot.NetLiquidation, MomentumScale: lot.Scale}
 	}
+	r.applyGlide(&p, d, figures)
 
 	var plan orderplan.IRAPlan
 	if p.Outcome == event.TargetsOutcomeDecided {
@@ -431,6 +444,7 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int) ([]event.Envel
 	if p.Outcome != event.TargetsOutcomeDecided || b.err != nil {
 		return b.result()
 	}
+	r.skipped(b, plan.Skipped)
 	h.gate.RecordDecision(id)
 	reb := &rebalance{
 		decisionID: id, session: end, snapshot: *r.snapshot, prices: maps.Clone(r.raw),
@@ -447,21 +461,51 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int) ([]event.Envel
 	return b.result()
 }
 
-// applyGlide records the owner's age and b on the rebalance session and, for
-// a decided outcome, replaces the rule's targets with the sleeves combined.
-// It fails only on an age outside the plausible range, which stops the run.
-func (r *momentumRun) applyGlide(p *event.TargetsDecidedPayload, d momentum.Decision, rebalance string) error {
+// minimumLot returns what D7-L's substitution values the picks against at the
+// close end, with b the decision's bond share (ADR 0026, point 2, "D7-L"):
+// the snapshot's net liquidation and this session's raw closes, the basis the
+// planner sizes orders from, and the momentum sleeve's scale 1 - b. With no
+// snapshot as of the close the decision is withheld whatever the picks, and
+// with b at 1 there is no momentum sleeve, so neither applies it.
+func (r *momentumRun) minimumLot(end time.Time, b float64) (momentum.MinimumLot, bool) {
+	if r.exec.ShareQuantity != event.ShareQuantityMinimumLot || r.snapshot == nil || r.snapshot.AsOf.Before(end) {
+		return momentum.MinimumLot{}, false
+	}
+	scale := 1 - b
+	if scale <= 0 {
+		return momentum.MinimumLot{}, false
+	}
+	return momentum.MinimumLot{NetLiquidation: r.snapshot.NetLiquidation, Scale: scale, Prices: r.raw}, true
+}
+
+// skipped records each trade the planner sized but could not order.
+func (r *momentumRun) skipped(b *emissions, skipped []event.OrderSkippedPayload) {
+	for _, s := range skipped {
+		b.add("order-skipped:"+s.ClientOrderID, event.OrderSkippedEventType, event.OrderSkippedSchemaVersion, s)
+	}
+}
+
+// glideFigures counts the owner's age in whole months on the rebalance
+// session and sets b from the schedule. It fails only on an age outside the
+// plausible range, which stops the run.
+func (r *momentumRun) glideFigures(rebalance string) (event.GlideFigures, error) {
 	day, _ := time.Parse(time.DateOnly, rebalance) // a validated calendar date
 	age, err := glide.AgeMonths(r.h.cfg.Glide.Birth, day)
 	if err != nil {
-		return err
+		return event.GlideFigures{}, err
 	}
-	// The anchors, the book and the funds are validated by configuration
-	// and the rule, so neither call can refuse them.
+	// The anchors are validated by configuration, so this cannot refuse them.
 	b, _ := glide.BondShare(r.anchors, age)
-	p.Glide = event.GlideFigures{RebalanceSession: rebalance, AgeMonths: age, BondShare: b}
+	return event.GlideFigures{RebalanceSession: rebalance, AgeMonths: age, BondShare: b}, nil
+}
+
+// applyGlide records the glide figures and, for a decided outcome, replaces
+// the rule's targets with the sleeves combined.
+func (r *momentumRun) applyGlide(p *event.TargetsDecidedPayload, d momentum.Decision, figures event.GlideFigures) {
+	p.Glide = figures
+	b := figures.BondShare
 	if p.Outcome != event.TargetsOutcomeDecided {
-		return nil
+		return
 	}
 	book := make([]glide.Weight, len(d.Targets))
 	for i, t := range d.Targets {
@@ -476,7 +520,6 @@ func (r *momentumRun) applyGlide(p *event.TargetsDecidedPayload, d momentum.Deci
 		}
 		p.Targets[i] = event.TargetWeight{InstrumentID: t.Symbol, Weight: t.Weight, Shares: shares}
 	}
-	return nil
 }
 
 func decisionID(accountID string, end time.Time) string {
@@ -533,7 +576,8 @@ func (r *momentumRun) planBuys(b *emissions) {
 	if short := r.unexplainedCashDrop(reb); short > 0 {
 		reb.budget.Remove(short)
 	}
-	buys, _ := orderplan.ScaleBuys(reb.buys, reb.budget.Remaining(), r.exec.MaxFeesPerOrder)
+	buys, skipped, _ := orderplan.ScaleBuys(reb.buys, reb.budget.Remaining(), r.exec.MaxFeesPerOrder)
+	r.skipped(b, skipped)
 	for _, o := range r.check(b, reb, buys, reb.sellsPlanned) {
 		reb.budget.Release(o.ClientOrderID, orderplan.BuyCost(o, r.exec.MaxFeesPerOrder))
 	}
@@ -723,7 +767,7 @@ func (r *momentumRun) payload(d momentum.Decision, end time.Time) event.TargetsD
 			InstrumentID: n.InstrumentID, UniverseRank: n.UniverseRank, DollarVolume: n.DollarVolume,
 			Sector: n.Sector, SectorSource: n.SectorSource, Status: string(n.Status), Closes: n.Closes,
 			Score: n.Score, Volatility: n.Volatility, ScoreRank: n.ScoreRank, Weight: n.Weight,
-			BacktestWouldPick: n.BacktestWouldPick,
+			BacktestWouldPick: n.BacktestWouldPick, OneShare: n.OneShare, TargetValue: n.TargetValue,
 		})
 	}
 	for _, t := range d.Targets {
