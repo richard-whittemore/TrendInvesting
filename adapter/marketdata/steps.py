@@ -13,7 +13,7 @@ history or a paid plan.
 import datetime as dt
 import zoneinfo
 
-from . import record as recording
+from . import nyse_calendar, record as recording
 from .massive import MarketDataError
 
 NEW_YORK = zoneinfo.ZoneInfo("America/New_York")
@@ -36,18 +36,17 @@ def _rows(pages):
     return [r for p in pages for r in (p.get("results") or ())]
 
 
-def find_session(client, asof, max_back=5):
-    """(day, grouped body) of the latest weekday on or before ``asof`` that
-    has bars. A holiday returns no bars and is skipped."""
-    day, tried = asof, 0
-    while tried <= max_back:
-        if day.weekday() < 5:
-            tried += 1
-            body = client.grouped(day)
-            if body.get("results"):
-                return day, body
+def find_session(client, asof):
+    """(day, grouped body) of the latest NYSE trading day on or before
+    ``asof``. Holidays come from the calendar; an empty response on a trading
+    day (data not yet published, or a transient fault) is MissingData."""
+    day = asof
+    while not nyse_calendar.is_trading_day(day):
         day -= dt.timedelta(days=1)
-    raise MissingData("no session with bars in the {} weekdays up to {}".format(max_back + 1, asof))
+    body = client.grouped(day)
+    if not body.get("results"):
+        raise MissingData("no bars for trading day {}".format(day))
+    return day, body
 
 
 last_session = find_session

@@ -15,8 +15,10 @@ the factors of all events dated after the bar):
   differ from its data by a constant factor per ticker while returns, and
   therefore momentum and volatility, agree. #324's parity test confirms this
   against QuantConnect's logs.
-Assumes Massive's dividend cash_amount is on the basis of its ex-date (not
-later restated for subsequent splits); a parity check should confirm it.
+Massive's dividend cash_amount is on the basis of its ex-date, not restated
+for later splits (checked 2026-10-16: AAPL's 2020-08-07 dividend reads 0.82,
+the pre-split amount, though the 4-for-1 split executed 2020-08-31), which
+is what the factor above needs: P and cash on the same, ex-date basis.
 Anything that cannot be adjusted exactly raises CannotAdjust.
 """
 import datetime as dt

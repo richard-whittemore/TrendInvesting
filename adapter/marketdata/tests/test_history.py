@@ -11,9 +11,9 @@ from marketdata.tests.test_marketdata import NOW, bar, grouped, make_client
 D = dt.date
 
 
-def put(directory, day, *rows, closed=False):
+def put(directory, day, *rows):
     record.write(directory, {"kind": "grouped", "source": "massive", "session": day.isoformat(),
-                             "fetched_at": "x", "adjusted": False, "closed": closed, "bars": list(rows)})
+                             "fetched_at": "x", "adjusted": False, "bars": list(rows)})
 
 
 class BackfillTest(unittest.TestCase):
@@ -27,13 +27,22 @@ class BackfillTest(unittest.TestCase):
             self.assertEqual(sorted(os.listdir(d)), ["grouped_2026-03-25.json", "grouped_2026-03-26.json",
                                                      "grouped_2026-03-27.json"])
 
-    def test_a_holiday_is_recorded_closed_and_not_counted_as_a_session(self):
+    def test_a_calendar_holiday_costs_no_request_and_leaves_no_file(self):
         with tempfile.TemporaryDirectory() as d:
-            client, opener, _ = make_client({"status": "OK", "resultsCount": 0},
-                                            grouped(bar("A")), grouped(bar("A")))
+            client, opener, _ = make_client(grouped(bar("A")), grouped(bar("A")))
             history.backfill(client, d, asof=D(2026, 4, 3), sessions=2, now=lambda: NOW)   # Good Friday
-            self.assertTrue(record.read(os.path.join(d, "grouped_2026-04-03.json"))["closed"])
-            self.assertEqual(len(opener.requests), 3)
+            self.assertEqual(len(opener.requests), 2)
+            self.assertFalse(os.path.exists(os.path.join(d, "grouped_2026-04-03.json")))
+
+    def test_an_empty_response_on_a_trading_day_records_nothing_and_is_retried_next_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            client, _, _ = make_client(grouped(bar("A")), {"status": "OK", "resultsCount": 0})
+            with self.assertRaises(history.MissingData):
+                history.backfill(client, d, asof=D(2026, 3, 27), sessions=3, now=lambda: NOW)
+            self.assertEqual(os.listdir(d), ["grouped_2026-03-27.json"])   # 03-26 not recorded
+            client, opener, _ = make_client(grouped(bar("A")), grouped(bar("A")))
+            history.backfill(client, d, asof=D(2026, 3, 27), sessions=3, now=lambda: NOW)
+            self.assertIn("2026-03-26", opener.requests[0].full_url)
 
     def test_a_rerun_after_an_interruption_never_overwrites(self):
         with tempfile.TemporaryDirectory() as d:
@@ -46,29 +55,28 @@ class BackfillTest(unittest.TestCase):
             self.assertEqual(record.read(os.path.join(d, "grouped_2026-03-27.json")), before)
             self.assertEqual(len(opener.requests), 2)
 
-    def test_gives_up_when_it_cannot_find_enough_sessions(self):
-        with tempfile.TemporaryDirectory() as d:
-            client, _, _ = make_client(*[{"status": "OK", "resultsCount": 0}] * 40)
-            with self.assertRaises(history.MissingData):
-                history.backfill(client, d, asof=D(2026, 3, 27), sessions=2, max_weekdays=5, now=lambda: NOW)
-
 
 class LoadTest(unittest.TestCase):
-    def test_load_returns_sessions_in_order_without_closed_days(self):
+    def test_load_returns_sessions_in_order_skipping_calendar_holidays(self):
         with tempfile.TemporaryDirectory() as d:
             put(d, D(2026, 4, 2), bar("A", 2))
-            put(d, D(2026, 4, 3), closed=True)
             put(d, D(2026, 4, 6), bar("A", 3))
-            h = history.load(d, D(2026, 4, 2), D(2026, 4, 6))
+            h = history.load(d, D(2026, 4, 2), D(2026, 4, 6))   # Good Friday and the weekend have no file
             self.assertEqual([s for s, _ in h], [D(2026, 4, 2), D(2026, 4, 6)])
+
+    def test_a_recording_with_no_bars_on_a_trading_day_is_a_gap(self):
+        with tempfile.TemporaryDirectory() as d:
+            put(d, D(2026, 4, 2))
+            with self.assertRaises(history.Gap):
+                history.load(d, D(2026, 4, 2), D(2026, 4, 2))
 
     def test_a_missing_weekday_is_a_gap(self):
         with tempfile.TemporaryDirectory() as d:
-            put(d, D(2026, 4, 2), bar("A"))
+            put(d, D(2026, 4, 1), bar("A"))
             put(d, D(2026, 4, 6), bar("A"))
             with self.assertRaises(history.Gap) as cm:
-                history.load(d, D(2026, 4, 2), D(2026, 4, 6))
-            self.assertIn("2026-04-03", str(cm.exception))
+                history.load(d, D(2026, 4, 1), D(2026, 4, 6))
+            self.assertIn("2026-04-02", str(cm.exception))
 
 
 class ActionsTest(unittest.TestCase):

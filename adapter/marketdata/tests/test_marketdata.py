@@ -209,24 +209,24 @@ class UniverseTest(unittest.TestCase):
         with self.assertRaises(steps.MissingData):
             steps.fetch_universe(client, DAY, now=lambda: NOW)
 
-    def test_last_session_skips_a_holiday(self):
+    def test_last_session_skips_an_exchange_holiday_without_a_request(self):
         good_friday = dt.date(2026, 4, 3)
-        client, opener, _ = make_client({"status": "OK", "resultsCount": 0}, grouped(bar("A")))
+        client, opener, _ = make_client(grouped(bar("A")))
         day, body = steps.last_session(client, good_friday)
         self.assertEqual(day, dt.date(2026, 4, 2))
-        self.assertEqual(body["results"][0]["T"], "A")
-        self.assertIn("2026-04-03", opener.requests[0].full_url)
+        self.assertIn("2026-04-02", opener.requests[0].full_url)
+        self.assertEqual(len(opener.requests), 1)
 
     def test_last_session_over_a_weekend_starts_at_friday(self):
         client, opener, _ = make_client(grouped(bar("A")))
         self.assertEqual(steps.last_session(client, dt.date(2026, 3, 29))[0], DAY)   # a Sunday
         self.assertIn("2026-03-27", opener.requests[0].full_url)
 
-    def test_last_session_gives_up_after_a_week_without_bars(self):
-        empty = {"status": "OK", "resultsCount": 0}
-        client, _, _ = make_client(*[empty] * 6)
+    def test_an_empty_response_on_a_trading_day_is_missing_data_not_a_skip(self):
+        client, opener, _ = make_client({"status": "OK", "resultsCount": 0}, grouped(bar("A")))
         with self.assertRaises(steps.MissingData):
-            steps.last_session(client, DAY, max_back=5)
+            steps.last_session(client, DAY)
+        self.assertEqual(len(opener.requests), 1)
 
 
 class BarsTest(unittest.TestCase):

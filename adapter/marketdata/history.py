@@ -5,14 +5,17 @@ session for every US stock (unadjusted), so 253 sessions of closes for the
 whole market cost 253 requests (about 53 minutes at 5 a minute). Splits and
 dividends come from the bulk reference endpoints, filtered by date and
 paginated, and are recorded per window. Recordings are never overwritten, so
-a backfill is resumable. A weekday with no bars is recorded as closed (a
-holiday); a weekday with no recording at all is a Gap and fails the read.
+a backfill is resumable. Closed
+days come from the NYSE calendar (nyse_calendar.py), never from an empty
+response: an empty response on a trading day is MissingData, records nothing
+and is retried on the next run. A trading day with no recording is a Gap and
+fails the read.
 """
 import datetime as dt
 import glob
 import os
 
-from . import record
+from . import nyse_calendar, record
 from .steps import MissingData, SOURCE, _now, _stamp
 
 
@@ -27,7 +30,7 @@ def _path(directory, day):
 def _weekdays_back(asof):
     day = asof
     while True:
-        if day.weekday() < 5:
+        if nyse_calendar.is_trading_day(day):
             yield day
         day -= dt.timedelta(days=1)
 
@@ -44,29 +47,33 @@ def backfill(client, directory, asof, sessions, max_weekdays=None, now=_now):
             raise MissingData("found {} of {} sessions in {} weekdays up to {}".format(have, sessions, max_weekdays, asof))
         path = _path(directory, day)
         if os.path.exists(path):
-            have += 0 if record.read(path).get("closed") else 1
+            if not record.read(path).get("bars"):
+                raise Gap("recording for {} has no bars".format(day))
+            have += 1
             continue
         bars = client.grouped(day).get("results") or []
+        if not bars:
+            raise MissingData("no bars for trading day {}".format(day))
         record.write(directory, {"kind": "grouped", "source": SOURCE, "session": day.isoformat(),
-                                 "fetched_at": _stamp(now), "adjusted": False,
-                                 "closed": not bars, "bars": bars})
+                                 "fetched_at": _stamp(now), "adjusted": False, "bars": bars})
         fetched += 1
-        have += 1 if bars else 0
+        have += 1
     return {"sessions": have, "fetched": fetched}
 
 
 def load(directory, first, last):
-    """[(session, bars)] oldest first for the sessions in first..last, closed
-    days left out. Raises Gap for a weekday with no recording."""
+    """[(session, bars)] oldest first for the trading days in first..last.
+    Raises Gap for a trading day with no recording or a recording with no bars."""
     out, day = [], first
     while day <= last:
-        if day.weekday() < 5:
+        if nyse_calendar.is_trading_day(day):
             path = _path(directory, day)
             if not os.path.exists(path):
                 raise Gap("no recording for {}".format(day.isoformat()))
-            rec = record.read(path)
-            if not rec.get("closed"):
-                out.append((day, rec["bars"]))
+            bars = record.read(path)["bars"]
+            if not bars:
+                raise Gap("recording for {} has no bars".format(day.isoformat()))
+            out.append((day, bars))
         day += dt.timedelta(days=1)
     return out
 
