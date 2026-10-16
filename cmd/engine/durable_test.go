@@ -280,6 +280,9 @@ func TestRunRefusesALogAtTheJournalPath(t *testing.T) {
 	if err := os.Symlink(dir, linked); err != nil {
 		t.Fatalf("link the journal's directory: %v", err)
 	}
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o700); err != nil {
+		t.Fatalf("make a subdirectory: %v", err)
+	}
 	for name, logPath := range map[string]string{
 		"through a link":     filepath.Join(linked, "run.jsonl"),
 		"the same path":      out,
@@ -297,6 +300,42 @@ func TestRunRefusesALogAtTheJournalPath(t *testing.T) {
 		}
 		if _, err := os.Stat(out); !os.IsNotExist(err) {
 			t.Fatalf("%s: %s exists after the refusal (stat error %v), want nothing created", name, out, err)
+		}
+	}
+}
+
+// TestSamePathResolvesEachDirectoryAsTheFileSystemDoes: a ".." after a
+// symbolic link climbs from the link's target, not from where the link
+// sits, so cleaning the path before resolving it would both refuse two
+// distinct files and miss one file spelled two ways.
+func TestSamePathResolvesEachDirectoryAsTheFileSystemDoes(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "other", "nested")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatalf("make the link's target: %v", err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(nested, link); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	sep := string(filepath.Separator)
+	// link/../run.jsonl is root/other/run.jsonl on disk, never root/run.jsonl.
+	throughLinkUp := link + sep + ".." + sep + "run.jsonl"
+	for _, tc := range []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"one spelling", filepath.Join(root, "run.jsonl"), filepath.Join(root, "run.jsonl"), true},
+		{"a dot segment", root + sep + "." + sep + "run.jsonl", filepath.Join(root, "run.jsonl"), true},
+		{"link then up is not the link's parent", throughLinkUp, filepath.Join(root, "run.jsonl"), false},
+		{"link then up is the target's parent", throughLinkUp, filepath.Join(root, "other", "run.jsonl"), true},
+		{"names differing only in case", filepath.Join(root, "run.JSONL"), filepath.Join(root, "run.jsonl"), true},
+		{"another name", filepath.Join(root, "run.log"), filepath.Join(root, "run.jsonl"), false},
+		{"another directory", filepath.Join(nested, "run.jsonl"), filepath.Join(root, "run.jsonl"), false},
+	} {
+		if got := samePath(tc.a, tc.b); got != tc.want {
+			t.Errorf("%s: samePath(%s, %s) = %v, want %v", tc.name, tc.a, tc.b, got, tc.want)
 		}
 	}
 }

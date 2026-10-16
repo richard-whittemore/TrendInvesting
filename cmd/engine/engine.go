@@ -474,22 +474,36 @@ func checkJournalPathFree(path string) error {
 }
 
 // samePath reports whether a and b name one file, however each is spelled:
-// the same name in the same directory, compared by the directories' identity
-// on disk so a symbolic link or a relative spelling is seen through. Neither
-// file need exist yet. A directory that cannot be examined falls back to
-// comparing the cleaned absolute paths.
+// the same name in the same directory. The directories are compared by
+// their identity on disk, each examined exactly as spelled, so the file
+// system resolves every symbolic link and every ".." in order; cleaning the
+// path first would resolve a ".." after a link lexically, from where the
+// link sits rather than from its target. Names are compared ignoring case,
+// since a case-insensitive file system (macOS's default) maps two spellings
+// to one file; on a case-sensitive one this refuses a pair that would have
+// worked, the cautious side. Neither file need exist yet. A directory that
+// cannot be examined cannot hold the file either path names, so the paths
+// are then treated as distinct and creating the file reports the error.
 func samePath(a, b string) bool {
-	if filepath.Base(filepath.Clean(a)) != filepath.Base(filepath.Clean(b)) {
+	dirA, nameA := splitAsSpelled(a)
+	dirB, nameB := splitAsSpelled(b)
+	if !strings.EqualFold(nameA, nameB) {
 		return false
 	}
-	dirA, errA := os.Stat(filepath.Dir(a))
-	dirB, errB := os.Stat(filepath.Dir(b))
-	if errA == nil && errB == nil {
-		return os.SameFile(dirA, dirB)
+	infoA, errA := os.Stat(dirA)
+	infoB, errB := os.Stat(dirB)
+	return errA == nil && errB == nil && os.SameFile(infoA, infoB)
+}
+
+// splitAsSpelled splits path after its last separator. filepath.Split,
+// unlike filepath.Dir, does not clean, so the directory keeps every
+// component the file system must resolve.
+func splitAsSpelled(path string) (dir, name string) {
+	dir, name = filepath.Split(path)
+	if dir == "" {
+		dir = "."
 	}
-	absA, errA := filepath.Abs(a)
-	absB, errB := filepath.Abs(b)
-	return errA == nil && errB == nil && absA == absB
+	return dir, name
 }
 
 func journalExistsError(path string) error {
