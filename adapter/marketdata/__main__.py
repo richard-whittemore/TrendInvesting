@@ -1,5 +1,5 @@
-"""python3 -m marketdata {universe|bars} --out DIR [--asof YYYY-MM-DD] [--instruments SPY,IEF,SHY]
-    [--settle-minutes N]
+"""python3 -m marketdata {universe|bars|backfill|actions} --out DIR [--asof YYYY-MM-DD]
+    [--instruments SPY,IEF,SHY] [--sessions N] [--lookback-days N] [--settle-minutes N]
 
 --asof defaults to today's New York date. A session is refused (exit 1,
 nothing written) until its close plus the settle delay.
@@ -41,11 +41,11 @@ def main(argv):
     try:
         client = massive.Client(massive.load_key(secrets_file=args.secrets_file))
         if args.what == "backfill":
-            print(history.backfill(client, args.out, args.asof, args.sessions))
+            print(history.backfill(client, args.out, args.asof, args.sessions, settle=settle))
             return 0
         if args.what == "actions":
             first = args.asof - dt.timedelta(days=args.lookback_days)
-            print("\n".join(history.record_actions(client, first, args.asof, args.out)))
+            print("\n".join(history.record_actions(client, first, args.asof, args.out, settle=settle)))
             return 0
         session, body = steps.find_session(client, args.asof, settle=settle)
         if args.what == "universe":
