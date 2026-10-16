@@ -99,16 +99,32 @@ rebalance (`defensive_v2.py:167`). Current weight wᵢ = qᵢ·pᵢ / V.
 
 **IRA execution** (`plan.md` lines 369-377). Buys are planned only after
 every sell has a terminal fill or lifecycle report, as a second decision
-caused by the last of them. They are funded from cash realised plus cash on
-hand; which cash counts is D5's answer, in configuration. If the buys cost more
-than that, every buy is scaled by min(1, cash / cost) and rounded again. This
-scaling is **new**, not in the backtest, and goes into the parity rerun
-(`momentum/execution.py`, `EXEC_DELAY`). A sell that fails leaves a shortfall
-that is never borrowed, and the owner is alerted.
+caused by the last of them. **If the plan has no sells** (an account holding
+only cash, say), the buy phase is planned at once, in the same decision.
+- **Budget.** Buys are funded from cash on hand plus cash realised by the
+  sells; which cash counts is D5's answer, in configuration. From that, the
+  cash already committed to working buys is subtracted.
+- **Worst-case cost.** Each buy is costed at its limit price, the band's edge
+  (point 3), not the previous close, plus the configured maximum commission
+  and fees. Buys worth $980 at the previous close cost $1,029 at a 5% band
+  before fees, and it is the $1,029 that must fit.
+- **Scaling.** If the worst-case total exceeds the budget, every buy is
+  scaled by min(1, budget / worst-case cost) and rounded again. This scaling
+  is **new**, not in the backtest, and goes into the parity rerun
+  (`momentum/execution.py`, `EXEC_DELAY`).
+- **Carried forward.** The remaining budget is updated as each buy is
+  released and as fills arrive (a partial fill releases the unspent part
+  only when the rest is cancelled). The limit gate (point 3) checks each buy
+  against what remains, not against the start.
+- A sell that fails leaves a shortfall that is never borrowed, and the owner
+  is alerted.
 
 **Boost** (`template.py:96-100`). On a state change only, one SPY order of
 want·V / p − q whole shares, rounded toward zero, where want is 0.98 or
-0.98 × `BOOST_SIZE`, for the next open (`plan.md` lines 148-151).
+0.98 × `BOOST_SIZE`, for the next open (`plan.md` lines 148-151). The
+**first** decision has no state in force (the research starts with
+`last_want = None`, `template.py`), so it always produces the order to the
+first target, normally 98% from cash, whether or not a boost is on.
 
 **D7, whole shares, open: both options specified.** The choice is
 configuration (point 6):
@@ -149,7 +165,7 @@ replaces `plan.md`'s "per run", since a live run spans many decisions.
 | Limit (source) | Check | On breach |
 | --- | --- | --- |
 | IRA exposure ≤ 100%, never margin (`plan.md` 333-334) | after the order, Σ qᵢ′·pᵢ / V ≤ 1.00, and buy cost ≤ cash available under D5 | refuse; urgent alert; account **Degraded** |
-| Joint account 150%, pre-trade (`plan.md` 336-341) | the exposure the order would leave, valued at the previous close, ≤ 150%. Held exposure is not capped, and nothing is sold because of drift. | refuse; urgent alert; **Degraded** |
+| Joint account 150%, pre-trade (`plan.md` 336-341) | applies only to an order that **increases** exposure: refused if the exposure it would leave, valued at the previous close, exceeds 150%. A sell is never refused by this check, even when the account stays above 150% after it (160% to 155% is allowed). Held exposure is not capped, and nothing is sold because of drift. | refuse the increasing order; urgent alert; **Degraded** |
 | Maximum orders per decision time (`plan.md` 334; ADR 0025) | count of planned orders ≤ N (configuration) | refuse the whole plan's buys; alert; **Degraded** |
 | Maximum order size as a share of V (`plan.md` 334-335) | \|qty·pᵢ\| / V ≤ the per-account limit | refuse that order; alert; **Degraded** |
 | Price band (`plan.md` 335; ADR 0025) | pᵢ within the band of the latest recorded IBKR mark (an input, never a live read) | refuse; alert; **Degraded** |
@@ -196,7 +212,14 @@ Per state, under ADR 0019 as amended:
   once per incident. This ADR follows that amendment and adds nothing to it.
   It does not apply to the IRAs.
 
-The urgent Excess Liquidity sale uses that amendment's sizing in every state.
+**The urgent Excess Liquidity sale in Normal and Degraded** is defined here,
+not by ADR 0019, whose 2026-10-15 amendment covers only Halted and changes
+nothing else. It uses the same sizing rule, adopted by this ADR for these two
+states: one sell-only order bringing exposure toward 98% of net liquidation
+and never below, its quantity the smaller of what reaches 98% at the mark of
+one IBKR account snapshot (shares kept rounded up) and the broker-reported
+holding minus every working sell. A Degraded account whose named instrument
+is the one to sell is the open item in point 8.
 
 ### 5. State recovered from the journal on restart, never recomputed
 
@@ -254,17 +277,21 @@ the module's own rules version and decision corpus (ADR 0016;
    It records each month's universe, scores, picks, weights, risk-off flag and
    *b*, and each day's Boost state. Goldens are transcribed from it: a
    risk-off month, a binding sector cap, a name under 253 closes, and a Boost
-   entry, exit and next-day re-entry.
+   entry, exit and next-day re-entry, and Boost's first decision from cash
+   (the 98% purchase with no boost on).
 2. **Parity** (`plan.md` section 6, item 2). Feed the Go modules QuantConnect's
    own universe and adjusted closes. Picks and their order must match exactly.
    Weights must match within a stated tolerance, because numpy's summation
    differs from Go's. Boost's state must match day by day. Repeat with each D7
    option and with the IRA buy delay.
 3. **Planner:** the band at exactly 25% and past it; entries and exits; IEF
-   summed across sleeves; sells first; buy scaling; both D7 roundings; no sale
-   beyond the holding net of working sells.
-4. **Limits:** each at, below and above its value; the exemptions; the kill
-   switch; the adapter refusing the same orders; every backtested order passing.
+   summed across sleeves; sells first; a plan with no sells planning its buys
+   at once; buys costed at the band edge plus fees; buy scaling and the
+   budget carried through releases and partial fills; both D7 roundings; no
+   sale beyond the holding net of working sells.
+4. **Limits:** each at, below and above its value; the exemptions; a sell
+   from 160% to 155% passing the 150% check; the kill switch; the adapter
+   refusing the same orders; every backtested order passing.
 5. **States:** no buy while Degraded; named instruments frozen; Halted sends
    only the ADR 0019 (2026-10-15) sale, with that amendment's tests (lines 271-273).
 6. **Replay:** byte-identical decisions, refusals and state changes; a restart
@@ -312,7 +339,9 @@ the module's own rules version and decision corpus (ADR 0016;
     (`internal/event/order_lifecycle.go:77-80`). It becomes optional for limit
     orders, and `Quantity` (`int64`) becomes a decimal under D7-F;
   - `execution.fill` (`internal/event/fill.go`): `CampaignID` becomes
-    optional, and a target-weight kind joins `entry`, `stop`, `exit`, `add`;
+    optional, a target-weight kind joins `entry`, `stop`, `exit`, `add`, and
+    under D7-F `FillPayload.Quantity` (`int64` today) becomes a decimal too,
+    with a test of a fractional partial fill;
   - `market.bar.completed` (`internal/event/bar.go:127-130`): a split- and
     dividend-adjusted view beside `split_adjusted` and `raw`;
   - `event.ConfigurationHash`: accepts the new configuration payload, not
