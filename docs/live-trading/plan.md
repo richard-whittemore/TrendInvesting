@@ -175,9 +175,11 @@ LEAN for backtests, our own IBKR adapter for live trading.
 ```text
 Lightsail VM (Ubuntu, $12/month, US East)
   IB Gateway, kept logged in by IBC (nightly restart, weekly 2FA on the phone)
-  broker adapter (Python, IBKR's TWS API client; ADR 0025): market data, orders, fills, positions
-     -> same envelope transport as today (Unix socket, NDJSON; ADR 0014)
-  decision core (Go): momentum, Boost, glide path, risk checks, journal
+  market-data step: fetches each day's bars once, recorded as the input every engine reads
+  one engine per account (decided 2026-10-16), three in all, each with:
+    broker adapter (Python, IBKR's TWS API client; ADR 0025; its own client ID): orders, fills, positions
+       -> same envelope transport as today (Unix socket, NDJSON; ADR 0014)
+    decision core (Go): momentum or Boost, glide path, risk checks, its own journal
   reporter: daily summary, equity against SPY, alerts
   dashboard (read-only, reachable only over Tailscale)
 ```
