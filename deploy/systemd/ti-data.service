@@ -1,0 +1,25 @@
+[Unit]
+Description=Market-data step: fetch each day's bars once and record them as the engines' input
+After=ti-gateway.service
+Wants=ti-gateway.service
+# PLACEHOLDER: the binary does not exist yet. The unit is skipped, not failed,
+# until it is installed. Its arguments are fixed by the change that ships it.
+ConditionFileIsExecutable=/opt/trend-investing/bin/ti-data
+
+[Service]
+Type=oneshot
+User=ti-trader
+Group=ti-trader
+Environment=TZ=America/New_York
+Environment=TI_ADAPTER_CLIENT_ID=10
+Environment=TI_DATA_DIR=/var/lib/trend-investing/data
+LoadCredential=secrets:/etc/trend-investing/secrets.env
+ExecStart=/opt/trend-investing/bin/ti-data
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trend-investing/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
