@@ -1,0 +1,191 @@
+"""Sector labels for the universe snapshot, recorded once per session.
+
+Source (docs/live-trading/plan.md section 4, "Sectors", chosen 2026-10-15
+on docs/research/sector-labels-2026-10.md): the GICS sector in iShares'
+daily IWV (Russell 3000) holdings file where it lists a stock, else the
+sector in Nasdaq's stock screener; a stock neither labels has no label, and
+the momentum rule leaves it out of the ranking.
+
+Both sources' sectors are mapped by name onto Morningstar's eleven sectors,
+the scheme the backtest's cap counted (QuantConnect's MorningstarSectorCode),
+using the mappings the sector-label study measured with
+(research/edge-search/sectors/compare.py, and the Nasdaq table in the study's
+part 4). One vocabulary is needed because the cap counts picks per label: a
+technology stock GICS calls "Information Technology" and one Nasdaq calls
+"Technology" must count against the same cap. A label a mapping does not
+name (Nasdaq's "Miscellaneous", an empty sector, iShares' cash rows) is no
+label from that source. The mapping is a judgment, not an official
+concordance; the recordings keep each source's own label.
+
+Neither source needs a key. Both responses are recorded whole (the iShares
+CSV text, the screener's rows), so the labels can be re-derived. A
+recording is written only when both sources answered usably; a source
+already recorded for the session is not fetched again into a new file.
+"""
+import csv
+import datetime as dt
+import glob
+import io
+import json
+import os
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
+
+from . import record
+from .massive import MarketDataError
+from .steps import MissingData, _now, _stamp
+
+IWV_SOURCE = "ishares-iwv-gics"
+NASDAQ_SOURCE = "nasdaq-screener"
+IWV_URL = ("https://www.ishares.com/us/products/239714/ishares-russell-3000-etf/1467271812596.ajax"
+           "?fileType=csv&fileName=IWV_holdings&dataType=fund")
+NASDAQ_URL = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true"
+HOSTS = ("www.ishares.com", "api.nasdaq.com")
+# Both sites refuse a request without a browser-like User-Agent.
+USER_AGENT = "Mozilla/5.0 (compatible; TrendInvesting market-data step)"
+
+MORNINGSTAR_SECTORS = ("Basic Materials", "Consumer Cyclical", "Financial Services", "Real Estate",
+                       "Consumer Defensive", "Healthcare", "Utilities", "Communication Services",
+                       "Energy", "Industrials", "Technology")
+#: iShares' GICS sector names onto Morningstar's (compare.py's GICS_TO_MORNINGSTAR).
+GICS_SECTORS = {"Materials": "Basic Materials", "Consumer Discretionary": "Consumer Cyclical",
+                "Financials": "Financial Services", "Real Estate": "Real Estate",
+                "Consumer Staples": "Consumer Defensive", "Health Care": "Healthcare",
+                "Utilities": "Utilities", "Communication": "Communication Services",
+                "Energy": "Energy", "Industrials": "Industrials", "Information Technology": "Technology"}
+#: Nasdaq's screener sector names onto Morningstar's (the study's part 4 table).
+NASDAQ_SECTORS = {"Basic Materials": "Basic Materials", "Consumer Discretionary": "Consumer Cyclical",
+                  "Finance": "Financial Services", "Real Estate": "Real Estate",
+                  "Consumer Staples": "Consumer Defensive", "Health Care": "Healthcare",
+                  "Utilities": "Utilities", "Telecommunications": "Communication Services",
+                  "Energy": "Energy", "Industrials": "Industrials", "Technology": "Technology"}
+
+
+class Unusable(MarketDataError):
+    """A source answered with something that is not its usual file."""
+
+
+def norm(ticker):
+    """A ticker without punctuation, upper case: Massive writes "BRK.B",
+    iShares "BRKB", Nasdaq "BRK/B"."""
+    return re.sub(r"[^A-Z0-9]", "", ticker.upper())
+
+
+def http_get(url, opener=urllib.request.urlopen):
+    """The text at ``url``, which must be HTTPS on one of the two sources' hosts."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or parts.netloc not in HOSTS:
+        raise MarketDataError("refusing a URL outside the sector sources: {}://{}".format(parts.scheme, parts.netloc))
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
+    try:
+        with opener(req, timeout=60) as resp:
+            return resp.read().decode("utf-8-sig")
+    except urllib.error.HTTPError as e:
+        raise MarketDataError("HTTP {} from {}".format(e.code, parts.netloc)) from None
+    except (urllib.error.URLError, OSError, UnicodeDecodeError) as e:
+        raise MarketDataError("request to {} failed: {}".format(parts.netloc, type(e).__name__)) from None
+
+
+def parse_iwv(text):
+    """(as-of text, {ticker: GICS sector}) from an iShares holdings CSV's
+    equity rows."""
+    lines = [line.lstrip("﻿") for line in text.splitlines()]
+    start = next((i for i, line in enumerate(lines) if line.startswith("Ticker,")), None)
+    if start is None:
+        raise Unusable("no 'Ticker,' header: not an iShares holdings file")
+    as_of = next((line.split(",", 1)[1].strip().strip('"') for line in lines[:start]
+                  if line.startswith("Fund Holdings as of,")), None)
+    rows = {}
+    for row in csv.DictReader(io.StringIO("\n".join(lines[start:]))):
+        if row.get("Asset Class") == "Equity" and row.get("Ticker"):
+            _put(rows, norm(row["Ticker"]), (row.get("Sector") or "").strip())
+    if not rows:
+        raise Unusable("the iShares file lists no equity")
+    return as_of, _unambiguous(rows)
+
+
+def parse_nasdaq(body):
+    """{symbol: sector} from the screener's JSON response."""
+    rows = (body.get("data") or {}).get("rows") if isinstance(body, dict) else None
+    if not rows or not all(isinstance(r, dict) and r.get("symbol") for r in rows):
+        raise Unusable("the screener response has no rows of symbols")
+    out = {}
+    for r in rows:
+        _put(out, norm(r["symbol"]), (r.get("sector") or "").strip())
+    return _unambiguous(out)
+
+
+_AMBIGUOUS = object()
+
+
+def _put(rows, key, sector):
+    """Two rows that normalise to one ticker with different sectors label it
+    ambiguously, so neither is used."""
+    if key in rows and rows[key] != sector:
+        rows[key] = _AMBIGUOUS
+    else:
+        rows[key] = sector
+
+
+def _unambiguous(rows):
+    return {k: v for k, v in rows.items() if v is not _AMBIGUOUS}
+
+
+def labels(iwv, nasdaq):
+    """{normalised ticker: (Morningstar sector, source)} from the two
+    recordings: IWV's GICS label where it maps, else Nasdaq's, else none."""
+    out = {}
+    for ticker, sector in parse_nasdaq({"data": {"rows": nasdaq["rows"]}}).items():
+        if sector in NASDAQ_SECTORS:
+            out[ticker] = (NASDAQ_SECTORS[sector], NASDAQ_SOURCE)
+    for ticker, sector in parse_iwv(iwv["body"])[1].items():
+        if sector in GICS_SECTORS:
+            out[ticker] = (GICS_SECTORS[sector], IWV_SOURCE)
+    return out
+
+
+def _fetch(get, session, now):
+    iwv_text = get(IWV_URL)
+    as_of, _ = parse_iwv(iwv_text)
+    try:
+        nasdaq_body = json.loads(get(NASDAQ_URL))
+    except ValueError:
+        raise Unusable("the screener response is not JSON") from None
+    parse_nasdaq(nasdaq_body)
+    stamp, day = _stamp(now), session.isoformat()
+    return [{"kind": "sectors-iwv", "source": IWV_SOURCE, "session": day, "fetched_at": stamp,
+             "url": IWV_URL, "as_of": as_of, "body": iwv_text},
+            {"kind": "sectors-nasdaq", "source": NASDAQ_SOURCE, "session": day, "fetched_at": stamp,
+             "url": NASDAQ_URL, "rows": nasdaq_body["data"]["rows"]}]
+
+
+def record_sectors(directory, session, get=http_get, now=_now):
+    """Fetches both sources and records each not yet recorded for
+    ``session``; returns the paths written. Writes nothing unless both
+    answered usably."""
+    written = []
+    for rec in _fetch(get, session, now):
+        path = os.path.join(directory, record.filename(rec))
+        if os.path.exists(path):
+            record.read(path)   # raises Corrupt rather than trusting a damaged file
+            continue
+        written.append(record.write(directory, rec))
+    return written
+
+
+def latest(directory, kind, session, max_age_days=7):
+    """The newest ``kind`` recording dated on or before ``session`` and no
+    more than ``max_age_days`` before it. Raises MissingData otherwise."""
+    best = None
+    for path in glob.glob(os.path.join(directory, kind + "_*.json")):
+        day = dt.date.fromisoformat(os.path.basename(path)[len(kind) + 1:-len(".json")])
+        if day <= session and (best is None or day > best[0]):
+            best = (day, path)
+    if best is None:
+        raise MissingData("no {} recording on or before {}".format(kind, session))
+    if (session - best[0]).days > max_age_days:
+        raise MissingData("the latest {} recording, {}, is more than {} days before {}".format(
+            kind, best[0], max_age_days, session))
+    return record.read(best[1])

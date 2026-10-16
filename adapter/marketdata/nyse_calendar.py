@@ -11,15 +11,21 @@ Independence Day, Labor Day (1st Monday of September), Thanksgiving (4th
 Thursday of November), Christmas. A holiday on a Saturday is observed the
 Friday before and on a Sunday the Monday after, except that New Year's Day on
 a Saturday is not observed on the Friday. Early closes (1 p.m.) still
-produce bars and are trading days. Special closures are listed in SPECIAL:
+produce bars and are trading days; they close at 1 p.m. New York time on
+the day after Thanksgiving, and on July 3 and December 24 when those are
+trading days (is_early_close). Special closures are listed in SPECIAL:
 2025-01-09 (National Day of Mourning for President Carter).
 Years outside FIRST_YEAR..LAST_YEAR raise OutOfRange; extend and re-check
 against the NYSE page each year.
 """
 import datetime as dt
+import zoneinfo
 
 FIRST_YEAR, LAST_YEAR = 2022, 2030
 SPECIAL = {dt.date(2025, 1, 9)}
+
+
+NEW_YORK = zoneinfo.ZoneInfo("America/New_York")
 
 
 class OutOfRange(Exception):
@@ -71,3 +77,41 @@ def is_trading_day(day):
     if not FIRST_YEAR <= day.year <= LAST_YEAR:
         raise OutOfRange("no NYSE calendar for {}".format(day.year))
     return day.weekday() < 5 and day not in holidays(day.year)
+
+
+def is_early_close(day):
+    """True for a 1 p.m. close: the day after Thanksgiving, and July 3 and
+    December 24 when they trade."""
+    if not is_trading_day(day):
+        return False
+    return (day == _nth_weekday(day.year, 11, 3, 4) + dt.timedelta(days=1)
+            or (day.month, day.day) in ((7, 3), (12, 24)))
+
+
+def close_utc(day):
+    """The session's close as a UTC datetime: 4 p.m. New York time, or 1 p.m.
+    on an early close. Raises ValueError for a day that does not trade."""
+    if not is_trading_day(day):
+        raise ValueError("{} is not an NYSE session".format(day))
+    hour = 13 if is_early_close(day) else 16
+    return dt.datetime(day.year, day.month, day.day, hour, tzinfo=NEW_YORK).astimezone(dt.timezone.utc)
+
+
+def sessions(first, last):
+    """The trading days first..last, oldest first."""
+    out, day = [], first
+    while day <= last:
+        if is_trading_day(day):
+            out.append(day)
+        day += dt.timedelta(days=1)
+    return out
+
+
+def sessions_after(day, n):
+    """The ``n`` trading days after ``day``."""
+    out = []
+    while len(out) < n:
+        day += dt.timedelta(days=1)
+        if is_trading_day(day):
+            out.append(day)
+    return out

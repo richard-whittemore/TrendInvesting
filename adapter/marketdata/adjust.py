@@ -22,6 +22,7 @@ is what the factor above needs: P and cash on the same, ex-date basis.
 Anything that cannot be adjusted exactly raises CannotAdjust.
 """
 import datetime as dt
+import math
 
 
 class CannotAdjust(Exception):
@@ -86,4 +87,81 @@ def adjusted_closes(history, ticker, splits, dividends):
             if day < d:
                 factor *= f
         out.append((day, raw * factor))
+    return out
+
+
+def _positive(value):
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0)
+
+
+def forward_factors(ticker, sessions, closes, splits, dividends, base):
+    """{session: (split multiplier, total multiplier)} for every session of
+    ``closes`` ({session: raw close}, one ticker) on or after ``base``.
+
+    The forward form of the convention above, for a stream of bars recorded
+    one session at a time: a session's multipliers are the products of the
+    inverse factors of the events dated after the base (or after the
+    ticker's first bar on or after it, if later) and on or before the
+    session, so a bar's figures depend only on events up to its own session
+    and are never restated by a later one. A split multiplies by
+    split_to / split_from; a cash dividend by P / (P - cash), P the raw close
+    of the session before its ex-date. Price x total multiplier is the split-
+    and dividend-adjusted price; price x split multiplier the split-adjusted
+    one; volume / split multiplier the volume in the base session's shares.
+    Ratios between sessions equal those of adjusted_closes.
+
+    ``sessions`` is every trading day loaded, oldest first, from the base to
+    the last; ``splits`` and ``dividends`` are the ticker's own rows, each
+    event once. A split and a dividend on one date, two splits on one date,
+    a non-positive or non-finite figure, or a dividend whose prior session
+    has no close raises CannotAdjust.
+    """
+    if base not in sessions:
+        raise CannotAdjust("{} base {} is not a loaded session".format(ticker, base))
+    days = [s for s in sessions if s >= base]
+    for day in days:
+        if day in closes and not _positive(closes[day]):
+            raise CannotAdjust("{} close on {} is {!r}".format(ticker, day, closes[day]))
+    seen = [d for d in days if d in closes]
+    if not seen:
+        return {}
+    first, last = seen[0], days[-1]
+    events, split_days = [], set()
+    for r in splits:
+        d = _date(r.get("execution_date"))
+        if not first < d <= last:
+            continue
+        frm, to = r.get("split_from"), r.get("split_to")
+        if not _positive(frm) or not _positive(to):
+            raise CannotAdjust("{} split on {} has ratio {!r}:{!r}".format(ticker, d, frm, to))
+        if d in split_days:
+            raise CannotAdjust("{} has two splits on {}".format(ticker, d))
+        split_days.add(d)
+        events.append((d, to / frm, to / frm))
+    for r in dividends:
+        d = _date(r.get("ex_dividend_date"))
+        if not first < d <= last:
+            continue
+        cash = r.get("cash_amount")
+        if not (isinstance(cash, (int, float)) and not isinstance(cash, bool) and math.isfinite(cash) and cash >= 0):
+            raise CannotAdjust("{} dividend on {} has cash {!r}".format(ticker, d, cash))
+        if d in split_days:
+            raise CannotAdjust("{} has a split and a dividend on the same date {}".format(ticker, d))
+        prior = [s for s in days if s < d][-1]   # exists: first < d
+        if prior not in closes:
+            raise CannotAdjust("{} has no close on the session before ex-date {}".format(ticker, d))
+        p = closes[prior]
+        if cash >= p:
+            raise CannotAdjust("{} dividend {} on {} is not below the prior close {}".format(ticker, cash, d, p))
+        events.append((d, 1.0, p / (p - cash)))
+    events.sort(key=lambda e: e[0])
+    out, split_m, total_m, i = {}, 1.0, 1.0, 0
+    for day in days:
+        while i < len(events) and events[i][0] <= day:
+            split_m *= events[i][1]
+            total_m *= events[i][2]
+            i += 1
+        if day in closes:
+            out[day] = (split_m, total_m)
     return out

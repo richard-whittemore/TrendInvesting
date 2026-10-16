@@ -34,3 +34,32 @@ class CalendarTest(unittest.TestCase):
     def test_outside_the_table_fails_closed(self):
         with self.assertRaises(calendar.OutOfRange):
             calendar.is_trading_day(D(2035, 1, 3))
+
+
+class SessionCloseTest(unittest.TestCase):
+    # NYSE's published early closes (1 p.m.); the 2026-2028 ones were checked
+    # against nyse.com/markets/hours-calendars on 2026-10-16.
+    EARLY = ("2022-11-25", "2023-07-03", "2023-11-24", "2024-07-03", "2024-11-29", "2024-12-24",
+             "2025-07-03", "2025-11-28", "2025-12-24", "2026-11-27", "2026-12-24", "2027-11-26",
+             "2028-07-03", "2028-11-24")
+
+    def test_early_closes_close_at_one_in_new_york(self):
+        for day in self.EARLY:
+            self.assertTrue(calendar.is_early_close(D.fromisoformat(day)), day)
+        utc = calendar.close_utc(D(2026, 11, 27))   # EST: 13:00 is 18:00 UTC
+        self.assertEqual(utc, dt.datetime(2026, 11, 27, 18, 0, tzinfo=dt.timezone.utc))
+
+    def test_other_sessions_close_at_four_in_new_york(self):
+        for day in ("2026-07-02", "2027-07-02", "2027-12-23", "2022-12-23", "2026-03-27"):
+            self.assertFalse(calendar.is_early_close(D.fromisoformat(day)), day)
+        self.assertEqual(calendar.close_utc(D(2026, 7, 2)), dt.datetime(2026, 7, 2, 20, 0, tzinfo=dt.timezone.utc))
+        self.assertEqual(calendar.close_utc(D(2026, 1, 2)), dt.datetime(2026, 1, 2, 21, 0, tzinfo=dt.timezone.utc))
+
+    def test_a_day_that_does_not_trade_has_no_close(self):
+        with self.assertRaises(ValueError):
+            calendar.close_utc(D(2026, 11, 26))
+
+    def test_sessions_lists_trading_days_and_the_ones_after(self):
+        self.assertEqual(calendar.sessions(D(2026, 4, 1), D(2026, 4, 7)),
+                         [D(2026, 4, 1), D(2026, 4, 2), D(2026, 4, 6), D(2026, 4, 7)])
+        self.assertEqual(calendar.sessions_after(D(2026, 4, 2), 2), [D(2026, 4, 6), D(2026, 4, 7)])
