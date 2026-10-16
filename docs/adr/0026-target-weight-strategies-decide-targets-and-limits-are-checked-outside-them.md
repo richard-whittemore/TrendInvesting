@@ -170,7 +170,7 @@ replaces `plan.md`'s "per run", since a live run spans many decisions.
 | Maximum order size as a share of V (`plan.md` 334-335) | \|qty·pᵢ\| / V ≤ the per-account limit | refuse that order; alert; **Degraded** |
 | Price band (`plan.md` 335; ADR 0025) | pᵢ within the band of the latest recorded IBKR mark (an input, never a live read) | refuse; alert; **Degraded** |
 | No order without a journalled decision (ADR 0025) | the tag names a durable `strategy.targets.decided` or incident decision in this run | refuse; urgent alert; **Halted** (a defect in the order path, so its scope cannot be bounded) |
-| Kill switch (`plan.md` 405) | a recorded `operator.kill-switch` input (new) is engaged | refuse every order, including risk-reducing ones; alert once; state unchanged |
+| Kill switch (`plan.md` 405) | a recorded `operator.kill-switch` input (new) is engaged | refuse every order except ADR 0019's one sale back to 98% in a margin account (its 2026-10-15 and 2026-10-16 amendments), which still goes; routine risk-reducing sells, including the IRAs', are refused; alert once; state unchanged (owner decision 2026-10-16) |
 | Mode (`plan.md` 406-407) | `dry-run`: released orders are journalled with `send: false` and never sent | not a breach |
 
 Degraded and Halted are emitted through the existing `strategy.engine.state`.
@@ -187,7 +187,8 @@ configuration error.
 
 **Risk-reducing orders** (point 4) are exempt from the order count, the order
 size and the price band. They stay subject to the journalled-decision check,
-the no-short sizing in point 2.5, and the kill switch.
+the no-short sizing in point 2.5, and the kill switch, which refuses them
+all except ADR 0019's one sale back to 98% in a margin account.
 
 ### 4. What a risk-reducing order is
 
@@ -300,7 +301,7 @@ the module's own rules version and decision corpus (ADR 0016;
    sale beyond the holding net of working and pending sells, a `cancel-pending`
    sell included.
 4. **Limits:** each at, below and above its value; the exemptions; a sell
-   from 160% to 155% passing the 150% check; the kill switch; the adapter
+   from 160% to 155% passing the 150% check; the kill switch refusing a routine IRA sell and passing ADR 0019's sale back to 98%; the adapter
    refusing the same orders; every backtested order passing.
 5. **States:** no buy while Degraded; named instruments frozen; Halted sends
    only the ADR 0019 (2026-10-15) sale, with that amendment's tests (lines 271-273).
@@ -316,7 +317,7 @@ the module's own rules version and decision corpus (ADR 0016;
 | Sector-label source (`plan.md` 280-290; `docs/research/sector-labels-2026-10.md`) | a field of `market.universe.snapshot` rows, with the source named in configuration |
 | Live universe data source (`plan.md` 247-253) | the producer of `market.universe.snapshot`; the module sees only the input |
 | A Degraded joint account whose named instrument is SPY while boosted | **decided 2026-10-16:** the one sale back to 98% applies, by ADR 0019's 2026-10-16 amendment (point 4) |
-| The kill switch and risk-reducing sales: this ADR lets it block them too, including the D6 sale | owner decision: keep, or exempt risk-reducing sales |
+| The kill switch and risk-reducing sales | **decided 2026-10-16:** only ADR 0019's one sale back to 98% in a margin account goes through it; every other order stops (point 3) |
 | One live engine per account, or one engine for all three behind one gateway (ADR 0025 allows one adapter connection per engine) | design decision before Phase 3; each account keeps its own configuration and hash either way |
 | The owner's birth date enters the journal through the configuration, though it stays out of the repository | **decided 2026-10-16:** only the birth year and month, as a configured value (point 6) |
 | Backtest behaviours live trading will not copy: keeping the last book on short data, SPY treated as risk-on with fewer than 200 closes, a lookback window that shifts across a gap (`defensive_v2.py:269-291`); ties in the ranking (323); a zero volatility weighted as 1 (76); RSI(2)'s dependence on its warm-up seed (`template.py:54-55`) | measured by the parity tests, which report each difference; none is copied into live code without a decision |

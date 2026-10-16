@@ -417,7 +417,12 @@ Lightsail VM (Ubuntu, $12/month, US East)
   and holds SPY at 98%. How long IBKR's restriction lasts and how it is
   lifted are confirmed with IBKR (D5) and written into the runbook before
   the joint account goes live.
-- **Kill switch**: a file or command that stops all new orders.
+- **Kill switch**: a file or command that stops all new orders, with one
+  exception: the margin account's one sale back to 98% (D6; ADR 0019's
+  2026-10-15 and 2026-10-16 amendments) still goes, so leverage is never
+  kept because the switch is on. Routine sells, the IRAs' included, stop
+  (owner decision 2026-10-16). A full stop remains outside the program:
+  stopping the gateway, or IBKR's own app.
 - **Modes**: dry-run (decide and journal, send nothing) → IBKR paper →
   live, set per account in configuration.
 
