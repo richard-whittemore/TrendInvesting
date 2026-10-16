@@ -128,6 +128,12 @@ backtest runs on their servers.
   universe on one date with each stock's Morningstar sector; `compare.py`,
   local, sets those against the GICS sectors in an iShares holdings file
   and lists the disagreements. Tested by `sectors/test_sectors.py`.
+- `momentum/fresh_universe.py` — decision D8's timing
+  (`docs/research/universe-massive-2026-10.md`, Finding 2).
+  `defensive_v2.py` with additions only: with `FRESH_SELECTION` each
+  month's universe is chosen on the last session before the month, so the
+  first rebalance never ranks the previous month's universe; the
+  `Selections` statistic counts the months chosen before the 1st.
 - `momentum/golden_log.py` — golden cases for the Go target-weight module
   (`docs/adr/0026-*.md`, point 7). `defensive_v2.py` with additions only:
   for each month in `GOLDEN_MONTHS` it logs the risk-off inputs, the top

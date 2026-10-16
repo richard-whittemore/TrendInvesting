@@ -157,6 +157,8 @@ class BuilderTest(unittest.TestCase):
     def test_vol_target_is_refused_where_it_would_be_ignored(self):
         with self.assertRaises(SystemExit):
             build_variants.check_variant("momentum/defensive.py", {"MODE": "mom", "VOL_TARGET": 0.2})
+        with self.assertRaises(SystemExit):
+            build_variants.check_variant("momentum/fresh_universe.py", {"MODE": "mom_trend", "VOL_TARGET": 0.2})
         build_variants.check_variant("momentum/momentum.py", {"MODE": "mom", "VOL_TARGET": 0.2})
 
     def test_an_unknown_constant_is_refused(self):
@@ -1791,6 +1793,81 @@ class GoldenLogTest(unittest.TestCase):
             first.pop("GOLDEN_FROM_RANK", None)
             self.assertEqual(second, first, name)
 
+
+
+class FreshSelectionTest(unittest.TestCase):
+    """momentum/fresh_universe.py: the month's universe chosen at the
+    selection whose next session opens in the new month."""
+
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/fresh_universe.py", {})
+        self.module.Universe = types.SimpleNamespace(Unchanged="unchanged")
+
+    def _algo(self, fresh, next_open):
+        algo = self.module.MomentumResearch()
+        algo.FRESH_SELECTION = fresh
+        algo.UNIVERSE_SIZE = 2
+        algo.spy = "SPY"
+        algo.last_month = None
+        algo.early_selections = 0
+        hours = types.SimpleNamespace(GetNextMarketOpen=lambda now, extended: next_open[now])
+        algo.Securities = {"SPY": types.SimpleNamespace(Exchange=types.SimpleNamespace(Hours=hours))}
+        return algo
+
+    @staticmethod
+    def _coarse():
+        row = namedtuple("Coarse", "Symbol HasFundamentalData Price DollarVolume")
+        return [row("A", True, 10.0, 3.0), row("B", True, 10.0, 2.0), row("C", True, 10.0, 1.0)]
+
+    def test_a_month_whose_first_is_a_sunday_is_chosen_after_the_last_friday(self):
+        # 2025-06-01 is a Sunday; Friday 2025-05-30 is the last session before it.
+        sat, tue = _dt.datetime(2025, 5, 31), _dt.datetime(2025, 6, 3)
+        opens = {sat: _dt.datetime(2025, 6, 2, 9, 30), tue: _dt.datetime(2025, 6, 3, 9, 30)}
+        algo = self._algo(True, opens)
+        algo.last_month = (2025, 5)
+        algo.Time = sat
+        self.assertEqual(algo.Coarse(self._coarse()), ["A", "B"])
+        self.assertEqual((algo.last_month, algo.early_selections), ((2025, 6), 1))
+        algo.Time = tue
+        self.assertEqual(algo.Coarse(self._coarse()), "unchanged")
+
+    def test_without_the_switch_the_month_waits_for_a_selection_dated_in_it(self):
+        sat = _dt.datetime(2025, 5, 31)
+        algo = self._algo(False, {sat: _dt.datetime(2025, 6, 2, 9, 30)})
+        algo.last_month = (2025, 5)
+        algo.Time = sat
+        self.assertEqual(algo.Coarse(self._coarse()), "unchanged")
+        algo.Time = _dt.datetime(2025, 6, 3)
+        self.assertEqual(algo.Coarse(self._coarse()), ["A", "B"])
+        self.assertEqual(algo.early_selections, 0)
+
+    def test_a_month_whose_first_is_a_weekday_is_chosen_as_before(self):
+        # 2025-10-01 is a Wednesday: the selection at its midnight uses 09-30.
+        wed = _dt.datetime(2025, 10, 1)
+        algo = self._algo(True, {wed: _dt.datetime(2025, 10, 1, 9, 30)})
+        algo.last_month = (2025, 9)
+        algo.Time = wed
+        self.assertEqual(algo.Coarse(self._coarse()), ["A", "B"])
+        self.assertEqual((algo.last_month, algo.early_selections), ((2025, 10), 0))
+
+    def test_the_template_only_adds_to_defensive_v2(self):
+        with open(os.path.join(HERE, "momentum", "defensive_v2.py")) as f:
+            old = f.read().splitlines()
+        with open(os.path.join(HERE, "momentum", "fresh_universe.py")) as f:
+            new = f.read().splitlines()
+        matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+        removed = [line for tag, i1, i2, _, _ in matcher.get_opcodes() if tag in ("replace", "delete")
+                   for line in old[i1:i2]]
+        self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
+
+    def test_the_runs_are_the_combination_plus_the_switch(self):
+        for name, base in (("FU_COMBO", "F_COMBO"), ("OOS_FU_COMBO", "OOS_F_COMBO")):
+            template, params = build_variants.VARIANTS[name]
+            self.assertEqual(template, "momentum/fresh_universe.py", name)
+            c = _class_constants(template, params)
+            self.assertIs(c.pop("FRESH_SELECTION"), True, name)
+            self.assertEqual(c, _class_constants(*build_variants.VARIANTS[base]), name)
 
 
 class BoostGoldenLogTest(unittest.TestCase):
