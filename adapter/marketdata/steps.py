@@ -77,7 +77,11 @@ last_session = find_session
 
 def fetch_universe(client, session, now=_now, grouped_body=None):
     """The raw inputs of the universe ranking for ``session``: every stock's
-    unadjusted bar and the type-CS reference tickers dated that session."""
+    unadjusted bar and the type-CS reference tickers dated that session.
+    Decision D8 (docs/live-trading/plan.md section 4): one session's
+    unadjusted close and volume for every US common stock, the listing as of
+    that session; ranking itself is a Go rule (ADR 0026 point 1, "Universe").
+    No bars or no tickers fails closed (ADR 0026 point 5)."""
     body = grouped_body if grouped_body is not None else client.grouped(session)
     bars = body.get("results") or []
     if not bars:
