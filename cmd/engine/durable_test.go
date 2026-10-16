@@ -41,12 +41,21 @@ func testIdentity(t *testing.T) (strategyVersion, configurationHash string) {
 // on disk already: journal-before-send, observed from the adapter's side.
 func driveSessions(t *testing.T, socketPath, logPath string, from, to int) {
 	t.Helper()
-	strategyVersion, configurationHash := testIdentity(t)
 	client, err := transport.Dial(socketPath)
 	if err != nil {
 		t.Fatalf("dial the engine: %v", err)
 	}
 	defer func() { _ = client.Close() }()
+	driveSessionsOn(t, client, logPath, from, to)
+}
+
+// driveSessionsOn drives sessions over a connection the caller already holds.
+// The engine admits one connection at a time, and frees the slot only once it
+// notices the previous one closed, so a test that closes a connection and
+// dials another at once can be refused (an EOF on its first call).
+func driveSessionsOn(t *testing.T, client *transport.Client, logPath string, from, to int) {
+	t.Helper()
+	strategyVersion, configurationHash := testIdentity(t)
 	for day := from; day < to; day++ {
 		for _, input := range sessionInputs(t, day, strategyVersion, configurationHash) {
 			reply, err := client.Decide(context.Background(), input)
@@ -198,8 +207,9 @@ func TestARestartAfterACrashMidWriteResumesFromTheLastCommit(t *testing.T) {
 	if _, err := client.Decide(context.Background(), sessionInputs(t, 2, strategyVersion, configurationHash)[1]); err != nil {
 		t.Fatalf("resend the torn input: %v", err)
 	}
+	// The same connection continues: the engine admits one at a time.
+	driveSessionsOn(t, client, secondLog, 3, 5)
 	_ = client.Close()
-	driveSessions(t, socketPath, secondLog, 3, 5)
 	if err := report.stop(); err != nil {
 		t.Fatalf("the resumed run: %v", err)
 	}
