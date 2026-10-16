@@ -1408,6 +1408,37 @@ class UniverseParityTest(unittest.TestCase):
                    for line in old[i1:i2]]
         self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
 
+    def _fine_row(self, ticker, sector):
+        sym = namedtuple("Sym", "Value")(ticker)
+        row = types.SimpleNamespace(Symbol=sym)
+        row.AssetClassification = types.SimpleNamespace(MorningstarSectorCode=sector)
+        return row
+
+    def test_a_sector_override_relabels_named_tickers_only(self):
+        algo = self._algo(source="coarse")
+        algo.SECTOR_OVERRIDE = {"MARA": 311}
+        algo.sectors, algo.fund_reads, algo.fund_hits = {}, 0, 0
+        rows = [self._fine_row("MARA", 103), self._fine_row("JPM", 103)]
+        algo.Fine(rows)
+        self.assertEqual({s.Value: c for s, c in algo.sectors.items()}, {"MARA": 311, "JPM": 103})
+        self.assertEqual(algo.overridden, 1)
+
+    def test_without_an_override_the_sectors_are_morningstars(self):
+        algo = self._algo(source="coarse")
+        algo.SECTOR_OVERRIDE = {}
+        algo.sectors, algo.fund_reads, algo.fund_hits = {}, 0, 0
+        algo.Fine([self._fine_row("MARA", 103)])
+        self.assertEqual([c for c in algo.sectors.values()], [103])
+
+    def test_the_gics_override_run_differs_from_the_coarse_parity_run_only_in_its_labels(self):
+        base = _class_constants(*build_variants.VARIANTS["OOS_P_COARSE"])
+        c = _class_constants(*build_variants.VARIANTS["OOS_P_GICS"])
+        override = c.pop("SECTOR_OVERRIDE")
+        self.assertEqual(base.pop("SECTOR_OVERRIDE"), {})
+        self.assertEqual(c, base)
+        self.assertEqual(len(override), 20)
+        self.assertTrue(set(override.values()) <= {101, 102, 103, 104, 205, 206, 207, 308, 309, 310, 311})
+
     def test_the_parity_runs_keep_the_combinations_settings(self):
         base = _class_constants(*build_variants.VARIANTS["OOS_F_COMBO"])
         base["END_DATE"] = (2026, 9, 30)
@@ -1416,10 +1447,11 @@ class UniverseParityTest(unittest.TestCase):
             template, params = build_variants.VARIANTS[name]
             self.assertEqual(template, "momentum/universe_parity.py", name)
             c = _class_constants(template, params)
-            own = {k: c.pop(k) for k in ("UNIVERSE_SOURCE", "ETF_TICKER", "ETF_LAG_DAYS", "SNAPSHOT_DAYS")}
+            own = {k: c.pop(k) for k in ("UNIVERSE_SOURCE", "ETF_TICKER", "ETF_LAG_DAYS", "SNAPSHOT_DAYS",
+                                         "SECTOR_OVERRIDE")}
             self.assertEqual(c, base, name)
             self.assertEqual(own, {"UNIVERSE_SOURCE": source, "ETF_TICKER": "IWB", "ETF_LAG_DAYS": lag,
-                                   "SNAPSHOT_DAYS": 45}, name)
+                                   "SNAPSHOT_DAYS": 45, "SECTOR_OVERRIDE": {}}, name)
 
 
 class ParityCompareTest(unittest.TestCase):

@@ -11,7 +11,8 @@
 # universe is limited to the ETF_TICKER fund's holdings as they stood at
 # least ETF_LAG_DAYS earlier, from QuantConnect's US ETF Constituents data
 # (daily from January 2015; QuantConnect says it may lag the sponsor's files
-# by up to a week, hence the lag). momentum/parity_compare.py compares two
+# by up to a week, hence the lag). SECTOR_OVERRIDE relabels named tickers'
+# sectors for the sector check (docs/research/sector-labels-2026-10.md). momentum/parity_compare.py compares two
 # runs' holdings month by month from their order lists (the Free plan's logs
 # are capped at 10 KB, too little for ten years of picks).
 #
@@ -156,6 +157,7 @@ class MomentumResearch(QCAlgorithm):
     ETF_TICKER = "IWB"            # iShares Russell 1000, the fund live trading will read
     ETF_LAG_DAYS = 7              # use holdings at least this many days old
     SNAPSHOT_DAYS = 45            # holdings snapshots older than this are dropped
+    SECTOR_OVERRIDE = {}          # ticker -> sector code used instead of Morningstar's (the sector check)
 
     def Initialize(self):
         self.SetStartDate(*self.START_DATE)
@@ -260,6 +262,10 @@ class MomentumResearch(QCAlgorithm):
             sec = self._get(f, "AssetClassification.MorningstarSectorCode",
                             "asset_classification.morningstar_sector_code")
             self.sectors[f.Symbol] = int(sec) if sec is not None else None
+            ticker = str(getattr(f.Symbol, "Value", f.Symbol))
+            if ticker in self.SECTOR_OVERRIDE:
+                self.sectors[f.Symbol] = self.SECTOR_OVERRIDE[ticker]
+                self.overridden = getattr(self, "overridden", 0) + 1
             self.fundamentals[f.Symbol] = {
                 "quality": gp / ta if gp is not None and ta and ta > 0 else None,
                 "value": ey,
@@ -503,3 +509,5 @@ class MomentumResearch(QCAlgorithm):
         self.SetRuntimeStatistic("Fundamentals", "reads={} hits={}".format(self.fund_reads, self.fund_hits))
         self.SetRuntimeStatistic("Universe", "{} {} lag={} waits={}".format(
             self.UNIVERSE_SOURCE, self.ETF_TICKER, self.ETF_LAG_DAYS, self.no_holdings))
+        self.SetRuntimeStatistic("Sectors", "overrides={} relabelled={}".format(
+            len(self.SECTOR_OVERRIDE), getattr(self, "overridden", 0)))
