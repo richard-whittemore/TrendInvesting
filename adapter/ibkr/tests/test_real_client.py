@@ -8,6 +8,7 @@ signatures IBKR has shipped for EWrapper.error.
 import importlib
 import sys
 import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -26,6 +27,8 @@ class _EClient:
     # Set to a threading.Event to make connect block until it is set, as a
     # stalled socket connect or handshake does.
     connect_gate = None
+    # Called once a connect stops blocking, so a test can move its clock then.
+    after_connect = None
 
     def __init__(self, wrapper):
         self.wrapper = wrapper
@@ -36,6 +39,8 @@ class _EClient:
         self.requests.append(("connect", host, port, clientId))
         if _EClient.connect_gate is not None:
             _EClient.connect_gate.wait(5)
+        if _EClient.after_connect is not None:
+            _EClient.after_connect()
         # The socket is open now, whatever happened while connect was blocked.
         self._stopped.clear()
 
@@ -107,6 +112,14 @@ def _uninstall_stub():
         sys.modules.pop(name, None)
 
 
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
 class Recorder(Inbox):
     def __init__(self):
         super().__init__()
@@ -134,6 +147,7 @@ class WithoutIbapiTests(unittest.TestCase):
 class ForwardingTests(unittest.TestCase):
     def tearDown(self):
         _EClient.connect_gate = None
+        _EClient.after_connect = None
         _uninstall_stub()
         import real_client
         importlib.reload(real_client)
@@ -208,6 +222,53 @@ class ForwardingTests(unittest.TestCase):
         self.assertFalse(opener.is_alive())
         self.assertFalse(abandoned.isConnected())
         self.assertIsNone(client._reader)
+
+    def _abandon_one_attempt(self, clock):
+        real_client = self.module()
+        from connection import ConnectFailed
+        gate = threading.Event()
+        _EClient.connect_gate = gate
+        client = real_client.IbapiClient(start_reader=False, monotonic=clock)
+        with self.assertRaises(ConnectFailed):
+            client.connect("127.0.0.1", 4002, 11, Recorder(), 0.05)
+        return client, gate, ConnectFailed
+
+    def test_waiting_for_an_abandoned_attempt_spends_the_same_timeout(self):
+        # The abandoned opener finishes just before the deadline; the new
+        # attempt may only have what is left of that one timeout.
+        clock = Clock()
+        client, gate, ConnectFailed = self._abandon_one_attempt(clock)
+        abandoned = client._client
+
+        def late_finish():
+            clock.now += 0.99
+            _EClient.after_connect = None
+        _EClient.after_connect = late_finish
+        _EClient.connect_gate = threading.Event()  # the new attempt stalls too
+        threading.Timer(0.02, gate.set).start()
+        started = time.monotonic()
+        try:
+            with self.assertRaises(ConnectFailed):
+                client.connect("127.0.0.1", 4002, 11, Recorder(), 1.0)
+            self.assertLess(time.monotonic() - started, 0.5)  # not another full second
+            self.assertIsNot(client._client, abandoned)
+        finally:
+            _EClient.connect_gate.set()
+
+    def test_no_attempt_starts_when_the_wait_used_the_whole_timeout(self):
+        clock = Clock()
+        client, gate, ConnectFailed = self._abandon_one_attempt(clock)
+        abandoned = client._client
+
+        def finish_at_the_deadline():
+            clock.now += 1.0
+            _EClient.after_connect = None
+        _EClient.after_connect = finish_at_the_deadline
+        threading.Timer(0.02, gate.set).start()
+        with self.assertRaises(ConnectFailed):
+            client.connect("127.0.0.1", 4002, 11, Recorder(), 1.0)
+        self.assertIs(client._client, abandoned)  # no new EClient was opened
+        self.assertFalse(abandoned.isConnected())
 
     def test_no_new_attempt_starts_while_an_abandoned_one_may_still_claim_the_id(self):
         real_client = self.module()

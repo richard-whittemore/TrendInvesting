@@ -11,6 +11,7 @@ IbapiUnavailable, so the rest of the adapter and its tests never need it.
 import inspect
 import logging
 import threading
+import time
 
 from connection import ConnectFailed
 from sender import LiveSendingDisabled
@@ -127,10 +128,11 @@ class IbapiClient(TWSApi):
     ID, so a stray session cannot make IBKR refuse the next one (code 326).
     """
 
-    def __init__(self, start_reader=True):
+    def __init__(self, start_reader=True, monotonic=time.monotonic):
         if not IBAPI_AVAILABLE:
             raise IbapiUnavailable("ibapi is not installed; see adapter/ibkr/README.md")
         self._start_reader = start_reader
+        self._monotonic = monotonic
         self._forwarder = _forwarder_class()
         self._wrapper = None
         self._client = None
@@ -138,14 +140,20 @@ class IbapiClient(TWSApi):
         self._opener = None
 
     def connect(self, host, port, client_id, callbacks, timeout):
+        # One deadline bounds the whole call: waiting out an abandoned attempt
+        # spends the same timeout the new attempt then has left.
+        deadline = self._monotonic() + timeout
         previous = self._opener
         if previous is not None and previous.is_alive():
             # An abandoned attempt is still inside EClient.connect and may yet
             # take this client ID; wait for it to finish and clean up.
-            previous.join(timeout)
+            previous.join(max(deadline - self._monotonic(), 0))
             if previous.is_alive():
                 raise ConnectFailed("an abandoned connect attempt has not finished")
         self.disconnect()
+        remaining = deadline - self._monotonic()
+        if remaining <= 0:
+            raise ConnectFailed("no time left within {}s for a new connect attempt".format(timeout))
         self._wrapper = self._forwarder(callbacks)
         self._client = EClient(self._wrapper)
         # EClient.connect opens the socket and runs IBKR's handshake
@@ -166,7 +174,7 @@ class IbapiClient(TWSApi):
         opener = threading.Thread(target=open_socket, name="ibapi-connect", daemon=True)
         self._opener = opener
         opener.start()
-        opener.join(timeout)
+        opener.join(remaining)
         with lock:
             timed_out = opener.is_alive()
             attempt["abandoned"] = timed_out
