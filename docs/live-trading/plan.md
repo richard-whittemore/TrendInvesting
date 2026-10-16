@@ -478,7 +478,7 @@ Lightsail VM (Ubuntu, $12/month, US East)
 | Lightsail 2 GB plan, snapshots | ~$170 |
 | Tailscale, Healthchecks.io, ntfy (free tiers) | $0 |
 | IBKR market data for API bars, if required | about $10/month (~$120/year); daily bars come from Massive (#326), so a subscription may be needed only for the marks the price band checks; budget it until paper trading shows otherwise |
-| Commissions | Pro (every account, since Lite has no API access; D5 revised 2026-10-16): ~$28 for Boost, and perhaps $100–200 per IRA for momentum. Basis (estimates, not measured trade counts): IBKR Pro Fixed, $0.005 a share with a $1 minimum and a 1% cap (ADR 0013's model); at these account sizes every order is under 200 shares, so each costs the $1 minimum and the estimate is an order count. ~$28 is about 14 Boost round trips a year, two orders each. $100–200 is 100–200 orders a year per IRA, about 8–17 a month at the monthly rebalance: a buy or sell for each name entering or leaving the 25 and each resize past the band; a name held unchanged inside the band sends no order and costs nothing. The parity backtest's order counts replace these |
+| Commissions | Pro (every account, since Lite has no API access; D5 revised 2026-10-16): ~$28 for Boost, and perhaps $100–200 per IRA for momentum. Fee model: IBKR Pro Fixed, $0.005 a share, at least $1 and at most 1% of the order's value (ADR 0013's model). So each order costs a floor of $1, plus $0.005 a share for every share above 200 (a 300-share order costs $1.50); a cheap stock or a bond-fund purchase can pass 200 shares. Both figures are early estimates with no recorded order counts behind them; a name held unchanged inside the band sends no order. The parity backtest's orders and share quantities replace them |
 
 **Decision D5** (revised 2026-10-16; section 10): **IBKR Pro for every
 account**, since Lite has no API access, and margin IRAs. The original
@@ -544,7 +544,7 @@ only after CodeRabbit and Greptile findings are addressed.
 - **D7** **Whole shares in the IRAs, with the minimum-lot rule** (D7-L;
   decided 2026-10-16, owner: "yes"; section 5): IBKR's FAQ says fractional
   orders are not supported through the TWS API. Fractional (D7-F) stays
-  built as configuration and is confirmed unavailable in paper trading.
+  built as configuration, and its availability is checked in paper trading.
 - **D8** Live universe: **every US-listed common stock ranked by one
   session's dollar volume, as the backtest does** (decided 2026-10-15;
   section 4). Data source: Massive's free plan (account opened by the owner
