@@ -2,7 +2,7 @@
 
 ## Decision boundary
 
-The system deliberately separates trading decisions from market and brokerage mechanics. LEAN owns market data for backtests; the IBKR adapter owns live market data and brokerage (ADR 0025). Both use the same transport and envelope contract. ADR 0025 adds an identity check, not yet built: a live engine will refuse any adapter but the one its configuration names.
+The system deliberately separates trading decisions from market and brokerage mechanics. LEAN owns market data for backtests; the IBKR adapter owns live market data and brokerage (ADR 0025). Both use the same transport and envelope contract. ADR 0025 adds an identity check, not yet built: a live engine will refuse any adapter but the one its configuration names. The live target-weight strategies (momentum, Boost) decide target weights only; a strategy-independent order planner turns targets into orders, and hard limits are checked outside the strategy, in Go and again in the adapter (ADR 0026, not yet built). Each account runs its own engine.
 
 ```text
 LEAN container (backtests) or IB Gateway (live, ADR 0025)

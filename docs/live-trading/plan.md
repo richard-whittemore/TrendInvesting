@@ -106,8 +106,9 @@ Vanguard's anchors, which is 10% until 40 and 30.8% at 53.
   month rather than in steps.
 - The first stretch starts from age 38, not from the first live
   rebalance, so trading that starts later starts above 0%.
-- Retirement is taken as age 65. The birth date is part of the account
-  configuration on the server, not of this repository.
+- Retirement is taken as age 65. The owner's birth year and month (never
+  the day, which the schedule does not use) are a configured value on the
+  server, not part of this repository (owner decision 2026-10-16).
 - Not tested as a path: the research measured fixed mixes (100/0, 90/10,
   70/30, 50/50), and the schedule moves between them. Mixes beyond 50%
   bonds, reached after 65, were not measured. So the schedule gets its own
@@ -140,7 +141,8 @@ Vanguard's anchors, which is 10% until 40 and 30.8% at 53.
   between the two mixes in every case
   (`docs/research/glide-path-2026-10.md`).
 
-The schedule is configuration with its own hash (ADR 0016), so a change is
+The schedule is part of the account configuration and its one hash (ADR
+0016; ADR 0026, point 6), so a change is
 recorded, never silent.
 
 **Boost** (`boost/template.py`, SPY, BOOST_SIZE 1.5, RSI_ENTRY 10,
@@ -174,9 +176,11 @@ LEAN for backtests, our own IBKR adapter for live trading.
 ```text
 Lightsail VM (Ubuntu, $12/month, US East)
   IB Gateway, kept logged in by IBC (nightly restart, weekly 2FA on the phone)
-  broker adapter (Python, IBKR's TWS API client; ADR 0025): market data, orders, fills, positions
-     -> same envelope transport as today (Unix socket, NDJSON; ADR 0014)
-  decision core (Go): momentum, Boost, glide path, risk checks, journal
+  market-data step: fetches each day's bars once, recorded as the input every engine reads
+  one engine per account (decided 2026-10-16), three in all, each with:
+    broker adapter (Python, IBKR's TWS API client; ADR 0025; its own client ID): orders, fills, positions
+       -> same envelope transport as today (Unix socket, NDJSON; ADR 0014)
+    decision core (Go): momentum or Boost, glide path, risk checks, its own journal
   reporter: daily summary, equity against SPY, alerts
   dashboard (read-only, reachable only over Tailscale)
 ```
@@ -365,7 +369,8 @@ Lightsail VM (Ubuntu, $12/month, US East)
     owner; the sale is journalled like any other order;
   - **no reading for 30 minutes** while the market is open counts as
     urgent.
-  The thresholds are configuration with their own hash (ADR 0016). The
+  The thresholds are part of the account configuration and its one hash
+  (ADR 0016; ADR 0026, point 6). The
   runbook, `docs/runbooks/margin-warning.md`, is written in Phase 3 with
   the action, who acts (the owner), and when the alarm clears (back above
   40%). It is rehearsed in paper trading before Phase 5.
@@ -416,7 +421,12 @@ Lightsail VM (Ubuntu, $12/month, US East)
   and holds SPY at 98%. How long IBKR's restriction lasts and how it is
   lifted are confirmed with IBKR (D5) and written into the runbook before
   the joint account goes live.
-- **Kill switch**: a file or command that stops all new orders.
+- **Kill switch**: a file or command that stops all new orders, with one
+  exception: the margin account's one sale back to 98% (D6; ADR 0019's
+  2026-10-15 and 2026-10-16 amendments) still goes, so leverage is never
+  kept because the switch is on. Routine sells, the IRAs' included, stop
+  (owner decision 2026-10-16). A full stop remains outside the program:
+  stopping the gateway, or IBKR's own app.
 - **Modes**: dry-run (decide and journal, send nothing) → IBKR paper →
   live, set per account in configuration.
 

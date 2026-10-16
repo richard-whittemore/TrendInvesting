@@ -1,6 +1,6 @@
 # ADR 0019: Broker reconciliation is an input, and unexplained differences halt
 
-- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts)
+- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument)
 - Date: 2026-09-17
 
 ## In plain English
@@ -272,3 +272,23 @@ to the Turtle reducer, and changes nothing else in this ADR.
   an unknown working sell; no order without readable broker values; one
   attempt only; byte-identical replay.
 
+## Amendment (2026-10-16): the same sale for a Degraded account's named instrument
+
+The owner decided that the one sale back to 98% in the 2026-10-15 amendment
+also applies to a Degraded margin account running a target-weight strategy
+when the instrument to sell is the one the discrepancy names. Without it,
+a joint account boosted on SPY, Degraded over its SPY quantity, would keep
+its borrowed exposure until a person acted, while a Halted account would
+not. The owner's reasoning: the system should not keep risk it does not
+need to.
+
+- **When:** the strategy's own exit fires, or the margin alarm is urgent
+  (`docs/live-trading/plan.md`, section 5), while the account is Degraded
+  and the instrument to sell is one its discrepancy names.
+- **What, sizing, price basis, checks, attempts, alerts and tests:**
+  exactly as the 2026-10-15 amendment states. Its sizing reads IBKR's own
+  holding, net liquidation value and open orders, never the journal's
+  quantity, so the discrepancy does not enter it.
+- **Nothing else changes.** Every other order on the named instrument stays
+  frozen, and the account stays Degraded until recovery. It does not apply
+  to the Turtle reducer or to the IRAs.
