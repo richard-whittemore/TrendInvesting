@@ -178,10 +178,11 @@ The best free combination measured:
 Weighted by coverage, that is about 95% agreement over the 494 names either
 source labels, not over all 500.
 
-**Six names had no label from either source:** APGE, ATAI, CRNX, EA, WBD and
-WBS, none of them in the SEC's ticker list under those symbols either, which
-suggests ticker changes or companies no longer listed under them at the
-snapshot. The backtest leaves a stock with no sector uncapped
+**Six names had no label from either source** (IWV or Nasdaq): APGE, ATAI,
+CRNX, EA, WBD and WBS. Five of them (all but WBD) are not in the SEC's ticker
+list under those symbols either, which suggests ticker changes or companies
+no longer listed under them at the snapshot. WBD has an SEC record (SIC 4841,
+cable and pay television; part 3) but SIC is not a chosen source. The backtest leaves a stock with no sector uncapped
 (`defensive_v2.py:69-73`), but every stock had a Morningstar sector there,
 so uncapping these would be a different rule. **Fallback:** a stock with no
 label from either source is left out of that month's ranking, the decision
