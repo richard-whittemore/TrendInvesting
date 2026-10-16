@@ -197,13 +197,19 @@ VARIANTS = {
     # Golden cases for the Go module (ADR 0026): the combination, trading
     # exactly as recorded, with chosen months' working logged. Months chosen
     # for a risk-off month, a binding sector cap and a recovery.
-    # At most two months per run (about 3 KB each at full precision), so each
-    # run's log stays inside the Free plan's 10 KB cap.
-    "OOS_GOLD_A": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2016, 2), (2020, 4)))),
-    "OOS_GOLD_B": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2021, 3), (2022, 6)))),
-    "OOS_GOLD_C": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2024, 3),))),
-    "IS_GOLD_A": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2000, 3), (2008, 11)))),
-    "IS_GOLD_B": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2009, 6), (2013, 5)))),
+    # One month per run, each ending at its month's end: the log holds one
+    # month (up to about 8 KB at full precision when the cap pushes picks
+    # deep into the ranking) inside the Free plan's 10 KB cap, and trading up
+    # to that month is exactly the full run's.
+    "OOS_GOLD_2016_02": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2016, 2),), END_DATE=(2016, 2, 29))),
+    "OOS_GOLD_2020_04": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2020, 4),), END_DATE=(2020, 4, 30))),
+    "OOS_GOLD_2021_03": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2021, 3),), END_DATE=(2021, 3, 31))),
+    "OOS_GOLD_2022_06": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2022, 6),), END_DATE=(2022, 6, 30))),
+    "OOS_GOLD_2024_03": ("momentum/golden_log.py", dict(_OOS, **_COMBO, GOLDEN_MONTHS=((2024, 3),), END_DATE=(2024, 3, 31))),
+    "IS_GOLD_2000_03": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2000, 3),), END_DATE=(2000, 3, 31))),
+    "IS_GOLD_2008_11": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2008, 11),), END_DATE=(2008, 11, 30))),
+    "IS_GOLD_2009_06": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2009, 6),), END_DATE=(2009, 6, 30))),
+    "IS_GOLD_2013_05": ("momentum/golden_log.py", dict(_COMBO, GOLDEN_MONTHS=((2013, 5),), END_DATE=(2013, 5, 31))),
     "BE_IB_MOC": ("boost/execution.py", {"EXEC": "moc"}),
     "BE_IB_OPEN": ("boost/execution.py", {"EXEC": "next_open"}),
     "BE_M1_AM": ("boost/execution.py", dict(_M1, EXEC="next_open")),

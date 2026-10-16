@@ -1746,15 +1746,22 @@ class GoldenLogTest(unittest.TestCase):
                    for line in old[i1:i2]]
         self.assertEqual([line for line in removed if not line.lstrip().startswith("#")], [])
 
-    def test_the_golden_runs_keep_the_combinations_settings(self):
-        for name, base in (("OOS_GOLD_A", "OOS_F_COMBO"), ("OOS_GOLD_B", "OOS_F_COMBO"),
-                           ("OOS_GOLD_C", "OOS_F_COMBO"), ("IS_GOLD_A", "F_COMBO"), ("IS_GOLD_B", "F_COMBO")):
+    def test_the_golden_runs_keep_the_combinations_settings_and_end_after_their_month(self):
+        import calendar
+        names = [n for n in build_variants.VARIANTS if "_GOLD_" in n and n.split("_")[0] in ("OOS", "IS")]
+        self.assertEqual(len(names), 9)
+        for name in names:
             template, params = build_variants.VARIANTS[name]
             self.assertEqual(template, "momentum/golden_log.py")
+            base = "OOS_F_COMBO" if name.startswith("OOS") else "F_COMBO"
             c = _class_constants(template, params)
-            months, k = c.pop("GOLDEN_MONTHS"), c.pop("GOLDEN_TOP_K")
-            self.assertEqual(c, _class_constants(*build_variants.VARIANTS[base]), name)
-            self.assertTrue(1 <= len(months) <= 2 and k == 40, name)
+            months, k, end = c.pop("GOLDEN_MONTHS"), c.pop("GOLDEN_TOP_K"), c.pop("END_DATE")
+            expected = _class_constants(*build_variants.VARIANTS[base])
+            expected.pop("END_DATE")
+            self.assertEqual(c, expected, name)
+            (y, m), = months
+            self.assertEqual(end, (y, m, calendar.monthrange(y, m)[1]), name)
+            self.assertEqual(k, 40, name)
 
 
 if __name__ == "__main__":
