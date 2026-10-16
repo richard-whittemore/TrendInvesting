@@ -145,7 +145,9 @@ EQR, FERG, FLUT). These fit the known gap: QuantConnect's
 - **The D8 rule reproduces QuantConnect's selection closely** once ADRs are
   left out: 96.4% agreement on average when ranked on the same session. In
   the other 5 months out of 7 that is also the universe the backtest traded.
-- **A decision is needed on the timing (Finding 2).** ADR 0026 (point 8)
+- **Decided 2026-10-16: choice 1** (owner: "Choice A"), with the effect
+  on returns to be measured (`momentum/fresh_universe.py`).
+- **The timing question (Finding 2).** ADR 0026 (point 8)
   says no backtest behaviour is copied into live trading without a decision.
   The two choices:
   1. **Live ranks the latest session** (as D8 is written). This is the
@@ -157,9 +159,10 @@ EQR, FERG, FLUT). These fit the known gap: QuantConnect's
      reproduces what was tested, but deliberately uses older data.
   Either way, the Phase 2 parity tests run both versions and report the
   difference in picks. A QuantConnect run with the selection moved before
-  the rebalance would measure the effect on returns.
+  the rebalance measures the effect on returns (variants `FU_COMBO`,
+  `OOS_FU_COMBO`).
 - **Phase 1:** the comparison the plan requires is recorded here, on dated
-  inputs. What stays open is the timing decision.
+  inputs, and the timing is decided.
 
 ## Notes
 
