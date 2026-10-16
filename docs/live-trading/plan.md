@@ -233,9 +233,13 @@ Lightsail VM (Ubuntu, $12/month, US East)
 
 ## 4. Data
 
-- **Prices**: IBKR historical daily bars (adjusted for splits and
-  dividends) for SPY, IEF, SHY and the universe. About 520 symbols a month
-  at IBKR's pacing limits takes well under an hour, done overnight.
+- **Prices**: daily bars from Massive (#326), not IBKR's historical bars:
+  the data step records raw bars and Massive's split adjustment, and
+  derives the dividend-adjusted closes from the raw bars and recorded
+  dividends. SPY, IEF, SHY and the held stocks are fetched per instrument
+  (about three requests each at the free plan's 5 a minute, one overnight
+  run); the ranked universe's history comes from the grouped daily bars,
+  one request a session, with bulk splits and dividends.
 - **Universe** (the hard part): IBKR gives no ready "500 largest by dollar
   volume with fundamentals" list. The first proposal, IWB's holdings, failed
   the parity study (62% overlap, `docs/research/universe-parity-2026-10.md`).
@@ -474,7 +478,7 @@ Lightsail VM (Ubuntu, $12/month, US East)
 | Lightsail 2 GB plan, snapshots | ~$170 |
 | Tailscale, Healthchecks.io, ntfy (free tiers) | $0 |
 | IBKR market data for API bars, if required | about $10/month (~$120/year); daily bars come from Massive (#326), so a subscription may be needed only for the marks the price band checks; budget it until paper trading shows otherwise |
-| Commissions | Pro (every account, since Lite has no API access; D5 revised 2026-10-16): ~$28 for Boost, and for momentum's ~25 names a month perhaps $100–200 per IRA |
+| Commissions | Pro (every account, since Lite has no API access; D5 revised 2026-10-16): ~$28 for Boost, and perhaps $100–200 per IRA for momentum. Basis (estimates, not measured trade counts): IBKR Pro Fixed, $0.005 a share with a $1 minimum and a 1% cap (ADR 0013's model); at these account sizes every order is under 200 shares, so each costs the $1 minimum and the estimate is an order count. ~$28 is about 14 Boost round trips a year, two orders each. $100–200 is 100–200 orders a year per IRA, about 8–17 a month at the monthly rebalance: a buy or sell for each name entering or leaving the 25 and each resize past the band; a name held unchanged inside the band sends no order and costs nothing. The parity backtest's order counts replace these |
 
 **Decision D5** (revised 2026-10-16; section 10): **IBKR Pro for every
 account**, since Lite has no API access, and margin IRAs. The original
@@ -489,7 +493,10 @@ questions, kept for the record (answers in #331):
 - which day-trading margin regime the joint account is under (legacy
   pattern-day-trader rule or FINRA's new intraday margin standards), and,
   under the legacy rule, how a restriction works and is lifted (section 5).
-  This is settled before Phase 2, since the risk limits depend on it.
+  Settled in paper trading (#331), before the joint account goes live; it
+  does not hold up Phase 2, because the risk limits cover both regimes
+  (section 5: the Excess Liquidity alarm under the new standards, the
+  day-trade count under the legacy rule).
 
 Momentum's monthly trades
 make Pro's $1 minimum matter for the smaller IRA, and the IRAs never borrow,
@@ -523,7 +530,10 @@ only after CodeRabbit and Greptile findings are addressed.
   funded IBKR Pro account), so the 2026-10-14 choice of Lite cannot hold.
   **Both IRAs are opened as margin IRAs** (owner decision 2026-10-16): a
   margin IRA never borrows but may buy with unsettled sale proceeds, while
-  a cash IRA risks a 90-day free-riding restriction for the same buy. The
+  a cash IRA cannot: IBKR requires settled cash for a cash account's stock
+  purchases, so a rebalance's buys would wait for its sales to settle (and
+  a buy paid with unsettled proceeds, then sold before they settle, is the
+  free-riding violation that brings a 90-day restriction). The
   planner's cash rule is therefore `total-cash` for the IRAs. Still to
   confirm with IBKR (#331): the joint account's day-trading regime and its
   switch date, SPY's house margin, and that each IRA's paper account is the
