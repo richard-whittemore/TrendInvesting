@@ -41,22 +41,32 @@ def norm(ticker):
 
 def read_snapshot(lines, expected=None):
     """({ticker: Morningstar code or None}, items skipped) from snapshot.py's
-    log lines. A malformed item (a line cut mid-item) is skipped and
-    counted. With ``expected``, anything other than exactly that many names
+    log lines. Each line must end with "|"; on a line without it (cut short)
+    the last item is skipped, since it may be cut too ("MSFT:311" to
+    "MSFT:3"). A malformed item, or a code that is not a Morningstar sector,
+    is skipped as well. Every skip is counted. With ``expected`` (which must
+    be positive), anything other than exactly that many names, or any skip,
     is refused."""
+    if expected is not None and expected <= 0:
+        raise ValueError("expected count {} is not positive: the snapshot run found no names".format(expected))
     out, skipped = {}, 0
     for line in lines:
         m = SECT.search(line)
         if not m:
             continue
-        for item in filter(None, m.group(1).split(";")):
+        body = m.group(1)
+        items = list(filter(None, body.rstrip("|").split(";")))
+        if not body.endswith("|") and items:
+            items.pop()
+            skipped += 1
+        for item in items:
             ticker, sep, code = item.rpartition(":")
-            if not sep or not ticker or not (code == "-" or code.isdigit()):
+            if not sep or not ticker or not (code == "-" or (code.isdigit() and int(code) in MORNINGSTAR)):
                 skipped += 1
                 continue
             out[norm(ticker)] = None if code == "-" else int(code)
     if expected is not None and (len(out) != expected or skipped):
-        raise ValueError("snapshot holds {} names ({} malformed), expected {}: the log is incomplete"
+        raise ValueError("snapshot holds {} names ({} skipped), expected {}: the log is incomplete"
                          .format(len(out), skipped, expected))
     return out, skipped
 
@@ -94,7 +104,7 @@ def main(argv):
     if len(argv) != 4:
         raise SystemExit(__doc__)
     try:
-        with open(argv[1]) as f:
+        with open(argv[1], encoding="utf-8") as f:
             ms, _ = read_snapshot(f, expected=int(argv[3]))
         with open(argv[2], encoding="utf-8-sig") as f:
             gics = read_ishares(f.read())

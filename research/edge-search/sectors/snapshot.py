@@ -7,24 +7,25 @@
 #
 # The universe filter is momentum/defensive_v2.py's Coarse step: fundamental
 # data, price at least $5, the UNIVERSE_SIZE largest by one day's dollar
-# volume. The output is logged as "SECT TICKER:code;..." lines (about 5 KB
+# volume. The output is logged as "SECT TICKER:code;...|" lines (about 5 KB
 # for 500 names, inside the Free plan's 10 KB log cap) and the count is a
 # runtime statistic, so a cut-off log is noticed.
 from AlgorithmImports import *
 
 
 def sector_lines(pairs, width=190):
-    """"SECT TICKER:code;..." lines of at most ``width`` characters; a stock
-    with no sector is written with "-"."""
+    """"SECT TICKER:code;...|" lines of at most ``width`` characters; a stock
+    with no sector is written with "-". The closing "|" marks a line that
+    was not cut short."""
     lines, cur = [], []
     for ticker, code in pairs:
         item = "{}:{}".format(ticker, "-" if code is None else code)
-        if cur and len("SECT " + ";".join(cur + [item])) > width:
-            lines.append("SECT " + ";".join(cur))
+        if cur and len("SECT " + ";".join(cur + [item]) + "|") > width:
+            lines.append("SECT " + ";".join(cur) + "|")
             cur = []
         cur.append(item)
     if cur:
-        lines.append("SECT " + ";".join(cur))
+        lines.append("SECT " + ";".join(cur) + "|")
     return lines
 
 

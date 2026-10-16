@@ -31,8 +31,8 @@ class SnapshotTest(unittest.TestCase):
     def test_sector_lines_are_short_and_carry_every_pair(self):
         pairs = [("T%03d" % i, 311) for i in range(60)] + [("NOSEC", None)]
         lines = self.m.sector_lines(pairs, width=100)
-        self.assertTrue(all(l.startswith("SECT ") and len(l) <= 100 for l in lines))
-        body = ";".join(l[5:] for l in lines)
+        self.assertTrue(all(l.startswith("SECT ") and l.endswith("|") and len(l) <= 100 for l in lines))
+        body = ";".join(l[5:-1] for l in lines)
         self.assertEqual(body.count(":"), 61)
         self.assertIn("NOSEC:-", body)
 
@@ -68,7 +68,7 @@ class SnapshotTest(unittest.TestCase):
         fine = [self._fine("MSFT", pascal=311), self._fine("JPM", snake=103),
                 self._fine("NEW"), self._fine("ZERO", pascal=0)]
         self.assertEqual(algo.Fine(fine), [])
-        body = ";".join(l[5:] for l in algo.logs)
+        body = ";".join(l[5:-1] for l in algo.logs)
         self.assertEqual(sorted(body.split(";")), ["JPM:103", "MSFT:311", "NEW:-", "ZERO:-"])
         self.assertEqual((algo.stats["Count"], algo.stats["NoSector"], algo.stats["Date"]),
                          ("4", "2", "2026-10-01"))
@@ -86,21 +86,27 @@ class CompareTest(unittest.TestCase):
         self.m = _load("compare")
 
     def test_snapshot_lines_are_read_from_a_log(self):
-        log = ["2026-10-01 00:00:00 SECT AAPL:311;BRK.B:103", "noise", "SECT XYZ:-"]
+        log = ["2026-10-01 00:00:00 SECT AAPL:311;BRK.B:103|", "noise", "SECT XYZ:-|"]
         self.assertEqual(self.m.read_snapshot(log), ({"AAPL": 311, "BRKB": 103, "XYZ": None}, 0))
         self.assertEqual(self.m.read_snapshot(log, expected=3)[0]["AAPL"], 311)
 
     def test_an_empty_or_cut_off_snapshot_is_refused_against_its_count(self):
         with self.assertRaises(ValueError):
             self.m.read_snapshot([], expected=500)
-        full = ["SECT AAPL:311;MSFT:311", "SECT JPM:103"]
+        with self.assertRaises(ValueError):
+            self.m.read_snapshot([], expected=0)                       # a run that found nothing
+        full = ["SECT AAPL:311;MSFT:311|", "SECT JPM:103|"]
         with self.assertRaises(ValueError):
             self.m.read_snapshot(full[:1], expected=3)                 # a whole line lost
-        cut = ["SECT AAPL:311;MSFT:3", "SECT JPM:103;GO"]               # cut mid-item
+        # Cut inside a code: "MSFT:311" became "MSFT:3", a valid-looking item.
+        cut = ["SECT AAPL:311;MSFT:3", "SECT JPM:103|"]
         names, skipped = self.m.read_snapshot(cut)
-        self.assertEqual((sorted(names), skipped), (["AAPL", "JPM", "MSFT"], 1))
+        self.assertEqual((sorted(names), skipped), (["AAPL", "JPM"], 1))
         with self.assertRaises(ValueError):
-            self.m.read_snapshot(cut, expected=4)
+            self.m.read_snapshot(cut, expected=3)
+
+    def test_a_code_that_is_not_a_morningstar_sector_is_skipped(self):
+        self.assertEqual(self.m.read_snapshot(["SECT AAPL:31;MSFT:311|"]), ({"MSFT": 311}, 1))
 
     def test_the_ishares_file_gives_each_equitys_gics_sector(self):
         text = "\n".join([
