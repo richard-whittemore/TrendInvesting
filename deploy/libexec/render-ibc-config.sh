@@ -3,7 +3,7 @@
 # owner's login file, into the service's tmpfs runtime directory (mode 0600).
 # The password therefore never reaches the disk, the repository or the logs.
 # This script never prints a credential value and must never run under
-# `set -x`. Runs as ti-gateway from ti-gateway.service's ExecStartPre.
+# `set -x`. Runs as ti-gateway from start-gateway.sh, ti-gateway.service's ExecStart.
 #
 # Inputs (all overridable for the container rehearsal):
 #   CREDENTIALS_DIRECTORY   systemd's private credential directory

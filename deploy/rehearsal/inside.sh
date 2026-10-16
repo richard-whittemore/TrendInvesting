@@ -97,19 +97,31 @@ printf 'TWS_USERID=a\nTWS_PASSWORD=b\nTWS_TRADING_MODE=prod\n' >"$cred/ibkr-logi
 CREDENTIALS_DIRECTORY=$cred RUNTIME_DIRECTORY=$run /usr/local/libexec/trend-investing/render-ibc-config.sh >/dev/null 2>&1 && fail "bad mode accepted"
 pass "renderer refuses an empty login and an unknown trading mode"
 
+# The gateway's start renders first, so an empty login ends the unit's main
+# process with 78, which the unit does not restart on (no 30-second loop
+# before the owner fills the login in).
+printf 'TWS_USERID=\nTWS_PASSWORD=\n' >"$cred/ibkr-login"
+status=0
+CREDENTIALS_DIRECTORY=$cred RUNTIME_DIRECTORY=$run GATEWAY_MAJOR=1050 \
+  /usr/local/libexec/trend-investing/start-gateway.sh >/dev/null 2>&1 || status=$?
+test "$status" = 78 || fail "start-gateway exited $status on an empty login, want 78"
+grep -qx 'RestartPreventExitStatus=64 65 78' /etc/systemd/system/ti-gateway.service || fail "ti-gateway restarts on a configuration exit"
+pass "an empty login stops the gateway with 78, which the unit does not restart on"
+
 # Unit files. The placeholder binaries do not exist; stand-ins let
 # systemd-analyze check the rest of each unit.
 for b in ti-data ti-engine ti-reporter ti-dashboard; do
   install -m 0755 /dev/null "/opt/trend-investing/bin/$b"
 done
 cd /etc/systemd/system
+verify_log=$(mktemp)
 systemd-analyze verify ti-gateway.service ti-data.service ti-data.timer \
   ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service \
-  ti-reporter.service ti-reporter.timer ti-dashboard.service 2>&1 | tee /tmp/verify.log
+  ti-reporter.service ti-reporter.timer ti-dashboard.service 2>&1 | tee "$verify_log"
 # systemd-analyze reports missing unit files for nothing here; any output line
 # naming one of our units is a finding. Warnings about the stand-in binaries
 # being empty are not expected (they are executable).
-if grep -E 'ti-(gateway|data|engine|reporter|dashboard)' /tmp/verify.log | grep -viE 'ibkr-login|secrets.env|gateway.env|credential'; then
+if grep -E 'ti-(gateway|data|engine|reporter|dashboard)' "$verify_log" | grep -viE 'ibkr-login|secrets.env|gateway.env|credential'; then
   fail "systemd-analyze verify reported problems (above)"
 fi
 pass "systemd-analyze verify clean on all units"

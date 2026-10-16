@@ -27,15 +27,17 @@ Schedule (New York time, `TZ` set in each unit): Gateway restarts nightly at 11:
 2. **[OWNER] Create the Tailscale account** and install Tailscale on your phone and laptop.
 3. SSH in as `ubuntu` over the public address and fetch the repository (read-only checkout is enough): `git clone https://github.com/richard-whittemore/TrendInvesting.git`.
 4. Run the first three stages. Each is safe to repeat:
+
    ```sh
    cd TrendInvesting
    sudo deploy/provision.sh base      # packages, users, auto-updates, Tailscale binaries
    sudo deploy/provision.sh gateway   # IBC and IB Gateway, checksum-verified
    sudo deploy/provision.sh services  # units, directories, empty root-only secret stubs
    ```
+
    Do not run these with `bash -x`.
 5. **[OWNER] Join the tailnet:** `sudo tailscale up --ssh`, approve in the browser, then confirm you can reach the server by its tailnet name from your laptop.
-6. Close the public door: `sudo deploy/provision.sh firewall`. It refuses (and says so) until Tailscale is signed in, so it cannot lock you out. Then **[OWNER]** remove the port 22 rule in Lightsail's Networking tab.
+6. Close the public door: `sudo deploy/provision.sh firewall`. It refuses (and says so) until Tailscale is signed in, so it cannot lock you out. Each run resets UFW, removing every existing rule (any added by hand included), then allows inbound on Tailscale only; re-add a manual rule after each run. Then **[OWNER]** remove the port 22 rule in Lightsail's Networking tab.
 7. **[OWNER] Enter the IBKR login.** On the server: `sudo -e /etc/trend-investing/ibkr-login.env`, fill in `TWS_USERID` and `TWS_PASSWORD` (a paper-trading login first). Leave `TWS_TRADING_MODE=paper` and `TWS_READONLY_API=yes`. Never paste these into an issue, a PR, a chat with an agent or a shell command line. Enter account numbers and alert URLs in `/etc/trend-investing/secrets.env` the same way.
 8. **[OWNER] Start the Gateway and approve 2FA:** `sudo systemctl start ti-gateway`. Approve the IBKR Mobile prompt on your phone within 3 minutes. Check `journalctl -u ti-gateway -n 50` shows a login and no credential.
 9. Publish the dashboard to the tailnet only, once its binary is installed: `sudo tailscale serve --bg 8080` (**[OWNER]**, tailnet configuration).
@@ -50,7 +52,7 @@ Rehearse before any engine trades. Record the result in #329.
 2. Confirm the Gateway is up: `systemctl is-active ti-gateway` and `journalctl -u ti-gateway --since "5 min ago"`.
 3. Engines reconnect on their own (`Restart=on-failure`, 30 s). Confirm each is `active` and that its journal shows a reconcile after reconnecting, not a resume from stale state (ADR 0019 and 0025 point 5: a restart must not cross an open order).
 4. `sudo reboot`, then repeat 2 and 3. This one needs your phone **[OWNER]**. Schedule reboots for Sunday, after the weekly cold restart, so one prompt serves both.
-5. Kill one engine (`sudo systemctl kill ti-engine@boost`) and confirm the others are untouched: a fault touches one account only (ADR 0026 section 8).
+5. Kill one engine with a failure signal (`sudo systemctl kill --signal=SIGKILL ti-engine@boost`; the default SIGTERM counts as a clean stop under `Restart=on-failure` and would leave it down). Confirm the other two stayed `active` throughout and that boost is `active` again within about 30 s: a fault touches one account only (ADR 0026 section 8).
 
 ## Reconnect drill: the Gateway will not log in
 
@@ -76,7 +78,7 @@ Run `deploy/rehearse.sh` (Docker, a clean Ubuntu 24.04 container; about 350 MB o
 - the real pinned IBC, IB Gateway and Tailscale downloads match their checksums; IBC and Tailscale are installed;
 - a corrupt cached download is not trusted;
 - the service users are non-root with no login shell; secret files are root:root 0600;
-- the credential renderer writes a fake password (with special characters) verbatim to a 0600 file, prints no credential, and leaves no copy under `/etc` or `/var/log`; it refuses an empty login and an unknown trading mode;
+- the credential renderer writes a fake password (with special characters) verbatim to a 0600 file, prints no credential, and leaves no copy under `/etc` or `/var/log`; it refuses an empty login and an unknown trading mode; the gateway's start exits 78 on an empty login, which the unit does not restart on;
 - `systemd-analyze verify` is clean on every unit;
 - the three engine client IDs are distinct and differ from the data step's.
 

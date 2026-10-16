@@ -195,6 +195,9 @@ CONF
   fi
 }
 
+# Replaces the whole UFW rule set: `ufw --force reset` removes every existing
+# rule, including any added by hand, before the Tailscale-only policy is
+# applied. Re-add a manual rule after each run, or add it here.
 step_firewall() {
   if test "$rehearsal" = 1; then log "rehearsal: skipping firewall"; return 0; fi
   # Refuse to close the public SSH door before the Tailscale door works, or
