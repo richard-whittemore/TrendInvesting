@@ -1696,6 +1696,27 @@ class BoostGoldenLogTest(unittest.TestCase):
         line = self.module.boost_line(_dt.datetime(1993, 9, 1, 16), 45.0, None, None, 44.0, False, 0.98)
         self.assertIn("rsi2=- sma200=-", line)
 
+    def test_ondata_logs_the_first_decision_and_the_chosen_months_days_only(self):
+        algo = _algorithm(self.module, "BoostResearch")
+        algo.GOLDEN_MONTHS = ((1992, 2),)
+        algo.logs, algo.stats = [], {}
+        algo.Log = algo.logs.append
+        algo.SetRuntimeStatistic = lambda k, v: algo.stats.__setitem__(k, v)
+        algo.IsWarmingUp = True
+        _day(algo, when=_dt.datetime(1992, 1, 2))          # warm-up: nothing
+        algo.IsWarmingUp = False
+        _day(algo, when=_dt.datetime(1992, 1, 15))         # the first decision, outside the months
+        _day(algo, when=_dt.datetime(1992, 1, 16))         # skipped
+        algo.rsi2 = _Indicator(5.0)
+        _day(algo, when=_dt.datetime(1992, 2, 3))          # chosen month: a boost begins
+        self.assertEqual([l.split()[1] for l in algo.logs], ["1992-01-15", "1992-02-03"])
+        self.assertIn("sig=0 want=0.980000|", algo.logs[0])
+        self.assertIn("rsi2=5.000000", algo.logs[1])
+        self.assertIn("sig=1 want=1.470000|", algo.logs[1])
+        self.assertEqual(algo.orders, [{"SPY": 0.98}, {"SPY": 1.47}])   # trading unchanged
+        algo.OnEndOfAlgorithm()
+        self.assertEqual(algo.stats["Golden"], "months=1 lines=2")
+
     def test_only_chosen_months_and_the_first_decision_are_logged(self):
         algo = self.module.BoostResearch()
         algo.GOLDEN_MONTHS = ((2019, 5),)
