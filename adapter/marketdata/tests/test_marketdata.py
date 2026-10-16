@@ -6,6 +6,7 @@ import logging
 import os
 import tempfile
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 import zoneinfo
@@ -143,6 +144,32 @@ class ClientTest(unittest.TestCase):
             client.tickers(DAY, "CS")
         self.assertEqual(len(opener.requests), 1)
 
+    def test_a_repeated_cursor_fails_instead_of_looping(self):
+        loop = {"status": "OK", "results": [ticker("AAA")],
+                "next_url": "https://api.massive.com/v3/reference/tickers?cursor=same"}
+        client, opener, _ = make_client(loop, loop, loop)
+        with self.assertRaises(massive.MarketDataError):
+            client.tickers(DAY, "CS")
+        self.assertEqual(len(opener.requests), 2)
+
+    def redirect(self, newurl):
+        req = urllib.request.Request("https://api.massive.com/v3/x", headers={"Authorization": "Bearer " + KEY})
+        return massive.MassiveOnlyRedirect().redirect_request(req, io.BytesIO(b""), 302, "Found", {}, newurl)
+
+    def test_a_redirect_off_massive_is_refused_so_the_key_is_not_forwarded(self):
+        for url in ("https://evil.example/x", "http://api.massive.com/x", "https://api.massive.com.evil.example/x"):
+            with self.assertRaises(urllib.error.HTTPError, msg=url):
+                self.redirect(url)
+
+    def test_a_redirect_within_massive_is_followed(self):
+        self.assertEqual(self.redirect("https://api.massive.com/v3/y").full_url, "https://api.massive.com/v3/y")
+
+    def test_the_default_opener_uses_the_massive_only_redirect(self):
+        handlers = massive.OPENER.handlers
+        self.assertTrue(any(isinstance(h, massive.MassiveOnlyRedirect) for h in handlers))
+        self.assertFalse(any(type(h) is urllib.request.HTTPRedirectHandler for h in handlers))
+        self.assertEqual(massive.Client(KEY)._opener, massive.OPENER.open)
+
     def test_the_key_is_never_logged(self):
         client, _, _ = make_client(429, grouped(bar("A")))
         stream = io.StringIO()
@@ -178,6 +205,7 @@ class KeyTest(unittest.TestCase):
 
 
 NOW = dt.datetime(2026, 3, 27, 21, 5, tzinfo=dt.timezone.utc)
+LATER = dt.datetime(2026, 4, 10, 12, 0, tzinfo=dt.timezone.utc)
 
 
 class UniverseTest(unittest.TestCase):
@@ -209,24 +237,84 @@ class UniverseTest(unittest.TestCase):
         with self.assertRaises(steps.MissingData):
             steps.fetch_universe(client, DAY, now=lambda: NOW)
 
-    def test_last_session_skips_a_holiday(self):
+    def test_last_session_skips_an_exchange_holiday_without_a_request(self):
         good_friday = dt.date(2026, 4, 3)
-        client, opener, _ = make_client({"status": "OK", "resultsCount": 0}, grouped(bar("A")))
-        day, body = steps.last_session(client, good_friday)
+        client, opener, _ = make_client(grouped(bar("A")))
+        day, body = steps.last_session(client, good_friday, now=lambda: LATER)
         self.assertEqual(day, dt.date(2026, 4, 2))
         self.assertEqual(body["results"][0]["T"], "A")
-        self.assertIn("2026-04-03", opener.requests[0].full_url)
+        self.assertIn("2026-04-02", opener.requests[0].full_url)
+        self.assertEqual(len(opener.requests), 1)
 
     def test_last_session_over_a_weekend_starts_at_friday(self):
         client, opener, _ = make_client(grouped(bar("A")))
-        self.assertEqual(steps.last_session(client, dt.date(2026, 3, 29))[0], DAY)   # a Sunday
+        self.assertEqual(steps.last_session(client, dt.date(2026, 3, 29), now=lambda: NOW)[0], DAY)
         self.assertIn("2026-03-27", opener.requests[0].full_url)
 
-    def test_last_session_gives_up_after_a_week_without_bars(self):
-        empty = {"status": "OK", "resultsCount": 0}
-        client, _, _ = make_client(*[empty] * 6)
+    def test_an_empty_response_on_a_trading_day_is_missing_data_not_a_skip(self):
+        weekday = dt.date(2026, 4, 2)
+        client, opener, _ = make_client({"status": "OK", "resultsCount": 0, "results": []}, grouped(bar("A")))
         with self.assertRaises(steps.MissingData):
-            steps.last_session(client, DAY, max_back=5)
+            steps.last_session(client, weekday, now=lambda: LATER)
+        self.assertEqual(len(opener.requests), 1)
+
+
+def ny(day, hour, minute=0):
+    return lambda: dt.datetime(day.year, day.month, day.day, hour, minute, tzinfo=NEW_YORK)
+
+
+class SettleTest(unittest.TestCase):
+    def test_a_run_during_the_session_requests_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            client, opener, _ = make_client(grouped(bar("A")), {"status": "OK", "results": [ticker("A")]})
+            with self.assertRaises(steps.NotSettled):
+                steps.find_session(client, DAY, now=ny(DAY, 10))
+            with self.assertRaises(steps.NotSettled):
+                steps.run_universe(client, DAY, d, now=ny(DAY, 10))
+            with self.assertRaises(steps.NotSettled):
+                steps.run_bars(client, ["SPY"], DAY, d, now=ny(DAY, 10))
+            self.assertEqual(opener.requests, [])
+            self.assertEqual(os.listdir(d), [])
+
+    def test_not_settled_is_missing_data_so_the_cli_fails_closed(self):
+        self.assertTrue(issubclass(steps.NotSettled, steps.MissingData))
+
+    def test_the_settle_delay_runs_from_the_close(self):
+        steps.require_settled(DAY, ny(DAY, 16, 30), settle=dt.timedelta(minutes=30))
+        with self.assertRaises(steps.NotSettled):
+            steps.require_settled(DAY, ny(DAY, 16, 29), settle=dt.timedelta(minutes=30))
+        with self.assertRaises(steps.NotSettled):
+            steps.require_settled(DAY, ny(DAY, 16, 59))   # default delay is an hour
+        steps.require_settled(DAY, ny(DAY, 17, 0))
+
+    def test_an_early_close_settles_from_one_oclock(self):
+        early = dt.date(2026, 11, 27)
+        steps.require_settled(early, ny(early, 14, 0))
+        with self.assertRaises(steps.NotSettled):
+            steps.require_settled(early, ny(early, 13, 59))
+
+    def test_a_past_session_is_settled(self):
+        steps.require_settled(DAY, ny(DAY + dt.timedelta(days=3), 9))
+
+    def test_after_close_plus_delay_the_universe_is_recorded(self):
+        with tempfile.TemporaryDirectory() as d:
+            client, _, _ = make_client(grouped(bar("A")), {"status": "OK", "results": [ticker("A")]})
+            path = steps.run_universe(client, DAY, d, now=ny(DAY, 17, 5))
+            self.assertTrue(os.path.exists(path))
+
+    def test_the_default_asof_is_the_new_york_date_not_the_utc_date(self):
+        # 01:30 UTC on Saturday is 21:30 on Friday in New York.
+        utc = dt.datetime(2026, 3, 28, 1, 30, tzinfo=dt.timezone.utc)
+        self.assertEqual(steps.new_york_date(lambda: utc), DAY)
+        # 23:30 New York on Friday is already Saturday in UTC; still Friday.
+        self.assertEqual(steps.new_york_date(ny(DAY, 23, 30)), DAY)
+
+    def test_the_cli_defaults_asof_to_the_new_york_date(self):
+        from marketdata import __main__ as cli
+        args = cli.parse(["universe", "--out", "x"], now=lambda: dt.datetime(2026, 3, 28, 1, 30, tzinfo=dt.timezone.utc))
+        self.assertEqual(args.asof, DAY)
+        self.assertEqual(cli.parse(["universe", "--out", "x", "--asof", "2026-03-20"]).asof, dt.date(2026, 3, 20))
+        self.assertEqual(cli.parse(["universe", "--out", "x", "--settle-minutes", "90"]).settle_minutes, 90)
 
 
 class BarsTest(unittest.TestCase):
@@ -289,6 +377,32 @@ class RecordTest(unittest.TestCase):
                 json.dump(doc, f)
             with self.assertRaises(record.Corrupt):
                 record.read(path)
+
+    def test_the_directory_and_parents_of_created_directories_are_synced_after_the_link(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, "a", "b")
+            synced = []
+            with mock.patch.object(record, "_sync_dir", side_effect=lambda p: synced.append(
+                    (p, os.path.exists(os.path.join(target, "universe_2026-03-27.json"))))):
+                record.write(target, self.rec())
+            self.assertEqual(synced, [(target, True), (os.path.join(d, "a"), True), (d, True)])
+
+    def test_an_existing_directory_alone_is_synced(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(record, "_sync_dir") as sync:
+                record.write(d, self.rec())
+            self.assertEqual([c.args[0] for c in sync.call_args_list], [d])
+
+    def test_a_failed_sync_after_the_link_says_the_file_is_recorded(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(record, "_sync_dir", side_effect=OSError(5, "EIO")):
+                with self.assertRaises(record.NotDurable) as cm:
+                    record.write(d, self.rec())
+            path = os.path.join(d, "universe_2026-03-27.json")
+            self.assertEqual(cm.exception.path, path)
+            self.assertIn("is recorded", str(cm.exception))
+            self.assertEqual(record.read(path), self.rec())
+            self.assertEqual(os.listdir(d), ["universe_2026-03-27.json"])
 
     def test_no_partial_file_is_left_when_serialising_fails(self):
         bad = self.rec()
