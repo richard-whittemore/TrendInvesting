@@ -535,9 +535,12 @@ only after CodeRabbit and Greptile findings are addressed.
   of names shared with it in those months). The owner asked for the effect
   on returns to be measured, and it was (2026-10-16, paired backtests,
   variants `FU_COMBO`, `OOS_FU_COMBO`): +1.69 pp/yr in-sample and
-  -1.41 pp/yr held out, drawdown slightly shallower in both, 6-7% more
-  orders. That is within the noise, and **choice A stands**
-  (`docs/research/universe-massive-2026-10.md`, "Effect of the timing on
-  returns").
+  -1.41 pp/yr held out (to 2026-06-30), drawdown 2.6 and 1.0 points
+  shallower, 7% and 6% more orders. **Choice A stands** as the owner's
+  decision (`docs/research/universe-massive-2026-10.md`, "Effect of the
+  timing on returns"). The paired `F_COMBO` / `OOS_F_COMBO` reruns show
+  worst drawdowns of 46.05% and 40.47% against the recorded 34.0% and 31.0%;
+  the cause is unresolved and under investigation in #403. The figures this
+  plan cites are unchanged until then, and parity (#324) waits on #403.
 - Account opening, funding, rollovers and the Lightsail sign-up are the
   owner's to do; nothing here signs up for or pays for anything.
