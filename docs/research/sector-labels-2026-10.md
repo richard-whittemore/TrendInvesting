@@ -105,5 +105,30 @@ and the cap admitted different names.
   the SEC's industry code (SIC) for each, mapped to sectors, checked against
   Morningstar the same way before use.
 
+## Part 3: SEC industry codes for the 25 names outside IWV
+
+Each name's SIC code was read from SEC EDGAR (`company_tickers.json` for
+the CIK, then the company's EDGAR record) and mapped to the nearest
+Morningstar sector by hand. The mapping is a judgment, as in part 1.
+
+| | Names |
+| --- | --- |
+| Outside IWV | 25 |
+| Not found under that ticker in the SEC's list (APGE, ATAI, CRNX, EA, WBS) | 5 |
+| SIC sector matches Morningstar | 14 of 20 (70%) |
+
+The six that differ (Morningstar / SIC): Cameco (Energy / metal ores),
+MercadoLibre (Consumer Cyclical / business services), Nebius (Communication
+Services / computer programming), TE Connectivity (Technology / electronic
+parts wholesale), Venture Global (Energy / gas distribution) and SDOT
+(Consumer Defensive / restaurants).
+
+**SIC is too coarse to stand in for Morningstar** on these names: 70%
+against 96% for GICS in part 1, and five names have no record under their
+ticker. A free source that labels every US listing, foreign issuers
+included, would serve better. The candidate is Nasdaq's stock screener,
+which gives a sector for each listed stock; it has not been checked yet and
+would be compared with Morningstar the same way before use.
+
 Research only; this is not a recommendation to trade any security.
 
