@@ -120,6 +120,15 @@ var notYetCrossed = map[string]string{
 	// next touched, so it stays here rather than in wireCovered's "ignored
 	// decision" group.
 	"strategy.watchlist.published": "no LEAN adapter fixture proves receipt or handling yet; not part of orders.py's SCHEMA_VERSIONS",
+	// ADR 0026's target-weight types belong to the live path: the IBKR
+	// adapter (ADR 0025), not LEAN, will send the mark and receive the
+	// decisions; LEAN never runs the target-weight strategies.
+	"strategy.target-weight.configuration": "composed by the target-weight engine's own composition root, not the adapter",
+	"market.mark.recorded":                 "sent by the IBKR adapter (ADR 0025), never by LEAN",
+	"strategy.targets.decided":             "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	"strategy.order.planned":               "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	"risk.order.released":                  "acted on by the IBKR adapter (ADR 0025), never by LEAN",
+	"risk.order.refused":                   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 }
 
 func main() {

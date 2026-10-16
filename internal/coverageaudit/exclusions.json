@@ -873,6 +873,50 @@
       "category": "unreachable-by-invariant",
       "occurrence": 2,
       "reason": "Propagates account.renameInstrument's own \"already holds shares\" refusal (internal/fills/account.go, its own entry in this list), which is unreachable for the identical reason: this package's account holds a position only under an instrument id the same reducer run opened a Campaign in, and the reducer's own applySymbolChange refuses a rename into an instrument id it already tracks before ever emitting the decision this function observes."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "New",
+      "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
+      "occurrence": 2,
+      "category": "unreachable-by-construction",
+      "reason": "boost.NewIndicators refuses only an RSI period, trend length or exit length below 1; TargetWeightConfigurationPayload.Validate, called a few lines above, refuses each of those (TestTargetWeightConfigurationValidate)."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "New",
+      "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
+      "occurrence": 3,
+      "category": "unreachable-by-construction",
+      "reason": "risklimit.NewGate refuses only an empty account, invalid limits or an unknown mode; TargetWeightConfigurationPayload.Validate, called above, refuses all three with the same MarginLimits rules."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*emissions).fail",
+      "statement": "b.err = fmt.Errorf(\"targetweight: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "Its callers pass errors only from the planner, the gate and stamp, each given values this handler has already validated: a decision it just built, a validated account snapshot, a validated bar's raw close, the configured band and limits, and payloads the planner and gate build from them (their own packages' tests check every planned, released and refused payload they return validates)."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*emissions).result",
+      "statement": "return nil, b.err",
+      "category": "unreachable-by-construction",
+      "reason": "b.err is set only by fail, which is unreachable for the reason given there."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).stamp",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"targetweight: %s %s: %w\", eventType, id, err)",
+      "category": "unreachable-by-construction",
+      "reason": "Every payload stamped is built by this handler, internal/orderplan or internal/risklimit from validated inputs; the orderplan and risklimit tests validate every payload those packages return, and the targetweight run tests decode and use every emission."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).stamp",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"targetweight: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; the payload passed Validate immediately before json.Marshal."
     }
   ]
 }

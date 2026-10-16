@@ -1,0 +1,418 @@
+// Package targetweight is the target-weight strategy module (ADR 0026,
+// point 1): a replay.Handler that decides each account's target weights from
+// completed bars, the account snapshot and its configuration, and hands each
+// decision to the strategy-independent order planner (internal/orderplan) and
+// the hard-limit gate (internal/risklimit). It shares no state with the
+// Turtle reducer in internal/strategy (AGENTS.md rule 4). Only Boost, for the
+// joint margin account, is decided here.
+package targetweight
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
+	"github.com/richard-whittemore/TrendInvesting/internal/risklimit"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/boost"
+)
+
+// RulesVersion is the target-weight module's rules version (ADR 0016),
+// bumped only when a rule changes.
+const RulesVersion = "1.0.0"
+
+// source names this handler on every envelope it emits.
+const source = "target-weight"
+
+// idTime is the fixed timestamp layout of the decision IDs this handler builds.
+const idTime = "2006-01-02T15:04:05Z07:00"
+
+// Options are run-level facts, recorded beside the configuration hash rather
+// than inside it (ADR 0016).
+type Options struct {
+	// DecideFrom is the first session decided. Sessions before it only feed
+	// the indicators, as QuantConnect's warm-up does (template.py:55-67).
+	DecideFrom time.Time
+}
+
+// Handler decides Boost for one account.
+//
+// # Inputs, in stream order
+//
+//   - strategy.target-weight.configuration, first and once, matching the
+//     configuration the handler was built with;
+//   - optionally, straight after it, one recorded strategy.targets.decided:
+//     the last decision of an earlier run. A restart recovers the latched
+//     boost and the target in force from it, never by recomputing (ADR 0026,
+//     point 5); sessions up to its session then only feed the indicators,
+//     which are rebuilt from the journal's own bars from the warm-up start;
+//   - per session: the Boost instrument's market.bar.completed, account.snapshot
+//     version 3, market.mark.recorded, then market.session.closed, which decides.
+//
+// # Fail-closed rules
+//
+// A session that closes without the instrument's bar withholds
+// (missing-bars), and so does every later session: the indicators would span
+// the gap (plan.md section 2, "Boost"). A session with no snapshot as of its
+// close withholds (stale-account-snapshot), but the latch still advances, as
+// the research's sig does on every bar (template.py:89-94); the target in
+// force changes only on a decided outcome, so a change withheld one session
+// is ordered the next.
+type Handler struct {
+	strategyVersion string
+	hash            string
+	cfg             event.TargetWeightConfigurationPayload
+	params          boost.Parameters
+	warmUp          time.Time
+	decideFrom      time.Time
+
+	configured bool
+	started    bool // a bar or session has been applied
+	recovered  bool
+	quietUntil time.Time // sessions at or before it only feed the indicators
+
+	indicators *boost.Indicators
+	latched    bool
+	inForce    float64
+	inForceSet bool
+	gapAt      time.Time
+	lastPeriod time.Time // last session closed
+	bar        *event.CompletedBarPayload
+	snapshot   *event.AccountPositionsSnapshotPayload
+	mark       *event.MarkRecordedPayload
+	gate       *risklimit.Gate
+}
+
+// New returns a handler for cfg, deriving its configuration hash itself
+// (ADR 0016) so no caller can pair a configuration with another's hash.
+func New(strategyVersion string, cfg event.TargetWeightConfigurationPayload, opts Options) (*Handler, error) {
+	if strategyVersion == "" {
+		return nil, errors.New("targetweight: strategy version is required")
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("targetweight: %w", err)
+	}
+	warmUp, _ := cfg.Boost.WarmUpDate() // validated above
+	if opts.DecideFrom.IsZero() {
+		return nil, errors.New("targetweight: the first session to decide is required")
+	}
+	params := boost.Parameters{
+		InvestedFraction: cfg.Boost.InvestedFraction, BoostSize: cfg.Boost.BoostSize, RSIEntry: cfg.Boost.RSIEntry,
+		RSIPeriod: cfg.Boost.RSIPeriod, TrendDays: cfg.Boost.TrendDays, ExitSMA: cfg.Boost.ExitSMA,
+	}
+	indicators, err := boost.NewIndicators(params)
+	if err != nil {
+		return nil, fmt.Errorf("targetweight: %w", err)
+	}
+	gate, err := risklimit.NewGate(cfg.AccountID, cfg.Limits, cfg.Mode)
+	if err != nil {
+		return nil, fmt.Errorf("targetweight: %w", err)
+	}
+	return &Handler{
+		strategyVersion: strategyVersion,
+		hash:            event.TargetWeightConfigurationHash(cfg),
+		cfg:             cfg,
+		params:          params,
+		warmUp:          warmUp,
+		decideFrom:      opts.DecideFrom,
+		indicators:      indicators,
+		gate:            gate,
+	}, nil
+}
+
+// ConfigurationHash returns the hash every emission carries.
+func (h *Handler) ConfigurationHash() string { return h.hash }
+
+// Apply implements replay.Handler.
+func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope, error) {
+	if !h.configured && in.Type != event.TargetWeightConfigurationEventType {
+		return nil, fmt.Errorf("targetweight: %s %s arrived before the configuration", in.Type, in.ID)
+	}
+	switch in.Type {
+	case event.TargetWeightConfigurationEventType:
+		return nil, h.applyConfiguration(in)
+	case event.TargetsDecidedEventType:
+		return nil, h.applyRecovery(in)
+	case event.CompletedBarEventType:
+		return nil, h.applyBar(in)
+	case event.AccountSnapshotEventType:
+		return nil, h.applySnapshot(in)
+	case event.MarkRecordedEventType:
+		return nil, h.applyMark(in)
+	case event.SessionClosedEventType:
+		return h.applySession(in)
+	case event.RunCompletedEventType:
+		return nil, nil
+	}
+	return nil, fmt.Errorf("targetweight: input type %q is not one this handler reads", in.Type)
+}
+
+// decodeInput checks an input's schema version and decodes and validates its payload.
+func decodeInput[T interface{ Validate() error }](in event.Envelope, version uint32) (T, error) {
+	var p T
+	if in.SchemaVersion != version {
+		return p, fmt.Errorf("targetweight: %s schema version %d is not the version %d this build reads (ADR 0015)", in.Type, in.SchemaVersion, version)
+	}
+	if err := json.Unmarshal(in.Payload, &p); err != nil {
+		return p, fmt.Errorf("targetweight: decode %s %s: %w", in.Type, in.ID, err)
+	}
+	if err := p.Validate(); err != nil {
+		return p, fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
+	return p, nil
+}
+
+func (h *Handler) applyConfiguration(in event.Envelope) error {
+	if h.configured {
+		return errors.New("targetweight: a run is configured once")
+	}
+	p, err := decodeInput[event.TargetWeightConfigurationPayload](in, event.TargetWeightConfigurationSchemaVersion)
+	if err != nil {
+		return err
+	}
+	if got := event.TargetWeightConfigurationHash(p); got != h.hash || in.ConfigurationHash != h.hash {
+		return fmt.Errorf("targetweight: configuration %s (envelope %s) is not the configuration %s this run was built with", got, in.ConfigurationHash, h.hash)
+	}
+	h.configured = true
+	return nil
+}
+
+func (h *Handler) applyRecovery(in event.Envelope) error {
+	if h.recovered || h.started {
+		return errors.New("targetweight: a recovered decision comes once, straight after the configuration")
+	}
+	p, err := decodeInput[event.TargetsDecidedPayload](in, event.TargetsDecidedSchemaVersion)
+	if err != nil {
+		return err
+	}
+	if in.ConfigurationHash != h.hash || p.AccountID != h.cfg.AccountID || p.Boost.InstrumentID != h.cfg.Boost.InstrumentID {
+		return fmt.Errorf("targetweight: recovered decision %s belongs to another configuration or account", in.ID)
+	}
+	h.recovered = true
+	h.latched = p.Boost.LatchedAfter
+	h.inForce, h.inForceSet = p.Boost.TargetInForce, p.Boost.TargetInForceSet
+	if p.Outcome == event.TargetsOutcomeDecided {
+		h.inForce, h.inForceSet = p.Targets[0].Weight, true
+	}
+	h.quietUntil = p.SessionPeriodEnd
+	return nil
+}
+
+func (h *Handler) applyBar(in event.Envelope) error {
+	p, err := decodeInput[event.CompletedBarPayload](in, event.CompletedBarSchemaVersion)
+	if err != nil {
+		return err
+	}
+	switch {
+	case p.InstrumentID != h.cfg.Boost.InstrumentID:
+		return fmt.Errorf("targetweight: bar for %s; this account decides %s only", p.InstrumentID, h.cfg.Boost.InstrumentID)
+	case h.bar != nil:
+		return fmt.Errorf("targetweight: a second bar for %s before its session closed", p.InstrumentID)
+	case !p.PeriodEnd.After(h.lastPeriod):
+		return fmt.Errorf("targetweight: bar %s does not follow the last session %s", p.PeriodEnd, h.lastPeriod)
+	case p.PeriodEnd.Before(h.warmUp):
+		return fmt.Errorf("targetweight: bar %s precedes the warm-up start %s", p.PeriodEnd, h.cfg.Boost.WarmUpStart)
+	}
+	h.started = true
+	h.bar = &p
+	return nil
+}
+
+func (h *Handler) applySnapshot(in event.Envelope) error {
+	p, err := decodeInput[event.AccountPositionsSnapshotPayload](in, event.AccountSnapshotPositionsVersion)
+	if err != nil {
+		return err
+	}
+	if p.AccountID != h.cfg.AccountID {
+		return fmt.Errorf("targetweight: snapshot for account %q; this run decides %q", p.AccountID, h.cfg.AccountID)
+	}
+	if h.snapshot != nil && !p.AsOf.After(h.snapshot.AsOf) {
+		return fmt.Errorf("targetweight: snapshot as of %s does not follow the last, %s", p.AsOf, h.snapshot.AsOf)
+	}
+	h.snapshot = &p
+	return nil
+}
+
+func (h *Handler) applyMark(in event.Envelope) error {
+	p, err := decodeInput[event.MarkRecordedPayload](in, event.MarkRecordedSchemaVersion)
+	if err != nil {
+		return err
+	}
+	if p.InstrumentID != h.cfg.Boost.InstrumentID {
+		return fmt.Errorf("targetweight: mark for %s; this account trades %s only", p.InstrumentID, h.cfg.Boost.InstrumentID)
+	}
+	if h.mark != nil && !p.AsOf.After(h.mark.AsOf) {
+		return fmt.Errorf("targetweight: mark as of %s does not follow the last, %s", p.AsOf, h.mark.AsOf)
+	}
+	h.mark = &p
+	return nil
+}
+
+func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
+	p, err := decodeInput[event.SessionClosedPayload](in, event.SessionClosedSchemaVersion)
+	if err != nil {
+		return nil, err
+	}
+	if !p.PeriodEnd.After(h.lastPeriod) {
+		return nil, fmt.Errorf("targetweight: session %s does not follow the last, %s", p.PeriodEnd, h.lastPeriod)
+	}
+	named := false
+	for _, id := range p.InstrumentIDs {
+		named = named || id == h.cfg.Boost.InstrumentID
+	}
+	bar := h.bar
+	if bar != nil && !bar.PeriodEnd.Equal(p.PeriodEnd) {
+		return nil, fmt.Errorf("targetweight: bar %s is not the session %s being closed", bar.PeriodEnd, p.PeriodEnd)
+	}
+	if named != (bar != nil) {
+		return nil, fmt.Errorf("targetweight: session %s and the bars received disagree about %s", p.PeriodEnd, h.cfg.Boost.InstrumentID)
+	}
+	h.started = true
+	h.lastPeriod = p.PeriodEnd
+	h.bar = nil
+
+	quiet := p.PeriodEnd.Before(h.decideFrom) || !p.PeriodEnd.After(h.quietUntil)
+	if bar == nil && h.gapAt.IsZero() {
+		h.gapAt = p.PeriodEnd
+	}
+	b := &emissions{h: h, in: in, at: p.PeriodEnd}
+	if !h.gapAt.IsZero() {
+		if quiet {
+			return nil, nil
+		}
+		figures := h.figures(boost.Readings{}, h.latched)
+		b.targets(figures, event.WithheldMissingBars,
+			fmt.Sprintf("no %s bar in the session closing %s; the indicators are not computed across the gap", h.cfg.Boost.InstrumentID, h.gapAt.Format(idTime)))
+		return b.result()
+	}
+
+	readings := h.indicators.Add(bar.SplitAdjusted.Close)
+	if quiet {
+		return nil, nil
+	}
+	before := h.latched
+	h.latched = h.params.Next(before, readings)
+	figures := h.figures(readings, before)
+	snapshot := h.snapshot
+	if snapshot == nil || snapshot.AsOf.Before(p.PeriodEnd) {
+		b.targets(figures, event.WithheldStaleAccountSnapshot,
+			fmt.Sprintf("no account snapshot for %s as of the session closing %s", h.cfg.AccountID, p.PeriodEnd.Format(idTime)))
+		return b.result()
+	}
+	decisionID, decided := b.targets(figures, "", "")
+	h.inForce, h.inForceSet = decided.Targets[0].Weight, true
+	h.gate.RecordDecision(decisionID)
+
+	// The planner and the gate cannot refuse what this handler has validated
+	// (the decision just built, a validated snapshot, the bar's raw close and
+	// the configured band and limits), so an error from either is a defect.
+	order, ok, err := orderplan.PlanBoost(orderplan.BoostInput{
+		Tag: decisionID, Decision: decided, Snapshot: *snapshot,
+		ReferencePrice: bar.Raw.Close, PriceBand: h.cfg.Limits.PriceBand,
+	})
+	b.fail(err)
+	if !ok {
+		return b.result()
+	}
+	planID := "order-planned:" + order.ClientOrderID
+	b.add(planID, event.OrderPlannedEventType, event.OrderPlannedSchemaVersion, order)
+	gateOrder := risklimit.Order{PlanID: planID, Planned: order}
+	if h.mark != nil && !h.mark.AsOf.Before(p.PeriodEnd) {
+		gateOrder.Mark, gateOrder.MarkSet = h.mark.Price, true
+	}
+	outcomes, err := h.gate.Check([]risklimit.Order{gateOrder})
+	b.fail(err)
+	for _, o := range outcomes {
+		if o.Released != nil {
+			b.add("risk-order-released:"+order.ClientOrderID, event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, *o.Released)
+		} else {
+			b.add("risk-order-refused:"+order.ClientOrderID, event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, *o.Refused)
+		}
+		if o.State != nil {
+			b.add(fmt.Sprintf("engine-state:%s:%s", h.cfg.AccountID, p.PeriodEnd.UTC().Format(idTime)), event.EngineStateEventType, o.StateSchemaVersion, *o.State)
+		}
+	}
+	return b.result()
+}
+
+// figures are the Boost figures for this session, with latchedBefore and the
+// latch and target in force as they stand.
+func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigures {
+	return event.BoostFigures{
+		InstrumentID: h.cfg.Boost.InstrumentID, Close: r.Close,
+		RSI: r.RSI, RSIReady: r.RSIReady, TrendMean: r.TrendMean, TrendMeanReady: r.TrendMeanReady,
+		ExitMean: r.ExitMean, ExitMeanReady: r.ExitMeanReady,
+		LatchedBefore: latchedBefore, LatchedAfter: h.latched,
+		TargetInForce: h.inForce, TargetInForceSet: h.inForceSet,
+	}
+}
+
+// emissions collects one input's emissions in order, keeping the first error.
+type emissions struct {
+	h   *Handler
+	in  event.Envelope
+	at  time.Time
+	out []event.Envelope
+	err error
+}
+
+func (b *emissions) fail(err error) {
+	if err != nil && b.err == nil {
+		b.err = fmt.Errorf("targetweight: %w", err)
+	}
+}
+
+func (b *emissions) add(id, eventType string, version uint32, payload interface{ Validate() error }) {
+	e, err := b.h.stamp(id, eventType, version, b.at, b.in, payload)
+	b.fail(err)
+	b.out = append(b.out, e)
+}
+
+func (b *emissions) result() ([]event.Envelope, error) {
+	if b.err != nil {
+		return nil, b.err
+	}
+	return b.out, nil
+}
+
+// targets adds the session's strategy.targets.decided, decided with the
+// latch's target when reason is empty, else withheld with reason and detail,
+// and returns its ID and payload.
+func (b *emissions) targets(figures event.BoostFigures, reason, detail string) (string, event.TargetsDecidedPayload) {
+	h := b.h
+	p := event.TargetsDecidedPayload{
+		AccountID: h.cfg.AccountID, StrategyID: h.cfg.StrategyID,
+		DecisionTime: b.at, SessionPeriodEnd: b.at,
+		Outcome: event.TargetsOutcomeDecided, Boost: figures,
+	}
+	if reason == "" {
+		p.Targets = []event.TargetWeight{{InstrumentID: h.cfg.Boost.InstrumentID, Weight: h.params.Target(h.latched)}}
+	} else {
+		p.Outcome, p.WithheldReason, p.Detail = event.TargetsOutcomeWithheld, reason, detail
+	}
+	id := fmt.Sprintf("targets-decided:%s:%s", h.cfg.AccountID, b.at.UTC().Format(idTime))
+	b.add(id, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, p)
+	return id, p
+}
+
+// stamp builds an emission: EventTime is the session's close and RecordedAt
+// the input's, never the wall clock. Sequence, causation and correlation are
+// the engine's to set (replay.Handler).
+func (h *Handler) stamp(id, eventType string, version uint32, at time.Time, in event.Envelope, payload interface{ Validate() error }) (event.Envelope, error) {
+	if err := payload.Validate(); err != nil {
+		return event.Envelope{}, fmt.Errorf("targetweight: %s %s: %w", eventType, id, err)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return event.Envelope{}, fmt.Errorf("targetweight: %w", err)
+	}
+	return event.Envelope{
+		ID: id, Type: eventType, EnvelopeVersion: event.CurrentEnvelopeVersion, SchemaVersion: version,
+		EventTime: at, RecordedAt: in.RecordedAt, Source: source,
+		StrategyVersion: h.strategyVersion, ConfigurationHash: h.hash,
+		PayloadHash: event.HashPayload(raw), Payload: raw,
+	}, nil
+}
