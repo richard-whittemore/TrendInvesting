@@ -10,8 +10,10 @@
 # - which stocks traded, and their close and volume: the grouped daily bars
 #   endpoint, unadjusted, one request for the whole market;
 # - which are common stock: the reference tickers endpoint with `date`,
-#   filtered by type. COMMON_TYPES keeps ordinary common stock and ADRs of
-#   it, since the backtest's universe holds foreign companies' US listings.
+#   filtered by type. COMMON_TYPES keeps common stock (CS) only. Foreign
+#   companies listed directly (SHOP, TECK) are CS and stay in; ADRs are left
+#   out, because QuantConnect's universe leaves them out: with ADRs, about 25
+#   of each month's 500 differed from it (docs/research/universe-massive-2026-10.md).
 #
 # The API key is read from the macOS Keychain (service MASSIVE_API_KEY) and
 # sent only as a header. Responses are cached as files under the data
@@ -30,7 +32,7 @@ import urllib.parse
 import urllib.request
 
 BASE = "https://api.massive.com"
-COMMON_TYPES = ("CS", "ADRC")
+COMMON_TYPES = ("CS",)
 UNIVERSE_SIZE = 500
 PRICE_FLOOR = 5.0
 

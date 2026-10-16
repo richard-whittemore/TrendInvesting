@@ -29,13 +29,14 @@ _COMBO = dict(_HALF, SECTOR_CAP=3, INV_VOL=True)
 _M1 = {"SPREAD": 0.022, "FEES": "none"}
 # Glide path (docs/live-trading/plan.md, section 2): the combination plus a
 # half-IEF/SHY sleeve in one account. Tuning window 2002-08 to 2015-12 (the
-# bond funds start in July 2002), held-out window 2016-01 to 2026-09.
+# bond funds start in July 2002), held-out window 2016-01 to 2026-09 as set; QuantConnect's
+# data ends on 2026-07-18, so the runs end there.
 _GLIDE_IS = dict(_COMBO, START_DATE=(2001, 8, 1), MEASURE_FROM=(2002, 8, 1), END_DATE=(2015, 12, 31),
                  BOND_FUNDS={"IEF": 0.5, "SHY": 0.5})
 _GLIDE_OOS = dict(_COMBO, START_DATE=(2015, 1, 1), MEASURE_FROM=(2016, 1, 1), END_DATE=(2026, 9, 30),
                   BOND_FUNDS={"IEF": 0.5, "SHY": 0.5})
 # Universe parity (docs/live-trading/plan.md, section 4): the combination's
-# held-out settings, run to September 2026.
+# held-out settings, set to run to September 2026; QuantConnect's data ends on 2026-07-18.
 _PARITY = dict(_OOS, **_COMBO, END_DATE=(2026, 9, 30), ETF_TICKER="IWB")
 #: Sector check (docs/research/sector-labels-2026-10.md): today's universe
 #: stocks whose GICS sector, mapped onto Morningstar's codes, differs.

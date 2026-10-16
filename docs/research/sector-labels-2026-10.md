@@ -68,7 +68,9 @@ month with `OOS_P_COARSE` (same settings, Morningstar labels;
 b0f7eb651ee24c5181d7321b74a97db1; all 20 tickers were relabelled
 (`Sectors` statistic: 20 tickers, 828 monthly rows).
 
-| 2016–Sep 2026 | Return per year | Worst drop, peak to trough, on daily equity |
+**Correction (2026-10-16):** QuantConnect's US equity data ends on 2026-07-18, so these runs, set to end in September 2026, ended on 2026-07-17 or 2026-07-18 (`docs/research/universe-massive-2026-10.md`). The figures are unchanged; only the label was wrong.
+
+| 2016 to 2026-07-17 | Return per year | Worst drop, peak to trough, on daily equity |
 | --- | --- | --- |
 | SPY | 15.07% | 33.7% |
 | Morningstar labels (`OOS_P_COARSE`) | 20.10% | 31.0% |

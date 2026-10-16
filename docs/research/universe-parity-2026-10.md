@@ -15,7 +15,8 @@ pick the same stocks as the backtest, month by month?
 - Template `research/edge-search/momentum/universe_parity.py` and
   comparison `research/edge-search/momentum/parity_compare.py` (PR #299).
 - Three runs on the combination's held-out settings (`OOS_F_COMBO`), 2015
-  warm-up, measured from January 2016 to September 2026, each run once:
+  warm-up, measured from January 2016 to 2026-07-17 (set to September
+  2026; see the correction below), each run once:
   - `OOS_P_COARSE`: the backtest's own universe;
   - `OOS_P_IWB7`: IWB's holdings at least 7 days old (QuantConnect's US ETF
     Constituents data may lag the sponsor by up to a week);
@@ -32,7 +33,9 @@ pick the same stocks as the backtest, month by month?
 
 ## Results
 
-| 2016–Sep 2026 | Return per year | Worst drop, peak to trough, on daily equity |
+**Correction (2026-10-16):** QuantConnect's US equity data ends on 2026-07-18, so these runs, set to end in September 2026, ended on 2026-07-17 or 2026-07-18 (`docs/research/universe-massive-2026-10.md`). The figures are unchanged; only the label was wrong.
+
+| 2016 to 2026-07-17 | Return per year | Worst drop, peak to trough, on daily equity |
 | --- | --- | --- |
 | SPY | 15.07% | 33.7% |
 | Backtest's universe | 20.10% | 31.0% |
