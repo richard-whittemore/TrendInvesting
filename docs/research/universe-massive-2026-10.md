@@ -145,8 +145,9 @@ EQR, FERG, FLUT). These fit the known gap: QuantConnect's
 - **The D8 rule reproduces QuantConnect's selection closely** once ADRs are
   left out: 96.4% agreement on average when ranked on the same session. In
   the other 5 months out of 7 that is also the universe the backtest traded.
-- **Decided 2026-10-16: choice 1** (owner: "Choice A"), with the effect
-  on returns to be measured (`momentum/fresh_universe.py`).
+- **Decided 2026-10-16: choice 1** (owner: "Choice A"). The effect on
+  returns was measured the same day and does not change it; see "Effect of
+  the timing on returns" below.
 - **The timing question (Finding 2).** ADR 0026 (point 8)
   says no backtest behaviour is copied into live trading without a decision.
   The two choices:
@@ -163,6 +164,52 @@ EQR, FERG, FLUT). These fit the known gap: QuantConnect's
   `OOS_FU_COMBO`).
 - **Phase 1:** the comparison the plan requires is recorded here, on dated
   inputs, and the timing is decided.
+
+## Effect of the timing on returns (2026-10-16)
+
+Research only; not investment advice.
+
+The two timings were run as paired backtests on QuantConnect (project
+37096083), each once, on the same data the same day, so the difference is
+the selection timing only. The variants are built by
+`research/edge-search/build_variants.py` (PR #318). `FU_COMBO` /
+`OOS_FU_COMBO` rank the universe chosen on the latest session (choice 1);
+`F_COMBO` / `OOS_F_COMBO` are the backtest as it was (choice 2: in
+Sunday/Monday months, the previous month's universe). Starting cash is $1M,
+with the LEAN IB brokerage model as in the templates. QuantConnect's data
+ends 2026-07-18.
+
+| Run | Backtest ID | Window | CAGR | MaxDD | Ratio | Rebalances | Risk-off months | Orders | Fees |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| FU_COMBO | 821115ccb7444cf44de683721cf9b756 | 1999-01 to 2015-12 | 14.78% | 43.48% | 0.3399 | 203 | 59 | 5571 | $209,986.71 |
+| F_COMBO | eee58c08c960a253047aab3b075c75f0 | 1999-01 to 2015-12 | 13.09% | 46.05% | 0.2843 | 203 | 59 | 5187 | $161,655.35 |
+| OOS_FU_COMBO | c2b3fe0bde31901df93b645eb0f19e2b | 2016-01 to 2026-07 | 18.65% | 39.47% | 0.4725 | 138 | 25 | 3816 | $34,140.36 |
+| OOS_F_COMBO | a752a0ae4155142464abb218b826abc9 | 2016-01 to 2026-07 | 20.06% | 40.47% | 0.4957 | 138 | 25 | 3589 | $34,224.92 |
+
+SPY over the same windows: 1999-2015 CAGR 4.91%, MaxDD 55.17%; 2016 to
+2026-07 CAGR 15.19%, MaxDD 33.72%. Sub-window 2009-2015: FU_COMBO
+14.76% / 25.57% (CAGR / MaxDD); F_COMBO 13.58% / 25.81%.
+
+**How often the selection was early.** "Early" counts the months whose
+universe was chosen before the 1st (the 1st fell on a Sunday or a Monday,
+or a Monday holiday). `FU_COMBO` logged 65 of 203 months (32%) and
+`OOS_FU_COMBO` 42 of 138 (30%), against the roughly 2-in-7 (29%) estimate
+in Finding 2.
+
+**Reading.**
+- The timing effect has opposite signs in the two windows: +1.69 pp/yr
+  in-sample (1999-2015) and -1.41 pp/yr held out (2016 to 2026-07). The
+  drawdown is a little shallower under fresh selection in both.
+- That is within the noise of month-to-month universe churn, and it does
+  not change the choice: choice 1 (A) stands.
+- Fresh selection trades more: 7% more orders in-sample and 6% held out,
+  since a fresher universe changes more names each month. That is a real
+  cost. The $30k commission runs (slice 7, #376) use the `FU` variants.
+
+Note: these `F_COMBO` / `OOS_F_COMBO` reruns differ a little from the
+recorded `F_COMBO_R4` / `OOS_F_COMBO_R4` figures, because QuantConnect's
+data is revised over time. That is why the comparison is paired on the same
+day, and why the parity work (#324) uses the `FU` runs recorded here.
 
 ## Notes
 
