@@ -114,8 +114,16 @@ class Client:
                 if e.code != 429 or attempt:
                     raise
                 self.sleep(60.0)
-        with open(path, "w") as f:
-            json.dump(body, f)
+        if isinstance(body.get("next_url"), str):
+            body["next_url"] = self._strip_key(body["next_url"])   # never cache a key the API echoes
+        tmp = path + ".part"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(body, f)
+            os.replace(tmp, path)   # a cut-short write never becomes a cache hit
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
         return body
 
     def get(self, path, params):

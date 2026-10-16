@@ -128,6 +128,15 @@ class ClientTest(unittest.TestCase):
         self.assertIn("type=CS", self.calls[0].full_url)
         self.assertIn("cursor=abc", self.calls[1].full_url)
         self.assertNotIn("k3y", self.calls[1].full_url)
+        for name in os.listdir(self.dir):
+            with open(os.path.join(self.dir, name)) as f:
+                self.assertNotIn("k3y", name + f.read())
+
+    def test_an_interrupted_write_leaves_no_cache_file(self):
+        c = self.client([{"results": [object()]}])
+        with self.assertRaises(TypeError):
+            c.grouped(_dt.date(2026, 2, 27))
+        self.assertEqual(os.listdir(self.dir), [])
 
     def test_a_rate_limited_request_waits_a_minute_and_retries_once(self):
         state = {"n": 0}
@@ -189,6 +198,26 @@ class CompareTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             compare.check_counts(months, {"2026-03": 3, "2026-04": 2})
         compare.check_counts({"2026-03": months["2026-03"]}, {"2026-03": 3})
+        with self.assertRaises(ValueError):   # a logged month with no count is refused too
+            compare.check_counts({"2026-03": months["2026-03"]}, {})
+
+    def test_main_prints_the_names_that_differ(self):
+        d = tempfile.mkdtemp()
+        paths = [os.path.join(d, n) for n in ("log.json", "counts.json", "live.json")]
+        for path, body in zip(paths, (["UNIV 2026-03 AAA;BBB|"], {"2026-03": 2},
+                                      {"month": "2026-03", "session": "2026-02-27", "names": ["AAA", "CCC"]})):
+            with open(path, "w") as f:
+                json.dump(body, f)
+        out = io.StringIO()
+        sys.stdout, saved = out, sys.stdout
+        try:
+            compare.main(paths)
+        finally:
+            sys.stdout = saved
+        text = out.getvalue()
+        self.assertIn("shared 1/2", text)
+        self.assertIn("only QC: BBB", text)
+        self.assertIn("only live: CCC", text)
 
     def test_overlap_normalises_share_class_separators(self):
         row = compare.overlap(["BRK.B", "AAA", "BBB", "CCC"], ["BRK/B", "AAA", "BBB", "DDD"])

@@ -27,7 +27,11 @@ def parse_qc_log(lines):
 
 
 def check_counts(months, counts):
-    """Raise ValueError unless every month holds exactly its logged count."""
+    """Raise ValueError unless the log and the counts name the same months
+    and every month holds exactly its count."""
+    missing = sorted(set(months) - set(counts))
+    if missing:
+        raise ValueError("no count for {}; cannot tell whether the log was cut short".format(", ".join(missing)))
     for month, n in counts.items():
         got = len(months.get(month, ()))
         if got != n:
@@ -55,6 +59,8 @@ def main(argv):
         row = overlap(months[live["month"]], live["names"])
         print("{} {} shared {}/{} ({:.1%})".format(live["month"], live["session"], row["shared"], row["qc"],
                                                     row["share"]))
+        print("  only QC: " + " ".join(row["only_qc"]))
+        print("  only live: " + " ".join(row["only_live"]))
 
 
 if __name__ == "__main__":
