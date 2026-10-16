@@ -85,7 +85,8 @@ research-test:
 		research/edge-search/momentum/momentum.py research/edge-search/boost/lev_etf_template.py \
 		research/edge-search/momentum/defensive.py research/edge-search/momentum/scores.py \
 		research/edge-search/etf/rotation.py research/edge-search/momentum/defensive_v2.py \
-		research/edge-search/momentum/universe_parity.py research/edge-search/momentum/parity_compare.py
+		research/edge-search/momentum/universe_parity.py research/edge-search/momentum/parity_compare.py \
+		research/edge-search/momentum/glide_path.py
 	python3 -m py_compile research/edge-search/etf-trend/main.py research/edge-search/etf-trend/main_oos.py \
 		research/edge-search/factors/main.py research/edge-search/timing/main.py \
 		research/edge-search/riskparity/main.py research/edge-search/bh-rsp/main.py

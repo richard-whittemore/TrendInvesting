@@ -26,6 +26,13 @@ _OOS = {"START_DATE": (2015, 1, 1), "END_DATE": (2026, 6, 30), "MEASURE_FROM": (
 _HALF = {"MODE": "mom_trend", "TOP_N": 25, "RISK_OFF_FRACTION": 0.5}
 _COMBO = dict(_HALF, SECTOR_CAP=3, INV_VOL=True)
 _M1 = {"SPREAD": 0.022, "FEES": "none"}
+# Glide path (docs/live-trading/plan.md, section 2): the combination plus a
+# half-IEF/SHY sleeve in one account. Tuning window 2002-08 to 2015-12 (the
+# bond funds start in July 2002), held-out window 2016-01 to 2026-09.
+_GLIDE_IS = dict(_COMBO, START_DATE=(2001, 8, 1), MEASURE_FROM=(2002, 8, 1), END_DATE=(2015, 12, 31),
+                 BOND_FUNDS={"IEF": 0.5, "SHY": 0.5})
+_GLIDE_OOS = dict(_COMBO, START_DATE=(2015, 1, 1), MEASURE_FROM=(2016, 1, 1), END_DATE=(2026, 9, 30),
+                  BOND_FUNDS={"IEF": 0.5, "SHY": 0.5})
 # Universe parity (docs/live-trading/plan.md, section 4): the combination's
 # held-out settings, run to September 2026.
 _PARITY = dict(_OOS, **_COMBO, END_DATE=(2026, 9, 30), ETF_TICKER="IWB")
@@ -160,6 +167,23 @@ VARIANTS = {
     "OOS_P_COARSE": ("momentum/universe_parity.py", dict(_PARITY, UNIVERSE_SOURCE="coarse", ETF_LAG_DAYS=7)),
     "OOS_P_IWB7": ("momentum/universe_parity.py", dict(_PARITY, UNIVERSE_SOURCE="etf", ETF_LAG_DAYS=7)),
     "OOS_P_IWB1": ("momentum/universe_parity.py", dict(_PARITY, UNIVERSE_SOURCE="etf", ETF_LAG_DAYS=1)),
+    # Glide path: the schedule started at ages 38, 53 and 65 on each window's
+    # first date, and the fixed mixes either side of each run (plan section 2).
+    "G_IS_P38": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=38.0)),
+    "G_IS_P53": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=53.0)),
+    "G_IS_P65": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=65.0)),
+    "G_IS_F00": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="fixed", BOND_SHARE=0.0, PATH_START_AGE=38.0)),
+    "G_IS_F30": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="fixed", BOND_SHARE=0.3, PATH_START_AGE=38.0)),
+    "G_IS_F50": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="fixed", BOND_SHARE=0.5, PATH_START_AGE=38.0)),
+    "G_IS_F60": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="fixed", BOND_SHARE=0.6, PATH_START_AGE=38.0)),
+    "G_IS_F70": ("momentum/glide_path.py", dict(_GLIDE_IS, GLIDE="fixed", BOND_SHARE=0.7, PATH_START_AGE=38.0)),
+    "G_OOS_P38": ("momentum/glide_path.py", dict(_GLIDE_OOS, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=38.0)),
+    "G_OOS_P53": ("momentum/glide_path.py", dict(_GLIDE_OOS, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=53.0)),
+    "G_OOS_P65": ("momentum/glide_path.py", dict(_GLIDE_OOS, GLIDE="path", BOND_SHARE=0.0, PATH_START_AGE=65.0)),
+    "G_OOS_F00": ("momentum/glide_path.py", dict(_GLIDE_OOS, GLIDE="fixed", BOND_SHARE=0.0, PATH_START_AGE=38.0)),
+    "G_OOS_F30": ("momentum/glide_path.py", dict(_GLIDE_OOS, GLIDE="fixed", BOND_SHARE=0.3, PATH_START_AGE=38.0)),
+    "G_OOS_F50": ("momentum/glide_path.py", dict(_GLIDE_OOS, GLIDE="fixed", BOND_SHARE=0.5, PATH_START_AGE=38.0)),
+    "G_OOS_F70": ("momentum/glide_path.py", dict(_GLIDE_OOS, GLIDE="fixed", BOND_SHARE=0.7, PATH_START_AGE=38.0)),
     "BE_IB_MOC": ("boost/execution.py", {"EXEC": "moc"}),
     "BE_IB_OPEN": ("boost/execution.py", {"EXEC": "next_open"}),
     "BE_M1_AM": ("boost/execution.py", dict(_M1, EXEC="next_open")),
