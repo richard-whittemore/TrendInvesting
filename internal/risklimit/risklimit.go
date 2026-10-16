@@ -46,13 +46,15 @@ type Outcome struct {
 // holdings and each holding's reference price (the raw previous close, ADR
 // 0026 point 2, "Valuation basis"), the shares already in working or pending
 // sells, cancel-pending ones included, the orders already planned at this
-// decision time in an earlier phase, and, for an IRA, the cash its buys may
+// decision time in an earlier phase and how many of those are not
+// risk-reducing, and, for an IRA, the cash its buys may
 // still commit under D5, net of the buys already committed.
 type Book struct {
 	Holdings      map[string]int64
 	Prices        map[string]float64
 	WorkingSells  map[string]int64
 	PriorOrders   int
+	PriorCounted  int
 	CashAvailable float64
 }
 
@@ -110,6 +112,40 @@ func (g *Gate) RecordDecision(id string) { g.decided[id] = true }
 // State returns the gate's engine state.
 func (g *Gate) State() string { return g.state }
 
+// RestoreState applies one strategy.engine.state record an earlier run of
+// this account journalled, at schemaVersion, before any order is checked: "a
+// crash or restart while Degraded or Halted resumes in that same state and
+// scope, read back from the run's durable record" (ADR 0019, amended
+// 2026-09-24, "The state survives a restart"; ADR 0026, point 5). Leaving
+// either state is never automatic, so a record never loosens the gate: a
+// Halted gate refuses a Degraded record, and a Degraded record widens the
+// scope to the union. A scope naming orders or cash components is refused,
+// since this gate holds instruments only and cannot honour it.
+func (g *Gate) RestoreState(p event.EngineStatePayload, schemaVersion uint32) error {
+	if err := p.ValidateSchema(schemaVersion); err != nil {
+		return fmt.Errorf("risklimit: recorded %w", err)
+	}
+	if len(p.ScopeOrderIDs) > 0 || len(p.ScopeCashComponents) > 0 {
+		return errors.New("risklimit: a recorded scope naming orders or cash components is not one this gate can hold")
+	}
+	if p.State == event.EngineStateHalted {
+		g.state, g.scope = StateHalted, nil
+		return nil
+	}
+	if g.state == StateHalted {
+		return errors.New("risklimit: a recorded Degraded state cannot follow Halted: leaving Halted is never automatic")
+	}
+	scope := slices.Clone(g.scope)
+	for _, id := range p.ScopeInstrumentIDs {
+		if !slices.Contains(scope, id) {
+			scope = append(scope, id)
+		}
+	}
+	slices.Sort(scope)
+	g.state, g.scope = StateDegraded, scope
+	return nil
+}
+
 // Check decides every order of one decision time's plan, or of one phase of
 // it, in plan order, against book. An order that fails its own payload
 // validation, or belongs to another account, is a defect in the caller and
@@ -117,16 +153,30 @@ func (g *Gate) State() string { return g.state }
 // a refusal, not an error, and halts.
 //
 // The checks, in order: Halted refuses every order; a tag naming no recorded
-// decision refuses and halts; Degraded refuses every buy and every order on an
-// instrument its scope names; then a sell beyond the holding net of working
-// and pending sells, the order count (buys only, when the decision time's
-// plan is over it), the mark, the price band, the order size, then for an
-// exposure-increasing order a holding with no reference price, the exposure
-// limit, and for an IRA's buy the cash available. The first breach refuses
-// the order and degrades the account, naming the instrument. The one sale
-// back to 98% that ADR 0019 allows while Halted or Degraded, and the
-// risk-reducing exemptions from count, size and band, are not in this gate
-// yet.
+// decision refuses and halts; Degraded refuses every buy, every sell that is
+// not risk-reducing, and every order on an instrument its scope names; then a
+// sell beyond the holding net of working and pending sells, the order count
+// (buys only, when the decision time's orders that are not risk-reducing are
+// over it), and, unless the order is risk-reducing, the mark, the price band
+// and the order size; then for an exposure-increasing order a holding with no
+// reference price, the exposure limit, and for an IRA's buy the cash
+// available. The first breach refuses the order and degrades the account,
+// naming the instrument.
+//
+// A risk-reducing order (ADR 0026, point 4) is "a sell that moves the
+// account's exposure toward 98% or lower, sized within the broker-reported
+// holding": here, a sell no larger than the holding the planner sized it
+// from. It is exempt from the order count, the order size and the price band
+// (point 3), and so from the mark, the band's only input; one late mark
+// cannot refuse Boost's exit. It is still refused when it exceeds the book's
+// holding net of working and pending sells.
+//
+// The one sale back to 98% that ADR 0019 allows a margin account while Halted
+// (amended 2026-10-15) or Degraded on the instrument to sell (amended
+// 2026-10-16) is not issued here: it is sized from IBKR's holding, net
+// liquidation and open orders read together, and no such sale goes when
+// those cannot be read. This gate reads no open orders, so a Halted account,
+// and a Degraded one's named instruments, release nothing.
 //
 // Exposure is account-wide: the sum of every holding x its reference price
 // (the order's own at its reference price) over net liquidation, before and
@@ -168,9 +218,15 @@ func (g *Gate) Check(book Book, plan []Order) ([]Outcome, error) {
 		running.WorkingSells = map[string]int64{}
 	}
 	planSize := book.PriorOrders + len(plan)
+	counted := book.PriorCounted
+	for _, o := range plan {
+		if !RiskReducing(o.Planned) {
+			counted++
+		}
+	}
 	outcomes := make([]Outcome, 0, len(plan))
 	for _, o := range plan {
-		out := g.check(o, planSize, running)
+		out := g.check(o, planSize, counted, running)
 		if out.Released != nil {
 			p := o.Planned
 			running.Prices[p.InstrumentID] = p.ReferencePrice
@@ -187,7 +243,16 @@ func (g *Gate) Check(book Book, plan []Order) ([]Outcome, error) {
 	return outcomes, nil
 }
 
-func (g *Gate) check(o Order, planSize int, book *Book) Outcome {
+// RiskReducing reports whether p is risk-reducing (ADR 0026, point 4): a sell
+// within the holding it was sized from. No buy is, even within a rebalance
+// that also sells.
+func RiskReducing(p event.OrderPlannedPayload) bool {
+	return p.Side == event.OrderSideSell && p.Quantity <= p.HeldQuantity
+}
+
+// check decides one order of a plan of planSize orders at its decision time,
+// counted of which are not risk-reducing, against book.
+func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 	p := o.Planned
 	f, unvalued := g.figures(o, planSize, book)
 	switch {
@@ -201,12 +266,15 @@ func (g *Gate) check(o Order, planSize int, book *Book) Outcome {
 			State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached,
 			Detail: fmt.Sprintf("order %s refused: %s; a defect in the order path, so its scope cannot be bounded", p.ClientOrderID, event.RefusedUndecidedOrder),
 		}
-		out.StateSchemaVersion = event.EngineStateSchemaVersion
+		out.StateSchemaVersion = event.EngineStateScopedVersion
 		return out
-	case g.state == StateDegraded && (p.Side == event.OrderSideBuy || slices.Contains(g.scope, p.InstrumentID)):
-		return Outcome{Refused: g.refusal(o, f, event.RefusedEngineDegraded, fmt.Sprintf("the account is Degraded (scope %v): no buy, and the scope's instruments are frozen", g.scope))}
+	case g.state == StateDegraded && (!RiskReducing(p) || slices.Contains(g.scope, p.InstrumentID)):
+		// ADR 0019, amended 2026-09-24: "Nothing that opens or adds to a
+		// position is allowed while not Normal", and named instruments are
+		// frozen; risk-reducing sells continue elsewhere (ADR 0026, point 4).
+		return Outcome{Refused: g.refusal(o, f, event.RefusedEngineDegraded, fmt.Sprintf("the account is Degraded (scope %v): only risk-reducing sells go, and the scope's instruments are frozen", g.scope))}
 	}
-	if reason, detail := g.breach(o, f, planSize, book, unvalued); reason != "" {
+	if reason, detail := g.breach(o, f, counted, book, unvalued); reason != "" {
 		out := Outcome{Refused: g.refusal(o, f, reason, detail)}
 		if !slices.Contains(g.scope, p.InstrumentID) {
 			g.state = StateDegraded
@@ -229,15 +297,20 @@ func (g *Gate) check(o Order, planSize int, book *Book) Outcome {
 }
 
 // breach returns the first limit o breaches and its detail, or "" when none.
-func (g *Gate) breach(o Order, f event.RiskFigures, planSize int, book *Book, unvalued string) (reason, detail string) {
+// counted is the decision time's orders that are not risk-reducing.
+func (g *Gate) breach(o Order, f event.RiskFigures, counted int, book *Book, unvalued string) (reason, detail string) {
 	p := o.Planned
 	increases := f.ExposureAfter > f.ExposureBefore
 	available := book.Holdings[p.InstrumentID] - book.WorkingSells[p.InstrumentID]
 	switch {
 	case p.Side == event.OrderSideSell && p.Quantity > available:
 		return event.RefusedSellExceedsHolding, fmt.Sprintf("sell of %d %s exceeds the %d held net of working and pending sells", p.Quantity, p.InstrumentID, available)
-	case planSize > g.limits.MaxOrdersPerDecision && p.Side == event.OrderSideBuy:
-		return event.RefusedOrderCount, fmt.Sprintf("%d orders planned at one decision time; the limit is %d, so the plan's buys are refused", planSize, g.limits.MaxOrdersPerDecision)
+	case counted > g.limits.MaxOrdersPerDecision && p.Side == event.OrderSideBuy:
+		return event.RefusedOrderCount, fmt.Sprintf("%d orders that are not risk-reducing planned at one decision time; the limit is %d, so the plan's buys are refused", counted, g.limits.MaxOrdersPerDecision)
+	case RiskReducing(p):
+		// Exempt from the mark, band and size (ADR 0026, point 3); a sell
+		// never breaches the exposure limit, which checks only an increase.
+		return "", ""
 	case !o.MarkSet:
 		return event.RefusedMissingMark, fmt.Sprintf("no mark recorded for %s at or after the session's close", p.InstrumentID)
 	case f.MarkDeviation > g.limits.PriceBand:

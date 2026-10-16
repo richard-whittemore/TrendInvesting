@@ -498,7 +498,7 @@ so Pro's margin rate does not help them.
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
 | 0 | Owner decisions D5 and D7 (D6 decided 2026-10-15); the broker-adapter ADR (0025, accepted 2026-10-15); this plan reviewed (owner, and an independent review on 2026-10-15) | Done except D5 and D7, which must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
-| 1 | Universe parity study (research, QuantConnect free) | IWB tested and failed (2026-10-15); D8 builds the universe from all US listings. Data source chosen (Massive, 2026-10-16) and the D8 rule's comparison recorded: 96.4% agreement with QuantConnect's selection over 21 months (`docs/research/universe-massive-2026-10.md`). The sector check is done (2026-10-15). Open until: the owner decides the timing question that comparison raised (section 10, D8) |
+| 1 | Universe parity study (research, QuantConnect free) | IWB tested and failed (2026-10-15); D8 builds the universe from all US listings. Data source chosen (Massive, 2026-10-16) and the D8 rule's comparison recorded: 96.4% agreement with QuantConnect's selection over 21 months (`docs/research/universe-massive-2026-10.md`). The sector check is done (2026-10-15). Timing decided 2026-10-16: live ranks the latest session (section 10, D8); its effect on returns is being measured |
 | 2 | The target-weight strategy ADR (decision contract, risk limits, the risk-reducing definition in section 3); Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest passes its stated test |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
 | 4 | IBKR paper trading | 2–3 clean months |
@@ -528,10 +528,12 @@ only after CodeRabbit and Greptile findings are addressed.
   section 4). Data source: Massive's free plan (account opened by the owner
   2026-10-16). Measured against QuantConnect's selection on 21 months: 96.4%
   of names shared when ranked on the same session (selection agreement)
-  (`docs/research/universe-massive-2026-10.md`). **Open for the owner:** in
-  months whose 1st is a Sunday or a Monday, the backtest ranked the previous
-  month's universe; live either ranks the latest session (about 80% of names
-  shared with the universe the backtest traded in those months) or copies
-  that.
+  (`docs/research/universe-massive-2026-10.md`). **Timing decided
+  2026-10-16 (owner: "Choice A"):** live always ranks the last session
+  before the rebalance, also in the months whose 1st is a Sunday or a
+  Monday, where the backtest ranked the previous month's universe (about 80%
+  of names shared with it in those months). The owner asked for the effect
+  on returns to be measured; `momentum/fresh_universe.py` (variants
+  `FU_COMBO`, `OOS_FU_COMBO`) runs the combination with that timing.
 - Account opening, funding, rollovers and the Lightsail sign-up are the
   owner's to do; nothing here signs up for or pays for anything.

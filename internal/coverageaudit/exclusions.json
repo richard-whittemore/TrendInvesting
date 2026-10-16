@@ -892,20 +892,6 @@
     },
     {
       "file": "internal/targetweight/handler.go",
-      "function": "(*emissions).fail",
-      "statement": "b.err = fmt.Errorf(\"targetweight: %w\", err)",
-      "category": "unreachable-by-construction",
-      "reason": "Its callers pass errors only from the planner, the gate and stamp, each given values this handler has already validated: a decision it just built, a validated account snapshot, a validated bar's raw close, the configured band and limits, and payloads the planner and gate build from them (their own packages' tests check every planned, released and refused payload they return validates)."
-    },
-    {
-      "file": "internal/targetweight/handler.go",
-      "function": "(*emissions).result",
-      "statement": "return nil, b.err",
-      "category": "unreachable-by-construction",
-      "reason": "b.err is set only by fail, which is unreachable for the reason given there."
-    },
-    {
-      "file": "internal/targetweight/handler.go",
       "function": "(*Handler).stamp",
       "statement": "return event.Envelope{}, fmt.Errorf(\"targetweight: %s %s: %w\", eventType, id, err)",
       "category": "unreachable-by-construction",

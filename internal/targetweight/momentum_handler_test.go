@@ -246,6 +246,9 @@ func TestMomentumFailsClosed(t *testing.T) {
 	}{
 		"stale snapshot": {momentumOptions{noSnapshot: map[string]bool{"2025-01-31": true}},
 			[]string{"withheld:stale-account-snapshot", "decided:"}},
+		// Orders are valued at the close (ADR 0026, point 2).
+		"snapshot taken after the close": {momentumOptions{lateSnapshot: map[string]bool{"2025-01-31": true}},
+			[]string{"withheld:stale-account-snapshot", "decided:"}},
 		// IEF is targeted risk-off in February but has no final bar.
 		"risk-off instrument without its final bar": {momentumOptions{noBar: map[string]string{"2025-02-28": "IEF"}},
 			[]string{"decided:", "withheld:missing-bars"}},

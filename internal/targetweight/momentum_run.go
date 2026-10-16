@@ -134,7 +134,12 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 	switch in.Type {
 	case event.SessionCalendarEventType:
 		return nil, r.applyCalendar(in)
+	case event.EngineStateEventType:
+		// An earlier run's state and scope, before the first bar or session
+		// (ADR 0019, amended 2026-09-24; ADR 0026, point 5).
+		return nil, r.h.applyRecordedState(in)
 	case event.CompletedBarEventType:
+		r.h.started = true
 		return nil, r.applyBar(in)
 	case event.UniverseSnapshotEventType:
 		return nil, r.applyUniverse(in)
@@ -143,6 +148,7 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 	case event.MarkRecordedEventType:
 		return nil, r.applyMark(in)
 	case event.SessionClosedEventType:
+		r.h.started = true
 		return r.applySession(in)
 	case event.OrderLifecycleEventType:
 		return r.applyLifecycle(in)
@@ -361,8 +367,13 @@ func decisionID(accountID string, end time.Time) string {
 // withhold returns why a decided rebalance cannot be planned, or "".
 func (r *momentumRun) withhold(p event.TargetsDecidedPayload, end time.Time) (reason, detail string) {
 	h := r.h
-	if r.snapshot == nil || r.snapshot.AsOf.Before(end) {
+	switch {
+	case r.snapshot == nil || r.snapshot.AsOf.Before(end):
 		return event.WithheldStaleAccountSnapshot, fmt.Sprintf("no account snapshot for %s as of the session closing %s", h.cfg.AccountID, end.Format(idTime))
+	case r.snapshot.AsOf.After(end):
+		// Orders are valued at the session's close (ADR 0026, point 2).
+		return event.WithheldStaleAccountSnapshot, fmt.Sprintf("the account snapshot for %s is as of %s, after the session closing %s; orders are valued at that close",
+			h.cfg.AccountID, r.snapshot.AsOf.Format(idTime), end.Format(idTime))
 	}
 	needed := make([]string, 0, len(p.Targets)+len(r.snapshot.Positions))
 	for _, t := range p.Targets {
@@ -404,7 +415,10 @@ func (r *momentumRun) planBuys(b *emissions) {
 }
 
 // check emits each order and the gate's outcome for it, and returns the
-// orders released, now tracked.
+// orders released, now tracked. The prior orders are the sell phase's, each
+// sized within its holding (orderplan.PlanIRA), so every one is risk-reducing
+// and none counts toward the order limit (ADR 0026, point 3): the book's
+// PriorCounted stays zero.
 func (r *momentumRun) check(b *emissions, reb *rebalance, orders []event.OrderPlannedPayload, prior int) []event.OrderPlannedPayload {
 	h := r.h
 	holdings := holdings(reb.snapshot.Positions)

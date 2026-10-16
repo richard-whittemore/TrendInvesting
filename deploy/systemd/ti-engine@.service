@@ -1,0 +1,35 @@
+[Unit]
+Description=Trend Investing engine for account %i (own adapter client ID, config, journal)
+After=ti-gateway.service
+Wants=ti-gateway.service
+# PLACEHOLDER: the engine and adapter binary do not exist yet in installable
+# form. The unit is skipped until it is installed. TI_CONFIG names the
+# account's configuration, which carries send: false for the dry-run gate.
+ConditionFileIsExecutable=/opt/trend-investing/bin/ti-engine
+ConditionPathExists=/etc/trend-investing/engines/%i.env
+
+[Service]
+Type=simple
+User=ti-trader
+Group=ti-trader
+Environment=TZ=America/New_York
+EnvironmentFile=/etc/trend-investing/engines/%i.env
+Environment=TI_CONFIG=/etc/trend-investing/engines/%i.config
+Environment=TI_STATE_DIR=/var/lib/trend-investing/engines/%i
+Environment=TI_DATA_DIR=/var/lib/trend-investing/data
+LoadCredential=secrets:/etc/trend-investing/secrets.env
+ExecStart=/opt/trend-investing/bin/ti-engine
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trend-investing/engines/%i
+ReadOnlyPaths=/var/lib/trend-investing/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

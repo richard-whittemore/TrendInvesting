@@ -156,13 +156,24 @@ func TestAnUnvaluedHoldingRefusesOnlyIncreasingOrders(t *testing.T) {
 }
 
 func TestPriorOrdersCountTowardTheDecisionTime(t *testing.T) {
-	// Ten orders allowed: nine sells already planned in the first phase, so
-	// two buys in the second make eleven and are refused.
-	out := checkBook(t, iraGate(t, 0), risklimit.Book{PriorOrders: 9, CashAvailable: 1e6},
+	// Ten orders allowed: nine sells that are not risk-reducing already
+	// planned in the first phase, so two buys in the second make eleven
+	// counted and are refused.
+	out := checkBook(t, iraGate(t, 0), risklimit.Book{PriorOrders: 9, PriorCounted: 9, CashAvailable: 1e6},
 		iraOrder("AAA", event.OrderSideBuy, 1), iraOrder("BBB", event.OrderSideBuy, 1))
 	refusedFor(t, out[0], event.RefusedOrderCount)
 	if out[0].Refused.Figures.OrdersInDecision != 11 {
 		t.Errorf("figures: %+v", out[0].Refused.Figures)
+	}
+	// Nine risk-reducing sells are exempt from the count (ADR 0026, point
+	// 3), so the same buys are released; the figures still name all eleven.
+	out = checkBook(t, iraGate(t, 0), risklimit.Book{PriorOrders: 9, CashAvailable: 1e6},
+		iraOrder("AAA", event.OrderSideBuy, 1), iraOrder("BBB", event.OrderSideBuy, 1))
+	for _, o := range out {
+		released(t, o)
+		if o.Released.Figures.OrdersInDecision != 11 {
+			t.Errorf("figures: %+v", o.Released.Figures)
+		}
 	}
 }
 

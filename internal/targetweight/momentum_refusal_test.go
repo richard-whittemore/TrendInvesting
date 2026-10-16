@@ -182,3 +182,37 @@ func TestMomentumMissingMarkRefusesAndDegrades(t *testing.T) {
 		t.Errorf("state %s at schema %d", states[0].ID, states[0].SchemaVersion)
 	}
 }
+
+// TestAMomentumRestartWhileDegradedStaysDegraded: a restart while Degraded
+// resumes in that state and scope (ADR 0019, amended 2026-09-24; ADR 0026,
+// point 5). The restarted run, given the recorded state, refuses every buy
+// of the January decision and releases nothing.
+func TestAMomentumRestartWhileDegradedStaysDegraded(t *testing.T) {
+	full := simulateMomentum(t, momentumOptions{noMark: map[string]string{"2025-01-31": "CCC"}, stopAfter: "2025-01-31"})
+	states := ofType(full.decisions, event.EngineStateEventType)
+	restarted := simulateMomentum(t, momentumOptions{recorded: states, stopAfter: "2025-01-31"})
+	if n := len(released(t, restarted.decisions)); n != 0 {
+		t.Fatalf("the restarted run released %d orders; Degraded is never left automatically", n)
+	}
+	refused := ofType(restarted.decisions, event.OrderRefusedEventType)
+	if len(refused) == 0 || len(ofType(restarted.decisions, event.EngineStateEventType)) != 0 {
+		t.Fatalf("%d refused, want every buy refused with no new state", len(refused))
+	}
+	for _, e := range refused {
+		var p event.OrderRefusedPayload
+		decode(t, e, &p)
+		if p.Reason != event.RefusedEngineDegraded {
+			t.Errorf("refusal: %+v", p)
+		}
+	}
+}
+
+func TestMomentumRecordedStateComesFirst(t *testing.T) {
+	full := simulateMomentum(t, momentumOptions{noMark: map[string]string{"2025-01-31": "CCC"}, stopAfter: "2025-01-31"})
+	state := ofType(full.decisions, event.EngineStateEventType)[0]
+	h, s := momentumHandler(t)
+	at := closeOf("2025-01-02")
+	mustApply(t, h, s.envelope(t, state.Type, state.SchemaVersion, state.ID, at, state.Payload))
+	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", at, spyBar("2025-01-02", 500)))
+	mustRefuse(t, h, s.envelope(t, state.Type, state.SchemaVersion, state.ID, at, state.Payload), "after the run began")
+}
