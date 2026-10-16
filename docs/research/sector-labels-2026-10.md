@@ -125,10 +125,43 @@ parts wholesale), Venture Global (Energy / gas distribution) and SDOT
 
 **SIC is too coarse to stand in for Morningstar** on these names: 70%
 against 96% for GICS in part 1, and five names have no record under their
-ticker. A free source that labels every US listing, foreign issuers
-included, would serve better. The candidate is Nasdaq's stock screener,
-which gives a sector for each listed stock; it has not been checked yet and
-would be compared with Morningstar the same way before use.
+ticker.
+
+## Part 4: Nasdaq's screener sectors
+
+Nasdaq's stock screener (`api.nasdaq.com/api/screener/stocks`, free, no
+account) labels 7,019 US listings, foreign issuers included, with its own
+sector scheme. Its sectors were mapped onto Morningstar's by name (Finance
+to Financial Services, Telecommunications to Communication Services, and so
+on; "Miscellaneous" left unmapped). The download was reduced to symbol,
+sector, industry and country and kept outside the repository.
+
+| | All 500 | The 25 outside IWV |
+| --- | --- | --- |
+| Labelled by Nasdaq | 493 | 19 |
+| Same sector as Morningstar | 378 (76.7%) | 15 (79%) |
+
+Across the whole universe Nasdaq's scheme differs from Morningstar's more
+than GICS does: it puts companies such as Alphabet and Meta under
+Technology, and many consumer and industrial companies across different
+lines. On the 25 outside IWV it matches about as well as SIC (15 of 19
+against 14 of 20); its misses are the companies whose sector is genuinely
+ambiguous (Cameco, Nebius, Venture Global, SDOT).
+
+## Conclusion
+
+The best free combination measured:
+- **GICS from iShares IWV** for the names it holds (about 475 of 500;
+  95.8% agree with Morningstar, and on the backtest's picks a difference of
+  about one name a month with no change in return, part 2);
+- **Nasdaq's screener sector** for the rest (about 25 names, 79% agree).
+
+Weighted by coverage, that is about 95% agreement overall. The live system
+records each stock's label and its source (ADR 0026, point 1), and the
+monthly comparison with QuantConnect during dry-run and paper trading
+measures the effect on the picks. A paid fundamentals source with
+Morningstar sectors remains the fallback if that comparison shows a
+material difference.
 
 Research only; this is not a recommendation to trade any security.
 

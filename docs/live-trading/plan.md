@@ -288,6 +288,13 @@ Lightsail VM (Ubuntu, $12/month, US East)
   measures how often that changes a month's picks. A paid fundamentals
   source (which would also close the `HasFundamentalData` gap) is the
   fallback.
+  **Measured (2026-10-15, `docs/research/sector-labels-2026-10.md`):**
+  GICS from IWV agrees with Morningstar on 95.8% of the names it covers and
+  changes about one pick a month with no change in return; SIC agrees on
+  14 of 20 of the names IWV lacks, Nasdaq's screener sectors on 15 of 19.
+  **Chosen:** GICS from IWV where it covers a stock, Nasdaq's screener
+  sector otherwise, with each label's source recorded and the effect
+  measured monthly through dry-run and paper trading.
 - **Universe parity study first** (research, before any build): for each
   month of 2016–2026, compare the 25 names this approach would pick with
   the backtest's own picks, and the return difference.
@@ -465,7 +472,7 @@ so Pro's margin rate does not help them.
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
 | 0 | Owner decisions D5 and D7 (D6 decided 2026-10-15); the broker-adapter ADR (0025, accepted 2026-10-15); this plan reviewed (owner, and an independent review on 2026-10-15) | Done except D5 and D7, which must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
-| 1 | Universe parity study (research, QuantConnect free) | IWB tested and failed (2026-10-15); D8 builds the universe from all US listings. Open until: the data source is chosen, the D8 rule's recent-months comparison with QuantConnect's universe is recorded (section 4), and the sector check is done |
+| 1 | Universe parity study (research, QuantConnect free) | IWB tested and failed (2026-10-15); D8 builds the universe from all US listings. Open until: the data source is chosen and the D8 rule's recent-months comparison with QuantConnect's universe is recorded (section 4). The sector check is done (2026-10-15) |
 | 2 | The target-weight strategy ADR (decision contract, risk limits, the risk-reducing definition in section 3); Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest passes its stated test |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
 | 4 | IBKR paper trading | 2–3 clean months |
