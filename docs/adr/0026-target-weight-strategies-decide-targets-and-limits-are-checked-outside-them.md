@@ -1,6 +1,6 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Proposed
+- Status: Accepted (2026-10-16, by the owner)
 - Date: 2026-10-15
 - Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (both amendments), ADR 0020, ADR 0022, ADR 0025
 
@@ -321,7 +321,7 @@ the module's own rules version and decision corpus (ADR 0016;
 | One live engine per account, or one engine for all three behind one gateway (ADR 0025 allows one adapter connection per engine) | **decided 2026-10-16: one engine per account**, each with its own adapter connection (its own client ID) to one IB Gateway, its own configuration, hash, journal and engine state. Market data both IRAs share is fetched once by a separate data step and recorded as the input each engine reads, so IBKR's request limits are not spent twice. A fault, Degraded or Halted state, or an upgrade touches one account only. No limit spans accounts. Depends on one IBKR username reaching all three accounts; if it cannot, each account gets its own gateway |
 | The owner's birth date enters the journal through the configuration, though it stays out of the repository | **decided 2026-10-16:** only the birth year and month, as a configured value (point 6) |
 | Backtest behaviours live trading will not copy: keeping the last book on short data, SPY treated as risk-on with fewer than 200 closes, a lookback window that shifts across a gap (`defensive_v2.py:269-291`); ties in the ranking (323); a zero volatility weighted as 1 (76); RSI(2)'s dependence on its warm-up seed (`template.py:54-55`) | measured by the parity tests, which report each difference; none is copied into live code without a decision |
-| Excess Liquidity thresholds: `plan.md` says "their own hash"; this ADR puts them in the account configuration's one hash | the plan is read as "part of the configuration hash"; corrected there when this ADR is accepted |
+| Excess Liquidity thresholds: `plan.md` says "their own hash"; this ADR puts them in the account configuration's one hash | corrected in `plan.md` on acceptance (2026-10-16): part of the account configuration's one hash |
 
 ## Alternatives rejected
 

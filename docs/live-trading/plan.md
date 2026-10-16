@@ -141,7 +141,8 @@ Vanguard's anchors, which is 10% until 40 and 30.8% at 53.
   between the two mixes in every case
   (`docs/research/glide-path-2026-10.md`).
 
-The schedule is configuration with its own hash (ADR 0016), so a change is
+The schedule is part of the account configuration and its one hash (ADR
+0016; ADR 0026, point 6), so a change is
 recorded, never silent.
 
 **Boost** (`boost/template.py`, SPY, BOOST_SIZE 1.5, RSI_ENTRY 10,
@@ -368,7 +369,8 @@ Lightsail VM (Ubuntu, $12/month, US East)
     owner; the sale is journalled like any other order;
   - **no reading for 30 minutes** while the market is open counts as
     urgent.
-  The thresholds are configuration with their own hash (ADR 0016). The
+  The thresholds are part of the account configuration and its one hash
+  (ADR 0016; ADR 0026, point 6). The
   runbook, `docs/runbooks/margin-warning.md`, is written in Phase 3 with
   the action, who acts (the owner), and when the alarm clears (back above
   40%). It is rehearsed in paper trading before Phase 5.
