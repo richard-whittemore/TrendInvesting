@@ -123,6 +123,11 @@ backtest runs on their servers.
   only: the combination plus a half-IEF/SHY bond sleeve in one account. Its
   share follows the owner's age schedule from a chosen starting age, or is
   held fixed for the comparison mixes.
+- `sectors/` — the sector-label check (`docs/live-trading/plan.md`,
+  section 4). `snapshot.py`, run once on QuantConnect, logs the backtest's
+  universe on one date with each stock's Morningstar sector; `compare.py`,
+  local, sets those against the GICS sectors in an iShares holdings file
+  and lists the disagreements. Tested by `sectors/test_sectors.py`.
 - `boost/multi.py` — Boost's rule, unchanged, on each fund of a blend at
   once (US large, mid and small caps, optionally with developed markets
   outside the US), each fund boosted on its own signal; `bh` is the same
