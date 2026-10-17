@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -337,5 +338,43 @@ func TestSamePathResolvesEachDirectoryAsTheFileSystemDoes(t *testing.T) {
 		if got := samePath(tc.a, tc.b); got != tc.want {
 			t.Errorf("%s: samePath(%s, %s) = %v, want %v", tc.name, tc.a, tc.b, got, tc.want)
 		}
+	}
+}
+
+// TestCreateLogFileFlushesTheDirectoryThatHoldsTheLog: a ".." after a
+// symbolic link climbs from the link's target, so link/../run.log is created
+// in the target's parent. The directory flushed must be that one, resolved
+// as spelled, not the link's parent that cleaning the path would name. The
+// link's parent is made unreadable, so flushing it fails while flushing the
+// log's own directory succeeds.
+func TestCreateLogFileFlushesTheDirectoryThatHoldsTheLog(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions and symbolic links differ on Windows")
+	}
+	root := t.TempDir()
+	nested := filepath.Join(root, "other", "nested")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatalf("make the link's target: %v", err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(nested, link); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	// Traversable but not readable: a path through root still resolves,
+	// but root itself cannot be opened to be flushed.
+	if err := os.Chmod(root, 0o300); err != nil {
+		t.Fatalf("make the link's parent unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
+	sep := string(filepath.Separator)
+	path := link + sep + ".." + sep + "run.log"
+
+	file, err := createLogFile(path)
+	if err != nil {
+		t.Fatalf("createLogFile(%s) = %v, want the log created and its own directory flushed", path, err)
+	}
+	_ = file.Close()
+	if _, err := os.Stat(filepath.Join(root, "other", "run.log")); err != nil {
+		t.Fatalf("the log is not in the link target's parent: %v", err)
 	}
 }

@@ -43,8 +43,8 @@ Three accepted or proposed rules need more than that:
 - ADR 0026 §5: a restart reads its state from the durable journal and never
   recomputes it from a fresh window of broker data.
 
-#151 weighed three shapes: an incremental journal, a second durability record
-beside the journal, and a journal rolled on a fixed boundary.
+Issue #151 weighed three shapes: an incremental journal, a second durability
+record beside the journal, and a journal rolled on a fixed boundary.
 
 ## Decision
 
