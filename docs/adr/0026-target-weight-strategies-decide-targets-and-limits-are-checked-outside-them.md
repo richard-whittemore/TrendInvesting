@@ -360,3 +360,53 @@ the module's own rules version and decision corpus (ADR 0016;
 - **Journal.** Live use needs a durable, streamed journal (#151). ADR 0017's
   one-pass, in-memory write reopens for live runs.
 - No code exists yet; Phase 2 implements this, test first.
+
+## Amendment (2026-10-17, owner decision, #352 and #357): readings and planner choices
+
+The owner accepted the following as built (slice 5, PR #353; slice 2,
+PR #358). Readings 1 to 4 and 7 to 10 of the ADR 0019 amendment of the same
+date (the sale back to 98%) are stated there; this amendment states the
+ones that belong here.
+
+### From #352
+
+- **The urgent Excess Liquidity sale (point 4) goes once per urgent alarm.**
+  Its client identifier derives from the alarm decision, so one alarm
+  episode sells once. It has no unknown-working-sell check; its sizing nets
+  every working sell, so it cannot open a short.
+- **Risk-reducing orders (point 3) are not counted toward N.** They are
+  exempt from the order count, order size and price band, and do not add to
+  the count that later orders are checked against.
+- **New event types.** `account.broker.snapshot` (the single IBKR snapshot
+  ADR 0019's sale is sized from), `risk.margin.alarm` and
+  `risk.sale.withheld` join the safety types in Consequences beside
+  `operator.kill-switch`, each under ADR 0015.
+
+### From #357
+
+- **Buy scaling always fits the budget (replaces the Scaling rule in point
+  2).** With `max_fees_per_order` above zero, scaling by
+  min(1, budget ÷ worst-case cost) can still leave a total over the budget,
+  because the fee allowance does not shrink with quantity. The rule is: if
+  the worst-case total (limit price × quantity, plus the fee allowance per
+  order) exceeds the budget, scale every buy by
+  (budget − n × fee allowance) ÷ Σ(quantity × limit price), n being the
+  number of buys, and round toward zero. The result fits the budget with
+  worst-case fees included. With a $0 allowance this is the earlier
+  formula.
+- **A new rebalance is withheld while an earlier one's orders are working.**
+  The decision is withheld with reason `rebalance-in-progress` while any
+  order of an earlier rebalance is not terminal. It is the live form of
+  point 5's "a restart mid-rebalance sends nothing until the owner clears
+  it", and it makes the planner's working-sell input empty at plan time.
+- **Execution reports for target-weight accounts are parallel versions, not
+  bumps.** `execution.fill` v5 (`TargetWeightFillPayload`) and
+  `execution.order.lifecycle` v2 (`LimitOrderLifecyclePayload`) sit beside
+  the Turtle's fill v4 and lifecycle v1, joined by client order ID. The
+  Turtle reducer still reads v1 and v4; the target-weight engine reads v2
+  and v5. This supersedes the Consequences bullet that describes changing
+  these types by a version bump.
+- **The per-order fee allowance is $2.00**, pending confirmation in paper
+  trading (`docs/research/commissions-30k-2026-10.md`): above every observed
+  $30k average ($1.03 to $1.49), below the $2.50 that 500 shares would
+  cost.

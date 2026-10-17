@@ -292,3 +292,54 @@ need to.
 - **Nothing else changes.** Every other order on the named instrument stays
   frozen, and the account stays Degraded until recovery. It does not apply
   to the Turtle reducer or to the IRAs.
+
+## Amendment (2026-10-17, owner decision, #352): eleven readings of the sale back to 98%
+
+The owner accepted eleven readings that slice 5 (#323, PR #353) built where
+the 2026-09-24, 2026-10-15 and 2026-10-16 amendments and ADR 0026 were
+ambiguous. They are rules from here on. Readings 5, 6 and 11 belong to
+ADR 0026 and are stated in its amendment of the same date; they are listed
+here so that all eleven are in one place.
+
+1. **Sizing never takes exposure below 98%, even with a working sell.** The
+   sale's quantity is the smallest of three bounds: what reaches 98%
+   (holding − keep); holding − every working or pending sell; and
+   holding − every working or pending sell − keep. The third bound means a
+   sell of ours that is still working (Boost's released exit, say) and the
+   sale together never take exposure below 98%, whichever fills.
+2. **The kill switch does not suppress the sale.** With the kill switch
+   engaged (ADR 0026 point 3), Boost's exit firing, or the Excess Liquidity
+   alarm turning urgent, still produces the one sale back to 98%, in any
+   engine state. It is attempted once per engagement; engaging again while
+   engaged is the same engagement.
+3. **Degraded to Halted is one incident.** An incident runs from the first
+   engine-state record that leaves Normal until recovery. Moving from
+   Degraded to Halted does not start another, so there is one sale per
+   instrument for the whole episode.
+4. **A withheld sale counts as the attempt when it needs a person.** If no
+   order is sent because the broker's values could not be read, or a working
+   sell is unknown, the sale counts as attempted and is never retried
+   automatically; the alert asks the owner to act by hand, and a later
+   automatic sale could duplicate the owner's. If nothing was sent because
+   there was nothing to sell (exposure already at or below 98%), it is not
+   an attempt.
+5. **The urgent Excess Liquidity sale goes once per urgent alarm** (ADR 0026
+   amendment, 2026-10-17).
+6. **Risk-reducing orders are not counted toward N** (ADR 0026 amendment,
+   2026-10-17).
+7. **"The strategy's own exit fires"** means a sell the strategy planned
+   that the gate refused because the account is Halted, Degraded on the
+   instrument, or under the kill switch.
+8. **An unknown working sell is per instrument.** It blocks the sale on that
+   instrument only, matching CONTAINMENT REQUIRED.
+9. **"98%" is the configured `InvestedFraction`**, the unlevered weight (0.98
+   for Boost). The sale keeps ceil(`InvestedFraction` × net liquidation ÷
+   mark) shares.
+10. **A Degraded sell above the broker quantity is refused, not resized.**
+    The gate refuses it (`broker-holding`) and the account degrades further
+    as ADR 0026 point 4 says. The planner, not the gate, chooses quantities.
+11. **New event types** `account.broker.snapshot`, `risk.margin.alarm` and
+    `risk.sale.withheld` are adopted (ADR 0026 amendment, 2026-10-17).
+    `account.broker.snapshot` carries the observed side that
+    `account.reconciliation` also needs; #227 folds one into the other or
+    references it.

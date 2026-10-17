@@ -593,5 +593,15 @@ only after CodeRabbit and Greptile findings are addressed.
   worst drawdowns of 46.05% and 40.47% against the recorded 34.0% and 31.0%;
   the cause is unresolved and under investigation in #403. The figures this
   plan cites are unchanged until then, and parity (#324) waits on #403.
+- **D9** Slice 5's eleven readings of ADR 0019 and ADR 0026 (the sale back
+  to 98%, kill switch, incidents, order count, event types): **approved as
+  built** (decided 2026-10-17, #352; ADR 0019 and ADR 0026 amendments).
+- **D10** Slice 2's planner choices (budget-fitting buy scaling,
+  `rebalance-in-progress`, parallel execution-report versions, a $2.00
+  per-order fee allowance pending paper trading): **approved as built**
+  (decided 2026-10-17, #357; ADR 0026 amendment).
+- **D11** The fresh-run approval input `operator.run.approved`: **accepted**
+  as specified in PR #414 (decided 2026-10-17, #365); ADR 0027 records it
+  when that PR merges.
 - Account opening, funding, rollovers and the Lightsail sign-up are the
   owner's to do; nothing here signs up for or pays for anything.
