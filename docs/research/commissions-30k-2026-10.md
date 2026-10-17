@@ -41,6 +41,12 @@ The four variants were run once each on 2026-10-17 (QuantConnect project
 drawdown and fee total, and report the result as the combined effect of
 account size and fees.
 
+Settings per variant: each variant is its base script with `CASH=30000` and
+the `InteractiveBrokersBrokerage` model set by the script (see Fee model);
+the `$1M` baselines keep their recorded `CASH`. This note does not archive
+the rendered settings of each run; the backtest IDs in the table below
+identify the four $30k runs in project 37096083.
+
 ## Results
 
 The $1,000,000 baselines are the 2026-10-16 runs recorded in
@@ -61,9 +67,25 @@ advice.
 SPY: 1999-2015 4.91% / 55.17%; 2016-2026-06 15.19% / 33.72%.
 
 Data state: the Fundamentals counters equal the $1M baselines pairwise (FU
-194,735 / 126,722 and F 194,862 / 126,718), so all eight runs are on the same
-QuantConnect data, the 2026-10-16 state (see
-`docs/research/r4-rerun-discrepancy-2026-10.md`).
+194,735 / 126,722 and F 194,862 / 126,718). These matches support, but do not
+prove, that the $30k runs used the baselines' 2026-10-16 data state. The
+counters count readable nonzero fields; they do not compare the underlying
+values, names, sectors or prices, and the referenced
+`docs/research/r4-rerun-discrepancy-2026-10.md` ties the baselines, not these
+four 2026-10-17 runs, to that state. It does show that the revised state was
+unchanged on 2026-10-17 (its rerun pair matches statistic for statistic).
+
+### Deltas ($30k minus $1M)
+
+| Pair | CAGR (pp) | MaxDD (pp) | Ratio | Orders | Fees |
+| --- | --- | --- | --- | --- | --- |
+| FU, 1999-2015 | -0.28 | -0.42 | -0.0032 | -43 | -$201,729.66 |
+| FU, 2016-2026-06 | +0.21 | -2.25 | +0.0342 | -38 | -$30,244.37 |
+| F, 1999-2015 | -0.31 | -0.83 | -0.0017 | -41 | -$154,680.51 |
+| F, 2016-2026-06 | +0.09 | -1.77 | +0.0249 | -43 | -$30,566.81 |
+
+A negative MaxDD delta is a shallower drawdown. The fee deltas mostly reflect
+the account size, not the commission rate.
 
 ### Fee per order
 
@@ -78,11 +100,12 @@ QuantConnect data, the 2026-10-16 state (see
 
 A $30k account differs from $1M by -0.28 and -0.31 pp/yr in the tuning years
 (FU and F, 1999-2015) and +0.21 and +0.09 pp/yr held-out (2016-2026-06), with
-slightly shallower drawdowns. The difference bundles the $1 commission floor
+shallower drawdowns (-0.42, -2.25, -0.83 and -1.77 pp). The difference bundles the $1 commission floor
 with whole-share sizing, visible as higher avgCash (15% vs 14% in-sample, 5.5%
-vs 3.4% held-out) and more retried buys. The independent review's 0.6-1.2
-pp/yr estimate for commission drag is not borne out at this account size. A
-matched no-fee run would separate the two effects and was not run.
+vs 3.4% held-out) and more retried buys. These comparisons cannot confirm
+or reject the independent review's 0.6-1.2 pp/yr estimate for commission
+drag: both account sizes paid commissions, and holdings differ. A matched
+no-fee run would separate the two effects and was not run.
 
 ### Recommendation
 
