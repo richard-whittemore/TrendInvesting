@@ -30,6 +30,7 @@ type item struct {
 	lifecycle *event.OrderLifecyclePayload
 	engine    *event.EngineStatePayload
 	snapshot  *event.AccountPositionsSnapshotPayload
+	renamed   *event.InstrumentSymbolChangedPayload
 }
 
 type seenFill struct {
@@ -64,6 +65,9 @@ func decode(j Journal) ([]item, error) {
 		case event.OrderLifecycleEventType:
 			it.lifecycle = new(event.OrderLifecyclePayload)
 			err = read(env, []uint32{event.OrderLifecycleSchemaVersion}, it.lifecycle)
+		case event.InstrumentSymbolChangedEventType:
+			it.renamed = new(event.InstrumentSymbolChangedPayload)
+			err = read(env, []uint32{event.InstrumentSymbolChangedSchemaVersion}, it.renamed)
 		case event.EngineStateEventType:
 			it.engine = new(event.EngineStatePayload)
 			err = read(env, []uint32{event.EngineStateSchemaVersion, event.EngineStateScopedVersion}, it.engine)

@@ -9,6 +9,9 @@ import (
 // Orders lists the orders the run planned, released and refused, and the
 // order lifecycle changes it recorded, for the records that pass f.
 func Orders(journals []Journal, f Filter) (Table, error) {
+	if err := distinct(journals); err != nil {
+		return Table{}, err
+	}
 	t := Table{Columns: []string{"journal", "seq", "time", "account", "instrument", "event", "side", "quantity", "price", "note"}}
 	for _, j := range journals {
 		items, err := decode(j)
@@ -53,6 +56,9 @@ func Orders(journals []Journal, f Filter) (Table, error) {
 // change with no instrument scope covers the whole engine, so an instrument
 // filter keeps it.
 func Refusals(journals []Journal, f Filter) (Table, error) {
+	if err := distinct(journals); err != nil {
+		return Table{}, err
+	}
 	t := Table{Columns: []string{"journal", "seq", "time", "account", "instrument", "event", "reason", "detail"}}
 	for _, j := range journals {
 		items, err := decode(j)

@@ -85,6 +85,9 @@ func money(v float64) string {
 
 // Fills lists every fill that passes f, in journal order.
 func Fills(journals []Journal, f Filter) (Table, error) {
+	if err := distinct(journals); err != nil {
+		return Table{}, err
+	}
 	t := Table{Columns: []string{"journal", "seq", "time", "instrument", "kind", "quantity", "price", "commission"}}
 	for _, j := range journals {
 		items, err := decode(j)
@@ -136,6 +139,9 @@ func (t tally) row(instrument, year string) []string {
 // instrument in each calendar year (UTC, by the fill's own time), followed by
 // a TOTAL row over everything that passed f.
 func Totals(journals []Journal, f Filter) (Table, error) {
+	if err := distinct(journals); err != nil {
+		return Table{}, err
+	}
 	type key struct {
 		instrument string
 		year       int

@@ -66,6 +66,15 @@ func rebuild(j Journal) ([]step, []check, error) {
 			change := signedQuantity(it.fill.Kind, it.fill.Quantity)
 			book[it.fill.InstrumentID] += change
 			steps = append(steps, step{it, it.fill.InstrumentID, change, book[it.fill.InstrumentID]})
+		case it.renamed != nil:
+			// The holding continues under the new id without a fill (ADR
+			// 0024), in every account that holds it.
+			for _, book := range books {
+				if q, ok := book[it.renamed.InstrumentID]; ok {
+					book[it.renamed.NewInstrumentID] += q
+					delete(book, it.renamed.InstrumentID)
+				}
+			}
 		case it.snapshot != nil:
 			reported := map[string]int64{}
 			for _, p := range it.snapshot.Positions {
@@ -99,6 +108,9 @@ func rebuild(j Journal) ([]step, []check, error) {
 // rebuilt from the account's baseline snapshot. The running position never
 // depends on f: a filter only chooses which rows to show.
 func Positions(journals []Journal, f Filter) (Table, error) {
+	if err := distinct(journals); err != nil {
+		return Table{}, err
+	}
 	t := Table{Columns: []string{"journal", "seq", "time", "account", "instrument", "kind", "change", "position"}}
 	for _, j := range journals {
 		steps, _, err := rebuild(j)
@@ -131,6 +143,9 @@ func (e *DisagreementError) Error() string {
 // lists every comparison and, when any disagree, returns a *DisagreementError
 // along with the table.
 func Reconcile(journals []Journal, f Filter) (Table, error) {
+	if err := distinct(journals); err != nil {
+		return Table{}, err
+	}
 	t := Table{Columns: []string{"journal", "seq", "time", "account", "instrument", "fills", "snapshot", "status"}}
 	disagreements := 0
 	for _, j := range journals {

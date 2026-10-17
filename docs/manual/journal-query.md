@@ -37,13 +37,19 @@ Reports:
 | `fills` | each fill with quantity, price and commission |
 | `refusals` | refused orders and engine-state changes (degraded, halted) |
 | `totals` | fills, shares bought and sold, and commission per instrument per year, plus a TOTAL row |
-| `positions` | the holding after each fill, rebuilt from the fills |
+| `positions` | the holding after each fill, rebuilt from the fills; a recorded symbol change moves the holding to the new id |
 | `reconcile` | whether the fills agree with the account snapshots recorded in the journal |
 
 Flags, all optional: `-account A1`, `-instrument AAA`, `-from 2026-01-01`,
 `-to 2026-12-31` (UTC dates, both ends inclusive of the whole day) and
-`-format text|csv|json` (default `text`). You can name several journals; the
-first column shows which file each row came from.
+`-format text|csv|json` (default `text`). You can name several journals. The
+`orders`, `fills`, `refusals`, `positions` and `reconcile` reports show the
+source journal in the first column; `totals` combines all selected journals.
+
+Name one file per run. A run resumed from a crash writes a new log that begins
+with every record of the log it resumed, so naming both would count that
+history twice; the tool refuses such files and names the two that overlap.
+Independent runs may be named together.
 
 ## Example questions
 

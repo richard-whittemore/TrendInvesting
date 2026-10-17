@@ -46,3 +46,27 @@ func Load(name string, data []byte) (Journal, error) {
 	header, records, _ := journal.Read(bytes.NewReader(data))
 	return Journal{Name: name, Header: header, Records: records}, nil
 }
+
+// distinct refuses journals that share a record. A resumed run's log begins
+// with every committed record of the run it resumes, so naming both would
+// report that history twice; the tool will not guess which copy to keep, and
+// asks for one file per run instead. Records are the same when their
+// envelope id, type and payload hash are.
+func distinct(journals []Journal) error {
+	type id struct{ id, typ, hash string }
+	seen := map[id]int{}
+	for n, j := range journals {
+		own := map[id]bool{}
+		for _, r := range j.Records {
+			k := id{r.Envelope.ID, r.Envelope.Type, r.Envelope.PayloadHash}
+			if first, ok := seen[k]; ok && first != n {
+				return fmt.Errorf("%s and %s overlap: both hold record %q (%s), as a resumed run's log and the run it resumed do; name one file per run so no record is counted twice", journals[first].Name, j.Name, k.id, k.typ)
+			}
+			own[k] = true
+		}
+		for k := range own {
+			seen[k] = n
+		}
+	}
+	return nil
+}

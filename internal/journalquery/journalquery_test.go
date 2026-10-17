@@ -513,3 +513,58 @@ func TestADurableLogWithNothingCommittedReportsNoRows(t *testing.T) {
 		t.Fatalf("empty log: %v %v", f.Rows, err)
 	}
 }
+
+func symbolChange(from, to string, when time.Time) rec {
+	return dec(event.InstrumentSymbolChangedEventType, event.InstrumentSymbolChangedSchemaVersion, when, event.InstrumentSymbolChangedPayload{
+		InstrumentID: from, NewInstrumentID: to, CorporateActionID: "ca-1", EffectiveAt: when,
+		Rule: event.RuleSymbolChangeCarriesInstrumentState, ADR: event.ADRSymbolChangeCarriesInstrumentState,
+	})
+}
+
+func TestARecordedSymbolChangeMovesTheHoldingToTheNewId(t *testing.T) {
+	d := at(time.March, 2)
+	data := build(t,
+		snap(at(time.January, 1), event.AccountPosition{InstrumentID: "OLD", Quantity: 100}),
+		symbolChange("OLD", "NEW", d),
+		fillRec(event.FillKindExit, "NEW", 100, 0, d),
+		snap(at(time.March, 3)),
+	)
+	js := []journalquery.Journal{load(t, "j", data)}
+	pos, err := journalquery.Positions(js, journalquery.Filter{})
+	if err != nil || len(pos.Rows) != 1 || cell(pos, 0, "instrument") != "NEW" || cell(pos, 0, "position") != "0" {
+		t.Fatalf("positions after a rename: %v %v", pos.Rows, err)
+	}
+	rec, err := journalquery.Reconcile(js, journalquery.Filter{})
+	if err != nil {
+		t.Fatalf("a correct snapshot disagreed after a rename: %v %v", rec.Rows, err)
+	}
+	for _, r := range rec.Rows {
+		if r[len(r)-1] != "ok" {
+			t.Errorf("row %v", r)
+		}
+	}
+}
+
+func TestOverlappingRunFilesAreRefusedNotCountedTwice(t *testing.T) {
+	d := at(time.March, 2)
+	one, two := fillInput(validFill("f-1", 5, d)), fillInput(validFill("f-2", 3, d))
+	// A resumed run's file starts with every record of the run it resumes.
+	first := load(t, "first.log", build(t, one))
+	resumed := load(t, "resumed.log", build(t, one, two))
+	// An independent run shares no record, even where its ids repeat.
+	other := load(t, "other.log", build(t, fillInput(validFill("g-1", 9, d))))
+
+	reports := map[string]func([]journalquery.Journal, journalquery.Filter) (journalquery.Table, error){
+		"orders": journalquery.Orders, "fills": journalquery.Fills, "refusals": journalquery.Refusals,
+		"positions": journalquery.Positions, "reconcile": journalquery.Reconcile, "totals": journalquery.Totals,
+	}
+	for name, report := range reports {
+		_, err := report([]journalquery.Journal{first, resumed}, journalquery.Filter{})
+		if err == nil || !strings.Contains(err.Error(), "first.log") || !strings.Contains(err.Error(), "resumed.log") || !strings.Contains(err.Error(), "overlap") {
+			t.Errorf("%s: overlapping files were not refused by name: %v", name, err)
+		}
+		if _, err := report([]journalquery.Journal{first, other}, journalquery.Filter{}); err != nil {
+			t.Errorf("%s: independent runs were refused: %v", name, err)
+		}
+	}
+}
