@@ -245,11 +245,11 @@ Lightsail VM (Ubuntu, $12/month, US East)
     negative, no order is sent either (reasons `stale-broker-snapshot` and
     `non-positive-broker-values`), but the attempt is not used up: while
     the exit or the urgent alarm still stands, the next good snapshot
-    re-evaluates the sale. The exit stands while any cause that refused
-    the sell still applies to the instrument (the kill switch engaged, the
-    account Halted, or Degraded on the instrument), so a hand-off from the
-    engagement to an incident does not end it; Degraded to Halted is the
-    same incident. It also ends when a decision that is not withheld no
+    re-evaluates the sale. The exit stands while any of the causes that
+    refuse a sell (the kill switch engaged, the account Halted, or Degraded
+    on the instrument) still applies, whichever fired it, so a hand-off in
+    either direction between engagement and incident does not end it;
+    Degraded to Halted is the same incident. It also ends when a decision that is not withheld no
     longer plans the sell. Once neither stands, the withheld sale lapses: it is
     journalled with reason `lapsed` and reported in the daily summary,
     not paged (ADR 0019 reading 1, "The snapshot rule", and readings 2
