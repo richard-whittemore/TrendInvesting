@@ -14,7 +14,7 @@ import datetime as dt
 import logging
 import sys
 
-from . import encode, history, massive, sectors, steps
+from . import encode, history, massive, nyse_calendar, sectors, steps
 
 
 def parse(argv, now=steps._now):
@@ -37,6 +37,8 @@ def parse(argv, now=steps._now):
     ap.add_argument("--run-id", help="encode: the run's correlation id")
     ap.add_argument("--first-sequence", type=int, default=2, help="encode: sequence of the first envelope")
     ap.add_argument("--stream", help="encode: the new file the envelopes are written to")
+    ap.add_argument("--engine", choices=encode.ENGINES, default="momentum",
+                    help="encode: the engine whose inputs are written (boost: one instrument's bars and closes)")
     args = ap.parse_args(argv)
     if args.settle_minutes < 0:
         ap.error("--settle-minutes must not be negative")
@@ -58,11 +60,15 @@ def main(argv):
                 args.out, args.first, args.asof,
                 encode.Identity(args.configuration_hash, args.strategy_version, args.run_id),
                 required=split(args.instruments), optional=split(args.optional),
-                universe_members=args.universe_members, base=args.base, first_sequence=args.first_sequence)
+                universe_members=args.universe_members, base=args.base, first_sequence=args.first_sequence,
+                engine=args.engine)
             print(encode.write_stream(args.stream, envelopes))
             return 0
         if args.what == "sectors":
-            print("\n".join(sectors.record_sectors(args.out, args.asof)))
+            day = args.asof
+            while not nyse_calendar.is_trading_day(day):
+                day -= dt.timedelta(days=1)
+            print("\n".join(sectors.record_sectors(args.out, day, settle=settle)))
             return 0
         client = massive.Client(massive.load_key(secrets_file=args.secrets_file))
         if args.what == "backfill":

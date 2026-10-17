@@ -36,6 +36,17 @@ the span (MissingData), two different copies of one action or two
 disagreeing recordings of a session (Conflict), a malformed bar or row
 (Malformed), or anything adjust.forward_factors cannot adjust exactly.
 
+``engine`` picks the inputs written. ``"momentum"`` (the default) writes
+all of the above. ``"boost"`` writes only the bars of its one required
+instrument and the session closes: the Boost handler reads one instrument
+and refuses every other input type (targetweight.Handler, "Boost's inputs,
+in stream order"), so it gets no calendar and no universe snapshot.
+
+The stream file is written in full or not at all: a temporary file in the
+same folder is synced, then hard-linked to the final name, which must not
+exist, and the folder is synced (ADR 0018, as record.write does). A failed
+write leaves nothing under the final name, so a retry can write it.
+
 Envelopes carry the run identity the caller gives (each engine's own
 configuration hash and strategy version) and contiguous sequences from
 ``first_sequence``; a composition that interleaves another producer's
@@ -47,6 +58,7 @@ import hashlib
 import json
 import math
 import os
+import tempfile
 
 from . import adjust, history, nyse_calendar, record, sectors
 from .massive import MarketDataError
@@ -59,6 +71,8 @@ CALENDAR = ("market.session.calendar", 1)     # SessionCalendarSchemaVersion
 UNIVERSE = ("market.universe.snapshot", 1)    # UniverseSnapshotSchemaVersion
 BAR = ("market.bar.completed", 2)             # CompletedBarAdjustedVersion
 SESSION_CLOSED = ("market.session.closed", 1)  # SessionClosedSchemaVersion
+
+ENGINES = ("momentum", "boost")
 
 Identity = collections.namedtuple("Identity", "configuration_hash strategy_version run_id")
 
@@ -197,13 +211,20 @@ class _Stream:
 
 
 def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), optional=(),
-           universe_members=False, base=None, ahead=1, first_sequence=2, max_sector_age_days=7):
+           universe_members=False, base=None, ahead=1, first_sequence=2, max_sector_age_days=7,
+           engine="momentum"):
     """The envelopes for first..last, as described above. ``required``
     instruments must have a bar every session; ``optional`` ones (and, with
     ``universe_members``, every type-CS ticker of the span's universe
     recordings) are written where they traded. ``base`` (default ``first``)
     is the session the adjusted views are based at; keep it fixed for the
-    life of an engine's journal."""
+    life of an engine's journal. ``engine`` is "momentum" or "boost", as
+    described above."""
+    if engine not in ENGINES:
+        raise ValueError("engine {!r} is not one of {}".format(engine, ", ".join(ENGINES)))
+    boost = engine == "boost"
+    if boost and (len(required) != 1 or optional or universe_members):
+        raise ValueError("a boost stream names exactly one required instrument and nothing else")
     base = base or first
     if base > first or not nyse_calendar.is_trading_day(base):
         raise ValueError("base {} must be a session on or before the first {}".format(base, first))
@@ -247,9 +268,10 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     stream = _Stream(identity, first_sequence)
     through = nyse_calendar.sessions_after(last, ahead)[-1]
     opening = _utc(nyse_calendar.session_close(span[0].day).astimezone(dt.timezone.utc))
-    stream.add(CALENDAR, "marketdata:calendar:{}:{}".format(span[0].day, through), opening, opening,
-               {"source": CALENDAR_SOURCE,
-                "sessions": [d.isoformat() for d in nyse_calendar.sessions(span[0].day, through)]})
+    if not boost:
+        stream.add(CALENDAR, "marketdata:calendar:{}:{}".format(span[0].day, through), opening, opening,
+                   {"source": CALENDAR_SOURCE,
+                    "sessions": [d.isoformat() for d in nyse_calendar.sessions(span[0].day, through)]})
     for s in span:
         end, session = _utc(nyse_calendar.session_close(s.day).astimezone(dt.timezone.utc)), s.day.isoformat()
         ids = sorted(t for t in wanted if t in s.bars)
@@ -264,7 +286,7 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
                 "raw": _view("raw", r, 1.0, 1.0),
                 "adjusted": _view("split-and-dividend-adjusted", r, total_m, split_m),
                 "adjusted_base": base.isoformat()})
-        if s.universe is not None:
+        if s.universe is not None and not boost:
             stream.add(UNIVERSE, "marketdata:universe:{}".format(session), end,
                        _fetched_at(s.universe, "universe " + session),
                        {"session": session, "source": s.universe.get("source"),
@@ -275,10 +297,23 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
 
 
 def write_stream(path, envelopes):
-    """Writes the envelopes one per line to a new file (never overwritten)."""
-    with open(path, "x") as f:
-        for e in envelopes:
-            f.write(json.dumps(e, separators=(",", ":"), allow_nan=False) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
+    """Writes the envelopes one per line to a new file, never overwritten,
+    in full or not at all (see above). Raises FileExistsError if ``path``
+    exists, and record.NotDurable if the folder sync fails after the file is
+    installed."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=directory, suffix=".part")
+    try:
+        with os.fdopen(fd, "w") as f:
+            for e in envelopes:
+                f.write(json.dumps(e, separators=(",", ":"), allow_nan=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.link(tmp, path)   # fails if the stream exists
+    finally:
+        os.remove(tmp)
+    try:
+        record._sync_dir(directory)
+    except OSError as e:
+        raise record.NotDurable(path, e) from None
     return path

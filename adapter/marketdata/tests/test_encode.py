@@ -60,11 +60,12 @@ def build(d, *, splits_windows=(("2026-11-01", "2026-11-27"), ("2026-11-20", "20
                      "fetched_at": stamp(LAST),
                      "rows": [{"id": "V1", "ticker": "CCC", "ex_dividend_date": "2026-11-27", "cash_amount": 1.0}]})
     if sector_session:
+        fetched = stamp(D.fromisoformat(sector_session))   # the evening of the labels' own session
         record.write(d, {"kind": "sectors-iwv", "source": sectors.IWV_SOURCE, "session": sector_session,
-                         "fetched_at": stamp(LAST), "url": sectors.IWV_URL, "as_of": "Nov 27, 2026",
+                         "fetched_at": fetched, "url": sectors.IWV_URL, "as_of": "Nov 27, 2026",
                          "body": iwv_csv(("AAA", "Information Technology", "Equity"), ("BBB", "Financials", "Equity"))})
         record.write(d, {"kind": "sectors-nasdaq", "source": sectors.NASDAQ_SOURCE, "session": sector_session,
-                         "fetched_at": stamp(LAST), "url": sectors.NASDAQ_URL,
+                         "fetched_at": fetched, "url": sectors.NASDAQ_URL,
                          "rows": json.loads(screener(("CCC", "Energy"), ("AAA", "Finance")))["data"]["rows"]})
 
 
@@ -203,6 +204,41 @@ class UniverseTest(unittest.TestCase):
         self.assertEqual(ids, ["AAA", "BBB", "CCC", "DDD", "IEF", "SPY"])
 
 
+class BoostStreamTest(unittest.TestCase):
+    """Boost reads one instrument's bars and the session closes, and refuses
+    any other input type (targetweight.Handler.Apply), so its stream carries
+    no calendar and no universe snapshot."""
+
+    def test_a_boost_stream_carries_only_the_one_instruments_bars_and_the_closes(self):
+        with tempfile.TemporaryDirectory() as d:
+            build(d)   # a universe is recorded for 11-30: it must not appear
+            stream = run(d, required=["SPY"], optional=[], engine="boost")
+        self.assertEqual([e["type"] for e in stream], ["market.bar.completed", "market.session.closed"] * 5)
+        self.assertEqual({e["payload"]["instrument_id"] for e in of(stream, "market.bar.completed")}, {"SPY"})
+        self.assertEqual([e["sequence"] for e in stream], list(range(2, 12)))
+
+    def test_a_boost_stream_names_exactly_one_required_instrument(self):
+        with tempfile.TemporaryDirectory() as d:
+            build(d)
+            for kw in ({"required": ["SPY", "IEF"], "optional": []}, {"required": ["SPY"], "optional": ["AAA"]},
+                       {"required": ["SPY"], "optional": [], "universe_members": True}):
+                with self.subTest(kw), self.assertRaises(ValueError):
+                    run(d, engine="boost", **kw)
+            with self.assertRaises(ValueError):
+                run(d, engine="turtle")
+
+    def test_the_cli_writes_a_boost_stream(self):
+        with tempfile.TemporaryDirectory() as d:
+            build(d)
+            out = os.path.join(d, "boost.jsonl")
+            status = cli.main(["encode", "--out", d, "--first", "2026-11-23", "--asof", "2026-11-30",
+                               "--instruments", "SPY", "--engine", "boost", "--configuration-hash", "hash-1",
+                               "--strategy-version", "momentum/test", "--run-id", "run-1", "--stream", out])
+            self.assertEqual(status, 0)
+            got = [json.loads(line) for line in Path(out).read_text().splitlines()]
+            self.assertEqual(got, run(d, required=["SPY"], optional=[], engine="boost"))
+
+
 class FailClosedTest(unittest.TestCase):
     def assertRefused(self, error, **build_kw):
         with tempfile.TemporaryDirectory() as d:
@@ -290,6 +326,16 @@ class ReplayTest(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 encode.write_stream(one, run(d))
 
+    def test_a_failed_write_leaves_no_file_and_a_retry_succeeds(self):
+        with tempfile.TemporaryDirectory() as d:
+            build(d)
+            stream, path = run(d), os.path.join(d, "stream.jsonl")
+            with self.assertRaises(ValueError):   # NaN is refused after the earlier lines were written
+                encode.write_stream(path, stream + [{"bad": float("nan")}])
+            self.assertEqual(sorted(f for f in os.listdir(d) if f.endswith((".jsonl", ".part"))), [])
+            encode.write_stream(path, stream)
+            self.assertEqual([json.loads(line) for line in Path(path).read_text().splitlines()], stream)
+
     def test_the_cli_encodes_without_a_key(self):
         with tempfile.TemporaryDirectory() as d:
             build(d)
@@ -311,7 +357,13 @@ class ReplayTest(unittest.TestCase):
                 mock.patch("marketdata.massive.load_key", side_effect=AssertionError("key loaded")), \
                 mock.patch("marketdata.sectors.record_sectors", return_value=["p"]) as rec:
             self.assertEqual(cli.main(["sectors", "--out", d, "--asof", "2026-11-30"]), 0)
-            rec.assert_called_once_with(d, D(2026, 11, 30))
+            rec.assert_called_once_with(d, D(2026, 11, 30), settle=dt.timedelta(minutes=60))
+
+    def test_the_sectors_command_records_the_last_trading_day_on_or_before_asof(self):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch("marketdata.sectors.record_sectors", return_value=["p"]) as rec:
+            self.assertEqual(cli.main(["sectors", "--out", d, "--asof", "2026-11-29", "--settle-minutes", "5"]), 0)
+            rec.assert_called_once_with(d, D(2026, 11, 27), settle=dt.timedelta(minutes=5))   # Sunday -> Friday
 
 
 class GoContractTest(unittest.TestCase):
@@ -330,6 +382,14 @@ class GoContractTest(unittest.TestCase):
             result = self.check(path)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("envelopes valid", result.stdout)
+
+    def test_a_boost_stream_satisfies_the_go_validators(self):
+        with tempfile.TemporaryDirectory() as d:
+            build(d)
+            path = os.path.join(d, "boost.jsonl")
+            encode.write_stream(path, run(d, required=["SPY"], optional=[], engine="boost"))
+            result = self.check(path)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_the_checker_refuses_a_stream_go_would_refuse(self):
         with tempfile.TemporaryDirectory() as d:

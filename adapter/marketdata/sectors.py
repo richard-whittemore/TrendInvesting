@@ -18,9 +18,16 @@ label from that source. The mapping is a judgment, not an official
 concordance; the recordings keep each source's own label.
 
 Neither source needs a key. Both responses are recorded whole (the iShares
-CSV text, the screener's rows), so the labels can be re-derived. A
-recording is written only when both sources answered usably; a source
-already recorded for the session is not fetched again into a new file.
+CSV text, the screener's rows), so the labels can be re-derived. Only the
+sources not yet recorded for the session are fetched, and nothing is
+written unless every one fetched answered usably.
+
+Both sources serve only today's file, so a session's labels are fetched
+while that session is the latest one: after its close plus the settle delay
+(steps.SETTLE) and before the next session's close. A past session is
+refused (Backdated) before any fetch, and ``latest`` refuses a recording
+whose fetch time falls outside its session's close-to-next-close window,
+so a backtest never reads labels taken after the fact.
 """
 import csv
 import datetime as dt
@@ -33,9 +40,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import record
+from . import nyse_calendar, record
 from .massive import MarketDataError
-from .steps import MissingData, _now, _stamp
+from .steps import SETTLE, MissingData, _now, _stamp, require_settled
 
 IWV_SOURCE = "ishares-iwv-gics"
 NASDAQ_SOURCE = "nasdaq-screener"
@@ -65,6 +72,11 @@ NASDAQ_SECTORS = {"Basic Materials": "Basic Materials", "Consumer Discretionary"
 
 class Unusable(MarketDataError):
     """A source answered with something that is not its usual file."""
+
+
+class Backdated(MarketDataError):
+    """Labels fetched for, or recorded under, a session that was no longer
+    the latest one when they were fetched."""
 
 
 def norm(ticker):
@@ -146,33 +158,50 @@ def labels(iwv, nasdaq):
     return out
 
 
-def _fetch(get, session, now):
-    iwv_text = get(IWV_URL)
-    as_of, _ = parse_iwv(iwv_text)
+def _fetch_iwv(get, day, stamp):
+    text = get(IWV_URL)
+    as_of, _ = parse_iwv(text)
+    return {"kind": "sectors-iwv", "source": IWV_SOURCE, "session": day, "fetched_at": stamp,
+            "url": IWV_URL, "as_of": as_of, "body": text}
+
+
+def _fetch_nasdaq(get, day, stamp):
     try:
-        nasdaq_body = json.loads(get(NASDAQ_URL))
+        body = json.loads(get(NASDAQ_URL))
     except ValueError:
         raise Unusable("the screener response is not JSON") from None
-    parse_nasdaq(nasdaq_body)
-    stamp, day = _stamp(now), session.isoformat()
-    return [{"kind": "sectors-iwv", "source": IWV_SOURCE, "session": day, "fetched_at": stamp,
-             "url": IWV_URL, "as_of": as_of, "body": iwv_text},
-            {"kind": "sectors-nasdaq", "source": NASDAQ_SOURCE, "session": day, "fetched_at": stamp,
-             "url": NASDAQ_URL, "rows": nasdaq_body["data"]["rows"]}]
+    parse_nasdaq(body)
+    return {"kind": "sectors-nasdaq", "source": NASDAQ_SOURCE, "session": day, "fetched_at": stamp,
+            "url": NASDAQ_URL, "rows": body["data"]["rows"]}
 
 
-def record_sectors(directory, session, get=http_get, now=_now):
-    """Fetches both sources and records each not yet recorded for
-    ``session``; returns the paths written. Writes nothing unless both
-    answered usably."""
-    written = []
-    for rec in _fetch(get, session, now):
-        path = os.path.join(directory, record.filename(rec))
+def _window(session):
+    """(from, until): a session's labels are fetched at or after its close
+    and before the next session's close."""
+    return nyse_calendar.session_close(session), nyse_calendar.session_close(nyse_calendar.sessions_after(session, 1)[0])
+
+
+def record_sectors(directory, session, get=http_get, now=_now, settle=SETTLE):
+    """Records each source not yet recorded for ``session``, fetching only
+    those; returns the paths written. ``session`` must be the latest NYSE
+    session settled by ``now`` (see above). Writes nothing unless every
+    source fetched answered usably."""
+    if not nyse_calendar.is_trading_day(session):
+        raise MarketDataError("{} is not an NYSE trading day".format(session))
+    require_settled(session, now, settle)
+    if now() >= _window(session)[1]:
+        raise Backdated("{} is no longer the latest session; the sources serve only today's files".format(session))
+    day = session.isoformat()
+    missing = []
+    for kind, fetch in (("sectors-iwv", _fetch_iwv), ("sectors-nasdaq", _fetch_nasdaq)):
+        path = os.path.join(directory, record.filename({"kind": kind, "session": day}))
         if os.path.exists(path):
             record.read(path)   # raises Corrupt rather than trusting a damaged file
-            continue
-        written.append(record.write(directory, rec))
-    return written
+        else:
+            missing.append(fetch)
+    stamp = _stamp(now)
+    fetched = [fetch(get, day, stamp) for fetch in missing]
+    return [record.write(directory, rec) for rec in fetched]
 
 
 def latest(directory, kind, session, max_age_days=7):
@@ -188,4 +217,13 @@ def latest(directory, kind, session, max_age_days=7):
     if (session - best[0]).days > max_age_days:
         raise MissingData("the latest {} recording, {}, is more than {} days before {}".format(
             kind, best[0], max_age_days, session))
-    return record.read(best[1])
+    rec = record.read(best[1])
+    try:
+        fetched = dt.datetime.strptime(rec.get("fetched_at"), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    except (TypeError, ValueError):
+        raise Backdated("{} has fetch time {!r}".format(best[1], rec.get("fetched_at"))) from None
+    start, until = _window(best[0])
+    if not start <= fetched < until:
+        raise Backdated("{} was fetched at {}, outside {}'s window {} to {}".format(
+            best[1], rec["fetched_at"], best[0], start.isoformat(), until.isoformat()))
+    return rec

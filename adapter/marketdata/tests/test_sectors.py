@@ -68,10 +68,13 @@ class ParseTest(unittest.TestCase):
                 sectors.parse_nasdaq(body)
 
 
-def records(iwv_rows, nasdaq_rows, session="2026-03-27"):
-    return ({"kind": "sectors-iwv", "source": sectors.IWV_SOURCE, "session": session, "fetched_at": "x",
+def records(iwv_rows, nasdaq_rows, session="2026-03-27", fetched_at=None):
+    """Fetched by default at 22:00 UTC on the session's own evening (its close
+    is 20:00 UTC in late March)."""
+    fetched_at = fetched_at or session + "T22:00:00Z"
+    return ({"kind": "sectors-iwv", "source": sectors.IWV_SOURCE, "session": session, "fetched_at": fetched_at,
              "url": sectors.IWV_URL, "as_of": "Mar 26, 2026", "body": iwv_csv(*iwv_rows)},
-            {"kind": "sectors-nasdaq", "source": sectors.NASDAQ_SOURCE, "session": session, "fetched_at": "x",
+            {"kind": "sectors-nasdaq", "source": sectors.NASDAQ_SOURCE, "session": session, "fetched_at": fetched_at,
              "url": sectors.NASDAQ_URL, "rows": json.loads(screener(*nasdaq_rows))["data"]["rows"]})
 
 
@@ -126,14 +129,43 @@ class RecordTest(unittest.TestCase):
                     sectors.record_sectors(d, D(2026, 3, 27), get=get, now=NOW)
                 self.assertEqual(os.listdir(d), [])
 
-    def test_a_rerun_writes_only_the_missing_recording(self):
+    def test_a_rerun_fetches_only_the_missing_source(self):
+        # IWV was recorded before the run stopped; its site is now down (403
+        # if asked), and the missing Nasdaq file is still recorded.
         with tempfile.TemporaryDirectory() as d:
             iwv, _ = records([("A", "Energy", "Equity")], [])
             record.write(d, iwv)
-            get, _ = getter(iwv_csv(("A", "Utilities", "Equity")), screener(("A", "Energy")))
+            get, opener = getter(screener(("A", "Energy")), 403)
             paths = sectors.record_sectors(d, D(2026, 3, 27), get=get, now=NOW)
             self.assertEqual([os.path.basename(p) for p in paths], ["sectors-nasdaq_2026-03-27.json"])
+            self.assertEqual([r.full_url for r in opener.requests], [sectors.NASDAQ_URL])
             self.assertEqual(record.read(os.path.join(d, "sectors-iwv_2026-03-27.json")), iwv)
+
+    def test_a_rerun_with_both_recorded_fetches_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            for rec in records([("A", "Energy", "Equity")], [("A", "Energy")]):
+                record.write(d, rec)
+            get, opener = getter()
+            self.assertEqual(sectors.record_sectors(d, D(2026, 3, 27), get=get, now=NOW), [])
+            self.assertEqual(opener.requests, [])
+
+    def test_a_past_session_is_refused_before_any_fetch(self):
+        # Live files describe today, so they are never saved under an earlier session.
+        get, opener = getter(iwv_csv(("A", "Energy", "Equity")), screener(("A", "Energy")))
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(sectors.Backdated):
+                sectors.record_sectors(d, D(2026, 3, 26), get=get, now=NOW)
+            self.assertEqual((os.listdir(d), opener.requests), ([], []))
+
+    def test_a_session_not_yet_settled_or_not_a_trading_day_is_refused(self):
+        get, opener = getter()
+        at_close = lambda: dt.datetime(2026, 3, 27, 20, 30, tzinfo=dt.timezone.utc)   # noqa: E731
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(steps.NotSettled):
+                sectors.record_sectors(d, D(2026, 3, 27), get=get, now=at_close)
+            with self.assertRaises(MarketDataError):
+                sectors.record_sectors(d, D(2026, 3, 28), get=get, now=NOW)   # a Saturday
+        self.assertEqual(opener.requests, [])
 
     def test_only_the_two_sources_hosts_are_fetched(self):
         with self.assertRaises(MarketDataError):
@@ -155,6 +187,22 @@ class LatestTest(unittest.TestCase):
                 sectors.latest(d, "sectors-iwv", D(2026, 3, 19))
             with self.assertRaises(steps.MissingData):
                 sectors.latest(d, "sectors-nasdaq", D(2026, 3, 27))
+
+    def test_a_recording_fetched_outside_its_sessions_window_is_refused(self):
+        # A session's labels are valid only if fetched after its close
+        # (20:00 UTC on 2026-03-25) and before the next session's close
+        # (20:00 UTC on 2026-03-26).
+        for fetched, ok in (("2026-03-25T20:00:00Z", True), ("2026-03-26T19:59:59Z", True),
+                            ("2026-03-26T20:00:00Z", False), ("2026-03-27T22:00:00Z", False),
+                            ("2026-03-25T19:59:59Z", False), ("x", False)):
+            with tempfile.TemporaryDirectory() as d, self.subTest(fetched):
+                iwv, _ = records([("A", "Energy", "Equity")], [], session="2026-03-25", fetched_at=fetched)
+                record.write(d, iwv)
+                if ok:
+                    self.assertEqual(sectors.latest(d, "sectors-iwv", D(2026, 3, 27)), iwv)
+                else:
+                    with self.assertRaises(sectors.Backdated):
+                        sectors.latest(d, "sectors-iwv", D(2026, 3, 27))
 
 
 if __name__ == "__main__":

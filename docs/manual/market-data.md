@@ -31,7 +31,7 @@ Run from `adapter/`. Every command takes `--out DIR`, the recordings folder.
 | `python3 -m marketdata bars --out DIR --instruments SPY,IEF,SHY` | the named instruments' bars | yes |
 | `python3 -m marketdata backfill --out DIR --sessions 253` | one whole-market bar file per past session (about 53 minutes at Massive's 5 requests a minute; resumable) | yes |
 | `python3 -m marketdata actions --out DIR --lookback-days 400` | every split and every dividend dated in the window | yes |
-| `python3 -m marketdata sectors --out DIR` | iShares' IWV holdings file and Nasdaq's stock screener, for sector labels | no |
+| `python3 -m marketdata sectors --out DIR` | iShares' IWV holdings file and Nasdaq's stock screener, for sector labels, for the latest settled session only | no |
 | `python3 -m marketdata encode --out DIR --first ... --asof ... --stream FILE ...` | the engines' input stream (below) | no, and it never uses the network |
 
 `--asof` defaults to today's date in New York, not the computer's own time
@@ -95,7 +95,10 @@ asked for.
 ## Encoding
 
 `encode` reads only the recordings and writes a new file (never overwriting
-one) of envelopes, one per line, in this order:
+one) of envelopes, one per line. The file is written in full or not at all:
+it is built under a temporary name in the same folder, flushed to disk, then
+given its final name, so a failed or interrupted run leaves nothing to block
+the retry. For momentum (the default, `--engine momentum`) the order is:
 
 1. one `market.session.calendar`: every session from the first to one past
    the last, from the NYSE calendar;
@@ -107,6 +110,13 @@ one) of envelopes, one per line, in this order:
      common stock with a bar that session, with its raw close and volume and
      its sector label and the label's source;
    - a `market.session.closed` naming exactly the bars written.
+
+Boost reads only its one instrument's bars and the session closes, and
+refuses any other input, so `--engine boost` writes just those: no calendar
+and no universe snapshot, even where a universe was recorded. It needs
+exactly one `--instruments` entry (for example `SPY`) and no `--optional` or
+`--universe-members`. The account snapshots and marks Boost also reads come
+from the broker side, not from this step.
 
 Every bar's time is the session's close: 4 p.m. New York, or 1 p.m. on an
 early close (the day after Thanksgiving, and July 3 and December 24 when they
@@ -128,6 +138,14 @@ Sector labels are GICS from iShares' IWV holdings where it lists the stock,
 else Nasdaq's sector, both mapped onto Morningstar's eleven sector names so
 the momentum cap counts one vocabulary (plan.md section 4). A stock neither
 source labels gets no label, and the momentum rule leaves it out.
+
+Both sources serve only today's file, so `sectors` records the latest
+settled session only: from an hour after its close until the next session's
+close. `--asof` on a weekend or holiday means the trading day before it. A
+past session is refused before anything is fetched, because today's file
+saved under an earlier date would let a backtest use labels it could not
+have had. A rerun fetches only the source not yet recorded for the session,
+so a source that is down does not block one already saved.
 
 ## What can go wrong, and what the step does
 
@@ -159,6 +177,10 @@ for the scheduler to alert on.
   a ratio or cash figure that is not a finite number of the right sign.
 - **Sector recordings are missing or more than 7 days old** for a universe
   session. Refused.
+- **Sector labels for a past session**: `sectors` refuses a session that is
+  no longer the latest one, and the encoder refuses a sector recording
+  fetched before its session's close or after the next session's close.
+- **A boost stream asks for more than one instrument.** Refused.
 - **The NYSE calendar does not reach the year asked for** (it covers
   2022-2030). Refused; extend it and check it against NYSE's published
   holidays and early closes.
