@@ -230,8 +230,8 @@ codes the cap uses), not in SPY or IEF prices.
   2026-10-16. They are also what the golden cases (ADR 0026) and the
   retirement/blend studies were built on.
 - **Add the 2026-10-16 reruns as the result on QuantConnect's revised
-  data.** Until the rerun pair below shows which state persists, quote the worse drawdowns
-  (46.05% and 40.47%) as the risk planning figure. This issue carries the
+  data.** The rerun pair below confirmed this state persists. Quote its
+  drawdowns (46.05% and 40.47%) as the risk planning figure. This issue carries the
   capital-safety label, and a later data state that deepens the drawdown
   may be the one live trading resembles.
 - **PR #402's note is wrong as written.** "Differ a little … because
@@ -242,18 +242,47 @@ codes the cap uses), not in SPY or IEF prices.
   together on the same data state, so FU against F is paired. The absolute
   levels in that table belong to the new data state, not to R4.
 
-## Rerun pair pending
+## Rerun pair (2026-10-17): the revised data persists
 
-Queued 2026-10-17 on the identical bytes (md5 `5777e081…` and `9c3c7b9d…`):
-`F_COMBO_RR` and `OOS_F_COMBO_RR`. Results to be added here when they
-finish, with their `Fundamentals` counters.
-- **46% / 40% again** (hits 194,862 / 126,718): the revised data persists.
-  #398 (parity) and #399 ($30k commission) then compare against a baseline
-  run on this data, not against R4. The plan records both states.
-- **34% / 31%** (hits 196,051 / 127,905): the 2026-10-16 state was
-  transient. The four D8 runs of #402 should be repeated once, as a pair,
-  before their figures are used.
-- **Any other count:** QuantConnect's data is still moving. Record it, and
-  pair every comparison on the same day.
+Each was run once, on the identical bytes (md5 `5777e081…` and
+`9c3c7b9d…`), in project 37096083:
 
-No other backtest needs rerunning for this question.
+| Run | Backtest ID | CAGR / worst drawdown | Fundamentals reads / hits | Orders | Fees |
+| --- | --- | --- | --- | --- | --- |
+| `F_COMBO_RR` | d3d11664ca37d9e61505e19769980ef3 | 13.09% / 46.05% | 107,500 / 194,862 | 5,187 | $161,655.36 |
+| `OOS_F_COMBO_RR` | 28914125c2522b35e2c2a3d9098c7f72 | 20.06% / 40.47% | 69,000 / 126,718 | 3,589 | $34,221.86 |
+
+- **They match the 2026-10-16 reruns statistic for statistic.** The hits
+  are identical, as are the risk-off months (59 / 25) and the order
+  counts. SPY is unchanged at 4.91% / 55.17%.
+- The only differences are a few dollars of fees, and Ratio 0.4956 against
+  0.4957 held out.
+
+## Conclusion
+
+- **The revised data state has persisted since at least 2026-10-16.** The
+  2026-10-04 state that produced R4 can no longer be reproduced.
+- **R4 is not wrong.** It is the result of the same script on
+  QuantConnect's earlier data. The difference is in the data, not in the
+  strategy's rules or the measurement.
+
+## Consequences
+
+- **Parity and commission baselines.** Parity (#398, #324) and the $30k
+  commission runs (#399, #376) use baselines recorded on the current data:
+  the 2026-10-16 `F_COMBO` / `OOS_F_COMBO` and `FU_COMBO` / `OOS_FU_COMBO`
+  reruns (#402), not R4.
+- **The plan cites both states.** `docs/live-trading/plan.md` cites R4,
+  labelled as the 2026-10-04 data state, with the current-state figures
+  beside it.
+- **Risk planning** uses the current state's drawdowns: 46.05% (1999–2015)
+  and 40.47% (2016 to 2026-06-30).
+- **Studies built on the R4 curves are figures of the 2026-10-04 state**,
+  and stay as recorded. They include the blends, the retirement bonds work
+  and the golden cases (ADR 0026). Re-derive them on the current data only
+  where a decision depends on the drawdown.
+- **Pair and fingerprint every run.** QuantConnect's data can change
+  without notice, so a figure is reproducible only together with its data
+  state. Every comparison runs as a same-day pair, and each run records
+  its `Fundamentals` counter (reads / hits) as the fingerprint of the data
+  it saw.

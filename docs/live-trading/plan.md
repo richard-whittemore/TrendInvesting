@@ -33,8 +33,23 @@ differ). Provenance: 12-1 momentum, Jegadeesh & Titman 1993; the trend
 filter, motivated by Daniel & Moskowitz 2016; the half fraction, sector cap
 and inverse volatility are this project's research settings, chosen on
 1999–2015 and checked once on 2016–mid-2026
-(`docs/research/boost-followup-2026-09.md`). Recorded runs: F_COMBO_R4
-24bdb0a9, OOS_F_COMBO_R4 dd45f8ec.
+(`docs/research/boost-followup-2026-09.md`). The same script gives
+different figures on two QuantConnect data states
+(`docs/research/r4-rerun-discrepancy-2026-10.md`, #403). CAGR / worst
+drawdown on daily equity:
+
+| Data state | 1999–2015 | 2016 to 2026-06-30 | Runs |
+| --- | --- | --- | --- |
+| 2026-10-04 (recorded R4; no longer reproducible) | 11.25% / 34.0% | 20.85% / 31.0% | F_COMBO_R4 24bdb0a9, OOS_F_COMBO_R4 dd45f8ec |
+| Current, since at least 2026-10-16 | 13.09% / 46.05% | 20.06% / 40.47% | F_COMBO eee58c08 / F_COMBO_RR d3d11664, OOS_F_COMBO a752a0ae / OOS_F_COMBO_RR 28914125 |
+
+- **Risk planning uses the current state's drawdowns** (46.05% / 40.47%).
+- **Comparisons use baselines on the current data.** Parity (#398, #324)
+  and the $30k commission runs (#399, #376) compare against the
+  2026-10-16 F / FU reruns, not R4.
+- **Pair and fingerprint every run.** QuantConnect's data can change
+  without notice. Every comparison runs as a same-day pair and records the
+  run's `Fundamentals` counter.
 - **How clean that check is.** The combination was declared before its own
   held-out run, but after the full filter's held-out run had shown the
   whipsaw problem that the half fraction answers. So its held-out result is
