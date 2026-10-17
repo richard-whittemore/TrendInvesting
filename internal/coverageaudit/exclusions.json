@@ -895,7 +895,7 @@
       "function": "(*Handler).applyApproval",
       "statement": "return fmt.Errorf(\"targetweight: approval %s: %w\", in.ID, err)",
       "category": "unreachable-by-construction",
-      "reason": "risklimit.Gate.RestoreSaleAttempt refuses three calls: an empty incident ID; a second restore of one incident; and an incident that already has its attempt record, which Sale writes into the same attempts record when this run has already attempted that incident's sale. OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses an incident in force with no ID (TestAnApprovalCarriesTheIncidentSaleAttempt), and applyApproval refuses a second approval before reaching it (TestApprovalInputRules). The line is unreachable from the approval path because the approval precedes any bar, so no sale of this run can have been attempted before it."
+      "reason": "risklimit.Gate.RestoreSaleAttempt refuses three calls: an empty incident ID; a second restore of one incident; and an incident that already has its attempt record, which Sale writes into the same attempts record when this run has already attempted that incident's sale. OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses an incident in force with no ID (TestAnApprovalCarriesTheIncidentSaleAttempt), and applyApproval refuses a second approval before reaching it (TestApprovalInputRules). And no attempt record can exist when the approval reaches it: Apply refuses an approval read after any input but the configuration (TestAnApprovalIsTheFirstInputAfterTheConfiguration), so the gate is the one New built, with no attempt record, since only Sale writes one and Sale runs only from a session close or a broker snapshot, both of which come after the approval."
     },
     {
       "file": "internal/targetweight/handler.go",
@@ -903,7 +903,7 @@
       "statement": "return fmt.Errorf(\"targetweight: approval %s: %w\", in.ID, err)",
       "occurrence": 2,
       "category": "unreachable-by-construction",
-      "reason": "risklimit.Gate.RestoreIncidentState refuses a state that is not degraded or halted, a degraded state with no scope, a halted one with a scope, and a degraded state on a Halted gate; OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses the first three (TestAnApprovalStatesTheIncidentsRestrictions), and the gate is Normal here because an approval comes before any recorded state or decision and only once (TestApprovalInputRules)."
+      "reason": "risklimit.Gate.RestoreIncidentState refuses a state that is not degraded or halted, a degraded state with no scope, a halted one with a scope, and a degraded state on a Halted gate; OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses the first three (TestAnApprovalStatesTheIncidentsRestrictions), and the gate is Normal here because Apply refuses an approval read after any input but the configuration, so no recorded state can precede it (TestAnApprovalIsTheFirstInputAfterTheConfiguration), and a second approval (TestApprovalInputRules)."
     },
     {
       "file": "internal/targetweight/handler.go",

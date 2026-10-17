@@ -198,6 +198,12 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if awaiting, ok := comp.handler.(interface{ AwaitApproval() }); ok && approval != nil {
+		// A fresh run decides nothing until the approval is recorded (ADR
+		// 0027, amended 2026-10-16): the handler refuses any other input
+		// before it, whatever order it arrives in.
+		awaiting.AwaitApproval()
+	}
 	configurationHash, strategyVersion, configEnvelope := comp.configurationHash, comp.strategyVersion, comp.configEnvelope
 	reducer := comp.handler
 

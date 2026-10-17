@@ -68,9 +68,12 @@ type Options struct {
 //     boost and the target in force from it, never by recomputing (ADR 0026,
 //     point 5); sessions up to its session then only feed the indicators,
 //     which are rebuilt from the journal's own bars from the warm-up start;
-//   - optionally, straight after the configuration, the owner's
-//     operator.run.approved: a fresh run after an earlier one starts from the
-//     approved latch;
+//   - optionally, straight after the configuration and before any other
+//     input, the owner's operator.run.approved: a fresh run after an earlier
+//     one starts from the approved latch and the incident in force. A handler
+//     told to await it (AwaitApproval) refuses every other input until it is
+//     recorded, since a fresh run decides nothing before the approval (ADR
+//     0027, amended 2026-10-16);
 //   - optionally, before the first bar or session, the earlier run's
 //     strategy.engine.state records, in journal order. A restart while
 //     Degraded or Halted resumes in that state and scope (ADR 0019, amended
@@ -115,6 +118,8 @@ type Handler struct {
 	started    bool // a bar or session has been applied
 	recovered  bool
 	approved   bool
+	awaiting   bool      // a fresh run: nothing but the approval is read until it is recorded
+	prelude    bool      // an input other than the configuration and an approval has been read
 	quietUntil time.Time // sessions at or before it only feed the indicators
 
 	indicators *boost.Indicators
@@ -172,6 +177,13 @@ func New(strategyVersion string, cfg event.TargetWeightConfigurationPayload, opt
 	}, nil
 }
 
+// AwaitApproval marks this run as a fresh run after an earlier one, which
+// decides nothing until the owner's approval is recorded (ADR 0027, amended
+// 2026-10-16): until then, every input but the configuration and the
+// approval is refused. Call it before the first input. The momentum handler
+// reads no approval and ignores it.
+func (h *Handler) AwaitApproval() { h.awaiting = true }
+
 // ConfigurationHash returns the hash every emission carries.
 func (h *Handler) ConfigurationHash() string { return h.hash }
 
@@ -182,6 +194,12 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 	}
 	if h.momentum != nil && in.Type != event.TargetWeightConfigurationEventType {
 		return h.momentum.apply(in)
+	}
+	if in.Type != event.TargetWeightConfigurationEventType && in.Type != event.OperatorRunApprovedEventType {
+		if h.awaiting && !h.approved {
+			return nil, fmt.Errorf("targetweight: %s %s arrived before the owner's approval; a fresh run after an earlier one reads nothing but its configuration until the approval is recorded (ADR 0027, amended 2026-10-16)", in.Type, in.ID)
+		}
+		h.prelude = true
 	}
 	switch in.Type {
 	case event.TargetWeightConfigurationEventType:
@@ -279,10 +297,11 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 // survives a restart"), and carries whether its one sale back to 98% was
 // attempted, so the fresh run never attempts it twice (ADR 0019, amended
 // 2026-10-15). It comes once, straight after the configuration, before any
-// bar.
+// other input, so the gate it restores into is the one New built: no
+// recorded state, decision or sale of this run can precede it.
 func (h *Handler) applyApproval(in event.Envelope) error {
-	if h.approved || h.recovered || h.started {
-		return errors.New("targetweight: an approval comes once, straight after the configuration and before any bar")
+	if h.approved || h.prelude {
+		return errors.New("targetweight: an approval comes once, straight after the configuration and before any other input")
 	}
 	p, err := decodeInput[event.OperatorRunApprovedPayload](in, event.OperatorRunApprovedSchemaVersion)
 	if err != nil {
