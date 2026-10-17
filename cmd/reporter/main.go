@@ -45,7 +45,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	flags.SetOutput(out)
 	journalPath := flags.String("journal", "", "path to the account's journal (read only)")
 	statePath := flags.String("state", "", "path to the reporter's own state file of delivered alerts")
-	channels := flags.String("channel", "stdout", "comma-separated delivery channels: stdout, ntfy")
+	channels := flags.String("channel", "stdout", "comma-separated channels: stdout (terminal echo, never a delivery), ntfy, pagerduty")
 	benchmark := flags.String("benchmark", "SPY", "benchmark instrument for the equity comparison")
 	date := flags.String("date", "", "summary date, YYYY-MM-DD (default: the journal's latest event day)")
 	summary := flags.Bool("summary", false, "also deliver the daily summary")
@@ -97,12 +97,10 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	}
 
 	var failures []error
-	for _, a := range report.Fresh(alerts, seen) {
-		if err := deliver(senders, a); err != nil {
+	for _, a := range report.Fresh(alerts, nil) {
+		if err := deliver(senders, a, seen); err != nil {
 			failures = append(failures, err)
-			continue
 		}
-		seen[a.Key] = true
 	}
 	if err := saveState(*statePath, seen); err != nil {
 		failures = append(failures, err)

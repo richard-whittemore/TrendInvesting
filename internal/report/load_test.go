@@ -62,3 +62,77 @@ func TestLoadRefusesATamperedJournal(t *testing.T) {
 		t.Fatal("garbage must be refused")
 	}
 }
+
+// syncBuffer is the SyncWriter a durable log is written to in tests.
+type syncBuffer struct{ bytes.Buffer }
+
+func (*syncBuffer) Sync() error { return nil }
+
+// logBytes writes the stream as a real ADR 0027 durable log: each input
+// starts a group and the decisions after it join that group. When torn is set
+// the final commit line is dropped, leaving the last group uncommitted.
+func logBytes(t *testing.T, envelopes []event.Envelope, torn bool) []byte {
+	t.Helper()
+	var groups [][]journal.Entry
+	for _, e := range envelopes {
+		kind := journal.KindInput
+		switch e.Type {
+		case event.TargetsDecidedEventType, event.OrderPlannedEventType, event.OrderReleasedEventType,
+			event.OrderRefusedEventType, event.EngineStateEventType:
+			kind = journal.KindDecision
+		}
+		if kind == journal.KindInput {
+			groups = append(groups, nil)
+		}
+		groups[len(groups)-1] = append(groups[len(groups)-1], journal.Entry{Kind: kind, Envelope: e})
+	}
+	var buf syncBuffer
+	log, err := journal.CreateLog(&buf, journal.NewLogHeader("h", "v"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range groups {
+		if err := log.Append(g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := buf.Bytes()
+	if torn {
+		trimmed := bytes.TrimRight(out, "\n")
+		out = trimmed[:bytes.LastIndexByte(trimmed, '\n')+1]
+	}
+	return out
+}
+
+func TestLoadReadsAnEngineDurableLog(t *testing.T) {
+	envelopes := buildDay(t)
+	_, got, err := report.Load(logBytes(t, envelopes, false))
+	if err != nil {
+		t.Fatalf("a live engine writes only the durable log, and the reporter must read it: %v", err)
+	}
+	if len(got) != len(envelopes) || got[3].ID != envelopes[3].ID {
+		t.Fatalf("got %d envelopes, want %d", len(got), len(envelopes))
+	}
+}
+
+func TestLoadReportsOnlyTheCommittedGroupsOfADurableLog(t *testing.T) {
+	envelopes := buildDay(t)
+	_, got, err := report.Load(logBytes(t, envelopes, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 || len(got) >= len(envelopes) {
+		t.Fatalf("a torn tail is uncommitted and must not be reported: got %d of %d", len(got), len(envelopes))
+	}
+}
+
+func TestLoadRefusesADamagedDurableLog(t *testing.T) {
+	raw := logBytes(t, buildDay(t), false)
+	damaged := bytes.Replace(raw, []byte(`"quantity":39`), []byte(`"quantity":40`), 1)
+	if bytes.Equal(raw, damaged) {
+		t.Fatal("the damage did not apply")
+	}
+	if _, _, err := report.Load(damaged); err == nil {
+		t.Fatal("a damaged durable log must be refused")
+	}
+}
