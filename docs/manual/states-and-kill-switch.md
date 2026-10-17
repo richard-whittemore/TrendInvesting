@@ -112,11 +112,14 @@ shares known filled. One rule decides what is known filled:
   remains.
 - A fall in your holding, seen by an account snapshot or an IBKR snapshot
   against the snapshot before it, that the fills already known do not
-  explain counts as filled by the sells still pending on that fund. An
-  account snapshot first sets aside the shares of any unknown sell IBKR
-  listed, since that order may be what sold. A sale you make by hand while
-  one of ours is working looks the same, so it is taken as ours until IBKR
-  lists ours at its true remaining quantity.
+  explain counts as filled by that fund's sells. An account snapshot first
+  sets aside the shares of any unknown sell IBKR listed, since that order
+  may be what sold. A sale you make by hand while one of ours is working
+  looks the same, so it is taken as ours until IBKR lists ours at its true
+  remaining quantity. An IBKR snapshot that cannot read the open orders is
+  not the one the next fall is measured from: the next snapshot that can
+  read them measures the fall since the snapshot before it, so no fall is
+  missed.
 - A fall counts once for the fund's sells together, never once per sell. If
   two sells are working, A for 60 and B for 40 of 100, and the account
   snapshot shows 70, the 30 are counted filled; when B's fill report for 30
@@ -142,16 +145,21 @@ shares known filled. One rule decides what is known filled:
   reading: against that snapshot, the 54 still count as being sold. A fill
   stamped 16:00:01 is one the snapshot shows. A cancellation in the same
   second as a snapshot is treated the same way: the shares the sale had sold
-  by then still count as being sold against that snapshot. A cancelled
-  sale is never counted as having sold more than the gate finally counts it
-  as having sold, so a drop in your holding seen in the same second as the
-  cancellation, before the fill report arrives, never lets through a sell
-  larger than the holding IBKR reports. A fill report stamped after a
-  cancellation (IBKR can report a late fill) counts only from its own time:
-  a snapshot taken between the cancellation and that fill still counts its
-  shares as being sold. A drop in your holding that the gate puts down to
-  the cancelled sale, with no fill report behind it, counts from the
-  cancellation's time instead.
+  by then still count as being sold against that snapshot. A fill report
+  stamped after a cancellation (IBKR can report a late fill) counts only
+  from its own time: a snapshot taken between the cancellation and that
+  fill still counts its shares as being sold.
+- A drop in your holding that no fill report explains yet is put down
+  first to the fund's cancelled sales, then to the sales still working. A
+  cancelled sale's fill may not be reported yet, and the drop is the only
+  sign of it; counting the drop as that sale's keeps a working sale's
+  shares counted as being sold until a report or a listing shows them sold.
+  The drop counts from the time of the snapshot that showed it, whether the
+  cancellation or that snapshot was recorded first. A sell of 60 of 100 is
+  cancelled at 15:00:02, and an IBKR snapshot of 15:00:02 holds 70: the 30
+  count as sold, so a sell of 100 is refused against the 70, and the next
+  exit, sized from an account snapshot of 15:00:00 that still showed 100,
+  counts the 30 as being sold.
 - A snapshot taken earlier than one already seen, but recorded after it
   (account and IBKR snapshots each keep their own order), is judged by its
   own time too. An IBKR snapshot from 15:59:55 that still shows 147,

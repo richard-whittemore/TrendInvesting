@@ -229,8 +229,9 @@ func TestABrokerSnapshotResolvesASell(t *testing.T) {
 	pendingIs(t, g, 35, "20 more filled since the account snapshot; the other 15 still pending")
 	g.ObserveAccount(account(55, 3))
 	pendingIs(t, g, 15, "the dropped 15 are not taken as cancelled")
-	sellFill(t, g, "tw-sell", "f1", 45, 3)
-	pendingIs(t, g, 15, "a fill report of shares a snapshot already showed is not counted twice")
+	sellFillAt(t, g, "tw-sell", "f1", 25, at.Add(90*time.Second))
+	sellFillAt(t, g, "tw-sell", "f2", 20, at.Add(150*time.Second))
+	pendingIs(t, g, 15, "fill reports of shares the snapshots already showed are not counted twice")
 	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCanceled, 60, 1, 4)
 	pendingIs(t, g, 0, "the cancellation report ends the 15")
 }
@@ -631,14 +632,14 @@ func TestASameSecondLifecycleEndStillCountsAsWorking(t *testing.T) {
 	}
 }
 
-// A sell a lifecycle report ended is counted filled by what it is finally
-// counted as having filled, never more, even from a snapshot that report
-// post-dates: a sell of 60 against a holding of 100 is cancelled at
-// 15:00:02 with no fill reported yet, and a broker snapshot of 15:00:02,
-// recorded after the cancellation, holds 70 and no longer lists it. The fall
-// of 30 cannot be credited to that snapshot beyond what the gate counts the
-// sell as having filled (none, until its fill report arrives), so no sell is
-// netted as working below zero and a sell of 100 is refused against the 70.
+// A fall seen after a lifecycle report ended a sell is still put down to
+// that sell: a sell of 60 against a holding of 100 is cancelled at 15:00:02
+// with no fill reported yet, and a broker snapshot of 15:00:02, recorded
+// after the cancellation, holds 70 and no longer lists it. The fall of 30 is
+// counted filled now and credited from that snapshot's time, so no sell is
+// netted as working below zero against it, a sell of 100 is refused against
+// the 70, and the 30 still count as being sold against the account snapshot
+// of 15:00:00 that held 100.
 func TestAnEndedSellIsNeverCreditedBeyondWhatItFinallyFilled(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	observe(t, g, "broker:1", broker(100))
@@ -659,6 +660,30 @@ func TestAnEndedSellIsNeverCreditedBeyondWhatItFinallyFilled(t *testing.T) {
 	o := check(t, g, big)[0]
 	refusedFor(t, o, event.RefusedBrokerHolding)
 	if got := workingSells(o); got != 0 {
-		t.Errorf("working sells %d, want 0: the ended sell has no fill the gate counts", got)
+		t.Errorf("working sells %d, want 0: the snapshot shows the ended sell's 30", got)
+	}
+	if got := g.PendingSells("SPY"); got != 30 {
+		t.Errorf("pending sells %d, want 30: the account snapshot of 15:00:00 cannot show the fall", got)
+	}
+}
+
+// A broker snapshot that cannot read the open orders is not one later falls
+// are measured from: a sell of 60 against a holding of 100 is cancelled with
+// no fill reported, a snapshot that cannot read the open orders holds 70,
+// and the next, which can, still holds 70 and no longer lists it. The fall
+// of 30 is measured by the second against the account snapshot's 100, so
+// the 30 still count as being sold against that account snapshot.
+func TestAFallIsMeasuredPastASnapshotThatCannotReadTheOpenOrders(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(100))
+	g.ObserveAccount(account(100, 0))
+	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCanceled, 60, 1, 1)
+	blind := later(broker(70), 2)
+	blind.Unreadable = []string{event.BrokerComponentOpenOrders}
+	observe(t, g, "broker:2", blind)
+	observe(t, g, "broker:3", later(broker(70), 3))
+	if got := g.PendingSells("SPY"); got != 30 {
+		t.Errorf("pending sells %d, want 30: the fall since the account snapshot", got)
 	}
 }
