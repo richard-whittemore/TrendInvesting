@@ -5,11 +5,13 @@ import (
 	"fmt"
 )
 
-// OrderSkippedEventType identifies a trade the order planner would have made
-// but could not, because whole shares rounded it to nothing (ADR 0026,
-// point 2, D7-L: "the planner then rounds toward zero to whole shares"). It is
-// recorded so no planned trade disappears silently: the journal says which
-// instrument, how many shares the rule asked for, and why none is ordered.
+// OrderSkippedEventType identifies a trade the order planner sized but could
+// not order: whole shares rounded it to nothing (ADR 0026, point 2, D7-L: "the
+// planner then rounds toward zero to whole shares"), fitting it to the budget
+// scaled it below one share, or, for a sell, its whole holding is already
+// committed to working sells. It is recorded so no planned trade disappears
+// silently: the journal says which instrument, how many shares the rule asked
+// for, and why none is ordered.
 const OrderSkippedEventType = "strategy.order.skipped"
 
 // OrderSkippedSchemaVersion is the current schema version of OrderSkippedPayload.

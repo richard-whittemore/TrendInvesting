@@ -170,3 +170,82 @@ func TestMinimumLotDoesNotApplyWithNoMomentumSleeve(t *testing.T) {
 		t.Errorf("%d skips", n)
 	}
 }
+
+// TestMinimumLotMovesAFullyRiskOffBookToTheRiskOffInstrument sets
+// RiskOffFraction 1 with b = 0: February is risk-off, so every pick has a
+// zero target. D7-L skips only a pick with a positive target value whose one
+// share exceeds it, so no name is unaffordable, the decision is made, the
+// book moves to the risk-off instrument and every held stock is sold.
+func TestMinimumLotMovesAFullyRiskOffBookToTheRiskOffInstrument(t *testing.T) {
+	r := simulateMomentum(t, momentumOptions{mutate: func(c *event.TargetWeightConfigurationPayload) {
+		c.Momentum.RiskOffFraction = 1
+	}})
+	ds := targets(t, r.decisions)
+	if len(ds) != 2 {
+		t.Fatalf("%d decisions", len(ds))
+	}
+	feb := ds[1]
+	if feb.Outcome != event.TargetsOutcomeDecided || !feb.Momentum.RiskOff || feb.Glide.BondShare != 0 {
+		t.Fatalf("February: %s %s risk-off %v b %v", feb.Outcome, feb.WithheldReason, feb.Momentum.RiskOff, feb.Glide.BondShare)
+	}
+	for _, n := range feb.Momentum.Names {
+		if n.Status == event.MomentumStatusUnaffordable {
+			t.Errorf("%s unaffordable at a zero target: %+v", n.InstrumentID, n)
+		}
+	}
+	for _, w := range feb.Targets {
+		if w.InstrumentID != "IEF" && w.Weight != 0 {
+			t.Errorf("%s target %v in a fully risk-off book", w.InstrumentID, w.Weight)
+		}
+	}
+	if ief, ok := targetOf(feb, "IEF"); !ok || ief.Weight != 0.98 {
+		t.Errorf("IEF target %+v", ief)
+	}
+	var phases []string
+	for _, o := range planned(t, r.decisions) {
+		phases = append(phases, o.Side+" "+o.InstrumentID)
+	}
+	if want := []string{"buy AAA", "buy CCC", "sell AAA", "sell CCC", "buy IEF"}; !equalStrings(phases, want) {
+		t.Errorf("orders %v, want %v", phases, want)
+	}
+}
+
+// TestMinimumLotIsNotAppliedFromALateSnapshot takes January's snapshot an
+// hour after the close: the decision is withheld as stale, and the lot, which
+// values picks at that close, is not applied either, so the withheld record
+// names no unaffordable pick and no minimum-lot figures.
+func TestMinimumLotIsNotAppliedFromALateSnapshot(t *testing.T) {
+	r := simulateMomentum(t, momentumOptions{rawScale: dearAAA, lateSnapshot: map[string]bool{"2025-01-31": true}, stopAfter: "2025-01-31"})
+	jan := targets(t, r.decisions)[0]
+	if jan.Outcome != event.TargetsOutcomeWithheld || jan.WithheldReason != event.WithheldStaleAccountSnapshot {
+		t.Fatalf("January: %s %s", jan.Outcome, jan.WithheldReason)
+	}
+	if jan.Momentum.MinimumLot != (event.MinimumLotFigures{}) {
+		t.Errorf("minimum lot figures %+v", jan.Momentum.MinimumLot)
+	}
+	for _, n := range jan.Momentum.Names {
+		if n.Status == event.MomentumStatusUnaffordable {
+			t.Errorf("%s unaffordable from a late snapshot: %+v", n.InstrumentID, n)
+		}
+	}
+}
+
+// TestMinimumLotFiguresOnlyWhenPicksWereValued withholds January before any
+// pick is valued, on the trend check (no SPY bar) and on a missing universe:
+// neither decision records minimum-lot figures.
+func TestMinimumLotFiguresOnlyWhenPicksWereValued(t *testing.T) {
+	for name, opts := range map[string]momentumOptions{
+		"trend check":      {noBar: map[string]string{"2025-01-31": "SPY"}, stopAfter: "2025-01-31"},
+		"missing universe": {noUniverse: true, stopAfter: "2025-01-31"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			jan := targets(t, simulateMomentum(t, opts).decisions)[0]
+			if jan.Outcome != event.TargetsOutcomeWithheld {
+				t.Fatalf("January %s", jan.Outcome)
+			}
+			if jan.Momentum.MinimumLot != (event.MinimumLotFigures{}) {
+				t.Errorf("%s: minimum lot figures %+v", jan.WithheldReason, jan.Momentum.MinimumLot)
+			}
+		})
+	}
+}

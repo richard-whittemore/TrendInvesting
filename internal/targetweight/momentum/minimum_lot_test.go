@@ -204,3 +204,29 @@ func TestDecideRecordsTheMinimumLot(t *testing.T) {
 		t.Error("a minimum lot without prices was accepted")
 	}
 }
+
+// TestMinimumLotLeavesAFullyRiskOffBookAsSelectBookMakesIt: with
+// RiskOffFraction 1 a risk-off book gives every pick a zero target, which
+// is no target value for D7-L to compare a share against, so no pick is
+// skipped and the book is SelectBook's: the whole of Invested in the
+// risk-off instrument.
+func TestMinimumLotLeavesAFullyRiskOffBookAsSelectBookMakesIt(t *testing.T) {
+	cfg := smallBook()
+	cfg.RiskOffFraction = 1
+	plain, err := momentum.SelectBook(cfg, capCandidates(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	book, err := momentum.SelectBookWithMinimumLot(cfg, capCandidates(), true, lot(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range book.Ranked {
+		if r.Status == momentum.StatusUnaffordable {
+			t.Errorf("%s unaffordable at a zero target", r.InstrumentID)
+		}
+	}
+	mustEqual(t, "targets", strings.Join(targetIDs(book), ","), strings.Join(targetIDs(plain), ","))
+	last := book.Targets[len(book.Targets)-1]
+	mustEqual(t, "risk-off target", last, momentum.Target{InstrumentID: cfg.RiskOffInstrument, Weight: cfg.Invested})
+}

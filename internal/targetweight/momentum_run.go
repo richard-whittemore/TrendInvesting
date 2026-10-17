@@ -421,7 +421,9 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int) ([]event.Envel
 	d, err := momentum.Decide(r.rule, input)
 	b.fail(err)
 	p := r.payload(d, end)
-	if lotSet {
+	if lotSet && (d.Outcome == momentum.OutcomeDecided || d.Reason == momentum.ReasonNoEligibleNames) {
+		// Only these outcomes reached the book, where the picks are valued;
+		// a decision withheld before ranking valued none.
 		p.Momentum.MinimumLot = event.MinimumLotFigures{NetLiquidation: lot.NetLiquidation, MomentumScale: lot.Scale}
 	}
 	r.applyGlide(&p, d, figures)
@@ -465,10 +467,11 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int) ([]event.Envel
 // close end, with b the decision's bond share (ADR 0026, point 2, "D7-L"):
 // the snapshot's net liquidation and this session's raw closes, the basis the
 // planner sizes orders from, and the momentum sleeve's scale 1 - b. With no
-// snapshot as of the close the decision is withheld whatever the picks, and
-// with b at 1 there is no momentum sleeve, so neither applies it.
+// snapshot as of the close (staleSnapshot) the decision is withheld whatever
+// the picks, and with b at 1 there is no momentum sleeve, so neither applies
+// it.
 func (r *momentumRun) minimumLot(end time.Time, b float64) (momentum.MinimumLot, bool) {
-	if r.exec.ShareQuantity != event.ShareQuantityMinimumLot || r.snapshot == nil || r.snapshot.AsOf.Before(end) {
+	if stale, _ := r.staleSnapshot(end); stale || r.exec.ShareQuantity != event.ShareQuantityMinimumLot {
 		return momentum.MinimumLot{}, false
 	}
 	scale := 1 - b
@@ -526,16 +529,26 @@ func decisionID(accountID string, end time.Time) string {
 	return fmt.Sprintf("targets-decided:%s:%s", accountID, end.UTC().Format(idTime))
 }
 
-// withhold returns why a decided rebalance cannot be planned, or "".
-func (r *momentumRun) withhold(p event.TargetsDecidedPayload, end time.Time) (reason, detail string) {
-	h := r.h
+// staleSnapshot reports whether the account snapshot is not as of the close
+// end, and why: missing, earlier, or later. Orders and D7-L's target values
+// are valued at that close (ADR 0026, point 2), so either needs a snapshot
+// as of it exactly.
+func (r *momentumRun) staleSnapshot(end time.Time) (stale bool, detail string) {
+	id := r.h.cfg.AccountID
 	switch {
 	case r.snapshot == nil || r.snapshot.AsOf.Before(end):
-		return event.WithheldStaleAccountSnapshot, fmt.Sprintf("no account snapshot for %s as of the session closing %s", h.cfg.AccountID, end.Format(idTime))
+		return true, fmt.Sprintf("no account snapshot for %s as of the session closing %s", id, end.Format(idTime))
 	case r.snapshot.AsOf.After(end):
-		// Orders are valued at the session's close (ADR 0026, point 2).
-		return event.WithheldStaleAccountSnapshot, fmt.Sprintf("the account snapshot for %s is as of %s, after the session closing %s; orders are valued at that close",
-			h.cfg.AccountID, r.snapshot.AsOf.Format(idTime), end.Format(idTime))
+		return true, fmt.Sprintf("the account snapshot for %s is as of %s, after the session closing %s; orders are valued at that close",
+			id, r.snapshot.AsOf.Format(idTime), end.Format(idTime))
+	}
+	return false, ""
+}
+
+// withhold returns why a decided rebalance cannot be planned, or "".
+func (r *momentumRun) withhold(p event.TargetsDecidedPayload, end time.Time) (reason, detail string) {
+	if stale, detail := r.staleSnapshot(end); stale {
+		return event.WithheldStaleAccountSnapshot, detail
 	}
 	needed := make([]string, 0, len(p.Targets)+len(r.snapshot.Positions))
 	for _, t := range p.Targets {

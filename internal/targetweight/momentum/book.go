@@ -109,6 +109,11 @@ func SelectBook(cfg Config, candidates []Candidate, riskOff bool) (Book, error) 
 // the sector cap, takes its place. A skipped name holds no place in the book
 // or its sector.
 //
+// Only a pick with a positive target value is compared. A risk-off book with
+// RiskOffFraction 1 gives every pick a zero target, which buys none of it:
+// that book is SelectBook's, the whole of Invested in RiskOffInstrument, and
+// the planner sells every stock held, as the risk-off rule asks.
+//
 // A target value depends on the weights, which depend on the picks, so the
 // substitution is a fixed point, reached by repeating the selection: each
 // pass selects from every name not yet skipped, weights the picks, and skips
@@ -158,7 +163,7 @@ func selectBook(cfg Config, candidates []Candidate, riskOff bool, lot *MinimumLo
 				break
 			}
 			value := float64(float64(r.Weight*lot.Scale) * lot.NetLiquidation)
-			if price := lot.Prices[r.InstrumentID]; price > value {
+			if price := lot.Prices[r.InstrumentID]; r.Weight > 0 && price > value {
 				skipped[r.InstrumentID], more = true, true
 				r.OneShare, r.TargetValue = price, value
 			}
