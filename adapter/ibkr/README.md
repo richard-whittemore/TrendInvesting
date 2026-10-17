@@ -35,12 +35,18 @@ an order (AGENTS.md rule 5).
   values. A snapshot is bracketed by two IBKR server times
   (`reqCurrentTime`), one before and one after, plus the adapter's own receipt
   time. Executions keep IBKR's time string verbatim, and `occurred_at` is its
-  UTC reading. A time with no zone is refused.
+  UTC reading. A time with no zone is refused. IBKR answers `reqCurrentTime`
+  in order, so each request's answer is found by counting. An answer lost in
+  an outage is counted as given once `request_timeout` has passed since the
+  restoration; until then a late old answer may still arrive, and a read fails
+  closed rather than take it as fresh.
 - **Order IDs come only from IBKR.** Records carry IBKR's `clientId`,
   `orderId` and `permId` as reported. IBKR's `orderId` is unique only within
   one client ID, so an order is identified by (`clientId`, `orderId`), or by
   `permId` for a manual TWS order with no positive `orderId` (`order_key`). The decision's tag travels as `orderRef`
-  (`client_order_id`). Reconnect matching uses the tag. Its result is
+  (`client_order_id`). Reconnect matching uses the tag, and each tag belongs
+  to one IBKR order: executions of that order are its fills, and a second
+  order with the same tag, open or executed, is unknown. The result is
   evidence for reconciliation and never triggers a resend.
 - **ADR 0022's closed status set.** `Submitted`/`PreSubmitted` are
   `submitted`, `PendingCancel` is `cancel-pending`, and
@@ -55,7 +61,9 @@ an order (AGENTS.md rule 5).
   journal write is recorded, not dropped.
 - **Other accounts are skipped.** One IBKR login may reach all three accounts.
   Rows, orders and executions for any other account are ignored, and so is a
-  commission report whose execution was not this account's.
+  commission report whose execution was not this account's. An order status
+  carries no account, so it is held until an open order (or IBKR's rejection)
+  shows the order is this account's, and discarded if it is another's.
 - **No credential.** The adapter never handles the IBKR password, which IBC
   holds. Logs name host, port and client ID only.
 

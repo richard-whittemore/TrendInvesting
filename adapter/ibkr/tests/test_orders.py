@@ -104,18 +104,21 @@ class OrderStatusTests(unittest.TestCase):
 
     def test_inactive_without_a_rejection_fails_closed(self):
         t = Tracked()
+        t.cb.open_order(7, contract(), order(), STATE)
         status(t.cb, 7, "Inactive", "0", "10")
         with self.assertRaises(UnrecognisedOrderReport):
             t.drain()
 
     def test_unknown_status_fails_closed(self):
         t = Tracked()
+        t.cb.open_order(7, contract(), order(), STATE)
         status(t.cb, 7, "Teleported", "0", "10")
         with self.assertRaises(UnrecognisedOrderReport):
             t.drain()
 
     def test_pending_submit_is_recorded_without_a_lifecycle(self):
         t = Tracked()
+        t.cb.open_order(7, contract(), order(), STATE)
         status(t.cb, 7, "PendingSubmit", "0", "10")
         status(t.cb, 7, "PreSubmitted", "0", "10")
         t.drain()
@@ -123,6 +126,7 @@ class OrderStatusTests(unittest.TestCase):
 
     def test_identical_repeats_are_collapsed(self):
         t = Tracked()
+        t.cb.open_order(7, contract(), order(), STATE)
         status(t.cb, 7, "Submitted", "0", "10")
         status(t.cb, 7, "Submitted", "0", "10")
         t.drain()
@@ -183,6 +187,7 @@ class OrderStatusTests(unittest.TestCase):
         t = Tracked()
         t.cb.open_order(7, contract(), order(), STATE)
         t.cb.error(7, 201, "Order rejected - reason:synthetic")
+        t.cb.open_order(7, contract(), order(client_id=12, perm_id=9002), STATE)
         status(t.cb, 7, "Inactive", "0", "10", perm_id=9002, client_id=12)
         with self.assertRaises(UnrecognisedOrderReport):
             t.drain()
@@ -202,6 +207,35 @@ class OrderStatusTests(unittest.TestCase):
         with self.assertRaises(UnrecognisedOrderReport):
             t.drain()
 
+    def test_a_status_waits_until_an_open_order_says_whose_account_it_is(self):
+        # orderStatus carries no account. Another account's status that
+        # arrives before its openOrder must not be recorded, and an
+        # unclassifiable one must not stop this account's reader.
+        t = Tracked()
+        status(t.cb, 8, "Submitted", "0", "10", perm_id=9100, client_id=12)
+        status(t.cb, 9, "Teleported", "0", "10", perm_id=9200, client_id=12)
+        status(t.cb, 7, "Submitted", "0", "10")
+        t.drain()
+        self.assertEqual(t.reports, [])
+        t.cb.open_order(8, contract(), order(account=OTHER_ACCOUNT, client_id=12, perm_id=9100),
+                        STATE)
+        t.cb.open_order(9, contract(), order(account=OTHER_ACCOUNT, client_id=12, perm_id=9200),
+                        STATE)
+        t.cb.open_order(7, contract(), order(order_ref="tag-1"), STATE)
+        t.drain()
+        self.assertEqual([type(r) for r in t.reports], [OpenOrderRecord, OrderStatusReport])
+        report = t.reports[1]
+        self.assertEqual((report.client_id, report.broker_order_id, report.client_order_id,
+                          report.lifecycle), (11, 7, "tag-1", "submitted"))
+
+    def test_a_rejection_shows_the_order_is_this_engines(self):
+        # error(reqId=orderId) reaches only the client that placed the order.
+        t = Tracked()
+        t.cb.error(7, 201, "Order rejected - reason:synthetic")
+        status(t.cb, 7, "Inactive", "0", "10")
+        t.drain()
+        self.assertEqual([s.lifecycle for s in t.of(OrderStatusReport)], ["invalid"])
+
     def test_a_status_the_sink_failed_to_record_is_recorded_on_redelivery(self):
         failures = [RuntimeError("synthetic journal write failure")]
         reports = []
@@ -211,6 +245,7 @@ class OrderStatusTests(unittest.TestCase):
                 raise failures.pop()
             reports.append(record)
         t = Tracked(sink)
+        t.cb.open_order(7, contract(), order(), STATE)
         status(t.cb, 7, "Submitted", "0", "10")
         with self.assertRaises(RuntimeError):
             t.drain()
@@ -302,6 +337,26 @@ class ReconnectMatchTests(unittest.TestCase):
         self.assertEqual(match.missing_at_broker, ("tag-1", "tag-2"))
         self.assertEqual(len(match.unknown_at_broker), 1)
         self.assertEqual(len(match.unknown_executions), 1)
+        self.assertFalse(match.clean)
+
+    def test_a_second_order_carrying_an_expected_tag_is_unknown_even_when_executed(self):
+        h = Harness()
+        h.conn.connect()
+        h.fake.open_orders = [(7, contract(), order(order_ref="tag-1"), STATE)]
+        h.fake.executions = [
+            # Two partial fills of one order: both are that tag's executions.
+            (contract(), execution(exec_id="x.01", order_id=8, perm_id=9002, order_ref="tag-2")),
+            (contract(), execution(exec_id="x.02", order_id=8, perm_id=9002, order_ref="tag-2")),
+            # A second order under this client ID with the same tag.
+            (contract(), execution(exec_id="x.03", order_id=10, perm_id=9004, order_ref="tag-2")),
+            # An execution of another order carrying the open order's tag.
+            (contract(), execution(exec_id="x.04", order_id=11, perm_id=9005, order_ref="tag-1")),
+        ]
+        match = match_on_reconnect({"tag-1", "tag-2"}, collect_broker_orders(h.conn), 11)
+        self.assertEqual(match.matched["tag-1"].broker_order_id, 7)
+        self.assertEqual([e.exec_id for e in match.executed["tag-2"]], ["x.01", "x.02"])
+        self.assertEqual([e.exec_id for e in match.unknown_executions], ["x.03", "x.04"])
+        self.assertEqual(match.missing_at_broker, ())
         self.assertFalse(match.clean)
 
     def test_clean_when_everything_is_accounted_for(self):

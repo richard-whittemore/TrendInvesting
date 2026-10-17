@@ -95,6 +95,43 @@ class SnapshotTests(unittest.TestCase):
             read_snapshot(h.conn)
         self.assertIn("server-time", caught.exception.missing)
 
+    def test_a_time_answer_lost_in_an_outage_does_not_block_reads_after_restoration(self):
+        # IBKR answers reqCurrentTime in order; an answer lost while Gateway
+        # had no link to IBKR's servers must not leave every later ticket
+        # waiting for one answer too many.
+        h = connected(request_timeout=0.05)
+        h.fake.summary = full_summary()
+        h.fake.answer_current_time = False
+        h.conn.request_server_time()  # its answer is lost in the outage
+        h.fake.callbacks.error(-1, 1100, "lost")
+        h.fake.callbacks.error(-1, 1102, "Connectivity restored - data maintained.")
+        h.conn.pump(0.001)
+        h.conn.pump(0.001)
+        h.fake.answer_current_time = True
+        # Until request_timeout has passed since the restoration, an answer
+        # may still be the lost one arriving late, so a read fails closed.
+        with self.assertRaises(SnapshotIncomplete) as caught:
+            read_snapshot(h.conn)
+        self.assertIn("server-time", caught.exception.missing)
+        h.clock.now += 1.0  # well past request_timeout
+        snap = read_snapshot(h.conn)
+        self.assertEqual(snap.server_time_completed, snap.server_time_requested + 1)
+
+    def test_a_late_answer_from_before_the_outage_is_not_read_as_fresh(self):
+        h = connected()
+        h.fake.summary = full_summary()
+        h.fake.answer_current_time = False
+        h.conn.request_server_time()
+        h.fake.callbacks.error(-1, 1100, "lost")
+        h.fake.callbacks.error(-1, 1102, "Connectivity restored - data maintained.")
+        h.conn.pump(0.001)
+        h.conn.pump(0.001)
+        h.fake.callbacks.current_time(SERVER_TIME - 100)  # the old request's answer, late
+        h.fake.answer_current_time = True
+        snap = read_snapshot(h.conn)
+        self.assertEqual(snap.server_time_requested, SERVER_TIME)
+        self.assertEqual(snap.server_time_completed, SERVER_TIME + 1)
+
     def test_conflicting_duplicate_balance_is_invalid(self):
         h = connected()
         h.fake.summary = full_summary() + [(ACCOUNT, "NetLiquidation", "1.00", "USD")]

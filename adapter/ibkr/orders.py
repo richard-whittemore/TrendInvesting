@@ -18,7 +18,7 @@ The `updated` status is not produced here: an amendment's acknowledgement
 arrives as a changed openOrder, which needs the order this adapter sent to
 compare against, and there is no sending path yet.
 """
-from collections import namedtuple
+from collections import deque, namedtuple
 from datetime import datetime, timezone
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -98,8 +98,9 @@ order's full identity (client ID, IBKR order ID, permId). executed: tag
 to its executions this session. missing_at_broker: tags neither open nor
 executed. unknown_at_broker / unknown_executions: IBKR's orders and
 executions with no expected tag (a manual order, or a crash after IBKR
-accepted an order the journal never recorded), including a second open order
-carrying an already-matched tag. clean is true only when the last three are
+accepted an order the journal never recorded), including a second order,
+open or executed, carrying an already-matched tag. Several executions of one
+order (partial fills) all go to executed. clean is true only when the last three are
 empty; anything else is for reconciliation to classify (ADR 0019), never a
 reason to resend.
 """
@@ -171,7 +172,11 @@ class OrderTracker:
     """Turns one account's order callbacks into records passed to sink, in arrival order.
 
     Subscribe on_event to a Connection. Orders and executions of other
-    accounts under the same login are skipped. An identical repeat of the
+    accounts under the same login are skipped. orderStatus carries no
+    account, so a status is held, unclassified, until the order's owner is
+    known: an openOrder in this account (or IBKR's rejection, which reaches
+    only the client that placed the order) releases it, an openOrder in
+    another account discards it. An identical repeat of the
     last status IBKR sent for an order is collapsed, since IBKR repeats them.
     Per-order state is keyed by order_key; client_id is this engine's own,
     which an order rejection (error with reqId = orderId) implicitly carries.
@@ -187,6 +192,7 @@ class OrderTracker:
         self._sink = sink
         self._client_ids = {}
         self._foreign = set()
+        self._held = {}
         self._last = {}
         self._rejections = {}
         self._executions = set()
@@ -199,18 +205,40 @@ class OrderTracker:
     def _on_open_order(self, order_id, contract, order, order_state):
         if order.account != self.account_id:
             if order_id > 0 or order.permId:
-                self._foreign.add(order_key(order.clientId, order_id, order.permId))
+                key = order_key(order.clientId, order_id, order.permId)
+                self._foreign.add(key)
+                self._held.pop(key, None)
             return
         key = order_key(order.clientId, order_id, order.permId)
         record = open_order_record(order_id, contract, order, order_state)
         self._sink(record)
         self._client_ids[key] = record.client_order_id
+        self._release(key)
 
-    def _on_order_status(self, order_id, status, filled, remaining, avg_fill_price, perm_id,
-                         parent_id, last_fill_price, client_id, why_held, mkt_cap_price):
+    def _on_order_status(self, *args):
+        order_id, perm_id, client_id = args[0], args[5], args[8]
         key = order_key(client_id, order_id, perm_id)
         if key in self._foreign:
             return
+        if key not in self._client_ids and key not in self._rejections:
+            self._held.setdefault(key, deque()).append(args)
+            return
+        self._status(key, *args)
+
+    def _release(self, key):
+        """Record the statuses held for an order now known to be this account's, in arrival order.
+
+        Each leaves the hold only once recorded, so a sink failure keeps the
+        rest for the next release.
+        """
+        held = self._held.get(key)
+        while held:
+            self._status(key, *held[0])
+            held.popleft()
+        self._held.pop(key, None)
+
+    def _status(self, key, order_id, status, filled, remaining, avg_fill_price, perm_id,
+                parent_id, last_fill_price, client_id, why_held, mkt_cap_price):
         code = reason = None
         if status in STATUS_LIFECYCLE:
             lifecycle = STATUS_LIFECYCLE[status]
@@ -236,6 +264,8 @@ class OrderTracker:
         key = order_key(self.client_id, req_id, None)
         if key in self._foreign:
             return
+        # Statuses held before the rejection arrived precede it.
+        self._release(key)
         # IBKR's rejection is remembered even if sink fails below: it is what
         # classifies the Inactive status that follows it.
         self._rejections[key] = (code, message)
@@ -331,21 +361,30 @@ def match_on_reconnect(expected_client_order_ids, broker, client_id):
     a match, so it can never satisfy reconciliation.
     """
     expected = set(expected_client_order_ids)
+    # Each expected tag belongs to one IBKR order: the first open order (or,
+    # if none is open, the first execution) carrying it. Further executions
+    # of that order are its partial fills; another order with the same tag is
+    # unknown.
+    owner = {}
     matched = {}
     unknown = []
     for record in broker.open_orders:
         cid = record.client_order_id
         if record.client_id == client_id and cid in expected and cid not in matched:
             matched[cid] = record
+            owner[cid] = order_key(record.client_id, record.broker_order_id, record.perm_id)
         else:
             unknown.append(record)
     executed = {}
     unknown_execs = []
     for report in broker.executions:
-        if report.client_id == client_id and report.client_order_id in expected:
-            executed.setdefault(report.client_order_id, []).append(report)
-        else:
-            unknown_execs.append(report)
+        cid = report.client_order_id
+        if report.client_id == client_id and cid in expected:
+            key = order_key(report.client_id, report.broker_order_id, report.perm_id)
+            if owner.setdefault(cid, key) == key:
+                executed.setdefault(cid, []).append(report)
+                continue
+        unknown_execs.append(report)
     executed = {k: tuple(v) for k, v in executed.items()}
     missing = tuple(sorted(expected - set(matched) - set(executed)))
     return ReconnectMatch(
