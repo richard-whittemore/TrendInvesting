@@ -1,13 +1,14 @@
 // Package risklimit is the hard-limit gate outside the strategy (ADR 0026,
 // point 3): every strategy.order.planned gets risk.order.released or
 // risk.order.refused, and a breach moves the account to Degraded or Halted
-// through strategy.engine.state. Only the joint margin account's limits are
-// checked here. It is pure: everything it checks arrives as an argument.
+// through strategy.engine.state. It checks the joint margin account's limits
+// and an IRA's. It is pure: everything it checks arrives as an argument.
 package risklimit
 
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 
@@ -41,18 +42,56 @@ type Outcome struct {
 	StateSchemaVersion uint32
 }
 
+// Book is the account as the plan is checked against it: the broker-reported
+// holdings and each holding's reference price (the raw previous close, ADR
+// 0026 point 2, "Valuation basis"), the shares already in working or pending
+// sells, cancel-pending ones included, the orders already planned at this
+// decision time in an earlier phase and how many of those are not
+// risk-reducing, and, for an IRA, the cash its buys may
+// still commit under D5, net of the buys already committed.
+type Book struct {
+	Holdings      map[string]int64
+	Prices        map[string]float64
+	WorkingSells  map[string]int64
+	PriorOrders   int
+	PriorCounted  int
+	CashAvailable float64
+}
+
 // Gate checks one account's planned orders against its limits and holds the
 // account's engine state between decisions.
 type Gate struct {
 	accountID string
 	limits    event.MarginLimits
 	mode      string
+	ira       bool
+	maxFees   float64
 	decided   map[string]bool
 	state     string
 	scope     []string
 }
 
-// NewGate returns a Normal gate for accountID under limits and mode.
+// NewIRAGate returns a Normal gate for an IRA: its exposure limit is at most
+// 1, since an IRA never uses margin, and every buy's worst-case cost, its
+// quantity at its limit plus maxFees, must fit the cash available (ADR 0026,
+// point 3).
+func NewIRAGate(accountID string, limits event.MarginLimits, mode string, maxFees float64) (*Gate, error) {
+	if limits.MaxExposure > 1 {
+		return nil, fmt.Errorf("risklimit: an IRA's max exposure %v exceeds 1: it never uses margin", limits.MaxExposure)
+	}
+	if !(maxFees >= 0) || math.IsInf(maxFees, 0) {
+		return nil, errors.New("risklimit: the fee allowance must be finite and not negative")
+	}
+	g, err := NewGate(accountID, limits, mode)
+	if err != nil {
+		return nil, err
+	}
+	g.ira, g.maxFees = true, maxFees
+	return g, nil
+}
+
+// NewGate returns a Normal gate for the joint margin account accountID under
+// limits and mode.
 func NewGate(accountID string, limits event.MarginLimits, mode string) (*Gate, error) {
 	if accountID == "" {
 		return nil, errors.New("risklimit: account id is required")
@@ -107,27 +146,30 @@ func (g *Gate) RestoreState(p event.EngineStatePayload, schemaVersion uint32) er
 	return nil
 }
 
-// Check decides every order of one decision time's plan, in plan order. An
-// order that fails its own payload validation, or belongs to another account,
-// is a defect in the caller and returns an error with no outcome and no state
-// change; an untagged order is a refusal, not an error, and halts.
+// Check decides every order of one decision time's plan, or of one phase of
+// it, in plan order, against book. An order that fails its own payload
+// validation, or belongs to another account, is a defect in the caller and
+// returns an error with no outcome and no state change; an untagged order is
+// a refusal, not an error, and halts.
 //
 // The checks, in order: Halted refuses every order; a tag naming no recorded
 // decision refuses and halts; Degraded refuses every buy, every sell that is
-// not risk-reducing, and every order on an instrument its scope names; then
-// the order count (buys only, when the plan's orders that are not
-// risk-reducing are over it), and, unless the order is risk-reducing, the
-// mark, the price band and the order size; then the pre-trade exposure
-// limit. The first breach refuses the order and degrades the account, naming
-// the instrument.
+// not risk-reducing, and every order on an instrument its scope names; then a
+// sell beyond the holding net of working and pending sells, the order count
+// (buys only, when the decision time's orders that are not risk-reducing are
+// over it), and, unless the order is risk-reducing, the mark, the price band
+// and the order size; then for an exposure-increasing order a holding with no
+// reference price, the exposure limit, and for an IRA's buy the cash
+// available. The first breach refuses the order and degrades the account,
+// naming the instrument.
 //
 // A risk-reducing order (ADR 0026, point 4) is "a sell that moves the
 // account's exposure toward 98% or lower, sized within the broker-reported
 // holding": here, a sell no larger than the holding the planner sized it
 // from. It is exempt from the order count, the order size and the price band
 // (point 3), and so from the mark, the band's only input; one late mark
-// cannot refuse Boost's exit. The holding is the account snapshot's, which
-// reports no working orders, so no working sell is netted from it.
+// cannot refuse Boost's exit. It is still refused when it exceeds the book's
+// holding net of working and pending sells.
 //
 // The one sale back to 98% that ADR 0019 allows a margin account while Halted
 // (amended 2026-10-15) or Degraded on the instrument to sell (amended
@@ -136,11 +178,16 @@ func (g *Gate) RestoreState(p event.EngineStatePayload, schemaVersion uint32) er
 // those cannot be read. This gate reads no open orders, so a Halted account,
 // and a Degraded one's named instruments, release nothing.
 //
-// Exposure is the order's own instrument's holding x the reference price over
-// net liquidation, before and after the order: the joint account holds SPY
-// only. Only an order that increases it is checked against MaxExposure, so a
-// sale is never refused by that check even when the account stays above it.
-func (g *Gate) Check(plan []Order) ([]Outcome, error) {
+// Exposure is account-wide: the sum of every holding x its reference price
+// (the order's own at its reference price) over net liquidation, before and
+// after the order (ADR 0026, point 3). Only an order that increases it is
+// checked against MaxExposure, so a sale is never refused by that check even
+// when the account stays above it. A released order moves the book the next
+// order is checked against: its shares, valued at its reference price, and an
+// IRA buy's worst-case cost out of the cash available. A released sell lowers
+// the holding once; it is not also added to the working sells, which would
+// count it twice against what the next sell may take.
+func (g *Gate) Check(book Book, plan []Order) ([]Outcome, error) {
 	for i, o := range plan {
 		probe := o.Planned
 		if probe.Tag == "" {
@@ -159,31 +206,60 @@ func (g *Gate) Check(plan []Order) ([]Outcome, error) {
 			return nil, fmt.Errorf("risklimit: order %d: a recorded mark must be finite and positive", i+1)
 		}
 	}
-	counted := 0
+	running := &book
+	running.Holdings = maps.Clone(book.Holdings)
+	running.Prices = maps.Clone(book.Prices)
+	running.WorkingSells = maps.Clone(book.WorkingSells)
+	if running.Holdings == nil {
+		running.Holdings = map[string]int64{}
+	}
+	if running.Prices == nil {
+		running.Prices = map[string]float64{}
+	}
+	if running.WorkingSells == nil {
+		running.WorkingSells = map[string]int64{}
+	}
+	planSize := book.PriorOrders + len(plan)
+	counted := book.PriorCounted
 	for _, o := range plan {
-		if !riskReducing(o.Planned) {
+		if !RiskReducing(o.Planned) {
 			counted++
 		}
 	}
 	outcomes := make([]Outcome, 0, len(plan))
 	for _, o := range plan {
-		outcomes = append(outcomes, g.check(o, len(plan), counted))
+		out := g.check(o, planSize, counted, running)
+		if out.Released != nil {
+			p := o.Planned
+			running.Prices[p.InstrumentID] = p.ReferencePrice
+			if p.Side == event.OrderSideSell {
+				// The lower holding is what the next sell may take from,
+				// net of the book's working sells: the released sell is
+				// counted once, not again as a working sell (ADR 0026,
+				// point 2.5).
+				running.Holdings[p.InstrumentID] -= p.Quantity
+			} else {
+				running.Holdings[p.InstrumentID] += p.Quantity
+				running.CashAvailable -= out.Released.Figures.BuyCost
+			}
+		}
+		outcomes = append(outcomes, out)
 	}
 	return outcomes, nil
 }
 
-// riskReducing reports whether p is risk-reducing (ADR 0026, point 4): a sell
+// RiskReducing reports whether p is risk-reducing (ADR 0026, point 4): a sell
 // within the holding it was sized from. No buy is, even within a rebalance
 // that also sells.
-func riskReducing(p event.OrderPlannedPayload) bool {
+func RiskReducing(p event.OrderPlannedPayload) bool {
 	return p.Side == event.OrderSideSell && p.Quantity <= p.HeldQuantity
 }
 
-// check decides one order of a plan of planSize orders, counted of which are
-// not risk-reducing.
-func (g *Gate) check(o Order, planSize, counted int) Outcome {
+// check decides one order of a plan of planSize orders at its decision time,
+// counted of which are not risk-reducing, against book.
+func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 	p := o.Planned
-	f := figures(o, planSize)
+	f, unvalued := g.figures(o, planSize, book)
 	switch {
 	case g.state == StateHalted:
 		return Outcome{Refused: g.refusal(o, f, event.RefusedEngineHalted, "the account is Halted: no order is released until the owner clears it")}
@@ -197,13 +273,13 @@ func (g *Gate) check(o Order, planSize, counted int) Outcome {
 		}
 		out.StateSchemaVersion = event.EngineStateScopedVersion
 		return out
-	case g.state == StateDegraded && (!riskReducing(p) || slices.Contains(g.scope, p.InstrumentID)):
+	case g.state == StateDegraded && (!RiskReducing(p) || slices.Contains(g.scope, p.InstrumentID)):
 		// ADR 0019, amended 2026-09-24: "Nothing that opens or adds to a
 		// position is allowed while not Normal", and named instruments are
 		// frozen; risk-reducing sells continue elsewhere (ADR 0026, point 4).
 		return Outcome{Refused: g.refusal(o, f, event.RefusedEngineDegraded, fmt.Sprintf("the account is Degraded (scope %v): only risk-reducing sells go, and the scope's instruments are frozen", g.scope))}
 	}
-	if reason, detail := g.breach(o, f, counted); reason != "" {
+	if reason, detail := g.breach(o, f, counted, book, unvalued); reason != "" {
 		out := Outcome{Refused: g.refusal(o, f, reason, detail)}
 		if !slices.Contains(g.scope, p.InstrumentID) {
 			g.state = StateDegraded
@@ -226,13 +302,17 @@ func (g *Gate) check(o Order, planSize, counted int) Outcome {
 }
 
 // breach returns the first limit o breaches and its detail, or "" when none.
-// counted is the plan's orders that are not risk-reducing.
-func (g *Gate) breach(o Order, f event.RiskFigures, counted int) (reason, detail string) {
+// counted is the decision time's orders that are not risk-reducing.
+func (g *Gate) breach(o Order, f event.RiskFigures, counted int, book *Book, unvalued string) (reason, detail string) {
 	p := o.Planned
+	increases := f.ExposureAfter > f.ExposureBefore
+	available := book.Holdings[p.InstrumentID] - book.WorkingSells[p.InstrumentID]
 	switch {
+	case p.Side == event.OrderSideSell && p.Quantity > available:
+		return event.RefusedSellExceedsHolding, fmt.Sprintf("sell of %d %s exceeds the %d held net of working and pending sells", p.Quantity, p.InstrumentID, available)
 	case counted > g.limits.MaxOrdersPerDecision && p.Side == event.OrderSideBuy:
 		return event.RefusedOrderCount, fmt.Sprintf("%d orders that are not risk-reducing planned at one decision time; the limit is %d, so the plan's buys are refused", counted, g.limits.MaxOrdersPerDecision)
-	case riskReducing(p):
+	case RiskReducing(p):
 		// Exempt from the mark, band and size (ADR 0026, point 3); a sell
 		// never breaches the exposure limit, which checks only an increase.
 		return "", ""
@@ -242,23 +322,48 @@ func (g *Gate) breach(o Order, f event.RiskFigures, counted int) (reason, detail
 		return event.RefusedPriceBand, fmt.Sprintf("reference price %v is %v from mark %v; the band is %v", p.ReferencePrice, f.MarkDeviation, o.Mark, g.limits.PriceBand)
 	case f.OrderFraction > g.limits.MaxOrderFraction:
 		return event.RefusedOrderSize, fmt.Sprintf("order is %v of net liquidation; the limit is %v", f.OrderFraction, g.limits.MaxOrderFraction)
-	case math.Abs(f.ExposureAfter) > math.Abs(f.ExposureBefore) && f.ExposureAfter > g.limits.MaxExposure:
+	case increases && unvalued != "":
+		return event.RefusedUnvaluedHolding, fmt.Sprintf("holding %s has no reference price, so the account's exposure cannot be valued", unvalued)
+	case increases && f.ExposureAfter > g.limits.MaxExposure && g.ira:
+		return event.RefusedIRAExposure, fmt.Sprintf("exposure after the order %v exceeds %v (before %v)", f.ExposureAfter, g.limits.MaxExposure, f.ExposureBefore)
+	case increases && f.ExposureAfter > g.limits.MaxExposure:
 		return event.RefusedMarginExposure, fmt.Sprintf("exposure after the order %v exceeds %v (before %v)", f.ExposureAfter, g.limits.MaxExposure, f.ExposureBefore)
+	case f.CashChecked && f.BuyCost > f.CashAvailable:
+		return event.RefusedInsufficientCash, fmt.Sprintf("worst-case cost %v exceeds the %v of cash available; an IRA never borrows", f.BuyCost, f.CashAvailable)
 	}
 	return "", ""
 }
 
-func figures(o Order, planSize int) event.RiskFigures {
+// figures values o against book: the account's exposure before and after it,
+// its share of net liquidation, its mark deviation and, for an IRA's buy, its
+// worst-case cost and the cash available. It also returns the first holding,
+// by instrument, that has no reference price, or "" when every one has.
+func (g *Gate) figures(o Order, planSize int, book *Book) (f event.RiskFigures, unvalued string) {
 	p := o.Planned
-	after := p.HeldQuantity + p.Quantity
+	held := book.Holdings[p.InstrumentID]
+	after := held + p.Quantity
 	if p.Side == event.OrderSideSell {
-		after = p.HeldQuantity - p.Quantity
+		after = held - p.Quantity
 	}
-	f := event.RiskFigures{
+	others := 0.0
+	for _, id := range slices.Sorted(maps.Keys(book.Holdings)) {
+		price, ok := book.Prices[id]
+		switch {
+		case id == p.InstrumentID || book.Holdings[id] == 0:
+		case !ok:
+			if unvalued == "" {
+				unvalued = id
+			}
+		default:
+			others += math.Abs(float64(float64(book.Holdings[id]) * price))
+		}
+	}
+	own := func(q int64) float64 { return math.Abs(float64(float64(q) * p.ReferencePrice)) }
+	f = event.RiskFigures{
 		NetLiquidation:   p.NetLiquidation,
 		ReferencePrice:   p.ReferencePrice,
-		ExposureBefore:   float64(p.HeldQuantity) * p.ReferencePrice / p.NetLiquidation,
-		ExposureAfter:    math.Abs(float64(after) * p.ReferencePrice / p.NetLiquidation),
+		ExposureBefore:   (others + own(held)) / p.NetLiquidation,
+		ExposureAfter:    (others + own(after)) / p.NetLiquidation,
 		OrderFraction:    float64(p.Quantity) * p.ReferencePrice / p.NetLiquidation,
 		OrdersInDecision: planSize,
 	}
@@ -266,7 +371,12 @@ func figures(o Order, planSize int) event.RiskFigures {
 		f.Mark, f.MarkSet = o.Mark, true
 		f.MarkDeviation = math.Abs(p.ReferencePrice-o.Mark) / o.Mark
 	}
-	return f
+	if g.ira && p.Side == event.OrderSideBuy {
+		f.CashChecked = true
+		f.BuyCost = float64(float64(p.Quantity)*p.LimitPrice) + g.maxFees
+		f.CashAvailable = book.CashAvailable
+	}
+	return f, unvalued
 }
 
 func (g *Gate) refusal(o Order, f event.RiskFigures, reason, detail string) *event.OrderRefusedPayload {

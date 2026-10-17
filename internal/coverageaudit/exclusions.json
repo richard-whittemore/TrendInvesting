@@ -921,6 +921,13 @@
       "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; the payload passed Validate immediately before json.Marshal."
     },
     {
+      "file": "internal/targetweight/momentum_run.go",
+      "function": "newMomentum",
+      "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "risklimit.NewIRAGate refuses only an empty account, invalid limits, an unknown mode, a max exposure above 1 or a negative or non-finite fee allowance; New calls TargetWeightConfigurationPayload.Validate first, which refuses each of those for a momentum configuration (TestMomentumConfigurationValidate)."
+    },
+    {
       "file": "internal/nysecalendar/calendar.go",
       "function": "mustLoad",
       "statement": "panic(fmt.Sprintf(\"nysecalendar: load %s: %v\", name, err))",

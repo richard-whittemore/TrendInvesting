@@ -44,20 +44,16 @@ func addQuantity(a, b int64) (int64, bool) {
 // the book, so one disagreement is reported once rather than carried into
 // every later comparison.
 //
-// A fill names no account. It belongs to its journal's single account; a
-// journal naming several accounts has no way to say which one a fill hit, so
-// rebuild refuses it rather than guess.
+// A Turtle fill (version 4) names no account. It belongs to its journal's
+// single account; a journal naming several accounts has no way to say which
+// one such a fill hit, so rebuild refuses it rather than guess. A
+// target-weight fill (version 5) names its own account.
 func rebuild(j Journal) ([]step, []check, error) {
 	items, err := decode(j)
 	if err != nil {
 		return nil, nil, err
 	}
-	accounts := map[string]bool{}
-	for _, it := range items {
-		if it.snapshot != nil || it.planned != nil || it.released != nil || it.refused != nil {
-			accounts[it.account] = true
-		}
-	}
+	accounts := namedAccounts(items)
 	books := map[string]map[string]int64{}
 	started := map[string]bool{}
 	var steps []step
