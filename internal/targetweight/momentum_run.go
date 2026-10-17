@@ -33,6 +33,8 @@ import (
 //     before its close: one per member the run ranks from that snapshot, in
 //     place of those members' daily bars (the compact universe input,
 //     applyHistory);
+//   - market.session.retracted: a session the exchange cancelled, removed
+//     from the calendar (applyRetraction);
 //   - account.snapshot version 4 and market.mark.recorded per instrument;
 //   - execution.order.lifecycle version 2 and execution.fill version 5 for the
 //     orders this run released.
@@ -104,8 +106,9 @@ type momentumRun struct {
 	rebalance *rebalance
 
 	// histories holds the ranked members' close histories until their
-	// session closes.
+	// session closes; retracted, every session withdrawn from the calendar.
 	histories map[string]event.CloseHistoryPayload
+	retracted map[string]bool
 }
 
 // trackedOrder is one released order and what the venue has reported of it.
@@ -179,6 +182,7 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 		fills:    map[string]event.TargetWeightFillPayload{},
 
 		histories: map[string]event.CloseHistoryPayload{},
+		retracted: map[string]bool{},
 	}
 	return h, nil
 }
@@ -198,6 +202,8 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 		return nil, r.applyUniverse(in)
 	case event.CloseHistoryEventType:
 		return nil, r.applyHistory(in)
+	case event.SessionRetractedEventType:
+		return r.applyRetraction(in)
 	case event.AccountSnapshotEventType:
 		return nil, r.applySnapshot(in)
 	case event.MarkRecordedEventType:
@@ -218,11 +224,16 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 // applyCalendar merges a calendar into the one held. The two must share a
 // session, and over the dates both cover they must list the same sessions: a
 // calendar that drops or adds a session the run already knows is a
-// contradiction, never a correction.
+// contradiction, never a correction. A retracted session is no session, so a
+// calendar that still lists one is read without it.
 func (r *momentumRun) applyCalendar(in event.Envelope) error {
 	p, err := decodeInput[event.SessionCalendarPayload](in, event.SessionCalendarSchemaVersion)
 	if err != nil {
 		return err
+	}
+	p.Sessions = slices.DeleteFunc(p.Sessions, func(s string) bool { return r.retracted[s] })
+	if len(p.Sessions) == 0 {
+		return nil
 	}
 	if len(r.calendar) > 0 {
 		lo, hi := max(p.Sessions[0], r.calendar[0]), min(p.Sessions[len(p.Sessions)-1], r.calendar[len(r.calendar)-1])
