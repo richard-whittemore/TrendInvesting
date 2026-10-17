@@ -3,10 +3,28 @@ export GOTOOLCHAIN := local
 COVERAGE_MIN ?= 80.0
 COVERAGE_PROFILE ?= coverage.out
 
-.PHONY: adapter-test build check coverage deps fmt fmt-check golangci lint research-test staticcheck test vet vuln
+.PHONY: adapter-test build check coverage demo-boost-dry-run deps engine fmt fmt-check golangci lint research-test staticcheck test vet vuln
+
+# The build stamp: every envelope's strategy version carries it (ADR 0016),
+# and cmd/engine refuses -mode dry-run, paper or live on an unstamped build
+# ("dev"). scripts/build-stamp.sh prints `git describe --always --dirty`,
+# with a dirty tree's own tree hash appended, and "dev" outside a git
+# checkout, which those modes refuse. Expanded only by the targets that
+# link a binary.
+BUILD_STAMP ?= $(shell ./scripts/build-stamp.sh)
+LDFLAGS = -X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=$(BUILD_STAMP)
 
 build:
-	go build ./...
+	go build -ldflags "$(LDFLAGS)" ./...
+
+# The engine binary, stamped. deploy/build-engine.sh builds the server's copy.
+engine:
+	go build -ldflags "$(LDFLAGS)" -o bin/ti-engine ./cmd/engine
+
+# The one engine in dry-run over a synthetic SPY series, its decision log,
+# and its durable log replayed byte for byte (scripts/demo-boost-dry-run.sh).
+demo-boost-dry-run:
+	./scripts/demo-boost-dry-run.sh
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './vendor/*')
@@ -49,8 +67,11 @@ deps:
 # cores on that job. `check`'s own explicit research-test prerequisite,
 # below, does not run it twice: make only remakes a phony target once per
 # invocation.
+# It also runs the IBKR adapter's suite (adapter/ibkr, ADR 0025), against a
+# fake TWS API client: ibapi itself is not installed here.
 adapter-test: research-test
 	cd adapter/lean && python3 -m unittest discover -s tests
+	cd adapter/ibkr && python3 -m unittest discover -s tests
 	cd adapter && python3 -m unittest discover -s marketdata/tests -t .
 
 # The research checks' rule cores (research/qc-cloud for the Turtle

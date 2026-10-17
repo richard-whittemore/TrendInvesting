@@ -451,3 +451,85 @@ func TestRestoreState(t *testing.T) {
 		}
 	}
 }
+
+// TestAnIncidentsSaleIsAttemptedOnce: ADR 0019's sale back to 98% (amended
+// 2026-10-15) is attempted once per incident and never retried
+// automatically. A fresh run restores whether the previous run attempted it
+// from the owner's approval, so an attempt recorded there refuses a second
+// one, and one recorded as not attempted may go once.
+func TestAnIncidentsSaleIsAttemptedOnce(t *testing.T) {
+	attempted := gate(t, limits(), event.TradingModeDryRun)
+	if err := attempted.RestoreSaleAttempt("incident-1", true); err != nil {
+		t.Fatal(err)
+	}
+	if attempted.AttemptSale("incident-1") {
+		t.Error("a sale the approval records as attempted was attempted again")
+	}
+
+	open := gate(t, limits(), event.TradingModeDryRun)
+	if err := open.RestoreSaleAttempt("incident-1", false); err != nil {
+		t.Fatal(err)
+	}
+	if !open.AttemptSale("incident-1") {
+		t.Error("a sale the approval records as not attempted was refused")
+	}
+	if open.AttemptSale("incident-1") {
+		t.Error("the incident's sale was attempted twice")
+	}
+	if !open.AttemptSale("incident-2") {
+		t.Error("another incident's sale was refused")
+	}
+
+	twice := gate(t, limits(), event.TradingModeDryRun)
+	if err := twice.RestoreSaleAttempt("incident-1", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := twice.RestoreSaleAttempt("incident-1", false); err == nil {
+		t.Error("an incident's attempt was restored twice")
+	}
+	if err := twice.RestoreSaleAttempt("", false); err == nil {
+		t.Error("an attempt was restored for no incident")
+	}
+}
+
+// TestAnApprovedIncidentRestoresItsState: a fresh run approved with an
+// incident in force resumes in the incident's state and scope before any
+// order is checked, under the same never-loosen rule as a recorded state
+// (ADR 0019, amended 2026-09-24, "The state survives a restart"): Halted
+// stays Halted, and a state that is neither Degraded with a scope nor Halted
+// is refused, leaving the gate as it was.
+func TestAnApprovedIncidentRestoresItsState(t *testing.T) {
+	degraded := gate(t, limits(), event.TradingModeDryRun)
+	if err := degraded.RestoreIncidentState(event.EngineStateDegraded, []string{"SPY"}); err != nil {
+		t.Fatal(err)
+	}
+	if degraded.State() != risklimit.StateDegraded {
+		t.Errorf("an approved Degraded incident leaves the gate %s", degraded.State())
+	}
+	halted := gate(t, limits(), event.TradingModeDryRun)
+	if err := halted.RestoreIncidentState(event.EngineStateHalted, nil); err != nil {
+		t.Fatal(err)
+	}
+	if halted.State() != risklimit.StateHalted {
+		t.Errorf("an approved Halted incident leaves the gate %s", halted.State())
+	}
+	if err := halted.RestoreIncidentState(event.EngineStateDegraded, []string{"SPY"}); err == nil || halted.State() != risklimit.StateHalted {
+		t.Errorf("a Degraded incident loosened a Halted gate: %v, %s", err, halted.State())
+	}
+	for name, c := range map[string]struct {
+		state string
+		scope []string
+	}{
+		"normal":                 {risklimit.StateNormal, nil},
+		"degraded with no scope": {event.EngineStateDegraded, nil},
+		"halted with a scope":    {event.EngineStateHalted, []string{"SPY"}},
+	} {
+		n := gate(t, limits(), event.TradingModeDryRun)
+		if err := n.RestoreIncidentState(c.state, c.scope); err == nil {
+			t.Errorf("%s: restored", name)
+		}
+		if n.State() != risklimit.StateNormal {
+			t.Errorf("%s: a refused incident changes no state", name)
+		}
+	}
+}

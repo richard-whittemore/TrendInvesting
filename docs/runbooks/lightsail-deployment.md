@@ -2,7 +2,7 @@
 
 Provisioning for the live server in `docs/live-trading/plan.md` section 3: one Ubuntu 24.04 LTS VM running one IB Gateway (kept logged in by IBC), a shared market-data step, three engines (one per account, each with its own adapter client ID, ADR 0026 section 8), a reporter and a read-only dashboard, reachable only over Tailscale. Everything is in `deploy/`.
 
-> **Status:** provisioning only. The engines, the broker adapter, the data step, the reporter and the dashboard are not built. Their systemd units exist as placeholders (`/opt/trend-investing/bin/ti-engine`, `ti-data`, `ti-reporter`, `ti-dashboard`) and are skipped, not failed, until the binary is installed; the change that ships each binary fixes its arguments. Nothing here has run against a real IBKR login. Trading mode defaults to **paper** and the API to **read-only** until the limited-live gate (AGENTS.md rule 5).
+> **Status:** provisioning only. The engine is built and runs Boost in dry-run (`deploy/build-engine.sh`, below); the broker adapter, the data step, the reporter and the dashboard are not built. Their systemd units exist as placeholders (`/opt/trend-investing/bin/ti-engine`, `ti-data`, `ti-reporter`, `ti-dashboard`) and are skipped, not failed, until the binary is installed; the change that ships each binary fixes its arguments. Nothing here has run against a real IBKR login. Trading mode defaults to **paper** and the API to **read-only** until the limited-live gate (AGENTS.md rule 5).
 
 **Owner steps** are marked **[OWNER]**. Agents never sign up, pay or enter credentials.
 
@@ -42,7 +42,9 @@ Schedule (New York time, `TZ` set in each unit): Gateway restarts nightly at 11:
 8. **[OWNER] Start the Gateway and approve 2FA:** `sudo systemctl start ti-gateway`. Approve the IBKR Mobile prompt on your phone within 3 minutes. Check `journalctl -u ti-gateway -n 50` shows a login and no credential.
 9. Publish the dashboard to the tailnet only, once its binary is installed: `sudo tailscale serve --bg 8080` (**[OWNER]**, tailnet configuration).
 
-When an engine, the data step, the reporter or the dashboard binary exists, install it at the path in its unit, add `/etc/trend-investing/engines/<account>.config` (with `send: false` for the dry-run gate), `sudo systemctl daemon-reload`, and start it. Check each with `systemctl status`.
+When the data step, the reporter or the dashboard binary exists, install it at the path in its unit, `sudo systemctl daemon-reload`, and start it. Check each with `systemctl status`.
+
+**The engine.** Build it on the Mac from a clean checkout with `deploy/build-engine.sh` (linux/amd64, stamped by `scripts/build-stamp.sh` from `git describe --always --dirty`, and it refuses a dirty tree; the engine refuses dry-run, paper and live on an unstamped build). Copy `dist/ti-engine` to the server and `sudo install -m 0755 ti-engine /opt/trend-investing/bin/ti-engine`. `provision.sh services` installs `boost.env` (`TI_MODE=dry-run`) and `boost.config` (mode `dry-run`). The engine units are **not enabled**, and `provision.sh services` disables any engine instance an earlier provisioner enabled: every start is an explicit owner step, written down in `docs/runbooks/durable-log.md`, "Restarting an engine". The unit runs the engine with `-mode`, `-config`, `-socket /run/ti-engine-<account>/engine.sock` (a 0700 directory per engine), `-log`, `-out` and `-as-of`, from the account's `run.env`, and never restarts it by itself (`Restart=no`).
 
 ## Restart drill
 
@@ -50,9 +52,9 @@ Rehearse before any engine trades. Record the result in #329.
 
 1. `sudo systemctl restart ti-gateway`. Expect a re-login within about two minutes. If the session was fresh, no phone prompt; after a cold start expect one **[OWNER]**.
 2. Confirm the Gateway is up: `systemctl is-active ti-gateway` and `journalctl -u ti-gateway --since "5 min ago"`.
-3. Engines reconnect on their own (`Restart=on-failure`, 30 s). Confirm each is `active` and that its journal shows a reconcile after reconnecting, not a resume from stale state (ADR 0019 and 0025 point 5: a restart must not cross an open order).
-4. `sudo reboot`, then repeat 2 and 3. This one needs your phone **[OWNER]**. Schedule reboots for Sunday, after the weekly cold restart, so one prompt serves both.
-5. Kill one engine with a failure signal (`sudo systemctl kill --signal=SIGKILL ti-engine@boost`; the default SIGTERM counts as a clean stop under `Restart=on-failure` and would leave it down). Confirm the other two stayed `active` throughout and that boost is `active` again within about 30 s: a fault touches one account only (ADR 0026 section 8).
+3. A Gateway restart does not restart an engine: the engine keeps running, and its adapter reconnects (the adapter is not built yet). Confirm each engine that was running is still `active` and that its journal shows a reconcile after reconnecting, not a resume from stale state (ADR 0019 and 0025 point 5: a restart must not cross an open order).
+4. `sudo reboot`, then repeat 2. This one needs your phone **[OWNER]**. Schedule reboots for Sunday, after the weekly cold restart, so one prompt serves both. The engines stay stopped after a reboot (they are not enabled): start each by `docs/runbooks/durable-log.md`, "Restarting an engine" (a reboot is not a crash, so each is a fresh run the owner approves).
+5. Kill one engine (`sudo systemctl kill --signal=SIGKILL ti-engine@boost`). Confirm the other two stayed `active` and that boost stays **stopped** (`Restart=no`): a fault touches one account only (ADR 0026 section 8), and only the owner restarts it. Resume it as a crash by the runbook.
 
 ## Reconnect drill: the Gateway will not log in
 

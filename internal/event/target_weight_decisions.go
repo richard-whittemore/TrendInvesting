@@ -18,7 +18,13 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     figures, and the withheld reason rebalance-in-progress. Boost is
 //     omitted from a momentum decision and Momentum from a Boost one, so a
 //     Boost decision's payload bytes are version 1's.
-const TargetsDecidedSchemaVersion uint32 = 2
+//   - Version 3 adds the glide path to momentum decisions: the Glide figures
+//     (the rebalance session, the owner's age in months and the bond share
+//     b), and each target's sleeve Shares, which record what the momentum
+//     and bond sleeves each contribute to a fund both hold (ADR 0026,
+//     point 1). Both are omitted from a Boost decision, whose payload bytes
+//     are still version 1's.
+const TargetsDecidedSchemaVersion uint32 = 3
 
 // The two outcomes of a target decision (ADR 0026, point 1).
 const (
@@ -49,9 +55,37 @@ const (
 )
 
 // TargetWeight is one instrument's target as a fraction of net liquidation.
+// A momentum target records the share each sleeve contributes, momentum then
+// bond, whose sum in that order is Weight (plan.md section 2, "Bond sleeve
+// and glide path": a fund both sleeves hold is one target, the sum, with each
+// sleeve's share in the journal). A Boost target has none.
 type TargetWeight struct {
-	InstrumentID string  `json:"instrument_id"`
-	Weight       float64 `json:"weight"`
+	InstrumentID string        `json:"instrument_id"`
+	Weight       float64       `json:"weight"`
+	Shares       []SleeveShare `json:"shares,omitempty"`
+}
+
+// The closed set of sleeves a momentum target's shares name.
+const (
+	SleeveMomentum = "momentum"
+	SleeveBond     = "bond"
+)
+
+// SleeveShare is the part of a target one sleeve contributes.
+type SleeveShare struct {
+	Sleeve string  `json:"sleeve"`
+	Weight float64 `json:"weight"`
+}
+
+// GlideFigures are the glide path's figures behind a momentum decision (ADR
+// 0026, point 1): the rebalance session the age is counted on, YYYY-MM-DD,
+// the owner's age on it in whole months, and the bond share b. The momentum
+// book is scaled to 1 - b and the bond sleeve holds 98% of b; the momentum
+// Names' weights are the book's before that scaling.
+type GlideFigures struct {
+	RebalanceSession string  `json:"rebalance_session"`
+	AgeMonths        int     `json:"age_months"`
+	BondShare        float64 `json:"bond_share"`
 }
 
 // BoostFigures are the figures behind a Boost decision, so the journal alone
@@ -96,6 +130,8 @@ type TargetsDecidedPayload struct {
 	// is zero and omitted.
 	Boost    BoostFigures    `json:"boost,omitzero"`
 	Momentum MomentumFigures `json:"momentum,omitzero"`
+	// Glide is set for StrategyID momentum, on either outcome.
+	Glide GlideFigures `json:"glide,omitzero"`
 }
 
 // MomentumFigures are the figures behind a momentum decision, so the journal
@@ -168,8 +204,12 @@ func (p TargetsDecidedPayload) Validate() error {
 		if !p.Momentum.isZero() {
 			errs = append(errs, errors.New("a boost decision carries no momentum figures"))
 		}
+		if p.Glide != (GlideFigures{}) {
+			errs = append(errs, errors.New("a boost decision carries no glide figures"))
+		}
 	case TargetWeightStrategyMomentum:
 		errs = append(errs, p.Momentum.validate()...)
+		errs = append(errs, p.Glide.validate(p.Momentum.CloseSession)...)
 		if p.Boost != (BoostFigures{}) {
 			errs = append(errs, errors.New("a momentum decision carries no boost figures"))
 		}
@@ -219,11 +259,60 @@ func (p TargetsDecidedPayload) Validate() error {
 		if !isFinite(target.Weight) || target.Weight < 0 {
 			errs = append(errs, fmt.Errorf("target %d: weight must be finite and not negative", i+1))
 		}
+		if boost && len(target.Shares) > 0 {
+			errs = append(errs, fmt.Errorf("target %d: a boost target carries no sleeve shares", i+1))
+		}
+		if p.StrategyID == TargetWeightStrategyMomentum {
+			errs = append(errs, target.validateShares(i+1)...)
+		}
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid targets decided payload: %w", err)
 	}
 	return nil
+}
+
+// validateShares checks a momentum target's sleeve shares: at least one,
+// momentum before bond, each sleeve once, each finite and not negative, and
+// their sum in that order exactly the target's weight.
+func (t TargetWeight) validateShares(n int) []error {
+	if len(t.Shares) == 0 {
+		return []error{fmt.Errorf("target %d: a momentum target needs its sleeve shares", n)}
+	}
+	var errs []error
+	sum := 0.0
+	for i, s := range t.Shares {
+		switch {
+		case s.Sleeve != SleeveMomentum && s.Sleeve != SleeveBond:
+			errs = append(errs, fmt.Errorf("target %d: sleeve %q is not momentum or bond", n, s.Sleeve))
+		case i > 0 && (s.Sleeve != SleeveBond || t.Shares[i-1].Sleeve != SleeveMomentum):
+			errs = append(errs, fmt.Errorf("target %d: sleeve shares come momentum then bond, each once", n))
+		}
+		if !isFinite(s.Weight) || s.Weight < 0 {
+			errs = append(errs, fmt.Errorf("target %d: sleeve share must be finite and not negative", n))
+		}
+		sum += s.Weight
+	}
+	if sum != t.Weight {
+		errs = append(errs, fmt.Errorf("target %d: sleeve shares sum to %v, not the weight %v", n, sum, t.Weight))
+	}
+	return errs
+}
+
+func (g GlideFigures) validate(closeSession string) []error {
+	var errs []error
+	if g.AgeMonths < 1 {
+		errs = append(errs, errors.New("glide age in months must be positive"))
+	}
+	if !isFinite(g.BondShare) || g.BondShare < 0 || g.BondShare > 1 {
+		errs = append(errs, errors.New("glide bond share must lie in [0, 1]"))
+	}
+	if _, err := time.Parse(time.DateOnly, g.RebalanceSession); err != nil {
+		errs = append(errs, fmt.Errorf("glide rebalance session %q is not a YYYY-MM-DD date", g.RebalanceSession))
+	} else if g.RebalanceSession <= closeSession {
+		errs = append(errs, errors.New("glide rebalance session must come after the close session"))
+	}
+	return errs
 }
 
 func (m MomentumFigures) isZero() bool {

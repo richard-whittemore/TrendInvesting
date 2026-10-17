@@ -228,15 +228,33 @@ Lightsail VM (Ubuntu, $12/month, US East)
   - an alert when the automatic flatten is sent, and another when it fills
     or fails;
   - the flatten is sell-only and sized from IBKR's own figures, never the
-    journal's (which is what is in doubt): the smaller of what reaches 98%
-    of IBKR's net liquidation value, priced at IBKR's current mark from the
-    same account snapshot, and IBKR's reported holding minus every
-    working or pending sell IBKR reports, ours or unknown. So no
-    combination of fills can open a short;
-  - if IBKR's holding, account values or open orders cannot be read, or a
-    working sell is one the journal does not recognise, no order is sent
-    and the urgent alert asks the owner to act by hand. It is attempted
-    once per incident, never retried automatically;
+    journal's (which is what is in doubt), taken from the latest account
+    snapshot only (the latest journalled at or before the event that
+    triggers the sale, ADR 0019 reading 1). The quantity is the smallest
+    of three bounds: what reaches 98%, IBKR's reported holding minus
+    every working or pending sell (ours or unknown), and that holding
+    minus those sells minus the shares kept. So no combination of fills
+    can open a short or take exposure below 98% (ADR 0019 amendment
+    2026-10-17, readings 1 and 10);
+  - if the latest snapshot, holding, account values or open orders cannot
+    be read, or a working sell is one the journal does not recognise, no
+    order is sent, the attempt is used up and the urgent alert asks the
+    owner to act by hand. If the snapshot is readable but older than
+    `MaxSnapshotAge` or stamped later than the event that triggers the
+    sale, or its net liquidation value or mark is zero or
+    negative, no order is sent either (reasons `stale-broker-snapshot` and
+    `non-positive-broker-values`), but the attempt is not used up: while
+    the exit or the urgent alarm still stands, the next good snapshot
+    re-evaluates the sale. The exit stands while any of the causes that
+    refuse a sell (the kill switch engaged, the account Halted, or Degraded
+    on the instrument) still applies, whichever fired it, so a hand-off in
+    either direction between engagement and incident does not end it;
+    Degraded to Halted is the same incident. It also ends when a decision that
+    is not withheld no longer plans the sell. Once neither stands, the
+    withheld sale lapses: it is journalled with reason `lapsed` and reported
+    in the daily summary, not paged (ADR 0019 reading 1, "The snapshot rule",
+    and readings 2 and 4; ADR 0026 points 3 to 6 and its 2026-10-17
+    amendment);
   - this is the one exception to ADR 0019's "no order changes" while
     Halted, recorded as an amendment to ADR 0019 (2026-10-15), so the
     target-weight strategy ADR has a single order rule to follow;
@@ -492,7 +510,15 @@ Lightsail VM (Ubuntu, $12/month, US East)
 ## 7. Operations
 
 - Daily: data refresh after the close, decisions, a summary to the phone
-  (ntfy), heartbeat to Healthchecks.io; an alert if the heartbeat is missed.
+  (PagerDuty or a private ntfy server, never the public relay), heartbeat
+  to Healthchecks.io; an alert if the heartbeat is missed.
+- Alert channels (owner decision, 2026-10-17): ntfy plus PagerDuty as the
+  second channel (the owner signs up; the reporter uses the Events API and
+  reads the acknowledgement back). An alert is delivered only when every real
+  channel has taken it, a failure on one channel never counts as delivered,
+  and `stdout` is a terminal echo, never a channel. The daily summary carries
+  balances and never goes through a public relay such as ntfy.sh. See
+  `docs/manual/alerts-and-dashboard.md`.
 - Weekly: approve IBC's 2FA prompt on the phone (Sunday).
 - Monthly: momentum rebalance on the first session; report against SPY.
 - Logs and the journal are kept on the VM and copied off it nightly; a
@@ -507,7 +533,7 @@ Lightsail VM (Ubuntu, $12/month, US East)
 | Lightsail 2 GB plan, snapshots | ~$170 |
 | Tailscale, Healthchecks.io, ntfy (free tiers) | $0 |
 | IBKR market data for API bars, if required | about $10/month (~$120/year); daily bars come from Massive (#326), so a subscription may be needed only for the marks the price band checks; budget it until paper trading shows otherwise |
-| Commissions | Pro (every account, since Lite has no API access; D5 revised 2026-10-16): ~$28 for Boost, and perhaps $100–200 per IRA for momentum. Fee model: IBKR Pro Fixed, $0.005 a share, at least $1 and at most 1% of the order's value (ADR 0013's model). So the commission is min(max($1, $0.005 × shares), 1% × order value): at least $1, plus $0.005 a share for every share above 200 (a 300-share order costs $1.50), unless the 1% cap is lower, which happens when the order's value is under $100 for 200 shares or fewer and under $150 for a 300-share order (300 shares at $0.25 are a $75 order and cost $0.75); a cheap stock or a bond-fund purchase can pass 200 shares. Both figures are early estimates, not measured trade counts, and assume each order is 200 shares or fewer and worth $100 or more, so each costs the $1 floor and the estimate is an order count (an order under $100 costs less, so the totals are an upper bound on that point). Activity basis: ~$28 is about 14 Boost round trips a year, two orders each; $100–200 is 100–200 orders a year per IRA, about 8–17 a month at the monthly rebalance (a buy or sell for each name entering or leaving the 25 and each resize past the band); a name held unchanged inside the band sends no order. The parity backtest's orders and share quantities replace them |
+| Commissions | Pro (every account, since Lite has no API access; D5 revised 2026-10-16): ~$28 for Boost; for an IRA, the $100–200 a year estimate (assumed order counts) is superseded by the measured combination backtests below, about $350–490 a year on a $30k start. Fee model: IBKR Pro Fixed, $0.005 a share, at least $1 and at most 1% of the order's value (ADR 0013's model). So the commission is min(max($1, $0.005 × shares), 1% × order value): at least $1, plus $0.005 a share for every share above 200 (a 300-share order costs $1.50), unless the 1% cap is lower, which happens when the order's value is under $100 for 200 shares or fewer and under $150 for a 300-share order (300 shares at $0.25 are a $75 order and cost $0.75); a cheap stock or a bond-fund purchase can pass 200 shares. Measured at a $30k start in the combination backtests (`docs/research/commissions-30k-2026-10.md`): the average fee is $1.49 (FU, 1999-2015), $1.03 (FU, 2016-2026-06), $1.36 (F, 1999-2015) and $1.03 (F, 2016-2026-06) per order; the fee totals imply $8,257 (FU) and $6,975 (F) over 17 years (about $486 and $410 a year) and $3,896 (FU) and $3,658 (F) over 10.5 years (about $371 and $348 a year) on a $30k start, growing with the account. Scope: those are single-account backtests of the combination (one $30k account); an IRA running only the momentum sleeve could cost less, so use the measured figure for a combination IRA until paper trading shows otherwise. The planner's per-order fee allowance is $2.00, the configured value pending paper trading (above every observed average, below the $2.50 that 500 shares would cost before the 1% cap, which lowers it for a cheap stock: 500 shares at $0.25 cost $1.25). The earlier ~$28 and $100–200 figures were estimates from assumed order counts, not measured |
 
 **Decision D5** (revised 2026-10-16; section 10): **IBKR Pro for every
 account**, since Lite has no API access, and margin IRAs. The original
@@ -543,7 +569,10 @@ so Pro's margin rate does not help them.
 | 5 | Limited live, one account at a time | A clean month each. The joint account goes live only after the margin-warning runbook has been rehearsed in paper trading (an injected low Excess Liquidity reading, handled end to end) |
 
 Each phase is a ticket with its own work log, worked test-first and merged
-only after CodeRabbit and Greptile findings are addressed.
+only after the findings of whichever reviewers ran are addressed. Greptile
+reviews the capital-safety paths only; CodeRabbit reviews everything, and a
+Claude reviewer stands in for it on docs-only and config-only PRs while it is rate-limited
+(owner decision 2026-10-17; `docs/development.md`, "Review cost").
 
 ## 10. Owner decisions
 
@@ -593,5 +622,15 @@ only after CodeRabbit and Greptile findings are addressed.
   worst drawdowns of 46.05% and 40.47% against the recorded 34.0% and 31.0%;
   the cause is unresolved and under investigation in #403. The figures this
   plan cites are unchanged until then, and parity (#324) waits on #403.
+- **D9** Slice 5's eleven readings of ADR 0019 and ADR 0026 (the sale back
+  to 98%, kill switch, incidents, order count, event types): **approved as
+  built** (decided 2026-10-17, #352; ADR 0019 and ADR 0026 amendments).
+- **D10** Slice 2's planner choices (budget-fitting buy scaling,
+  `rebalance-in-progress`, parallel execution-report versions, a $2.00
+  per-order fee allowance pending paper trading): **approved as built**
+  (decided 2026-10-17, #357; ADR 0026 amendment).
+- **D11** The fresh-run approval input `operator.run.approved`: **accepted**
+  as specified in PR #414 (decided 2026-10-17, #365); ADR 0027 records it
+  when that PR merges.
 - Account opening, funding, rollovers and the Lightsail sign-up are the
   owner's to do; nothing here signs up for or pays for anything.
