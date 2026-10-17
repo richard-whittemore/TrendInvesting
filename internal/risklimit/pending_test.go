@@ -630,3 +630,35 @@ func TestASameSecondLifecycleEndStillCountsAsWorking(t *testing.T) {
 		}
 	}
 }
+
+// A sell a lifecycle report ended is counted filled by what it is finally
+// counted as having filled, never more, even from a snapshot that report
+// post-dates: a sell of 60 against a holding of 100 is cancelled at
+// 15:00:02 with no fill reported yet, and a broker snapshot of 15:00:02,
+// recorded after the cancellation, holds 70 and no longer lists it. The fall
+// of 30 cannot be credited to that snapshot beyond what the gate counts the
+// sell as having filled (none, until its fill report arrives), so no sell is
+// netted as working below zero and a sell of 100 is refused against the 70.
+func TestAnEndedSellIsNeverCreditedBeyondWhatItFinallyFilled(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(100))
+	g.ObserveAccount(account(100, 0))
+	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+	end := at.Add(2 * time.Second)
+	if err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{
+		AccountID: "joint", ClientOrderID: "tw-sell", OrderID: "ib-tw-sell", InstrumentID: "SPY",
+		Side: event.OrderSideSell, Status: event.OrderLifecycleStatusCanceled, Quantity: 60, LimitPrice: 1, OccurredAt: end,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := broker(70)
+	s.AsOf = end
+	observe(t, g, "broker:2", s)
+	big := order(event.OrderSideSell, 100, 100)
+	big.Planned.ClientOrderID = "tw-big"
+	o := check(t, g, big)[0]
+	refusedFor(t, o, event.RefusedBrokerHolding)
+	if got := workingSells(o); got != 0 {
+		t.Errorf("working sells %d, want 0: the ended sell has no fill the gate counts", got)
+	}
+}

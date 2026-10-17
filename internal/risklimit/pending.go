@@ -51,7 +51,8 @@ import (
 // recorded after it: it is credited by its own time like any other, and only
 // its holding is not measured as a fall, the newer holding having been
 // measured already. So an older snapshot never moves what the gate knows
-// backwards, and no snapshot is credited with a fill it cannot show.
+// backwards, and no snapshot is credited with a fill report it cannot show
+// nor with more filled than the gate counts filled now.
 
 // endOfTime is later than any fact: what is known now.
 var endOfTime = time.Unix(1<<62, 0)
@@ -103,8 +104,10 @@ func (s *trackedSell) endedBy(t time.Time) bool { return s.ended && s.endedAt.Be
 // knownBy is the most the sell's own facts credited to a snapshot taken at t
 // show filled: fill reports and a lifecycle end before t, listings at or
 // before t. A lifecycle end is credited with what it froze less the fill
-// reports it counted that are stamped at or after t: a fill stamped after
-// the end is credited by its own time, never from the end's.
+// reports it counted that are stamped at or after t: a fill report stamped
+// after the end is credited by its own time; a fall in the holding
+// attributed to the sell, folded into what the end froze, is credited from
+// the end's.
 func (s *trackedSell) knownBy(t time.Time) int64 {
 	var reported int64
 	for _, f := range s.fills {
@@ -123,6 +126,20 @@ func (s *trackedSell) knownBy(t time.Time) int64 {
 		known = max(known, frozen)
 	}
 	return known
+}
+
+// unfilledBy is the most of a floor the sell, not ended by t, can hold by
+// the facts credited to a snapshot taken at t: its shares beyond what they
+// show filled, or, once a lifecycle report has ended it, only what it is
+// finally counted as having filled beyond them. So no snapshot is credited
+// with more filled than the gate counts filled now, whatever order the end
+// and the snapshot were recorded in.
+func (s *trackedSell) unfilledBy(t time.Time) int64 {
+	limit := s.released
+	if s.ended {
+		limit = min(limit, s.knownBy(endOfTime))
+	}
+	return limit - s.knownBy(t)
 }
 
 // sellBook is what snapshots show of one instrument's released sells
@@ -185,7 +202,7 @@ func (g *Gate) spread(instrumentID string, t time.Time, part func(*trackedSell, 
 	for _, s := range sells {
 		known += s.knownBy(t)
 		if !s.endedBy(t) {
-			open += s.released - s.knownBy(t)
+			open += s.unfilledBy(t)
 		}
 	}
 	left := min(max(most(g.book(instrumentID).floors, t)-known, 0), open)
@@ -194,7 +211,7 @@ func (g *Gate) spread(instrumentID string, t time.Time, part func(*trackedSell, 
 		if s.endedBy(t) || left == 0 {
 			continue
 		}
-		take := min(left, s.released-s.knownBy(t))
+		take := min(left, s.unfilledBy(t))
 		left -= take
 		if part != nil {
 			part(s, take)
@@ -227,10 +244,18 @@ func (g *Gate) brokerHolding(instrumentID string) (holding, working int64, ok bo
 
 // unshownSells is the one rule PendingSells and the broker-holding check
 // share: for a snapshot taken at asOf, the sells of instrumentID it cannot
-// show, ours (pending, or filled after asOf) and unknown.
+// show, ours (pending, or filled after asOf) and unknown. A snapshot is never
+// credited with more filled than the gate counts filled now; were it, what
+// it shows of the sells' fills could not be read, and it is credited with
+// none (fail closed: every share the sells filled or still pend counts as
+// working), never with a count below zero.
 func (g *Gate) unshownSells(instrumentID string, asOf time.Time) int64 {
 	filled, pending := g.shares(instrumentID)
-	return pending + filled - g.filledBy(instrumentID, asOf) + g.unknownWorking(instrumentID)
+	shown := g.filledBy(instrumentID, asOf)
+	if shown > filled {
+		shown = 0
+	}
+	return pending + filled - shown + g.unknownWorking(instrumentID)
 }
 
 // unknownWorking returns the remaining shares of every working sell of
@@ -417,7 +442,7 @@ func (g *Gate) resolve(next event.BrokerSnapshotPayload) {
 			ceiling, _, _ := g.spread(instrument, next.AsOf, nil)
 			for _, s := range g.sellsOf(instrument) {
 				if !s.endedBy(next.AsOf) && !listed[s] {
-					ceiling += s.released - s.knownBy(next.AsOf)
+					ceiling += s.unfilledBy(next.AsOf)
 				}
 			}
 			b := g.book(instrument)
