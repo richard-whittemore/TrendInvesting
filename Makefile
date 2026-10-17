@@ -49,8 +49,11 @@ deps:
 # cores on that job. `check`'s own explicit research-test prerequisite,
 # below, does not run it twice: make only remakes a phony target once per
 # invocation.
+# It also runs the IBKR adapter's suite (adapter/ibkr, ADR 0025), against a
+# fake TWS API client: ibapi itself is not installed here.
 adapter-test: research-test
 	cd adapter/lean && python3 -m unittest discover -s tests
+	cd adapter/ibkr && python3 -m unittest discover -s tests
 	cd adapter && python3 -m unittest discover -s marketdata/tests -t .
 
 # The research checks' rule cores (research/qc-cloud for the Turtle
