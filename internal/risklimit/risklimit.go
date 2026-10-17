@@ -50,6 +50,9 @@ type Gate struct {
 	decided   map[string]bool
 	state     string
 	scope     []string
+	// saleAttempted holds, per incident, whether its one sale back to 98%
+	// was attempted (ADR 0019, amended 2026-10-15).
+	saleAttempted map[string]bool
 }
 
 // NewGate returns a Normal gate for accountID under limits and mode.
@@ -63,7 +66,7 @@ func NewGate(accountID string, limits event.MarginLimits, mode string) (*Gate, e
 	if !event.ValidTradingMode(mode) {
 		return nil, fmt.Errorf("risklimit: mode %q is not dry-run, paper or live", mode)
 	}
-	return &Gate{accountID: accountID, limits: limits, mode: mode, decided: make(map[string]bool), state: StateNormal}, nil
+	return &Gate{accountID: accountID, limits: limits, mode: mode, decided: make(map[string]bool), state: StateNormal, saleAttempted: make(map[string]bool)}, nil
 }
 
 // RecordDecision records the ID of a journalled strategy.targets.decided
@@ -72,6 +75,35 @@ func (g *Gate) RecordDecision(id string) { g.decided[id] = true }
 
 // State returns the gate's engine state.
 func (g *Gate) State() string { return g.state }
+
+// RestoreSaleAttempt records, before any order is checked, whether an
+// earlier run attempted incidentID's one sale back to 98%: ADR 0019 (amended
+// 2026-10-15) allows one attempt per incident, never retried automatically,
+// and a fresh run learns of an earlier attempt only from the owner's
+// approval, since it does not replay the earlier run's log. An incident is
+// restored once.
+func (g *Gate) RestoreSaleAttempt(incidentID string, attempted bool) error {
+	if incidentID == "" {
+		return errors.New("risklimit: a restored sale attempt must name its incident")
+	}
+	if _, ok := g.saleAttempted[incidentID]; ok {
+		return fmt.Errorf("risklimit: incident %q's sale attempt is restored once", incidentID)
+	}
+	g.saleAttempted[incidentID] = attempted
+	return nil
+}
+
+// AttemptSale claims incidentID's one sale back to 98% (ADR 0019, amended
+// 2026-10-15): it reports true, and records the attempt, only when no
+// attempt is recorded, in this run or restored from an approval. The sale's
+// planner calls it before planning the sale and plans nothing on false.
+func (g *Gate) AttemptSale(incidentID string) bool {
+	if g.saleAttempted[incidentID] {
+		return false
+	}
+	g.saleAttempted[incidentID] = true
+	return true
+}
 
 // RestoreState applies one strategy.engine.state record an earlier run of
 // this account journalled, at schemaVersion, before any order is checked: "a

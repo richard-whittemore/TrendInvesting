@@ -144,6 +144,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	if opts.resumePath != "" && opts.logPath == "" {
 		missing = append(missing, errors.New("-resume requires -log: a resumed run streams its own durable log, which begins with the records it resumes (ADR 0027)"))
 	}
+	if opts.resumePath != "" && strings.HasSuffix(opts.build, "-dirty") {
+		missing = append(missing, fmt.Errorf("-resume refuses build %q: a dirty build that does not identify its tree names every uncommitted change at its commit alike, and a run never resumes across builds (ADR 0027, owner decision 2026-10-16); `make engine` stamps a dirty tree with its own tree hash", opts.build))
+	}
 	if err := errors.Join(missing...); err != nil {
 		return fmt.Errorf("engine: %w", err)
 	}

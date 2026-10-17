@@ -245,14 +245,15 @@ accepted them together with this ADR on 2026-10-17.*
   recorded by another build, and its message names this procedure. The
   runbook is `docs/runbooks/durable-log.md`.
 
-## Amendment (2026-10-17, the restart model; owner decision 2026-10-16 #365; proposed for the owner's review)
+## Amendment (2026-10-17, owner decision #365, accepted)
 
-*The owner chose the restart model on 2026-10-16. This section records how
-`cmd/engine` implements it; the details below are proposed and stand until
-the owner reviews them.*
+*The owner chose the restart model on 2026-10-16 and accepted this section,
+which records how `cmd/engine` implements it, on 2026-10-17.*
 
 - **A crash resumes; every other restart is a fresh run.** A crash is
-  resumed with `-resume` as §4 and §6 describe. Leaving Halted, a build
+  resumed with `-resume` as §4 and §6 describe. The crashed run is always
+  the latest, so `-resume` must name the most recently modified log in the
+  directory of `-log`; an older log is refused. Leaving Halted, a build
   upgrade, a cleared rebalance, a reboot or any deliberate stop is a fresh
   run with a new log. The decision-prelude model (feeding an earlier run's
   decisions into a new one, PR #364) is dropped.
@@ -261,17 +262,30 @@ the owner reviews them.*
   durable log (`*.log`), the engine refuses to start without `-approval`, a
   file holding an `operator.run.approved` v1 payload: the account, the
   latest earlier log's file name and its final record hash, the incident it
-  clears (if any), who approved and when, and the state in force (Boost's
-  latch). The engine checks that the log named is the most recently modified
-  log in the directory and that its last committed record hash is the one
-  approved, then records the approval as the run's second input (sequence 2,
+  clears (if any), who approved and when, and the state in force: Boost's
+  latch, and the incident in force (null when none) with whether its one
+  sale back to 98% was attempted and the attempt's client order ID if sent
+  (ADR 0019, amended 2026-10-15: one attempt per incident). Every key is
+  required, null where there is none, and an unknown key is refused, so no
+  state is a default. The engine checks that the log named is the most
+  recently modified log in the directory, that its last committed record
+  hash is the one approved, and that the approved latch is the one that log
+  ends with (its last decision's `latched_after`, or its own approval's
+  latch when it decided nothing), then records the approval as the run's second input (sequence 2,
   straight after the configuration), so the adapter's first input carries
-  sequence 3. The target-weight handler starts from the approved latch.
+  sequence 3. The target-weight handler starts from the approved latch, and
+  a sale recorded as attempted is never attempted again by the fresh run.
   `-approval` with `-resume`, with a backtest, or with no earlier run is
   refused.
 - **Build identity.** `-mode dry-run`, `paper` and `live` refuse an
   unstamped build ("dev"); `make engine` and `deploy/build-engine.sh` stamp
-  it from `git describe --always --dirty`.
+  it with `scripts/build-stamp.sh`: `git describe --always --dirty`, and for
+  a dirty tree the hash of its whole working tree after "-dirty-", so two
+  different uncommitted changes are two builds. A bare "-dirty" stamp, which
+  names every dirty tree at its commit alike, is refused by `-resume`.
+  `deploy/build-engine.sh` still refuses a dirty tree for the server.
+- **No engine starts at boot.** The provisioner enables no engine and
+  disables every engine instance an earlier provisioner enabled.
 - **Mode binding.** `-mode` must equal the mode in the hashed configuration;
   a Turtle configuration, which declares none, runs only as a backtest. A
   paper configuration must name an IBKR paper account (ID beginning "DU"),

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 )
 
 // durableLogSuffix names a durable log in an engine's log directory. A run
@@ -28,7 +28,17 @@ const durableLogSuffix = ".log"
 // earlier log in the directory and that log's final record hash, so what is
 // approved is the evidence the owner reviewed.
 //
-// freshRunApproval applies that rule to one invocation and returns the
+// A crash is resumed, and the crashed run is always the latest one, so
+// -resume must name the latest log in the directory of -log; resuming an
+// older log would continue a history a newer run has already moved past.
+//
+// The approved latch must be the one the approved log ends with: its last
+// strategy.targets.decided's latched_after, or, when that run decided
+// nothing, the latch its own approval stated (ADR 0026, point 5: the latch
+// is restored, never recomputed). A log with neither leaves the approval's
+// latch as the fresh run's start.
+//
+// freshRunApproval applies these rules to one invocation and returns the
 // approval to record, or nil when none is needed: a backtest, a resume, or
 // the first run in the directory. It runs before this process creates its
 // log, so a refused start leaves nothing new behind.
@@ -43,7 +53,7 @@ func freshRunApproval(opts options, comp composition) (*event.OperatorRunApprove
 		if opts.approvalPath != "" {
 			return nil, errors.New("engine: -approval and -resume cannot both be given: a crash resumes from its durable log as it stood, and any other restart is a fresh run started with -approval and no -resume")
 		}
-		return nil, nil
+		return nil, checkResumesLatest(opts)
 	}
 	dir, _ := splitAsSpelled(opts.logPath)
 	latest, err := latestLog(dir)
@@ -81,7 +91,58 @@ func freshRunApproval(opts options, comp composition) (*event.OperatorRunApprove
 		return nil, fmt.Errorf("engine: the approval in %s names %s with final record hash %s, but that log's final record hash is %s; the approval must be of the log as it stands",
 			opts.approvalPath, latest, approval.PreviousLogFinalHash, recovery.FinalRecordHash)
 	}
+	if err := checkApprovedLatch(recovery.Entries, approval, latest); err != nil {
+		return nil, err
+	}
 	return &approval, nil
+}
+
+// checkResumesLatest refuses a -resume that names a log other than the
+// latest in the directory of -log.
+func checkResumesLatest(opts options) error {
+	dir, _ := splitAsSpelled(opts.logPath)
+	latest, err := latestLog(dir)
+	if err != nil {
+		return err
+	}
+	prefix, _ := filepath.Split(opts.logPath)
+	if latest == "" || !samePath(opts.resumePath, prefix+latest) {
+		return fmt.Errorf("engine: -resume names %s, but the latest run in %s, the directory of -log, is %q: only a crash is resumed, and the crashed run is the latest one (ADR 0027, the restart model); resume that log, or start a fresh run with -approval",
+			opts.resumePath, dir, latest)
+	}
+	return nil
+}
+
+// checkApprovedLatch refuses an approval whose latch is not the one the
+// approved log ends with.
+func checkApprovedLatch(entries []journal.Entry, approval event.OperatorRunApprovedPayload, logName string) error {
+	stated := *approval.Boost.Latched
+	for i := len(entries) - 1; i >= 0; i-- {
+		env := entries[i].Envelope
+		switch env.Type {
+		case event.TargetsDecidedEventType:
+			var decided event.TargetsDecidedPayload
+			if err := json.Unmarshal(env.Payload, &decided); err != nil {
+				return fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
+			}
+			if decided.Boost.LatchedAfter != stated {
+				return fmt.Errorf("engine: %s's last decision, %s, has latched_after %t, but the approval states latched %t; the latch in force is restored, never changed by a restart (ADR 0026, point 5)",
+					logName, env.ID, decided.Boost.LatchedAfter, stated)
+			}
+			return nil
+		case event.OperatorRunApprovedEventType:
+			previous, err := event.DecodeOperatorRunApproved(env.Payload)
+			if err != nil {
+				return fmt.Errorf("engine: %s in %s: %w", env.ID, logName, err)
+			}
+			if *previous.Boost.Latched != stated {
+				return fmt.Errorf("engine: %s decided nothing, and the approval it started from, %s, states latched %t; this approval states latched %t, but the latch in force is restored, never changed by a restart (ADR 0026, point 5)",
+					logName, env.ID, *previous.Boost.Latched, stated)
+			}
+			return nil
+		}
+	}
+	return nil
 }
 
 // latestLog returns the name of the most recently modified durable log in
@@ -122,21 +183,16 @@ func latestLog(dir string) (string, error) {
 	return logs[len(logs)-1].name, nil
 }
 
-// readApproval reads and validates an approval file, refusing a field this
-// build does not know rather than ignoring it.
+// readApproval reads and validates an approval file, refusing a key it
+// leaves out or one this build does not know rather than guessing.
 func readApproval(path string) (event.OperatorRunApprovedPayload, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return event.OperatorRunApprovedPayload{}, fmt.Errorf("engine: read the approval: %w", err)
 	}
-	var approval event.OperatorRunApprovedPayload
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&approval); err != nil {
-		return event.OperatorRunApprovedPayload{}, fmt.Errorf("engine: decode the approval in %s: %w", path, err)
-	}
-	if err := approval.Validate(); err != nil {
-		return event.OperatorRunApprovedPayload{}, fmt.Errorf("engine: the approval in %s is invalid: %w", path, err)
+	approval, err := event.DecodeOperatorRunApproved(raw)
+	if err != nil {
+		return event.OperatorRunApprovedPayload{}, fmt.Errorf("engine: the approval in %s is refused: %w", path, err)
 	}
 	return approval, nil
 }

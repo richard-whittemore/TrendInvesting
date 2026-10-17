@@ -29,8 +29,9 @@ and records everything, and marks every order "do not send".
    - a paper configuration names a live account, or a live configuration a
      paper account (IBKR paper account numbers begin "DU");
    - there is no durable log (`-log`) for a mode that can reach a broker;
-   - this is a fresh run after an earlier one and you have not approved it
-     (see `restart.md`).
+   - this is a fresh run after an earlier one and you have not approved it,
+     or the approval leaves out the state in force (see `restart.md`);
+   - a resume names a log that is not the latest in its folder.
 3. **It records the configuration first** in its durable log, so the log
    always says what it decided under, including the mode.
 4. **Each session** the adapter sends the SPY bar, the account's positions
@@ -53,11 +54,16 @@ and records everything, and marks every order "do not send".
 ## Build identity
 
 Every decision carries the build that made it. A build is "stamped" with the
-git commit it came from (`git describe --always --dirty`) by `make engine` or
-`deploy/build-engine.sh`. A plain `go build` is unstamped ("dev"), and the
-engine refuses dry-run, paper and live on it, because two different unstamped
-builds would look like one, and the rule that a run never continues on a
-different build (ADR 0027, amendment of 2026-10-16) could not work.
+git commit it came from by `make engine` or `deploy/build-engine.sh`
+(`scripts/build-stamp.sh`: `git describe --always --dirty`, and for a tree
+with uncommitted changes a fingerprint of the whole tree after "-dirty-", so
+two different sets of changes are two builds). A plain `go build` is
+unstamped ("dev"), and the engine refuses dry-run, paper and live on it,
+because two different unstamped builds would look like one, and the rule
+that a run never continues on a different build (ADR 0027, amendment of
+2026-10-16) could not work. For the same reason a build stamped only
+"-dirty" may run but is never resumed. `deploy/build-engine.sh` refuses a
+dirty tree outright: the server only ever runs a committed build.
 
 ## How it is started
 
@@ -65,7 +71,8 @@ systemd starts it from `deploy/systemd/ti-engine@.service` with every setting
 written out: `-mode`, `-config`, `-socket` (in `/run/ti-engine-<account>`, a
 folder only the engine's user can open), `-log`, `-out` and `-as-of`. systemd
 never restarts it by itself; restarting is your step (`restart.md`). The
-engines are not started at boot.
+engines are not started at boot, and the provisioner disables any engine an
+earlier version of it had set to start at boot.
 
 ## What can go wrong, and what it does
 

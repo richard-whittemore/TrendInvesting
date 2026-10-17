@@ -152,7 +152,7 @@ Continuing a crashed engine's run from its durable log: every committed input is
 Any engine start after an earlier run that is not a Resume: after a deliberate stop, a reboot, leaving Halted, a build upgrade or a cleared rebalance. It begins a new durable log and decides nothing until a Run approval is its input.
 
 **Run approval**:
-The owner's recorded `operator.run.approved` input that lets a Fresh run start: it names the previous run's durable log and that log's final record hash, the incident it clears, if any, and the state in force (Boost's latch). It is the run's second input, straight after the configuration.
+The owner's recorded `operator.run.approved` input that lets a Fresh run start: it names the previous run's durable log and that log's final record hash, the incident it clears, if any, and the state in force: Boost's latch, and the incident in force, if any, with whether its one sale back to 98% was attempted. Every item is stated, none defaulted. It is the run's second input, straight after the configuration.
 
 ### Research
 

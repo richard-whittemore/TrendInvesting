@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 )
 
 // writeApproval writes an approval naming previous with finalHash and
@@ -20,7 +22,7 @@ func writeApproval(t *testing.T, dir, previous, finalHash string, latched bool) 
 	raw, err := json.Marshal(event.OperatorRunApprovedPayload{
 		AccountID: "joint", PreviousLog: previous, PreviousLogFinalHash: finalHash, IncidentID: "incident-1",
 		ApprovedBy: "owner", ApprovedAt: time.Date(2026, time.October, 17, 13, 0, 0, 0, time.UTC),
-		Boost: event.BoostStateInForce{Latched: latched},
+		Boost: event.BoostStateInForce{Latched: new(latched)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +65,12 @@ func TestAFreshRunAfterAPriorRunNeedsTheOwnersApproval(t *testing.T) {
 	if err := stop(); err != nil {
 		t.Fatalf("the first run: %v", err)
 	}
-	finalHash := recoverFile(t, first.logPath).FinalRecordHash
+	firstLog := recoverFile(t, first.logPath)
+	finalHash := firstLog.FinalRecordHash
+	latch, decided := lastLatch(t, firstLog.Entries)
+	if !decided {
+		t.Fatal("the first run decided nothing")
+	}
 
 	fresh := boostOptions(t, dir)
 	fresh.logPath, fresh.outPath = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal")
@@ -73,16 +80,20 @@ func TestAFreshRunAfterAPriorRunNeedsTheOwnersApproval(t *testing.T) {
 	wrong.approvalPath = writeApproval(t, dir, "run-1.log", "sha256:"+strings.Repeat("0", 64), true)
 	refuse(t, "a wrong final hash", wrong, "final record hash")
 
+	unlatched := fresh
+	unlatched.approvalPath = writeApproval(t, dir, "run-1.log", finalHash, !latch)
+	refuse(t, "a latch the previous run's last decision does not hold", unlatched, fmt.Sprintf("latched_after %t", latch))
+
 	missing := fresh
-	missing.approvalPath = writeApproval(t, dir, "run-0.log", finalHash, true)
+	missing.approvalPath = writeApproval(t, dir, "run-0.log", finalHash, latch)
 	refuse(t, "an unknown previous log", missing, "run-0.log")
 
 	resumed := fresh
-	resumed.resumePath, resumed.approvalPath = first.logPath, writeApproval(t, dir, "run-1.log", finalHash, true)
+	resumed.resumePath, resumed.approvalPath = first.logPath, writeApproval(t, dir, "run-1.log", finalHash, latch)
 	refuse(t, "an approval with -resume", resumed, "-approval and -resume")
 
 	approved := fresh
-	approved.approvalPath = writeApproval(t, dir, "run-1.log", finalHash, true)
+	approved.approvalPath = writeApproval(t, dir, "run-1.log", finalHash, latch)
 	stop = startEngine(t, approved)
 	feed = newBoostFeed(t, approved.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 3)
 	feed.sessions(3, 4)
@@ -102,10 +113,28 @@ func TestAFreshRunAfterAPriorRunNeedsTheOwnersApproval(t *testing.T) {
 		if err := json.Unmarshal(e.Envelope.Payload, &p); err != nil {
 			t.Fatal(err)
 		}
-		if !p.Boost.LatchedBefore {
+		if p.Boost.LatchedBefore != latch {
 			t.Errorf("%s: the fresh run did not start from the approved latch", e.Envelope.ID)
 		}
+		break
 	}
+}
+
+// lastLatch returns the latched_after of the last strategy.targets.decided
+// in entries, and whether there is one.
+func lastLatch(t *testing.T, entries []journal.Entry) (latched, decided bool) {
+	t.Helper()
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Envelope.Type != event.TargetsDecidedEventType {
+			continue
+		}
+		var p event.TargetsDecidedPayload
+		if err := json.Unmarshal(entries[i].Envelope.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		return p.Boost.LatchedAfter, true
+	}
+	return false, false
 }
 
 // TestAnApprovalMustNameTheLatestRun: with several earlier logs in the
@@ -134,7 +163,47 @@ func TestAnApprovalMustNameTheLatestRun(t *testing.T) {
 	older.approvalPath = writeApproval(t, dir, "run-1.log", hashes["run-1.log"], false)
 	refuse(t, "an approval of an older run", older, "run-2.log")
 
+	// run-2 ended before deciding, so its latch in force is its approval's.
+	latched := boostOptions(t, dir)
+	latched.logPath, latched.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
+	latched.approvalPath = writeApproval(t, dir, "run-2.log", hashes["run-2.log"], true)
+	refuse(t, "a latch the previous run's approval does not hold", latched, "latched false")
+
+	resumed := boostOptions(t, dir)
+	resumed.logPath, resumed.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
+	resumed.resumePath = filepath.Join(dir, "run-1.log")
+	refuse(t, "a resume of an older run", resumed, "run-2.log")
+
 	empty := boostOptions(t, t.TempDir())
 	empty.approvalPath = writeApproval(t, dir, "run-1.log", hashes["run-1.log"], false)
 	refuse(t, "an approval with no earlier run", empty, "no earlier run")
+}
+
+// TestAnApprovalFileStatesEveryKey: the approval is written outside the
+// engine, so one that leaves out Boost's latch or the incident in force is
+// refused before anything is created, never read as "not latched" or "no
+// incident" (ADR 0026, point 5; ADR 0027, the restart model).
+func TestAnApprovalFileStatesEveryKey(t *testing.T) {
+	dir := t.TempDir()
+	first := boostOptions(t, dir)
+	first.logPath, first.outPath = filepath.Join(dir, "run-1.log"), filepath.Join(dir, "run-1.journal")
+	if err := startEngine(t, first)(); err != nil {
+		t.Fatalf("the first run: %v", err)
+	}
+	finalHash := recoverFile(t, first.logPath).FinalRecordHash
+	base := `"account_id":"joint","previous_log":"run-1.log","previous_log_final_hash":"` + finalHash + `","incident_id":"","approved_by":"owner","approved_at":"2026-10-17T13:00:00Z"`
+	for name, c := range map[string]struct{ raw, want string }{
+		"no boost":    {`{` + base + `,"incident_in_force":null}`, "boost"},
+		"no latch":    {`{` + base + `,"boost":{},"incident_in_force":null}`, "latched"},
+		"null latch":  {`{` + base + `,"boost":{"latched":null},"incident_in_force":null}`, "latched"},
+		"no incident": {`{` + base + `,"boost":{"latched":false}}`, "incident_in_force"},
+	} {
+		fresh := boostOptions(t, dir)
+		fresh.logPath, fresh.outPath = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal")
+		fresh.approvalPath = filepath.Join(t.TempDir(), "approval.json")
+		if err := os.WriteFile(fresh.approvalPath, []byte(c.raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		refuse(t, name, fresh, c.want)
+	}
 }

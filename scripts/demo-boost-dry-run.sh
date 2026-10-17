@@ -43,21 +43,29 @@ start_engine() {
   exit 1
 }
 
+# stop_engine NAME: stop the engine cleanly; on an unclean exit, report it
+# with the engine's output before failing with its status.
 stop_engine() {
+  local name=$1 status=0
   kill -TERM "$engine_pid"
-  wait "$engine_pid"
+  wait "$engine_pid" || status=$?
   engine_pid=
+  if test "$status" != 0; then
+    echo "demo: the $name engine did not stop cleanly (status $status)" >&2
+    cat "$work/$name.out" >&2
+    return "$status"
+  fi
 }
 
-echo "== decision log (engine build $(git describe --always --dirty), dry-run, synthetic SPY)"
+echo "== decision log (engine build $(scripts/build-stamp.sh), dry-run, synthetic SPY)"
 start_engine run
 bin/boost-demo -socket "$sockets/engine.sock" -log "$work/run.log" -config "$config" -sessions 320
-stop_engine
+stop_engine run
 cat "$work/run.out"
 
 echo "== replay: resume the durable log into a new engine"
 start_engine replay -resume "$work/run.log"
-stop_engine
+stop_engine replay
 cat "$work/replay.out"
 cmp "$work/run.log" "$work/replay.log"
 cmp "$work/run.journal" "$work/replay.journal"

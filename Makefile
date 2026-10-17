@@ -7,10 +7,12 @@ COVERAGE_PROFILE ?= coverage.out
 
 # The build stamp: every envelope's strategy version carries it (ADR 0016),
 # and cmd/engine refuses -mode dry-run, paper or live on an unstamped build
-# ("dev"). Outside a git checkout it falls back to "dev", which those modes
-# refuse.
-BUILD_STAMP ?= $(shell git describe --always --dirty 2>/dev/null || echo dev)
-LDFLAGS := -X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=$(BUILD_STAMP)
+# ("dev"). scripts/build-stamp.sh prints `git describe --always --dirty`,
+# with a dirty tree's own tree hash appended, and "dev" outside a git
+# checkout, which those modes refuse. Expanded only by the targets that
+# link a binary.
+BUILD_STAMP ?= $(shell ./scripts/build-stamp.sh)
+LDFLAGS = -X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=$(BUILD_STAMP)
 
 build:
 	go build -ldflags "$(LDFLAGS)" ./...

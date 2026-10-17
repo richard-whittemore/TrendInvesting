@@ -73,14 +73,18 @@ func TestTheMakefileStampsTheBuildTheEngineRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(makefile), "-X "+stampSymbol+"=$(BUILD_STAMP)") ||
-		!strings.Contains(string(makefile), "git describe --always --dirty") {
-		t.Fatalf("the Makefile does not stamp %s from git describe --always --dirty", stampSymbol)
+		!strings.Contains(string(makefile), "scripts/build-stamp.sh") {
+		t.Fatalf("the Makefile does not stamp %s from scripts/build-stamp.sh", stampSymbol)
 	}
 
+	// Each child is bounded, so a guard that regresses and leaves an engine
+	// serving fails this test instead of hanging it.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	dir := t.TempDir()
 	stamped := buildEngine(t, t.TempDir(), "-X "+stampSymbol+"=stamp-for-test")
 	opts := boostOptions(t, dir)
-	cmd := exec.Command(stamped, "-mode", modeDryRun, "-socket", opts.socketPath, "-config", opts.configPath,
+	cmd := exec.CommandContext(ctx, stamped, "-mode", modeDryRun, "-socket", opts.socketPath, "-config", opts.configPath,
 		"-as-of", opts.asOf, "-out", opts.outPath, "-log", opts.logPath)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -107,7 +111,7 @@ func TestTheMakefileStampsTheBuildTheEngineRecords(t *testing.T) {
 
 	unstamped := buildEngine(t, t.TempDir(), "")
 	other := boostOptions(t, t.TempDir())
-	out, err := exec.Command(unstamped, "-mode", modeDryRun, "-socket", other.socketPath, "-config", other.configPath,
+	out, err := exec.CommandContext(ctx, unstamped, "-mode", modeDryRun, "-socket", other.socketPath, "-config", other.configPath,
 		"-as-of", other.asOf, "-out", other.outPath, "-log", other.logPath).CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "unstamped build") {
 		t.Errorf("the unstamped engine in dry-run: %v\n%s\nwant it to refuse to start", err, out)
@@ -133,5 +137,90 @@ func TestABoostRunDoesNotResumeAcrossBuilds(t *testing.T) {
 	}
 	if _, statErr := os.Stat(next.logPath); !os.IsNotExist(statErr) {
 		t.Error("the refused resume left a durable log behind")
+	}
+}
+
+// TestADirtyBuildThatDoesNotIdentifyItsTreeNeverResumes: "<commit>-dirty"
+// names every dirty tree at that commit alike, so two binaries built from
+// different uncommitted changes would pass as one build, and a run never
+// resumes across builds (ADR 0027, owner decision 2026-10-16). Such a build
+// may run fresh, but -resume refuses it before anything is created.
+func TestADirtyBuildThatDoesNotIdentifyItsTreeNeverResumes(t *testing.T) {
+	dir := t.TempDir()
+	first := boostOptions(t, dir)
+	first.build = "abc1234-dirty"
+	if err := startEngine(t, first)(); err != nil {
+		t.Fatalf("a fresh run on a dirty build: %v", err)
+	}
+	next := boostOptions(t, dir)
+	next.build, next.resumePath = first.build, first.logPath
+	next.outPath, next.logPath = filepath.Join(dir, "next.journal"), filepath.Join(dir, "next.log")
+	refuse(t, "a resume on a dirty build", next, "dirty")
+}
+
+// TestADirtyTreeIsStampedWithItsOwnTree: the stamp is `git describe
+// --always --dirty`, and a dirty tree's adds the hash of its whole working
+// tree, untracked files included, so two different uncommitted changes at
+// one commit are two builds and a run never resumes across them (ADR 0027,
+// owner decision 2026-10-16), while the same tree stamps alike every time.
+func TestADirtyTreeIsStampedWithItsOwnTree(t *testing.T) {
+	script, err := filepath.Abs("../../scripts/build-stamp.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	stamp := func() string {
+		t.Helper()
+		cmd := exec.Command(script)
+		cmd.Dir = repo
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("build-stamp.sh: %v", err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("init", "-q")
+	write("a.txt", "one\n")
+	git("add", "a.txt")
+	git("commit", "-q", "-m", "one")
+	clean := git("describe", "--always", "--dirty")
+	if got := stamp(); got != clean {
+		t.Fatalf("a clean tree is stamped %q, want %q", got, clean)
+	}
+	write("a.txt", "two\n")
+	first := stamp()
+	if !strings.HasPrefix(first, clean+"-dirty-") || first == clean+"-dirty-" {
+		t.Fatalf("a dirty tree is stamped %q, want %s-dirty-<tree>", first, clean)
+	}
+	if again := stamp(); again != first {
+		t.Errorf("one dirty tree is stamped %q, then %q", first, again)
+	}
+	write("a.txt", "three\n")
+	if second := stamp(); second == first {
+		t.Errorf("two different dirty trees are both stamped %q", first)
+	}
+	write("a.txt", "two\n")
+	write("b.txt", "untracked\n")
+	if untracked := stamp(); untracked == first {
+		t.Errorf("an untracked file leaves the stamp at %q", first)
+	}
+	if status := git("status", "--porcelain"); status != "M a.txt\n?? b.txt" && status != " M a.txt\n?? b.txt" {
+		t.Errorf("stamping changed the index or tree: status %q", status)
 	}
 }

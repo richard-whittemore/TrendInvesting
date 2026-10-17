@@ -56,7 +56,9 @@ The engine reads its settings from
    `journalctl -u ti-engine@<account> -n 20`. Expect `resumed N record(s)`,
    and possibly a torn tail of one input, which the adapter sends again.
 3. A refusal naming another build or configuration means this is not a
-   crash restart: follow "Upgrading the build" or start a fresh run.
+   crash restart: follow "Upgrading the build" or start a fresh run. A
+   refusal naming a later log means the log you named is not the crashed
+   run: only the latest log in the state directory is resumed.
 
 ### Start a fresh run after an earlier one
 
@@ -71,15 +73,25 @@ The engine reads its settings from
    {"account_id": "joint", "previous_log": "run-2026-10-20.log",
     "previous_log_final_hash": "sha256:<64 hex digits>",
     "incident_id": "", "approved_by": "owner",
-    "approved_at": "2026-10-21T13:00:00Z", "boost": {"latched": false}}
+    "approved_at": "2026-10-21T13:00:00Z", "boost": {"latched": false},
+    "incident_in_force": null}
    ```
 
-   `boost.latched` is the state in force: the `latched_after` of the latest
-   `strategy.targets.decided` in the previous log. `incident_id` names the
-   incident you are clearing, or is empty.
+   Every key is required (`null` where there is none); one left out, or one
+   the engine does not know, is refused. `boost.latched` is the state in
+   force: the `latched_after` of the latest `strategy.targets.decided` in the
+   previous log, or, if that run decided nothing, the latch its own approval
+   stated; the engine refuses any other value. `incident_id` names the
+   incident you are clearing, or is empty. `incident_in_force` is `null`
+   unless the new run continues an incident; then it is
+   `{"incident_id": "<id>", "sale_attempted": true|false,
+   "sale_client_order_id": "<id, only if the sale was sent>"}`: whether that
+   incident's one sale back to 98% was attempted (ADR 0019, amended
+   2026-10-15). A run approved with `true` never attempts it again.
 4. Set `TI_RUN` to a new name, `TI_AS_OF` to the first session the new run
    decides, and `TI_RESTART_ARGS=-approval <that file>`.
 5. `sudo systemctl start ti-engine@<account>`. Expect `recorded the owner's
    approval ... the adapter's first input carries sequence 3`. A refusal
    names what does not match: a later log than the one approved, a final hash
-   that is not the log's, or another account.
+   that is not the log's, a latch the log does not end with, or another
+   account.

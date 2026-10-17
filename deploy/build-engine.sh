@@ -1,7 +1,8 @@
 #!/bin/bash
 # Builds the server's engine binary: linux/amd64, stamped with the build
 # identity cmd/engine records in every envelope's strategy version
-# (`git describe --always --dirty`, through the Makefile's LDFLAGS). The
+# (scripts/build-stamp.sh: `git describe --always --dirty`, with a dirty
+# tree's own tree hash appended; through the Makefile's LDFLAGS). The
 # engine refuses -mode dry-run, paper or live on an unstamped build.
 #
 #   deploy/build-engine.sh            writes dist/ti-engine and prints its stamp
@@ -15,9 +16,9 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-stamp=$(git -C "$repo" describe --always --dirty)
+stamp=$(cd "$repo" && scripts/build-stamp.sh)
 case $stamp in
-  *-dirty)
+  *-dirty-*)
     if test "${TI_ALLOW_DIRTY:-0}" != 1; then
       printf 'build-engine: the working tree is dirty (%s); commit first\n' "$stamp" >&2
       exit 1

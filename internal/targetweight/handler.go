@@ -215,8 +215,11 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 }
 
 // applyApproval starts a fresh run from the owner's approval: Boost's latch
-// is the approved one, never recomputed from the bars (ADR 0026, point 5).
-// It comes once, straight after the configuration, before any bar.
+// is the approved one, never recomputed from the bars (ADR 0026, point 5),
+// and an incident in force carries whether its one sale back to 98% was
+// attempted, so the fresh run never attempts it twice (ADR 0019, amended
+// 2026-10-15). It comes once, straight after the configuration, before any
+// bar.
 func (h *Handler) applyApproval(in event.Envelope) error {
 	if h.approved || h.recovered || h.started {
 		return errors.New("targetweight: an approval comes once, straight after the configuration and before any bar")
@@ -231,8 +234,13 @@ func (h *Handler) applyApproval(in event.Envelope) error {
 	if p.AccountID != h.cfg.AccountID {
 		return fmt.Errorf("targetweight: approval %s is for another account, %q; this run decides %q", in.ID, p.AccountID, h.cfg.AccountID)
 	}
+	if incident := p.IncidentInForce; incident != nil {
+		if err := h.gate.RestoreSaleAttempt(incident.IncidentID, *incident.SaleAttempted); err != nil {
+			return fmt.Errorf("targetweight: approval %s: %w", in.ID, err)
+		}
+	}
 	h.approved = true
-	h.latched = p.Boost.Latched
+	h.latched = *p.Boost.Latched
 	return nil
 }
 

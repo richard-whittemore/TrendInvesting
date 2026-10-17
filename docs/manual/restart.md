@@ -41,7 +41,15 @@ A small file you write (the runbook has the template):
 - who approved and when;
 - the state in force: whether Boost's boost was on ("latched") when the
   previous run ended. The new run starts from that, rather than working it
-  out again from prices.
+  out again from prices;
+- the incident still in force, if the previous run ended in one (otherwise
+  `null`), and whether its one sale back to 98% was already attempted, with
+  that sale's client order ID if it was sent. The rule is one attempt per
+  incident (ADR 0019), so a new run told "attempted" never tries it again.
+
+Every item must be written, even when it is "none" (`null`): the engine
+refuses an approval that leaves one out rather than guess, so a forgotten
+latch can never quietly switch the boost off.
 
 ## What the engine checks
 
@@ -49,6 +57,10 @@ A small file you write (the runbook has the template):
 | --- | --- |
 | The log folder already holds an earlier run and there is no approval | Refuses to start, names the latest log. |
 | The approval names an older log than the latest | Refuses, names the latest. |
+| The approval leaves out the latch or the incident in force, or adds an item the engine does not know | Refuses, names it. |
+| The approval's latch is not the one the previous log ended with | Refuses, names the previous log's latch. |
+| A resume names a log that is not the latest in the folder | Refuses, names the latest: only the crashed run, which is the latest, is resumed. |
+| Resuming on a build stamped only "-dirty" | Refuses: such a stamp cannot tell two different uncommitted changes apart. |
 | The fingerprint does not match the log | Refuses: the log is not the one you approved. |
 | The approval is for another account | Refuses. |
 | An approval and a resume together | Refuses: a crash resume needs no approval. |
@@ -63,10 +75,20 @@ stopped.
 
 ## What backs this
 
-ADR 0027 and its amendment of 2026-10-17; ADR 0026, point 5 (state recovered
-from the record, never recomputed); ADR 0019 (recovery from Degraded and
-Halted). Tests: `TestAFreshRunAfterAPriorRunNeedsTheOwnersApproval`,
-`TestAnApprovalMustNameTheLatestRun`, `TestABoostRunDoesNotResumeAcrossBuilds`
-(`cmd/engine`); `TestAnApprovedFreshRunStartsFromTheApprovedLatch`,
-`TestApprovalInputRules` (`internal/targetweight`);
-`TestOperatorRunApprovedValidate` (`internal/event`).
+ADR 0027 and its amendment of 2026-10-17 (accepted); ADR 0026, point 5
+(state recovered from the record, never recomputed); ADR 0019 (recovery from
+Degraded and Halted; one sale back to 98% per incident). Tests:
+`TestAFreshRunAfterAPriorRunNeedsTheOwnersApproval`,
+`TestAnApprovalMustNameTheLatestRun`, `TestAnApprovalFileStatesEveryKey`,
+`TestABoostRunDoesNotResumeAcrossBuilds`,
+`TestADirtyBuildThatDoesNotIdentifyItsTreeNeverResumes` (`cmd/engine`);
+`TestAnApprovedFreshRunStartsFromTheApprovedLatch`, `TestApprovalInputRules`,
+`TestAFreshRunNeverAttemptsAnIncidentsSaleTwice` (`internal/targetweight`);
+`TestAnIncidentsSaleIsAttemptedOnce` (`internal/risklimit`);
+`TestOperatorRunApprovedValidate`, `TestAnApprovalStatesBoostsLatchExplicitly`,
+`TestAnApprovalCarriesTheIncidentSaleAttempt`,
+`TestDecodeOperatorRunApprovedRequiresEveryKey` (`internal/event`).
+
+The engine on this branch plans no sale back to 98% yet; it records the
+approval's attempt in its risk gate, which refuses a second attempt, and the
+sale planner checks that before planning one.

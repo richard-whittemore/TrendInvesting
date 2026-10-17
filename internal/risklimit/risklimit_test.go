@@ -423,3 +423,43 @@ func TestRestoreState(t *testing.T) {
 		}
 	}
 }
+
+// TestAnIncidentsSaleIsAttemptedOnce: ADR 0019's sale back to 98% (amended
+// 2026-10-15) is attempted once per incident and never retried
+// automatically. A fresh run restores whether the previous run attempted it
+// from the owner's approval, so an attempt recorded there refuses a second
+// one, and one recorded as not attempted may go once.
+func TestAnIncidentsSaleIsAttemptedOnce(t *testing.T) {
+	attempted := gate(t, limits(), event.TradingModeDryRun)
+	if err := attempted.RestoreSaleAttempt("incident-1", true); err != nil {
+		t.Fatal(err)
+	}
+	if attempted.AttemptSale("incident-1") {
+		t.Error("a sale the approval records as attempted was attempted again")
+	}
+
+	open := gate(t, limits(), event.TradingModeDryRun)
+	if err := open.RestoreSaleAttempt("incident-1", false); err != nil {
+		t.Fatal(err)
+	}
+	if !open.AttemptSale("incident-1") {
+		t.Error("a sale the approval records as not attempted was refused")
+	}
+	if open.AttemptSale("incident-1") {
+		t.Error("the incident's sale was attempted twice")
+	}
+	if !open.AttemptSale("incident-2") {
+		t.Error("another incident's sale was refused")
+	}
+
+	twice := gate(t, limits(), event.TradingModeDryRun)
+	if err := twice.RestoreSaleAttempt("incident-1", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := twice.RestoreSaleAttempt("incident-1", false); err == nil {
+		t.Error("an incident's attempt was restored twice")
+	}
+	if err := twice.RestoreSaleAttempt("", false); err == nil {
+		t.Error("an attempt was restored for no incident")
+	}
+}

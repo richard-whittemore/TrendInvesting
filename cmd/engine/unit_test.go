@@ -43,21 +43,30 @@ func readAssignments(t *testing.T, path string) map[string]string {
 	return values
 }
 
-// unitDirectives returns every Key=Value directive of a unit file, in order.
-func unitDirectives(t *testing.T, path string) [][2]string {
+// unitDirective is one Key=Value line of a unit file and the section it is in.
+type unitDirective struct{ section, key, value string }
+
+// unitDirectives returns every Key=Value directive of a unit file, in order,
+// each with its section ("[Service]").
+func unitDirectives(t *testing.T, path string) []unitDirective {
 	t.Helper()
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var out [][2]string
+	var out []unitDirective
+	section := ""
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			section = line
 			continue
 		}
 		key, value, _ := strings.Cut(line, "=")
-		out = append(out, [2]string{key, value})
+		out = append(out, unitDirective{section, key, value})
 	}
 	return out
 }
@@ -100,21 +109,27 @@ func TestTheServiceFileStartsTheEngineWithExplicitSettings(t *testing.T) {
 	env := map[string]string{}
 	var execStart string
 	for _, d := range directives {
-		switch d[0] {
-		case "Restart", "RuntimeDirectory", "RuntimeDirectoryMode":
-			if d[1] != want[d[0]] {
-				t.Errorf("%s=%s, want %s", d[0], d[1], want[d[0]])
+		if d.section != "[Service]" {
+			if _, ok := want[d.key]; ok || d.key == "ExecStart" || d.key == "Environment" {
+				t.Errorf("%s=%s is in %s, not [Service], where systemd reads it", d.key, d.value, d.section)
 			}
-			delete(want, d[0])
+			continue
+		}
+		switch d.key {
+		case "Restart", "RuntimeDirectory", "RuntimeDirectoryMode":
+			if d.value != want[d.key] {
+				t.Errorf("%s=%s, want %s", d.key, d.value, want[d.key])
+			}
+			delete(want, d.key)
 		case "Environment":
-			key, value, _ := strings.Cut(d[1], "=")
+			key, value, _ := strings.Cut(d.value, "=")
 			env[key] = value
 		case "ExecStart":
-			execStart = d[1]
+			execStart = d.value
 		}
 	}
 	for key := range want {
-		t.Errorf("the unit sets no %s", key)
+		t.Errorf("the unit's [Service] sets no %s", key)
 	}
 
 	for key, value := range readAssignments(t, boostEnvPath) {
@@ -130,17 +145,21 @@ func TestTheServiceFileStartsTheEngineWithExplicitSettings(t *testing.T) {
 	state := t.TempDir()
 	env["TI_CONFIG"] = boostDeployCfg
 	env["TI_STATE_DIR"] = state
-	args := expandExecStart(execStart, map[string]string{"%i": "boost", "%t": shortSocketDir(t)}, env)
+	socketDir := shortSocketDir(t)
+	args := expandExecStart(execStart, map[string]string{"%i": "boost", "%t": socketDir}, env)
 	if len(args) == 0 || args[0] != "/opt/trend-investing/bin/ti-engine" {
 		t.Fatalf("ExecStart runs %v, want /opt/trend-investing/bin/ti-engine", args)
 	}
-	for _, flag := range []string{"-mode", "-config", "-socket", "-log", "-out", "-as-of"} {
-		found := false
-		for _, a := range args {
-			found = found || a == flag
-		}
-		if !found {
-			t.Errorf("ExecStart %v does not pass %s", args, flag)
+	for flag, value := range map[string]string{
+		"-mode":   env["TI_MODE"],
+		"-config": boostDeployCfg,
+		"-socket": socketDir + "/ti-engine-boost/engine.sock",
+		"-log":    state + "/" + env["TI_RUN"] + ".log",
+		"-out":    state + "/" + env["TI_RUN"] + ".journal",
+		"-as-of":  env["TI_AS_OF"],
+	} {
+		if i := indexOf(args, flag); i < 0 || i+1 >= len(args) || args[i+1] != value {
+			t.Errorf("ExecStart %v does not pass %s %s", args, flag, value)
 		}
 	}
 	runtimeDir := filepath.Dir(args[indexOf(args, "-socket")+1])
@@ -166,4 +185,40 @@ func indexOf(words []string, word string) int {
 		}
 	}
 	return -1
+}
+
+// TestTheProvisionerLeavesNoEngineEnabled: every engine start is the owner's
+// explicit step, a crash resumed and anything else an approved fresh run
+// (ADR 0027, the restart model), so no engine starts at boot. A server an
+// earlier provisioner enabled engines on keeps those links until they are
+// removed, so the provisioner disables every engine instance as well as
+// enabling none.
+func TestTheProvisionerLeavesNoEngineEnabled(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/provision.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled := map[string]bool{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "systemctl" {
+			continue
+		}
+		for _, f := range fields[2:] {
+			if !strings.HasPrefix(f, "ti-engine@") {
+				continue
+			}
+			switch fields[1] {
+			case "enable":
+				t.Errorf("the provisioner enables %s: %q", f, strings.TrimSpace(line))
+			case "disable":
+				disabled[f] = true
+			}
+		}
+	}
+	for _, account := range []string{"boost", "trad-ira", "roth-ira"} {
+		if unit := "ti-engine@" + account + ".service"; !disabled[unit] {
+			t.Errorf("the provisioner does not disable %s, which an earlier provisioner enabled", unit)
+		}
+	}
 }
