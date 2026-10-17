@@ -100,6 +100,12 @@ type Gate struct {
 	saleTags  map[string]bool
 	attempted map[string]bool
 	pending   map[string]bool
+	// inFlight holds, per instrument, the shares of every sell released
+	// since the latest broker snapshot, which that snapshot cannot show as
+	// working: a later sell is sized and checked net of them, so two sells
+	// never both take the same shares (ADR 0019, amended 2026-10-15, "never
+	// below it").
+	inFlight map[string]int64
 }
 
 // NewGate returns a Normal gate for the joint margin account accountID under
@@ -149,6 +155,7 @@ func newGate(accountID string, limits event.MarginLimits, mode string) (*Gate, e
 		state: StateNormal, alarmLevel: event.MarginAlarmClear,
 		released: make(map[string]bool), saleTags: make(map[string]bool),
 		attempted: make(map[string]bool), pending: make(map[string]bool),
+		inFlight: make(map[string]int64),
 	}, nil
 }
 
@@ -353,6 +360,9 @@ func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 func (g *Gate) release(o Order, f event.RiskFigures) Outcome {
 	p := o.Planned
 	g.released[p.ClientOrderID] = true
+	if p.Side == event.OrderSideSell {
+		g.inFlight[p.InstrumentID] += p.Quantity
+	}
 	return Outcome{Released: &event.OrderReleasedPayload{
 		AccountID: g.accountID, PlanID: o.PlanID, Tag: p.Tag, ClientOrderID: p.ClientOrderID,
 		InstrumentID: p.InstrumentID, Side: p.Side, Quantity: p.Quantity, LimitPrice: p.LimitPrice,

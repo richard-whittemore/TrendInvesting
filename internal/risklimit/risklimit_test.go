@@ -2,6 +2,7 @@ package risklimit_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/risklimit"
@@ -272,6 +273,12 @@ func TestDegradedKeepsManagingInstrumentsItDoesNotName(t *testing.T) {
 	if got.State != nil || g.State() != risklimit.StateDegraded {
 		t.Errorf("a released sell changes no state: %+v, gate %s", got.State, g.State())
 	}
+	// A snapshot recorded after the release shows the sell filled; the next
+	// sell is sized within what it shows.
+	ief.AsOf = ief.AsOf.Add(time.Minute)
+	ief.Positions[0].Quantity = 40
+	observe(t, g, "broker:2", ief)
+	o.Planned.Quantity, o.Planned.HeldQuantity = 40, 40
 	o.MarkSet, o.Mark = true, 2
 	released(t, check(t, g, o)[0])
 }

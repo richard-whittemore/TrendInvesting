@@ -65,6 +65,10 @@ The kill switch is your own input, recorded in the journal as
 - the engine state does not change. Turning the switch off puts things back
   as they were. Turning it on twice is still one engagement.
 
+Each input must say `engaged` true or false. An input that leaves it out, or
+sets it to null, is rejected rather than read as "off", so a malformed input
+can never turn the switch off.
+
 The kill switch stops new orders from this program. To stop everything,
 including orders already at the broker, stop the gateway or use IBKR's own
 app.
@@ -88,6 +92,9 @@ ceil(0.98 × net liquidation ÷ mark) shares. It sells the smallest of three
 amounts: what reaches 98%; your holding minus every working sell (so it can
 never sell shares you do not have); and that minus the shares to keep (so,
 together with a sell of ours still working, it never takes you below 98%).
+A sell this program sent after that snapshot counts as working until a later
+snapshot shows it. Boost's own exit is reduced by the same working sells, so
+an urgent sale and the exit in one session never sell the same shares twice.
 Worked example (ADR 0019): 147 SPY, $4,700 borrowed, mark $90, so net
 liquidation is $8,530. It keeps 93 shares and sells 54.
 

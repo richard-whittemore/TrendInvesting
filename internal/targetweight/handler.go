@@ -378,6 +378,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	order, ok, err := orderplan.PlanBoost(orderplan.BoostInput{
 		Tag: decisionID, Decision: decided, Snapshot: *snapshot,
 		ReferencePrice: bar.Raw.Close, PriceBand: h.cfg.Limits.PriceBand,
+		WorkingSells: h.gate.PendingSells(h.cfg.Boost.InstrumentID),
 	})
 	b.fail(err)
 	if !ok {

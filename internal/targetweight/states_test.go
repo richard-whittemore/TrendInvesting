@@ -373,3 +373,29 @@ func TestEachDecisionIsJournalledAtTheVersionThatHoldsIt(t *testing.T) {
 		}
 	}
 }
+
+// An urgent sale released from a broker snapshot is still in flight when the
+// same session's Boost exit is planned: the two together never take the
+// holding below the shares the sale keeps (ADR 0019 line 241, "back to 98%
+// of net liquidation and never below it"; ADR 0026 line 224).
+func TestAnUrgentSaleAndTheExitTogetherNeverSellBelow98(t *testing.T) {
+	urgent := map[int]func(*event.BrokerSnapshotPayload){20: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.15 * b.NetLiquidation }}
+	r := simulate(t, options{brokers: true, brokerMutate: urgent})
+	sold := sales(t, r.decisions)
+	if len(sold) != 1 || sold[0].Sale.Kind != event.SaleKindUrgent {
+		t.Fatalf("urgent sale in the exit session: %+v", sold)
+	}
+	keep := sold[0].Sale.KeepShares
+	held := sold[0].HeldQuantity
+	at := sessionEnd(20)
+	for _, e := range ofType(r.decisions, event.OrderReleasedEventType) {
+		var p event.OrderReleasedPayload
+		decode(t, e, &p)
+		if p.Side == event.OrderSideSell && !e.EventTime.After(at) && !e.EventTime.Before(at.Add(-time.Hour)) {
+			held -= p.Quantity
+		}
+	}
+	if held < keep {
+		t.Fatalf("the sale and the exit together leave %d shares; the sale keeps %d", held, keep)
+	}
+}

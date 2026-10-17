@@ -20,15 +20,29 @@ type Observation struct {
 }
 
 // brokerHolding returns the latest broker snapshot's holding of instrumentID
-// and its working sells, when the snapshot read both positions and open
-// orders.
+// and its working sells, with every sell released since that snapshot, when
+// the snapshot read both positions and open orders.
 func (g *Gate) brokerHolding(instrumentID string) (holding, working int64, ok bool) {
 	s := g.broker
 	if s == nil || !s.Readable(event.BrokerComponentPositions) || !s.Readable(event.BrokerComponentOpenOrders) {
 		return 0, 0, false
 	}
 	position, _ := s.Position(instrumentID)
-	return position.Quantity, s.WorkingSells(instrumentID), true
+	return position.Quantity, s.WorkingSells(instrumentID) + g.inFlight[instrumentID], true
+}
+
+// PendingSells returns the shares of instrumentID already being sold: every
+// working or pending sell the latest broker snapshot reports, when it read
+// its open orders, and every sell released since that snapshot. A planner
+// nets them from a new sell, so a sell and one already working never
+// together take exposure below the target (ADR 0019, amended 2026-10-15,
+// "never below it"; ADR 0026, point 2.5).
+func (g *Gate) PendingSells(instrumentID string) int64 {
+	working := g.inFlight[instrumentID]
+	if s := g.broker; s != nil && s.Readable(event.BrokerComponentOpenOrders) {
+		working += s.WorkingSells(instrumentID)
+	}
+	return working
 }
 
 // riskReducing reports whether p is risk-reducing (ADR 0026, point 4): a sell
@@ -117,7 +131,10 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 	if g.broker != nil && !s.AsOf.After(g.broker.AsOf) {
 		return Observation{}, fmt.Errorf("risklimit: broker snapshot as of %s does not follow the last, %s", s.AsOf, g.broker.AsOf)
 	}
+	// A snapshot recorded after a release shows that sell as working or
+	// in its holding, so the sells in flight before it are counted by it.
 	g.broker, g.brokerID = &s, id
+	clear(g.inFlight)
 	if g.ira {
 		return Observation{}, nil
 	}

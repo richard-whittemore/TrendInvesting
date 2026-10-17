@@ -2,6 +2,7 @@ package event_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -375,5 +376,32 @@ func TestOnlyAMarginAccountHasACushion(t *testing.T) {
 	}
 	if err := boost.Limits.Validate(); err != nil {
 		t.Errorf("a margin account's limits: %v", err)
+	}
+}
+
+// An input that does not state whether the switch is engaged must never
+// release it: ADR 0026 line 173 refuses every order but the sale while it is
+// engaged, so only an explicit false releases it.
+func TestKillSwitchRequiresAnExplicitEngaged(t *testing.T) {
+	base := `"account_id":"joint","as_of":"2026-01-02T21:00:00Z","operator":"owner","detail":"switch file removed"`
+	for name, raw := range map[string]string{
+		"omitted":  `{` + base + `}`,
+		"null":     `{` + base + `,"engaged":null}`,
+		"a string": `{` + base + `,"engaged":"false"}`,
+	} {
+		var p event.KillSwitchPayload
+		if err := json.Unmarshal([]byte(raw), &p); err == nil {
+			t.Errorf("%s engaged decoded as %+v; want an error", name, p)
+		}
+	}
+	for _, engaged := range []bool{false, true} {
+		var p event.KillSwitchPayload
+		raw := fmt.Sprintf(`{%s,"engaged":%t}`, base, engaged)
+		if err := json.Unmarshal([]byte(raw), &p); err != nil || p.Engaged != engaged {
+			t.Errorf("engaged %t: %+v, %v", engaged, p, err)
+		}
+	}
+	if _, err := json.Marshal(validKillSwitch()); err != nil {
+		t.Fatal(err)
 	}
 }

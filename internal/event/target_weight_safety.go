@@ -1,6 +1,7 @@
 package event
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -26,6 +27,27 @@ type KillSwitchPayload struct {
 	// Operator names who set the switch; Detail says how and why.
 	Operator string `json:"operator"`
 	Detail   string `json:"detail"`
+}
+
+// UnmarshalJSON decodes the payload and requires engaged to be stated as a
+// boolean: an input that omits it, or sets it null, would otherwise read as
+// false and release a switch that refuses every order but the sale (ADR
+// 0026, point 3). Only an explicit false releases it.
+func (p *KillSwitchPayload) UnmarshalJSON(raw []byte) error {
+	type plain KillSwitchPayload
+	var stated struct {
+		plain
+		Engaged *bool `json:"engaged"`
+	}
+	if err := json.Unmarshal(raw, &stated); err != nil {
+		return err
+	}
+	if stated.Engaged == nil {
+		return errors.New("kill switch payload: engaged must be stated as true or false")
+	}
+	*p = KillSwitchPayload(stated.plain)
+	p.Engaged = *stated.Engaged
+	return nil
 }
 
 // Validate checks the account, time, operator and detail.

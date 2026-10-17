@@ -590,3 +590,32 @@ func TestARestoredStateNamesTheIncident(t *testing.T) {
 		t.Error("the incident's sale is attempted once")
 	}
 }
+
+// TestASellReleasedSinceTheSnapshotIsCountedAsWorking: a released sell is
+// counted against every later sell until a broker snapshot recorded after it
+// shows it, so two sells never both take the same shares (ADR 0019 line 241,
+// "back to 98% of net liquidation and never below it").
+func TestASellReleasedSinceTheSnapshotIsCountedAsWorking(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(100, event.BrokerOrder{
+		BrokerOrderID: "ib-1", ClientOrderID: "tw-x", InstrumentID: "SPY", Side: event.OrderSideSell,
+		Status: event.BrokerOrderWorking, RemainingQuantity: 10,
+	}))
+	if got := g.PendingSells("SPY"); got != 10 {
+		t.Fatalf("pending sells before any release: %d", got)
+	}
+	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+	if got := g.PendingSells("SPY"); got != 70 {
+		t.Fatalf("the released sell is pending until a snapshot shows it: %d", got)
+	}
+	again := order(event.OrderSideSell, 31, 100)
+	again.Planned.ClientOrderID = "tw-again"
+	refusedFor(t, check(t, g, again)[0], event.RefusedBrokerHolding)
+	later := broker(40)
+	later.AsOf = later.AsOf.Add(time.Minute)
+	later.Unreadable = []string{event.BrokerComponentOpenOrders}
+	observe(t, g, "broker:2", later)
+	if got := g.PendingSells("SPY"); got != 0 {
+		t.Errorf("a later snapshot accounts for the released sell: %d", got)
+	}
+}

@@ -577,7 +577,9 @@ type RiskFigures struct {
 	// pending sell. It is exempt from the order count, size and price band.
 	RiskReducing bool `json:"risk_reducing,omitempty"`
 	// The latest broker snapshot's holding and working sells for the
-	// instrument, when the gate had one (BrokerSet). All four fields are
+	// instrument, when the gate had one (BrokerSet). WorkingSells also counts
+	// the sells the gate released after that snapshot, which it cannot yet
+	// show (ADR 0019, amended 2026-10-15: "never below it"). All four fields are
 	// omitted when unset, so figures without a broker snapshot keep their
 	// bytes.
 	BrokerSet     bool  `json:"broker_set,omitempty"`
