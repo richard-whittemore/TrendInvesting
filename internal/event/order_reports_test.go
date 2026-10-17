@@ -2,6 +2,7 @@ package event_test
 
 import (
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -86,5 +87,26 @@ func TestOrderReportsReadsAReportAsTheMomentumRunDoes(t *testing.T) {
 	cancelled.ClientOrderID, cancelled.Status, cancelled.LimitPrice = "tw-2", event.OrderLifecycleStatusCanceled, 10
 	if o, err := r.Lifecycle(cancelled); err != nil || !o.Terminal {
 		t.Errorf("a cancellation: %+v %v, want the order terminal", o, err)
+	}
+}
+
+// TestOrderReportsRefusesAFillPastTheOrderWhateverItsSize: a fill quantity
+// so large that the order's filled total would wrap past int64 is still
+// past the order, never read as a fill within it.
+func TestOrderReportsRefusesAFillPastTheOrderWhateverItsSize(t *testing.T) {
+	at := time.Date(2025, 2, 3, 21, 0, 0, 0, time.UTC)
+	r := event.NewOrderReports()
+	r.Release(event.OrderReleasedPayload{AccountID: "ira", ClientOrderID: "tw-1", InstrumentID: "AAA", Side: event.OrderSideBuy, Quantity: 9, LimitPrice: 10})
+	fill := func(id string, quantity int64) event.TargetWeightFillPayload {
+		return event.TargetWeightFillPayload{AccountID: "ira", ClientOrderID: "tw-1", FillID: id, InstrumentID: "AAA", Side: event.OrderSideBuy, Quantity: quantity, Price: 10, FilledAt: at}
+	}
+	if _, _, err := r.Fill(fill("f1", 5)); err != nil {
+		t.Fatalf("first fill: %v", err)
+	}
+	if _, _, err := r.Fill(fill("f2", math.MaxInt64)); err == nil || !strings.Contains(err.Error(), "past its") {
+		t.Fatalf("a fill of MaxInt64 shares on a part-filled order: %v, want it refused as past the order", err)
+	}
+	if o, _ := r.Order("tw-1"); o.Filled != 5 || o.Terminal {
+		t.Errorf("order %+v, want it left at 5 filled and working", o)
 	}
 }

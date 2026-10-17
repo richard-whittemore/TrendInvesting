@@ -69,13 +69,16 @@ type Order struct {
 // (version 5) by event.OrderReports, the rule the engine applies: one that
 // does not describe the order, takes it past its quantity in total, reuses
 // a fill id for another execution, or arrives once the order is terminal is
-// refused. Every report the engine refuses that names a released order,
-// including one at a schema version the run does not read or one that does
-// not validate, is returned as unread for its own alert rather than
-// refusing the log, since the log is append-only and would be refused on
-// every later reading. Two kinds of report change nothing and raise no
-// alert: one naming no released order, which is reconciliation's to explain
-// (ADR 0019), and a fill in a Boost run, which does not read fills yet.
+// refused. A venue report that cannot be read at all, at a schema version
+// the run does not read or not validating, is returned as unread whatever
+// order it names, and its client order ID may be unknown (empty): it is
+// refused before the order it names is known. A report that is read and
+// refused by the rule above is returned as unread when it names a released
+// order. Each unread report gets its own alert rather than refusing the log,
+// since the log is append-only and would be refused on every later reading.
+// Two kinds of report that can be read change nothing and raise no alert:
+// one naming no released order, which is reconciliation's to explain (ADR
+// 0019), and a fill in a Boost run, which does not read fills yet.
 func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []UnreadReport, error) {
 	var orders []*Order
 	var unread []UnreadReport
@@ -124,8 +127,8 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 
 // UnreadReport is a venue's report the log holds that the engine did not
 // read: InputID is the input, ClientOrderID the order it names (empty when
-// its payload does not decode), Reason why it was not read, and At when it
-// was recorded.
+// its payload is at a version not read or does not decode), Reason why it
+// was not read, and At when it was recorded.
 type UnreadReport struct {
 	InputID, Type, ClientOrderID, Reason string
 	At                                   time.Time

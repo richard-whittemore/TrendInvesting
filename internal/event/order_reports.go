@@ -24,7 +24,8 @@ var ErrNotReleased = errors.New("which this run never released")
 // fill id names one execution across the account (TargetWeightFillPayload).
 // The same execution delivered again (SameExecution) is a redelivery and
 // changes nothing. An order becomes terminal on a lifecycle report that is
-// (Terminal) or on the fill that completes its quantity.
+// terminal (cancelled or invalid; LimitOrderLifecyclePayload's Terminal) or
+// on the fill that completes its quantity.
 type OrderReports struct {
 	orders map[string]*ReportedOrder
 	fills  map[string]TargetWeightFillPayload
@@ -104,7 +105,8 @@ func (r *OrderReports) Fill(p TargetWeightFillPayload) (o *ReportedOrder, redeli
 	if p.AccountID != q.AccountID || p.InstrumentID != q.InstrumentID || p.Side != q.Side {
 		return nil, false, fmt.Errorf("describes %s %s %s, but order %s is %s %s %s", p.AccountID, p.Side, p.InstrumentID, q.ClientOrderID, q.AccountID, q.Side, q.InstrumentID)
 	}
-	if o.Filled+p.Quantity > q.Quantity {
+	// Against what remains, not the sum: the sum can wrap past int64.
+	if p.Quantity > q.Quantity-o.Filled {
 		return nil, false, fmt.Errorf("takes order %s past its %d shares", q.ClientOrderID, q.Quantity)
 	}
 	r.fills[p.FillID] = p

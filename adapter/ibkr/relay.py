@@ -30,17 +30,39 @@ open or executed under any client ID, is never sent either: a second order
 with the same tag is unknown to reconciliation. A dry-run release (send
 false) is never sent (ADR 0026 point 3, "Mode").
 
+A person settles a stopped hand-over with the resolve command, never by
+editing the record: `python3 adapter/ibkr/relay.py resolve PENDING_FILE
+CLIENT_ORDER_ID --sent | --resend --reason TEXT`. It writes only a known
+mark, refuses an order the record does not hold, and appends the decision
+and its reason to a sidecar file. A resend is allowed only for an order
+committed in today's session (in New York): an order from an earlier
+session may have filled or been cancelled where today's open orders and
+executions no longer show it, so it is marked sent instead. The record is
+read strictly (fail closed on unknown, AGENTS.md): anything but a JSON object
+from client order ID to one of the two marks raises HandoverRecordInvalid,
+and the adapter stops before sending.
+
 An input ID names one input (ADR 0027 section 4): a retry under the ID of
 the input awaiting its reply, with other content, is refused (InputChanged)
 after the saved original is settled, and never replaces it on disk.
 """
+import argparse
 import json
 import os
+import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 RELEASED = "risk.order.released"
 # The two marks the write-ahead record holds for a client order ID.
 HANDING_OVER = "handing-over"
 SENT = "sent"
+MARKS = (HANDING_OVER, SENT)
+# The trading session's calendar: a session's date is its New York date.
+SESSION_ZONE = ZoneInfo("America/New_York")
+# The person's decisions on a stopped hand-over.
+DECIDE_SENT = "sent"
+DECIDE_RESEND = "resend"
 
 
 class EngineUnavailable(Exception):
@@ -58,8 +80,16 @@ class HandoverUnconfirmed(Exception):
         super().__init__(
             "order {0} was being handed to the broker when the adapter stopped, and IBKR shows it neither open "
             "nor executed; it is not sent again and nothing else is sent: check IBKR for an order whose orderRef "
-            "is {0}".format(client_order_id))
+            "is {0}, then settle it with relay.py resolve (docs/manual/redelivery.md)".format(client_order_id))
         self.client_order_id = client_order_id
+
+
+class HandoverRecordInvalid(ValueError):
+    """The write-ahead record is not a JSON object from client order ID to a known mark; nothing is sent."""
+
+
+class ResolveRefused(ValueError):
+    """The resolve command refused a decision and changed nothing."""
 
 
 class InputChanged(Exception):
@@ -72,6 +102,7 @@ class PendingInput:
     def __init__(self, path):
         self.path = path
         self.handover_path = path + ".handover"
+        self.decisions_path = path + ".handover.decisions"
 
     def load(self):
         try:
@@ -86,18 +117,54 @@ class PendingInput:
         self._write(self.path, envelope)
 
     def handovers(self):
-        """The write-ahead record: each client order ID's mark, HANDING_OVER or SENT."""
+        """The write-ahead record: each client order ID's mark, HANDING_OVER or SENT.
+
+        Anything else raises HandoverRecordInvalid: a mark the relay does
+        not know is never read as no mark, which would send the order again.
+        """
         try:
             with open(self.handover_path, encoding="utf-8") as f:
-                return json.load(f)
+                marks = json.load(f)
         except FileNotFoundError:
             return {}
+        except ValueError as err:
+            raise HandoverRecordInvalid("{} is not JSON: {}".format(self.handover_path, err)) from None
+        if not isinstance(marks, dict):
+            raise HandoverRecordInvalid("{} holds {}, not an object of marks".format(
+                self.handover_path, type(marks).__name__))
+        for cid, mark in marks.items():
+            if mark not in MARKS:
+                raise HandoverRecordInvalid("{} marks order {} {!r}, which is neither {!r} nor {!r}".format(
+                    self.handover_path, cid, mark, HANDING_OVER, SENT))
+        return marks
 
     def mark(self, client_order_id, state):
         """Record durably, before the call it precedes returns, that an order is being or was handed over."""
         marks = self.handovers()
         marks[client_order_id] = state
         self._write(self.handover_path, marks)
+
+    def unmark(self, client_order_id):
+        """Remove an order's mark, so the relay treats it as never handed over."""
+        marks = self.handovers()
+        del marks[client_order_id]
+        self._write(self.handover_path, marks)
+
+    def decisions(self):
+        """The person's recorded decisions on stopped hand-overs, oldest first."""
+        try:
+            with open(self.decisions_path, encoding="utf-8") as f:
+                return [json.loads(line) for line in f if line.strip()]
+        except FileNotFoundError:
+            return []
+
+    def record_decision(self, decision):
+        """Append one decision durably; the file is kept for the owner and never read by the relay."""
+        with open(self.decisions_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(decision, sort_keys=True, separators=(",", ":")) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        self._sync_dir()
 
     def clear(self):
         """Remove the input, then its write-ahead record.
@@ -220,3 +287,79 @@ def released_orders(reply):
     for decision in reply["payload"]["decisions"]:
         if decision.get("type") == RELEASED and decision["payload"].get("send") is True:
             yield decision["payload"]
+
+
+def resolve(pending, client_order_id, decision, reason, today=None):
+    """Settle a stopped hand-over: mark it sent, or remove its mark so it is sent again.
+
+    Refuses (ResolveRefused, nothing changed) an order the record does not
+    hold, an unknown decision, an empty reason, and a resend of an order not
+    committed in today's session. The order's committed session is its
+    input's event time as a New York date: the engine commits the order only
+    once it receives that input, so no earlier. A missing or unreadable
+    event time refuses the resend. today defaults to today in New York.
+    """
+    if decision not in (DECIDE_SENT, DECIDE_RESEND):
+        raise ResolveRefused("decision {!r} is neither {!r} nor {!r}".format(decision, DECIDE_SENT, DECIDE_RESEND))
+    if not reason or not reason.strip():
+        raise ResolveRefused("a reason is required: it is kept with the decision")
+    marks = pending.handovers()
+    if client_order_id not in marks:
+        raise ResolveRefused("order {} is not in the hand-over record {}; check the client order ID".format(
+            client_order_id, pending.handover_path))
+    if today is None:
+        today = datetime.now(SESSION_ZONE).date()
+    if decision == DECIDE_RESEND:
+        committed = _session_date(pending.load())
+        if committed != today:
+            raise ResolveRefused(
+                "order {} was not committed in today's session ({}; committed {}): an order from an earlier "
+                "session may have filled or been cancelled where IBKR's open orders and today's trades no longer "
+                "show it. Check IBKR's order and trade history for every day since, then mark it sent".format(
+                    client_order_id, today, committed or "unknown"))
+        pending.record_decision({"client_order_id": client_order_id, "decision": decision, "reason": reason})
+        pending.unmark(client_order_id)
+    else:
+        pending.record_decision({"client_order_id": client_order_id, "decision": decision, "reason": reason})
+        pending.mark(client_order_id, SENT)
+
+
+def _session_date(envelope):
+    """The New York date of an input's event time, or None when it has none that can be read."""
+    text = (envelope or {}).get("event_time")
+    if not isinstance(text, str):
+        return None
+    try:
+        at = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if at.tzinfo is None:
+        return None
+    return at.astimezone(SESSION_ZONE).date()
+
+
+def main(argv=None, today=None):
+    """The relay's operator command; returns the process exit status."""
+    parser = argparse.ArgumentParser(prog="relay.py", description="Settle a stopped hand-over (adapter stopped).")
+    commands = parser.add_subparsers(dest="command", required=True)
+    cmd = commands.add_parser("resolve", help="mark a stopped hand-over sent, or allow it to be sent again")
+    cmd.add_argument("pending_file", help="the adapter's pending-input file (not the .handover file)")
+    cmd.add_argument("client_order_id")
+    which = cmd.add_mutually_exclusive_group(required=True)
+    which.add_argument("--sent", dest="decision", action="store_const", const=DECIDE_SENT,
+                       help="IBKR shows the order at all (working, filled or cancelled): never send it again")
+    which.add_argument("--resend", dest="decision", action="store_const", const=DECIDE_RESEND,
+                       help="IBKR has no trace of it and it was committed today: send it again at its original limit")
+    cmd.add_argument("--reason", required=True, help="what IBKR showed; kept with the decision")
+    args = parser.parse_args(argv)
+    try:
+        resolve(PendingInput(args.pending_file), args.client_order_id, args.decision, args.reason, today=today)
+    except (ResolveRefused, HandoverRecordInvalid) as err:
+        print("refused: {}".format(err), file=sys.stderr)
+        return 1
+    print("order {} resolved: {}".format(args.client_order_id, args.decision))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
