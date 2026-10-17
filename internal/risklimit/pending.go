@@ -36,8 +36,13 @@ import (
 // Every fact of a fill carries the time it shows the shares filled by: a fill
 // report its execution time, a broker listing and a holding fall the time of
 // the snapshot that showed them, a lifecycle report that ends a sell the time
-// it occurred. A snapshot taken at asOf is credited with the facts at or
-// before asOf only, whenever they were recorded: fill reports are pushed and
+// it occurred. A snapshot taken at asOf is credited with its own facts and
+// those of earlier snapshots, at or before asOf, and with the fill and
+// lifecycle reports strictly before asOf, whenever they were recorded. IBKR
+// stamps executions in whole seconds and a snapshot carries no broker time of
+// its own, so a report in the same second as a snapshot may have happened
+// after the snapshot read its positions; it is assumed to have (fail closed),
+// and stays pending from that snapshot. Fill reports are pushed and
 // snapshots polled, so a fill reported before a snapshot taken before it is
 // still pending from that snapshot's view, and a fill reported after a
 // snapshot taken after it is shares that snapshot's holding already showed,
@@ -63,7 +68,8 @@ type shown struct {
 	filled int64
 }
 
-// most returns the most shares facts at or before t show filled, 0 with none.
+// most returns the most shares snapshot facts at or before t show filled, 0
+// with none.
 func most(facts []shown, t time.Time) int64 {
 	var out int64
 	for _, f := range facts {
@@ -89,14 +95,16 @@ type trackedSell struct {
 	ended   bool
 }
 
-// endedBy reports whether a lifecycle report had ended the sell by t.
-func (s *trackedSell) endedBy(t time.Time) bool { return s.ended && !s.endedAt.After(t) }
+// endedBy reports whether a lifecycle report had ended the sell before t.
+func (s *trackedSell) endedBy(t time.Time) bool { return s.ended && s.endedAt.Before(t) }
 
-// knownBy is the most the sell's own facts at or before t show filled.
+// knownBy is the most the sell's own facts credited to a snapshot taken at t
+// show filled: fill reports and a lifecycle end before t, listings at or
+// before t.
 func (s *trackedSell) knownBy(t time.Time) int64 {
 	var reported int64
 	for _, f := range s.fills {
-		if !f.at.After(t) {
+		if f.at.Before(t) {
 			reported += f.filled
 		}
 	}
@@ -151,15 +159,15 @@ func (g *Gate) shares(instrumentID string) (filled, pending int64) {
 }
 
 // filledBy returns the shares of instrumentID's released sells that the
-// facts at or before t show filled: what a snapshot taken at t shows.
+// facts credited to a snapshot taken at t show filled: what it shows.
 func (g *Gate) filledBy(instrumentID string, t time.Time) int64 {
 	known, extra, _ := g.spread(instrumentID, t, nil)
 	return known + extra
 }
 
-// spread returns, by the facts at or before t, the shares the sells' own
-// facts show filled, the part of the floor beyond them that the open sells
-// hold, and the open sells' unfilled shares. The floor beyond the sells' own
+// spread returns, by the facts credited to a snapshot taken at t, the shares
+// the sells' own facts show filled, the part of the floor beyond them that
+// the open sells hold, and the open sells' unfilled shares. The floor beyond the sells' own
 // facts is spread over the open sells oldest first, each up to its unfilled
 // shares; part, when set, receives each open sell's part of it.
 func (g *Gate) spread(instrumentID string, t time.Time, part func(*trackedSell, int64)) (known, extra, open int64) {
@@ -237,7 +245,7 @@ func (g *Gate) notOlder(asOf time.Time) bool {
 }
 
 // ObserveAccount records account snapshot p, the one PendingSells nets for:
-// it shows the fills at or before its time. When it is not older than the
+// it shows the fills credited to its time. When it is not older than the
 // latest holding seen, a fall in its holding that the fills by then do not
 // explain is taken as filled by the pending sells, net first of every
 // unknown sell the latest broker snapshot lists (which may be what sold),

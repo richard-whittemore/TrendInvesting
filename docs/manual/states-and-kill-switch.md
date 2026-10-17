@@ -135,6 +135,14 @@ shares known filled. One rule decides what is known filled:
   being sold against that snapshot; otherwise the session's exit could sell
   another 54 and leave 39 of 147. A fill reported after a snapshot taken
   after the fill is one the snapshot already showed, so it counts once.
+- A fill in the same second as a snapshot is assumed to have come after it.
+  IBKR stamps fills to the whole second, and a snapshot has no IBKR time of
+  its own, so a fill stamped 16:00:02 may have happened just after a
+  snapshot stamped 16:00:02 read its holdings. The gate takes the safe
+  reading: against that snapshot, the 54 still count as being sold. A fill
+  stamped 16:00:01 is one the snapshot shows. A cancellation in the same
+  second as a snapshot is treated the same way: the shares the sale had sold
+  by then still count as being sold against that snapshot.
 - A snapshot taken earlier than one already seen, but recorded after it
   (account and IBKR snapshots each keep their own order), is judged by its
   own time too. An IBKR snapshot from 15:59:55 that still shows 147,

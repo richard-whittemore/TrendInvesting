@@ -527,3 +527,88 @@ func TestAnOlderAccountSnapshotStillShowsTheFillsBeforeIt(t *testing.T) {
 	g.ObserveAccount(account(70, 2))
 	pendingIs(t, g, 30, "the 15:02 snapshot shows the 30 filled at 15:01")
 }
+
+// workingSells is the working sells an outcome's broker-holding figures net.
+func workingSells(o risklimit.Outcome) int64 {
+	if o.Refused != nil {
+		return o.Refused.Figures.WorkingSells
+	}
+	return o.Released.Figures.WorkingSells
+}
+
+// sameSecond walks ADR 0019's worked example with the reports at reported,
+// and an account and a broker snapshot both stamped 16:00:02 that still hold
+// the 147: it returns the pending sells the account snapshot leaves and the
+// working sells the broker-holding check nets against the broker snapshot.
+func sameSecond(t *testing.T, report func(g *risklimit.Gate, sale event.OrderPlannedPayload)) (pending, working int64) {
+	t.Helper()
+	g := gate(t, limits(), event.TradingModeDryRun)
+	sale := urgentSale(t, g)
+	report(g, sale)
+	snapshot := at.Add(time.Hour + 2*time.Second)
+	a := account(147, 0)
+	a.AsOf = snapshot
+	g.ObserveAccount(a)
+	b := boosted()
+	b.AsOf = snapshot
+	observe(t, g, "broker:2", b)
+	one := order(event.OrderSideSell, 1, 147)
+	one.Planned.ClientOrderID = "tw-one"
+	return g.PendingSells("SPY"), workingSells(check(t, g, one)[0])
+}
+
+// IBKR stamps executions in whole seconds and a snapshot carries no broker
+// time of its own, so a fill stamped in the same second as a snapshot may
+// have happened after the snapshot read its positions. It is assumed to have
+// (fail closed): the urgent sale of 54 of 147 fills at 16:00:02 and both
+// snapshots of 16:00:02 still hold 147, so the 54 stay pending and working
+// against them, and the session's exit cannot sell them again. A fill a
+// second earlier is shown by them.
+func TestASameSecondFillIsStillPendingFromTheSnapshot(t *testing.T) {
+	fill := at.Add(time.Hour + 2*time.Second)
+	for _, c := range []struct {
+		name     string
+		filledAt time.Time
+		want     int64
+	}{
+		{"the same second", fill, 54},
+		{"a second earlier", fill.Add(-time.Second), 0},
+	} {
+		pending, working := sameSecond(t, func(g *risklimit.Gate, sale event.OrderPlannedPayload) {
+			sellFillAt(t, g, sale.ClientOrderID, "s1", 54, c.filledAt)
+		})
+		if pending != c.want || working != c.want {
+			t.Errorf("%s: pending sells %d and working sells %d, want %d", c.name, pending, working, c.want)
+		}
+	}
+}
+
+// A lifecycle report that ends a sell in the same second as a snapshot is
+// likewise assumed to post-date it: a partial fill of 20 and the
+// cancellation of the rest, both stamped 16:00:02, leave the 20 working
+// against snapshots of 16:00:02 that still hold 147. Ended a second earlier,
+// the sell is shown by them.
+func TestASameSecondLifecycleEndStillCountsAsWorking(t *testing.T) {
+	end := at.Add(time.Hour + 2*time.Second)
+	for _, c := range []struct {
+		name  string
+		endAt time.Time
+		want  int64
+	}{
+		{"the same second", end, 20},
+		{"a second earlier", end.Add(-time.Second), 0},
+	} {
+		pending, working := sameSecond(t, func(g *risklimit.Gate, sale event.OrderPlannedPayload) {
+			sellFillAt(t, g, sale.ClientOrderID, "s1", 20, c.endAt)
+			if err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{
+				AccountID: "joint", ClientOrderID: sale.ClientOrderID, OrderID: "ib-" + sale.ClientOrderID, InstrumentID: "SPY",
+				Side: event.OrderSideSell, Status: event.OrderLifecycleStatusCanceled, Quantity: sale.Quantity, LimitPrice: sale.LimitPrice, OccurredAt: c.endAt,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if pending != c.want || working != c.want {
+			t.Errorf("%s: pending sells %d and working sells %d, want %d", c.name, pending, working, c.want)
+		}
+	}
+}
