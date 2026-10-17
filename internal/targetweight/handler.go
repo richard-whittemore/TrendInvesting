@@ -73,7 +73,7 @@ type Options struct {
 //     one starts from the approved latch and the incident in force. A handler
 //     told to await it (AwaitApproval) refuses every other input until it is
 //     recorded, since a fresh run decides nothing before the approval (ADR
-//     0027, amended 2026-10-16);
+//     0027, amended 2026-10-17);
 //   - optionally, before the first bar or session, the earlier run's
 //     strategy.engine.state records, in journal order. A restart while
 //     Degraded or Halted resumes in that state and scope (ADR 0019, amended
@@ -179,7 +179,7 @@ func New(strategyVersion string, cfg event.TargetWeightConfigurationPayload, opt
 
 // AwaitApproval marks this run as a fresh run after an earlier one, which
 // decides nothing until the owner's approval is recorded (ADR 0027, amended
-// 2026-10-16): until then, every input but the configuration and the
+// 2026-10-17): until then, every input but the configuration and the
 // approval is refused. Call it before the first input. The momentum handler
 // reads no approval and ignores it.
 func (h *Handler) AwaitApproval() { h.awaiting = true }
@@ -197,7 +197,7 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 	}
 	if in.Type != event.TargetWeightConfigurationEventType && in.Type != event.OperatorRunApprovedEventType {
 		if h.awaiting && !h.approved {
-			return nil, fmt.Errorf("targetweight: %s %s arrived before the owner's approval; a fresh run after an earlier one reads nothing but its configuration until the approval is recorded (ADR 0027, amended 2026-10-16)", in.Type, in.ID)
+			return nil, fmt.Errorf("targetweight: %s %s arrived before the owner's approval; a fresh run after an earlier one reads nothing but its configuration until the approval is recorded (ADR 0027, amended 2026-10-17)", in.Type, in.ID)
 		}
 		h.prelude = true
 	}
@@ -266,7 +266,7 @@ func (h *Handler) applyConfiguration(in event.Envelope) error {
 // run's recorded decision (ADR 0026, point 5). It comes once, straight after
 // the configuration, and never after an approval: the approval states the
 // latch in force, and nothing after it changes that latch (ADR 0026, point
-// 5; ADR 0027, amended 2026-10-16), just as applyApproval refuses to follow
+// 5; ADR 0027, amended 2026-10-17), just as applyApproval refuses to follow
 // a recovered decision.
 func (h *Handler) applyRecovery(in event.Envelope) error {
 	if h.recovered || h.approved || h.started {

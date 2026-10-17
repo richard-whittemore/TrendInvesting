@@ -198,11 +198,8 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if awaiting, ok := comp.handler.(interface{ AwaitApproval() }); ok && approval != nil {
-		// A fresh run decides nothing until the approval is recorded (ADR
-		// 0027, amended 2026-10-16): the handler refuses any other input
-		// before it, whatever order it arrives in.
-		awaiting.AwaitApproval()
+	if err := armApproval(comp.handler, approval); err != nil {
+		return err
 	}
 	configurationHash, strategyVersion, configEnvelope := comp.configurationHash, comp.strategyVersion, comp.configEnvelope
 	reducer := comp.handler
@@ -629,4 +626,21 @@ func syncDir(dir string) error {
 		return nil
 	}
 	return err
+}
+
+// armApproval tells a fresh run's handler to decide nothing until the
+// owner's approval is recorded (ADR 0027, amended 2026-10-17): the handler
+// refuses any other input before it, whatever order it arrives in. A handler
+// that cannot be told to wait is refused, because running it would leave
+// the guard silently off.
+func armApproval(handler replay.Handler, approval *event.OperatorRunApprovedPayload) error {
+	if approval == nil {
+		return nil
+	}
+	awaiting, ok := handler.(interface{ AwaitApproval() })
+	if !ok {
+		return fmt.Errorf("engine: an approval is required but the %T handler cannot hold its inputs until it is recorded, so the run does not start", handler)
+	}
+	awaiting.AwaitApproval()
+	return nil
 }

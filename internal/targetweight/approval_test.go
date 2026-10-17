@@ -148,7 +148,7 @@ func TestAFreshRunContinuesTheIncidentsRestrictions(t *testing.T) {
 // latch in force, restored and never changed afterwards (ADR 0026, point 5),
 // so a recorded strategy.targets.decided arriving after it is refused, just
 // as an approval after a recovered decision is; the decision-prelude model
-// that once fed such decisions in is dropped (ADR 0027, amended 2026-10-16).
+// that once fed such decisions in is dropped (ADR 0027, amended 2026-10-17).
 func TestARecoveredDecisionNeverFollowsAnApproval(t *testing.T) {
 	full := simulate(t, options{})
 	decided := ofType(full.decisions, event.TargetsDecidedEventType)[3]
@@ -160,7 +160,7 @@ func TestARecoveredDecisionNeverFollowsAnApproval(t *testing.T) {
 
 // TestAFreshRunReadsNothingBeforeItsApproval: a fresh run after an earlier
 // one decides nothing until the owner's approval is recorded (ADR 0027,
-// amended 2026-10-16), so every input but the configuration and the
+// amended 2026-10-17), so every input but the configuration and the
 // approval is refused until then. A broker snapshot that would turn the
 // margin alarm urgent while Halted plans no sale; the same snapshot after
 // the approval is read.
