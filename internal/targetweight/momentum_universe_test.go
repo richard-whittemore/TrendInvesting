@@ -3,6 +3,7 @@ package targetweight_test
 import (
 	"bytes"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -254,4 +255,42 @@ func TestCloseHistoryRules(t *testing.T) {
 			t.Fatalf("%d decisions at the decision session", len(targets(t, out)))
 		}
 	})
+}
+
+// TestMomentumHistoryRequestNamesTheMembersTheRunRanks pins the seam the
+// market-data step asks through: for a decision session, the members the run
+// will rank from the snapshot, in rank order, and the window of closes each
+// history must cover; for any other session, none.
+func TestMomentumHistoryRequestNamesTheMembersTheRunRanks(t *testing.T) {
+	cfg := momentumConfiguration()
+	f := historyFixture{t: t, s: &stream{}}
+	var snap event.UniverseSnapshotPayload
+	decode(t, f.universe("2025-01-31"), &snap)
+
+	got, err := targetweight.MomentumHistoryRequest(cfg, snap, "2025-02-03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := targetweight.HistoryRequest{Session: "2025-01-31", DecisionSession: true, Window: 7, Members: []string{"AAA", "BBB"}}
+	if !equalJSON(t, got, want) {
+		t.Errorf("request %+v, want %+v", got, want)
+	}
+	if got, err := targetweight.MomentumHistoryRequest(cfg, snap, "2025-01-31"); err == nil {
+		t.Errorf("a next session that does not follow the snapshot's was accepted: %+v", got)
+	}
+	snap.Session = "2025-01-30"
+	if got, err := targetweight.MomentumHistoryRequest(cfg, snap, "2025-01-31"); err != nil || got.DecisionSession || len(got.Members) != 0 {
+		t.Errorf("mid-month request %+v, %v; want no decision and no members", got, err)
+	}
+	other := snap
+	other.Source = "elsewhere"
+	if _, err := targetweight.MomentumHistoryRequest(cfg, other, "2025-01-31"); err == nil || !strings.Contains(err.Error(), "this run reads") {
+		t.Errorf("a snapshot from another source: %v", err)
+	}
+	if _, err := targetweight.MomentumHistoryRequest(cfg, event.UniverseSnapshotPayload{}, "2025-01-31"); err == nil {
+		t.Error("an invalid snapshot was accepted")
+	}
+	if _, err := targetweight.MomentumHistoryRequest(testConfiguration(), snap, "2025-01-31"); err == nil {
+		t.Error("a Boost configuration was accepted")
+	}
 }

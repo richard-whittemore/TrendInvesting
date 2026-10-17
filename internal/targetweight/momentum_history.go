@@ -1,6 +1,7 @@
 package targetweight
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -58,15 +59,7 @@ func (r *momentumRun) mergeHistories(date string, at int) error {
 	if !decide || r.universe.Session != date {
 		return fmt.Errorf("targetweight: close histories arrived for the session %s, which is not a decision session with its universe snapshot", date)
 	}
-	// The configuration and the snapshot's rows are validated, so ranking
-	// cannot refuse them; were it to, no member matches and the run stops.
-	members, _, _ := momentum.RankUniverse(r.rule, rows(r.universe.Rows))
-	ranked := make([]string, len(members))
-	closes := make(map[string]float64, len(members))
-	for i, m := range members {
-		ranked[i] = m.InstrumentID
-		closes[m.InstrumentID] = m.Close
-	}
+	ranked, closes := rankedMembers(r.rule, *r.universe)
 	slices.Sort(ranked)
 	if got := slices.Sorted(maps.Keys(histories)); !slices.Equal(got, ranked) {
 		return fmt.Errorf("targetweight: close histories for the session %s name %v, but the universe ranks %v", date, got, ranked)
@@ -91,4 +84,90 @@ func (r *momentumRun) mergeHistories(date string, at int) error {
 		}
 	}
 	return nil
+}
+
+// HistoryRequest is what the compact universe input needs from one session's
+// universe snapshot: whether the session is a decision session and, for one,
+// the members the momentum run will rank from the snapshot, in rank order,
+// and how many calendar sessions of closes, ending at the session, each
+// member's market.close.history must cover. The market-data step asks for it
+// rather than rank in Python, since ranking is a rule (ADR 0026, point 1).
+type HistoryRequest struct {
+	Session         string   `json:"session"`
+	DecisionSession bool     `json:"decision_session"`
+	Window          int      `json:"window"`
+	Members         []string `json:"members"`
+}
+
+// MomentumHistoryRequest answers HistoryRequest for the snapshot u, whose
+// next calendar session is next, under the momentum configuration cfg, with
+// the ranking and the window the run itself uses. A configuration or
+// snapshot the run would refuse is an error, as is a next session that does
+// not follow the snapshot's.
+func MomentumHistoryRequest(cfg event.TargetWeightConfigurationPayload, u event.UniverseSnapshotPayload, next string) (HistoryRequest, error) {
+	if cfg.StrategyID != event.TargetWeightStrategyMomentum {
+		return HistoryRequest{}, fmt.Errorf("targetweight: a history request needs a momentum configuration, not %q", cfg.StrategyID)
+	}
+	if err := errors.Join(cfg.Validate(), u.Validate()); err != nil {
+		return HistoryRequest{}, fmt.Errorf("targetweight: %w", err)
+	}
+	if err := checkUniverse(cfg.Momentum, "for "+u.Session, u); err != nil {
+		return HistoryRequest{}, err
+	}
+	decide, err := momentum.IsDecisionSession(u.Session, next)
+	if err != nil {
+		return HistoryRequest{}, fmt.Errorf("targetweight: %w", err)
+	}
+	req := HistoryRequest{Session: u.Session, DecisionSession: decide, Window: momentumWindow(cfg.Momentum), Members: []string{}}
+	if decide {
+		req.Members, _ = rankedMembers(momentumRule(cfg.Momentum), u)
+	}
+	return req, nil
+}
+
+// rankedMembers returns the members the rule ranks from u, in rank order,
+// with each one's raw close. The configuration and the snapshot are
+// validated before either caller ranks, so RankUniverse cannot refuse them;
+// were it to, no member is ranked, and a history set then matches nothing.
+func rankedMembers(rule momentum.Config, u event.UniverseSnapshotPayload) (ids []string, closes map[string]float64) {
+	members, _, _ := momentum.RankUniverse(rule, rows(u.Rows))
+	ids = make([]string, len(members))
+	closes = make(map[string]float64, len(members))
+	for i, m := range members {
+		ids[i] = m.InstrumentID
+		closes[m.InstrumentID] = m.Close
+	}
+	return ids, closes
+}
+
+// checkUniverse refuses a snapshot from a source the configuration does not
+// read, or with a sector label from an unconfigured source.
+func checkUniverse(m event.MomentumConfiguration, id string, p event.UniverseSnapshotPayload) error {
+	if p.Source != m.UniverseSource {
+		return fmt.Errorf("targetweight: universe %s is from %q; this run reads %q", id, p.Source, m.UniverseSource)
+	}
+	for _, row := range p.Rows {
+		if row.SectorSource != "" && !slices.Contains(m.SectorSources, row.SectorSource) {
+			return fmt.Errorf("targetweight: universe %s labels %s from %q, not a configured sector source", id, row.InstrumentID, row.SectorSource)
+		}
+	}
+	return nil
+}
+
+// momentumRule is the momentum rule's configuration (ADR 0026, point 6).
+func momentumRule(m event.MomentumConfiguration) momentum.Config {
+	return momentum.Config{
+		ListingType: m.ListingType, UniverseSize: m.UniverseSize, MinPrice: m.MinPrice,
+		ScoreLookback: m.ScoreLookback, ScoreSkip: m.ScoreSkip, VolatilityReturns: m.VolatilityReturns,
+		TopN: m.TopN, SectorCap: m.SectorCap, Invested: m.Invested,
+		TrendInstrument: m.TrendInstrument, TrendCloses: m.TrendCloses,
+		RiskOffInstrument: m.RiskOffInstrument, RiskOffFraction: m.RiskOffFraction,
+	}
+}
+
+// momentumWindow is how many calendar sessions of closes the run keeps: the
+// longest lookback, the score's ScoreLookback+1 closes or the trend's
+// TrendCloses.
+func momentumWindow(m event.MomentumConfiguration) int {
+	return max(m.ScoreLookback+1, m.TrendCloses)
 }

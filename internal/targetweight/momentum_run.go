@@ -134,13 +134,7 @@ type rebalance struct {
 
 func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayload, opts Options) (*Handler, error) {
 	m := cfg.Momentum
-	rule := momentum.Config{
-		ListingType: m.ListingType, UniverseSize: m.UniverseSize, MinPrice: m.MinPrice,
-		ScoreLookback: m.ScoreLookback, ScoreSkip: m.ScoreSkip, VolatilityReturns: m.VolatilityReturns,
-		TopN: m.TopN, SectorCap: m.SectorCap, Invested: m.Invested,
-		TrendInstrument: m.TrendInstrument, TrendCloses: m.TrendCloses,
-		RiskOffInstrument: m.RiskOffInstrument, RiskOffFraction: m.RiskOffFraction,
-	}
+	rule := momentumRule(m)
 	// The bond sleeve holds glide.Invested of b, so the momentum book, scaled
 	// to 1 - b, must be invested at most that for the two to fit.
 	if m.Invested > glide.Invested {
@@ -172,7 +166,7 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 	}
 	h.momentum = &momentumRun{
 		h: h, rule: rule, cfg: m, exec: cfg.Execution,
-		window:  max(m.ScoreLookback+1, m.TrendCloses),
+		window:  momentumWindow(m),
 		anchors: anchors, funds: funds,
 		adjusted: map[string]map[string]float64{},
 		bars:     map[string]event.CompletedBarAdjustedPayload{},
@@ -286,13 +280,8 @@ func (r *momentumRun) applyUniverse(in event.Envelope) error {
 	if err != nil {
 		return err
 	}
-	if p.Source != r.cfg.UniverseSource {
-		return fmt.Errorf("targetweight: universe %s is from %q; this run reads %q", in.ID, p.Source, r.cfg.UniverseSource)
-	}
-	for _, row := range p.Rows {
-		if row.SectorSource != "" && !slices.Contains(r.cfg.SectorSources, row.SectorSource) {
-			return fmt.Errorf("targetweight: universe %s labels %s from %q, not a configured sector source", in.ID, row.InstrumentID, row.SectorSource)
-		}
+	if err := checkUniverse(r.cfg, in.ID, p); err != nil {
+		return err
 	}
 	if r.universe != nil && p.Session <= r.universe.Session {
 		return fmt.Errorf("targetweight: universe for %s does not follow the last, %s", p.Session, r.universe.Session)
