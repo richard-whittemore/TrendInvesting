@@ -355,10 +355,10 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 		if !opts.noUniverse && next(i)[:7] != session[:7] {
 			snap = event.UniverseSnapshotPayload{Session: session, Source: "fixture-universe"}
 			for _, n := range names() {
-				// A stock of the listing type ranked with no bar this session
-				// is left out of the snapshot, as the market-data step writes
-				// it (ADR 0026 point 5).
-				if opts.noBar[session] == n.id && n.listing == cfg.Momentum.ListingType {
+				// A stock with no bar this session, of any listing type, is
+				// left out of the snapshot, as the market-data step writes it
+				// (ADR 0026 point 5).
+				if opts.noBar[session] == n.id {
 					continue
 				}
 				if p, ok := prices[n.id]; ok {

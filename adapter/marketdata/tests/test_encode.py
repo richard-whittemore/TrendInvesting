@@ -200,6 +200,11 @@ class UniverseTest(unittest.TestCase):
     def test_universe_members_adds_every_listed_stock_with_a_bar_to_the_bars_written(self):
         with tempfile.TemporaryDirectory() as d:
             build(d)
+            path = os.path.join(d, "universe_2026-11-30.json")
+            rec = record.read(path)
+            os.remove(path)
+            next(t for t in rec["tickers"] if t["ticker"] == "CCC")["type"] = "ETF"   # members are of any type
+            record.write(d, rec)
             stream = run(d, optional=[], universe_members=True)
         ids = of(stream, "market.session.closed", "2026-11-30")[0]["payload"]["instrument_ids"]
         self.assertEqual(ids, ["AAA", "BBB", "CCC", "DDD", "IEF", "SPY"])
