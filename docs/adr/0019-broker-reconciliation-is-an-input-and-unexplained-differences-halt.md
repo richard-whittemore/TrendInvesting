@@ -318,6 +318,13 @@ here so that all eleven are in one place.
    limit (reading 3): where a sale has already been attempted for the
    instrument in the incident, engaging again sends no second one, so the
    incident limit overrides the once-per-engagement limit.
+   Engaging the kill switch does not itself start an incident. While the
+   engine stays Normal there is no incident, so the limit is the
+   engagement's: one sale per instrument. Disengaging and engaging again
+   is a new engagement and may send one more sale, even after an earlier
+   attempt failed or was withheld (reading 4). The first engine-state
+   record that leaves Normal starts an incident, and from then on the
+   incident limit applies.
 3. **Degraded to Halted is one incident.** An incident runs from the first
    engine-state record that leaves Normal until recovery. Moving from
    Degraded to Halted does not start another, so there is one sale per
