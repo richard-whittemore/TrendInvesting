@@ -26,7 +26,10 @@ import (
 //
 //   - 1.1.0 reads configuration schema version 2 and refuses version 1
 //     (ADR 0015), so a journal written under 1.0.0 does not replay.
-const RulesVersion = "1.1.0"
+//   - 1.2.0 reads market.bar.completed version 2 and refuses version 1, and
+//     computes its indicators from the split- and dividend-adjusted close
+//     (ADR 0026), so a journal written under 1.1.0 does not replay.
+const RulesVersion = "1.2.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"

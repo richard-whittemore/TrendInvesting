@@ -129,10 +129,19 @@ base needs a new run.
 `--instruments` names instruments that must have a bar every session;
 `--optional` names ones written only where they traded. `--universe-members`
 also writes a bar for every common stock in the universe, about 5,000 a
-session. That is the current stream and it is correct, but large; the next
-step (slice 4) replaces it with one compact universe input per session (every
-common stock's raw close and volume, ranked in Go) plus a short history input
-for only the 500 ranked names.
+session. That is the current stream and it is correct, but large. The target
+shape the owner has decided on is one compact universe input per session
+(every common stock's raw close and volume, ranked in Go) plus a short
+history input for only the 500 ranked names; the encoder does not write it
+yet.
+
+A stock written only because it is a universe member, whose bars are
+malformed or cannot be adjusted exactly, is left out of the stream instead of
+refusing it: none of its bars is written, so the momentum rule finds no
+window for it and leaves it out of the ranking, recording why (ADR 0026,
+point 5). Its universe snapshot row is still written, and `encode` names it
+on stderr (`marketdata: excluded TICKER: reason`). SPY, IEF, SHY and every
+other instrument are still written.
 
 Sector labels are GICS from iShares' IWV holdings where it lists the stock,
 else Nasdaq's sector, both mapped onto Morningstar's eleven sector names so
@@ -170,13 +179,18 @@ for the scheduler to alert on.
 - **The whole-market and universe recordings of one session disagree.**
   Refused.
 - **A bar or row is malformed**: a missing or repeated ticker, a price that is
-  not a positive number, a high below the close, a volume below zero.
+  not a positive number, a high below the close, a volume below zero. For a
+  stock written only as a universe member, a bad bar or an adjustment that
+  cannot be done leaves that stock out instead (see above).
 - **An adjustment cannot be done exactly**: a dividend whose previous session
   has no close for that stock, total cash on an ex-date at or above that
   close, a split and a dividend on the same date, two splits on one date, or
   a ratio or cash figure that is not a finite number of the right sign.
 - **Sector recordings are missing or more than 7 days old** for a universe
   session. Refused.
+- **A sector source redirects off HTTPS or off its two hosts.** Refused at
+  every hop, not only the first; each recording names the URL its body was
+  actually read from.
 - **Sector labels for a past session**: `sectors` refuses a session that is
   no longer the latest one, and the encoder refuses a sector recording
   fetched before its session's close or after the next session's close.
@@ -196,11 +210,10 @@ for the scheduler to alert on.
 - Tests in `adapter/marketdata/tests/`: `test_encode.py` (stream shape,
   adjustment, universe rows, every refusal above, byte-identical replays
   with the network disabled), `test_forward_adjust.py` (the forward form
-  agrees with the backward one, including two dividends on one ex-date),
+  agrees with the backward one, including two dividends on one ex-date and a
+  split dated on a non-trading day just before an ex-date),
   `test_history.py`, `test_marketdata.py`, `test_nyse_calendar.py` and
   `test_sectors.py`. All use made-up data.
 - `adapter/marketdata/tests/testdata/envelope_contract.go` decodes the encoded
   stream with the Go engine's own validators, refusing unknown fields, so a
   stream the engines would refuse fails the Python tests first.
-- The sector URLs have not yet been fetched by this code; check the first real
-  run.

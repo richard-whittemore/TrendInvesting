@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 import urllib.error
+import urllib.request
 
 from marketdata import record, sectors, steps
 from marketdata.massive import MarketDataError
@@ -28,7 +29,21 @@ def screener(*rows):
                        "status": {"rCode": 200}})
 
 
+class Response(io.BytesIO):
+    """A response read from ``url`` (the request's own, unless redirected)."""
+
+    def __init__(self, body, url):
+        super().__init__(body.encode())
+        self.url = url
+
+    def geturl(self):
+        return self.url
+
+
 class FakeOpener:
+    """Answers each request with the next queued item: an HTTP status to
+    fail with, a body, or (body, URL the body was read from after redirects)."""
+
     def __init__(self, *queue):
         self.queue, self.requests = list(queue), []
 
@@ -37,7 +52,8 @@ class FakeOpener:
         item = self.queue.pop(0)
         if isinstance(item, int):
             raise urllib.error.HTTPError(req.full_url, item, "err", {}, io.BytesIO(b""))
-        return io.BytesIO(item.encode())
+        body, url = item if isinstance(item, tuple) else (item, req.full_url)
+        return Response(body, url)
 
 
 def getter(*queue):
@@ -172,6 +188,45 @@ class RecordTest(unittest.TestCase):
             sectors.http_get("https://example.com/x", opener=FakeOpener("x"))
         with self.assertRaises(MarketDataError):
             sectors.http_get("http://www.ishares.com/x", opener=FakeOpener("x"))
+
+    def redirect(self, newurl):
+        req = urllib.request.Request(sectors.IWV_URL)
+        return sectors.SourceOnlyRedirect().redirect_request(req, io.BytesIO(b""), 302, "Found", {}, newurl)
+
+    def test_a_redirect_off_the_two_sources_or_off_https_is_refused(self):
+        for url in ("https://evil.example/x", "http://www.ishares.com/x", "https://www.ishares.com.evil.example/x",
+                    "http://api.nasdaq.com/x"):
+            with self.assertRaises(urllib.error.HTTPError, msg=url):
+                self.redirect(url)
+
+    def test_a_redirect_within_the_sources_is_followed(self):
+        self.assertEqual(self.redirect("https://www.ishares.com/y.csv").full_url, "https://www.ishares.com/y.csv")
+
+    def test_the_default_opener_checks_every_redirect_hop(self):
+        self.assertTrue(any(isinstance(h, sectors.SourceOnlyRedirect) for h in sectors.OPENER.handlers))
+        self.assertFalse(any(type(h) is urllib.request.HTTPRedirectHandler for h in sectors.OPENER.handlers))
+        self.assertEqual(sectors.http_get.__defaults__, (sectors.OPENER.open,))
+
+    def test_a_refused_redirect_fails_the_fetch_and_writes_nothing(self):
+        def refusing(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 302, "redirect off the sector sources refused", {},
+                                         io.BytesIO(b""))
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(MarketDataError):
+                sectors.record_sectors(d, D(2026, 3, 27), get=lambda u: sectors.http_get(u, opener=refusing), now=NOW)
+            self.assertEqual(os.listdir(d), [])
+
+    def test_each_recording_names_the_url_actually_read(self):
+        moved_iwv, moved_nasdaq = "https://www.ishares.com/moved.csv", "https://api.nasdaq.com/api/moved"
+        get, _ = getter((iwv_csv(("A", "Energy", "Equity")), moved_iwv), (screener(("B", "Energy")), moved_nasdaq))
+        with tempfile.TemporaryDirectory() as d:
+            sectors.record_sectors(d, D(2026, 3, 27), get=get, now=NOW)
+            self.assertEqual(record.read(os.path.join(d, "sectors-iwv_2026-03-27.json"))["url"], moved_iwv)
+            self.assertEqual(record.read(os.path.join(d, "sectors-nasdaq_2026-03-27.json"))["url"], moved_nasdaq)
+
+    def test_a_response_read_from_outside_the_sources_is_refused(self):
+        with self.assertRaises(MarketDataError):
+            sectors.http_get(sectors.IWV_URL, opener=FakeOpener(("x", "http://www.ishares.com/x")))
 
 
 class LatestTest(unittest.TestCase):

@@ -56,12 +56,15 @@ def main(argv):
         if args.what == "encode":
             if not args.stream or not args.first:
                 raise ValueError("encode needs --first and --stream")
+            excluded = {}
             envelopes = encode.encode(
                 args.out, args.first, args.asof,
                 encode.Identity(args.configuration_hash, args.strategy_version, args.run_id),
                 required=split(args.instruments), optional=split(args.optional),
                 universe_members=args.universe_members, base=args.base, first_sequence=args.first_sequence,
-                engine=args.engine)
+                engine=args.engine, excluded=excluded)
+            for ticker in sorted(excluded):
+                print("marketdata: excluded {}: {}".format(ticker, excluded[ticker]), file=sys.stderr)
             print(encode.write_stream(args.stream, envelopes))
             return 0
         if args.what == "sectors":

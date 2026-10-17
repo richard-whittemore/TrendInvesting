@@ -26,9 +26,6 @@ SPECIAL = {dt.date(2025, 1, 9)}
 NEW_YORK = zoneinfo.ZoneInfo("America/New_York")
 
 
-NEW_YORK = zoneinfo.ZoneInfo("America/New_York")
-
-
 class OutOfRange(Exception):
     pass
 

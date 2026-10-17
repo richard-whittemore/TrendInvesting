@@ -85,15 +85,39 @@ def norm(ticker):
     return re.sub(r"[^A-Z0-9]", "", ticker.upper())
 
 
-def http_get(url, opener=urllib.request.urlopen):
-    """The text at ``url``, which must be HTTPS on one of the two sources' hosts."""
+def _is_source(url):
     parts = urllib.parse.urlsplit(url)
-    if parts.scheme != "https" or parts.netloc not in HOSTS:
+    return parts.scheme == "https" and parts.netloc in HOSTS
+
+
+class SourceOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuses (as the redirect's HTTP error) any redirect off HTTPS on the two
+    sources' hosts, so every hop is checked, not only the first; the pattern
+    of massive.MassiveOnlyRedirect."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _is_source(urllib.parse.urljoin(req.full_url, newurl)):
+            raise urllib.error.HTTPError(req.full_url, code, "redirect off the sector sources refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+OPENER = urllib.request.build_opener(SourceOnlyRedirect())
+
+
+def http_get(url, opener=OPENER.open):
+    """(text, URL read) for ``url``, which, like every redirect followed from
+    it, must be HTTPS on one of the two sources' hosts. The URL read is the
+    last hop's, so a recording names where its body actually came from."""
+    parts = urllib.parse.urlsplit(url)
+    if not _is_source(url):
         raise MarketDataError("refusing a URL outside the sector sources: {}://{}".format(parts.scheme, parts.netloc))
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
     try:
         with opener(req, timeout=60) as resp:
-            return resp.read().decode("utf-8-sig")
+            read_from = resp.geturl()
+            if not _is_source(read_from):
+                raise MarketDataError("refusing a response read outside the sector sources")
+            return resp.read().decode("utf-8-sig"), read_from
     except urllib.error.HTTPError as e:
         raise MarketDataError("HTTP {} from {}".format(e.code, parts.netloc)) from None
     except (urllib.error.URLError, OSError, UnicodeDecodeError) as e:
@@ -159,20 +183,21 @@ def labels(iwv, nasdaq):
 
 
 def _fetch_iwv(get, day, stamp):
-    text = get(IWV_URL)
+    text, url = get(IWV_URL)
     as_of, _ = parse_iwv(text)
     return {"kind": "sectors-iwv", "source": IWV_SOURCE, "session": day, "fetched_at": stamp,
-            "url": IWV_URL, "as_of": as_of, "body": text}
+            "url": url, "as_of": as_of, "body": text}
 
 
 def _fetch_nasdaq(get, day, stamp):
+    text, url = get(NASDAQ_URL)
     try:
-        body = json.loads(get(NASDAQ_URL))
+        body = json.loads(text)
     except ValueError:
         raise Unusable("the screener response is not JSON") from None
     parse_nasdaq(body)
     return {"kind": "sectors-nasdaq", "source": NASDAQ_SOURCE, "session": day, "fetched_at": stamp,
-            "url": NASDAQ_URL, "rows": body["data"]["rows"]}
+            "url": url, "rows": body["data"]["rows"]}
 
 
 def _window(session):

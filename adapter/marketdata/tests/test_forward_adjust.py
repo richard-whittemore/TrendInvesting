@@ -69,6 +69,22 @@ class ForwardFactorsTest(unittest.TestCase):
         early = factors(dict(zip(DAYS[:3], closes[:3])), splits_, divs, sessions=DAYS[:3])
         self.assertEqual(early, {d: got[d] for d in DAYS[:3]})
 
+    def test_a_split_dated_between_the_prior_session_and_an_ex_date_restates_the_prior_close(self):
+        # Friday close 100; a 2-for-1 split dated Saturday; a 1.00 dividend
+        # ex Monday (cash on the post-split share); Monday close 49. On the
+        # ex-date share basis the prior close is 50, so the return is
+        # 49 / (50 - 1) - 1 = 0, not a false -1 %.
+        sessions = [D(2026, 3, 5), D(2026, 3, 6), D(2026, 3, 9), D(2026, 3, 10)]
+        closes = [100.0, 100.0, 49.0, 49.0]
+        splits_, divs = [split("2026-03-07", 1, 2)], [div("2026-03-09", 1.0)]
+        got = factors(closes, splits_, divs, base=sessions[0], sessions=sessions)
+        forward = [c * got[d][1] for d, c in zip(sessions, closes)]
+        self.assertAlmostEqual(forward[2] / forward[1], 1.0, places=12)
+        backward = [c for _, c in adjust.adjusted_closes([(d, [bar("A", c)]) for d, c in zip(sessions, closes)],
+                                                        "A", splits_, divs)]
+        for i in range(1, 4):
+            self.assertAlmostEqual(forward[i] / forward[i - 1], backward[i] / backward[i - 1], places=12)
+
     def test_events_on_or_before_the_base_or_after_the_last_session_are_ignored(self):
         got = factors([10.0] * 5, splits=[split("2026-03-03", 1, 2), split("2026-04-01", 1, 2)],
                       dividends=[div("2026-03-02", 1.0)], base=DAYS[1])

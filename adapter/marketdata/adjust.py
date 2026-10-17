@@ -131,8 +131,10 @@ def forward_factors(ticker, sessions, closes, splits, dividends, base):
     and dividend-adjusted price; price x split multiplier the split-adjusted
     one; volume / split multiplier the volume in the base session's shares.
     The cash dividends sharing an ex-date are one factor on their total
-    cash, as in adjusted_closes. Ratios between sessions equal those of
-    adjusted_closes.
+    cash, as in adjusted_closes. As there, P is first restated by every
+    split dated after the prior session and before the ex-date (a split on a
+    non-trading day), since the cash is on the ex-date share basis. Ratios
+    between sessions equal those of adjusted_closes.
 
     ``sessions`` is every trading day loaded, oldest first, from the base to
     the last; ``splits`` and ``dividends`` are the ticker's own rows, each
@@ -150,7 +152,7 @@ def forward_factors(ticker, sessions, closes, splits, dividends, base):
     if not seen:
         return {}
     first, last = seen[0], days[-1]
-    events, split_days = [], set()
+    events, split_ratio = [], {}   # split date -> split_from / split_to
     for r in splits:
         d = _date(r.get("execution_date"))
         if not first < d <= last:
@@ -158,10 +160,10 @@ def forward_factors(ticker, sessions, closes, splits, dividends, base):
         frm, to = r.get("split_from"), r.get("split_to")
         if not _positive(frm) or not _positive(to):
             raise CannotAdjust("{} split on {} has ratio {!r}:{!r}".format(ticker, d, frm, to))
-        if d in split_days:
+        if d in split_ratio:
             raise CannotAdjust("{} has two splits on {}".format(ticker, d))
-        split_days.add(d)
         events.append((d, to / frm, to / frm))
+        split_ratio[d] = frm / to
     cash_by_date = {}   # ex-date -> total cash; one factor per date, not one per row
     for r in dividends:
         d = _date(r.get("ex_dividend_date"))
@@ -172,12 +174,15 @@ def forward_factors(ticker, sessions, closes, splits, dividends, base):
             raise CannotAdjust("{} dividend on {} has cash {!r}".format(ticker, d, cash))
         cash_by_date[d] = cash_by_date.get(d, 0.0) + cash
     for d, cash in sorted(cash_by_date.items()):
-        if d in split_days:
+        if d in split_ratio:
             raise CannotAdjust("{} has a split and a dividend on the same date {}".format(ticker, d))
         prior = [s for s in days if s < d][-1]   # exists: first < d
         if prior not in closes:
             raise CannotAdjust("{} has no close on the session before ex-date {}".format(ticker, d))
         p = closes[prior]
+        for sd, f in split_ratio.items():
+            if prior < sd < d:
+                p *= f   # onto the ex-date share basis, as adjusted_closes does
         if cash >= p:
             raise CannotAdjust("{} dividend {} on {} is not below the prior close {}".format(ticker, cash, d, p))
         events.append((d, 1.0, p / (p - cash)))

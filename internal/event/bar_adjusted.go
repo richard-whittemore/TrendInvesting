@@ -25,12 +25,15 @@ const ViewAdjusted = "split-and-dividend-adjusted"
 
 // CompletedBarAdjustedPayload is market.bar.completed version 2.
 //
-// The adjusted view is adjusted forward from AdjustedBase: on that session
-// it equals the raw view, and each split or cash dividend dated after it, up
-// to and including the bar's own session, scales it by the inverse of that
-// event's backward ratio factor (a split's split_from/split_to; a dividend's
-// (P - cash)/P, P the raw close of the session before its ex-date). Its
-// ratios between sessions are those of the backward-adjusted series that
+// The adjusted view is adjusted forward from AdjustedBase: on the
+// instrument's first session on or after AdjustedBase (AdjustedBase itself
+// when the instrument has a bar then; its first bar when it first traded
+// later) it equals the raw view, and each split or cash dividend dated after
+// that session, up to and including the bar's own session, scales it by the
+// inverse of that event's backward ratio factor (a split's
+// split_from/split_to; a dividend's (P - cash)/P, P the raw close of the
+// session before its ex-date, on the ex-date's share basis). Its ratios
+// between sessions are those of the backward-adjusted series that
 // QuantConnect's Adjusted mode uses, which differs from it only by a
 // constant per instrument; and since a bar's adjusted figures depend only on
 // events up to its own session, a recorded bar is never restated when a
@@ -40,8 +43,10 @@ const ViewAdjusted = "split-and-dividend-adjusted"
 type CompletedBarAdjustedPayload struct {
 	CompletedBarPayload
 	Adjusted PriceView `json:"adjusted"`
-	// AdjustedBase is the session, YYYY-MM-DD, the adjusted view is based at;
-	// on or before the bar's session.
+	// AdjustedBase is the session, YYYY-MM-DD, the run's adjusted views are
+	// based at, the same for every instrument; on or before the bar's
+	// session. An instrument with no bar on it is based at its first bar
+	// after it.
 	AdjustedBase string `json:"adjusted_base"`
 }
 

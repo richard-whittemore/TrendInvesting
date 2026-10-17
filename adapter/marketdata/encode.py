@@ -34,7 +34,9 @@ recording (Gap), a required instrument without a bar or a universe without
 recent sector recordings (MissingData), action recordings that do not cover
 the span (MissingData), two different copies of one action or two
 disagreeing recordings of a session (Conflict), a malformed bar or row
-(Malformed), or anything adjust.forward_factors cannot adjust exactly.
+(Malformed), or anything adjust.forward_factors cannot adjust exactly;
+except that a ticker written only as a universe member is left out instead
+(see encode).
 
 ``engine`` picks the inputs written. ``"momentum"`` (the default) writes
 all of the above. ``"boost"`` writes only the bars of its one required
@@ -192,6 +194,21 @@ def _universe_rows(directory, day, rec, max_age_days):
     return [rows[s] for s in sorted(rows)]
 
 
+def _factors(ticker, loaded, days, actions, base):
+    """adjust.forward_factors for ``ticker``, after checking each of its bars;
+    raises Malformed for a bad bar or anything that cannot be adjusted."""
+    closes = {}
+    for s in loaded:
+        if ticker in s.bars:
+            _check_bar(ticker, s.day, s.bars[ticker])
+            closes[s.day] = float(s.bars[ticker]["c"])
+    splits, dividends = actions
+    try:
+        return adjust.forward_factors(ticker, days, closes, splits, dividends, base)
+    except adjust.CannotAdjust as e:
+        raise Malformed(str(e)) from None
+
+
 class _Stream:
     def __init__(self, identity, first_sequence):
         if not all(identity):
@@ -212,14 +229,23 @@ class _Stream:
 
 def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), optional=(),
            universe_members=False, base=None, ahead=1, first_sequence=2, max_sector_age_days=7,
-           engine="momentum"):
+           engine="momentum", excluded=None):
     """The envelopes for first..last, as described above. ``required``
     instruments must have a bar every session; ``optional`` ones (and, with
     ``universe_members``, every type-CS ticker of the span's universe
     recordings) are written where they traded. ``base`` (default ``first``)
     is the session the adjusted views are based at; keep it fixed for the
     life of an engine's journal. ``engine`` is "momentum" or "boost", as
-    described above."""
+    described above.
+
+    A ticker written only because it is a universe member, whose bars
+    cannot be encoded (a malformed bar) or adjusted exactly (CannotAdjust),
+    is left out: none of its bars is written, so the momentum rule finds no
+    window for it and leaves it out of the ranking, recording why (ADR 0026
+    point 5, "A universe stock missing any session ... is left out"); its
+    universe snapshot row is still written. It is named, with the reason,
+    in ``excluded`` (a dict, if given). A required or optional instrument
+    that cannot be encoded still refuses the stream."""
     if engine not in ENGINES:
         raise ValueError("engine {!r} is not one of {}".format(engine, ", ".join(ENGINES)))
     boost = engine == "boost"
@@ -235,7 +261,8 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     span = [s for s in loaded if s.day >= first]
     if not span:
         raise MissingData("no session in {}..{}".format(first, last))
-    wanted = set(required) | set(optional)
+    named = set(required) | set(optional)
+    wanted = set(named)
     if universe_members:
         for s in span:
             if s.universe is not None:
@@ -248,18 +275,17 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     for r in _actions(directory, "dividends", start, last):
         by_ticker[r.get("ticker")][1].append(r)
 
-    factors = {}
+    factors, left_out = {}, {}
     for ticker in sorted(wanted):
-        closes = {}
-        for s in loaded:
-            if ticker in s.bars:
-                _check_bar(ticker, s.day, s.bars[ticker])
-                closes[s.day] = float(s.bars[ticker]["c"])
-        splits, dividends = by_ticker[ticker]
         try:
-            factors[ticker] = adjust.forward_factors(ticker, days, closes, splits, dividends, base)
-        except adjust.CannotAdjust as e:
-            raise Malformed(str(e)) from None
+            factors[ticker] = _factors(ticker, loaded, days, by_ticker[ticker], base)
+        except Malformed as e:
+            if ticker in named:
+                raise
+            left_out[ticker] = str(e)
+    wanted -= set(left_out)
+    if excluded is not None:
+        excluded.update(left_out)
     for ticker in required:
         missing = [s.day.isoformat() for s in span if ticker not in s.bars]
         if missing:

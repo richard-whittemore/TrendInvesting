@@ -2,6 +2,7 @@
 Synthetic data only; no network."""
 import datetime as dt
 import hashlib
+import io
 import json
 import os
 import socket
@@ -202,6 +203,99 @@ class UniverseTest(unittest.TestCase):
             stream = run(d, optional=[], universe_members=True)
         ids = of(stream, "market.session.closed", "2026-11-30")[0]["payload"]["instrument_ids"]
         self.assertEqual(ids, ["AAA", "BBB", "CCC", "DDD", "IEF", "SPY"])
+
+
+def unadjustable_ddd(d):
+    """A DDD dividend ex 11-25, the session after the one DDD did not trade:
+    no prior close, so DDD cannot be adjusted exactly."""
+    record.write(d, {"kind": "dividends", "source": "massive", "session": "2026-11-25", "from": "2026-11-20",
+                     "fetched_at": stamp(LAST),
+                     "rows": [{"id": "V2", "ticker": "DDD", "ex_dividend_date": "2026-11-25", "cash_amount": 0.1}]})
+
+
+def break_bar(d, day, ticker):
+    """Rewrites ``ticker``'s bar on ``day`` with its high below its close."""
+    path = os.path.join(d, "grouped_{}.json".format(day))
+    rec = record.read(path)
+    os.remove(path)
+    next(b for b in rec["bars"] if b["T"] == ticker)["h"] = 1.0
+    record.write(d, rec)
+
+
+class UniverseMemberExclusionTest(unittest.TestCase):
+    """A universe member that cannot be encoded exactly is left out of the
+    stream, so the momentum rule leaves it out of the ranking (ADR 0026
+    point 5), and is named as excluded; the other inputs are still written."""
+
+    def encoded(self, spoil, **kw):
+        excluded = {}
+        with tempfile.TemporaryDirectory() as d:
+            build(d)
+            spoil(d)
+            stream = run(d, optional=[], universe_members=True, excluded=excluded, **kw)
+        return stream, excluded
+
+    def assertLeftOut(self, stream, ticker):
+        bars = {e["payload"]["instrument_id"] for e in of(stream, "market.bar.completed")}
+        self.assertNotIn(ticker, bars)
+        for close in of(stream, "market.session.closed"):
+            self.assertNotIn(ticker, close["payload"]["instrument_ids"])
+        self.assertEqual(of(stream, "market.session.closed", "2026-11-30")[0]["payload"]["instrument_ids"],
+                         sorted({"AAA", "BBB", "CCC", "DDD", "IEF", "SPY"} - {ticker}))
+
+    def test_a_member_that_cannot_be_adjusted_is_left_out_and_named(self):
+        stream, excluded = self.encoded(unadjustable_ddd)
+        self.assertLeftOut(stream, "DDD")
+        self.assertEqual(list(excluded), ["DDD"])
+        self.assertIn("no close on the session before ex-date 2026-11-25", excluded["DDD"])
+
+    def test_a_member_with_a_malformed_bar_is_left_out_and_named(self):
+        stream, excluded = self.encoded(lambda d: break_bar(d, "2026-11-25", "AAA"))
+        self.assertLeftOut(stream, "AAA")
+        self.assertEqual(list(excluded), ["AAA"])
+        self.assertIn("inconsistent", excluded["AAA"])
+
+    def test_the_universe_snapshot_still_lists_an_excluded_member(self):
+        stream, _ = self.encoded(unadjustable_ddd)
+        rows = of(stream, "market.universe.snapshot")[0]["payload"]["rows"]
+        self.assertIn("DDD", [r["instrument_id"] for r in rows])
+
+    def test_a_required_or_named_optional_instrument_is_still_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            build(d)
+            break_bar(d, "2026-11-25", "SPY")
+            with self.assertRaisesRegex(encode.Malformed, "SPY"):
+                run(d, optional=[], universe_members=True)
+        with tempfile.TemporaryDirectory() as d:
+            build(d)
+            unadjustable_ddd(d)
+            with self.assertRaisesRegex(encode.Malformed, "DDD"):
+                run(d, optional=["DDD"], universe_members=True)
+
+    def test_the_cli_reports_each_excluded_member(self):
+        with tempfile.TemporaryDirectory() as d:
+            build(d)
+            unadjustable_ddd(d)
+            out = os.path.join(d, "stream.jsonl")
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                status = cli.main(["encode", "--out", d, "--first", "2026-11-23", "--asof", "2026-11-30",
+                                   "--instruments", "SPY,IEF", "--universe-members",
+                                   "--configuration-hash", "hash-1", "--strategy-version", "momentum/test",
+                                   "--run-id", "run-1", "--stream", out])
+            self.assertEqual(status, 0)
+            self.assertIn("excluded DDD", err.getvalue())
+            self.assertEqual([json.loads(line) for line in Path(out).read_text().splitlines()],
+                             run(d, optional=[], universe_members=True))
+
+    def test_the_stream_with_an_excluded_member_satisfies_the_go_validators(self):
+        stream, _ = self.encoded(unadjustable_ddd)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "stream.jsonl")
+            encode.write_stream(path, stream)
+            with open(path) as f:
+                check = subprocess.run(["go", "run", "./adapter/marketdata/tests/testdata/envelope_contract.go"],
+                                       cwd=REPO, stdin=f, text=True, capture_output=True)
+        self.assertEqual(check.returncode, 0, check.stderr)
 
 
 class BoostStreamTest(unittest.TestCase):
