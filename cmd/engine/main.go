@@ -35,6 +35,12 @@ func main() {
 // from main so the command is testable as a function rather than as a
 // process (mirrors cmd/backtest's run).
 func parseAndRun(ctx context.Context, args []string, out io.Writer) error {
+	return parseAndRunWithBuild(ctx, args, out, buildinfo.Version)
+}
+
+// parseAndRunWithBuild is parseAndRun with the build identity given, so a
+// test can run a parsed invocation as a stamped build would.
+func parseAndRunWithBuild(ctx context.Context, args []string, out io.Writer, build string) error {
 	flags := flag.NewFlagSet("engine", flag.ContinueOnError)
 	flags.SetOutput(out)
 	socketPath := flags.String("socket", "", "Unix-domain socket path to listen on (ADR 0014)")
@@ -59,7 +65,7 @@ func parseAndRun(ctx context.Context, args []string, out io.Writer) error {
 		approvalPath:    *approvalPath,
 		asOf:            *asOf,
 		mode:            *mode,
-		build:           buildinfo.Version,
+		build:           build,
 		maxFrameBytes:   *maxFrame,
 		decisionTimeout: *decisionTimeout,
 	}, out)

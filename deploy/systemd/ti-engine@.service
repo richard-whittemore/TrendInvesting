@@ -1,26 +1,41 @@
 [Unit]
-Description=Trend Investing engine for account %i (own adapter client ID, config, journal)
+Description=Trend Investing engine for account %i (own adapter client ID, config, durable log)
 After=ti-gateway.service
 Wants=ti-gateway.service
-# PLACEHOLDER: the engine and adapter binary do not exist yet in installable
-# form. The unit is skipped until it is installed. TI_CONFIG names the
-# account's configuration, which carries send: false for the dry-run gate.
+# Skipped, not failed, until the stamped binary (deploy/build-engine.sh) and
+# the account's configuration are installed. The IRA engines have no
+# configuration yet.
 ConditionFileIsExecutable=/opt/trend-investing/bin/ti-engine
 ConditionPathExists=/etc/trend-investing/engines/%i.env
+ConditionPathExists=/etc/trend-investing/engines/%i.config
 
 [Service]
 Type=simple
 User=ti-trader
 Group=ti-trader
 Environment=TZ=America/New_York
+# TI_MODE and the adapter client ID: repo-managed, per account.
 EnvironmentFile=/etc/trend-investing/engines/%i.env
+# TI_RUN, TI_AS_OF and TI_RESTART_ARGS: written by the owner before every
+# start (docs/runbooks/durable-log.md, "Restarting an engine"). Required: a
+# start without it fails, it does not guess.
+EnvironmentFile=/var/lib/trend-investing/engines/%i/run.env
 Environment=TI_CONFIG=/etc/trend-investing/engines/%i.config
 Environment=TI_STATE_DIR=/var/lib/trend-investing/engines/%i
 Environment=TI_DATA_DIR=/var/lib/trend-investing/data
 LoadCredential=secrets:/etc/trend-investing/secrets.env
-ExecStart=/opt/trend-investing/bin/ti-engine
-Restart=on-failure
-RestartSec=30
+# The socket lives in a private directory, /run/ti-engine-%i, mode 0700,
+# which transport.Listen requires of a socket's parent (ADR 0014).
+RuntimeDirectory=ti-engine-%i
+RuntimeDirectoryMode=0700
+# Every setting is explicit. $TI_RESTART_ARGS is empty for a first run,
+# "-approval <file>" for a fresh run after an earlier one, or
+# "-resume <log>" after a crash; it expands to zero or more arguments.
+ExecStart=/opt/trend-investing/bin/ti-engine -mode ${TI_MODE} -config ${TI_CONFIG} -socket %t/ti-engine-%i/engine.sock -log ${TI_STATE_DIR}/${TI_RUN}.log -out ${TI_STATE_DIR}/${TI_RUN}.journal -as-of ${TI_AS_OF} $TI_RESTART_ARGS
+# Never restarted by systemd: a crash is resumed, and any other restart is a
+# fresh run the owner approves, both as an explicit step (owner decision
+# 2026-10-16). SIGTERM stops it cleanly and writes its journal.
+Restart=no
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
