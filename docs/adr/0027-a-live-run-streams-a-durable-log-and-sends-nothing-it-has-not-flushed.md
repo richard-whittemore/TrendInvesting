@@ -1,6 +1,7 @@
 # ADR 0027: A live run streams a durable log, and sends nothing it has not flushed
 
-- Status: Proposed
+- Status: Accepted (2026-10-17, by the owner)
+- Accepted together with the owner's decisions of 2026-10-16 recorded as an amendment (PR #348): the durable log is mandatory outside backtests, and no run resumes across builds.
 - Date: 2026-10-16
 - Relates to: ADR 0014, ADR 0016, ADR 0017, ADR 0018, ADR 0019 (amended 2026-09-24), ADR 0022, ADR 0026 (§3, §5, Consequences)
 
