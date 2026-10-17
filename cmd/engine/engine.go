@@ -48,7 +48,6 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
-	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 	"github.com/richard-whittemore/TrendInvesting/transport"
 )
 
@@ -172,21 +171,17 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 		return fmt.Errorf("engine: -log and -out both name %s: the durable log is streamed during the run and the journal is installed when it stops, so they must be two files", opts.outPath)
 	}
 
-	cfg, err := readConfiguration(opts.configPath)
+	// The configuration selects the strategy: the target-weight handler
+	// with its risk gate, or the Turtle reducer (compose.go).
+	comp, err := compose(opts.configPath, opts.build, asOf.UTC())
 	if err != nil {
 		return err
 	}
-	configurationHash := event.ConfigurationHash(cfg)
-	strategyVersion := event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, opts.build)
-
-	reducer, err := strategy.NewReducer(strategyVersion, cfg)
-	if err != nil {
-		return fmt.Errorf("engine: %w", err)
-	}
-	configEnvelope, err := configurationEnvelope(cfg, strategyVersion, asOf.UTC())
-	if err != nil {
+	if err := checkModeBinding(opts.mode, comp); err != nil {
 		return err
 	}
+	configurationHash, strategyVersion, configEnvelope := comp.configurationHash, comp.strategyVersion, comp.configEnvelope
+	reducer := comp.handler
 
 	// # Durability: journal-before-send
 	//

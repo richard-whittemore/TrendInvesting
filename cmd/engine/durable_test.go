@@ -435,13 +435,16 @@ func TestTheDurableLogIsRequiredOutsideABacktest(t *testing.T) {
 		t.Errorf("an unknown mode: run() = %v, want a refusal naming -mode", err)
 	}
 
-	// With -log a live mode starts; the backtest modes need none.
-	for _, mode := range []string{"backtest", "paper"} {
+	// With -log a mode that can reach a broker starts (a dry-run Boost
+	// configuration; the Turtle reducer runs only as a backtest); a backtest
+	// needs no log.
+	for _, mode := range []string{"backtest", "dry-run"} {
 		socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 		opts := options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, build: "test-build", mode: mode,
 			outPath: filepath.Join(dir, "ok-"+mode+".jsonl")}
-		if mode == "paper" {
-			opts.logPath = filepath.Join(dir, "ok-paper.log")
+		if mode == "dry-run" {
+			opts.configPath, opts.asOf = boostConfigPath, boostAsOf
+			opts.logPath = filepath.Join(dir, "ok-dry-run.log")
 		}
 		stop := startEngine(t, opts)
 		if err := stop(); err != nil {
