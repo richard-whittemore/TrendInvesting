@@ -27,14 +27,19 @@ and LEAN's `InteractiveBrokersBrokerageModel.GetFeeModel` returns
 `new InteractiveBrokersFeeModel()` for every security
 (`Common/Brokerages/InteractiveBrokersBrokerageModel.cs` in
 QuantConnect/Lean). So the recorded $1,000,000 runs already paid IB
-commissions; the comparison isolates the effect of the smaller account
-(IB's per-order minimum weighs more on small orders).
+commissions. A base-versus-variant difference is therefore the combined
+effect of the smaller account (different order sizes and holdings, and IB's
+per-order minimum weighing more on small orders) and fees; it is not a
+commission-only effect. The fee total of each run shows how much of the
+difference commissions could account for, and a matched $30,000 run with fees
+disabled would be needed to separate the two.
 
 ## Planned runs
 
 The four variants, run once each on the same data as their bases, after the
 review of this change is cleared. Compare each with its base run's return,
-drawdown and fee total.
+drawdown and fee total, and report the result as the combined effect of
+account size and fees.
 
 ## Results
 

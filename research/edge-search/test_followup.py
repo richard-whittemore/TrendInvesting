@@ -1871,7 +1871,7 @@ class FreshSelectionTest(unittest.TestCase):
 
 
 class CommissionDrag30kTest(unittest.TestCase):
-    """The $30k commission-drag variants (#376, slice 7): each is the
+    """The $30k commission-drag variants: each is the
     combination run it is named for with only the starting cash changed.
     No fee switch: the templates set the Interactive Brokers brokerage
     model, whose GetFeeModel returns InteractiveBrokersFeeModel."""
