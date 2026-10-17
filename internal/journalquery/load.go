@@ -22,11 +22,15 @@ import (
 )
 
 // Journal is one verified journal: its name (shown beside every row it
-// contributes), its header, and its records in sequence order.
+// contributes), its header, and its records in sequence order. A durable log
+// (ADR 0027) has no journal header, so Header stays zero and LogHeader holds
+// the run identity its header names; for an end-of-run journal LogHeader is
+// zero.
 type Journal struct {
-	Name    string
-	Header  journal.Header
-	Records []journal.Record
+	Name      string
+	Header    journal.Header
+	LogHeader journal.LogHeader
+	Records   []journal.Record
 }
 
 // Load verifies data as a journal and returns it. The chain is checked before

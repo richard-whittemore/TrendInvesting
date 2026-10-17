@@ -26,7 +26,7 @@ func loadDurableLog(name string, data []byte) (Journal, error) {
 		return Journal{}, fmt.Errorf("%s: refused, the durable log does not verify: %w", name, err)
 	}
 	// A log's header states no span (ADR 0027), so Header stays zero.
-	loaded := Journal{Name: name}
+	loaded := Journal{Name: name, LogHeader: recovery.Header}
 	// A log's sequence is contiguous from 1 and RecoverLog has checked it.
 	for i, entry := range recovery.Entries {
 		loaded.Records = append(loaded.Records, journal.Record{Sequence: uint64(i + 1), Kind: entry.Kind, Envelope: entry.Envelope})

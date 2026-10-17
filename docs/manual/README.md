@@ -7,3 +7,6 @@ prints, and what happens when something goes wrong.
 - [journal-query](journal-query.md): ask a run's journals what happened, such
   as which orders were planned, released or refused, which fills happened and
   what they cost, and whether the positions add up.
+- [alerts-and-dashboard](alerts-and-dashboard.md): the reporter that sends
+  alerts and a daily summary to your phone and PagerDuty, and the read-only
+  dashboard; what each alert means and what counts as delivered.
