@@ -149,6 +149,36 @@ class OrderStatusTests(unittest.TestCase):
         self.assertEqual(t.of(CommissionReport),
                          [CommissionReport("x.01", Decimal("1.0"), "USD")])
 
+    def test_redelivered_commission_report_is_reported_once(self):
+        # Reconnect matching re-requests executions, and IBKR then resends each
+        # execution's commission report.
+        t = Tracked()
+        t.cb.exec_details(-1, contract(), execution(exec_id="x.01"))
+        t.cb.commission_report(SimpleNamespace(execId="x.01", commission=1.0, currency="USD"))
+        t.cb.exec_details(4, contract(), execution(exec_id="x.01"))
+        t.cb.commission_report(SimpleNamespace(execId="x.01", commission=1.0, currency="USD"))
+        t.drain()
+        self.assertEqual(t.of(CommissionReport),
+                         [CommissionReport("x.01", Decimal("1.0"), "USD")])
+
+    def test_a_commission_report_whose_record_failed_is_recorded_on_redelivery(self):
+        failures = [RuntimeError("journal write failed")]
+        reports = []
+
+        def sink(record):
+            if isinstance(record, CommissionReport) and failures:
+                raise failures.pop()
+            reports.append(record)
+        t = Tracked(sink)
+        t.cb.exec_details(-1, contract(), execution(exec_id="x.01"))
+        t.cb.commission_report(SimpleNamespace(execId="x.01", commission=1.0, currency="USD"))
+        with self.assertRaises(RuntimeError):
+            t.drain()
+        t.cb.commission_report(SimpleNamespace(execId="x.01", commission=1.0, currency="USD"))
+        t.drain()
+        self.assertEqual([r for r in reports if isinstance(r, CommissionReport)],
+                         [CommissionReport("x.01", Decimal("1.0"), "USD")])
+
     def test_redelivered_execution_is_reported_once(self):
         t = Tracked()
         t.cb.exec_details(-1, contract(), execution())

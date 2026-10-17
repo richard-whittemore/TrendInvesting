@@ -196,6 +196,7 @@ class OrderTracker:
         self._last = {}
         self._rejections = {}
         self._executions = set()
+        self._commissions = set()
 
     def on_event(self, event):
         handler = getattr(self, "_on_" + event.name, None)
@@ -303,11 +304,13 @@ class OrderTracker:
 
     def _on_commission_report(self, report):
         # A commission report carries no account; it belongs to this account
-        # only if its execution did.
-        if report.execId not in self._executions:
+        # only if its execution did. IBKR resends it whenever executions are
+        # requested again (reconnect matching), so it is recorded once.
+        if report.execId not in self._executions or report.execId in self._commissions:
             return
         self._sink(CommissionReport(report.execId, to_decimal(report.commission, "commission"),
                                     report.currency))
+        self._commissions.add(report.execId)
 
 
 def collect_broker_orders(conn):
