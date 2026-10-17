@@ -281,7 +281,7 @@ func TestWireGuardSerialisesAnAbandonedDecisionAgainstTheNextOne(t *testing.T) {
 	abandonedCtx, cancel := context.WithCancel(context.Background())
 	firstErr := make(chan error, 1)
 	go func() {
-		_, err := guard.decide(abandonedCtx, engine, stubInputAt(t, "bar-1", 1))
+		_, _, err := guard.answer(abandonedCtx, engine, recorder, stubInputAt(t, "bar-1", 1))
 		firstErr <- err
 	}()
 
@@ -304,7 +304,7 @@ func TestWireGuardSerialisesAnAbandonedDecisionAgainstTheNextOne(t *testing.T) {
 	secondDone := make(chan struct{})
 	var secondErr error
 	go func() {
-		_, secondErr = guard.decide(context.Background(), engine, stubInputAt(t, "bar-2", 2))
+		_, _, secondErr = guard.answer(context.Background(), engine, recorder, stubInputAt(t, "bar-2", 2))
 		close(secondDone)
 	}()
 
@@ -380,9 +380,9 @@ func TestWireGuardAwaitIdleWaitsForAnInFlightCall(t *testing.T) {
 		<-release
 		return nil, nil
 	})
-	guard, engine, _ := newTestWiring(t, handler)
+	guard, engine, recorder := newTestWiring(t, handler)
 
-	go func() { _, _ = guard.decide(context.Background(), engine, stubInputAt(t, "bar-1", 1)) }()
+	go func() { _, _, _ = guard.answer(context.Background(), engine, recorder, stubInputAt(t, "bar-1", 1)) }()
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):

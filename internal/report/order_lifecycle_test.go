@@ -2,6 +2,7 @@ package report_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,5 +165,66 @@ func TestAFillAcknowledgesAnOrder(t *testing.T) {
 	}
 	if got := orders[0]; got.State != report.LifecycleAcknowledged || got.Acknowledgement != "fill" || !got.AcknowledgedAt.Equal(filled) {
 		t.Fatalf("after its fill: %+v, want acknowledged by the fill at %s", got, filled)
+	}
+}
+
+// TestOrderLifecyclesReadsOnlyWhatItCanRead: a release, lifecycle report or
+// fill at a version this build does not read, or that does not validate,
+// is refused, never guessed at (ADR 0015). Other decisions change nothing,
+// and an order released again under its client order ID keeps its first
+// release.
+func TestOrderLifecyclesReadsOnlyWhatItCanRead(t *testing.T) {
+	order := releasedOrder("tw-1", event.TradingModePaper)
+	for name, add := range map[string]func(*logRun){
+		"a release at another version": func(r *logRun) {
+			r.add(journal.KindDecision, event.OrderReleasedEventType, event.OrderReleasedSchemaVersion+1, "release", day(0), order)
+		},
+		"a lifecycle report that does not validate": func(r *logRun) {
+			r.add(journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack", day(0), event.LimitOrderLifecyclePayload{ClientOrderID: "tw-1"})
+		},
+		"a fill that does not validate": func(r *logRun) {
+			r.add(journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, "fill", day(0), event.TargetWeightFillPayload{ClientOrderID: "tw-1"})
+		},
+	} {
+		run := &logRun{t: t}
+		run.session(0)
+		add(run)
+		if _, err := report.OrderLifecycles(run.out); err == nil {
+			t.Errorf("%s: read without error", name)
+		}
+	}
+
+	run := &logRun{t: t}
+	run.session(0)
+	run.add(journal.KindDecision, event.OrderPlannedEventType, event.OrderPlannedSchemaVersion, "plan", day(0), struct{}{})
+	run.release(0, order)
+	run.session(1)
+	again := order
+	again.Quantity = 5
+	run.add(journal.KindDecision, event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release-again", day(1), again)
+	orders, err := report.OrderLifecycles(run.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 || orders[0].Quantity != 9 || orders[0].State != report.LifecycleReleased {
+		t.Fatalf("orders %+v, want the first release only, released", orders)
+	}
+}
+
+// TestAnOrderStillCommittedSaysTheAdapterMayNotHaveIt: an alert for an order
+// no later input follows says the adapter may never have received it and
+// will ask for its reply again (ADR 0027, amendment "re-delivery on
+// request").
+func TestAnOrderStillCommittedSaysTheAdapterMayNotHaveIt(t *testing.T) {
+	run := &logRun{t: t}
+	run.session(0)
+	run.release(0, releasedOrder("tw-1", event.TradingModePaper))
+	orders, err := report.OrderLifecycles(run.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts := report.UnacknowledgedAlerts(orders, day(1), time.Minute, func(string) bool { return false })
+	if len(alerts) != 1 || !strings.Contains(alerts[0].Body, "may never have received it") {
+		t.Fatalf("alerts %+v, want one saying the adapter may never have received the order", alerts)
 	}
 }

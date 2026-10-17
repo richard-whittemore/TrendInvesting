@@ -71,7 +71,7 @@ type decisionsPayload struct {
 // wireGuard closes that gap with the smallest mechanism that actually
 // prevents it, rather than a second, independent timeout of its own:
 //
-//   - mu is held for the WHOLE of one call to decide, not merely entered and
+//   - mu is held for the WHOLE of one call to answer, not merely entered and
 //     released around it, so an abandoned call's goroutine still holds mu
 //     for as long as it is actually running inside the reducer — serialising
 //     it against every OTHER call this composition ever makes into engine,
@@ -79,10 +79,10 @@ type decisionsPayload struct {
 //     an abandoned decision. ADR 0014's own measured failure table gives
 //     "Drop the bar" as the adapter's correct response to a rejected
 //     timeout, over the SAME connection — nothing about that response stops
-//     a second decide call from starting while the first one's goroutine is
+//     a second answer call from starting while the first one's goroutine is
 //     still running.
 //   - The moment a call's own ctx is found to have been cancelled once
-//     engine.Apply returns, wireGuard is permanently poisoned: every decide
+//     engine.Apply returns, wireGuard is permanently poisoned: every answer
 //     call after that point — on this connection or a later one — returns
 //     the same error immediately, without touching engine again, instead of
 //     going on as though the abandoned call had never happened. Once one
@@ -114,15 +114,6 @@ type wireGuard struct {
 	poisoned error
 }
 
-// decide applies input through engine while holding g for the call's whole
-// duration (see wireGuard's own doc comment), and permanently poisons g the
-// moment ctx is found to have been cancelled once engine.Apply returns.
-func (g *wireGuard) decide(ctx context.Context, engine *replay.Engine, input event.Envelope) ([]event.Envelope, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.applyLocked(ctx, engine, input)
-}
-
 // answer returns the committed group for input, applying input through
 // engine only when no input with its ID was committed before, all while
 // holding g. An input sent again is the adapter asking for its committed
@@ -138,7 +129,7 @@ func (g *wireGuard) answer(ctx context.Context, engine *replay.Engine, recorder 
 	if committed, ok := recorder.Committed(input.ID); ok {
 		return committed, true, nil
 	}
-	_, err := g.applyLocked(ctx, engine, input)
+	err := g.applyLocked(ctx, engine, input)
 	if g.poisoned != nil {
 		return journal.Committed{}, false, g.poisoned
 	}
@@ -146,24 +137,24 @@ func (g *wireGuard) answer(ctx context.Context, engine *replay.Engine, recorder 
 	return committed, ok, err
 }
 
-func (g *wireGuard) applyLocked(ctx context.Context, engine *replay.Engine, input event.Envelope) ([]event.Envelope, error) {
-	if g.poisoned != nil {
-		return nil, g.poisoned
-	}
+// applyLocked applies input through engine; g must be held for the call's
+// whole duration (see wireGuard's own doc comment). It permanently poisons g
+// the moment ctx is found to have been cancelled once engine.Apply returns.
+func (g *wireGuard) applyLocked(ctx context.Context, engine *replay.Engine, input event.Envelope) error {
 	g.wg.Add(1)
 	defer g.wg.Done()
 
-	decisions, err := engine.Apply(ctx, input)
+	_, err := engine.Apply(ctx, input)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		g.poisoned = fmt.Errorf("engine: this decision's deadline passed while it was still running against the reducer, so the wire had already abandoned it; this engine's state can no longer be vouched for, and no further decisions will be made: %w", ctxErr)
-		return nil, g.poisoned
+		return g.poisoned
 	}
-	return decisions, err
+	return err
 }
 
-// awaitIdle blocks until no call to decide is in progress. Call it once
+// awaitIdle blocks until no call to answer is in progress. Call it once
 // transport.Server.ServeContext has returned and before reading anything
-// engine.Apply (and so decide) may have written to — see wireGuard's own
+// engine.Apply (and so answer) may have written to — see wireGuard's own
 // doc comment for why a call can still be running after ServeContext
 // returns, and why waiting rather than acting immediately is the fix.
 func (g *wireGuard) awaitIdle() {
