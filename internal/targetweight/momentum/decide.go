@@ -1,6 +1,9 @@
 package momentum
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Outcome is whether a decision set targets (ADR 0026 point 1, "Output").
 type Outcome string
@@ -203,9 +206,7 @@ func Decide(cfg Config, in Input) (Decision, error) {
 			return withhold(d, ReasonNoEligibleNames), nil
 		}
 		d = withhold(d, ReasonAllUnaffordable)
-		d.Detail = fmt.Sprintf("every candidate's one share at its previous raw close exceeds its target value "+
-			"(weight x momentum scale %g x net liquidation %.2f); the book is kept: check the net liquidation and the raw closes",
-			in.MinimumLot.Scale, in.MinimumLot.NetLiquidation)
+		d.Detail = allUnaffordableDetail(d.Names, in.MinimumLot)
 		return d, nil
 	}
 	d.Outcome = OutcomeDecided
@@ -218,6 +219,43 @@ func Decide(cfg Config, in Input) (Decision, error) {
 			cfg.RiskOffFraction, cfg.RiskOffInstrument)
 	}
 	return d, nil
+}
+
+// allUnaffordableDetail counts the candidates D7-L valued and found
+// unaffordable, and the candidates left out for another reason. With no pick
+// every candidate is unaffordable, no sector or zero volatility, since a
+// sector cap or the top-N limit needs a pick first, so only those two reasons
+// can leave a name out here.
+func allUnaffordableDetail(names []NameRecord, lot *MinimumLot) string {
+	var valued, noSector, zeroVol int
+	for _, n := range names {
+		switch n.Status {
+		case StatusUnaffordable:
+			valued++
+		case StatusNoSector:
+			noSector++
+		case StatusZeroVolatility:
+			zeroVol++
+		}
+	}
+	left := "none left out"
+	if noSector+zeroVol > 0 {
+		var reasons []string
+		if noSector > 0 {
+			reasons = append(reasons, fmt.Sprintf("%d no sector", noSector))
+		}
+		if zeroVol > 0 {
+			reasons = append(reasons, fmt.Sprintf("%d zero volatility", zeroVol))
+		}
+		left = fmt.Sprintf("%d left out (%s)", noSector+zeroVol, strings.Join(reasons, ", "))
+	}
+	candidates := "candidates"
+	if valued == 1 {
+		candidates = "candidate"
+	}
+	return fmt.Sprintf("%d %s valued, every one unaffordable (one share at its previous raw close exceeds its target value: "+
+		"weight x momentum scale %g x net liquidation %.2f); %s; the book is kept: check the net liquidation and the raw closes",
+		valued, candidates, lot.Scale, lot.NetLiquidation, left)
 }
 
 func withhold(d Decision, reason WithheldReason) Decision {

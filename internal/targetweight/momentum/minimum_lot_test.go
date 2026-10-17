@@ -202,6 +202,7 @@ func TestDecideRecordsTheMinimumLot(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustAllUnaffordable(t, d, 2)
+	mustEqual(t, "detail", d.Detail, "2 candidates valued, every one unaffordable (one share at its previous raw close exceeds its target value: weight x momentum scale 1 x net liquidation 1000.00); none left out; the book is kept: check the net liquidation and the raw closes")
 
 	in.MinimumLot.Prices = map[string]float64{}
 	if _, err := momentum.Decide(momentum.FCombo(), in); err == nil {
@@ -244,6 +245,24 @@ func TestDecideWithholdsAMixedBookOfDearAndUnlabelledNames(t *testing.T) {
 	}
 	mustAllUnaffordable(t, d, 1)
 	mustEqual(t, "BBB", d.Names[1].Status, momentum.StatusNoSector)
+	mustEqual(t, "detail", d.Detail, "1 candidate valued, every one unaffordable (one share at its previous raw close exceeds its target value: weight x momentum scale 1 x net liquidation 1000.00); 1 left out (1 no sector); the book is kept: check the net liquidation and the raw closes")
+}
+
+// TestDecideNamesTheZeroVolatilityLeftOut flattens BBB, so its volatility is
+// zero and it is left out as zero-volatility, while AAA's one share is above
+// its target: the detail counts the one valued name and names the reason the
+// other was left out, not every candidate as valued.
+func TestDecideNamesTheZeroVolatilityLeftOut(t *testing.T) {
+	in := decideInput()
+	in.Closes["BBB"] = series(in.Sessions, constant(300, 40))
+	in.MinimumLot = &momentum.MinimumLot{NetLiquidation: 1000, Scale: 1, Prices: map[string]float64{"AAA": 2000, "BBB": 1}}
+	d, err := momentum.Decide(momentum.FCombo(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAllUnaffordable(t, d, 1)
+	mustEqual(t, "BBB", d.Names[1].Status, momentum.StatusZeroVolatility)
+	mustEqual(t, "detail", d.Detail, "1 candidate valued, every one unaffordable (one share at its previous raw close exceeds its target value: weight x momentum scale 1 x net liquidation 1000.00); 1 left out (1 zero volatility); the book is kept: check the net liquidation and the raw closes")
 }
 
 // TestDecideExplainsAFullyRiskOffLiquidation: with RiskOffFraction 1 in a
