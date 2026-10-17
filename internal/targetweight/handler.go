@@ -390,6 +390,10 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		WorkingSells: h.gate.PendingSells(h.cfg.Boost.InstrumentID),
 	})
 	b.fail(err)
+	if !ok || order.Side != event.OrderSideSell {
+		// The decision no longer plans the sell that fired a withheld sale.
+		h.gate.LapseExitSale()
+	}
 	if !ok {
 		return b.result()
 	}
@@ -460,6 +464,9 @@ func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, erro
 	}
 	if obs.Urgent {
 		b.sale(event.SaleTriggerMarginUrgent)
+	}
+	if obs.RetryExit {
+		b.sale(event.SaleTriggerExit)
 	}
 	return b.result()
 }

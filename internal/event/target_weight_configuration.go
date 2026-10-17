@@ -138,8 +138,8 @@ type MomentumConfiguration struct {
 }
 
 // ExecutionConfiguration is an account's execution rules (ADR 0026, points 2
-// and 6): an IRA's cash rule, share quantity and fee allowance, and the joint
-// margin account's MaxSnapshotAge, alone.
+// and 6): an IRA's cash rule, share quantity and fee allowance, and every
+// account's MaxSnapshotAge, which is all the joint margin account sets.
 type ExecutionConfiguration struct {
 	// CashRule is one of the CashRule constants (D5). It and ShareQuantity
 	// are always set for an IRA, so omitting them when empty changes no IRA
@@ -153,11 +153,10 @@ type ExecutionConfiguration struct {
 	// cost").
 	MaxFeesPerOrder float64 `json:"max_fees_per_order"`
 	// MaxSnapshotAge, in minutes, is the oldest the latest broker snapshot
-	// may be at its trigger for the sale back to 98% to be sized from it
-	// (ADR 0019: the maximum snapshot age is required configuration with no
-	// permissive default; "a stale matching snapshot is not success"). It is
-	// set for the joint margin account and is zero, and omitted, for an IRA,
-	// which never gets the sale.
+	// may be at the trigger for the sale back to 98%, or at a sell's planned
+	// time for the broker-holding check, to be read (ADR 0019: the maximum
+	// snapshot age is required configuration with no permissive default; "a
+	// stale matching snapshot is not success"). Every account sets it.
 	MaxSnapshotAge int `json:"max_snapshot_age_minutes,omitzero"`
 }
 
@@ -225,15 +224,10 @@ func (p TargetWeightConfigurationPayload) Validate() error {
 		if !p.Momentum.isZero() || p.Execution != (ExecutionConfiguration{MaxSnapshotAge: p.Execution.MaxSnapshotAge}) {
 			errs = append(errs, errors.New("a boost configuration sets no momentum or execution section beyond the execution max snapshot age"))
 		}
-		if p.Execution.MaxSnapshotAge < 1 {
-			errs = append(errs, errors.New("a margin account's execution max snapshot age must be at least 1 minute"))
-		}
+
 	case TargetWeightStrategyMomentum:
 		errs = append(errs, p.Momentum.validate()...)
 		errs = append(errs, p.Execution.validate()...)
-		if p.Execution.MaxSnapshotAge != 0 {
-			errs = append(errs, errors.New("an IRA's execution sets no max snapshot age: it never gets the sale back to 98%"))
-		}
 		if p.Boost != (BoostConfiguration{}) {
 			errs = append(errs, errors.New("a momentum configuration sets no boost section"))
 		}
@@ -245,6 +239,9 @@ func (p TargetWeightConfigurationPayload) Validate() error {
 		}
 	default:
 		errs = append(errs, fmt.Errorf("strategy id %q is not a target-weight strategy this schema configures", p.StrategyID))
+	}
+	if p.Execution.MaxSnapshotAge < 1 {
+		errs = append(errs, errors.New("execution max snapshot age must be at least 1 minute: every account's broker-holding check reads the broker snapshot"))
 	}
 	if p.AccountID == "" {
 		errs = append(errs, errors.New("account id is required"))

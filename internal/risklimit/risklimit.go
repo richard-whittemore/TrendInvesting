@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
 )
 
 // The gate's states (ADR 0019, amended 2026-09-24; ADR 0026, point 4).
@@ -93,10 +94,15 @@ type Gate struct {
 	// firstBroker is when the run's first broker snapshot was taken.
 	firstBroker time.Time
 	// maxSnapshotAge is the oldest the latest broker snapshot may be at a
-	// trigger to size the sale back to 98%; urgentRetry is set while the
-	// urgent alarm's sale is withheld from a snapshot that could not size it.
-	maxSnapshotAge time.Duration
-	urgentRetry    bool
+	// trigger or a sell's planned time; staleAlerted is the snapshot whose
+	// staleness has raised the urgent alert. urgentRetry and exitRetry (the
+	// exit's instrument) are set while a sale the urgent alarm or Boost's
+	// exit fired is withheld from a snapshot that could not size it.
+	maxSnapshotAge   time.Duration
+	staleAlerted     string
+	urgentRetry      bool
+	urgentInstrument string
+	exitRetry        string
 
 	alarmLevel     string
 	alarmID        string
@@ -129,27 +135,21 @@ type Gate struct {
 // limits and mode. Its limits set the margin-cushion alarm's thresholds (ADR
 // 0026, point 6), and maxSnapshotAge, the configured execution
 // MaxSnapshotAge, is the oldest the latest broker snapshot may be at a
-// trigger for the sale back to 98% to be sized from it (ADR 0019).
+// trigger for the sale back to 98%, or at a sell's planned time for the
+// broker-holding check, to be read (ADR 0019).
 func NewGate(accountID string, limits event.MarginLimits, mode string, maxSnapshotAge time.Duration) (*Gate, error) {
 	if !limits.HasCushion() {
 		return nil, errors.New("risklimit: a margin account's limits set the excess liquidity thresholds")
 	}
-	if maxSnapshotAge <= 0 {
-		return nil, errors.New("risklimit: a margin account's sale needs a positive maximum broker snapshot age")
-	}
-	g, err := newGate(accountID, limits, mode)
-	if err != nil {
-		return nil, err
-	}
-	g.maxSnapshotAge = maxSnapshotAge
-	return g, nil
+	return newGate(accountID, limits, mode, maxSnapshotAge)
 }
 
 // NewIRAGate returns a Normal gate for an IRA: its exposure limit is at most
 // 1, since an IRA never uses margin, its limits set no margin cushion, and
 // every buy's worst-case cost, its quantity at its limit plus maxFees, must
-// fit the cash available (ADR 0026, point 3).
-func NewIRAGate(accountID string, limits event.MarginLimits, mode string, maxFees float64) (*Gate, error) {
+// fit the cash available (ADR 0026, point 3). maxSnapshotAge bounds the
+// broker snapshot its broker-holding check reads, as for the margin account.
+func NewIRAGate(accountID string, limits event.MarginLimits, mode string, maxFees float64, maxSnapshotAge time.Duration) (*Gate, error) {
 	if limits.MaxExposure > 1 {
 		return nil, fmt.Errorf("risklimit: an IRA's max exposure %v exceeds 1: it never uses margin", limits.MaxExposure)
 	}
@@ -159,7 +159,7 @@ func NewIRAGate(accountID string, limits event.MarginLimits, mode string, maxFee
 	if !(maxFees >= 0) || math.IsInf(maxFees, 0) {
 		return nil, errors.New("risklimit: the fee allowance must be finite and not negative")
 	}
-	g, err := newGate(accountID, limits, mode)
+	g, err := newGate(accountID, limits, mode, maxSnapshotAge)
 	if err != nil {
 		return nil, err
 	}
@@ -167,9 +167,12 @@ func NewIRAGate(accountID string, limits event.MarginLimits, mode string, maxFee
 	return g, nil
 }
 
-func newGate(accountID string, limits event.MarginLimits, mode string) (*Gate, error) {
+func newGate(accountID string, limits event.MarginLimits, mode string, maxSnapshotAge time.Duration) (*Gate, error) {
 	if accountID == "" {
 		return nil, errors.New("risklimit: account id is required")
+	}
+	if maxSnapshotAge <= 0 {
+		return nil, errors.New("risklimit: the maximum broker snapshot age must be positive: no permissive default")
 	}
 	if err := limits.Validate(); err != nil {
 		return nil, fmt.Errorf("risklimit: %w", err)
@@ -179,7 +182,7 @@ func newGate(accountID string, limits event.MarginLimits, mode string) (*Gate, e
 	}
 	return &Gate{
 		accountID: accountID, limits: limits, mode: mode, decided: make(map[string]bool),
-		state: StateNormal, alarmLevel: event.MarginAlarmClear,
+		state: StateNormal, alarmLevel: event.MarginAlarmClear, maxSnapshotAge: maxSnapshotAge,
 		released: make(map[string]bool), saleTags: make(map[string]bool),
 		attempted: make(map[string]bool), pending: make(map[string]bool),
 		sells: make(map[string]*trackedSell), orders: make(map[string]*releasedOrder),
@@ -255,14 +258,14 @@ func (g *Gate) RestoreState(id string, p event.EngineStatePayload, schemaVersion
 //   - Halted refuses every other order;
 //   - a tag naming no recorded decision refuses and halts;
 //   - the kill switch refuses every other order and changes no state;
-//   - in a margin account, a sell checked against a latest broker snapshot
-//     older at book.At than MaxSnapshotAge, or one reporting a net
-//     liquidation or mark that is not strictly positive, is refused and
-//     changes no state (unsizable);
 //   - Degraded refuses every buy and every order on an instrument its scope
 //     names, and a sell elsewhere with no broker snapshot to size it from
 //     (ADR 0019, amended 2026-09-24: sells are "sized from" the broker
 //     quantity);
+//   - a sell checked against a readable latest broker snapshot older at
+//     book.At than MaxSnapshotAge, or taken after it, is refused
+//     (stale-broker-snapshot) and changes no state; the first such refusal
+//     per snapshot raises the urgent alert (staleFor);
 //   - a sell beyond the latest broker snapshot's holding net of every
 //     working or pending sell is a breach, refused and not resized: the
 //     planner, not the gate, chooses quantities (ADR 0019, amendment of
@@ -316,8 +319,8 @@ func (g *Gate) Check(book Book, plan []Order) ([]Outcome, error) {
 			return nil, fmt.Errorf("risklimit: order %d: a recorded mark must be finite and positive", i+1)
 		}
 	}
-	if g.maxSnapshotAge > 0 && book.At.IsZero() {
-		return nil, errors.New("risklimit: a margin account's check needs the time of its trigger, to bound the broker snapshot's age")
+	if book.At.IsZero() {
+		return nil, errors.New("risklimit: a check needs its orders' planned time, to bound the broker snapshot's age")
 	}
 	running := &book
 	running.Holdings = maps.Clone(book.Holdings)
@@ -369,9 +372,6 @@ func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 	if p.Sale != (event.SaleFigures{}) {
 		return g.checkSale(o, f)
 	}
-	if reason, detail := g.unsizable(p, book.At); reason != "" && g.state != StateHalted && g.decided[p.Tag] && !g.killEngaged {
-		return Outcome{Refused: g.refusal(o, f, reason, detail)}
-	}
 	switch {
 	case g.state == StateHalted:
 		return Outcome{Refused: g.refusal(o, f, event.RefusedEngineHalted, "the account is Halted: no order is released until the owner clears it")}
@@ -389,6 +389,15 @@ func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 	case g.state == StateDegraded && !f.BrokerSet:
 		return Outcome{Refused: g.refusal(o, f, event.RefusedBrokerHolding, "the account is Degraded and no readable broker snapshot holds the quantity to size this sell from")}
 	}
+	// After the engine-state and kill-switch refusals, so a stale snapshot
+	// never stops Boost's exit from firing the sale back to 98%.
+	if detail := g.staleFor(p, book.At); detail != "" {
+		out := Outcome{Refused: g.refusal(o, f, event.RefusedStaleBrokerSnapshot, detail)}
+		if g.staleAlerted != g.brokerID {
+			g.staleAlerted, out.Refused.Alert = g.brokerID, true
+		}
+		return out
+	}
 	if reason, detail := g.breach(o, f, counted, book, unvalued); reason != "" {
 		out := Outcome{Refused: g.refusal(o, f, reason, detail)}
 		g.degrade(&out, p.InstrumentID, fmt.Sprintf("order %s refused: %s: %s", p.ClientOrderID, reason, detail), p.ClientOrderID)
@@ -397,31 +406,23 @@ func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 	return g.release(o, f)
 }
 
-// unsizable returns why a margin account's sell p cannot be checked against
-// the latest broker snapshot at at, the time its strategy.order.planned is
-// journalled, or "" when it can or no readable broker snapshot is recorded:
-// the snapshot is older than MaxSnapshotAge (ADR 0019: "a stale matching
-// snapshot is not success"), checked first, or its net liquidation or the
-// instrument's mark is not strictly positive (ADR 0019: never short).
-// Neither changes the engine state.
-func (g *Gate) unsizable(p event.OrderPlannedPayload, at time.Time) (reason, detail string) {
+// staleFor returns why sell p cannot be checked against the latest broker
+// snapshot at at, the time its strategy.order.planned is journalled, or ""
+// when it can, is no sell, or no readable broker snapshot is recorded: the
+// snapshot is older than MaxSnapshotAge, or was taken after at, which is
+// stale too, never fresh (ADR 0019: "a stale matching snapshot is not
+// success"). The snapshot gates only the broker-holding check: its net
+// liquidation and mark are read by the sale's keep alone. The refusal
+// changes no engine state.
+func (g *Gate) staleFor(p event.OrderPlannedPayload, at time.Time) string {
 	s := g.broker
-	if p.Side != event.OrderSideSell || g.maxSnapshotAge <= 0 || s == nil ||
+	if p.Side != event.OrderSideSell || s == nil ||
 		!s.Readable(event.BrokerComponentPositions) || !s.Readable(event.BrokerComponentOpenOrders) {
 		// No snapshot, or one that cannot be read, is the existing case: the
 		// sell is sized as it would be without one.
-		return "", ""
+		return ""
 	}
-	if age := at.Sub(s.AsOf); age > g.maxSnapshotAge {
-		return event.RefusedStaleBrokerSnapshot, fmt.Sprintf("broker snapshot %s is %v old at the trigger; the most a sell is checked against is %v", g.brokerID, age, g.maxSnapshotAge)
-	}
-	if s.Readable(event.BrokerComponentNetLiquidation) && !(s.NetLiquidation > 0) {
-		return event.RefusedNonPositiveBrokerValues, fmt.Sprintf("broker snapshot %s reports net liquidation %v", g.brokerID, s.NetLiquidation)
-	}
-	if position, held := s.Position(p.InstrumentID); held && position.MarkSet && !(position.Mark > 0) {
-		return event.RefusedNonPositiveBrokerValues, fmt.Sprintf("broker snapshot %s reports a mark of %v for %s", g.brokerID, position.Mark, p.InstrumentID)
-	}
-	return "", ""
+	return orderplan.StaleDetail(g.brokerID, s.AsOf, at, g.maxSnapshotAge)
 }
 
 // release releases o with figures f.

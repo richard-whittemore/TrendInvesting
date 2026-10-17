@@ -153,25 +153,39 @@ In the first two cases the sale counts as attempted and is never tried again
 automatically. The alert will ask you to act by hand, and a later automatic
 sale could duplicate yours. No IBKR snapshot recorded yet counts as
 unreadable. In the other three nothing was attempted: the engine state does
-not change, and the sale is decided again while what fired it is still in
-force: Boost's exit firing again at a later session, or the alarm still
-urgent at the next IBKR snapshot. The incident or the engagement only decides
-the tag, picked afresh each time. The sale is always sized from the latest
-snapshot, never an older one. A snapshot both stale and not positive is
-withheld as `stale-broker-snapshot`: freshness is checked first.
+not change, and the sale is decided again at the next IBKR snapshot that is
+readable and positive, while what fired it is still in force:
 
-**`MaxSnapshotAge`.** The margin account's configuration sets it, in
-minutes, in the execution section (`execution.max_snapshot_age_minutes`).
-It has no default: a margin configuration without it, or with zero or less,
-is rejected. For the sale, the age is the triggering input's journalled time
-(the session's close for the exit, the snapshot's own time for the urgent
-alarm) minus the IBKR snapshot's time; for any other sell, it is measured
-from that sell's `strategy.order.planned` time. The wall clock is never
-read. The same bound applies to every other sell in the margin
-account: one checked against a stale snapshot is refused
-(`stale-broker-snapshot`), and one checked against a net liquidation or mark
-that is not positive is refused (`non-positive-broker-values`). Neither
-refusal changes the engine state.
+- for Boost's exit, until the next decision no longer plans that sell, or
+  the account no longer refuses the exit (no longer Halted, Degraded on SPY
+  or under the kill switch);
+- for the alarm, while it stays urgent.
+
+Otherwise the withheld sale lapses, its attempt unspent. The incident or the
+engagement only decides the tag, picked afresh each time. The sale is always
+sized from the latest snapshot, never an older one. A snapshot both stale and
+not positive is withheld as `stale-broker-snapshot`: freshness is checked
+first.
+
+**`MaxSnapshotAge`.** Every account's configuration sets it, the IRAs'
+included, in minutes, in the execution section
+(`execution.max_snapshot_age_minutes`). It has no default: a configuration
+without it, or with zero or less, is rejected. For the sale, the age is the
+triggering input's journalled time (the session's close for the exit, the
+snapshot's own time for the urgent alarm) minus the IBKR snapshot's time;
+for any other sell, it is measured from that sell's `strategy.order.planned`
+time. A snapshot taken after that time is stale too, never fresh, and the
+record says by how much. The wall clock is never read.
+
+For any other sell, the IBKR snapshot gates only the broker-holding check. A
+sell checked against a stale latest snapshot is refused
+(`stale-broker-snapshot`) with no state change, and the first such refusal
+for that snapshot raises the urgent alert (the refusal's `alert` flag); a
+later snapshot is a new condition. The sell is planned again at the next
+decision. Net liquidation and the mark are read only by the sale's shares to
+keep, so they never refuse another sell. The state and kill-switch refusals
+come first, so a stale snapshot never stops Boost's exit from firing the
+sale.
 
 ## The margin-cushion alarm
 
@@ -198,7 +212,8 @@ alarm. A change of level is recorded as
 
 `journal-query refusals` lists each refusal with its reason and each state
 change. The new reasons are `kill-switch`, `broker-holding`,
-`sale-attempted`, `stale-broker-snapshot` and `non-positive-broker-values`.
+`sale-attempted` and `stale-broker-snapshot`; a withheld sale may also give
+`stale-broker-snapshot` or `non-positive-broker-values`.
 A sell exempt as risk-reducing records `risk_reducing`, with or without an
 IBKR snapshot, so the journal shows why its mark, band and size were not
 checked. A planned sale is version 2 of `strategy.order.planned`.
@@ -211,9 +226,12 @@ account-wide exposure and the IRA's cash check). The tool reads every version. S
 - **The broker snapshot is missing or unreadable.** Degraded sells are refused
   and the sale back to 98% is withheld. Nothing is guessed. Sell by hand if the
   alert asks you to.
-- **The broker snapshot is old, or reports a net liquidation or mark of zero
-  or less.** The sale is withheld and other sells are refused, with no state
-  change; the next fresh, positive snapshot decides again.
+- **The broker snapshot is old.** The sale is withheld and other sells are
+  refused, with no state change and one urgent alert per snapshot; the next
+  fresh snapshot decides again.
+- **The broker snapshot reports a net liquidation or mark of zero or less.**
+  The sale is withheld, with no state change; the next positive snapshot
+  decides it again. Other sells are not affected.
 - **An order you placed by hand is still working at IBKR.** The program does
   not recognise it, so the sale is withheld (CONTAINMENT REQUIRED). Cancel or
   settle it, then recover.

@@ -17,6 +17,9 @@ type Observation struct {
 	Alarm   *event.MarginAlarmPayload
 	AlarmID string
 	Urgent  bool
+	// RetryExit is set when a sale Boost's exit fired, withheld from a
+	// snapshot that could not size it, is decided again from this one.
+	RetryExit bool
 }
 
 // riskReducing reports whether p is risk-reducing (ADR 0026, point 4): a sell
@@ -117,6 +120,10 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 	if g.ira {
 		return Observation{}, nil
 	}
+	retryExit := g.exitRetry != "" && g.refusesExit(g.exitRetry) && sizable(s, g.exitRetry)
+	if g.exitRetry != "" && !g.refusesExit(g.exitRetry) {
+		g.exitRetry = ""
+	}
 	alarm := event.MarginAlarmPayload{
 		AccountID: g.accountID, SnapshotID: id, AsOf: s.AsOf,
 		Warning: g.limits.ExcessLiquidityWarning, Urgent: g.limits.ExcessLiquidityUrgent, StaleMinutes: g.limits.ExcessLiquidityStaleMinutes,
@@ -145,26 +152,52 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 			alarm.Detail = fmt.Sprintf("no excess liquidity reading in the %d minutes since the run's first broker snapshot, while the market is open", g.limits.ExcessLiquidityStaleMinutes)
 		}
 	default:
-		return Observation{}, nil
+		return Observation{RetryExit: retryExit}, nil
 	}
 	alarm.LastReadingAt, alarm.LastReadingSet = g.lastReading, g.lastReadingSet
 	if alarm.Level == g.alarmLevel {
 		// Still urgent, with the alarm's sale withheld from a snapshot that
 		// could not size it: the producing condition is still in force, so
-		// this snapshot decides the sale again.
-		return Observation{Urgent: alarm.Level == event.MarginAlarmUrgent && g.urgentRetry}, nil
+		// a readable, positive snapshot decides the sale again.
+		urgent := alarm.Level == event.MarginAlarmUrgent && g.urgentRetry && g.urgentInstrument != "" && sizable(s, g.urgentInstrument)
+		return Observation{Urgent: urgent, RetryExit: retryExit && !urgent}, nil
 	}
 	g.urgentRetry = false
 	alarmID := "margin-alarm:" + g.accountID + ":" + id
 	g.alarmLevel = alarm.Level
-	obs := Observation{Alarm: &alarm, AlarmID: alarmID}
+	obs := Observation{Alarm: &alarm, AlarmID: alarmID, RetryExit: retryExit}
 	if alarm.Level == event.MarginAlarmUrgent {
 		g.alarmID = alarmID
 		g.saleTags[alarmID] = true
-		obs.Urgent = true
+		obs.Urgent, obs.RetryExit = true, false
 	}
 	return obs, nil
 }
+
+// refusesExit reports whether the account still refuses Boost's exit on
+// instrumentID, the condition that fires the sale back to 98%: Halted,
+// Degraded on it, or the kill switch engaged.
+func (g *Gate) refusesExit(instrumentID string) bool {
+	return g.state == StateHalted || g.state == StateDegraded && slices.Contains(g.scope, instrumentID) || g.killEngaged
+}
+
+// sizable reports whether broker snapshot s can size a sale of
+// instrumentID: readable, with a net liquidation and a mark that are
+// strictly positive. It is fresh by construction, being the latest.
+func sizable(s event.BrokerSnapshotPayload, instrumentID string) bool {
+	for _, c := range []string{event.BrokerComponentNetLiquidation, event.BrokerComponentOpenOrders, event.BrokerComponentPositions} {
+		if !s.Readable(c) {
+			return false
+		}
+	}
+	position, held := s.Position(instrumentID)
+	return s.NetLiquidation > 0 && (!held || position.MarkSet && position.Mark > 0)
+}
+
+// LapseExitSale ends the retry of a sale Boost's exit fired: the account's
+// next strategy.targets.decided no longer plans the sell that fired it. The
+// attempt stays unspent.
+func (g *Gate) LapseExitSale() { g.exitRetry = "" }
 
 // Sale decides whether a sale back to target (the unlevered weight, 98%) of
 // net liquidation goes for instrumentID now that trigger has fired, and plans
@@ -190,10 +223,12 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 // unknown, is never planned again, so a sale placed by hand after the alert
 // is never duplicated. A sale withheld with nothing to sell, from a stale
 // snapshot, or from a net liquidation or mark that is not strictly positive
-// is not an attempt: it changes no state, the incident, engagement or alarm
-// stays in force, and the next trigger with a readable, fresh latest
-// snapshot decides again under the same tag; an older snapshot is never used
-// in place of the latest (event.SaleWithheldPayload.Attempted). The planned
+// is not an attempt: it changes no state, and the next readable, positive
+// broker snapshot decides it again (ObserveBroker's Urgent or RetryExit)
+// while what fired it is in force: the alarm still urgent, or the exit
+// still refused and still planned (LapseExitSale); otherwise it lapses. The
+// tag is picked afresh each time, and an older snapshot is never used in
+// place of the latest (event.SaleWithheldPayload.Attempted). The planned
 // sale must then pass Check.
 func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band float64) (orderplan.Sale, bool, error) {
 	if trigger != event.SaleTriggerExit && trigger != event.SaleTriggerMarginUrgent {
@@ -231,10 +266,16 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 	case sale.Withheld.Attempted():
 		g.attempted[sale.Withheld.ClientOrderID] = true
 	}
-	// Only the urgent alarm is retried on a later snapshot: an exit that
-	// still fires triggers the sale again by itself.
-	g.urgentRetry = trigger == event.SaleTriggerMarginUrgent && sale.Withheld != nil &&
+	// A sale withheld from a snapshot that could not size it is decided
+	// again on the next readable, positive snapshot while what fired it is
+	// in force: the alarm still urgent, or the exit still refused.
+	retry := sale.Withheld != nil &&
 		(sale.Withheld.Reason == event.SaleWithheldStaleBrokerSnapshot || sale.Withheld.Reason == event.SaleWithheldNotPositive)
+	if trigger == event.SaleTriggerMarginUrgent {
+		g.urgentRetry, g.urgentInstrument = retry, instrumentID
+	} else if g.exitRetry = ""; retry {
+		g.exitRetry = instrumentID
+	}
 	return sale, true, nil
 }
 
@@ -249,11 +290,11 @@ func (g *Gate) saleAttempted(tag, instrumentID string) bool {
 // RestoreSaleAttempt records that an earlier run already attempted the
 // restored incident's sale of instrumentID under tag (ADR 0026, point 5:
 // "Whether the incident sale has been attempted"), so this run never
-// attempts it again. It is the seam the restart's run approval feeds: a crash
-// resumes by replaying the durable log's inputs, never from recorded
-// decisions (ADR 0027, section 6), so the earlier run's planned or withheld
-// sale reaches the gate through the approval, not as an input of its own. It
-// needs the incident restored first (RestoreState), and tag must be that
+// attempts it again. It is an unwired seam: the operator run-approval input,
+// which carries the earlier run's planned or withheld sale, wires it when it
+// lands. Until then nothing calls it, since a crash resumes by replaying the
+// durable log's inputs, never from recorded decisions (ADR 0027, section 6).
+// It needs the incident restored first (RestoreState), and tag must be that
 // incident.
 func (g *Gate) RestoreSaleAttempt(tag, instrumentID string) error {
 	switch {

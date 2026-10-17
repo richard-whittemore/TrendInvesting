@@ -94,8 +94,8 @@ func PlanSale(in SaleInput) (Sale, error) {
 		}
 	}
 	// A readable snapshot's freshness is checked before its values.
-	if age := in.At.Sub(s.AsOf); age > in.MaxSnapshotAge {
-		return withheld(event.SaleWithheldStaleBrokerSnapshot, fmt.Sprintf("broker snapshot %s is %v old at the trigger; the most a sale is sized from is %v", in.SnapshotID, age, in.MaxSnapshotAge))
+	if detail := StaleDetail(in.SnapshotID, s.AsOf, in.At, in.MaxSnapshotAge); detail != "" {
+		return withheld(event.SaleWithheldStaleBrokerSnapshot, detail+"; the sale waits for a fresh snapshot")
 	}
 	position, held := s.Position(in.InstrumentID)
 	switch {
@@ -187,4 +187,19 @@ func (in SaleInput) validate() error {
 		return fmt.Errorf("orderplan: %w", err)
 	}
 	return nil
+}
+
+// StaleDetail returns why broker snapshot id, taken at asOf, is stale at at,
+// or "" when it is fresh: older than maxAge, or taken after at, which is
+// stale too, never fresh, and records the skew (ADR 0019: age is the
+// triggering event's journalled time minus the snapshot's broker timestamp;
+// the wall clock is never read).
+func StaleDetail(id string, asOf, at time.Time, maxAge time.Duration) string {
+	switch age := at.Sub(asOf); {
+	case age < 0:
+		return fmt.Sprintf("broker snapshot %s was taken %v after the trigger, a clock skew, so it is stale", id, -age)
+	case age > maxAge:
+		return fmt.Sprintf("broker snapshot %s is %v old at the trigger; the most allowed is %v", id, age, maxAge)
+	}
+	return ""
 }

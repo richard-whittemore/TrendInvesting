@@ -494,8 +494,8 @@ const (
 //     unvalued-holding) to the closed set.
 //   - Version 3 adds the figures' broker fields (BrokerSet, BrokerHolding,
 //     WorkingSells, RiskReducing) and the refusal reasons kill-switch,
-//     broker-holding, sale-attempted, stale-broker-snapshot and
-//     non-positive-broker-values (ADR 0019, amended 2026-10-15 and
+//     broker-holding, sale-attempted and stale-broker-snapshot, and the
+//     refusal's alert (ADR 0019, amended 2026-10-15 and
 //     2026-10-17; ADR 0026, points 3 and 4).
 //
 // Each version reads every earlier version's fields, and refuses a later
@@ -554,15 +554,11 @@ const (
 	// (ADR 0019, amended 2026-10-15).
 	RefusedSaleAttempted = "sale-attempted"
 	// RefusedStaleBrokerSnapshot: a sell would be checked against a latest
-	// broker snapshot older at its trigger than the configured execution
-	// MaxSnapshotAge (ADR 0019: "a stale matching snapshot is not success").
-	// It changes no engine state.
+	// broker snapshot older at its planned time than the configured execution
+	// MaxSnapshotAge, or taken after it (ADR 0019: "a stale matching
+	// snapshot is not success"). It changes no engine state; the sell is
+	// planned again at the next decision.
 	RefusedStaleBrokerSnapshot = "stale-broker-snapshot"
-	// RefusedNonPositiveBrokerValues: the latest broker snapshot reports a
-	// net liquidation or a mark for the instrument that is not strictly
-	// positive, which no sell is checked against (ADR 0019: never short). It
-	// changes no engine state.
-	RefusedNonPositiveBrokerValues = "non-positive-broker-values"
 )
 
 // RiskFigures are the values the gate checked an order against, so the
@@ -725,13 +721,17 @@ type OrderRefusedPayload struct {
 	Reason        string      `json:"reason"`
 	Detail        string      `json:"detail"`
 	Figures       RiskFigures `json:"figures"`
+	// Alert marks the first stale-broker-snapshot refusal against one latest
+	// broker snapshot: it raises the urgent alert, once per snapshot, until a
+	// later snapshot is recorded (ADR 0019, amendment of 2026-10-17).
+	Alert bool `json:"alert,omitempty"`
 }
 
 // need returns the earliest version that holds p: its figures', or the
 // version its reason joined at.
 func (p OrderRefusedPayload) need() uint32 {
 	switch p.Reason {
-	case RefusedKillSwitch, RefusedBrokerHolding, RefusedSaleAttempted, RefusedStaleBrokerSnapshot, RefusedNonPositiveBrokerValues:
+	case RefusedKillSwitch, RefusedBrokerHolding, RefusedSaleAttempted, RefusedStaleBrokerSnapshot:
 		return OrderRefusedSafetyVersion
 	case RefusedIRAExposure, RefusedInsufficientCash, RefusedSellExceedsHolding, RefusedUnvaluedHolding:
 		return max(p.Figures.need(), 2)
@@ -763,12 +763,15 @@ func (p OrderRefusedPayload) Validate() error {
 	case RefusedUndecidedOrder, RefusedMarginExposure, RefusedOrderCount, RefusedOrderSize,
 		RefusedPriceBand, RefusedMissingMark, RefusedEngineDegraded, RefusedEngineHalted,
 		RefusedIRAExposure, RefusedInsufficientCash, RefusedSellExceedsHolding, RefusedUnvaluedHolding,
-		RefusedKillSwitch, RefusedBrokerHolding, RefusedSaleAttempted, RefusedStaleBrokerSnapshot, RefusedNonPositiveBrokerValues:
+		RefusedKillSwitch, RefusedBrokerHolding, RefusedSaleAttempted, RefusedStaleBrokerSnapshot:
 	default:
 		errs = append(errs, fmt.Errorf("refusal reason %q is not recognised", p.Reason))
 	}
 	if p.Detail == "" {
 		errs = append(errs, errors.New("detail is required: a refusal without its figures cannot be checked"))
+	}
+	if p.Alert && p.Reason != RefusedStaleBrokerSnapshot {
+		errs = append(errs, errors.New("only a stale-broker-snapshot refusal raises the alert"))
 	}
 	errs = append(errs, p.Figures.validate(p.Side)...)
 	if err := errors.Join(errs...); err != nil {

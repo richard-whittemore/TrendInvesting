@@ -29,7 +29,7 @@ func momentumConfiguration() event.TargetWeightConfigurationPayload {
 			RiskOffInstrument: "IEF", RiskOffFraction: 0.5, RebalanceBand: 0.25,
 			UniverseSource: "fixture-universe", SectorSources: []string{"gics", "screener"},
 		},
-		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityWhole, MaxFeesPerOrder: 1},
+		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityWhole, MaxFeesPerOrder: 1, MaxSnapshotAge: 30},
 		Limits:    event.MarginLimits{MaxExposure: 1, MaxOrdersPerDecision: 10, MaxOrderFraction: 0.9, PriceBand: 0.05},
 	}
 }

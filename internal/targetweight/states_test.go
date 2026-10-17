@@ -142,34 +142,85 @@ func TestAWithheldSaleIsAnAttempt(t *testing.T) {
 	}
 }
 
-// TestAStaleWithholdIsNotAnAttempt: a sale withheld because the latest broker
-// snapshot was older than the configured maximum age changes no state and
-// spends no attempt, so the incident's next trigger, with a fresh snapshot,
-// is decided again under the same tag (here, by session 22, the exit has
-// already brought the holding to 98%, so it finds nothing to sell).
+// TestAStaleWithholdIsNotAnAttempt: a sale Boost's exit fired, withheld
+// because the latest broker snapshot was older than MaxSnapshotAge, changes
+// no state and spends no attempt. While the account still refuses the exit,
+// the next readable, positive broker snapshot decides it again under the
+// same tag, before any later session (here, the earlier run's holding at
+// session 21 is already at 98%, so it finds nothing to sell).
 func TestAStaleWithholdIsNotAnAttempt(t *testing.T) {
 	full := simulate(t, options{brokers: true})
 	state := haltedState(t)
 	mutate := map[int]func(*event.BrokerSnapshotPayload){
 		20: func(b *event.BrokerSnapshotPayload) { b.AsOf = b.AsOf.Add(-2 * time.Hour) },
-		22: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation },
 	}
 	r := restartAt17(t, full, options{prelude: []event.Envelope{state}, brokerMutate: mutate})
 	withheld := ofType(r.decisions, event.SaleWithheldEventType)
-	if len(withheld) != 2 {
-		t.Fatalf("withheld %d, want the stale one and the re-evaluation", len(withheld))
+	if len(withheld) < 2 {
+		t.Fatalf("withheld %d, want the stale one and the retry", len(withheld))
 	}
-	var stale, again event.SaleWithheldPayload
+	var stale, retry event.SaleWithheldPayload
 	decode(t, withheld[0], &stale)
-	decode(t, withheld[1], &again)
-	if stale.Reason != event.SaleWithheldStaleBrokerSnapshot || stale.SnapshotID != "broker:20" {
+	decode(t, withheld[1], &retry)
+	if stale.Reason != event.SaleWithheldStaleBrokerSnapshot || stale.SnapshotID != "broker:20" || stale.Trigger != event.SaleTriggerExit {
 		t.Errorf("first: %+v", stale)
 	}
-	if again.Tag != state.ID || again.Trigger != event.SaleTriggerMarginUrgent || again.SnapshotID != "broker:22" || again.Reason != event.SaleWithheldNothingToSell {
-		t.Errorf("the next trigger is decided again under the incident from the fresh snapshot: %+v", again)
+	if withheld[1].ID != "sale-withheld:"+retry.ClientOrderID+":broker:21" || retry.Tag != state.ID || retry.Trigger != event.SaleTriggerExit || retry.SnapshotID != "broker:21" {
+		t.Errorf("the exit's sale is decided again from the next snapshot, under the incident: %s %+v", withheld[1].ID, retry)
 	}
 	if got := ofType(r.decisions, event.EngineStateEventType); len(got) != 0 {
 		t.Fatalf("the withhold changes no state: %d", len(got))
+	}
+}
+
+// TestAStaleSnapshotRefusesTheExitAndAlertsOnce: in a Normal account Boost's
+// exit checked against a stale latest broker snapshot is refused
+// (stale-broker-snapshot) with the urgent alert and changes no state; the
+// next session's decision plans afresh.
+func TestAStaleSnapshotRefusesTheExitAndAlertsOnce(t *testing.T) {
+	full := simulate(t, options{brokers: true})
+	exitAt := -1
+	for i, e := range full.decisions {
+		if e.Type == event.OrderReleasedEventType {
+			var p event.OrderReleasedPayload
+			decode(t, e, &p)
+			if p.Side == event.OrderSideSell {
+				exitAt = i
+				break
+			}
+		}
+	}
+	if exitAt < 0 {
+		t.Fatal("setup: the full run has no exit")
+	}
+	var session int
+	for i := 0; i < 60; i++ {
+		if full.decisions[exitAt].EventTime.Equal(sessionEnd(i)) {
+			session = i
+		}
+	}
+	r := simulate(t, options{brokers: true, brokerMutate: map[int]func(*event.BrokerSnapshotPayload){
+		session: func(b *event.BrokerSnapshotPayload) { b.AsOf = b.AsOf.Add(-2 * time.Hour) },
+	}})
+	refused := ofType(r.decisions, event.OrderRefusedEventType)
+	if len(refused) != 1 {
+		t.Fatalf("refused %d, want the exit once", len(refused))
+	}
+	var p event.OrderRefusedPayload
+	decode(t, refused[0], &p)
+	if p.Reason != event.RefusedStaleBrokerSnapshot || !p.Alert || p.Side != event.OrderSideSell {
+		t.Errorf("refusal: %+v", p)
+	}
+	if got := ofType(r.decisions, event.EngineStateEventType); len(got) != 0 {
+		t.Errorf("no state change: %d", len(got))
+	}
+	// The refusal leaves the plan to the next decision, which is made as usual.
+	var next bool
+	for _, d := range targets(t, r.decisions) {
+		next = next || d.SessionPeriodEnd.After(refused[0].EventTime) && d.Outcome == event.TargetsOutcomeDecided
+	}
+	if !next {
+		t.Error("the next session decides afresh")
 	}
 }
 

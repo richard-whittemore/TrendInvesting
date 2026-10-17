@@ -61,7 +61,9 @@ func holding(id string, n int64) risklimit.Book {
 
 func check(t *testing.T, g *risklimit.Gate, plan ...risklimit.Order) []risklimit.Outcome {
 	t.Helper()
-	outcomes, err := g.Check(bookOf(plan...), plan)
+	book := bookOf(plan...)
+	book.At = now(g)
+	outcomes, err := g.Check(book, plan)
 	if err != nil {
 		t.Fatal(err)
 	}

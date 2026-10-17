@@ -23,7 +23,7 @@ func validMomentumConfiguration() event.TargetWeightConfigurationPayload {
 			RiskOffInstrument: "IEF", RiskOffFraction: 0.5, RebalanceBand: 0.25,
 			UniverseSource: "massive", SectorSources: []string{"ishares-iwv-gics", "nasdaq-screener"},
 		},
-		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityWhole, MaxFeesPerOrder: 1},
+		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityWhole, MaxFeesPerOrder: 1, MaxSnapshotAge: 30},
 		Limits:    event.MarginLimits{MaxExposure: 1, MaxOrdersPerDecision: 60, MaxOrderFraction: 0.5, PriceBand: 0.05},
 	}
 }
@@ -117,6 +117,8 @@ func TestMomentumConfigurationValidate(t *testing.T) {
 	expectInvalid(t, "cash rule", v, func(p *P) { p.Execution.CashRule = "borrowed" }, "cash rule")
 	expectInvalid(t, "share quantity", v, func(p *P) { p.Execution.ShareQuantity = "fractional" }, "share quantity")
 	expectInvalid(t, "fees", v, func(p *P) { p.Execution.MaxFeesPerOrder = -1 }, "fees")
+	expectInvalid(t, "no max snapshot age", v, func(p *P) { p.Execution.MaxSnapshotAge = 0 }, "max snapshot age")
+	expectInvalid(t, "negative max snapshot age", v, func(p *P) { p.Execution.MaxSnapshotAge = -1 }, "max snapshot age")
 
 	b := validTargetWeightConfiguration()
 	expectInvalid(t, "boost with momentum", b, func(p *P) { p.Momentum.TopN = 25 }, "no momentum or execution")

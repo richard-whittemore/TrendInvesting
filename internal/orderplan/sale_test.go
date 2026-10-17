@@ -239,6 +239,12 @@ func TestNoSaleFromAStaleSnapshot(t *testing.T) {
 	if got := sale(t, in); got.Order == nil {
 		t.Errorf("30 minutes old: %+v", got)
 	}
+	// A snapshot taken after the trigger is stale, never fresh, and the
+	// withhold records the skew.
+	in.At = session.Add(-time.Minute)
+	if got := sale(t, in); got.Withheld == nil || got.Withheld.Reason != event.SaleWithheldStaleBrokerSnapshot || !strings.Contains(got.Withheld.Detail, "after the trigger") {
+		t.Errorf("taken after the trigger: %+v", got)
+	}
 	// Freshness is checked before the values: stale and not positive is stale.
 	both := saleInput(workedExample())
 	both.Snapshot.NetLiquidation, both.At = -1, session.Add(31*time.Minute)

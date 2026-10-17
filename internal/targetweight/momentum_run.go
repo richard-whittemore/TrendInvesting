@@ -116,7 +116,7 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 		TrendInstrument: m.TrendInstrument, TrendCloses: m.TrendCloses,
 		RiskOffInstrument: m.RiskOffInstrument, RiskOffFraction: m.RiskOffFraction,
 	}
-	gate, err := risklimit.NewIRAGate(cfg.AccountID, cfg.Limits, cfg.Mode, cfg.Execution.MaxFeesPerOrder)
+	gate, err := risklimit.NewIRAGate(cfg.AccountID, cfg.Limits, cfg.Mode, cfg.Execution.MaxFeesPerOrder, time.Duration(cfg.Execution.MaxSnapshotAge)*time.Minute)
 	if err != nil {
 		return nil, fmt.Errorf("targetweight: %w", err)
 	}
@@ -510,7 +510,7 @@ func (r *momentumRun) check(b *emissions, reb *rebalance, orders []event.OrderPl
 	for id, sold := range reb.sold {
 		holdings[id] -= sold
 	}
-	book := risklimit.Book{Holdings: holdings, Prices: reb.prices, PriorOrders: prior, CashAvailable: reb.budget.Remaining()}
+	book := risklimit.Book{Holdings: holdings, Prices: reb.prices, PriorOrders: prior, CashAvailable: reb.budget.Remaining(), At: b.at}
 	plan := make([]risklimit.Order, len(orders))
 	for i, o := range orders {
 		plan[i] = risklimit.Order{PlanID: "order-planned:" + o.ClientOrderID, Planned: o}
