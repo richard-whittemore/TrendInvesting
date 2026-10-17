@@ -37,7 +37,7 @@ def parse(argv, now=steps._now):
     ap.add_argument("--reason", default="", help="retract: why, for the record")
     ap.add_argument("--base", type=dt.date.fromisoformat, help="encode: adjusted views' base (default --first)")
     ap.add_argument("--optional", default="", help="encode: instruments written where they traded")
-    ap.add_argument("--universe-members", action="store_true", help="encode: also every type-CS ticker with a bar")
+    ap.add_argument("--universe-members", action="store_true", help="encode: also every universe reference ticker with a bar")
     ap.add_argument("--ranker", help="encode: the compact stream's ranker command, for example "
                                      "'bin/universe-rank -config momentum.json': no member bars, and a close "
                                      "history for each member it ranks at a decision session")

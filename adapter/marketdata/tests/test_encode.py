@@ -197,7 +197,7 @@ class UniverseTest(unittest.TestCase):
             {"instrument_id": "DDD", "type": "CS", "close": 7.5, "volume": 1000.0, "sector": "", "sector_source": ""},
         ])
 
-    def test_universe_members_adds_every_common_stock_with_a_bar_to_the_bars_written(self):
+    def test_universe_members_adds_every_listed_stock_with_a_bar_to_the_bars_written(self):
         with tempfile.TemporaryDirectory() as d:
             build(d)
             stream = run(d, optional=[], universe_members=True)

@@ -121,7 +121,7 @@ already closed, when it was not yet a decision session:
 
 - in a run configured `"bars"`, the engine already holds every price it
   needs and makes that day's decision at once (withheld as `missing-bars` if
-  no stock it ranks had a bar that day);
+  any stock it ranks had no bar that day);
 - in a run configured `"compact"`, no history was sent for that day, since it was
   not the month's last when it closed. The engine waits for them: once a
   history has arrived for every stock it ranks from that day's snapshot, it

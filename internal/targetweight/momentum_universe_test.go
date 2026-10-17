@@ -450,3 +450,35 @@ func TestACompactDecisionSessionRankingNoMemberNeedsNoHistory(t *testing.T) {
 		t.Fatalf("decisions %+v", got)
 	}
 }
+
+// TestABarsRunDecidesWithoutAMemberLeftOutOfTheDecisionSession: a member with
+// no bar on the decision session is left out of that session's snapshot too,
+// as the market-data step writes it (ADR 0026 point 5), so the next stock by
+// dollar volume is ranked in its place, and the run configured for bars
+// decides, from the bars of every member it ranks, exactly as the compact
+// run does. A universe of 4 leaves FFF, the next by dollar volume, outside
+// it on clean data.
+func TestABarsRunDecidesWithoutAMemberLeftOutOfTheDecisionSession(t *testing.T) {
+	four := func(c *event.TargetWeightConfigurationPayload) { c.Momentum.UniverseSize = 4 }
+	spoiled := map[string]string{"2025-01-31": "AAA"}
+	full := simulateMomentum(t, momentumOptions{mutate: four, noBar: spoiled})
+	compact := simulateMomentum(t, momentumOptions{mutate: four, noBar: spoiled, compact: true})
+	clean := simulateMomentum(t, momentumOptions{mutate: four})
+	decided := targets(t, full.decisions)
+	if got := withheldReasons(t, full); len(got) == 0 || got[0] != "decided:" {
+		t.Fatalf("decisions %v, want January's decided", got)
+	}
+	ranked := func(d event.TargetsDecidedPayload) []string {
+		var out []string
+		for _, n := range d.Momentum.Names {
+			out = append(out, n.InstrumentID)
+		}
+		slices.Sort(out)
+		return out
+	}
+	was, now := ranked(targets(t, clean.decisions)[0]), ranked(decided[0])
+	if want := []string{"BBB", "CCC", "FFF", "HHH"}; !slices.Contains(was, "AAA") || !slices.Equal(now, want) {
+		t.Fatalf("January ranked %v, want the clean run's %v with FFF, the next by dollar volume, in AAA's place", now, was)
+	}
+	requireSameDecisions(t, full.decisions, compact.decisions)
+}

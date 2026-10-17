@@ -18,8 +18,8 @@ writes, in order:
      action once by its id, the windows covering the span), so a bar is
      never restated by a later run;
    - a ``market.universe.snapshot`` v1 for a session with a universe
-     recording: one row per type-CS reference ticker with a bar that
-     session, its unadjusted close and volume, and its sector label and
+     recording: one row per reference ticker, of any type, with a bar
+     that session, its unadjusted close and volume, and its sector label and
      source (sectors.py), sorted by instrument; a row of a ticker not named
      as required or optional whose close or volume is missing or negative,
      or of a member left out of the session for bad data, is left out (see
@@ -456,8 +456,8 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
            engine="momentum", excluded=None, ranker=None):
     """The envelopes for first..last, as described above. ``required``
     instruments must have a bar every session; ``optional`` ones (and, with
-    ``universe_members``, every type-CS ticker of the span's universe
-    recordings) are written where they traded. ``base`` (default ``first``)
+    ``universe_members``, every reference ticker, of any type, with a bar
+    in the span's universe recordings) are written where they traded. ``base`` (default ``first``)
     is the session the adjusted views are based at; keep it fixed for the
     life of an engine's journal. ``engine`` is "momentum" or "boost", as
     described above.
@@ -527,12 +527,16 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
         raise MissingData("no session in {}..{}".format(first, last))
     named = set(required) | set(optional)
     wanted = set(named)
-    members = set()   # every type-CS ticker with a bar in a universe session, checked in every momentum stream
+    # Every listed ticker with a bar in a universe session, of any type: the
+    # run ranks its configured listing type, which the stream does not know,
+    # so each is checked before the snapshot filter below and no ranked
+    # member's bad session can be found after it (ADR 0026 point 5).
+    members = set()
     if not boost:
         for s in span:
             if s.universe is not None:
-                cs = {t.get("ticker") for t in s.universe.get("tickers") or () if t.get("type") == "CS"}
-                members |= cs & set(s.bars)
+                listed = {t.get("ticker") for t in s.universe.get("tickers") or ()}
+                members |= listed & set(s.bars)
     if universe_members:
         wanted |= members
     start = base + dt.timedelta(days=1)
@@ -590,10 +594,8 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
                     for day, (rows, _) in sorted(universes.items())]
         for req, ans in zip(requests, _check_answers(requests, ranker(requests))):
             answers[dt.date.fromisoformat(req["universe"]["session"])] = ans
-        for ticker in sorted({m for a in answers.values() for m in a["members"]} - set(factors)):
-            factors[ticker], bad = _member_factors(ticker, loaded, days, by_ticker[ticker], base)
-            if bad:
-                out[ticker] = _left_out(days, bad)
+        # Each member ranked is a row of its snapshot (_check_answers), so a
+        # listed ticker with a bar that session, checked above.
     for s in span:
         end, session = _utc(nyse_calendar.session_close(s.day).astimezone(dt.timezone.utc)), s.day.isoformat()
         ids = sorted(t for t in wanted if t in s.bars and s.day not in out.get(t, ()))

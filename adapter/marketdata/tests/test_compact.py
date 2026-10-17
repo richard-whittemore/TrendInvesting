@@ -145,6 +145,27 @@ class HistoryContentTest(unittest.TestCase):
         self.assertEqual(ranker.requests, [{"universe": snap, "next_session": "2026-12-01"}])
         self.assertEqual([(r.first, r.last) for r in excluded["AAA"]], [(D(2026, 11, 30), D(2026, 11, 30))])
 
+    def test_a_listed_stock_of_any_type_left_out_of_the_session_is_left_out_of_the_snapshot(self):
+        """The run ranks its configured listing type, which the stream does
+        not know, so a listed stock of any type with bad data on a session is
+        left out of that session's snapshot, and no snapshot holds a stock
+        left out of its session."""
+        path = os.path.join(self.tmp.name, "universe_2026-11-30.json")
+        rec = record.read(path)
+        os.remove(path)
+        next(t for t in rec["tickers"] if t["ticker"] == "CCC")["type"] = "ETF"
+        record.write(self.tmp.name, rec)
+        rewrite(self.tmp.name, "universe", "2026-11-30", "CCC", h=1.0)   # a high below the close
+        excluded = {}
+        stream = compact(self.tmp.name, ranker=FakeRanker(members=("BBB",)), excluded=excluded)
+        snap = of(stream, "market.universe.snapshot")[0]["payload"]
+        self.assertEqual([r["instrument_id"] for r in snap["rows"]], ["AAA", "BBB", "DDD"])
+        self.assertEqual([(r.first, r.last) for r in excluded["CCC"]], [(D(2026, 11, 30), D(2026, 11, 30))])
+        for e in of(stream, "market.universe.snapshot"):
+            day = D.fromisoformat(e["payload"]["session"])
+            left_out = {t for t, runs in excluded.items() if any(r.first <= day <= r.last for r in runs)}
+            self.assertFalse(left_out & {r["instrument_id"] for r in e["payload"]["rows"]}, day)
+
 
 class CompactRefusalTest(unittest.TestCase):
     def setUp(self):
@@ -294,11 +315,14 @@ class GoRankerTest(unittest.TestCase):
                                         cwd=REPO, stdin=f, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_the_momentum_engine_decides_the_same_from_the_compact_stream_as_from_full_bars(self):
-        """The acceptance demo: the same recordings encoded both ways, each
-        fed to a fresh Go momentum run, emit byte-identical records."""
+    def decide_both_ways(self, spoil=None):
+        """Encodes the recordings both ways, feeds each to a fresh Go momentum
+        run (the helper fails unless both emit byte-identical records), and
+        returns the decisions and the two streams' sizes."""
         with tempfile.TemporaryDirectory() as d:
             build(d)
+            if spoil:
+                spoil(d)
             full, small = os.path.join(d, "full.jsonl"), os.path.join(d, "compact.jsonl")
             encode.write_stream(full, run(d, optional=[], universe_members=True))
             encode.write_stream(small, compact(d, ranker=go_ranker))
@@ -308,12 +332,31 @@ class GoRankerTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             with open(full) as f, open(small) as g:
                 sizes = (sum(1 for _ in f), sum(1 for _ in g))
-        decisions = [json.loads(line) for line in result.stdout.splitlines()]
+        return [json.loads(line) for line in result.stdout.splitlines()], sizes
+
+    def test_the_momentum_engine_decides_the_same_from_the_compact_stream_as_from_full_bars(self):
+        """The acceptance demo: the same recordings encoded both ways, each
+        fed to a fresh Go momentum run, emit byte-identical records."""
+        decisions, sizes = self.decide_both_ways()
         self.assertEqual(len(decisions), 1)
         names = {n["instrument_id"]: n["status"] for n in decisions[0]["momentum"]["names"]}
         self.assertEqual(sorted(names), ["AAA", "CCC"])
         self.assertEqual(decisions[0]["momentum"]["close_session"], "2026-11-30")
         self.assertLess(sizes[1], sizes[0])
+
+    def test_a_member_spoiled_on_the_decision_session_gives_way_to_the_next_by_dollar_volume_in_both_streams(self):
+        """A member left out of the decision session for bad data is left out
+        of its snapshot, so the next stock by dollar volume is ranked in its
+        place, and the bars run (which needs a bar for every member it ranks)
+        decides exactly as the compact run does (ADR 0026 point 5)."""
+        spoil = lambda d: rewrite(d, "universe", "2026-11-30", "AAA", h=1.0)   # a high below the close
+        decisions, _ = self.decide_both_ways(spoil)
+        self.assertEqual(len(decisions), 1)
+        # The fixture's run has no account and flat closes, so the decision is
+        # withheld past the ranking, never for a missing bar or history.
+        self.assertNotIn(decisions[0].get("withheld_reason"), ("missing-bars", "histories-missing"))
+        self.assertEqual(decisions[0]["momentum"]["close_session"], "2026-11-30")
+        self.assertEqual(sorted(n["instrument_id"] for n in decisions[0]["momentum"]["names"]), ["BBB", "CCC"])
 
 
 if __name__ == "__main__":
