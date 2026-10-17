@@ -148,6 +148,9 @@ func TestMomentumVenueReportRules(t *testing.T) {
 		Quantity: o.Quantity - 1, Price: o.LimitPrice, Commission: 0.5, FilledAt: at,
 	}
 	refuse(event.FillEventType, event.FillSchemaVersion, "f0", fill, "schema version")
+	joint := fill
+	joint.AccountID = "joint"
+	refuse(event.FillEventType, event.FillTargetWeightVersion, "f-joint", joint, "this run decides")
 	over := fill
 	over.Quantity = o.Quantity + 1
 	refuse(event.FillEventType, event.FillTargetWeightVersion, "f-over", over, "past its")

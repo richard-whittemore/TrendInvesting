@@ -2,6 +2,7 @@ package report_test
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -239,6 +240,80 @@ func TestOnlyAReportTheEngineReadsAcknowledgesAnOrder(t *testing.T) {
 	})
 	if got.State == report.LifecycleAcknowledged {
 		t.Errorf("a fill larger than the order, which the engine refuses, acknowledged it: %+v", got)
+	}
+}
+
+// TestEveryReportTheEngineRefusesIsUnread: a venue report the engine would
+// refuse surfaces for its own alert, read by the rule the momentum run
+// applies (event.OrderReports): a lifecycle report at a schema version
+// neither target-weight run reads, a fill that takes the order past its
+// quantity in total, a fill id reused for another execution, and any report
+// on an order already terminal. The same execution delivered again is read
+// and changes nothing.
+func TestEveryReportTheEngineRefusesIsUnread(t *testing.T) {
+	order := releasedOrder("tw-1", event.TradingModePaper)
+	at := day(0).Add(time.Minute)
+	fill := func(id string, quantity int64) event.TargetWeightFillPayload {
+		return event.TargetWeightFillPayload{AccountID: "joint", ClientOrderID: "tw-1", FillID: id, InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: quantity, Price: 100, FilledAt: at}
+	}
+	lifecycle := event.LimitOrderLifecyclePayload{AccountID: order.AccountID, ClientOrderID: order.ClientOrderID, OrderID: "7", InstrumentID: order.InstrumentID,
+		Side: order.Side, Status: event.OrderLifecycleStatusCanceled, Quantity: order.Quantity, LimitPrice: order.LimitPrice, OccurredAt: at}
+	unreadAfter := func(strategy string, add func(*logRun)) []string {
+		t.Helper()
+		run := &logRun{t: t}
+		run.session(0)
+		run.release(0, order)
+		add(run)
+		_, unread, err := report.OrderLifecycles(run.out, strategy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, u := range unread {
+			ids = append(ids, u.InputID)
+		}
+		return ids
+	}
+	input := func(r *logRun, eventType string, version uint32, id string, p any) {
+		r.add(journal.KindInput, eventType, version, id, at, p)
+	}
+	for _, strategy := range []string{event.TargetWeightStrategyBoost, event.TargetWeightStrategyMomentum} {
+		if got := unreadAfter(strategy, func(r *logRun) {
+			input(r, event.OrderLifecycleEventType, event.OrderLifecycleSchemaVersion, "ack:v1", lifecycle)
+		}); !slices.Equal(got, []string{"ack:v1"}) {
+			t.Errorf("%s: a lifecycle report at a version neither run reads: unread %v, want it", strategy, got)
+		}
+	}
+	for name, c := range map[string]struct {
+		add  func(*logRun)
+		want []string
+	}{
+		"fills past the order's quantity in total": {func(r *logRun) {
+			input(r, event.FillEventType, event.FillTargetWeightVersion, "fill:1", fill("f1", 5))
+			input(r, event.FillEventType, event.FillTargetWeightVersion, "fill:2", fill("f2", 5))
+		}, []string{"fill:2"}},
+		"a fill id reused for another execution": {func(r *logRun) {
+			input(r, event.FillEventType, event.FillTargetWeightVersion, "fill:1", fill("f1", 5))
+			input(r, event.FillEventType, event.FillTargetWeightVersion, "fill:again", fill("f1", 5))
+			input(r, event.FillEventType, event.FillTargetWeightVersion, "fill:reused", fill("f1", 1))
+		}, []string{"fill:reused"}},
+		"a report on an order already terminal": {func(r *logRun) {
+			input(r, event.FillEventType, event.FillTargetWeightVersion, "fill:all", fill("f1", 9))
+			input(r, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:late", lifecycle)
+			input(r, event.FillEventType, event.FillTargetWeightVersion, "fill:late", fill("f2", 1))
+		}, []string{"ack:late", "fill:late"}},
+	} {
+		if got := unreadAfter(event.TargetWeightStrategyMomentum, c.add); !slices.Equal(got, c.want) {
+			t.Errorf("momentum, %s: unread %v, want %v", name, got, c.want)
+		}
+	}
+	// A Boost run tracks no terminal state: it reads every lifecycle report
+	// that describes the order, however many.
+	if got := unreadAfter(event.TargetWeightStrategyBoost, func(r *logRun) {
+		input(r, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:1", lifecycle)
+		input(r, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:2", lifecycle)
+	}); len(got) != 0 {
+		t.Errorf("boost, two lifecycle reports on a cancelled order: unread %v, want none", got)
 	}
 }
 

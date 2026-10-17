@@ -117,9 +117,9 @@ class RelayTests(unittest.TestCase):
         self.pending = PendingInput(str(Path(self.dir.name) / "pending.json"))
         self.sent = []
 
-    def relay(self, connect, broker=holding(), reconnects=1, send=None):
+    def relay(self, connect, broker=holding(), reconnects=1, send=None, mapper=to_request):
         return Relay(connect=connect, send=send or self.sent.append, pending=self.pending, broker_orders=broker,
-                     to_request=to_request, reconnects=reconnects)
+                     to_request=mapper, reconnects=reconnects)
 
     def test_a_reply_lost_to_a_crash_is_asked_for_again_and_its_order_sent_once(self):
         log = {}
@@ -179,6 +179,23 @@ class RelayTests(unittest.TestCase):
         self.assertEqual([r.client_order_id for r in self.sent], ["tw-1"], "the handed-over order is never sent twice")
         self.assertEqual(self.pending.load(), envelope(0), "its input stays on disk for the person to settle")
         self.assertEqual(connect.engines[0].asked, ["session:0", "session:0"], "nothing new is sent while it is unsettled")
+
+    def test_an_order_the_mapper_cannot_shape_leaves_no_mark_and_is_sent_after_a_restart(self):
+        # Nothing reaches the sender when the request cannot be built, so the
+        # order provably never left the process and a restart sends it.
+        log = {}
+        decisions = {"session:0": [released("tw-1")]}
+
+        def unshapeable(order):
+            raise ValueError("cannot shape {}".format(order["client_order_id"]))
+
+        with self.assertRaises(ValueError):
+            self.relay(Restarts(log, decisions), mapper=unshapeable).exchange(envelope(0))
+        self.assertEqual(self.pending.handovers(), {}, "no hand-over is recorded for a request never built")
+
+        self.relay(Restarts(log, decisions)).exchange(envelope(1))
+        self.assertEqual([r.client_order_id for r in self.sent], ["tw-1"])
+        self.assertIsNone(self.pending.load())
 
     def test_a_changed_retry_under_a_pending_id_is_refused_and_the_original_settled(self):
         log = {}

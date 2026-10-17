@@ -16,9 +16,10 @@ reply to its last, which is what lets the log show the adapter has an order
 
 Each released order marked send is handed to the sender once, under its
 client order ID (IBKR's orderRef). Write-ahead (plan.md section 5, "No order
-sent twice"): before an order is handed over, the relay records on disk that
-it is about to send that client order ID, and once the sender returns, that
-it sent it. A recorded order is never handed over again. One recorded as
+sent twice"): once an order's request is built and just before it is handed
+over, the relay records on disk that it is about to send that client order
+ID, and once the sender returns, that it sent it; a request that cannot be
+built is never marked, since it never left the process. A recorded order is never handed over again. One recorded as
 about to be sent when the adapter stopped may or may not have reached the
 broker, so it is matched against IBKR's open orders and executions (ADR 0025
 point 5): if either carries its tag the broker has it; if neither does, it
@@ -137,8 +138,9 @@ class Relay:
     envelope or raises EngineUnavailable. send takes an OrderRequest.
     broker_orders returns IBKR's open orders and executions
     (orders.BrokerOrders, as orders.collect_broker_orders builds it); an
-    order either carries the tag of is one the broker has. to_request maps a released order's payload to an
-    OrderRequest. reconnects bounds how often one exchange reconnects and
+    open order or execution in either list carrying a released order's client
+    order ID means the broker already has that order. to_request maps a
+    released order's payload to an OrderRequest. reconnects bounds how often one exchange reconnects and
     asks again before EngineUnavailable reaches the caller.
     """
 
@@ -180,8 +182,11 @@ class Relay:
                 continue
             if marks.get(cid) == HANDING_OVER:
                 raise HandoverUnconfirmed(cid)
+            # Built before the mark: a request that cannot be built never
+            # reaches the sender, so it leaves no mark to stop a restart.
+            request = self._to_request(order)
             self._pending.mark(cid, HANDING_OVER)
-            self._send(self._to_request(order))
+            self._send(request)
             self._pending.mark(cid, SENT)
             self._sent.add(cid)
         self._pending.clear()

@@ -1,6 +1,7 @@
 package report
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -61,19 +62,25 @@ type Order struct {
 //
 // The log commits an input the engine refused as well as one it read, with
 // no mark of which (journal.Recorder.Apply), so a venue's report is read as
-// the engine reads it, and only one the engine reads acknowledges an order:
-// a lifecycle report that describes the order as released
-// (event.LimitOrderLifecyclePayload's Describes), or, in a momentum run, the
-// one run that reads fills, a fill of no more than the order's quantity on
-// its account, instrument and side. A report that does not validate, or
-// does not describe the released order it names, is returned as unread for
-// its own alert rather than refusing the log, since the log is append-only
-// and would be refused on every later reading. A report naming no released
-// order changes nothing: explaining it is reconciliation's (ADR 0019).
+// the engine reads it, and only one the engine reads acknowledges an order.
+// A Boost run reads a lifecycle report (version 2) that describes the order
+// as released (event.LimitOrderLifecyclePayload's Describes). A momentum
+// run, the one run that reads fills, reads lifecycle reports and fills
+// (version 5) by event.OrderReports, the rule the engine applies: one that
+// does not describe the order, takes it past its quantity in total, reuses
+// a fill id for another execution, or arrives once the order is terminal is
+// refused. Every report the engine refuses that names a released order,
+// including one at a schema version the run does not read or one that does
+// not validate, is returned as unread for its own alert rather than
+// refusing the log, since the log is append-only and would be refused on
+// every later reading. Two kinds of report change nothing and raise no
+// alert: one naming no released order, which is reconciliation's to explain
+// (ADR 0019), and a fill in a Boost run, which does not read fills yet.
 func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []UnreadReport, error) {
 	var orders []*Order
 	var unread []UnreadReport
 	byID := map[string]*Order{}
+	reports := event.NewOrderReports()
 	var group string // the input whose group the current record belongs to
 	for _, entry := range entries {
 		e := entry.Envelope
@@ -84,7 +91,7 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 					o.State = LifecycleReleased
 				}
 			}
-			if u := acknowledge(e, strategyID, byID); u != nil {
+			if u := acknowledge(e, strategyID, byID, reports); u != nil {
 				unread = append(unread, *u)
 			}
 			continue
@@ -106,6 +113,7 @@ func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []Unr
 		}
 		orders = append(orders, o)
 		byID[p.ClientOrderID] = o
+		reports.Release(p)
 	}
 	out := make([]Order, len(orders))
 	for i, o := range orders {
@@ -142,48 +150,45 @@ func UnreadReportAlerts(account string, unread []UnreadReport) []Alert {
 
 // acknowledge marks the order a venue's report names as acknowledged, the
 // first report only, when the engine reads the report (see OrderLifecycles),
-// and returns the report as unread when the engine does not.
-func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order) *UnreadReport {
+// and returns the report as unread when the engine refuses it. reports
+// holds the run's releases for the momentum run's rule.
+func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order, reports *event.OrderReports) *UnreadReport {
 	unread := func(clientID, reason string) *UnreadReport {
 		return &UnreadReport{InputID: e.ID, Type: e.Type, ClientOrderID: clientID, Reason: reason, At: e.RecordedAt}
 	}
-	var o *Order
-	var status string
+	momentum := strategyID == event.TargetWeightStrategyMomentum
+	var client, status string
 	var at time.Time
+	var refused error
 	switch {
-	case e.Type == event.OrderLifecycleEventType && e.SchemaVersion == event.OrderLifecycleLimitVersion:
+	case e.Type == event.OrderLifecycleEventType:
 		var p event.LimitOrderLifecyclePayload
 		if err := read(e, lifecycleVersions, &p); err != nil {
 			return unread(p.ClientOrderID, err.Error())
 		}
-		var ok bool
-		if o, ok = byID[p.ClientOrderID]; !ok {
-			return nil
+		client, status, at = p.ClientOrderID, p.Status, p.OccurredAt
+		if momentum {
+			_, refused = reports.Lifecycle(p)
+		} else if o, ok := byID[client]; ok && !p.Describes(o.released()) {
+			refused = fmt.Errorf("it reports %s %s %d %s at %v, which does not describe order %s as released (%s %s %d %s at %.2f)",
+				p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, o.ClientOrderID, o.AccountID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice)
 		}
-		if !p.Describes(o.released()) {
-			return unread(p.ClientOrderID, fmt.Sprintf("it reports %s %s %d %s at %v, which does not describe order %s as released (%s %s %d %s at %.2f)",
-				p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, o.ClientOrderID, o.AccountID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice))
-		}
-		status, at = p.Status, p.OccurredAt
-	case e.Type == event.FillEventType && e.SchemaVersion == event.FillTargetWeightVersion:
-		if strategyID != event.TargetWeightStrategyMomentum {
-			return nil // a Boost run reads no fill
-		}
+	case e.Type == event.FillEventType && momentum:
 		var p event.TargetWeightFillPayload
 		if err := read(e, targetWeightFillVersions, &p); err != nil {
 			return unread(p.ClientOrderID, err.Error())
 		}
-		var ok bool
-		if o, ok = byID[p.ClientOrderID]; !ok {
-			return nil
-		}
-		if p.AccountID != o.AccountID || p.InstrumentID != o.InstrumentID || p.Side != o.Side || p.Quantity > o.Quantity {
-			return unread(p.ClientOrderID, fmt.Sprintf("it fills %s %s %d %s, which does not describe order %s as released (%s %s %d %s)",
-				p.AccountID, p.Side, p.Quantity, p.InstrumentID, o.ClientOrderID, o.AccountID, o.Side, o.Quantity, o.InstrumentID))
-		}
-		status, at = "fill", p.FilledAt
+		client, status, at = p.ClientOrderID, "fill", p.FilledAt
+		_, _, refused = reports.Fill(p)
 	default:
-		return nil
+		return nil // not a venue report, or a fill in a Boost run, which reads none yet
+	}
+	o, ok := byID[client]
+	switch {
+	case !ok || errors.Is(refused, event.ErrNotReleased):
+		return nil // reconciliation's to explain (ADR 0019)
+	case refused != nil:
+		return unread(client, refused.Error())
 	}
 	if o.State != LifecycleAcknowledged {
 		o.State, o.AcknowledgedAt, o.Acknowledgement = LifecycleAcknowledged, at, status

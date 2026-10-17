@@ -34,8 +34,10 @@ Re-delivery closes that gap:
   already, and IBKR shows no order with that order's tag (its client order
   ID, which IBKR calls `orderRef`), neither open nor already executed.
 - **The adapter writes down that it is about to send, before it sends.**
-  Just before it hands an order to IBKR it records on disk "about to send
-  this client order ID", and once IBKR has taken it, "sent". It never sends a
+  Once the order's request to IBKR is fully built, and just before it is
+  handed over, it records on disk "about to send this client order ID", and
+  once IBKR has taken it, "sent". An order whose request cannot be built is
+  never recorded, since it never left the adapter. It never sends a
   recorded order again. If the adapter stopped in between, it cannot know
   whether IBKR got the order, so after its restart it looks for the order in
   IBKR's open orders **and** its executions (an order that has already filled
@@ -94,6 +96,9 @@ and after a crash.
   - `test_a_handover_the_broker_does_not_show_stops_the_relay_rather_than_resend`:
     the adapter stops mid-send and IBKR shows nothing; the restarted adapter
     refuses to go on, every time, and the order is sent once only.
+  - `test_an_order_the_mapper_cannot_shape_leaves_no_mark_and_is_sent_after_a_restart`:
+    an order whose broker request cannot be built never reached IBKR, so it
+    leaves no "about to send" record and is sent once after a restart.
   - `test_a_changed_retry_under_a_pending_id_is_refused_and_the_original_settled`:
     a changed copy under the waiting input's ID is refused; the original's
     reply is asked for and its order sent once.
@@ -102,7 +107,7 @@ and after a crash.
 
 | What you see | What it means | What to do |
 | --- | --- | --- |
-| The adapter stops with "was being handed to the broker when the adapter stopped" | It stopped while sending that order, and IBKR shows it neither open nor executed. It may have been taken and cancelled, or never arrived. The adapter will not guess: it sends nothing more. | Look in IBKR (including cancelled orders and today's trades) for an order whose `orderRef` is the client order ID named. Do not place it by hand until you know. The waiting input and its "about to send" record stay on disk (the adapter's pending file and the same name ending `.handover`); deciding what to do with them is yours. |
+| The adapter stops with "was being handed to the broker when the adapter stopped" | It stopped while sending that order, and IBKR shows it neither open nor executed. It may have been taken and cancelled, or never arrived. The adapter will not guess: it sends nothing more. | Look in IBKR (including cancelled orders and today's trades) for an order whose `orderRef` is the client order ID named. Do not place it by hand until you know. The waiting input stays in the adapter's pending file, and the "about to send" record in the file of the same name ending `.handover`: a small JSON object from client order ID to `"handing-over"` or `"sent"`. Once IBKR has told you what happened, stop the adapter and edit that one entry in the `.handover` file: if IBKR shows the order at all (working, filled or cancelled), change its value to `"sent"`, so it is never sent again; if IBKR has no trace of it and you want it sent, delete its entry. Leave the pending file alone, and do not edit the engine's log: the log is the record of what the engine committed, and the adapter asks for the waiting input's committed reply again on restart. Then start the adapter. |
 | The adapter reports "retried with other content" | The adapter was asked to resend its waiting input with something changed. The original was finished and its orders sent once; the changed copy was refused. | A fault in the adapter. Find why the input changed before starting again. |
 | The adapter reports "committed with different content" | It sent a different input under an ID it had already used. That is a fault in the adapter, not the market. | Stop the adapter. Nothing was recorded for the refused input. Find why the input changed before starting again. |
 | An "order not acknowledged" alert (see [order lifecycle](order-lifecycle.md)) | The order is on disk and IBKR has not reported on it. | Follow the alert's text. Look in IBKR for an order whose `orderRef` is the alert's client order ID **before** anything is placed by hand. |

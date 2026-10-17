@@ -1,8 +1,8 @@
 // Command reporter reads one account's journal and delivers what a person
 // needs to know: alerts for every refusal, Degraded or Halted state, withheld
-// decision, missing input, order not acknowledged in time, lost heartbeat and
-// journal it cannot read, each
-// once per incident, and optionally the daily summary
+// decision, missing input, order not acknowledged in time, venue report the
+// engine did not read, lost heartbeat and journal it cannot read, each once
+// per incident, and optionally the daily summary
 // (docs/live-trading/plan.md section 3; ADR 0019, "Alerting"). It only reads
 // the journal. The one file it writes is its own state file of delivered
 // incident keys. Every rule lives in internal/report; this is composition.
@@ -144,9 +144,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 }
 
 // readJournal reads, verifies and decodes the journal, returning its
-// envelopes, its account and its alerts, including every order to be sent
-// not acknowledged within ackWithin of its commit by now, or the reason it
-// was refused.
+// envelopes, its account and its alerts, including every venue report the
+// engine did not read and every order to be sent not acknowledged within
+// ackWithin of its commit by now, or the reason it was refused.
 func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[string]bool) ([]event.Envelope, string, []report.Alert, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
