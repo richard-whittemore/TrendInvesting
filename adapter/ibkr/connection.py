@@ -98,9 +98,8 @@ class Connection:
         self._next_req_id = 1
         self.time_requests = 0
         self.time_answers = 0
-        # Set by a restoration that found server-time requests unanswered:
-        # how many, and when it happened. See _write_off_lost_time_answers.
-        self._time_unanswered_at_restore = 0
+        # Monotonic time of a restoration that found server-time requests
+        # unanswered; see _settle_time_answers.
         self._time_restored_at = None
 
     # -- state reporting -------------------------------------------------
@@ -132,33 +131,38 @@ class Connection:
         IBKR answers reqCurrentTime in request order, so the answer to ticket n
         is the n-th current_time callback since connect: once time_answers
         reaches n, that callback is this request's answer, not an earlier one.
+        Raises NotConnected if the link had to be dropped because that count
+        could no longer be trusted (see _settle_time_answers).
         """
-        self._write_off_lost_time_answers()
+        if not self._settle_time_answers():
+            raise NotConnected("server-time answers could not be matched to requests")
         self.time_requests += 1
         self.api.req_current_time()
         return self.time_requests
 
-    def _write_off_lost_time_answers(self):
-        """Count answers lost in an outage as given, once they are too late to be expected.
+    def _settle_time_answers(self):
+        """Drop the link once an outage leaves server-time answers unmatchable; False if dropped.
 
-        An outage (1100/2110) can swallow a reqCurrentTime answer, which would
-        leave every later ticket one answer short for good. Within
-        request_timeout of the restoration an old answer may still arrive,
-        and counting stays exact, so no old answer is read as fresh. After
-        that, the answers still outstanding, up to the number unanswered at
-        the restoration, are presumed lost and counted as given. Answers
-        alone cannot show whether an old one arrived (a fresh answer fills
-        the lost one's place in the count), so this waits for the deadline
-        rather than for the count.
+        An outage (1100/2110) can swallow a reqCurrentTime answer, or only
+        delay it, and IBKR's answers carry no request ID. Within
+        request_timeout of the restoration an old answer may still arrive
+        and the count stays exact, so a read fails closed rather than taking
+        an old answer as fresh. Once that deadline has passed with any
+        request still unanswered, a lost answer and a late one can no longer
+        be told apart (a fresh answer fills the lost one's place in the
+        count), so the link is dropped: the reconnected session has a new
+        Inbox, which no old answer can reach, and counts from zero.
         """
         if self._time_restored_at is None:
-            return
+            return True
         if self._monotonic() - self._time_restored_at < self.config.request_timeout:
-            return
-        outstanding = self.time_requests - self.time_answers
-        self.time_answers += min(self._time_unanswered_at_restore, outstanding)
-        self._time_unanswered_at_restore = 0
+            return True
         self._time_restored_at = None
+        if self.time_answers >= self.time_requests:
+            return True
+        self._abandon()
+        self._report("disconnected", "time-answers-unmatched")
+        return False
 
     def new_req_id(self):
         req_id = self._next_req_id
@@ -179,7 +183,6 @@ class Connection:
         self._lost_at = None
         self.time_requests = 0
         self.time_answers = 0
-        self._time_unanswered_at_restore = 0
         self._time_restored_at = None
         # One deadline covers the socket connect, IBKR's handshake and the
         # wait for nextValidId: EClient.connect is synchronous, so a deadline
@@ -324,7 +327,6 @@ class Connection:
             self._probe_sent_at = None
             self._last_probe_at = None
             if self.time_answers < self.time_requests:
-                self._time_unanswered_at_restore = self.time_requests - self.time_answers
                 self._time_restored_at = self._monotonic()
             self._report("connected", "restored", ibkr_code=code,
                          data_lost=code == CODE_RESTORED_DATA_LOST)
@@ -341,7 +343,7 @@ class Connection:
         Call it regularly from the adapter's loop. The answer is applied by
         pump(), which records last_server_time.
         """
-        if not self.connected:
+        if not self.connected or not self._settle_time_answers():
             return
         cfg = self.config
         now = self._monotonic()

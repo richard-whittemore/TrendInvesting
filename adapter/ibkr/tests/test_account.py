@@ -114,6 +114,10 @@ class SnapshotTests(unittest.TestCase):
             read_snapshot(h.conn)
         self.assertIn("server-time", caught.exception.missing)
         h.clock.now += 1.0  # well past request_timeout
+        # The answers can no longer be matched to their requests, so the
+        # adapter's loop drops the link and reconnects, and reads resume.
+        h.conn.maintain()
+        self.assertEqual(len(h.fake.called("connect")), 2)
         snap = read_snapshot(h.conn)
         self.assertEqual(snap.server_time_completed, snap.server_time_requested + 1)
 
@@ -128,6 +132,31 @@ class SnapshotTests(unittest.TestCase):
         h.conn.pump(0.001)
         h.fake.callbacks.current_time(SERVER_TIME - 100)  # the old request's answer, late
         h.fake.answer_current_time = True
+        snap = read_snapshot(h.conn)
+        self.assertEqual(snap.server_time_requested, SERVER_TIME)
+        self.assertEqual(snap.server_time_completed, SERVER_TIME + 1)
+
+    def test_an_old_answer_arriving_after_the_restore_deadline_is_not_read_as_fresh(self):
+        # Past request_timeout an unanswered request's real answer can still
+        # arrive, and IBKR's answers carry no request ID, so the adapter can
+        # no longer tell which answer belongs to which request: it drops the
+        # link, and the reconnected session starts its count afresh.
+        h = connected(request_timeout=0.05)
+        h.fake.summary = full_summary()
+        h.fake.answer_current_time = False
+        h.conn.request_server_time()
+        h.fake.callbacks.error(-1, 1100, "lost")
+        h.fake.callbacks.error(-1, 1102, "Connectivity restored - data maintained.")
+        h.conn.pump(0.001)
+        h.conn.pump(0.001)
+        h.clock.now += 1.0  # well past request_timeout
+        h.fake.callbacks.current_time(SERVER_TIME - 100)  # the old request's answer, very late
+        h.fake.answer_current_time = True
+        with self.assertRaises(SnapshotIncomplete) as caught:
+            read_snapshot(h.conn)
+        self.assertIn("connection", caught.exception.missing)
+        self.assertIn("time-answers-unmatched", [s.reason for s in h.statuses])
+        h.conn.maintain()
         snap = read_snapshot(h.conn)
         self.assertEqual(snap.server_time_requested, SERVER_TIME)
         self.assertEqual(snap.server_time_completed, SERVER_TIME + 1)

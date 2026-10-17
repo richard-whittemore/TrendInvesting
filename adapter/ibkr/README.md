@@ -36,10 +36,12 @@ an order (AGENTS.md rule 5).
   (`reqCurrentTime`), one before and one after, plus the adapter's own receipt
   time. Executions keep IBKR's time string verbatim, and `occurred_at` is its
   UTC reading. A time with no zone is refused. IBKR answers `reqCurrentTime`
-  in order, so each request's answer is found by counting. An answer lost in
-  an outage is counted as given once `request_timeout` has passed since the
-  restoration; until then a late old answer may still arrive, and a read fails
-  closed rather than take it as fresh.
+  in order, so each request's answer is found by counting. Within
+  `request_timeout` of a restoration that found requests unanswered, a late
+  old answer may still arrive, and a read fails closed rather than take it as
+  fresh. If any request is still unanswered after that, a lost answer and a
+  late one cannot be told apart, so the link is dropped and the adapter's loop
+  reconnects; the new session counts from zero and no old answer reaches it.
 - **Order IDs come only from IBKR.** Records carry IBKR's `clientId`,
   `orderId` and `permId` as reported. IBKR's `orderId` is unique only within
   one client ID, so an order is identified by (`clientId`, `orderId`), or by
@@ -63,7 +65,9 @@ an order (AGENTS.md rule 5).
   Rows, orders and executions for any other account are ignored, and so is a
   commission report whose execution was not this account's. An order status
   carries no account, so it is held until an open order (or IBKR's rejection)
-  shows the order is this account's, and discarded if it is another's.
+  shows the order is this account's, and discarded if it is another's. A
+  held status whose record failed stays ahead of every later status for that
+  order, so history is never recorded out of order.
 - **No credential.** The adapter never handles the IBKR password, which IBC
   holds. Logs name host, port and client ID only.
 

@@ -220,8 +220,14 @@ class OrderTracker:
         key = order_key(client_id, order_id, perm_id)
         if key in self._foreign:
             return
-        if key not in self._client_ids and key not in self._rejections:
+        owner_known = key in self._client_ids or key in self._rejections
+        if key in self._held or not owner_known:
+            # Statuses still held (one whose record failed, for instance) are
+            # older than this one, so it queues behind them: a held Submitted
+            # must never be recorded after a later Cancelled.
             self._held.setdefault(key, deque()).append(args)
+            if owner_known:
+                self._release(key)
             return
         self._status(key, *args)
 

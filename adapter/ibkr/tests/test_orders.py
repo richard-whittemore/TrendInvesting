@@ -253,6 +253,28 @@ class OrderStatusTests(unittest.TestCase):
         t.drain()
         self.assertEqual(len([r for r in reports if isinstance(r, OrderStatusReport)]), 1)
 
+    def test_a_held_status_the_sink_failed_to_record_stays_ahead_of_later_ones(self):
+        # The owner is known once the openOrder arrives, but a held status
+        # that failed to record is still older than anything after it.
+        failures = [RuntimeError("synthetic journal write failure")]
+        reports = []
+
+        def sink(record):
+            if isinstance(record, OrderStatusReport) and failures:
+                raise failures.pop()
+            reports.append(record)
+        t = Tracked(sink)
+        status(t.cb, 7, "Submitted", "0", "10")
+        t.cb.open_order(7, contract(), order(), STATE)
+        with self.assertRaises(RuntimeError):
+            t.drain()
+        status(t.cb, 7, "Submitted", "0", "10")
+        status(t.cb, 7, "Cancelled", "0", "10")
+        t.cb.open_order(7, contract(), order(), STATE)
+        t.drain()
+        self.assertEqual([r.lifecycle for r in reports if isinstance(r, OrderStatusReport)],
+                         ["submitted", "canceled"])
+
     def test_an_execution_the_sink_failed_to_record_is_recorded_on_redelivery(self):
         failures = [RuntimeError("synthetic journal write failure")]
         reports = []

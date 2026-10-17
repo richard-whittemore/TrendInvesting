@@ -13,6 +13,7 @@ adapter's own receipt time.
 """
 from collections import namedtuple
 
+from connection import NotConnected
 from values import to_decimal
 
 SUMMARY_GROUP = "All"
@@ -114,7 +115,10 @@ def read_snapshot(conn):
 
 
 def _server_time(conn, timeout):
-    ticket = conn.request_server_time()
+    try:
+        ticket = conn.request_server_time()
+    except NotConnected:
+        raise SnapshotIncomplete(["connection"]) from None
     for event in conn.events(timeout):
         if not conn.connected:
             break
