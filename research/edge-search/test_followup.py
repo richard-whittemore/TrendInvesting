@@ -1870,6 +1870,32 @@ class FreshSelectionTest(unittest.TestCase):
             self.assertEqual(c, _class_constants(*build_variants.VARIANTS[base]), name)
 
 
+class CommissionDrag30kTest(unittest.TestCase):
+    """The $30k commission-drag variants: each is the
+    combination run it is named for with only the starting cash changed.
+    No fee switch: the templates set the Interactive Brokers brokerage
+    model, whose GetFeeModel returns InteractiveBrokersFeeModel."""
+
+    PAIRS = {"FU_COMBO_30K": "FU_COMBO", "OOS_FU_COMBO_30K": "OOS_FU_COMBO",
+             "F_COMBO_30K": "F_COMBO", "OOS_F_COMBO_30K": "OOS_F_COMBO"}
+
+    def test_each_run_differs_from_its_base_only_in_cash(self):
+        for name, base in self.PAIRS.items():
+            template, params = build_variants.VARIANTS[name]
+            base_template, _ = build_variants.VARIANTS[base]
+            self.assertEqual(template, base_template, name)
+            c = _class_constants(template, params)
+            self.assertEqual(c.pop("CASH"), 30_000, name)
+            base_c = _class_constants(*build_variants.VARIANTS[base])
+            self.assertEqual(base_c.pop("CASH"), 1_000_000, name)
+            self.assertEqual(c, base_c, name)
+
+    def test_the_templates_use_the_interactive_brokers_model(self):
+        for template in ("momentum/defensive_v2.py", "momentum/fresh_universe.py"):
+            with open(os.path.join(HERE, template)) as f:
+                self.assertIn("SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage", f.read())
+
+
 class BoostGoldenLogTest(unittest.TestCase):
     """boost/golden_log.py: template.py logging each day of chosen months,
     and its first decision, for the Go module's golden cases (ADR 0026)."""
