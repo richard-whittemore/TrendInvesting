@@ -951,6 +951,14 @@ func TestAnUnreadableLogThatMayBeTheLatestRunIsNeverQuarantined(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "quarantine") || !strings.Contains(err.Error(), "could not be read") {
 		t.Fatalf("run() = %v, want a refusal saying the log could not be read, with no quarantine step", err)
 	}
+	for _, want := range []string{"never set aside while the disk may yet be fixed", "give-up steps"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("run() = %v, want the refusal to say %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "never setting it aside") {
+		t.Fatalf("run() = %v, want no claim the log is never set aside", err)
+	}
 }
 
 // TestAnOldLogWithAPermissionFaultIsNeverQuarantined: a log the engine is

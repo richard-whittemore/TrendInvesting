@@ -140,7 +140,8 @@ The engine reads its settings from
    read to find the latest run, so a log the engine cannot recover (ADR
    0027 §5) stops every start until it is set aside: see "An unrecoverable
    log"; a log it cannot open or read stops every start until the fault is
-   fixed or, if it is a superseded log, it is set aside: see "A log that
+   fixed, it is set aside if it is a superseded log, or the runbook's
+   give-up steps are followed if the disk is written off: see "A log that
    cannot be read".
 
 ## A log that cannot be read
@@ -167,7 +168,18 @@ whether it is the crashed run. The message says which case it is.
       evidence, as in "An unrecoverable log" step 2 (a move needs no read).
    3. Start a fresh run from a reconciled baseline (ADR 0019's recovery
       procedure), with an approval naming the latest run the engine can
-      still read.
+      still read. The engine can check the approval only against that older
+      log, which does not hold what the lost log recorded, so the approval
+      is your attestation of the following, and you reconcile each at the
+      broker before the start:
+      - Positions and cash agree with the book at the last record of the
+        journal you can still read; any difference is explained, not
+        assumed.
+      - Open orders are cancelled at the broker or recorded.
+      - `incident_in_force` carries the incident state from the last
+        readable log, unless you know the incident ended while the lost log
+        was written; never loosen it on a guess.
+      - `boost.latched` carries the latch from the last readable log.
 
    Any decision recorded only in the lost log is gone. The broker
    reconciliation is the baseline, not that log.

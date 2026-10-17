@@ -97,8 +97,9 @@ const durableLogSuffix = ".log"
 // disk fault, refuses every start too. Three cases are told apart
 // (readFault): a permission fault, where the fix is the file's owner or mode;
 // a disk fault on a log that is or may be the latest run, where the fix is
-// the disk and the log is never set aside, for it may be the intact crashed
-// run; and a disk fault on a superseded log, which is set aside only after
+// the disk and the log is never set aside while the disk may yet be fixed,
+// for it may be the intact crashed run, and a disk written off is given up by
+// the runbook's give-up steps; and a disk fault on a superseded log, which is set aside only after
 // the runbook's journal check shows a later run superseded it.
 //
 // freshRunApproval applies these rules to one invocation and returns the
@@ -552,8 +553,9 @@ const quarantineFolder = "quarantine"
 // naming the operator's step when one cannot be recovered. Every log is read
 // to find the latest run, and none is skipped: one whose content cannot be
 // recovered (ADR 0027 §5) stops every start until it is set aside, and one
-// that cannot be opened or read stops every start until the fault is fixed
-// or, when it is not the latest run, until it is set aside (readFault).
+// that cannot be opened or read stops every start until the fault is fixed,
+// until it is set aside when it is not the latest run, or until the disk is
+// written off and the runbook's give-up steps are followed (readFault).
 func readLogs(opts options) ([]string, []journal.Recovery, error) {
 	dir, _ := splitAsSpelled(opts.logPath)
 	logs, err := logsByAge(dir)
@@ -584,12 +586,14 @@ func readLogs(opts options) ([]string, []journal.Recovery, error) {
 
 // readFault is the refusal for logs[i], which could not be opened or read:
 // a fault in reading it, not damage to what it holds, so it may be an intact
-// crashed run. It is set aside only when it is not the latest run, which
-// holds when a later log holding a committed record was modified after it;
-// even then that later log may be a resume of it abandoned partway, which
+// crashed run. It is set aside as a superseded log only when it is not the
+// latest run, which holds when a later log holding a committed record was
+// modified after it; even then that later log may be a resume of it abandoned partway, which
 // only the operator can rule out, so the step is theirs to take after the
-// check the runbook gives. A permission fault is never set aside: its owner
-// or mode is fixed.
+// check the runbook gives. A log that is or may be the latest run is never set
+// aside while the disk may yet be fixed; once the disk is written off the
+// owner follows the runbook's give-up steps. A permission fault is never set
+// aside: its owner or mode is fixed.
 func readFault(err error, prefix string, logs []loggedFile, recovered []journal.Recovery, failed []error, i int) error {
 	name := logs[i].name
 	if errors.Is(err, fs.ErrPermission) {
@@ -603,7 +607,7 @@ func readFault(err error, prefix string, logs []loggedFile, recovered []journal.
 		}
 	}
 	if newer == "" {
-		return fmt.Errorf("%w; %s could not be read, a fault in reading it, such as the disk, not damage to what it holds, and no log holding a record was modified after it, so it is or may be the latest run, an intact crashed run: fix the fault and start again, leaving the log where it is, never setting it aside (docs/runbooks/durable-log.md, \"A log that cannot be read\")",
+		return fmt.Errorf("%w; %s could not be read, a fault in reading it, such as the disk, not damage to what it holds, and no log holding a record was modified after it, so it is or may be the latest run, an intact crashed run: fix the fault and start again, leaving the log where it is: never set aside while the disk may yet be fixed; if the disk is written off, follow the runbook's give-up steps (docs/runbooks/durable-log.md, \"A log that cannot be read\")",
 			err, name)
 	}
 	return fmt.Errorf("%w; %s could not be read, a fault in reading it, such as the disk, not damage to what it holds: fix the fault and start again; if it persists, %s, a log holding a record, was modified after it, so it is not the latest run unless %s is a resume of it abandoned partway: once the service journal shows a start after it was last written that finished its resume or recorded an approval, move %s, unchanged, into %s and start again, never editing or deleting it (ADR 0018; docs/runbooks/durable-log.md, \"A log that cannot be read\")",
