@@ -308,7 +308,7 @@ func TestAWithheldRebalancePlansNothing(t *testing.T) {
 // (line 45, one decision per account at each decision time) and point 5
 // (lines 246-248, missing bars fail closed): when the month's last session
 // never closes, the next close journals that decision withheld for
-// missing-bars, naming the session, and plans nothing (PR #358 review).
+// missing-bars, naming the session, and plans nothing.
 func TestAMissedDecisionSessionIsWithheldAtTheNextClose(t *testing.T) {
 	r := simulateMomentum(t, momentumOptions{neverClosed: map[string]bool{"2025-01-31": true}})
 	es := ofType(r.decisions, event.TargetsDecidedEventType)
@@ -336,7 +336,7 @@ func TestAMissedDecisionSessionIsWithheldAtTheNextClose(t *testing.T) {
 // cash realised by the sells"), and point 3 (line 167: "buy cost <= cash
 // available under D5"; an IRA never borrows): cash withdrawn while
 // February's sells are working, shown by a newer snapshot, comes out of the
-// buy budget before the buys are scaled and gated (PR #358 review).
+// buy budget before the buys are scaled and gated.
 func TestBuysAreBudgetedFromNoMoreCashThanALaterSnapshotExplains(t *testing.T) {
 	for _, rule := range []string{event.CashRuleSettled, event.CashRuleTotal} {
 		mutate := func(c *event.TargetWeightConfigurationPayload) { c.Execution.CashRule = rule }

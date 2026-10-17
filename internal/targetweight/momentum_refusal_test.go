@@ -42,7 +42,7 @@ func TestMomentumCalendarRules(t *testing.T) {
 	mustRefuse(t, h, calendarInput(t, s, "c5"), "invalid")
 	// A calendar that shares no session with the one held would leave a hole
 	// between them, and a date in that hole would read as no session at all:
-	// it is refused, not merged (PR #358 review).
+	// it is refused, not merged.
 	mustRefuse(t, h, calendarInput(t, s, "c6", "2025-01-09", "2025-01-10"), "does not overlap")
 
 	closeSession := func(session string, ids ...string) event.Envelope {
@@ -155,7 +155,7 @@ func TestMomentumVenueReportRules(t *testing.T) {
 	refuse(event.FillEventType, event.FillTargetWeightVersion, "f1-reused", reused, "reuses fill id")
 	// A fill id names one execution across the account, not per order: the
 	// same id on the other released order is refused, so one execution never
-	// moves two orders' fills and budget (PR #358 review).
+	// moves two orders' fills and budget.
 	other := buys[1]
 	elsewhere := event.TargetWeightFillPayload{
 		AccountID: iraAccount, ClientOrderID: other.ClientOrderID, FillID: "f1", InstrumentID: other.InstrumentID, Side: other.Side,

@@ -276,7 +276,7 @@ func TestBudgetCarriedThroughReleasesAndPartialFills(t *testing.T) {
 // TestBudgetLosesCashANewerSnapshotCannotExplain encodes ADR 0026 point 2,
 // "Budget" (line 104: buys are funded from cash on hand plus cash realised by
 // the sells): cash the account no longer has comes out of what the buys may
-// commit, alongside the proceeds and commitments (PR #358 review).
+// commit, alongside the proceeds and commitments.
 func TestBudgetLosesCashANewerSnapshotCannotExplain(t *testing.T) {
 	b := orderplan.NewBudget(1000)
 	b.AddProceeds(500)

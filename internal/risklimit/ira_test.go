@@ -150,7 +150,7 @@ func TestASellBeyondTheHoldingNetOfWorkingSellsIsRefused(t *testing.T) {
 // holding minus every working or pending sell") for two sells in one plan: 100
 // held, 40 then 50 sold leaves 10 that may still be sold, so both go, and an
 // 11th share would not. A released sell counts once against the holding, not
-// once as a lower holding and again as a working sell (PR #358 review).
+// once as a lower holding and again as a working sell.
 func TestEachReleasedSellReducesWhatMaySellOnlyOnce(t *testing.T) {
 	book := func() risklimit.Book {
 		return risklimit.Book{Holdings: map[string]int64{"AAA": 100}, Prices: map[string]float64{"AAA": 1}}
