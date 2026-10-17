@@ -331,5 +331,6 @@ func TestTargetWeightFillValidate(t *testing.T) {
 	expectInvalid(t, "price", v, func(p *P) { p.Price = 0 }, "price")
 	expectInvalid(t, "commission", v, func(p *P) { p.Commission = -0.01 }, "commission")
 	expectInvalid(t, "time", v, func(p *P) { p.FilledAt = time.Time{} }, "filled at")
+	expectInvalid(t, "sub-second time", v, func(p *P) { p.FilledAt = p.FilledAt.Add(500 * time.Millisecond) }, "whole second")
 	expectInvalid(t, "quantity", v, func(p *P) { p.Quantity = 0 }, "quantity")
 }

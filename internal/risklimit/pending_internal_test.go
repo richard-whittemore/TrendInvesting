@@ -59,10 +59,10 @@ func TestNoSnapshotIsCreditedWithMoreThanIsFilledNow(t *testing.T) {
 			}
 		}
 		lastBroker := base
-		probes := []time.Time{base, endOfTime}
+		probes := []view{{at: base}, now, g.account, g.brokerView}
 		for step := 1; step <= 16; step++ {
 			when := base.Add(time.Duration(rng.Intn(8)) * time.Second)
-			probes = append(probes, when)
+			probes = append(probes, view{at: when})
 			c := clients[rng.Intn(len(clients))]
 			switch rng.Intn(4) {
 			case 0:
@@ -88,7 +88,7 @@ func TestNoSnapshotIsCreditedWithMoreThanIsFilledNow(t *testing.T) {
 				// may be recorded out of order against them.
 				if !when.After(lastBroker) {
 					when = lastBroker.Add(time.Second)
-					probes = append(probes, when)
+					probes = append(probes, view{at: when})
 				}
 				lastBroker = when
 				s := snapshot(when, 40+rng.Int63n(61))
@@ -101,13 +101,15 @@ func TestNoSnapshotIsCreditedWithMoreThanIsFilledNow(t *testing.T) {
 				if _, err := g.ObserveBroker(fmt.Sprintf("broker:%d", step), s); err != nil {
 					t.Fatal(err)
 				}
+				probes = append(probes, g.brokerView)
 			default:
 				g.ObserveAccount(event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: when, NetLiquidation: 10000, Currency: "USD", Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: 40 + rng.Int63n(61)}}})
+				probes = append(probes, g.account)
 			}
 			filled, _ := g.shares("SPY")
 			for _, p := range probes {
 				if by := g.filledBy("SPY", p); by > filled {
-					t.Fatalf("seed %d step %d: a snapshot at %s is credited with %d filled; %d are filled now", seed, step, p.Format(time.TimeOnly), by, filled)
+					t.Fatalf("seed %d step %d: snapshot %d at %s is credited with %d filled; %d are filled now", seed, step, p.by, p.at.Format(time.TimeOnly), by, filled)
 				}
 			}
 		}
@@ -127,8 +129,8 @@ func TestASnapshotCreditedBeyondTheFillsNowIsCreditedWithNone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	beyond := endOfTime.Add(time.Second)
-	g.sells["tw-a"] = &trackedSell{instrumentID: "SPY", released: 60, listed: []shown{{at: beyond, filled: 30}}}
+	beyond := view{at: endOfTime.Add(time.Second), by: 1}
+	g.sells["tw-a"] = &trackedSell{instrumentID: "SPY", released: 60, listed: []shown{{at: beyond.at, by: beyond.by, filled: 30}}}
 	g.sellOrder = append(g.sellOrder, "tw-a")
 	if filled, _ := g.shares("SPY"); g.filledBy("SPY", beyond) <= filled {
 		t.Fatalf("setup: the invariant holds")
@@ -166,8 +168,9 @@ type fact struct {
 // account snapshot cannot show (fail closed: never sized past the holding).
 // A simulated broker executes and cancels two sells of 30 against a holding
 // of 100, second by second, and takes account and broker snapshots of the
-// truth, at most one a second; IBKR stamps each fact in whole seconds, so
-// facts in one second keep only their true order. The facts are recorded in
+// truth, several a second when it so happens (one broker snapshot a second
+// at most, as the gate requires); IBKR stamps each fact in
+// whole seconds, so facts in one second keep only their true order. The facts are recorded in
 // random order, account and broker snapshots each in their own order. The
 // truth is the shares of each sell executed after the latest recorded
 // account snapshot, and every sell's shares still working. A sell whose
@@ -269,21 +272,23 @@ func TestPendingSellsIsNeverBelowWhatIsTrulyBeingSold(t *testing.T) {
 					if rng.Intn(2) == 0 {
 						stream = "broker"
 					}
-					taken := false
-					for _, f := range facts {
-						if f.stream != "" && f.asOf == sec {
-							taken = true
-						}
-					}
-					if taken {
-						continue
-					}
 					if stream == "account" {
 						p := accountAt(sec, held)
 						facts = append(facts, fact{seq: seq, stream: stream, shows: true, asOf: sec, account: true, record: func(g *Gate) error {
 							g.ObserveAccount(p)
 							return nil
 						}})
+						continue
+					}
+					// The gate refuses a broker snapshot that does not
+					// follow the last, so a second holds one at most.
+					taken := false
+					for _, f := range facts {
+						if f.stream == "broker" && f.asOf == sec {
+							taken = true
+						}
+					}
+					if taken {
 						continue
 					}
 					s := snapshot(sec, held)

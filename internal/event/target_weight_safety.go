@@ -121,7 +121,7 @@ type BrokerOrder struct {
 	RemainingQuantity int64  `json:"remaining_quantity"`
 }
 
-// BrokerSnapshotPayload is one IBKR account snapshot at AsOf.
+// BrokerSnapshotPayload is one IBKR account snapshot at AsOf, a whole second.
 type BrokerSnapshotPayload struct {
 	AccountID string    `json:"account_id"`
 	AsOf      time.Time `json:"as_of"`
@@ -189,7 +189,7 @@ func (p BrokerSnapshotPayload) Validate() error {
 	if p.AccountID == "" {
 		errs = append(errs, errors.New("account id is required"))
 	}
-	errs = append(errs, requiredTime("as of", p.AsOf)...)
+	errs = append(errs, wholeSecondTime("as of", p.AsOf)...)
 	for i, c := range p.Unreadable {
 		switch c {
 		case BrokerComponentExcessLiquidity, BrokerComponentNetLiquidation, BrokerComponentOpenOrders, BrokerComponentPositions:

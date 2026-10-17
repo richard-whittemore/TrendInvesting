@@ -87,6 +87,7 @@ func TestBrokerSnapshotValidate(t *testing.T) {
 	type P = event.BrokerSnapshotPayload
 	expectInvalid(t, "account", v, func(p *P) { p.AccountID = "" }, "account")
 	expectInvalid(t, "as of", v, func(p *P) { p.AsOf = time.Time{} }, "as of")
+	expectInvalid(t, "sub-second as of", v, func(p *P) { p.AsOf = p.AsOf.Add(time.Nanosecond) }, "whole second")
 	expectInvalid(t, "net liquidation", v, func(p *P) { p.NetLiquidation = math.Inf(-1) }, "net liquidation")
 	// IBKR can report a net liquidation or mark that is not positive: the
 	// snapshot records it as observed, and the gate refuses to size from it.

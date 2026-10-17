@@ -241,7 +241,7 @@ func (p TargetWeightFillPayload) Validate() error {
 	if !isFinite(p.Commission) || p.Commission < 0 {
 		errs = append(errs, errors.New("commission must be finite and not negative"))
 	}
-	errs = append(errs, requiredTime("filled at", p.FilledAt)...)
+	errs = append(errs, wholeSecondTime("filled at", p.FilledAt)...)
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid target-weight fill payload: %w", err)
 	}

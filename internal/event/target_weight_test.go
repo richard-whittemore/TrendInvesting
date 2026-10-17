@@ -223,6 +223,9 @@ func TestAccountPositionsSnapshotValidate(t *testing.T) {
 	type P = event.AccountPositionsSnapshotPayload
 	expectInvalid(t, "account", v, func(p *P) { p.AccountID = "" }, "account")
 	expectInvalid(t, "as of", v, func(p *P) { p.AsOf = time.Time{} }, "as of")
+	// The pending-sell rule orders snapshots and fills by the whole second
+	// IBKR stamps; a finer time would be read as an order it cannot show.
+	expectInvalid(t, "sub-second as of", v, func(p *P) { p.AsOf = p.AsOf.Add(time.Millisecond) }, "whole second")
 	expectInvalid(t, "net liquidation zero", v, func(p *P) { p.NetLiquidation = 0 }, "net liquidation")
 	expectInvalid(t, "net liquidation nan", v, func(p *P) { p.NetLiquidation = math.NaN() }, "net liquidation")
 	expectInvalid(t, "currency", v, func(p *P) { p.Currency = "" }, "currency")

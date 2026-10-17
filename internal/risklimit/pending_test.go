@@ -687,3 +687,56 @@ func TestAFallIsMeasuredPastASnapshotThatCannotReadTheOpenOrders(t *testing.T) {
 		t.Errorf("pending sells %d, want 30: the fall since the account snapshot", got)
 	}
 }
+
+// An account and a broker snapshot stamped in the same second are taken as
+// the same instant: neither can show the order of what happened within that
+// second, so a fill stamped in it, or a fall the other snapshot saw, is
+// credited to neither, while a broker listing stays its own snapshot's fact
+// (fail closed). The urgent sale of 54 of 147 fills in 16:00:02 between an
+// account snapshot that still holds 147 and a broker snapshot of the same
+// second that shows the fill, either as a fall to 93 or as a listing at 24
+// left with the holding at 117. Recorded in either order, the account
+// snapshot still counts all 54 as being sold, and the broker snapshot only
+// what it lists working.
+func TestSnapshotsInOneSecondShowNoFillOfThatSecondToEachOther(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		filled, held int64
+		listing      []event.BrokerOrder
+		wantWorking  int64
+		brokerFirst  bool
+	}{
+		{name: "a fall, account first", filled: 54, held: 93, wantWorking: 0},
+		{name: "a fall, broker first", filled: 54, held: 93, wantWorking: 0, brokerFirst: true},
+		{name: "a listing, account first", filled: 30, held: 117, listing: []event.BrokerOrder{listed("tw-urgent", event.BrokerOrderWorking, 24)}, wantWorking: 24},
+		{name: "a listing, broker first", filled: 30, held: 117, listing: []event.BrokerOrder{listed("tw-urgent", event.BrokerOrderWorking, 24)}, wantWorking: 24, brokerFirst: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			g := gate(t, limits(), event.TradingModeDryRun)
+			sale := urgentSale(t, g)
+			for i := range c.listing {
+				c.listing[i].ClientOrderID, c.listing[i].BrokerOrderID = sale.ClientOrderID, "ib-"+sale.ClientOrderID
+			}
+			second := at.Add(time.Hour + 2*time.Second)
+			sellFillAt(t, g, sale.ClientOrderID, "s1", c.filled, second)
+			a := account(147, 0)
+			a.AsOf = second
+			b := boosted(c.listing...)
+			b.AsOf = second
+			b.Positions[0].Quantity = c.held
+			if c.brokerFirst {
+				observe(t, g, "broker:2", b)
+				g.ObserveAccount(a)
+			} else {
+				g.ObserveAccount(a)
+				observe(t, g, "broker:2", b)
+			}
+			pendingIs(t, g, 54, "the account snapshot may have read 147 before the fill")
+			one := order(event.OrderSideSell, 1, 147)
+			one.Planned.ClientOrderID = "tw-one"
+			if got := workingSells(check(t, g, one)[0]); got != c.wantWorking {
+				t.Errorf("working sells %d against the broker snapshot, want %d", got, c.wantWorking)
+			}
+		})
+	}
+}
