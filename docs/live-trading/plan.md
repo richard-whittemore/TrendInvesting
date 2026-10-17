@@ -228,15 +228,22 @@ Lightsail VM (Ubuntu, $12/month, US East)
   - an alert when the automatic flatten is sent, and another when it fills
     or fails;
   - the flatten is sell-only and sized from IBKR's own figures, never the
-    journal's (which is what is in doubt): the smaller of what reaches 98%
-    of IBKR's net liquidation value, priced at IBKR's current mark from the
-    same account snapshot, and IBKR's reported holding minus every
-    working or pending sell IBKR reports, ours or unknown. So no
-    combination of fills can open a short;
-  - if IBKR's holding, account values or open orders cannot be read, or a
-    working sell is one the journal does not recognise, no order is sent
-    and the urgent alert asks the owner to act by hand. It is attempted
-    once per incident, never retried automatically;
+    journal's (which is what is in doubt), taken from the latest account
+    snapshot only. The quantity is the smallest of three bounds: what
+    reaches 98%, IBKR's reported holding minus every working or pending
+    sell (ours or unknown), and that holding minus those sells minus the
+    shares kept. So no combination of fills can open a short or take
+    exposure below 98% (ADR 0019 amendment 2026-10-17, readings 1 and 10);
+  - if the latest snapshot, holding, account values or open orders cannot
+    be read, or a working sell is one the journal does not recognise, no
+    order is sent, the attempt is used up and the urgent alert asks the
+    owner to act by hand. If the snapshot is readable but older than
+    `MaxSnapshotAge`, or its net liquidation value or mark is zero or
+    negative, no order is sent either (reasons `stale-broker-snapshot` and
+    `non-positive-broker-values`), but the attempt is not used up: while
+    the exit or the urgent alarm still stands, the next good snapshot
+    sends the sale (ADR 0019 reading 1, "The snapshot rule", and readings
+    2 and 4; ADR 0026 points 3 to 6 and its 2026-10-17 amendment);
   - this is the one exception to ADR 0019's "no order changes" while
     Halted, recorded as an amendment to ADR 0019 (2026-10-15), so the
     target-weight strategy ADR has a single order rule to follow;
