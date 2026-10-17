@@ -149,16 +149,21 @@ func mapsKeys[V any](m map[string]V) func(func(string) bool) {
 }
 
 type momentumOptions struct {
-	mutate      func(*event.TargetWeightConfigurationPayload)
-	partial     map[string]int64 // instrument -> shares of its sell filled before the rest is cancelled
-	noSnapshot  map[string]bool  // sessions without an account snapshot
-	noBar       map[string]string
-	noMark      map[string]string // session -> instrument without a mark
-	noUniverse  bool
-	silentVenue bool   // the venue never reports on a released order
-	decideFrom  string // first session decided, when not the first session
-	stopAfter   string // last session fed
-	beforeClose func(session string) []event.Envelope
+	mutate       func(*event.TargetWeightConfigurationPayload)
+	partial      map[string]int64 // instrument -> shares of its sell filled before the rest is cancelled
+	noSnapshot   map[string]bool  // sessions without an account snapshot
+	lateSnapshot map[string]bool  // sessions whose snapshot is taken an hour after the close
+	recorded     []event.Envelope // an earlier run's engine-state records, fed before the first session
+	noBar        map[string]string
+	noMark       map[string]string // session -> instrument without a mark
+	noUniverse   bool
+	silentVenue  bool   // the venue never reports on a released order
+	decideFrom   string // first session decided, when not the first session
+	stopAfter    string // last session fed
+	beforeClose  func(session string) []event.Envelope
+	neverClosed  map[string]bool    // calendar sessions with no bar and no close
+	withdraw     map[string]float64 // session -> settled cash withdrawn after its close, in a snapshot an hour later
+	withdrawFill map[string]float64 // instrument -> settled cash withdrawn as its sell fills, in a snapshot as of the fill
 	// riskOffJanuary makes SPY fall over January's last six sessions too.
 	riskOffJanuary bool
 }
@@ -211,8 +216,14 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 	apply(s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", start, cfg))
 	apply(s.envelope(t, event.SessionCalendarEventType, event.SessionCalendarSchemaVersion, "calendar", start,
 		event.SessionCalendarPayload{Source: "fixture", Sessions: cal}))
+	for _, rec := range opts.recorded {
+		apply(s.envelope(t, rec.Type, rec.SchemaVersion, rec.ID, start, rec.Payload))
+	}
 
 	for i, session := range cal[:len(cal)-1] {
+		if opts.neverClosed[session] {
+			continue
+		}
 		end := closeOf(session)
 		prices := map[string]float64{}
 		for _, n := range names() {
@@ -265,6 +276,10 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 					AccountID: iraAccount, ClientOrderID: o.ClientOrderID, FillID: "fill:" + o.ClientOrderID, InstrumentID: o.InstrumentID,
 					Side: o.Side, Quantity: quantity, Price: price, Commission: 0.5, FilledAt: at,
 				}, event.FillEventType, event.FillTargetWeightVersion, "fill:"+o.ClientOrderID)
+				if amount, ok := opts.withdrawFill[o.InstrumentID]; ok && o.Side == event.OrderSideSell {
+					acct.settled = float64(acct.settled - amount)
+					venue(acct.snapshot(at, prices), event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-at-fill:"+o.ClientOrderID)
+				}
 			}
 			if quantity < o.Quantity {
 				at = end.Add(time.Duration(-390+minute+1) * time.Minute)
@@ -304,7 +319,11 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			apply(s.envelope(t, event.UniverseSnapshotEventType, event.UniverseSnapshotSchemaVersion, "universe:"+session, end, snap))
 		}
 		if !opts.noSnapshot[session] {
-			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:"+session, end, acct.snapshot(end, prices)))
+			asOf := end
+			if opts.lateSnapshot[session] {
+				asOf = end.Add(time.Hour)
+			}
+			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:"+session, end, acct.snapshot(asOf, prices)))
 		}
 		for _, id := range ids {
 			if opts.noMark[session] == id {
@@ -321,6 +340,10 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 		}
 		apply(s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "session:"+session, end,
 			event.SessionClosedPayload{PeriodEnd: end, InstrumentIDs: ids}))
+		if amount, ok := opts.withdraw[session]; ok {
+			acct.settled = float64(acct.settled - amount)
+			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-after-withdrawal:"+session, end.Add(time.Hour), acct.snapshot(end.Add(time.Hour), prices)))
+		}
 		if session == opts.stopAfter {
 			break
 		}

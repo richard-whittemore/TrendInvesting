@@ -22,9 +22,13 @@ import (
 )
 
 // RulesVersion is the target-weight module's rules version (ADR 0016),
-// bumped only when a rule changes: 1.1.0 adds the glide path to momentum
-// decisions.
-const RulesVersion = "1.1.0"
+// bumped only when a rule changes.
+//
+//   - 1.1.0 reads configuration schema version 2 and refuses version 1
+//     (ADR 0015), so a journal written under 1.0.0 does not replay.
+//   - 1.2.0 adds the glide path to momentum decisions (configuration
+//     schema version 3, targets.decided schema version 3; ADR 0026).
+const RulesVersion = "1.2.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -52,6 +56,10 @@ type Options struct {
 //     boost and the target in force from it, never by recomputing (ADR 0026,
 //     point 5); sessions up to its session then only feed the indicators,
 //     which are rebuilt from the journal's own bars from the warm-up start;
+//   - optionally, before the first bar or session, the earlier run's
+//     strategy.engine.state records, in journal order. A restart while
+//     Degraded or Halted resumes in that state and scope (ADR 0019, amended
+//     2026-09-24, "The state survives a restart"; ADR 0026, point 5);
 //   - per session: the Boost instrument's market.bar.completed, account.snapshot
 //     version 3, market.mark.recorded, then market.session.closed, which decides.
 //
@@ -60,7 +68,8 @@ type Options struct {
 // A session that closes without the instrument's bar withholds
 // (missing-bars), and so does every later session: the indicators would span
 // the gap (plan.md section 2, "Boost"). A session with no snapshot as of its
-// close withholds (stale-account-snapshot), but the latch still advances, as
+// close, or only one taken after it, withholds (stale-account-snapshot):
+// orders are valued at the previous close (ADR 0026, point 2). But the latch still advances, as
 // the research's sig does on every bar (template.py:89-94); the target in
 // force changes only on a decided outcome, so a change withheld one session
 // is ordered the next.
@@ -147,6 +156,8 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 		return nil, h.applyConfiguration(in)
 	case event.TargetsDecidedEventType:
 		return nil, h.applyRecovery(in)
+	case event.EngineStateEventType:
+		return nil, h.applyRecordedState(in)
 	case event.CompletedBarEventType:
 		return nil, h.applyBar(in)
 	case event.AccountSnapshotEventType:
@@ -209,6 +220,28 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 		h.inForce, h.inForceSet = p.Targets[0].Weight, true
 	}
 	h.quietUntil = p.SessionPeriodEnd
+	return nil
+}
+
+// applyRecordedState restores an earlier run's engine state and scope into the
+// gate before any decision (ADR 0026, point 5).
+func (h *Handler) applyRecordedState(in event.Envelope) error {
+	if h.started {
+		return fmt.Errorf("targetweight: recorded %s %s arrived after the run began; an earlier run's records come first", in.Type, in.ID)
+	}
+	if in.ConfigurationHash != h.hash {
+		return fmt.Errorf("targetweight: recorded %s %s belongs to another configuration", in.Type, in.ID)
+	}
+	if in.SchemaVersion != event.EngineStateSchemaVersion && in.SchemaVersion != event.EngineStateScopedVersion {
+		return fmt.Errorf("targetweight: %s schema version %d is not one this build reads (ADR 0015)", in.Type, in.SchemaVersion)
+	}
+	var p event.EngineStatePayload
+	if err := json.Unmarshal(in.Payload, &p); err != nil {
+		return fmt.Errorf("targetweight: decode %s %s: %w", in.Type, in.ID, err)
+	}
+	if err := h.gate.RestoreState(p, in.SchemaVersion); err != nil {
+		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
 	return nil
 }
 
@@ -308,9 +341,15 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	h.latched = h.params.Next(before, readings)
 	figures := h.figures(readings, before)
 	snapshot := h.snapshot
-	if snapshot == nil || snapshot.AsOf.Before(p.PeriodEnd) {
+	switch {
+	case snapshot == nil || snapshot.AsOf.Before(p.PeriodEnd):
 		b.targets(figures, event.WithheldStaleAccountSnapshot,
 			fmt.Sprintf("no account snapshot for %s as of the session closing %s", h.cfg.AccountID, p.PeriodEnd.Format(idTime)))
+		return b.result()
+	case snapshot.AsOf.After(p.PeriodEnd):
+		b.targets(figures, event.WithheldStaleAccountSnapshot,
+			fmt.Sprintf("the account snapshot for %s is as of %s, after the session closing %s; orders are valued at that close",
+				h.cfg.AccountID, snapshot.AsOf.Format(idTime), p.PeriodEnd.Format(idTime)))
 		return b.result()
 	}
 	decisionID, decided := b.targets(figures, "", "")

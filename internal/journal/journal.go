@@ -29,6 +29,14 @@
 // Which records are inputs and which are decisions is stated on the record
 // (Kind) and covered by the chain, because that claim is what replay
 // equivalence reads to decide what to feed in and what to compare against.
+//
+// # The durable log
+//
+// A journal is written once, when its run ends. A long-lived run also
+// streams a durable log (ADR 0027): the same records, chained the same way
+// from a header that states no span, one flushed group per input, written
+// before any of that input's decisions is released. A restart rebuilds the
+// run from it (Resume), and a journal can be composed from it.
 package journal
 
 import (

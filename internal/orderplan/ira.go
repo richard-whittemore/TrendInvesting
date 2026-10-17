@@ -185,13 +185,15 @@ func scaled(buys []event.OrderPlannedPayload, scale, maxFees float64) (kept []ev
 
 // Budget is the cash an IRA's buy phase may still commit (ADR 0026, point 2,
 // "Budget" and "Carried forward"): the starting cash under the D5 rule, plus
-// the sell proceeds that rule counts, minus what each released buy commits.
+// the sell proceeds that rule counts, minus cash a newer snapshot shows gone,
+// minus what each released buy commits.
 // A working buy commits its worst-case cost, or what its fills have spent if
 // that is more; once it is terminal it commits only what it spent, so a
 // partial fill releases its unspent part only when the rest is cancelled.
 type Budget struct {
 	start    float64
 	proceeds float64
+	removed  float64
 	buys     []*committedBuy // in release order, so the sum is deterministic
 }
 
@@ -207,7 +209,7 @@ func NewBudget(cash float64) *Budget { return &Budget{start: cash} }
 
 // Remaining is the cash still uncommitted.
 func (b *Budget) Remaining() float64 {
-	remaining := b.start + b.proceeds
+	remaining := b.start + b.proceeds - b.removed
 	for _, c := range b.buys {
 		committed := c.spent
 		if !c.terminal {
@@ -220,6 +222,11 @@ func (b *Budget) Remaining() float64 {
 
 // AddProceeds counts a sell's realised proceeds, net of its commission.
 func (b *Budget) AddProceeds(amount float64) { b.proceeds += amount }
+
+// Remove takes out cash the account no longer has: what a newer account
+// snapshot shows missing beyond what the recorded fills explain (a fee or a
+// transfer). The buys are never funded from cash that is gone.
+func (b *Budget) Remove(amount float64) { b.removed += amount }
 
 // Release commits a released buy's worst-case cost.
 func (b *Budget) Release(clientOrderID string, worstCost float64) {

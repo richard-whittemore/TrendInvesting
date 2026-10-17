@@ -298,3 +298,49 @@ func TestGlideJournalIsByteIdenticalAndReplays(t *testing.T) {
 		t.Fatalf("replay diverged: %+v", d)
 	}
 }
+
+// TestAMissedDecisionRecordsTheGlideOnItsRebalanceSession checks that a
+// decision withheld because its session never closed still records the
+// owner's age and b on its rebalance session, as every momentum decision
+// does on either outcome (ADR 0026 point 5 lists b in the record).
+func TestAMissedDecisionRecordsTheGlideOnItsRebalanceSession(t *testing.T) {
+	r := simulateMomentum(t, momentumOptions{mutate: withBirth(glideBirth), neverClosed: map[string]bool{"2025-01-31": true}})
+	es := ofType(r.decisions, event.TargetsDecidedEventType)
+	if len(es) == 0 {
+		t.Fatal("no decision")
+	}
+	var missed event.TargetsDecidedPayload
+	decode(t, es[0], &missed)
+	want := event.GlideFigures{RebalanceSession: "2025-02-03", AgeMonths: 53 * 12, BondShare: 0.308}
+	if missed.Outcome != event.TargetsOutcomeWithheld || missed.Glide != want {
+		t.Errorf("missed decision %s glide %+v, want withheld with %+v", missed.Outcome, missed.Glide, want)
+	}
+}
+
+// TestGlideAgeBeyondThePlausibleAtAMissedDecisionStopsTheRun checks that
+// the age check holds for a decision journalled withheld because its session
+// never closed, as it does for one decided at its own close.
+func TestGlideAgeBeyondThePlausibleAtAMissedDecisionStopsTheRun(t *testing.T) {
+	cfg := momentumConfiguration()
+	cfg.Glide.Birth = "1915-01" // 110 years at the start, one month more at February's rebalance
+	h, err := targetweight.New(strategyVersion, cfg, targetweight.Options{DecideFrom: closeOf("2025-01-30")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &stream{hash: h.ConfigurationHash()}
+	mustApply(t, h, s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", closeOf("2025-01-30"), cfg))
+	mustApply(t, h, calendarInput(t, s, "cal", "2025-01-30", "2025-01-31", "2025-02-03", "2025-02-04"))
+	closeSession := func(session string) error {
+		mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b"+session, closeOf(session), spyBar(session, 500)))
+		_, err := h.Apply(context.Background(), s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s"+session, closeOf(session),
+			event.SessionClosedPayload{PeriodEnd: closeOf(session), InstrumentIDs: []string{"SPY"}}))
+		return err
+	}
+	if err := closeSession("2025-01-30"); err != nil {
+		t.Fatal(err)
+	}
+	// 2025-01-31, the decision session, never closes.
+	if err := closeSession("2025-02-03"); err == nil || !bytes.Contains([]byte(err.Error()), []byte("implies an age of 1321 months")) {
+		t.Fatalf("err = %v, want the age refused", err)
+	}
+}

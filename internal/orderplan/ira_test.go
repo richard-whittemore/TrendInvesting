@@ -278,3 +278,20 @@ func TestBudgetCarriedThroughReleasesAndPartialFills(t *testing.T) {
 		t.Error("an unreleased buy cannot fill or close")
 	}
 }
+
+// TestBudgetLosesCashANewerSnapshotCannotExplain encodes ADR 0026 point 2,
+// "Budget" (line 104: buys are funded from cash on hand plus cash realised by
+// the sells): cash the account no longer has comes out of what the buys may
+// commit, alongside the proceeds and commitments.
+func TestBudgetLosesCashANewerSnapshotCannotExplain(t *testing.T) {
+	b := orderplan.NewBudget(1000)
+	b.AddProceeds(500)
+	b.Remove(300)
+	if got := b.Remaining(); got != 1200 {
+		t.Fatalf("remaining %v, want 1200", got)
+	}
+	b.Release("tw-a", 200)
+	if got := b.Remaining(); got != 1000 {
+		t.Fatalf("remaining %v after a release, want 1000", got)
+	}
+}

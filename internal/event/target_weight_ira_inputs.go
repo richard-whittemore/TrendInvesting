@@ -220,6 +220,15 @@ type TargetWeightFillPayload struct {
 	FilledAt      time.Time `json:"filled_at"`
 }
 
+// SameExecution reports whether q restates the execution p records: every
+// field equal, with one instant the same however its UTC offset is written.
+// The reducer and the query tool share this rule, so a redelivery is judged
+// alike wherever it is read.
+func (p TargetWeightFillPayload) SameExecution(q TargetWeightFillPayload) bool {
+	p.FilledAt, q.FilledAt = p.FilledAt.UTC(), q.FilledAt.UTC()
+	return p == q
+}
+
 // Validate checks identity, side, quantity, price, commission and time.
 func (p TargetWeightFillPayload) Validate() error {
 	errs := orderIdentity(p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, 1)

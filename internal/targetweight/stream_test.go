@@ -118,6 +118,9 @@ type options struct {
 	noSnap   map[int]bool // sessions with no account snapshot
 	noMark   map[int]bool // sessions with no mark
 	recovery *event.Envelope
+	// recorded are an earlier run's journalled records, fed after the
+	// configuration and before the recovered decision.
+	recorded []event.Envelope
 	// snapshots, when set, supplies each session's account snapshot from an
 	// earlier run's inputs, so a restarted run sees the account the original
 	// run's orders left.
@@ -165,6 +168,12 @@ func simulate(t *testing.T, opts options) run {
 	}
 	start := sessionEnd(0).Add(-time.Hour)
 	apply(s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", start, cfg))
+	for _, e := range opts.recorded {
+		s.sequence++
+		e.Sequence = s.sequence
+		e.CausationID, e.CorrelationID = "", ""
+		apply(e)
+	}
 	if opts.recovery != nil {
 		recovered := *opts.recovery
 		s.sequence++

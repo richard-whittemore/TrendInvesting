@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
@@ -40,6 +41,10 @@ func TestMomentumCalendarRules(t *testing.T) {
 	mustRefuse(t, h, calendarInput(t, s, "c3", "2025-01-02", "2025-01-06"), "disagrees")
 	mustApply(t, h, calendarInput(t, s, "c4", "2025-01-06", "2025-01-07"))
 	mustRefuse(t, h, calendarInput(t, s, "c5"), "invalid")
+	// A calendar that shares no session with the one held would leave a hole
+	// between them, and a date in that hole would read as no session at all:
+	// it is refused, not merged.
+	mustRefuse(t, h, calendarInput(t, s, "c6", "2025-01-09", "2025-01-10"), "does not overlap")
 
 	closeSession := func(session string, ids ...string) event.Envelope {
 		return s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s:"+session, closeOf(session),
@@ -146,9 +151,24 @@ func TestMomentumVenueReportRules(t *testing.T) {
 	if out, err := apply(event.FillEventType, event.FillTargetWeightVersion, "f1-again", fill); err != nil || out != nil {
 		t.Fatalf("a redelivered fill: %v %v", out, err)
 	}
+	// One instant written in another UTC offset is the same execution.
+	offset := fill
+	offset.FilledAt = fill.FilledAt.In(time.FixedZone("EST", -5*3600))
+	if out, err := apply(event.FillEventType, event.FillTargetWeightVersion, "f1-offset", offset); err != nil || out != nil {
+		t.Fatalf("a redelivery in another offset: %v %v", out, err)
+	}
 	reused := fill
 	reused.Quantity = 1
 	refuse(event.FillEventType, event.FillTargetWeightVersion, "f1-reused", reused, "reuses fill id")
+	// A fill id names one execution across the account, not per order: the
+	// same id on the other released order is refused, so one execution never
+	// moves two orders' fills and budget.
+	other := buys[1]
+	elsewhere := event.TargetWeightFillPayload{
+		AccountID: iraAccount, ClientOrderID: other.ClientOrderID, FillID: "f1", InstrumentID: other.InstrumentID, Side: other.Side,
+		Quantity: 1, Price: other.LimitPrice, Commission: 0.5, FilledAt: at,
+	}
+	refuse(event.FillEventType, event.FillTargetWeightVersion, "f1-elsewhere", elsewhere, "reuses fill id")
 	last := fill
 	last.FillID, last.Quantity = "f2", 1
 	if _, err := apply(event.FillEventType, event.FillTargetWeightVersion, "f2", last); err != nil {
@@ -160,7 +180,7 @@ func TestMomentumVenueReportRules(t *testing.T) {
 	third.FillID, third.Quantity = "f3", 1
 	refuse(event.FillEventType, event.FillTargetWeightVersion, "f3", third, "already terminal")
 	unknown := fill
-	unknown.ClientOrderID = "tw-unknown"
+	unknown.ClientOrderID, unknown.FillID = "tw-unknown", "f4"
 	refuse(event.FillEventType, event.FillTargetWeightVersion, "f4", unknown, "never released")
 }
 
@@ -181,4 +201,38 @@ func TestMomentumMissingMarkRefusesAndDegrades(t *testing.T) {
 	if states[0].SchemaVersion != event.EngineStateScopedVersion || !strings.HasPrefix(states[0].ID, "engine-state:tw-") {
 		t.Errorf("state %s at schema %d", states[0].ID, states[0].SchemaVersion)
 	}
+}
+
+// TestAMomentumRestartWhileDegradedStaysDegraded: a restart while Degraded
+// resumes in that state and scope (ADR 0019, amended 2026-09-24; ADR 0026,
+// point 5). The restarted run, given the recorded state, refuses every buy
+// of the January decision and releases nothing.
+func TestAMomentumRestartWhileDegradedStaysDegraded(t *testing.T) {
+	full := simulateMomentum(t, momentumOptions{noMark: map[string]string{"2025-01-31": "CCC"}, stopAfter: "2025-01-31"})
+	states := ofType(full.decisions, event.EngineStateEventType)
+	restarted := simulateMomentum(t, momentumOptions{recorded: states, stopAfter: "2025-01-31"})
+	if n := len(released(t, restarted.decisions)); n != 0 {
+		t.Fatalf("the restarted run released %d orders; Degraded is never left automatically", n)
+	}
+	refused := ofType(restarted.decisions, event.OrderRefusedEventType)
+	if len(refused) == 0 || len(ofType(restarted.decisions, event.EngineStateEventType)) != 0 {
+		t.Fatalf("%d refused, want every buy refused with no new state", len(refused))
+	}
+	for _, e := range refused {
+		var p event.OrderRefusedPayload
+		decode(t, e, &p)
+		if p.Reason != event.RefusedEngineDegraded {
+			t.Errorf("refusal: %+v", p)
+		}
+	}
+}
+
+func TestMomentumRecordedStateComesFirst(t *testing.T) {
+	full := simulateMomentum(t, momentumOptions{noMark: map[string]string{"2025-01-31": "CCC"}, stopAfter: "2025-01-31"})
+	state := ofType(full.decisions, event.EngineStateEventType)[0]
+	h, s := momentumHandler(t)
+	at := closeOf("2025-01-02")
+	mustApply(t, h, s.envelope(t, state.Type, state.SchemaVersion, state.ID, at, state.Payload))
+	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", at, spyBar("2025-01-02", 500)))
+	mustRefuse(t, h, s.envelope(t, state.Type, state.SchemaVersion, state.ID, at, state.Payload), "after the run began")
 }

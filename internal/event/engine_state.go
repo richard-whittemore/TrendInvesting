@@ -67,6 +67,7 @@ const (
 	// EngineStateReasonRiskLimitBreached means the target-weight risk gate
 	// refused an order for breaching a hard limit (ADR 0026, point 3): an
 	// order with no journalled decision halts, any other breach degrades.
+	// It is recorded at schema version 2 only.
 	EngineStateReasonRiskLimitBreached = "risk-limit-breached"
 )
 
@@ -96,13 +97,17 @@ type EngineStatePayload struct {
 }
 
 // ValidateSchema checks p under the rules of schemaVersion: version 1 knows
-// only halted with no scope; version 2 is Validate's rules. Any other version
-// is refused (ADR 0015).
+// only halted with no scope, for campaign-without-protective-stop, the one
+// reason version-1 readers know; version 2 is Validate's rules, and carries
+// every later reason. Any other version is refused (ADR 0015).
 func (p EngineStatePayload) ValidateSchema(schemaVersion uint32) error {
 	switch schemaVersion {
 	case EngineStateSchemaVersion:
 		if p.State != EngineStateHalted || p.scoped() {
 			return fmt.Errorf("invalid engine state payload: schema version 1 records only %q with no scope", EngineStateHalted)
+		}
+		if p.Reason != EngineStateReasonCampaignWithoutProtectiveStop {
+			return fmt.Errorf("invalid engine state payload: schema version 1 records only the reason %q", EngineStateReasonCampaignWithoutProtectiveStop)
 		}
 	case EngineStateScopedVersion:
 	default:

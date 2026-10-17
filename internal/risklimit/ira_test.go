@@ -130,7 +130,7 @@ func TestReleasedBuysCarryTheBudgetToTheNext(t *testing.T) {
 
 func TestASellBeyondTheHoldingNetOfWorkingSellsIsRefused(t *testing.T) {
 	// 100 held, 30 in a cancel-pending sell that may still execute: 70 may be
-	// sold, 71 may not. A released sell adds to the working sells for the next.
+	// sold, 71 may not. A released sell lowers what the next may take.
 	book := func() risklimit.Book {
 		return risklimit.Book{Holdings: map[string]int64{"AAA": 100}, Prices: map[string]float64{"AAA": 1}, WorkingSells: map[string]int64{"AAA": 30}}
 	}
@@ -145,6 +145,31 @@ func TestASellBeyondTheHoldingNetOfWorkingSellsIsRefused(t *testing.T) {
 	refusedFor(t, checkBook(t, gate(t, limits(), event.TradingModeDryRun), risklimit.Book{}, iraOrder("AAA", event.OrderSideSell, 1))[0], event.RefusedSellExceedsHolding)
 }
 
+// TestEachReleasedSellReducesWhatMaySellOnlyOnce encodes ADR 0026 point 2.5
+// (docs/adr/0026-...md line 95: "A sell never exceeds the broker-reported
+// holding minus every working or pending sell") for two sells in one plan: 100
+// held, 40 then 50 sold leaves 10 that may still be sold, so both go, and an
+// 11th share would not. A released sell counts once against the holding, not
+// once as a lower holding and again as a working sell.
+func TestEachReleasedSellReducesWhatMaySellOnlyOnce(t *testing.T) {
+	book := func() risklimit.Book {
+		return risklimit.Book{Holdings: map[string]int64{"AAA": 100}, Prices: map[string]float64{"AAA": 1}}
+	}
+	sell := func(name string, quantity int64) risklimit.Order {
+		o := iraOrder("AAA", event.OrderSideSell, quantity)
+		o.PlanID, o.Planned.ClientOrderID = "order-planned:"+name, "tw-"+name
+		return o
+	}
+	for _, g := range []*risklimit.Gate{iraGate(t, 0), gate(t, limits(), event.TradingModeDryRun)} {
+		out := checkBook(t, g, book(), sell("first", 40), sell("second", 50), sell("third", 10))
+		released(t, out[0])
+		released(t, out[1])
+		released(t, out[2])
+		over := checkBook(t, g, book(), sell("first", 40), sell("second", 50), sell("third", 11))
+		refusedFor(t, over[2], event.RefusedSellExceedsHolding)
+	}
+}
+
 func TestAnUnvaluedHoldingRefusesOnlyIncreasingOrders(t *testing.T) {
 	book := risklimit.Book{Holdings: map[string]int64{"AAA": 10, "ZZZ": 5}, Prices: map[string]float64{"AAA": 1}, CashAvailable: 1e6}
 	o := checkBook(t, iraGate(t, 0), book, iraOrder("BBB", event.OrderSideBuy, 10))[0]
@@ -156,13 +181,24 @@ func TestAnUnvaluedHoldingRefusesOnlyIncreasingOrders(t *testing.T) {
 }
 
 func TestPriorOrdersCountTowardTheDecisionTime(t *testing.T) {
-	// Ten orders allowed: nine sells already planned in the first phase, so
-	// two buys in the second make eleven and are refused.
-	out := checkBook(t, iraGate(t, 0), risklimit.Book{PriorOrders: 9, CashAvailable: 1e6},
+	// Ten orders allowed: nine sells that are not risk-reducing already
+	// planned in the first phase, so two buys in the second make eleven
+	// counted and are refused.
+	out := checkBook(t, iraGate(t, 0), risklimit.Book{PriorOrders: 9, PriorCounted: 9, CashAvailable: 1e6},
 		iraOrder("AAA", event.OrderSideBuy, 1), iraOrder("BBB", event.OrderSideBuy, 1))
 	refusedFor(t, out[0], event.RefusedOrderCount)
 	if out[0].Refused.Figures.OrdersInDecision != 11 {
 		t.Errorf("figures: %+v", out[0].Refused.Figures)
+	}
+	// Nine risk-reducing sells are exempt from the count (ADR 0026, point
+	// 3), so the same buys are released; the figures still name all eleven.
+	out = checkBook(t, iraGate(t, 0), risklimit.Book{PriorOrders: 9, CashAvailable: 1e6},
+		iraOrder("AAA", event.OrderSideBuy, 1), iraOrder("BBB", event.OrderSideBuy, 1))
+	for _, o := range out {
+		released(t, o)
+		if o.Released.Figures.OrdersInDecision != 11 {
+			t.Errorf("figures: %+v", o.Released.Figures)
+		}
 	}
 }
 

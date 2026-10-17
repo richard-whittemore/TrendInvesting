@@ -105,6 +105,7 @@ func TestBadAnchorsFailClosed(t *testing.T) {
 		{{38, -0.1}, {53, 0.3}},
 		{{38, 0}, {53, 1.5}},
 		{{38, 0}, {53, math.NaN()}},
+		{{38, 0.3}, {53, 0.5}}, // a nonzero first share would be ignored at that age
 	}
 	for i, a := range bad {
 		if _, err := BondShare(a, 40*12); err == nil {
@@ -209,7 +210,7 @@ func glideShareReference(age float64) float64 {
 }
 
 func TestScheduleMatchesReferenceFormulaEveryMonth(t *testing.T) {
-	for months := 0; months <= 45*12; months++ {
+	for months := 0; months <= maxOwnerAgeYears*12; months++ {
 		want := glideShareReference(float64(months) / 12)
 		if got := mustShare(t, months); !near(got, want) {
 			t.Fatalf("%d months: %v, reference %v", months, got, want)
