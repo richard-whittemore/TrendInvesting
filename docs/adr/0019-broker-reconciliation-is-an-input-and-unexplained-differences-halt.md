@@ -247,7 +247,8 @@ to the Turtle reducer, and changes nothing else in this ADR.
   reading 1: a third bound, holding − every working or pending sell − keep,
   is added; the quantity is the smallest of the three bounds, never below
   zero, and never more than the holding. Where net liquidation or the mark
-  is not strictly positive the sale is refused and withheld: reading 1.)*
+  is not strictly positive, or the latest snapshot is unreadable, the sale is
+  refused and withheld: reading 1.)*
   This keeps the invariant above
   ("working sell quantity never exceeds the holding"), so no combination of
   fills can open a short.
@@ -315,10 +316,13 @@ here so that all eleven are in one place.
    can open a short. The one-line form max(0, holding − every working or
    pending sell − keep) holds only when keep is zero or more, which needs a
    net liquidation and a mark that are both strictly positive. **The rule
-   fails closed:** when net liquidation or the mark is zero, negative or
-   unreadable, keep cannot be trusted, so the sale is refused and withheld
-   (`risk.sale.withheld`, with the reason), and the account is Halted pending
-   the owner, as for an unreadable snapshot. The third bound means a
+   fails closed:** when net liquidation or the mark is not strictly positive,
+   or the latest snapshot is unreadable, keep cannot be trusted, so the sale
+   is refused and withheld (`risk.sale.withheld`, with the reason). The engine
+   state is unchanged, exactly as reading 10 treats no readable snapshot; the
+   alarm or incident stays in force; the withhold is not the one attempt
+   (reading 4); and the gate re-evaluates on the next readable snapshot. The
+   owner hears about it through the withheld alert, not through a Halt. The third bound means a
    sell of ours that is still working (Boost's released exit, say) and the
    sale together never take exposure below 98%, whichever fills. When the
    smallest bound is zero or negative (a holding of 147, a keep of 93 and
@@ -358,9 +362,14 @@ here so that all eleven are in one place.
    engine-state record that leaves Normal until recovery. Moving from
    Degraded to Halted does not start another, so there is one sale per
    instrument for the whole episode.
-4. **A withheld sale counts as the attempt when the broker's values cannot
-   be read or a working sell is unknown.** In those cases the sale counts as
-   attempted and is never retried automatically; the alert asks the owner to
+4. **A withheld sale counts as the attempt only in two cases: the broker's
+   values cannot be read, or a working sell is unknown.** A released order
+   always consumes the attempt. A withhold that sends no order never does
+   otherwise: not "nothing to sell" (below), and not the fail-closed withhold
+   of reading 1 (net liquidation or mark not strictly positive, or the latest
+   snapshot unreadable), which leaves the attempt unspent so the sale can go
+   once a readable snapshot arrives. In the two cases that do count, the sale
+   counts as attempted and is never retried automatically; the alert asks the owner to
    act by hand, and a later automatic sale could duplicate the owner's.
    "Nothing to sell" is not an attempt, and covers three cases as built:
    the snapshot holds none of the instrument; the holding is short (a short
@@ -385,13 +394,15 @@ here so that all eleven are in one place.
    for Boost). The sale keeps ceil(`InvestedFraction` × net liquidation ÷
    mark) shares.
 10. **A sell above the broker quantity is refused, not resized.** The
-    check applies in any engine state, not only Degraded. With a readable
-    snapshot, the gate refuses the sell
+    check applies in any engine state, not only Degraded, and reads the
+    latest broker snapshot only. With a readable latest snapshot, the gate
+    refuses the sell
     (`broker-holding`) and adds the instrument to the Degraded scope (ADR
     0026 point 3, limits table); a Normal account becomes Degraded on that
-    instrument. A sell placed before the first readable snapshot, or when none
-    is readable, is refused with `broker-holding`, and the engine state is
-    left unchanged: a Normal account stays Normal. The planner, not the gate, chooses quantities.
+    instrument. A sell placed before the first readable snapshot, or when the
+    latest snapshot is unreadable, is refused with `broker-holding`, and an older readable snapshot is
+    never used, and the engine state is left unchanged: a Normal account stays
+    Normal. The planner, not the gate, chooses quantities.
 11. **New event types** `account.broker.snapshot`, `risk.margin.alarm` and
     `risk.sale.withheld` are adopted (ADR 0026 amendment, 2026-10-17).
     `account.broker.snapshot` carries the observed side that

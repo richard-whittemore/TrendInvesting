@@ -231,8 +231,9 @@ holding minus every working or pending sell (including `cancel-pending` ones, wh
 *(Refined by the ADR 0019 amendment of 2026-10-17, reading 1: a third bound,
 holding − every working or pending sell − keep, is added; the quantity is the
 smallest of the three, never below zero and never more than the holding, and
-where net liquidation or the mark is not strictly positive the sale is refused
-and withheld, the account Halted pending the owner.)* When the
+where net liquidation or the mark is not strictly positive, or the latest
+snapshot is unreadable, the sale is refused and withheld (`risk.sale.withheld`),
+the engine state unchanged and the attempt unspent.)* When the
 instrument to sell is the one a Degraded account's discrepancy names, the
 sale is ADR 0019's one sale, sized and checked as that ADR states (amended
 2026-10-16).
@@ -251,7 +252,8 @@ IBKR bars:
 - The engine state and its scope (ADR 0019, amended 2026-09-24).
 - Whether the incident sale has been attempted (ADR 0019, 2026-10-15), and
   the one-attempt-per-instrument state of the kill-switch engagement and of the
-  margin alarm (ADR 0019, 2026-10-17, reading 2), withheld attempts included.
+  margin alarm (ADR 0019, 2026-10-17, reading 2). A released order consumes an
+  attempt; a withhold consumes one only in the two cases of reading 4.
 - The day-trade count, under the legacy regime (`plan.md` lines 393-404).
 
 **Missing bars fail closed:**
