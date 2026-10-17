@@ -102,7 +102,6 @@ func TestTheCompactStreamDecidesAsTheFullBarsDo(t *testing.T) {
 	requireSameDecisions(t, full.decisions, compact.decisions)
 }
 
-
 // TestTheCompactStreamCarriesNoBarPerUniverseMember counts what the compact
 // run's journal ingested: per session, bars only for the trend, risk-off and
 // bond instruments and the names held, never one per listed stock; and close
@@ -175,7 +174,9 @@ func (f historyFixture) close(session string, ids ...string) event.Envelope {
 		event.SessionClosedPayload{PeriodEnd: closeOf(session), InstrumentIDs: ids})
 }
 
-func close31(price float64) event.SessionClose { return event.SessionClose{Session: "2025-01-31", Close: price} }
+func close31(price float64) event.SessionClose {
+	return event.SessionClose{Session: "2025-01-31", Close: price}
+}
 
 // TestCloseHistoryRules checks how the run reads the compact universe input:
 // histories follow their session's universe snapshot, carry closes on the
