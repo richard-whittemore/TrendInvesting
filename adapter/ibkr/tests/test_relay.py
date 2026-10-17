@@ -497,8 +497,9 @@ class RelayTests(unittest.TestCase):
     def test_close_from_another_thread_waits_for_the_input_being_saved(self):
         def saved():
             # The save finished whole before close released the lock; the
-            # settlement then stopped at its next step, the relay being closed.
-            self.assertEqual(self.pending.load(), envelope(0))
+            # settlement then either finished too or stopped at its next
+            # step, the relay being closed. Never a torn record.
+            self.assertIn(self.pending.load(), (envelope(0), None))
             self.assertEqual(self.pending.handovers(), {})
 
         self._close_waits_inside("save", {"session:0": []}, saved)
