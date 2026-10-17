@@ -8,68 +8,86 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
 
-// A released sell is pending from its release until recorded broker facts
-// resolve it, and every sizing that nets working sells nets it (ADR 0019,
-// amended 2026-10-15, "Sized from the broker, net of every working sell",
-// cancel-pending included; ADR 0026, points 2.5 and 4):
+// The pending rule (ADR 0019, amended 2026-10-15, "Sized from the broker, net
+// of every working sell", cancel-pending included; ADR 0026, points 2.5 and
+// 4) is one bound, worked out afresh from the facts recorded, in whatever
+// order they were recorded. For an instrument and a view V, a snapshot that
+// read the holding:
 //
-//	pending = released - filled, or 0 once a lifecycle report ends it
+//	unshown(V) = max(held(V) - remains, 0)
+//	remains    = max(0, the most over references P of held(P) - toGo(P))
 //
-// What is known of each sell's fills is the most that its own facts show:
-// its fill reports, and a broker snapshot that lists it working at a
-// remaining quantity, which has filled the rest, with the fills reported
-// after it. A fall in an instrument's holding that the fills already known
-// do not explain, seen by an account or a broker snapshot against the
-// snapshot that read the holding before it, is taken as filled by the
-// instrument's sells. It is a floor on what they filled together, with the
-// fills reported after it, not an addition to any one sell's reports: a
-// fill report on any sell of the instrument counts toward it, so the same
-// shares are never counted filled twice. The part of the floor no sell's
-// own facts explain is counted filled first by the sells a lifecycle report
-// ended, whose unreported fills show only as a fall, and only then taken
-// off the pending sells, so a working sell is never netted below what it
-// may still sell (fail closed). A listing in a snapshot not older than the
-// latest holding seen shows its sells exactly, so the floor then holds only
-// what the sells it does not list can have filled. Only a canceled or invalid
-// lifecycle report ends what has not filled. A snapshot that no longer lists
-// a sell never shows it cancelled: it may not have reached IBKR yet, and ADR
-// 0019 treats an unexplained cancellation as a discrepancy, never an
-// inference. A cancel-pending sell may still fill, so it stays pending. So
-// pending is never below zero and never above the release.
+// unshown(V) is the shares already being sold that V cannot show: those sold
+// since V was taken, and those that may still sell. PendingSells is unshown
+// at the latest account snapshot; the broker-holding check and the sale back
+// to 98% net unshown at the latest broker snapshot. remains is the most the
+// facts show is sure to be held once every sell still working has filled. A
+// reference is a snapshot that read the holding: an account snapshot, or a
+// broker snapshot that read both its positions and its open orders. toGo(P)
+// is the most that can still sell after P was taken:
 //
-// A snapshot shows the shares filled by when it was taken, and no others.
-// Every fact of a fill carries the time it shows the shares filled by: a fill
-// report its execution time, a broker listing and a holding fall the time of
-// the snapshot that showed them. A lifecycle report credits no fill, so a
-// snapshot is credited with none from the end of a sell. A snapshot taken
-// at asOf is credited with its own facts and those of the snapshots taken
-// before asOf's second, and with the fill reports strictly before asOf,
-// whenever they were recorded. IBKR stamps executions in whole seconds and a
-// snapshot carries no broker time of its own, so a report in the same
-// second as a snapshot may have happened after the snapshot read its
-// positions; it is assumed to have (fail closed), and stays pending from
-// that snapshot. Snapshots stamped in the same second are taken as the same
-// instant, whose order within the second no one can show: each is credited
-// with its own listings and fall, and with none of another snapshot of that
-// second, so a fill in that second is shown to neither by the other (fail
-// closed). Every time these facts carry is a whole second: event validation
-// refuses a finer one (ADR 0015). Fill reports are pushed and
-// snapshots polled, so a fill reported before a snapshot taken before it is
-// still pending from that snapshot's view, and a fill reported after a
-// snapshot taken after it is shares that snapshot's holding already showed,
-// counted once. Account and broker snapshots are ordered only within their
-// own stream, so a snapshot older than the latest holding seen may be
-// recorded after it: it is credited by its own time like any other, and only
-// its holding is not measured as a fall, the newer holding having been
-// measured already. So an older snapshot never moves what the gate knows
-// backwards, and no snapshot is credited with a fill report it cannot show
-// nor with more filled than the gate counts filled now.
+//   - each released sell's release, less what it is known to have filled by
+//     P, or nothing once a canceled or invalid lifecycle report has ended it
+//     in a second before P's;
+//   - each unknown sell's remaining in the latest broker snapshot credited to
+//     P that read the open orders, or nothing when that snapshot no longer
+//     lists it. A reference that is credited with no listing of an unknown
+//     sell that a later snapshot lists cannot bound what it sold, and is none.
+//
+// A sell is known to have filled by P the most of its fill reports stamped
+// before P's second and, for each listing of it credited to P, its release
+// less the remaining listed with the fills reported in the seconds between
+// the listing's and P's. A snapshot is credited with its own listing and with
+// the facts stamped before its second. With no reference at all, remains is
+// nothing: a long holding is never sold below nothing. The view now, with no
+// holding, is credited with every fact: unshown(now) is toGo(now), what may
+// still sell.
+//
+// Its invariants:
+//
+//   - Never below the truth (fail closed): toGo(P) is never below what can
+//     truly still sell after P, so remains is never above what will truly be
+//     held, and a sell sized from V's holding net of unshown(V) never sells a
+//     share that a working sell has sold since V or may still sell.
+//   - Monotone in facts: a fill report, a lifecycle end or a snapshot only
+//     adds to what is known, so never raises unshown at a view; only a
+//     release, or a listing of an unknown sell where it was not listed, shows
+//     more being sold.
+//   - Same-second snapshots share nothing: the order of reads and fills
+//     within a second cannot be known, so each snapshot is credited with its
+//     own listing and the facts of earlier seconds only, and its holding
+//     bounds remains alone, never with another's.
+//   - A broker snapshot that cannot read the open orders is neither a
+//     reference nor a source of unknown sells: the latest that read them is.
+//   - Unknown sells are counted once, by their remaining at each reference,
+//     never by putting a fall in the holding down to anyone: every share sold
+//     between two references is in their holdings' difference, whoever sold
+//     it, so a hand sell's fill is never taken as ours, nor ours as theirs.
+//   - An ended sell frees at most what it finally left unfilled: nothing at a
+//     reference its end may follow, and at one after its end its fills are
+//     all in that reference's holding, so it can never be counted as having
+//     filled more of a fall than it did.
+//   - Same-second fills post-date the snapshot: a fill stamped in a
+//     snapshot's second is never credited as shown by it, nor added to a
+//     listing of that second, which may already hold it.
+//
+// A snapshot that no longer lists a sell of ours never shows it ended: it may
+// not have reached IBKR yet, and ADR 0019 treats an unexplained cancellation
+// as a discrepancy, never an inference. A cancel-pending sell may still fill,
+// so it stays pending. Snapshot and fill times are whole seconds (event
+// validation, ADR 0015); a lifecycle report is taken at its second.
+//
+// A reference older than one at which nothing released before it, and no
+// unknown sell, can still sell is never the better bound: what was sold
+// between them is in the newer holding. So remains stops at the latest such
+// reference, which changes nothing for facts that are true and only lowers
+// remains, failing closed, for any that are not.
 
 // endOfTime is later than any fact: what is known now.
 var endOfTime = time.Unix(1<<62, 0)
 
 // view is where facts are credited from: a snapshot, taken at at, with its
-// identity by among the snapshots recorded, or what is known now (now).
+// identity by (its place among the snapshots recorded, from 1), or now.
 type view struct {
 	at time.Time
 	by int
@@ -78,11 +96,18 @@ type view struct {
 // now is the view of what is known now, later than any fact.
 var now = view{at: endOfTime}
 
-// credits reports whether a snapshot fact f is credited to v: one shown
-// before v's second, or v's own. A fact of another snapshot in the same
-// second is not, for the two are the same instant.
-func (v view) credits(f shown) bool {
-	return f.at.Before(v.at) || f.by != 0 && f.by == v.by
+// credits reports whether a fact stamped at, shown by the snapshot by (0 for
+// a report), is credited to v: one of an earlier second, or v's own.
+func (v view) credits(at time.Time, by int) bool {
+	return at.Before(v.at) || by != 0 && by == v.by
+}
+
+// stamped is a quantity a fact shows at a time: a fill report's execution, or
+// a listing's remaining in the snapshot by.
+type stamped struct {
+	at       time.Time
+	by       int
+	quantity int64
 }
 
 // releasedOrder is a released order and the shares fill reports executed.
@@ -91,174 +116,216 @@ type releasedOrder struct {
 	reported int64
 }
 
-// shown is a fact that filled shares had been filled by at, shown by the
-// snapshot by (0 for a fill report).
-type shown struct {
-	at     time.Time
-	by     int
-	filled int64
-}
-
-// beyond returns the most shares the snapshot facts credited to v show
-// filled by v's time, 0 with none: each fact's shares and the fills reported
-// after the snapshot that showed it and before v's second. IBKR stamps a fill in whole seconds, so a
-// fill in the same second as that snapshot may be one the fact already
-// holds or one that followed it. Credited to a snapshot, it is taken as
-// held, so no fill is counted twice into what a snapshot shows; with
-// sameSecond set, as followed, so no fill is left out of what is counted
-// filled now. Either way the reading is the one that keeps more counted as
-// being sold (fail closed).
-func beyond(facts, fills []shown, v view, sameSecond bool) int64 {
-	var out int64
-	for _, f := range facts {
-		if !v.credits(f) {
-			continue
-		}
-		bound := f.filled
-		for _, x := range fills {
-			if x.at.Before(v.at) && (x.at.After(f.at) || sameSecond && x.at.Equal(f.at)) {
-				bound += x.filled
-			}
-		}
-		out = max(out, bound)
-	}
-	return out
-}
-
-// trackedSell is one released sell and what its own recorded facts show.
-type trackedSell struct {
+// ledgerSell is a released sell and the facts recorded of it.
+type ledgerSell struct {
 	instrumentID string
 	released     int64
-	// fills are the executions fill reports show, each at its execution
-	// time; listed are the shares broker listings showed filled, each at its
-	// snapshot's time.
-	fills, listed []shown
-	// ended is set once a canceled or invalid lifecycle report ends the
-	// sell's remainder.
+	// since is the number of snapshots recorded before its release.
+	since int
+	// fills are its fill reports; listings its remaining in each broker
+	// snapshot that read the open orders and listed it.
+	fills, listings []stamped
+	// ended is set by a canceled or invalid lifecycle report, end the
+	// earliest such report's second.
 	ended bool
+	end   time.Time
 }
 
-// knownBy is the most the sell's own facts credited to v show filled, never
-// past its release: fill reports before v's second, and the listings
-// credited to v with the sell's fills reported after them. What it is
-// counted as having filled now takes a fill in the same
-// second as a listing as following it once a lifecycle report has ended
-// the sell, so more counts as filled, and as held while it may still fill,
-// so more stays pending.
-func (s *trackedSell) knownBy(v view) int64 {
-	var reported int64
-	for _, f := range s.fills {
-		if f.at.Before(v.at) {
-			reported += f.filled
-		}
-	}
-	return min(max(reported, beyond(s.listed, s.fills, v, s.ended && v == now)), s.released)
-}
-
-// unfilledBy is the most of a floor the sell can hold by the facts credited
-// to v: its shares beyond what they show filled. A sell a lifecycle report
-// has ended may have filled any of them before its end with no fill report
-// yet, so it holds them too.
-func (s *trackedSell) unfilledBy(v view) int64 {
-	return s.released - s.knownBy(v)
-}
-
-// sellBook is what snapshots show of one instrument's released sells
-// together.
-type sellBook struct {
-	// floors are the fewest shares the holding's falls show the sells filled
-	// together, each at the time of the snapshot that showed it and by it.
-	floors []shown
-}
-
-// holdingSeen is the latest snapshot, account or broker, that read the
-// holdings: its view and what it held.
-type holdingSeen struct {
+// reference is a snapshot that read the holding, and what it held.
+type reference struct {
 	view
-	quantity map[string]int64
+	held map[string]int64
 }
 
-// sellsOf returns instrumentID's released sells, in release order.
-func (g *Gate) sellsOf(instrumentID string) []*trackedSell {
-	var out []*trackedSell
-	for _, id := range g.sellOrder {
-		if s := g.sells[id]; s.instrumentID == instrumentID {
-			out = append(out, s)
+// sellLedger is every recorded fact the pending rule reads.
+type sellLedger struct {
+	// sells are the released sells by client order ID, and by instrument in
+	// release order.
+	sells        map[string]*ledgerSell
+	byInstrument map[string][]*ledgerSell
+	// snapshots counts the snapshots recorded; held is what each that read
+	// the holding held, by identity.
+	snapshots int
+	held      map[int]map[string]int64
+	// refs are the references, by time and then identity; openOrders the
+	// broker snapshots that read the open orders, in time order.
+	refs       []reference
+	openOrders []view
+	// unknown holds each unknown sell's listings, by instrument and broker
+	// order ID, in time order.
+	unknown map[string]map[string][]stamped
+}
+
+func newSellLedger() sellLedger {
+	return sellLedger{
+		sells: map[string]*ledgerSell{}, byInstrument: map[string][]*ledgerSell{},
+		held: map[int]map[string]int64{}, unknown: map[string]map[string][]stamped{},
+	}
+}
+
+// release records a released sell.
+func (l *sellLedger) release(client, instrumentID string, quantity int64) {
+	s := &ledgerSell{instrumentID: instrumentID, released: quantity, since: l.snapshots}
+	l.sells[client] = s
+	l.byInstrument[instrumentID] = append(l.byInstrument[instrumentID], s)
+}
+
+// snapshot records a snapshot taken at asOf that read held (nil when it read
+// no holding), a reference when it is one, and returns its view.
+func (l *sellLedger) snapshot(asOf time.Time, held map[string]int64, isReference bool) view {
+	l.snapshots++
+	v := view{at: asOf, by: l.snapshots}
+	if held != nil {
+		l.held[v.by] = held
+	}
+	if isReference {
+		at, _ := slices.BinarySearchFunc(l.refs, v, func(r reference, v view) int {
+			if c := r.at.Compare(v.at); c != 0 {
+				return c
+			}
+			return r.by - v.by
+		})
+		l.refs = slices.Insert(l.refs, at, reference{view: v, held: held})
+	}
+	return v
+}
+
+// listOpenOrders records the open orders a broker snapshot v read: each sell
+// of ours it lists, and each sell it lists that the gate did not release.
+func (l *sellLedger) listOpenOrders(v view, orders []event.BrokerOrder) {
+	l.openOrders = append(l.openOrders, v)
+	for _, o := range orders {
+		if o.Side != event.OrderSideSell {
+			continue
+		}
+		listing := stamped{at: v.at, by: v.by, quantity: o.RemainingQuantity}
+		if s := l.sells[o.ClientOrderID]; s != nil && s.instrumentID == o.InstrumentID {
+			s.listings = append(s.listings, listing)
+			continue
+		}
+		byID := l.unknown[o.InstrumentID]
+		if byID == nil {
+			byID = map[string][]stamped{}
+			l.unknown[o.InstrumentID] = byID
+		}
+		byID[o.BrokerOrderID] = append(byID[o.BrokerOrderID], listing)
+	}
+}
+
+// unshown is the pending rule: the shares of instrumentID already being sold
+// that the view v, now or a snapshot that read the holding, cannot show. A
+// view of no snapshot is now.
+func (l *sellLedger) unshown(instrumentID string, v view) int64 {
+	if v.by == 0 {
+		toGo, _, _ := l.toGo(instrumentID, now)
+		return toGo
+	}
+	return max(l.held[v.by][instrumentID]-l.remains(instrumentID), 0)
+}
+
+// remains is the most of instrumentID the facts show is sure to be held once
+// every sell still working has filled, never below nothing.
+func (l *sellLedger) remains(instrumentID string) int64 {
+	var best int64
+	var stop time.Time
+	for _, p := range slices.Backward(l.refs) {
+		if p.at.Before(stop) {
+			break
+		}
+		toGo, quiet, ok := l.toGo(instrumentID, p.view)
+		if !ok {
+			continue
+		}
+		best = max(best, p.held[instrumentID]-toGo)
+		if quiet && stop.IsZero() {
+			stop = p.at
 		}
 	}
-	return out
+	return best
 }
 
-// book returns instrumentID's sell book, creating it empty.
-func (g *Gate) book(instrumentID string) *sellBook {
-	b, ok := g.books[instrumentID]
-	if !ok {
-		b = &sellBook{}
-		g.books[instrumentID] = b
+// toGo returns the most of instrumentID that can still sell after v was
+// taken, and ok false when v cannot bound an unknown sell. quiet reports
+// that nothing released before v was recorded, and no unknown sell, can.
+func (l *sellLedger) toGo(instrumentID string, v view) (toGo int64, quiet, ok bool) {
+	quiet = true
+	for _, s := range l.byInstrument[instrumentID] {
+		if s.endedBefore(v) {
+			continue
+		}
+		n := s.released - s.filledBy(v)
+		toGo += n
+		quiet = quiet && (n == 0 || s.since >= v.by)
 	}
-	return b
-}
-
-// shares returns what is known now of instrumentID's released sells
-// together: the shares filled, and the shares still pending. The floor
-// beyond the sells' own facts is put down to the sells a lifecycle report
-// ended before any still working: an ended sell's unreported fill shows
-// only as a fall, and counting the fall filled by it keeps the working
-// sells' shares pending (fail closed), never sized again.
-func (g *Gate) shares(instrumentID string) (filled, pending int64) {
-	known, extra := g.spread(instrumentID, now)
-	var ended, working int64
-	for _, s := range g.sellsOf(instrumentID) {
-		if s.ended {
-			ended += s.unfilledBy(now)
-		} else {
-			working += s.unfilledBy(now)
+	var latest view
+	for _, b := range slices.Backward(l.openOrders) {
+		if v.credits(b.at, b.by) {
+			latest = b
+			break
 		}
 	}
-	return known + extra, working - max(extra-ended, 0)
-}
-
-// filledBy returns the shares of instrumentID's released sells that the
-// facts credited to v show filled: what that snapshot shows.
-func (g *Gate) filledBy(instrumentID string, v view) int64 {
-	known, extra := g.spread(instrumentID, v)
-	return known + extra
-}
-
-// spread returns, by the facts credited to v, the shares
-// the sells' own facts show filled, and the part of the floor beyond them,
-// never more than the sells' unfilled shares together. So the floor is a
-// count of the sells together, and a snapshot is credited with no more
-// filled than the gate counts filled now: neither the floor nor the sells'
-// own facts ever shrink as more facts are credited.
-func (g *Gate) spread(instrumentID string, v view) (known, extra int64) {
-	var unfilled int64
-	for _, s := range g.sellsOf(instrumentID) {
-		known += s.knownBy(v)
-		unfilled += s.unfilledBy(v)
+	for _, listings := range l.unknown[instrumentID] {
+		// Broker snapshots follow one another, so the listings credited to v
+		// come first.
+		credited := len(listings)
+		if i := slices.IndexFunc(listings, func(x stamped) bool { return !v.credits(x.at, x.by) }); i >= 0 {
+			credited = i
+		}
+		switch {
+		case credited > 0 && listings[credited-1].by == latest.by:
+			toGo += listings[credited-1].quantity
+			quiet = false
+		case credited < len(listings):
+			// Listed after v but not in the latest listing credited to v.
+			return 0, false, false
+		}
 	}
-	return known, min(max(g.floorBy(instrumentID, v)-known, 0), unfilled)
+	return toGo, quiet, true
 }
 
-// floorBy returns the fewest shares the falls credited to v show
-// instrumentID's sells filled by v's time together: a fall's floor and the
-// fills any of them reported after the snapshot that showed it, a fill in
-// the same second taken as following it in what is counted filled now.
-func (g *Gate) floorBy(instrumentID string, v view) int64 {
-	var fills []shown
-	for _, s := range g.sellsOf(instrumentID) {
-		fills = append(fills, s.fills...)
+// endedBefore reports whether a lifecycle report has ended the sell in a
+// second before v's. A fill report stamped after the end's second shows the
+// end no earlier than that fill's.
+func (s *ledgerSell) endedBefore(v view) bool {
+	if !s.ended {
+		return false
 	}
-	return beyond(g.book(instrumentID).floors, fills, v, v == now)
+	for _, f := range s.fills {
+		if !f.at.Before(v.at) {
+			return false
+		}
+	}
+	return s.end.Before(v.at)
+}
+
+// filledBy is the most the sell's facts credited to v show it filled, never
+// past its release: its fills reported before v's second, or a listing
+// credited to v with the fills reported in the seconds after it.
+func (s *ledgerSell) filledBy(v view) int64 {
+	reported := func(after time.Time) int64 {
+		var n int64
+		for _, f := range s.fills {
+			if f.at.After(after) && f.at.Before(v.at) {
+				n += f.quantity
+			}
+		}
+		return n
+	}
+	best := reported(time.Time{})
+	for _, x := range s.listings {
+		if v.credits(x.at, x.by) {
+			best = max(best, s.released-min(x.quantity, s.released)+reported(x.at))
+		}
+	}
+	return min(best, s.released)
 }
 
 // PendingSells returns the shares of instrumentID already being sold that
 // the latest account snapshot cannot show, for a planner sizing a new sell
-// from that snapshot: its released sells' pending shares and those they
-// filled after it was taken, and every other working or pending sell the
-// latest broker snapshot reports, when it read its open orders.
+// from that snapshot (unshown): its released sells' and the unknown sells'
+// shares sold since it was taken or still to sell.
 func (g *Gate) PendingSells(instrumentID string) int64 {
-	return g.unshownSells(instrumentID, g.account)
+	return g.ledger.unshown(instrumentID, g.account)
 }
 
 // brokerHolding returns the latest broker snapshot's holding of instrumentID
@@ -271,121 +338,35 @@ func (g *Gate) brokerHolding(instrumentID string) (holding, working int64, ok bo
 		return 0, 0, false
 	}
 	position, _ := s.Position(instrumentID)
-	return position.Quantity, g.unshownSells(instrumentID, g.brokerView), true
+	return position.Quantity, g.ledger.unshown(instrumentID, g.brokerView), true
 }
 
-// unshownSells is the one rule PendingSells and the broker-holding check
-// share: for the snapshot v, the sells of instrumentID it cannot show,
-// ours (pending, or filled after it was taken) and unknown. A snapshot is never
-// credited with more filled than the gate counts filled now; were it, what
-// it shows of the sells' fills could not be read, and it is credited with
-// none (fail closed: every share the sells filled or still pend counts as
-// working), never with a count below zero.
-func (g *Gate) unshownSells(instrumentID string, v view) int64 {
-	filled, pending := g.shares(instrumentID)
-	shown := g.filledBy(instrumentID, v)
-	if shown > filled {
-		shown = 0
-	}
-	return pending + filled - shown + g.unknownWorking(instrumentID)
-}
-
-// unknownWorking returns the remaining shares of every working sell of
-// instrumentID the latest broker snapshot lists that the gate did not
-// release, when it read its open orders.
-func (g *Gate) unknownWorking(instrumentID string) int64 {
-	var total int64
-	if b := g.broker; b != nil && b.Readable(event.BrokerComponentOpenOrders) {
-		for _, o := range b.OpenOrders {
-			if _, ours := g.sells[o.ClientOrderID]; !ours && o.InstrumentID == instrumentID && o.Side == event.OrderSideSell {
-				total += o.RemainingQuantity
-			}
-		}
-	}
-	return total
-}
-
-// notOlder reports whether a snapshot taken at asOf is not older than the
-// latest snapshot that read the holding.
-func (g *Gate) notOlder(asOf time.Time) bool {
-	return g.holding == nil || !asOf.Before(g.holding.at)
-}
-
-// ObserveAccount records account snapshot p, the one PendingSells nets for:
-// it shows the fills credited to its time. When it is not older than the
-// latest holding seen, a fall in its holding that the fills by then do not
-// explain is taken as filled by the pending sells, net first of every
-// unknown sell the latest broker snapshot lists (which may be what sold),
-// and its holding is the one later falls are measured from.
+// ObserveAccount records account snapshot p, the one PendingSells nets for,
+// and a reference.
 func (g *Gate) ObserveAccount(p event.AccountPositionsSnapshotPayload) {
-	g.account = g.nextView(p.AsOf)
-	if !g.notOlder(p.AsOf) {
-		return
-	}
 	held := map[string]int64{}
 	for _, position := range p.Positions {
 		held[position.InstrumentID] = position.Quantity
 	}
-	for _, instrument := range g.sellInstruments() {
-		if floor, ok := g.fallFloor(instrument, held[instrument]); ok {
-			var released int64
-			for _, s := range g.sellsOf(instrument) {
-				released += s.released
-			}
-			g.takeFall(instrument, g.account, floor-g.unknownWorking(instrument), released)
+	g.account = g.ledger.snapshot(p.AsOf, held, true)
+}
+
+// recordBroker records broker snapshot next, recorded after the latest one: its
+// holding when it read the positions, its listings when it read the open
+// orders, and a reference when it read both.
+func (g *Gate) recordBroker(next event.BrokerSnapshotPayload) {
+	var held map[string]int64
+	if next.Readable(event.BrokerComponentPositions) {
+		held = map[string]int64{}
+		for _, p := range next.Positions {
+			held[p.InstrumentID] = p.Quantity
 		}
 	}
-	g.seeHolding(g.account, held)
-}
-
-// nextView returns the view of the next snapshot recorded, taken at asOf,
-// with an identity of its own.
-func (g *Gate) nextView(asOf time.Time) view {
-	g.snapshots++
-	return view{at: asOf, by: g.snapshots}
-}
-
-// sellInstruments returns the instruments of the released sells, in release
-// order.
-func (g *Gate) sellInstruments() []string {
-	var out []string
-	for _, id := range g.sellOrder {
-		if i := g.sells[id].instrumentID; !slices.Contains(out, i) {
-			out = append(out, i)
-		}
+	orders := next.Readable(event.BrokerComponentOpenOrders)
+	g.brokerView = g.ledger.snapshot(next.AsOf, held, held != nil && orders)
+	if orders {
+		g.ledger.listOpenOrders(g.brokerView, next.OpenOrders)
 	}
-	return out
-}
-
-// fallFloor returns the fewest shares instrumentID's sells had filled when a
-// snapshot holding held was taken, by the fall from the latest snapshot that
-// read the holding: what that snapshot showed filled, and the fall since.
-// ok is false when no earlier snapshot read the holding.
-func (g *Gate) fallFloor(instrumentID string, held int64) (floor int64, ok bool) {
-	if g.holding == nil {
-		return 0, false
-	}
-	return g.filledBy(instrumentID, g.holding.view) + g.holding.quantity[instrumentID] - held, true
-}
-
-// takeFall takes floor, seen by the snapshot v, as filled by instrumentID's
-// sells, so that no share they may have sold is sold again (ADR 0019,
-// amended 2026-10-15, "never below it"), never past ceiling, the most the
-// sells that may have sold can have filled. A floor the facts credited to v
-// already show changes nothing.
-func (g *Gate) takeFall(instrumentID string, v view, floor, ceiling int64) {
-	floor = min(floor, ceiling)
-	if floor <= g.filledBy(instrumentID, v) {
-		return
-	}
-	b := g.book(instrumentID)
-	b.floors = append(b.floors, shown{at: v.at, by: v.by, filled: floor})
-}
-
-// seeHolding makes held, seen by the snapshot v, the holding later falls are
-// measured from.
-func (g *Gate) seeHolding(v view, held map[string]int64) {
-	g.holding = &holdingSeen{view: v, quantity: held}
 }
 
 // reportedOrder returns the released order a venue report names, checking
@@ -424,15 +405,15 @@ func (g *Gate) ObserveFill(p event.TargetWeightFillPayload) error {
 	}
 	o.reported += p.Quantity
 	g.fills[p.FillID] = p
-	if s := g.sells[p.ClientOrderID]; s != nil {
-		s.fills = append(s.fills, shown{at: p.FilledAt, filled: p.Quantity})
+	if s := g.ledger.sells[p.ClientOrderID]; s != nil {
+		s.fills = append(s.fills, stamped{at: p.FilledAt, quantity: p.Quantity})
 	}
 	return nil
 }
 
 // ObserveLifecycle applies a recorded lifecycle report on a released order:
-// canceled or invalid ends a sell's remainder; submitted and cancel-pending
-// leave it pending.
+// canceled or invalid ends a sell's remainder, from the earliest such
+// report's second; submitted and cancel-pending leave it pending.
 func (g *Gate) ObserveLifecycle(p event.LimitOrderLifecyclePayload) error {
 	if err := p.Validate(); err != nil {
 		return fmt.Errorf("risklimit: %w", err)
@@ -444,92 +425,10 @@ func (g *Gate) ObserveLifecycle(p event.LimitOrderLifecyclePayload) error {
 	if p.Quantity != o.planned.Quantity || p.LimitPrice != o.planned.LimitPrice {
 		return fmt.Errorf("risklimit: a lifecycle report on order %s reports %d at %v; the order is %d at %v", p.ClientOrderID, p.Quantity, p.LimitPrice, o.planned.Quantity, o.planned.LimitPrice)
 	}
-	if s := g.sells[p.ClientOrderID]; s != nil && p.Terminal() {
-		s.ended = true
+	if s := g.ledger.sells[p.ClientOrderID]; s != nil && p.Terminal() {
+		if end := p.OccurredAt.Truncate(time.Second); !s.ended || end.Before(s.end) {
+			s.ended, s.end = true, end
+		}
 	}
 	return nil
-}
-
-// resolve applies what the broker snapshot next, recorded after the latest
-// one, shows of each released sell. A sell it lists working had filled all
-// but its remaining quantity by its time. When it is not older than the
-// latest holding seen, the sells it lists are shown exactly, so every floor
-// keeps only what the open sells it does not list can have filled by then;
-// and a fall in its holding that the fills by then, those it lists included,
-// and an unknown sell's own fills do not explain is taken as filled by the
-// pending sells it does not list. A sell it does not list stays pending
-// otherwise. A snapshot that cannot read the open orders resolves nothing,
-// and later falls are not measured from its holding, so a fall it shows is
-// measured by the next snapshot that can read them, never lost.
-func (g *Gate) resolve(next event.BrokerSnapshotPayload) {
-	v := g.nextView(next.AsOf)
-	g.brokerView = v
-	if !next.Readable(event.BrokerComponentOpenOrders) {
-		return
-	}
-	listed := map[*trackedSell]bool{}
-	for _, o := range next.OpenOrders {
-		if s := g.sells[o.ClientOrderID]; s != nil && o.Side == event.OrderSideSell && o.InstrumentID == s.instrumentID {
-			listed[s] = true
-			s.listed = append(s.listed, shown{at: v.at, by: v.by, filled: min(max(s.released-o.RemainingQuantity, 0), s.released)})
-		}
-	}
-	if g.notOlder(next.AsOf) {
-		for _, instrument := range g.sellInstruments() {
-			ceiling, _ := g.spread(instrument, v)
-			for _, s := range g.sellsOf(instrument) {
-				if !listed[s] {
-					ceiling += s.unfilledBy(v)
-				}
-			}
-			b := g.book(instrument)
-			for i := range b.floors {
-				b.floors[i].filled = min(b.floors[i].filled, ceiling)
-			}
-			if next.Readable(event.BrokerComponentPositions) {
-				after, _ := next.Position(instrument)
-				if floor, ok := g.fallFloor(instrument, after.Quantity); ok {
-					g.takeFall(instrument, v, floor-g.unknownFills(next, instrument), ceiling)
-				}
-			}
-		}
-	}
-	g.brokerSeen(v, next)
-}
-
-// brokerSeen records broker snapshot next, which read the open orders: when
-// it is not older than the latest holding seen and read the holdings, its
-// holding is the one later falls are measured from.
-func (g *Gate) brokerSeen(v view, next event.BrokerSnapshotPayload) {
-	if !g.notOlder(next.AsOf) || !next.Readable(event.BrokerComponentPositions) {
-		return
-	}
-	held := map[string]int64{}
-	for _, p := range next.Positions {
-		held[p.InstrumentID] = p.Quantity
-	}
-	g.seeHolding(v, held)
-}
-
-// unknownFills returns the shares of instrumentID that unknown sells listed
-// in both the latest broker snapshot and next sold between them, by the fall
-// in their remaining quantity.
-func (g *Gate) unknownFills(next event.BrokerSnapshotPayload, instrumentID string) int64 {
-	prev := g.broker
-	if prev == nil || !prev.Readable(event.BrokerComponentOpenOrders) {
-		return 0
-	}
-	remaining := map[string]int64{}
-	for _, o := range prev.OpenOrders {
-		if _, ours := g.sells[o.ClientOrderID]; !ours && o.InstrumentID == instrumentID && o.Side == event.OrderSideSell {
-			remaining[o.BrokerOrderID] = o.RemainingQuantity
-		}
-	}
-	var sold int64
-	for _, o := range next.OpenOrders {
-		if was, ok := remaining[o.BrokerOrderID]; ok && o.InstrumentID == instrumentID && o.Side == event.OrderSideSell && was > o.RemainingQuantity {
-			sold += was - o.RemainingQuantity
-		}
-	}
-	return sold
 }

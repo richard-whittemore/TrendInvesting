@@ -122,24 +122,14 @@ type Gate struct {
 	saleTags  map[string]bool
 	attempted map[string]bool
 	pending   map[string]bool
-	// sells holds every sell the gate released, by client order ID, and
-	// sellOrder their IDs in release order; orders holds every released
-	// order, so a fill or lifecycle report is checked against the order it
-	// names, and fills every execution reported, by fill ID.
-	sells     map[string]*trackedSell
-	sellOrder []string
-	// books holds what snapshots show of each instrument's released sells
-	// together.
-	books map[string]*sellBook
-	// holding is the latest snapshot that read the holdings, which a later
-	// snapshot's fall in the holding is measured from.
-	holding *holdingSeen
-	// account is the view of the latest account snapshot: the snapshot a
-	// planner sizes from, which PendingSells nets for; brokerView is the
-	// latest broker snapshot's. snapshots counts the snapshots recorded, so
-	// each has its own identity among those stamped in one second.
+	// ledger holds every fact the pending rule reads: the released sells,
+	// their reports and the snapshots. account is the view of the latest
+	// account snapshot, the snapshot a planner sizes from, which PendingSells
+	// nets for; brokerView is the latest broker snapshot's. orders holds
+	// every released order, so a fill or lifecycle report is checked against
+	// the order it names, and fills every execution reported, by fill ID.
+	ledger              sellLedger
 	account, brokerView view
-	snapshots           int
 	orders              map[string]*releasedOrder
 	fills               map[string]event.TargetWeightFillPayload
 }
@@ -198,7 +188,7 @@ func newGate(accountID string, limits event.MarginLimits, mode string, maxSnapsh
 		state: StateNormal, alarmLevel: event.MarginAlarmClear, maxSnapshotAge: maxSnapshotAge,
 		released: make(map[string]bool), saleTags: make(map[string]bool),
 		attempted: make(map[string]bool), pending: make(map[string]bool),
-		sells: make(map[string]*trackedSell), orders: make(map[string]*releasedOrder), books: make(map[string]*sellBook),
+		ledger: newSellLedger(), orders: make(map[string]*releasedOrder),
 		fills: make(map[string]event.TargetWeightFillPayload),
 	}, nil
 }
@@ -448,8 +438,7 @@ func (g *Gate) release(o Order, f event.RiskFigures) Outcome {
 	g.released[p.ClientOrderID] = true
 	g.orders[p.ClientOrderID] = &releasedOrder{planned: p}
 	if p.Side == event.OrderSideSell {
-		g.sells[p.ClientOrderID] = &trackedSell{instrumentID: p.InstrumentID, released: p.Quantity}
-		g.sellOrder = append(g.sellOrder, p.ClientOrderID)
+		g.ledger.release(p.ClientOrderID, p.InstrumentID, p.Quantity)
 	}
 	return Outcome{Released: &event.OrderReleasedPayload{
 		AccountID: g.accountID, PlanID: o.PlanID, Tag: p.Tag, ClientOrderID: p.ClientOrderID,

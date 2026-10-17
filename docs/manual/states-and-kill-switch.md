@@ -101,107 +101,111 @@ twice. Which sells count is set by one rule, below.
 Worked example (ADR 0019): 147 SPY, $4,700 borrowed, mark $90, so net
 liquidation is $8,530. It keeps 93 shares and sells 54.
 
-**When a sell stops counting.** A sell this program sent is *pending* from
-the moment it is released until the shares are known filled or a
-cancellation report ends it. Pending shares are the shares sent minus the
-shares known filled. One rule decides what is known filled:
+**Which sells count: one rule.** Every sell is sized from a snapshot of
+your holding, net of the shares already being sold that the snapshot cannot
+show: the shares sold since it was taken, and the shares that may still
+sell. The program works that out with one rule, from everything recorded,
+in whatever order it arrived:
 
-- A fill report shows the shares it filled. A partial fill leaves the rest
-  pending.
-- A sell IBKR lists as working has filled all but the quantity IBKR says
-  remains.
-- A fall in your holding, seen by an account snapshot or an IBKR snapshot
-  against the snapshot before it, that the fills already known do not
-  explain counts as filled by that fund's sells. An account snapshot first
-  sets aside the shares of any unknown sell IBKR listed, since that order
-  may be what sold. A sale you make by hand while one of ours is working
-  looks the same, so it is taken as ours until IBKR lists ours at its true
-  remaining quantity. An IBKR snapshot that cannot read the open orders is
-  not the one the next fall is measured from: the next snapshot that can
-  read them measures the fall since the snapshot before it, so no fall is
-  missed.
-- A fall counts once for the fund's sells together, never once per sell. If
-  two sells are working, A for 60 and B for 40 of 100, and the account
-  snapshot shows 70, the 30 are counted filled; when B's fill report for 30
-  arrives, it is the same 30, so 70 shares (A's 60 and B's 10) are still
-  being sold, not 40.
-- A fill learned in more than one way is counted once. If the account
+1. It looks at every snapshot that read your holding: each account
+   snapshot, and each IBKR snapshot that read both your positions and your
+   open orders.
+2. For each, it adds up the most that can still be sold after it was taken:
+   - for each sell the program sent, the shares sent minus the shares known
+     filled by then, or nothing once a cancellation or refusal report has
+     ended it in an earlier second;
+   - for each sell IBKR lists that the program did not send (a sale you
+     placed by hand), what IBKR's latest listing before that snapshot says
+     remains, or nothing once IBKR no longer lists it.
+3. That snapshot's holding minus that sum is a floor: once every working
+   sell has filled, you will still hold at least that much. The program
+   takes the highest of these floors, never below zero.
+4. What a snapshot cannot show is its holding minus that floor. Boost's exit
+   is sized from the account snapshot net of it; the sale back to 98% and
+   the broker-holding check from the IBKR snapshot net of it.
+
+A sell's shares *known filled* by a snapshot are the most of two things:
+its fill reports stamped before the snapshot's second; or what an IBKR
+listing at or before it showed (the shares sent minus the quantity IBKR
+said remains), plus the fills reported in the seconds after that listing.
+
+For example, two sells are working, A for 60 and B for 40 of 100. An
+account snapshot shows 70, and B's fill report for 30 arrives after it. The
+snapshot before the fills gives a floor of 100 - 100 = 0; the one showing
+70 gives 70 - (60 + 10) = 0. So 70 shares (A's 60 and B's 10) are still
+being sold against the 70, never 40.
+
+What follows from the rule:
+
+- A fill learned in more than one way is counted once. Nothing is added up
+  from separate sources: every share sold between two snapshots is in the
+  difference between their holdings, whoever sold it. If the account
   snapshot already showed the 54 shares of the sale sold (147 down to 93),
   the IBKR snapshot and the fill report that follow add nothing, and the
   next exit is not cut down by them a second time.
-- A snapshot shows only the fills that had happened when it was taken,
-  whatever order things are recorded in. Fill reports arrive as the fills
-  happen, but snapshots are taken on a schedule, so a fill report can be
-  recorded before a snapshot taken a moment before the fill. If the urgent
-  sale of 54 fills at 16:00:02 and its report is recorded before an account
-  snapshot taken at 16:00:00 that still shows 147, the 54 still count as
-  being sold against that snapshot; otherwise the session's exit could sell
-  another 54 and leave 39 of 147. A fill reported after a snapshot taken
-  after the fill is one the snapshot already showed, so it counts once.
-- A fill in the same second as a snapshot is assumed to have come after it.
-  IBKR stamps fills to the whole second, and a snapshot has no IBKR time of
-  its own, so a fill stamped 16:00:02 may have happened just after a
-  snapshot stamped 16:00:02 read its holdings. The gate takes the safe
-  reading: against that snapshot, the 54 still count as being sold. A fill
-  stamped 16:00:01 is one the snapshot shows. A cancellation in the same
-  second as a snapshot is treated the same way: the shares the sale had sold
-  by then still count as being sold against that snapshot. A fill report
-  stamped after a cancellation (IBKR can report a late fill) counts only
-  from its own time: a snapshot taken between the cancellation and that
-  fill still counts its shares as being sold.
-- An account snapshot and an IBKR snapshot stamped in the same second are
-  taken as one moment. Neither can show which came first within that
-  second, so neither is taken to show a fill of that second that the other
-  saw. If the account snapshot of 16:00:02 still holds 147 and the IBKR
-  snapshot of 16:00:02 holds 93 after the urgent sale filled, the 54 still
-  count as being sold against the account snapshot, whichever was recorded
-  first; against the IBKR snapshot, which saw the fall itself, they do not.
-  What IBKR lists as working stays that IBKR snapshot's own fact. Every
-  snapshot and fill time is a whole second; a time with a fraction of a
-  second is refused when it is recorded.
-- A sale you make by hand while an IBKR snapshot cannot read the open
-  orders looks like a fall no fill report explains, because the order you
-  placed is not listed to set it aside. The fall is put down first to the
-  fund's cancelled sales, as above, so the working sales stay counted as
-  being sold and nothing is sold twice. Only a hand sale larger than what
-  the cancelled sales could still have sold is taken off the working
-  sales: the program then counts a working sale as further along than it
-  is, and could size the next exit from shares you have already sold. Do
-  not sell by hand while a sale of the program's is working; if you must,
-  engage the kill switch first, which stops every new order but the sale
-  back to 98%.
-- A drop in your holding that no fill report explains yet is put down
-  first to the fund's cancelled sales, then to the sales still working. A
-  cancelled sale's fill may not be reported yet, and the drop is the only
-  sign of it; counting the drop as that sale's keeps a working sale's
-  shares counted as being sold until a report or a listing shows them sold.
-  The drop counts from the time of the snapshot that showed it, whether the
-  cancellation or that snapshot was recorded first. A sell of 60 of 100 is
-  cancelled at 15:00:02, and an IBKR snapshot of 15:00:02 holds 70: the 30
-  count as sold, so a sell of 100 is refused against the 70, and the next
-  exit, sized from an account snapshot of 15:00:00 that still showed 100,
-  counts the 30 as being sold.
+- A drop in your holding is put down to no sale in particular. Say IBKR
+  lists a hand sale of 30, the program sends a sell of 60 against 100, and
+  the account snapshot shows 60. Whether yours or the program's sold the 40,
+  you will hold 100 - 30 - 60 = 10 once both fill, so 50 of the 60 are
+  still being sold.
+- A snapshot shows only the fills that had happened when it was taken.
+  Fill reports arrive as the fills happen, but snapshots are taken on a
+  schedule, so a fill report can be recorded before a snapshot taken a
+  moment before the fill. If the urgent sale of 54 fills at 16:00:02 and
+  its report is recorded before an account snapshot taken at 16:00:00 that
+  still shows 147, the 54 still count as being sold against that snapshot;
+  otherwise the session's exit could sell another 54 and leave 39 of 147.
+- A fill or a cancellation in the same second as a snapshot is assumed to
+  have come after it. IBKR stamps fills to the whole second, and a snapshot
+  has no IBKR time of its own, so a fill stamped 16:00:02 may have happened
+  just after a snapshot stamped 16:00:02 read your holding. Against that
+  snapshot, the 54 still count as being sold; a fill stamped 16:00:01 is one
+  it shows. Snapshots stamped in the same second are each taken alone:
+  neither is credited with a fill or a listing the other saw, and each one's
+  holding gives its own floor. Every snapshot and fill time is a whole
+  second; a time with a fraction of a second is refused when it is
+  recorded.
+- A cancelled sale stops counting once a snapshot taken in a later second
+  than the cancellation reads your holding. Until then, every share it may
+  have sold before the cancellation still counts, its fill reported or not,
+  because a fill can be reported late and the holding is the only sure
+  sign. A sell of 60 of 100 is cancelled at 15:00:02, and an IBKR snapshot
+  of 15:00:02 holds 70: the other 30 may have sold after that snapshot's
+  read, so they still count against it, and all 60 against an account
+  snapshot of 15:00:00 that showed 100. The IBKR snapshot of 15:00:03 shows
+  what it finally sold. A fill report stamped after a cancellation (IBKR can
+  report a late fill) moves the cancellation's time to that fill's.
+- Only a cancellation or refusal report ends a sell. A sell IBKR no longer
+  lists, with your holding unchanged, stays counted: it may simply not have
+  reached IBKR yet. So an urgent sale of 54 that a snapshot a minute later
+  does not list still holds the same session's exit back; otherwise both
+  could fill and sell 108 of 147, far below 98%. A sell waiting to be
+  cancelled (cancel-pending) may still fill, so it counts in full until the
+  cancellation is confirmed.
+- An IBKR snapshot that cannot read the open orders is not one of the
+  snapshots in step 1, and the hand sales are taken from the last IBKR
+  snapshot that could read them, never from it. A hand sale IBKR listed
+  before it is still counted at its remaining quantity, so its fill is never
+  taken as the program's.
 - A snapshot taken earlier than one already seen, but recorded after it
-  (account and IBKR snapshots each keep their own order), is judged by its
-  own time too. An IBKR snapshot from 15:59:55 that still shows 147,
-  recorded after the 16:00 account snapshot that showed the 54 sold, is
-  still checked with the 54 counted as working against its 147, so a sell
-  of 117 is refused rather than sold short. An account snapshot from 15:02,
-  recorded after a 15:03 IBKR snapshot, still shows a fill reported for
-  15:01, so the next exit is not cut down by it a second time.
-
-Only a cancellation or refusal report ends what has not filled. A sell IBKR
-no longer lists, with your holding unchanged, stays pending: it may simply
-not have reached IBKR yet. So an urgent sale of 54 that a snapshot a minute
-later does not list still holds the same session's exit back; otherwise both
-could fill and sell 108 of 147, far below 98%. The sell is settled by a
-later snapshot that lists it, a fall in the holding, a fill report or a
-cancellation report. A sell waiting to be cancelled (cancel-pending) may
-still fill, so it stays pending in full until the cancellation is confirmed.
+  (account and IBKR snapshots each keep their own order), is judged by the
+  same rule. An IBKR snapshot from 15:59:55 that still shows 147, recorded
+  after the 16:00 account snapshot that showed the 54 sold, still has the
+  54 counted as working against its 147, so a sell of 117 is refused rather
+  than sold short.
+- A sale you make by hand is known to the program only from IBKR's list of
+  open orders. One placed after the last IBKR snapshot that could read that
+  list is not counted until a snapshot lists it, and if it fills first it
+  never is: its shares sold look like fills of the program's working sales,
+  so the program can count them as further along than they are and size the
+  next exit from shares you have already sold. Do not sell by hand while a
+  sale of the program's is working; if you must, engage the kill switch
+  first, which stops every new order but the sale back to 98%.
 
 The exit and the broker-holding check use this same rule, so a sell still
-working is never sold again, and a sell that was cancelled no longer holds
-the exit back (ADR 0019, amended 2026-10-15; ADR 0026, points 2.5 and 4).
+working is never sold again, and a sell that was cancelled stops holding the
+exit back once a snapshot shows what it sold (ADR 0019, amended 2026-10-15;
+ADR 0026, points 2.5 and 4).
 
 **Once per incident.** An incident runs from the first move out of Normal
 until recovery. Going from Degraded to Halted is the same incident. Under the

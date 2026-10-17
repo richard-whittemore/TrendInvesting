@@ -92,7 +92,7 @@ func (g *Gate) SetKillSwitch(id string, p event.KillSwitchPayload) error {
 }
 
 // ObserveBroker applies a recorded account.broker.snapshot with envelope ID
-// id: it resolves what it shows of each released sell (resolve), becomes the
+// id: it is recorded for the pending rule (recordBroker), becomes the
 // latest broker observation, and ends the account's stale episode, being
 // fresh by its own time (ADR 0019, amendment of 2026-10-17, reading 10). For
 // a margin account the margin-cushion alarm is evaluated (plan.md section 5;
@@ -122,7 +122,7 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 	if g.broker != nil && !s.AsOf.After(g.broker.AsOf) {
 		return Observation{}, fmt.Errorf("risklimit: broker snapshot as of %s does not follow the last, %s", s.AsOf, g.broker.AsOf)
 	}
-	g.resolve(s)
+	g.recordBroker(s)
 	if g.broker == nil {
 		g.firstBroker = s.AsOf
 	}
