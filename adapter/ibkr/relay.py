@@ -45,7 +45,9 @@ permission dated with that session, and an adapter started on a later day
 does not send it: it marks the order about to be sent again and stops
 (ResendExpired). A permission can be withdrawn the same way it was given,
 by marking the order sent, for an owner who finds the order at IBKR after
-allowing it; it is never given twice. The record is edited
+allowing it. A permission is spent by the send it authorises; if the adapter
+crashes mid-send the order reverts to handing-over, and the same day it may
+be allowed again after another check at IBKR. The record is edited
 read-modify-write, so each relay holds an exclusive lock on the pending
 file's lock file from construction until close, and resolve holds it while
 it runs, refusing while a relay has it; a closed relay neither edits the
@@ -294,10 +296,13 @@ class Relay:
                                    "this copy is refused".format(envelope.get("id")))
         return self._settle(envelope)
 
-    def _settle(self, envelope):
+    def _require_held(self):
         if self._held is None:
             raise PendingInUse("this relay was closed and no longer holds {}; it edits and sends nothing".format(
                 self._pending.path))
+
+    def _settle(self, envelope):
+        self._require_held()
         self._pending.save(envelope)
         reply = self._ask(envelope)
         marks = self._pending.handovers()
@@ -317,15 +322,19 @@ class Relay:
             if mark is not None:
                 allowed_on, today = resend_date(mark), self._today()
                 if allowed_on != today:
+                    self._require_held()
                     self._pending.mark(cid, HANDING_OVER)
                     raise ResendExpired(cid, allowed_on, today)
             # Built before the mark: a request that cannot be built never
             # reaches the sender, so it leaves no mark to stop a restart.
             request = self._to_request(order)
+            self._require_held()
             self._pending.mark(cid, HANDING_OVER)
             self._send(request)
+            self._require_held()
             self._pending.mark(cid, SENT)
             self._sent.add(cid)
+        self._require_held()
         self._pending.clear()
         return reply
 

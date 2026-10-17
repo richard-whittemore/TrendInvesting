@@ -418,6 +418,20 @@ class RelayTests(unittest.TestCase):
         self.assertIsNone(self.pending.load(), "and edits nothing")
         second.close()
 
+    def test_a_relay_closed_mid_settlement_sends_no_further_order(self):
+        decisions = {"session:0": [released("tw-1"), released("tw-2")]}
+        holder = []
+
+        def send_then_close(request):
+            self.sent.append(request)
+            holder[0].close()
+
+        holder.append(self.relay(Restarts({}, decisions), send=send_then_close))
+        with self.assertRaises(PendingInUse):
+            holder[0].exchange(envelope(0))
+        self.assertEqual([r.client_order_id for r in self.sent], ["tw-1"], "the lock was released, so tw-2 waits")
+        self.assertEqual(self.pending.handovers(), {"tw-1": "handing-over"}, "and the closed relay edits nothing")
+
     def test_resolve_is_refused_while_an_adapter_holds_the_pending_file(self):
         inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z")
         decisions = {"session:0": [released("tw-1")]}
