@@ -93,7 +93,8 @@ type Book struct {
 //     (defensive_v2.py:76).
 //
 // With no pick the whole of Invested goes to RiskOffInstrument, as
-// defensive_book does (84-85); Decide withholds such a decision instead.
+// defensive_book does (84-85); Decide withholds such a decision instead
+// (no-eligible-names, or all-unaffordable when D7-L skipped a name).
 //
 // The inverse volatilities are summed in pick order, as Python summed its
 // dict's values, so the weights can match the backtest's to the last bit.
@@ -112,10 +113,10 @@ func SelectBook(cfg Config, candidates []Candidate, riskOff bool) (Book, error) 
 // Only a pick with a positive target value is compared. A risk-off book with
 // RiskOffFraction 1 gives every pick a zero target, which buys none of it:
 // that book is SelectBook's, the whole of Invested in RiskOffInstrument, and
-// the planner sells every stock held, as the risk-off rule asks. When every
-// candidate is skipped, at any RiskOffFraction, the book has no pick and the
-// whole of Invested in RiskOffInstrument; Decide makes that decision rather
-// than withholding it.
+// Decide makes it, so the planner sells every stock held, as the risk-off
+// rule asks. When every pick with a positive target is skipped, at any
+// RiskOffFraction, the book has no pick; Decide withholds it as
+// all-unaffordable and the last book is kept.
 //
 // A target value depends on the weights, which depend on the picks, so the
 // substitution is a fixed point, reached by repeating the selection: each

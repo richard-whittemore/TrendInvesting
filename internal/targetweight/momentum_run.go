@@ -427,13 +427,14 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int) ([]event.Envel
 	d, err := momentum.Decide(r.rule, input)
 	b.fail(err)
 	p := r.payload(d, end)
-	if lotSet && d.Outcome == momentum.OutcomeDecided {
-		// The figures are recorded exactly when the momentum rule decided a
-		// book under D7-L, which compared every pick it reached, a book it
-		// emptied included. They stay if the run then withholds that book
-		// (missing bars, a rebalance in progress), beside the unaffordable
-		// names they value. A decision the rule withheld, no-eligible-names
-		// among them, compared no pick and records none.
+	if lotSet && (d.Outcome == momentum.OutcomeDecided || d.Reason == momentum.ReasonAllUnaffordable) {
+		// The figures are recorded exactly when D7-L valued the picks: a
+		// book the rule decided under it, or one it withheld as
+		// all-unaffordable, beside the unaffordable names they value. They
+		// stay if the run then withholds a decided book (missing bars, a
+		// rebalance in progress). A decision the rule withheld for any other
+		// reason, no-eligible-names among them, compared no pick and records
+		// none.
 		p.Momentum.MinimumLot = event.MinimumLotFigures{NetLiquidation: lot.NetLiquidation, MomentumScale: lot.Scale}
 	}
 	r.applyGlide(&p, d, figures)
@@ -781,9 +782,12 @@ func (r *momentumRun) payload(d momentum.Decision, end time.Time) event.TargetsD
 			UniverseAtOrAboveFloor: d.Universe.AtOrAboveFloor, UniverseMembers: d.Universe.Members,
 		},
 	}
+	p.Detail = d.Detail
 	if d.Outcome == momentum.OutcomeWithheld {
 		p.WithheldReason = string(d.Reason)
-		p.Detail = withheldDetail(d.Reason, r.rule, d.CloseSession)
+		if p.Detail == "" {
+			p.Detail = withheldDetail(d.Reason, r.rule, d.CloseSession)
+		}
 	}
 	for _, n := range d.Names {
 		p.Momentum.Names = append(p.Momentum.Names, event.MomentumName{

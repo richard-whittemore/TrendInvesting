@@ -52,12 +52,17 @@ const (
 	// backtest treats as risk-on and live withholds (ADR 0026, point 5).
 	WithheldInsufficientTrendHistory = "insufficient-trend-history"
 	// WithheldNoEligibleNames: the ranking left no name to hold, none of
-	// them skipped as unaffordable (a book D7-L emptied is decided).
+	// them skipped as unaffordable.
 	WithheldNoEligibleNames = "no-eligible-names"
 	// WithheldRebalanceInProgress: an order of an earlier decision is not
 	// yet terminal, so no new rebalance is planned until it is (ADR 0026,
 	// point 5: nothing is sent mid-rebalance until the owner clears it).
 	WithheldRebalanceInProgress = "rebalance-in-progress"
+	// WithheldAllUnaffordable: D7-L skipped every pick with a positive
+	// target as unaffordable, so no stock could be picked. The book is kept,
+	// since a bad net liquidation or bad raw closes would look the same
+	// (ADR 0026, point 2, "D7-L", and point 5, "fail closed").
+	WithheldAllUnaffordable = "all-unaffordable"
 )
 
 // TargetWeight is one instrument's target as a fraction of net liquidation.
@@ -162,12 +167,13 @@ type MomentumFigures struct {
 	UniverseMembers        int `json:"universe_members"`
 	// Names holds every universe member in universe rank order.
 	Names []MomentumName `json:"names"`
-	// MinimumLot is set exactly when the momentum rule decided a book under
-	// D7-L: net liquidation V at the previous close and the momentum
-	// sleeve's scale, 1 - b. A pick's target value is its weight x
-	// MomentumScale x V. The figures stay when the run then withholds that
-	// book (missing bars, a rebalance in progress); a decision the rule
-	// withheld, no-eligible-names included, compared no pick and has none.
+	// MinimumLot is set exactly when D7-L valued the picks: the momentum
+	// rule decided a book under it, or withheld one as all-unaffordable. It
+	// holds net liquidation V at the previous close and the momentum sleeve's
+	// scale, 1 - b; a pick's target value is its weight x MomentumScale x V.
+	// The figures stay when the run then withholds a decided book (missing
+	// bars, a rebalance in progress); a decision the rule withheld for any
+	// other reason, no-eligible-names included, compared no pick and has none.
 	MinimumLot MinimumLotFigures `json:"minimum_lot,omitzero"`
 }
 
@@ -263,7 +269,7 @@ func (p TargetsDecidedPayload) Validate() error {
 	case TargetsOutcomeWithheld:
 		switch p.WithheldReason {
 		case WithheldMissingBars, WithheldStaleAccountSnapshot, WithheldMissingUniverse,
-			WithheldInsufficientTrendHistory, WithheldNoEligibleNames, WithheldRebalanceInProgress:
+			WithheldInsufficientTrendHistory, WithheldNoEligibleNames, WithheldRebalanceInProgress, WithheldAllUnaffordable:
 		default:
 			errs = append(errs, fmt.Errorf("withheld reason %q is not recognised", p.WithheldReason))
 		}

@@ -3,6 +3,7 @@ package targetweight_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -174,8 +175,9 @@ func TestMinimumLotDoesNotApplyWithNoMomentumSleeve(t *testing.T) {
 // TestMinimumLotMovesAFullyRiskOffBookToTheRiskOffInstrument sets
 // RiskOffFraction 1 with b = 0: February is risk-off, so every pick has a
 // zero target. D7-L skips only a pick with a positive target value whose one
-// share exceeds it, so no name is unaffordable, the decision is made, the
-// book moves to the risk-off instrument and every held stock is sold.
+// share exceeds it, so no name is unaffordable, the decision is made with a
+// detail saying so, the book moves to the risk-off instrument and every held
+// stock is sold.
 func TestMinimumLotMovesAFullyRiskOffBookToTheRiskOffInstrument(t *testing.T) {
 	r := simulateMomentum(t, momentumOptions{mutate: func(c *event.TargetWeightConfigurationPayload) {
 		c.Momentum.RiskOffFraction = 1
@@ -200,6 +202,11 @@ func TestMinimumLotMovesAFullyRiskOffBookToTheRiskOffInstrument(t *testing.T) {
 	}
 	if ief, ok := targetOf(feb, "IEF"); !ok || ief.Weight != 0.98 {
 		t.Errorf("IEF target %+v", ief)
+	}
+	for _, want := range []string{"every pick's target weight is zero", "IEF", "every stock held is sold"} {
+		if !bytes.Contains([]byte(feb.Detail), []byte(want)) {
+			t.Errorf("detail %q does not name %q", feb.Detail, want)
+		}
 	}
 	var phases []string
 	for _, o := range planned(t, r.decisions) {
@@ -252,47 +259,55 @@ func TestMinimumLotFiguresOnlyWhenPicksWereValued(t *testing.T) {
 	}
 }
 
-// TestMinimumLotMovesAnUnaffordablePartialRiskOffBookToTheRiskOffInstrument
-// makes January risk-off at RiskOffFraction 0.5 with every candidate's one
-// share above its positive target and the IRA holding HHH, an unlabelled
-// stock: the decision is made with every candidate unaffordable and the
-// whole book in the risk-off instrument, so HHH is sold and IEF bought,
-// rather than the decision being withheld and the old book kept.
-func TestMinimumLotMovesAnUnaffordablePartialRiskOffBookToTheRiskOffInstrument(t *testing.T) {
-	dear := map[string]float64{"AAA": 200, "BBB": 200, "CCC": 200, "FFF": 200, "GGG": 200}
-	r := simulateMomentum(t, momentumOptions{riskOffJanuary: true, rawScale: dear, held: map[string]int64{"HHH": 10}, stopAfter: "2025-02-03"})
-	jan := targets(t, r.decisions)[0]
-	if jan.Outcome != event.TargetsOutcomeDecided || !jan.Momentum.RiskOff {
-		t.Fatalf("January: %s %s risk-off %v", jan.Outcome, jan.WithheldReason, jan.Momentum.RiskOff)
-	}
-	unaffordable := 0
-	for _, n := range jan.Momentum.Names {
-		switch n.Status {
-		case event.MomentumStatusUnaffordable:
-			unaffordable++
-		case event.MomentumStatusPicked:
-			t.Errorf("%s picked at a share above its target", n.InstrumentID)
-		}
-	}
-	if unaffordable == 0 {
-		t.Error("no name recorded unaffordable")
-	}
-	if jan.Momentum.MinimumLot == (event.MinimumLotFigures{}) {
-		t.Error("no minimum lot figures on a decision whose picks were valued")
-	}
-	for _, w := range jan.Targets {
-		if w.InstrumentID != "IEF" && w.Weight != 0 {
-			t.Errorf("%s target %v in an unaffordable book", w.InstrumentID, w.Weight)
-		}
-	}
-	if ief, ok := targetOf(jan, "IEF"); !ok || ief.Weight != 0.98 {
-		t.Errorf("IEF target %+v", ief)
-	}
-	var phases []string
-	for _, o := range planned(t, r.decisions) {
-		phases = append(phases, o.Side+" "+o.InstrumentID)
-	}
-	if want := []string{"sell HHH", "buy IEF"}; !equalStrings(phases, want) {
-		t.Errorf("orders %v, want %v", phases, want)
+// TestMinimumLotWithholdsAnAllUnaffordableBook prices every candidate's one
+// share above its positive target, in a risk-on January and a risk-off one at
+// RiskOffFraction 0.5, with the IRA holding HHH, an unlabelled stock. A
+// systematic valuation error (a bad net liquidation or bad raw closes) looks
+// the same as a book nothing in it can buy, so the decision is withheld as
+// all-unaffordable: every candidate recorded unaffordable with the figures
+// that valued it, a detail naming the one-share lot and the net liquidation,
+// and no order planned, so HHH is kept (ADR 0026, point 5, "fail closed").
+func TestMinimumLotWithholdsAnAllUnaffordableBook(t *testing.T) {
+	dear := map[string]float64{"AAA": 200, "BBB": 200, "CCC": 200, "FFF": 2000, "GGG": 2000}
+	for name, riskOff := range map[string]bool{"risk-on": false, "partial risk-off": true} {
+		t.Run(name, func(t *testing.T) {
+			r := simulateMomentum(t, momentumOptions{riskOffJanuary: riskOff, rawScale: dear, held: map[string]int64{"HHH": 10}, stopAfter: "2025-02-03"})
+			jan := targets(t, r.decisions)[0]
+			if jan.Outcome != event.TargetsOutcomeWithheld || jan.WithheldReason != event.WithheldAllUnaffordable || jan.Momentum.RiskOff != riskOff {
+				t.Fatalf("January: %s %s risk-off %v", jan.Outcome, jan.WithheldReason, jan.Momentum.RiskOff)
+			}
+			if err := jan.Validate(); err != nil {
+				t.Errorf("January's record does not validate: %v", err)
+			}
+			unaffordable := 0
+			for _, n := range jan.Momentum.Names {
+				switch n.Status {
+				case event.MomentumStatusUnaffordable:
+					unaffordable++
+					if !(n.TargetValue > 0 && n.TargetValue < n.OneShare) {
+						t.Errorf("%s target value %v against one share %v", n.InstrumentID, n.TargetValue, n.OneShare)
+					}
+				case event.MomentumStatusPicked:
+					t.Errorf("%s picked at a share above its target", n.InstrumentID)
+				}
+			}
+			if unaffordable == 0 {
+				t.Error("no name recorded unaffordable")
+			}
+			if jan.Momentum.MinimumLot == (event.MinimumLotFigures{}) {
+				t.Error("no minimum lot figures on a decision whose picks were valued")
+			}
+			for _, want := range []string{"one share", fmt.Sprintf("net liquidation %.2f", jan.Momentum.MinimumLot.NetLiquidation)} {
+				if !bytes.Contains([]byte(jan.Detail), []byte(want)) {
+					t.Errorf("detail %q does not name %q", jan.Detail, want)
+				}
+			}
+			if len(jan.Targets) != 0 {
+				t.Errorf("targets %+v on a withheld decision", jan.Targets)
+			}
+			if orders := planned(t, r.decisions); len(orders) != 0 {
+				t.Errorf("orders %+v, want none", orders)
+			}
+		})
 	}
 }

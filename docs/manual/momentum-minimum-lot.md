@@ -25,18 +25,28 @@ price of one share and the target value it exceeded.
 
 ## When nothing is affordable
 
-If every candidate is skipped, the book has no stock at all. The program does
-not hold back that decision. It decides that the whole invested fraction goes
-to the risk-off instrument, and the planner sells every stock the account
-holds. This is the same in a risk-on month and a risk-off month. The idea is
-that the account does not keep a book it could not rebuild.
+The rule only compares a stock whose target is above zero. Three cases follow
+(ADR 0026 amendment, 2026-10-17, which the owner is asked to confirm):
 
-A book with no stock for any other reason (nothing eligible) is still
-withheld, not decided.
+- **(a) Fully risk-off by design.** In a risk-off month with the risk-off
+  fraction at 1, every stock's target is zero, so nothing is compared. The
+  decision is made: the whole invested fraction goes to the risk-off
+  instrument and every held stock is sold, as the risk-off rule asks. The
+  decision's detail says so.
+- **(b) Every stock with a target is unaffordable.** If no stock is picked and
+  at least one was skipped as unaffordable, the decision is **withheld** with
+  the reason `all-unaffordable`, and the account keeps the book it has. This
+  is the same in a risk-on month and a partly risk-off month. A wrong net
+  liquidation value or wrong prices would look exactly like this, and
+  selling every stock on a wrong figure is the worse mistake. Every skipped
+  stock is recorded `unaffordable` with its one-share price and target value,
+  and the detail names the lot (one share), the momentum scale and the net
+  liquidation value used. The reporter sends this as an urgent alert.
+- **(c) Some stocks are affordable.** The book is the affordable stocks after
+  substitution, and the decision is made as usual.
 
-In a fully risk-off month every stock's target is zero, so nothing is
-compared; the book is the risk-off instrument and every held stock is sold,
-as the risk-off rule already asks.
+A book with no stock and nothing skipped (nothing eligible) is withheld as
+`no-eligible-names`.
 
 ## Orders that round to nothing: `strategy.order.skipped`
 
@@ -45,8 +55,9 @@ program records every such trade as a `strategy.order.skipped` event instead
 of dropping it silently. It names the instrument, the shares the rule asked
 for and one of three reasons:
 
-- `below-one-share`: the trade, past the rebalance band, is less than one
-  share.
+- `below-one-share`: the trade the planner sized is less than one share. For
+  a stock already held this is a trade past the rebalance band; a buy of a
+  stock not held has no band.
 - `scaled-below-one-share`: a buy was scaled down to fit the budget (the fee
   allowance) and is left with less than one share.
 - `held-by-working-sells`: a sell finds its whole holding already committed to
@@ -56,12 +67,12 @@ for and one of three reasons:
 
 Each momentum decision (`strategy.targets.decided`) carries the **MinimumLot
 figures**: the net liquidation value and the momentum scale the stocks were
-valued against. They are recorded exactly when the momentum rule decided a
-book under D7-L, including a book that D7-L emptied. If the run then withholds
-that book (for example because bars are missing or a rebalance is still in
-progress) the figures stay on the withheld decision beside the unaffordable
-stocks they value. A decision the rule itself withheld compared no stock and
-records none.
+valued against. They are recorded exactly when D7-L valued the stocks: a book
+the momentum rule decided under it, or one it withheld as `all-unaffordable`.
+If the run then withholds a decided book (for example because bars are
+missing or a rebalance is still in progress) the figures stay on the withheld
+decision beside the unaffordable stocks they value. A decision the rule
+withheld for any other reason compared no stock and records none.
 
 The rule is not applied at all when there is no account snapshot as of the
 previous close (the decision is withheld whatever the picks), or when the bond
@@ -86,8 +97,10 @@ In `internal/targetweight/momentum/minimum_lot_test.go`:
 `TestMinimumLotWithEveryPickAffordableIsTheBook`,
 `TestMinimumLotWithNoAffordablePickPicksNothing`,
 `TestMinimumLotRefusesBadInputs`, `TestDecideRecordsTheMinimumLot`,
+`TestDecideWithholdsAMixedBookOfDearAndUnlabelledNames`,
+`TestDecideExplainsAFullyRiskOffLiquidation`,
 `TestMinimumLotLeavesAFullyRiskOffBookAsSelectBookMakesIt`,
-`TestDecideMovesAnUnaffordablePartialRiskOffBookToTheRiskOffInstrument` and
+`TestDecideWithholdsAnUnaffordablePartialRiskOffBook` and
 `TestDecideWithNoCandidateUnderTheLotIsStillWithheld`.
 
 In `internal/targetweight/momentum_d7_test.go`:
@@ -97,18 +110,24 @@ In `internal/targetweight/momentum_d7_test.go`:
 `TestMinimumLotRunReplaysByteIdentically`,
 `TestMinimumLotDoesNotApplyWithNoMomentumSleeve`,
 `TestMinimumLotMovesAFullyRiskOffBookToTheRiskOffInstrument`,
-`TestMinimumLotIsNotAppliedFromALateSnapshot` and
-`TestMinimumLotFiguresOnlyWhenPicksWereValued`.
+`TestMinimumLotIsNotAppliedFromALateSnapshot`,
+`TestMinimumLotFiguresOnlyWhenPicksWereValued` and
+`TestMinimumLotWithholdsAnAllUnaffordableBook`.
 
 `TestRulesVersionDeclaresMinimumLot` (in `rules_version_test.go`) pins the
-version, and `TestOrderSkippedValidate` and `TestUnaffordableNamesValidate`
-(in `internal/event`) pin the recorded payloads.
+version, `TestOrderSkippedValidate` and `TestUnaffordableNamesValidate` (in
+`internal/event`) pin the recorded payloads, and
+`TestAnAllUnaffordableWithholdIsUrgent` (in `internal/report`) pins the
+alert.
 
 ## What can go wrong and what the program does then
 
-- **A small account cannot afford any stock.** The whole invested fraction
-  goes to the risk-off instrument and held stocks are sold. Look for
-  `unaffordable` names in the decision to see the prices that caused it.
+- **No stock with a target is affordable.** The decision is withheld as
+  `all-unaffordable` and the account keeps its book; an urgent alert is
+  sent. Check the net liquidation value in the detail against the broker and
+  the one-share prices of the `unaffordable` names against the market. If the
+  figures are right, the account is too small for the book; if not, fix the
+  data and the next decision runs on it.
 - **A stock is skipped and the book holds fewer or different names than the
   research.** That is intended. The decision keeps whether the backtest would
   have picked each stock, so the difference can be measured.

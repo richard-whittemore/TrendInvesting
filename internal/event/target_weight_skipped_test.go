@@ -58,4 +58,14 @@ func TestUnaffordableNamesValidate(t *testing.T) {
 	expectInvalid(t, "net liquidation", v, func(p *P) { p.Momentum.MinimumLot.NetLiquidation = 0 }, "positive net liquidation")
 	expectInvalid(t, "affordable", v, func(p *P) { p.Momentum.Names[1].OneShare = 700 }, "exceeds its target value")
 	expectInvalid(t, "figures on a pick", v, func(p *P) { p.Momentum.Names[0].OneShare = 10 }, "only an unaffordable name")
+
+	// A book D7-L found wholly unaffordable is withheld with its figures.
+	w := validMomentumDecided()
+	w.Momentum.MinimumLot = event.MinimumLotFigures{NetLiquidation: 30000, MomentumScale: 0.9}
+	w.Momentum.Names[0] = event.MomentumName{InstrumentID: "AAA", UniverseRank: 1, DollarVolume: 5e8, Sector: "Tech", SectorSource: "ishares-iwv-gics",
+		Status: event.MomentumStatusUnaffordable, Closes: 300, Score: 0.3, Volatility: 0.02, ScoreRank: 1, OneShare: 900, TargetValue: 800}
+	w.Outcome, w.WithheldReason, w.Detail, w.Targets = event.TargetsOutcomeWithheld, event.WithheldAllUnaffordable, "every candidate's one share exceeds its target value", nil
+	if err := w.Validate(); err != nil {
+		t.Errorf("an all-unaffordable withhold: %v", err)
+	}
 }

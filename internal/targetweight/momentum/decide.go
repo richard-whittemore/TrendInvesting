@@ -26,9 +26,15 @@ const (
 	// ReasonMissingUniverse: no universe snapshot for the close session.
 	ReasonMissingUniverse WithheldReason = "missing-universe"
 	// ReasonNoEligibleNames: no universe member could be picked, and none
-	// was skipped as unaffordable under D7-L (that book is decided). The
-	// backtest kept the last book (defensive_v2.py:319-320).
+	// was skipped as unaffordable under D7-L. The backtest kept the last
+	// book (defensive_v2.py:319-320).
 	ReasonNoEligibleNames WithheldReason = "no-eligible-names"
+	// ReasonAllUnaffordable: no universe member could be picked and D7-L
+	// skipped at least one, every pick with a positive target being dear by
+	// the share. The last book is kept: a bad net liquidation or bad raw
+	// closes would look the same, and selling every stock on them is the
+	// wrong failure (ADR 0026, point 2, "D7-L", and point 5).
+	ReasonAllUnaffordable WithheldReason = "all-unaffordable"
 )
 
 // Snapshot is one session's universe rows (ADR 0026 point 1,
@@ -82,8 +88,12 @@ type NameRecord struct {
 // Decision is one momentum decision with the figures behind it, so the
 // record alone can check it (ADR 0026 point 1, "Output").
 type Decision struct {
-	Outcome      Outcome
-	Reason       WithheldReason
+	Outcome Outcome
+	Reason  WithheldReason
+	// Detail explains an all-unaffordable withhold, naming the valuation,
+	// and a decided book whose every pick has weight zero, which sells every
+	// stock held. Empty otherwise.
+	Detail       string
 	CloseSession string
 	Trend        Trend
 	Universe     UniverseCounts
@@ -166,7 +176,7 @@ func Decide(cfg Config, in Input) (Decision, error) {
 	if err != nil {
 		return Decision{}, err
 	}
-	picked, unaffordable := false, false
+	picked, unaffordable, allZero := false, false, true
 	for _, r := range book.Ranked {
 		n := &d.Names[index[r.InstrumentID]]
 		n.Status = r.Status
@@ -176,19 +186,37 @@ func Decide(cfg Config, in Input) (Decision, error) {
 		n.Weight = r.Weight
 		n.BacktestWouldPick = r.BacktestWouldPick
 		n.OneShare, n.TargetValue = r.OneShare, r.TargetValue
-		picked = picked || r.Status == StatusPicked
+		if r.Status == StatusPicked {
+			picked = true
+			allZero = allZero && r.Weight == 0
+		}
 		unaffordable = unaffordable || r.Status == StatusUnaffordable
 	}
-	// A book D7-L emptied, every pick dear by the share, is still a decision:
-	// SelectBook puts the whole of Invested in RiskOffInstrument, so the
-	// planner sells every stock held, risk-on or risk-off, rather than
-	// keeping a book the account cannot rebuild (ADR 0026, point 2, "D7-L").
-	// A book with no pick for any other reason is withheld.
-	if !picked && !unaffordable {
-		return withhold(d, ReasonNoEligibleNames), nil
+	// A book with no pick is withheld and the last book kept (ADR 0026,
+	// point 5). When D7-L skipped a name the reason is all-unaffordable: a
+	// systematic valuation error, a bad net liquidation or bad raw closes,
+	// looks the same as an account too small for every pick, so the owner
+	// is shown the valuation rather than every stock being sold on it
+	// (ADR 0026, point 2, "D7-L").
+	if !picked {
+		if !unaffordable {
+			return withhold(d, ReasonNoEligibleNames), nil
+		}
+		d = withhold(d, ReasonAllUnaffordable)
+		d.Detail = fmt.Sprintf("every candidate's one share at its previous raw close exceeds its target value "+
+			"(weight x momentum scale %g x net liquidation %.2f); the book is kept: check the net liquidation and the raw closes",
+			in.MinimumLot.Scale, in.MinimumLot.NetLiquidation)
+		return d, nil
 	}
 	d.Outcome = OutcomeDecided
 	d.Targets = book.Targets
+	// Every pick's weight is zero only by design, in a risk-off month at
+	// RiskOffFraction 1: the whole of Invested is in RiskOffInstrument and
+	// the planner sells every stock held, as the risk-off rule asks.
+	if allZero {
+		d.Detail = fmt.Sprintf("every pick's target weight is zero (risk-off at risk-off fraction %g): the whole invested fraction goes to %s and every stock held is sold",
+			cfg.RiskOffFraction, cfg.RiskOffInstrument)
+	}
 	return d, nil
 }
 
