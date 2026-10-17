@@ -498,7 +498,7 @@ so Pro's margin rate does not help them.
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
 | 0 | Owner decisions D5 and D7 (D6 decided 2026-10-15); the broker-adapter ADR (0025, accepted 2026-10-15); this plan reviewed (owner, and an independent review on 2026-10-15) | Done except D5 and D7, which must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
-| 1 | Universe parity study (research, QuantConnect free) | IWB tested and failed (2026-10-15); D8 builds the universe from all US listings. Data source chosen (Massive, 2026-10-16) and the D8 rule's comparison recorded: 96.4% agreement with QuantConnect's selection over 21 months (`docs/research/universe-massive-2026-10.md`). The sector check is done (2026-10-15). Timing decided 2026-10-16: live ranks the latest session (section 10, D8); its effect on returns is being measured |
+| 1 | Universe parity study (research, QuantConnect free) | IWB tested and failed (2026-10-15); D8 builds the universe from all US listings. Data source chosen (Massive, 2026-10-16) and the D8 rule's comparison recorded: 96.4% agreement with QuantConnect's selection over 21 months (`docs/research/universe-massive-2026-10.md`). The sector check is done (2026-10-15). Timing decided 2026-10-16: live ranks the latest session (section 10, D8); its effect on returns was measured (+1.69 pp/yr in-sample, -1.41 pp/yr held out, drawdown slightly shallower in both, 6-7% more orders) and choice A stands (`docs/research/universe-massive-2026-10.md`) |
 | 2 | The target-weight strategy ADR (decision contract, risk limits, the risk-reducing definition in section 3); Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest passes its stated test |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
 | 4 | IBKR paper trading | 2–3 clean months |
@@ -533,7 +533,14 @@ only after CodeRabbit and Greptile findings are addressed.
   before the rebalance, also in the months whose 1st is a Sunday or a
   Monday, where the backtest ranked the previous month's universe (about 80%
   of names shared with it in those months). The owner asked for the effect
-  on returns to be measured; `momentum/fresh_universe.py` (variants
-  `FU_COMBO`, `OOS_FU_COMBO`) runs the combination with that timing.
+  on returns to be measured, and it was (2026-10-16, paired backtests,
+  variants `FU_COMBO`, `OOS_FU_COMBO`): +1.69 pp/yr in-sample and
+  -1.41 pp/yr held out (to 2026-06-30), drawdown 2.6 and 1.0 points
+  shallower, 7% and 6% more orders. **Choice A stands** as the owner's
+  decision (`docs/research/universe-massive-2026-10.md`, "Effect of the
+  timing on returns"). The paired `F_COMBO` / `OOS_F_COMBO` reruns show
+  worst drawdowns of 46.05% and 40.47% against the recorded 34.0% and 31.0%;
+  the cause is unresolved and under investigation in #403. The figures this
+  plan cites are unchanged until then, and parity (#324) waits on #403.
 - Account opening, funding, rollovers and the Lightsail sign-up are the
   owner's to do; nothing here signs up for or pays for anything.
