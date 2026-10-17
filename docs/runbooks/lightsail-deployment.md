@@ -2,7 +2,7 @@
 
 Provisioning for the live server in `docs/live-trading/plan.md` section 3: one Ubuntu 24.04 LTS VM running one IB Gateway (kept logged in by IBC), a shared market-data step, three engines (one per account, each with its own adapter client ID, ADR 0026 section 8), a reporter and a read-only dashboard, reachable only over Tailscale. Everything is in `deploy/`.
 
-> **Status:** provisioning only. The engines, the broker adapter, the data step, the reporter and the dashboard are not built. Their systemd units exist as placeholders (`/opt/trend-investing/bin/ti-engine`, `ti-data`, `ti-reporter`, `ti-dashboard`) and are skipped, not failed, until the binary is installed; the change that ships each binary fixes its arguments. Nothing here has run against a real IBKR login. Trading mode defaults to **paper** and the API to **read-only** until the limited-live gate (AGENTS.md rule 5).
+> **Status:** provisioning only. The engine is built and runs Boost in dry-run (`deploy/build-engine.sh`, below); the broker adapter, the data step, the reporter and the dashboard are not built. Their systemd units exist as placeholders (`/opt/trend-investing/bin/ti-engine`, `ti-data`, `ti-reporter`, `ti-dashboard`) and are skipped, not failed, until the binary is installed; the change that ships each binary fixes its arguments. Nothing here has run against a real IBKR login. Trading mode defaults to **paper** and the API to **read-only** until the limited-live gate (AGENTS.md rule 5).
 
 **Owner steps** are marked **[OWNER]**. Agents never sign up, pay or enter credentials.
 

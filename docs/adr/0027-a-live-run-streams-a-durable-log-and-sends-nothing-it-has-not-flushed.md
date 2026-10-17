@@ -243,3 +243,38 @@ accepted them together with this ADR on 2026-10-17.*
   never ignored when comparing decisions. `-resume` therefore refuses a log
   recorded by another build, and its message names this procedure. The
   runbook is `docs/runbooks/durable-log.md`.
+
+## Amendment (2026-10-17, the restart model; owner decision 2026-10-16 #365; proposed for the owner's review)
+
+*The owner chose the restart model on 2026-10-16. This section records how
+`cmd/engine` implements it; the details below are proposed and stand until
+the owner reviews them.*
+
+- **A crash resumes; every other restart is a fresh run.** A crash is
+  resumed with `-resume` as §4 and §6 describe. Leaving Halted, a build
+  upgrade, a cleared rebalance, a reboot or any deliberate stop is a fresh
+  run with a new log. The decision-prelude model (feeding an earlier run's
+  decisions into a new one, PR #364) is dropped.
+- **A fresh run after an earlier one needs the owner's recorded approval.**
+  In any mode but `backtest`, when the directory of `-log` already holds a
+  durable log (`*.log`), the engine refuses to start without `-approval`, a
+  file holding an `operator.run.approved` v1 payload: the account, the
+  latest earlier log's file name and its final record hash, the incident it
+  clears (if any), who approved and when, and the state in force (Boost's
+  latch). The engine checks that the log named is the most recently modified
+  log in the directory and that its last committed record hash is the one
+  approved, then records the approval as the run's second input (sequence 2,
+  straight after the configuration), so the adapter's first input carries
+  sequence 3. The target-weight handler starts from the approved latch.
+  `-approval` with `-resume`, with a backtest, or with no earlier run is
+  refused.
+- **Build identity.** `-mode dry-run`, `paper` and `live` refuse an
+  unstamped build ("dev"); `make engine` and `deploy/build-engine.sh` stamp
+  it from `git describe --always --dirty`.
+- **Mode binding.** `-mode` must equal the mode in the hashed configuration;
+  a Turtle configuration, which declares none, runs only as a backtest. A
+  paper configuration must name an IBKR paper account (ID beginning "DU"),
+  and a live one must not.
+- **Not decided here:** the engine cannot tell a crashed log from one a clean
+  stop ended, so choosing `-resume` is the owner's judgement, guided by the
+  runbook (`docs/runbooks/durable-log.md`, "Restarting an engine").
