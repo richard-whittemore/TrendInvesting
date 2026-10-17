@@ -15,6 +15,10 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 )
 
+// laterAsOf is a fresh run's start after a first run at boostAsOf: a fresh
+// run declares a new start (ADR 0027, the restart model).
+var laterAsOf = boostSession(3).Format(time.RFC3339)
+
 // writeApproval writes an approval naming previous with finalHash and
 // returns its path.
 func writeApproval(t *testing.T, dir, previous, finalHash string, latched bool) string {
@@ -74,6 +78,7 @@ func TestAFreshRunAfterAPriorRunNeedsTheOwnersApproval(t *testing.T) {
 
 	fresh := boostOptions(t, dir)
 	fresh.logPath, fresh.outPath = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal")
+	fresh.asOf = laterAsOf
 	refuse(t, "no approval", fresh, "operator.run.approved")
 
 	wrong := fresh
@@ -235,6 +240,7 @@ func TestACrashBeforeTheApprovalIsRecordedResumesWithIt(t *testing.T) {
 	// The crashed fresh run: its log holds the configuration only.
 	scratch := t.TempDir()
 	crashed := boostOptions(t, scratch)
+	crashed.asOf = laterAsOf
 	if err := startEngine(t, crashed)(); err != nil {
 		t.Fatalf("the configuration-only run: %v", err)
 	}
@@ -256,7 +262,7 @@ func TestACrashBeforeTheApprovalIsRecordedResumesWithIt(t *testing.T) {
 
 	resumed := boostOptions(t, dir)
 	resumed.logPath, resumed.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
-	resumed.resumePath = crashedLog
+	resumed.resumePath, resumed.asOf = crashedLog, laterAsOf
 	refuse(t, "a resume without the approval", resumed, "-approval")
 
 	wrong := resumed
@@ -343,6 +349,8 @@ func TestAnApprovalNeverLoosensThePreviousRunsState(t *testing.T) {
 		{"halted, another incident cleared", []journal.Entry{halted}, "incident-9", nil, "engine-state:joint:1"},
 		{"halted, carried under another id", []journal.Entry{halted}, "", otherIncident(event.EngineStateHalted), "engine-state:joint:1"},
 		{"normal, an incident cleared", nil, "incident-9", nil, "no incident"},
+		{"normal, an incident carried in force", nil, "", otherIncident(event.EngineStateHalted), "no incident"},
+		{"normal, the would-be ID carried in force", nil, "", inForce(event.EngineStateDegraded, "SPY"), "no incident"},
 	} {
 		approval := event.OperatorRunApprovedPayload{IncidentID: c.clears, IncidentInForce: c.in}
 		err := checkIncidentInForce(c.entries, approval, "run-1.log")
@@ -425,12 +433,14 @@ func TestAnInheritedIncidentSurvivesARunThatRecordsNoStateChange(t *testing.T) {
 
 // configurationOnlyLog records a Boost run that stops before any input,
 // leaving a log holding its configuration only, and installs a copy of it
-// as dir/name modified at at: the log a start cut short leaves, whether a
-// first run, a fresh run before its approval, or a resume of either.
-func configurationOnlyLog(t *testing.T, dir, name string, at time.Time) string {
+// as dir/name modified at at: the log a start at asOf cut short leaves,
+// whether a first run, a fresh run before its approval, or a resume of
+// either.
+func configurationOnlyLog(t *testing.T, dir, name, asOf string, at time.Time) string {
 	t.Helper()
 	scratch := t.TempDir()
 	opts := boostOptions(t, scratch)
+	opts.asOf = asOf
 	if err := startEngine(t, opts)(); err != nil {
 		t.Fatalf("the configuration-only run: %v", err)
 	}
@@ -451,10 +461,11 @@ func configurationOnlyLog(t *testing.T, dir, name string, at time.Time) string {
 // TestARepeatedCrashBeforeTheApprovalIsRecordedResumesWithTheSameApproval:
 // a resume of a start cut short copies its configuration before recording
 // the approval, so a second crash in that window leaves another log holding
-// the configuration only. Each such log is an attempt at the same start, so
-// the approval to record is still the one naming the run before the first
-// attempt (ADR 0027, the restart model; ADR 0026, point 5: the state in
-// force is restored, never lost to a restart).
+// the configuration only, a prefix of the first: an abandoned attempt, not
+// a run (ADR 0027 §6). The first is still the one resumed, and the approval
+// to record is still the one naming the run before it (ADR 0027, the
+// restart model; ADR 0026, point 5: the state in force is restored, never
+// lost to a restart).
 func TestARepeatedCrashBeforeTheApprovalIsRecordedResumesWithTheSameApproval(t *testing.T) {
 	dir := t.TempDir()
 	first := boostOptions(t, dir)
@@ -469,12 +480,16 @@ func TestARepeatedCrashBeforeTheApprovalIsRecordedResumesWithTheSameApproval(t *
 	firstLog := recoverFile(t, first.logPath)
 	latch, _ := lastLatch(t, firstLog.Entries)
 	now := time.Now()
-	configurationOnlyLog(t, dir, "run-2.log", now.Add(time.Hour))
-	attempt := configurationOnlyLog(t, dir, "run-3.log", now.Add(2*time.Hour))
+	cut := configurationOnlyLog(t, dir, "run-2.log", laterAsOf, now.Add(time.Hour))
+	attempt := configurationOnlyLog(t, dir, "run-3.log", laterAsOf, now.Add(2*time.Hour))
 
 	resumed := boostOptions(t, dir)
 	resumed.logPath, resumed.outPath = filepath.Join(dir, "run-4.log"), filepath.Join(dir, "run-4.journal")
-	resumed.resumePath = attempt
+	resumed.resumePath, resumed.asOf = attempt, laterAsOf
+	resumed.approvalPath = writeApproval(t, dir, "run-1.log", firstLog.FinalRecordHash, latch)
+	refuse(t, "a resume of the abandoned attempt", resumed, "abandoned")
+
+	resumed.resumePath, resumed.approvalPath = cut, ""
 	refuse(t, "a resume without the approval", resumed, "-approval")
 
 	approved := resumed
@@ -491,17 +506,20 @@ func TestARepeatedCrashBeforeTheApprovalIsRecordedResumesWithTheSameApproval(t *
 
 // TestACutShortFirstRunResumesWithoutAnApprovalAfterRepeatedCrashes: a
 // first run needs no approval, and neither does a resume of its start cut
-// short, however many attempts the directory holds; an attempt at the same
-// start is never an earlier run an approval must name (ADR 0027, the
-// restart model).
+// short, however many attempts the directory holds; a later attempt at the
+// same start is a prefix of the first, an abandoned attempt and never an
+// earlier run an approval must name (ADR 0027, the restart model; ADR 0027
+// §6).
 func TestACutShortFirstRunResumesWithoutAnApprovalAfterRepeatedCrashes(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
-	configurationOnlyLog(t, dir, "run-1.log", now.Add(time.Hour))
-	attempt := configurationOnlyLog(t, dir, "run-2.log", now.Add(2*time.Hour))
+	cut := configurationOnlyLog(t, dir, "run-1.log", boostAsOf, now.Add(time.Hour))
+	attempt := configurationOnlyLog(t, dir, "run-2.log", boostAsOf, now.Add(2*time.Hour))
 	resumed := boostOptions(t, dir)
 	resumed.logPath, resumed.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
 	resumed.resumePath = attempt
+	refuse(t, "a resume of the abandoned attempt", resumed, "abandoned")
+	resumed.resumePath = cut
 	if err := startEngine(t, resumed)(); err != nil {
 		t.Fatalf("the resumed first run: %v", err)
 	}
@@ -515,7 +533,7 @@ func TestACutShortFirstRunResumesWithoutAnApprovalAfterRepeatedCrashes(t *testin
 // or declare a new start with -as-of.
 func TestAFreshRunCannotRepeatAStartThatRecordedNothing(t *testing.T) {
 	dir := t.TempDir()
-	previous := configurationOnlyLog(t, dir, "run-1.log", time.Now())
+	previous := configurationOnlyLog(t, dir, "run-1.log", boostAsOf, time.Now())
 	fresh := boostOptions(t, dir)
 	fresh.logPath, fresh.outPath = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal")
 	fresh.approvalPath = writeApproval(t, dir, "run-1.log", recoverFile(t, previous).FinalRecordHash, false)
@@ -541,12 +559,12 @@ func TestAFreshRunAfterACutShortStartIsCheckedAgainstTheRunBeforeIt(t *testing.T
 		t.Fatalf("the first run: %v", err)
 	}
 	latch, _ := lastLatch(t, recoverFile(t, first.logPath).Entries)
-	cut := configurationOnlyLog(t, dir, "run-2.log", time.Now().Add(time.Hour))
+	cut := configurationOnlyLog(t, dir, "run-2.log", laterAsOf, time.Now().Add(time.Hour))
 	cutHash := recoverFile(t, cut).FinalRecordHash
 
 	fresh := boostOptions(t, dir)
 	fresh.logPath, fresh.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
-	fresh.asOf = "2024-01-03T21:00:00Z"
+	fresh.asOf = boostSession(4).Format(time.RFC3339)
 	unlatched := fresh
 	unlatched.approvalPath = writeApproval(t, dir, "run-2.log", cutHash, !latch)
 	refuse(t, "a latch the run before the cut-short start does not hold", unlatched, fmt.Sprintf("latched_after %t", latch))
@@ -595,8 +613,7 @@ func committedPrefix(t *testing.T, source, dir, name string, groups int, at time
 // TestAResumeAbandonedPartwayIsNeverTheLatestRun: a resume creates its new
 // log, then copies the old log's committed groups into it one by one (ADR
 // 0027 §6), so a resume refused for divergence, or a crash during the copy,
-// leaves a newer log holding a strict prefix of the old one's committed
-// groups. That log is an abandoned attempt, not a run: the state it ends in
+// leaves a newer log holding a prefix of the old one's committed groups. That log is an abandoned attempt, not a run: the state it ends in
 // is a cut-down copy of the old run's, so it is never the latest log. The
 // old log is still the one resumed or approved, and the attempt is named
 // when it is.
@@ -633,5 +650,95 @@ func TestAResumeAbandonedPartwayIsNeverTheLatestRun(t *testing.T) {
 	resumed.resumePath = first.logPath
 	if err := startEngine(t, resumed)(); err != nil {
 		t.Fatalf("the resume of the run the attempt abandoned: %v", err)
+	}
+}
+
+// TestAResumeAbandonedBeforeItCopiedPastItsConfigurationIsNeverTheLatestRun:
+// a resume creates its new log, then copies the old log's committed groups
+// one by one, the configuration first (ADR 0027 §6), so a resume that stops
+// before or just after that first group leaves a newer log, empty or
+// holding the configuration only, whose committed records are a prefix of
+// the old log's under the same header. It is an abandoned attempt, not a
+// run, however little it copied: the crashed run is still the one resumed,
+// and the attempt is named when it is.
+func TestAResumeAbandonedBeforeItCopiedPastItsConfigurationIsNeverTheLatestRun(t *testing.T) {
+	for _, groups := range []int{0, 1} {
+		dir := t.TempDir()
+		first := boostOptions(t, dir)
+		first.logPath, first.outPath = filepath.Join(dir, "run-1.log"), filepath.Join(dir, "run-1.journal")
+		stop := startEngine(t, first)
+		feed := newBoostFeed(t, first.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
+		feed.sessions(0, 3)
+		_ = feed.client.Close()
+		if err := stop(); err != nil {
+			t.Fatalf("the first run: %v", err)
+		}
+		abandoned := committedPrefix(t, first.logPath, dir, "run-2.log", groups, time.Now().Add(time.Hour))
+		if n := len(recoverFile(t, abandoned).Entries); n != groups {
+			t.Fatalf("the abandoned attempt holds %d record(s), want %d", n, groups)
+		}
+
+		resumedAttempt := boostOptions(t, dir)
+		resumedAttempt.logPath, resumedAttempt.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
+		resumedAttempt.resumePath = abandoned
+		refuse(t, fmt.Sprintf("a resume of an attempt abandoned after %d group(s)", groups), resumedAttempt, "abandoned")
+
+		resumed := resumedAttempt
+		resumed.resumePath = first.logPath
+		if err := startEngine(t, resumed)(); err != nil {
+			t.Fatalf("after %d group(s): the resume of the run the attempt abandoned: %v", groups, err)
+		}
+	}
+}
+
+// TestAFreshRunCannotRepeatTheStartOfAnEarlierRun: a fresh run declares a
+// new start with a new -as-of. One whose configuration input is the one an
+// earlier log opens with, under the same header, would, if it crashed
+// before its approval was recorded, leave a log indistinguishable from a
+// resume of that earlier run abandoned after its configuration (ADR 0027
+// §6), so it is refused (ADR 0027, the restart model).
+func TestAFreshRunCannotRepeatTheStartOfAnEarlierRun(t *testing.T) {
+	dir := t.TempDir()
+	first := boostOptions(t, dir)
+	first.logPath, first.outPath = filepath.Join(dir, "run-1.log"), filepath.Join(dir, "run-1.journal")
+	stop := startEngine(t, first)
+	feed := newBoostFeed(t, first.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
+	feed.sessions(0, 3)
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatalf("the first run: %v", err)
+	}
+	firstLog := recoverFile(t, first.logPath)
+	latch, _ := lastLatch(t, firstLog.Entries)
+	fresh := boostOptions(t, dir)
+	fresh.logPath, fresh.outPath = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal")
+	fresh.approvalPath = writeApproval(t, dir, "run-1.log", firstLog.FinalRecordHash, latch)
+	refuse(t, "a repeated start", fresh, "-as-of")
+}
+
+// TestAnUnrecoverableLogIsSetAsideInTheQuarantineFolder: every *.log in the
+// state directory's root is read to find the latest run, so one the engine
+// cannot recover (ADR 0027 §5) refuses every start, naming the step: move
+// it, unchanged, into the quarantine folder beside it, never editing or
+// deleting it (ADR 0018). The engine reads only the directory's root, so a
+// log in the quarantine folder is never a run.
+func TestAnUnrecoverableLogIsSetAsideInTheQuarantineFolder(t *testing.T) {
+	dir := t.TempDir()
+	damaged := filepath.Join(dir, "run-1.log")
+	if err := os.WriteFile(damaged, []byte("not a durable log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fresh := boostOptions(t, dir)
+	fresh.logPath, fresh.outPath = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal")
+	refuse(t, "a start beside an unrecoverable log", fresh, filepath.Join(dir, "quarantine"))
+
+	if err := os.Mkdir(filepath.Join(dir, "quarantine"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(damaged, filepath.Join(dir, "quarantine", "run-1.log")); err != nil {
+		t.Fatal(err)
+	}
+	if err := startEngine(t, fresh)(); err != nil {
+		t.Fatalf("a first run once the unrecoverable log is quarantined: %v", err)
 	}
 }

@@ -49,7 +49,7 @@ const durableLogSuffix = ".log"
 // incident's ID is the one the inherited incident in force carries, or else
 // the ID of the first strategy.engine.state record out of Normal
 // (event.IncidentInForce). An approval of a log that ended Normal clears no
-// incident.
+// incident and carries none in force.
 //
 // A log holding nothing past its configuration decided nothing and records
 // no state, so the state an approval of it is checked against is the latest
@@ -57,12 +57,15 @@ const durableLogSuffix = ".log"
 // latest log and its final record hash.
 //
 // A resume creates its new log, then copies the old log's committed groups
-// into it one by one (ADR 0027 §6), so a resume refused for divergence, or a
-// crash during the copy, leaves a newer log whose committed records are a
-// strict prefix of the old one's. Such a log is an abandoned attempt, not a
-// run: it ends in a cut-down copy of the old run's state, so it is never the
-// latest log and never the run before a start (runsByAge); it stays in the
-// directory as evidence (ADR 0018).
+// into it one by one, the configuration first (ADR 0027 §6), so a resume
+// refused for divergence, or a crash before or during the copy, leaves a
+// newer log whose committed records are a prefix of the old one's under the
+// same header: empty, the configuration only, or more. Such a log is an
+// abandoned attempt, not a run: it ends in a cut-down copy of the old run's
+// state, so it is never the latest log and never the run before a start
+// (runsByAge); it stays in the directory as evidence (ADR 0018). A fresh
+// run never opens with the configuration input an earlier log opens with,
+// so a fresh run cut short is never mistaken for one (freshRunApproval).
 //
 // A fresh run records its configuration, then its approval, one input at a
 // time, so a crash between the two leaves a log holding nothing past its
@@ -70,10 +73,17 @@ const durableLogSuffix = ".log"
 // incident, losing the approved state in force, so it resumes only with
 // -approval, checked against the run before it as a fresh run's is, and
 // recorded as its second input. A crash of that resume in the same window
-// leaves another such log, an attempt at the same start, so the run before
-// it is the latest log that is not one (runBeforeStart), and a fresh run
-// never repeats the start of a log holding nothing past it (ADR 0027, the
+// leaves a copy of that log, an abandoned attempt (runsByAge), so the same
+// log is resumed again with the same approval; the run before it is the
+// latest run that is not an attempt at the same start (runBeforeStart), and
+// a fresh run never repeats the start of an earlier log (ADR 0027, the
 // restart model).
+//
+// Every *.log in the root of the directory of -log is read; a log the
+// engine cannot recover (ADR 0027 §5) refuses every start until the
+// operator moves it, unchanged, into the directory's quarantine folder,
+// which the engine never reads (ADR 0018: evidence is never edited or
+// deleted).
 //
 // freshRunApproval applies these rules to one invocation and returns the
 // approval to record, or nil when none is needed: a backtest, a resume of a
@@ -118,7 +128,38 @@ func freshRunApproval(opts options, comp composition) (*event.OperatorRunApprove
 		return nil, fmt.Errorf("engine: %s holds nothing past its configuration, and this run's configuration input is the one it opens with, so a crash of this run before its approval was recorded would leave a log no resume could tell from another attempt at that same start: resume %s with -resume, or declare a new start with -as-of (ADR 0027, the restart model)",
 			latest, latest)
 	}
+	if earlier, err := logOpeningWith(opts, comp); err != nil || earlier != "" {
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("engine: %s opens with this run's configuration input, so a crash of this run before its approval was recorded would leave a log no resume could tell from a resume of %s abandoned after its configuration (ADR 0027 §6): declare a new start with -as-of (ADR 0027, the restart model)",
+			earlier, earlier)
+	}
 	return approval, nil
+}
+
+// logOpeningWith returns the name of a log in the directory of -log,
+// abandoned attempts included, recorded under this composition's header
+// and opening with its configuration input, or "" when there is none.
+func logOpeningWith(opts options, comp composition) (string, error) {
+	dir, _ := splitAsSpelled(opts.logPath)
+	names, err := logsByAge(dir)
+	if err != nil {
+		return "", err
+	}
+	prefix, _ := filepath.Split(opts.logPath)
+	header := journal.NewLogHeader(comp.configurationHash, comp.strategyVersion)
+	opening := event.CanonicalEnvelopeBytes(comp.configEnvelope)
+	for _, name := range names {
+		recovery, err := recoverRun(prefix, name)
+		if err != nil {
+			return "", err
+		}
+		if recovery.Header == header && len(recovery.Entries) > 0 && bytes.Equal(event.CanonicalEnvelopeBytes(recovery.Entries[0].Envelope), opening) {
+			return name, nil
+		}
+	}
+	return "", nil
 }
 
 // runBeforeStart returns the run a resume of resumed, a log cut short in
@@ -273,7 +314,8 @@ func stateBefore(opts options, named string) ([]journal.Entry, string, error) {
 // that incident, under its ID, Halted, or Degraded over at least the same
 // instruments. The incident's ID is the inherited incident's, or else the
 // ID of the first strategy.engine.state record out of Normal
-// (event.IncidentInForce); a log that ended Normal has none to clear.
+// (event.IncidentInForce); a log that ended Normal has none to clear and
+// none to carry in force.
 func checkIncidentInForce(entries []journal.Entry, approval event.OperatorRunApprovedPayload, logName string) error {
 	state, scope, incident := "", []string(nil), ""
 	fold := func(id, next string, ids []string) {
@@ -317,6 +359,8 @@ func checkIncidentInForce(entries []journal.Entry, approval event.OperatorRunApp
 	switch {
 	case state == "" && approval.IncidentID != "":
 		return fmt.Errorf("engine: the approval clears incident %q, but %s records no incident: it ended normal, and an approval clears only the incident the log ended in (ADR 0019)", approval.IncidentID, logName)
+	case state == "" && in != nil:
+		return fmt.Errorf("engine: the approval carries incident %q in force, but %s records no incident: it ended normal, and an approval carries in force only the incident the log ended in (ADR 0019, amended 2026-09-24, \"The state survives a restart\")", in.IncidentID, logName)
 	case state == "":
 		return nil
 	case approval.IncidentID != "" && approval.IncidentID != incident:
@@ -351,7 +395,7 @@ func checkResumesLatest(opts options) error {
 	prefix, _ := filepath.Split(opts.logPath)
 	for attempt, source := range abandoned {
 		if samePath(opts.resumePath, prefix+attempt) {
-			return fmt.Errorf("engine: -resume names %s, a resume of %s abandoned partway: its committed records are a strict prefix of that log's, so it is not a run (ADR 0027 §6, the restart model); resume the latest run, %q, and keep %s as evidence",
+			return fmt.Errorf("engine: -resume names %s, a resume of %s abandoned partway: its committed records are a prefix of that log's, so it is not a run (ADR 0027 §6, the restart model); resume the latest run, %q, and keep %s as evidence",
 				opts.resumePath, source, latest, attempt)
 		}
 	}
@@ -406,13 +450,14 @@ func latestLog(opts options) (latest string, abandoned map[string]string, err er
 }
 
 // runsByAge returns the runs in the directory of -log, least recently
-// modified first, as logsByAge orders them, leaving out each log holding
-// more than its configuration whose committed records are a strict prefix
-// of an older log's under the same header: a resume of that log abandoned
-// partway (ADR 0027 §6: a resume's new log begins with the old log's
-// committed part, byte for byte). It also returns the abandoned attempts,
-// each mapped to the log it copied. A log holding only its configuration is
-// never left out here: it is a start cut short (attemptAtStart, stateBefore).
+// modified first, as logsByAge orders them, leaving out each log whose
+// committed records are a prefix of an older log's under the same header,
+// however few, none included: a resume of that log abandoned partway (ADR
+// 0027 §6: a resume's new log begins with the old log's committed part,
+// byte for byte, the configuration first). It also returns the abandoned
+// attempts, each mapped to the log it copied. A log holding only its
+// configuration that is no such prefix is a start cut short
+// (attemptAtStart, stateBefore), and stays a run.
 func runsByAge(opts options) (runs []string, abandoned map[string]string, err error) {
 	dir, _ := splitAsSpelled(opts.logPath)
 	names, err := logsByAge(dir)
@@ -422,7 +467,7 @@ func runsByAge(opts options) (runs []string, abandoned map[string]string, err er
 	prefix, _ := filepath.Split(opts.logPath)
 	recovered := make([]journal.Recovery, len(names))
 	for i, name := range names {
-		if recovered[i], err = recoverLogFile(prefix + name); err != nil {
+		if recovered[i], err = recoverRun(prefix, name); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -430,7 +475,7 @@ func runsByAge(opts options) (runs []string, abandoned map[string]string, err er
 	for i, name := range names {
 		source := ""
 		for j := range i {
-			if strictCommittedPrefix(recovered[i], recovered[j]) {
+			if committedPrefixOf(recovered[i], recovered[j]) {
 				source = names[j]
 				break
 			}
@@ -444,12 +489,11 @@ func runsByAge(opts options) (runs []string, abandoned map[string]string, err er
 	return runs, abandoned, nil
 }
 
-// strictCommittedPrefix reports whether attempt holds more than its
-// configuration and its committed entries are a strict prefix of source's
-// under the same header, compared by kind and canonical envelope bytes as a
-// resume compares them (ADR 0027 §6).
-func strictCommittedPrefix(attempt, source journal.Recovery) bool {
-	if attempt.Header != source.Header || len(attempt.Entries) <= 1 || len(attempt.Entries) >= len(source.Entries) {
+// committedPrefixOf reports whether attempt's committed entries, however
+// few, are a prefix of source's under the same header, compared by kind and
+// canonical envelope bytes as a resume compares them (ADR 0027 §6).
+func committedPrefixOf(attempt, source journal.Recovery) bool {
+	if attempt.Header != source.Header || len(attempt.Entries) > len(source.Entries) {
 		return false
 	}
 	for k, entry := range attempt.Entries {
@@ -459,6 +503,24 @@ func strictCommittedPrefix(attempt, source journal.Recovery) bool {
 		}
 	}
 	return true
+}
+
+// quarantineFolder names the folder in a log directory into which the
+// operator moves a log the engine cannot recover, unchanged (ADR 0018). The
+// engine reads only the directory's root, so it never reads that folder.
+const quarantineFolder = "quarantine"
+
+// recoverRun recovers the log name in the directory spelled prefix,
+// naming the operator's step when it cannot: every log in the directory is
+// read to find the latest run, so one that cannot be recovered (ADR 0027
+// §5) stops every start until it is set aside.
+func recoverRun(prefix, name string) (journal.Recovery, error) {
+	recovery, err := recoverLogFile(prefix + name)
+	if err != nil {
+		return journal.Recovery{}, fmt.Errorf("%w; every log in the directory is read to find the latest run, so move %s, unchanged, into %s and start again, never editing or deleting it (ADR 0018; docs/runbooks/durable-log.md, \"An unrecoverable log\")",
+			err, name, prefix+quarantineFolder)
+	}
+	return recovery, nil
 }
 
 // logsByAge returns the names of the durable logs in dir, least recently

@@ -63,16 +63,17 @@ latch can never quietly switch the boost off.
 | The approval's latch is not the one the previous log ended with | Refuses, names the previous log's latch. |
 | The previous log ended Degraded or Halted and the approval neither clears that incident nor carries it in force at least as tightly | Refuses: a restart never loosens Degraded or Halted (ADR 0019). An incident the previous run was itself approved to continue counts, even when that run recorded no new state. |
 | The approval clears, or carries in force, an incident whose ID is not the one the previous log ended in | Refuses, names the log's incident: an approval clears or continues only that incident, by its ID (the continued incident's ID, or else the ID of the first `strategy.engine.state` record out of Normal). |
-| The approval clears an incident, but the previous log ended Normal | Refuses: there is no incident to clear; write `"incident_id": ""`. |
+| The approval clears an incident, or carries one in force, but the previous log ended Normal | Refuses: there is no incident to clear or continue; write `"incident_id": ""` and `"incident_in_force": null`. |
 | The latest log holds nothing past its configuration (a start cut short) and a fresh run approves it | The approval still names that log and its fingerprint, but the latch and incident are checked against the latest earlier log that holds more: a cut-short start decided nothing, so the run before it is the state still in force. |
-| A newer log holds an exact, shorter copy of an older log's records (more than its configuration) | It is a resume that stopped partway through copying (refused for divergence, or crashed), not a run: the engine skips it when finding the latest log, refuses to resume it or have it approved, and names the log it copied. Resume or approve that older log; keep the copy as evidence (ADR 0027 §6). |
-| A resume names a log that is not the latest in the folder | Refuses, names the latest: only the crashed run, which is the latest, is resumed. |
+| A newer log holds an exact copy of the start of an older log's records, however short: none, the configuration only, or more | It is a resume that stopped before or partway through copying (refused for divergence, or crashed), not a run: the engine skips it when finding the latest run, refuses to resume it or have it approved, and names the log it copied. Resume or approve that older log; keep the copy as evidence (ADR 0027 §6). A log holding only its configuration that copies no older log is a start cut short, and is still a run. |
+| A resume names a log that is not the latest run in the folder | Refuses, names the latest: only the crashed run, which is the latest run, is resumed. |
 | Resuming on a build stamped only "-dirty" | Refuses: such a stamp cannot tell two different uncommitted changes apart. |
 | The fingerprint does not match the log | Refuses: the log is not the one you approved. |
 | The approval is for another account | Refuses. |
 | An approval and a resume together | Refuses: a crash resume needs no approval. |
-| A resume of a log holding nothing past its configuration, in a folder with an earlier run | Refuses without the approval: the fresh run crashed before recording it. Resume with the same approval; the engine checks it against the earlier run and records it. If that resume crashed too before recording it, resume the newest log with the same approval again: the logs left by attempts at the same start are skipped, so the approval still names the run before them. |
-| A fresh run whose start (configuration and `-as-of`) is the very one the latest log opens with, when that log holds nothing past it | Refuses: a crash of it before its approval was recorded would look like another attempt at that start. Resume that log, or pick a new `-as-of`. |
+| A resume of a log holding nothing past its configuration, in a folder with an earlier run | Refuses without the approval: the fresh run crashed before recording it. Resume with the same approval; the engine checks it against the earlier run and records it. If that resume crashed too before recording it, it left a copy of the cut-short log, which the engine treats as an abandoned attempt: resume the same cut-short log again, with the same approval. |
+| A fresh run whose start (configuration and `-as-of`) is the very one an earlier log in the folder opens with | Refuses: a crash of it before its approval was recorded would look like an abandoned resume of that log. Pick a new `-as-of` (or, if the latest log holds nothing past that start, resume it). |
+| A log in the folder cannot be read (damaged, or a stray file ending in `.log`) | Every start is refused, naming the step: move the file, unchanged, into the `quarantine` folder beside the logs, never edit or delete it. The engine reads only the folder itself, never `quarantine`. |
 | Resuming a log made by another build | Refuses, and names the upgrade procedure (ADR 0027). |
 | The approval is accepted | Records it as the run's second entry, straight after the configuration, then starts. |
 
@@ -93,10 +94,13 @@ Degraded and Halted; one sale back to 98% per incident). Tests:
 `TestARepeatedCrashBeforeTheApprovalIsRecordedResumesWithTheSameApproval`,
 `TestACutShortFirstRunResumesWithoutAnApprovalAfterRepeatedCrashes`,
 `TestAFreshRunCannotRepeatAStartThatRecordedNothing`,
+`TestAFreshRunCannotRepeatTheStartOfAnEarlierRun`,
 `TestAnApprovalNeverLoosensThePreviousRunsState`,
 `TestAnInheritedIncidentSurvivesARunThatRecordsNoStateChange`,
 `TestAFreshRunAfterACutShortStartIsCheckedAgainstTheRunBeforeIt`,
 `TestAResumeAbandonedPartwayIsNeverTheLatestRun`,
+`TestAResumeAbandonedBeforeItCopiedPastItsConfigurationIsNeverTheLatestRun`,
+`TestAnUnrecoverableLogIsSetAsideInTheQuarantineFolder`,
 `TestABoostRunDoesNotResumeAcrossBuilds`,
 `TestADirtyBuildThatDoesNotIdentifyItsTreeNeverResumes` (`cmd/engine`);
 `TestAnApprovedFreshRunStartsFromTheApprovedLatch`, `TestApprovalInputRules`,

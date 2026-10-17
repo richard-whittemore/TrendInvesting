@@ -252,8 +252,9 @@ which records how `cmd/engine` implements it, on 2026-10-17.*
 
 - **A crash resumes; every other restart is a fresh run.** A crash is
   resumed with `-resume` as §4 and §6 describe. The crashed run is always
-  the latest, so `-resume` must name the most recently modified log in the
-  directory of `-log`; an older log is refused. Leaving Halted, a build
+  the latest, so `-resume` must name the most recent run in the directory
+  of `-log`, where an abandoned resume attempt is not a run (§6; amended
+  below, "Abandoned resume attempts"); an older log is refused. Leaving Halted, a build
   upgrade, a cleared rebalance, a reboot or any deliberate stop is a fresh
   run with a new log. The decision-prelude model (feeding an earlier run's
   decisions into a new one, PR #364) is dropped.
@@ -271,7 +272,7 @@ which records how `cmd/engine` implements it, on 2026-10-17.*
   incident). Every key is
   required, null where there is none, and an unknown key is refused, so no
   state is a default. The engine checks that the log named is the most
-  recently modified log in the directory, that its last committed record
+  recent run in the directory (as above), that its last committed record
   hash is the one approved, and that the approved latch is the one that log
   ends with (its last decision's `latched_after`, or its own approval's
   latch when it decided nothing), and that the approval does not loosen
@@ -319,3 +320,42 @@ which records how `cmd/engine` implements it, on 2026-10-17.*
 - **Not decided here:** the engine cannot tell a crashed log from one a clean
   stop ended, so choosing `-resume` is the owner's judgement, guided by the
   runbook (`docs/runbooks/durable-log.md`, "Restarting an engine").
+
+## Amendment (2026-10-17, later the same day: abandoned resume attempts)
+
+*This section corrects how `cmd/engine` implements the restart model the
+owner decided (#365, above); it changes no owner decision. The sentence
+"`-resume` must name the most recently modified log" above is amended to
+"the most recent run, where an abandoned resume attempt is not a run".*
+
+- **An abandoned resume attempt is not a run.** A resume creates its new log
+  and then copies the old log's committed groups into it one by one, the
+  configuration first (§6). A resume refused for divergence, or one that
+  crashes before or during the copy, therefore leaves a newer log whose
+  committed records are a prefix of the older log's under the same header:
+  empty, the configuration only, or more. Such a log is an abandoned
+  attempt. It is never the latest run, never the run an approval names and
+  never the run before a start; `-resume` of it is refused, naming the log
+  it copied; it stays in the directory as evidence (ADR 0018). This
+  replaces the attempt-at-the-same-start rule above: a second crash of a
+  resume of a start cut short leaves a prefix of the first attempt, so the
+  first attempt is the one resumed, with the same approval, and a first run
+  cut short resumes without one. A log holding nothing past its
+  configuration that is no such prefix is a start cut short, and stays a
+  run.
+- **A fresh run never repeats an earlier log's start.** So that a fresh run
+  cut short can never be taken for an abandoned resume, a fresh run whose
+  configuration input is the one any earlier log in the directory opens
+  with, under the same header, is refused: declare a new start with
+  `-as-of`. (A fresh run always starts at the first session it decides,
+  after the previous run's.)
+- **An approval of a log that ended Normal carries no incident in force.**
+  It clears none and carries none: `incident_in_force` is the incident the
+  previous run ended in, so for a log recording no incident any value but
+  `null` is refused.
+- **An unrecoverable log is set aside, never edited or deleted.** Every
+  `*.log` in the root of the directory of `-log` is read to find the latest
+  run, so a log that cannot be recovered (§5) refuses every start, and the
+  refusal names the step: move the log, unchanged, into the `quarantine`
+  folder in that directory. The engine reads only the directory's root, so
+  it never reads the quarantine folder.

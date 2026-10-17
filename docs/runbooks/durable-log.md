@@ -1,9 +1,9 @@
 # Runbook: the durable log, a refused restart and a build upgrade
 
 This is the durable-log runbook (ADR 0027). #338 adds the remaining entries
-(a damaged log, a diverging restart, a torn tail). The two entries here
-follow the owner's decisions of 2026-10-16: no resume across builds, and
-the restart model.
+(a diverging restart, a torn tail). The entries here follow the owner's
+decisions of 2026-10-16: no resume across builds, and the restart model;
+"An unrecoverable log" is the step for a log the engine cannot read.
 
 ## Upgrading the build
 
@@ -58,17 +58,18 @@ The engine reads its settings from
 3. A refusal naming another build or configuration means this is not a
    crash restart: follow "Upgrading the build" or start a fresh run. A
    refusal naming a later log means the log you named is not the crashed
-   run: only the latest log in the state directory is resumed. A refusal
+   run: only the latest run in the state directory is resumed. A refusal
    saying the log is a resume abandoned partway means an earlier resume
-   stopped while copying (refused, or crashed): resume the log it names,
-   the crashed run, and leave the partial copy where it is as evidence;
-   the engine skips it when finding the latest log (ADR 0027 §6). A refusal
-   saying the log holds nothing past its configuration means a fresh run
-   crashed before recording its approval: add
+   stopped before or while copying (refused, or crashed), even if it copied
+   only the configuration or nothing: resume the log it names, the crashed
+   run, and leave the partial copy where it is as evidence; the engine
+   skips it when finding the latest run (ADR 0027 §6). A refusal saying
+   the log holds nothing past its configuration means a fresh run crashed
+   before recording its approval: add
    `-approval <the approval it was started with>` to `TI_RESTART_ARGS`
-   beside `-resume`, and start again. If that start crashes too, resume
-   the newest log with the same approval: the approval still names the run
-   before the first attempt.
+   beside `-resume`, and start again. If that start crashes too, it leaves
+   a copy the engine treats as an abandoned attempt: resume the same
+   cut-short log again, with the same approval.
 
 ### Start a fresh run after an earlier one
 
@@ -116,14 +117,43 @@ The engine reads its settings from
    but take the latch and incident from the latest earlier log that holds
    more: the engine checks them against that log.
 4. Set `TI_RUN` to a new name, `TI_AS_OF` to the first session the new run
-   decides, and `TI_RESTART_ARGS=-approval <that file>`. If the latest log
-   holds nothing past its configuration, `TI_AS_OF` must differ from its
-   run's: the engine refuses to repeat that start (resume that log instead).
+   decides, and `TI_RESTART_ARGS=-approval <that file>`. `TI_AS_OF` must
+   differ from every earlier run's in the state directory: the engine
+   refuses to repeat a start (if the latest log holds nothing past its
+   configuration, resume that log instead).
 5. `sudo systemctl start ti-engine@<account>`. Expect `recorded the owner's
    approval ... the adapter's first input carries sequence 3`. A refusal
    names what does not match: a later log than the one approved, a final hash
    that is not the log's, a latch the log does not end with, an incident
    state looser than the one the log ended in, an incident ID that is not
-   the log's, a repeated start, or another account. Every log in the state
-   directory is read to find the latest run, so a log the engine cannot
-   recover (ADR 0027 §5) stops every start until it is dealt with.
+   the log's, a carried-in-force incident when the log ended normal, a
+   repeated start, or another account. Every log in the state directory is
+   read to find the latest run, so a log the engine cannot recover (ADR
+   0027 §5) stops every start until it is set aside: see "An unrecoverable
+   log".
+
+## An unrecoverable log
+
+Every `*.log` in the root of the account's state directory,
+`/var/lib/trend-investing/engines/<account>/`, is read to find the latest
+run. A log the engine cannot recover (ADR 0027 §5: a damaged file, an old
+log whose bytes rotted after it was superseded, or a stray file ending in
+`.log`) refuses every start, resume and fresh run alike, with a message
+ending "move `<name>`, unchanged, into `<state directory>/quarantine`".
+
+1. **Do not edit or delete the file.** It is recorded evidence (ADR 0018).
+2. **Move it, unchanged, into the quarantine folder** beside the logs:
+
+   ```sh
+   sudo -u ti-trader mkdir -p /var/lib/trend-investing/engines/<account>/quarantine
+   sudo -u ti-trader mv /var/lib/trend-investing/engines/<account>/<name>.log \
+     /var/lib/trend-investing/engines/<account>/quarantine/
+   ```
+
+   The engine reads only the state directory's root, never the quarantine
+   folder, so the file is kept and no longer counted as a run.
+3. **Decide the restart again** ("Restarting an engine"): with the file set
+   aside, the latest run may be a different log. If the quarantined log was
+   the crashed run itself, it cannot be resumed: start a fresh run from a
+   reconciled baseline (ADR 0019's recovery procedure), with an approval
+   naming the latest run left in the directory.
