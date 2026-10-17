@@ -248,7 +248,8 @@ to the Turtle reducer, and changes nothing else in this ADR.
   is added; the quantity is the smallest of the three bounds, never below
   zero, and never more than the holding. The sale is sized from the latest
   broker snapshot only. Where that snapshot's net liquidation or mark is not
-  strictly positive, or it is older than `MaxSnapshotAge`, the sale is
+  strictly positive, or it is stale (older than `MaxSnapshotAge`, or
+  stamped later than the triggering event), the sale is
   withheld without consuming the attempt and re-evaluated later: reading 1.
   Where it cannot be read, the broker's values cannot be read and the
   attempt is consumed: reading 4.)*
@@ -338,17 +339,22 @@ here so that all eleven are in one place.
      withheld, the attempt is consumed, and the alert asks the owner to act
      by hand.
    - **Stale:** the latest snapshot is readable but older than
-     `MaxSnapshotAge`. The sale is withheld (`risk.sale.withheld`, reason
-     `stale-broker-snapshot`). Age is the journalled time of the event that
-     triggers the evaluation minus the snapshot's recorded broker
-     timestamp; the wall clock is never read, so replay withholds exactly
-     where live did. `MaxSnapshotAge` is an account configuration field,
+     `MaxSnapshotAge`, or its recorded broker timestamp is later than the
+     triggering event's journalled time. The sale is withheld
+     (`risk.sale.withheld`, reason `stale-broker-snapshot`). Age is the
+     journalled time of the event that triggers the evaluation minus the
+     snapshot's recorded broker timestamp; the wall clock is never read, so
+     replay withholds exactly where live did. A negative age (the broker's
+     timestamp ahead of our journalled time, from clock skew or a malformed
+     timestamp) is stale, never fresh, with no tolerance; the withheld
+     payload records the skew. A snapshot is fresh only when its age is
+     zero or more and not above `MaxSnapshotAge`. `MaxSnapshotAge` is an account configuration field,
      covered by the configuration hash; configuration validation rejects a
      missing, zero or negative value (ADR 0026 point 6, Execution). This
      reason is the gate's, distinct from the strategy decision's
      `stale-account-snapshot` (ADR 0026 point 1).
-   - **Not strictly positive:** the latest snapshot is readable and within
-     `MaxSnapshotAge`, but its net liquidation or its mark for the
+   - **Not strictly positive:** the latest snapshot is readable and fresh,
+     but its net liquidation or its mark for the
      instrument is zero or negative, so keep cannot be trusted. The sale is
      withheld (`risk.sale.withheld`, reason `non-positive-broker-values`).
      Freshness is checked first: a snapshot that is both stale and
@@ -362,14 +368,19 @@ here so that all eleven are in one place.
    engagement or the incident in force, and do not consume the attempt
    (reading 4). The owner hears of them through the `risk.sale.withheld`
    alert, not through a Halt. **Retry:** while the condition that produced
-   the withheld sale is still in force (the strategy's exit still fired,
-   or the alarm still urgent), the next latest snapshot that is readable,
-   within `MaxSnapshotAge` and strictly positive re-evaluates the sale. The
-   gate then applies this reading afresh and picks the tag by reading 2's
-   order at that time, so a change of engine state or of the kill switch
-   between the two evaluations re-tags the sale, and the new tag's one
-   attempt applies. The incident or the engagement is a tag, not a
-   trigger: neither alone produces or retries the sale.
+   the withheld sale is still in force, the next latest snapshot that is
+   readable, fresh and strictly positive re-evaluates the sale. The exit
+   (reading 7) is in force until the next `strategy.targets.decided` for
+   the account that no longer plans the sell that fired it, or until the
+   engine state leaves the state that made it fire (Halted, or Degraded on
+   the instrument; for the kill switch, until the engagement ends). The
+   alarm is in force while it is urgent. When neither holds, the withheld
+   sale lapses with no further action and its attempt remains unspent. On
+   re-evaluation the gate applies this reading afresh and picks the tag by
+   reading 2's order at that time, so a change of engine state or of the
+   kill switch between the two evaluations re-tags the sale, and the new
+   tag's one attempt applies. The incident or the engagement is a tag, not
+   a trigger: neither alone produces or retries the sale.
 2. **The kill switch does not suppress the sale.** While the kill switch
    is engaged (ADR 0026 point 3), Boost's exit firing or the Excess
    Liquidity alarm turning urgent still produces the one sale back to 98%,
@@ -439,24 +450,35 @@ here so that all eleven are in one place.
 10. **A sell above the broker quantity is refused, not resized.** The
     check applies to every sell, in any engine state, not only Degraded,
     and reads the latest broker snapshot only; an older snapshot is never
-    used in its place. With a latest snapshot that is readable, within
-    `MaxSnapshotAge` and strictly positive, the gate refuses a sell above
-    its holding (`broker-holding`) and adds the instrument to the Degraded
-    scope (ADR 0026 point 3, limits table); a Normal account becomes
-    Degraded on that instrument. When the latest snapshot is not like that,
-    the engine state is left unchanged (a Normal account stays Normal), and
-    the outcome depends on the sell:
-    - **ADR 0019's sale back to 98%** follows reading 1's snapshot rule:
-      withheld (`risk.sale.withheld`); unspent and re-evaluated for
-      `stale-broker-snapshot` and `non-positive-broker-values`; the attempt
-      consumed when the latest snapshot is unreadable.
-    - **Any other sell** is refused (`risk.order.refused`): `broker-holding`
-      when no snapshot has yet been readable or the latest is unreadable;
-      `stale-broker-snapshot` when the latest is older than
-      `MaxSnapshotAge`; `non-positive-broker-values` when its net
-      liquidation or mark is not strictly positive (freshness checked
-      first, and age measured as reading 1 states, from the sell's
-      `strategy.order.planned`).
+    used in its place.
+    - **ADR 0019's sale back to 98%** follows reading 1's snapshot rule
+      instead of this reading: withheld (`risk.sale.withheld`); unspent and
+      re-evaluated for `stale-broker-snapshot` and
+      `non-positive-broker-values`; the attempt consumed when the latest
+      snapshot is unreadable.
+    - **Any other sell:** the snapshot gates only the broker-holding check,
+      a quantity no more than the latest snapshot's holding. Net
+      liquidation and the mark are not read for these sells; they are used
+      only by the sale's keep (reading 1). With a latest snapshot that is
+      readable and fresh (age as reading 1 states, measured from the sell's
+      `strategy.order.planned`, a negative age being stale), the gate
+      refuses a sell above its holding (`broker-holding`) and adds the
+      instrument to the Degraded scope (ADR 0026 point 3, limits table); a
+      Normal account becomes Degraded on that instrument. When no snapshot
+      has yet been readable or the latest is unreadable, the sell is
+      refused as `broker-holding`. When the latest is stale, the sell is
+      refused (`risk.order.refused`, reason `stale-broker-snapshot`), the
+      engine state is left unchanged (a Normal account stays Normal), and
+      an urgent alert is raised once per snapshot condition; the alert
+      clears when a fresh snapshot arrives. A sell refused as stale is
+      re-planned at the next decision, like any refused planned sell; it is
+      not retried when a fresh snapshot arrives.
+    - **Check order.** The engine-state and kill-switch refusals of reading
+      7 (Halted, Degraded on the instrument, the kill switch) are evaluated
+      before this reading's snapshot checks. A planned sell refused for one
+      of those is the strategy's exit firing, whatever the snapshot's
+      condition, so a stale snapshot never prevents the exit from firing;
+      the sale it fires then meets reading 1's snapshot rule.
 
     The planner, not the gate, chooses quantities.
 11. **New event types** `account.broker.snapshot`, `risk.margin.alarm` and

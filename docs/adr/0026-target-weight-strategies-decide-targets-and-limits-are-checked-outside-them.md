@@ -195,20 +195,24 @@ its other reasons, not listed here; these are the snapshot reasons:
     holding, or no broker snapshot is readable yet or the latest is
     unreadable;
   - `stale-broker-snapshot`: the latest broker snapshot is readable but
-    older than `MaxSnapshotAge` (point 6);
-  - `non-positive-broker-values`: the latest broker snapshot is readable
-    and fresh, but its net liquidation or its mark for the instrument is
-    zero or negative.
+    stale: older than `MaxSnapshotAge`, or stamped later than the sell's
+    journalled time (point 6); an urgent alert is raised once per snapshot
+    condition and the sell is re-planned at the next decision.
+
+  These sells never read net liquidation or the mark, so
+  `non-positive-broker-values` is not in this set.
 - **`risk.sale.withheld`** for ADR 0019's sale back to 98%, beside the
   withholds reading 4 names (values that cannot be read, an unknown working
   sell, nothing to sell):
   - `stale-broker-snapshot`: the latest broker snapshot is readable but
-    older than `MaxSnapshotAge`; the attempt is not consumed;
+    older than `MaxSnapshotAge`, or stamped later than the triggering
+    event's journalled time (the payload records the skew); the attempt is
+    not consumed;
   - `non-positive-broker-values`: the latest broker snapshot is readable
     and fresh, but its net liquidation or its mark for the instrument is
     zero or negative; the attempt is not consumed.
 
-Both stale reasons are distinct from the strategy decision's
+`stale-broker-snapshot`, in both sets, is distinct from the strategy decision's
 `stale-account-snapshot` (point 1). When, how and with what effect each is
 used is ADR 0019's snapshot rule (amendment, 2026-10-17, reading 1), not
 restated here. ADR 0019's
@@ -321,7 +325,8 @@ run and is hashed by ADR 0016's derivation. It holds:
   refused, each with `stale-broker-snapshot` (ADR 0019 amendment,
   2026-10-17, readings 1 and 10; point 3). The age is the journalled time
   of the event that triggers the check minus the snapshot's recorded broker
-  timestamp, never the wall clock. Configuration validation rejects a
+  timestamp, never the wall clock; a negative age is stale, with no
+  tolerance. Configuration validation rejects a
   missing, zero or negative `MaxSnapshotAge`.
 - **Limits:** every value in point 3, and the Excess Liquidity thresholds of
   40%, 20% and 30 minutes.

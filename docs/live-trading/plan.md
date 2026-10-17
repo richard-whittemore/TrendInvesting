@@ -238,12 +238,13 @@ Lightsail VM (Ubuntu, $12/month, US East)
     be read, or a working sell is one the journal does not recognise, no
     order is sent, the attempt is used up and the urgent alert asks the
     owner to act by hand. If the snapshot is readable but older than
-    `MaxSnapshotAge`, or its net liquidation value or mark is zero or
+    `MaxSnapshotAge` or stamped later than the event that triggers the
+    sale, or its net liquidation value or mark is zero or
     negative, no order is sent either (reasons `stale-broker-snapshot` and
     `non-positive-broker-values`), but the attempt is not used up: while
     the exit or the urgent alarm still stands, the next good snapshot
-    sends the sale (ADR 0019 reading 1, "The snapshot rule", and readings
-    2 and 4; ADR 0026 points 3 to 6 and its 2026-10-17 amendment);
+    re-evaluates the sale, and once neither stands the withheld sale
+    lapses (ADR 0019 reading 1, "The snapshot rule", and readings 2 and 4; ADR 0026 points 3 to 6 and its 2026-10-17 amendment);
   - this is the one exception to ADR 0019's "no order changes" while
     Halted, recorded as an amendment to ADR 0019 (2026-10-15), so the
     target-weight strategy ADR has a single order rule to follow;
