@@ -518,7 +518,11 @@ here so that all eleven are in one place.
       Both ends are journalled records, so replay and a restart rebuild the
       episode from the journal identically and do not send the alert
       again. Episodes are ordered by the triggering event's journal sequence.
-      A stale check opens an episode when no episode is open for the account and either no episode has yet closed or the check's triggering event comes after (by journal sequence) the event that closed the most recent episode; a stale check whose triggering event precedes that close belongs to the closed episode and opens none. A sell
+      A stale check opens an episode when no episode is open for the account and
+      either no episode has yet closed or the check's triggering event comes
+      after (by journal sequence) the event that closed the most recent episode;
+      a stale check whose triggering event precedes that close belongs to the
+      closed episode and opens none. A sell
       refused as stale is re-planned at the next decision, like any refused
       planned sell; it is not retried when a fresh snapshot arrives.
     - **Check order.** The engine-state and kill-switch refusals of reading
