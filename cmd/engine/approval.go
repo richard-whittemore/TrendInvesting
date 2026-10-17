@@ -60,12 +60,22 @@ const durableLogSuffix = ".log"
 // into it one by one, the configuration first (ADR 0027 §6), so a resume
 // refused for divergence, or a crash before or during the copy, leaves a
 // newer log whose committed records are a prefix of the old one's under the
-// same header: empty, the configuration only, or more. Such a log is an
-// abandoned attempt, not a run: it ends in a cut-down copy of the old run's
-// state, so it is never the latest log and never the run before a start
-// (runsByAge); it stays in the directory as evidence (ADR 0018). A fresh
-// run never opens with the configuration input an earlier log opens with,
-// so a fresh run cut short is never mistaken for one (freshRunApproval).
+// same header: the configuration only, or more. Such a log is an abandoned
+// attempt, not a run: it ends in a cut-down copy of the old run's state, so
+// it is never the latest log and never the run before a start (runsByAge);
+// it stays in the directory as evidence (ADR 0018). It is attributed to the
+// newest log it is a prefix of, the one it copied. A fresh run never opens
+// with the configuration input an earlier log opens with, so a fresh run cut
+// short after its configuration is never mistaken for one
+// (freshRunApproval).
+//
+// A run creates its log, header first, before it commits its first record,
+// so a fresh run that crashes in that window, like a resume that crashes
+// before its first copy, leaves a log holding no committed record. Nothing
+// in it tells the two apart, and it holds nothing to resume, so it is an
+// abandoned start: never a run, never the source of an abandoned attempt,
+// and a resume of it is refused (checkResumesLatest); the fresh run is
+// started again, or, if the latest run crashed, that run is resumed.
 //
 // A fresh run records its configuration, then its approval, one input at a
 // time, so a crash between the two leaves a log holding nothing past its
@@ -79,11 +89,13 @@ const durableLogSuffix = ".log"
 // a fresh run never repeats the start of an earlier log (ADR 0027, the
 // restart model).
 //
-// Every *.log in the root of the directory of -log is read; a log the
-// engine cannot recover (ADR 0027 §5) refuses every start until the
-// operator moves it, unchanged, into the directory's quarantine folder,
+// Every *.log in the root of the directory of -log is read; a log whose
+// content the engine cannot recover (ADR 0027 §5) refuses every start until
+// the operator moves it, unchanged, into the directory's quarantine folder,
 // which the engine never reads (ADR 0018: evidence is never edited or
-// deleted).
+// deleted). A log the engine cannot open or read, for its permissions or a
+// disk fault, refuses every start too, but may be an intact crashed run, so
+// the step is to fix the fault and start again, never to quarantine it.
 //
 // freshRunApproval applies these rules to one invocation and returns the
 // approval to record, or nil when none is needed: a backtest, a resume of a
@@ -170,11 +182,12 @@ func logOpeningWith(opts options, comp composition) (string, error) {
 // another such attempt, and the approval that start was given still names
 // the run before the first attempt.
 func runBeforeStart(opts options, comp composition, resumed string) (string, error) {
-	logs, _, err := runsByAge(opts)
+	found, err := runsByAge(opts)
 	if err != nil {
 		return "", err
 	}
 	prefix, _ := filepath.Split(opts.logPath)
+	logs := found.runs
 	for i := len(logs) - 1; i >= 0; i-- {
 		if logs[i] == resumed {
 			continue
@@ -280,12 +293,12 @@ func checkApproval(opts options, comp composition, dir, latest string) (*event.O
 // configuration decided nothing and records no state. It returns no entries
 // when there is none, as for a first run.
 func stateBefore(opts options, named string) ([]journal.Entry, string, error) {
-	logs, _, err := runsByAge(opts)
+	found, err := runsByAge(opts)
 	if err != nil {
 		return nil, "", err
 	}
 	prefix, _ := filepath.Split(opts.logPath)
-	older := false
+	logs, older := found.runs, false
 	for i := len(logs) - 1; i >= 0; i-- {
 		if logs[i] == named {
 			older = true
@@ -388,12 +401,23 @@ func checkIncidentInForce(entries []journal.Entry, approval event.OperatorRunApp
 // latest in the directory of -log.
 func checkResumesLatest(opts options) error {
 	dir, _ := splitAsSpelled(opts.logPath)
-	latest, abandoned, err := latestLog(opts)
+	latest, found, err := latestLog(opts)
 	if err != nil {
 		return err
 	}
 	prefix, _ := filepath.Split(opts.logPath)
-	for attempt, source := range abandoned {
+	for _, start := range found.emptyStarts {
+		if !samePath(opts.resumePath, prefix+start) {
+			continue
+		}
+		step := fmt.Sprintf("start the fresh run again, with its -as-of and -approval naming the latest run, %q; only if %q itself crashed, resume that log instead", latest, latest)
+		if latest == "" {
+			step = fmt.Sprintf("start the fresh run again; %s holds no earlier run, so it needs no approval", dir)
+		}
+		return fmt.Errorf("engine: -resume names %s, which holds no committed record: a fresh run that crashed before its first record, or a resume that crashed before its first copy, leaves such a log, an abandoned start with nothing to resume (ADR 0027, the restart model); keep %s as evidence and %s",
+			opts.resumePath, start, step)
+	}
+	for attempt, source := range found.abandoned {
 		if samePath(opts.resumePath, prefix+attempt) {
 			return fmt.Errorf("engine: -resume names %s, a resume of %s abandoned partway: its committed records are a prefix of that log's, so it is not a run (ADR 0027 §6, the restart model); resume the latest run, %q, and keep %s as evidence",
 				opts.resumePath, source, latest, attempt)
@@ -438,55 +462,71 @@ func checkApprovedLatch(entries []journal.Entry, approval event.OperatorRunAppro
 	return nil
 }
 
+// logDirectory is what runsByAge finds in the directory of -log.
+type logDirectory struct {
+	// runs are the runs, least recently modified first.
+	runs []string
+	// abandoned maps each abandoned resume attempt to the log it copied.
+	abandoned map[string]string
+	// emptyStarts are the logs holding no committed record.
+	emptyStarts []string
+}
+
 // latestLog returns the name of the latest run in the directory of -log, or
-// "" when there is none, and the abandoned resume attempts runsByAge left
-// out.
-func latestLog(opts options) (latest string, abandoned map[string]string, err error) {
-	runs, abandoned, err := runsByAge(opts)
-	if err != nil || len(runs) == 0 {
-		return "", abandoned, err
+// "" when there is none, and the logs runsByAge found there.
+func latestLog(opts options) (latest string, found logDirectory, err error) {
+	found, err = runsByAge(opts)
+	if err != nil || len(found.runs) == 0 {
+		return "", found, err
 	}
-	return runs[len(runs)-1], abandoned, nil
+	return found.runs[len(found.runs)-1], found, nil
 }
 
 // runsByAge returns the runs in the directory of -log, least recently
-// modified first, as logsByAge orders them, leaving out each log whose
-// committed records are a prefix of an older log's under the same header,
-// however few, none included: a resume of that log abandoned partway (ADR
-// 0027 §6: a resume's new log begins with the old log's committed part,
-// byte for byte, the configuration first). It also returns the abandoned
-// attempts, each mapped to the log it copied. A log holding only its
-// configuration that is no such prefix is a start cut short
-// (attemptAtStart, stateBefore), and stays a run.
-func runsByAge(opts options) (runs []string, abandoned map[string]string, err error) {
+// modified first, as logsByAge orders them. It leaves out each log holding
+// no committed record, an abandoned start (freshRunApproval), and each log
+// whose committed records are a prefix of an older log's under the same
+// header: a resume of that log abandoned partway (ADR 0027 §6: a resume's
+// new log begins with the old log's committed part, byte for byte, the
+// configuration first), attributed to the newest log it is a prefix of,
+// since a resume of a resumed run is a prefix of every run that run
+// continued. A log holding only its configuration that is no such prefix is
+// a start cut short (attemptAtStart, stateBefore), and stays a run.
+func runsByAge(opts options) (logDirectory, error) {
 	dir, _ := splitAsSpelled(opts.logPath)
 	names, err := logsByAge(dir)
 	if err != nil {
-		return nil, nil, err
+		return logDirectory{}, err
 	}
 	prefix, _ := filepath.Split(opts.logPath)
 	recovered := make([]journal.Recovery, len(names))
 	for i, name := range names {
 		if recovered[i], err = recoverRun(prefix, name); err != nil {
-			return nil, nil, err
+			return logDirectory{}, err
 		}
 	}
-	abandoned = map[string]string{}
+	found := logDirectory{abandoned: map[string]string{}}
 	for i, name := range names {
+		if len(recovered[i].Entries) == 0 {
+			found.emptyStarts = append(found.emptyStarts, name)
+			continue
+		}
+		// A log holding a record is never a prefix of an empty one, so an
+		// empty start is never the source of an attempt.
 		source := ""
-		for j := range i {
+		for j := i - 1; j >= 0; j-- {
 			if committedPrefixOf(recovered[i], recovered[j]) {
 				source = names[j]
 				break
 			}
 		}
 		if source != "" {
-			abandoned[name] = source
+			found.abandoned[name] = source
 			continue
 		}
-		runs = append(runs, name)
+		found.runs = append(found.runs, name)
 	}
-	return runs, abandoned, nil
+	return found, nil
 }
 
 // committedPrefixOf reports whether attempt's committed entries, however
@@ -512,15 +552,23 @@ const quarantineFolder = "quarantine"
 
 // recoverRun recovers the log name in the directory spelled prefix,
 // naming the operator's step when it cannot: every log in the directory is
-// read to find the latest run, so one that cannot be recovered (ADR 0027
-// §5) stops every start until it is set aside.
+// read to find the latest run, so one whose content cannot be recovered
+// (ADR 0027 §5) stops every start until it is set aside, and one that
+// cannot be read stops every start until the fault is fixed. Only the first
+// is quarantined: a log that cannot be read may be an intact crashed run.
 func recoverRun(prefix, name string) (journal.Recovery, error) {
 	recovery, err := recoverLogFile(prefix + name)
-	if err != nil {
+	var unrecoverable *unrecoverableLogError
+	switch {
+	case err == nil:
+		return recovery, nil
+	case errors.As(err, &unrecoverable):
 		return journal.Recovery{}, fmt.Errorf("%w; every log in the directory is read to find the latest run, so move %s, unchanged, into %s and start again, never editing or deleting it (ADR 0018; docs/runbooks/durable-log.md, \"An unrecoverable log\")",
 			err, name, prefix+quarantineFolder)
+	default:
+		return journal.Recovery{}, fmt.Errorf("%w; %s could not be read, a fault in reading it, such as its permissions or the disk, not damage to what it holds, so it may be an intact crashed run: fix the fault and start again, leaving the log where it is (docs/runbooks/durable-log.md, \"A log that cannot be read\")",
+			err, name)
 	}
-	return recovery, nil
 }
 
 // logsByAge returns the names of the durable logs in dir, least recently

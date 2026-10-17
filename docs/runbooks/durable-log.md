@@ -3,7 +3,9 @@
 This is the durable-log runbook (ADR 0027). #338 adds the remaining entries
 (a diverging restart, a torn tail). The entries here follow the owner's
 decisions of 2026-10-16: no resume across builds, and the restart model;
-"An unrecoverable log" is the step for a log the engine cannot read.
+"An unrecoverable log" is the step for a log whose content the engine cannot
+recover; "A log that cannot be read" is the step for one it cannot open or
+read.
 
 ## Upgrading the build
 
@@ -60,10 +62,17 @@ The engine reads its settings from
    refusal naming a later log means the log you named is not the crashed
    run: only the latest run in the state directory is resumed. A refusal
    saying the log is a resume abandoned partway means an earlier resume
-   stopped before or while copying (refused, or crashed), even if it copied
-   only the configuration or nothing: resume the log it names, the crashed
-   run, and leave the partial copy where it is as evidence; the engine
-   skips it when finding the latest run (ADR 0027 §6). A refusal saying
+   stopped while copying (refused, or crashed), even if it copied only the
+   configuration: resume the log it names, the crashed run, and leave the
+   partial copy where it is as evidence; the engine skips it when finding
+   the latest run (ADR 0027 §6). A refusal saying the log holds no
+   committed record means a fresh run crashed before its first record, or
+   a resume crashed before copying anything: nothing in the log tells which,
+   and it holds nothing to resume. If you were starting a fresh run, start
+   it again ("Start a fresh run after an earlier one") with the same
+   `TI_AS_OF` and approval and a new `TI_RUN`; only if the latest run the
+   refusal names itself crashed, resume that log. Leave the empty log where
+   it is; the engine skips it when finding the latest run. A refusal saying
    the log holds nothing past its configuration means a fresh run crashed
    before recording its approval: add
    `-approval <the approval it was started with>` to `TI_RESTART_ARGS`
@@ -130,13 +139,27 @@ The engine reads its settings from
    repeated start, or another account. Every log in the state directory is
    read to find the latest run, so a log the engine cannot recover (ADR
    0027 §5) stops every start until it is set aside: see "An unrecoverable
-   log".
+   log"; a log it cannot open or read stops every start until the fault is
+   fixed: see "A log that cannot be read".
+
+## A log that cannot be read
+
+A log the engine cannot open or read (its owner or mode after a manual
+copy, or a disk fault) refuses every start with a message saying it "could
+not be read" and giving no quarantine step. The file may be an intact
+crashed run, so never quarantine it for this.
+
+1. Fix the fault: for example
+   `sudo chown ti-trader: /var/lib/trend-investing/engines/<account>/<name>.log`
+   and `sudo chmod 600` on it, or the disk the error names.
+2. Start again, leaving the log where it is. If the engine then reads it
+   and finds its content unrecoverable, follow "An unrecoverable log".
 
 ## An unrecoverable log
 
 Every `*.log` in the root of the account's state directory,
 `/var/lib/trend-investing/engines/<account>/`, is read to find the latest
-run. A log the engine cannot recover (ADR 0027 §5: a damaged file, an old
+run. A log whose content the engine cannot recover (ADR 0027 §5: a damaged file, an old
 log whose bytes rotted after it was superseded, or a stray file ending in
 `.log`) refuses every start, resume and fresh run alike, with a message
 ending "move `<name>`, unchanged, into `<state directory>/quarantine`".

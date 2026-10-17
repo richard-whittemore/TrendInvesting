@@ -657,10 +657,11 @@ func TestAResumeAbandonedPartwayIsNeverTheLatestRun(t *testing.T) {
 // a resume creates its new log, then copies the old log's committed groups
 // one by one, the configuration first (ADR 0027 §6), so a resume that stops
 // before or just after that first group leaves a newer log, empty or
-// holding the configuration only, whose committed records are a prefix of
-// the old log's under the same header. It is an abandoned attempt, not a
-// run, however little it copied: the crashed run is still the one resumed,
-// and the attempt is named when it is.
+// holding the configuration only. Holding the configuration, it is a prefix
+// of the old log's committed records under the same header, an abandoned
+// attempt; empty, it is an abandoned start. Neither is a run, however
+// little it copied: the crashed run is still the one resumed, and the
+// abandoned log is named when it is.
 func TestAResumeAbandonedBeforeItCopiedPastItsConfigurationIsNeverTheLatestRun(t *testing.T) {
 	for _, groups := range []int{0, 1} {
 		dir := t.TempDir()
@@ -741,4 +742,120 @@ func TestAnUnrecoverableLogIsSetAsideInTheQuarantineFolder(t *testing.T) {
 	if err := startEngine(t, fresh)(); err != nil {
 		t.Fatalf("a first run once the unrecoverable log is quarantined: %v", err)
 	}
+}
+
+// firstBoostRun runs a first engine whose log is dir/run-1.log through the
+// first three sessions and returns its options and recovered log.
+func firstBoostRun(t *testing.T, dir string) (options, journal.Recovery) {
+	t.Helper()
+	first := boostOptions(t, dir)
+	first.logPath, first.outPath = filepath.Join(dir, "run-1.log"), filepath.Join(dir, "run-1.journal")
+	stop := startEngine(t, first)
+	feed := newBoostFeed(t, first.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
+	feed.sessions(0, 3)
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatalf("the first run: %v", err)
+	}
+	return first, recoverFile(t, first.logPath)
+}
+
+// TestAnEmptyLogIsAnAbandonedStartNeverARun: a run creates its log, header
+// first, before it commits its first record, so a fresh run that crashes in
+// that window, like a resume that crashes before its first copy, leaves a
+// log holding no committed record. Nothing in it tells the two apart, and
+// it records nothing to resume, so it is an abandoned start: never the
+// latest run, never the source of an abandoned resume, and a resume of it
+// is refused with the step for either case. The fresh run it was is started
+// again, at its new -as-of, with its approval (ADR 0027, the restart model;
+// ADR 0018: the empty log stays as evidence).
+func TestAnEmptyLogIsAnAbandonedStartNeverARun(t *testing.T) {
+	dir := t.TempDir()
+	first, firstLog := firstBoostRun(t, dir)
+	latch, _ := lastLatch(t, firstLog.Entries)
+	empty := committedPrefix(t, first.logPath, dir, "run-2.log", 0, time.Now().Add(time.Hour))
+
+	resumedEmpty := boostOptions(t, dir)
+	resumedEmpty.logPath, resumedEmpty.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
+	resumedEmpty.resumePath, resumedEmpty.asOf = empty, laterAsOf
+	refuse(t, "a resume of the empty log", resumedEmpty, "holds no committed record")
+	refuse(t, "a resume of the empty log", resumedEmpty, "start the fresh run again")
+
+	fresh := boostOptions(t, dir)
+	fresh.logPath, fresh.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
+	fresh.asOf = laterAsOf
+	fresh.approvalPath = writeApproval(t, dir, "run-1.log", firstLog.FinalRecordHash, latch)
+	if err := startEngine(t, fresh)(); err != nil {
+		t.Fatalf("the fresh run started again beside its empty log: %v", err)
+	}
+	entries := recoverFile(t, fresh.logPath).Entries
+	if len(entries) < 2 || entries[1].Envelope.Type != event.OperatorRunApprovedEventType {
+		t.Fatalf("the fresh run does not record its approval as its second input: %d record(s)", len(entries))
+	}
+}
+
+// TestAnEmptyLogAloneLeavesAFirstRun: an empty log beside no other is an
+// abandoned start, not an earlier run, so the run started again is still a
+// first run and needs no approval (ADR 0027, the restart model).
+func TestAnEmptyLogAloneLeavesAFirstRun(t *testing.T) {
+	source := t.TempDir()
+	first, _ := firstBoostRun(t, source)
+	dir := t.TempDir()
+	committedPrefix(t, first.logPath, dir, "run-1.log", 0, time.Now())
+	fresh := boostOptions(t, dir)
+	fresh.logPath, fresh.outPath = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal")
+	if err := startEngine(t, fresh)(); err != nil {
+		t.Fatalf("a first run beside an empty log: %v", err)
+	}
+}
+
+// TestALogThatCannotBeReadIsNeverQuarantined: a log the engine cannot open
+// or read, for its permissions or a disk fault, may be an intact crashed
+// run, so the refusal names the fault to fix and retry and gives no
+// quarantine step; only a log whose content cannot be recovered (ADR 0027
+// §5) is set aside (ADR 0018).
+func TestALogThatCannotBeReadIsNeverQuarantined(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file whatever its mode")
+	}
+	dir := t.TempDir()
+	first, _ := firstBoostRun(t, dir)
+	if err := os.Chmod(first.logPath, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(first.logPath, 0o600) })
+	fresh := boostOptions(t, dir)
+	fresh.logPath, fresh.outPath = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal")
+	fresh.asOf = laterAsOf
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	err := run(ctx, fresh, io.Discard)
+	cancel()
+	if err == nil || strings.Contains(err.Error(), "quarantine") || !strings.Contains(err.Error(), "could not be read") {
+		t.Fatalf("run() = %v, want a refusal saying the log could not be read, with no quarantine step", err)
+	}
+}
+
+// TestAnAbandonedResumeNamesTheLogItCopied: a resume's log begins with the
+// committed part of the run it resumed (ADR 0027 §6), so an attempt
+// abandoned while copying a resumed run is also a prefix of every run that
+// run continued; it is attributed to the newest log it is a prefix of, the
+// one it copied, which is also the latest run to resume.
+func TestAnAbandonedResumeNamesTheLogItCopied(t *testing.T) {
+	source := t.TempDir()
+	full, _ := firstBoostRun(t, source)
+	dir := t.TempDir()
+	now := time.Now()
+	committedPrefix(t, full.logPath, dir, "run-1.log", 3, now.Add(time.Hour))
+	all := 0
+	for _, entry := range recoverFile(t, full.logPath).Entries {
+		if entry.Kind == journal.KindInput {
+			all++
+		}
+	}
+	committedPrefix(t, full.logPath, dir, "run-2.log", all, now.Add(2*time.Hour))
+	attempt := committedPrefix(t, full.logPath, dir, "run-3.log", 2, now.Add(3*time.Hour))
+	resumed := boostOptions(t, dir)
+	resumed.logPath, resumed.outPath = filepath.Join(dir, "run-4.log"), filepath.Join(dir, "run-4.journal")
+	resumed.resumePath = attempt
+	refuse(t, "a resume of the abandoned attempt", resumed, "a resume of run-2.log abandoned")
 }
