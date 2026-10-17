@@ -1188,3 +1188,88 @@ func TestAWithheldSaleThatLapsesIsJournalledLapsed(t *testing.T) {
 	}
 	lapsedFrom(*s.Withheld, &obs.Lapsed[0], "the alarm cleared")
 }
+
+// TestASaleWithheldUnderOneTriggerIsDisarmedWhenTheOtherPlansIt: Halted, the
+// exit and the urgent alarm fire the same sale, under the incident's tag and
+// one client order ID. Withheld under one trigger and planned under the
+// other, it is decided: neither trigger retries it, and nothing journals it
+// lapsed, since a lapse says the sale was not decided again.
+func TestASaleWithheldUnderOneTriggerIsDisarmedWhenTheOtherPlansIt(t *testing.T) {
+	urgentAt := func(minutes int, mark float64) event.BrokerSnapshotPayload {
+		s := later(boosted(), minutes)
+		s.ExcessLiquidity, s.Positions[0].Mark = 1500, mark
+		return s
+	}
+
+	// Withheld under the exit, planned under the alarm.
+	g := gate(t, limits(), event.TradingModeDryRun)
+	incident := halt(t, g).StateID
+	observe(t, g, "broker:1", boosted())
+	if s, ok, err := g.Sale(event.SaleTriggerExit, "SPY", at.Add(time.Hour), 0.98, 0.05); err != nil || !ok || s.Withheld == nil || s.Withheld.Reason != event.SaleWithheldStaleBrokerSnapshot {
+		t.Fatalf("setup: %+v %v %v", s, ok, err)
+	}
+	if !observe(t, g, "broker:2", urgentAt(61, 90)).Urgent {
+		t.Fatal("setup: not urgent")
+	}
+	s, ok, err := g.Sale(event.SaleTriggerMarginUrgent, "SPY", at.Add(61*time.Minute), 0.98, 0.05)
+	if err != nil || !ok || s.Order == nil || s.Order.Tag != incident {
+		t.Fatalf("planned under the alarm: %+v %v %v", s, ok, err)
+	}
+	if obs := observe(t, g, "broker:3", later(boosted(), 62)); obs.RetryExit || len(obs.Lapsed) != 0 {
+		t.Errorf("the planned sale is neither retried for the exit nor lapsed: %+v", obs)
+	}
+	if l := g.LapseExitSale(); l != nil {
+		t.Errorf("a sale planned under the alarm never lapses for the exit: %+v", l)
+	}
+
+	// Withheld under the alarm, planned under the exit.
+	g = gate(t, limits(), event.TradingModeDryRun)
+	incident = halt(t, g).StateID
+	observe(t, g, "broker:0", boosted())
+	if !observe(t, g, "broker:1", urgentAt(1, 0)).Urgent {
+		t.Fatal("setup: not urgent")
+	}
+	if s, ok := requestSale(t, g, event.SaleTriggerMarginUrgent); !ok || s.Withheld == nil || s.Withheld.Reason != event.SaleWithheldNotPositive {
+		t.Fatalf("setup: %+v", s)
+	}
+	observe(t, g, "broker:2", urgentAt(2, 90))
+	if s, ok := requestSale(t, g, event.SaleTriggerExit); !ok || s.Order == nil || s.Order.Tag != incident {
+		t.Fatalf("planned under the exit: %+v", s)
+	}
+	if obs := observe(t, g, "broker:3", later(boosted(), 3)); obs.Urgent || len(obs.Lapsed) != 0 {
+		t.Errorf("the planned sale is neither retried for the alarm nor lapsed: %+v", obs)
+	}
+}
+
+// TestASaleWithheldUnderBothTriggersLapsesOnce: with the kill switch engaged
+// the exit and the urgent alarm fire the same sale, both withheld stale.
+// One snapshot that ends both (the switch released, the alarm clear) lapses
+// the sale once: one risk.sale.withheld per sale, never two records of one.
+func TestASaleWithheldUnderBothTriggersLapsesOnce(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	urgent := boosted()
+	urgent.ExcessLiquidity = 1500
+	if !observe(t, g, "broker:1", urgent).Urgent {
+		t.Fatal("setup: not urgent")
+	}
+	kill(t, g, "kill:1", true)
+	var client string
+	for _, trigger := range []string{event.SaleTriggerExit, event.SaleTriggerMarginUrgent} {
+		s, ok, err := g.Sale(trigger, "SPY", at.Add(time.Hour), 0.98, 0.05)
+		if err != nil || !ok || s.Withheld == nil || s.Withheld.Reason != event.SaleWithheldStaleBrokerSnapshot {
+			t.Fatalf("setup %s: %+v %v %v", trigger, s, ok, err)
+		}
+		if client != "" && s.Withheld.ClientOrderID != client {
+			t.Fatalf("setup: one sale under both triggers: %s and %s", client, s.Withheld.ClientOrderID)
+		}
+		client = s.Withheld.ClientOrderID
+	}
+	kill(t, g, "kill:2", false)
+	obs := observe(t, g, "broker:2", later(boosted(), 61))
+	if len(obs.Lapsed) != 1 || obs.Lapsed[0].ClientOrderID != client {
+		t.Fatalf("one lapse for the one sale: %+v", obs.Lapsed)
+	}
+	if l := g.LapseExitSale(); l != nil {
+		t.Errorf("already lapsed: %+v", l)
+	}
+}

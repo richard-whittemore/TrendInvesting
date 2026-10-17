@@ -134,8 +134,11 @@ type Gate struct {
 	// holding is the latest snapshot that read the holdings, which a later
 	// snapshot's fall in the holding is measured from.
 	holding *holdingSeen
-	orders  map[string]*releasedOrder
-	fills   map[string]event.TargetWeightFillPayload
+	// accountAsOf is when the latest account snapshot was taken: the
+	// snapshot a planner sizes from, which PendingSells nets for.
+	accountAsOf time.Time
+	orders      map[string]*releasedOrder
+	fills       map[string]event.TargetWeightFillPayload
 }
 
 // NewGate returns a Normal gate for the joint margin account accountID under

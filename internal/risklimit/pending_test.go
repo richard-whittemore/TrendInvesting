@@ -19,24 +19,31 @@ import (
 // lifecycle report ends the remainder: a snapshot that no longer lists a sell
 // never shows it cancelled.
 
-// sellFill records an execution of the released sell client.
-func sellFill(t *testing.T, g *risklimit.Gate, client, fillID string, quantity int64) {
+// sellFill records an execution of the released sell client, executed
+// minutes after the fixture time.
+func sellFill(t *testing.T, g *risklimit.Gate, client, fillID string, quantity int64, minutes int) {
+	t.Helper()
+	sellFillAt(t, g, client, fillID, quantity, at.Add(time.Duration(minutes)*time.Minute))
+}
+
+// sellFillAt records an execution of the released sell client at filledAt.
+func sellFillAt(t *testing.T, g *risklimit.Gate, client, fillID string, quantity int64, filledAt time.Time) {
 	t.Helper()
 	if err := g.ObserveFill(event.TargetWeightFillPayload{
 		AccountID: "joint", ClientOrderID: client, FillID: fillID, InstrumentID: "SPY",
-		Side: event.OrderSideSell, Quantity: quantity, Price: 1, FilledAt: at,
+		Side: event.OrderSideSell, Quantity: quantity, Price: 1, FilledAt: filledAt,
 	}); err != nil {
 		t.Fatal(err)
 	}
 }
 
 // sellStatus records a lifecycle report on the released sell client of
-// quantity at limit.
-func sellStatus(t *testing.T, g *risklimit.Gate, client, status string, quantity int64, limit float64) {
+// quantity at limit, which occurred minutes after the fixture time.
+func sellStatus(t *testing.T, g *risklimit.Gate, client, status string, quantity int64, limit float64, minutes int) {
 	t.Helper()
 	if err := g.ObserveLifecycle(event.LimitOrderLifecyclePayload{
 		AccountID: "joint", ClientOrderID: client, OrderID: "ib-" + client, InstrumentID: "SPY",
-		Side: event.OrderSideSell, Status: status, Quantity: quantity, LimitPrice: limit, OccurredAt: at,
+		Side: event.OrderSideSell, Status: status, Quantity: quantity, LimitPrice: limit, OccurredAt: at.Add(time.Duration(minutes) * time.Minute),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +129,7 @@ func TestADroppedSellWithTheHoldingUnchangedStaysPending(t *testing.T) {
 	pendingIs(t, g, 54, "listed working at last")
 	observe(t, g, "broker:4", later(boosted(), 3))
 	pendingIs(t, g, 54, "dropped again, the holding unchanged")
-	sellStatus(t, g, sale.ClientOrderID, event.OrderLifecycleStatusCanceled, 54, sale.LimitPrice)
+	sellStatus(t, g, sale.ClientOrderID, event.OrderLifecycleStatusCanceled, 54, sale.LimitPrice, 4)
 	pendingIs(t, g, 0, "only the cancellation report ends it")
 }
 
@@ -141,7 +148,7 @@ func TestACompletedSellTheAccountSnapshotShowsFirstIsNotCountedTwice(t *testing.
 	b.Positions[0].Quantity = 93
 	observe(t, g, "broker:2", b)
 	pendingIs(t, g, 0, "the broker snapshot infers the same 54, already shown")
-	sellFill(t, g, sale.ClientOrderID, "late", 54)
+	sellFill(t, g, sale.ClientOrderID, "late", 54, 30)
 	pendingIs(t, g, 0, "a late fill report of the same 54 is not counted again")
 	o := check(t, g, order(event.OrderSideSell, 1, 93))[0]
 	released(t, o)
@@ -158,7 +165,7 @@ func TestAnAccountSnapshotsHoldingFallShowsAFill(t *testing.T) {
 	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
 	g.ObserveAccount(account(75, 10))
 	pendingIs(t, g, 35, "25 shown sold; 35 still pending")
-	sellFill(t, g, "tw-sell", "f1", 25)
+	sellFill(t, g, "tw-sell", "f1", 25, 5)
 	pendingIs(t, g, 35, "the report of the same 25 changes nothing")
 }
 
@@ -169,9 +176,9 @@ func TestAPartialFillLeavesTheRestPending(t *testing.T) {
 	observe(t, g, "broker:1", broker(100))
 	g.ObserveAccount(account(100, 1))
 	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
-	sellFill(t, g, "tw-sell", "f1", 20)
+	sellFill(t, g, "tw-sell", "f1", 20, 2)
 	pendingIs(t, g, 60, "40 working and 20 filled since the account snapshot")
-	g.ObserveAccount(account(80, 2))
+	g.ObserveAccount(account(80, 3))
 	pendingIs(t, g, 40, "an account snapshot after the fill shows the 20")
 	again := order(event.OrderSideSell, 41, 100)
 	again.Planned.ClientOrderID = "tw-again"
@@ -180,7 +187,7 @@ func TestAPartialFillLeavesTheRestPending(t *testing.T) {
 	if o.Refused.Figures.WorkingSells != 60 {
 		t.Errorf("against the broker snapshot taken before the fill, 40 working and 20 filled: %d", o.Refused.Figures.WorkingSells)
 	}
-	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCanceled, 60, 1)
+	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCanceled, 60, 1, 4)
 	pendingIs(t, g, 0, "the cancellation ends the remainder")
 }
 
@@ -191,11 +198,11 @@ func TestACancelPendingSellStaysPendingInFull(t *testing.T) {
 	observe(t, g, "broker:1", broker(100))
 	g.ObserveAccount(account(100, 0))
 	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
-	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCancelPending, 60, 1)
+	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCancelPending, 60, 1, 1)
 	pendingIs(t, g, 60, "cancel-pending")
 	observe(t, g, "broker:2", later(broker(100, listed("tw-sell", event.BrokerOrderCancelPending, 60)), 1))
 	pendingIs(t, g, 60, "listed cancel-pending by the broker")
-	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCanceled, 60, 1)
+	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCanceled, 60, 1, 2)
 	pendingIs(t, g, 0, "cancelled")
 }
 
@@ -222,9 +229,9 @@ func TestABrokerSnapshotResolvesASell(t *testing.T) {
 	pendingIs(t, g, 35, "20 more filled since the account snapshot; the other 15 still pending")
 	g.ObserveAccount(account(55, 3))
 	pendingIs(t, g, 15, "the dropped 15 are not taken as cancelled")
-	sellFill(t, g, "tw-sell", "f1", 45)
+	sellFill(t, g, "tw-sell", "f1", 45, 3)
 	pendingIs(t, g, 15, "a fill report of shares a snapshot already showed is not counted twice")
-	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCanceled, 60, 1)
+	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCanceled, 60, 1, 4)
 	pendingIs(t, g, 0, "the cancellation report ends the 15")
 }
 
@@ -238,7 +245,7 @@ func TestADroppedSellWithNoEarlierHoldingStaysPending(t *testing.T) {
 	pendingIs(t, g, 60, "no earlier broker holding")
 	observe(t, g, "broker:2", later(broker(100), 1))
 	pendingIs(t, g, 60, "still unresolved")
-	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusInvalid, 60, 1)
+	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusInvalid, 60, 1, 2)
 	pendingIs(t, g, 0, "the venue refused it")
 }
 
@@ -249,13 +256,13 @@ func TestALifecycleReportResolvesASell(t *testing.T) {
 	observe(t, g, "broker:1", broker(100))
 	g.ObserveAccount(account(100, 0))
 	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
-	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusSubmitted, 60, 1)
+	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusSubmitted, 60, 1, 1)
 	pendingIs(t, g, 60, "acknowledged")
-	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCanceled, 60, 1)
+	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCanceled, 60, 1, 2)
 	pendingIs(t, g, 0, "cancelled unfilled")
-	sellFill(t, g, "tw-sell", "late", 10)
+	sellFill(t, g, "tw-sell", "late", 10, 1)
 	pendingIs(t, g, 10, "a late fill since the account snapshot")
-	g.ObserveAccount(account(90, 1))
+	g.ObserveAccount(account(90, 3))
 	pendingIs(t, g, 0, "shown")
 }
 
@@ -336,10 +343,10 @@ func TestPendingStaysWithinZeroAndTheRelease(t *testing.T) {
 					q := 1 + rng.Int63n(release-reported)
 					reported += q
 					fills++
-					sellFill(t, g, "tw-sell", "f"+string(rune('a'+fills)), q)
+					sellFill(t, g, "tw-sell", "f"+string(rune('a'+fills)), q, step)
 				}
 			case 1:
-				sellStatus(t, g, "tw-sell", statuses[rng.Intn(len(statuses))], release, 1)
+				sellStatus(t, g, "tw-sell", statuses[rng.Intn(len(statuses))], release, 1, step)
 			default:
 				s := later(broker(40+rng.Int63n(61)), step)
 				if rng.Intn(2) == 0 {
@@ -426,7 +433,7 @@ func TestAnInferredFillAndAnotherSellsReportAreNotBothCounted(t *testing.T) {
 	pendingIs(t, g, 100, "both released")
 	g.ObserveAccount(account(70, 10))
 	pendingIs(t, g, 70, "30 shown sold")
-	sellFill(t, g, "tw-b", "b1", 30)
+	sellFill(t, g, "tw-b", "b1", 30, 5)
 	pendingIs(t, g, 70, "B's report is the 30 the account snapshot showed")
 	g.ObserveAccount(account(70, 20))
 	pendingIs(t, g, 70, "a second snapshot of 70 shows nothing new")
@@ -450,4 +457,73 @@ func TestAnOlderAccountSnapshotShowsNothingNewer(t *testing.T) {
 	observe(t, g, "broker:1", later(broker(100, listed("tw-sell", event.BrokerOrderWorking, 60)), 10))
 	g.ObserveAccount(account(70, 5))
 	pendingIs(t, g, 60, "a snapshot from before the broker's shows no fill")
+}
+
+// A snapshot shows only the fills that had happened when it was taken. Fill
+// reports are pushed and snapshots polled, so a report can be recorded before
+// a snapshot taken before the fill: the urgent sale of 54 of 147 fills at
+// 16:00:02, its report is recorded, then an account snapshot taken at 16:00
+// still holding 147 is recorded. That snapshot does not show the 54, so they
+// stay pending against it, and a broker snapshot taken before the fill keeps
+// them working against its 147. Counting them shown would let the session's
+// exit sell another 54 and leave 39 of 147, far below 98%.
+func TestAFillReportedBeforeAnOlderSnapshotIsStillPendingFromIt(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	sale := urgentSale(t, g)
+	sellFillAt(t, g, sale.ClientOrderID, "s1", 54, at.Add(time.Hour+2*time.Second))
+	g.ObserveAccount(account(147, 60))
+	pendingIs(t, g, 54, "the 16:00 snapshot's 147 does not show the 16:00:02 fill")
+	sell := order(event.OrderSideSell, 94, 147)
+	sell.Planned.ClientOrderID = "tw-exit"
+	o := check(t, g, sell)[0]
+	refusedFor(t, o, event.RefusedBrokerHolding)
+	if o.Refused.Figures.WorkingSells != 54 {
+		t.Errorf("the broker snapshot from before the fill still nets the 54: %+v", o.Refused.Figures)
+	}
+	g.ObserveAccount(account(93, 61))
+	pendingIs(t, g, 0, "a snapshot after the fill shows the 54 sold")
+}
+
+// A broker snapshot taken before a fill whose report was recorded first lists
+// the sell at its full remaining quantity; it is credited with no fill, so the
+// account snapshot after the fill measures its fall against what that broker
+// snapshot showed, and no phantom fall moves onto another pending sell.
+func TestAFillReportedBeforeAnOlderBrokerSnapshotIsNotInferredTwice(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(200))
+	g.ObserveAccount(account(200, 0))
+	e := order(event.OrderSideSell, 60, 200)
+	e.Planned.ClientOrderID = "tw-e"
+	released(t, check(t, g, e)[0])
+	s := order(event.OrderSideSell, 47, 200)
+	s.Planned.ClientOrderID = "tw-s"
+	released(t, check(t, g, s)[0])
+	sellFill(t, g, "tw-s", "s1", 47, 3)
+	observe(t, g, "broker:2", later(broker(200, listed("tw-e", event.BrokerOrderWorking, 60), listed("tw-s", event.BrokerOrderWorking, 47)), 2))
+	pendingIs(t, g, 107, "the account snapshot at 0 shows neither")
+	again := order(event.OrderSideSell, 94, 200)
+	again.Planned.ClientOrderID = "tw-again"
+	o := check(t, g, again)[0]
+	refusedFor(t, o, event.RefusedBrokerHolding)
+	if o.Refused.Figures.WorkingSells != 107 {
+		t.Errorf("E's 60 working and S's 47 filled after the broker snapshot: %+v", o.Refused.Figures)
+	}
+	g.ObserveAccount(account(153, 4))
+	pendingIs(t, g, 60, "the fall of 47 is S's reported fill; E's 60 stay pending")
+}
+
+// An account snapshot that is older than the latest broker snapshot, recorded
+// after it, still shows the fills that had happened when it was taken: 100
+// held, 60 released, 30 reported filled at 15:01; a broker snapshot at 15:03
+// shows 70 held and 30 working; an account snapshot at 15:02 showing 70 is
+// recorded after it. The planner sizes from that snapshot, which already
+// shows the 30 sold, so only the 30 working are pending.
+func TestAnOlderAccountSnapshotStillShowsTheFillsBeforeIt(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	g.ObserveAccount(account(100, 0))
+	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+	sellFill(t, g, "tw-sell", "f1", 30, 1)
+	observe(t, g, "broker:1", later(broker(70, listed("tw-sell", event.BrokerOrderWorking, 30)), 3))
+	g.ObserveAccount(account(70, 2))
+	pendingIs(t, g, 30, "the 15:02 snapshot shows the 30 filled at 15:01")
 }

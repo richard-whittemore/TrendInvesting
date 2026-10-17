@@ -126,12 +126,23 @@ shares known filled. One rule decides what is known filled:
   snapshot already showed the 54 shares of the sale sold (147 down to 93),
   the IBKR snapshot and the fill report that follow add nothing, and the
   next exit is not cut down by them a second time.
+- A snapshot shows only the fills that had happened when it was taken,
+  whatever order things are recorded in. Fill reports arrive as the fills
+  happen, but snapshots are taken on a schedule, so a fill report can be
+  recorded before a snapshot taken a moment before the fill. If the urgent
+  sale of 54 fills at 16:00:02 and its report is recorded before an account
+  snapshot taken at 16:00:00 that still shows 147, the 54 still count as
+  being sold against that snapshot; otherwise the session's exit could sell
+  another 54 and leave 39 of 147. A fill reported after a snapshot taken
+  after the fill is one the snapshot already showed, so it counts once.
 - A snapshot taken earlier than one already seen, but recorded after it
-  (account and IBKR snapshots each keep their own order), shows nothing
-  newer. An IBKR snapshot from 15:59:55 that still shows 147, recorded after
-  the 16:00 account snapshot that showed the 54 sold, is still checked with
-  the 54 counted as working against its 147, so a sell of 117 is refused
-  rather than sold short.
+  (account and IBKR snapshots each keep their own order), is judged by its
+  own time too. An IBKR snapshot from 15:59:55 that still shows 147,
+  recorded after the 16:00 account snapshot that showed the 54 sold, is
+  still checked with the 54 counted as working against its 147, so a sell
+  of 117 is refused rather than sold short. An account snapshot from 15:02,
+  recorded after a 15:03 IBKR snapshot, still shows a fill reported for
+  15:01, so the next exit is not cut down by it a second time.
 
 Only a cancellation or refusal report ends what has not filled. A sell IBKR
 no longer lists, with your holding unchanged, stays pending: it may simply
@@ -180,7 +191,10 @@ readable and positive, while what fired it is still in force:
 Otherwise the withheld sale lapses, its attempt unspent, and the program
 records one more `risk.sale.withheld`, with reason `lapsed`, so the journal
 shows it will not be decided again. A lapse goes in the daily summary, not
-an urgent alert: what needed the sale has ended. The incident or the
+an urgent alert: what needed the sale has ended. Boost's exit and the alarm
+can fire the same sale, under the same incident or engagement. Once either
+of them plans it, it is not tried again for the other and never recorded as
+lapsed; withheld for both, it lapses once, when neither is still in force. The incident or the
 engagement only decides the tag, picked afresh each time. The sale is always
 sized from the latest snapshot, never an older one. A snapshot both stale and
 not positive is withheld as `stale-broker-snapshot`: freshness is checked

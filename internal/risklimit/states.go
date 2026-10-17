@@ -132,7 +132,9 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 	var lapsed []event.SaleWithheldPayload
 	retryExit := g.exitRetry != "" && g.refusesExit(g.exitRetry) && sizable(s, g.exitRetry)
 	if g.exitRetry != "" && !g.refusesExit(g.exitRetry) {
-		lapsed = append(lapsed, g.lapseExit(fmt.Sprintf("broker snapshot %s finds the account no longer refusing the exit on %s", id, g.exitRetry)))
+		if l := g.lapseExit(fmt.Sprintf("broker snapshot %s finds the account no longer refusing the exit on %s", id, g.exitRetry)); l != nil {
+			lapsed = append(lapsed, *l)
+		}
 	}
 	alarm := event.MarginAlarmPayload{
 		AccountID: g.accountID, SnapshotID: id, AsOf: s.AsOf,
@@ -184,7 +186,7 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 		// longer urgent: a new urgent alarm is a new sale.
 		w := g.urgentWithheld
 		g.urgentRetry, g.urgentWithheld = false, nil
-		if alarm.Level != event.MarginAlarmUrgent && w != nil {
+		if alarm.Level != event.MarginAlarmUrgent && w != nil && !armed(g.exitWithheld, w.ClientOrderID) {
 			lapsed = append(lapsed, lapse(*w, fmt.Sprintf("broker snapshot %s finds the margin alarm %s, no longer urgent", id, alarm.Level)))
 		}
 	}
@@ -228,15 +230,42 @@ func (g *Gate) LapseExitSale() *event.SaleWithheldPayload {
 	if g.exitRetry == "" {
 		return nil
 	}
-	l := g.lapseExit("the decision no longer plans the sell that fired the sale")
+	return g.lapseExit("the decision no longer plans the sell that fired the sale")
+}
+
+// lapseExit ends the exit's retry for why, returning its lapse, or nil while
+// the urgent alarm still retries the same sale: "when neither holds and the
+// sale is still withheld, the gate journals one" lapse (ADR 0019, amendment
+// of 2026-10-17, reading 1, "Lapse").
+func (g *Gate) lapseExit(why string) *event.SaleWithheldPayload {
+	w := *g.exitWithheld
+	g.exitRetry, g.exitWithheld = "", nil
+	if armed(g.urgentWithheld, w.ClientOrderID) {
+		return nil
+	}
+	l := lapse(w, why)
 	return &l
 }
 
-// lapseExit ends the exit's retry for why, returning its lapse.
-func (g *Gate) lapseExit(why string) event.SaleWithheldPayload {
-	w := *g.exitWithheld
-	g.exitRetry, g.exitWithheld = "", nil
-	return lapse(w, why)
+// armed reports whether withheld, a trigger's withheld sale, is the sale
+// client.
+func armed(withheld *event.SaleWithheldPayload, client string) bool {
+	return withheld != nil && withheld.ClientOrderID == client
+}
+
+// disarm ends every trigger's retry of the sale client, which has been
+// decided: planned, or withheld for a person. While the account refuses the
+// exit, the exit and the urgent alarm fire one sale under one tag (ADR 0019,
+// amendment of 2026-10-17, reading 2), so a sale withheld under one and
+// decided under the other is no longer withheld: it is neither retried nor
+// lapsed (reading 1, "Lapse": only a sale "still withheld" lapses).
+func (g *Gate) disarm(client string) {
+	if armed(g.urgentWithheld, client) {
+		g.urgentRetry, g.urgentWithheld = false, nil
+	}
+	if armed(g.exitWithheld, client) {
+		g.exitRetry, g.exitWithheld = "", nil
+	}
 }
 
 // lapse is withheld sale w's risk.sale.withheld with reason lapsed.
@@ -252,8 +281,10 @@ func lapse(w event.SaleWithheldPayload, why string) event.SaleWithheldPayload {
 func (g *Gate) StaleEpisodeOpen() bool { return g.staleOpen }
 
 // RestoreStaleEpisode restores whether an earlier run left the account's
-// stale episode open (ADR 0026, point 5: "Whether a stale-snapshot episode is
-// open for the account"), so a restart within it does not alert again. Like
+// stale episode open, which ADR 0026 point 5 lists among the state a restart
+// recovers from the journal ("Whether a stale-snapshot episode is open for
+// the account, from its opening `stale-broker-snapshot` record" and what
+// closes it), so a restart within it does not alert again. Like
 // RestoreSaleAttempt it is an unwired seam: a crash resumes by replaying the
 // durable log's inputs, which rebuilds the episode identically (ADR 0027,
 // section 6).
@@ -330,6 +361,7 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 		return orderplan.Sale{}, false, nil
 	}
 	if g.saleAttempted(tag, instrumentID) {
+		g.disarm(orderplan.SaleClientOrderID(tag, instrumentID))
 		return orderplan.Sale{}, false, nil
 	}
 	// Sized net of every sell the gate counts against the latest broker
@@ -371,6 +403,11 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 		g.urgentRetry, g.urgentInstrument, g.urgentWithheld = retry, instrumentID, withheld
 	} else if g.exitRetry, g.exitWithheld = "", nil; retry {
 		g.exitRetry, g.exitWithheld = instrumentID, withheld
+	}
+	if sale.Order != nil {
+		g.disarm(sale.Order.ClientOrderID)
+	} else if sale.Withheld.Attempted() {
+		g.disarm(sale.Withheld.ClientOrderID)
 	}
 	return sale, true, nil
 }
