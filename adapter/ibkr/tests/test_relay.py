@@ -22,7 +22,7 @@ if tests_dir not in sys.path:
 
 from orders import BrokerOrders
 from relay import (EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged, PendingInput,
-                   PendingInUse, Relay, ResendExpired, ResolveRefused, main, resolve)
+                   PendingInUse, Relay, RelayCloseTimeout, ResendExpired, ResolveRefused, main, resolve)
 from sender import OrderRequest
 
 
@@ -121,9 +121,10 @@ class RelayTests(unittest.TestCase):
         self.pending = PendingInput(str(Path(self.dir.name) / "pending.json"))
         self.sent = []
 
-    def relay(self, connect, broker=holding(), reconnects=1, send=None, mapper=to_request, today=date(2026, 10, 16)):
+    def relay(self, connect, broker=holding(), reconnects=1, send=None, mapper=to_request, today=date(2026, 10, 16),
+              **options):
         relay = Relay(connect=connect, send=send or self.sent.append, pending=self.pending, broker_orders=broker,
-                      to_request=mapper, reconnects=reconnects, today=lambda: today)
+                      to_request=mapper, reconnects=reconnects, today=lambda: today, **options)
         self.addCleanup(relay.close)
         return relay
 
@@ -443,7 +444,9 @@ class RelayTests(unittest.TestCase):
             in_send.set()
             let_send_return.wait(timeout=5)
 
-        # The record is read after the settlement, which would otherwise clear it.
+        # Stubbed only so the record can be read after the settlement, which
+        # would otherwise clear it; the real save and clear paths are covered
+        # by the tests that pause inside them.
         self.pending.clear = lambda: None
         relay = self.relay(Restarts({}, decisions), send=blocking_send)
         settling = threading.Thread(target=relay.exchange, args=(envelope(0),))
@@ -460,6 +463,123 @@ class RelayTests(unittest.TestCase):
         with self.assertRaises(ResolveRefused) as refused:
             resolve(PendingInput(self.pending.path), "tw-1", "sent", "already sent", today=date(2026, 10, 16))
         self.assertNotIn("stop it first", str(refused.exception), "the lock was released once the send was marked")
+
+    def _close_waits_inside(self, method, decisions, check):
+        """Close from another thread while the real PendingInput.<method> is running must wait for it.
+
+        The real method runs after a pause (it is wrapped, not replaced), so
+        what is covered is the file edit itself; check sees the record once
+        close has returned.
+        """
+        inside, let_go = threading.Event(), threading.Event()
+        close_returned = threading.Event()
+        real = getattr(self.pending, method)
+
+        def paused(*args):
+            inside.set()
+            let_go.wait(timeout=5)
+            return real(*args)
+
+        setattr(self.pending, method, paused)
+        relay = self.relay(Restarts({}, decisions))
+        settling = threading.Thread(target=relay.exchange, args=(envelope(0),))
+        closing = threading.Thread(target=lambda: (relay.close(), close_returned.set()))
+        settling.start()
+        self.assertTrue(inside.wait(timeout=5))
+        closing.start()
+        self.assertFalse(close_returned.wait(timeout=0.3), "close waits for the {} in flight".format(method))
+        let_go.set()
+        settling.join(timeout=5)
+        closing.join(timeout=5)
+        self.assertTrue(close_returned.is_set())
+        check()
+
+    def test_close_from_another_thread_waits_for_the_input_being_saved(self):
+        def saved():
+            # The save finished whole before close released the lock; the
+            # settlement then stopped at its next step, the relay being closed.
+            self.assertEqual(self.pending.load(), envelope(0))
+            self.assertEqual(self.pending.handovers(), {})
+
+        self._close_waits_inside("save", {"session:0": []}, saved)
+
+    def test_close_from_another_thread_waits_for_the_record_being_cleared(self):
+        def cleared():
+            self.assertIsNone(self.pending.load())
+            self.assertEqual(self.pending.handovers(), {}, "both files are removed, never half")
+
+        self._close_waits_inside("clear", {"session:0": [released("tw-1")]}, cleared)
+
+    def test_close_waits_for_the_resend_expired_mark(self):
+        self.pending.save(envelope(0))
+        self.pending.mark("tw-1", "resend:2026-10-15")
+        inside, let_go = threading.Event(), threading.Event()
+        close_returned = threading.Event()
+        real = self.pending.mark
+
+        def paused(cid, state):
+            inside.set()
+            let_go.wait(timeout=5)
+            return real(cid, state)
+
+        self.pending.mark = paused
+        relay = self.relay(Restarts({}, {"session:0": [released("tw-1")]}))
+        errors = []
+
+        def settle():
+            try:
+                relay.exchange(envelope(0))
+            except ResendExpired as err:
+                errors.append(err)
+
+        settling = threading.Thread(target=settle)
+        closing = threading.Thread(target=lambda: (relay.close(), close_returned.set()))
+        settling.start()
+        self.assertTrue(inside.wait(timeout=5))
+        closing.start()
+        self.assertFalse(close_returned.wait(timeout=0.3), "close waits for the mark in flight")
+        let_go.set()
+        settling.join(timeout=5)
+        closing.join(timeout=5)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(real.__self__.handovers(), {"tw-1": "handing-over"})
+
+    def test_close_gives_up_after_its_timeout_while_the_sender_runs_and_works_once_it_returns(self):
+        in_send, let_send_return = threading.Event(), threading.Event()
+
+        def blocking_send(request):
+            self.sent.append(request)
+            in_send.set()
+            let_send_return.wait(timeout=5)
+
+        relay = self.relay(Restarts({}, {"session:0": [released("tw-1")]}), send=blocking_send, close_timeout=60)
+        settling = threading.Thread(target=relay.exchange, args=(envelope(0),))
+        settling.start()
+        self.assertTrue(in_send.wait(timeout=5))
+        with self.assertRaises(RelayCloseTimeout):
+            relay.close(timeout=0.2)
+        with self.assertRaises(ResolveRefused) as refused:
+            resolve(PendingInput(self.pending.path), "tw-1", "sent", "still held", today=date(2026, 10, 16))
+        self.assertIn("stop it first", str(refused.exception), "a timed-out close leaves the lock held")
+        let_send_return.set()
+        settling.join(timeout=5)
+        relay.close()
+
+    def test_close_uses_the_configured_timeout_by_default(self):
+        in_send, let_send_return = threading.Event(), threading.Event()
+
+        def blocking_send(request):
+            in_send.set()
+            let_send_return.wait(timeout=5)
+
+        relay = self.relay(Restarts({}, {"session:0": [released("tw-1")]}), send=blocking_send, close_timeout=0.2)
+        settling = threading.Thread(target=relay.exchange, args=(envelope(0),))
+        settling.start()
+        self.assertTrue(in_send.wait(timeout=5))
+        with self.assertRaises(RelayCloseTimeout):
+            relay.close()
+        let_send_return.set()
+        settling.join(timeout=5)
 
     def test_resolve_is_refused_while_an_adapter_holds_the_pending_file(self):
         inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z")

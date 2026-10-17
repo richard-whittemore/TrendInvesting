@@ -127,6 +127,13 @@ and after a crash.
     and `test_each_relay_holds_its_own_lock_and_a_closed_relay_never_edits_or_sends`:
     the adapter and the command never edit the record at the same time, and
     a stopped relay edits and sends nothing.
+  - `test_close_from_another_thread_waits_for_the_record_being_cleared`,
+    `test_close_gives_up_after_its_timeout_while_the_sender_runs_and_works_once_it_returns`
+    and their neighbours: stopping the adapter from another thread waits for
+    the order or record edit in flight (at most `close_timeout`, 60 seconds
+    by default), then raises `RelayCloseTimeout` and leaves the adapter
+    running and holding the file, so a supervisor sees a stuck sender
+    instead of a hang.
   - `test_an_order_the_mapper_cannot_shape_leaves_no_mark_and_is_sent_after_a_restart`:
     an order whose broker request cannot be built never reached IBKR, so it
     leaves no "about to send" record and is sent once after a restart.

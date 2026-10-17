@@ -85,6 +85,8 @@ RESEND = "resend:"
 RESEND_SHAPE = re.compile(r"resend:[0-9]{4}-[0-9]{2}-[0-9]{2}")
 # The trading session's calendar: a session's date is its New York date.
 SESSION_ZONE = ZoneInfo("America/New_York")
+# How long close waits, by default, for the step in flight (seconds).
+CLOSE_TIMEOUT = 60
 # The person's decisions on a stopped hand-over.
 DECIDE_SENT = "sent"
 DECIDE_RESEND = "resend"
@@ -129,6 +131,10 @@ class ResendExpired(HandoverUnconfirmed):
 
 class PendingInUse(Exception):
     """Another relay, or the resolve command, holds the pending file; or this relay was closed and holds it no more."""
+
+
+class RelayCloseTimeout(Exception):
+    """close waited for the sender or a record edit in flight and gave up; the relay still holds the pending file."""
 
 
 class HandoverRecordInvalid(ValueError):
@@ -265,7 +271,8 @@ class Relay:
     PendingInUse rather than edit the record or send.
     """
 
-    def __init__(self, connect, send, pending, broker_orders, to_request, reconnects=1, today=None):
+    def __init__(self, connect, send, pending, broker_orders, to_request, reconnects=1, today=None,
+                 close_timeout=CLOSE_TIMEOUT):
         self._held = _lock(pending.lock_path)
         if self._held is None:
             raise PendingInUse("{} is held by another adapter or by relay.py resolve".format(pending.path))
@@ -278,22 +285,35 @@ class Relay:
         self._reconnects = reconnects
         self._engine = None
         self._sent = set()
-        # Serialises close against the step that marks, sends and marks an
-        # order, so the lock is never released while an order is going out
+        # Serialises close against each step that edits the record or sends (the
+        # save, the marks around a send, the clear), so the lock is never released while an order is going out
         # (resolve could otherwise settle it concurrently). Reentrant: a send
         # callback may close its own relay.
         self._step = threading.RLock()
+        self._close_timeout = close_timeout
 
-    def close(self):
+    def close(self, timeout=None):
         """Release the pending file, as the adapter stopping does; the closed relay edits and sends nothing more.
 
-        Safe from any thread: it waits for an order's hand-over in flight to
-        finish and be marked before it releases the lock.
+        Safe from any thread: it waits for the step in flight (an order's
+        hand-over and its marks, or one edit of the record) to finish before
+        it releases the lock, so it waits on the sender for as long as the
+        sender runs. It waits at most timeout seconds (the relay's
+        close_timeout when None) and then raises RelayCloseTimeout, leaving
+        the relay open and holding the pending file, so a supervisor can
+        decide what to do.
         """
-        with self._step:
+        wait = self._close_timeout if timeout is None else timeout
+        if not self._step.acquire(timeout=wait):
+            raise RelayCloseTimeout("close waited {} s for the step in flight (the sender, or an edit of {}) and "
+                                    "gave up; the relay is still open and holds the pending file".format(
+                                        wait, self._pending.path))
+        try:
             if self._held is not None:
                 os.close(self._held)
                 self._held = None
+        finally:
+            self._step.release()
 
     def exchange(self, envelope):
         """Send one input and act on its reply, after settling any input still awaiting one."""
@@ -313,8 +333,9 @@ class Relay:
                 self._pending.path))
 
     def _settle(self, envelope):
-        self._require_held()
-        self._pending.save(envelope)
+        with self._step:
+            self._require_held()
+            self._pending.save(envelope)
         reply = self._ask(envelope)
         marks = self._pending.handovers()
         broker = None
@@ -333,8 +354,9 @@ class Relay:
             if mark is not None:
                 allowed_on, today = resend_date(mark), self._today()
                 if allowed_on != today:
-                    self._require_held()
-                    self._pending.mark(cid, HANDING_OVER)
+                    with self._step:
+                        self._require_held()
+                        self._pending.mark(cid, HANDING_OVER)
                     raise ResendExpired(cid, allowed_on, today)
             # Built before the mark: a request that cannot be built never
             # reaches the sender, so it leaves no mark to stop a restart.
@@ -346,8 +368,9 @@ class Relay:
                 self._require_held()
                 self._pending.mark(cid, SENT)
             self._sent.add(cid)
-        self._require_held()
-        self._pending.clear()
+        with self._step:
+            self._require_held()
+            self._pending.clear()
         return reply
 
     def _ask(self, envelope):
