@@ -40,6 +40,8 @@ func parseAndRun(ctx context.Context, args []string, out io.Writer) error {
 	socketPath := flags.String("socket", "", "Unix-domain socket path to listen on (ADR 0014)")
 	configPath := flags.String("config", "", "path to the JSON strategy configuration this run decides under")
 	outPath := flags.String("out", "", "path to write the run's journal to when this process stops")
+	logPath := flags.String("log", "", "path to stream this process's durable log to, each input flushed before its decisions are returned (ADR 0027); must not exist")
+	resumePath := flags.String("resume", "", "path of a previous process's durable log to rebuild state from before listening; requires -log")
 	asOf := flags.String("as-of", "", "required nonzero run start as an RFC 3339 time; warm-up bars may precede it (ADR 0012)")
 	maxFrame := flags.Int("max-frame", transport.DefaultMaxFrameBytes, "maximum frame size in bytes")
 	decisionTimeout := flags.Duration("decision-timeout", 5*time.Second, "per-decision timeout; 0 disables")
@@ -50,6 +52,8 @@ func parseAndRun(ctx context.Context, args []string, out io.Writer) error {
 		socketPath:      *socketPath,
 		configPath:      *configPath,
 		outPath:         *outPath,
+		logPath:         *logPath,
+		resumePath:      *resumePath,
 		asOf:            *asOf,
 		build:           buildinfo.Version,
 		maxFrameBytes:   *maxFrame,

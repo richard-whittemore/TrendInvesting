@@ -875,6 +875,22 @@
       "reason": "Propagates account.renameInstrument's own \"already holds shares\" refusal (internal/fills/account.go, its own entry in this list), which is unreachable for the identical reason: this package's account holds a position only under an instrument id the same reducer run opened a Campaign in, and the reducer's own applySymbolChange refuses a rename into an instrument id it already tracks before ever emitting the decision this function observes."
     },
     {
+      "file": "internal/journal/durable_log.go",
+      "function": "CreateLog",
+      "statement": "return nil, err",
+      "occurrence": 2,
+      "category": "unreachable-by-construction",
+      "reason": "encodeLine of a LogHeader that validate has just accepted: one uint32 and three strings, none of which has a failing JSON encoding."
+    },
+    {
+      "file": "internal/journal/durable_log.go",
+      "function": "(*LogWriter).Append",
+      "statement": "return err",
+      "occurrence": 3,
+      "category": "unreachable-by-construction",
+      "reason": "encodeLine of the commit line this function has just built: a uint64 and a string, neither of which has a failing JSON encoding. The record lines before it, which carry timestamps, are the encoding that can fail, and TestAppendReturnsTimestampEncodingErrorsWithoutWriting covers that branch."
+    },
+    {
       "file": "internal/targetweight/handler.go",
       "function": "New",
       "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
