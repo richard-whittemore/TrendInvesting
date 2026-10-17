@@ -351,9 +351,12 @@ Bot reviews are metered, so:
 - Review scope: both bots review the capital-safety paths (`internal/risklimit`,
   `internal/orderplan`, `internal/targetweight`, `internal/journal`,
   `internal/event`, `internal/replay`, `cmd/engine`, `adapter/ibkr`,
-  `adapter/marketdata/adjust.py`, `adapter/marketdata/history.py`, `deploy/`).
-  Everywhere else CodeRabbit alone reviews. Greptile is scoped through
-  `ignorePatterns` in `.greptile/config.json` (a deny list, so a new path
+  `adapter/marketdata/adjust.py`, `adapter/marketdata/history.py`, `transport/`,
+  `deploy/`). `transport/` is the live adapter socket path. The review tooling's
+  own configuration (`.greptile/`, `.coderabbit.yaml`) is reviewed too: it is
+  safety-relevant, so a PR that loosens the Greptile scope must still get a
+  Greptile review. Everywhere else CodeRabbit alone reviews. Greptile is scoped
+  through `ignorePatterns` in `.greptile/config.json` (a deny list, so a new path
   outside the safety list must be added there); CodeRabbit is unscoped.
 - Greptile bills per completed review (1, 3 or 10 credits by review tier; 50
   credits per active developer per billing period, then $1 per credit).
