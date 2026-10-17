@@ -29,6 +29,10 @@ import (
 //     market.session.closed naming exactly those instruments;
 //   - market.universe.snapshot, from the configured source, for the session
 //     it ranks;
+//   - market.close.history, after a decision session's universe snapshot and
+//     before its close: one per member the run ranks from that snapshot, in
+//     place of those members' daily bars (the compact universe input,
+//     applyHistory);
 //   - account.snapshot version 4 and market.mark.recorded per instrument;
 //   - execution.order.lifecycle version 2 and execution.fill version 5 for the
 //     orders this run released.
@@ -98,6 +102,10 @@ type momentumRun struct {
 	orders    map[string]*trackedOrder
 	fills     map[string]event.TargetWeightFillPayload // every accepted fill, by fill id
 	rebalance *rebalance
+
+	// histories holds the ranked members' close histories until their
+	// session closes.
+	histories map[string]event.CloseHistoryPayload
 }
 
 // trackedOrder is one released order and what the venue has reported of it.
@@ -169,6 +177,8 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 		marks:    map[string]event.MarkRecordedPayload{},
 		orders:   map[string]*trackedOrder{},
 		fills:    map[string]event.TargetWeightFillPayload{},
+
+		histories: map[string]event.CloseHistoryPayload{},
 	}
 	return h, nil
 }
@@ -186,6 +196,8 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 		return nil, r.applyBar(in)
 	case event.UniverseSnapshotEventType:
 		return nil, r.applyUniverse(in)
+	case event.CloseHistoryEventType:
+		return nil, r.applyHistory(in)
 	case event.AccountSnapshotEventType:
 		return nil, r.applySnapshot(in)
 	case event.MarkRecordedEventType:
@@ -336,6 +348,9 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 		r.raw[id] = bar.Raw.Close
 	}
 	r.bars = map[string]event.CompletedBarAdjustedPayload{}
+	if err := r.mergeHistories(date, at); err != nil {
+		return nil, err
+	}
 	b := &emissions{h: r.h, in: in, at: p.PeriodEnd}
 	if err := r.missed(b, at); err != nil {
 		return nil, err

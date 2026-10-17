@@ -166,6 +166,14 @@ type momentumOptions struct {
 	withdrawFill map[string]float64 // instrument -> settled cash withdrawn as its sell fills, in a snapshot as of the fill
 	// riskOffJanuary makes SPY fall over January's last six sessions too.
 	riskOffJanuary bool
+	// compact feeds the compact universe stream: bars only for SPY, IEF,
+	// SHY and the names held, and at each universe snapshot one
+	// market.close.history per ranked member (closeHistories).
+	compact bool
+	// retract feeds a market.session.retracted for each session named,
+	// just after the calendar; unlisted leaves sessions off the calendar fed.
+	retract  []string
+	unlisted map[string]bool
 }
 
 type momentumResult struct {
@@ -215,7 +223,11 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 	start := closeOf(cal[0]).Add(-12 * time.Hour)
 	apply(s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", start, cfg))
 	apply(s.envelope(t, event.SessionCalendarEventType, event.SessionCalendarSchemaVersion, "calendar", start,
-		event.SessionCalendarPayload{Source: "fixture", Sessions: cal}))
+		event.SessionCalendarPayload{Source: "fixture", Sessions: slices.DeleteFunc(slices.Clone(cal), func(s string) bool { return opts.unlisted[s] })}))
+	for _, session := range opts.retract {
+		apply(s.envelope(t, event.SessionRetractedEventType, event.SessionRetractedSchemaVersion, "retracted:"+session, start,
+			event.SessionRetractedPayload{Source: "fixture", Session: session, Reason: "the exchange closed"}))
+	}
 	for _, rec := range opts.recorded {
 		apply(s.envelope(t, rec.Type, rec.SchemaVersion, rec.ID, start, rec.Payload))
 	}
@@ -290,9 +302,12 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			}
 		}
 
-		var ids []string
+		var ids, marked []string
 		for _, n := range names() {
-			if _, ok := prices[n.id]; !ok || opts.noBar[session] == n.id {
+			if _, ok := prices[n.id]; ok && opts.compact {
+				marked = append(marked, n.id) // the venue marks what it trades, whatever bars the stream carries
+			}
+			if _, ok := prices[n.id]; !ok || opts.noBar[session] == n.id || opts.compact && !compactBar(n.id, acct.held) {
 				continue
 			}
 			ids = append(ids, n.id)
@@ -313,6 +328,11 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 				return 1
 			})
 			apply(s.envelope(t, event.UniverseSnapshotEventType, event.UniverseSnapshotSchemaVersion, "universe:"+session, end, snap))
+			if opts.compact {
+				for _, h := range closeHistories(t, cfg, cal, i, snap, opts) {
+					apply(s.envelope(t, event.CloseHistoryEventType, event.CloseHistorySchemaVersion, "history:"+h.InstrumentID+":"+session, end, h))
+				}
+			}
 		}
 		if !opts.noSnapshot[session] {
 			asOf := end
@@ -321,7 +341,10 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			}
 			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot:"+session, end, acct.snapshot(asOf, prices)))
 		}
-		for _, id := range ids {
+		if !opts.compact {
+			marked = ids
+		}
+		for _, id := range marked {
 			if opts.noMark[session] == id {
 				continue
 			}
