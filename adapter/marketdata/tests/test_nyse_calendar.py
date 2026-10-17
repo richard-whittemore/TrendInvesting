@@ -46,3 +46,15 @@ class CalendarTest(unittest.TestCase):
     def test_a_closed_day_has_no_close(self):
         with self.assertRaises(ValueError):
             calendar.session_close(D(2026, 4, 3))
+
+    def test_published_early_closes_close_at_one_new_york_time(self):
+        # NYSE's published early closes; the 2026-2028 ones were checked
+        # against nyse.com/markets/hours-calendars on 2026-10-16.
+        for e in ("2022-11-25", "2023-07-03", "2023-11-24", "2024-11-29", "2024-12-24",
+                  "2027-11-26", "2028-07-03", "2028-11-24"):
+            self.assertEqual(calendar.session_close(D.fromisoformat(e)).hour, 13, e)
+
+    def test_sessions_lists_trading_days_and_the_ones_after(self):
+        self.assertEqual(calendar.sessions(D(2026, 4, 1), D(2026, 4, 7)),
+                         [D(2026, 4, 1), D(2026, 4, 2), D(2026, 4, 6), D(2026, 4, 7)])
+        self.assertEqual(calendar.sessions_after(D(2026, 4, 2), 2), [D(2026, 4, 6), D(2026, 4, 7)])

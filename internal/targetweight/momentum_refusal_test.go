@@ -27,7 +27,7 @@ func calendarInput(t *testing.T, s *stream, id string, sessions ...string) event
 		event.SessionCalendarPayload{Source: "fixture", Sessions: sessions})
 }
 
-func spyBar(session string, price float64) event.CompletedBarPayload {
+func spyBar(session string, price float64) event.CompletedBarAdjustedPayload {
 	p := bar(price, closeOf(session))
 	return p
 }
@@ -52,14 +52,18 @@ func TestMomentumCalendarRules(t *testing.T) {
 	}
 	mustRefuse(t, h, closeSession("2025-01-01", "SPY"), "not on the calendar")
 	mustRefuse(t, h, closeSession("2025-01-02", "SPY"), "bars arrived for []")
-	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b1", closeOf("2025-01-02"), spyBar("2025-01-02", 500)))
-	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b1", closeOf("2025-01-02"), spyBar("2025-01-02", 500)), "second bar")
+	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b1", closeOf("2025-01-02"), spyBar("2025-01-02", 500).CompletedBarPayload), "schema version 1 is not the version 2")
+	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b1", closeOf("2025-01-02"), spyBar("2025-01-02", 500)))
+	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b1", closeOf("2025-01-02"), spyBar("2025-01-02", 500)), "second bar")
 	mustApply(t, h, closeSession("2025-01-02", "SPY"))
 	mustRefuse(t, h, closeSession("2025-01-02", "SPY"), "does not follow")
-	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b0", closeOf("2025-01-02"), spyBar("2025-01-02", 500)), "does not follow")
-	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "bx", closeOf("2025-01-03"), event.CompletedBarPayload{}), "invalid")
+	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b0", closeOf("2025-01-02"), spyBar("2025-01-02", 500)), "does not follow")
+	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "bx", closeOf("2025-01-03"), event.CompletedBarAdjustedPayload{}), "invalid")
 	// A bar for a later session cannot close an earlier one.
-	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b3", closeOf("2025-01-06"), spyBar("2025-01-06", 500)))
+	rebased := spyBar("2025-01-06", 500)
+	rebased.AdjustedBase = "2025-01-03"
+	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b3", closeOf("2025-01-06"), rebased), "based at 2025-01-03")
+	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b3", closeOf("2025-01-06"), spyBar("2025-01-06", 500)))
 	mustRefuse(t, h, closeSession("2025-01-03", "SPY"), "is not the session")
 	mustRefuse(t, h, closeSession("2025-01-07", "SPY"), "calendar ends")
 	mustRefuse(t, h, s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "sx", closeOf("2025-01-06"), event.SessionClosedPayload{}), "invalid")
@@ -233,6 +237,6 @@ func TestMomentumRecordedStateComesFirst(t *testing.T) {
 	h, s := momentumHandler(t)
 	at := closeOf("2025-01-02")
 	mustApply(t, h, s.envelope(t, state.Type, state.SchemaVersion, state.ID, at, state.Payload))
-	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", at, spyBar("2025-01-02", 500)))
+	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b", at, spyBar("2025-01-02", 500)))
 	mustRefuse(t, h, s.envelope(t, state.Type, state.SchemaVersion, state.ID, at, state.Payload), "after the run began")
 }

@@ -92,3 +92,23 @@ def session_close(day):
         raise ValueError("{} is not an NYSE trading day".format(day))
     hour = 13 if day in early_closes(day.year) else 16
     return dt.datetime(day.year, day.month, day.day, hour, tzinfo=NEW_YORK)
+
+
+def sessions(first, last):
+    """The trading days first..last, oldest first."""
+    out, day = [], first
+    while day <= last:
+        if is_trading_day(day):
+            out.append(day)
+        day += dt.timedelta(days=1)
+    return out
+
+
+def sessions_after(day, n):
+    """The ``n`` trading days after ``day``."""
+    out = []
+    while len(out) < n:
+        day += dt.timedelta(days=1)
+        if is_trading_day(day):
+            out.append(day)
+    return out

@@ -28,10 +28,14 @@ import (
 //     (ADR 0015), so a journal written under 1.0.0 does not replay.
 //   - 1.2.0 adds the glide path to momentum decisions (configuration
 //     schema version 3, targets.decided schema version 3; ADR 0026).
-//   - 1.3.0 adds D7-L's substitution of an unaffordable pick and records
-//     skipped trades (configuration schema version 4, targets.decided
-//     schema version 4).
-const RulesVersion = "1.3.0"
+//   - 1.3.0 reads market.bar.completed version 2 and refuses version 1, and
+//     computes its indicators from the split- and dividend-adjusted close
+//     (ADR 0026), so a journal written under 1.2.0 does not replay.
+//   - 1.4.0 adds D7-L's minimum-lot substitution of an unaffordable pick and
+//     records skipped trades (configuration schema version 4,
+//     targets.decided schema version 4), so a journal written under 1.3.0
+//     does not replay.
+const RulesVersion = "1.4.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -66,8 +70,8 @@ type Options struct {
 //     strategy.engine.state records, in journal order. A restart while
 //     Degraded or Halted resumes in that state and scope (ADR 0019, amended
 //     2026-09-24, "The state survives a restart"; ADR 0026, point 5);
-//   - per session: the Boost instrument's market.bar.completed, account.snapshot
-//     version 3, market.mark.recorded, then market.session.closed, which decides.
+//   - per session: the Boost instrument's market.bar.completed version 2
+//     (every bar on one adjusted base), account.snapshot version 3, market.mark.recorded, then market.session.closed, which decides.
 //
 // # Fail-closed rules
 //
@@ -99,7 +103,8 @@ type Handler struct {
 	inForceSet bool
 	gapAt      time.Time
 	lastPeriod time.Time // last session closed
-	bar        *event.CompletedBarPayload
+	bar        *event.CompletedBarAdjustedPayload
+	base       string // the adjusted view's base, fixed by the first bar
 	snapshot   *event.AccountPositionsSnapshotPayload
 	mark       *event.MarkRecordedPayload
 	gate       *risklimit.Gate
@@ -297,11 +302,13 @@ func (h *Handler) applyRecordedState(in event.Envelope) error {
 }
 
 func (h *Handler) applyBar(in event.Envelope) error {
-	p, err := decodeInput[event.CompletedBarPayload](in, event.CompletedBarSchemaVersion)
+	p, err := decodeInput[event.CompletedBarAdjustedPayload](in, event.CompletedBarAdjustedVersion)
 	if err != nil {
 		return err
 	}
 	switch {
+	case h.base != "" && p.AdjustedBase != h.base:
+		return fmt.Errorf("targetweight: bar %s is based at %s; this run's bars are based at %s, and levels on two bases cannot be compared", in.ID, p.AdjustedBase, h.base)
 	case p.InstrumentID != h.cfg.Boost.InstrumentID:
 		return fmt.Errorf("targetweight: bar for %s; this account decides %s only", p.InstrumentID, h.cfg.Boost.InstrumentID)
 	case h.bar != nil:
@@ -312,6 +319,7 @@ func (h *Handler) applyBar(in event.Envelope) error {
 		return fmt.Errorf("targetweight: bar %s precedes the warm-up start %s", p.PeriodEnd, h.cfg.Boost.WarmUpStart)
 	}
 	h.started = true
+	h.base = p.AdjustedBase
 	h.bar = &p
 	return nil
 }
@@ -384,7 +392,9 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		return b.result()
 	}
 
-	readings := h.indicators.Add(bar.SplitAdjusted.Close)
+	// RSI(2) and the means read the split- and dividend-adjusted close, as
+	// the backtest's adjusted series does (ADR 0026, point 1).
+	readings := h.indicators.Add(bar.Adjusted.Close)
 	if quiet {
 		return nil, nil
 	}

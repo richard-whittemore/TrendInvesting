@@ -63,7 +63,7 @@ func TestNewRefusesBadArguments(t *testing.T) {
 func TestConfigurationInputRules(t *testing.T) {
 	h, s := newHandler(t)
 	at := sessionEnd(0)
-	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "bar", at, bar(100, at)), "before the configuration")
+	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "bar", at, bar(100, at)), "before the configuration")
 	other := testConfiguration()
 	other.Limits.PriceBand = 0.04
 	mustRefuse(t, h, s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "c", at, other), "not the configuration")
@@ -85,11 +85,14 @@ func TestInputOrderRules(t *testing.T) {
 	h, s := configured(t)
 	qqq := bar(100, at)
 	qqq.InstrumentID = "QQQ"
-	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", at, qqq), "decides SPY only")
+	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b", at, qqq), "decides SPY only")
 	early := bar(100, time.Date(2024, 12, 31, 21, 0, 0, 0, time.UTC))
-	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", at, early), "warm-up")
-	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", at, bar(100, at)))
-	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b2", next, bar(100, next)), "second bar")
+	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b", at, early), "warm-up")
+	// Version 1 has no adjusted view: Boost's indicators would read its
+	// split-adjusted close, so it is refused, never read in its place.
+	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", at, bar(100, at).CompletedBarPayload), "schema version 1 is not the version 2")
+	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b", at, bar(100, at)))
+	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b2", next, bar(100, next)), "second bar")
 	mustRefuse(t, h, s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s", next, event.SessionClosedPayload{PeriodEnd: next, InstrumentIDs: []string{"SPY"}}), "not the session")
 	mustRefuse(t, h, s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s", at, event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: []string{"QQQ"}}), "disagree")
 	mustRefuse(t, h, s.envelope(t, event.SessionClosedEventType, 7, "s", at, event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: []string{"SPY"}}), "schema")
@@ -115,8 +118,11 @@ func TestInputOrderRules(t *testing.T) {
 		t.Fatalf("first session: decision, plan and release, got %d", len(out))
 	}
 	mustRefuse(t, h, s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s", at, event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: []string{"SPY"}}), "does not follow")
-	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", at, bar(100, at)), "does not follow")
-	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", next, event.CompletedBarPayload{}), "invalid")
+	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b", at, bar(100, at)), "does not follow")
+	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b", next, event.CompletedBarAdjustedPayload{}), "invalid")
+	rebased := bar(100, next)
+	rebased.AdjustedBase = "2025-01-02"
+	mustRefuse(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b", next, rebased), "based at 2025-01-02")
 	mustRefuse(t, h, s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s", next, event.SessionClosedPayload{}), "invalid")
 }
 
@@ -161,7 +167,7 @@ func TestDecisionsBeforeTheFirstSessionToDecideAreQuiet(t *testing.T) {
 		if i == 1 {
 			ids = []string{"QQQ"} // a gap during the warm-up still poisons the indicators
 		} else {
-			mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", at, bar(100, at)))
+			mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b", at, bar(100, at)))
 		}
 		out := mustApply(t, h, s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s", at, event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: ids}))
 		if i < 3 && out != nil {

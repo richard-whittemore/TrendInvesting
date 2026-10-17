@@ -59,14 +59,16 @@ func read(e event.Envelope, versions []uint32, into interface{ Validate() error 
 var (
 	configurationVersions = []uint32{event.TargetWeightConfigurationSchemaVersion}
 	sessionVersions       = []uint32{event.SessionClosedSchemaVersion}
-	barVersions           = []uint32{event.CompletedBarSchemaVersion}
-	snapshotVersions      = []uint32{event.AccountSnapshotPositionsVersion}
-	fillVersions          = []uint32{event.FillSchemaVersion}
-	engineStateVersions   = []uint32{event.EngineStateSchemaVersion, event.EngineStateScopedVersion}
-	decidedVersions       = []uint32{event.TargetsDecidedSchemaVersion}
-	plannedVersions       = []uint32{event.OrderPlannedSchemaVersion}
-	releasedVersions      = []uint32{event.OrderReleasedSchemaVersion}
-	refusedVersions       = []uint32{event.OrderRefusedSchemaVersion}
+	// A bar is read at version 1, which the Turtle engine writes, and at
+	// version 2, which the target-weight engines write (ADR 0026).
+	barVersions         = []uint32{event.CompletedBarSchemaVersion, event.CompletedBarAdjustedVersion}
+	snapshotVersions    = []uint32{event.AccountSnapshotPositionsVersion}
+	fillVersions        = []uint32{event.FillSchemaVersion}
+	engineStateVersions = []uint32{event.EngineStateSchemaVersion, event.EngineStateScopedVersion}
+	decidedVersions     = []uint32{event.TargetsDecidedSchemaVersion}
+	plannedVersions     = []uint32{event.OrderPlannedSchemaVersion}
+	releasedVersions    = []uint32{event.OrderReleasedSchemaVersion}
+	refusedVersions     = []uint32{event.OrderRefusedSchemaVersion}
 )
 
 func dateOf(t time.Time) string { return t.UTC().Format(time.DateOnly) }
