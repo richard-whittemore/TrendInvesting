@@ -294,3 +294,52 @@ func TestMomentumHistoryRequestNamesTheMembersTheRunRanks(t *testing.T) {
 		t.Error("a Boost configuration was accepted")
 	}
 }
+
+// TestADecisionSessionWithoutItsHistoriesIsWithheld: once a run reads the
+// compact stream, a decision session whose ranked members sent no close
+// history is withheld as histories-missing, never decided from the bars of
+// the names held alone.
+func TestADecisionSessionWithoutItsHistoriesIsWithheld(t *testing.T) {
+	r := simulateMomentum(t, momentumOptions{compact: true, noHistories: map[string]bool{"2025-02-28": true}})
+	got := targets(t, r.decisions)
+	if len(got) != 2 || got[0].Outcome != event.TargetsOutcomeDecided {
+		t.Fatalf("%d decisions, the first %s; want January decided and February's", len(got), got[0].Outcome)
+	}
+	feb := got[1]
+	if feb.Outcome != event.TargetsOutcomeWithheld || feb.WithheldReason != event.WithheldHistoriesMissing || feb.Momentum.CloseSession != "2025-02-28" {
+		t.Fatalf("February is %s (%s) at %s: %s", feb.Outcome, feb.WithheldReason, feb.Momentum.CloseSession, feb.Detail)
+	}
+	if !strings.Contains(feb.Detail, "2025-02-28") || len(feb.Momentum.Names) != 0 {
+		t.Errorf("detail %q, names %v", feb.Detail, feb.Momentum.Names)
+	}
+}
+
+// TestCloseHistoryArrivalRules: a history is refused as it arrives when its
+// session has already closed, and a later universe snapshot is refused while
+// the held one's histories wait for their session to close.
+func TestCloseHistoryArrivalRules(t *testing.T) {
+	const base = "2024-12-31"
+	t.Run("a history for a session already closed", func(t *testing.T) {
+		f := newHistoryFixture(t)
+		mustApply(t, f.h, f.universe("2025-01-31"))
+		mustApply(t, f.h, f.history("AAA", "2025-01-31", base, close31(20)))
+		mustApply(t, f.h, f.history("BBB", "2025-01-31", base, close31(10)))
+		mustApply(t, f.h, f.bar("SPY", "2025-01-31", 500))
+		mustApply(t, f.h, f.close("2025-01-31", "SPY"))
+		mustRefuse(t, f.h, f.history("AAA", "2025-01-31", base, close31(20)), "already closed")
+	})
+	t.Run("a snapshot while histories wait", func(t *testing.T) {
+		f := newHistoryFixture(t)
+		mustApply(t, f.h, f.universe("2025-01-30"))
+		mustApply(t, f.h, f.history("AAA", "2025-01-30", base))
+		mustRefuse(t, f.h, f.universe("2025-01-31"), "still wait")
+	})
+	t.Run("a ranked member's bar and its universe row agree on the raw close", func(t *testing.T) {
+		f := newHistoryFixture(t)
+		mustApply(t, f.h, f.bar("AAA", "2025-01-31", 21)) // the universe row says 20
+		mustApply(t, f.h, f.universe("2025-01-31"))
+		mustApply(t, f.h, f.history("AAA", "2025-01-31", base, close31(21)))
+		mustApply(t, f.h, f.history("BBB", "2025-01-31", base, close31(10)))
+		mustRefuse(t, f.h, f.close("2025-01-31", "AAA"), "universe row close 20 for AAA disagrees with its bar's raw close 21")
+	})
+}

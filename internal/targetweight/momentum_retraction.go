@@ -15,10 +15,20 @@ import (
 // for a year; a retracted session is no session, so windows fill from the
 // sessions before it and no decision time falls on it (point 1).
 //
-// Only a session still to come can be retracted: one on or before the last
-// session closed has already been decided on or journalled as missed. A
-// retraction of a session already retracted is a redelivery and changes
-// nothing; a date the calendar does not list is refused.
+// Only a session after the last one closed can be retracted, and only while
+// nothing of it has arrived: its bars, its universe snapshot or its close
+// histories say it traded. A retraction of a session already retracted is a
+// redelivery and changes nothing; a date the calendar does not list is
+// refused.
+//
+// When the session retracted followed the last one closed and was its
+// month's last, the session closed becomes the last before the rebalance,
+// and its decision is due. A run reading bars for every listed stock holds
+// every close it needs and decides at once. A run reading the compact
+// universe input has no histories for the members ranked from that
+// session's snapshot, since it was no decision session when it closed: its
+// decision waits for them (applyPendingHistory), and is withheld as
+// histories-missing if the next session closes first.
 func (r *momentumRun) applyRetraction(in event.Envelope) ([]event.Envelope, error) {
 	p, err := decodeInput[event.SessionRetractedPayload](in, event.SessionRetractedSchemaVersion)
 	if err != nil {
@@ -32,7 +42,10 @@ func (r *momentumRun) applyRetraction(in event.Envelope) ([]event.Envelope, erro
 	case !listed:
 		return nil, fmt.Errorf("targetweight: retraction %s names %s, which is not on the calendar", in.ID, p.Session)
 	case p.Session <= r.last:
-		return nil, fmt.Errorf("targetweight: retraction %s names %s, on or before the last session closed, %s: it has already closed or been journalled missed", in.ID, p.Session, r.last)
+		return nil, fmt.Errorf("targetweight: retraction %s names %s, on or before the last session closed, %s, so it can no longer be retracted", in.ID, p.Session, r.last)
+	case r.universe != nil && r.universe.Session == p.Session:
+		// The histories held follow the snapshot held, so this covers them.
+		return nil, fmt.Errorf("targetweight: retraction %s names %s, but its universe snapshot has arrived, so it traded", in.ID, p.Session)
 	}
 	for _, bar := range r.bars {
 		if bar.PeriodEnd.UTC().Format(time.DateOnly) == p.Session {
@@ -54,10 +67,22 @@ func (r *momentumRun) applyRetraction(in event.Envelope) ([]event.Envelope, erro
 	}
 	// The last session closed is now followed by the session after the one
 	// retracted: if that is in another month, it was the last before the
-	// rebalance, and its decision is due now.
+	// rebalance, and its decision is due.
 	decide, _ := momentum.IsDecisionSession(r.last, r.calendar[prev+1])
 	if !decide || r.lastEnd.Before(r.h.decideFrom) {
 		return nil, nil
 	}
-	return r.decide(&emissions{h: r.h, in: in, at: r.lastEnd}, r.lastEnd, prev)
+	var u *event.UniverseSnapshotPayload
+	if r.universe != nil && r.universe.Session == r.last {
+		u = r.universe
+	}
+	if u != nil && r.compact {
+		ranked, closes := rankedMembers(r.rule, *u)
+		if len(ranked) > 0 {
+			slices.Sort(ranked)
+			r.pending = &pendingDecision{session: r.last, end: r.lastEnd, universe: *u, ranked: ranked, closes: closes, histories: map[string]event.CloseHistoryPayload{}}
+			return nil, nil
+		}
+	}
+	return r.decide(&emissions{h: r.h, in: in, at: r.lastEnd}, r.lastEnd, prev, u)
 }

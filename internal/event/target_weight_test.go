@@ -294,7 +294,7 @@ func TestTargetsDecidedValidate(t *testing.T) {
 	expectInvalid(t, "negative close", w, func(p *P) { p.Boost.Close = -1 }, "close")
 	for _, reason := range []string{
 		event.WithheldStaleAccountSnapshot, event.WithheldMissingUniverse,
-		event.WithheldInsufficientTrendHistory, event.WithheldNoEligibleNames,
+		event.WithheldInsufficientTrendHistory, event.WithheldNoEligibleNames, event.WithheldHistoriesMissing,
 	} {
 		other := w
 		other.WithheldReason = reason

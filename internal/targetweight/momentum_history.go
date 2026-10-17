@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/momentum"
@@ -15,27 +16,85 @@ import (
 // momentum input shape) is one universe snapshot per session and, at a
 // decision session, one history per member ranked from it, in place of a bar
 // for every listed stock every session. A history must follow its session's
-// universe snapshot, and every close it carries must be on a calendar
-// session: a close on a date the calendar does not list as a session is a
-// malformed input, never a skipped one.
-func (r *momentumRun) applyHistory(in event.Envelope) error {
+// universe snapshot, its session must still be to close, and every close it
+// carries must be on a calendar session: a close on a date the calendar does
+// not list as a session is a malformed input, never a skipped one. The one
+// history for a session already closed that is read is one for the decision
+// a retraction left awaiting its histories (applyRetraction), which decides
+// once the last of them arrives.
+func (r *momentumRun) applyHistory(in event.Envelope) ([]event.Envelope, error) {
 	p, err := decodeInput[event.CloseHistoryPayload](in, event.CloseHistorySchemaVersion)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if r.pending != nil && p.Session == r.pending.session {
+		return r.applyPendingHistory(in, p)
 	}
 	switch _, seen := r.histories[p.InstrumentID]; {
+	case p.Session <= r.last:
+		return nil, fmt.Errorf("targetweight: history %s ends at %s, on or before the last session closed, %s, and no decision there awaits its histories: that session has already closed", in.ID, p.Session, r.last)
 	case r.universe == nil || r.universe.Session != p.Session:
-		return fmt.Errorf("targetweight: history %s ends at %s, which is not the session of the universe snapshot held", in.ID, p.Session)
+		return nil, fmt.Errorf("targetweight: history %s ends at %s, which is not the session of the universe snapshot held", in.ID, p.Session)
 	case seen:
-		return fmt.Errorf("targetweight: a second close history for %s before its session closed", p.InstrumentID)
+		return nil, fmt.Errorf("targetweight: a second close history for %s before its session closed", p.InstrumentID)
 	}
+	if err := r.onCalendar(in, p); err != nil {
+		return nil, err
+	}
+	r.histories[p.InstrumentID] = p
+	r.compact = true
+	return nil, nil
+}
+
+// onCalendar refuses a history with a close on a date the calendar does not
+// list as a session.
+func (r *momentumRun) onCalendar(in event.Envelope, p event.CloseHistoryPayload) error {
 	for _, c := range p.Closes {
 		if _, ok := slices.BinarySearch(r.calendar, c.Session); !ok {
 			return fmt.Errorf("targetweight: history %s has a close on %s, which is not on the calendar", in.ID, c.Session)
 		}
 	}
-	r.histories[p.InstrumentID] = p
 	return nil
+}
+
+// pendingDecision is a decision a retraction made due at a session already
+// closed, in a run reading the compact universe input: the members ranked
+// from that session's universe snapshot had no histories, since it was no
+// decision session when it closed. The decision waits for them.
+type pendingDecision struct {
+	session   string
+	end       time.Time
+	universe  event.UniverseSnapshotPayload
+	ranked    []string // sorted
+	closes    map[string]float64
+	histories map[string]event.CloseHistoryPayload
+}
+
+// applyPendingHistory holds one history of the decision awaiting them and,
+// with the last of the members ranked, merges them and decides, as that
+// session's close would have had its calendar never listed the session
+// retracted.
+func (r *momentumRun) applyPendingHistory(in event.Envelope, p event.CloseHistoryPayload) ([]event.Envelope, error) {
+	pd := r.pending
+	if _, seen := pd.histories[p.InstrumentID]; seen {
+		return nil, fmt.Errorf("targetweight: a second close history for %s awaiting the decision at %s", p.InstrumentID, pd.session)
+	}
+	if !slices.Contains(pd.ranked, p.InstrumentID) {
+		return nil, fmt.Errorf("targetweight: history %s names %s, but the universe of %s ranks %v", in.ID, p.InstrumentID, pd.session, pd.ranked)
+	}
+	if err := r.onCalendar(in, p); err != nil {
+		return nil, err
+	}
+	pd.histories[p.InstrumentID] = p
+	if len(pd.histories) < len(pd.ranked) {
+		return nil, nil
+	}
+	r.pending = nil
+	if err := r.merge(pd.ranked, pd.closes, pd.histories); err != nil {
+		return nil, err
+	}
+	at, _ := slices.BinarySearch(r.calendar, pd.session) // the last session closed is on the calendar
+	return r.decide(&emissions{h: r.h, in: in, at: pd.end}, pd.end, at, &pd.universe)
 }
 
 // mergeHistories adds the close histories held to the run's adjusted closes
@@ -44,30 +103,53 @@ func (r *momentumRun) applyHistory(in event.Envelope) error {
 // Histories arrive only for a decision session, and they must name exactly
 // the members this run ranks from that session's universe snapshot
 // (RankUniverse, ADR 0026, point 1: ranking is a Go rule, so a producer's
-// list is checked against it, never trusted). A close that an earlier bar or
-// history already gave for the same session must agree with it, on the same
-// adjusted base. A member's raw reference price for the session is its
-// universe row's close, the same unadjusted trade close its bar would carry,
-// unless a bar already gave one.
-func (r *momentumRun) mergeHistories(date string, at int) error {
-	if len(r.histories) == 0 {
-		return nil
-	}
+// list is checked against it, never trusted). The check runs at every
+// decision session with its snapshot: once the run has read a history, it
+// reads the compact input, and a decision session with none for the members
+// ranked returns why (missing), for the decision to be withheld as
+// histories-missing rather than decided from the bars of the names held
+// alone (ADR 0026, point 5, "fail closed"). A run that never reads a history
+// reads a bar for every listed stock instead.
+func (r *momentumRun) mergeHistories(date string, at int) (missing string, err error) {
 	histories := r.histories
 	r.histories = map[string]event.CloseHistoryPayload{}
 	decide, _ := momentum.IsDecisionSession(date, r.calendar[at+1]) // both on the validated calendar
-	if !decide || r.universe.Session != date {
-		return fmt.Errorf("targetweight: close histories arrived for the session %s, which is not a decision session with its universe snapshot", date)
+	held := r.universe != nil && r.universe.Session == date
+	if len(histories) > 0 && (!decide || !held) {
+		return "", fmt.Errorf("targetweight: close histories arrived for the session %s, which is not a decision session with its universe snapshot", date)
+	}
+	if !decide || !held {
+		return "", nil
 	}
 	ranked, closes := rankedMembers(r.rule, *r.universe)
 	slices.Sort(ranked)
-	if got := slices.Sorted(maps.Keys(histories)); !slices.Equal(got, ranked) {
-		return fmt.Errorf("targetweight: close histories for the session %s name %v, but the universe ranks %v", date, got, ranked)
+	if len(histories) == 0 {
+		if r.compact && len(ranked) > 0 {
+			return fmt.Sprintf("no market.close.history arrived for the %d members ranked from the universe snapshot of %s, so none can be scored", len(ranked), date), nil
+		}
+		return "", nil
 	}
+	if got := slices.Sorted(maps.Keys(histories)); !slices.Equal(got, ranked) {
+		return "", fmt.Errorf("targetweight: close histories for the session %s name %v, but the universe ranks %v", date, got, ranked)
+	}
+	return "", r.merge(ranked, closes, histories)
+}
+
+// merge adds the histories of the members ranked to the run's adjusted
+// closes. A close that an earlier bar or history already gave for the same
+// session must agree with it, on the same adjusted base. A member's raw
+// reference price for the session is its universe row's close (closes), the
+// same unadjusted trade close its bar would carry: a member with a bar too
+// must have the two agree, since the planner and the gate value its orders
+// at that price.
+func (r *momentumRun) merge(ranked []string, closes map[string]float64, histories map[string]event.CloseHistoryPayload) error {
 	for _, id := range ranked {
 		h := histories[id]
 		if base := r.bases[id]; base != "" && base != h.AdjustedBase {
 			return fmt.Errorf("targetweight: the close history for %s is based at %s; its earlier closes are based at %s, and levels on two bases cannot be compared", id, h.AdjustedBase, base)
+		}
+		if raw, ok := r.raw[id]; ok && raw != closes[id] {
+			return fmt.Errorf("targetweight: the universe row close %v for %s disagrees with its bar's raw close %v", closes[id], id, raw)
 		}
 		if r.adjusted[id] == nil {
 			r.adjusted[id] = map[string]float64{}
@@ -79,9 +161,7 @@ func (r *momentumRun) mergeHistories(date string, at int) error {
 			r.adjusted[id][c.Session] = c.Close
 		}
 		r.bases[id] = h.AdjustedBase
-		if _, ok := r.raw[id]; !ok {
-			r.raw[id] = closes[id]
-		}
+		r.raw[id] = closes[id]
 	}
 	return nil
 }

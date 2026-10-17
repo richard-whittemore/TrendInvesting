@@ -58,8 +58,20 @@ this in place:
 inputs per session.
 
 A stock's raw price for orders comes from its universe row, the same
-unadjusted close its bar would carry, unless a bar for it arrived too (a
-stock you hold has both, and they must agree).
+unadjusted close its bar would carry. A stock you hold has a bar too, and
+the bar's raw close and the universe row's close must agree; the engine
+stops the run if they do not.
+
+Once the engine has read one history, it knows the stream is the compact
+one, and from then on it expects histories at every month's last session. If
+a month's last session closes with its universe snapshot but no history for
+the stocks it ranks (a ranker that wrongly said it was not a decision
+session, or named no stocks), the engine does not decide from the few stocks
+it has bars for: it journals that month's decision withheld, with the reason
+`histories-missing`, and alerts you as missing data. A stream that has sent
+no history yet (the very first month of a compact run) cannot be told apart
+from one that sends a bar for every stock, so that first month is not
+checked this way.
 
 ## A session the exchange cancels
 
@@ -72,13 +84,30 @@ keeps deciding. Without it, every window that reached that day would be
 short a session for a year, and every month would be withheld.
 
 If the cancelled day was the last of its month, the day before becomes the
-month's decision session. When the retraction arrives after that day has
-already closed, the engine makes that day's decision at once, from that
-day's closes, so no month passes without a decision (ADR 0026, point 1).
+month's decision session. The retraction can arrive after that day has
+already closed, when it was not yet a decision session:
+
+- with a bar for every stock, the engine already holds every price it needs
+  and makes that day's decision at once;
+- with the compact stream, no history was sent for that day, since it was
+  not the month's last when it closed. The engine waits for them: once a
+  history has arrived for every stock it ranks from that day's snapshot, it
+  makes the decision, exactly as it would have at that day's close had the
+  calendar never listed the cancelled day. If the next session closes first,
+  it journals that decision withheld as `histories-missing` instead, so no
+  month passes without a decision (ADR 0026, point 1). `encode` writes a
+  day's histories only with that day's session, so a stream encoded from the
+  next session on does not carry them: until something sends them, expect
+  the withheld decision, and an alert, in that month. A run fed a stream
+  encoded after the retraction was recorded, from before that day, reads the
+  retraction first and decides the day at its own close.
 
 Tests: `TestARetractedSessionIsNoGap` (a retracted day decides exactly as a
 calendar that never listed it, while the same day left in place withholds
-January), `TestRetractingTheNextSessionDecidesTheLastOneClosed`,
+January), `TestALateRetractionWaitsForTheLastSessionsHistories` (a late
+retraction decides exactly as a calendar that never listed the day, from
+either stream), `TestALateRetractionWithoutHistoriesIsWithheldAtTheNextClose`,
+`TestRetractingTheNextSessionDecidesTheLastOneClosed`,
 `TestSessionRetractionRules` and the encoder's `RetractionTest`.
 
 ## What can go wrong, and what the engine does
@@ -89,16 +118,28 @@ when:
 - a history names a stock the engine did not rank, or one it ranked has no
   history;
 - a history arrives before its session's universe snapshot, for a session
-  that is not the last of its month, or twice for one stock;
+  that is not the last of its month, for a session that has already closed
+  (unless a late retraction left that session's decision waiting for it), or
+  twice for one stock;
+- a universe snapshot arrives while the histories of the one before it are
+  still waiting for their session to close;
+- a stock with both a bar and a history has a bar whose raw close differs
+  from its universe row's close;
 - a history has a price on a day the calendar does not list, or a price that
   disagrees with one the engine already holds for that stock and day, or was
   adjusted from a different base;
-- a retraction names a day not on the calendar, a day already closed, a day
-  whose bars have arrived (it traded), or would leave the calendar with no
-  session after the last one closed.
+- a retraction names a day not on the calendar, or any day on or before the
+  last session closed (a retraction must name a session after it; a day
+  before it that never closed cannot be repaired by retracting it), a day
+  whose bars, universe snapshot or histories have arrived (it traded), or
+  would leave the calendar with no session after the last one closed.
 
 A second copy of the same retraction changes nothing, and a later calendar
 that still lists the cancelled day is read without it.
+
+A month's last session with no history for the stocks it ranks, once the
+stream is known to be compact, is not a stop: the decision is withheld as
+`histories-missing` (above).
 
 A stock whose history is short or has a gap is recorded in the decision as
 `short-history` or `gap` and left out of that month, exactly as with daily

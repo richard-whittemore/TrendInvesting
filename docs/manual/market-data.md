@@ -194,8 +194,12 @@ day as no session: it needs no price recording, histories skip it, and the
 calendar reaches one extra session ahead to step past it. The engine removes
 the day from its calendar, so every window simply reaches one session
 further back. If the cancelled day was the last of its month, the session
-before it becomes the decision session; if that session has already closed
-when the retraction arrives, the engine makes its decision at once.
+before it becomes the decision session. If that session has already closed
+when the retraction arrives, an engine fed a bar for every stock decides at
+once; one fed the compact stream waits for that session's histories, which
+a stream encoded from the next session on does not carry, and withholds the
+decision as `histories-missing` if the next session closes first (see
+[momentum-universe](momentum-universe.md)).
 
 A stock written only because it is a universe member is left out of some
 sessions, instead of refusing the stream, when its data is bad. No bar is

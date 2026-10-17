@@ -28,7 +28,9 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     point 2, "D7-L"): the MinimumLot figures the picks were valued against,
 //     the name status unaffordable, and each unaffordable name's one share
 //     and target value. All are omitted when unset, so a Boost decision's
-//     bytes are still version 1's.
+//     bytes are still version 1's. The withheld reason histories-missing,
+//     which only a run reading the compact universe input emits, is a
+//     reason of this version too: no journal read before that input has it.
 const TargetsDecidedSchemaVersion uint32 = 4
 
 // The two outcomes of a target decision (ADR 0026, point 1).
@@ -63,6 +65,11 @@ const (
 	// since a bad net liquidation or bad raw closes would look the same
 	// (ADR 0026, point 2, "D7-L", and point 5, "fail closed").
 	WithheldAllUnaffordable = "all-unaffordable"
+	// WithheldHistoriesMissing: a run reading the compact universe input
+	// reached a decision session without a market.close.history for the
+	// members it ranks, so it cannot score them and does not decide from the
+	// bars of the names held alone (ADR 0026, point 5, "fail closed").
+	WithheldHistoriesMissing = "histories-missing"
 )
 
 // TargetWeight is one instrument's target as a fraction of net liquidation.
@@ -269,7 +276,8 @@ func (p TargetsDecidedPayload) Validate() error {
 	case TargetsOutcomeWithheld:
 		switch p.WithheldReason {
 		case WithheldMissingBars, WithheldStaleAccountSnapshot, WithheldMissingUniverse,
-			WithheldInsufficientTrendHistory, WithheldNoEligibleNames, WithheldRebalanceInProgress, WithheldAllUnaffordable:
+			WithheldInsufficientTrendHistory, WithheldNoEligibleNames, WithheldRebalanceInProgress, WithheldAllUnaffordable,
+			WithheldHistoriesMissing:
 		default:
 			errs = append(errs, fmt.Errorf("withheld reason %q is not recognised", p.WithheldReason))
 		}

@@ -174,6 +174,14 @@ type momentumOptions struct {
 	// just after the calendar; unlisted leaves sessions off the calendar fed.
 	retract  []string
 	unlisted map[string]bool
+	// lateRetract is a session retracted only after the session before it
+	// closes, so it never closes; in a compact stream that session's close
+	// histories follow the retraction, unless lateHistoriesMissing.
+	lateRetract          string
+	lateHistoriesMissing bool
+	// noHistories names decision sessions whose close histories the compact
+	// stream leaves out.
+	noHistories map[string]bool
 	// rawScale multiplies an instrument's raw close, leaving its adjusted
 	// close, as an unadjusted split would: a stock dear by the share.
 	rawScale map[string]float64
@@ -240,8 +248,18 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 		apply(s.envelope(t, rec.Type, rec.SchemaVersion, rec.ID, start, rec.Payload))
 	}
 
+	// next is the session after calendar session i on the calendar the run
+	// ends with, which is what decides whether i is a month's last.
+	next := func(i int) string {
+		for _, s := range cal[i+1:] {
+			if !opts.unlisted[s] && !slices.Contains(opts.retract, s) && s != opts.lateRetract {
+				return s
+			}
+		}
+		return ""
+	}
 	for i, session := range cal[:len(cal)-1] {
-		if opts.neverClosed[session] {
+		if opts.neverClosed[session] || session == opts.lateRetract {
 			continue
 		}
 		end := closeOf(session)
@@ -326,8 +344,9 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			}
 			apply(s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, fmt.Sprintf("bar:%s:%s", n.id, session), end, bar))
 		}
-		if !opts.noUniverse && cal[i+1][:7] != session[:7] {
-			snap := event.UniverseSnapshotPayload{Session: session, Source: "fixture-universe"}
+		var snap event.UniverseSnapshotPayload
+		if !opts.noUniverse && next(i)[:7] != session[:7] {
+			snap = event.UniverseSnapshotPayload{Session: session, Source: "fixture-universe"}
 			for _, n := range names() {
 				if p, ok := prices[n.id]; ok {
 					snap.Rows = append(snap.Rows, event.UniverseRow{InstrumentID: n.id, Type: n.listing, Close: p, Volume: n.volume, Sector: n.sector, SectorSource: n.source})
@@ -340,7 +359,9 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 				return 1
 			})
 			apply(s.envelope(t, event.UniverseSnapshotEventType, event.UniverseSnapshotSchemaVersion, "universe:"+session, end, snap))
-			if opts.compact {
+			// Before a late retraction the session is not yet a decision
+			// session, so the stream sends its histories only after it.
+			if opts.compact && !opts.noHistories[session] && cal[i+1] != opts.lateRetract {
 				for _, h := range closeHistories(t, cfg, cal, i, snap, opts) {
 					apply(s.envelope(t, event.CloseHistoryEventType, event.CloseHistorySchemaVersion, "history:"+h.InstrumentID+":"+session, end, h))
 				}
@@ -371,6 +392,15 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 		}
 		apply(s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "session:"+session, end,
 			event.SessionClosedPayload{PeriodEnd: end, InstrumentIDs: ids}))
+		if cal[i+1] == opts.lateRetract {
+			apply(s.envelope(t, event.SessionRetractedEventType, event.SessionRetractedSchemaVersion, "retracted:"+opts.lateRetract, end,
+				event.SessionRetractedPayload{Source: "fixture", Session: opts.lateRetract, Reason: "the exchange closed"}))
+			if opts.compact && !opts.lateHistoriesMissing && snap.Session == session {
+				for _, h := range closeHistories(t, cfg, cal, i, snap, opts) {
+					apply(s.envelope(t, event.CloseHistoryEventType, event.CloseHistorySchemaVersion, "history:"+h.InstrumentID+":"+session, end, h))
+				}
+			}
+		}
 		if amount, ok := opts.withdraw[session]; ok {
 			acct.settled = float64(acct.settled - amount)
 			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-after-withdrawal:"+session, end.Add(time.Hour), acct.snapshot(end.Add(time.Hour), prices)))

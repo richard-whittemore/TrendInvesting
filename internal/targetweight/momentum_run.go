@@ -33,7 +33,8 @@ import (
 //   - market.close.history, after a decision session's universe snapshot and
 //     before its close: one per member the run ranks from that snapshot, in
 //     place of those members' daily bars (the compact universe input,
-//     applyHistory);
+//     applyHistory), or, for a session already closed that a retraction
+//     made a decision session, after that retraction;
 //   - market.session.retracted: a session the exchange cancelled, removed
 //     from the calendar (applyRetraction);
 //   - account.snapshot version 4 and market.mark.recorded per instrument;
@@ -108,8 +109,14 @@ type momentumRun struct {
 
 	// histories holds the ranked members' close histories until their
 	// session closes; retracted, every session withdrawn from the calendar.
+	// compact is set by the first history read: the run reads the compact
+	// universe input, so a decision session's ranked members have no bars
+	// and need their histories. pending is the decision a retraction left
+	// awaiting its histories (applyRetraction).
 	histories map[string]event.CloseHistoryPayload
 	retracted map[string]bool
+	compact   bool
+	pending   *pendingDecision
 }
 
 // trackedOrder is one released order and what the venue has reported of it.
@@ -196,7 +203,7 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 	case event.UniverseSnapshotEventType:
 		return nil, r.applyUniverse(in)
 	case event.CloseHistoryEventType:
-		return nil, r.applyHistory(in)
+		return r.applyHistory(in)
 	case event.SessionRetractedEventType:
 		return r.applyRetraction(in)
 	case event.AccountSnapshotEventType:
@@ -284,8 +291,12 @@ func (r *momentumRun) applyUniverse(in event.Envelope) error {
 	if err := checkUniverse(r.cfg, in.ID, p); err != nil {
 		return err
 	}
-	if r.universe != nil && p.Session <= r.universe.Session {
+	switch {
+	case r.universe != nil && p.Session <= r.universe.Session:
 		return fmt.Errorf("targetweight: universe for %s does not follow the last, %s", p.Session, r.universe.Session)
+	case len(r.histories) > 0:
+		// The histories held are checked against the snapshot they follow.
+		return fmt.Errorf("targetweight: universe for %s arrived while the close histories of %s still wait for that session to close", p.Session, r.universe.Session)
 	}
 	r.universe = &p
 	return nil
@@ -335,6 +346,17 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 	case !slices.Equal(p.InstrumentIDs, slices.Sorted(maps.Keys(r.bars))):
 		return nil, fmt.Errorf("targetweight: session %s names %v, but bars arrived for %v", date, p.InstrumentIDs, slices.Sorted(maps.Keys(r.bars)))
 	}
+	b := &emissions{h: r.h, in: in, at: p.PeriodEnd}
+	if pd := r.pending; pd != nil {
+		// The session after the one awaiting its histories closed first.
+		r.pending = nil
+		prev, _ := slices.BinarySearch(r.calendar, pd.session) // the last session closed is on the calendar
+		detail := fmt.Sprintf("a retraction made %s the last session before the rebalance, but %d of the close histories of the %d members ranked from its universe snapshot had arrived when the session closing %s did",
+			pd.session, len(pd.histories), len(pd.ranked), p.PeriodEnd.Format(idTime))
+		if err := r.withheldAt(b, decisionID(r.h.cfg.AccountID, pd.end), pd.session, pd.end, prev, event.WithheldHistoriesMissing, detail); err != nil {
+			return nil, err
+		}
+	}
 	r.raw = make(map[string]float64, len(r.bars))
 	for id, bar := range r.bars {
 		if !bar.PeriodEnd.Equal(p.PeriodEnd) {
@@ -349,10 +371,10 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 		r.raw[id] = bar.Raw.Close
 	}
 	r.bars = map[string]event.CompletedBarAdjustedPayload{}
-	if err := r.mergeHistories(date, at); err != nil {
+	missing, err := r.mergeHistories(date, at)
+	if err != nil {
 		return nil, err
 	}
-	b := &emissions{h: r.h, in: in, at: p.PeriodEnd}
 	if err := r.missed(b, at); err != nil {
 		return nil, err
 	}
@@ -360,10 +382,40 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 	r.trim(at)
 
 	decide, _ := momentum.IsDecisionSession(date, r.calendar[at+1]) // both on the validated calendar
-	if !decide || p.PeriodEnd.Before(r.h.decideFrom) {
+	switch {
+	case !decide || p.PeriodEnd.Before(r.h.decideFrom):
+		return b.result()
+	case missing != "":
+		if err := r.withheldAt(b, decisionID(r.h.cfg.AccountID, p.PeriodEnd), date, p.PeriodEnd, at, event.WithheldHistoriesMissing, missing); err != nil {
+			return nil, err
+		}
 		return b.result()
 	}
-	return r.decide(b, p.PeriodEnd, at)
+	return r.decide(b, p.PeriodEnd, at, r.universe)
+}
+
+// withheldAt journals a withheld decision for calendar session at (session,
+// closing at end), found at b's time, with the glide figures on the session
+// after it, as a decided one records them; an implausible age there stops
+// the run. So no decision time passes without a decision (ADR 0026, point
+// 1): a decision session that never closed (missing-bars), and one whose
+// ranked members sent no close history in the compact universe input
+// (histories-missing), never decided from the bars of the names held alone
+// (point 5).
+func (r *momentumRun) withheldAt(b *emissions, id, session string, end time.Time, at int, reason, detail string) error {
+	p := event.TargetsDecidedPayload{
+		AccountID: r.h.cfg.AccountID, StrategyID: r.h.cfg.StrategyID,
+		DecisionTime: b.at, SessionPeriodEnd: end,
+		Outcome: event.TargetsOutcomeWithheld, WithheldReason: reason, Detail: detail,
+		Momentum: event.MomentumFigures{CloseSession: session, TrendInstrument: r.rule.TrendInstrument},
+	}
+	figures, err := r.glideFigures(r.calendar[at+1])
+	if err != nil {
+		return fmt.Errorf("targetweight: decision for %s: %w", session, err)
+	}
+	r.applyGlide(&p, momentum.Decision{}, figures)
+	b.add(id, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, p)
+	return nil
 }
 
 // missed journals a withheld missing-bars decision for each decision session
@@ -385,20 +437,11 @@ func (r *momentumRun) missed(b *emissions, at int) error {
 		if decide, _ := momentum.IsDecisionSession(session, r.calendar[k+1]); !decide || session < from {
 			continue
 		}
-		p := event.TargetsDecidedPayload{
-			AccountID: r.h.cfg.AccountID, StrategyID: r.h.cfg.StrategyID,
-			DecisionTime: end, SessionPeriodEnd: end,
-			Outcome: event.TargetsOutcomeWithheld, WithheldReason: event.WithheldMissingBars,
-			Detail: fmt.Sprintf("the decision session %s never closed, so no instrument has its final bar; found at the session closing %s",
-				session, end.Format(idTime)),
-			Momentum: event.MomentumFigures{CloseSession: session, TrendInstrument: r.rule.TrendInstrument},
+		detail := fmt.Sprintf("the decision session %s never closed, so no instrument has its final bar; found at the session closing %s",
+			session, end.Format(idTime))
+		if err := r.withheldAt(b, fmt.Sprintf("targets-decided:%s:missed:%s", r.h.cfg.AccountID, session), session, end, k, event.WithheldMissingBars, detail); err != nil {
+			return err
 		}
-		figures, err := r.glideFigures(r.calendar[k+1])
-		if err != nil {
-			return fmt.Errorf("targetweight: decision for %s: %w", session, err)
-		}
-		r.applyGlide(&p, momentum.Decision{}, figures)
-		b.add(fmt.Sprintf("targets-decided:%s:missed:%s", r.h.cfg.AccountID, session), event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, p)
 	}
 	return nil
 }
@@ -421,12 +464,13 @@ func (r *momentumRun) trim(at int) {
 	}
 }
 
-// decide makes the decision at the close of calendar session at, adding to b.
-func (r *momentumRun) decide(b *emissions, end time.Time, at int) ([]event.Envelope, error) {
+// decide makes the decision at the close of calendar session at, adding to
+// b, ranking the universe snapshot u when it is that session's.
+func (r *momentumRun) decide(b *emissions, end time.Time, at int, u *event.UniverseSnapshotPayload) ([]event.Envelope, error) {
 	h := r.h
 	input := momentum.Input{Sessions: r.calendar[max(0, at+1-r.window) : at+1], Closes: r.adjusted}
-	if r.universe != nil && r.universe.Session == r.last {
-		input.Universe = momentum.Snapshot{Session: r.universe.Session, Rows: rows(r.universe.Rows)}
+	if u != nil && u.Session == r.last {
+		input.Universe = momentum.Snapshot{Session: u.Session, Rows: rows(u.Rows)}
 	}
 	figures, err := r.glideFigures(r.calendar[at+1])
 	if err != nil {
