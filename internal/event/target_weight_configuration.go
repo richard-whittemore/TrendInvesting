@@ -20,13 +20,18 @@ const TargetWeightConfigurationEventType = "strategy.target-weight.configuration
 //
 //   - Version 1 held Boost's strategy fields, the margin account's limits and
 //     the account's identity only.
-//   - Version 2 adds the momentum strategy for an IRA: Momentum (its rule's
+//   - Version 2 added the momentum strategy for an IRA: Momentum (its rule's
 //     parameters, the universe data source and the sector-label sources) and
 //     Execution (the D5 cash rule, the share quantity rule, the fee
 //     allowance). StrategyID chooses which strategy section is set; the other
-//     is zero. The glide path and the Excess Liquidity thresholds join in
-//     later versions, each a new hash (ADR 0016).
-const TargetWeightConfigurationSchemaVersion uint32 = 2
+//     is zero.
+//   - Version 3 adds the margin-cushion alarm's Excess Liquidity thresholds
+//     to the limits (ADR 0026, point 6): required for Boost's margin account,
+//     absent for an IRA, which has no margin cushion; and the execution
+//     section's MaxSnapshotAge, required for every account, from 1 minute to
+//     MaxSnapshotAgeCeiling. The glide path joins in a later version, a new
+//     hash (ADR 0016).
+const TargetWeightConfigurationSchemaVersion uint32 = 3
 
 // The strategies this schema configures: Boost on SPY for the joint margin
 // account, and the momentum combination for an IRA (docs/live-trading/plan.md,
@@ -85,8 +90,8 @@ type TargetWeightConfigurationPayload struct {
 	// Momentum holds the momentum rule's parameters, set only for StrategyID
 	// momentum.
 	Momentum MomentumConfiguration `json:"momentum,omitzero"`
-	// Execution holds the IRA execution rules, set only for StrategyID
-	// momentum.
+	// Execution holds the IRA's execution rules and every account's
+	// MaxSnapshotAge, which is all the joint margin account sets.
 	Execution ExecutionConfiguration `json:"execution,omitzero"`
 	// Limits holds the account's hard limits (ADR 0026, point 3).
 	Limits MarginLimits `json:"limits"`
@@ -134,17 +139,35 @@ type MomentumConfiguration struct {
 	SectorSources []string `json:"sector_sources"`
 }
 
-// ExecutionConfiguration is an IRA's execution rules (ADR 0026, points 2 and 6).
+// ExecutionConfiguration is an account's execution rules (ADR 0026, points 2
+// and 6): an IRA's cash rule, share quantity and fee allowance, and every
+// account's MaxSnapshotAge, which is all the joint margin account sets.
 type ExecutionConfiguration struct {
-	// CashRule is one of the CashRule constants (D5).
-	CashRule string `json:"cash_rule"`
+	// CashRule is one of the CashRule constants (D5). It and ShareQuantity
+	// are always set for an IRA, so omitting them when empty changes no IRA
+	// configuration's bytes or hash, and the joint account's execution
+	// section encodes only what it sets.
+	CashRule string `json:"cash_rule,omitzero"`
 	// ShareQuantity is ShareQuantityWhole (D7).
-	ShareQuantity string `json:"share_quantity"`
+	ShareQuantity string `json:"share_quantity,omitzero"`
 	// MaxFeesPerOrder is the most commission and fees one order can cost,
 	// added to every buy's worst-case cost (ADR 0026, point 2, "Worst-case
 	// cost").
 	MaxFeesPerOrder float64 `json:"max_fees_per_order"`
+	// MaxSnapshotAge, in minutes, is the oldest the latest broker snapshot
+	// may be at the trigger for the sale back to 98%, or at a sell's planned
+	// time for the broker-holding check, to be read (ADR 0019: the maximum
+	// snapshot age is required configuration with no permissive default; "a
+	// stale matching snapshot is not success"). Every account sets it, from 1
+	// to MaxSnapshotAgeCeiling minutes.
+	MaxSnapshotAge int `json:"max_snapshot_age_minutes,omitzero"`
 }
+
+// MaxSnapshotAgeCeiling is the largest MaxSnapshotAge, in minutes: one
+// regular session, 09:30 to 16:00. A snapshot older than a session is never
+// fresh evidence of the holding (ADR 0019: "a stale matching snapshot is not
+// success"), and the bound keeps the minutes within what a duration holds.
+const MaxSnapshotAgeCeiling = 390
 
 // BoostConfiguration is Boost's parameters as backtested
 // (research/edge-search/boost/template.py:33-37; plan.md section 2: SPY,
@@ -182,6 +205,15 @@ type MarginLimits struct {
 	// the reference price must lie, and the distance of each limit price from
 	// the reference price (ADR 0026, point 2, "Order type and price").
 	PriceBand float64 `json:"price_band"`
+	// The margin-cushion alarm's thresholds (plan.md section 5; ADR 0026,
+	// point 6): Excess Liquidity as a share of net liquidation, a warning
+	// below ExcessLiquidityWarning (0.40), urgent below ExcessLiquidityUrgent
+	// (0.20), and no reading for ExcessLiquidityStaleMinutes (30) while the
+	// market is open counting as urgent. All three are set for a margin
+	// account and all three are zero, and omitted, for an IRA.
+	ExcessLiquidityWarning      float64 `json:"excess_liquidity_warning,omitzero"`
+	ExcessLiquidityUrgent       float64 `json:"excess_liquidity_urgent,omitzero"`
+	ExcessLiquidityStaleMinutes int     `json:"excess_liquidity_stale_minutes,omitzero"`
 }
 
 // WarmUpDate returns WarmUpStart parsed as a UTC date.
@@ -195,9 +227,13 @@ func (p TargetWeightConfigurationPayload) Validate() error {
 	switch p.StrategyID {
 	case TargetWeightStrategyBoost:
 		errs = append(errs, p.Boost.validate()...)
-		if !p.Momentum.isZero() || p.Execution != (ExecutionConfiguration{}) {
-			errs = append(errs, errors.New("a boost configuration sets no momentum or execution section"))
+		if !p.Limits.HasCushion() {
+			errs = append(errs, errors.New("a margin account's limits set the excess liquidity thresholds"))
 		}
+		if !p.Momentum.isZero() || p.Execution != (ExecutionConfiguration{MaxSnapshotAge: p.Execution.MaxSnapshotAge}) {
+			errs = append(errs, errors.New("a boost configuration sets no momentum or execution section beyond the execution max snapshot age"))
+		}
+
 	case TargetWeightStrategyMomentum:
 		errs = append(errs, p.Momentum.validate()...)
 		errs = append(errs, p.Execution.validate()...)
@@ -207,8 +243,17 @@ func (p TargetWeightConfigurationPayload) Validate() error {
 		if p.Limits.MaxExposure > 1 {
 			errs = append(errs, errors.New("an IRA's max exposure is at most 1: it never uses margin"))
 		}
+		if p.Limits.HasCushion() {
+			errs = append(errs, errors.New("an IRA's limits set no excess liquidity thresholds: it has no margin cushion"))
+		}
 	default:
 		errs = append(errs, fmt.Errorf("strategy id %q is not a target-weight strategy this schema configures", p.StrategyID))
+	}
+	switch {
+	case p.Execution.MaxSnapshotAge < 1:
+		errs = append(errs, errors.New("execution max snapshot age must be at least 1 minute: every account's broker-holding check reads the broker snapshot"))
+	case p.Execution.MaxSnapshotAge > MaxSnapshotAgeCeiling:
+		errs = append(errs, fmt.Errorf("execution max snapshot age of %d minutes exceeds %d, one session", p.Execution.MaxSnapshotAge, MaxSnapshotAgeCeiling))
 	}
 	if p.AccountID == "" {
 		errs = append(errs, errors.New("account id is required"))
@@ -345,7 +390,24 @@ func (l MarginLimits) validate() []error {
 	if !isFinite(l.PriceBand) || l.PriceBand <= 0 || l.PriceBand >= 1 {
 		errs = append(errs, errors.New("limits price band must lie strictly between 0 and 1"))
 	}
+	if !l.HasCushion() {
+		return errs
+	}
+	if !isFinite(l.ExcessLiquidityWarning) || !isFinite(l.ExcessLiquidityUrgent) ||
+		!(0 < l.ExcessLiquidityUrgent && l.ExcessLiquidityUrgent < l.ExcessLiquidityWarning && l.ExcessLiquidityWarning < 1) {
+		errs = append(errs, errors.New("limits excess liquidity thresholds must satisfy 0 < urgent < warning < 1"))
+	}
+	if l.ExcessLiquidityStaleMinutes < 1 || l.ExcessLiquidityStaleMinutes > MaxSnapshotAgeCeiling {
+		errs = append(errs, fmt.Errorf("limits excess liquidity stale minutes must be from 1 to %d, one session", MaxSnapshotAgeCeiling))
+	}
 	return errs
+}
+
+// HasCushion reports whether l sets any of the margin-cushion alarm's
+// thresholds. Limits that set one must set all three validly; limits that set
+// none have no alarm, as an IRA's (ADR 0026, point 6).
+func (l MarginLimits) HasCushion() bool {
+	return l.ExcessLiquidityWarning != 0 || l.ExcessLiquidityUrgent != 0 || l.ExcessLiquidityStaleMinutes != 0
 }
 
 // Validate checks every limit against its range.

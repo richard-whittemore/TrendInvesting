@@ -23,7 +23,7 @@ func validMomentumConfiguration() event.TargetWeightConfigurationPayload {
 			RiskOffInstrument: "IEF", RiskOffFraction: 0.5, RebalanceBand: 0.25,
 			UniverseSource: "massive", SectorSources: []string{"ishares-iwv-gics", "nasdaq-screener"},
 		},
-		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityWhole, MaxFeesPerOrder: 1},
+		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityWhole, MaxFeesPerOrder: 1, MaxSnapshotAge: 30},
 		Limits:    event.MarginLimits{MaxExposure: 1, MaxOrdersPerDecision: 60, MaxOrderFraction: 0.5, PriceBand: 0.05},
 	}
 }
@@ -117,6 +117,17 @@ func TestMomentumConfigurationValidate(t *testing.T) {
 	expectInvalid(t, "cash rule", v, func(p *P) { p.Execution.CashRule = "borrowed" }, "cash rule")
 	expectInvalid(t, "share quantity", v, func(p *P) { p.Execution.ShareQuantity = "fractional" }, "share quantity")
 	expectInvalid(t, "fees", v, func(p *P) { p.Execution.MaxFeesPerOrder = -1 }, "fees")
+	expectInvalid(t, "no max snapshot age", v, func(p *P) { p.Execution.MaxSnapshotAge = 0 }, "max snapshot age")
+	expectInvalid(t, "negative max snapshot age", v, func(p *P) { p.Execution.MaxSnapshotAge = -1 }, "max snapshot age")
+	// Bounded above by one regular session, so the minutes never wrap as a
+	// duration and a stale snapshot is never read as fresh.
+	expectInvalid(t, "max snapshot age above a session", v, func(p *P) { p.Execution.MaxSnapshotAge = event.MaxSnapshotAgeCeiling + 1 }, "max snapshot age")
+	expectInvalid(t, "max snapshot age that wraps", v, func(p *P) { p.Execution.MaxSnapshotAge = 200_000_000_000_000 }, "max snapshot age")
+	ceiling := v
+	ceiling.Execution.MaxSnapshotAge = event.MaxSnapshotAgeCeiling
+	if err := ceiling.Validate(); err != nil {
+		t.Errorf("a maximum age of one session is valid: %v", err)
+	}
 
 	b := validTargetWeightConfiguration()
 	expectInvalid(t, "boost with momentum", b, func(p *P) { p.Momentum.TopN = 25 }, "no momentum or execution")
@@ -155,7 +166,7 @@ func TestBoostPayloadsOmitMomentumSections(t *testing.T) {
 		payload any
 		absent  []string
 	}{
-		{validTargetWeightConfiguration(), []string{`"momentum"`, `"execution"`}},
+		{validTargetWeightConfiguration(), []string{`"momentum"`, `"cash_rule"`, `"share_quantity"`}},
 		{validTargetsDecided(), []string{`"momentum"`}},
 		{validMomentumDecided(), []string{`"boost"`}},
 		{validOrderReleased(), []string{"cash_checked", "buy_cost", "cash_available"}},
@@ -320,5 +331,6 @@ func TestTargetWeightFillValidate(t *testing.T) {
 	expectInvalid(t, "price", v, func(p *P) { p.Price = 0 }, "price")
 	expectInvalid(t, "commission", v, func(p *P) { p.Commission = -0.01 }, "commission")
 	expectInvalid(t, "time", v, func(p *P) { p.FilledAt = time.Time{} }, "filled at")
+	expectInvalid(t, "sub-second time", v, func(p *P) { p.FilledAt = p.FilledAt.Add(500 * time.Millisecond) }, "whole second")
 	expectInvalid(t, "quantity", v, func(p *P) { p.Quantity = 0 }, "quantity")
 }

@@ -35,7 +35,7 @@ Reports:
 | --- | --- |
 | `orders` | orders planned, released and refused, and order lifecycle changes |
 | `fills` | each fill with quantity, price and commission |
-| `refusals` | refused orders and engine-state changes (degraded, halted) |
+| `refusals` | refused orders, withheld sales back to 98% and engine-state changes (degraded, halted) |
 | `totals` | fills, shares bought and sold, and commission per instrument per year, plus a TOTAL row |
 | `positions` | the holding after each fill, rebuilt from the fills; a recorded symbol change moves the holding to the new id |
 | `reconcile` | whether the fills agree with the account snapshots recorded in the journal |
@@ -162,8 +162,13 @@ Turtle stop order's row shows its stop price and its tag.
   not read, including a newer account snapshot). Refused, naming the record; the
   tool never guesses at a figure. It reads fills of versions 4 (Turtle) and 5
   (target-weight), order lifecycle changes of versions 1 (Turtle stop orders)
-  and 2 (target-weight limit orders), risk-gate releases and refusals of
-  versions 1 and 2, and account snapshots of versions 3 (positions) and 4
+  and 2 (target-weight limit orders), planned orders of versions 1 and 2 (2 is a
+  sale back to 98%), risk-gate releases and refusals of versions 1, 2 and 3
+  (3 adds the broker figures and the kill-switch, broker-holding,
+  sale-attempted and stale-broker-snapshot reasons, and the refusal's
+  alert), withheld sales back to 98% of version 1 (`risk.sale.withheld`,
+  listed by `refusals` with their reason, `lapsed` included), and account
+  snapshots of versions 3 (positions) and 4
   (positions and cash; the cash is not reported). Only the equity-and-cash
   snapshot (version 2), which holds no positions, is passed over by design.
 - **A bad flag** (a malformed date, a backwards range, an unknown format or

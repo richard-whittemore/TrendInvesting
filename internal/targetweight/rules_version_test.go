@@ -17,3 +17,15 @@ func TestRulesVersionDeclaresTheVersion2ConfigurationBreak(t *testing.T) {
 		t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.0.0 once the configuration schema moved to version 2", targetweight.RulesVersion)
 	}
 }
+
+// TestRulesVersionDeclaresTheVersion3ConfigurationBreak: the configuration
+// schema moved to version 3 (the margin-cushion thresholds) and the gate
+// gained the kill switch, the broker-sized sells and the sale back to 98%,
+// so a journal written under rules 1.1.0 cannot replay under this build.
+func TestRulesVersionDeclaresTheVersion3ConfigurationBreak(t *testing.T) {
+	t.Parallel()
+
+	if v := targetweight.RulesVersion; v == "1.0.0" || v == "1.1.0" {
+		t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.1.0 once the configuration schema moved to version 3", v)
+	}
+}

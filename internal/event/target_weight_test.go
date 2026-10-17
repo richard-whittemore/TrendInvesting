@@ -33,7 +33,12 @@ func validTargetWeightConfiguration() event.TargetWeightConfigurationPayload {
 			MaxOrdersPerDecision: 1,
 			MaxOrderFraction:     0.6,
 			PriceBand:            0.05,
+
+			ExcessLiquidityWarning:      0.4,
+			ExcessLiquidityUrgent:       0.2,
+			ExcessLiquidityStaleMinutes: 30,
 		},
+		Execution: event.ExecutionConfiguration{MaxSnapshotAge: 30},
 	}
 }
 
@@ -175,7 +180,7 @@ func TestTargetWeightConfigurationValidate(t *testing.T) {
 // or an encoding change.
 func TestTargetWeightConfigurationHashStability(t *testing.T) {
 	got := event.TargetWeightConfigurationHash(validTargetWeightConfiguration())
-	const want = "sha256:126cb0598b602bf4de2229f2d8313945eefe2ef2389d0bd077b5232bfab54ab7"
+	const want = "sha256:f49cf708aec6e453ba8978f31323ae6fb0657d5b9e07ac53fd60615a54f7409e"
 	if got != want {
 		t.Fatalf("TargetWeightConfigurationHash = %s, want %s", got, want)
 	}
@@ -201,6 +206,9 @@ func TestTargetWeightConfigurationHashChangesWithEveryField(t *testing.T) {
 		"orders":     func(p *P) { p.Limits.MaxOrdersPerDecision = 2 },
 		"fraction":   func(p *P) { p.Limits.MaxOrderFraction = 0.5 },
 		"band":       func(p *P) { p.Limits.PriceBand = 0.04 },
+		"el warning": func(p *P) { p.Limits.ExcessLiquidityWarning = 0.45 },
+		"el urgent":  func(p *P) { p.Limits.ExcessLiquidityUrgent = 0.25 },
+		"el stale":   func(p *P) { p.Limits.ExcessLiquidityStaleMinutes = 20 },
 	} {
 		p := validTargetWeightConfiguration()
 		mutate(&p)
@@ -215,6 +223,9 @@ func TestAccountPositionsSnapshotValidate(t *testing.T) {
 	type P = event.AccountPositionsSnapshotPayload
 	expectInvalid(t, "account", v, func(p *P) { p.AccountID = "" }, "account")
 	expectInvalid(t, "as of", v, func(p *P) { p.AsOf = time.Time{} }, "as of")
+	// The pending-sell rule orders snapshots and fills by the whole second
+	// IBKR stamps; a finer time would be read as an order it cannot show.
+	expectInvalid(t, "sub-second as of", v, func(p *P) { p.AsOf = p.AsOf.Add(time.Millisecond) }, "whole second")
 	expectInvalid(t, "net liquidation zero", v, func(p *P) { p.NetLiquidation = 0 }, "net liquidation")
 	expectInvalid(t, "net liquidation nan", v, func(p *P) { p.NetLiquidation = math.NaN() }, "net liquidation")
 	expectInvalid(t, "currency", v, func(p *P) { p.Currency = "" }, "currency")
