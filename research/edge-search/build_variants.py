@@ -163,6 +163,27 @@ VARIANTS = {
     "OOS_F_130_S10_B5": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_130", SLIPPAGE=0.001, BORROW_FEE=0.05)),
     "OOS_F_130_S20_B5": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_130", SLIPPAGE=0.002, BORROW_FEE=0.05)),
     # Execution test (M1 against Interactive Brokers): the half-filter and
+    # D8 timing (docs/research/universe-massive-2026-10.md, Finding 2): the
+    # combination with each month's universe chosen on the last session
+    # before it, against F_COMBO / OOS_F_COMBO run again on the same data
+    "FU_COMBO": ("momentum/fresh_universe.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                "INV_VOL": True, "RISK_OFF_FRACTION": 0.5, "FRESH_SELECTION": True}),
+    "OOS_FU_COMBO": ("momentum/fresh_universe.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                        RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True)),
+    # Commission drag at $30k (#376, slice 7): FU_COMBO, OOS_FU_COMBO, F_COMBO
+    # and OOS_F_COMBO with only the starting cash changed. The templates set
+    # the Interactive Brokers brokerage model, which applies LEAN's
+    # InteractiveBrokersFeeModel to every equity: no fee switch is needed.
+    "FU_COMBO_30K": ("momentum/fresh_universe.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                    "INV_VOL": True, "RISK_OFF_FRACTION": 0.5,
+                                                    "FRESH_SELECTION": True, "CASH": 30_000}),
+    "OOS_FU_COMBO_30K": ("momentum/fresh_universe.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                            RISK_OFF_FRACTION=0.5, FRESH_SELECTION=True,
+                                                            CASH=30_000)),
+    "F_COMBO_30K": ("momentum/defensive_v2.py", {"MODE": "mom_trend", "TOP_N": 25, "SECTOR_CAP": 3,
+                                                 "INV_VOL": True, "RISK_OFF_FRACTION": 0.5, "CASH": 30_000}),
+    "OOS_F_COMBO_30K": ("momentum/defensive_v2.py", dict(_OOS, MODE="mom_trend", SECTOR_CAP=3, INV_VOL=True,
+                                                         RISK_OFF_FRACTION=0.5, CASH=30_000)),
     # combination books of F_HALF / F_COMBO and their held-out runs, traded
     # 1 or 3 sessions after the month's book is computed.
     "XF_HALF_D3": ("momentum/execution.py", dict(_HALF, EXEC_DELAY=3)),
@@ -322,7 +343,8 @@ def render(template_src, params, rates):
 
 #: Templates whose long-only modes ignore VOL_TARGET: their book comes from
 #: defensive_book, which has no volatility scaling.
-NO_VOL_TARGET = ("momentum/defensive.py", "momentum/defensive_v2.py", "momentum/scores.py")
+NO_VOL_TARGET = ("momentum/defensive.py", "momentum/defensive_v2.py", "momentum/scores.py",
+                 "momentum/fresh_universe.py")
 
 
 def check_variant(template, params):

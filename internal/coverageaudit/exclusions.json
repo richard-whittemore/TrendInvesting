@@ -889,6 +889,36 @@
       "occurrence": 3,
       "category": "unreachable-by-construction",
       "reason": "encodeLine of the commit line this function has just built: a uint64 and a string, neither of which has a failing JSON encoding. The record lines before it, which carry timestamps, are the encoding that can fail, and TestAppendReturnsTimestampEncodingErrorsWithoutWriting covers that branch."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "New",
+      "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
+      "occurrence": 2,
+      "category": "unreachable-by-construction",
+      "reason": "boost.NewIndicators refuses only an RSI period, trend length or exit length below 1; TargetWeightConfigurationPayload.Validate, called a few lines above, refuses each of those (TestTargetWeightConfigurationValidate)."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "New",
+      "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
+      "occurrence": 3,
+      "category": "unreachable-by-construction",
+      "reason": "risklimit.NewGate refuses only an empty account, invalid limits or an unknown mode; TargetWeightConfigurationPayload.Validate, called above, refuses all three with the same MarginLimits rules."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).stamp",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"targetweight: %s %s: %w\", eventType, id, err)",
+      "category": "unreachable-by-construction",
+      "reason": "Every payload stamped is built by this handler, internal/orderplan or internal/risklimit from validated inputs; the orderplan and risklimit tests validate every payload those packages return, and the targetweight run tests decode and use every emission."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).stamp",
+      "statement": "return event.Envelope{}, fmt.Errorf(\"targetweight: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; the payload passed Validate immediately before json.Marshal."
     }
   ]
 }

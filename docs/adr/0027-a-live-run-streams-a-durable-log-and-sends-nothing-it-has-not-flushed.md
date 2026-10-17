@@ -1,6 +1,7 @@
 # ADR 0027: A live run streams a durable log, and sends nothing it has not flushed
 
-- Status: Proposed
+- Status: Accepted (2026-10-17, by the owner)
+- Accepted together with the owner's decisions of 2026-10-16 recorded as an amendment (PR #348): the durable log is mandatory outside backtests, and no run resumes across builds.
 - Date: 2026-10-16
 - Relates to: ADR 0014, ADR 0016, ADR 0017, ADR 0018, ADR 0019 (amended 2026-09-24), ADR 0022, ADR 0026 (§3, §5, Consequences)
 
@@ -42,8 +43,8 @@ Three accepted or proposed rules need more than that:
 - ADR 0026 §5: a restart reads its state from the durable journal and never
   recomputes it from a fresh window of broker data.
 
-#151 weighed three shapes: an incremental journal, a second durability record
-beside the journal, and a journal rolled on a fixed boundary.
+Issue #151 weighed three shapes: an incremental journal, a second durability
+record beside the journal, and a journal rolled on a fixed boundary.
 
 ## Decision
 
@@ -219,11 +220,10 @@ continues the recovered sequence. A torn input is sent again.
   (ADR 0019's recovery procedure).
 - Every existing journal, journal test and replay test is unchanged.
 
-## Proposed addition (owner's decisions of 2026-10-16, #336 and #337)
+## Amendment (2026-10-16, owner decisions #336, #337; accepted with the ADR 2026-10-17)
 
-*This section is added while the ADR is still Proposed and under the owner's
-review. It records two decisions the owner made on 2026-10-16; it does not
-change the ADR's status, and the owner may amend it in that review.*
+*This section records two decisions the owner made on 2026-10-16. The owner
+accepted them together with this ADR on 2026-10-17.*
 
 - **The durable log is mandatory before paper trading (#336).** This replaces
   the Consequences' statement that `-log` is optional. `cmd/engine` takes

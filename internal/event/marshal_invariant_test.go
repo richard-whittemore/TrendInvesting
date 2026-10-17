@@ -44,6 +44,9 @@ func marshalPayloads() []validatedPayload {
 		validSymbolChangeAction(), validInstrumentSymbolChanged(),
 		validDividendAction(), validCampaignDividend(),
 		validWatchlistPublished(),
+		validTargetWeightConfiguration(), validAccountPositionsSnapshot(), validMarkRecorded(),
+		validTargetsDecided(), validTargetsWithheld(), validOrderPlanned(),
+		validOrderReleased(), validOrderRefused(), validDegradedEngineState(),
 	}
 }
 

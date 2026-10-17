@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -17,7 +16,9 @@ import (
 // createLogFile creates the file this process streams its durable log to,
 // exclusively, so an existing log is never appended to or overwritten (ADR
 // 0018), and flushes its directory so the name survives a power loss along
-// with the header CreateLog flushes into it (ADR 0027).
+// with the header CreateLog flushes into it (ADR 0027). The directory is
+// taken as spelled, not cleaned: a ".." after a symbolic link climbs from the
+// link's target, so cleaning would name, and flush, another directory.
 func createLogFile(path string) (*os.File, error) {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -26,9 +27,10 @@ func createLogFile(path string) (*os.File, error) {
 		}
 		return nil, fmt.Errorf("engine: create the durable log: %w", err)
 	}
-	if err := syncDir(filepath.Dir(path)); err != nil {
+	dir, _ := splitAsSpelled(path)
+	if err := syncDir(dir); err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("engine: flush the durable log's directory %s: %w", filepath.Dir(path), err)
+		return nil, fmt.Errorf("engine: flush the durable log's directory %s: %w", dir, err)
 	}
 	return file, nil
 }

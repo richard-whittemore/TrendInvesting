@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -263,6 +265,117 @@ func TestRunRefusesAResumeItCannotHonour(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: run() = %v, want an error saying %q", name, err, tc.want)
 		}
+	}
+}
+
+// TestRunRefusesALogAtTheJournalPath: a log created where the journal is to
+// be installed would take that path for the whole run, and the operator
+// would learn it only when the journal could not be written at shutdown. It
+// is refused at startup, however the same path is spelled, and nothing is
+// created.
+func TestRunRefusesALogAtTheJournalPath(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
+	out := filepath.Join(dir, "run.jsonl")
+	linked := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(dir, linked); err != nil {
+		t.Fatalf("link the journal's directory: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o700); err != nil {
+		t.Fatalf("make a subdirectory: %v", err)
+	}
+	for name, logPath := range map[string]string{
+		"through a link":     filepath.Join(linked, "run.jsonl"),
+		"the same path":      out,
+		"the same path, dot": dir + string(filepath.Separator) + "." + string(filepath.Separator) + "run.jsonl",
+		"the same path, up":  filepath.Join(dir, "sub") + string(filepath.Separator) + ".." + string(filepath.Separator) + "run.jsonl",
+	} {
+		opts := options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: out, logPath: logPath, build: "test-build"}
+		// Bounded, so a run that wrongly starts serving fails the test
+		// rather than hanging it.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := run(ctx, opts, io.Discard)
+		cancel()
+		if err == nil || !strings.Contains(err.Error(), "-log and -out") {
+			t.Fatalf("%s: run() = %v, want an error saying -log and -out name one file", name, err)
+		}
+		if _, err := os.Stat(out); !os.IsNotExist(err) {
+			t.Fatalf("%s: %s exists after the refusal (stat error %v), want nothing created", name, out, err)
+		}
+	}
+}
+
+// TestSamePathResolvesEachDirectoryAsTheFileSystemDoes: a ".." after a
+// symbolic link climbs from the link's target, not from where the link
+// sits, so cleaning the path before resolving it would both refuse two
+// distinct files and miss one file spelled two ways.
+func TestSamePathResolvesEachDirectoryAsTheFileSystemDoes(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "other", "nested")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatalf("make the link's target: %v", err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(nested, link); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	sep := string(filepath.Separator)
+	// link/../run.jsonl is root/other/run.jsonl on disk, never root/run.jsonl.
+	throughLinkUp := link + sep + ".." + sep + "run.jsonl"
+	for _, tc := range []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"one spelling", filepath.Join(root, "run.jsonl"), filepath.Join(root, "run.jsonl"), true},
+		{"a dot segment", root + sep + "." + sep + "run.jsonl", filepath.Join(root, "run.jsonl"), true},
+		{"link then up is not the link's parent", throughLinkUp, filepath.Join(root, "run.jsonl"), false},
+		{"link then up is the target's parent", throughLinkUp, filepath.Join(root, "other", "run.jsonl"), true},
+		{"names differing only in case", filepath.Join(root, "run.JSONL"), filepath.Join(root, "run.jsonl"), true},
+		{"another name", filepath.Join(root, "run.log"), filepath.Join(root, "run.jsonl"), false},
+		{"another directory", filepath.Join(nested, "run.jsonl"), filepath.Join(root, "run.jsonl"), false},
+	} {
+		if got := samePath(tc.a, tc.b); got != tc.want {
+			t.Errorf("%s: samePath(%s, %s) = %v, want %v", tc.name, tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// TestCreateLogFileFlushesTheDirectoryThatHoldsTheLog: a ".." after a
+// symbolic link climbs from the link's target, so link/../run.log is created
+// in the target's parent. The directory flushed must be that one, resolved
+// as spelled, not the link's parent that cleaning the path would name. The
+// link's parent is made unreadable, so flushing it fails while flushing the
+// log's own directory succeeds.
+func TestCreateLogFileFlushesTheDirectoryThatHoldsTheLog(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions and symbolic links differ on Windows")
+	}
+	root := t.TempDir()
+	nested := filepath.Join(root, "other", "nested")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatalf("make the link's target: %v", err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(nested, link); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	// Traversable but not readable: a path through root still resolves,
+	// but root itself cannot be opened to be flushed.
+	if err := os.Chmod(root, 0o300); err != nil {
+		t.Fatalf("make the link's parent unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
+	sep := string(filepath.Separator)
+	path := link + sep + ".." + sep + "run.log"
+
+	file, err := createLogFile(path)
+	if err != nil {
+		t.Fatalf("createLogFile(%s) = %v, want the log created and its own directory flushed", path, err)
+	}
+	_ = file.Close()
+	if _, err := os.Stat(filepath.Join(root, "other", "run.log")); err != nil {
+		t.Fatalf("the log is not in the link target's parent: %v", err)
 	}
 }
 

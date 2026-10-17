@@ -19,13 +19,28 @@ import (
 // CampaignExitedPayload's Reason grows — rather than minting a second one.
 const EngineStateEventType = "strategy.engine.state"
 
-// EngineStateSchemaVersion is the current schema version of
-// EngineStatePayload, for the Envelope's SchemaVersion field.
+// EngineStateSchemaVersion is schema version 1 of EngineStatePayload: the
+// state halted only, with no scope, meaning the whole engine. It is what the
+// Turtle reducer emits.
 const EngineStateSchemaVersion uint32 = 1
 
-// EngineStateHalted is the only State value today: the run must stop rather
-// than continue past the violation named in Reason.
+// EngineStateScopedVersion is schema version 2 of EngineStatePayload
+// (ADR 0019, amended 2026-09-24, "The schema change"): it adds the state
+// degraded and the scope naming the affected instruments, orders and cash
+// components. Version-1 records stay valid under the version-1 rules. A
+// degraded record with no scope is invalid: scope is never inferred from
+// absence.
+const EngineStateScopedVersion uint32 = 2
+
+// EngineStateHalted means the run must stop rather than continue past the
+// violation named in Reason; a halted record names no scope, since it covers
+// the whole engine.
 const EngineStateHalted = "halted"
+
+// EngineStateDegraded means the engine continues within the limits ADR 0019
+// (amended 2026-09-24) and ADR 0026 (point 4) set: no new risk, and the
+// instruments, orders and cash components its scope names are frozen.
+const EngineStateDegraded = "degraded"
 
 // The enumerated reasons the engine can halt. A closed set, not free text,
 // for the same reason every other Reason field in this package is: a
@@ -49,6 +64,11 @@ const (
 	// why the Campaign struct cannot be built without a valid stop in the
 	// first place.
 	EngineStateReasonCampaignWithoutProtectiveStop = "campaign-without-protective-stop"
+	// EngineStateReasonRiskLimitBreached means the target-weight risk gate
+	// refused an order for breaching a hard limit (ADR 0026, point 3): an
+	// order with no journalled decision halts, any other breach degrades.
+	// It is recorded at schema version 2 only.
+	EngineStateReasonRiskLimitBreached = "risk-limit-breached"
 )
 
 // EngineStatePayload records the engine halting because a capital-safety
@@ -68,20 +88,60 @@ type EngineStatePayload struct {
 	// rule ProposalDeclinedPayload.Detail and DrawdownStepAppliedPayload's
 	// figures follow).
 	Detail string `json:"detail"`
+	// The scope (schema version 2 only): what a degraded engine has frozen,
+	// each list strictly ascending. All three are omitted when empty, so a
+	// halted record encodes exactly as it did at version 1.
+	ScopeInstrumentIDs  []string `json:"scope_instrument_ids,omitempty"`
+	ScopeOrderIDs       []string `json:"scope_order_ids,omitempty"`
+	ScopeCashComponents []string `json:"scope_cash_components,omitempty"`
+}
+
+// ValidateSchema checks p under the rules of schemaVersion: version 1 knows
+// only halted with no scope, for campaign-without-protective-stop, the one
+// reason version-1 readers know; version 2 is Validate's rules, and carries
+// every later reason. Any other version is refused (ADR 0015).
+func (p EngineStatePayload) ValidateSchema(schemaVersion uint32) error {
+	switch schemaVersion {
+	case EngineStateSchemaVersion:
+		if p.State != EngineStateHalted || p.scoped() {
+			return fmt.Errorf("invalid engine state payload: schema version 1 records only %q with no scope", EngineStateHalted)
+		}
+		if p.Reason != EngineStateReasonCampaignWithoutProtectiveStop {
+			return fmt.Errorf("invalid engine state payload: schema version 1 records only the reason %q", EngineStateReasonCampaignWithoutProtectiveStop)
+		}
+	case EngineStateScopedVersion:
+	default:
+		return fmt.Errorf("invalid engine state payload: schema version %d is not recognised", schemaVersion)
+	}
+	return p.Validate()
+}
+
+func (p EngineStatePayload) scoped() bool {
+	return len(p.ScopeInstrumentIDs)+len(p.ScopeOrderIDs)+len(p.ScopeCashComponents) > 0
 }
 
 // Validate checks that State and Reason are each one of their enumerated
-// constants, and that Detail is present.
+// constants, that Detail is present, and that a degraded state names a scope
+// and a halted one does not.
 func (p EngineStatePayload) Validate() error {
 	var errs []error
 	switch p.State {
 	case EngineStateHalted:
-		// recognised
+		if p.scoped() {
+			errs = append(errs, errors.New("a halted state covers the whole engine and names no scope"))
+		}
+	case EngineStateDegraded:
+		if !p.scoped() {
+			errs = append(errs, errors.New("a degraded state names its scope: scope is never inferred from absence"))
+		}
 	default:
 		errs = append(errs, fmt.Errorf("state %q is not a recognised engine state", p.State))
 	}
+	errs = append(errs, ascendingIDs("scope instrument id", p.ScopeInstrumentIDs)...)
+	errs = append(errs, ascendingIDs("scope order id", p.ScopeOrderIDs)...)
+	errs = append(errs, ascendingIDs("scope cash component", p.ScopeCashComponents)...)
 	switch p.Reason {
-	case EngineStateReasonCampaignWithoutProtectiveStop:
+	case EngineStateReasonCampaignWithoutProtectiveStop, EngineStateReasonRiskLimitBreached:
 		// recognised
 	default:
 		errs = append(errs, fmt.Errorf("reason %q is not a recognised engine state reason", p.Reason))
