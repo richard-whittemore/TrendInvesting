@@ -232,8 +232,12 @@ holding minus every working or pending sell (including `cancel-pending` ones, wh
 holding − every working or pending sell − keep, is added; the quantity is the
 smallest of the three, never below zero and never more than the holding, and
 where net liquidation or the mark is not strictly positive, or the latest
-snapshot is unreadable, the sale is refused and withheld (`risk.sale.withheld`),
-the engine state unchanged and the attempt unspent.)* When the
+snapshot is older than the configured maximum age (`MaxSnapshotAge`, a field
+of the account configuration, point 6; reason `stale-snapshot`), the sale is
+refused and withheld (`risk.sale.withheld`), the engine state unchanged and
+the attempt unspent. An unreadable latest snapshot is the case where the
+broker's values cannot be read: the attempt is consumed (ADR 0019, reading
+4).)* When the
 instrument to sell is the one a Degraded account's discrepancy names, the
 sale is ADR 0019's one sale, sized and checked as that ADR states (amended
 2026-10-16).
@@ -281,7 +285,8 @@ run and is hashed by ADR 0016's derivation. It holds:
   months, so the day is never needed and never stored; owner decision
   2026-10-16),
   which lives only in server configuration (`plan.md` lines 109-110).
-- **Execution:** the D7 choice and its parameters; the D5 cash rule; the day-trading regime.
+- **Execution:** the D7 choice and its parameters; the D5 cash rule; the day-trading regime; `MaxSnapshotAge`, the age past which the latest broker
+  snapshot is stale and the sale back to 98% is withheld (ADR 0019, reading 1).
 - **Limits:** every value in point 3, and the Excess Liquidity thresholds of
   40%, 20% and 30 minutes.
 - **Identity:** the account, the mode, the adapter name `ibkr` (ADR 0025,
