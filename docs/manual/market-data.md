@@ -140,21 +140,23 @@ sessions, instead of refusing the stream, when its data is bad. No bar is
 written for those sessions and the session close does not name it.
 
 - A malformed bar (a missing or negative close or volume, a high below the
-  close) leaves out that one session's bar, and that session's universe
-  snapshot row when it has one. Nothing more is needed: the momentum rule
-  ranks a stock on its last 253 closes and leaves it out of any month's
-  ranking whose window is missing a session, and records why (ADR 0026,
-  point 5). So the stock is ranked again when its window is complete under
-  that rule, 253 sessions after the bad one.
+  close) leaves out that one session's bar. Only a close or volume that is
+  itself missing or negative also leaves out that session's universe
+  snapshot row; a bar whose high is below its close keeps its row. Nothing
+  more is needed: the momentum rule ranks a stock on its last 253 closes
+  and leaves it out of any month's ranking whose window is missing a
+  session, and records why (ADR 0026, point 5). So the stock is ranked
+  again when its window is complete under that rule, 253 sessions after the
+  bad one.
 - A split or dividend that cannot be adjusted exactly is not applied, so
-  the stock's adjusted prices jump at the ex-date. Its bars are left out
-  from the first session on or after the ex-date for 253 sessions, so no
-  253-close window of written bars spans the jump; it is written again at
-  that session plus 253, and the prices on each side of the jump have their
-  true returns. The momentum rule then waits for a full window of written
-  bars, so the stock is ranked again only about 253 sessions after that,
-  roughly two years in all. Whether that second wait is wanted is an open
-  question in the repository's issue tracker.
+  the stock's adjusted prices jump at the ex-date. Only the first session on
+  or after the ex-date is left out, as for a malformed bar, and the prices
+  on each side of the jump have their true returns. No complete 253-close
+  window spans the jump, because the ex-date session is missing from every
+  such window, so the momentum rule ranks the stock again once its window
+  lies wholly after the jump, 253 sessions after the ex-date. If that
+  session also holds a malformed bar, it is still one session left out and
+  both reasons are named.
 - A split or dividend with no readable date cannot be placed, so that stock
   is left out of every session.
 

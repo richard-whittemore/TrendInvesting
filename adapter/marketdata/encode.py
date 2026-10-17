@@ -81,11 +81,6 @@ SESSION_CLOSED = ("market.session.closed", 1)  # SessionClosedSchemaVersion
 
 ENGINES = ("momentum", "boost")
 
-# The momentum rule ranks a universe stock on its last 253 closes and leaves
-# out a stock missing any of them, for that ranking only (ADR 0026 point 5;
-# the 21/252/253-close lookbacks of its configuration, section 6).
-WINDOW = 253
-
 Identity = collections.namedtuple("Identity", "configuration_hash strategy_version run_id")
 
 
@@ -247,11 +242,13 @@ def _member_factors(ticker, loaded, days, actions, base):
     point 5). A split or dividend that cannot be adjusted exactly is not
     applied, so the price series jumps at its ex-date: the factors are still
     exact within each side (the levels differ by one constant, returns are
-    unchanged), and the WINDOW sessions from the first session on or after
-    the ex-date are left out, so no window of written bars spans the jump.
-    Only the action is dropped; that session's close is kept for the next
-    action. An action with no readable date cannot be placed, so every
-    session is bad."""
+    unchanged), and the first session on or after the ex-date is left out.
+    No complete 253-close window spans the jump, because the ex-date session
+    is missing from every such window (ADR 0026 point 5). When that session
+    already holds a malformed bar it is still one session, with both reasons
+    recorded. Only the action is dropped; that session's close is kept for
+    the next action. An action with no readable date cannot be placed, so
+    every session is bad."""
     bad, closes = {}, {}
     for s in loaded:
         if ticker in s.bars:
@@ -271,7 +268,8 @@ def _member_factors(ticker, loaded, days, actions, base):
             kept = ([r for r in splits if _event_day(r, "execution_date") != e.day],
                     [r for r in dividends if _event_day(r, "ex_dividend_date") != e.day])
             if kept != (splits, dividends):
-                bad.setdefault(next(d for d in days if d >= e.day), (str(e), WINDOW))
+                day = next(d for d in days if d >= e.day)
+                bad[day] = ("; ".join(filter(None, (bad.get(day, ("", 1))[0], str(e)))), 1)
                 splits, dividends = kept
             elif e.day in closes:   # a refused close: leave out that session only
                 bad.setdefault(e.day, (str(e), 1))
@@ -347,11 +345,11 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
       window is complete under that rule.
     - A split or dividend that cannot be adjusted exactly (CannotAdjust) is
       not applied, so the price series is discontinuous at its ex-date. The
-      ticker is left out of the WINDOW sessions from the first session on or
-      after the ex-date (B), so no window of written bars spans the jump,
-      and is written again at B + WINDOW. The momentum rule then extends the
-      ranking exclusion by another window, until its window holds WINDOW
-      written bars (an open question in the issue tracker).
+      ticker is left out of the first session on or after the ex-date only,
+      like a malformed bar. No complete 253-close window spans the jump,
+      because the ex-date session is missing from every such window, so the
+      momentum rule ranks the ticker again once its window lies wholly after
+      the jump (ADR 0026 point 5).
 
     Its bars before the bad session are written, so later bad data never
     changes an earlier session's bars. A universe snapshot row whose close

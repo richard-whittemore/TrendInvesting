@@ -236,10 +236,10 @@ ALL_SESSIONS = ["2026-11-23", "2026-11-24", "2026-11-25", "2026-11-27", "2026-11
 
 
 class UniverseMemberExclusionTest(unittest.TestCase):
-    """A universe member with bad data is left out of the sessions it reaches
-    (a bad bar: that session; an unadjustable action: from its ex-date): no
-    bar is written for those sessions, its other bars are, and the sessions
-    are named in ``excluded``; the other inputs are still written."""
+    """A universe member with bad data is left out of one session (a bad
+    bar: that session; an unadjustable action: the first session on or after
+    its ex-date): no bar is written for it, its other bars are, and the
+    session is named in ``excluded``; the other inputs are still written."""
 
     def encoded(self, spoil, **kw):
         excluded = {}
@@ -249,20 +249,19 @@ class UniverseMemberExclusionTest(unittest.TestCase):
             stream = run(d, **dict(dict(optional=[], universe_members=True, excluded=excluded), **kw))
         return stream, excluded
 
-    def assertLeftOutFrom(self, stream, ticker, day):
+    def assertLeftOutOf(self, stream, ticker, day):
         bars = [e["payload"]["period_end"][:10] for e in of(stream, "market.bar.completed")
                 if e["payload"]["instrument_id"] == ticker]
-        self.assertEqual(bars, [s for s in ALL_SESSIONS if s < day and (ticker, s) != ("DDD", "2026-11-24")])
+        self.assertEqual(bars, [s for s in ALL_SESSIONS if s != day and (ticker, s) != ("DDD", "2026-11-24")])
         self.assertEqual(sessions_with(stream, ticker), bars)
-        self.assertEqual(of(stream, "market.session.closed", "2026-11-30")[0]["payload"]["instrument_ids"],
-                         sorted({"AAA", "BBB", "CCC", "DDD", "IEF", "SPY"} - {ticker}))
+        self.assertNotIn(ticker, of(stream, "market.session.closed", day)[0]["payload"]["instrument_ids"])
 
-    def test_a_member_that_cannot_be_adjusted_is_left_out_from_the_ex_date_and_named(self):
+    def test_a_member_that_cannot_be_adjusted_is_left_out_of_the_ex_date_only_and_named(self):
         stream, excluded = self.encoded(unadjustable_ddd)
-        self.assertLeftOutFrom(stream, "DDD", "2026-11-25")
+        self.assertLeftOutOf(stream, "DDD", "2026-11-25")
         self.assertEqual(list(excluded), ["DDD"])
         [gone] = excluded["DDD"]
-        self.assertEqual((gone.first, gone.last), (D(2026, 11, 25), LAST))
+        self.assertEqual((gone.first, gone.last, gone.sessions), (D(2026, 11, 25), D(2026, 11, 25), 1))
         self.assertIn("no close on the session before ex-date 2026-11-25", gone.reason)
 
     def test_a_member_with_a_malformed_bar_is_left_out_of_that_session_only_and_named(self):
@@ -299,7 +298,7 @@ class UniverseMemberExclusionTest(unittest.TestCase):
             with self.subTest(field=field, value=value):
                 stream, excluded = self.encoded(
                     lambda d: rewrite(d, "universe", LAST.isoformat(), "AAA", **{field: value}))
-                self.assertLeftOutFrom(stream, "AAA", "2026-11-30")
+                self.assertLeftOutOf(stream, "AAA", "2026-11-30")
                 rows = of(stream, "market.universe.snapshot")[0]["payload"]["rows"]
                 self.assertEqual([r["instrument_id"] for r in rows], ["BBB", "CCC", "DDD"])
                 [gone] = excluded["AAA"]
@@ -313,9 +312,11 @@ class UniverseMemberExclusionTest(unittest.TestCase):
         self.assertEqual([(g.first, g.last) for g in excluded["AAA"]], [(LAST, LAST)])
 
     def test_the_universe_snapshot_still_lists_an_excluded_member_whose_row_is_good(self):
-        stream, _ = self.encoded(unadjustable_ddd)
+        stream, excluded = self.encoded(lambda d: rewrite(d, "universe", LAST.isoformat(), "AAA", h=1.0))
+        self.assertLeftOutOf(stream, "AAA", "2026-11-30")   # a high below the close: no bar, but the row stays
+        self.assertEqual([(g.first, g.last) for g in excluded["AAA"]], [(LAST, LAST)])
         rows = of(stream, "market.universe.snapshot")[0]["payload"]["rows"]
-        self.assertIn("DDD", [r["instrument_id"] for r in rows])
+        self.assertIn("AAA", [r["instrument_id"] for r in rows])
 
     def test_a_required_or_named_optional_instrument_is_still_refused(self):
         with tempfile.TemporaryDirectory() as d:
@@ -348,7 +349,7 @@ class UniverseMemberExclusionTest(unittest.TestCase):
                                    "--configuration-hash", "hash-1", "--strategy-version", "momentum/test",
                                    "--run-id", "run-1", "--stream", out])
             self.assertEqual(status, 0)
-            self.assertIn("excluded DDD from 2026-11-25 to 2026-11-30 (3 sessions): ", err.getvalue())
+            self.assertIn("excluded DDD from 2026-11-25 to 2026-11-25 (1 sessions): ", err.getvalue())
             self.assertEqual([json.loads(line) for line in Path(out).read_text().splitlines()],
                              run(d, optional=[], universe_members=True))
 
@@ -402,9 +403,10 @@ class ExclusionWindowTest(unittest.TestCase):
     is left out of that session only; the momentum rule's own window then
     keeps it out of every ranking that reaches the session (ADR 0026 point
     5). A member with a split or dividend that cannot be adjusted exactly
-    has a price series that jumps at the ex-date, so it is left out from the
-    ex-date for 253 sessions and written again at ex-date + 253: no written
-    window spans the jump."""
+    has a price series that jumps at the ex-date, so it is left out of the
+    first session on or after the ex-date only: that session is missing from
+    every 253-close window that spans the jump, so no such window is
+    complete."""
 
     def encoded(self, n, aaa, **actions):
         days = span_sessions(n)
@@ -431,12 +433,12 @@ class ExclusionWindowTest(unittest.TestCase):
                      {"id": "V2", "ticker": "AAA", "ex_dividend_date": days[2].isoformat(), "cash_amount": 0.5}]
         days, stream, excluded = self.encoded(256, lambda i: 20.0, dividends=dividends)
         [gone] = excluded["AAA"]
-        self.assertEqual((gone.first, gone.last, gone.sessions), (days[1], days[253], 253))
+        self.assertEqual((gone.first, gone.last, gone.sessions), (days[1], days[1], 1))
         self.assertIn("not below the prior close", gone.reason)
         iso = [day.isoformat() for day in days]
-        self.assertEqual(sessions_with(stream, "AAA"), [iso[0], iso[254], iso[255]])
+        self.assertEqual(sessions_with(stream, "AAA"), iso[:1] + iso[2:])
 
-    def test_a_dropped_split_leaves_exact_returns_on_each_side_and_no_window_spans_the_gap(self):
+    def test_a_dropped_split_leaves_out_the_ex_date_only_with_exact_returns_on_each_side(self):
         n, x = 300, 3
         days = span_sessions(n)
         raw = [(20.0 + i / 100) / (2 if i >= x else 1) for i in range(n)]
@@ -444,16 +446,51 @@ class ExclusionWindowTest(unittest.TestCase):
         days, stream, excluded = self.encoded(n, lambda i: raw[i],
                                               splits=[dict(split, id="S1"), dict(split, id="S2")])
         [gone] = excluded["AAA"]
-        self.assertEqual((gone.first, gone.last, gone.sessions), (days[x], days[x + 252], 253))
+        self.assertEqual((gone.first, gone.last, gone.sessions), (days[x], days[x], 1))
         self.assertIn("two splits", gone.reason)
         iso = [day.isoformat() for day in days]
-        before, after = list(range(x)), list(range(x + 253, n))
+        before, after = list(range(x)), list(range(x + 1, n))
+        self.assertTrue(before and after)
         self.assertEqual(sessions_with(stream, "AAA"), [iso[i] for i in before + after])
+        self.assertEqual([e for e in of(stream, "market.bar.completed", iso[x])
+                          if e["payload"]["instrument_id"] == "AAA"], [])   # in every window spanning the jump
         closes = {i: bar_of(stream, "AAA", iso[i])["adjusted"]["close"] for i in before + after}
         for side in (before, after):
             for i in side[1:]:
                 self.assertAlmostEqual(closes[i] / closes[side[0]], raw[i] / raw[side[0]], places=12)
-        self.assertGreater(after[0] - before[-1], encode.WINDOW)   # no 253-close window holds both sides
+
+    def test_a_bad_bar_before_an_ordinary_dividend_leaves_out_those_two_sessions_only(self):
+        days = span_sessions(30)
+
+        def aaa(i):
+            bar = row("AAA", 20.0)
+            if i == 9:
+                bar["h"] = 1.0   # high below close: no prior close for the dividend
+            return bar
+        dividend = {"id": "V1", "ticker": "AAA", "ex_dividend_date": days[10].isoformat(), "cash_amount": 0.1}
+        days, stream, excluded = self.encoded(30, aaa, dividends=[dividend])
+        self.assertEqual([(g.first, g.last, g.sessions) for g in excluded["AAA"]],
+                         [(days[9], days[9], 1), (days[10], days[10], 1)])
+        iso = [day.isoformat() for day in days]
+        self.assertEqual(sessions_with(stream, "AAA"), iso[:9] + iso[11:])
+
+    def test_a_dropped_action_on_a_bad_bars_session_records_both_reasons_for_that_one_session(self):
+        n, x = 30, 10
+        days = span_sessions(n)
+
+        def aaa(i):
+            bar = row("AAA", 20.0 if i < x else 10.0)
+            if i == x:
+                bar["h"] = 1.0   # high below close
+            return bar
+        split = {"ticker": "AAA", "execution_date": days[x].isoformat(), "split_from": 1, "split_to": 2}
+        days, stream, excluded = self.encoded(n, aaa, splits=[dict(split, id="S1"), dict(split, id="S2")])
+        [gone] = excluded["AAA"]
+        self.assertEqual((gone.first, gone.last, gone.sessions), (days[x], days[x], 1))
+        self.assertIn("inconsistent", gone.reason)
+        self.assertIn("two splits", gone.reason)
+        iso = [day.isoformat() for day in days]
+        self.assertEqual(sessions_with(stream, "AAA"), iso[:x] + iso[x + 1:])
 
 
 class BoostStreamTest(unittest.TestCase):
