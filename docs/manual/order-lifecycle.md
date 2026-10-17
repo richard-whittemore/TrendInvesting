@@ -46,14 +46,16 @@ no longer raised, and if you were already paged, a routine message says
 
 A report from IBKR that the engine refused acknowledges nothing, and gets
 its own urgent alert, "venue report … not read", once. That covers any report
-that cannot be read at all, at a version the run does not read or one that
-does not validate, whatever order it names: its client order ID in the alert
-may be empty, because the report was refused before the order it names was
-known, so check IBKR for every order around the time it was recorded. It also
-covers a report about an order the run released that the rule above does not
-count. Two kinds of report that can be read raise no alert: one about an
-order the run never released, which is reconciliation's to explain, and a
-fill in a Boost run, which does not read fills yet. The reporter's
+the run would read (an order status report in either run, a fill in a
+momentum run) that cannot be read at all, at a version the run does not read
+or one that does not validate, whatever order it names: its client order ID
+in the alert may be empty, because the report was refused before the order it
+names was known, so check IBKR for every order around the time it was
+recorded. It also covers a report about an order the run released that the
+rule above does not count. A report that can be read about an order the run
+never released raises no alert: it is reconciliation's to explain. A fill in
+a Boost run raises no alert, readable or not, because a Boost run does not
+read fills yet. The reporter's
 other alerts keep coming: one bad report in the log does not stop the
 reporter reading the rest of it.
 

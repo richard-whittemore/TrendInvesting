@@ -11,7 +11,7 @@ import json
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -20,8 +20,8 @@ if tests_dir not in sys.path:
     sys.path.insert(0, tests_dir)
 
 from orders import BrokerOrders
-from relay import (EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged, PendingInput, Relay,
-                   ResolveRefused, main, resolve)
+from relay import (EngineUnavailable, HandoverRecordInvalid, HandoverUnconfirmed, InputChanged, PendingInput,
+                   PendingInUse, Relay, ResendExpired, ResolveRefused, main, resolve)
 from sender import OrderRequest
 
 
@@ -120,9 +120,9 @@ class RelayTests(unittest.TestCase):
         self.pending = PendingInput(str(Path(self.dir.name) / "pending.json"))
         self.sent = []
 
-    def relay(self, connect, broker=holding(), reconnects=1, send=None, mapper=to_request):
+    def relay(self, connect, broker=holding(), reconnects=1, send=None, mapper=to_request, today=date(2026, 10, 16)):
         return Relay(connect=connect, send=send or self.sent.append, pending=self.pending, broker_orders=broker,
-                     to_request=mapper, reconnects=reconnects)
+                     to_request=mapper, reconnects=reconnects, today=lambda: today)
 
     def test_a_reply_lost_to_a_crash_is_asked_for_again_and_its_order_sent_once(self):
         log = {}
@@ -236,14 +236,20 @@ class RelayTests(unittest.TestCase):
         self.relay(connect).exchange(envelope(0))
         self.assertEqual(self.sent, [])
 
-    def stopped_mid_send(self, inp, decisions):
-        """The adapter stops after handing tw-1 over; IBKR then shows nothing, and the relay stops for a person."""
+    def stopped_mid_send(self, inp, decisions, crash_on="tw-1"):
+        """The adapter stops after handing crash_on over; IBKR then shows nothing, and the relay stops for a person.
+
+        Each relay is closed as its process ending would, releasing the pending file.
+        """
         log = {}
-        crashed = self.relay(Restarts(log, decisions), send=CrashingSender(self.sent, crash_on=["tw-1"]))
+        crashed = self.relay(Restarts(log, decisions), send=CrashingSender(self.sent, crash_on=[crash_on]))
         with self.assertRaises(ConnectionError):
             crashed.exchange(inp)
+        crashed.close()
+        restarted = self.relay(Restarts(log, decisions))
         with self.assertRaises(HandoverUnconfirmed):
-            self.relay(Restarts(log, decisions)).exchange(envelope(1))
+            restarted.exchange(envelope(1))
+        restarted.close()
         return log
 
     def test_a_handover_record_with_an_unknown_mark_stops_the_relay_and_sends_nothing(self):
@@ -266,10 +272,17 @@ class RelayTests(unittest.TestCase):
     def test_resolving_a_handover_as_sent_lets_the_relay_go_on_without_sending_it(self):
         decisions = {"session:0": [released("tw-1")]}
         log = self.stopped_mid_send(envelope(0), decisions)
+        before = datetime.now(timezone.utc).replace(microsecond=0)
         resolve(self.pending, "tw-1", "sent", "IBKR shows tw-1 cancelled unfilled", today=date(2026, 10, 16))
         self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
-        self.assertEqual(self.pending.decisions(), [{"client_order_id": "tw-1", "decision": "sent",
-                                                     "reason": "IBKR shows tw-1 cancelled unfilled"}])
+        [recorded] = self.pending.decisions()
+        at = recorded.pop("at")
+        self.assertEqual(recorded, {"client_order_id": "tw-1", "decision": "sent", "session_date": "2026-10-16",
+                                    "reason": "IBKR shows tw-1 cancelled unfilled"})
+        when = datetime.fromisoformat(at)
+        self.assertEqual(when.utcoffset(), timedelta(0), "the decision's time is kept in UTC")
+        self.assertEqual(when.microsecond, 0, "to the second")
+        self.assertTrue(before <= when <= datetime.now(timezone.utc))
 
         self.relay(Restarts(log, decisions)).exchange(envelope(1))
         self.assertEqual([r.client_order_id for r in self.sent], ["tw-1"], "a resolved hand-over is never sent again")
@@ -280,11 +293,95 @@ class RelayTests(unittest.TestCase):
         decisions = {"session:0": [released("tw-1")]}
         log = self.stopped_mid_send(inp, decisions)
         resolve(self.pending, "tw-1", "resend", "no trace in IBKR today", today=date(2026, 10, 16))
-        self.assertEqual(self.pending.handovers(), {})
+        self.assertEqual(self.pending.handovers(), {"tw-1": "resend:2026-10-16"}, "a resend permission, dated")
+        [recorded] = self.pending.decisions()
+        self.assertEqual((recorded["decision"], recorded["session_date"]), ("resend", "2026-10-16"))
 
         self.relay(Restarts(log, decisions)).exchange(envelope(1))
         sent = [(r.client_order_id, r.limit_price) for r in self.sent]
         self.assertEqual(sent, [("tw-1", Decimal("401.5"))] * 2, "resent once, at the original limit")
+
+    def test_a_resend_permission_expires_with_its_day_and_stops_for_another_check(self):
+        # Permission is given on the committed day; an adapter started on a
+        # later day must not act on it, since the order may have filled or
+        # been cancelled where that day's lists no longer show it.
+        inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z")
+        decisions = {"session:0": [released("tw-1")]}
+        log = self.stopped_mid_send(inp, decisions)
+        resolve(self.pending, "tw-1", "resend", "no trace in IBKR today", today=date(2026, 10, 16))
+
+        late = self.relay(Restarts(log, decisions), today=date(2026, 10, 17))
+        with self.assertRaises(ResendExpired) as raised:
+            late.exchange(envelope(1))
+        late.close()
+        self.assertIsInstance(raised.exception, HandoverUnconfirmed, "it stops the adapter as an unsettled hand-over")
+        self.assertIn("tw-1", str(raised.exception))
+        self.assertEqual([r.client_order_id for r in self.sent], ["tw-1"], "an expired permission sends nothing")
+        self.assertEqual(self.pending.handovers(), {"tw-1": "handing-over"}, "the order is unsettled again")
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "resend", "still no trace", today=date(2026, 10, 17))
+        resolve(self.pending, "tw-1", "sent", "IBKR history shows it cancelled on the 16th", today=date(2026, 10, 17))
+        self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
+
+    def test_an_order_marked_sent_cannot_be_resolved(self):
+        # A "sent" mark is written only once the sender returned: the relay's
+        # own proof the order was handed over, which no decision may undo.
+        inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z")
+        decisions = {"session:0": [released("tw-1"), released("tw-2")]}
+        log = self.stopped_mid_send(inp, decisions, crash_on="tw-2")
+        self.assertEqual(self.pending.handovers(), {"tw-1": "sent", "tw-2": "handing-over"})
+        for decision in ("resend", "sent"):
+            with self.assertRaises(ResolveRefused) as raised:
+                resolve(self.pending, "tw-1", decision, "mistyped ID", today=date(2026, 10, 16))
+            self.assertIn("sent", str(raised.exception))
+        self.assertEqual(self.pending.handovers(), {"tw-1": "sent", "tw-2": "handing-over"})
+        self.assertEqual(self.pending.decisions(), [])
+
+        with self.assertRaises(HandoverUnconfirmed):
+            self.relay(Restarts(log, decisions)).exchange(envelope(1))
+        self.assertEqual([r.client_order_id for r in self.sent], ["tw-1", "tw-2"], "nothing is sent again")
+
+    def test_resolve_is_refused_while_an_adapter_holds_the_pending_file(self):
+        inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z")
+        decisions = {"session:0": [released("tw-1")]}
+        log = self.stopped_mid_send(inp, decisions)
+        running = self.relay(Restarts(log, decisions))
+        for decision in ("sent", "resend"):
+            with self.assertRaises(ResolveRefused) as raised:
+                resolve(PendingInput(self.pending.path), "tw-1", decision, "IBKR shows nothing",
+                        today=date(2026, 10, 16))
+            self.assertIn("stop it first", str(raised.exception))
+        self.assertEqual(self.pending.handovers(), {"tw-1": "handing-over"})
+        self.assertEqual(self.pending.decisions(), [])
+
+        running.close()
+        resolve(PendingInput(self.pending.path), "tw-1", "sent", "IBKR shows it filled", today=date(2026, 10, 16))
+        self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
+
+    def test_an_adapter_cannot_start_while_resolve_or_another_adapter_holds_the_pending_file(self):
+        decisions = {"session:0": [released("tw-1")]}
+        log = self.stopped_mid_send(envelope(0), decisions)
+        blocked = []
+        other = PendingInput(self.pending.path)
+        record = other.record_decision
+
+        def record_while_starting_an_adapter(decision):
+            try:
+                Relay(connect=Restarts(log, decisions), send=self.sent.append, pending=PendingInput(other.path),
+                      broker_orders=holding(), to_request=to_request)
+            except PendingInUse as err:
+                blocked.append(err)
+            record(decision)
+
+        other.record_decision = record_while_starting_an_adapter
+        resolve(other, "tw-1", "sent", "IBKR shows it filled", today=date(2026, 10, 16))
+        self.assertEqual(len(blocked), 1, "an adapter cannot start while resolve edits the record")
+
+        first = self.relay(Restarts(log, decisions))
+        with self.assertRaises(PendingInUse):
+            Relay(connect=Restarts(log, decisions), send=self.sent.append, pending=PendingInput(self.pending.path),
+                  broker_orders=holding(), to_request=to_request)
+        first.close()
 
     def test_a_resend_is_refused_unless_the_order_was_committed_in_todays_session(self):
         for inp in (dict(envelope(0), event_time="2026-10-15T20:00:00Z"), envelope(0),
