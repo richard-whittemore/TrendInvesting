@@ -155,7 +155,9 @@ func TestWithoutABrokerSnapshotASellIsExemptWithinTheAccountHolding(t *testing.T
 	if o.Released.Figures.RiskReducing || o.Released.Figures.BrokerSet {
 		t.Errorf("figures: %+v", o.Released.Figures)
 	}
-	refusedFor(t, check(t, g, order(event.OrderSideSell, 5001, 5000))[0], event.RefusedOrderSize)
+	// Beyond the holding it is not exempt, and the book's holding refuses it
+	// before the size is reached.
+	refusedFor(t, check(t, g, order(event.OrderSideSell, 5001, 5000))[0], event.RefusedSellExceedsHolding)
 }
 
 func TestDegradedSellsElsewhereAreSizedFromTheBroker(t *testing.T) {
@@ -186,12 +188,7 @@ func TestDegradedSellsElsewhereAreSizedFromTheBroker(t *testing.T) {
 }
 
 func TestKillSwitchRefusesEveryRoutineOrderAndLeavesTheState(t *testing.T) {
-	for _, kind := range []string{risklimit.KindMargin, risklimit.KindIRA} {
-		g, err := risklimit.NewAccountGate(kind, "joint", limits(), event.TradingModeDryRun)
-		if err != nil {
-			t.Fatal(err)
-		}
-		g.RecordDecision(tag)
+	for kind, g := range map[string]*risklimit.Gate{"margin": gate(t, limits(), event.TradingModeDryRun), "ira": iraGate(t, 0)} {
 		observe(t, g, "broker:1", broker(9800))
 		kill(t, g, "kill:1", true)
 		for _, o := range []risklimit.Order{order(event.OrderSideBuy, 1, 9800), order(event.OrderSideSell, 1, 9800)} {
@@ -207,11 +204,7 @@ func TestKillSwitchRefusesEveryRoutineOrderAndLeavesTheState(t *testing.T) {
 }
 
 func TestKillSwitchRefusesARoutineIRASellAndPassesTheSaleBackTo98(t *testing.T) {
-	ira, err := risklimit.NewAccountGate(risklimit.KindIRA, "joint", limits(), event.TradingModeDryRun)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ira.RecordDecision(tag)
+	ira := iraGate(t, 0)
 	observe(t, ira, "broker:1", boosted())
 	kill(t, ira, "kill:1", true)
 	refusedFor(t, check(t, ira, order(event.OrderSideSell, 10, 147))[0], event.RefusedKillSwitch)
@@ -305,11 +298,7 @@ func TestHaltedSendsOnlyTheSaleOncePerIncident(t *testing.T) {
 		t.Error("the account stays Halted until recovery")
 	}
 
-	ira, err := risklimit.NewAccountGate(risklimit.KindIRA, "joint", limits(), event.TradingModeDryRun)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ira.RecordDecision(tag)
+	ira := iraGate(t, 0)
 	halt(t, ira)
 	observe(t, ira, "broker:1", boosted())
 	if _, ok := requestSale(t, ira, event.SaleTriggerExit); ok {
@@ -491,10 +480,7 @@ func TestNoReadingForThirtyMinutesWhileOpenIsUrgent(t *testing.T) {
 		t.Error("no net liquidation, no ratio")
 	}
 	// An IRA has no margin alarm.
-	ira, err := risklimit.NewAccountGate(risklimit.KindIRA, "joint", limits(), event.TradingModeDryRun)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ira := iraGate(t, 0)
 	if obs := observe(t, ira, "broker:0", blind(0, true)); obs.Alarm != nil {
 		t.Errorf("IRA alarm: %+v", obs.Alarm)
 	}
@@ -556,8 +542,15 @@ func TestBrokerAndKillSwitchInputsAreChecked(t *testing.T) {
 	if err := g.SetKillSwitch("", event.KillSwitchPayload{AccountID: "joint", AsOf: at, Engaged: true, Operator: "o", Detail: "d"}); err == nil {
 		t.Error("a switch without its ID accepted")
 	}
-	if _, err := risklimit.NewAccountGate("cash", "joint", limits(), event.TradingModeDryRun); err == nil {
-		t.Error("an unknown account kind accepted")
+	noCushion := limits()
+	noCushion.ExcessLiquidityWarning, noCushion.ExcessLiquidityUrgent, noCushion.ExcessLiquidityStaleMinutes = 0, 0, 0
+	if _, err := risklimit.NewGate("joint", noCushion, event.TradingModeDryRun); err == nil || !strings.Contains(err.Error(), "excess liquidity") {
+		t.Errorf("a margin gate without the alarm's thresholds: %v", err)
+	}
+	cushioned := iraLimits()
+	cushioned.ExcessLiquidityWarning, cushioned.ExcessLiquidityUrgent, cushioned.ExcessLiquidityStaleMinutes = 0.4, 0.2, 30
+	if _, err := risklimit.NewIRAGate("joint", cushioned, event.TradingModeDryRun, 0); err == nil || !strings.Contains(err.Error(), "no margin cushion") {
+		t.Errorf("an IRA gate with a margin cushion: %v", err)
 	}
 	if _, _, err := g.Sale("whim", "SPY", 0.98, 0.05); err == nil {
 		t.Error("an unknown trigger accepted")

@@ -108,14 +108,22 @@ Both carry the same figures as the text table.
 ### How `positions` and `reconcile` work
 
 An account's first snapshot is its starting point (its baseline). Each fill
-then moves the position: entries and adds buy, stops and exits sell. At every
+then moves the position: entries, adds and buys buy; stops, exits and sells
+sell. A Turtle fill's `kind` is entry, add, stop or exit; a target-weight
+(Boost or momentum IRA) fill's `kind` is its side, buy or sell. At every
 later snapshot the tool compares the position the fills imply with the one
 the snapshot reports, instrument by instrument, and lists every comparison,
 not only the failures. After a comparison the snapshot becomes the new
 starting point, so one mismatch is reported once and not repeated.
 
-Fills do not name an account. They are counted toward the journal's account
-when the journal names exactly one.
+Turtle fills do not name an account. They are counted toward the journal's
+account when the journal's records name exactly one account, counting every
+record that names one (a target-weight fill included). Target-weight fills
+name their own account.
+
+For a target-weight account's limit orders, an `orders` lifecycle row shows
+the order's side, its limit price and, in `note`, its client order id; a
+Turtle stop order's row shows its stop price and its tag.
 
 ## What can go wrong, and what the tool does
 
@@ -152,8 +160,14 @@ when the journal names exactly one.
   with different content is refused, naming both records.
 - **A record from a newer or older build** (a schema version this build does
   not read, including a newer account snapshot). Refused, naming the record; the
-  tool never guesses at a figure. Only the equity-and-cash snapshot (version 2),
-  which holds no positions, is passed over by design.
+  tool never guesses at a figure. It reads fills of versions 4 (Turtle) and 5
+  (target-weight), order lifecycle changes of versions 1 (Turtle stop orders)
+  and 2 (target-weight limit orders), planned orders of versions 1 and 2 (2 is a
+  sale back to 98%), risk-gate releases and refusals of versions 1, 2 and 3
+  (3 adds the broker figures and the kill-switch, broker-holding and
+  sale-attempted reasons), and account snapshots of versions 3 (positions) and 4
+  (positions and cash; the cash is not reported). Only the equity-and-cash
+  snapshot (version 2), which holds no positions, is passed over by design.
 - **A bad flag** (a malformed date, a backwards range, an unknown format or
   report). Refused before any file is read.
 

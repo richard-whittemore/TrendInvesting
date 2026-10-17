@@ -47,17 +47,6 @@ func restartAt17(t *testing.T, full run, opts options) run {
 	return simulate(t, opts)
 }
 
-func released(t *testing.T, es []event.Envelope) []event.OrderReleasedPayload {
-	t.Helper()
-	var out []event.OrderReleasedPayload
-	for _, e := range ofType(es, event.OrderReleasedEventType) {
-		var p event.OrderReleasedPayload
-		decode(t, e, &p)
-		out = append(out, p)
-	}
-	return out
-}
-
 func sales(t *testing.T, es []event.Envelope) []event.OrderPlannedPayload {
 	t.Helper()
 	var out []event.OrderPlannedPayload

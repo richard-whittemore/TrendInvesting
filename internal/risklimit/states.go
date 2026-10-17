@@ -118,7 +118,7 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 		return Observation{}, fmt.Errorf("risklimit: broker snapshot as of %s does not follow the last, %s", s.AsOf, g.broker.AsOf)
 	}
 	g.broker, g.brokerID = &s, id
-	if g.kind != KindMargin {
+	if g.ira {
 		return Observation{}, nil
 	}
 	alarm := event.MarginAlarmPayload{
@@ -190,7 +190,7 @@ func (g *Gate) Sale(trigger, instrumentID string, target, band float64) (orderpl
 	if trigger != event.SaleTriggerExit && trigger != event.SaleTriggerMarginUrgent {
 		return orderplan.Sale{}, false, fmt.Errorf("risklimit: sale trigger %q is not exit or margin-urgent", trigger)
 	}
-	if g.kind != KindMargin {
+	if g.ira {
 		return orderplan.Sale{}, false, nil
 	}
 	var tag, kind string
@@ -204,7 +204,7 @@ func (g *Gate) Sale(trigger, instrumentID string, target, band float64) (orderpl
 	default:
 		return orderplan.Sale{}, false, nil
 	}
-	if g.attempted[orderplan.SaleClientOrderID(tag, instrumentID)] {
+	if g.saleAttempted(tag, instrumentID) {
 		return orderplan.Sale{}, false, nil
 	}
 	sale, err := orderplan.PlanSale(orderplan.SaleInput{
@@ -222,4 +222,15 @@ func (g *Gate) Sale(trigger, instrumentID string, target, band float64) (orderpl
 		g.attempted[sale.Withheld.ClientOrderID] = true
 	}
 	return sale, true, nil
+}
+
+// saleAttempted reports whether the sale for tag and instrumentID was already
+// attempted: planned, or withheld for a person (ADR 0019, amended 2026-10-15:
+// the sale is attempted once and never retried automatically). It knows this
+// run's attempts only. A fresh run after a restart learns an incident's
+// earlier attempt from the owner's run approval (ADR 0027's restart model);
+// that per-incident ledger is consulted here, and its attempted client order
+// ID marked attempted but not pending, once the approval reaches the gate.
+func (g *Gate) saleAttempted(tag, instrumentID string) bool {
+	return g.attempted[orderplan.SaleClientOrderID(tag, instrumentID)]
 }

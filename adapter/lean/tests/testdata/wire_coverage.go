@@ -133,6 +133,8 @@ var notYetCrossed = map[string]string{
 	"account.broker.snapshot":              "sent by the IBKR adapter (ADR 0025), never by LEAN",
 	"risk.margin.alarm":                    "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 	"risk.sale.withheld":                   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	"market.universe.snapshot":             "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
+	"market.session.calendar":              "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
 }
 
 func main() {

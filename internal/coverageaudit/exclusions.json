@@ -904,7 +904,7 @@
       "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
       "occurrence": 3,
       "category": "unreachable-by-construction",
-      "reason": "risklimit.NewGate refuses only an empty account, invalid limits or an unknown mode; TargetWeightConfigurationPayload.Validate, called above, refuses all three with the same MarginLimits rules."
+      "reason": "risklimit.NewGate refuses only an empty account, invalid limits, limits without the margin-cushion thresholds or an unknown mode; TargetWeightConfigurationPayload.Validate, called above, refuses all four for a boost configuration with the same MarginLimits rules."
     },
     {
       "file": "internal/targetweight/handler.go",
@@ -919,6 +919,13 @@
       "statement": "return event.Envelope{}, fmt.Errorf(\"targetweight: %w\", err)",
       "category": "unreachable-by-construction",
       "reason": "validated-payload-json (docs/development.md), pinned by event.TestValidatedPayloadsMarshal; the payload passed Validate immediately before json.Marshal."
+    },
+    {
+      "file": "internal/targetweight/momentum_run.go",
+      "function": "newMomentum",
+      "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
+      "category": "unreachable-by-construction",
+      "reason": "risklimit.NewIRAGate refuses only an empty account, invalid limits, an unknown mode, a max exposure above 1, margin-cushion thresholds or a negative or non-finite fee allowance; New calls TargetWeightConfigurationPayload.Validate first, which refuses each of those for a momentum configuration (TestMomentumConfigurationValidate, TestOnlyAMarginAccountHasACushion)."
     }
   ]
 }

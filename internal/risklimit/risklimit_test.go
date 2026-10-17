@@ -40,9 +40,27 @@ func order(side string, quantity, held int64) risklimit.Order {
 	}
 }
 
+// bookOf is the book the orders were planned against: each order's held
+// quantity of its instrument at its reference price, and nothing else held.
+func bookOf(plan ...risklimit.Order) risklimit.Book {
+	book := risklimit.Book{Holdings: map[string]int64{}, Prices: map[string]float64{}}
+	for _, o := range plan {
+		if o.Planned.HeldQuantity != 0 {
+			book.Holdings[o.Planned.InstrumentID] = o.Planned.HeldQuantity
+			book.Prices[o.Planned.InstrumentID] = o.Planned.ReferencePrice
+		}
+	}
+	return book
+}
+
+// holding is a book holding n of id at price 1, and nothing else.
+func holding(id string, n int64) risklimit.Book {
+	return risklimit.Book{Holdings: map[string]int64{id: n}, Prices: map[string]float64{id: 1}}
+}
+
 func check(t *testing.T, g *risklimit.Gate, plan ...risklimit.Order) []risklimit.Outcome {
 	t.Helper()
-	outcomes, err := g.Check(plan)
+	outcomes, err := g.Check(bookOf(plan...), plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,8 +138,12 @@ func TestMaxOrderSizeAtBelowAndAbove(t *testing.T) {
 	released(t, check(t, gate(t, limits(), event.TradingModeDryRun), order(event.OrderSideBuy, 4999, 0))[0])
 	released(t, check(t, gate(t, limits(), event.TradingModeDryRun), order(event.OrderSideBuy, 5000, 0))[0])
 	refusedFor(t, check(t, gate(t, limits(), event.TradingModeDryRun), order(event.OrderSideBuy, 5001, 0))[0], event.RefusedOrderSize)
-	// A sell beyond the holding is not risk-reducing, so the size limit applies.
-	refusedFor(t, check(t, gate(t, limits(), event.TradingModeDryRun), order(event.OrderSideSell, 5001, 100))[0], event.RefusedOrderSize)
+	// A sell beyond the holding it was sized from is not risk-reducing, so the
+	// size limit applies; the book holds more, so it is not refused first for
+	// exceeding the book's holding.
+	beyond := order(event.OrderSideSell, 5001, 100)
+	refusedFor(t, checkBook(t, gate(t, limits(), event.TradingModeDryRun), holding("SPY", 10000), beyond)[0], event.RefusedOrderSize)
+	refusedFor(t, check(t, gate(t, limits(), event.TradingModeDryRun), beyond)[0], event.RefusedSellExceedsHolding)
 }
 
 func TestMaxOrderCountAtBelowAndAbove(t *testing.T) {
@@ -141,11 +163,15 @@ func TestMaxOrderCountAtBelowAndAbove(t *testing.T) {
 	for _, o := range check(t, gate(t, l, event.TradingModeDryRun), sell, buy) {
 		released(t, o)
 	}
-	// A sell beyond its holding is counted; over the count, the plan's buys
-	// are refused and its sells are checked as usual.
+	// A sell beyond the holding it was sized from is counted; over the count,
+	// the plan's buys are refused and its sells are checked as usual. The
+	// book holds more, so the sell is within the book's holding and released.
 	short := sell
 	short.Planned.Quantity = 101
-	outcomes := check(t, gate(t, l, event.TradingModeDryRun), short, buy)
+	book := holding("IEF", 1000)
+	book.Holdings["SPY"], book.Prices["SPY"] = 100, 1
+	outcomes := checkBook(t, gate(t, l, event.TradingModeDryRun), book, short, buy)
+	released(t, outcomes[0])
 	refusedFor(t, outcomes[1], event.RefusedOrderCount)
 	if outcomes[1].Refused.Figures.OrdersInDecision != 2 {
 		t.Errorf("figures: %+v", outcomes[1].Refused.Figures)
@@ -293,7 +319,9 @@ func TestDryRunReleasesWithoutSending(t *testing.T) {
 }
 
 func TestGateRefusesBadConstructionAndInput(t *testing.T) {
-	if _, err := risklimit.NewGate("joint", event.MarginLimits{}, event.TradingModeDryRun); err == nil {
+	invalid := limits()
+	invalid.MaxExposure = 0
+	if _, err := risklimit.NewGate("joint", invalid, event.TradingModeDryRun); err == nil {
 		t.Error("invalid limits accepted")
 	}
 	if _, err := risklimit.NewGate("joint", limits(), "yolo"); err == nil {
@@ -304,22 +332,22 @@ func TestGateRefusesBadConstructionAndInput(t *testing.T) {
 	}
 	g := gate(t, limits(), event.TradingModeDryRun)
 	bad := order(event.OrderSideBuy, 0, 0)
-	if _, err := g.Check([]risklimit.Order{bad}); err == nil {
+	if _, err := g.Check(risklimit.Book{}, []risklimit.Order{bad}); err == nil {
 		t.Error("an invalid planned order must be an error, not a refusal")
 	}
 	wrongAccount := order(event.OrderSideBuy, 1, 0)
 	wrongAccount.Planned.AccountID = "ira"
-	if _, err := g.Check([]risklimit.Order{wrongAccount}); err == nil {
+	if _, err := g.Check(risklimit.Book{}, []risklimit.Order{wrongAccount}); err == nil {
 		t.Error("another account's order must be an error")
 	}
 	noPlan := order(event.OrderSideBuy, 1, 0)
 	noPlan.PlanID = ""
-	if _, err := g.Check([]risklimit.Order{noPlan}); err == nil {
+	if _, err := g.Check(risklimit.Book{}, []risklimit.Order{noPlan}); err == nil {
 		t.Error("an order without its plan ID must be an error")
 	}
 	badMark := order(event.OrderSideBuy, 1, 0)
 	badMark.Mark = -1
-	if _, err := g.Check([]risklimit.Order{badMark}); err == nil {
+	if _, err := g.Check(risklimit.Book{}, []risklimit.Order{badMark}); err == nil {
 		t.Error("a negative recorded mark must be an error")
 	}
 	if g.State() != risklimit.StateNormal {
@@ -376,13 +404,15 @@ func TestOnlyARiskReducingOrderIsExempt(t *testing.T) {
 	buy := order(event.OrderSideBuy, 10, 9800)
 	buy.Mark, buy.MarkSet = 0, false
 	refusedFor(t, check(t, gate(t, l, event.TradingModeDryRun), buy)[0], event.RefusedMissingMark)
+	// The book holds more than each sell was sized from, so neither is
+	// refused first for exceeding the book's holding.
 	beyond := order(event.OrderSideSell, 101, 100)
 	beyond.Mark, beyond.MarkSet = 0, false
-	refusedFor(t, check(t, gate(t, l, event.TradingModeDryRun), beyond)[0], event.RefusedMissingMark)
+	refusedFor(t, checkBook(t, gate(t, l, event.TradingModeDryRun), holding("SPY", 10000), beyond)[0], event.RefusedMissingMark)
 	beyond.Mark, beyond.MarkSet = 1.2, true
-	refusedFor(t, check(t, gate(t, l, event.TradingModeDryRun), beyond)[0], event.RefusedPriceBand)
+	refusedFor(t, checkBook(t, gate(t, l, event.TradingModeDryRun), holding("SPY", 10000), beyond)[0], event.RefusedPriceBand)
 	big := order(event.OrderSideSell, 4001, 4000)
-	refusedFor(t, check(t, gate(t, l, event.TradingModeDryRun), big)[0], event.RefusedOrderSize)
+	refusedFor(t, checkBook(t, gate(t, l, event.TradingModeDryRun), holding("SPY", 10000), big)[0], event.RefusedOrderSize)
 }
 
 // TestTheNamedInstrumentStaysFrozen: while Degraded, "named instruments are

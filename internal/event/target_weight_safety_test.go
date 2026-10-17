@@ -274,12 +274,15 @@ func TestExcessLiquidityLimits(t *testing.T) {
 	expectInvalid(t, "stale", v, func(p *P) { p.Limits.ExcessLiquidityStaleMinutes = 0 }, "stale")
 }
 
-// TestSafetyFieldsJoinAtVersionTwo: a sale's figures join
-// strategy.order.planned, and the risk figures' broker fields and the three
-// safety refusal reasons join risk.order.released and risk.order.refused, at
-// version 2. Version 1 keeps its meaning and refuses them, so a version-1
-// record is never read as carrying them (ADR 0015).
-func TestSafetyFieldsJoinAtVersionTwo(t *testing.T) {
+// TestSafetyFieldsJoinAtTheirVersions: a sale's figures join
+// strategy.order.planned at version 2. The risk figures' broker fields and
+// the three safety refusal reasons join risk.order.released and
+// risk.order.refused at version 3, after version 2's account-wide exposure,
+// IRA cash figures and IRA refusal reasons. A writer journals each payload at
+// the lowest version that holds it, never below the current base, and an
+// earlier version keeps its meaning and refuses a later version's field, so a
+// record is never read as carrying what its version cannot hold (ADR 0015).
+func TestSafetyFieldsJoinAtTheirVersions(t *testing.T) {
 	type versioned interface {
 		SchemaVersion() uint32
 		ValidateSchema(uint32) error
@@ -288,39 +291,54 @@ func TestSafetyFieldsJoinAtVersionTwo(t *testing.T) {
 	withBroker.BrokerSet, withBroker.BrokerHolding, withBroker.WorkingSells, withBroker.RiskReducing = true, 147, 10, true
 	brokerReleased := validOrderReleased()
 	brokerReleased.Figures = withBroker
+	cashReleased := validOrderReleased()
+	cashReleased.Figures.CashChecked, cashReleased.Figures.BuyCost, cashReleased.Figures.CashAvailable = true, 900, 980
 	brokerRefused := validOrderRefused()
 	brokerRefused.Figures = withBroker
 	killRefused := validOrderRefused()
 	killRefused.Reason = event.RefusedKillSwitch
+	sellRefused := validOrderRefused()
+	sellRefused.Reason = event.RefusedSellExceedsHolding
 	for name, c := range map[string]struct {
-		p    versioned
-		want uint32
+		p      versioned
+		want   uint32 // the version a writer journals it at
+		oldest uint32 // the earliest version that holds it
+		latest uint32 // the latest version of its type
 	}{
-		"ordinary order":           {validOrderPlanned(), event.OrderPlannedSchemaVersion},
-		"sale":                     {validSaleOrder(), event.OrderPlannedSafetyVersion},
-		"release without a broker": {validOrderReleased(), event.OrderReleasedSchemaVersion},
-		"release with a broker":    {brokerReleased, event.OrderReleasedSafetyVersion},
-		"refusal without a broker": {validOrderRefused(), event.OrderRefusedSchemaVersion},
-		"refusal with a broker":    {brokerRefused, event.OrderRefusedSafetyVersion},
-		"kill-switch refusal":      {killRefused, event.OrderRefusedSafetyVersion},
+		"ordinary order":           {validOrderPlanned(), event.OrderPlannedSchemaVersion, 1, 2},
+		"sale":                     {validSaleOrder(), event.OrderPlannedSafetyVersion, 2, 2},
+		"release without a broker": {validOrderReleased(), event.OrderReleasedSchemaVersion, 1, 3},
+		"release with IRA cash":    {cashReleased, event.OrderReleasedSchemaVersion, 2, 3},
+		"release with a broker":    {brokerReleased, event.OrderReleasedSafetyVersion, 3, 3},
+		"refusal without a broker": {validOrderRefused(), event.OrderRefusedSchemaVersion, 1, 3},
+		"IRA refusal":              {validIRARefused(), event.OrderRefusedSchemaVersion, 2, 3},
+		"sell-exceeds-holding":     {sellRefused, event.OrderRefusedSchemaVersion, 2, 3},
+		"refusal with a broker":    {brokerRefused, event.OrderRefusedSafetyVersion, 3, 3},
+		"kill-switch refusal":      {killRefused, event.OrderRefusedSafetyVersion, 3, 3},
 	} {
 		if got := c.p.SchemaVersion(); got != c.want {
 			t.Errorf("%s: version %d, want %d", name, got, c.want)
 		}
-		if err := c.p.ValidateSchema(c.want); err != nil {
-			t.Errorf("%s at its version: %v", name, err)
-		}
-		if err := c.p.ValidateSchema(2); err != nil {
-			t.Errorf("%s: version 2 reads every version-1 record's fields: %v", name, err)
-		}
-		if err := c.p.ValidateSchema(3); err == nil {
-			t.Errorf("%s: an unknown version accepted", name)
-		}
-		if c.want == 2 {
-			if err := c.p.ValidateSchema(1); err == nil {
-				t.Errorf("%s: version 1 accepted a version-2 field", name)
+		for v := uint32(1); v <= c.latest; v++ {
+			err := c.p.ValidateSchema(v)
+			if v >= c.oldest && err != nil {
+				t.Errorf("%s at version %d: %v", name, v, err)
+			}
+			if v < c.oldest && err == nil {
+				t.Errorf("%s: version %d accepted a field of version %d", name, v, c.oldest)
 			}
 		}
+		if err := c.p.ValidateSchema(c.latest + 1); err == nil {
+			t.Errorf("%s: an unknown version accepted", name)
+		}
+		if err := c.p.ValidateSchema(0); err == nil {
+			t.Errorf("%s: version 0 accepted", name)
+		}
+	}
+	if event.OrderReleasedSchemaVersion != 2 || event.OrderReleasedSafetyVersion != 3 ||
+		event.OrderRefusedSchemaVersion != 2 || event.OrderRefusedSafetyVersion != 3 ||
+		event.OrderPlannedSchemaVersion != 1 || event.OrderPlannedSafetyVersion != 2 {
+		t.Error("the released and refused versions are 2 and 3, the planned versions 1 and 2")
 	}
 	for name, p := range map[string]versioned{
 		"planned":  event.OrderPlannedPayload{},
@@ -330,5 +348,32 @@ func TestSafetyFieldsJoinAtVersionTwo(t *testing.T) {
 		if err := p.ValidateSchema(2); err == nil {
 			t.Errorf("an invalid %s payload accepted at version 2", name)
 		}
+	}
+}
+
+// TestOnlyAMarginAccountHasACushion: the Excess Liquidity thresholds are
+// required for Boost's margin account and absent for an IRA, which has no
+// margin cushion to watch (ADR 0026, point 6; plan.md section 5).
+func TestOnlyAMarginAccountHasACushion(t *testing.T) {
+	type P = event.TargetWeightConfigurationPayload
+	boost := validTargetWeightConfiguration()
+	expectInvalid(t, "boost without thresholds", boost, func(p *P) {
+		p.Limits.ExcessLiquidityWarning, p.Limits.ExcessLiquidityUrgent, p.Limits.ExcessLiquidityStaleMinutes = 0, 0, 0
+	}, "excess liquidity")
+	ira := validMomentumConfiguration()
+	expectInvalid(t, "IRA with thresholds", ira, func(p *P) {
+		p.Limits.ExcessLiquidityWarning, p.Limits.ExcessLiquidityUrgent, p.Limits.ExcessLiquidityStaleMinutes = 0.4, 0.2, 30
+	}, "no margin cushion")
+	expectInvalid(t, "IRA with stale minutes only", ira, func(p *P) { p.Limits.ExcessLiquidityStaleMinutes = 30 }, "no margin cushion")
+	if err := ira.Limits.Validate(); err != nil {
+		t.Errorf("an IRA's limits without thresholds: %v", err)
+	}
+	half := ira.Limits
+	half.ExcessLiquidityUrgent = 0.2
+	if err := half.Validate(); err == nil {
+		t.Error("limits with some thresholds and not others accepted")
+	}
+	if err := boost.Limits.Validate(); err != nil {
+		t.Errorf("a margin account's limits: %v", err)
 	}
 }

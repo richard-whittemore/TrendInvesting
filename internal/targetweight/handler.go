@@ -3,8 +3,9 @@
 // completed bars, the account snapshot and its configuration, and hands each
 // decision to the strategy-independent order planner (internal/orderplan) and
 // the hard-limit gate (internal/risklimit). It shares no state with the
-// Turtle reducer in internal/strategy (AGENTS.md rule 4). Only Boost, for the
-// joint margin account, is decided here.
+// Turtle reducer in internal/strategy (AGENTS.md rule 4). It decides Boost for
+// the joint margin account and the momentum combination for an IRA, one
+// configuration per account.
 package targetweight
 
 import (
@@ -22,7 +23,13 @@ import (
 
 // RulesVersion is the target-weight module's rules version (ADR 0016),
 // bumped only when a rule changes.
-const RulesVersion = "1.0.0"
+//
+//   - 1.1.0 reads configuration schema version 2 and refuses version 1
+//     (ADR 0015), so a journal written under 1.0.0 does not replay.
+//   - 1.2.0 reads configuration schema version 3 (the margin-cushion
+//     thresholds) and refuses earlier versions, and its gate reads the kill
+//     switch and broker snapshots and issues ADR 0019's sale back to 98%.
+const RulesVersion = "1.2.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -38,9 +45,10 @@ type Options struct {
 	DecideFrom time.Time
 }
 
-// Handler decides Boost for one account.
+// Handler decides one account's target weights: Boost, described here, or
+// momentum (see momentumRun).
 //
-// # Inputs, in stream order
+// # Boost's inputs, in stream order
 //
 //   - strategy.target-weight.configuration, first and once, matching the
 //     configuration the handler was built with;
@@ -100,6 +108,8 @@ type Handler struct {
 	snapshot   *event.AccountPositionsSnapshotPayload
 	mark       *event.MarkRecordedPayload
 	gate       *risklimit.Gate
+
+	momentum *momentumRun // set for a momentum configuration, nil for Boost
 }
 
 // New returns a handler for cfg, deriving its configuration hash itself
@@ -111,10 +121,13 @@ func New(strategyVersion string, cfg event.TargetWeightConfigurationPayload, opt
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("targetweight: %w", err)
 	}
-	warmUp, _ := cfg.Boost.WarmUpDate() // validated above
 	if opts.DecideFrom.IsZero() {
 		return nil, errors.New("targetweight: the first session to decide is required")
 	}
+	if cfg.StrategyID == event.TargetWeightStrategyMomentum {
+		return newMomentum(strategyVersion, cfg, opts)
+	}
+	warmUp, _ := cfg.Boost.WarmUpDate() // validated above
 	params := boost.Parameters{
 		InvestedFraction: cfg.Boost.InvestedFraction, BoostSize: cfg.Boost.BoostSize, RSIEntry: cfg.Boost.RSIEntry,
 		RSIPeriod: cfg.Boost.RSIPeriod, TrendDays: cfg.Boost.TrendDays, ExitSMA: cfg.Boost.ExitSMA,
@@ -146,6 +159,9 @@ func (h *Handler) ConfigurationHash() string { return h.hash }
 func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope, error) {
 	if !h.configured && in.Type != event.TargetWeightConfigurationEventType {
 		return nil, fmt.Errorf("targetweight: %s %s arrived before the configuration", in.Type, in.ID)
+	}
+	if h.momentum != nil && in.Type != event.TargetWeightConfigurationEventType {
+		return h.momentum.apply(in)
 	}
 	switch in.Type {
 	case event.TargetWeightConfigurationEventType:
@@ -371,7 +387,8 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	if h.mark != nil && !h.mark.AsOf.Before(p.PeriodEnd) {
 		gateOrder.Mark, gateOrder.MarkSet = h.mark.Price, true
 	}
-	if outcome := b.order(gateOrder); order.Side == event.OrderSideSell && outcome.Refused != nil {
+	book := risklimit.Book{Holdings: holdings(snapshot.Positions), Prices: map[string]float64{h.cfg.Boost.InstrumentID: bar.Raw.Close}}
+	if outcome := b.order(gateOrder, book); order.Side == event.OrderSideSell && outcome.Refused != nil {
 		b.sale(event.SaleTriggerExit)
 	}
 	return b.result()
@@ -408,6 +425,15 @@ func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, erro
 		b.sale(event.SaleTriggerMarginUrgent)
 	}
 	return b.result()
+}
+
+// holdings maps each position to its quantity.
+func holdings(positions []event.AccountPosition) map[string]int64 {
+	out := make(map[string]int64, len(positions))
+	for _, p := range positions {
+		out[p.InstrumentID] = p.Quantity
+	}
+	return out
 }
 
 // figures are the Boost figures for this session, with latchedBefore and the
@@ -489,16 +515,17 @@ func (h *Handler) stamp(id, eventType string, version uint32, at time.Time, in e
 	}, nil
 }
 
-// order journals a planned order, checks it with the gate and journals the
-// gate's outcome and any state change, returning the outcome. Each is
-// journalled at the lowest schema version that holds it (ADR 0015).
-func (b *emissions) order(o risklimit.Order) risklimit.Outcome {
+// order journals a planned order, checks it with the gate against book and
+// journals the gate's outcome and any state change, returning the outcome.
+// Each is journalled at the schema version its SchemaVersion names (ADR
+// 0015).
+func (b *emissions) order(o risklimit.Order, book risklimit.Book) risklimit.Outcome {
 	o.PlanID = "order-planned:" + o.Planned.ClientOrderID
 	b.add(o.PlanID, event.OrderPlannedEventType, o.Planned.SchemaVersion(), o.Planned)
 	// The gate cannot refuse what this handler has validated (a planned
 	// order built from validated inputs), so an error is a defect and leaves
 	// an empty outcome, which journals nothing.
-	outcomes, err := b.h.gate.Check([]risklimit.Order{o})
+	outcomes, err := b.h.gate.Check(book, []risklimit.Order{o})
 	b.fail(err)
 	var out risklimit.Outcome
 	if len(outcomes) == 1 {
@@ -526,6 +553,11 @@ func (b *emissions) sale(trigger string) {
 	case s.Withheld != nil:
 		b.add("sale-withheld:"+s.Withheld.ClientOrderID, event.SaleWithheldEventType, event.SaleWithheldSchemaVersion, *s.Withheld)
 	default:
-		b.order(risklimit.Order{Planned: *s.Order})
+		// The sale is sized from the broker snapshot alone (orderplan.PlanSale),
+		// so it is valued at the broker's holding and mark: the joint margin
+		// account holds the Boost instrument only.
+		o := *s.Order
+		book := risklimit.Book{Holdings: map[string]int64{o.InstrumentID: o.HeldQuantity}, Prices: map[string]float64{o.InstrumentID: o.ReferencePrice}}
+		b.order(risklimit.Order{Planned: o}, book)
 	}
 }

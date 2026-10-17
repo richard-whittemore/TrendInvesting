@@ -153,7 +153,7 @@ func TestTargetWeightPayloadFixturesAreValid(t *testing.T) {
 func TestTargetWeightConfigurationValidate(t *testing.T) {
 	v := validTargetWeightConfiguration()
 	type P = event.TargetWeightConfigurationPayload
-	expectInvalid(t, "strategy", v, func(p *P) { p.StrategyID = "momentum" }, "strategy")
+	expectInvalid(t, "strategy", v, func(p *P) { p.StrategyID = "turtle" }, "strategy")
 	expectInvalid(t, "account", v, func(p *P) { p.AccountID = "" }, "account")
 	expectInvalid(t, "mode", v, func(p *P) { p.Mode = "yolo" }, "mode")
 	expectInvalid(t, "adapter", v, func(p *P) { p.Adapter = "lean" }, "adapter")
@@ -179,7 +179,7 @@ func TestTargetWeightConfigurationValidate(t *testing.T) {
 // or an encoding change.
 func TestTargetWeightConfigurationHashStability(t *testing.T) {
 	got := event.TargetWeightConfigurationHash(validTargetWeightConfiguration())
-	const want = "sha256:4ba21c30a973c7d1aee2ff2a5a5a828630a8cc786b3d620acaa5490e28bed80f"
+	const want = "sha256:eba3a6b9d07f600a527f7df04d2644faec0abb9a74bea0b09f343e518fa95329"
 	if got != want {
 		t.Fatalf("TargetWeightConfigurationHash = %s, want %s", got, want)
 	}

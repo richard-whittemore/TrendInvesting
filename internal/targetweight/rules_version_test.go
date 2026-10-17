@@ -1,0 +1,31 @@
+package targetweight_test
+
+import (
+	"testing"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
+)
+
+// TestRulesVersionDeclaresTheVersion2ConfigurationBreak pins ADR 0016's
+// same-rules-version replay guarantee: the handler refuses a version-1
+// configuration envelope (ADR 0015), so a journal written under rules 1.0.0
+// cannot replay under this build and the build must not claim 1.0.0.
+func TestRulesVersionDeclaresTheVersion2ConfigurationBreak(t *testing.T) {
+	t.Parallel()
+
+	if targetweight.RulesVersion == "1.0.0" {
+		t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.0.0 once the configuration schema moved to version 2", targetweight.RulesVersion)
+	}
+}
+
+// TestRulesVersionDeclaresTheVersion3ConfigurationBreak: the configuration
+// schema moved to version 3 (the margin-cushion thresholds) and the gate
+// gained the kill switch, the broker-sized sells and the sale back to 98%,
+// so a journal written under rules 1.1.0 cannot replay under this build.
+func TestRulesVersionDeclaresTheVersion3ConfigurationBreak(t *testing.T) {
+	t.Parallel()
+
+	if v := targetweight.RulesVersion; v == "1.0.0" || v == "1.1.0" {
+		t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.1.0 once the configuration schema moved to version 3", v)
+	}
+}

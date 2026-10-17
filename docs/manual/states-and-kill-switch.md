@@ -119,17 +119,20 @@ account's Excess Liquidity as a share of net liquidation:
 | warning | below 40% |
 | urgent | below 20%, or no reading for 30 minutes while the market is open |
 
-The thresholds are in the configuration (version 2 of
-`strategy.target-weight.configuration`). A change of level is recorded as
+The thresholds are in the configuration (version 3 of
+`strategy.target-weight.configuration`). Only the margin account has them: an
+IRA has no margin cushion, so its configuration leaves them out and it gets no
+alarm. A change of level is recorded as
 `risk.margin.alarm`. Turning urgent fires the sale back to 98%.
 
 ## Reading it afterwards
 
 `journal-query refusals` lists each refusal with its reason and each state
 change. The new reasons are `kill-switch`, `broker-holding` and
-`sale-attempted`. Records with a sale or broker figures are version 2 of
-`strategy.order.planned`, `risk.order.released` and `risk.order.refused`, and
-the tool reads both versions. See [journal-query](journal-query.md).
+`sale-attempted`. A planned sale is version 2 of `strategy.order.planned`.
+Releases and refusals with broker figures or one of the new reasons are
+version 3 of `risk.order.released` and `risk.order.refused` (version 2 is the
+account-wide exposure and the IRA's cash check). The tool reads every version. See [journal-query](journal-query.md).
 
 ## What can go wrong
 
