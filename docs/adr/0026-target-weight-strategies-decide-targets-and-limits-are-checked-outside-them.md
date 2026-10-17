@@ -130,7 +130,9 @@ first target, normally 98% from cash, whether or not a boost is on.
 configuration (point 6):
 - **D7-F, fractional:** quantity = value / pᵢ, rounded down to IBKR's
   fractional increment, itself configuration. Quantities become exact
-  decimals, not `int64`. That needs the schema changes in Consequences.
+  decimals, not `int64`. That needs the decimal quantity on the parallel
+  execution-report versions (`execution.fill` v5 and
+  `execution.order.lifecycle` v2, Consequences and the 2026-10-17 amendment).
 - **D7-L, minimum lot:** whole shares. Before weighting, a pick whose one
   share at pᵢ exceeds its target value is skipped and the next eligible
   ranked name, within the sector cap, takes its place (`plan.md` lines
@@ -140,7 +142,9 @@ configuration (point 6):
 
 **Order identity** (`plan.md` lines 358-368). Each planned order carries:
 - a tag: the ID of the `strategy.targets.decided` envelope it serves, or, for
-  a D6 sale, the incident decision. This is the same join
+  a D6 sale, the incident decision, a durable `operator.kill-switch`
+  engagement or a `risk.margin.alarm` decision (ADR 0019 amendment,
+  2026-10-17, reading 2). This is the same join
   `OrderLifecyclePayload.Tag` makes today;
 - a client order ID derived deterministically from the tag, the instrument and
   the phase (sell or buy).
@@ -169,7 +173,7 @@ replaces `plan.md`'s "per run", since a live run spans many decisions.
 | Maximum orders per decision time (`plan.md` 334; ADR 0025) | count of planned orders ≤ N (configuration) | refuse the whole plan's buys; alert; **Degraded** |
 | Maximum order size as a share of V (`plan.md` 334-335) | \|qty·pᵢ\| / V ≤ the per-account limit | refuse that order; alert; **Degraded** |
 | Price band (`plan.md` 335; ADR 0025) | pᵢ within the band of the latest recorded IBKR mark (an input, never a live read) | refuse; alert; **Degraded** |
-| No order without a journalled decision (ADR 0025) | the tag names a durable `strategy.targets.decided` or incident decision in this run | refuse; urgent alert; **Halted** (a defect in the order path, so its scope cannot be bounded) |
+| No order without a journalled decision (ADR 0025) | the tag names a durable `strategy.targets.decided`, incident, `operator.kill-switch` engagement or `risk.margin.alarm` decision in this run | refuse; urgent alert; **Halted** (a defect in the order path, so its scope cannot be bounded) |
 | Kill switch (`plan.md` 405) | a recorded `operator.kill-switch` input (new) is engaged | refuse every order except ADR 0019's one sale back to 98% in a margin account (its 2026-10-15 and 2026-10-16 amendments), which still goes; routine risk-reducing sells, including the IRAs', are refused; alert once; state unchanged (owner decision 2026-10-16) |
 | Mode (`plan.md` 406-407) | `dry-run`: released orders are journalled with `send: false` and never sent | not a breach |
 
@@ -223,7 +227,10 @@ nothing else. It uses the same sizing rule, adopted by this ADR for these two
 states: one sell-only order bringing exposure toward 98% of net liquidation
 and never below, its quantity the smaller of what reaches 98% at the mark of
 one IBKR account snapshot (shares kept rounded up) and the broker-reported
-holding minus every working or pending sell (including `cancel-pending` ones, which may still execute). When the
+holding minus every working or pending sell (including `cancel-pending` ones, which may still execute).
+*(Refined by the ADR 0019 amendment of 2026-10-17, reading 1: a third bound,
+holding − every working or pending sell − keep, always wins, so the quantity
+is max(0, that bound).)* When the
 instrument to sell is the one a Degraded account's discrepancy names, the
 sale is ADR 0019's one sale, sized and checked as that ADR states (amended
 2026-10-16).
@@ -342,7 +349,8 @@ the module's own rules version and decision corpus (ADR 0016;
   `strategy.target-weight.configuration`, `strategy.targets.decided`,
   `strategy.order.planned`, `risk.order.released`, `risk.order.refused`,
   `market.universe.snapshot`, `operator.kill-switch`,
-  `account.broker.snapshot`, `risk.margin.alarm` and `risk.sale.withheld`. They also need an
+  `account.broker.snapshot`, `risk.margin.alarm`, `risk.sale.withheld` and
+  `strategy.order.skipped` (this last lands with the minimum-lot slice). They also need an
   account snapshot carrying positions and net liquidation, as a new version of
   `account.snapshot` or as ADR 0019's proposed `account.reconciliation`, and a
   recorded IBKR mark.
@@ -381,7 +389,14 @@ ones that belong here.
   episode runs from the level becoming urgent until it next changes level.
   Urgent, then warning, then urgent again is two alarms and may sell twice,
   even if the cushion never got back above 40%; a change of cause while
-  staying urgent (ratio to no reading) is the same alarm. It has no unknown-working-sell check; its sizing nets
+  staying urgent (ratio to no reading) is the same alarm. This applies in
+  Normal, and in Degraded on another instrument, with the kill switch
+  disengaged, where the sale carries the alarm's tag (ADR 0019 amendment,
+  reading 2). In a Halted account, in Degraded on the instrument, or with
+  the kill switch engaged, the sale carries the incident's or the
+  engagement's tag, so that tag's one attempt per instrument applies and
+  ADR 0019's unknown-working-sell check applies (readings 4 and 8). Under
+  the alarm's tag there is no unknown-working-sell check; the sizing nets
   every working sell, so it cannot open a short.
 - **Risk-reducing orders (point 3) are not counted toward N.** They are
   exempt from the order count, order size and price band, and do not add to
@@ -404,8 +419,9 @@ ones that belong here.
   Σ(quantity × limit price), n being the number of buys before step (a),
   floored at zero and rounded toward zero. The result fits the budget with
   worst-case fees included. A buy that scales to zero is dropped: no buy is
-  planned for it. On main this is silent; once PR #392 lands, each is
-  recorded as `strategy.order.skipped`. It is not a withheld decision with
+  planned for it, and each dropped buy is recorded as
+  `strategy.order.skipped` (the type lands with the minimum-lot slice; until
+  then the drop is unrecorded). It is not a withheld decision with
   a reason from point 1's closed set. The budget is not a cutoff: a budget
   at or below n × fee allowance can still release a buy (for example 100,
   1 and 1 shares at $10, a $10 allowance and a $20 budget keep one share of
@@ -415,14 +431,22 @@ ones that belong here.
   The decision is withheld with reason `rebalance-in-progress` while any
   order of an earlier rebalance is not terminal. It is the live form of
   point 5's "a restart mid-rebalance sends nothing until the owner clears
-  it", and it makes the planner's working-sell input empty at plan time.
+  it", and it waits only for orders of an earlier
+  rebalance, so the planner's own earlier rebalance sells are never working at
+  plan time. The planner still nets every other working or pending sell
+  (point 2, step 5).
 - **Execution reports for target-weight accounts are parallel versions, not
   bumps.** `execution.fill` v5 (`TargetWeightFillPayload`) and
   `execution.order.lifecycle` v2 (`LimitOrderLifecyclePayload`) sit beside
   the Turtle's fill v4 and lifecycle v1, joined by client order ID. The
   Turtle reducer still reads v1 and v4; the target-weight engine reads v2
-  and v5. This supersedes the `OrderLifecyclePayload` and `execution.fill`
-  sub-bullets of the Consequences bullet "Existing types to change"; its
+  and v5. Both carry the D7-F decimal quantity, and
+  `StopPrice` is optional for limit orders on v2. The required test of a
+  fractional partial fill stays, applied to v5 and v2 and built with D7-F as
+  configuration. This supersedes the `OrderLifecyclePayload` and
+  `execution.fill` sub-bullets of the Consequences bullet "Existing types to
+  change" as versioning (parallel versions, not bumps); their facts carry over
+  to v2 and v5 as just stated. The
   `market.bar.completed` and `event.ConfigurationHash` sub-bullets stand.
 - **The per-order fee allowance is $2.00**, pending confirmation in paper
   trading (`docs/research/commissions-30k-2026-10.md`): above every observed

@@ -243,7 +243,10 @@ to the Turtle reducer, and changes nothing else in this ADR.
   the smallest of: what reaches 98% of IBKR's reported net liquidation
   value; and IBKR's reported holding minus the total
   quantity of every working and pending sell order IBKR reports for the
-  instrument, ours and unknown ones. This keeps the invariant above
+  instrument, ours and unknown ones. *(Refined by the 2026-10-17 amendment,
+  reading 1: a third bound, holding − every working or pending sell − keep,
+  is added and always wins, so the quantity is max(0, that third bound).)*
+  This keeps the invariant above
   ("working sell quantity never exceeds the holding"), so no combination of
   fills can open a short.
 - **One price basis.** The 98% target is computed from a single IBKR
@@ -304,17 +307,24 @@ here so that all eleven are in one place.
 1. **Sizing never takes exposure below 98%, even with a working sell.** The
    sale's quantity is the smallest of three bounds: what reaches 98%
    (holding − keep); holding − every working or pending sell; and
-   holding − every working or pending sell − keep. The third bound means a
+   holding − every working or pending sell − keep. This replaces the two-bound
+   sizing of the 2026-10-15 amendment and of ADR 0026 point 4. Because keep
+   and working sells are never negative, the third bound is never larger than
+   the other two, so it always wins: the quantity is
+   max(0, holding − every working or pending sell − keep). The third bound means a
    sell of ours that is still working (Boost's released exit, say) and the
    sale together never take exposure below 98%, whichever fills. When the
    smallest bound is zero or negative (a holding of 147, a keep of 93 and
    working sells of 60 give -6), the quantity is zero and no order is sent;
    it is nothing to sell, not an attempt (reading 4).
-2. **The kill switch does not suppress the sale.** With the kill switch
-   engaged (ADR 0026 point 3), Boost's exit firing, or the Excess Liquidity
-   alarm turning urgent, still produces the one sale back to 98%, in any
-   engine state. Each sale carries one tag, and each tag allows one attempt
-   per instrument. The gate picks the tag in this order: the incident's
+2. **The kill switch does not suppress the sale.** While the kill switch
+   is engaged (ADR 0026 point 3), Boost's exit firing or the Excess
+   Liquidity alarm turning urgent still produces the one sale back to 98%,
+   in any engine state. Each sale carries one tag, and each tag allows one
+   attempt per instrument. The tag is a durable incident decision, an
+   `operator.kill-switch` engagement or a `risk.margin.alarm` decision;
+   ADR 0026 point 2 and its journalled-decision limit accept all three (ADR
+   0026 amendment, 2026-10-17). The gate picks the tag in this order: the incident's
    while the account is Halted, or Degraded on that instrument; otherwise,
    with the switch engaged, the engagement's; otherwise the urgent alarm's.
    Engaging again while engaged is the same engagement.
@@ -367,13 +377,14 @@ here so that all eleven are in one place.
 9. **"98%" is the configured `InvestedFraction`**, the unlevered weight (0.98
    for Boost). The sale keeps ceil(`InvestedFraction` × net liquidation ÷
    mark) shares.
-10. **A Degraded sell above the broker quantity is refused, not resized.**
-    The gate refuses it (`broker-holding`), in any state where a broker
-    snapshot is set, not only Degraded. Where the refusal is a limit breach,
-    the instrument is added to the Degraded scope (ADR 0026 point 3, limits
-    table); with no readable broker snapshot the gate refuses with
-    `broker-holding` and does not degrade the account further. The planner,
-    not the gate, chooses quantities.
+10. **A sell above the broker quantity is refused, not resized.** The
+    check applies in any engine state where a broker snapshot is set, not
+    only Degraded. With a readable snapshot, the gate refuses the sell
+    (`broker-holding`) and adds the instrument to the Degraded scope (ADR
+    0026 point 3, limits table); a Normal account becomes Degraded on that
+    instrument. With no readable broker snapshot, the gate refuses with
+    `broker-holding` and leaves the engine state unchanged: a Normal account
+    stays Normal. The planner, not the gate, chooses quantities.
 11. **New event types** `account.broker.snapshot`, `risk.margin.alarm` and
     `risk.sale.withheld` are adopted (ADR 0026 amendment, 2026-10-17).
     `account.broker.snapshot` carries the observed side that
