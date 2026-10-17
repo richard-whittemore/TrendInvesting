@@ -37,6 +37,11 @@ const (
 	// KindHeartbeatUnchecked is the reporter's own failure to check the
 	// heartbeat, such as a span the calendar does not cover.
 	KindHeartbeatUnchecked Kind = "heartbeat-unchecked"
+	// KindUnacknowledged is an order to be sent that the venue has not
+	// acknowledged within the configured time, and KindAcknowledged the
+	// notice that one already alerted has since been acknowledged.
+	KindUnacknowledged Kind = "order-unacknowledged"
+	KindAcknowledged   Kind = "order-acknowledged"
 )
 
 // Alert is one incident to tell the owner about. Key names the incident:

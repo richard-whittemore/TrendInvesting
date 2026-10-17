@@ -1,13 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
 	"github.com/richard-whittemore/TrendInvesting/transport"
 )
@@ -69,7 +71,7 @@ type decisionsPayload struct {
 // wireGuard closes that gap with the smallest mechanism that actually
 // prevents it, rather than a second, independent timeout of its own:
 //
-//   - mu is held for the WHOLE of one call to decide, not merely entered and
+//   - mu is held for the WHOLE of one call to answer, not merely entered and
 //     released around it, so an abandoned call's goroutine still holds mu
 //     for as long as it is actually running inside the reducer — serialising
 //     it against every OTHER call this composition ever makes into engine,
@@ -77,10 +79,10 @@ type decisionsPayload struct {
 //     an abandoned decision. ADR 0014's own measured failure table gives
 //     "Drop the bar" as the adapter's correct response to a rejected
 //     timeout, over the SAME connection — nothing about that response stops
-//     a second decide call from starting while the first one's goroutine is
+//     a second answer call from starting while the first one's goroutine is
 //     still running.
 //   - The moment a call's own ctx is found to have been cancelled once
-//     engine.Apply returns, wireGuard is permanently poisoned: every decide
+//     engine.Apply returns, wireGuard is permanently poisoned: every answer
 //     call after that point — on this connection or a later one — returns
 //     the same error immediately, without touching engine again, instead of
 //     going on as though the abandoned call had never happened. Once one
@@ -112,29 +114,47 @@ type wireGuard struct {
 	poisoned error
 }
 
-// decide applies input through engine while holding g for the call's whole
-// duration (see wireGuard's own doc comment), and permanently poisons g the
-// moment ctx is found to have been cancelled once engine.Apply returns.
-func (g *wireGuard) decide(ctx context.Context, engine *replay.Engine, input event.Envelope) ([]event.Envelope, error) {
+// answer returns the committed group for input, applying input through
+// engine only when no input with its ID was committed before, all while
+// holding g. An input sent again is the adapter asking for its committed
+// reply, so it is never applied twice and never yields a second order (ADR
+// 0027, section 4: durable means possibly sent). The lookup is under g
+// because the recorder is not safe for concurrent use.
+func (g *wireGuard) answer(ctx context.Context, engine *replay.Engine, recorder *journal.Recorder, input event.Envelope) (journal.Committed, bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.poisoned != nil {
-		return nil, g.poisoned
+		return journal.Committed{}, false, g.poisoned
 	}
+	if committed, ok := recorder.Committed(input.ID); ok {
+		return committed, true, nil
+	}
+	err := g.applyLocked(ctx, engine, input)
+	if g.poisoned != nil {
+		return journal.Committed{}, false, g.poisoned
+	}
+	committed, ok := recorder.Committed(input.ID)
+	return committed, ok, err
+}
+
+// applyLocked applies input through engine; g must be held for the call's
+// whole duration (see wireGuard's own doc comment). It permanently poisons g
+// the moment ctx is found to have been cancelled once engine.Apply returns.
+func (g *wireGuard) applyLocked(ctx context.Context, engine *replay.Engine, input event.Envelope) error {
 	g.wg.Add(1)
 	defer g.wg.Done()
 
-	decisions, err := engine.Apply(ctx, input)
+	_, err := engine.Apply(ctx, input)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		g.poisoned = fmt.Errorf("engine: this decision's deadline passed while it was still running against the reducer, so the wire had already abandoned it; this engine's state can no longer be vouched for, and no further decisions will be made: %w", ctxErr)
-		return nil, g.poisoned
+		return g.poisoned
 	}
-	return decisions, err
+	return err
 }
 
-// awaitIdle blocks until no call to decide is in progress. Call it once
+// awaitIdle blocks until no call to answer is in progress. Call it once
 // transport.Server.ServeContext has returned and before reading anything
-// engine.Apply (and so decide) may have written to — see wireGuard's own
+// engine.Apply (and so answer) may have written to — see wireGuard's own
 // doc comment for why a call can still be running after ServeContext
 // returns, and why waiting rather than acting immediately is the fix.
 func (g *wireGuard) awaitIdle() {
@@ -256,10 +276,10 @@ func (g *wireGuard) awaitIdle() {
 // goroutine either one came from, would race that state — memory corruption
 // in the component that sizes real positions, not a mere correctness
 // nicety.
-func newDecider(guard *wireGuard, engine *replay.Engine, strategyVersion, configurationHash string) transport.Decider {
+func newDecider(guard *wireGuard, engine *replay.Engine, recorder *journal.Recorder, strategyVersion, configurationHash string) transport.Decider {
 	return func(ctx context.Context, input event.Envelope) (event.Envelope, error) {
-		decisions, err := guard.decide(ctx, engine, input)
-		if err != nil {
+		committed, ok, err := guard.answer(ctx, engine, recorder, input)
+		if !ok {
 			// Fail closed (docs/development.md principle 4): an envelope the
 			// reducer rejects, a bound journal.Recorder itself enforces
 			// (journal.RecordLimitError, journal.EmissionLimitError), a
@@ -269,10 +289,45 @@ func newDecider(guard *wireGuard, engine *replay.Engine, strategyVersion, config
 			// decisionErrorCode maps any non-nil error here to
 			// CodeDeciderFailed, absent a deadline of its own). Nothing is
 			// fabricated in its place.
+			if err == nil {
+				err = fmt.Errorf("engine: input %s was applied but not committed, so it has no reply", input.ID)
+			}
 			return event.Envelope{}, err
 		}
-		return bundleDecisions(input, decisions, strategyVersion, configurationHash)
+		reply, replyErr := committedReply(committed, input, strategyVersion, configurationHash)
+		if replyErr != nil && err != nil && committed.Refusal != "" {
+			// The first answer to a refused input: the committed refusal's
+			// text, which a later re-delivery repeats, unwrapping to the
+			// error the reducer returned.
+			return event.Envelope{}, &refusalError{text: committed.Refusal, err: err}
+		}
+		return reply, replyErr
 	}
+}
+
+// refusalError is a committed refusal answered for the first time.
+type refusalError struct {
+	text string
+	err  error
+}
+
+func (e *refusalError) Error() string { return e.text }
+
+func (e *refusalError) Unwrap() error { return e.err }
+
+// committedReply is the one reply an input ever gets: built from the group
+// committed for it, so the first answer and every answer served again are
+// the same bytes, before a restart or after one (ADR 0027, sections 4 and
+// 6). An input ID names one input: a different input sent under a
+// committed input's ID is refused, never answered with the other's reply.
+func committedReply(committed journal.Committed, input event.Envelope, strategyVersion, configurationHash string) (event.Envelope, error) {
+	if !bytes.Equal(event.CanonicalEnvelopeBytes(committed.Input), event.CanonicalEnvelopeBytes(input)) {
+		return event.Envelope{}, fmt.Errorf("engine: input %s was committed with different content; an input ID names one input, so this one is refused and nothing is recorded", input.ID)
+	}
+	if committed.Refusal != "" {
+		return event.Envelope{}, errors.New(committed.Refusal)
+	}
+	return bundleDecisions(committed.Input, committed.Decisions, strategyVersion, configurationHash)
 }
 
 // bundleDecisions builds the wire envelope newDecider returns for one
@@ -292,12 +347,14 @@ func bundleDecisions(input event.Envelope, decisions []event.Envelope, strategyV
 		return event.Envelope{}, fmt.Errorf("engine: encode the decisions payload for %s: %w", input.ID, err)
 	}
 	return event.Envelope{
-		ID:                "decisions:" + input.ID,
-		Type:              decisionsEventType,
-		SchemaVersion:     decisionsSchemaVersion,
-		EnvelopeVersion:   event.CurrentEnvelopeVersion,
-		EventTime:         input.EventTime,
-		RecordedAt:        time.Now().UTC(),
+		ID:              "decisions:" + input.ID,
+		Type:            decisionsEventType,
+		SchemaVersion:   decisionsSchemaVersion,
+		EnvelopeVersion: event.CurrentEnvelopeVersion,
+		EventTime:       input.EventTime,
+		// The input's, never the wall clock, so the reply served again is
+		// the reply first served.
+		RecordedAt:        input.RecordedAt,
 		Sequence:          input.Sequence,
 		CorrelationID:     input.CorrelationID,
 		CausationID:       input.ID,

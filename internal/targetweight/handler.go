@@ -68,6 +68,10 @@ type Options struct {
 //     2026-09-24, "The state survives a restart"; ADR 0026, point 5);
 //   - per session: the Boost instrument's market.bar.completed version 2
 //     (every bar on one adjusted base), account.snapshot version 3, market.mark.recorded, then market.session.closed, which decides.
+//   - at any point after an order is released: the venue's reports about
+//     it, execution.order.lifecycle version 2, recorded and deciding
+//     nothing (ADR 0022). A report about an order this run did not release
+//     is refused: it is reconciliation's to explain (ADR 0019).
 //
 // # Fail-closed rules
 //
@@ -104,6 +108,9 @@ type Handler struct {
 	snapshot   *event.AccountPositionsSnapshotPayload
 	mark       *event.MarkRecordedPayload
 	gate       *risklimit.Gate
+	// released holds every order this run released, by client order ID,
+	// so a venue's report about one can be checked against it.
+	released map[string]event.OrderReleasedPayload
 
 	momentum *momentumRun // set for a momentum configuration, nil for Boost
 }
@@ -176,6 +183,8 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 		return nil, h.applyMark(in)
 	case event.SessionClosedEventType:
 		return h.applySession(in)
+	case event.OrderLifecycleEventType:
+		return nil, h.applyLifecycle(in)
 	case event.RunCompletedEventType:
 		return nil, nil
 	}
@@ -435,6 +444,10 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	b.fail(err)
 	for _, o := range outcomes {
 		if o.Released != nil {
+			if h.released == nil {
+				h.released = map[string]event.OrderReleasedPayload{}
+			}
+			h.released[o.Released.ClientOrderID] = *o.Released
 			b.add("risk-order-released:"+order.ClientOrderID, event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, *o.Released)
 		} else {
 			b.add("risk-order-refused:"+order.ClientOrderID, event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, *o.Refused)
@@ -444,6 +457,25 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		}
 	}
 	return b.result()
+}
+
+// applyLifecycle records the venue's report of a change to an order this
+// run released, and decides nothing from it (ADR 0022). The report must name
+// the order as released: its account, instrument, side, quantity and limit.
+func (h *Handler) applyLifecycle(in event.Envelope) error {
+	p, err := decodeInput[event.LimitOrderLifecyclePayload](in, event.OrderLifecycleLimitVersion)
+	if err != nil {
+		return err
+	}
+	o, ok := h.released[p.ClientOrderID]
+	if !ok {
+		return fmt.Errorf("targetweight: lifecycle %s reports order %s, which this run did not release", in.ID, p.ClientOrderID)
+	}
+	if p.AccountID != o.AccountID || p.InstrumentID != o.InstrumentID || p.Side != o.Side || p.Quantity != o.Quantity || p.LimitPrice != o.LimitPrice {
+		return fmt.Errorf("targetweight: lifecycle %s reports %s %s %d %s at %v; order %s was released as %s %s %d %s at %v",
+			in.ID, p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, p.ClientOrderID, o.AccountID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice)
+	}
+	return nil
 }
 
 // holdings maps each position to its quantity.

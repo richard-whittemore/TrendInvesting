@@ -69,6 +69,10 @@ var (
 	plannedVersions     = []uint32{event.OrderPlannedSchemaVersion}
 	releasedVersions    = []uint32{event.OrderReleasedSchemaVersion}
 	refusedVersions     = []uint32{event.OrderRefusedSchemaVersion}
+	// A target-weight account's orders are limit orders, reported at
+	// lifecycle version 2 and fill version 5 (ADR 0026, Consequences).
+	lifecycleVersions        = []uint32{event.OrderLifecycleLimitVersion}
+	targetWeightFillVersions = []uint32{event.FillTargetWeightVersion}
 )
 
 func dateOf(t time.Time) string { return t.UTC().Format(time.DateOnly) }
