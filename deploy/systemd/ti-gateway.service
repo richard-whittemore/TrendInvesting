@@ -1,0 +1,42 @@
+[Unit]
+Description=IB Gateway under IBC (one gateway for all three engines)
+Documentation=https://github.com/IbcAlpha/IBC
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/trend-investing/ibkr-login.env
+
+[Service]
+Type=simple
+User=ti-gateway
+Group=ti-gateway
+Environment=TZ=America/New_York
+EnvironmentFile=/etc/trend-investing/gateway.env
+# The login file is root-only; systemd hands this service one private copy.
+LoadCredential=ibkr-login:/etc/trend-investing/ibkr-login.env
+RuntimeDirectory=ti-gateway
+RuntimeDirectoryMode=0700
+LogsDirectory=ti-gateway
+StateDirectory=ti-gateway
+# Renders IBC's config.ini, then starts the gateway (see the script for why
+# the render is not an ExecStartPre).
+ExecStart=/usr/local/libexec/trend-investing/start-gateway.sh
+# IBC exits non-zero when the weekly second factor times out; start again so
+# the next phone prompt arrives rather than leaving the gateway down.
+Restart=always
+RestartSec=30
+# Except on the renderer's configuration exits: 78 = the login file is not
+# filled in yet (owner step), 64 = it holds an unknown key or value, 65 = the
+# IBC template lacks a key. None fixes itself, so do not loop on them.
+RestartPreventExitStatus=64 65 78
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ti-gateway /var/log/ti-gateway
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
