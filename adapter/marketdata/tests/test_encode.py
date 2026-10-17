@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from marketdata import __main__ as cli
-from marketdata import encode, history, record
+from marketdata import encode, history, nyse_calendar, record
 from marketdata.tests.test_sectors import iwv_csv, screener
 from marketdata import sectors
 
@@ -207,55 +207,109 @@ class UniverseTest(unittest.TestCase):
 
 def unadjustable_ddd(d):
     """A DDD dividend ex 11-25, the session after the one DDD did not trade:
-    no prior close, so DDD cannot be adjusted exactly."""
+    no prior close, so DDD cannot be adjusted exactly from 11-25 on."""
     record.write(d, {"kind": "dividends", "source": "massive", "session": "2026-11-25", "from": "2026-11-20",
                      "fetched_at": stamp(LAST),
                      "rows": [{"id": "V2", "ticker": "DDD", "ex_dividend_date": "2026-11-25", "cash_amount": 0.1}]})
 
 
-def break_bar(d, day, ticker):
-    """Rewrites ``ticker``'s bar on ``day`` with its high below its close."""
-    path = os.path.join(d, "grouped_{}.json".format(day))
+def rewrite(d, kind, day, ticker, **fields):
+    """Rewrites ``ticker``'s bar in the ``kind`` recording of ``day``."""
+    path = os.path.join(d, "{}_{}.json".format(kind, day))
     rec = record.read(path)
     os.remove(path)
-    next(b for b in rec["bars"] if b["T"] == ticker)["h"] = 1.0
+    next(b for b in rec["bars"] if b["T"] == ticker).update(fields)
     record.write(d, rec)
 
 
+def break_bar(d, day, ticker):
+    """Rewrites ``ticker``'s bar on ``day`` with its high below its close."""
+    rewrite(d, "grouped", day, ticker, h=1.0)
+
+
+def sessions_with(stream, ticker):
+    return [e["event_time"][:10] for e in of(stream, "market.session.closed")
+            if ticker in e["payload"]["instrument_ids"]]
+
+
+ALL_SESSIONS = ["2026-11-23", "2026-11-24", "2026-11-25", "2026-11-27", "2026-11-30"]
+
+
 class UniverseMemberExclusionTest(unittest.TestCase):
-    """A universe member that cannot be encoded exactly is left out of the
-    stream, so the momentum rule leaves it out of the ranking (ADR 0026
-    point 5), and is named as excluded; the other inputs are still written."""
+    """A universe member with bad data is left out only of the sessions whose
+    253-close window holds it (ADR 0026 point 5, "that month's ranking"):
+    no bar is written for those sessions, its other bars are, and the
+    sessions are named in ``excluded``; the other inputs are still written."""
 
     def encoded(self, spoil, **kw):
         excluded = {}
         with tempfile.TemporaryDirectory() as d:
             build(d)
             spoil(d)
-            stream = run(d, optional=[], universe_members=True, excluded=excluded, **kw)
+            stream = run(d, **dict(dict(optional=[], universe_members=True, excluded=excluded), **kw))
         return stream, excluded
 
-    def assertLeftOut(self, stream, ticker):
-        bars = {e["payload"]["instrument_id"] for e in of(stream, "market.bar.completed")}
-        self.assertNotIn(ticker, bars)
-        for close in of(stream, "market.session.closed"):
-            self.assertNotIn(ticker, close["payload"]["instrument_ids"])
+    def assertLeftOutFrom(self, stream, ticker, day):
+        bars = [e["payload"]["period_end"][:10] for e in of(stream, "market.bar.completed")
+                if e["payload"]["instrument_id"] == ticker]
+        self.assertEqual(bars, [s for s in ALL_SESSIONS if s < day and (ticker, s) != ("DDD", "2026-11-24")])
+        self.assertEqual(sessions_with(stream, ticker), bars)
         self.assertEqual(of(stream, "market.session.closed", "2026-11-30")[0]["payload"]["instrument_ids"],
                          sorted({"AAA", "BBB", "CCC", "DDD", "IEF", "SPY"} - {ticker}))
 
-    def test_a_member_that_cannot_be_adjusted_is_left_out_and_named(self):
+    def test_a_member_that_cannot_be_adjusted_is_left_out_from_the_ex_date_and_named(self):
         stream, excluded = self.encoded(unadjustable_ddd)
-        self.assertLeftOut(stream, "DDD")
+        self.assertLeftOutFrom(stream, "DDD", "2026-11-25")
         self.assertEqual(list(excluded), ["DDD"])
-        self.assertIn("no close on the session before ex-date 2026-11-25", excluded["DDD"])
+        [gone] = excluded["DDD"]
+        self.assertEqual((gone.first, gone.last), (D(2026, 11, 25), LAST))
+        self.assertIn("no close on the session before ex-date 2026-11-25", gone.reason)
 
-    def test_a_member_with_a_malformed_bar_is_left_out_and_named(self):
+    def test_a_member_with_a_malformed_bar_is_left_out_from_that_session_and_named(self):
         stream, excluded = self.encoded(lambda d: break_bar(d, "2026-11-25", "AAA"))
-        self.assertLeftOut(stream, "AAA")
-        self.assertEqual(list(excluded), ["AAA"])
-        self.assertIn("inconsistent", excluded["AAA"])
+        self.assertLeftOutFrom(stream, "AAA", "2026-11-25")
+        [gone] = excluded["AAA"]
+        self.assertEqual((gone.first, gone.last), (D(2026, 11, 25), LAST))
+        self.assertIn("inconsistent", gone.reason)
 
-    def test_the_universe_snapshot_still_lists_an_excluded_member(self):
+    def test_later_bad_data_never_changes_an_earlier_sessions_bars(self):
+        with tempfile.TemporaryDirectory() as d:
+            build(d)
+            clean = run(d, optional=[], universe_members=True)
+            break_bar(d, "2026-11-25", "AAA")
+            spoiled = run(d, optional=[], universe_members=True)
+        for day in ("2026-11-23", "2026-11-24"):
+            self.assertEqual(bar_of(spoiled, "AAA", day), bar_of(clean, "AAA", day))
+
+    def test_a_member_action_with_no_readable_date_leaves_it_out_of_every_session(self):
+        def undated(d):
+            record.write(d, {"kind": "dividends", "source": "massive", "session": "2026-11-25", "from": "2026-11-20",
+                             "fetched_at": stamp(LAST),
+                             "rows": [{"id": "V3", "ticker": "DDD", "ex_dividend_date": "soon", "cash_amount": 0.1}]})
+        stream, excluded = self.encoded(undated)
+        self.assertEqual(sessions_with(stream, "DDD"), [])
+        self.assertEqual([(g.first, g.last, g.sessions) for g in excluded["DDD"]], [(FIRST, LAST, 5)])
+        self.assertIn("soon", excluded["DDD"][0].reason)
+
+    def test_a_member_with_a_missing_or_negative_close_or_volume_in_the_universe_is_left_out_of_that_session(self):
+        for field, value in (("c", None), ("c", -1.0), ("v", None), ("v", -5)):
+            with self.subTest(field=field, value=value):
+                stream, excluded = self.encoded(
+                    lambda d: rewrite(d, "universe", LAST.isoformat(), "AAA", **{field: value}))
+                self.assertLeftOutFrom(stream, "AAA", "2026-11-30")
+                rows = of(stream, "market.universe.snapshot")[0]["payload"]["rows"]
+                self.assertEqual([r["instrument_id"] for r in rows], ["BBB", "CCC", "DDD"])
+                [gone] = excluded["AAA"]
+                self.assertEqual((gone.first, gone.last), (LAST, LAST))
+
+    def test_a_universe_row_with_a_bad_close_is_left_out_without_universe_members(self):
+        stream, excluded = self.encoded(lambda d: rewrite(d, "universe", LAST.isoformat(), "AAA", c=None),
+                                        universe_members=False)
+        rows = of(stream, "market.universe.snapshot")[0]["payload"]["rows"]
+        self.assertEqual([r["instrument_id"] for r in rows], ["BBB", "CCC", "DDD"])
+        self.assertEqual([(g.first, g.last) for g in excluded["AAA"]], [(LAST, LAST)])
+
+    def test_the_universe_snapshot_still_lists_an_excluded_member_whose_row_is_good(self):
         stream, _ = self.encoded(unadjustable_ddd)
         rows = of(stream, "market.universe.snapshot")[0]["payload"]["rows"]
         self.assertIn("DDD", [r["instrument_id"] for r in rows])
@@ -271,8 +325,16 @@ class UniverseMemberExclusionTest(unittest.TestCase):
             unadjustable_ddd(d)
             with self.assertRaisesRegex(encode.Malformed, "DDD"):
                 run(d, optional=["DDD"], universe_members=True)
+        for field, value in (("c", None), ("v", -5)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as d:
+                build(d)
+                rewrite(d, "universe", LAST.isoformat(), "AAA", **{field: value})
+                with self.assertRaisesRegex(encode.Malformed, "AAA"):
+                    run(d, optional=["AAA"], universe_members=True)
+                with self.assertRaisesRegex(encode.Malformed, "AAA"):
+                    run(d, optional=["AAA"], universe_members=False)
 
-    def test_the_cli_reports_each_excluded_member(self):
+    def test_the_cli_names_each_excluded_member_and_its_sessions(self):
         with tempfile.TemporaryDirectory() as d:
             build(d)
             unadjustable_ddd(d)
@@ -283,19 +345,58 @@ class UniverseMemberExclusionTest(unittest.TestCase):
                                    "--configuration-hash", "hash-1", "--strategy-version", "momentum/test",
                                    "--run-id", "run-1", "--stream", out])
             self.assertEqual(status, 0)
-            self.assertIn("excluded DDD", err.getvalue())
+            self.assertIn("excluded DDD from 2026-11-25 to 2026-11-30 (3 sessions): ", err.getvalue())
             self.assertEqual([json.loads(line) for line in Path(out).read_text().splitlines()],
                              run(d, optional=[], universe_members=True))
 
     def test_the_stream_with_an_excluded_member_satisfies_the_go_validators(self):
-        stream, _ = self.encoded(unadjustable_ddd)
+        for spoil in (unadjustable_ddd, lambda d: break_bar(d, "2026-11-25", "AAA"),
+                      lambda d: rewrite(d, "universe", LAST.isoformat(), "AAA", c=None)):
+            stream, _ = self.encoded(spoil)
+            with tempfile.TemporaryDirectory() as d:
+                path = os.path.join(d, "stream.jsonl")
+                encode.write_stream(path, stream)
+                with open(path) as f:
+                    check = subprocess.run(["go", "run", "./adapter/marketdata/tests/testdata/envelope_contract.go"],
+                                           cwd=REPO, stdin=f, text=True, capture_output=True)
+            self.assertEqual(check.returncode, 0, check.stderr)
+
+
+class ExclusionWindowTest(unittest.TestCase):
+    """Over a span longer than the 253-close window, a member with one bad
+    bar is ranked again once that bar has left its window."""
+
+    def test_a_member_is_written_again_once_its_window_is_clean(self):
+        days = nyse_calendar.sessions(D(2025, 10, 1), D(2026, 12, 31))[:256]
+        last = days[-1]
         with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "stream.jsonl")
-            encode.write_stream(path, stream)
-            with open(path) as f:
-                check = subprocess.run(["go", "run", "./adapter/marketdata/tests/testdata/envelope_contract.go"],
-                                       cwd=REPO, stdin=f, text=True, capture_output=True)
-        self.assertEqual(check.returncode, 0, check.stderr)
+            for i, day in enumerate(days):
+                bars = [row("SPY", 600.0), row("IEF", 95.0), row("AAA", 20.0)]
+                if i == 1:
+                    bars[2]["h"] = 1.0   # high below close
+                rec = {"source": "massive", "session": day.isoformat(), "fetched_at": stamp(day),
+                       "adjusted": False, "bars": bars}
+                if day == last:
+                    rec.update(kind="universe", ticker_type="CS",
+                               tickers=[{"ticker": "AAA", "type": "CS", "market": "stocks"}])
+                else:
+                    rec.update(kind="grouped")
+                record.write(d, rec)
+            for kind in ("splits", "dividends"):
+                record.write(d, {"kind": kind, "source": "massive", "session": last.isoformat(),
+                                 "from": days[0].isoformat(), "fetched_at": stamp(last), "rows": []})
+            for kind, source, url, body in (
+                    ("sectors-iwv", sectors.IWV_SOURCE, sectors.IWV_URL,
+                     {"as_of": "x", "body": iwv_csv(("AAA", "Information Technology", "Equity"))}),
+                    ("sectors-nasdaq", sectors.NASDAQ_SOURCE, sectors.NASDAQ_URL,
+                     {"rows": json.loads(screener(("AAA", "Technology")))["data"]["rows"]})):
+                record.write(d, dict({"kind": kind, "source": source, "session": last.isoformat(),
+                                      "fetched_at": stamp(last), "url": url}, **body))
+            excluded = {}
+            stream = run(d, first=days[0], last=last, optional=[], universe_members=True, excluded=excluded)
+        self.assertEqual([(g.first, g.last) for g in excluded["AAA"]], [(days[1], days[253])])
+        iso = [day.isoformat() for day in days]
+        self.assertEqual(sessions_with(stream, "AAA"), [iso[0], iso[254], iso[255]])
 
 
 class BoostStreamTest(unittest.TestCase):

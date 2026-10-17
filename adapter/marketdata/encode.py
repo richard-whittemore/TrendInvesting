@@ -20,7 +20,8 @@ writes, in order:
    - a ``market.universe.snapshot`` v1 for a session with a universe
      recording: one row per type-CS reference ticker with a bar that
      session, its unadjusted close and volume, and its sector label and
-     source (sectors.py), sorted by instrument;
+     source (sectors.py), sorted by instrument; a non-required row whose
+     close or volume is missing or negative is left out (see encode);
    - a ``market.session.closed`` v1 naming exactly the bars written.
 
 Bars come from ``grouped_<session>.json`` (the backfill) or, for a session
@@ -35,7 +36,8 @@ recent sector recordings (MissingData), action recordings that do not cover
 the span (MissingData), two different copies of one action or two
 disagreeing recordings of a session (Conflict), a malformed bar or row
 (Malformed), or anything adjust.forward_factors cannot adjust exactly;
-except that a ticker written only as a universe member is left out instead
+except that a ticker written only as a universe member, or listed only in a
+universe snapshot, is left out of the sessions its bad data reaches instead
 (see encode).
 
 ``engine`` picks the inputs written. ``"momentum"`` (the default) writes
@@ -76,6 +78,11 @@ SESSION_CLOSED = ("market.session.closed", 1)  # SessionClosedSchemaVersion
 
 ENGINES = ("momentum", "boost")
 
+# The momentum rule ranks a universe stock on its last 253 closes and leaves
+# out a stock missing any of them, for that ranking only (ADR 0026 point 5;
+# the 21/252/253-close lookbacks of its configuration, section 6).
+WINDOW = 253
+
 Identity = collections.namedtuple("Identity", "configuration_hash strategy_version run_id")
 
 
@@ -92,6 +99,10 @@ class Malformed(MarketDataError):
 
 
 Session = collections.namedtuple("Session", "day bars fetched_at universe")
+
+# A run of consecutive sessions of the stream a ticker is left out of:
+# the first and last session, how many sessions, and why.
+Exclusion = collections.namedtuple("Exclusion", "first last sessions reason")
 
 
 def _utc(t):
@@ -167,7 +178,11 @@ def _view(label, r, price, shares):
             "low": float(r["l"]) * price, "close": float(r["c"]) * price, "volume": float(r["v"]) / shares}
 
 
-def _universe_rows(directory, day, rec, max_age_days):
+def _universe_rows(directory, day, rec, max_age_days, named):
+    """(rows, skipped): the snapshot rows, and {ticker: reason} for each row
+    whose close or volume is missing or negative. Such a row is left out of
+    this session's snapshot, unless the ticker is ``named`` (required or
+    optional), which refuses the stream."""
     types = {}
     for t in rec.get("tickers") or ():
         sym, kind = t.get("ticker"), t.get("type")
@@ -178,20 +193,24 @@ def _universe_rows(directory, day, rec, max_age_days):
         raise MissingData("universe {} has no reference tickers".format(day))
     labels = sectors.labels(sectors.latest(directory, "sectors-iwv", day, max_age_days),
                             sectors.latest(directory, "sectors-nasdaq", day, max_age_days))
-    rows = {}
+    rows, skipped = {}, {}
     for b in rec["bars"]:
         sym = b.get("T")
         if sym not in types:
             continue
-        if sym in rows:
+        if sym in rows or sym in skipped:
             raise Malformed("universe {} repeats {}".format(day, sym))
         c, v = b.get("c"), b.get("v")
         if not _finite(c, False) or not _finite(v, False):
-            raise Malformed("universe {} row {} has close {!r} and volume {!r}".format(day, sym, c, v))
+            reason = "universe {} row {} has close {!r} and volume {!r}".format(day, sym, c, v)
+            if sym in named:
+                raise Malformed(reason)
+            skipped[sym] = reason
+            continue
         sector, source = labels.get(sectors.norm(sym), ("", ""))
         rows[sym] = {"instrument_id": sym, "type": types[sym], "close": float(c), "volume": float(v),
                      "sector": sector, "sector_source": source}
-    return [rows[s] for s in sorted(rows)]
+    return [rows[s] for s in sorted(rows)], skipped
 
 
 def _factors(ticker, loaded, days, actions, base):
@@ -207,6 +226,73 @@ def _factors(ticker, loaded, days, actions, base):
         return adjust.forward_factors(ticker, days, closes, splits, dividends, base)
     except adjust.CannotAdjust as e:
         raise Malformed(str(e)) from None
+
+
+def _event_day(row, key):
+    try:
+        return dt.date.fromisoformat(row.get(key))
+    except (TypeError, ValueError):
+        return None
+
+
+def _member_factors(ticker, loaded, days, actions, base):
+    """(factors, bad) for a ticker written only as a universe member: bad is
+    {session: reason} for each session whose data is bad, a malformed bar
+    or the first session on or after a split or dividend that cannot be
+    adjusted exactly. A bad bar is not used and such an action is not
+    applied, so the factors are still exact across any window holding no
+    bad session: on either side of an action left unapplied the levels
+    differ by one constant, and returns within a side are unchanged. An
+    action with no readable date cannot be placed, so every session is
+    bad."""
+    bad, closes = {}, {}
+    for s in loaded:
+        if ticker in s.bars:
+            try:
+                _check_bar(ticker, s.day, s.bars[ticker])
+            except Malformed as e:
+                bad[s.day] = str(e)
+                continue
+            closes[s.day] = float(s.bars[ticker]["c"])
+    splits, dividends = actions
+    while True:
+        try:
+            return adjust.forward_factors(ticker, days, closes, splits, dividends, base), bad
+        except adjust.CannotAdjust as e:
+            if e.day is None:
+                return {}, dict.fromkeys(days, str(e))
+            bad.setdefault(next(d for d in days if d >= e.day), str(e))
+            kept = ([r for r in splits if _event_day(r, "execution_date") != e.day],
+                    [r for r in dividends if _event_day(r, "ex_dividend_date") != e.day])
+            if e.day not in closes and kept == (splits, dividends):
+                return {}, dict.fromkeys(days, str(e))   # nothing left to drop: refuse every session
+            closes.pop(e.day, None)
+            splits, dividends = kept
+
+
+def _left_out(days, bad):
+    """{session: reason} for every session whose WINDOW-close window, the
+    WINDOW sessions ending at it, holds a bad session."""
+    out = {}
+    for i, day in enumerate(days):
+        if day in bad:
+            for later in days[i:i + WINDOW]:
+                out.setdefault(later, bad[day])
+    return out
+
+
+def _exclusions(span_days, out):
+    """[Exclusion] for the runs of consecutive span sessions in ``out``."""
+    runs, previous = [], None
+    for day in span_days:
+        reason = out.get(day)
+        if reason is not None and reason == previous:
+            first, _, n, _ = runs[-1]
+            runs[-1] = Exclusion(first, day, n + 1, reason)
+        elif reason is not None:
+            runs.append(Exclusion(day, day, 1, reason))
+        previous = reason
+    return runs
 
 
 class _Stream:
@@ -238,14 +324,21 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     life of an engine's journal. ``engine`` is "momentum" or "boost", as
     described above.
 
-    A ticker written only because it is a universe member, whose bars
-    cannot be encoded (a malformed bar) or adjusted exactly (CannotAdjust),
-    is left out: none of its bars is written, so the momentum rule finds no
-    window for it and leaves it out of the ranking, recording why (ADR 0026
-    point 5, "A universe stock missing any session ... is left out"); its
-    universe snapshot row is still written. It is named, with the reason,
-    in ``excluded`` (a dict, if given). A required or optional instrument
-    that cannot be encoded still refuses the stream."""
+    A ticker written only because it is a universe member, with a bar that
+    cannot be encoded (malformed) or a split or dividend that cannot be
+    adjusted exactly (CannotAdjust, at the first session on or after it), is
+    left out of every session whose WINDOW-close window holds that bad
+    session, and only those: no bar is written for them and the session's
+    ``market.session.closed`` does not name it, so the momentum rule leaves
+    it out of those rankings (ADR 0026 point 5, "left out of that month's
+    ranking"). Its bars before the bad session, and from the session whose
+    window is clean again, are written, so later bad data never changes an
+    earlier session's bars. A universe snapshot row whose close or volume is
+    missing or negative is left out of that session's snapshot; the ticker's
+    other rows are written. Each ticker left out of any session of the
+    stream is named in ``excluded`` (a dict, if given) with an [Exclusion]
+    per run of sessions. A required or optional instrument with bad data
+    still refuses the stream."""
     if engine not in ENGINES:
         raise ValueError("engine {!r} is not one of {}".format(engine, ", ".join(ENGINES)))
     boost = engine == "boost"
@@ -275,17 +368,14 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     for r in _actions(directory, "dividends", start, last):
         by_ticker[r.get("ticker")][1].append(r)
 
-    factors, left_out = {}, {}
+    factors, out = {}, {}   # out: ticker -> {session left out: reason}
     for ticker in sorted(wanted):
-        try:
+        if ticker in named:
             factors[ticker] = _factors(ticker, loaded, days, by_ticker[ticker], base)
-        except Malformed as e:
-            if ticker in named:
-                raise
-            left_out[ticker] = str(e)
-    wanted -= set(left_out)
-    if excluded is not None:
-        excluded.update(left_out)
+            continue
+        factors[ticker], bad = _member_factors(ticker, loaded, days, by_ticker[ticker], base)
+        if bad:
+            out[ticker] = _left_out(days, bad)
     for ticker in required:
         missing = [s.day.isoformat() for s in span if ticker not in s.bars]
         if missing:
@@ -300,7 +390,7 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
                     "sessions": [d.isoformat() for d in nyse_calendar.sessions(span[0].day, through)]})
     for s in span:
         end, session = _utc(nyse_calendar.session_close(s.day).astimezone(dt.timezone.utc)), s.day.isoformat()
-        ids = sorted(t for t in wanted if t in s.bars)
+        ids = sorted(t for t in wanted if t in s.bars and s.day not in out.get(t, ()))
         if not ids:
             raise MissingData("no requested instrument has a bar on {}".format(session))
         for ticker in ids:
@@ -313,12 +403,19 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
                 "adjusted": _view("split-and-dividend-adjusted", r, total_m, split_m),
                 "adjusted_base": base.isoformat()})
         if s.universe is not None and not boost:
+            rows, skipped = _universe_rows(directory, s.day, s.universe, max_sector_age_days, named)
+            for ticker, reason in skipped.items():
+                out.setdefault(ticker, {}).setdefault(s.day, reason)
             stream.add(UNIVERSE, "marketdata:universe:{}".format(session), end,
                        _fetched_at(s.universe, "universe " + session),
-                       {"session": session, "source": s.universe.get("source"),
-                        "rows": _universe_rows(directory, s.day, s.universe, max_sector_age_days)})
+                       {"session": session, "source": s.universe.get("source"), "rows": rows})
         stream.add(SESSION_CLOSED, "marketdata:session-closed:{}".format(session), end, s.fetched_at,
                    {"period_end": end, "instrument_ids": ids})
+    if excluded is not None:
+        for ticker in sorted(out):
+            runs = _exclusions([s.day for s in span], out[ticker])
+            if runs:
+                excluded[ticker] = runs
     return stream.out
 
 

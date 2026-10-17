@@ -64,7 +64,9 @@ def main(argv):
                 universe_members=args.universe_members, base=args.base, first_sequence=args.first_sequence,
                 engine=args.engine, excluded=excluded)
             for ticker in sorted(excluded):
-                print("marketdata: excluded {}: {}".format(ticker, excluded[ticker]), file=sys.stderr)
+                for run in excluded[ticker]:
+                    print("marketdata: excluded {} from {} to {} ({} sessions): {}".format(
+                        ticker, run.first, run.last, run.sessions, run.reason), file=sys.stderr)
             print(encode.write_stream(args.stream, envelopes))
             return 0
         if args.what == "sectors":

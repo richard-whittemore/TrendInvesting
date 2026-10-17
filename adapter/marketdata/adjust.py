@@ -32,7 +32,13 @@ import math
 
 
 class CannotAdjust(Exception):
-    pass
+    """``day`` is the session or action date the refusal is about, where
+    there is one (forward_factors), so a caller can tell which sessions it
+    reaches."""
+
+    def __init__(self, message, day=None):
+        super().__init__(message)
+        self.day = day
 
 
 def _date(text):
@@ -147,7 +153,7 @@ def forward_factors(ticker, sessions, closes, splits, dividends, base):
     days = [s for s in sessions if s >= base]
     for day in days:
         if day in closes and not _positive(closes[day]):
-            raise CannotAdjust("{} close on {} is {!r}".format(ticker, day, closes[day]))
+            raise CannotAdjust("{} close on {} is {!r}".format(ticker, day, closes[day]), day)
     seen = [d for d in days if d in closes]
     if not seen:
         return {}
@@ -159,9 +165,9 @@ def forward_factors(ticker, sessions, closes, splits, dividends, base):
             continue
         frm, to = r.get("split_from"), r.get("split_to")
         if not _positive(frm) or not _positive(to):
-            raise CannotAdjust("{} split on {} has ratio {!r}:{!r}".format(ticker, d, frm, to))
+            raise CannotAdjust("{} split on {} has ratio {!r}:{!r}".format(ticker, d, frm, to), d)
         if d in split_ratio:
-            raise CannotAdjust("{} has two splits on {}".format(ticker, d))
+            raise CannotAdjust("{} has two splits on {}".format(ticker, d), d)
         events.append((d, to / frm, to / frm))
         split_ratio[d] = frm / to
     cash_by_date = {}   # ex-date -> total cash; one factor per date, not one per row
@@ -171,20 +177,20 @@ def forward_factors(ticker, sessions, closes, splits, dividends, base):
             continue
         cash = r.get("cash_amount")
         if not (isinstance(cash, (int, float)) and not isinstance(cash, bool) and math.isfinite(cash) and cash >= 0):
-            raise CannotAdjust("{} dividend on {} has cash {!r}".format(ticker, d, cash))
+            raise CannotAdjust("{} dividend on {} has cash {!r}".format(ticker, d, cash), d)
         cash_by_date[d] = cash_by_date.get(d, 0.0) + cash
     for d, cash in sorted(cash_by_date.items()):
         if d in split_ratio:
-            raise CannotAdjust("{} has a split and a dividend on the same date {}".format(ticker, d))
+            raise CannotAdjust("{} has a split and a dividend on the same date {}".format(ticker, d), d)
         prior = [s for s in days if s < d][-1]   # exists: first < d
         if prior not in closes:
-            raise CannotAdjust("{} has no close on the session before ex-date {}".format(ticker, d))
+            raise CannotAdjust("{} has no close on the session before ex-date {}".format(ticker, d), d)
         p = closes[prior]
         for sd, f in split_ratio.items():
             if prior < sd < d:
                 p *= f   # onto the ex-date share basis, as adjusted_closes does
         if cash >= p:
-            raise CannotAdjust("{} dividend {} on {} is not below the prior close {}".format(ticker, cash, d, p))
+            raise CannotAdjust("{} dividend {} on {} is not below the prior close {}".format(ticker, cash, d, p), d)
         events.append((d, 1.0, p / (p - cash)))
     events.sort(key=lambda e: e[0])
     out, split_m, total_m, i = {}, 1.0, 1.0, 0

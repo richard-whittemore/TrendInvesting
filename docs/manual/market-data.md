@@ -135,13 +135,25 @@ shape the owner has decided on is one compact universe input per session
 history input for only the 500 ranked names; the encoder does not write it
 yet.
 
-A stock written only because it is a universe member, whose bars are
-malformed or cannot be adjusted exactly, is left out of the stream instead of
-refusing it: none of its bars is written, so the momentum rule finds no
-window for it and leaves it out of the ranking, recording why (ADR 0026,
-point 5). Its universe snapshot row is still written, and `encode` names it
-on stderr (`marketdata: excluded TICKER: reason`). SPY, IEF, SHY and every
-other instrument are still written.
+A stock written only because it is a universe member is left out of a
+session, instead of refusing the stream, when its last 253 closes up to that
+session (the window the momentum rule ranks on) hold bad data: a malformed
+bar (a missing or negative close or volume, a high below the close), or a
+split or dividend that cannot be adjusted exactly (counted from the first
+session on or after it). It is left out of those sessions only: no bar is
+written for them and the session close does not name it, so the momentum
+rule leaves it out of those months' rankings and records why (ADR 0026,
+point 5). Its bars before the bad session are written as usual, so bad data
+later on never changes an earlier session, and it is written, and ranked,
+again from the first session whose 253-close window is clean. A split or
+dividend with no readable date cannot be placed, so that stock is left out
+of every session. A universe snapshot row whose close or volume is missing
+or negative is left out of that session's snapshot; the stock's other rows
+are written. `encode` names each stretch on stderr (`marketdata: excluded
+TICKER from FIRST to LAST (N sessions): reason`). SPY, IEF, SHY and every
+other instrument are still written, and the same bad data in SPY, IEF, SHY
+or any instrument named with `--instruments` or `--optional` still refuses
+the whole stream.
 
 Sector labels are GICS from iShares' IWV holdings where it lists the stock,
 else Nasdaq's sector, both mapped onto Morningstar's eleven sector names so
@@ -180,8 +192,9 @@ for the scheduler to alert on.
   Refused.
 - **A bar or row is malformed**: a missing or repeated ticker, a price that is
   not a positive number, a high below the close, a volume below zero. For a
-  stock written only as a universe member, a bad bar or an adjustment that
-  cannot be done leaves that stock out instead (see above).
+  stock written only as a universe member, or listed only in a universe
+  snapshot, a bad bar or row or an adjustment that cannot be done leaves that
+  stock out of the sessions it reaches instead (see above).
 - **An adjustment cannot be done exactly**: a dividend whose previous session
   has no close for that stock, total cash on an ex-date at or above that
   close, a split and a dividend on the same date, two splits on one date, or
