@@ -12,12 +12,14 @@ script, or QuantConnect?
 
 | Run | Backtest ID | Window | CAGR | Worst drawdown | Orders | Fees |
 | --- | --- | --- | --- | --- | --- | --- |
-| `F_COMBO_R4` (recorded) | 24bdb0a9… | 1999–2015 | 11.25% | 34.0% | n/r | n/r |
+| `F_COMBO_R4` (recorded) | 24bdb0a9ff4d4fe089644db615c58804 | 1999–2015 | 11.25% | 34.03% | 5,209 | n/r |
 | `F_COMBO` rerun | eee58c08c960a253047aab3b075c75f0 | 1999–2015 | 13.09% | 46.05% | 5,187 | $161,655 |
-| `OOS_F_COMBO_R4` (recorded) | dd45f8ec… | 2016 to 2026-06-30 | 20.85% | 31.0% | n/r | n/r |
+| `OOS_F_COMBO_R4` (recorded) | dd45f8ecd9385e34cd94bb39658634ae | 2016 to 2026-06-30 | 20.85% | 31.01% | 3,585 | n/r |
 | `OOS_F_COMBO` rerun | a752a0ae4155142464abb218b826abc9 | 2016 to 2026-06-30 | 20.06% | 40.47% | 3,589 | $34,225 |
 
-n/r: not recorded in the repository.
+n/r: not read. R4 figures are the runs' own runtime statistics, read back
+from QuantConnect on 2026-10-17 (created 2026-10-04 03:15 and 01:43). The
+reruns were created 2026-10-16 20:56 and 21:45.
 
 **Where the R4 figures are recorded.** `docs/research/boost-followup-2026-09.md`,
 "The unpriced-buy fix", headline table, Combination row (11.25% / 34.0% and
@@ -32,17 +34,20 @@ repeats the same figures as the execution test's baseline. The run IDs
 
 ## Finding
 
-**Most likely cause: something changed on QuantConnect's side, in its data
-or its engine, between the morning and the afternoon of 2026-10-16.** Of
-the four candidates:
-- (a) the template did not change;
-- (b) the drawdown is measured the same way;
-- (c) the script is not a different one.
+**Cause: QuantConnect's fundamental data changed between 2026-10-04 (the R4
+runs) and 2026-10-16 (the reruns). The code and the requests did not
+change.**
+- **Same requests.** The two runs read the same number of stock-months:
+  107,500 in-sample and 69,000 held out, in both R4 and the reruns.
+- **Different data.** The reruns found about 1,190 fewer fundamental
+  fields in each window (below).
+- **Different path.** With the same bytes and the same measure, the
+  1999–2002 span alone moves from 4.94% / 34.03% (R4) to 11.74% / 46.05%.
 
-Each is ruled out by byte-level or arithmetic evidence below. A data change
-is directly visible in the runs' own fundamental-data counters. The engine
-version, which would separate a data change from an engine change, has
-not yet been read (see "What would settle it").
+Candidates (a)–(c) are ruled out by byte-level or arithmetic evidence. The
+engine version could not be read: the log endpoint returned no first line
+for these runs. So an engine change alongside the data change is not
+excluded, but no engine change is needed to explain the counters.
 
 ### (a) Template drift: ruled out
 
@@ -109,10 +114,12 @@ reruns do not:
 | `IS_GOLD_2008_11` 65c3df3b… (10-16, before 04:40) | 1999–2002 | 4.82% / 34.13% |
 | `IS_GOLD_2009_06` 2fb0d2e1… (10-16, before 04:40) | 1999–2002 | 4.88% / 34.24% |
 | `IS_GOLD_2013_05` e06aef39… (10-16, before 04:40) | 1999–2002 | 4.88% / 34.24% |
+| **`F_COMBO_R4` 24bdb0a9 (10-04), own statistic** | 1999–2002 | **4.94% / 34.03%** |
 | R4 script, 2026-10-03 (`tax_r2.json`, chart) | 1999–2002 | 4.94% / 33.68% |
 | **`F_COMBO` rerun eee58c08 (10-16 afternoon)** | 1999–2002 | **11.74% / 46.05%** |
 | `IS_GOLD_2013_05` (10-16 morning) | 2009 to 2013-05 | 15.99% / 25.48% |
 | R4 script, 2026-10-03 (`tax_r2.json`) | 2009–2015 | 15.99% / 23.63% |
+| `F_COMBO_R4` 24bdb0a9, own statistic | 2009–2015 | 16.04% / 25.48% |
 | `F_COMBO` rerun eee58c08 | 2009–2015 | 13.58% / 25.81% |
 | `OOS_P_COARSE` 33a58892… (10-15), R4's window from its chart | 2016 to 2026-06-30 | 20.76% / 30.97% |
 | `G_OOS_F00` 7d9b8411… (10-15) | 2016 to 2026-07-17 | 20.10% / 30.97% |
@@ -136,11 +143,21 @@ profit and total assets together, one for earnings yield.
 
 | Run | Selection months | reads | hits |
 | --- | --- | --- | --- |
+| **`F_COMBO_R4` 24bdb0a9 (10-04)** | 1998-01 to 2015-12 (215) | 107,500 | **196,051** |
+| **`F_COMBO` rerun eee58c08 (10-16)** | 1998-01 to 2015-12 (215) | 107,500 | **194,862** |
+| **`OOS_F_COMBO_R4` dd45f8ec (10-04)** | 2015-01 to 2026-06 (138) | 69,000 | **127,905** |
 | `OOS_P_GICS` (10-15) | 2015-01 to 2026-07 (139) | 69,500 | 128,758 |
 | `G_OOS_F00` (10-15) | 2015-01 to 2026-07 (139) | 69,500 | 128,758 |
 | `OOS_F_COMBO` rerun (10-16 afternoon) | 2015-01 to 2026-06 (138) | 69,000 | 126,718 |
 | `OOS_FU_COMBO` rerun (10-16 afternoon) | 2015-01 to 2026-06 (138) | 69,000 | 126,722 |
 
+- **Same script, same window, same reads, fewer hits:** 196,051 − 194,862
+  = 1,189 fewer in-sample; 127,905 − 126,718 = 1,187 fewer held out. The
+  data the same requests returned changed between 2026-10-04 and
+  2026-10-16.
+- The 10-15 runs sit with R4. 128,758 − 127,905 = 853 hits for their
+  extra month (2026-07). That is within the 1,000 a month can add, so
+  10-15 is consistent with R4's data state.
 - The 10-15 runs' extra month (2026-07) can add at most 500 × 2 = 1,000
   hits. So over the 138 months they share, the 10-15 runs found at least
   128,758 − 1,000 = 127,758 hits.
@@ -172,68 +189,71 @@ $23.7 (2026-10-03 export: 5,209 fills, $123,290) to $31.2 in the rerun
 account, (1.1309 / 1.1125)^17 ≈ 1.32. It is a consequence of the
 different path, not a separate cause.
 
-### Not yet settled: data or engine
+### Side by side: R4 against the rerun (runtime statistics, 2026-10-17)
 
-Both remain possible:
-- a reprocessing or revision of QuantConnect's US equity
-  universe/fundamental data, published during 2026-10-16;
-- a LEAN engine update (for example, in how Python reads fundamental
-  attributes, which this template's `_get` probes by name).
+| Statistic | `F_COMBO_R4` | `F_COMBO` rerun | `OOS_F_COMBO_R4` | `OOS_F_COMBO` rerun |
+| --- | --- | --- | --- | --- |
+| OVERALL | 11.25% / 34.03% | 13.09% / 46.05% | 20.85% / 31.01% | 20.06% / 40.47% |
+| 1999-02 | 4.94% / 34.03% | 11.74% / 46.05% | | |
+| 2003-07 | 16.69% / 25.41% | 21.41% / 27.02% | | |
+| 2008-09 | −5.08% / 28.23% | −7.22% / 31.66% | | |
+| 2009-15 | 16.04% / 25.48% | 13.58% / 25.81% | | |
+| Rebalances / risk-off | 203 / 59 | 203 / 59 | 138 / 25 | 138 / 25 |
+| Orders | 5,209 | 5,187 | 3,585 | 3,589 |
+| Resizes / retried | 582 / 875 | 624 / 894 | 648 / 445 | 691 / 506 |
+| Average cash | 13.9% | 13.9% | 3.9% | 3.6% |
+| Fundamentals reads / hits | 107,500 / 196,051 | 107,500 / 194,862 | 69,000 / 127,905 | 69,000 / 126,718 |
 
-The morning golden runs log "LEAN Engine v2.5.0.0.18184". The engine
-version of the afternoon reruns has not been read.
+The trend filter's months are identical (59 and 25 risk-off months). The
+difference is in which stocks the momentum part held. That fits a change
+in the universe or fundamentals data (membership, the Morningstar sector
+codes the cap uses), not in SPY or IEF prices.
 
-## What would settle it (fields to fetch, read-only, project 37096083)
+### Still open
 
-1. **Engine version.** From the backtest log of eee58c08 and a752a0ae,
-   the first line, "Launching analysis for … with LEAN Engine v…".
-   Compare with 18184 (golden runs, 10-16 morning). Also read each
-   backtest's `created` timestamp.
-2. **R4's own counters.** From the runtime statistics of `F_COMBO_R4`
-   24bdb0a9… and `OOS_F_COMBO_R4` dd45f8ec… (full IDs from the project's
-   backtest list), read `Fundamentals`, `Mode`, `Borrow`, `OVERALL`,
-   `1999-02`, `2003-07`, `2008-09`, `2009-15` and `2016-`. The same
-   window and the same bytes as the reruns allow a direct test:
-   - hits 194,862 (in-sample) and 126,718 (held out) mean the data read
-     was the same;
-   - different counts confirm a data change.
-3. **Where the paths part.** The order list of eee58c08 (and a752a0ae),
-   compared month by month with the 2026-10-03 R4-script fills already
-   held locally (`data/qc_exports/tax_r2.json`). Use
-   `momentum/parity_compare.py`'s holdings rebuild. The first month with
-   different names, and whether those names differ in universe membership,
-   sector code or price, says what changed.
+- **Engine version.** The log endpoint returned no first line for these
+  runs, so it was not read. The morning golden runs log LEAN
+  v2.5.0.0.18184.
+- **Where the paths part.** The order list of eee58c08, compared month by
+  month with the R4-script fills held locally
+  (`data/qc_exports/tax_r2.json`, which match R4: 5,209 fills against R4's
+  5,209 orders), would name the first differing month. It would also show
+  whether the change is universe membership or sector code. Not needed
+  for the conclusion.
 
 ## What the plan should cite
 
-- **Keep citing the recorded R4 figures** (1999–2015 11.25% / 34.0%;
+- **Keep citing the recorded R4 figures, as R4 (QuantConnect data of
+  2026-10-04)** (1999–2015 11.25% / 34.0%;
   2016 to mid-2026 20.85% / 31.0%) as the recorded result. They are
   consistent with at least six later same-logic runs up to the morning of
   2026-10-16. They are also what the golden cases (ADR 0026) and the
   retirement/blend studies were built on.
-- **Add the 2026-10-16 reruns as an unexplained second data state.** Until
-  item 1–3 above or the rerun below settles it, quote the worse drawdowns
+- **Add the 2026-10-16 reruns as the result on QuantConnect's revised
+  data.** Until the rerun pair below shows which state persists, quote the worse drawdowns
   (46.05% and 40.47%) as the risk planning figure. This issue carries the
   capital-safety label, and a later data state that deepens the drawdown
   may be the one live trading resembles.
 - **PR #402's note is wrong as written.** "Differ a little … because
   QuantConnect's data is revised over time" understates a 9–12 point
-  drawdown change. The data-change explanation is now supported by the
-  fundamentals counter, but not yet proven.
+  drawdown change. A data change is the cause, shown by the fundamentals
+  counter, but its size is not little.
 - **The D8 comparison itself is not invalidated.** Its four runs ran
   together on the same data state, so FU against F is paired. The absolute
   levels in that table belong to the new data state, not to R4.
 
-## Reruns needed
+## Rerun pair pending
 
-- **Once each, `F_COMBO` and `OOS_F_COMBO`, the exact bytes above (md5
-  `5777e081…` and `9c3c7b9d…`), now.** Record the engine version and the
-  `Fundamentals` counter. Free research runs.
-  - If they give 46% / 40% again, the new state persists. Then #398
-    (parity) and #399 ($30k commission) must compare against a baseline
-    run on that same state, not against R4. The plan should record both
-    states.
-  - If they give 34% / 31%, the afternoon of 2026-10-16 was a transient
-    state. In that case the four D8 runs should be repeated once, as a
-    pair, before #402's figures are used.
-- No other backtest needs rerunning for this question.
+Queued 2026-10-17 on the identical bytes (md5 `5777e081…` and `9c3c7b9d…`):
+`F_COMBO_RR` and `OOS_F_COMBO_RR`. Results to be added here when they
+finish, with their `Fundamentals` counters.
+- **46% / 40% again** (hits 194,862 / 126,718): the revised data persists.
+  #398 (parity) and #399 ($30k commission) then compare against a baseline
+  run on this data, not against R4. The plan records both states.
+- **34% / 31%** (hits 196,051 / 127,905): the 2026-10-16 state was
+  transient. The four D8 runs of #402 should be repeated once, as a pair,
+  before their figures are used.
+- **Any other count:** QuantConnect's data is still moving. Record it, and
+  pair every comparison on the same day.
+
+No other backtest needs rerunning for this question.
