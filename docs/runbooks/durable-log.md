@@ -176,22 +176,26 @@ whether it is the crashed run. The message says which case it is.
         journal you can still read; any difference is explained, not
         assumed.
       - Open orders are cancelled at the broker or recorded.
-      - `incident_in_force` carries the incident state from the last
-        readable log, unless you know the incident ended while the lost log
-        was written; never loosen it on a guess.
-      - `boost.latched` carries the latch from the last readable log.
+      - `incident_in_force` carries the incident the last readable log
+        ended in, under its ID. If that log ended in an incident, carry it
+        Halted (or as the same state); never loosen it on a guess, and
+        clear it only by that ID through the recorded recovery.
+      - `boost.latched` is the latch the last readable log ended with.
 
-      The engine accepts in the approval only the incident and latch that
-      the last readable log ended with, and refuses anything else, looser or
-      stricter. An incident or latch change recorded only in the lost log
-      therefore cannot be expressed in the approval and must be handled
-      outside it, before you start the fresh run:
-      - If you believe an incident was open, engage the kill switch for the
-        account (an operator input the engine honours regardless of the
-        approval).
-      - If the latch may have been set, keep Boost off through
-        configuration.
-      - Disengage only after the broker reconciliation confirms the state.
+      The engine checks the approval against that log alone. The latch must
+      be exactly the one it ended with. The incident must be the one it
+      ended in, under its ID: carried as the same state or tightened (Halted
+      for a Degraded log, or a wider Degraded scope), never loosened, and
+      cleared only by that ID. A log that ended Normal accepts no incident.
+      An incident or latch change recorded only in the lost log therefore
+      cannot be expressed in the approval. This build has no kill-switch
+      input (that is a later slice) and no configuration fallback, so:
+      - If the last readable log ended in an incident, carry it Halted
+        under that ID.
+      - If it ended Normal and you believe the lost log opened an incident,
+        the approval cannot say so. Resolve positions by hand at the broker,
+        and rely on the first session's broker reconciliation, which
+        Degrades or Halts on any unexplained difference.
 
    Any decision recorded only in the lost log is gone. The broker
    reconciliation is the baseline, not that log.

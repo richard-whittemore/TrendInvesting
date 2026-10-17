@@ -20,36 +20,15 @@ import (
 // is recorded there as <name>.log, so any such file is an earlier run.
 const durableLogSuffix = ".log"
 
-// The restart model (owner decision 2026-10-16), whose rules live in
-// internal/restart; this file finds and reads the logs they apply to. A crash resumes from the
-// durable log with -resume (ADR 0027); every other restart, leaving Halted,
-// a build upgrade or a cleared rebalance, is a fresh run, and a fresh run of
-// an engine whose log directory already holds an earlier run decides nothing
-// until the owner's approval is recorded as its input. -approval names a
-// file holding that operator.run.approved payload; it must name the latest
-// earlier log in the directory and that log's final record hash, so what is
-// approved is the evidence the owner reviewed.
-//
-// A crash is resumed, and the crashed run is always the latest one, so
-// -resume must name the latest log in the directory of -log; resuming an
-// older log would continue a history a newer run has already moved past.
-//
-// The approved latch must be the one the approved log ends with: its last
-// strategy.targets.decided's latched_after, or, when that run decided
-// nothing, the latch its own approval stated (ADR 0026, point 5: the latch
-// is restored, never recomputed). A log with neither leaves the approval's
-// latch as the fresh run's start.
-//
-// The approved incident state must not loosen the one the approved log
-// ends in, read from the incident its own approval carried in force and its
-// strategy.engine.state records after it: leaving Degraded or
-// Halted is never automatic (ADR 0019, amended 2026-09-24, "The state
-// survives a restart"), so the approval either clears that incident by its
-// ID or carries it in force, under that ID, at least as tight. The
-// incident's ID is the one the inherited incident in force carries, or else
-// the ID of the first strategy.engine.state record out of Normal
-// (event.IncidentInForce). An approval of a log that ended Normal clears no
-// incident and carries none in force.
+// The restart model (owner decision 2026-10-16): this file finds, orders
+// and reads the logs, and decides which refusal each case gets. The rules an
+// approval is checked against, the latch and the incident in force, live in
+// internal/restart (CheckApprovedLatch, CheckIncidentInForce) and are not
+// restated here. A crash resumes from the durable log with -resume (ADR
+// 0027), and -resume must name the latest log in the directory of -log;
+// every other restart is a fresh run, which decides nothing until the
+// owner's -approval, a file holding an operator.run.approved payload naming
+// the latest earlier log and its final record hash, is recorded as its input.
 //
 // A log holding nothing past its configuration decided nothing and records
 // no state, so the state an approval of it is checked against is the latest
