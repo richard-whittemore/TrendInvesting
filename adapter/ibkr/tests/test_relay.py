@@ -10,6 +10,7 @@ import copy
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -431,6 +432,34 @@ class RelayTests(unittest.TestCase):
             holder[0].exchange(envelope(0))
         self.assertEqual([r.client_order_id for r in self.sent], ["tw-1"], "the lock was released, so tw-2 waits")
         self.assertEqual(self.pending.handovers(), {"tw-1": "handing-over"}, "and the closed relay edits nothing")
+
+    def test_close_from_another_thread_waits_for_an_order_being_sent_and_leaves_it_marked_sent(self):
+        decisions = {"session:0": [released("tw-1")]}
+        in_send, let_send_return = threading.Event(), threading.Event()
+        close_returned = threading.Event()
+
+        def blocking_send(request):
+            self.sent.append(request)
+            in_send.set()
+            let_send_return.wait(timeout=5)
+
+        # The record is read after the settlement, which would otherwise clear it.
+        self.pending.clear = lambda: None
+        relay = self.relay(Restarts({}, decisions), send=blocking_send)
+        settling = threading.Thread(target=relay.exchange, args=(envelope(0),))
+        closing = threading.Thread(target=lambda: (relay.close(), close_returned.set()))
+        settling.start()
+        self.assertTrue(in_send.wait(timeout=5))
+        closing.start()
+        self.assertFalse(close_returned.wait(timeout=0.3), "close waits for the send in flight to return")
+        let_send_return.set()
+        settling.join(timeout=5)
+        closing.join(timeout=5)
+        self.assertTrue(close_returned.is_set())
+        self.assertEqual(self.pending.handovers(), {"tw-1": "sent"})
+        with self.assertRaises(ResolveRefused) as refused:
+            resolve(PendingInput(self.pending.path), "tw-1", "sent", "already sent", today=date(2026, 10, 16))
+        self.assertNotIn("stop it first", str(refused.exception), "the lock was released once the send was marked")
 
     def test_resolve_is_refused_while_an_adapter_holds_the_pending_file(self):
         inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z")

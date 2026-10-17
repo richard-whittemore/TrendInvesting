@@ -66,6 +66,7 @@ import json
 import os
 import re
 import sys
+import threading
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -277,12 +278,22 @@ class Relay:
         self._reconnects = reconnects
         self._engine = None
         self._sent = set()
+        # Serialises close against the step that marks, sends and marks an
+        # order, so the lock is never released while an order is going out
+        # (resolve could otherwise settle it concurrently). Reentrant: a send
+        # callback may close its own relay.
+        self._step = threading.RLock()
 
     def close(self):
-        """Release the pending file, as the adapter stopping does; the closed relay edits and sends nothing more."""
-        if self._held is not None:
-            os.close(self._held)
-            self._held = None
+        """Release the pending file, as the adapter stopping does; the closed relay edits and sends nothing more.
+
+        Safe from any thread: it waits for an order's hand-over in flight to
+        finish and be marked before it releases the lock.
+        """
+        with self._step:
+            if self._held is not None:
+                os.close(self._held)
+                self._held = None
 
     def exchange(self, envelope):
         """Send one input and act on its reply, after settling any input still awaiting one."""
@@ -328,11 +339,12 @@ class Relay:
             # Built before the mark: a request that cannot be built never
             # reaches the sender, so it leaves no mark to stop a restart.
             request = self._to_request(order)
-            self._require_held()
-            self._pending.mark(cid, HANDING_OVER)
-            self._send(request)
-            self._require_held()
-            self._pending.mark(cid, SENT)
+            with self._step:
+                self._require_held()
+                self._pending.mark(cid, HANDING_OVER)
+                self._send(request)
+                self._require_held()
+                self._pending.mark(cid, SENT)
             self._sent.add(cid)
         self._require_held()
         self._pending.clear()
