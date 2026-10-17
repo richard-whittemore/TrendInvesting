@@ -543,7 +543,10 @@ so Pro's margin rate does not help them.
 | 5 | Limited live, one account at a time | A clean month each. The joint account goes live only after the margin-warning runbook has been rehearsed in paper trading (an injected low Excess Liquidity reading, handled end to end) |
 
 Each phase is a ticket with its own work log, worked test-first and merged
-only after CodeRabbit and Greptile findings are addressed.
+only after the findings of whichever reviewers ran are addressed. Greptile
+reviews the capital-safety paths only; CodeRabbit reviews everything, and a
+Claude reviewer stands in for it on docs-only and config-only PRs while it is rate-limited
+(owner decision 2026-10-17; `docs/development.md`, "Review cost").
 
 ## 10. Owner decisions
 
