@@ -229,11 +229,13 @@ Lightsail VM (Ubuntu, $12/month, US East)
     or fails;
   - the flatten is sell-only and sized from IBKR's own figures, never the
     journal's (which is what is in doubt), taken from the latest account
-    snapshot only (latest by journal sequence, ADR 0019 reading 1). The quantity is the smallest of three bounds: what
-    reaches 98%, IBKR's reported holding minus every working or pending
-    sell (ours or unknown), and that holding minus those sells minus the
-    shares kept. So no combination of fills can open a short or take
-    exposure below 98% (ADR 0019 amendment 2026-10-17, readings 1 and 10);
+    snapshot only (the latest journalled at or before the event that
+    triggers the sale, ADR 0019 reading 1). The quantity is the smallest
+    of three bounds: what reaches 98%, IBKR's reported holding minus
+    every working or pending sell (ours or unknown), and that holding
+    minus those sells minus the shares kept. So no combination of fills
+    can open a short or take exposure below 98% (ADR 0019 amendment
+    2026-10-17, readings 1 and 10);
   - if the latest snapshot, holding, account values or open orders cannot
     be read, or a working sell is one the journal does not recognise, no
     order is sent, the attempt is used up and the urgent alert asks the
@@ -243,8 +245,14 @@ Lightsail VM (Ubuntu, $12/month, US East)
     negative, no order is sent either (reasons `stale-broker-snapshot` and
     `non-positive-broker-values`), but the attempt is not used up: while
     the exit or the urgent alarm still stands, the next good snapshot
-    re-evaluates the sale, and once neither stands the withheld sale
-    lapses (ADR 0019 reading 1, "The snapshot rule", and readings 2 and 4; ADR 0026 points 3 to 6 and its 2026-10-17 amendment);
+    re-evaluates the sale. The exit stands until the incident ends (the
+    account returns to Normal through the owner's recovery; Degraded to
+    Halted is the same incident) or, under the kill switch, until the
+    engagement ends, or until a decision that is not withheld no longer
+    plans the sell. Once neither stands, the withheld sale lapses: it is
+    journalled with reason `lapsed` and reported in the daily summary,
+    not paged (ADR 0019 reading 1, "The snapshot rule", and readings 2
+    and 4; ADR 0026 points 3 to 6 and its 2026-10-17 amendment);
   - this is the one exception to ADR 0019's "no order changes" while
     Halted, recorded as an amendment to ADR 0019 (2026-10-15), so the
     target-weight strategy ADR has a single order rule to follow;
