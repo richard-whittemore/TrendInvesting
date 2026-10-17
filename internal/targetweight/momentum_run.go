@@ -427,9 +427,13 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int) ([]event.Envel
 	d, err := momentum.Decide(r.rule, input)
 	b.fail(err)
 	p := r.payload(d, end)
-	if lotSet && (d.Outcome == momentum.OutcomeDecided || d.Reason == momentum.ReasonNoEligibleNames) {
-		// Only these outcomes reached the book, where the picks are valued;
-		// a decision withheld before ranking valued none.
+	if lotSet && d.Outcome == momentum.OutcomeDecided {
+		// The figures are recorded exactly when the momentum rule decided a
+		// book under D7-L, which compared every pick it reached, a book it
+		// emptied included. They stay if the run then withholds that book
+		// (missing bars, a rebalance in progress), beside the unaffordable
+		// names they value. A decision the rule withheld, no-eligible-names
+		// among them, compared no pick and records none.
 		p.Momentum.MinimumLot = event.MinimumLotFigures{NetLiquidation: lot.NetLiquidation, MomentumScale: lot.Scale}
 	}
 	r.applyGlide(&p, d, figures)

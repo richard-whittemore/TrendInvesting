@@ -25,7 +25,8 @@ const (
 	ReasonInsufficientTrendHistory WithheldReason = "insufficient-trend-history"
 	// ReasonMissingUniverse: no universe snapshot for the close session.
 	ReasonMissingUniverse WithheldReason = "missing-universe"
-	// ReasonNoEligibleNames: no universe member could be picked. The
+	// ReasonNoEligibleNames: no universe member could be picked, and none
+	// was skipped as unaffordable under D7-L (that book is decided). The
 	// backtest kept the last book (defensive_v2.py:319-320).
 	ReasonNoEligibleNames WithheldReason = "no-eligible-names"
 )
@@ -165,7 +166,7 @@ func Decide(cfg Config, in Input) (Decision, error) {
 	if err != nil {
 		return Decision{}, err
 	}
-	picked := false
+	picked, unaffordable := false, false
 	for _, r := range book.Ranked {
 		n := &d.Names[index[r.InstrumentID]]
 		n.Status = r.Status
@@ -176,8 +177,14 @@ func Decide(cfg Config, in Input) (Decision, error) {
 		n.BacktestWouldPick = r.BacktestWouldPick
 		n.OneShare, n.TargetValue = r.OneShare, r.TargetValue
 		picked = picked || r.Status == StatusPicked
+		unaffordable = unaffordable || r.Status == StatusUnaffordable
 	}
-	if !picked {
+	// A book D7-L emptied, every pick dear by the share, is still a decision:
+	// SelectBook puts the whole of Invested in RiskOffInstrument, so the
+	// planner sells every stock held, risk-on or risk-off, rather than
+	// keeping a book the account cannot rebuild (ADR 0026, point 2, "D7-L").
+	// A book with no pick for any other reason is withheld.
+	if !picked && !unaffordable {
 		return withhold(d, ReasonNoEligibleNames), nil
 	}
 	d.Outcome = OutcomeDecided

@@ -51,7 +51,8 @@ const (
 	// WithheldInsufficientTrendHistory: fewer than 200 SPY closes, which the
 	// backtest treats as risk-on and live withholds (ADR 0026, point 5).
 	WithheldInsufficientTrendHistory = "insufficient-trend-history"
-	// WithheldNoEligibleNames: the ranking left no name to hold.
+	// WithheldNoEligibleNames: the ranking left no name to hold, none of
+	// them skipped as unaffordable (a book D7-L emptied is decided).
 	WithheldNoEligibleNames = "no-eligible-names"
 	// WithheldRebalanceInProgress: an order of an earlier decision is not
 	// yet terminal, so no new rebalance is planned until it is (ADR 0026,
@@ -161,9 +162,12 @@ type MomentumFigures struct {
 	UniverseMembers        int `json:"universe_members"`
 	// Names holds every universe member in universe rank order.
 	Names []MomentumName `json:"names"`
-	// MinimumLot is set when D7-L's substitution valued the picks: net
-	// liquidation V at the previous close and the momentum sleeve's scale,
-	// 1 - b. A pick's target value is its weight x MomentumScale x V.
+	// MinimumLot is set exactly when the momentum rule decided a book under
+	// D7-L: net liquidation V at the previous close and the momentum
+	// sleeve's scale, 1 - b. A pick's target value is its weight x
+	// MomentumScale x V. The figures stay when the run then withholds that
+	// book (missing bars, a rebalance in progress); a decision the rule
+	// withheld, no-eligible-names included, compared no pick and has none.
 	MinimumLot MinimumLotFigures `json:"minimum_lot,omitzero"`
 }
 

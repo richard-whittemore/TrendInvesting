@@ -231,12 +231,14 @@ func TestMinimumLotIsNotAppliedFromALateSnapshot(t *testing.T) {
 }
 
 // TestMinimumLotFiguresOnlyWhenPicksWereValued withholds January before any
-// pick is valued, on the trend check (no SPY bar) and on a missing universe:
-// neither decision records minimum-lot figures.
+// pick is valued: on the trend check (no SPY bar), on a missing universe, and
+// as no-eligible-names with no candidate (every member short of a 30-session
+// lookback): none of these decisions records minimum-lot figures.
 func TestMinimumLotFiguresOnlyWhenPicksWereValued(t *testing.T) {
 	for name, opts := range map[string]momentumOptions{
 		"trend check":      {noBar: map[string]string{"2025-01-31": "SPY"}, stopAfter: "2025-01-31"},
 		"missing universe": {noUniverse: true, stopAfter: "2025-01-31"},
+		"no candidate":     {mutate: func(c *event.TargetWeightConfigurationPayload) { c.Momentum.ScoreLookback = 30 }, stopAfter: "2025-01-31"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			jan := targets(t, simulateMomentum(t, opts).decisions)[0]
@@ -247,5 +249,50 @@ func TestMinimumLotFiguresOnlyWhenPicksWereValued(t *testing.T) {
 				t.Errorf("%s: minimum lot figures %+v", jan.WithheldReason, jan.Momentum.MinimumLot)
 			}
 		})
+	}
+}
+
+// TestMinimumLotMovesAnUnaffordablePartialRiskOffBookToTheRiskOffInstrument
+// makes January risk-off at RiskOffFraction 0.5 with every candidate's one
+// share above its positive target and the IRA holding HHH, an unlabelled
+// stock: the decision is made with every candidate unaffordable and the
+// whole book in the risk-off instrument, so HHH is sold and IEF bought,
+// rather than the decision being withheld and the old book kept.
+func TestMinimumLotMovesAnUnaffordablePartialRiskOffBookToTheRiskOffInstrument(t *testing.T) {
+	dear := map[string]float64{"AAA": 200, "BBB": 200, "CCC": 200, "FFF": 200, "GGG": 200}
+	r := simulateMomentum(t, momentumOptions{riskOffJanuary: true, rawScale: dear, held: map[string]int64{"HHH": 10}, stopAfter: "2025-02-03"})
+	jan := targets(t, r.decisions)[0]
+	if jan.Outcome != event.TargetsOutcomeDecided || !jan.Momentum.RiskOff {
+		t.Fatalf("January: %s %s risk-off %v", jan.Outcome, jan.WithheldReason, jan.Momentum.RiskOff)
+	}
+	unaffordable := 0
+	for _, n := range jan.Momentum.Names {
+		switch n.Status {
+		case event.MomentumStatusUnaffordable:
+			unaffordable++
+		case event.MomentumStatusPicked:
+			t.Errorf("%s picked at a share above its target", n.InstrumentID)
+		}
+	}
+	if unaffordable == 0 {
+		t.Error("no name recorded unaffordable")
+	}
+	if jan.Momentum.MinimumLot == (event.MinimumLotFigures{}) {
+		t.Error("no minimum lot figures on a decision whose picks were valued")
+	}
+	for _, w := range jan.Targets {
+		if w.InstrumentID != "IEF" && w.Weight != 0 {
+			t.Errorf("%s target %v in an unaffordable book", w.InstrumentID, w.Weight)
+		}
+	}
+	if ief, ok := targetOf(jan, "IEF"); !ok || ief.Weight != 0.98 {
+		t.Errorf("IEF target %+v", ief)
+	}
+	var phases []string
+	for _, o := range planned(t, r.decisions) {
+		phases = append(phases, o.Side+" "+o.InstrumentID)
+	}
+	if want := []string{"sell HHH", "buy IEF"}; !equalStrings(phases, want) {
+		t.Errorf("orders %v, want %v", phases, want)
 	}
 }

@@ -1,6 +1,7 @@
 package momentum_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -173,7 +174,8 @@ func TestMinimumLotRefusesBadInputs(t *testing.T) {
 // TestDecideRecordsTheMinimumLot runs Decide under D7-L: with AAA's one
 // share above its target the decision records it unaffordable with its
 // figures and holds BBB alone; with every share above its target the
-// decision is withheld, never made from an unaffordable book.
+// decision is made, every name recorded unaffordable and the whole of
+// Invested in the risk-off instrument, so no stock is held.
 func TestDecideRecordsTheMinimumLot(t *testing.T) {
 	in := decideInput()
 	in.MinimumLot = &momentum.MinimumLot{NetLiquidation: 1000, Scale: 1, Prices: map[string]float64{"AAA": 900, "BBB": 40}}
@@ -196,8 +198,10 @@ func TestDecideRecordsTheMinimumLot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustEqual(t, "outcome", d.Outcome, momentum.OutcomeWithheld)
-	mustEqual(t, "reason", d.Reason, momentum.ReasonNoEligibleNames)
+	mustEqual(t, "outcome", d.Outcome, momentum.OutcomeDecided)
+	mustEqual(t, "AAA every share dear", d.Names[0].Status, momentum.StatusUnaffordable)
+	mustEqual(t, "BBB every share dear", d.Names[1].Status, momentum.StatusUnaffordable)
+	mustEqual(t, "risk-off only", fmt.Sprint(d.Targets), fmt.Sprint([]momentum.Target{{InstrumentID: "IEF", Weight: 0.98}}))
 
 	in.MinimumLot.Prices = map[string]float64{}
 	if _, err := momentum.Decide(momentum.FCombo(), in); err == nil {
@@ -229,4 +233,50 @@ func TestMinimumLotLeavesAFullyRiskOffBookAsSelectBookMakesIt(t *testing.T) {
 	mustEqual(t, "targets", strings.Join(targetIDs(book), ","), strings.Join(targetIDs(plain), ","))
 	last := book.Targets[len(book.Targets)-1]
 	mustEqual(t, "risk-off target", last, momentum.Target{InstrumentID: cfg.RiskOffInstrument, Weight: cfg.Invested})
+}
+
+// TestDecideMovesAnUnaffordablePartialRiskOffBookToTheRiskOffInstrument:
+// with RiskOffFraction 0.5 a risk-off book keeps a positive target for each
+// pick, and with every candidate's one share above it D7-L skips them all.
+// The decision is made with the whole of Invested in the risk-off
+// instrument, every candidate recorded unaffordable, so the planner sells
+// every stock held rather than keeping the old book through the month.
+func TestDecideMovesAnUnaffordablePartialRiskOffBookToTheRiskOffInstrument(t *testing.T) {
+	in := decideInput()
+	prices := trending(300, 1.001)
+	prices[299] = 50
+	in.Closes["SPY"] = series(in.Sessions, prices)
+	in.MinimumLot = &momentum.MinimumLot{NetLiquidation: 1000, Scale: 1, Prices: map[string]float64{"AAA": 900, "BBB": 900}}
+	cfg := momentum.FCombo()
+	mustEqual(t, "partial risk-off", cfg.RiskOffFraction, 0.5)
+	d, err := momentum.Decide(cfg, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustEqual(t, "risk-off", d.Trend.RiskOff, true)
+	mustEqual(t, "outcome", d.Outcome, momentum.OutcomeDecided)
+	for _, n := range d.Names[:2] {
+		mustEqual(t, n.InstrumentID, n.Status, momentum.StatusUnaffordable)
+		if !(n.TargetValue > 0 && n.TargetValue < n.OneShare) {
+			t.Errorf("%s target value %v against one share %v", n.InstrumentID, n.TargetValue, n.OneShare)
+		}
+	}
+	mustEqual(t, "risk-off only", fmt.Sprint(d.Targets), fmt.Sprint([]momentum.Target{{InstrumentID: "IEF", Weight: cfg.Invested}}))
+}
+
+// TestDecideWithNoCandidateUnderTheLotIsStillWithheld: D7-L decides an
+// all-unaffordable book, but a book with no pick for any other reason (here
+// every member unlabelled) is still withheld as no-eligible-names.
+func TestDecideWithNoCandidateUnderTheLotIsStillWithheld(t *testing.T) {
+	in := decideInput()
+	for i := range in.Universe.Rows {
+		in.Universe.Rows[i].Sector, in.Universe.Rows[i].SectorSource = "", ""
+	}
+	in.MinimumLot = &momentum.MinimumLot{NetLiquidation: 1000, Scale: 1, Prices: map[string]float64{"AAA": 1, "BBB": 1}}
+	d, err := momentum.Decide(momentum.FCombo(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustEqual(t, "outcome", d.Outcome, momentum.OutcomeWithheld)
+	mustEqual(t, "reason", d.Reason, momentum.ReasonNoEligibleNames)
 }

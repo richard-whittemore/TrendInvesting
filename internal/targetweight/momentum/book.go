@@ -112,7 +112,10 @@ func SelectBook(cfg Config, candidates []Candidate, riskOff bool) (Book, error) 
 // Only a pick with a positive target value is compared. A risk-off book with
 // RiskOffFraction 1 gives every pick a zero target, which buys none of it:
 // that book is SelectBook's, the whole of Invested in RiskOffInstrument, and
-// the planner sells every stock held, as the risk-off rule asks.
+// the planner sells every stock held, as the risk-off rule asks. When every
+// candidate is skipped, at any RiskOffFraction, the book has no pick and the
+// whole of Invested in RiskOffInstrument; Decide makes that decision rather
+// than withholding it.
 //
 // A target value depends on the weights, which depend on the picks, so the
 // substitution is a fixed point, reached by repeating the selection: each
