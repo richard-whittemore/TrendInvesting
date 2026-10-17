@@ -341,7 +341,8 @@ the module's own rules version and decision corpus (ADR 0016;
 - **New event types**, each needing a schema and tests under ADR 0015:
   `strategy.target-weight.configuration`, `strategy.targets.decided`,
   `strategy.order.planned`, `risk.order.released`, `risk.order.refused`,
-  `market.universe.snapshot` and `operator.kill-switch`. They also need an
+  `market.universe.snapshot`, `operator.kill-switch`,
+  `account.broker.snapshot`, `risk.margin.alarm` and `risk.sale.withheld`. They also need an
   account snapshot carrying positions and net liquidation, as a new version of
   `account.snapshot` or as ADR 0019's proposed `account.reconciliation`, and a
   recorded IBKR mark.
@@ -391,7 +392,9 @@ ones that belong here.
   the worst-case total (limit price × quantity, plus the fee allowance per
   order) exceeds the budget, scale every buy by
   (budget − n × fee allowance) ÷ Σ(quantity × limit price), n being the
-  number of buys, and round toward zero. The result fits the budget with
+  number of buys, and round toward zero. When the budget does not exceed
+  n × fee allowance the factor is zero or negative, and no buy is released:
+  the planner withholds them rather than apply a negative scale. The result fits the budget with
   worst-case fees included. With a $0 allowance this is the earlier
   formula.
 - **A new rebalance is withheld while an earlier one's orders are working.**
@@ -409,4 +412,4 @@ ones that belong here.
 - **The per-order fee allowance is $2.00**, pending confirmation in paper
   trading (`docs/research/commissions-30k-2026-10.md`): above every observed
   $30k average ($1.03 to $1.49), below the $2.50 that 500 shares would
-  cost.
+  cost before the 1% cap lowers it.

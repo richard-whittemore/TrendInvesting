@@ -306,12 +306,18 @@ here so that all eleven are in one place.
    (holding − keep); holding − every working or pending sell; and
    holding − every working or pending sell − keep. The third bound means a
    sell of ours that is still working (Boost's released exit, say) and the
-   sale together never take exposure below 98%, whichever fills.
+   sale together never take exposure below 98%, whichever fills. When the
+   smallest bound is zero or negative (a holding of 147, a keep of 93 and
+   working sells of 60 give -6), the quantity is zero and no order is sent;
+   it is nothing to sell, not an attempt (reading 4).
 2. **The kill switch does not suppress the sale.** With the kill switch
    engaged (ADR 0026 point 3), Boost's exit firing, or the Excess Liquidity
    alarm turning urgent, still produces the one sale back to 98%, in any
    engine state. It is attempted once per engagement; engaging again while
-   engaged is the same engagement.
+   engaged is the same engagement. Engagement does not reset the incident's
+   limit (reading 3): where a sale has already been attempted for the
+   instrument in the incident, engaging again sends no second one, so the
+   incident limit overrides the once-per-engagement limit.
 3. **Degraded to Halted is one incident.** An incident runs from the first
    engine-state record that leaves Normal until recovery. Moving from
    Degraded to Halted does not start another, so there is one sale per
