@@ -3,10 +3,21 @@ export GOTOOLCHAIN := local
 COVERAGE_MIN ?= 80.0
 COVERAGE_PROFILE ?= coverage.out
 
-.PHONY: adapter-test build check coverage deps fmt fmt-check golangci lint research-test staticcheck test vet vuln
+.PHONY: adapter-test build check coverage demo-boost-dry-run deps engine fmt fmt-check golangci lint research-test staticcheck test vet vuln
+
+# The build stamp: every envelope's strategy version carries it (ADR 0016),
+# and cmd/engine refuses -mode dry-run, paper or live on an unstamped build
+# ("dev"). Outside a git checkout it falls back to "dev", which those modes
+# refuse.
+BUILD_STAMP ?= $(shell git describe --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -X github.com/richard-whittemore/TrendInvesting/internal/buildinfo.Version=$(BUILD_STAMP)
 
 build:
-	go build ./...
+	go build -ldflags "$(LDFLAGS)" ./...
+
+# The engine binary, stamped. deploy/build-engine.sh builds the server's copy.
+engine:
+	go build -ldflags "$(LDFLAGS)" -o bin/ti-engine ./cmd/engine
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './vendor/*')

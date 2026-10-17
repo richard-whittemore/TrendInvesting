@@ -45,6 +45,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/richard-whittemore/TrendInvesting/internal/buildinfo"
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
@@ -129,6 +130,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	case "":
 		missing = append(missing, fmt.Errorf("-mode is required: %s, %s, %s or %s; there is no default, so a live run cannot start without the durable log by forgetting it (owner decision 2026-10-16)", modeBacktest, modeDryRun, modePaper, modeLive))
 	case modeDryRun, modePaper, modeLive:
+		if opts.build == buildinfo.Unstamped {
+			missing = append(missing, fmt.Errorf("-mode %s refuses an unstamped build (%q): a run's build is part of every envelope's strategy version (ADR 0016) and a run never resumes across builds (ADR 0027), so it must be identified; build the engine with `make engine`, which stamps it from `git describe --always --dirty`", opts.mode, opts.build))
+		}
 		if opts.logPath == "" {
 			missing = append(missing, fmt.Errorf("-log is required in -mode %s: orders that can reach a broker are sent only after they are flushed to a durable log (ADR 0027; owner decision 2026-10-16)", opts.mode))
 		}
