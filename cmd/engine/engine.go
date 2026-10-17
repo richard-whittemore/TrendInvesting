@@ -26,6 +26,14 @@
 // input stream (configuration included), and a stream in which two records
 // both claim Sequence 1 fails its own replay.
 //
+// # Wire contract: an input sent again is a request for its committed reply
+//
+// An input whose ID names a group already committed is answered with the
+// reply built from that group, byte for byte, and is not applied again, so
+// the same input never yields a second order; a resumed run answers alike
+// for every group it recovered (ADR 0027, amendment "re-delivery on
+// request"). A different input under a committed ID is refused.
+//
 // The reducer's decisions are received over that socket and written to a
 // journal; that is the whole of this command's job. Four design decisions
 // this composition had to make, and why, are recorded beside the code that
