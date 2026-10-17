@@ -87,8 +87,8 @@ func TestNewDeciderBundlesEveryDecisionIntoOneEnvelope(t *testing.T) {
 	handler := replay.HandlerFunc(func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
 		return want, nil
 	})
-	guard, engine, _ := newTestWiring(t, handler)
-	decide := newDecider(guard, engine, "stub/1.0.0+test", "sha256:stub")
+	guard, engine, recorder := newTestWiring(t, handler)
+	decide := newDecider(guard, engine, recorder, "stub/1.0.0+test", "sha256:stub")
 
 	input := stubInput(t, "input-1")
 	reply, err := decide(context.Background(), input)
@@ -136,8 +136,8 @@ func TestNewDeciderWritesAnEmptyArrayNeverNullForZeroDecisions(t *testing.T) {
 	handler := replay.HandlerFunc(func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
 		return nil, nil
 	})
-	guard, engine, _ := newTestWiring(t, handler)
-	decide := newDecider(guard, engine, "stub/1.0.0+test", "sha256:stub")
+	guard, engine, recorder := newTestWiring(t, handler)
+	decide := newDecider(guard, engine, recorder, "stub/1.0.0+test", "sha256:stub")
 
 	reply, err := decide(context.Background(), stubInput(t, "input-1"))
 	if err != nil {
@@ -166,8 +166,8 @@ func TestNewDeciderFailsClosedOnAReducerError(t *testing.T) {
 	handler := replay.HandlerFunc(func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
 		return nil, wantErr
 	})
-	guard, engine, _ := newTestWiring(t, handler)
-	decide := newDecider(guard, engine, "stub/1.0.0+test", "sha256:stub")
+	guard, engine, recorder := newTestWiring(t, handler)
+	decide := newDecider(guard, engine, recorder, "stub/1.0.0+test", "sha256:stub")
 
 	reply, err := decide(context.Background(), stubInput(t, "input-1"))
 	if !errors.Is(err, wantErr) {
@@ -191,7 +191,7 @@ func TestNewDeciderFailsClosedOnAReducerError(t *testing.T) {
 func TestNewDeciderRejectsADuplicatedInput(t *testing.T) {
 	handler := replay.HandlerFunc(func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) { return nil, nil })
 	guard, engine, recorder := newTestWiring(t, handler)
-	decide := newDecider(guard, engine, "stub/1.0.0+test", "sha256:stub")
+	decide := newDecider(guard, engine, recorder, "stub/1.0.0+test", "sha256:stub")
 
 	if _, err := decide(context.Background(), stubInputAt(t, "bar-1", 1)); err != nil {
 		t.Fatalf("first bar: decide: %v", err)
@@ -210,7 +210,7 @@ func TestNewDeciderRejectsADuplicatedInput(t *testing.T) {
 func TestNewDeciderRejectsAGappedInput(t *testing.T) {
 	handler := replay.HandlerFunc(func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) { return nil, nil })
 	guard, engine, recorder := newTestWiring(t, handler)
-	decide := newDecider(guard, engine, "stub/1.0.0+test", "sha256:stub")
+	decide := newDecider(guard, engine, recorder, "stub/1.0.0+test", "sha256:stub")
 
 	if _, err := decide(context.Background(), stubInputAt(t, "bar-1", 1)); err != nil {
 		t.Fatalf("first bar: decide: %v", err)
@@ -423,8 +423,8 @@ func TestDeciderRefusesABarBeforeConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("construct the reducer: %v", err)
 	}
-	guard, engine, _ := newTestWiring(t, reducer)
-	decide := newDecider(guard, engine, strategyVersion, event.ConfigurationHash(cfg))
+	guard, engine, recorder := newTestWiring(t, reducer)
+	decide := newDecider(guard, engine, recorder, strategyVersion, event.ConfigurationHash(cfg))
 
 	bar := flatBar("TEST", 0)
 	envelope := barEnvelope(t, bar, 1, strategyVersion, event.ConfigurationHash(cfg))

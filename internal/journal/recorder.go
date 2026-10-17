@@ -106,6 +106,43 @@ type Recorder struct {
 	// failed is set once a durable Recorder cannot keep its log in step with
 	// its handler, and refuses every later input.
 	failed error
+	// committed indexes each committed group by its input's ID, first
+	// occurrence kept, so the reply to an input can be served again.
+	committed map[string]committedGroup
+}
+
+// committedGroup locates one committed group in entries, with the error the
+// handler returned for its input, if any.
+type committedGroup struct {
+	start, end int
+	refusal    string
+}
+
+// Committed is one input as it was committed, with the decisions recorded
+// for it, in order and stamped, and the refusal its application returned
+// (empty when there was none).
+type Committed struct {
+	Input     event.Envelope
+	Decisions []event.Envelope
+	Refusal   string
+}
+
+// Committed returns the group committed for the input with this ID: made
+// durable for a durable Recorder, recorded for an in-memory one. An input
+// whose group was refused, or could not be made durable, was never
+// committed, and reports false. Because the group is the log's own record,
+// the reply built from it is the same however often it is asked for and
+// whether the run was resumed since (ADR 0027, sections 4 and 6).
+func (r *Recorder) Committed(inputID string) (Committed, bool) {
+	g, ok := r.committed[inputID]
+	if !ok {
+		return Committed{}, false
+	}
+	c := Committed{Input: r.entries[g.start].Envelope, Refusal: g.refusal}
+	for _, e := range r.entries[g.start+1 : g.end] {
+		c.Decisions = append(c.Decisions, e.Envelope)
+	}
+	return c, true
 }
 
 // NewRecorder returns a Recorder wrapping handler, which is required, holding
@@ -188,7 +225,11 @@ func (r *Recorder) Apply(ctx context.Context, input event.Envelope) ([]event.Env
 		}
 		group = append(group, Entry{Kind: KindDecision, Envelope: stamped})
 	}
-	if err := r.record(input, group); err != nil {
+	refusal := applyErr
+	if stampErr != nil {
+		refusal = stampErr
+	}
+	if err := r.record(input, group, refusal); err != nil {
 		return nil, err
 	}
 	if stampErr != nil {
@@ -213,7 +254,7 @@ func (r *Recorder) released(decisions []event.Envelope) []event.Envelope {
 // A group whose log append failed is still held: the journal written at the
 // end of the run keeps it as evidence of what was decided, while the log a
 // restart reads does not, and nothing of it was released.
-func (r *Recorder) record(input event.Envelope, group []Entry) error {
+func (r *Recorder) record(input event.Envelope, group []Entry, refusal error) error {
 	if r.expected != nil {
 		if divergence := compareGroup(input.ID, r.expected, group); divergence != nil {
 			r.failed = divergence
@@ -221,13 +262,23 @@ func (r *Recorder) record(input event.Envelope, group []Entry) error {
 		}
 		r.expected = nil
 	}
+	start := len(r.entries)
 	r.entries = append(r.entries, group...)
-	if r.log == nil {
-		return nil
+	if r.log != nil {
+		if err := r.log.Append(group); err != nil {
+			r.failed = err
+			return &DurabilityError{Input: input.ID, Err: err}
+		}
 	}
-	if err := r.log.Append(group); err != nil {
-		r.failed = err
-		return &DurabilityError{Input: input.ID, Err: err}
+	if _, seen := r.committed[input.ID]; !seen {
+		if r.committed == nil {
+			r.committed = map[string]committedGroup{}
+		}
+		g := committedGroup{start: start, end: len(r.entries)}
+		if refusal != nil {
+			g.refusal = refusal.Error()
+		}
+		r.committed[input.ID] = g
 	}
 	return nil
 }

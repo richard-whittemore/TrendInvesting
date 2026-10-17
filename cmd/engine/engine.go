@@ -346,7 +346,7 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	}
 
 	guard := &wireGuard{}
-	server, err := transport.Listen(opts.socketPath, newDecider(guard, wireEngine, strategyVersion, configurationHash), transport.ServerConfig{
+	server, err := transport.Listen(opts.socketPath, newDecider(guard, wireEngine, recorder, strategyVersion, configurationHash), transport.ServerConfig{
 		MaxFrameBytes:   opts.maxFrameBytes,
 		DecisionTimeout: opts.decisionTimeout,
 		// Decision 4: at most one connection may be open at a time (see
