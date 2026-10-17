@@ -18,6 +18,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
 var t0 = time.Date(2024, time.January, 2, 21, 0, 0, 0, time.UTC)
@@ -42,7 +43,7 @@ func writeJournal(t *testing.T, dir string) string {
 func writeJournalWith(t *testing.T, dir string, extra ...journal.Entry) string {
 	t.Helper()
 	cfg := event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint <b>", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR}
-	snap := event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: t0, Currency: "USD", NetLiquidation: 4000,
+	snap := event.AccountPositionsSnapshotPayload{AccountID: "joint <b>", AsOf: t0, Currency: "USD", NetLiquidation: 4000,
 		Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: 39}}}
 	refused := event.OrderRefusedPayload{AccountID: "joint", PlanID: "p", Tag: "targets:0", ClientOrderID: "tw-a", InstrumentID: "SPY",
 		Side: event.OrderSideBuy, Quantity: 39, LimitPrice: 101, Reason: event.RefusedOrderSize, Detail: "figures",
@@ -94,12 +95,37 @@ func TestDashboardShowsEachAccountEscapedAndNeverCached(t *testing.T) {
 }
 
 func TestDashboardSaysWhenAnInputWasNotRead(t *testing.T) {
-	rejected := event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: t0, Currency: "USD", NetLiquidation: -1}
+	rejected := event.AccountPositionsSnapshotPayload{AccountID: "joint <b>", AsOf: t0, Currency: "USD", NetLiquidation: -1}
 	path := writeJournalWith(t, t.TempDir(),
 		journal.Entry{Kind: journal.KindInput, Envelope: envelope(t, 4, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, "snap-bad", rejected)})
 	body := get(newHandler([]string{path}, "SPY"), http.MethodGet, "/").Body.String()
 	if !strings.Contains(body, "Inputs not read: 1") || !strings.Contains(body, "4000.00") {
 		t.Fatalf("the page must show the figures without the rejected input, and say it left one out:\n%s", body)
+	}
+}
+
+func TestDashboardShowsEachAlertsBody(t *testing.T) {
+	body := get(newHandler([]string{writeJournal(t, t.TempDir())}, "SPY"), http.MethodGet, "/").Body.String()
+	if !strings.Contains(body, "Risk gate refused buy 39 SPY") {
+		t.Fatalf("the page must show what the alert says, not only its title:\n%s", body)
+	}
+}
+
+func TestDashboardDatesTheEquityComparison(t *testing.T) {
+	render := func(e report.Equity) string {
+		var buf bytes.Buffer
+		if err := page.Execute(&buf, []account{{Summary: report.Summary{AccountID: "joint", Date: "2024-01-04", Benchmark: "SPY", Equity: e}}}); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	stale := render(report.Equity{Available: true, StartDate: "2024-01-02", EndDate: "2024-01-03", DayAccountReturn: 0.5})
+	if !strings.Contains(stale, "2024-01-02 to 2024-01-03") || !strings.Contains(stale, "Day: not available") || strings.Contains(stale, "50.00%") {
+		t.Fatalf("an earlier day's change must not show as today's:\n%s", stale)
+	}
+	current := render(report.Equity{Available: true, StartDate: "2024-01-02", EndDate: "2024-01-04", DayAvailable: true, DayStartDate: "2024-01-02", DayAccountReturn: 0.5})
+	if !strings.Contains(current, "Day, 2024-01-02 to 2024-01-04: account &#43;50.00%") {
+		t.Fatalf("the day's change must name the dates it compares:\n%s", current)
 	}
 }
 

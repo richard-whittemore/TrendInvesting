@@ -53,12 +53,22 @@ type FillLine struct {
 // Equity compares the account's net liquidation with the benchmark's close
 // over the points where both are recorded on one date. Returns are simple
 // price returns: the benchmark's dividends are not included.
+//
+// The comparison runs from StartDate to EndDate, the latest paired point,
+// which can be earlier than the summary's date when that day has no bar or
+// snapshot. The day's figures compare EndDate with the paired point before
+// it, DayStartDate, which is more than one session back when points are
+// missing between them; they are available only when EndDate is the
+// summary's date, so an earlier day's change is never shown as today's.
 type Equity struct {
 	Available          bool
 	StartDate          string
+	EndDate            string
 	AccountReturn      float64
 	BenchmarkReturn    float64
 	Excess             float64
+	DayAvailable       bool
+	DayStartDate       string
 	DayAccountReturn   float64
 	DayBenchmarkReturn float64
 }
@@ -122,7 +132,7 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 				continue // equity and cash only: no positions to show
 			}
 			var p event.AccountPositionsSnapshotPayload
-			if read(e, snapshotVersions, &p) != nil {
+			if read(e, snapshotVersions, &p) != nil || !s.snapshotFollows(p) {
 				s.RejectedInputs++
 				continue
 			}
@@ -202,8 +212,17 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 		}
 	}
 	sort.Slice(points, func(i, j int) bool { return points[i].date < points[j].date })
-	s.Equity = equityOf(points)
+	s.Equity = equityOf(points, date)
 	return s, nil
+}
+
+// snapshotFollows applies the engine's own rule for a positions snapshot
+// (internal/targetweight, applySnapshot): it names this journal's account and
+// is later than the last one taken. The log keeps a snapshot the engine
+// refused, and one that broke either rule must not replace the holdings the
+// engine decided on.
+func (s *Summary) snapshotFollows(p event.AccountPositionsSnapshotPayload) bool {
+	return p.AccountID == s.AccountID && (!s.HaveSnapshot || p.AsOf.After(s.HoldingsAsOf))
 }
 
 // order returns the day's line for a client order ID, adding one when the
@@ -223,18 +242,21 @@ type equityPoint struct {
 	net, benchmark float64
 }
 
-func equityOf(points []equityPoint) Equity {
+func equityOf(points []equityPoint, date string) Equity {
 	if len(points) < 2 {
 		return Equity{}
 	}
 	first, last, prev := points[0], points[len(points)-1], points[len(points)-2]
 	e := Equity{
-		Available: true, StartDate: first.date,
-		AccountReturn:      last.net/first.net - 1,
-		BenchmarkReturn:    last.benchmark/first.benchmark - 1,
-		DayAccountReturn:   last.net/prev.net - 1,
-		DayBenchmarkReturn: last.benchmark/prev.benchmark - 1,
+		Available: true, StartDate: first.date, EndDate: last.date,
+		AccountReturn:   last.net/first.net - 1,
+		BenchmarkReturn: last.benchmark/first.benchmark - 1,
 	}
 	e.Excess = e.AccountReturn - e.BenchmarkReturn
+	if last.date == date {
+		e.DayAvailable, e.DayStartDate = true, prev.date
+		e.DayAccountReturn = last.net/prev.net - 1
+		e.DayBenchmarkReturn = last.benchmark/prev.benchmark - 1
+	}
 	return e
 }

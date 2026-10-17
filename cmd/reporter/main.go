@@ -97,15 +97,18 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if a, lost := report.HeartbeatAlert(account, info.ModTime(), now(), *timeout); lost {
 		alerts = append(alerts, a)
 	}
+	// A summary that cannot be built is reported, but never holds back the
+	// incident alerts: they are what ADR 0019 requires to reach a person.
+	var failures []error
 	if *summary {
 		a, err := summaryAlert(envelopes, *date, *benchmark)
 		if err != nil {
-			return err
+			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))
+		} else {
+			alerts = append(alerts, a)
 		}
-		alerts = append(alerts, a)
 	}
 
-	var failures []error
 	for _, a := range report.Fresh(alerts, nil) {
 		if err := deliver(senders, a, seen); err != nil {
 			failures = append(failures, err)

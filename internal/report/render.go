@@ -58,9 +58,13 @@ func RenderText(s Summary) string {
 	b.WriteString("\n")
 	if s.Equity.Available {
 		e := s.Equity
-		fmt.Fprintf(&b, "Equity vs %s since %s: account %+.2f%%, %s %+.2f%%, difference %+.2f points\n",
-			s.Benchmark, e.StartDate, e.AccountReturn*100, s.Benchmark, e.BenchmarkReturn*100, e.Excess*100)
-		fmt.Fprintf(&b, "Day: account %+.2f%%, %s %+.2f%%\n", e.DayAccountReturn*100, s.Benchmark, e.DayBenchmarkReturn*100)
+		fmt.Fprintf(&b, "Equity vs %s, %s to %s: account %+.2f%%, %s %+.2f%%, difference %+.2f points\n",
+			s.Benchmark, e.StartDate, e.EndDate, e.AccountReturn*100, s.Benchmark, e.BenchmarkReturn*100, e.Excess*100)
+		if e.DayAvailable {
+			fmt.Fprintf(&b, "Day, %s to %s: account %+.2f%%, %s %+.2f%%\n", e.DayStartDate, e.EndDate, e.DayAccountReturn*100, s.Benchmark, e.DayBenchmarkReturn*100)
+		} else {
+			fmt.Fprintf(&b, "Day: not available (no paired snapshot and %s close on %s)\n", s.Benchmark, s.Date)
+		}
 	} else {
 		fmt.Fprintf(&b, "Equity vs %s: not enough paired snapshots and bars yet.\n", s.Benchmark)
 	}

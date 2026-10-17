@@ -2,6 +2,7 @@ package report_test
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -134,5 +135,20 @@ func TestLoadRefusesADamagedDurableLog(t *testing.T) {
 	}
 	if _, _, err := report.Load(damaged); err == nil {
 		t.Fatal("a damaged durable log must be refused")
+	}
+}
+
+func TestLoadRefusesADurableLogWhoseRecordsNameAnotherRun(t *testing.T) {
+	for name, edit := range map[string]func(*event.Envelope){
+		"configuration":    func(e *event.Envelope) { e.ConfigurationHash = "another" },
+		"strategy version": func(e *event.Envelope) { e.StrategyVersion = "another" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			envelopes := buildDay(t)
+			edit(&envelopes[3])
+			if _, _, err := report.Load(logBytes(t, envelopes, false)); err == nil || !strings.Contains(err.Error(), "header names the run") {
+				t.Fatalf("a log that mixes runs must be refused as a journal is, got %v", err)
+			}
+		})
 	}
 }

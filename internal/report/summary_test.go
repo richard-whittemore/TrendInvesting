@@ -2,7 +2,9 @@ package report_test
 
 import (
 	"math"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
@@ -76,7 +78,7 @@ func TestSummaryEquityAgainstTheBenchmark(t *testing.T) {
 	if !near(e.AccountReturn, 0.075) || !near(e.BenchmarkReturn, 0.10) || !near(e.Excess, -0.025) {
 		t.Fatalf("since start = %+v", e)
 	}
-	if !near(e.DayAccountReturn, 0.075) || !near(e.DayBenchmarkReturn, 0.10) {
+	if !e.DayAvailable || !near(e.DayAccountReturn, 0.075) || !near(e.DayBenchmarkReturn, 0.10) {
 		t.Fatalf("day = %+v", e)
 	}
 	if e.StartDate != "2024-01-02" {
@@ -151,5 +153,77 @@ func TestRenderTextNamesEverySection(t *testing.T) {
 		if !contains(text, want) {
 			t.Errorf("text lacks %q:\n%s", want, text)
 		}
+	}
+}
+
+// snapshotAs records a positions snapshot for any account and time, as the
+// log keeps one the engine refused.
+func (s *stream) snapshotAs(id, account string, asOf, at time.Time, netLiquidation float64) {
+	s.add(event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, id, at,
+		event.AccountPositionsSnapshotPayload{AccountID: account, AsOf: asOf, Currency: "USD", NetLiquidation: netLiquidation,
+			Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: 99}}})
+}
+
+func TestSummarySkipsSnapshotsTheEngineRefuses(t *testing.T) {
+	s := newStream(t)
+	s.bar(0, "SPY", 100)
+	s.snapshot(0, 4000, 0)
+	s.bar(1, "SPY", 110)
+	s.snapshot(1, 4300, 39)
+	// Another account's snapshot, and one that does not follow the last.
+	s.snapshotAs("snapshot:other", "ira", day(1).Add(time.Hour), day(1).Add(time.Hour), 9000)
+	s.snapshotAs("snapshot:stale", "joint", day(0), day(1).Add(2*time.Hour), 1000)
+	got, err := report.Summarize(s.out, "2024-01-03", "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NetLiquidation != 4300 || len(got.Holdings) != 1 || got.Holdings[0].Quantity != 39 || !got.HoldingsAsOf.Equal(day(1)) {
+		t.Fatalf("holdings = %+v", got)
+	}
+	if !near(got.Equity.AccountReturn, 0.075) {
+		t.Fatalf("equity moved by a refused snapshot: %+v", got.Equity)
+	}
+	if got.RejectedInputs != 2 {
+		t.Fatalf("rejected inputs = %d, want 2", got.RejectedInputs)
+	}
+}
+
+func TestSummaryDayReturnIsUnavailableWhenTheReportDateHasNoPairedPoint(t *testing.T) {
+	s := newStream(t)
+	s.bar(0, "SPY", 100)
+	s.snapshot(0, 4000, 0)
+	s.bar(1, "SPY", 110)
+	s.snapshot(1, 4300, 39)
+	s.withheld(2, event.WithheldMissingBars)
+	got, err := report.Summarize(s.out, "2024-01-04", "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := got.Equity
+	if !e.Available || e.EndDate != "2024-01-03" || e.DayAvailable {
+		t.Fatalf("equity = %+v", e)
+	}
+	text := report.RenderText(got)
+	if !strings.Contains(text, "2024-01-02 to 2024-01-03") || !strings.Contains(text, "Day: not available") {
+		t.Fatalf("text does not date the comparison:\n%s", text)
+	}
+}
+
+func TestSummaryDayReturnNamesTheDatesItCompares(t *testing.T) {
+	s := newStream(t)
+	s.bar(0, "SPY", 100)
+	s.snapshot(0, 4000, 0)
+	s.bar(2, "SPY", 110) // no paired point on day 1
+	s.snapshot(2, 4300, 39)
+	got, err := report.Summarize(s.out, "2024-01-04", "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := got.Equity
+	if !e.DayAvailable || e.DayStartDate != "2024-01-02" || e.EndDate != "2024-01-04" {
+		t.Fatalf("equity = %+v", e)
+	}
+	if text := report.RenderText(got); !strings.Contains(text, "Day, 2024-01-02 to 2024-01-04:") {
+		t.Fatalf("text does not name the compared dates:\n%s", text)
 	}
 }

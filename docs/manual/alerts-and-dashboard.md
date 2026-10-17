@@ -25,8 +25,10 @@ A run leaves one of two files, and both programs read either.
   Only records the engine has committed are reported; the unfinished end of a
   log from a crashed run holds nothing to trust and is ignored.
 
-Before reporting anything the program checks the file's fingerprints. A file
-that has been edited or damaged is refused whole, and no figure from it is
+Before reporting anything the program checks the file's fingerprints, and
+that every record names the same run (configuration and strategy version) as
+the file's header. A file that has been edited or damaged, or that mixes
+records from different runs, is refused whole, and no figure from it is
 shown. The checking is the same code `journal-query` uses, so the three tools
 cannot disagree about what a file holds.
 
@@ -39,7 +41,9 @@ engine applies.
   stops with an error naming it.
 - An input that fails (a bar, an account snapshot, a fill) is skipped and
   counted. The log keeps inputs the engine itself refused, so stopping for one
-  would silence every later alert. A skipped input moves no figure, and the
+  would silence every later alert. An account snapshot is also skipped when
+  the engine would refuse it: one naming another account, or one no later
+  than the last snapshot taken. A skipped input moves no figure, and the
   summary and the dashboard say "Inputs not read: N" when there are any.
 
 ## What triggers an alert
@@ -85,6 +89,9 @@ The delivery rules:
   only to PagerDuty or your own ntfy server. If no such channel is named, the
   incident alerts still go out and the run ends with an error saying the
   summary had nowhere private to go.
+- If the summary cannot be built (a decision record the program cannot read),
+  the incident alerts still go out and are remembered, and the run ends with
+  an error naming the record.
 - The reporter remembers what each channel has taken in its own state file
   (`-state`). That file is the only thing it writes, and it is flushed to disk
   before the run ends, so a power cut cannot leave it empty. If it is
@@ -133,7 +140,8 @@ or an address this machine's own Tailscale interface holds (`tailscale ip`
 prints it), so on the server it is reachable only over Tailscale. An address
 that merely looks like a Tailscale one but belongs to another network is
 refused.
-Pages: `/` (the summaries), `/api/summary.json` and `/healthz`. Anything but a
+Pages: `/` (the summaries, with each alert's full text under its title),
+`/api/summary.json` and `/healthz`. Anything but a
 read is answered "method not allowed". If a log does not verify, the page says
 so without showing paths or figures.
 
@@ -142,6 +150,12 @@ so without showing paths or figures.
 - Holdings come from the broker's account snapshot.
 - Equity against SPY pairs the snapshot's net liquidation with SPY's closing
   price on the same day. It is price return only (no dividends) and needs two
-  paired points before it shows a comparison.
+  paired points before it shows a comparison. The comparison names the dates
+  it runs between; the last date can be earlier than the summary's day when
+  that day has no paired snapshot and close.
+- The day's change compares the summary's day with the paired point before
+  it, and names both dates, so a gap of missing days shows as a longer span.
+  When the summary's day has no paired point it says "Day: not available"
+  rather than showing an earlier day's change as today's.
 - The fills list stays empty until the engine records fills for target-weight
   strategies.

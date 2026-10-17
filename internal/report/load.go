@@ -21,12 +21,16 @@ func Load(raw []byte) (journal.Header, []event.Envelope, error) {
 	if err != nil {
 		return journal.Header{}, nil, fmt.Errorf("report: %w", err)
 	}
-	// A durable log states no span and its reader has checked every record
-	// against its own header; only a journal's header is left to check.
-	if loaded.Header.JournalVersion != 0 {
-		if err := journal.CheckIdentity(loaded.Header, loaded.Records); err != nil {
-			return journal.Header{}, nil, err
-		}
+	// Every record must name the run its file's header names (ADR 0017's
+	// identity rule). Recovering a durable log checks its chain and commits
+	// but not this, so a log is checked against the identity its header
+	// names, exactly as a journal is.
+	identity := loaded.Header
+	if identity.JournalVersion == 0 {
+		identity = journal.Header{ConfigurationHash: loaded.LogHeader.ConfigurationHash, StrategyVersion: loaded.LogHeader.StrategyVersion}
+	}
+	if err := journal.CheckIdentity(identity, loaded.Records); err != nil {
+		return journal.Header{}, nil, err
 	}
 	envelopes := make([]event.Envelope, len(loaded.Records))
 	for i, r := range loaded.Records {

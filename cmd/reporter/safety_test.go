@@ -12,6 +12,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 )
 
 func TestADeliveryThatHangsIsCutOffAndRetriedNextRun(t *testing.T) {
@@ -147,5 +150,42 @@ func TestASummaryWithOnlyThePublicRelayIsRefusedButTheAlertsStillGo(t *testing.T
 	raw, _ := os.ReadFile(state)
 	if strings.Contains(string(raw), "summary:") {
 		t.Fatalf("the summary was recorded as delivered: %s", raw)
+	}
+}
+
+func TestASummaryThatCannotBeBuiltStillLetsEveryAlertGo(t *testing.T) {
+	dir := t.TempDir()
+	// A decision at a schema version this build does not read refuses the
+	// summary; the refusal, the halt and the heartbeat loss must still go out.
+	planned := envelope(t, 5, event.OrderPlannedEventType, 99, "plan", t0, map[string]string{"client_order_id": "tw-a"})
+	var buf bytes.Buffer
+	entries := append(haltedEntries(t), journal.Entry{Kind: journal.KindDecision, Envelope: planned})
+	if err := journal.Write(&buf, journal.NewHeader("h", "v", t0.Add(-time.Hour), t0), entries); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(dir, "joint.journal")
+	if err := os.WriteFile(journalPath, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(journalPath, t0, t0); err != nil {
+		t.Fatal(err)
+	}
+	r := &relay{sent: map[string][]string{}}
+	state := filepath.Join(dir, "s.json")
+	args := []string{"-journal", journalPath, "-state", state, "-channel", "pagerduty", "-summary", "-heartbeat-timeout", "2h"}
+	environment := env(map[string]string{"TI_PAGERDUTY_ROUTING_KEY": "k", "TI_PAGERDUTY_URL": "https://events.pagerduty.test/v2/enqueue"})
+	err := run(args, environment, func() time.Time { return t0.Add(3 * time.Hour) }, &bytes.Buffer{}, &http.Client{Transport: r})
+	if err == nil || !strings.Contains(err.Error(), "schema version 99") {
+		t.Fatalf("the summary's failure must be reported, got %v", err)
+	}
+	sent := strings.Join(r.to("events.pagerduty.test"), "\n")
+	for _, want := range []string{"order refused", "engine halted", "no engine heartbeat"} {
+		if !strings.Contains(sent, want) {
+			t.Errorf("alert %q was not delivered:\n%s", want, sent)
+		}
+	}
+	raw, _ := os.ReadFile(state)
+	if !strings.Contains(string(raw), "pagerduty|") || strings.Contains(string(raw), "summary:") {
+		t.Fatalf("the alerts' deliveries must be saved and the summary's must not: %s", raw)
 	}
 }
