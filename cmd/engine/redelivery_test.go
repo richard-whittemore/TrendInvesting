@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
@@ -42,6 +43,15 @@ func wireBytes(t *testing.T, e event.Envelope) []byte {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+func logHoldsInput(recovery journal.Recovery, id string) bool {
+	for _, e := range recovery.Entries {
+		if e.Kind == journal.KindInput && e.Envelope.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func countRecords(recovery journal.Recovery, kind, eventType string) int {
@@ -174,5 +184,54 @@ func TestAResumedEngineServesACommittedButUnsentOrderAgain(t *testing.T) {
 	}
 	if got := countRecords(now, journal.KindInput, event.SessionClosedEventType); got != session+2 {
 		t.Errorf("the resumed log holds %d session closes, want %d: the reply served again records nothing", got, session+2)
+	}
+}
+
+// lifecycle builds the venue's report of a released order's new status.
+func lifecycle(o event.OrderReleasedPayload, status string, at time.Time) event.LimitOrderLifecyclePayload {
+	return event.LimitOrderLifecyclePayload{
+		AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+		Side: o.Side, Status: status, Quantity: o.Quantity, LimitPrice: o.LimitPrice, OccurredAt: at,
+	}
+}
+
+// TestABoostEngineRecordsTheAcknowledgementOfAnOrderItReleased: the venue's
+// acknowledgement of a released order is recorded evidence (ADR 0022),
+// carried as execution.order.lifecycle version 2 for a limit order, and a
+// Boost engine records it and decides nothing from it. A report for an
+// order this run never released is refused (docs/development.md principle
+// 4): it is reconciliation's to explain (ADR 0019).
+func TestABoostEngineRecordsTheAcknowledgementOfAnOrderItReleased(t *testing.T) {
+	dir := t.TempDir()
+	opts, cfg := paperBoostOptions(t, dir)
+	stop := startEngine(t, opts)
+	feed := newBoostFeed(t, opts.socketPath, cfg, "test-build", 2)
+	session := feedUntilReleased(t, feed)
+	order := feed.released[0]
+	at := boostSession(session).Add(time.Minute)
+
+	feed.send(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:"+order.ClientOrderID, at, lifecycle(order, event.OrderLifecycleStatusSubmitted, at))
+	var bundle decisionsPayload
+	if err := json.Unmarshal(feed.lastReply.Payload, &bundle); err != nil || len(bundle.Decisions) != 0 {
+		t.Fatalf("the acknowledgement decided %d (%v), want nothing", len(bundle.Decisions), err)
+	}
+
+	unknown := order
+	unknown.ClientOrderID = "not-released-here"
+	raw, _ := json.Marshal(lifecycle(unknown, event.OrderLifecycleStatusSubmitted, at))
+	in := event.Envelope{
+		ID: "ack:unknown", Type: event.OrderLifecycleEventType, EnvelopeVersion: event.CurrentEnvelopeVersion, SchemaVersion: event.OrderLifecycleLimitVersion,
+		EventTime: at, RecordedAt: at, Sequence: feed.sequence, Source: "test-adapter",
+		StrategyVersion: feed.version, ConfigurationHash: feed.hash, PayloadHash: event.HashPayload(raw), Payload: raw,
+	}
+	if _, err := feed.client.Decide(context.Background(), in); err == nil || !strings.Contains(err.Error(), "not-released-here") {
+		t.Fatalf("a report for an order this run never released: %v, want a refusal naming it", err)
+	}
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatalf("stop the engine: %v", err)
+	}
+	if !logHoldsInput(recoverFile(t, opts.logPath), "ack:"+order.ClientOrderID) {
+		t.Fatal("the durable log does not hold the acknowledgement")
 	}
 }
