@@ -6,7 +6,7 @@
 // file. It is composition only and contains no rules
 // (cmd-is-composition-only, .golangci.yml; AGENTS.md rule 7).
 //
-//	engine -socket <path> -config <configuration.json> -out <journal.jsonl> -as-of <RFC3339>
+//	engine -socket <path> -config <configuration.json> -out <journal.jsonl> -as-of <RFC3339> [-log <durable.log> [-resume <previous.log>]]
 //
 // # Wire contract: the adapter's first bar must carry Sequence 2
 //
@@ -77,6 +77,8 @@ type options struct {
 	socketPath      string
 	configPath      string
 	outPath         string
+	logPath         string
+	resumePath      string
 	asOf            string
 	build           string
 	maxFrameBytes   int
@@ -106,6 +108,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	if opts.build == "" {
 		missing = append(missing, errors.New("the running build must be identified; it is part of every envelope's strategy version (ADR 0016)"))
 	}
+	if opts.resumePath != "" && opts.logPath == "" {
+		missing = append(missing, errors.New("-resume requires -log: a resumed run streams its own durable log, which begins with the records it resumes (ADR 0027)"))
+	}
 	if err := errors.Join(missing...); err != nil {
 		return fmt.Errorf("engine: %w", err)
 	}
@@ -133,6 +138,11 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	if err := checkJournalPathFree(opts.outPath); err != nil {
 		return err
 	}
+	// A log created at the journal's own path would hold that path for the
+	// whole run, and the journal could then not be installed at shutdown.
+	if opts.logPath != "" && samePath(opts.logPath, opts.outPath) {
+		return fmt.Errorf("engine: -log and -out both name %s: the durable log is streamed during the run and the journal is installed when it stops, so they must be two files", opts.outPath)
+	}
 
 	cfg, err := readConfiguration(opts.configPath)
 	if err != nil {
@@ -145,7 +155,43 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("engine: %w", err)
 	}
+	configEnvelope, err := configurationEnvelope(cfg, strategyVersion, asOf.UTC())
+	if err != nil {
+		return err
+	}
+
+	// # Durability: journal-before-send
+	//
+	// With -log, every input's records are streamed to a durable log and
+	// flushed before any of its decisions is returned towards the adapter
+	// (ADR 0019, amended 2026-09-24; ADR 0026 §3; ADR 0027), so a crash
+	// loses at most the one input whose write it interrupted, none of whose
+	// decisions was released. With -resume, this process first rebuilds its
+	// state from a previous process's log (ADR 0026 §5). The end-of-run
+	// journal below is written exactly as before either way.
 	recorder := journal.NewRecorder(reducer)
+	logHeader := journal.NewLogHeader(configurationHash, strategyVersion)
+	var recovery journal.Recovery
+	if opts.resumePath != "" {
+		if recovery, err = recoverLogFile(opts.resumePath); err != nil {
+			return err
+		}
+		if err := checkResumable(recovery, logHeader, configEnvelope); err != nil {
+			return err
+		}
+	}
+	if opts.logPath != "" {
+		logFile, err := createLogFile(opts.logPath)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = logFile.Close() }()
+		log, err := journal.CreateLog(logFile, logHeader)
+		if err != nil {
+			return fmt.Errorf("engine: %w", err)
+		}
+		recorder = journal.NewDurableRecorder(reducer, log, journal.DefaultMaxRecords)
+	}
 
 	// wireEngine is the ONE replay.Engine this run ever constructs, wrapping
 	// recorder, and it is what EVERY input this run ever applies — its own
@@ -219,11 +265,17 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	// own first bar must carry configurationSequence+1 to be accepted — see
 	// configurationSequence's own doc comment, and cmd/engine's package doc
 	// comment, for where that is stated to an adapter author.
-	configEnvelope, err := configurationEnvelope(cfg, strategyVersion, asOf.UTC())
-	if err != nil {
-		return err
-	}
-	if _, err := wireEngine.Apply(ctx, configEnvelope); err != nil {
+	if len(recovery.Entries) > 0 {
+		// The recovered log opens with this same configuration input
+		// (checkResumable), so resuming delivers it through wireEngine
+		// exactly as the else branch does.
+		if err := resumeRun(ctx, wireEngine, recorder, recovery); err != nil {
+			return err
+		}
+		if err := reportResume(out, opts.resumePath, recovery); err != nil {
+			return err
+		}
+	} else if _, err := wireEngine.Apply(ctx, configEnvelope); err != nil {
 		// Unreachable in practice: cfg has already passed Validate() above,
 		// and strategy.NewReducer computed configurationHash from the same
 		// cfg configEnvelope carries, so applyConfiguration's own checks
@@ -303,19 +355,12 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	// operator's shutdown) exactly as before. Nothing about the journal
 	// changes until this process itself is asked to stop.
 	//
-	// This has a real, stated cost, said here plainly rather than papered
-	// over: a SIGKILL, a panic, or a power loss between the last accepted
-	// input and this process's own shutdown loses every decision this run
-	// made, because ADR 0017's in-memory buffer is not durable until Write
-	// runs. cmd/backtest carries the identical exposure for the identical
-	// reason — ADR 0017's own consequence list: "A journal is composed in
-	// memory and written in one pass... the format reopens when the bar
-	// source is streamed, not before" — and this composition does not close
-	// that gap, only inherits it at the scope of a whole server process
-	// instead of one backtest run, where the window it is open for is far
-	// longer and has no natural end. A durable, incremental journal (a
-	// write-ahead log, one record at a time, rather than one write at the
-	// end) would close it, and is future work, not attempted here.
+	// Without -log, a SIGKILL, a panic, or a power loss between the last
+	// accepted input and this process's own shutdown loses every decision
+	// this run made, because ADR 0017's in-memory buffer is not durable
+	// until Write runs. With -log, the durable log (ADR 0027) bounds that
+	// loss to the one input whose write the crash interrupted, none of whose
+	// decisions was released, and -resume rebuilds the run from it.
 	serveErr := server.ServeContext(ctx)
 
 	// ServeContext waits for every accepted CONNECTION's own goroutine, but
@@ -426,6 +471,39 @@ func checkJournalPathFree(path string) error {
 		return fmt.Errorf("engine: check the journal path: %w", err)
 	}
 	return nil
+}
+
+// samePath reports whether a and b name one file, however each is spelled:
+// the same name in the same directory. The directories are compared by
+// their identity on disk, each examined exactly as spelled, so the file
+// system resolves every symbolic link and every ".." in order; cleaning the
+// path first would resolve a ".." after a link lexically, from where the
+// link sits rather than from its target. Names are compared ignoring case,
+// since a case-insensitive file system (macOS's default) maps two spellings
+// to one file; on a case-sensitive one this refuses a pair that would have
+// worked, the cautious side. Neither file need exist yet. A directory that
+// cannot be examined cannot hold the file either path names, so the paths
+// are then treated as distinct and creating the file reports the error.
+func samePath(a, b string) bool {
+	dirA, nameA := splitAsSpelled(a)
+	dirB, nameB := splitAsSpelled(b)
+	if !strings.EqualFold(nameA, nameB) {
+		return false
+	}
+	infoA, errA := os.Stat(dirA)
+	infoB, errB := os.Stat(dirB)
+	return errA == nil && errB == nil && os.SameFile(infoA, infoB)
+}
+
+// splitAsSpelled splits path after its last separator. filepath.Split,
+// unlike filepath.Dir, does not clean, so the directory keeps every
+// component the file system must resolve.
+func splitAsSpelled(path string) (dir, name string) {
+	dir, name = filepath.Split(path)
+	if dir == "" {
+		dir = "."
+	}
+	return dir, name
 }
 
 func journalExistsError(path string) error {

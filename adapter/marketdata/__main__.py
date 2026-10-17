@@ -1,5 +1,5 @@
-"""python3 -m marketdata {universe|bars} --out DIR [--asof YYYY-MM-DD] [--instruments SPY,IEF,SHY]
-    [--settle-minutes N]
+"""python3 -m marketdata {universe|bars|backfill|actions} --out DIR [--asof YYYY-MM-DD]
+    [--instruments SPY,IEF,SHY] [--sessions N] [--lookback-days N] [--settle-minutes N]
 
 --asof defaults to today's New York date. A session is refused (exit 1,
 nothing written) until its close plus the settle delay.
@@ -12,17 +12,18 @@ import datetime as dt
 import logging
 import sys
 
-from . import massive, steps
+from . import history, massive, steps
 
 
 def parse(argv, now=steps._now):
     ap = argparse.ArgumentParser(prog="marketdata")
-    ap.add_argument("what", choices=("universe", "bars"))
+    ap.add_argument("what", choices=("universe", "bars", "backfill", "actions"))
     ap.add_argument("--out", required=True)
     ap.add_argument("--asof", type=dt.date.fromisoformat, default=None)
     ap.add_argument("--instruments", default="SPY,IEF,SHY")
     ap.add_argument("--secrets-file")
     ap.add_argument("--lookback-days", type=int, default=400)
+    ap.add_argument("--sessions", type=int, default=253, help="backfill: sessions of history to record")
     ap.add_argument("--settle-minutes", type=int, default=int(steps.SETTLE.total_seconds() // 60),
                     help="minutes after the close before a session may be recorded")
     args = ap.parse_args(argv)
@@ -39,6 +40,13 @@ def main(argv):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     try:
         client = massive.Client(massive.load_key(secrets_file=args.secrets_file))
+        if args.what == "backfill":
+            print(history.backfill(client, args.out, args.asof, args.sessions, settle=settle))
+            return 0
+        if args.what == "actions":
+            first = args.asof - dt.timedelta(days=args.lookback_days)
+            print("\n".join(history.record_actions(client, first, args.asof, args.out, settle=settle)))
+            return 0
         session, body = steps.find_session(client, args.asof, settle=settle)
         if args.what == "universe":
             path = steps.run_universe(client, session, args.out, grouped_body=body, settle=settle)
