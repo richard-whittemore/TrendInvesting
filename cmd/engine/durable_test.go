@@ -407,6 +407,23 @@ func TestAResumeAcrossBuildsNamesTheUpgradeProcedure(t *testing.T) {
 	}
 }
 
+// TestAChangedStartOutranksABuildChange: a resume that differs in both build
+// and -as-of must send the operator to the configuration correction, not to
+// the build-upgrade procedure, which would not fix the start time.
+func TestAChangedStartOutranksABuildChange(t *testing.T) {
+	cfg := testConfiguration(t)
+	hash := event.ConfigurationHash(cfg)
+	old := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "build-1"))
+	next := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "build-2"))
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	logged := event.Envelope{EventTime: start, RecordedAt: start}
+	composed := event.Envelope{EventTime: start.Add(time.Second), RecordedAt: start.Add(time.Second)}
+	err := checkResumable(journal.Recovery{Header: old, Entries: []journal.Entry{{Kind: journal.KindInput, Envelope: logged}}}, next, composed)
+	if err == nil || !strings.Contains(err.Error(), "configuration input") || strings.Contains(err.Error(), "docs/runbooks/durable-log.md") {
+		t.Fatalf("a changed start and build got %v, want the configuration-input refusal", err)
+	}
+}
+
 // TestTheDurableLogIsRequiredOutsideABacktest pins ADR 0027's rule that an engine
 // that serves a dry-run, paper or live session
 // refuses to start without -log, so journal-before-send always holds; a
