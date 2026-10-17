@@ -246,9 +246,12 @@ to the Turtle reducer, and changes nothing else in this ADR.
   instrument, ours and unknown ones. *(Refined by the 2026-10-17 amendment,
   reading 1: a third bound, holding − every working or pending sell − keep,
   is added; the quantity is the smallest of the three bounds, never below
-  zero, and never more than the holding. Where net liquidation or the mark
-  is not strictly positive, or the latest snapshot is unreadable, the sale is
-  refused and withheld: reading 1.)*
+  zero, and never more than the holding. The sale is sized from the latest
+  broker snapshot only. Where that snapshot's net liquidation or mark is not
+  strictly positive, or it is older than `MaxSnapshotAge`, the sale is
+  withheld without consuming the attempt and re-evaluated later: reading 1.
+  Where it cannot be read, the broker's values cannot be read and the
+  attempt is consumed: reading 4.)*
   This keeps the invariant above
   ("working sell quantity never exceeds the holding"), so no combination of
   fills can open a short.
@@ -315,26 +318,58 @@ here so that all eleven are in one place.
    governs, and the sale never sells past the holding: no combination of fills
    can open a short. The one-line form max(0, holding − every working or
    pending sell − keep) holds only when keep is zero or more, which needs a
-   net liquidation and a mark that are both strictly positive. **The rule
-   fails closed:** when net liquidation or the mark is not strictly positive,
-   keep cannot be trusted, so the sale is refused and withheld
-   (`risk.sale.withheld`, with the reason). The same withhold applies when
-   the latest snapshot is readable but older than a configured maximum age
-   (`MaxSnapshotAge`, an account configuration field, ADR 0026 point 6):
-   the reason is `stale-snapshot`. In both cases the engine state is
-   unchanged, exactly as reading 10 treats no readable snapshot; the alarm,
-   the kill-switch engagement or the incident stays in force; the withhold
-   is not the one attempt (reading 4); and the sale is re-evaluated at the
-   next trigger (exit fired, urgent alarm, or the engagement) that has a
-   readable latest snapshot, under the same tag. A latest snapshot that
-   cannot be read is a different case: the broker's values cannot be read,
-   which consumes the attempt (reading 4). The owner hears about it through
-   the withheld alert, not through a Halt. The third bound means a
-   sell of ours that is still working (Boost's released exit, say) and the
-   sale together never take exposure below 98%, whichever fills. When the
-   smallest bound is zero or negative (a holding of 147, a keep of 93 and
-   working sells of 60 give -6), the quantity is zero and no order is sent;
-   it is nothing to sell, not an attempt (reading 4).
+   net liquidation and a mark that are both strictly positive. The third
+   bound means a sell of ours that is still working (Boost's released exit,
+   say) and the sale together never take exposure below 98%, whichever
+   fills. When the smallest bound is zero or negative (a holding of 147, a
+   keep of 93 and working sells of 60 give -6), the quantity is zero and no
+   order is sent; it is nothing to sell, not an attempt (reading 4).
+
+   **The snapshot rule.** This is the one statement of which broker snapshot
+   sizes the sale, when the sale is withheld instead, whether that spends
+   the attempt, and when the sale is evaluated again; the other readings,
+   the 2026-10-15 amendment and ADR 0026 points 4 to 6 cite it.
+   - **The latest snapshot only.** The sale is sized from the latest
+     `account.broker.snapshot`. An older snapshot is never used in its
+     place, whatever the latest one's condition.
+   - **Unreadable:** the latest snapshot cannot be read, or none has been
+     recorded yet. This counts as
+     "the broker's values cannot be read" (reading 4): the sale is
+     withheld, the attempt is consumed, and the alert asks the owner to act
+     by hand.
+   - **Stale:** the latest snapshot is readable but older than
+     `MaxSnapshotAge`. The sale is withheld (`risk.sale.withheld`, reason
+     `stale-broker-snapshot`). Age is the journalled time of the event that
+     triggers the evaluation minus the snapshot's recorded broker
+     timestamp; the wall clock is never read, so replay withholds exactly
+     where live did. `MaxSnapshotAge` is an account configuration field,
+     covered by the configuration hash; configuration validation rejects a
+     missing, zero or negative value (ADR 0026 point 6, Execution). This
+     reason is the gate's, distinct from the strategy decision's
+     `stale-account-snapshot` (ADR 0026 point 1).
+   - **Not strictly positive:** the latest snapshot is readable and within
+     `MaxSnapshotAge`, but its net liquidation or its mark for the
+     instrument is zero or negative, so keep cannot be trusted. The sale is
+     withheld (`risk.sale.withheld`, reason `non-positive-broker-values`).
+     Freshness is checked first: a snapshot that is both stale and
+     non-positive is withheld as `stale-broker-snapshot`.
+   - **Readable, fresh and positive:** the sale is sized by the three bounds
+     above.
+
+   The two readable-snapshot withholds, `stale-broker-snapshot` and
+   `non-positive-broker-values`, leave the engine state unchanged (a
+   Normal account stays Normal), leave the alarm, the kill-switch
+   engagement or the incident in force, and do not consume the attempt
+   (reading 4). The owner hears of them through the `risk.sale.withheld`
+   alert, not through a Halt. **Retry:** while the condition that produced
+   the withheld sale is still in force (the strategy's exit still fired,
+   or the alarm still urgent), the next latest snapshot that is readable,
+   within `MaxSnapshotAge` and strictly positive re-evaluates the sale. The
+   gate then applies this reading afresh and picks the tag by reading 2's
+   order at that time, so a change of engine state or of the kill switch
+   between the two evaluations re-tags the sale, and the new tag's one
+   attempt applies. The incident or the engagement is a tag, not a
+   trigger: neither alone produces or retries the sale.
 2. **The kill switch does not suppress the sale.** While the kill switch
    is engaged (ADR 0026 point 3), Boost's exit firing or the Excess
    Liquidity alarm turning urgent still produces the one sale back to 98%,
@@ -370,16 +405,15 @@ here so that all eleven are in one place.
    Degraded to Halted does not start another, so there is one sale per
    instrument for the whole episode.
 4. **A withheld sale counts as the attempt only in two cases: the broker's
-   values cannot be read, or a working sell is unknown.** A released order
-   always consumes the attempt. A withhold that sends no order never does
-   otherwise: not "nothing to sell" (below), and not the fail-closed withhold
-   of reading 1 (net liquidation or mark not strictly positive, or a stale
-   latest snapshot), which leaves the attempt unspent so the sale can go
-   at a later trigger with a good snapshot. An unreadable latest snapshot is
-   the broker's values cannot be read, which does count. In the two cases
-   that do count, the sale counts as attempted and is never retried
-   automatically; the alert asks the owner to act by hand, and a later
-   automatic sale could duplicate the owner's.
+   values cannot be read, or a working sell is unknown.** An unreadable
+   latest snapshot is one way the broker's values cannot be read (reading
+   1's snapshot rule). A released order always consumes the attempt. No
+   other withhold does: not "nothing to sell" (below), and not reading 1's
+   `stale-broker-snapshot` or `non-positive-broker-values` withholds, which
+   leave the attempt unspent and are re-evaluated as reading 1 states. In
+   the two cases that do count, the sale counts as attempted and is never
+   retried automatically; the alert asks the owner to act by hand, and a
+   later automatic sale could duplicate the owner's.
    "Nothing to sell" is not an attempt, and covers three cases as built:
    the snapshot holds none of the instrument; the holding is short (a short
    is never sold further; the alert asks for a person, but a later trigger
@@ -403,18 +437,28 @@ here so that all eleven are in one place.
    for Boost). The sale keeps ceil(`InvestedFraction` × net liquidation ÷
    mark) shares.
 10. **A sell above the broker quantity is refused, not resized.** The
-    check applies in any engine state, not only Degraded, and reads the
-    latest broker snapshot only. With a readable, fresh latest snapshot, the
-    gate refuses the sell (`broker-holding`) and adds the instrument to the
-    Degraded scope (ADR
-    0026 point 3, limits table); a Normal account becomes Degraded on that
-    instrument. A sell placed before the first readable snapshot, or when the
-    latest snapshot is unreadable, is refused with `broker-holding` and the
-    engine state is left unchanged: a Normal account stays Normal. An older
-    readable snapshot is never used in its place. A readable latest snapshot
-    older than `MaxSnapshotAge` is stale: the sell is withheld with reason
-    `stale-snapshot`, the engine state is unchanged and the attempt is
-    unspent. The planner, not the gate, chooses quantities.
+    check applies to every sell, in any engine state, not only Degraded,
+    and reads the latest broker snapshot only; an older snapshot is never
+    used in its place. With a latest snapshot that is readable, within
+    `MaxSnapshotAge` and strictly positive, the gate refuses a sell above
+    its holding (`broker-holding`) and adds the instrument to the Degraded
+    scope (ADR 0026 point 3, limits table); a Normal account becomes
+    Degraded on that instrument. When the latest snapshot is not like that,
+    the engine state is left unchanged (a Normal account stays Normal), and
+    the outcome depends on the sell:
+    - **ADR 0019's sale back to 98%** follows reading 1's snapshot rule:
+      withheld (`risk.sale.withheld`); unspent and re-evaluated for
+      `stale-broker-snapshot` and `non-positive-broker-values`; the attempt
+      consumed when the latest snapshot is unreadable.
+    - **Any other sell** is refused (`risk.order.refused`): `broker-holding`
+      when no snapshot has yet been readable or the latest is unreadable;
+      `stale-broker-snapshot` when the latest is older than
+      `MaxSnapshotAge`; `non-positive-broker-values` when its net
+      liquidation or mark is not strictly positive (freshness checked
+      first, and age measured as reading 1 states, from the sell's
+      `strategy.order.planned`).
+
+    The planner, not the gate, chooses quantities.
 11. **New event types** `account.broker.snapshot`, `risk.margin.alarm` and
     `risk.sale.withheld` are adopted (ADR 0026 amendment, 2026-10-17).
     `account.broker.snapshot` carries the observed side that

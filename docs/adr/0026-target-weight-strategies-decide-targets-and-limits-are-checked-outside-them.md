@@ -47,7 +47,11 @@ contract are Turtle-shaped too (Consequences).
   - the account, the decision time and the session whose closes it used;
   - an outcome, `decided` or `withheld`; `withheld` carries a reason from a
     closed set (for example `missing-bars`, `missing-universe`,
-    `stale-account-snapshot`) and no targets;
+    `stale-account-snapshot`) and no targets. These are the strategy
+    decision's reasons. The limit gate's reasons for refusing an order or
+    withholding the sale back to 98% are separate closed sets (point 3);
+    in particular the gate's `stale-broker-snapshot` is not
+    `stale-account-snapshot`;
   - for `decided`, the target weight per instrument. Where both sleeves hold
     one fund, the payload records each sleeve's share and their sum (`plan.md`
     lines 77-78);
@@ -179,7 +183,35 @@ replaces `plan.md`'s "per run", since a live run spans many decisions.
 
 Degraded and Halted are emitted through the existing `strategy.engine.state`.
 A new reason, `risk-limit-breached`, joins its closed set, as
-`internal/event/engine_state.go:14-19` invites. ADR 0019's
+`internal/event/engine_state.go:14-19` invites.
+
+**The gate's closed reason sets.** Replay compares each reason byte for
+byte (point 7, item 6), so the members named below are exact strings, and
+a reason both sets hold is spelled the same in each. Each set also holds
+its other reasons, not listed here; these are the snapshot reasons:
+- **`risk.order.refused`** for any sell other than ADR 0019's sale back to
+  98% (ADR 0019 amendment, 2026-10-17, reading 10):
+  - `broker-holding`: the sell is above the latest broker snapshot's
+    holding, or no broker snapshot is readable yet or the latest is
+    unreadable;
+  - `stale-broker-snapshot`: the latest broker snapshot is readable but
+    older than `MaxSnapshotAge` (point 6);
+  - `non-positive-broker-values`: the latest broker snapshot is readable
+    and fresh, but its net liquidation or its mark for the instrument is
+    zero or negative.
+- **`risk.sale.withheld`** for ADR 0019's sale back to 98%, beside the
+  withholds reading 4 names (values that cannot be read, an unknown working
+  sell, nothing to sell):
+  - `stale-broker-snapshot`: the latest broker snapshot is readable but
+    older than `MaxSnapshotAge`; the attempt is not consumed;
+  - `non-positive-broker-values`: the latest broker snapshot is readable
+    and fresh, but its net liquidation or its mark for the instrument is
+    zero or negative; the attempt is not consumed.
+
+Both stale reasons are distinct from the strategy decision's
+`stale-account-snapshot` (point 1). When, how and with what effect each is
+used is ADR 0019's snapshot rule (amendment, 2026-10-17, reading 1), not
+restated here. ADR 0019's
 `EngineStatePayload` version 2 adds the `degraded` state and the scope; it is
 not built yet. Leaving either state follows ADR 0019's recovery procedure,
 never automatically.
@@ -230,14 +262,10 @@ one IBKR account snapshot (shares kept rounded up) and the broker-reported
 holding minus every working or pending sell (including `cancel-pending` ones, which may still execute).
 *(Refined by the ADR 0019 amendment of 2026-10-17, reading 1: a third bound,
 holding − every working or pending sell − keep, is added; the quantity is the
-smallest of the three, never below zero and never more than the holding, and
-where net liquidation or the mark is not strictly positive, or the latest
-snapshot is older than the configured maximum age (`MaxSnapshotAge`, a field
-of the account configuration, point 6; reason `stale-snapshot`), the sale is
-refused and withheld (`risk.sale.withheld`), the engine state unchanged and
-the attempt unspent. An unreadable latest snapshot is the case where the
-broker's values cannot be read: the attempt is consumed (ADR 0019, reading
-4).)* When the
+smallest of the three, never below zero and never more than the holding.
+Which snapshot sizes the sale, when it is withheld instead, whether the
+withhold spends the attempt and when the sale is evaluated again are that
+reading's snapshot rule, stated there once.)* When the
 instrument to sell is the one a Degraded account's discrepancy names, the
 sale is ADR 0019's one sale, sized and checked as that ADR states (amended
 2026-10-16).
@@ -257,7 +285,10 @@ IBKR bars:
 - Whether the incident sale has been attempted (ADR 0019, 2026-10-15), and
   the one-attempt-per-instrument state of the kill-switch engagement and of the
   margin alarm (ADR 0019, 2026-10-17, reading 2). A released order consumes an
-  attempt; a withhold consumes one only in the two cases of reading 4.
+  attempt; a withhold consumes one only in the two cases of reading 4. A
+  sale withheld without consuming its attempt is re-evaluated after a
+  restart exactly as ADR 0019's snapshot rule states (reading 1), from the
+  journalled withhold and the condition still in force.
 - The day-trade count, under the legacy regime (`plan.md` lines 393-404).
 
 **Missing bars fail closed:**
@@ -286,7 +317,12 @@ run and is hashed by ADR 0016's derivation. It holds:
   2026-10-16),
   which lives only in server configuration (`plan.md` lines 109-110).
 - **Execution:** the D7 choice and its parameters; the D5 cash rule; the day-trading regime; `MaxSnapshotAge`, the age past which the latest broker
-  snapshot is stale and the sale back to 98% is withheld (ADR 0019, reading 1).
+  snapshot is stale: the sale back to 98% is withheld and any other sell is
+  refused, each with `stale-broker-snapshot` (ADR 0019 amendment,
+  2026-10-17, readings 1 and 10; point 3). The age is the journalled time
+  of the event that triggers the check minus the snapshot's recorded broker
+  timestamp, never the wall clock. Configuration validation rejects a
+  missing, zero or negative `MaxSnapshotAge`.
 - **Limits:** every value in point 3, and the Excess Liquidity thresholds of
   40%, 20% and 30 minutes.
 - **Identity:** the account, the mode, the adapter name `ibkr` (ADR 0025,
