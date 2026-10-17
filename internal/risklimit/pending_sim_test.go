@@ -427,10 +427,6 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 		short := false
 		checkAll := func(step int) {
 			for _, instrument := range instruments {
-				// remains stops at the latest reference at which nothing
-				// released before it can still sell: that changes nothing
-				// while every hand-sold share is listed, and only lowers
-				// remains while some are not.
 				// Each reference's toGo meets its truth less its own slack
 				// alone, and the part of it for our own sells, with no unknown
 				// sell recorded, meets our sells' part of the truth exactly,
@@ -467,6 +463,10 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 					}
 					less = max(less, own)
 				}
+				// remains stops at the latest reference at which nothing
+				// released before it can still sell: that changes nothing
+				// while every hand-sold share is listed, and only lowers
+				// remains while some are not.
 				if got, unseen := g.ledger.remains(instrument), unlisted()[instrument]; got > every || got != every && unseen == 0 {
 					t.Fatalf("seed %d step %d: %s: remains %d, but %d over every reference, %d unlisted", seed, step, instrument, got, every, unseen)
 				}
