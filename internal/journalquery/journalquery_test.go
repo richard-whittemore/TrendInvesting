@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -565,6 +566,87 @@ func TestOverlappingRunFilesAreRefusedNotCountedTwice(t *testing.T) {
 		}
 		if _, err := report([]journalquery.Journal{first, other}, journalquery.Filter{}); err != nil {
 			t.Errorf("%s: independent runs were refused: %v", name, err)
+		}
+	}
+}
+
+func configRec() rec {
+	return rec{journal.KindInput, event.ConfigurationEventType, event.ConfigurationSchemaVersion, at(time.January, 1), map[string]string{"name": "baseline"}}
+}
+
+func overlapReports() map[string]func([]journalquery.Journal, journalquery.Filter) (journalquery.Table, error) {
+	return map[string]func([]journalquery.Journal, journalquery.Filter) (journalquery.Table, error){
+		"orders": journalquery.Orders, "fills": journalquery.Fills, "refusals": journalquery.Refusals,
+		"positions": journalquery.Positions, "reconcile": journalquery.Reconcile, "totals": journalquery.Totals,
+	}
+}
+
+func TestIndependentRunsWithTheSameConfigurationCombine(t *testing.T) {
+	d, later := at(time.March, 2), at(time.April, 2)
+	cfg := configRec()
+	pairs := map[string][2][]rec{
+		"only the configuration is shared":            {{cfg, fillInput(validFill("f-1", 5, d))}, {cfg, fillInput(validFill("g-1", 9, later))}},
+		"the same id and payload at other times":      {{cfg, fillInput(validFill("f-1", 5, d))}, {cfg, fillInput(validFill("f-1", 5, later))}},
+		"a first record in common, then they part":    {{cfg, fillInput(validFill("f-1", 5, d)), fillInput(validFill("f-2", 3, d))}, {cfg, fillInput(validFill("f-1", 5, d)), fillInput(validFill("g-2", 4, d))}},
+		"a run holding nothing but its configuration": {{cfg}, {cfg, fillInput(validFill("f-1", 5, d))}},
+	}
+	for name, pair := range pairs {
+		a, b := load(t, "a.log", build(t, pair[0]...)), load(t, "b.log", build(t, pair[1]...))
+		for report, run := range overlapReports() {
+			if _, err := run([]journalquery.Journal{a, b}, journalquery.Filter{}); err != nil {
+				t.Errorf("%s, %s: independent runs were refused: %v", name, report, err)
+			}
+		}
+	}
+}
+
+func TestAResumedLogNamedWithItsPredecessorIsRefused(t *testing.T) {
+	d := at(time.March, 2)
+	cfg := configRec()
+	first := load(t, "first.log", build(t, cfg, fillInput(validFill("f-1", 5, d))))
+	resumed := load(t, "resumed.log", build(t, cfg, fillInput(validFill("f-1", 5, d)), fillInput(validFill("f-2", 3, d))))
+	for report, run := range overlapReports() {
+		for _, order := range [][]journalquery.Journal{{first, resumed}, {resumed, first}} {
+			_, err := run(order, journalquery.Filter{})
+			if err == nil || !strings.Contains(err.Error(), "first.log") || !strings.Contains(err.Error(), "resumed.log") || !strings.Contains(err.Error(), "overlap") {
+				t.Errorf("%s: a resumed log and its predecessor were not refused by name: %v", report, err)
+			}
+		}
+	}
+}
+
+func TestTwoCopiesOfOneJournalAreRefused(t *testing.T) {
+	d := at(time.March, 2)
+	data := build(t, configRec(), fillInput(validFill("f-1", 5, d)))
+	a, b := load(t, "run.jsonl", data), load(t, "copy.jsonl", data)
+	for report, run := range overlapReports() {
+		_, err := run([]journalquery.Journal{a, b}, journalquery.Filter{})
+		if err == nil || !strings.Contains(err.Error(), "run.jsonl") || !strings.Contains(err.Error(), "copy.jsonl") {
+			t.Errorf("%s: copies of one journal were not refused by name: %v", report, err)
+		}
+	}
+}
+
+func TestPositionsThatWouldOverflowAreRefusedNotWrapped(t *testing.T) {
+	d := at(time.March, 2)
+	cases := map[string][]rec{
+		"a rename onto a held id": {
+			snap(at(time.January, 1), event.AccountPosition{InstrumentID: "NEW", Quantity: 1}, event.AccountPosition{InstrumentID: "OLD", Quantity: math.MaxInt64}),
+			symbolChange("OLD", "NEW", d),
+		},
+		"a fill past the largest position": {
+			snap(at(time.January, 1), event.AccountPosition{InstrumentID: "AAA", Quantity: math.MaxInt64}),
+			fillInput(validFill("f-1", 1, d)),
+		},
+	}
+	for name, recs := range cases {
+		js := []journalquery.Journal{load(t, "j", build(t, recs...))}
+		for report, run := range map[string]func([]journalquery.Journal, journalquery.Filter) (journalquery.Table, error){
+			"positions": journalquery.Positions, "reconcile": journalquery.Reconcile,
+		} {
+			if _, err := run(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "overflow") {
+				t.Errorf("%s, %s: want an overflow refusal, got %v", name, report, err)
+			}
 		}
 	}
 }

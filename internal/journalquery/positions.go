@@ -23,6 +23,17 @@ type check struct {
 	snapshot   int64
 }
 
+// addQuantity adds two position quantities and reports false rather than
+// wrapping when the sum does not fit an int64, so a figure that cannot be
+// represented is refused instead of reported wrong.
+func addQuantity(a, b int64) (int64, bool) {
+	sum := a + b
+	if (b > 0 && sum < a) || (b < 0 && sum > a) {
+		return 0, false
+	}
+	return sum, true
+}
+
 // rebuild replays a journal's fills against its account snapshots, one book
 // per account.
 //
@@ -64,14 +75,22 @@ func rebuild(j Journal) ([]step, []check, error) {
 			}
 			started[it.account] = true
 			change := signedQuantity(it.fill.Kind, it.fill.Quantity)
-			book[it.fill.InstrumentID] += change
+			sum, ok := addQuantity(book[it.fill.InstrumentID], change)
+			if !ok {
+				return nil, nil, fmt.Errorf("%s: record %d: the fill takes %s past the largest position that can be reported (int64 overflow)", j.Name, it.seq, it.fill.InstrumentID)
+			}
+			book[it.fill.InstrumentID] = sum
 			steps = append(steps, step{it, it.fill.InstrumentID, change, book[it.fill.InstrumentID]})
 		case it.renamed != nil:
 			// The holding continues under the new id without a fill (ADR
 			// 0024), in every account that holds it.
 			for _, book := range books {
 				if q, ok := book[it.renamed.InstrumentID]; ok {
-					book[it.renamed.NewInstrumentID] += q
+					sum, ok := addQuantity(book[it.renamed.NewInstrumentID], q)
+					if !ok {
+						return nil, nil, fmt.Errorf("%s: record %d: renaming %s to %s overflows the position quantity (int64 overflow)", j.Name, it.seq, it.renamed.InstrumentID, it.renamed.NewInstrumentID)
+					}
+					book[it.renamed.NewInstrumentID] = sum
 					delete(book, it.renamed.InstrumentID)
 				}
 			}

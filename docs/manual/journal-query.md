@@ -47,9 +47,17 @@ Flags, all optional: `-account A1`, `-instrument AAA`, `-from 2026-01-01`,
 source journal in the first column; `totals` combines all selected journals.
 
 Name one file per run. A run resumed from a crash writes a new log that begins
-with every record of the log it resumed, so naming both would count that
-history twice; the tool refuses such files and names the two that overlap.
-Independent runs may be named together.
+with every record of the log it resumed, and a second copy of a journal holds
+all of its records again, so naming either pair would count that history twice.
+The tool refuses such files and names the two that overlap. It decides this
+from the history, not from a record that merely looks alike: two files are the
+same history when, over the sequence numbers both hold, every record is
+identical (same sequence, id, type, payload, event time, recorded time,
+strategy version and configuration) and at least one of them is not the
+configuration record. The configuration record is ignored because independent
+runs of one configuration all start with the same one. Independent runs of the
+same configuration, even over overlapping dates, can therefore be named
+together.
 
 ## Example questions
 
