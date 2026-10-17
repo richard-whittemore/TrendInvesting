@@ -186,6 +186,11 @@ What follows from the rule:
   could fill and sell 108 of 147, far below 98%. A sell waiting to be
   cancelled (cancel-pending) may still fill, so it counts in full until the
   cancellation is confirmed.
+- One limit is deliberate: a sell is counted until its report arrives, even if
+  the holding is later bought back to where it was, because a fall in the
+  holding is never assumed to be the program's sale. The error is only ever
+  toward selling less, and it clears when IBKR's fill report or the end of
+  the order arrives, usually within seconds.
 - An IBKR snapshot that cannot read the open orders is not one of the
   snapshots in step 1, and the hand sales are taken from the last IBKR
   snapshot that could read them, never from it. A hand sale IBKR listed
