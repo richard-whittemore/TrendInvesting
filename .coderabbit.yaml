@@ -10,7 +10,7 @@ reviews:
   # No poem in the walkthrough.
   poem: false
   auto_review:
-    # Auto-review stays on: a manual request would bill a second review.
+    # Auto-review stays on: a manual request uses more of the per-developer review allowance.
     enabled: true
     # Draft PRs (stacked work) are not reviewed.
     drafts: false

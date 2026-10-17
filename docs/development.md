@@ -334,13 +334,15 @@ Never hide a failed research result by rewriting or removing its recorded config
 
 ## Review cost
 
-Each bot review is billed, so:
+Bot reviews are metered, so:
 
 - Push once per review round. Batch all fixes for a round into one push.
-- While automatic review is active, do not request a bot review manually; a
-  manual request then bills a second review. If CodeRabbit pauses automatic
-  reviews after five reviewed commits, use `@coderabbitai review` to review the
-  incremental changes.
+- While automatic review is active, do not request a bot review manually. A
+  manual request counts against CodeRabbit's per-developer hourly review
+  allowance (usage charges apply only beyond the included limits, when
+  enabled), and that allowance is what has throttled us. If CodeRabbit pauses
+  automatic reviews after five reviewed commits, use `@coderabbitai review` to
+  review the incremental changes.
 - Drafts are not reviewed (`.coderabbit.yaml` and `.greptile/config.json`), so
   stacked work stays draft until its base merges.
 - Review scope: both bots review the capital-safety paths (`internal/risklimit`,
