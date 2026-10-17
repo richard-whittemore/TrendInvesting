@@ -99,3 +99,29 @@ func TestAccountOfReadsTheConfigurationOnlyAtAKnownVersionAndValidated(t *testin
 		t.Fatal("a configuration that does not validate must be refused")
 	}
 }
+
+func TestAVersion2BarIsValidatedAtItsOwnVersion(t *testing.T) {
+	s := newStream(t)
+	s.bar(0, "SPY", 100)
+	s.snapshot(0, 4000, 3)
+	s.bar(1, "SPY", 110)
+	s.snapshot(1, 4400, 3)
+	// Its version 1 fields are sound, but its adjusted base is after its own
+	// session, which the engine refuses (event.CompletedBarAdjustedPayload).
+	view := func(label string) event.PriceView {
+		return event.PriceView{View: label, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1}
+	}
+	s.add(event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "bar:bad", day(1), event.CompletedBarAdjustedPayload{
+		CompletedBarPayload: event.CompletedBarPayload{InstrumentID: "SPY", PeriodEnd: day(1), SplitAdjusted: view(event.ViewSplitAdjusted), Raw: view(event.ViewRaw)},
+		Adjusted:            view(event.ViewAdjusted),
+		AdjustedBase:        "2030-01-01",
+	})
+
+	got, err := report.Summarize(s.out, "2024-01-03", "SPY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RejectedInputs != 1 || !near(got.Equity.BenchmarkReturn, 0.1) {
+		t.Fatalf("an invalid version 2 bar must be counted and move no figure: rejected %d, equity %+v", got.RejectedInputs, got.Equity)
+	}
+}

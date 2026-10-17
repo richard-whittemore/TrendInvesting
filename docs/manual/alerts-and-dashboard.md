@@ -50,6 +50,11 @@ account.
   the engine would refuse it: one naming another account, or one no later
   than the last snapshot taken. A skipped input moves no figure, and the
   summary and the dashboard say "Inputs not read: N" when there are any.
+- Bars are read in both forms the engines record: the Turtle engine's, and
+  the Boost and momentum engines', which also carry a dividend-adjusted
+  price. The comparison with SPY uses SPY's split-adjusted close from either.
+  The dividend-adjusted price is for the strategies' signals only and never
+  moves an equity figure.
 
 ## What triggers an alert
 

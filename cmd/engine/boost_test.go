@@ -166,8 +166,11 @@ func (f *boostFeed) sessions(from, to int) {
 		if f.held != 0 {
 			snapshot.Positions = []event.AccountPosition{{InstrumentID: "SPY", Quantity: f.held}}
 		}
-		f.send(event.CompletedBarEventType, event.CompletedBarSchemaVersion, fmt.Sprintf("bar:%d", i), at,
-			event.CompletedBarPayload{InstrumentID: "SPY", PeriodEnd: at, SplitAdjusted: view(event.ViewSplitAdjusted), Raw: view(event.ViewRaw)})
+		f.send(event.CompletedBarEventType, event.CompletedBarAdjustedVersion, fmt.Sprintf("bar:%d", i), at,
+			event.CompletedBarAdjustedPayload{
+				CompletedBarPayload: event.CompletedBarPayload{InstrumentID: "SPY", PeriodEnd: at, SplitAdjusted: view(event.ViewSplitAdjusted), Raw: view(event.ViewRaw)},
+				Adjusted:            view(event.ViewAdjusted), AdjustedBase: "2024-01-02",
+			})
 		f.send(event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, fmt.Sprintf("snapshot:%d", i), at, snapshot)
 		f.send(event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("mark:%d", i), at,
 			event.MarkRecordedPayload{InstrumentID: "SPY", AsOf: at, Price: price, Source: event.AdapterIBKR})

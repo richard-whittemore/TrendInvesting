@@ -154,8 +154,8 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 			s.HaveSnapshot, s.HoldingsAsOf, s.NetLiquidation, s.Holdings = true, p.AsOf, p.NetLiquidation, p.Positions
 			netBy[dateOf(p.AsOf)] = p.NetLiquidation
 		case event.CompletedBarEventType:
-			var p event.CompletedBarPayload
-			if read(e, barVersions, &p) != nil {
+			p, err := readBar(e)
+			if err != nil {
 				s.RejectedInputs++
 				continue
 			}
@@ -229,6 +229,27 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 	sort.Slice(points, func(i, j int) bool { return points[i].date < points[j].date })
 	s.Equity = equityOf(points, date)
 	return s, nil
+}
+
+// readBar decodes a bar at either version this build reads and validates it
+// in full at its own version. The benchmark comparison takes the
+// split-adjusted close of either: account money is kept in that one view
+// (ADR 0004, amendment), and a version 2 bar's split- and dividend-adjusted
+// view is for the target-weight strategies' signals only (ADR 0026, point 1),
+// never for an equity figure.
+func readBar(e event.Envelope) (event.CompletedBarPayload, error) {
+	if e.SchemaVersion == event.CompletedBarAdjustedVersion {
+		var p event.CompletedBarAdjustedPayload
+		if err := read(e, barVersions, &p); err != nil {
+			return event.CompletedBarPayload{}, err
+		}
+		return p.CompletedBarPayload, nil
+	}
+	var p event.CompletedBarPayload
+	if err := read(e, barVersions, &p); err != nil {
+		return event.CompletedBarPayload{}, err
+	}
+	return p, nil
 }
 
 // snapshotFollows applies the engine's own rule for a positions snapshot

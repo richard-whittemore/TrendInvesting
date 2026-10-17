@@ -32,3 +32,18 @@ func TestRulesVersionDeclaresTheGlidePath(t *testing.T) {
 		}
 	}
 }
+
+// TestRulesVersionDeclaresTheVersion2BarBreak pins the same guarantee for the
+// bar input: the handler reads market.bar.completed version 2 and its split-
+// and dividend-adjusted close, refusing version 1, so a journal written under
+// rules 1.2.0 (the glide path on version-1 bars) cannot replay under this
+// build and the build must not claim 1.2.0 or earlier.
+func TestRulesVersionDeclaresTheVersion2BarBreak(t *testing.T) {
+	t.Parallel()
+
+	for _, old := range []string{"1.0.0", "1.1.0", "1.2.0"} {
+		if targetweight.RulesVersion == old {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.2.0 once the handler reads bar version 2 and the adjusted close", targetweight.RulesVersion)
+		}
+	}
+}

@@ -244,7 +244,7 @@ func TestGlideAgeBeyondThePlausibleStopsTheRun(t *testing.T) {
 	s := &stream{hash: h.ConfigurationHash()}
 	mustApply(t, h, s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", closeOf("2025-01-31"), cfg))
 	mustApply(t, h, calendarInput(t, s, "cal", "2025-01-31", "2025-02-03"))
-	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", closeOf("2025-01-31"), spyBar("2025-01-31", 500)))
+	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b", closeOf("2025-01-31"), spyBar("2025-01-31", 500)))
 	_, err = h.Apply(context.Background(), s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s", closeOf("2025-01-31"),
 		event.SessionClosedPayload{PeriodEnd: closeOf("2025-01-31"), InstrumentIDs: []string{"SPY"}}))
 	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("age")) {
@@ -331,7 +331,7 @@ func TestGlideAgeBeyondThePlausibleAtAMissedDecisionStopsTheRun(t *testing.T) {
 	mustApply(t, h, s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", closeOf("2025-01-30"), cfg))
 	mustApply(t, h, calendarInput(t, s, "cal", "2025-01-30", "2025-01-31", "2025-02-03", "2025-02-04"))
 	closeSession := func(session string) error {
-		mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b"+session, closeOf(session), spyBar(session, 500)))
+		mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b"+session, closeOf(session), spyBar(session, 500)))
 		_, err := h.Apply(context.Background(), s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s"+session, closeOf(session),
 			event.SessionClosedPayload{PeriodEnd: closeOf(session), InstrumentIDs: []string{"SPY"}}))
 		return err

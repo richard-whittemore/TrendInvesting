@@ -218,8 +218,11 @@ func (f *feeder) session(i int, at time.Time, price float64) error {
 		id        string
 		payload   any
 	}{
-		{event.CompletedBarEventType, event.CompletedBarSchemaVersion, fmt.Sprintf("bar:%d", i),
-			event.CompletedBarPayload{InstrumentID: f.instrument, PeriodEnd: at, SplitAdjusted: view(event.ViewSplitAdjusted), Raw: view(event.ViewRaw)}},
+		{event.CompletedBarEventType, event.CompletedBarAdjustedVersion, fmt.Sprintf("bar:%d", i),
+			event.CompletedBarAdjustedPayload{
+				CompletedBarPayload: event.CompletedBarPayload{InstrumentID: f.instrument, PeriodEnd: at, SplitAdjusted: view(event.ViewSplitAdjusted), Raw: view(event.ViewRaw)},
+				Adjusted:            view(event.ViewAdjusted), AdjustedBase: "2024-01-02",
+			}},
 		{event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, fmt.Sprintf("snapshot:%d", i), snapshot},
 		{event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("mark:%d", i),
 			event.MarkRecordedPayload{InstrumentID: f.instrument, AsOf: at, Price: price, Source: event.AdapterIBKR}},
