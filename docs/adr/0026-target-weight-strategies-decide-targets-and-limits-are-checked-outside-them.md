@@ -229,8 +229,10 @@ and never below, its quantity the smaller of what reaches 98% at the mark of
 one IBKR account snapshot (shares kept rounded up) and the broker-reported
 holding minus every working or pending sell (including `cancel-pending` ones, which may still execute).
 *(Refined by the ADR 0019 amendment of 2026-10-17, reading 1: a third bound,
-holding − every working or pending sell − keep, always wins, so the quantity
-is max(0, that bound).)* When the
+holding − every working or pending sell − keep, is added; the quantity is the
+smallest of the three, never below zero and never more than the holding, and
+where net liquidation or the mark is not strictly positive the sale is refused
+and withheld, the account Halted pending the owner.)* When the
 instrument to sell is the one a Degraded account's discrepancy names, the
 sale is ADR 0019's one sale, sized and checked as that ADR states (amended
 2026-10-16).
@@ -247,7 +249,9 @@ IBKR bars:
   pending). A restart mid-rebalance sends nothing for that decision time until
   the owner clears it (`plan.md` line 332).
 - The engine state and its scope (ADR 0019, amended 2026-09-24).
-- Whether the incident sale has been attempted (ADR 0019, 2026-10-15).
+- Whether the incident sale has been attempted (ADR 0019, 2026-10-15), and
+  the one-attempt-per-instrument state of the kill-switch engagement and of the
+  margin alarm (ADR 0019, 2026-10-17, reading 2), withheld attempts included.
 - The day-trade count, under the legacy regime (`plan.md` lines 393-404).
 
 **Missing bars fail closed:**

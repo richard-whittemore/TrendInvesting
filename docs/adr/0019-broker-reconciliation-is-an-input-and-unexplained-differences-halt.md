@@ -245,7 +245,9 @@ to the Turtle reducer, and changes nothing else in this ADR.
   quantity of every working and pending sell order IBKR reports for the
   instrument, ours and unknown ones. *(Refined by the 2026-10-17 amendment,
   reading 1: a third bound, holding − every working or pending sell − keep,
-  is added and always wins, so the quantity is max(0, that third bound).)*
+  is added; the quantity is the smallest of the three bounds, never below
+  zero, and never more than the holding. Where net liquidation or the mark
+  is not strictly positive the sale is refused and withheld: reading 1.)*
   This keeps the invariant above
   ("working sell quantity never exceeds the holding"), so no combination of
   fills can open a short.
@@ -308,10 +310,15 @@ here so that all eleven are in one place.
    sale's quantity is the smallest of three bounds: what reaches 98%
    (holding − keep); holding − every working or pending sell; and
    holding − every working or pending sell − keep. This replaces the two-bound
-   sizing of the 2026-10-15 amendment and of ADR 0026 point 4. Because keep
-   and working sells are never negative, the third bound is never larger than
-   the other two, so it always wins: the quantity is
-   max(0, holding − every working or pending sell − keep). The third bound means a
+   sizing of the 2026-10-15 amendment and of ADR 0026 point 4. The smallest of the three bounds
+   governs, and the sale never sells past the holding: no combination of fills
+   can open a short. The one-line form max(0, holding − every working or
+   pending sell − keep) holds only when keep is zero or more, which needs a
+   net liquidation and a mark that are both strictly positive. **The rule
+   fails closed:** when net liquidation or the mark is zero, negative or
+   unreadable, keep cannot be trusted, so the sale is refused and withheld
+   (`risk.sale.withheld`, with the reason), and the account is Halted pending
+   the owner, as for an unreadable snapshot. The third bound means a
    sell of ours that is still working (Boost's released exit, say) and the
    sale together never take exposure below 98%, whichever fills. When the
    smallest bound is zero or negative (a holding of 147, a keep of 93 and
@@ -323,7 +330,7 @@ here so that all eleven are in one place.
    in any engine state. Each sale carries one tag, and each tag allows one
    attempt per instrument. The tag is a durable incident decision, an
    `operator.kill-switch` engagement or a `risk.margin.alarm` decision;
-   ADR 0026 point 2 and its journalled-decision limit accept all three (ADR
+   ADR 0026 point 2's order identity and point 3's journalled-decision limit accept all three (ADR
    0026 amendment, 2026-10-17). The gate picks the tag in this order: the incident's
    while the account is Halted, or Degraded on that instrument; otherwise,
    with the switch engaged, the engagement's; otherwise the urgent alarm's.
@@ -378,13 +385,13 @@ here so that all eleven are in one place.
    for Boost). The sale keeps ceil(`InvestedFraction` × net liquidation ÷
    mark) shares.
 10. **A sell above the broker quantity is refused, not resized.** The
-    check applies in any engine state where a broker snapshot is set, not
-    only Degraded. With a readable snapshot, the gate refuses the sell
+    check applies in any engine state, not only Degraded. With a readable
+    snapshot, the gate refuses the sell
     (`broker-holding`) and adds the instrument to the Degraded scope (ADR
     0026 point 3, limits table); a Normal account becomes Degraded on that
-    instrument. With no readable broker snapshot, the gate refuses with
-    `broker-holding` and leaves the engine state unchanged: a Normal account
-    stays Normal. The planner, not the gate, chooses quantities.
+    instrument. A sell placed before the first readable snapshot, or when none
+    is readable, is refused with `broker-holding`, and the engine state is
+    left unchanged: a Normal account stays Normal. The planner, not the gate, chooses quantities.
 11. **New event types** `account.broker.snapshot`, `risk.margin.alarm` and
     `risk.sale.withheld` are adopted (ADR 0026 amendment, 2026-10-17).
     `account.broker.snapshot` carries the observed side that
