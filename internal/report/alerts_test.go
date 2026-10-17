@@ -159,3 +159,21 @@ func TestAlertsFailOnAMalformedPayload(t *testing.T) {
 		t.Fatal("expected a decode error")
 	}
 }
+
+func TestTheSameEngineStateAfterAnotherIsANewIncident(t *testing.T) {
+	s := newStream(t)
+	s.engineState(0, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
+	s.engineState(1, event.EngineStateDegraded, event.EngineStateReasonRiskLimitBreached, "SPY")
+	s.engineState(2, event.EngineStateHalted, event.EngineStateReasonRiskLimitBreached)
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0].Key == got[2].Key {
+		t.Fatalf("a second halt is a second incident: %v", got)
+	}
+	fresh := report.Fresh(got, map[string]bool{got[0].Key: true})
+	if len(fresh) != 2 || fresh[1].Kind != report.KindHalted {
+		t.Fatalf("the second halt was dropped as already delivered: %v", fresh)
+	}
+}

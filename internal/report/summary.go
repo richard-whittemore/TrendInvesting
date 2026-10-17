@@ -79,6 +79,10 @@ type Summary struct {
 	Fills          []FillLine
 	EngineState    string
 	Equity         Equity
+	// RejectedInputs counts the inputs the summary would have read (bars,
+	// snapshots, the day's fills) that are at a schema version this build
+	// does not read or that fail validation. None of them moves a figure.
+	RejectedInputs int
 }
 
 // Summarize builds the account's summary for the UTC date from the journal's
@@ -86,6 +90,12 @@ type Summary struct {
 // the end of that date; decisions, orders and fills are those of the date.
 // Events after the date are ignored, so a past day's summary does not change
 // when the journal grows.
+//
+// A journal keeps the inputs the engine refused, so an input that does not
+// read or validate is skipped and counted in RejectedInputs: refusing the
+// whole report for it would silence every later alert. A decision the
+// engine recorded (targets, orders, engine state) that does not read or
+// validate refuses the summary, as journalquery does.
 func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, error) {
 	end, err := time.Parse(time.DateOnly, date)
 	if err != nil {
@@ -108,26 +118,28 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 		today := dateOf(e.EventTime) == date
 		switch e.Type {
 		case event.AccountSnapshotEventType:
-			if e.SchemaVersion != event.AccountSnapshotPositionsVersion {
-				continue
+			if e.SchemaVersion == event.AccountSnapshotSchemaVersion {
+				continue // equity and cash only: no positions to show
 			}
 			var p event.AccountPositionsSnapshotPayload
-			if err := decode(e, &p); err != nil {
-				return Summary{}, err
+			if read(e, snapshotVersions, &p) != nil {
+				s.RejectedInputs++
+				continue
 			}
 			s.HaveSnapshot, s.HoldingsAsOf, s.NetLiquidation, s.Holdings = true, p.AsOf, p.NetLiquidation, p.Positions
 			netBy[dateOf(p.AsOf)] = p.NetLiquidation
 		case event.CompletedBarEventType:
 			var p event.CompletedBarPayload
-			if err := decode(e, &p); err != nil {
-				return Summary{}, err
+			if read(e, barVersions, &p) != nil {
+				s.RejectedInputs++
+				continue
 			}
 			if p.InstrumentID == benchmark {
 				closes[dateOf(p.PeriodEnd)] = p.SplitAdjusted.Close
 			}
 		case event.EngineStateEventType:
 			var p event.EngineStatePayload
-			if err := decode(e, &p); err != nil {
+			if err := read(e, engineStateVersions, &p); err != nil {
 				return Summary{}, err
 			}
 			s.EngineState = p.State
@@ -136,7 +148,7 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 				continue
 			}
 			var p event.TargetsDecidedPayload
-			if err := decode(e, &p); err != nil {
+			if err := read(e, decidedVersions, &p); err != nil {
 				return Summary{}, err
 			}
 			s.Decisions = append(s.Decisions, DecisionLine{At: e.EventTime, Outcome: p.Outcome, WithheldReason: p.WithheldReason, Targets: p.Targets})
@@ -145,7 +157,7 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 				continue
 			}
 			var p event.OrderPlannedPayload
-			if err := decode(e, &p); err != nil {
+			if err := read(e, plannedVersions, &p); err != nil {
 				return Summary{}, err
 			}
 			orders[p.ClientOrderID] = len(s.Orders)
@@ -156,7 +168,7 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 				continue
 			}
 			var p event.OrderReleasedPayload
-			if err := decode(e, &p); err != nil {
+			if err := read(e, releasedVersions, &p); err != nil {
 				return Summary{}, err
 			}
 			line := s.order(orders, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.LimitPrice)
@@ -166,7 +178,7 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 				continue
 			}
 			var p event.OrderRefusedPayload
-			if err := decode(e, &p); err != nil {
+			if err := read(e, refusedVersions, &p); err != nil {
 				return Summary{}, err
 			}
 			line := s.order(orders, p.ClientOrderID, p.InstrumentID, p.Side, p.Quantity, p.LimitPrice)
@@ -177,8 +189,9 @@ func Summarize(envelopes []event.Envelope, date, benchmark string) (Summary, err
 				continue
 			}
 			var p event.FillPayload
-			if err := decode(e, &p); err != nil {
-				return Summary{}, err
+			if read(e, fillVersions, &p) != nil {
+				s.RejectedInputs++
+				continue
 			}
 			s.Fills = append(s.Fills, FillLine{At: p.FilledAt, InstrumentID: p.InstrumentID, Quantity: p.Quantity, Price: p.Price})
 		}

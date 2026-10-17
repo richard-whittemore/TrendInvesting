@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,7 +36,8 @@ func haltedEntries(t *testing.T) []journal.Entry {
 	cfg := event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR}
 	snap := event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: t0, Currency: "USD", NetLiquidation: 4000}
 	refused := event.OrderRefusedPayload{AccountID: "joint", PlanID: "p", Tag: "targets:0", ClientOrderID: "tw-a", InstrumentID: "SPY",
-		Side: event.OrderSideBuy, Quantity: 39, LimitPrice: 101, Reason: event.RefusedOrderSize, Detail: "figures"}
+		Side: event.OrderSideBuy, Quantity: 39, LimitPrice: 101, Reason: event.RefusedOrderSize, Detail: "figures",
+		Figures: event.RiskFigures{NetLiquidation: 4000, ReferencePrice: 100, ExposureBefore: 0.5, ExposureAfter: 0.98, OrderFraction: 0.48, OrdersInDecision: 1}}
 	state := event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "figures"}
 	entries := []journal.Entry{
 		{Kind: journal.KindInput, Envelope: envelope(t, 1, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "cfg", t0.Add(-time.Hour), cfg)},
@@ -174,11 +176,14 @@ func TestRunSendsASummaryOncePerDay(t *testing.T) {
 }
 
 func TestNtfyPostsToTheTopicWithPriorityAndNeverEchoesIt(t *testing.T) {
+	var mu sync.Mutex
 	var gotPath, gotPriority, gotTitle, gotBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath, gotPriority, gotTitle = r.URL.Path, r.Header.Get("Priority"), r.Header.Get("Title")
 		var b bytes.Buffer
 		_, _ = b.ReadFrom(r.Body)
+		mu.Lock()
+		defer mu.Unlock()
+		gotPath, gotPriority, gotTitle = r.URL.Path, r.Header.Get("Priority"), r.Header.Get("Title")
 		gotBody = b.String()
 	}))
 	defer server.Close()
@@ -189,6 +194,8 @@ func TestNtfyPostsToTheTopicWithPriorityAndNeverEchoesIt(t *testing.T) {
 	if err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, &out, server.Client()); err != nil {
 		t.Fatal(err)
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if gotPath != "/secret-topic-123" || gotPriority != "5" || !strings.Contains(gotTitle, "joint") || !strings.Contains(gotBody, "Engine halted") {
 		t.Fatalf("path %q priority %q title %q body %q", gotPath, gotPriority, gotTitle, gotBody)
 	}
@@ -198,9 +205,12 @@ func TestNtfyPostsToTheTopicWithPriorityAndNeverEchoesIt(t *testing.T) {
 }
 
 func TestNtfyFailureIsReportedWithoutTheTopicAndRetriedNextRun(t *testing.T) {
+	var mu sync.Mutex
 	fail := true
 	var hits int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
 		hits++
 		if fail {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -215,11 +225,14 @@ func TestNtfyFailureIsReportedWithoutTheTopicAndRetriedNextRun(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "secret-topic-123") {
 		t.Fatalf("error = %v", err)
 	}
-	fail = false
-	hits = 0
+	mu.Lock()
+	fail, hits = false, 0
+	mu.Unlock()
 	if err := run(args, environment, now, &bytes.Buffer{}, server.Client()); err != nil {
 		t.Fatal(err)
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if hits != 2 {
 		t.Fatalf("a failed delivery must be retried: %d posts", hits)
 	}
@@ -234,32 +247,39 @@ func TestNtfyWithoutATopicIsAConfigurationError(t *testing.T) {
 }
 
 func TestRunRefusesBadInput(t *testing.T) {
+	fakeEnv, fakeClient := acceptingNtfy(t)
 	dir := t.TempDir()
 	good := writeJournal(t, dir)
 	bad := filepath.Join(dir, "bad.journal")
 	if err := os.WriteFile(bad, []byte("garbage"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cases := map[string][]string{
-		"no journal flag":  {"-state", "s"},
-		"no state flag":    {"-journal", good},
-		"missing file":     {"-journal", filepath.Join(dir, "none"), "-state", filepath.Join(dir, "s")},
-		"unverifiable":     {"-journal", bad, "-state", filepath.Join(dir, "s")},
-		"unknown channel":  {"-journal", good, "-state", filepath.Join(dir, "s"), "-channel", "pigeon"},
-		"bad flag":         {"-nope"},
-		"bad summary date": {"-journal", good, "-state", filepath.Join(dir, "s"), "-summary", "-date", "x"},
-	}
-	for name, args := range cases {
-		if err := run(args, env(nil), time.Now, &bytes.Buffer{}, http.DefaultClient); err == nil {
-			t.Errorf("%s: expected an error", name)
-		}
-	}
 	corrupt := filepath.Join(dir, "corrupt-state.json")
 	if err := os.WriteFile(corrupt, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"-journal", good, "-state", corrupt, "-channel", "stdout"}, env(nil), time.Now, &bytes.Buffer{}, http.DefaultClient); err == nil {
-		t.Fatal("a corrupt state file must not be silently reset: it would resend every alert")
+	state := filepath.Join(dir, "s")
+	// Each case names a real channel, so it fails at the input it names and
+	// not at sender setup.
+	cases := map[string]struct {
+		args []string
+		want string
+	}{
+		"no journal flag":  {[]string{"-state", "s", "-channel", "ntfy"}, "-journal and -state are required"},
+		"no state flag":    {[]string{"-journal", good, "-channel", "ntfy"}, "-journal and -state are required"},
+		"missing file":     {[]string{"-journal", filepath.Join(dir, "none"), "-state", state, "-channel", "ntfy"}, "read journal"},
+		"unverifiable":     {[]string{"-journal", bad, "-state", state, "-channel", "ntfy"}, "report:"},
+		"unknown channel":  {[]string{"-journal", good, "-state", state, "-channel", "pigeon"}, "unknown channel"},
+		"bad flag":         {[]string{"-nope"}, "not defined"},
+		"bad summary date": {[]string{"-journal", good, "-state", state, "-channel", "ntfy", "-summary", "-date", "x"}, "is not YYYY-MM-DD"},
+		// A reset would resend every alert, so a corrupt state file is refused.
+		"corrupt state": {[]string{"-journal", good, "-state", corrupt, "-channel", "ntfy"}, "state file is unreadable"},
+	}
+	for name, c := range cases {
+		err := run(c.args, fakeEnv, time.Now, &bytes.Buffer{}, fakeClient)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: error = %v, want one containing %q", name, err, c.want)
+		}
 	}
 }
 
@@ -297,6 +317,7 @@ func TestStdoutAloneIsNotADeliveryChannel(t *testing.T) {
 // pagerDuty is a fake Events API: it records what it was sent and answers as
 // the real one does.
 type pagerDuty struct {
+	mu     sync.Mutex
 	status int
 	body   string
 	got    []map[string]any
@@ -305,9 +326,25 @@ type pagerDuty struct {
 func (p *pagerDuty) handler(w http.ResponseWriter, r *http.Request) {
 	var m map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&m)
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.got = append(p.got, m)
 	w.WriteHeader(p.status)
 	_, _ = w.Write([]byte(p.body))
+}
+
+// answer sets how the fake answers and forgets what it was sent.
+func (p *pagerDuty) answer(status int, body string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.status, p.body, p.got = status, body, nil
+}
+
+// received returns what the fake was sent.
+func (p *pagerDuty) received() []map[string]any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]map[string]any(nil), p.got...)
 }
 
 func TestPagerDutyTriggersWithTheAlertKeyAndReadsTheAcknowledgementBack(t *testing.T) {
@@ -321,10 +358,11 @@ func TestPagerDutyTriggersWithTheAlertKeyAndReadsTheAcknowledgementBack(t *testi
 	if err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, &out, server.Client()); err != nil {
 		t.Fatal(err)
 	}
-	if len(pd.got) == 0 {
+	got := pd.received()
+	if len(got) == 0 {
 		t.Fatal("nothing was sent")
 	}
-	first := pd.got[0]
+	first := got[0]
 	payload, _ := first["payload"].(map[string]any)
 	if first["routing_key"] != "routing-secret-9" || first["event_action"] != "trigger" || first["dedup_key"] == "" || payload["severity"] == "" || payload["summary"] == "" {
 		t.Fatalf("request = %v", first)
@@ -351,7 +389,7 @@ func TestPagerDutyAnswerThatIsNotASuccessIsNotADelivery(t *testing.T) {
 		}
 		if _, statErr := os.Stat(filepath.Join(dir, "s.json")); statErr == nil {
 			raw, _ := os.ReadFile(filepath.Join(dir, "s.json"))
-			if strings.Contains(string(raw), "pagerduty:") {
+			if strings.Contains(string(raw), channelKey("pagerduty", "")) {
 				t.Errorf("%s: recorded as delivered: %s", name, raw)
 			}
 		}
@@ -367,8 +405,18 @@ func TestPagerDutyWithoutARoutingKeyIsAConfigurationError(t *testing.T) {
 }
 
 func TestAFailureOnOneChannelIsNeverADeliveryAndOnlyThatChannelIsRetried(t *testing.T) {
+	var mu sync.Mutex
 	var ntfyHits int
-	ntfy := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { ntfyHits++ }))
+	ntfy := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		ntfyHits++
+	}))
+	hits := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return ntfyHits
+	}
 	defer ntfy.Close()
 	pd := &pagerDuty{status: http.StatusInternalServerError, body: `{}`}
 	pager := httptest.NewServer(http.HandlerFunc(pd.handler))
@@ -380,20 +428,20 @@ func TestAFailureOnOneChannelIsNeverADeliveryAndOnlyThatChannelIsRetried(t *test
 	if err := run(args, environment, now, &bytes.Buffer{}, http.DefaultClient); err == nil {
 		t.Fatal("ntfy took the alerts but PagerDuty did not: that is not delivered")
 	}
-	sent := ntfyHits
-	pd.status, pd.body, pd.got = http.StatusAccepted, `{"status":"success"}`, nil
+	sent := hits()
+	pd.answer(http.StatusAccepted, `{"status":"success"}`)
 	if err := run(args, environment, now, &bytes.Buffer{}, http.DefaultClient); err != nil {
 		t.Fatal(err)
 	}
-	if ntfyHits != sent {
-		t.Fatalf("ntfy was sent %d alerts again though it had taken them", ntfyHits-sent)
+	if hits() != sent {
+		t.Fatalf("ntfy was sent %d alerts again though it had taken them", hits()-sent)
 	}
-	if len(pd.got) == 0 {
+	if len(pd.received()) == 0 {
 		t.Fatal("PagerDuty was not retried")
 	}
-	pd.got = nil
-	if err := run(args, environment, now, &bytes.Buffer{}, http.DefaultClient); err != nil || len(pd.got) != 0 {
-		t.Fatalf("delivered on every channel, yet sent again: %v %d", err, len(pd.got))
+	pd.answer(http.StatusAccepted, `{"status":"success"}`)
+	if err := run(args, environment, now, &bytes.Buffer{}, http.DefaultClient); err != nil || len(pd.received()) != 0 {
+		t.Fatalf("delivered on every channel, yet sent again: %v %d", err, len(pd.received()))
 	}
 }
 

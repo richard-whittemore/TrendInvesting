@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,16 +35,24 @@ func envelope(t *testing.T, seq uint64, eventType string, version uint32, id str
 
 func writeJournal(t *testing.T, dir string) string {
 	t.Helper()
+	return writeJournalWith(t, dir)
+}
+
+// writeJournalWith writes the run with extra entries after its own.
+func writeJournalWith(t *testing.T, dir string, extra ...journal.Entry) string {
+	t.Helper()
 	cfg := event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint <b>", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR}
 	snap := event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: t0, Currency: "USD", NetLiquidation: 4000,
 		Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: 39}}}
 	refused := event.OrderRefusedPayload{AccountID: "joint", PlanID: "p", Tag: "targets:0", ClientOrderID: "tw-a", InstrumentID: "SPY",
-		Side: event.OrderSideBuy, Quantity: 39, LimitPrice: 101, Reason: event.RefusedOrderSize, Detail: "figures"}
+		Side: event.OrderSideBuy, Quantity: 39, LimitPrice: 101, Reason: event.RefusedOrderSize, Detail: "figures",
+		Figures: event.RiskFigures{NetLiquidation: 4000, ReferencePrice: 100, ExposureBefore: 0.5, ExposureAfter: 0.98, OrderFraction: 0.48, OrdersInDecision: 1}}
 	entries := []journal.Entry{
 		{Kind: journal.KindInput, Envelope: envelope(t, 1, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "cfg", cfg)},
 		{Kind: journal.KindInput, Envelope: envelope(t, 2, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, "snap", snap)},
 		{Kind: journal.KindDecision, Envelope: envelope(t, 3, event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, "refuse", refused)},
 	}
+	entries = append(entries, extra...)
 	var buf bytes.Buffer
 	if err := journal.Write(&buf, journal.NewHeader("h", "v", t0, t0), entries); err != nil {
 		t.Fatal(err)
@@ -80,6 +90,16 @@ func TestDashboardShowsEachAccountEscapedAndNeverCached(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(body), "<form") || strings.Contains(strings.ToLower(body), "<script") {
 		t.Error("a read-only page has no form and no script")
+	}
+}
+
+func TestDashboardSaysWhenAnInputWasNotRead(t *testing.T) {
+	rejected := event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: t0, Currency: "USD", NetLiquidation: -1}
+	path := writeJournalWith(t, t.TempDir(),
+		journal.Entry{Kind: journal.KindInput, Envelope: envelope(t, 4, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, "snap-bad", rejected)})
+	body := get(newHandler([]string{path}, "SPY"), http.MethodGet, "/").Body.String()
+	if !strings.Contains(body, "Inputs not read: 1") || !strings.Contains(body, "4000.00") {
+		t.Fatalf("the page must show the figures without the rejected input, and say it left one out:\n%s", body)
 	}
 }
 
@@ -140,16 +160,56 @@ func TestDashboardRefusesAJournalThatDoesNotVerify(t *testing.T) {
 	}
 }
 
-func TestListenAddressMustBeLoopbackOrTailscale(t *testing.T) {
+// host is a machine with Tailscale up on tailscale0, and a second interface
+// that owns an address in the shared CGNAT range Tailscale also uses.
+func host() ([]netInterface, error) {
+	return []netInterface{
+		{Name: "lo", Addrs: []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("::1")}},
+		{Name: "tailscale0", Addrs: []netip.Addr{netip.MustParseAddr("100.101.102.103"), netip.MustParseAddr("fd7a:115c:a1e0::1")}},
+		{Name: "utun4", Addrs: []netip.Addr{netip.MustParseAddr("100.64.0.1")}},
+		{Name: "eth1", Addrs: []netip.Addr{netip.MustParseAddr("100.100.1.1"), netip.MustParseAddr("192.168.1.5")}},
+	}, nil
+}
+
+func TestListenAddressMustBeLoopbackOrThisHostsTailscaleAddress(t *testing.T) {
 	for addr, ok := range map[string]bool{
-		"127.0.0.1:8080": true, "[::1]:8080": true, "100.101.102.103:8080": true, "100.64.0.1:1": true, "100.127.255.254:1": true,
+		"127.0.0.1:8080": true, "[::1]:8080": true, "100.101.102.103:8080": true, "100.64.0.1:1": true,
 		"[fd7a:115c:a1e0::1]:8080": true,
-		"0.0.0.0:8080":             false, ":8080": false, "192.168.1.5:8080": false, "100.128.0.1:8080": false, "100.63.0.1:8080": false,
+		// In the Tailscale range but owned by a carrier-grade NAT interface,
+		// or by no interface of this host.
+		"100.100.1.1:8080": false, "100.127.255.254:1": false, "[fd7a:115c:a1e0::2]:8080": false,
+		"0.0.0.0:8080": false, ":8080": false, "192.168.1.5:8080": false, "100.128.0.1:8080": false, "100.63.0.1:8080": false,
 		"localhost:8080": false, "example.com:80": false, "[::]:8080": false, "127.0.0.1": false, "8.8.8.8:80": false,
 	} {
-		if err := checkListenAddr(addr); (err == nil) != ok {
+		if err := checkListenAddr(addr, host); (err == nil) != ok {
 			t.Errorf("%s: err = %v, want ok=%v", addr, err, ok)
 		}
+	}
+}
+
+func TestListenAddressIsRefusedWhenTheInterfacesCannotBeRead(t *testing.T) {
+	broken := func() ([]netInterface, error) { return nil, errors.New("no interfaces") }
+	if err := checkListenAddr("100.101.102.103:8080", broken); err == nil {
+		t.Fatal("an address that cannot be checked must be refused")
+	}
+	if err := checkListenAddr("127.0.0.1:8080", broken); err != nil {
+		t.Fatalf("loopback needs no interface check: %v", err)
+	}
+}
+
+func TestTheHostsInterfacesAreRead(t *testing.T) {
+	got, err := hostInterfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	loopback := false
+	for _, i := range got {
+		for _, a := range i.Addrs {
+			loopback = loopback || a.IsLoopback()
+		}
+	}
+	if !loopback {
+		t.Fatalf("no loopback address among %v", got)
 	}
 }
 

@@ -23,6 +23,26 @@ type sender interface {
 // terminal and reaches no one else, so it never counts as a delivery.
 type echoOnly interface{ echo() }
 
+// relayed marks a sender whose messages pass through a public relay, which
+// anyone who learns the topic can read. The daily summary, which carries the
+// account's balances, is never sent through one (owner decision 2026-10-17,
+// docs/live-trading/plan.md section 7).
+type relayed interface{ publicRelay() bool }
+
+// kindSummary is the daily summary's kind: a routine message, not an
+// incident, and the one message that carries balances.
+const kindSummary report.Kind = "daily-summary"
+
+// publicNtfy reports whether an ntfy server is the public ntfy.sh relay.
+func publicNtfy(server string) (bool, error) {
+	u, err := url.Parse(server)
+	if err != nil || u.Host == "" {
+		return false, errors.New("reporter: TI_NTFY_SERVER must be an absolute URL such as https://ntfy.example.org")
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "ntfy.sh" || strings.HasSuffix(host, ".ntfy.sh"), nil
+}
+
 const defaultPagerDutyURL = "https://events.pagerduty.com/v2/enqueue"
 
 func buildSenders(channels string, getenv func(string) string, client *http.Client, out io.Writer) ([]sender, error) {
@@ -41,7 +61,11 @@ func buildSenders(channels string, getenv func(string) string, client *http.Clie
 			if server == "" {
 				server = "https://ntfy.sh"
 			}
-			senders = append(senders, ntfySender{server: strings.TrimRight(server, "/"), topic: topic, client: client})
+			public, err := publicNtfy(server)
+			if err != nil {
+				return nil, err
+			}
+			senders = append(senders, ntfySender{server: strings.TrimRight(server, "/"), topic: topic, client: client, public: public})
 			reaches = true
 		case "pagerduty":
 			key := getenv("TI_PAGERDUTY_ROUTING_KEY")
@@ -72,13 +96,24 @@ func channelKey(channel, alertKey string) string { return channel + "|" + alertK
 // every delivery channel has taken it: a failure on one channel is never
 // covered by another's success, and only the channel that failed is tried
 // again. The terminal echo shows an alert while any channel still lacks it
-// and never counts. The error joins every channel failure.
+// and never counts. The daily summary skips a channel on a public relay, and
+// is an error when no other delivery channel was named. The error joins every
+// channel failure.
 func deliver(senders []sender, a report.Alert, seen map[string]bool) error {
 	var pending []sender
+	private := false
 	for _, s := range senders {
-		if _, echo := s.(echoOnly); echo || !seen[channelKey(s.name(), a.Key)] {
+		_, echo := s.(echoOnly)
+		if r, ok := s.(relayed); ok && r.publicRelay() && a.Kind == kindSummary {
+			continue
+		}
+		private = private || !echo
+		if echo || !seen[channelKey(s.name(), a.Key)] {
 			pending = append(pending, s)
 		}
+	}
+	if !private {
+		return errors.New("the daily summary carries balances and never goes through a public relay such as ntfy.sh; name pagerduty or your own ntfy server (TI_NTFY_SERVER) to receive it")
 	}
 	reaching := 0
 	for _, s := range pending {
@@ -120,9 +155,12 @@ func (s stdoutSender) send(a report.Alert) error {
 type ntfySender struct {
 	server, topic string
 	client        *http.Client
+	public        bool
 }
 
 func (ntfySender) name() string { return "ntfy" }
+
+func (n ntfySender) publicRelay() bool { return n.public }
 
 func (n ntfySender) send(a report.Alert) error {
 	req, err := http.NewRequest(http.MethodPost, n.server+"/"+url.PathEscape(n.topic), bytes.NewBufferString(a.Body))

@@ -30,12 +30,24 @@ that has been edited or damaged is refused whole, and no figure from it is
 shown. The checking is the same code `journal-query` uses, so the three tools
 cannot disagree about what a file holds.
 
+Each record is then read the way `journal-query` reads it: only at a schema
+version this build knows, and only if its values pass the same checks the
+engine applies.
+
+- A record of what the engine decided (targets, orders, refusals, engine
+  state) that fails is a sign of a damaged or mismatched file, so the program
+  stops with an error naming it.
+- An input that fails (a bar, an account snapshot, a fill) is skipped and
+  counted. The log keeps inputs the engine itself refused, so stopping for one
+  would silence every later alert. A skipped input moves no figure, and the
+  summary and the dashboard say "Inputs not read: N" when there are any.
+
 ## What triggers an alert
 
 | Alert | Urgency | Sent once per |
 | --- | --- | --- |
 | An order was refused | urgent | refused order |
-| The engine went Degraded or Halted | urgent | change of state, reason and scope |
+| The engine went Degraded or Halted | urgent | change of state, reason and scope; the same state coming back after another is a new alert |
 | A decision was withheld for missing data (bars, account snapshot, universe) | urgent | run of the same reason |
 | A decision was withheld for another reason | routine | run of the same reason |
 | No sign of life from the engine | urgent | silence, keyed by the last activity |
@@ -47,11 +59,11 @@ dead-man's switch ADR 0019 asks for is a separate service and is not built.
 
 ## Where alerts go
 
-Alerts go to real channels. You choose them with `-channel`, comma separated.
+Alerts go to real channels. You choose them with `-channel`, comma-separated.
 
 | Channel | What it is | Secret (environment) |
 | --- | --- | --- |
-| `ntfy` | Push to your phone through ntfy | `TI_NTFY_TOPIC`, an unguessable topic name; optionally `TI_NTFY_SERVER` |
+| `ntfy` | Push to your phone through ntfy (the public ntfy.sh relay unless you run your own server) | `TI_NTFY_TOPIC`, an unguessable topic name; optionally `TI_NTFY_SERVER` |
 | `pagerduty` | The second channel, chosen by the owner: PagerDuty, through its Events API | `TI_PAGERDUTY_ROUTING_KEY`, the integration key; optionally `TI_PAGERDUTY_URL` |
 | `stdout` | Prints to the terminal or the system log | none |
 
@@ -65,10 +77,19 @@ The delivery rules:
   taken it. One channel working does not make up for another failing.
 - A channel that failed is retried on the next run, and only that channel.
   A channel that already took the alert is not sent it again.
+- Each send has a time limit (`-send-timeout`, default 30 seconds). A channel
+  that does not answer in time has failed and is retried next run, so one
+  stalled channel cannot hold up the other alerts.
+- The daily summary carries your balances, so it never goes through a public
+  relay. With ntfy on the public ntfy.sh server the summary skips ntfy and goes
+  only to PagerDuty or your own ntfy server. If no such channel is named, the
+  incident alerts still go out and the run ends with an error saying the
+  summary had nowhere private to go.
 - The reporter remembers what each channel has taken in its own state file
-  (`-state`). That file is the only thing it writes. If it is unreadable the
-  reporter stops rather than starting over, because starting over would
-  resend every alert.
+  (`-state`). That file is the only thing it writes, and it is flushed to disk
+  before the run ends, so a power cut cannot leave it empty. If it is
+  unreadable the reporter stops rather than starting over, because starting
+  over would resend every alert.
 - Secrets (the ntfy topic, the PagerDuty key) never appear in output or errors.
 
 PagerDuty details: you sign up for PagerDuty and create a service with an
@@ -96,7 +117,7 @@ Flags: `-journal` and `-state` are required; `-channel` (default `stdout`,
 which is refused on its own, so always name a real channel); `-summary`
 (also send the day's summary); `-date YYYY-MM-DD` (default: the latest day in
 the log); `-benchmark` (default SPY); `-heartbeat-timeout` (default 36 hours of
-silence).
+silence); `-send-timeout` (default 30 seconds per send).
 
 If it exits with an error, read it: it names the channel that failed or the
 file it refused. Nothing is lost; the next run tries again.
@@ -108,7 +129,10 @@ go run ./cmd/dashboard -journal joint.log -journal ira.log -addr 127.0.0.1:8088
 ```
 
 Repeat `-journal` for each account. It will listen only on a loopback address
-or a Tailscale address, so on the server it is reachable only over Tailscale.
+or an address this machine's own Tailscale interface holds (`tailscale ip`
+prints it), so on the server it is reachable only over Tailscale. An address
+that merely looks like a Tailscale one but belongs to another network is
+refused.
 Pages: `/` (the summaries), `/api/summary.json` and `/healthz`. Anything but a
 read is answered "method not allowed". If a log does not verify, the page says
 so without showing paths or figures.

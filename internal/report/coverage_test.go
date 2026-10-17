@@ -29,7 +29,8 @@ func rich(t *testing.T) *stream {
 	return s
 }
 
-func TestEveryPayloadThatCannotBeDecodedFailsTheReport(t *testing.T) {
+func TestEveryDecisionThatCannotBeDecodedFailsTheReportAndEveryInputIsCounted(t *testing.T) {
+	inputs := map[string]bool{event.CompletedBarEventType: true, event.AccountSnapshotEventType: true, event.FillEventType: true}
 	base := rich(t)
 	for i, e := range base.out {
 		if i == 0 {
@@ -37,7 +38,11 @@ func TestEveryPayloadThatCannotBeDecodedFailsTheReport(t *testing.T) {
 		}
 		s := rich(t)
 		s.out[i].Payload = []byte(`{`)
-		if _, err := report.Summarize(s.out, "2024-01-02", "SPY"); err == nil {
+		got, err := report.Summarize(s.out, "2024-01-02", "SPY")
+		switch {
+		case inputs[e.Type] && (err != nil || got.RejectedInputs != 1):
+			t.Errorf("a corrupt %s input must be skipped and counted: %v, %d", e.Type, err, got.RejectedInputs)
+		case !inputs[e.Type] && err == nil:
 			t.Errorf("Summarize accepted a corrupt %s", e.Type)
 		}
 	}

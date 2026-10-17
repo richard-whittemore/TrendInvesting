@@ -49,7 +49,9 @@ type Alert struct {
 //   - Every risk.order.refused is its own incident.
 //   - A strategy.engine.state record is an incident when its state, reason and
 //     scope differ from the previous one: a repeat of the same state is the
-//     same incident, and Degraded to Halted is a new one (ADR 0019).
+//     same incident, and Degraded to Halted is a new one (ADR 0019). The
+//     incident is keyed by its start, so a state that returns after another
+//     is a new incident too.
 //   - A run of consecutive withheld decisions with one reason is one
 //     incident; a decided outcome ends it. Reasons that name absent inputs
 //     (missing bars, stale snapshot, missing universe) and a refusal for a
@@ -67,13 +69,13 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 		switch e.Type {
 		case event.OrderRefusedEventType:
 			var p event.OrderRefusedPayload
-			if err := decode(e, &p); err != nil {
+			if err := read(e, refusedVersions, &p); err != nil {
 				return nil, err
 			}
 			out = append(out, refusalAlerts(account, e, p)...)
 		case event.EngineStateEventType:
 			var p event.EngineStatePayload
-			if err := decode(e, &p); err != nil {
+			if err := read(e, engineStateVersions, &p); err != nil {
 				return nil, err
 			}
 			key := engineStateKey(p)
@@ -81,10 +83,10 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 				continue
 			}
 			lastState = key
-			out = append(out, engineStateAlert(account, e, p, key))
+			out = append(out, engineStateAlert(account, e, p))
 		case event.TargetsDecidedEventType:
 			var p event.TargetsDecidedPayload
-			if err := decode(e, &p); err != nil {
+			if err := read(e, decidedVersions, &p); err != nil {
 				return nil, err
 			}
 			if p.Outcome != event.TargetsOutcomeWithheld {
@@ -125,7 +127,11 @@ func engineStateKey(p event.EngineStatePayload) string {
 
 // engineStateAlert states what the system is still and no longer doing, per
 // ADR 0019's "Every alert states" list, as far as the record itself knows.
-func engineStateAlert(account string, e event.Envelope, p event.EngineStatePayload, key string) Alert {
+//
+// Its key is the state, reason and scope with the incident's start, so a
+// state that returns after another is a new incident, never one already
+// delivered.
+func engineStateAlert(account string, e event.Envelope, p event.EngineStatePayload) Alert {
 	kind := KindHalted
 	body := fmt.Sprintf("Engine halted since %s: %s. %s. Whole engine. It places no new orders; the one sale back toward 98%% for a target-weight account (ADR 0019 amendment) is the only exception. Recovery is a person's: docs/runbooks/reconciliation.md.",
 		e.EventTime.UTC().Format(time.RFC3339), p.Reason, p.Detail)
@@ -135,7 +141,7 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 			e.EventTime.UTC().Format(time.RFC3339), p.Reason, p.Detail,
 			strings.Join(p.ScopeInstrumentIDs, ","), strings.Join(p.ScopeOrderIDs, ","), strings.Join(p.ScopeCashComponents, ","))
 	}
-	return Alert{Key: key + "@" + account, Kind: kind, Severity: Urgent, AccountID: account, At: e.EventTime,
+	return Alert{Key: engineStateKey(p) + ":" + e.EventTime.UTC().Format(time.RFC3339Nano) + "@" + account, Kind: kind, Severity: Urgent, AccountID: account, At: e.EventTime,
 		Title: fmt.Sprintf("%s: engine %s (%s)", account, p.State, p.Reason), Body: body}
 }
 

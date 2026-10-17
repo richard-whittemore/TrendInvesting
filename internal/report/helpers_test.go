@@ -79,16 +79,19 @@ func (s *stream) planned(n int, clientID string, quantity int64) {
 			TargetWeight: 0.98, NetLiquidation: 4000, ReferencePrice: 100, PriceBand: 0.05})
 }
 
+// figures are risk figures that validate, as the gate records them.
+var figures = event.RiskFigures{NetLiquidation: 4000, ReferencePrice: 100, ExposureBefore: 0.5, ExposureAfter: 0.98, OrderFraction: 0.48, OrdersInDecision: 1}
+
 func (s *stream) released(n int, clientID string, quantity int64) {
 	s.add(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "release:"+clientID, day(n),
 		event.OrderReleasedPayload{AccountID: "joint", PlanID: "plan:" + clientID, Tag: fmt.Sprintf("targets:%d", n), ClientOrderID: clientID,
-			InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: quantity, LimitPrice: 101, Mode: event.TradingModeDryRun})
+			InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: quantity, LimitPrice: 101, Mode: event.TradingModeDryRun, Figures: figures})
 }
 
 func (s *stream) refused(n int, clientID, reason string) {
 	s.add(event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, "refuse:"+clientID, day(n),
 		event.OrderRefusedPayload{AccountID: "joint", PlanID: "plan:" + clientID, Tag: fmt.Sprintf("targets:%d", n), ClientOrderID: clientID,
-			InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 39, LimitPrice: 101, Reason: reason, Detail: "figures"})
+			InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 39, LimitPrice: 101, Reason: reason, Detail: "figures", Figures: figures})
 }
 
 func (s *stream) engineState(n int, state, reason string, scope ...string) {

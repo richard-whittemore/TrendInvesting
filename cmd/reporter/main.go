@@ -50,13 +50,22 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	date := flags.String("date", "", "summary date, YYYY-MM-DD (default: the journal's latest event day)")
 	summary := flags.Bool("summary", false, "also deliver the daily summary")
 	timeout := flags.Duration("heartbeat-timeout", 36*time.Hour, "journal silence after which a heartbeat alert fires")
+	sendTimeout := flags.Duration("send-timeout", 30*time.Second, "longest one send to one channel may take before it counts as failed")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *journalPath == "" || *statePath == "" {
 		return errors.New("reporter: -journal and -state are required")
 	}
-	senders, err := buildSenders(*channels, getenv, client, out)
+	if *sendTimeout <= 0 {
+		return errors.New("reporter: -send-timeout must be positive: a send with no bound can hold the run forever, and with it every later alert")
+	}
+	// Every send is bounded, so a stalled channel fails as that channel's
+	// failure, is retried next run, and never holds back the other alerts or
+	// the state file.
+	bounded := *client
+	bounded.Timeout = *sendTimeout
+	senders, err := buildSenders(*channels, getenv, &bounded, out)
 	if err != nil {
 		return err
 	}
@@ -123,7 +132,7 @@ func summaryAlert(envelopes []event.Envelope, date, benchmark string) (report.Al
 		return report.Alert{}, err
 	}
 	return report.Alert{
-		Key: "summary:" + s.AccountID + ":" + s.Date, Severity: report.Routine, AccountID: s.AccountID,
+		Key: "summary:" + s.AccountID + ":" + s.Date, Kind: kindSummary, Severity: report.Routine, AccountID: s.AccountID,
 		Title: fmt.Sprintf("%s: daily summary %s", s.AccountID, s.Date), Body: report.RenderText(s),
 	}, nil
 }
@@ -147,7 +156,13 @@ func loadState(path string) (map[string]bool, error) {
 	return seen, nil
 }
 
-// saveState replaces the state file atomically.
+// syncFile flushes a file to disk; a test replaces it to see a failure.
+var syncFile = func(f *os.File) error { return f.Sync() }
+
+// saveState replaces the state file atomically and durably: the new content
+// is on disk before the rename, and the rename before it returns. Without
+// that, a power cut can leave an empty state file, which loadState refuses,
+// and every later run then fails.
 func saveState(path string, seen map[string]bool) error {
 	d := delivered{Keys: make([]string, 0, len(seen))}
 	for k := range seen {
@@ -167,8 +182,23 @@ func saveState(path string, seen map[string]bool) error {
 		_ = tmp.Close()
 		return fmt.Errorf("reporter: write state: %w", err)
 	}
+	if err := syncFile(tmp); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("reporter: write state: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("reporter: write state: %w", err)
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("reporter: write state: %w", err)
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("reporter: write state: %w", err)
+	}
+	defer func() { _ = dir.Close() }()
+	if err := syncFile(dir); err != nil {
+		return fmt.Errorf("reporter: write state: %w", err)
+	}
+	return nil
 }

@@ -64,5 +64,8 @@ func RenderText(s Summary) string {
 	} else {
 		fmt.Fprintf(&b, "Equity vs %s: not enough paired snapshots and bars yet.\n", s.Benchmark)
 	}
+	if s.RejectedInputs > 0 {
+		fmt.Fprintf(&b, "Inputs not read: %d (an unknown schema version or values that fail validation; they move no figure)\n", s.RejectedInputs)
+	}
 	return b.String()
 }

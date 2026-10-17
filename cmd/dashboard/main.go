@@ -1,9 +1,9 @@
 // Command dashboard serves a read-only view of each account's journal: the
 // daily summary and the alerts, in HTML and JSON (docs/live-trading/plan.md
 // section 3). It has no write path: it answers GET and HEAD only, opens its
-// journals for reading, and refuses to listen anywhere but loopback or a
-// Tailscale address, so on the server it is reached only over Tailscale. Every
-// rule lives in internal/report; this is composition.
+// journals for reading, and refuses to listen anywhere but loopback or this
+// host's Tailscale address, so on the server it is reached only over
+// Tailscale. Every rule lives in internal/report; this is composition.
 package main
 
 import (
@@ -49,7 +49,7 @@ func run(args []string, log io.Writer) error {
 	if len(journals) == 0 {
 		return errors.New("dashboard: at least one -journal is required")
 	}
-	if err := checkListenAddr(*addr); err != nil {
+	if err := checkListenAddr(*addr, hostInterfaces); err != nil {
 		return err
 	}
 	server := &http.Server{
@@ -65,10 +65,47 @@ var (
 	tailscaleV6 = netip.MustParsePrefix("fd7a:115c:a1e0::/48")
 )
 
-// checkListenAddr accepts only a literal loopback or Tailscale address with a
-// port. A hostname, a wildcard or any other interface would expose the
-// dashboard beyond Tailscale.
-func checkListenAddr(addr string) error {
+// netInterface is one network interface of the host and its addresses.
+type netInterface struct {
+	Name  string
+	Addrs []netip.Addr
+}
+
+// hostInterfaces reads this host's interfaces and their addresses.
+func hostInterfaces() ([]netInterface, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]netInterface, 0, len(ifaces))
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			return nil, err
+		}
+		n := netInterface{Name: iface.Name}
+		for _, a := range addrs {
+			if prefix, err := netip.ParsePrefix(a.String()); err == nil {
+				n.Addrs = append(n.Addrs, prefix.Addr().Unmap())
+			}
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// tailscaleInterface reports whether an interface name is one Tailscale
+// creates: tailscale0 on Linux, a utun device on macOS.
+func tailscaleInterface(name string) bool {
+	return strings.HasPrefix(name, "tailscale") || strings.HasPrefix(name, "utun")
+}
+
+// checkListenAddr accepts only a literal loopback address, or a Tailscale
+// address that one of this host's Tailscale interfaces owns, with a port. A
+// hostname, a wildcard or any other interface would expose the dashboard
+// beyond Tailscale; 100.64.0.0/10 is also the shared carrier-grade NAT range,
+// so being in it is not enough.
+func checkListenAddr(addr string, interfaces func() ([]netInterface, error)) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("dashboard: -addr %q must be host:port: %w", addr, err)
@@ -77,10 +114,25 @@ func checkListenAddr(addr string) error {
 	if err != nil {
 		return fmt.Errorf("dashboard: -addr host %q must be a literal loopback or Tailscale IP", host)
 	}
-	if ip.IsLoopback() || tailscaleV4.Contains(ip) || tailscaleV6.Contains(ip) {
+	ip = ip.Unmap()
+	if ip.IsLoopback() {
 		return nil
 	}
-	return fmt.Errorf("dashboard: %s is neither loopback nor a Tailscale address (100.64.0.0/10, fd7a:115c:a1e0::/48)", ip)
+	if !tailscaleV4.Contains(ip) && !tailscaleV6.Contains(ip) {
+		return fmt.Errorf("dashboard: %s is neither loopback nor a Tailscale address (100.64.0.0/10, fd7a:115c:a1e0::/48)", ip)
+	}
+	ifaces, err := interfaces()
+	if err != nil {
+		return fmt.Errorf("dashboard: cannot read this host's interfaces to check %s is its Tailscale address: %w", ip, err)
+	}
+	for _, iface := range ifaces {
+		for _, a := range iface.Addrs {
+			if a == ip && tailscaleInterface(iface.Name) {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("dashboard: %s is not an address of this host's Tailscale interface", ip)
 }
 
 // account is one journal's view.
@@ -205,7 +257,8 @@ table{border-collapse:collapse}td,th{padding:.2rem .7rem;text-align:left;border-
 <h3>Orders</h3>{{if .Orders}}<table>{{range .Orders}}<tr><td>{{.ClientOrderID}}</td><td>{{.Side}} {{.Quantity}} {{.InstrumentID}} @ {{printf "%.2f" .LimitPrice}}</td><td>{{.Status}}</td><td>{{.Reason}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
 <p>Refusals today: {{.Refusals}}</p>
 <h3>Fills</h3>{{if .Fills}}<table>{{range .Fills}}<tr><td>{{.InstrumentID}}</td><td>{{.Quantity}} @ {{printf "%.2f" .Price}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
-<h3>Equity against {{.Benchmark}}</h3>{{if .Equity.Available}}<p>Since {{.Equity.StartDate}}: account {{pct .Equity.AccountReturn}}, {{.Benchmark}} {{pct .Equity.BenchmarkReturn}}, difference {{pct .Equity.Excess}}.<br>Day: account {{pct .Equity.DayAccountReturn}}, {{.Benchmark}} {{pct .Equity.DayBenchmarkReturn}}.</p>{{else}}<p>Not enough paired snapshots and bars yet.</p>{{end}}{{end}}
+<h3>Equity against {{.Benchmark}}</h3>{{if .Equity.Available}}<p>Since {{.Equity.StartDate}}: account {{pct .Equity.AccountReturn}}, {{.Benchmark}} {{pct .Equity.BenchmarkReturn}}, difference {{pct .Equity.Excess}}.<br>Day: account {{pct .Equity.DayAccountReturn}}, {{.Benchmark}} {{pct .Equity.DayBenchmarkReturn}}.</p>{{else}}<p>Not enough paired snapshots and bars yet.</p>{{end}}
+{{if .RejectedInputs}}<p class="urgent">Inputs not read: {{.RejectedInputs}} (an unknown schema version or values that fail validation; they move no figure).</p>{{end}}{{end}}
 <h3>Alerts</h3>{{if .Alerts}}<table>{{range .Alerts}}<tr class="{{.Severity}}"><td>{{.At.Format "2006-01-02 15:04Z"}}</td><td>{{.Severity}}</td><td>{{.Title}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
 {{end}}</body></html>
 `))
