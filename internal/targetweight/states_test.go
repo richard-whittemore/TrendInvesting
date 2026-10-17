@@ -34,11 +34,12 @@ func degradedOnSPY(t *testing.T) event.Envelope {
 func haltedState(t *testing.T) event.Envelope {
 	return recordedState(t, "engine-state:joint:recorded", event.EngineStatePayload{
 		State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "recorded: untagged order",
-	}, event.EngineStateSchemaVersion)
+	}, event.EngineStateScopedVersion)
 }
 
 // restartAt17 restarts the full run from its boosted decision of session 17,
-// feeding the full run's account and broker snapshots, with prelude records.
+// feeding the full run's account and broker snapshots, after the recorded
+// engine states in opts.prelude.
 func restartAt17(t *testing.T, full run, opts options) run {
 	t.Helper()
 	recovery := ofType(full.decisions, event.TargetsDecidedEventType)[17]
@@ -109,65 +110,43 @@ func TestDegradedOnSPYWhileBoostedSellsBackTo98(t *testing.T) {
 	}
 }
 
-func TestHaltedSellsOnceAcrossARestart(t *testing.T) {
+// TestHaltedSellsOncePerIncident: a later urgent alarm in the same incident
+// sells nothing; the incident's one sale is spent (ADR 0019, amended
+// 2026-10-15; amended 2026-10-17, reading 3).
+func TestHaltedSellsOncePerIncident(t *testing.T) {
 	full := simulate(t, options{brokers: true})
 	state := haltedState(t)
-	first := restartAt17(t, full, options{prelude: []event.Envelope{state}})
-	sold := sales(t, first.decisions)
+	urgent := map[int]func(*event.BrokerSnapshotPayload){22: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation }}
+	r := restartAt17(t, full, options{prelude: []event.Envelope{state}, brokerMutate: urgent})
+	sold := sales(t, r.decisions)
 	if len(sold) != 1 || sold[0].Tag != state.ID {
 		t.Fatalf("Halted: one sale tagged with the incident, got %+v", sold)
 	}
-	if n := len(released(t, first.decisions)); n != 1 {
+	if n := len(released(t, r.decisions)); n != 1 {
 		t.Fatalf("only the sale is released while Halted, got %d", n)
 	}
-
-	// Restart again, after the sale, reading back the state and the sale's
-	// records. A later urgent alarm in the same incident sells nothing.
-	var prelude []event.Envelope
-	prelude = append(prelude, state)
-	for _, e := range first.decisions {
-		switch e.Type {
-		case event.OrderPlannedEventType, event.OrderReleasedEventType, event.OrderRefusedEventType:
-			prelude = append(prelude, e)
-		}
-	}
-	urgent := map[int]func(*event.BrokerSnapshotPayload){22: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation }}
-	second := restartAt17(t, full, options{prelude: prelude, brokerMutate: urgent})
-	alarms := ofType(second.decisions, event.MarginAlarmEventType)
-	if len(alarms) == 0 {
+	if len(ofType(r.decisions, event.MarginAlarmEventType)) == 0 {
 		t.Fatal("the urgent alarm is journalled")
 	}
-	if got := sales(t, second.decisions); len(got) != 0 {
-		t.Fatalf("attempted once per incident, across a restart: %+v", got)
-	}
-	if got := ofType(second.decisions, event.SaleWithheldEventType); len(got) != 0 {
+	if got := ofType(r.decisions, event.SaleWithheldEventType); len(got) != 0 {
 		t.Fatalf("nothing withheld either: the attempt is spent: %d", len(got))
-	}
-
-	// Without the sale's records, the same restart would sell: the records
-	// are what stop it.
-	control := restartAt17(t, full, options{prelude: []event.Envelope{state}, brokerMutate: urgent})
-	if got := sales(t, control.decisions); len(got) != 1 {
-		t.Fatalf("control: %+v", got)
 	}
 }
 
-func TestAWithheldSaleIsRecoveredAsAnAttempt(t *testing.T) {
+// TestAWithheldSaleIsAnAttempt: a sale withheld because IBKR's open orders
+// were unreadable asked the owner to act by hand, so it is never attempted
+// again in the incident (ADR 0019, amended 2026-10-17, reading 4).
+func TestAWithheldSaleIsAnAttempt(t *testing.T) {
 	full := simulate(t, options{brokers: true})
-	state := haltedState(t)
-	// The earlier run withheld the incident's sale: IBKR's open orders were
-	// unreadable, and the alert asked the owner to act by hand.
-	unreadable := map[int]func(*event.BrokerSnapshotPayload){20: func(b *event.BrokerSnapshotPayload) {
-		b.Unreadable = []string{event.BrokerComponentOpenOrders}
-	}}
-	first := restartAt17(t, full, options{prelude: []event.Envelope{state}, brokerMutate: unreadable})
-	withheld := ofType(first.decisions, event.SaleWithheldEventType)
-	if len(withheld) != 1 || len(sales(t, first.decisions)) != 0 {
-		t.Fatalf("withheld %d, sales %d", len(withheld), len(sales(t, first.decisions)))
+	mutate := map[int]func(*event.BrokerSnapshotPayload){
+		20: func(b *event.BrokerSnapshotPayload) { b.Unreadable = []string{event.BrokerComponentOpenOrders} },
+		22: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation },
 	}
-	urgent := map[int]func(*event.BrokerSnapshotPayload){22: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation }}
-	second := restartAt17(t, full, options{prelude: []event.Envelope{state, withheld[0]}, brokerMutate: urgent})
-	if got := sales(t, second.decisions); len(got) != 0 {
+	r := restartAt17(t, full, options{prelude: []event.Envelope{haltedState(t)}, brokerMutate: mutate})
+	if withheld := ofType(r.decisions, event.SaleWithheldEventType); len(withheld) != 1 {
+		t.Fatalf("withheld %d, want 1", len(withheld))
+	}
+	if got := sales(t, r.decisions); len(got) != 0 {
 		t.Fatalf("a sale the owner was asked to make by hand is never attempted again: %+v", got)
 	}
 }
@@ -306,10 +285,6 @@ func TestRecordedDecisionsAndSafetyInputsAreChecked(t *testing.T) {
 		}
 	}
 	halted := event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x"}
-	planned := event.OrderPlannedPayload{
-		AccountID: "ira", Tag: "t", ClientOrderID: "tw-1", InstrumentID: "SPY", Side: event.OrderSideBuy, Phase: event.OrderSideBuy,
-		OrderType: event.OrderTypeLimit, Quantity: 1, LimitPrice: 1, TargetWeight: 1, NetLiquidation: 1, ReferencePrice: 1, PriceBand: 0.05,
-	}
 	started := func(h *targetweight.Handler, s *stream) {
 		if _, err := h.Apply(context.Background(), s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "bar:0", sessionEnd(0), bar(100, sessionEnd(0)))); err != nil {
 			t.Fatal(err)
@@ -334,26 +309,17 @@ func TestRecordedDecisionsAndSafetyInputsAreChecked(t *testing.T) {
 	refuses("an invalid engine state", nil, func(s *stream) event.Envelope {
 		return s.envelope(t, event.EngineStateEventType, event.EngineStateSchemaVersion, "engine-state:x", start, event.EngineStatePayload{State: "fine"})
 	})
-	refuses("another account's planned order", nil, func(s *stream) event.Envelope {
-		return s.envelope(t, event.OrderPlannedEventType, event.OrderPlannedSchemaVersion, "order-planned:x", start, planned)
-	})
-	refuses("an invalid release", nil, func(s *stream) event.Envelope {
-		return s.envelope(t, event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, "risk-order-released:x", start, event.OrderReleasedPayload{})
-	})
-	refuses("an invalid refusal", nil, func(s *stream) event.Envelope {
-		return s.envelope(t, event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, "risk-order-refused:x", start, event.OrderRefusedPayload{})
-	})
-	refuses("an invalid withheld sale", nil, func(s *stream) event.Envelope {
-		return s.envelope(t, event.SaleWithheldEventType, event.SaleWithheldSchemaVersion, "sale-withheld:x", start, event.SaleWithheldPayload{})
-	})
-	refuses("an invalid alarm", nil, func(s *stream) event.Envelope {
-		return s.envelope(t, event.MarginAlarmEventType, event.MarginAlarmSchemaVersion, "margin-alarm:x", start, event.MarginAlarmPayload{})
-	})
-	refuses("another account's alarm", nil, func(s *stream) event.Envelope {
-		return s.envelope(t, event.MarginAlarmEventType, event.MarginAlarmSchemaVersion, "margin-alarm:x", start, event.MarginAlarmPayload{
-			AccountID: "ira", SnapshotID: "b", AsOf: start, Level: event.MarginAlarmUrgent, Cause: event.MarginAlarmCauseNoReading,
-			Warning: 0.4, Urgent: 0.2, StaleMinutes: 30, Detail: "x",
+	// A crash resumes by replaying the durable log's inputs, never from
+	// recorded decisions (ADR 0027, section 6; owner decision 2026-10-16), so
+	// an earlier run's planned orders and alarms are not inputs.
+	refuses("a recorded planned order", nil, func(s *stream) event.Envelope {
+		return s.envelope(t, event.OrderPlannedEventType, event.OrderPlannedSchemaVersion, "order-planned:x", start, event.OrderPlannedPayload{
+			AccountID: cfg.AccountID, Tag: "t", ClientOrderID: "tw-1", InstrumentID: "SPY", Side: event.OrderSideBuy, Phase: event.OrderSideBuy,
+			OrderType: event.OrderTypeLimit, Quantity: 1, LimitPrice: 1, TargetWeight: 1, NetLiquidation: 1, ReferencePrice: 1, PriceBand: 0.05,
 		})
+	})
+	refuses("a recorded margin alarm", nil, func(s *stream) event.Envelope {
+		return s.envelope(t, event.MarginAlarmEventType, event.MarginAlarmSchemaVersion, "margin-alarm:x", start, event.MarginAlarmPayload{})
 	})
 	refuses("an invalid kill switch", nil, func(s *stream) event.Envelope {
 		return s.envelope(t, event.KillSwitchEventType, event.KillSwitchSchemaVersion, "kill:x", start, event.KillSwitchPayload{})
@@ -370,7 +336,7 @@ func TestRecordedDecisionsAndSafetyInputsAreChecked(t *testing.T) {
 			event.BrokerSnapshotPayload{AccountID: "ira", AsOf: start, NetLiquidation: 1})
 	})
 	refuses("a Halted record before a Degraded one", func(h *targetweight.Handler, s *stream) {
-		if _, err := h.Apply(context.Background(), s.envelope(t, event.EngineStateEventType, event.EngineStateSchemaVersion, "engine-state:a", start, halted)); err != nil {
+		if _, err := h.Apply(context.Background(), s.envelope(t, event.EngineStateEventType, event.EngineStateScopedVersion, "engine-state:a", start, halted)); err != nil {
 			t.Fatal(err)
 		}
 	}, func(s *stream) event.Envelope {
@@ -378,4 +344,43 @@ func TestRecordedDecisionsAndSafetyInputsAreChecked(t *testing.T) {
 			State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x", ScopeInstrumentIDs: []string{"SPY"},
 		})
 	})
+}
+
+// TestEachDecisionIsJournalledAtTheVersionThatHoldsIt: a sale, figures with a
+// broker snapshot and a safety refusal reason are journalled at version 2 of
+// their types; everything else stays at version 1, byte for byte (ADR 0015).
+func TestEachDecisionIsJournalledAtTheVersionThatHoldsIt(t *testing.T) {
+	full := simulate(t, options{brokers: true})
+	r := restartAt17(t, full, options{prelude: []event.Envelope{degradedOnSPY(t)}})
+	plain := simulate(t, options{})
+	for name, c := range map[string]struct {
+		es   []event.Envelope
+		kind string
+		want uint32
+	}{
+		"a sale": {r.decisions, event.OrderPlannedEventType, 0},
+		"a refusal while Degraded with a broker snapshot": {r.decisions, event.OrderRefusedEventType, event.OrderRefusedSafetyVersion},
+		"the sale's release":                              {r.decisions, event.OrderReleasedEventType, event.OrderReleasedSafetyVersion},
+		"an ordinary order":                               {plain.decisions, event.OrderPlannedEventType, event.OrderPlannedSchemaVersion},
+		"an ordinary release":                             {plain.decisions, event.OrderReleasedEventType, event.OrderReleasedSchemaVersion},
+	} {
+		es := ofType(c.es, c.kind)
+		if len(es) == 0 {
+			t.Fatalf("%s: no %s", name, c.kind)
+		}
+		for _, e := range es {
+			want := c.want
+			if want == 0 {
+				var p event.OrderPlannedPayload
+				decode(t, e, &p)
+				want = p.SchemaVersion()
+				if p.Sale != (event.SaleFigures{}) && want != event.OrderPlannedSafetyVersion {
+					t.Errorf("%s: sale %s needs version 2", name, e.ID)
+				}
+			}
+			if e.SchemaVersion != want {
+				t.Errorf("%s: %s %s at version %d, want %d", name, e.Type, e.ID, e.SchemaVersion, want)
+			}
+		}
+	}
 }

@@ -386,9 +386,19 @@ func TestEngineStateScopes(t *testing.T) {
 		t.Error("an unknown schema version must be refused")
 	}
 	halted := P{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "untagged order"}
+	if err := halted.ValidateSchema(event.EngineStateScopedVersion); err != nil {
+		t.Errorf("halted, unscoped, at schema 2: %v", err)
+	}
+	// risk-limit-breached arrived with schema 2; a version-1 reader knows
+	// only campaign-without-protective-stop, so a version-1 record cannot
+	// carry it.
+	if err := halted.ValidateSchema(event.EngineStateSchemaVersion); err == nil {
+		t.Error("risk-limit-breached must be refused at schema 1")
+	}
+	turtle := P{State: event.EngineStateHalted, Reason: event.EngineStateReasonCampaignWithoutProtectiveStop, Detail: "no stop"}
 	for _, version := range []uint32{event.EngineStateSchemaVersion, event.EngineStateScopedVersion} {
-		if err := halted.ValidateSchema(version); err != nil {
-			t.Errorf("halted, unscoped, at schema %d: %v", version, err)
+		if err := turtle.ValidateSchema(version); err != nil {
+			t.Errorf("the Turtle halt at schema %d: %v", version, err)
 		}
 	}
 	if err := (P{}).ValidateSchema(event.EngineStateScopedVersion); err == nil {

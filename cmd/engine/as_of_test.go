@@ -57,7 +57,7 @@ func TestAsOfMakesJournalDeterministic(t *testing.T) {
 				socket := filepath.Join(shortSocketDir(t), "engine.sock")
 				stop := startEngineInvocation(t, func(ctx context.Context, out io.Writer) error {
 					return parseAndRun(ctx, []string{"-socket", socket, "-config", testConfigPath,
-						"-out", path, "-as-of", tc.asOf}, out)
+						"-out", path, "-mode", "backtest", "-as-of", tc.asOf}, out)
 				})
 				if tc.bars > 0 {
 					client, err := transport.Dial(socket)
@@ -172,7 +172,7 @@ func TestAsOfRefusesInvalidStartup(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			socket := filepath.Join(shortSocketDir(t), "engine.sock")
 			path := filepath.Join(t.TempDir(), "journal.jsonl")
-			args := append([]string{"-socket", socket, "-config", testConfigPath, "-out", path}, tc.args...)
+			args := append([]string{"-socket", socket, "-config", testConfigPath, "-out", path, "-mode", "backtest"}, tc.args...)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			var out bytes.Buffer

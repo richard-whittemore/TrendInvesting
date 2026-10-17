@@ -273,3 +273,62 @@ func TestExcessLiquidityLimits(t *testing.T) {
 	expectInvalid(t, "urgent above warning", v, func(p *P) { p.Limits.ExcessLiquidityUrgent = 0.5 }, "excess liquidity")
 	expectInvalid(t, "stale", v, func(p *P) { p.Limits.ExcessLiquidityStaleMinutes = 0 }, "stale")
 }
+
+// TestSafetyFieldsJoinAtVersionTwo: a sale's figures join
+// strategy.order.planned, and the risk figures' broker fields and the three
+// safety refusal reasons join risk.order.released and risk.order.refused, at
+// version 2. Version 1 keeps its meaning and refuses them, so a version-1
+// record is never read as carrying them (ADR 0015).
+func TestSafetyFieldsJoinAtVersionTwo(t *testing.T) {
+	type versioned interface {
+		SchemaVersion() uint32
+		ValidateSchema(uint32) error
+	}
+	withBroker := validRiskFigures()
+	withBroker.BrokerSet, withBroker.BrokerHolding, withBroker.WorkingSells, withBroker.RiskReducing = true, 147, 10, true
+	brokerReleased := validOrderReleased()
+	brokerReleased.Figures = withBroker
+	brokerRefused := validOrderRefused()
+	brokerRefused.Figures = withBroker
+	killRefused := validOrderRefused()
+	killRefused.Reason = event.RefusedKillSwitch
+	for name, c := range map[string]struct {
+		p    versioned
+		want uint32
+	}{
+		"ordinary order":           {validOrderPlanned(), event.OrderPlannedSchemaVersion},
+		"sale":                     {validSaleOrder(), event.OrderPlannedSafetyVersion},
+		"release without a broker": {validOrderReleased(), event.OrderReleasedSchemaVersion},
+		"release with a broker":    {brokerReleased, event.OrderReleasedSafetyVersion},
+		"refusal without a broker": {validOrderRefused(), event.OrderRefusedSchemaVersion},
+		"refusal with a broker":    {brokerRefused, event.OrderRefusedSafetyVersion},
+		"kill-switch refusal":      {killRefused, event.OrderRefusedSafetyVersion},
+	} {
+		if got := c.p.SchemaVersion(); got != c.want {
+			t.Errorf("%s: version %d, want %d", name, got, c.want)
+		}
+		if err := c.p.ValidateSchema(c.want); err != nil {
+			t.Errorf("%s at its version: %v", name, err)
+		}
+		if err := c.p.ValidateSchema(2); err != nil {
+			t.Errorf("%s: version 2 reads every version-1 record's fields: %v", name, err)
+		}
+		if err := c.p.ValidateSchema(3); err == nil {
+			t.Errorf("%s: an unknown version accepted", name)
+		}
+		if c.want == 2 {
+			if err := c.p.ValidateSchema(1); err == nil {
+				t.Errorf("%s: version 1 accepted a version-2 field", name)
+			}
+		}
+	}
+	for name, p := range map[string]versioned{
+		"planned":  event.OrderPlannedPayload{},
+		"released": event.OrderReleasedPayload{},
+		"refused":  event.OrderRefusedPayload{},
+	} {
+		if err := p.ValidateSchema(2); err == nil {
+			t.Errorf("an invalid %s payload accepted at version 2", name)
+		}
+	}
+}

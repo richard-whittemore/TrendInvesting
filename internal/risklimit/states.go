@@ -33,11 +33,18 @@ func (g *Gate) brokerHolding(instrumentID string) (holding, working int64, ok bo
 
 // riskReducing reports whether p is risk-reducing (ADR 0026, point 4): a sell
 // within the latest broker snapshot's holding net of every working or pending
-// sell. A long holding's sell always moves exposure toward 98% or lower. No
-// buy is risk-reducing.
+// sell, or, with no readable broker snapshot, within the account snapshot's
+// holding it was sized from. A long holding's sell always moves exposure
+// toward 98% or lower. No buy is risk-reducing, even within a rebalance that
+// also sells.
 func (g *Gate) riskReducing(p event.OrderPlannedPayload) bool {
-	holding, working, ok := g.brokerHolding(p.InstrumentID)
-	return ok && p.Side == event.OrderSideSell && holding > 0 && p.Quantity <= holding-working
+	if p.Side != event.OrderSideSell {
+		return false
+	}
+	if holding, working, ok := g.brokerHolding(p.InstrumentID); ok {
+		return holding > 0 && p.Quantity <= holding-working
+	}
+	return p.Quantity <= p.HeldQuantity
 }
 
 // checkSale decides a sale back to 98% (ADR 0019, amended 2026-10-15 and
@@ -215,75 +222,4 @@ func (g *Gate) Sale(trigger, instrumentID string, target, band float64) (orderpl
 		g.attempted[sale.Withheld.ClientOrderID] = true
 	}
 	return sale, true, nil
-}
-
-// RestoreState reads back a recorded strategy.engine.state with envelope ID
-// id at schemaVersion, so a restart resumes in the same state and scope (ADR
-// 0019, amended 2026-09-24, "The state survives a restart"; ADR 0026,
-// point 5). The first record out of Normal is the incident. A Halted account
-// never returns to Degraded.
-func (g *Gate) RestoreState(id string, p event.EngineStatePayload, schemaVersion uint32) error {
-	if err := p.ValidateSchema(schemaVersion); err != nil {
-		return fmt.Errorf("risklimit: %w", err)
-	}
-	if id == "" {
-		return errors.New("risklimit: a recorded engine state needs its envelope ID")
-	}
-	if g.state == StateHalted && p.State != event.EngineStateHalted {
-		return fmt.Errorf("risklimit: recorded state %s %s follows Halted, which only recovery leaves", id, p.State)
-	}
-	if g.state == StateNormal {
-		g.incident = id
-		g.saleTags[id] = true
-	}
-	g.state = StateDegraded
-	if p.State == event.EngineStateHalted {
-		g.state = StateHalted
-	}
-	g.scope = slices.Clone(p.ScopeInstrumentIDs)
-	return nil
-}
-
-// RestorePlanned reads back a recorded strategy.order.planned: a sale back
-// to 98% planned before a restart was attempted, even if its release was
-// never journalled, and is never planned again (ADR 0026, point 5).
-func (g *Gate) RestorePlanned(p event.OrderPlannedPayload) {
-	if p.Sale != (event.SaleFigures{}) {
-		g.attempted[p.ClientOrderID] = true
-	}
-}
-
-// RestoreReleased reads back a recorded risk.order.released, so a working
-// broker order carrying its client ID is recognised.
-func (g *Gate) RestoreReleased(p event.OrderReleasedPayload) {
-	g.released[p.ClientOrderID] = true
-}
-
-// RestoreWithheld reads back a recorded risk.sale.withheld: one that asked a
-// person to act was an attempt.
-func (g *Gate) RestoreWithheld(p event.SaleWithheldPayload) {
-	if p.Reason != event.SaleWithheldNothingToSell {
-		g.attempted[p.ClientOrderID] = true
-	}
-}
-
-// RestoreAlarm reads back a recorded risk.margin.alarm with envelope ID id:
-// its level, its last reading, and, when urgent, the alarm a later urgent
-// sale is tagged with.
-func (g *Gate) RestoreAlarm(id string, p event.MarginAlarmPayload) error {
-	if err := p.Validate(); err != nil {
-		return fmt.Errorf("risklimit: %w", err)
-	}
-	if id == "" || p.AccountID != g.accountID {
-		return fmt.Errorf("risklimit: recorded alarm %q is not this account's", id)
-	}
-	g.alarmLevel = p.Level
-	if p.LastReadingSet {
-		g.lastReading, g.lastReadingSet = p.LastReadingAt, true
-	}
-	if p.Level == event.MarginAlarmUrgent {
-		g.alarmID = id
-		g.saleTags[id] = true
-	}
-	return nil
 }

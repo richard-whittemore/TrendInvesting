@@ -44,17 +44,15 @@ type Options struct {
 //
 //   - strategy.target-weight.configuration, first and once, matching the
 //     configuration the handler was built with;
-//   - optionally, before the first bar or session, an earlier run's recorded
-//     decisions: at most one strategy.targets.decided, its last, from which a
-//     restart recovers the latched boost and the target in force, never by
-//     recomputing; and its strategy.engine.state, strategy.order.planned,
-//     risk.order.released, risk.order.refused, risk.sale.withheld and
-//     risk.margin.alarm records, from which the gate recovers the engine
-//     state and scope, the incident, whether the incident's sale was
-//     attempted, the orders it released and the alarm (ADR 0026, point 5).
-//     Sessions up to the recovered decision's session then only feed the
-//     indicators, which are rebuilt from the journal's own bars from the
-//     warm-up start;
+//   - optionally, straight after it, one recorded strategy.targets.decided:
+//     the last decision of an earlier run. A restart recovers the latched
+//     boost and the target in force from it, never by recomputing (ADR 0026,
+//     point 5); sessions up to its session then only feed the indicators,
+//     which are rebuilt from the journal's own bars from the warm-up start;
+//   - optionally, before the first bar or session, the earlier run's
+//     strategy.engine.state records, in journal order. A restart while
+//     Degraded or Halted resumes in that state and scope (ADR 0019, amended
+//     2026-09-24, "The state survives a restart"; ADR 0026, point 5);
 //   - per session: the Boost instrument's market.bar.completed, account.snapshot
 //     version 3, market.mark.recorded, then market.session.closed, which decides;
 //   - at any time after the configuration: operator.kill-switch, and
@@ -74,7 +72,8 @@ type Options struct {
 // A session that closes without the instrument's bar withholds
 // (missing-bars), and so does every later session: the indicators would span
 // the gap (plan.md section 2, "Boost"). A session with no snapshot as of its
-// close withholds (stale-account-snapshot), but the latch still advances, as
+// close, or only one taken after it, withholds (stale-account-snapshot):
+// orders are valued at the previous close (ADR 0026, point 2). But the latch still advances, as
 // the research's sig does on every bar (template.py:89-94); the target in
 // force changes only on a decided outcome, so a change withheld one session
 // is ordered the next.
@@ -153,9 +152,8 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 		return nil, h.applyConfiguration(in)
 	case event.TargetsDecidedEventType:
 		return nil, h.applyRecovery(in)
-	case event.EngineStateEventType, event.OrderPlannedEventType, event.OrderReleasedEventType,
-		event.OrderRefusedEventType, event.SaleWithheldEventType, event.MarginAlarmEventType:
-		return nil, h.applyRecorded(in)
+	case event.EngineStateEventType:
+		return nil, h.applyRecordedState(in)
 	case event.KillSwitchEventType:
 		return nil, h.applyKillSwitch(in)
 	case event.BrokerSnapshotEventType:
@@ -222,6 +220,28 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 		h.inForce, h.inForceSet = p.Targets[0].Weight, true
 	}
 	h.quietUntil = p.SessionPeriodEnd
+	return nil
+}
+
+// applyRecordedState restores an earlier run's engine state, scope and
+// incident into the gate before any decision (ADR 0026, point 5).
+func (h *Handler) applyRecordedState(in event.Envelope) error {
+	if h.started {
+		return fmt.Errorf("targetweight: recorded %s %s arrived after the run began; an earlier run's records come first", in.Type, in.ID)
+	}
+	if in.ConfigurationHash != h.hash {
+		return fmt.Errorf("targetweight: recorded %s %s belongs to another configuration", in.Type, in.ID)
+	}
+	if in.SchemaVersion != event.EngineStateSchemaVersion && in.SchemaVersion != event.EngineStateScopedVersion {
+		return fmt.Errorf("targetweight: %s schema version %d is not one this build reads (ADR 0015)", in.Type, in.SchemaVersion)
+	}
+	var p event.EngineStatePayload
+	if err := json.Unmarshal(in.Payload, &p); err != nil {
+		return fmt.Errorf("targetweight: decode %s %s: %w", in.Type, in.ID, err)
+	}
+	if err := h.gate.RestoreState(in.ID, p, in.SchemaVersion); err != nil {
+		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
 	return nil
 }
 
@@ -321,9 +341,15 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	h.latched = h.params.Next(before, readings)
 	figures := h.figures(readings, before)
 	snapshot := h.snapshot
-	if snapshot == nil || snapshot.AsOf.Before(p.PeriodEnd) {
+	switch {
+	case snapshot == nil || snapshot.AsOf.Before(p.PeriodEnd):
 		b.targets(figures, event.WithheldStaleAccountSnapshot,
 			fmt.Sprintf("no account snapshot for %s as of the session closing %s", h.cfg.AccountID, p.PeriodEnd.Format(idTime)))
+		return b.result()
+	case snapshot.AsOf.After(p.PeriodEnd):
+		b.targets(figures, event.WithheldStaleAccountSnapshot,
+			fmt.Sprintf("the account snapshot for %s is as of %s, after the session closing %s; orders are valued at that close",
+				h.cfg.AccountID, snapshot.AsOf.Format(idTime), p.PeriodEnd.Format(idTime)))
 		return b.result()
 	}
 	decisionID, decided := b.targets(figures, "", "")
@@ -349,73 +375,6 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		b.sale(event.SaleTriggerExit)
 	}
 	return b.result()
-}
-
-// applyRecorded reads back an earlier run's recorded gate decision before
-// the first bar or session (ADR 0026, point 5).
-func (h *Handler) applyRecorded(in event.Envelope) error {
-	if h.started {
-		return fmt.Errorf("targetweight: recorded %s %s arrived after the run began; an earlier run's records come first", in.Type, in.ID)
-	}
-	if in.ConfigurationHash != h.hash {
-		return fmt.Errorf("targetweight: recorded %s %s belongs to another configuration", in.Type, in.ID)
-	}
-	switch in.Type {
-	case event.EngineStateEventType:
-		if in.SchemaVersion != event.EngineStateSchemaVersion && in.SchemaVersion != event.EngineStateScopedVersion {
-			return fmt.Errorf("targetweight: %s schema version %d is not one this build reads (ADR 0015)", in.Type, in.SchemaVersion)
-		}
-		var p event.EngineStatePayload
-		if err := json.Unmarshal(in.Payload, &p); err != nil {
-			return fmt.Errorf("targetweight: decode %s %s: %w", in.Type, in.ID, err)
-		}
-		if err := h.gate.RestoreState(in.ID, p, in.SchemaVersion); err != nil {
-			return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
-		}
-	case event.OrderPlannedEventType:
-		p, err := decodeAccount[event.OrderPlannedPayload](h, in, event.OrderPlannedSchemaVersion, func(p event.OrderPlannedPayload) string { return p.AccountID })
-		if err != nil {
-			return err
-		}
-		h.gate.RestorePlanned(p)
-	case event.OrderReleasedEventType:
-		p, err := decodeAccount[event.OrderReleasedPayload](h, in, event.OrderReleasedSchemaVersion, func(p event.OrderReleasedPayload) string { return p.AccountID })
-		if err != nil {
-			return err
-		}
-		h.gate.RestoreReleased(p)
-	case event.OrderRefusedEventType:
-		// A refused order was never sent, so it leaves nothing to recover.
-		_, err := decodeAccount[event.OrderRefusedPayload](h, in, event.OrderRefusedSchemaVersion, func(p event.OrderRefusedPayload) string { return p.AccountID })
-		return err
-	case event.SaleWithheldEventType:
-		p, err := decodeAccount[event.SaleWithheldPayload](h, in, event.SaleWithheldSchemaVersion, func(p event.SaleWithheldPayload) string { return p.AccountID })
-		if err != nil {
-			return err
-		}
-		h.gate.RestoreWithheld(p)
-	default: // event.MarginAlarmEventType
-		p, err := decodeInput[event.MarginAlarmPayload](in, event.MarginAlarmSchemaVersion)
-		if err != nil {
-			return err
-		}
-		if err := h.gate.RestoreAlarm(in.ID, p); err != nil {
-			return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
-		}
-	}
-	return nil
-}
-
-// decodeAccount decodes a recorded decision and checks it is this account's.
-func decodeAccount[T interface{ Validate() error }](h *Handler, in event.Envelope, version uint32, account func(T) string) (T, error) {
-	p, err := decodeInput[T](in, version)
-	if err != nil {
-		return p, err
-	}
-	if account(p) != h.cfg.AccountID {
-		return p, fmt.Errorf("targetweight: recorded %s %s is account %q's; this run decides %q", in.Type, in.ID, account(p), h.cfg.AccountID)
-	}
-	return p, nil
 }
 
 func (h *Handler) applyKillSwitch(in event.Envelope) error {
@@ -531,10 +490,11 @@ func (h *Handler) stamp(id, eventType string, version uint32, at time.Time, in e
 }
 
 // order journals a planned order, checks it with the gate and journals the
-// gate's outcome and any state change, returning the outcome.
+// gate's outcome and any state change, returning the outcome. Each is
+// journalled at the lowest schema version that holds it (ADR 0015).
 func (b *emissions) order(o risklimit.Order) risklimit.Outcome {
 	o.PlanID = "order-planned:" + o.Planned.ClientOrderID
-	b.add(o.PlanID, event.OrderPlannedEventType, event.OrderPlannedSchemaVersion, o.Planned)
+	b.add(o.PlanID, event.OrderPlannedEventType, o.Planned.SchemaVersion(), o.Planned)
 	// The gate cannot refuse what this handler has validated (a planned
 	// order built from validated inputs), so an error is a defect and leaves
 	// an empty outcome, which journals nothing.
@@ -545,9 +505,9 @@ func (b *emissions) order(o risklimit.Order) risklimit.Outcome {
 		out = outcomes[0]
 	}
 	if out.Released != nil {
-		b.add("risk-order-released:"+o.Planned.ClientOrderID, event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, *out.Released)
+		b.add("risk-order-released:"+o.Planned.ClientOrderID, event.OrderReleasedEventType, out.Released.SchemaVersion(), *out.Released)
 	} else if out.Refused != nil {
-		b.add("risk-order-refused:"+o.Planned.ClientOrderID, event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, *out.Refused)
+		b.add("risk-order-refused:"+o.Planned.ClientOrderID, event.OrderRefusedEventType, out.Refused.SchemaVersion(), *out.Refused)
 	}
 	if out.State != nil {
 		b.add(out.StateID, event.EngineStateEventType, out.StateSchemaVersion, *out.State)

@@ -179,8 +179,16 @@ func (b BoostFigures) validate() []error {
 // derived from a target decision (ADR 0026, point 2).
 const OrderPlannedEventType = "strategy.order.planned"
 
-// OrderPlannedSchemaVersion is the current schema version of OrderPlannedPayload.
-const OrderPlannedSchemaVersion uint32 = 1
+// The schema versions of OrderPlannedPayload (ADR 0015). A writer journals
+// each payload at SchemaVersion, the lowest version that holds it.
+//
+//   - Version 1 is an ordinary planned order, with no Sale.
+//   - Version 2 adds Sale, the figures of ADR 0019's sale back to 98%
+//     (amended 2026-10-15 and 2026-10-17). It reads every version-1 field.
+const (
+	OrderPlannedSchemaVersion uint32 = 1
+	OrderPlannedSafetyVersion uint32 = 2
+)
 
 // Order sides, which are also the planner's phases (ADR 0026, point 2,
 // "Order identity").
@@ -218,6 +226,34 @@ type OrderPlannedPayload struct {
 	// amended 2026-10-15 and 2026-10-16; ADR 0026, point 4). It is omitted
 	// otherwise, so an ordinary order's bytes do not change.
 	Sale SaleFigures `json:"sale,omitzero"`
+}
+
+// SchemaVersion returns the lowest schema version that holds p.
+func (p OrderPlannedPayload) SchemaVersion() uint32 {
+	if p.Sale.set() {
+		return OrderPlannedSafetyVersion
+	}
+	return OrderPlannedSchemaVersion
+}
+
+// ValidateSchema checks that p is one schemaVersion holds, then validates it.
+func (p OrderPlannedPayload) ValidateSchema(schemaVersion uint32) error {
+	if err := checkSafetyVersion(OrderPlannedEventType, schemaVersion, p.SchemaVersion()); err != nil {
+		return err
+	}
+	return p.Validate()
+}
+
+// checkSafetyVersion refuses a schema version other than 1 and 2, and a
+// version-1 record of a payload that needs version 2 (need).
+func checkSafetyVersion(eventType string, schemaVersion, need uint32) error {
+	switch {
+	case schemaVersion != 1 && schemaVersion != 2:
+		return fmt.Errorf("%s: schema version %d is not recognised", eventType, schemaVersion)
+	case schemaVersion < need:
+		return fmt.Errorf("%s: schema version %d cannot hold the payload's sale figures, broker figures or safety refusal reason; it needs version %d", eventType, schemaVersion, need)
+	}
+	return nil
 }
 
 // Validate checks identity, side, type, quantity and prices, and that the
@@ -299,11 +335,21 @@ const (
 	OrderRefusedEventType  = "risk.order.refused"
 )
 
-// OrderReleasedSchemaVersion and OrderRefusedSchemaVersion are the current
-// schema versions of OrderReleasedPayload and OrderRefusedPayload.
+// The schema versions of OrderReleasedPayload and OrderRefusedPayload (ADR
+// 0015). A writer journals each payload at SchemaVersion, the lowest version
+// that holds it.
+//
+//   - Version 1 holds figures with no broker snapshot and, for a refusal,
+//     the reasons of ADR 0026 point 3 and the engine states.
+//   - Version 2 adds the figures' broker fields (BrokerSet, BrokerHolding,
+//     WorkingSells, RiskReducing) and the refusal reasons kill-switch,
+//     broker-holding and sale-attempted (ADR 0019, amended 2026-10-15 and
+//     2026-10-17; ADR 0026, points 3 and 4). It reads every version-1 field.
 const (
 	OrderReleasedSchemaVersion uint32 = 1
+	OrderReleasedSafetyVersion uint32 = 2
 	OrderRefusedSchemaVersion  uint32 = 1
+	OrderRefusedSafetyVersion  uint32 = 2
 )
 
 // The closed set of reasons the risk gate refuses an order (ADR 0026, point 3).
@@ -422,6 +468,27 @@ type OrderReleasedPayload struct {
 	Figures       RiskFigures `json:"figures"`
 }
 
+// brokerFigures reports whether f carries the broker fields of version 2.
+func (f RiskFigures) brokerFigures() bool {
+	return f.BrokerSet || f.RiskReducing || f.BrokerHolding != 0 || f.WorkingSells != 0
+}
+
+// SchemaVersion returns the lowest schema version that holds p.
+func (p OrderReleasedPayload) SchemaVersion() uint32 {
+	if p.Figures.brokerFigures() {
+		return OrderReleasedSafetyVersion
+	}
+	return OrderReleasedSchemaVersion
+}
+
+// ValidateSchema checks that p is one schemaVersion holds, then validates it.
+func (p OrderReleasedPayload) ValidateSchema(schemaVersion uint32) error {
+	if err := checkSafetyVersion(OrderReleasedEventType, schemaVersion, p.SchemaVersion()); err != nil {
+		return err
+	}
+	return p.Validate()
+}
+
 // Validate checks identity, mode, the dry-run rule and the figures.
 func (p OrderReleasedPayload) Validate() error {
 	var errs []error
@@ -460,6 +527,24 @@ type OrderRefusedPayload struct {
 	Reason        string      `json:"reason"`
 	Detail        string      `json:"detail"`
 	Figures       RiskFigures `json:"figures"`
+}
+
+// SchemaVersion returns the lowest schema version that holds p.
+func (p OrderRefusedPayload) SchemaVersion() uint32 {
+	switch {
+	case p.Figures.brokerFigures(),
+		p.Reason == RefusedKillSwitch, p.Reason == RefusedBrokerHolding, p.Reason == RefusedSaleAttempted:
+		return OrderRefusedSafetyVersion
+	}
+	return OrderRefusedSchemaVersion
+}
+
+// ValidateSchema checks that p is one schemaVersion holds, then validates it.
+func (p OrderRefusedPayload) ValidateSchema(schemaVersion uint32) error {
+	if err := checkSafetyVersion(OrderRefusedEventType, schemaVersion, p.SchemaVersion()); err != nil {
+		return err
+	}
+	return p.Validate()
 }
 
 // Validate checks identity, the reason, the detail and the figures.

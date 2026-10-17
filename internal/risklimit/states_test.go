@@ -144,13 +144,18 @@ func TestRiskReducingSellsAreExemptFromCountSizeAndBand(t *testing.T) {
 	refusedFor(t, check(t, g, buy)[0], event.RefusedPriceBand)
 }
 
-func TestWithoutABrokerSnapshotASellIsNotExempt(t *testing.T) {
+// TestWithoutABrokerSnapshotASellIsExemptWithinTheAccountHolding: with no
+// readable broker snapshot, a Normal account's sell is risk-reducing within
+// the account snapshot's holding it was sized from (ADR 0026, point 4), and
+// its figures record no broker snapshot.
+func TestWithoutABrokerSnapshotASellIsExemptWithinTheAccountHolding(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	o := check(t, g, order(event.OrderSideSell, 5001, 9800))[0]
-	refusedFor(t, o, event.RefusedOrderSize)
-	if o.Refused.Figures.RiskReducing || o.Refused.Figures.BrokerSet {
-		t.Errorf("figures: %+v", o.Refused.Figures)
+	released(t, o)
+	if o.Released.Figures.RiskReducing || o.Released.Figures.BrokerSet {
+		t.Errorf("figures: %+v", o.Released.Figures)
 	}
+	refusedFor(t, check(t, g, order(event.OrderSideSell, 5001, 5000))[0], event.RefusedOrderSize)
 }
 
 func TestDegradedSellsElsewhereAreSizedFromTheBroker(t *testing.T) {
@@ -316,7 +321,9 @@ func TestHaltedSaleChecks(t *testing.T) {
 	ours := event.BrokerOrder{BrokerOrderID: "ib-1", ClientOrderID: "tw-ours", InstrumentID: "SPY", Side: event.OrderSideSell, Status: event.BrokerOrderWorking, RemainingQuantity: 20}
 	t.Run("net of a working sell", func(t *testing.T) {
 		g := gate(t, limits(), event.TradingModeDryRun)
-		g.RestoreReleased(event.OrderReleasedPayload{ClientOrderID: "tw-ours"})
+		mine := order(event.OrderSideSell, 20, 147)
+		mine.Planned.ClientOrderID = "tw-ours"
+		released(t, check(t, g, mine)[0])
 		halt(t, g)
 		observe(t, g, "broker:1", boosted(ours))
 		s, _ := requestSale(t, g, event.SaleTriggerExit)
@@ -561,87 +568,32 @@ func TestBrokerAndKillSwitchInputsAreChecked(t *testing.T) {
 	}
 }
 
-func TestRestartRecoversStateIncidentAndTheAttempt(t *testing.T) {
-	// The original run: Degraded on SPY, then the sale back to 98%.
+// TestARestoredStateNamesTheIncident: the first restored record out of
+// Normal is the incident, and a later one (Degraded to Halted) is the same
+// incident (ADR 0019, amended 2026-10-17, reading 3), so the restored run's
+// one sale back to 98% is tagged with the first.
+func TestARestoredStateNamesTheIncident(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	degraded := degrade(t, g)
-	observe(t, g, "broker:1", boosted())
-	s, _ := requestSale(t, g, event.SaleTriggerExit)
-	out := check(t, g, saleOrder(s.Order))[0]
-	released(t, out)
+	halted := halt(t, g)
 
-	// The restarted run reads back the state, the planned sale and its release.
 	r := gate(t, limits(), event.TradingModeDryRun)
 	if err := r.RestoreState(degraded.StateID, *degraded.State, degraded.StateSchemaVersion); err != nil {
 		t.Fatal(err)
 	}
-	r.RestorePlanned(*s.Order)
-	r.RestoreReleased(*out.Released)
-	if r.State() != risklimit.StateDegraded || r.Incident() != degraded.StateID {
-		t.Fatalf("state %s incident %s", r.State(), r.Incident())
-	}
-	refusedFor(t, check(t, r, order(event.OrderSideSell, 1, 147))[0], event.RefusedEngineDegraded)
-	// Our released sale is recognised, so it is a known working sell.
-	observe(t, r, "broker:2", boosted(event.BrokerOrder{
-		BrokerOrderID: "ib-1", ClientOrderID: s.Order.ClientOrderID, InstrumentID: "SPY", Side: event.OrderSideSell,
-		Status: event.BrokerOrderWorking, RemainingQuantity: 54,
-	}))
-	if _, ok := requestSale(t, r, event.SaleTriggerExit); ok {
-		t.Error("the incident's sale was attempted before the restart")
-	}
-
-	// A withheld attempt that asked for a person is recovered too.
-	w := gate(t, limits(), event.TradingModeDryRun)
-	halted := halt(t, w)
-	ws, _ := requestSale(t, w, event.SaleTriggerExit)
-	r = gate(t, limits(), event.TradingModeDryRun)
 	if err := r.RestoreState(halted.StateID, *halted.State, halted.StateSchemaVersion); err != nil {
 		t.Fatal(err)
 	}
-	r.RestoreWithheld(*ws.Withheld)
+	if r.State() != risklimit.StateHalted || r.Incident() != degraded.StateID {
+		t.Fatalf("state %s incident %s, want halted and %s", r.State(), r.Incident(), degraded.StateID)
+	}
 	observe(t, r, "broker:1", boosted())
+	s, ok := requestSale(t, r, event.SaleTriggerExit)
+	if !ok || s.Order == nil || s.Order.Tag != degraded.StateID {
+		t.Fatalf("restored incident's sale: %+v %v", s, ok)
+	}
+	released(t, check(t, r, saleOrder(s.Order))[0])
 	if _, ok := requestSale(t, r, event.SaleTriggerExit); ok {
-		t.Error("the withheld attempt was recovered")
-	}
-
-	// A recovered urgent alarm is the tag a later sale serves.
-	a := gate(t, limits(), event.TradingModeDryRun)
-	urgent := boosted()
-	urgent.ExcessLiquidity = 1500
-	obs := observe(t, a, "broker:1", urgent)
-	r = gate(t, limits(), event.TradingModeDryRun)
-	if err := r.RestoreAlarm(obs.AlarmID, *obs.Alarm); err != nil {
-		t.Fatal(err)
-	}
-	later := boosted()
-	later.AsOf, later.ExcessLiquidity = at.Add(time.Minute), 1500
-	if obs := observe(t, r, "broker:2", later); obs.Alarm != nil {
-		t.Errorf("already urgent before the restart: %+v", obs.Alarm)
-	}
-	if sale, ok := requestSale(t, r, event.SaleTriggerMarginUrgent); !ok || sale.Order == nil || sale.Order.Tag != obs.AlarmID {
-		t.Errorf("urgent sale after restart: %+v", sale)
-	}
-
-	// Recovery refuses what a journal could not hold.
-	r = gate(t, limits(), event.TradingModeDryRun)
-	if err := r.RestoreState("engine-state:x", event.EngineStatePayload{State: event.EngineStateDegraded}, event.EngineStateScopedVersion); err == nil {
-		t.Error("an invalid state accepted")
-	}
-	if err := r.RestoreState("", *halted.State, halted.StateSchemaVersion); err == nil {
-		t.Error("a state without its ID accepted")
-	}
-	if err := r.RestoreState(halted.StateID, *halted.State, halted.StateSchemaVersion); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.RestoreState(degraded.StateID, *degraded.State, degraded.StateSchemaVersion); err == nil {
-		t.Error("a Halted account never returns to Degraded")
-	}
-	if err := r.RestoreAlarm("margin-alarm:x", event.MarginAlarmPayload{}); err == nil {
-		t.Error("an invalid alarm accepted")
-	}
-	other := *obs.Alarm
-	other.AccountID = "ira"
-	if err := r.RestoreAlarm("margin-alarm:x", other); err == nil {
-		t.Error("another account's alarm accepted")
+		t.Error("the incident's sale is attempted once")
 	}
 }

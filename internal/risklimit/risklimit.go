@@ -129,6 +129,49 @@ func (g *Gate) State() string { return g.state }
 // out of Normal, or "" while Normal.
 func (g *Gate) Incident() string { return g.incident }
 
+// RestoreState applies one strategy.engine.state record an earlier run of
+// this account journalled under envelope ID id, at schemaVersion, before any
+// order is checked: "a crash or restart while Degraded or Halted resumes in
+// that same state and scope, read back from the run's durable record" (ADR
+// 0019, amended 2026-09-24, "The state survives a restart"; ADR 0026, point
+// 5). Leaving either state is never automatic, so a record never loosens the
+// gate: a Halted gate refuses a Degraded record, and a Degraded record widens
+// the scope to the union. A scope naming orders or cash components is
+// refused, since this gate holds instruments only and cannot honour it. The
+// first record out of Normal is the incident, whose one sale back to 98% it
+// tags (ADR 0019, amended 2026-10-17, reading 3).
+func (g *Gate) RestoreState(id string, p event.EngineStatePayload, schemaVersion uint32) error {
+	if err := p.ValidateSchema(schemaVersion); err != nil {
+		return fmt.Errorf("risklimit: recorded %w", err)
+	}
+	if id == "" {
+		return errors.New("risklimit: a recorded engine state needs its envelope ID")
+	}
+	if len(p.ScopeOrderIDs) > 0 || len(p.ScopeCashComponents) > 0 {
+		return errors.New("risklimit: a recorded scope naming orders or cash components is not one this gate can hold")
+	}
+	if p.State != event.EngineStateHalted && g.state == StateHalted {
+		return errors.New("risklimit: a recorded Degraded state cannot follow Halted: leaving Halted is never automatic")
+	}
+	if g.state == StateNormal {
+		g.incident = id
+		g.saleTags[id] = true
+	}
+	if p.State == event.EngineStateHalted {
+		g.state, g.scope = StateHalted, nil
+		return nil
+	}
+	scope := slices.Clone(g.scope)
+	for _, instrument := range p.ScopeInstrumentIDs {
+		if !slices.Contains(scope, instrument) {
+			scope = append(scope, instrument)
+		}
+	}
+	slices.Sort(scope)
+	g.state, g.scope = StateDegraded, scope
+	return nil
+}
+
 // Check decides every order of one decision time's plan, in plan order. An
 // order that fails its own payload validation, or belongs to another account,
 // is a defect in the caller and returns an error with no outcome and no state
@@ -142,20 +185,29 @@ func (g *Gate) Incident() string { return g.incident }
 //   - a tag naming no recorded decision refuses and halts;
 //   - the kill switch refuses every other order and changes no state;
 //   - Degraded refuses every buy and every order on an instrument its scope
-//     names, and a sell elsewhere with no broker snapshot to size it from;
+//     names, and a sell elsewhere with no broker snapshot to size it from
+//     (ADR 0019, amended 2026-09-24: sells are "sized from" the broker
+//     quantity);
 //   - a sell beyond the latest broker snapshot's holding net of every
-//     working or pending sell is a breach;
-//   - then, unless the order is risk-reducing, the order count (buys only,
-//     when the plan's other orders are over it), the mark, the price band and
-//     the order size; and the pre-trade exposure limit.
+//     working or pending sell is a breach, refused and not resized (ADR 0019,
+//     amended 2026-10-17, reading 10);
+//   - the order count (buys only, when the plan's orders that are not
+//     risk-reducing are over it); then, unless the order is risk-reducing,
+//     the mark, the price band and the order size; then the pre-trade
+//     exposure limit.
 //
 // A breach refuses the order and degrades the account, naming the
 // instrument.
 //
-// A risk-reducing order (ADR 0026, point 4) is a sell within the latest
-// broker snapshot's holding net of every working or pending sell, which moves
-// exposure toward 98% or lower. It is exempt from the order count, size and
-// price band, and is not counted against the count.
+// A risk-reducing order (ADR 0026, point 4) is "a sell that moves the
+// account's exposure toward 98% or lower, sized within the broker-reported
+// holding": a sell within the latest broker snapshot's holding net of every
+// working or pending sell, or, with no readable broker snapshot, a sell no
+// larger than the account snapshot's holding the planner sized it from,
+// which reports no working orders. It is exempt from the order count, the
+// order size and the price band (point 3), and so from the mark, the band's
+// only input; one late mark cannot refuse Boost's exit. It is not counted
+// toward the count (ADR 0026, amended 2026-10-17).
 //
 // Exposure is the order's own instrument's holding x the reference price over
 // net liquidation, before and after the order: the joint account holds SPY
@@ -193,6 +245,8 @@ func (g *Gate) Check(plan []Order) ([]Outcome, error) {
 	return outcomes, nil
 }
 
+// check decides one order of a plan of planSize orders, counted of which are
+// not risk-reducing.
 func (g *Gate) check(o Order, planSize, counted int) Outcome {
 	p := o.Planned
 	f := g.figures(o, planSize)
@@ -209,7 +263,10 @@ func (g *Gate) check(o Order, planSize, counted int) Outcome {
 	case g.killEngaged:
 		return Outcome{Refused: g.refusal(o, f, event.RefusedKillSwitch, fmt.Sprintf("the kill switch is engaged (%s): every order is refused except the margin account's one sale back to 98%%", g.killID))}
 	case g.state == StateDegraded && (p.Side == event.OrderSideBuy || slices.Contains(g.scope, p.InstrumentID)):
-		return Outcome{Refused: g.refusal(o, f, event.RefusedEngineDegraded, fmt.Sprintf("the account is Degraded (scope %v): no buy, and the scope's instruments are frozen", g.scope))}
+		// ADR 0019, amended 2026-09-24: "Nothing that opens or adds to a
+		// position is allowed while not Normal", and named instruments are
+		// frozen; risk-reducing sells continue elsewhere (ADR 0026, point 4).
+		return Outcome{Refused: g.refusal(o, f, event.RefusedEngineDegraded, fmt.Sprintf("the account is Degraded (scope %v): only risk-reducing sells go, and the scope's instruments are frozen", g.scope))}
 	case g.state == StateDegraded && !f.BrokerSet:
 		return Outcome{Refused: g.refusal(o, f, event.RefusedBrokerHolding, "the account is Degraded and no readable broker snapshot holds the quantity to size this sell from")}
 	}
@@ -237,7 +294,7 @@ func (g *Gate) release(o Order, f event.RiskFigures) Outcome {
 func (g *Gate) halt(out *Outcome, detail, cause string) {
 	g.enter(out, StateHalted, &event.EngineStatePayload{
 		State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: detail,
-	}, event.EngineStateSchemaVersion, cause)
+	}, event.EngineStateScopedVersion, cause)
 	g.scope = nil
 }
 
@@ -276,10 +333,12 @@ func (g *Gate) breach(o Order, f event.RiskFigures, counted int) (reason, detail
 	switch {
 	case p.Side == event.OrderSideSell && f.BrokerSet && p.Quantity > held:
 		return event.RefusedBrokerHolding, fmt.Sprintf("sell of %d exceeds the broker's holding %d net of %d working sells (snapshot %s)", p.Quantity, f.BrokerHolding, f.WorkingSells, g.brokerID)
-	case f.RiskReducing:
-		return "", ""
 	case counted > g.limits.MaxOrdersPerDecision && p.Side == event.OrderSideBuy:
 		return event.RefusedOrderCount, fmt.Sprintf("%d orders that are not risk-reducing planned at one decision time; the limit is %d, so the plan's buys are refused", counted, g.limits.MaxOrdersPerDecision)
+	case g.riskReducing(p):
+		// Exempt from the mark, band and size (ADR 0026, point 3); a sell
+		// never breaches the exposure limit, which checks only an increase.
+		return "", ""
 	case !o.MarkSet:
 		return event.RefusedMissingMark, fmt.Sprintf("no mark recorded for %s at or after the session's close", p.InstrumentID)
 	case f.MarkDeviation > g.limits.PriceBand:

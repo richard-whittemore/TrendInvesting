@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the market-data step after the US close on weekdays
+
+[Timer]
+# 16:30 New York, after the close; the engines read what it records.
+OnCalendar=Mon..Fri 16:30 America/New_York
+Persistent=true
+Unit=ti-data.service
+
+[Install]
+WantedBy=timers.target

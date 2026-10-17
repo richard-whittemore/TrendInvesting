@@ -122,11 +122,47 @@ func run(args []string, out io.Writer) error {
 		return err
 	}
 	if *outPath != "" {
-		if err := os.WriteFile(*outPath, written.Bytes(), 0o600); err != nil {
+		if err := writeNew(*outPath, written.Bytes()); err != nil {
 			return err
 		}
 	}
 	return replayJournal(written.Bytes(), version, cfg, opts, out)
+}
+
+// writeNew writes data to a file that must not exist yet: the exclusive
+// create refuses an occupied path, so a rerun never replaces an earlier run's
+// journal (AGENTS.md rule 6). The file is synced before it is closed.
+func writeNew(path string, data []byte) error {
+	return writeNewWith(path, data, func(f *os.File, b []byte) error {
+		_, err := f.Write(b)
+		return err
+	})
+}
+
+// writeNewWith is writeNew with the write step injectable, so a test can force
+// a failure after the file exists.
+func writeNewWith(path string, data []byte, write func(*os.File, []byte) error) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	// The path was created by this call, so removing it on failure never
+	// touches an earlier journal.
+	if err := write(f, data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 // replayJournal reads the journal back, verifies its chain and identity, and

@@ -33,8 +33,23 @@ differ). Provenance: 12-1 momentum, Jegadeesh & Titman 1993; the trend
 filter, motivated by Daniel & Moskowitz 2016; the half fraction, sector cap
 and inverse volatility are this project's research settings, chosen on
 1999–2015 and checked once on 2016–mid-2026
-(`docs/research/boost-followup-2026-09.md`). Recorded runs: F_COMBO_R4
-24bdb0a9, OOS_F_COMBO_R4 dd45f8ec.
+(`docs/research/boost-followup-2026-09.md`). The same script gives
+different figures on two QuantConnect data states
+(`docs/research/r4-rerun-discrepancy-2026-10.md`, #403). CAGR / worst
+drawdown on daily equity:
+
+| Data state | 1999–2015 | 2016 to 2026-06-30 | Runs |
+| --- | --- | --- | --- |
+| 2026-10-04 (recorded R4; no longer reproducible) | 11.25% / 34.0% | 20.85% / 31.0% | F_COMBO_R4 24bdb0a9, OOS_F_COMBO_R4 dd45f8ec |
+| Current, since at least 2026-10-16 | 13.09% / 46.05% | 20.06% / 40.47% | F_COMBO eee58c08 / F_COMBO_RR d3d11664, OOS_F_COMBO a752a0ae / OOS_F_COMBO_RR 28914125 |
+
+- **Risk planning uses the current state's drawdowns** (46.05% / 40.47%).
+- **Comparisons use baselines on the current data.** Parity (#398, #324)
+  and the $30k commission runs (#399, #376) compare against the
+  2026-10-16 F / FU reruns, not R4.
+- **Pair and fingerprint every run.** QuantConnect's data can change
+  without notice. Every comparison runs as a same-day pair and records the
+  run's `Fundamentals` counter.
 - **How clean that check is.** The combination was declared before its own
   held-out run, but after the full filter's held-out run had shown the
   whipsaw problem that the half fraction answers. So its held-out result is
@@ -233,9 +248,26 @@ Lightsail VM (Ubuntu, $12/month, US East)
 
 ## 4. Data
 
-- **Prices**: IBKR historical daily bars (adjusted for splits and
-  dividends) for SPY, IEF, SHY and the universe. About 520 symbols a month
-  at IBKR's pacing limits takes well under an hour, done overnight.
+- **Prices**: daily bars from Massive (#326), not IBKR's historical bars:
+  the data step records raw bars and Massive's split adjustment, and
+  derives the adjusted closes from the raw bars and recorded dividends.
+  Each use has one price series:
+  - **signals** (momentum, volatility, trend) and target-weight weights use
+    split- and dividend-adjusted closes (ADR 0026, point 1), adjusted
+    *forward* from a fixed base date (#343, #363). A later dividend never
+    rewrites a stored level, which is the look-ahead ADR 0004 rules out for
+    a backward-adjusted series, so a replayed decision matches the live one.
+    Its returns match QuantConnect's backward series; its levels differ by
+    a constant, so signals use only ratios. This is a third view beside
+    ADR 0004's split-adjusted and raw views, and the Go core labels it as
+    such;
+  - **orders and the $5 floor** use the raw, unadjusted trade close (ADR
+    0004: raw closes trade), and the account is accounted at raw prices.
+
+  SPY, IEF, SHY and the held stocks are fetched per instrument
+  (about three requests each at the free plan's 5 a minute, one overnight
+  run); the ranked universe's history comes from the grouped daily bars,
+  one request a session, with bulk splits and dividends.
 - **Universe** (the hard part): IBKR gives no ready "500 largest by dollar
   volume with fundamentals" list. The first proposal, IWB's holdings, failed
   the parity study (62% overlap, `docs/research/universe-parity-2026-10.md`).
@@ -257,7 +289,8 @@ Lightsail VM (Ubuntu, $12/month, US East)
     the **unadjusted** trade close and volume (for IBKR, `TRADES` bars, not
     `ADJUSTED_LAST`), since an adjusted close can move a stock across $5 or
     in and out of the top 500. The momentum, volatility and trend
-    calculations keep using split- and dividend-adjusted closes;
+    calculations use the split- and dividend-adjusted closes described
+    under Prices;
   - **data source** for that one session's close and volume for every
     listed stock: **chosen 2026-10-16, Massive's free Basic plan** (grouped
     daily bars, two years of history, individual use; the owner's account,
@@ -406,10 +439,11 @@ Lightsail VM (Ubuntu, $12/month, US East)
   - **whole shares**: on the ~$30k IRA a name gets about $1,000. A stock
     priced above its target cannot be held, and one priced at a large share
     of it cannot be kept within the band. Decision D7: fractional shares
-    through the API, if IBKR offers them for IRAs on Lite, or else a
+    through the API, if IBKR offers them for IRAs, or else a
     minimum-lot rule (for example, skip a name whose one share exceeds its
     target and give the weight to the next eligible name). Whichever is
-    chosen goes into the parity backtest.
+    chosen goes into the parity backtest. **Decided 2026-10-16: the
+    minimum-lot rule** (section 10, D7).
 - **Day-trading margin rules**: which regime applies is to be confirmed
   with IBKR (D5). FINRA replaced the pattern-day-trader designation and its
   $25,000 minimum with intraday margin standards in Rule 4210(d)(2),
@@ -472,11 +506,12 @@ Lightsail VM (Ubuntu, $12/month, US East)
 | --- | --- |
 | Lightsail 2 GB plan, snapshots | ~$170 |
 | Tailscale, Healthchecks.io, ntfy (free tiers) | $0 |
-| IBKR market data for API bars, if required | about $10/month (~$120/year). Lite pays no commissions, so no commission waiver applies; budget it unless IBKR confirms the bars are free |
-| Commissions | Lite: $0. Pro: ~$28 for Boost, and for momentum's ~25 names a month perhaps $100–200 per IRA |
+| IBKR market data for API bars, if required | about $10/month (~$120/year); daily bars come from Massive (#326), so a subscription may be needed only for the marks the price band checks; budget it until paper trading shows otherwise |
+| Commissions | Pro (every account, since Lite has no API access; D5 revised 2026-10-16): ~$28 for Boost, and perhaps $100–200 per IRA for momentum. Fee model: IBKR Pro Fixed, $0.005 a share, at least $1 and at most 1% of the order's value (ADR 0013's model). So the commission is min(max($1, $0.005 × shares), 1% × order value): at least $1, plus $0.005 a share for every share above 200 (a 300-share order costs $1.50), unless the 1% cap is lower, which happens when the order's value is under $100 for 200 shares or fewer and under $150 for a 300-share order (300 shares at $0.25 are a $75 order and cost $0.75); a cheap stock or a bond-fund purchase can pass 200 shares. Both figures are early estimates, not measured trade counts, and assume each order is 200 shares or fewer and worth $100 or more, so each costs the $1 floor and the estimate is an order count (an order under $100 costs less, so the totals are an upper bound on that point). Activity basis: ~$28 is about 14 Boost round trips a year, two orders each; $100–200 is 100–200 orders a year per IRA, about 8–17 a month at the monthly rebalance (a buy or sell for each name entering or leaving the 25 and each resize past the band); a name held unchanged inside the band sends no order. The parity backtest's orders and share quantities replace them |
 
-**Decision D5**: the owner chose IBKR Lite for every account, if IBKR
-allows it. To confirm with IBKR:
+**Decision D5** (revised 2026-10-16; section 10): **IBKR Pro for every
+account**, since Lite has no API access, and margin IRAs. The original
+questions, kept for the record (answers in #331):
 - that Lite is allowed on both IRAs and on a joint margin account;
 - what the API's daily bars cost on Lite;
 - that the three accounts can be linked under one username, so one IB
@@ -487,7 +522,10 @@ allows it. To confirm with IBKR:
 - which day-trading margin regime the joint account is under (legacy
   pattern-day-trader rule or FINRA's new intraday margin standards), and,
   under the legacy rule, how a restriction works and is lifted (section 5).
-  This is settled before Phase 2, since the risk limits depend on it.
+  Settled in paper trading (#331), before the joint account goes live; it
+  does not hold up Phase 2, because the risk limits cover both regimes
+  (section 5: the Excess Liquidity alarm under the new standards, the
+  day-trade count under the legacy rule).
 
 Momentum's monthly trades
 make Pro's $1 minimum matter for the smaller IRA, and the IRAs never borrow,
@@ -497,8 +535,8 @@ so Pro's margin rate does not help them.
 
 | Phase | Work | Gate to move on |
 | --- | --- | --- |
-| 0 | Owner decisions D5 and D7 (D6 decided 2026-10-15); the broker-adapter ADR (0025, accepted 2026-10-15); this plan reviewed (owner, and an independent review on 2026-10-15) | Done except D5 and D7, which must be settled before Phase 2 starts, since the strategy modules and limits depend on them |
-| 1 | Universe parity study (research, QuantConnect free) | IWB tested and failed (2026-10-15); D8 builds the universe from all US listings. Data source chosen (Massive, 2026-10-16) and the D8 rule's comparison recorded: 96.4% agreement with QuantConnect's selection over 21 months (`docs/research/universe-massive-2026-10.md`). The sector check is done (2026-10-15). Open until: the owner decides the timing question that comparison raised (section 10, D8) |
+| 0 | Owner decisions D5 and D7 (D6 decided 2026-10-15); the broker-adapter ADR (0025, accepted 2026-10-15); this plan reviewed (owner, and an independent review on 2026-10-15) | Done: D5 revised and D7 decided 2026-10-16 (section 10); the remaining IBKR confirmations (#331) are settled in paper trading |
+| 1 | Universe parity study (research, QuantConnect free) | IWB tested and failed (2026-10-15); D8 builds the universe from all US listings. Data source chosen (Massive, 2026-10-16) and the D8 rule's comparison recorded: 96.4% agreement with QuantConnect's selection over 21 months (`docs/research/universe-massive-2026-10.md`). The sector check is done (2026-10-15). Timing decided 2026-10-16: live ranks the latest session (section 10, D8); its effect on returns was measured (+1.69 pp/yr in-sample, -1.41 pp/yr held out, drawdown slightly shallower in both, 6-7% more orders) and choice A stands (`docs/research/universe-massive-2026-10.md`) |
 | 2 | The target-weight strategy ADR (decision contract, risk limits, the risk-reducing definition in section 3); Go strategy modules and risk limits, test first; backtest parity; the glide-path backtest (section 2) | Parity passes, and the glide-path backtest passes its stated test |
 | 3 | Broker adapter, journal wiring, reporter, dashboard; dry-run on Lightsail | A clean dry-run month for Boost and 2 clean dry-run rebalances for momentum |
 | 4 | IBKR paper trading | 2–3 clean months |
@@ -516,22 +554,44 @@ only after CodeRabbit and Greptile findings are addressed.
 - **D3** Joint account: **margin Boost** (decided 2026-10-14).
 - **D4** Architecture: **Go decision core with a Python broker adapter**
   (decided 2026-10-14).
-- **D5** **IBKR Lite for every account**, if IBKR allows it and its API
-  data suffices (decided 2026-10-14; to confirm with IBKR).
+- **D5** **IBKR Pro for every account** (revised 2026-10-16; owner: "yes"):
+  IBKR Lite has no API access (IBKR's TWS API requirements page names a
+  funded IBKR Pro account), so the 2026-10-14 choice of Lite cannot hold.
+  **Both IRAs are opened as margin IRAs** (owner decision 2026-10-16): a
+  margin IRA never borrows but may buy with unsettled sale proceeds, while
+  a cash IRA cannot: IBKR requires settled cash for a cash account's stock
+  purchases, so a rebalance's buys would wait for its sales to settle (and
+  a buy paid with unsettled proceeds, then sold before they settle, is the
+  free-riding violation that brings a 90-day restriction). The
+  planner's cash rule is therefore `total-cash` for the IRAs. Still to
+  confirm with IBKR (#331): the joint account's day-trading regime and its
+  switch date, SPY's house margin, and that each IRA's paper account is the
+  same type. Research with sources: #331.
 - **D6** A Halted joint account **flattens to 98% by itself**, with an
   alert when the account freezes, when the sale is sent and when it fills
   or fails (decided 2026-10-15; section 3).
-- **D7** Whole shares in the IRAs: fractional shares through the API, or a
-  minimum-lot rule (section 5). Open; depends on what IBKR confirms.
+- **D7** **Whole shares in the IRAs, with the minimum-lot rule** (D7-L;
+  decided 2026-10-16, owner: "yes"; section 5): IBKR's FAQ says fractional
+  orders are not supported through the TWS API. Fractional (D7-F) stays
+  built as configuration, and its availability is checked in paper trading.
 - **D8** Live universe: **every US-listed common stock ranked by one
   session's dollar volume, as the backtest does** (decided 2026-10-15;
   section 4). Data source: Massive's free plan (account opened by the owner
   2026-10-16). Measured against QuantConnect's selection on 21 months: 96.4%
   of names shared when ranked on the same session (selection agreement)
-  (`docs/research/universe-massive-2026-10.md`). **Open for the owner:** in
-  months whose 1st is a Sunday or a Monday, the backtest ranked the previous
-  month's universe; live either ranks the latest session (about 80% of names
-  shared with the universe the backtest traded in those months) or copies
-  that.
+  (`docs/research/universe-massive-2026-10.md`). **Timing decided
+  2026-10-16 (owner: "Choice A"):** live always ranks the last session
+  before the rebalance, also in the months whose 1st is a Sunday or a
+  Monday, where the backtest ranked the previous month's universe (about 80%
+  of names shared with it in those months). The owner asked for the effect
+  on returns to be measured, and it was (2026-10-16, paired backtests,
+  variants `FU_COMBO`, `OOS_FU_COMBO`): +1.69 pp/yr in-sample and
+  -1.41 pp/yr held out (to 2026-06-30), drawdown 2.6 and 1.0 points
+  shallower, 7% and 6% more orders. **Choice A stands** as the owner's
+  decision (`docs/research/universe-massive-2026-10.md`, "Effect of the
+  timing on returns"). The paired `F_COMBO` / `OOS_F_COMBO` reruns show
+  worst drawdowns of 46.05% and 40.47% against the recorded 34.0% and 31.0%;
+  the cause is unresolved and under investigation in #403. The figures this
+  plan cites are unchanged until then, and parity (#324) waits on #403.
 - Account opening, funding, rollovers and the Lightsail sign-up are the
   owner's to do; nothing here signs up for or pays for anything.
