@@ -125,8 +125,18 @@ when the journal names exactly one.
 - **A durable log (the live engine's crash-safe log, ADR 0027).** The tool
   recognises the form and refuses it by name for now. Reading it is a separate
   piece of work, waiting on that log reader landing.
+- **A record whose values are invalid** (for example a fill with a negative
+  quantity or an unknown kind, which a journal can keep as a rejected input).
+  The chain only proves the file was not altered, so the tool also checks each
+  record's values and refuses the file, naming the record, before it prints
+  any figure.
+- **The same fill delivered more than once.** A fill id that appears again
+  with identical content is one execution and is counted once. The same id
+  with different content is refused, naming both records.
 - **A record from a newer or older build** (a schema version this build does
-  not read). Refused, naming the record; the tool never guesses at a figure.
+  not read, including a newer account snapshot). Refused, naming the record; the
+  tool never guesses at a figure. Only the equity-and-cash snapshot (version 2),
+  which holds no positions, is passed over by design.
 - **A bad flag** (a malformed date, a backwards range, an unknown format or
   report). Refused before any file is read.
 

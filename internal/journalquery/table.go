@@ -80,13 +80,11 @@ func (t Table) writeJSON(w io.Writer) error {
 			if c > 0 {
 				b.WriteByte(',')
 			}
-			for _, part := range []string{t.Columns[c], cell} {
-				enc, _ := json.Marshal(part) // a string always marshals
-				b.Write(enc)
-				if part == t.Columns[c] {
-					b.WriteByte(':')
-				}
-			}
+			key, _ := json.Marshal(t.Columns[c]) // a string always marshals
+			value, _ := json.Marshal(cell)
+			b.Write(key)
+			b.WriteByte(':')
+			b.Write(value)
 		}
 		b.WriteByte('}')
 	}

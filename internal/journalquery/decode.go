@@ -3,6 +3,7 @@ package journalquery
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -31,8 +32,14 @@ type item struct {
 	snapshot  *event.AccountPositionsSnapshotPayload
 }
 
+type seenFill struct {
+	seq     uint64
+	payload event.FillPayload
+}
+
 func decode(j Journal) ([]item, error) {
 	var items []item
+	fills := map[string]seenFill{}
 	for _, record := range j.Records {
 		env := record.Envelope
 		it := item{journal: j.Name, seq: record.Sequence, at: env.EventTime}
@@ -62,8 +69,9 @@ func decode(j Journal) ([]item, error) {
 			err = read(env, []uint32{event.EngineStateSchemaVersion, event.EngineStateScopedVersion}, it.engine)
 		case event.AccountSnapshotEventType:
 			// Version 2 (equity and cash) carries no positions and is not
-			// read here; version 3 is the broker's positions.
-			if env.SchemaVersion != event.AccountSnapshotPositionsVersion {
+			// read here. Version 3 is the broker's positions; any other
+			// version is refused by read, never skipped.
+			if env.SchemaVersion == event.AccountSnapshotSchemaVersion {
 				continue
 			}
 			it.snapshot = new(event.AccountPositionsSnapshotPayload)
@@ -74,6 +82,17 @@ func decode(j Journal) ([]item, error) {
 		}
 		if err != nil {
 			return nil, fmt.Errorf("%s: record %d: %w", j.Name, record.Sequence, err)
+		}
+		if it.fill != nil {
+			// A repeated delivery of one fill is one execution (the reducer
+			// ignores it too); the same id with different content is refused.
+			if first, dup := fills[it.fill.FillID]; dup {
+				if !reflect.DeepEqual(first.payload, *it.fill) {
+					return nil, fmt.Errorf("%s: record %d: fill %q conflicts with record %d, which used the same fill id differently", j.Name, record.Sequence, it.fill.FillID, first.seq)
+				}
+				continue
+			}
+			fills[it.fill.FillID] = seenFill{seq: record.Sequence, payload: *it.fill}
 		}
 		items = append(items, it)
 	}
@@ -116,6 +135,13 @@ func read(env event.Envelope, schemas []uint32, into any) error {
 	}
 	if err := json.Unmarshal(env.Payload, into); err != nil {
 		return fmt.Errorf("decode %s: %w", env.Type, err)
+	}
+	// Chain verification does not check payload values, and a journal keeps
+	// rejected inputs, so a record is validated before it can move a figure.
+	if v, ok := into.(interface{ Validate() error }); ok {
+		if err := v.Validate(); err != nil {
+			return fmt.Errorf("%s: %w", env.Type, err)
+		}
 	}
 	return nil
 }

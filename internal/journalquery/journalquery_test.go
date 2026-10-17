@@ -58,9 +58,33 @@ func snap(when time.Time, p ...event.AccountPosition) rec {
 		event.AccountPositionsSnapshotPayload{AccountID: "A", AsOf: when, NetLiquidation: 1, Currency: "USD", Positions: p}}
 }
 
+var fillSeq int
+
+// fillRec is a valid fill with an id of its own.
 func fillRec(kind, id string, qty int64, commission float64, when time.Time) rec {
-	return rec{journal.KindInput, event.FillEventType, event.FillSchemaVersion, when,
-		event.FillPayload{InstrumentID: id, Kind: kind, Quantity: qty, Price: 2, FilledAt: when, Commission: commission}}
+	fillSeq++
+	p := event.FillPayload{
+		InstrumentID: id, Kind: kind, FillID: fmt.Sprintf("f%d", fillSeq), Direction: event.DirectionLong,
+		Quantity: qty, Price: 2, Level: 2, FilledAt: when, Commission: commission,
+	}
+	switch kind {
+	case event.FillKindEntry:
+		p.ProposalID = "p"
+	case event.FillKindStop:
+		p.CampaignID, p.UnitIDs = "c", []string{"u"}
+	default:
+		p.ProposalID, p.CampaignID = "p", "c"
+	}
+	return rec{journal.KindInput, event.FillEventType, event.FillSchemaVersion, when, p}
+}
+
+var figures = event.RiskFigures{NetLiquidation: 1, ReferencePrice: 3}
+
+func plannedPayload(instrument, side string) event.OrderPlannedPayload {
+	return event.OrderPlannedPayload{
+		AccountID: "A", Tag: "t", ClientOrderID: "c", InstrumentID: instrument, Side: side, Phase: side, OrderType: event.OrderTypeLimit,
+		Quantity: 1, LimitPrice: 3, NetLiquidation: 1, ReferencePrice: 3, PriceBand: 0.05,
+	}
 }
 
 func dec(typ string, schema uint32, when time.Time, p any) rec {
@@ -92,10 +116,10 @@ func TestEveryReportOverOneHandBuiltJournal(t *testing.T) {
 		fillRec(event.FillKindEntry, "AAA", 5, 0.1, d),
 		fillRec(event.FillKindEntry, "AAA", 5, 0.2, d),
 		fillRec(event.FillKindExit, "AAA", 3, 0.3, d),
-		dec(event.OrderPlannedEventType, 1, d, event.OrderPlannedPayload{AccountID: "A", Tag: "t", InstrumentID: "AAA", Side: "buy", Quantity: 1, LimitPrice: 3}),
-		dec(event.OrderReleasedEventType, 1, d, event.OrderReleasedPayload{AccountID: "A", InstrumentID: "AAA", Side: "buy", Quantity: 1, LimitPrice: 3, Mode: "paper"}),
-		dec(event.OrderRefusedEventType, 1, d, event.OrderRefusedPayload{AccountID: "A", InstrumentID: "AAA", Side: "sell", Quantity: 1, LimitPrice: 3, Reason: "order-size", Detail: "d"}),
-		rec{journal.KindInput, event.OrderLifecycleEventType, 1, d, event.OrderLifecyclePayload{InstrumentID: "AAA", Tag: "stop", Status: "submitted", Quantity: -7, StopPrice: 1.5}},
+		dec(event.OrderPlannedEventType, 1, d, plannedPayload("AAA", "buy")),
+		dec(event.OrderReleasedEventType, 1, d, event.OrderReleasedPayload{AccountID: "A", ClientOrderID: "c", PlanID: "p", Tag: "t", InstrumentID: "AAA", Side: "buy", Quantity: 1, LimitPrice: 3, Mode: "paper", Figures: figures}),
+		dec(event.OrderRefusedEventType, 1, d, event.OrderRefusedPayload{AccountID: "A", ClientOrderID: "c", PlanID: "p", InstrumentID: "AAA", Side: "sell", Quantity: 1, LimitPrice: 3, Reason: "order-size", Detail: "d", Figures: figures}),
+		rec{journal.KindInput, event.OrderLifecycleEventType, 1, d, event.OrderLifecyclePayload{InstrumentID: "AAA", OrderID: "o", Tag: "stop", Status: "submitted", Quantity: -7, StopPrice: 1.5, OccurredAt: d}},
 		dec(event.EngineStateEventType, 1, d, event.EngineStatePayload{State: "halted", Reason: "risk-limit-breached", Detail: "x"}),
 		rec{journal.KindInput, event.AccountSnapshotEventType, event.AccountSnapshotSchemaVersion, d, map[string]any{"equity": 1}},
 		snap(at(time.March, 3), event.AccountPosition{InstrumentID: "AAA", Quantity: 12}, event.AccountPosition{InstrumentID: "ZZZ", Quantity: 1}),
@@ -234,8 +258,8 @@ func TestFillsPositionsAndTotalsAcrossInstrumentsAndFilters(t *testing.T) {
 		fillRec(event.FillKindEntry, "AAA", 2, 0.25, d),
 		fillRec(event.FillKindEntry, "AAA", 1, 0.25, at(time.March, 2).AddDate(-1, 0, 0)),
 		fillRec(event.FillKindStop, "BBB", 1, 0.5, at(time.April, 2)),
-		dec(event.OrderPlannedEventType, 1, d, event.OrderPlannedPayload{AccountID: "A", Tag: "t", InstrumentID: "BBB", Side: "buy", Quantity: 1, LimitPrice: 3}),
-		dec(event.OrderRefusedEventType, 1, d, event.OrderRefusedPayload{AccountID: "A", InstrumentID: "AAA", Side: "sell", Quantity: 1, LimitPrice: 3, Reason: "order-size", Detail: "d"}),
+		dec(event.OrderPlannedEventType, 1, d, plannedPayload("BBB", "buy")),
+		dec(event.OrderRefusedEventType, 1, d, event.OrderRefusedPayload{AccountID: "A", ClientOrderID: "c", PlanID: "p", InstrumentID: "AAA", Side: "sell", Quantity: 1, LimitPrice: 3, Reason: "order-size", Detail: "d", Figures: figures}),
 	)
 	js := []journalquery.Journal{load(t, "j", data)}
 	all := journalquery.Filter{}
@@ -291,5 +315,84 @@ func TestFillsPositionsAndTotalsAcrossInstrumentsAndFilters(t *testing.T) {
 		fillRec(event.FillKindEntry, "AAA", 1, 0, d))
 	if _, err := journalquery.Positions([]journalquery.Journal{load(t, "two", two)}, all); err == nil || !strings.Contains(err.Error(), "attributed") {
 		t.Errorf("two accounts: %v", err)
+	}
+}
+
+// validFill is a fill that passes event.FillPayload.Validate.
+func validFill(id string, qty int64, when time.Time) event.FillPayload {
+	return event.FillPayload{
+		InstrumentID: "AAA", Kind: event.FillKindEntry, FillID: id, ProposalID: "p-1", Direction: event.DirectionLong,
+		Quantity: qty, Price: 2, FilledAt: when, Level: 2, Commission: 0.5,
+	}
+}
+
+func fillInput(p event.FillPayload) rec {
+	return rec{journal.KindInput, event.FillEventType, event.FillSchemaVersion, p.FilledAt, p}
+}
+
+func TestJSONKeysAndValuesThatMatchStayValid(t *testing.T) {
+	tab := journalquery.Table{Columns: []string{"journal", "note"}, Rows: [][]string{{"journal", "note"}}}
+	var out bytes.Buffer
+	if err := tab.Write(&out, "json"); err != nil {
+		t.Fatal(err)
+	}
+	var got []map[string]string
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || len(got) != 1 || got[0]["journal"] != "journal" || got[0]["note"] != "note" {
+		t.Errorf("json %q: %v %v", out.String(), got, err)
+	}
+}
+
+func TestRepeatedDeliveryOfOneFillCountsOnce(t *testing.T) {
+	d := at(time.March, 2)
+	data := build(t, fillInput(validFill("f-1", 5, d)), fillInput(validFill("f-1", 5, d)), fillInput(validFill("f-2", 3, d)))
+	js := []journalquery.Journal{load(t, "j", data)}
+	tot, err := journalquery.Totals(js, journalquery.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(tot.Rows[len(tot.Rows)-1], " "); got != "TOTAL all 2 8 0 1.00" {
+		t.Errorf("totals counted a repeated delivery: %q", got)
+	}
+	if f, _ := journalquery.Fills(js, journalquery.Filter{}); len(f.Rows) != 2 {
+		t.Errorf("fills lists a repeated delivery: %v", f.Rows)
+	}
+}
+
+func TestConflictingUsesOfOneFillIDAreRefused(t *testing.T) {
+	d := at(time.March, 2)
+	data := build(t, fillInput(validFill("f-1", 5, d)), fillInput(validFill("f-1", 6, d)))
+	js := []journalquery.Journal{load(t, "j", data)}
+	if _, err := journalquery.Totals(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "f-1") {
+		t.Errorf("conflicting fill id: %v", err)
+	}
+}
+
+func TestInvalidPayloadsAreRefusedBeforeAnyFigure(t *testing.T) {
+	d := at(time.March, 2)
+	negative := validFill("f-1", -4, d)
+	unknown := validFill("f-2", 4, d)
+	unknown.Kind = "teleport"
+	badSnap := rec{journal.KindInput, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, d,
+		event.AccountPositionsSnapshotPayload{AccountID: "A", AsOf: d, NetLiquidation: -1, Currency: "USD"}}
+	for name, r := range map[string]rec{"negative quantity": fillInput(negative), "unknown kind": fillInput(unknown), "snapshot": badSnap} {
+		js := []journalquery.Journal{load(t, "j", build(t, r))}
+		for rname, fn := range map[string]func([]journalquery.Journal, journalquery.Filter) (journalquery.Table, error){
+			"fills": journalquery.Fills, "totals": journalquery.Totals, "positions": journalquery.Positions, "reconcile": journalquery.Reconcile,
+		} {
+			if _, err := fn(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "record 1") {
+				t.Errorf("%s: %s accepted or unnamed: %v", name, rname, err)
+			}
+		}
+	}
+}
+
+func TestUnknownSnapshotVersionsAreRefusedNotSkipped(t *testing.T) {
+	d := at(time.March, 2)
+	for _, v := range []uint32{event.AccountSnapshotPositionsVersion + 1} {
+		r := rec{journal.KindInput, event.AccountSnapshotEventType, v, d, event.AccountPositionsSnapshotPayload{AccountID: "A", AsOf: d, NetLiquidation: 1, Currency: "USD"}}
+		js := []journalquery.Journal{load(t, "j", build(t, r))}
+		if _, err := journalquery.Reconcile(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "record 1") {
+			t.Errorf("snapshot v%d skipped: %v", v, err)
+		}
 	}
 }

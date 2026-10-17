@@ -33,7 +33,7 @@ func day(year int, month time.Month, d int) time.Time {
 func fill(kind, instrument string, qty int64, price, commission float64, at time.Time) ev {
 	p := event.FillPayload{
 		InstrumentID: instrument, Kind: kind, FillID: fmt.Sprintf("f-%s-%d", instrument, at.Unix()),
-		Direction: event.DirectionLong, Quantity: qty, Price: price, FilledAt: at, Commission: commission,
+		Direction: event.DirectionLong, Quantity: qty, Price: price, Level: price, FilledAt: at, Commission: commission,
 	}
 	switch kind {
 	case event.FillKindEntry:
@@ -142,6 +142,7 @@ func planned(account, cid, instrument, side string, qty int64, limit float64, ta
 	return decision(event.OrderPlannedEventType, event.OrderPlannedSchemaVersion, at, event.OrderPlannedPayload{
 		AccountID: account, Tag: tag, ClientOrderID: cid, InstrumentID: instrument, Side: side, Phase: side,
 		OrderType: event.OrderTypeLimit, Quantity: qty, LimitPrice: limit,
+		NetLiquidation: 100000, ReferencePrice: limit, PriceBand: 0.05,
 	})
 }
 
@@ -149,6 +150,7 @@ func released(account, cid, instrument, side string, qty int64, limit float64, a
 	return decision(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, at, event.OrderReleasedPayload{
 		AccountID: account, PlanID: "plan-" + cid, Tag: "t", ClientOrderID: cid, InstrumentID: instrument, Side: side,
 		Quantity: qty, LimitPrice: limit, Mode: event.TradingModePaper, Send: true,
+		Figures: event.RiskFigures{NetLiquidation: 100000, ReferencePrice: limit},
 	})
 }
 
@@ -156,6 +158,7 @@ func refused(account, cid, instrument, side string, qty int64, limit float64, re
 	return decision(event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, at, event.OrderRefusedPayload{
 		AccountID: account, PlanID: "plan-" + cid, Tag: "t", ClientOrderID: cid, InstrumentID: instrument, Side: side,
 		Quantity: qty, LimitPrice: limit, Reason: reason, Detail: detail,
+		Figures: event.RiskFigures{NetLiquidation: 100000, ReferencePrice: limit},
 	})
 }
 

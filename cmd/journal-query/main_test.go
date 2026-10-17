@@ -310,7 +310,9 @@ func TestNoQueryChangesAJournalByAByte(t *testing.T) {
 		for _, format := range []string{"text", "csv", "json"} {
 			// reconcile exits non-zero on the disagreement in positionsJournal.
 			args := append([]string{report, "-format", format}, paths...)
-			if _, err := query(t, args...); err != nil && report != "reconcile" {
+			_, err := query(t, args...)
+			var disagreement *journalquery.DisagreementError
+			if err != nil && (report != "reconcile" || !errors.As(err, &disagreement)) {
 				t.Fatalf("%s %s: %v", report, format, err)
 			}
 		}
