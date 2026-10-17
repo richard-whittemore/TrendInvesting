@@ -10,11 +10,17 @@ import (
 
 const iraTag = "targets-decided:ira:2025-03-04"
 
+// momentumDecision is a momentum decision before the glide path starts (b is
+// 0), so each target is the momentum sleeve's alone.
 func momentumDecision(targets ...event.TargetWeight) event.TargetsDecidedPayload {
+	for i, t := range targets {
+		targets[i].Shares = []event.SleeveShare{{Sleeve: event.SleeveMomentum, Weight: t.Weight}}
+	}
 	return event.TargetsDecidedPayload{
 		AccountID: "ira", StrategyID: event.TargetWeightStrategyMomentum,
 		DecisionTime: session, SessionPeriodEnd: session, Outcome: event.TargetsOutcomeDecided, Targets: targets,
 		Momentum: event.MomentumFigures{CloseSession: "2025-03-04", TrendInstrument: "SPY", TrendCloses: 300, TrendClose: 110, TrendMean: 100},
+		Glide:    event.GlideFigures{RebalanceSession: "2025-03-05", AgeMonths: 30 * 12},
 	}
 }
 

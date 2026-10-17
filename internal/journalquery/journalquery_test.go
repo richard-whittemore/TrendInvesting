@@ -794,3 +794,36 @@ func TestTurtleFillIsRefusedWhenAnotherAccountOnlyAppearsOnAFill(t *testing.T) {
 		}
 	}
 }
+
+// TestTheGlidePathRecordVersionsAreRead covers the glide path's record
+// versions (ADR 0026 point 5): strategy.target-weight.configuration version
+// 3 (the glide section) and strategy.targets.decided version 3 (the glide
+// figures and each target's sleeve shares). No report draws a figure from
+// either, so a journal holding them reads in every report, and two runs
+// that begin with the same version-3 configuration are not taken for one.
+func TestTheGlidePathRecordVersionsAreRead(t *testing.T) {
+	d := at(time.March, 2)
+	configuration := rec{journal.KindInput, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, at(time.January, 1),
+		map[string]any{"strategy_id": event.TargetWeightStrategyMomentum, "glide": map[string]any{"birth": "1972-02", "retirement_age_years": 65}}}
+	decided := dec(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, d, event.TargetsDecidedPayload{
+		AccountID: "I", StrategyID: event.TargetWeightStrategyMomentum, DecisionTime: d, SessionPeriodEnd: d, Outcome: event.TargetsOutcomeDecided,
+		Targets: []event.TargetWeight{{InstrumentID: "AAA", Weight: 0.5, Shares: []event.SleeveShare{{Sleeve: "momentum", Weight: 0.5}}}},
+		Glide:   event.GlideFigures{RebalanceSession: "2026-03-03", AgeMonths: 649, BondShare: 0.32},
+	})
+	run := func(fillID string) []byte {
+		return build(t, configuration, cashSnap(at(time.January, 1)), decided, limitFill(fillID, "buy", 5, 0.1, d))
+	}
+	js := []journalquery.Journal{load(t, "a", run("f-a")), load(t, "b", run("f-b"))}
+	for report, query := range map[string]func([]journalquery.Journal, journalquery.Filter) (journalquery.Table, error){
+		"fills": journalquery.Fills, "totals": journalquery.Totals, "orders": journalquery.Orders,
+		"refusals": journalquery.Refusals, "positions": journalquery.Positions, "reconcile": journalquery.Reconcile,
+	} {
+		if _, err := query(js, journalquery.Filter{}); err != nil {
+			t.Errorf("%s: %v", report, err)
+		}
+	}
+	fills, err := journalquery.Fills(js, journalquery.Filter{})
+	if err != nil || len(fills.Rows) != 2 {
+		t.Errorf("fills across both runs: %v %v", fills.Rows, err)
+	}
+}
