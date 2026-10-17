@@ -97,14 +97,22 @@ Degraded and Halted; one sale back to 98% per incident). Tests:
 `TestACutShortFirstRunResumesWithoutAnApprovalAfterRepeatedCrashes`,
 `TestAFreshRunCannotRepeatAStartThatRecordedNothing`,
 `TestAFreshRunCannotRepeatTheStartOfAnEarlierRun`,
-`TestAnApprovalNeverLoosensThePreviousRunsState`,
-`TestAnInheritedIncidentSurvivesARunThatRecordsNoStateChange`,
 `TestAFreshRunAfterACutShortStartIsCheckedAgainstTheRunBeforeIt`,
 `TestAResumeAbandonedPartwayIsNeverTheLatestRun`,
 `TestAResumeAbandonedBeforeItCopiedPastItsConfigurationIsNeverTheLatestRun`,
 `TestAnUnrecoverableLogIsSetAsideInTheQuarantineFolder`,
 `TestABoostRunDoesNotResumeAcrossBuilds`,
 `TestADirtyBuildThatDoesNotIdentifyItsTreeNeverResumes` (`cmd/engine`);
+`TestAnApprovalNeverLoosensThePreviousRunsState`,
+`TestAnInheritedIncidentSurvivesARunThatRecordsNoStateChange`,
+`TestAnUndecodableRecordRefusesTheIncidentCheck`,
+`TestAnApprovedLatchIsTheOneTheApprovedLogEndsWith`,
+`TestALogDirectoryIsClassifiedIntoRunsAttemptsAndEmptyStarts`,
+`TestAnEmptyDirectoryHasNoLatestRun`,
+`TestAStartCutShortHoldsNothingPastItsConfiguration`,
+`TestAnAttemptAtAStartIsALogOfThatStartHoldingNothingPastIt`,
+`TestAReadFaultIsToldApartFromTheLatestRun` (`internal/restart`, where
+these rules live; `cmd/engine` only finds, orders and reads the logs);
 `TestAnApprovedFreshRunStartsFromTheApprovedLatch`, `TestApprovalInputRules`,
 `TestAFreshRunNeverAttemptsAnIncidentsSaleTwice`,
 `TestARecoveredDecisionNeverFollowsAnApproval` (`internal/targetweight`);
