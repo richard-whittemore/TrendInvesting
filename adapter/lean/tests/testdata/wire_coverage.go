@@ -134,6 +134,8 @@ var notYetCrossed = map[string]string{
 	"operator.run.approved":    "cmd/engine's approval input (-approval), not an adapter",
 	"market.universe.snapshot": "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
 	"market.session.calendar":  "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
+	"market.close.history":     "written by the market-data step (adapter/marketdata) for the momentum engine, never by LEAN",
+	"market.session.retracted": "written by the market-data step (adapter/marketdata) for the momentum engine, never by LEAN",
 }
 
 func main() {
