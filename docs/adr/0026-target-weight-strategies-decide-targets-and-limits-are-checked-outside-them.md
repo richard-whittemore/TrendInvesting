@@ -178,7 +178,7 @@ replaces `plan.md`'s "per run", since a live run spans many decisions.
 | Maximum order size as a share of V (`plan.md` 334-335) | \|qty·pᵢ\| / V ≤ the per-account limit | refuse that order; alert; **Degraded** |
 | Price band (`plan.md` 335; ADR 0025) | pᵢ within the band of the latest recorded IBKR mark (an input, never a live read) | refuse; alert; **Degraded** |
 | No order without a journalled decision (ADR 0025) | the tag names a durable `strategy.targets.decided`, incident, `operator.kill-switch` engagement or `risk.margin.alarm` decision in this run | refuse; urgent alert; **Halted** (a defect in the order path, so its scope cannot be bounded) |
-| Broker holding (ADR 0019 amendment, 2026-10-17, reading 10) | a sell other than ADR 0019's sale back to 98% is no more than the latest broker snapshot's holding, when that snapshot is readable and fresh; with no readable latest snapshot, a Normal account releases the sell against the journal's account book and a Degraded, Halted or kill-switch-engaged account refuses it; an older readable snapshot is never used | refuse (`risk.order.refused`, reason `broker-holding`); alert; **Degraded** on the instrument when the sell is above a fresh snapshot's holding |
+| Broker holding (ADR 0019 amendment, 2026-10-17, reading 10) | a sell other than ADR 0019's sale back to 98% is no more than the latest broker snapshot's holding, when that snapshot is readable and fresh; with no readable latest snapshot, a Normal account releases the sell against the journal's account book, only an account Degraded on another instrument reaches this refusal, and every other state has already refused the sell under ADR 0019 reading 7 (checked first) and the exit has fired; an older readable snapshot is never used | refuse (`risk.order.refused`, reason `broker-holding`); alert; **Degraded** on the instrument when the sell is above a fresh snapshot's holding |
 | Broker snapshot freshness (ADR 0019 amendment, 2026-10-17, reading 10) | a sell other than ADR 0019's sale back to 98% is checked against the latest broker snapshot, which is stale: older than `MaxSnapshotAge`, or stamped later than the sell's journalled time (point 6) | refuse (`risk.order.refused`, reason `stale-broker-snapshot`); one urgent alert per stale episode, carried by the episode's first `stale-broker-snapshot` refusal or withhold and cleared by the first gate check whose latest snapshot is fresh as measured from that check's triggering event (ADR 0019 reading 10); state unchanged; the sell is re-planned at the next decision |
 | Kill switch (`plan.md` 405) | a recorded `operator.kill-switch` input (new) is engaged | refuse every order except ADR 0019's one sale back to 98% in a margin account (its 2026-10-15 and 2026-10-16 amendments), which still goes; routine risk-reducing sells, including the IRAs', are refused; alert once; state unchanged (owner decision 2026-10-16) |
 | Mode (`plan.md` 406-407) | `dry-run`: released orders are journalled with `send: false` and never sent | not a breach |
@@ -199,10 +199,11 @@ event's journal sequence, as ADR 0019's snapshot rule defines it
   98% (ADR 0019 amendment, 2026-10-17, reading 10):
   - `broker-holding`: the sell is above the latest broker snapshot's
     holding; or no broker snapshot is readable yet or the latest is
-    unreadable and the account is Degraded, Halted or under the kill
-    switch (a Normal account then releases the sell against the
-    journal's account book; an older readable snapshot is never used in
-    its place);
+    unreadable and the account is Degraded on another instrument. A
+    Normal account then releases the sell against the journal's account
+    book; every other state has already refused the sell under ADR 0019
+    reading 7, which is checked first, and the exit has fired. An older
+    readable snapshot is never used in its place;
   - `stale-broker-snapshot`: the latest broker snapshot is readable but
     stale: older than `MaxSnapshotAge`, or stamped later than the sell's
     journalled time (point 6); one urgent alert is raised per stale

@@ -350,9 +350,11 @@ here so that all eleven are in one place.
      (`risk.sale.withheld`, reason `stale-broker-snapshot`). Age is the
      journalled time of the event that triggers the evaluation minus the
      snapshot's recorded broker timestamp; the wall clock is never read, so
-     replay withholds exactly where live did. A negative age (the broker's
-     timestamp ahead of our journalled time, from clock skew or a malformed
-     timestamp) is stale, never fresh, with no tolerance; the withheld
+     replay withholds exactly where live did. When the triggering event is
+     a broker snapshot itself (the retry below), its age is its own
+     journalled time minus its own broker timestamp. A negative age (the
+     broker's timestamp ahead of our journalled time, from clock skew or a
+     malformed timestamp) is stale, never fresh, with no tolerance; the withheld
      payload records the skew. A snapshot is fresh only when its age is
      zero or more and not above `MaxSnapshotAge`. `MaxSnapshotAge` is an
      account configuration field, covered by the configuration hash;
@@ -486,10 +488,13 @@ here so that all eleven are in one place.
       instrument to the Degraded scope (ADR 0026 point 3, limits table); a
       Normal account becomes Degraded on that instrument. When no snapshot
       has yet been readable or the latest is unreadable, no broker-holding
-      check is possible yet: a Normal account releases the sell against
-      the journal's account book, and a Degraded or Halted account, or one
-      with the kill switch engaged, refuses it as `broker-holding`. An
-      older readable snapshot is never used in its place. When the latest
+      check is possible yet. A Normal account releases the sell against
+      the journal's account book. Only an account Degraded on another
+      instrument reaches the `broker-holding` refusal: every other state
+      (Halted, Degraded on this instrument, the kill switch engaged) has
+      already refused the sell under reading 7, by the check order below,
+      and the exit has fired. An older readable snapshot is never used in
+      its place. When the latest
       is stale, the sell is refused (`risk.order.refused`, reason
       `stale-broker-snapshot`) and the engine state is left unchanged (a
       Normal account stays Normal).
