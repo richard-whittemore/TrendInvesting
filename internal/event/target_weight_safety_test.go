@@ -146,14 +146,6 @@ func TestBrokerSnapshotValidate(t *testing.T) {
 	if err := unknown.Validate(); err != nil {
 		t.Fatalf("an order with no client ID is a valid observation (it is unknown): %v", err)
 	}
-	// Every working and pending sell counts, a cancel-pending one included;
-	// buys do not.
-	if got := unknown.WorkingSells("SPY"); got != 15 {
-		t.Errorf("working sells %d, want 15", got)
-	}
-	if got := unknown.WorkingSells("IEF"); got != 0 {
-		t.Errorf("working sells on an instrument with none: %d", got)
-	}
 	if p, ok := unknown.Position("SPY"); !ok || p.Quantity != 147 {
 		t.Errorf("position: %+v %v", p, ok)
 	}
@@ -201,6 +193,27 @@ func TestMarginAlarmValidate(t *testing.T) {
 		t.Fatalf("an urgent alarm for no reading: %v", err)
 	}
 	expectInvalid(t, "no reading but clear", stale, func(p *P) { p.Level = event.MarginAlarmClear }, "urgent")
+	// A readable net liquidation of zero or less is a reading with no ratio,
+	// and always urgent.
+	deficit := P{
+		AccountID: "joint", SnapshotID: "broker-snapshot:3", AsOf: twSession, Level: event.MarginAlarmUrgent,
+		Cause: event.MarginAlarmCauseNonPositive, ReadingSet: true, ExcessLiquidity: -500, NetLiquidation: -200,
+		LastReadingAt: twSession, LastReadingSet: true,
+		Warning: 0.4, Urgent: 0.2, StaleMinutes: 30, Detail: "net liquidation -200 is not positive",
+	}
+	if err := deficit.Validate(); err != nil {
+		t.Fatalf("an urgent alarm for a non-positive net liquidation: %v", err)
+	}
+	zero := deficit
+	zero.NetLiquidation = 0
+	if err := zero.Validate(); err != nil {
+		t.Errorf("zero net liquidation: %v", err)
+	}
+	expectInvalid(t, "non-positive but warning", deficit, func(p *P) { p.Level = event.MarginAlarmWarning }, "urgent")
+	expectInvalid(t, "non-positive without the reading", deficit, func(p *P) { p.ReadingSet, p.ExcessLiquidity, p.NetLiquidation = false, 0, 0 }, "reading")
+	expectInvalid(t, "non-positive with a positive net liquidation", deficit, func(p *P) { p.NetLiquidation = 1 }, "net liquidation")
+	expectInvalid(t, "non-positive with a ratio", deficit, func(p *P) { p.Ratio = 2.5 }, "ratio")
+	expectInvalid(t, "ratio from a non-positive net liquidation", v, func(p *P) { p.NetLiquidation, p.Ratio = 0, 0 }, "net liquidation")
 }
 
 func TestSaleWithheldValidate(t *testing.T) {
@@ -218,6 +231,7 @@ func TestSaleWithheldValidate(t *testing.T) {
 	for reason, attempt := range map[string]bool{
 		event.SaleWithheldUnreadable: true, event.SaleWithheldUnknownWorkingSell: true,
 		event.SaleWithheldNothingToSell: false, event.SaleWithheldStaleBrokerSnapshot: false, event.SaleWithheldNotPositive: false,
+		event.SaleWithheldLapsed: false,
 	} {
 		p := v
 		p.Reason = reason
@@ -225,13 +239,20 @@ func TestSaleWithheldValidate(t *testing.T) {
 			t.Errorf("%s: attempted %v, want %v", reason, p.Attempted(), attempt)
 		}
 	}
-	for _, reason := range []string{event.SaleWithheldUnreadable, event.SaleWithheldUnknownWorkingSell, event.SaleWithheldNothingToSell, event.SaleWithheldStaleBrokerSnapshot, event.SaleWithheldNotPositive} {
+	for _, reason := range []string{event.SaleWithheldUnreadable, event.SaleWithheldUnknownWorkingSell, event.SaleWithheldNothingToSell, event.SaleWithheldStaleBrokerSnapshot, event.SaleWithheldNotPositive, event.SaleWithheldLapsed} {
 		p := v
 		p.Reason = reason
 		if err := p.Validate(); err != nil {
 			t.Errorf("reason %s: %v", reason, err)
 		}
 	}
+	// Only a stale withhold opening a stale episode carries the alert.
+	alert := v
+	alert.Reason, alert.Alert = event.SaleWithheldStaleBrokerSnapshot, true
+	if err := alert.Validate(); err != nil {
+		t.Errorf("a stale withhold's alert: %v", err)
+	}
+	expectInvalid(t, "alert on another reason", v, func(p *P) { p.Alert = true }, "alert")
 }
 
 func TestSaleOrderValidate(t *testing.T) {

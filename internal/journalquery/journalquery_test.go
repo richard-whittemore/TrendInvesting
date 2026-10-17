@@ -849,3 +849,47 @@ func TestTurtleFillIsRefusedWhenAnotherAccountOnlyAppearsOnAFill(t *testing.T) {
 		}
 	}
 }
+
+// A sale back to 98% the gate withheld (risk.sale.withheld) is listed with
+// the refusals, by its reason, the lapse of a withheld sale included, and is
+// read by every report; a version this build does not know, or an invalid
+// record, is refused.
+func TestWithheldSalesAreListedWithTheRefusals(t *testing.T) {
+	d := at(time.March, 2)
+	withheld := event.SaleWithheldPayload{
+		AccountID: "A", Tag: "engine-state:A:x", ClientOrderID: "s", InstrumentID: "AAA", Kind: event.SaleKindIncident,
+		Trigger: event.SaleTriggerExit, Reason: event.SaleWithheldStaleBrokerSnapshot, Detail: "stale", SnapshotID: "broker:1", Alert: true,
+	}
+	lapsed := withheld
+	lapsed.Reason, lapsed.Detail, lapsed.Alert = event.SaleWithheldLapsed, "the exit is no longer refused", false
+	input := rec{journal.KindInput, "other.thing", 1, d, 1}
+	js := []journalquery.Journal{load(t, "j", build(t, input,
+		dec(event.SaleWithheldEventType, event.SaleWithheldSchemaVersion, d, withheld),
+		dec(event.SaleWithheldEventType, event.SaleWithheldSchemaVersion, d, lapsed),
+	))}
+	r, err := journalquery.Refusals(js, journalquery.Filter{})
+	if err != nil || len(r.Rows) != 2 {
+		t.Fatalf("refusals: %v %+v", err, r)
+	}
+	if cell(r, 0, "event") != "sale-withheld" || cell(r, 0, "reason") != event.SaleWithheldStaleBrokerSnapshot || cell(r, 0, "instrument") != "AAA" || cell(r, 0, "account") != "A" {
+		t.Errorf("withheld row: %v", r.Rows[0])
+	}
+	if cell(r, 1, "reason") != event.SaleWithheldLapsed || cell(r, 1, "detail") != "the exit is no longer refused" {
+		t.Errorf("lapsed row: %v", r.Rows[1])
+	}
+	if r, _ := journalquery.Refusals(js, journalquery.Filter{Instrument: "BBB"}); len(r.Rows) != 0 {
+		t.Errorf("an instrument filter: %v", r.Rows)
+	}
+	if o, err := journalquery.Orders(js, journalquery.Filter{}); err != nil || len(o.Rows) != 0 {
+		t.Errorf("a withheld sale is no order: %v %v", o.Rows, err)
+	}
+	for name, bad := range map[string]rec{
+		"unknown version": dec(event.SaleWithheldEventType, event.SaleWithheldSchemaVersion+1, d, withheld),
+		"invalid":         dec(event.SaleWithheldEventType, event.SaleWithheldSchemaVersion, d, event.SaleWithheldPayload{AccountID: "A"}),
+	} {
+		js := []journalquery.Journal{load(t, "j", build(t, input, bad))}
+		if _, err := journalquery.Refusals(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "record 2") {
+			t.Errorf("%s: accepted or unnamed: %v", name, err)
+		}
+	}
+}

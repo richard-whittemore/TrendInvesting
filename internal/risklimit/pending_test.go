@@ -385,3 +385,69 @@ func TestAnAccountSnapshotsFallIsFirstAnUnknownSells(t *testing.T) {
 	g.ObserveAccount(account(60, 10))
 	pendingIs(t, g, 80, "a fall of 40: 30 may be the unknown sell's, so only 10 are taken as ours; 50 pending and the unknown 30")
 }
+
+// A broker snapshot taken before a fill that a newer account snapshot already
+// showed, but journalled after it, never moves what the gate knows backwards:
+// its holding of 147 does not show the 54 the urgent sale sold, so the 54 stay
+// working against it. A sell of 117 against those 147 would otherwise pass
+// the no-short check with 93 actually held.
+func TestAnOlderBrokerSnapshotNeverRegressesAFillANewerSnapshotShowed(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	g.ObserveAccount(account(147, -1))
+	urgentSale(t, g)
+	g.ObserveAccount(account(93, 60))
+	pendingIs(t, g, 0, "the account snapshot at 16:00 shows the 54 sold")
+	observe(t, g, "broker:2", later(boosted(), 59))
+	pendingIs(t, g, 0, "an older broker snapshot does not unsell what the account snapshot showed")
+	sell := order(event.OrderSideSell, 117, 147)
+	sell.Planned.ClientOrderID = "tw-117"
+	o := check(t, g, sell)[0]
+	refusedFor(t, o, event.RefusedBrokerHolding)
+	if o.Refused.Figures.BrokerHolding != 147 || o.Refused.Figures.WorkingSells != 54 {
+		t.Errorf("against the pre-fill snapshot's 147, the 54 sold stay working: %+v", o.Refused.Figures)
+	}
+}
+
+// A holding fall taken as filled by the oldest pending sell and a later fill
+// report of the sell that actually executed are the same shares: the inferred
+// fills are a floor on what the instrument's sells filled, not an addition to
+// each sell's reports. A of 60 and B of 40 are released against 100; B fills
+// 30; the account shows 70; B's report of 30 follows. A's 60 and B's 10 are
+// still pending: 70, never 40, however many snapshots of 70 follow.
+func TestAnInferredFillAndAnotherSellsReportAreNotBothCounted(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	g.ObserveAccount(account(100, 0))
+	a := order(event.OrderSideSell, 60, 100)
+	a.Planned.ClientOrderID = "tw-a"
+	released(t, check(t, g, a)[0])
+	b := order(event.OrderSideSell, 40, 100)
+	b.Planned.ClientOrderID = "tw-b"
+	released(t, check(t, g, b)[0])
+	pendingIs(t, g, 100, "both released")
+	g.ObserveAccount(account(70, 10))
+	pendingIs(t, g, 70, "30 shown sold")
+	sellFill(t, g, "tw-b", "b1", 30)
+	pendingIs(t, g, 70, "B's report is the 30 the account snapshot showed")
+	g.ObserveAccount(account(70, 20))
+	pendingIs(t, g, 70, "a second snapshot of 70 shows nothing new")
+	observe(t, g, "broker:1", later(broker(70), 21))
+	sell := order(event.OrderSideSell, 1, 70)
+	sell.Planned.ClientOrderID = "tw-one"
+	o := check(t, g, sell)[0]
+	refusedFor(t, o, event.RefusedBrokerHolding)
+	if o.Refused.Figures.WorkingSells != 70 {
+		t.Errorf("A's 60 and B's 10 work against the broker's 70: %+v", o.Refused.Figures)
+	}
+}
+
+// An account snapshot older than a broker snapshot already seen, recorded
+// after it, shows nothing newer: its lower holding is not taken as a fill,
+// and the shares the broker snapshot cannot show stay pending.
+func TestAnOlderAccountSnapshotShowsNothingNewer(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	g.ObserveAccount(account(100, 0))
+	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+	observe(t, g, "broker:1", later(broker(100, listed("tw-sell", event.BrokerOrderWorking, 60)), 10))
+	g.ObserveAccount(account(70, 5))
+	pendingIs(t, g, 60, "a snapshot from before the broker's shows no fill")
+}

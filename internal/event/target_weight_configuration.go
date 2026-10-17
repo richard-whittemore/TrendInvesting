@@ -27,8 +27,10 @@ const TargetWeightConfigurationEventType = "strategy.target-weight.configuration
 //     is zero.
 //   - Version 3 adds the margin-cushion alarm's Excess Liquidity thresholds
 //     to the limits (ADR 0026, point 6): required for Boost's margin account,
-//     absent for an IRA, which has no margin cushion. The glide path joins in
-//     a later version, a new hash (ADR 0016).
+//     absent for an IRA, which has no margin cushion; and the execution
+//     section's MaxSnapshotAge, required for every account, from 1 minute to
+//     MaxSnapshotAgeCeiling. The glide path joins in a later version, a new
+//     hash (ADR 0016).
 const TargetWeightConfigurationSchemaVersion uint32 = 3
 
 // The strategies this schema configures: Boost on SPY for the joint margin
@@ -88,8 +90,8 @@ type TargetWeightConfigurationPayload struct {
 	// Momentum holds the momentum rule's parameters, set only for StrategyID
 	// momentum.
 	Momentum MomentumConfiguration `json:"momentum,omitzero"`
-	// Execution holds the IRA execution rules, set only for StrategyID
-	// momentum.
+	// Execution holds the IRA's execution rules and every account's
+	// MaxSnapshotAge, which is all the joint margin account sets.
 	Execution ExecutionConfiguration `json:"execution,omitzero"`
 	// Limits holds the account's hard limits (ADR 0026, point 3).
 	Limits MarginLimits `json:"limits"`
@@ -156,9 +158,16 @@ type ExecutionConfiguration struct {
 	// may be at the trigger for the sale back to 98%, or at a sell's planned
 	// time for the broker-holding check, to be read (ADR 0019: the maximum
 	// snapshot age is required configuration with no permissive default; "a
-	// stale matching snapshot is not success"). Every account sets it.
+	// stale matching snapshot is not success"). Every account sets it, from 1
+	// to MaxSnapshotAgeCeiling minutes.
 	MaxSnapshotAge int `json:"max_snapshot_age_minutes,omitzero"`
 }
+
+// MaxSnapshotAgeCeiling is the largest MaxSnapshotAge, in minutes: one
+// regular session, 09:30 to 16:00. A snapshot older than a session is never
+// fresh evidence of the holding (ADR 0019: "a stale matching snapshot is not
+// success"), and the bound keeps the minutes within what a duration holds.
+const MaxSnapshotAgeCeiling = 390
 
 // BoostConfiguration is Boost's parameters as backtested
 // (research/edge-search/boost/template.py:33-37; plan.md section 2: SPY,
@@ -240,8 +249,11 @@ func (p TargetWeightConfigurationPayload) Validate() error {
 	default:
 		errs = append(errs, fmt.Errorf("strategy id %q is not a target-weight strategy this schema configures", p.StrategyID))
 	}
-	if p.Execution.MaxSnapshotAge < 1 {
+	switch {
+	case p.Execution.MaxSnapshotAge < 1:
 		errs = append(errs, errors.New("execution max snapshot age must be at least 1 minute: every account's broker-holding check reads the broker snapshot"))
+	case p.Execution.MaxSnapshotAge > MaxSnapshotAgeCeiling:
+		errs = append(errs, fmt.Errorf("execution max snapshot age of %d minutes exceeds %d, one session", p.Execution.MaxSnapshotAge, MaxSnapshotAgeCeiling))
 	}
 	if p.AccountID == "" {
 		errs = append(errs, errors.New("account id is required"))

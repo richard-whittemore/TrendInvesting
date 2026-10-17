@@ -27,6 +27,7 @@ type item struct {
 	planned   *event.OrderPlannedPayload
 	released  *event.OrderReleasedPayload
 	refused   *event.OrderRefusedPayload
+	withheld  *event.SaleWithheldPayload
 	lifecycle *lifecycle
 	engine    *event.EngineStatePayload
 	snapshot  *event.AccountPositionsSnapshotPayload
@@ -94,6 +95,10 @@ func decode(j Journal) ([]item, error) {
 			it.refused = new(event.OrderRefusedPayload)
 			err = read(env, []uint32{1, event.OrderRefusedSchemaVersion, event.OrderRefusedSafetyVersion}, it.refused)
 			it.account = it.refused.AccountID
+		case event.SaleWithheldEventType:
+			it.withheld = new(event.SaleWithheldPayload)
+			err = read(env, []uint32{event.SaleWithheldSchemaVersion}, it.withheld)
+			it.account = it.withheld.AccountID
 		case event.OrderLifecycleEventType:
 			it.lifecycle, it.account, err = readLifecycle(env)
 		case event.InstrumentSymbolChangedEventType:

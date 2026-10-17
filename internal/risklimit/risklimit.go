@@ -94,15 +94,19 @@ type Gate struct {
 	// firstBroker is when the run's first broker snapshot was taken.
 	firstBroker time.Time
 	// maxSnapshotAge is the oldest the latest broker snapshot may be at a
-	// trigger or a sell's planned time; staleAlerted is the snapshot whose
-	// staleness has raised the urgent alert. urgentRetry and exitRetry (the
-	// exit's instrument) are set while a sale the urgent alarm or Boost's
-	// exit fired is withheld from a snapshot that could not size it.
+	// trigger or a sell's planned time; staleOpen is set while the account's
+	// stale episode, whose first stale refusal or withhold raised the urgent
+	// alert, is open. urgentRetry and exitRetry (the exit's instrument) are
+	// set while a sale the urgent alarm or Boost's exit fired is withheld
+	// from a snapshot that could not size it, urgentWithheld and
+	// exitWithheld holding that withhold for its lapse.
 	maxSnapshotAge   time.Duration
-	staleAlerted     string
+	staleOpen        bool
 	urgentRetry      bool
 	urgentInstrument string
+	urgentWithheld   *event.SaleWithheldPayload
 	exitRetry        string
+	exitWithheld     *event.SaleWithheldPayload
 
 	alarmLevel     string
 	alarmID        string
@@ -124,6 +128,9 @@ type Gate struct {
 	// names, and fills every execution reported, by fill ID.
 	sells     map[string]*trackedSell
 	sellOrder []string
+	// books holds what snapshots show of each instrument's released sells
+	// together.
+	books map[string]*sellBook
 	// holding is the latest snapshot that read the holdings, which a later
 	// snapshot's fall in the holding is measured from.
 	holding *holdingSeen
@@ -185,7 +192,7 @@ func newGate(accountID string, limits event.MarginLimits, mode string, maxSnapsh
 		state: StateNormal, alarmLevel: event.MarginAlarmClear, maxSnapshotAge: maxSnapshotAge,
 		released: make(map[string]bool), saleTags: make(map[string]bool),
 		attempted: make(map[string]bool), pending: make(map[string]bool),
-		sells: make(map[string]*trackedSell), orders: make(map[string]*releasedOrder),
+		sells: make(map[string]*trackedSell), orders: make(map[string]*releasedOrder), books: make(map[string]*sellBook),
 		fills: make(map[string]event.TargetWeightFillPayload),
 	}, nil
 }
@@ -264,8 +271,11 @@ func (g *Gate) RestoreState(id string, p event.EngineStatePayload, schemaVersion
 //     quantity);
 //   - a sell checked against a readable latest broker snapshot older at
 //     book.At than MaxSnapshotAge, or taken after it, is refused
-//     (stale-broker-snapshot) and changes no state; the first such refusal
-//     per snapshot raises the urgent alert (staleFor);
+//     (stale-broker-snapshot) and changes no state; the first stale
+//     refusal or withhold of the account's stale episode raises its one
+//     urgent alert, and a check, a broker snapshot journalled or a sale
+//     decided whose latest snapshot is fresh ends the episode (staleFor,
+//     openStale);
 //   - a sell beyond the latest broker snapshot's holding net of every
 //     working or pending sell is a breach, refused and not resized: the
 //     planner, not the gate, chooses quantities (ADR 0019, amendment of
@@ -322,6 +332,9 @@ func (g *Gate) Check(book Book, plan []Order) ([]Outcome, error) {
 	if book.At.IsZero() {
 		return nil, errors.New("risklimit: a check needs its orders' planned time, to bound the broker snapshot's age")
 	}
+	// A check whose latest snapshot is fresh at its trigger ends the stale
+	// episode (ADR 0019, amendment of 2026-10-17, reading 10).
+	g.freshCheck(book.At)
 	running := &book
 	running.Holdings = maps.Clone(book.Holdings)
 	running.Prices = maps.Clone(book.Prices)
@@ -393,9 +406,7 @@ func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 	// never stops Boost's exit from firing the sale back to 98%.
 	if detail := g.staleFor(p, book.At); detail != "" {
 		out := Outcome{Refused: g.refusal(o, f, event.RefusedStaleBrokerSnapshot, detail)}
-		if g.staleAlerted != g.brokerID {
-			g.staleAlerted, out.Refused.Alert = g.brokerID, true
-		}
+		out.Refused.Alert = g.openStale()
 		return out
 	}
 	if reason, detail := g.breach(o, f, counted, book, unvalued); reason != "" {

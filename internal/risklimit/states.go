@@ -20,6 +20,10 @@ type Observation struct {
 	// RetryExit is set when a sale Boost's exit fired, withheld from a
 	// snapshot that could not size it, is decided again from this one.
 	RetryExit bool
+	// Lapsed holds a risk.sale.withheld with reason lapsed for each sale,
+	// withheld from a snapshot that could not size it, whose trigger this
+	// snapshot ended (Lapse).
+	Lapsed []event.SaleWithheldPayload
 }
 
 // riskReducing reports whether p is risk-reducing (ADR 0026, point 4): a sell
@@ -89,16 +93,20 @@ func (g *Gate) SetKillSwitch(id string, p event.KillSwitchPayload) error {
 
 // ObserveBroker applies a recorded account.broker.snapshot with envelope ID
 // id: it resolves what it shows of each released sell (resolve), becomes the
-// latest broker observation, and for a margin account the
-// margin-cushion alarm is evaluated (plan.md section 5; ADR 0026, point 6):
-// Excess Liquidity over net liquidation below the warning threshold warns,
-// below the urgent threshold is urgent, and a snapshot without that reading,
-// while the market is open, is urgent once there has been no reading for the
-// stale period (a net liquidation that is not positive gives no ratio, so no
-// reading): since the last reading, or, with none yet, since the run's
-// first broker snapshot, which starts the clock. Without a reading and short
-// of that, the level stands. An alarm is returned only when its level
-// changes.
+// latest broker observation, and ends the account's stale episode, being
+// fresh by its own time (ADR 0019, amendment of 2026-10-17, reading 10). For
+// a margin account the margin-cushion alarm is evaluated (plan.md section 5;
+// ADR 0026, point 6): Excess Liquidity over net liquidation below the warning
+// threshold warns, below the urgent threshold is urgent, and a readable net
+// liquidation of zero or less, below every threshold though it gives no
+// ratio, is urgent at once. A snapshot without that reading, while the
+// market is open, is urgent once there has been no reading for the stale
+// period: since the last reading, or, with none yet, since the run's first
+// broker snapshot, which starts the clock. Without a reading and short of
+// that, the level stands. An alarm is returned only when its level changes.
+// A sale withheld from a snapshot that could not size it lapses when what
+// fired it is no longer in force: the account no longer refuses Boost's
+// exit, or the alarm is no longer urgent.
 func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observation, error) {
 	if err := s.Validate(); err != nil {
 		return Observation{}, fmt.Errorf("risklimit: %w", err)
@@ -117,12 +125,14 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 		g.firstBroker = s.AsOf
 	}
 	g.broker, g.brokerID = &s, id
+	g.staleOpen = false
 	if g.ira {
 		return Observation{}, nil
 	}
+	var lapsed []event.SaleWithheldPayload
 	retryExit := g.exitRetry != "" && g.refusesExit(g.exitRetry) && sizable(s, g.exitRetry)
 	if g.exitRetry != "" && !g.refusesExit(g.exitRetry) {
-		g.exitRetry = ""
+		lapsed = append(lapsed, g.lapseExit(fmt.Sprintf("broker snapshot %s finds the account no longer refusing the exit on %s", id, g.exitRetry)))
 	}
 	alarm := event.MarginAlarmPayload{
 		AccountID: g.accountID, SnapshotID: id, AsOf: s.AsOf,
@@ -130,7 +140,14 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 	}
 	stale := time.Duration(g.limits.ExcessLiquidityStaleMinutes) * time.Minute
 	switch {
-	case s.Readable(event.BrokerComponentExcessLiquidity) && s.Readable(event.BrokerComponentNetLiquidation) && s.NetLiquidation > 0:
+	case s.Readable(event.BrokerComponentExcessLiquidity) && s.Readable(event.BrokerComponentNetLiquidation) && !(s.NetLiquidation > 0):
+		// A reading, and the most alarming: no ratio, but below every
+		// threshold, so urgent at once rather than awaited as no reading.
+		g.lastReading, g.lastReadingSet = s.AsOf, true
+		alarm.Cause, alarm.ReadingSet, alarm.Level = event.MarginAlarmCauseNonPositive, true, event.MarginAlarmUrgent
+		alarm.ExcessLiquidity, alarm.NetLiquidation = s.ExcessLiquidity, s.NetLiquidation
+		alarm.Detail = fmt.Sprintf("net liquidation %v is not positive (excess liquidity %v): below every threshold", s.NetLiquidation, s.ExcessLiquidity)
+	case s.Readable(event.BrokerComponentExcessLiquidity) && s.Readable(event.BrokerComponentNetLiquidation):
 		g.lastReading, g.lastReadingSet = s.AsOf, true
 		alarm.Cause, alarm.ReadingSet = event.MarginAlarmCauseRatio, true
 		alarm.ExcessLiquidity, alarm.NetLiquidation = s.ExcessLiquidity, s.NetLiquidation
@@ -152,7 +169,7 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 			alarm.Detail = fmt.Sprintf("no excess liquidity reading in the %d minutes since the run's first broker snapshot, while the market is open", g.limits.ExcessLiquidityStaleMinutes)
 		}
 	default:
-		return Observation{RetryExit: retryExit}, nil
+		return Observation{RetryExit: retryExit, Lapsed: lapsed}, nil
 	}
 	alarm.LastReadingAt, alarm.LastReadingSet = g.lastReading, g.lastReadingSet
 	if alarm.Level == g.alarmLevel {
@@ -160,12 +177,20 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 		// could not size it: the producing condition is still in force, so
 		// a readable, positive snapshot decides the sale again.
 		urgent := alarm.Level == event.MarginAlarmUrgent && g.urgentRetry && g.urgentInstrument != "" && sizable(s, g.urgentInstrument)
-		return Observation{Urgent: urgent, RetryExit: retryExit && !urgent}, nil
+		return Observation{Urgent: urgent, RetryExit: retryExit && !urgent, Lapsed: lapsed}, nil
 	}
-	g.urgentRetry = false
+	if g.urgentRetry {
+		// The level changed, so the alarm that fired the withheld sale is no
+		// longer urgent: a new urgent alarm is a new sale.
+		w := g.urgentWithheld
+		g.urgentRetry, g.urgentWithheld = false, nil
+		if alarm.Level != event.MarginAlarmUrgent && w != nil {
+			lapsed = append(lapsed, lapse(*w, fmt.Sprintf("broker snapshot %s finds the margin alarm %s, no longer urgent", id, alarm.Level)))
+		}
+	}
 	alarmID := "margin-alarm:" + g.accountID + ":" + id
 	g.alarmLevel = alarm.Level
-	obs := Observation{Alarm: &alarm, AlarmID: alarmID, RetryExit: retryExit}
+	obs := Observation{Alarm: &alarm, AlarmID: alarmID, RetryExit: retryExit, Lapsed: lapsed}
 	if alarm.Level == event.MarginAlarmUrgent {
 		g.alarmID = alarmID
 		g.saleTags[alarmID] = true
@@ -195,9 +220,65 @@ func sizable(s event.BrokerSnapshotPayload, instrumentID string) bool {
 }
 
 // LapseExitSale ends the retry of a sale Boost's exit fired: the account's
-// next strategy.targets.decided no longer plans the sell that fired it. The
-// attempt stays unspent.
-func (g *Gate) LapseExitSale() { g.exitRetry = "" }
+// next strategy.targets.decided, decided, no longer plans the sell that
+// fired it. It returns the risk.sale.withheld with reason lapsed to journal
+// when such a sale was still withheld, else nil. The attempt stays unspent
+// (ADR 0019, amendment of 2026-10-17, reading 1, "Lapse").
+func (g *Gate) LapseExitSale() *event.SaleWithheldPayload {
+	if g.exitRetry == "" {
+		return nil
+	}
+	l := g.lapseExit("the decision no longer plans the sell that fired the sale")
+	return &l
+}
+
+// lapseExit ends the exit's retry for why, returning its lapse.
+func (g *Gate) lapseExit(why string) event.SaleWithheldPayload {
+	w := *g.exitWithheld
+	g.exitRetry, g.exitWithheld = "", nil
+	return lapse(w, why)
+}
+
+// lapse is withheld sale w's risk.sale.withheld with reason lapsed.
+func lapse(w event.SaleWithheldPayload, why string) event.SaleWithheldPayload {
+	w.Reason, w.Alert = event.SaleWithheldLapsed, false
+	w.Detail = why + "; the sale is not decided again and its attempt stays unspent"
+	return w
+}
+
+// StaleEpisodeOpen reports whether the account's stale episode is open: a
+// stale-broker-snapshot refusal or withhold raised its one urgent alert, and
+// no fresh broker snapshot or fresh gate check has ended it since.
+func (g *Gate) StaleEpisodeOpen() bool { return g.staleOpen }
+
+// RestoreStaleEpisode restores whether an earlier run left the account's
+// stale episode open (ADR 0026, point 5: "Whether a stale-snapshot episode is
+// open for the account"), so a restart within it does not alert again. Like
+// RestoreSaleAttempt it is an unwired seam: a crash resumes by replaying the
+// durable log's inputs, which rebuilds the episode identically (ADR 0027,
+// section 6).
+func (g *Gate) RestoreStaleEpisode(open bool) { g.staleOpen = open }
+
+// freshCheck applies a gate check of the latest broker snapshot at at, the
+// time the check's trigger was journalled, to the account's stale episode: a
+// readable snapshot fresh at at ends it. A replay applies inputs in journal
+// sequence, so episodes are ordered by their triggering events' sequence.
+func (g *Gate) freshCheck(at time.Time) {
+	s := g.broker
+	if s != nil && s.Readable(event.BrokerComponentPositions) && s.Readable(event.BrokerComponentOpenOrders) &&
+		orderplan.StaleDetail(g.brokerID, s.AsOf, at, g.maxSnapshotAge) == "" {
+		g.staleOpen = false
+	}
+}
+
+// openStale records a stale-broker-snapshot refusal or withhold: it opens
+// the account's stale episode when none is open, and reports whether this
+// record carries the episode's one urgent alert.
+func (g *Gate) openStale() bool {
+	alert := !g.staleOpen
+	g.staleOpen = true
+	return alert
+}
 
 // Sale decides whether a sale back to target (the unlevered weight, 98%) of
 // net liquidation goes for instrumentID now that trigger has fired, and plans
@@ -251,10 +332,14 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 	if g.saleAttempted(tag, instrumentID) {
 		return orderplan.Sale{}, false, nil
 	}
+	// Sized net of every sell the gate counts against the latest broker
+	// snapshot, by the broker-holding check's own rule, so a released sell
+	// that snapshot does not list yet is never sold again.
+	_, working, _ := g.brokerHolding(instrumentID)
 	sale, err := orderplan.PlanSale(orderplan.SaleInput{
 		AccountID: g.accountID, Tag: tag, InstrumentID: instrumentID, Kind: kind, Trigger: trigger,
 		Target: target, PriceBand: band, SnapshotID: g.brokerID, Snapshot: g.broker, Recognised: g.released,
-		At: at, MaxSnapshotAge: g.maxSnapshotAge,
+		WorkingSells: working, At: at, MaxSnapshotAge: g.maxSnapshotAge,
 	})
 	if err != nil {
 		return orderplan.Sale{}, false, fmt.Errorf("risklimit: %w", err)
@@ -266,15 +351,26 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 	case sale.Withheld.Attempted():
 		g.attempted[sale.Withheld.ClientOrderID] = true
 	}
+	// The decision is a gate check of the latest snapshot: fresh, it ends
+	// the stale episode; a stale withhold opening one carries its alert.
+	g.freshCheck(at)
+	if sale.Withheld != nil && sale.Withheld.Reason == event.SaleWithheldStaleBrokerSnapshot {
+		sale.Withheld.Alert = g.openStale()
+	}
 	// A sale withheld from a snapshot that could not size it is decided
 	// again on the next readable, positive snapshot while what fired it is
 	// in force: the alarm still urgent, or the exit still refused.
 	retry := sale.Withheld != nil &&
 		(sale.Withheld.Reason == event.SaleWithheldStaleBrokerSnapshot || sale.Withheld.Reason == event.SaleWithheldNotPositive)
+	var withheld *event.SaleWithheldPayload
+	if retry {
+		w := *sale.Withheld
+		withheld = &w
+	}
 	if trigger == event.SaleTriggerMarginUrgent {
-		g.urgentRetry, g.urgentInstrument = retry, instrumentID
-	} else if g.exitRetry = ""; retry {
-		g.exitRetry = instrumentID
+		g.urgentRetry, g.urgentInstrument, g.urgentWithheld = retry, instrumentID, withheld
+	} else if g.exitRetry, g.exitWithheld = "", nil; retry {
+		g.exitRetry, g.exitWithheld = instrumentID, withheld
 	}
 	return sale, true, nil
 }

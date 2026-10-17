@@ -78,17 +78,42 @@ func TestSaleIsSizedNetOfAWorkingSell(t *testing.T) {
 	}, {
 		BrokerOrderID: "ib-2", InstrumentID: "SPY", Side: event.OrderSideBuy, Status: event.BrokerOrderWorking, RemainingQuantity: 9,
 	}}
-	got := sale(t, saleInput(s))
-	// The cancel-pending sell may still execute, so it counts; the buy does not.
-	// To target 54, within holding 127, never below 34: sell 34.
+	in := saleInput(s)
+	in.WorkingSells = 20
+	got := sale(t, in)
+	// The cancel-pending sell may still execute, so the caller counts it; the
+	// buy is no sell. To target 54, within holding 127, never below 34: sell 34.
 	f := got.Order.Sale
 	if f.WorkingSells != 20 || f.ToTarget != 54 || f.WithinHolding != 127 || f.NeverBelow != 34 || got.Order.Quantity != 34 {
 		t.Fatalf("net of a working sell: %+v quantity %d", f, got.Order.Quantity)
 	}
 	// Working sells that cover more than the holding above 98% leave nothing.
 	s.OpenOrders[0].RemainingQuantity = 60
-	if w := sale(t, saleInput(s)).Withheld; w.Reason != event.SaleWithheldNothingToSell {
+	in.WorkingSells = 60
+	if w := sale(t, in).Withheld; w.Reason != event.SaleWithheldNothingToSell {
 		t.Fatalf("withheld %+v", w)
+	}
+}
+
+// TestSaleIsSizedNetOfEveryPendingSellTheCallerCounts: the sale nets the
+// working and pending sells its caller counts against the snapshot by the
+// gate's one pending rule, including a released sell the snapshot does not
+// list yet, never only the sells the snapshot lists. Boost's exit of 54,
+// released and not yet listed, already sells 147 down to the 93 kept.
+func TestSaleIsSizedNetOfEveryPendingSellTheCallerCounts(t *testing.T) {
+	in := saleInput(workedExample())
+	in.WorkingSells = 54
+	got := sale(t, in)
+	if got.Withheld == nil || got.Withheld.Reason != event.SaleWithheldNothingToSell {
+		t.Fatalf("the unlisted exit of 54 leaves nothing to sell: %+v", got)
+	}
+	in.WorkingSells = 20
+	if o := sale(t, in).Order; o == nil || o.Quantity != 34 || o.Sale.WorkingSells != 20 {
+		t.Fatalf("net of 20 pending: %+v", o)
+	}
+	in.WorkingSells = -1
+	if _, err := orderplan.PlanSale(in); err == nil {
+		t.Error("negative working sells accepted")
 	}
 }
 
@@ -120,6 +145,7 @@ func TestNoSaleWithAnUnknownWorkingSell(t *testing.T) {
 	s.OpenOrders[0].Side = event.OrderSideSell
 	in := saleInput(s)
 	in.Kind, in.Trigger, in.Tag = event.SaleKindUrgent, event.SaleTriggerMarginUrgent, "margin-alarm:joint:broker-snapshot:1"
+	in.WorkingSells = 1
 	if got := sale(t, in); got.Order == nil || got.Order.Quantity != 53 {
 		t.Fatalf("urgent sale: %+v", got)
 	}

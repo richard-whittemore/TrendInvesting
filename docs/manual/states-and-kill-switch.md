@@ -92,6 +92,9 @@ ceil(0.98 × net liquidation ÷ mark) shares. It sells the smallest of three
 amounts: what reaches 98%; your holding minus every working sell (so it can
 never sell shares you do not have); and that minus the shares to keep (so,
 together with a sell of ours still working, it never takes you below 98%).
+"Every working sell" is every sell the program counts as still being sold,
+by the rule below, not only the ones that IBKR snapshot lists: a sell it
+released a moment ago that IBKR does not list yet still counts.
 Boost's own exit is sized from the account snapshot, and is reduced the same
 way, so an urgent sale and the exit in one session never sell the same shares
 twice. Which sells count is set by one rule, below.
@@ -109,13 +112,26 @@ shares known filled. One rule decides what is known filled:
   remains.
 - A fall in your holding, seen by an account snapshot or an IBKR snapshot
   against the snapshot before it, that the fills already known do not
-  explain counts as filled, oldest sell first. An account snapshot first
-  sets aside the shares of any unknown sell IBKR listed, since that order
-  may be what sold.
+  explain counts as filled by the sells still pending on that fund. An
+  account snapshot first sets aside the shares of any unknown sell IBKR
+  listed, since that order may be what sold. A sale you make by hand while
+  one of ours is working looks the same, so it is taken as ours until IBKR
+  lists ours at its true remaining quantity.
+- A fall counts once for the fund's sells together, never once per sell. If
+  two sells are working, A for 60 and B for 40 of 100, and the account
+  snapshot shows 70, the 30 are counted filled; when B's fill report for 30
+  arrives, it is the same 30, so 70 shares (A's 60 and B's 10) are still
+  being sold, not 40.
 - A fill learned in more than one way is counted once. If the account
   snapshot already showed the 54 shares of the sale sold (147 down to 93),
   the IBKR snapshot and the fill report that follow add nothing, and the
   next exit is not cut down by them a second time.
+- A snapshot taken earlier than one already seen, but recorded after it
+  (account and IBKR snapshots each keep their own order), shows nothing
+  newer. An IBKR snapshot from 15:59:55 that still shows 147, recorded after
+  the 16:00 account snapshot that showed the 54 sold, is still checked with
+  the 54 counted as working against its 147, so a sell of 117 is refused
+  rather than sold short.
 
 Only a cancellation or refusal report ends what has not filled. A sell IBKR
 no longer lists, with your holding unchanged, stays pending: it may simply
@@ -161,7 +177,10 @@ readable and positive, while what fired it is still in force:
   or under the kill switch);
 - for the alarm, while it stays urgent.
 
-Otherwise the withheld sale lapses, its attempt unspent. The incident or the
+Otherwise the withheld sale lapses, its attempt unspent, and the program
+records one more `risk.sale.withheld`, with reason `lapsed`, so the journal
+shows it will not be decided again. A lapse goes in the daily summary, not
+an urgent alert: what needed the sale has ended. The incident or the
 engagement only decides the tag, picked afresh each time. The sale is always
 sized from the latest snapshot, never an older one. A snapshot both stale and
 not positive is withheld as `stale-broker-snapshot`: freshness is checked
@@ -170,7 +189,8 @@ first.
 **`MaxSnapshotAge`.** Every account's configuration sets it, the IRAs'
 included, in minutes, in the execution section
 (`execution.max_snapshot_age_minutes`). It has no default: a configuration
-without it, or with zero or less, is rejected. For the sale, the age is the
+without it, with zero or less, or with more than 390 (one regular session,
+09:30 to 16:00) is rejected. For the sale, the age is the
 triggering input's journalled time (the session's close for the exit, the
 snapshot's own time for the urgent alarm) minus the IBKR snapshot's time;
 for any other sell, it is measured from that sell's `strategy.order.planned`
@@ -179,10 +199,18 @@ record says by how much. The wall clock is never read.
 
 For any other sell, the IBKR snapshot gates only the broker-holding check. A
 sell checked against a stale latest snapshot is refused
-(`stale-broker-snapshot`) with no state change, and the first such refusal
-for that snapshot raises the urgent alert (the refusal's `alert` flag); a
-later snapshot is a new condition. The sell is planned again at the next
-decision. Net liquidation and the mark are read only by the sale's shares to
+(`stale-broker-snapshot`) with no state change. The sell is planned again at
+the next decision.
+
+**One alert per stale episode.** The first stale refusal or stale withhold
+for the account opens a *stale episode* and carries its one urgent alert
+(the record's `alert` flag). Further stale refusals and withholds in the
+episode are recorded without it. The episode ends at the first IBKR snapshot
+recorded (fresh by its own time) or the first check, refusal, withhold or
+release whose latest snapshot is fresh, whichever comes first. A later
+outage opens a new episode and alerts again, even on the same snapshot.
+Episodes follow the order the inputs were recorded in, so a replay or a
+restart rebuilds them exactly and does not resend the alert. Net liquidation and the mark are read only by the sale's shares to
 keep, so they never refuse another sell. The state and kill-switch refusals
 come first, so a stale snapshot never stops Boost's exit from firing the
 sale.
@@ -200,7 +228,10 @@ account's Excess Liquidity as a share of net liquidation:
 
 With no reading yet in a run, the 30 minutes run from the run's first IBKR
 snapshot, so a run started mid-session is not urgent at once. A net
-liquidation that is not positive gives no ratio, so it counts as no reading.
+liquidation of zero or less, with Excess Liquidity readable, is a reading,
+and the worst one: there is no ratio, but it is below every threshold, so
+the alarm is urgent at once, market open or not (cause
+`non-positive-net-liquidation`).
 
 The thresholds are in the configuration (version 3 of
 `strategy.target-weight.configuration`). Only the margin account has them: an
@@ -212,8 +243,10 @@ alarm. A change of level is recorded as
 
 `journal-query refusals` lists each refusal with its reason and each state
 change. The new reasons are `kill-switch`, `broker-holding`,
-`sale-attempted` and `stale-broker-snapshot`; a withheld sale may also give
-`stale-broker-snapshot` or `non-positive-broker-values`.
+`sale-attempted` and `stale-broker-snapshot`. Each withheld sale is listed
+too (event `sale-withheld`) with its reason: `broker-values-unreadable`,
+`unknown-working-sell`, `nothing-to-sell`, `stale-broker-snapshot`,
+`non-positive-broker-values` or `lapsed`.
 A sell exempt as risk-reducing records `risk_reducing`, with or without an
 IBKR snapshot, so the journal shows why its mark, band and size were not
 checked. A planned sale is version 2 of `strategy.order.planned`.
@@ -227,8 +260,8 @@ account-wide exposure and the IRA's cash check). The tool reads every version. S
   and the sale back to 98% is withheld. Nothing is guessed. Sell by hand if the
   alert asks you to.
 - **The broker snapshot is old.** The sale is withheld and other sells are
-  refused, with no state change and one urgent alert per snapshot; the next
-  fresh snapshot decides again.
+  refused, with no state change and one urgent alert per stale episode; the
+  next fresh snapshot ends the episode and decides again.
 - **The broker snapshot reports a net liquidation or mark of zero or less.**
   The sale is withheld, with no state change; the next positive snapshot
   decides it again. Other sells are not affected.

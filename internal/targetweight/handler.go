@@ -392,7 +392,9 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	b.fail(err)
 	if !ok || order.Side != event.OrderSideSell {
 		// The decision no longer plans the sell that fired a withheld sale.
-		h.gate.LapseExitSale()
+		if l := h.gate.LapseExitSale(); l != nil {
+			b.lapsed(*l)
+		}
 	}
 	if !ok {
 		return b.result()
@@ -461,6 +463,9 @@ func (h *Handler) applyBrokerSnapshot(in event.Envelope) ([]event.Envelope, erro
 	b := &emissions{h: h, in: in, at: p.AsOf}
 	if obs.Alarm != nil {
 		b.add(obs.AlarmID, event.MarginAlarmEventType, event.MarginAlarmSchemaVersion, *obs.Alarm)
+	}
+	for _, l := range obs.Lapsed {
+		b.lapsed(l)
 	}
 	if obs.Urgent {
 		b.sale(event.SaleTriggerMarginUrgent)
@@ -584,6 +589,12 @@ func (b *emissions) order(o risklimit.Order, book risklimit.Book) risklimit.Outc
 		b.add(out.StateID, event.EngineStateEventType, out.StateSchemaVersion, *out.State)
 	}
 	return out
+}
+
+// lapsed journals the lapse of a withheld sale whose trigger the input ended,
+// named for that input.
+func (b *emissions) lapsed(l event.SaleWithheldPayload) {
+	b.add("sale-lapsed:"+l.ClientOrderID+":"+b.in.ID, event.SaleWithheldEventType, event.SaleWithheldSchemaVersion, l)
 }
 
 // sale asks the gate for the sale back to the unlevered weight after

@@ -15,22 +15,32 @@ import (
 //
 //	pending = released - filled, or 0 once a lifecycle report ends it
 //
-// Filled is the most that any recorded fact shows executed: the fill
-// reports; a broker snapshot that lists the sell working at a remaining
-// quantity, which has filled the rest; and a fall in the holding that the
-// fills already known do not explain, seen by an account or a broker
-// snapshot against the snapshot that read the holding before it, which is
-// taken as filled by the pending sells, oldest first. Only a canceled or
-// invalid lifecycle report ends what has not filled. A snapshot that no
-// longer lists a sell never shows it cancelled: it may not have reached
-// IBKR yet, and ADR 0019 treats an unexplained cancellation as a
-// discrepancy, never an inference. A cancel-pending sell may still fill, so
-// it stays pending. So pending is never below zero and never above the
-// release.
+// What is known of each sell's fills is the most that its own facts show:
+// its fill reports, and a broker snapshot that lists it working at a
+// remaining quantity, which has filled the rest. A fall in an instrument's
+// holding that the fills already known do not explain, seen by an account or
+// a broker snapshot against the snapshot that read the holding before it, is
+// taken as filled by the instrument's pending sells. It is a floor on what
+// they filled together, not an addition to any one sell's reports: a fill
+// report on any sell of the instrument counts toward it, so the same shares
+// are never counted filled twice. A listing in a snapshot not older than the
+// latest holding seen shows its sells exactly, so the floor then holds only
+// what the sells it does not list can have filled. Only a canceled or invalid
+// lifecycle report ends what has not filled. A snapshot that no longer lists
+// a sell never shows it cancelled: it may not have reached IBKR yet, and ADR
+// 0019 treats an unexplained cancellation as a discrepancy, never an
+// inference. A cancel-pending sell may still fill, so it stays pending. So
+// pending is never below zero and never above the release.
 //
-// Every snapshot's holding shows the shares filled when it was taken
-// (atAccount, atBroker); a fill learned later that a snapshot's own holding
-// fall already showed is the same fill, so it is counted once.
+// Every snapshot's holding shows the shares filled when it was taken, and
+// the gate records, per instrument, how many it knew filled when it applied
+// the latest account snapshot, broker snapshot and snapshot of either kind
+// that read the holding. A fill learned later that a snapshot's own holding
+// fall already showed is the same fill, so it is counted once. A snapshot
+// older than the latest holding seen, applied after it because account and
+// broker snapshots are ordered only within their own stream, shows nothing
+// newer: it advances none of these, so a fill a newer snapshot showed is
+// never taken as already in an older snapshot's holding.
 
 // releasedOrder is a released order and the shares fill reports executed.
 type releasedOrder struct {
@@ -38,40 +48,30 @@ type releasedOrder struct {
 	reported int64
 }
 
-// trackedSell is one released sell and what recorded broker facts show of it.
+// trackedSell is one released sell and what its own recorded facts show.
 type trackedSell struct {
 	instrumentID string
 	released     int64
-	// reported is what fill reports executed, and inferred what snapshots
-	// show filled; ended is set by a canceled or invalid lifecycle report.
-	reported, inferred int64
-	ended              bool
-	// atAccount, atBroker and atHolding are filled as of the latest account
-	// snapshot, broker snapshot and snapshot of either kind that read the
-	// holding: a share filled since is not in that snapshot's holding.
+	// reported is what fill reports executed, listed the most a broker
+	// listing showed filled, and frozen what was counted filled when a
+	// canceled or invalid lifecycle report ended it.
+	reported, listed, frozen int64
+	ended                    bool
+}
+
+// known is the most the sell's own facts show filled.
+func (s *trackedSell) known() int64 { return max(s.reported, s.listed, s.frozen) }
+
+// sellBook is what snapshots show of one instrument's released sells
+// together.
+type sellBook struct {
+	// floor is the fewest shares the holding's falls show the sells filled.
+	floor int64
+	// atAccount, atBroker and atHolding are the shares known filled when the
+	// latest account snapshot, broker snapshot and snapshot of either kind
+	// that read the holding were applied: a share filled since is not in
+	// that snapshot's holding.
 	atAccount, atBroker, atHolding int64
-}
-
-func (s *trackedSell) filled() int64 { return max(s.reported, s.inferred) }
-
-func (s *trackedSell) pending() int64 {
-	if s.ended {
-		return 0
-	}
-	return s.released - s.filled()
-}
-
-// notShown is the shares of the sell a snapshot taken when it had filled
-// shown cannot show: those still pending and those filled since.
-func (s *trackedSell) notShown(shown int64) int64 { return s.pending() + s.filled() - shown }
-
-// infer records that snapshots show filled shares executed. A listing
-// replaces an earlier inference, so the views of earlier snapshots are kept
-// within what is now known filled.
-func (s *trackedSell) infer(filled int64) {
-	s.inferred = min(max(filled, 0), s.released)
-	f := s.filled()
-	s.atAccount, s.atBroker, s.atHolding = min(s.atAccount, f), min(s.atBroker, f), min(s.atHolding, f)
 }
 
 // holdingSeen is the latest snapshot, account or broker, that read the
@@ -81,37 +81,99 @@ type holdingSeen struct {
 	quantity map[string]int64
 }
 
+// sellsOf returns instrumentID's released sells, in release order.
+func (g *Gate) sellsOf(instrumentID string) []*trackedSell {
+	var out []*trackedSell
+	for _, id := range g.sellOrder {
+		if s := g.sells[id]; s.instrumentID == instrumentID {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// book returns instrumentID's sell book, creating it empty.
+func (g *Gate) book(instrumentID string) *sellBook {
+	b, ok := g.books[instrumentID]
+	if !ok {
+		b = &sellBook{}
+		g.books[instrumentID] = b
+	}
+	return b
+}
+
+// shares returns what is known of instrumentID's released sells together:
+// the shares filled, the most of the floor the open sells can hold, and the
+// shares still pending. extra, the floor beyond what the sells' own facts
+// show, is spread over the open sells oldest first, each up to its unfilled
+// shares (spread, which also reports each sell's part).
+func (g *Gate) shares(instrumentID string) (filled, pending int64) {
+	known, extra, open := g.spread(instrumentID, nil)
+	return known + extra, open - extra
+}
+
+// spread returns the shares the sells' own facts show filled, the part of
+// the floor beyond them that the open sells hold, and the open sells'
+// unfilled shares; part, when set, receives each open sell's part of it.
+func (g *Gate) spread(instrumentID string, part func(*trackedSell, int64)) (known, extra, open int64) {
+	sells := g.sellsOf(instrumentID)
+	for _, s := range sells {
+		known += s.known()
+		if !s.ended {
+			open += s.released - s.known()
+		}
+	}
+	left := min(max(g.book(instrumentID).floor-known, 0), open)
+	extra = left
+	for _, s := range sells {
+		if s.ended || left == 0 {
+			continue
+		}
+		take := min(left, s.released-s.known())
+		left -= take
+		if part != nil {
+			part(s, take)
+		}
+	}
+	return known, extra, open
+}
+
 // PendingSells returns the shares of instrumentID already being sold that
 // the latest account snapshot cannot show, for a planner sizing a new sell
-// from that snapshot: each released sell's pending shares and those it
+// from that snapshot: its released sells' pending shares and those they
 // filled since that snapshot, and every other working or pending sell the
 // latest broker snapshot reports, when it read its open orders.
 func (g *Gate) PendingSells(instrumentID string) int64 {
-	return g.unshownSells(instrumentID, func(s *trackedSell) int64 { return s.atAccount })
+	return g.unshownSells(instrumentID, g.book(instrumentID).atAccount)
 }
 
 // brokerHolding returns the latest broker snapshot's holding of instrumentID
 // and the shares already being sold that it cannot show, by the same rule as
-// PendingSells, when the snapshot read both positions and open orders.
+// PendingSells, when the snapshot read both positions and open orders. It is
+// what the broker-holding check and the sale back to 98% net.
 func (g *Gate) brokerHolding(instrumentID string) (holding, working int64, ok bool) {
 	s := g.broker
 	if s == nil || !s.Readable(event.BrokerComponentPositions) || !s.Readable(event.BrokerComponentOpenOrders) {
 		return 0, 0, false
 	}
 	position, _ := s.Position(instrumentID)
-	return position.Quantity, g.unshownSells(instrumentID, func(t *trackedSell) int64 { return t.atBroker }), true
+	return position.Quantity, g.unshownSells(instrumentID, g.book(instrumentID).atBroker), true
 }
 
 // unshownSells is the one rule PendingSells and the broker-holding check
-// share: for a snapshot whose view of each released sell's fills is shown,
-// the sells of instrumentID it cannot show, ours and unknown.
-func (g *Gate) unshownSells(instrumentID string, shown func(*trackedSell) int64) int64 {
+// share: for a snapshot applied when shown shares of instrumentID's released
+// sells were known filled, the sells of instrumentID it cannot show, ours
+// (pending, or filled since) and unknown.
+func (g *Gate) unshownSells(instrumentID string, shown int64) int64 {
+	filled, pending := g.shares(instrumentID)
+	return pending + filled - shown + g.unknownWorking(instrumentID)
+}
+
+// unknownWorking returns the remaining shares of every working sell of
+// instrumentID the latest broker snapshot lists that the gate did not
+// release, when it read its open orders.
+func (g *Gate) unknownWorking(instrumentID string) int64 {
 	var total int64
-	for _, id := range g.sellOrder {
-		if s := g.sells[id]; s.instrumentID == instrumentID {
-			total += s.notShown(shown(s))
-		}
-	}
 	if b := g.broker; b != nil && b.Readable(event.BrokerComponentOpenOrders) {
 		for _, o := range b.OpenOrders {
 			if _, ours := g.sells[o.ClientOrderID]; !ours && o.InstrumentID == instrumentID && o.Side == event.OrderSideSell {
@@ -122,31 +184,34 @@ func (g *Gate) unshownSells(instrumentID string, shown func(*trackedSell) int64)
 	return total
 }
 
-// ObserveAccount records account snapshot p: a fall in its holding that the
-// fills already known do not explain is taken as filled by the pending sells,
-// net first of every unknown sell the latest broker snapshot lists (which may
-// be what sold), and its holding then shows every share known filled.
+// notOlder reports whether a snapshot taken at asOf is not older than the
+// latest snapshot that read the holding.
+func (g *Gate) notOlder(asOf time.Time) bool {
+	return g.holding == nil || !asOf.Before(g.holding.asOf)
+}
+
+// ObserveAccount records account snapshot p. When it is not older than the
+// latest holding seen, a fall in its holding that the fills already known do
+// not explain is taken as filled by the pending sells, net first of every
+// unknown sell the latest broker snapshot lists (which may be what sold), and
+// its holding then shows every share known filled. An older one changes
+// nothing.
 func (g *Gate) ObserveAccount(p event.AccountPositionsSnapshotPayload) {
+	if !g.notOlder(p.AsOf) {
+		return
+	}
 	held := map[string]int64{}
 	for _, position := range p.Positions {
 		held[position.InstrumentID] = position.Quantity
 	}
-	if g.holding == nil || !p.AsOf.Before(g.holding.asOf) {
-		for _, instrument := range g.sellInstruments() {
-			fall := g.knownFall(instrument, held[instrument])
-			if b := g.broker; b != nil && b.Readable(event.BrokerComponentOpenOrders) {
-				for _, o := range b.OpenOrders {
-					if _, ours := g.sells[o.ClientOrderID]; !ours && o.InstrumentID == instrument && o.Side == event.OrderSideSell {
-						fall -= o.RemainingQuantity
-					}
-				}
-			}
-			g.takeFall(instrument, fall, nil)
-		}
-		g.seeHolding(p.AsOf, held)
+	for _, instrument := range g.sellInstruments() {
+		filled, pending := g.shares(instrument)
+		g.takeFall(instrument, g.knownFall(instrument, held[instrument])-g.unknownWorking(instrument), filled+pending)
 	}
-	for _, s := range g.sells {
-		s.atAccount = s.filled()
+	g.seeHolding(p.AsOf, held)
+	for _, instrument := range g.sellInstruments() {
+		filled, _ := g.shares(instrument)
+		g.book(instrument).atAccount = filled
 	}
 }
 
@@ -169,41 +234,39 @@ func (g *Gate) knownFall(instrumentID string, now int64) int64 {
 	if g.holding == nil {
 		return 0
 	}
-	fall := g.holding.quantity[instrumentID] - now
-	for _, id := range g.sellOrder {
-		if s := g.sells[id]; s.instrumentID == instrumentID {
-			fall -= s.filled() - s.atHolding
-		}
-	}
-	return fall
+	filled, _ := g.shares(instrumentID)
+	return g.holding.quantity[instrumentID] - now - (filled - g.book(instrumentID).atHolding)
 }
 
-// takeFall takes fall as filled by instrumentID's pending sells, oldest
-// first, skipping those skip names (a listing already shows them), so that
-// no share they may have sold is sold again (ADR 0019, amended 2026-10-15,
-// "never below it").
-func (g *Gate) takeFall(instrumentID string, fall int64, skip map[string]bool) {
-	for _, id := range g.sellOrder {
-		s := g.sells[id]
-		if fall <= 0 {
-			return
-		}
-		if s.instrumentID != instrumentID || skip[id] || s.pending() == 0 {
-			continue
-		}
-		f := min(s.pending(), fall)
-		fall -= f
-		s.infer(s.filled() + f)
+// takeFall takes fall as filled by instrumentID's pending sells, so that no
+// share they may have sold is sold again (ADR 0019, amended 2026-10-15,
+// "never below it"): it raises the floor, never past ceiling, the most the
+// sells that may have sold can have filled.
+func (g *Gate) takeFall(instrumentID string, fall, ceiling int64) {
+	if fall <= 0 {
+		return
 	}
+	filled, _ := g.shares(instrumentID)
+	b := g.book(instrumentID)
+	b.floor = max(b.floor, min(filled+fall, ceiling))
 }
 
 // seeHolding makes held, taken at asOf, the holding later falls are measured
 // from.
 func (g *Gate) seeHolding(asOf time.Time, held map[string]int64) {
 	g.holding = &holdingSeen{asOf: asOf, quantity: held}
-	for _, s := range g.sells {
-		s.atHolding = s.filled()
+	for _, instrument := range g.sellInstruments() {
+		filled, _ := g.shares(instrument)
+		g.book(instrument).atHolding = filled
 	}
+}
+
+// settle keeps each snapshot's view of instrumentID within what is now known
+// filled, after a listing has lowered the floor.
+func (g *Gate) settle(instrumentID string) {
+	filled, _ := g.shares(instrumentID)
+	b := g.book(instrumentID)
+	b.atAccount, b.atBroker, b.atHolding = min(b.atAccount, filled), min(b.atBroker, filled), min(b.atHolding, filled)
 }
 
 // reportedOrder returns the released order a venue report names, checking
@@ -262,53 +325,79 @@ func (g *Gate) ObserveLifecycle(p event.LimitOrderLifecyclePayload) error {
 	if p.Quantity != o.planned.Quantity || p.LimitPrice != o.planned.LimitPrice {
 		return fmt.Errorf("risklimit: a lifecycle report on order %s reports %d at %v; the order is %d at %v", p.ClientOrderID, p.Quantity, p.LimitPrice, o.planned.Quantity, o.planned.LimitPrice)
 	}
-	if s := g.sells[p.ClientOrderID]; s != nil && p.Terminal() {
-		s.ended = true
+	if s := g.sells[p.ClientOrderID]; s != nil && p.Terminal() && !s.ended {
+		// What the sell is counted as having filled stays counted, so the
+		// floor's part it held never moves onto a later sell.
+		part := int64(0)
+		g.spread(s.instrumentID, func(t *trackedSell, take int64) {
+			if t == s {
+				part = take
+			}
+		})
+		s.frozen, s.ended = s.known()+part, true
 	}
 	return nil
 }
 
 // resolve applies what the broker snapshot next, recorded after the latest
 // one, shows of each released sell. A sell it lists working has filled all
-// but its remaining quantity. A fall in its holding that the fills known,
-// those it lists included, and an unknown sell's own fills do not explain is
-// taken as filled by the pending sells it does not list, oldest first. A
-// sell it does not list stays pending otherwise. A snapshot that cannot read
-// the open orders resolves nothing.
+// but its remaining quantity. When it is not older than the latest holding
+// seen, the sells it lists are shown exactly, so the floor keeps only what
+// the open sells it does not list can have filled; and a fall in its holding
+// that the fills known, those it lists included, and an unknown sell's own
+// fills do not explain is taken as filled by the pending sells it does not
+// list. A sell it does not list stays pending otherwise. A snapshot that
+// cannot read the open orders resolves nothing.
 func (g *Gate) resolve(next event.BrokerSnapshotPayload) {
 	if !next.Readable(event.BrokerComponentOpenOrders) {
 		g.brokerSeen(next)
 		return
 	}
-	listed := map[string]bool{}
+	listed := map[*trackedSell]bool{}
 	for _, o := range next.OpenOrders {
 		if s := g.sells[o.ClientOrderID]; s != nil && o.Side == event.OrderSideSell && o.InstrumentID == s.instrumentID {
-			listed[o.ClientOrderID] = true
-			s.infer(s.released - o.RemainingQuantity)
+			listed[s] = true
+			s.listed = max(s.listed, min(max(s.released-o.RemainingQuantity, 0), s.released))
 		}
 	}
-	if next.Readable(event.BrokerComponentPositions) && (g.holding == nil || !next.AsOf.Before(g.holding.asOf)) {
+	if g.notOlder(next.AsOf) {
 		for _, instrument := range g.sellInstruments() {
-			after, _ := next.Position(instrument)
-			g.takeFall(instrument, g.knownFall(instrument, after.Quantity)-g.unknownFills(next, instrument), listed)
+			ceiling, _, _ := g.spread(instrument, nil)
+			for _, s := range g.sellsOf(instrument) {
+				if !s.ended && !listed[s] {
+					ceiling += s.released - s.known()
+				}
+			}
+			b := g.book(instrument)
+			b.floor = min(b.floor, ceiling)
+			g.settle(instrument)
+			if next.Readable(event.BrokerComponentPositions) {
+				after, _ := next.Position(instrument)
+				g.takeFall(instrument, g.knownFall(instrument, after.Quantity)-g.unknownFills(next, instrument), ceiling)
+			}
 		}
 	}
 	g.brokerSeen(next)
 }
 
-// brokerSeen records that broker snapshot next shows every share known
-// filled, and, when it read the holdings and is not older than the latest
-// that did, makes its holding the one later falls are measured from.
+// brokerSeen records broker snapshot next. When it is not older than the
+// latest holding seen, it shows every share known filled, and, when it read
+// the holdings, its holding is the one later falls are measured from. An
+// older one shows nothing newer, so it advances neither.
 func (g *Gate) brokerSeen(next event.BrokerSnapshotPayload) {
-	if next.Readable(event.BrokerComponentPositions) && (g.holding == nil || !next.AsOf.Before(g.holding.asOf)) {
+	if !g.notOlder(next.AsOf) {
+		return
+	}
+	if next.Readable(event.BrokerComponentPositions) {
 		held := map[string]int64{}
 		for _, p := range next.Positions {
 			held[p.InstrumentID] = p.Quantity
 		}
 		g.seeHolding(next.AsOf, held)
 	}
-	for _, s := range g.sells {
-		s.atBroker = s.filled()
+	for _, instrument := range g.sellInstruments() {
+		filled, _ := g.shares(instrument)
+		g.book(instrument).atBroker = filled
 	}
 }
 

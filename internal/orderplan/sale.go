@@ -17,8 +17,9 @@ const salePhase = "sale-to-98"
 // its tag (the incident, kill-switch engagement or urgent alarm it serves),
 // kind and trigger, the unlevered weight it sells back to, the configured
 // price band, and the latest broker snapshot (nil when there is none) with
-// the client order IDs the journal has released. Only the incident kind
-// refuses to sell beside an unknown working sell.
+// the client order IDs the journal has released and the shares already being
+// sold that the snapshot cannot show. Only the incident kind refuses to sell
+// beside an unknown working sell.
 type SaleInput struct {
 	AccountID    string
 	Tag          string
@@ -30,6 +31,12 @@ type SaleInput struct {
 	SnapshotID   string
 	Snapshot     *event.BrokerSnapshotPayload
 	Recognised   map[string]bool
+	// WorkingSells is every working and pending sell of the instrument that
+	// the snapshot cannot show, ours and unknown, cancel-pending included,
+	// by the risk gate's one pending rule (risklimit.Gate.PendingSells, here
+	// against the broker snapshot): a released sell the snapshot does not
+	// list yet is still being sold.
+	WorkingSells int64
 	// At is when the sale's trigger fired, and MaxSnapshotAge the oldest the
 	// snapshot may be then.
 	At             time.Time
@@ -61,9 +68,10 @@ func SaleClientOrderID(tag, instrumentID string) string {
 //     than Target;
 //   - the quantity is the smallest of what reaches Target (holding - keep)
 //     and the holding minus every working and pending sell, ours and
-//     unknown, cancel-pending included; and, so that the sale together with
-//     those working sells never takes exposure below Target ("never below
-//     it"), the holding minus every working sell minus keep;
+//     unknown, cancel-pending included (WorkingSells, the gate's count, not
+//     only the sells the snapshot lists); and, so that the sale together
+//     with those working sells never takes exposure below Target ("never
+//     below it"), the holding minus every working sell minus keep;
 //   - no order when the snapshot is older at the trigger than MaxSnapshotAge,
 //     when the holding, net liquidation, open orders or mark cannot be read
 //     or net liquidation or the mark is not strictly positive, or, for the
@@ -127,7 +135,7 @@ func PlanSale(in SaleInput) (Sale, error) {
 	if keep >= math.MaxInt64 {
 		return Sale{}, fmt.Errorf("orderplan: %v shares to keep cannot be represented", keep)
 	}
-	working := s.WorkingSells(in.InstrumentID)
+	working := in.WorkingSells
 	figures := event.SaleFigures{
 		Kind: in.Kind, Trigger: in.Trigger, SnapshotID: in.SnapshotID, WorkingSells: working,
 		KeepShares:    int64(keep),
@@ -166,6 +174,9 @@ func (in SaleInput) validate() error {
 	}
 	if !(in.PriceBand > 0 && in.PriceBand < 1) {
 		errs = append(errs, errors.New("the price band must lie strictly between 0 and 1"))
+	}
+	if in.WorkingSells < 0 {
+		errs = append(errs, errors.New("a sale's working sells must not be negative"))
 	}
 	if in.MaxSnapshotAge <= 0 {
 		errs = append(errs, errors.New("a sale needs a positive maximum snapshot age"))

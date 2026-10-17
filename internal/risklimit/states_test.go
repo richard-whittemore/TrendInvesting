@@ -957,3 +957,234 @@ func TestAnUrgentAlarmStillInForceRetriesAWithheldSale(t *testing.T) {
 		t.Error("once planned, the alarm's sale is not decided again")
 	}
 }
+
+// TestTheSaleIsSizedNetOfEveryPendingSellTheGateKnows: the sale back to 98%
+// nets every sell the gate counts pending against the broker snapshot, by the
+// same rule as the broker-holding check, not only the sells that snapshot
+// lists. Holding 147, V 8,530, mark 90: keep 93. Boost's exit of 54 is
+// released; the next broker snapshot does not list it yet and turns the alarm
+// urgent. The exit and a sale of 54 would sell 108 of 147, leaving 39, far
+// below 98%: with the exit's 54 netted, nothing is left to sell.
+func TestTheSaleIsSizedNetOfEveryPendingSellTheGateKnows(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", boosted())
+	exit := order(event.OrderSideSell, 54, 147)
+	exit.Planned.ClientOrderID = "tw-exit"
+	released(t, check(t, g, exit)[0])
+	urgent := later(boosted(), 1)
+	urgent.ExcessLiquidity = 1500
+	if !observe(t, g, "broker:2", urgent).Urgent {
+		t.Fatal("setup: not urgent")
+	}
+	s, ok := requestSale(t, g, event.SaleTriggerMarginUrgent)
+	if !ok || s.Withheld == nil || s.Withheld.Reason != event.SaleWithheldNothingToSell {
+		t.Fatalf("the released, unlisted exit already sells the excess: %+v", s)
+	}
+	// The sale is not an attempt, and a smaller holding sells only the rest.
+	g = gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", boosted())
+	small := order(event.OrderSideSell, 20, 147)
+	small.Planned.ClientOrderID = "tw-small"
+	released(t, check(t, g, small)[0])
+	observe(t, g, "broker:2", urgent)
+	s, ok = requestSale(t, g, event.SaleTriggerMarginUrgent)
+	if !ok || s.Order == nil || s.Order.Quantity != 34 || s.Order.Sale.WorkingSells != 20 {
+		t.Fatalf("54 to target less the 20 pending: %+v", s)
+	}
+}
+
+// TestANonPositiveNetLiquidationIsAnUrgentReading: a readable net liquidation
+// of zero or less, with Excess Liquidity readable, is a reading, and the most
+// alarming one: below every threshold. It turns the alarm urgent at once,
+// even with the market closed, and is not "no reading" waiting 30 minutes.
+func TestANonPositiveNetLiquidationIsAnUrgentReading(t *testing.T) {
+	for _, nl := range []float64{0, -200} {
+		g := gate(t, limits(), event.TradingModeDryRun)
+		s := broker(100)
+		s.NetLiquidation, s.ExcessLiquidity, s.MarketOpen = nl, -500, false
+		obs := observe(t, g, "broker:0", s)
+		if !obs.Urgent || obs.Alarm == nil || obs.Alarm.Level != event.MarginAlarmUrgent || obs.Alarm.Cause != event.MarginAlarmCauseNonPositive {
+			t.Fatalf("net liquidation %v: urgent at once: %+v", nl, obs.Alarm)
+		}
+		if !obs.Alarm.ReadingSet || obs.Alarm.NetLiquidation != nl || obs.Alarm.ExcessLiquidity != -500 || obs.Alarm.Ratio != 0 {
+			t.Errorf("net liquidation %v: the reading is recorded, with no ratio: %+v", nl, obs.Alarm)
+		}
+		if !obs.Alarm.LastReadingSet || !obs.Alarm.LastReadingAt.Equal(at) {
+			t.Errorf("net liquidation %v: it is the last reading: %+v", nl, obs.Alarm)
+		}
+	}
+}
+
+// TestTheStaleAlertIsOncePerEpisode: one urgent alert per stale episode for
+// the account, carried by the episode's first stale-broker-snapshot refusal
+// or withhold. The episode ends at the first fresh broker snapshot journalled
+// or the first gate check whose latest snapshot is fresh, so a later outage
+// alerts again, even on the same snapshot.
+func TestTheStaleAlertIsOncePerEpisode(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	// Taken five minutes after the first check: stale (skew) until then.
+	ahead := broker(100)
+	ahead.AsOf = at.Add(5 * time.Minute)
+	if _, err := g.ObserveBroker("broker:1", ahead); err != nil {
+		t.Fatal(err)
+	}
+	checkAt := func(id string, minutes int) risklimit.Outcome {
+		t.Helper()
+		sell := order(event.OrderSideSell, 1, 100)
+		sell.Planned.ClientOrderID = id
+		book := bookOf(sell)
+		book.At = at.Add(time.Duration(minutes) * time.Minute)
+		out, err := g.Check(book, []risklimit.Order{sell})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out[0]
+	}
+	if o := checkAt("tw-1", 0); o.Refused == nil || !o.Refused.Alert {
+		t.Fatalf("the first stale refusal opens the episode with the alert: %+v", o)
+	}
+	if !g.StaleEpisodeOpen() {
+		t.Error("the episode is open")
+	}
+	halt(t, g)
+	s, ok, err := g.Sale(event.SaleTriggerExit, "SPY", at.Add(time.Minute), 0.98, 0.05)
+	if err != nil || !ok || s.Withheld == nil || s.Withheld.Reason != event.SaleWithheldStaleBrokerSnapshot || s.Withheld.Alert {
+		t.Fatalf("a stale withhold in the open episode raises no second alert: %+v %v %v", s, ok, err)
+	}
+	if err := s.Withheld.Validate(); err != nil {
+		t.Error(err)
+	}
+
+	// A fresh gate check ends the episode; the next stale one opens another.
+	g = gate(t, limits(), event.TradingModeDryRun)
+	if _, err := g.ObserveBroker("broker:1", ahead); err != nil {
+		t.Fatal(err)
+	}
+	if o := checkAt("tw-1", 0); o.Refused == nil || !o.Refused.Alert {
+		t.Fatalf("opened: %+v", o)
+	}
+	if o := checkAt("tw-2", 10); o.Released == nil {
+		t.Fatalf("fresh at ten minutes: %+v", o)
+	}
+	if g.StaleEpisodeOpen() {
+		t.Error("a fresh check ends the episode")
+	}
+	if o := checkAt("tw-3", 50); o.Refused == nil || !o.Refused.Alert {
+		t.Fatalf("a later outage on the same snapshot alerts again: %+v", o)
+	}
+	if o := checkAt("tw-4", 51); o.Refused == nil || o.Refused.Alert {
+		t.Fatalf("once per episode: %+v", o)
+	}
+	// A fresh broker snapshot journalled ends it too.
+	next := broker(100)
+	next.AsOf = at.Add(52 * time.Minute)
+	observe(t, g, "broker:2", next)
+	if g.StaleEpisodeOpen() {
+		t.Error("a fresh journalled snapshot ends the episode")
+	}
+	halt(t, g)
+	s, ok, err = g.Sale(event.SaleTriggerExit, "SPY", at.Add(90*time.Minute), 0.98, 0.05)
+	if err != nil || !ok || s.Withheld == nil || !s.Withheld.Alert {
+		t.Fatalf("a stale withhold can open the episode: %+v %v %v", s, ok, err)
+	}
+
+	// The episode's state survives a restart, so a restart does not alert
+	// again within it.
+	r := gate(t, limits(), event.TradingModeDryRun)
+	if _, err := r.ObserveBroker("broker:1", ahead); err != nil {
+		t.Fatal(err)
+	}
+	r.RestoreStaleEpisode(true)
+	sell := order(event.OrderSideSell, 1, 100)
+	if out, err := r.Check(bookOf(sell), []risklimit.Order{sell}); err != nil || out[0].Refused == nil || out[0].Refused.Alert {
+		t.Fatalf("a restored open episode has spent its alert: %+v %v", out, err)
+	}
+	q := gate(t, limits(), event.TradingModeDryRun)
+	q.RestoreStaleEpisode(true)
+	if !q.StaleEpisodeOpen() {
+		t.Error("restored open")
+	}
+	q.RestoreStaleEpisode(false)
+	if q.StaleEpisodeOpen() {
+		t.Error("restored closed")
+	}
+}
+
+// TestAWithheldSaleThatLapsesIsJournalledLapsed: when what fired a sale
+// withheld from a snapshot that could not size it is no longer in force,
+// the gate returns one risk.sale.withheld with reason lapsed, the attempt
+// unspent: on the exit's decision no longer planning the sell, on the
+// account no longer refusing the exit, and on the urgent alarm clearing.
+func TestAWithheldSaleThatLapsesIsJournalledLapsed(t *testing.T) {
+	staleExit := func(g *risklimit.Gate) event.SaleWithheldPayload {
+		t.Helper()
+		observe(t, g, "broker:1", boosted())
+		s, ok, err := g.Sale(event.SaleTriggerExit, "SPY", at.Add(time.Hour), 0.98, 0.05)
+		if err != nil || !ok || s.Withheld == nil || s.Withheld.Reason != event.SaleWithheldStaleBrokerSnapshot {
+			t.Fatalf("setup: %+v %v %v", s, ok, err)
+		}
+		return *s.Withheld
+	}
+	lapsedFrom := func(w event.SaleWithheldPayload, got *event.SaleWithheldPayload, why string) {
+		t.Helper()
+		if got == nil {
+			t.Fatalf("%s: no lapse", why)
+		}
+		if got.Reason != event.SaleWithheldLapsed || got.Tag != w.Tag || got.ClientOrderID != w.ClientOrderID || got.Trigger != w.Trigger || got.Kind != w.Kind || got.Attempted() {
+			t.Errorf("%s: %+v from %+v", why, got, w)
+		}
+		if err := got.Validate(); err != nil {
+			t.Errorf("%s: %v", why, err)
+		}
+	}
+	g := gate(t, limits(), event.TradingModeDryRun)
+	halt(t, g)
+	w := staleExit(g)
+	lapsedFrom(w, g.LapseExitSale(), "the decision no longer plans the sell")
+	if again := g.LapseExitSale(); again != nil {
+		t.Errorf("one lapse: %+v", again)
+	}
+
+	g = gate(t, limits(), event.TradingModeDryRun)
+	kill(t, g, "kill:1", true)
+	w = staleExit(g)
+	kill(t, g, "kill:2", false)
+	obs := observe(t, g, "broker:2", later(boosted(), 61))
+	if len(obs.Lapsed) != 1 {
+		t.Fatalf("the kill switch released: %+v", obs)
+	}
+	lapsedFrom(w, &obs.Lapsed[0], "the exit is no longer refused")
+
+	// Planned on the retry: nothing lapses.
+	g = gate(t, limits(), event.TradingModeDryRun)
+	halt(t, g)
+	staleExit(g)
+	if obs := observe(t, g, "broker:2", later(boosted(), 61)); !obs.RetryExit {
+		t.Fatal("retried")
+	}
+	if s, ok, _ := g.Sale(event.SaleTriggerExit, "SPY", at.Add(61*time.Minute), 0.98, 0.05); !ok || s.Order == nil {
+		t.Fatalf("planned: %+v", s)
+	}
+	if l := g.LapseExitSale(); l != nil {
+		t.Errorf("a planned sale never lapses: %+v", l)
+	}
+
+	// The urgent alarm clearing lapses its withheld sale.
+	g = gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:0", boosted())
+	urgent := later(boosted(), 1)
+	urgent.ExcessLiquidity = 1500
+	urgent.Positions[0].Mark = 0
+	if !observe(t, g, "broker:1", urgent).Urgent {
+		t.Fatal("setup: not urgent")
+	}
+	s, ok := requestSale(t, g, event.SaleTriggerMarginUrgent)
+	if !ok || s.Withheld == nil || s.Withheld.Reason != event.SaleWithheldNotPositive {
+		t.Fatalf("setup: %+v", s)
+	}
+	obs = observe(t, g, "broker:2", later(boosted(), 2))
+	if obs.Alarm == nil || obs.Alarm.Level != event.MarginAlarmClear || len(obs.Lapsed) != 1 {
+		t.Fatalf("cleared: %+v", obs)
+	}
+	lapsedFrom(*s.Withheld, &obs.Lapsed[0], "the alarm cleared")
+}

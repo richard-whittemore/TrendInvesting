@@ -119,6 +119,15 @@ func TestMomentumConfigurationValidate(t *testing.T) {
 	expectInvalid(t, "fees", v, func(p *P) { p.Execution.MaxFeesPerOrder = -1 }, "fees")
 	expectInvalid(t, "no max snapshot age", v, func(p *P) { p.Execution.MaxSnapshotAge = 0 }, "max snapshot age")
 	expectInvalid(t, "negative max snapshot age", v, func(p *P) { p.Execution.MaxSnapshotAge = -1 }, "max snapshot age")
+	// Bounded above by one regular session, so the minutes never wrap as a
+	// duration and a stale snapshot is never read as fresh.
+	expectInvalid(t, "max snapshot age above a session", v, func(p *P) { p.Execution.MaxSnapshotAge = event.MaxSnapshotAgeCeiling + 1 }, "max snapshot age")
+	expectInvalid(t, "max snapshot age that wraps", v, func(p *P) { p.Execution.MaxSnapshotAge = 200_000_000_000_000 }, "max snapshot age")
+	ceiling := v
+	ceiling.Execution.MaxSnapshotAge = event.MaxSnapshotAgeCeiling
+	if err := ceiling.Validate(); err != nil {
+		t.Errorf("a maximum age of one session is valid: %v", err)
+	}
 
 	b := validTargetWeightConfiguration()
 	expectInvalid(t, "boost with momentum", b, func(p *P) { p.Momentum.TopN = 25 }, "no momentum or execution")

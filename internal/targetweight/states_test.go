@@ -557,3 +557,62 @@ func TestARepeatedNothingToSellWithholdHasItsOwnID(t *testing.T) {
 		}
 	}
 }
+
+// TestAWithheldSaleLapsesWhenTheExitIsNoLongerRefused: the kill switch
+// refuses Boost's exit, which fires the sale; the latest broker snapshot is
+// stale, so the sale is withheld, opening the stale episode with its alert.
+// The switch is released before the next snapshot, so the exit is no longer
+// in force: the gate journals one risk.sale.withheld with reason lapsed, the
+// attempt unspent, and the released switch lets the next exit go as usual.
+func TestAWithheldSaleLapsesWhenTheExitIsNoLongerRefused(t *testing.T) {
+	r := simulate(t, options{
+		brokers:      true,
+		kill:         map[int]bool{19: true, 21: false},
+		brokerMutate: map[int]func(*event.BrokerSnapshotPayload){20: func(b *event.BrokerSnapshotPayload) { b.AsOf = b.AsOf.Add(-2 * time.Hour) }},
+	})
+	withheld := ofType(r.decisions, event.SaleWithheldEventType)
+	if len(withheld) != 2 {
+		t.Fatalf("withheld %d, want the stale one and its lapse", len(withheld))
+	}
+	var stale, lapsed event.SaleWithheldPayload
+	decode(t, withheld[0], &stale)
+	decode(t, withheld[1], &lapsed)
+	if stale.Reason != event.SaleWithheldStaleBrokerSnapshot || !stale.Alert || stale.Tag != "kill:19" {
+		t.Errorf("the stale withhold opens the episode with the alert: %+v", stale)
+	}
+	if withheld[1].ID != "sale-lapsed:"+stale.ClientOrderID+":broker:21" || lapsed.Reason != event.SaleWithheldLapsed ||
+		lapsed.Tag != stale.Tag || lapsed.ClientOrderID != stale.ClientOrderID || lapsed.Alert {
+		t.Errorf("the lapse: %s %+v", withheld[1].ID, lapsed)
+	}
+	if got := sales(t, r.decisions); len(got) != 0 {
+		t.Errorf("no sale was planned: %+v", got)
+	}
+}
+
+// TestAWithheldSaleLapsesWhenTheDecisionNoLongerPlansTheSell: Halted, Boost's
+// exit is refused and fires the sale, withheld because the latest broker
+// snapshot is stale. The next snapshot reports a mark of zero, so it cannot
+// size the sale and nothing is retried; the next session's decision, its
+// holding already at the target, plans no sell, so the exit is no longer in
+// force and the sale lapses, journalled for that session.
+func TestAWithheldSaleLapsesWhenTheDecisionNoLongerPlansTheSell(t *testing.T) {
+	full := simulate(t, options{brokers: true})
+	mutate := map[int]func(*event.BrokerSnapshotPayload){
+		20: func(b *event.BrokerSnapshotPayload) { b.AsOf = b.AsOf.Add(-2 * time.Hour) },
+		21: func(b *event.BrokerSnapshotPayload) { b.Positions[0].Mark = 0 },
+	}
+	r := restartAt17(t, full, options{prelude: []event.Envelope{haltedState(t)}, brokerMutate: mutate})
+	withheld := ofType(r.decisions, event.SaleWithheldEventType)
+	if len(withheld) != 2 {
+		t.Fatalf("withheld %d, want the stale one and its lapse", len(withheld))
+	}
+	var stale, lapsed event.SaleWithheldPayload
+	decode(t, withheld[0], &stale)
+	decode(t, withheld[1], &lapsed)
+	if stale.Reason != event.SaleWithheldStaleBrokerSnapshot || lapsed.Reason != event.SaleWithheldLapsed || lapsed.ClientOrderID != stale.ClientOrderID {
+		t.Fatalf("stale then lapsed: %+v %+v", stale, lapsed)
+	}
+	if !strings.HasPrefix(withheld[1].ID, "sale-lapsed:"+stale.ClientOrderID+":") || !withheld[1].EventTime.Equal(sessionEnd(21)) {
+		t.Errorf("journalled for the session that no longer plans the sell: %s at %s", withheld[1].ID, withheld[1].EventTime)
+	}
+}

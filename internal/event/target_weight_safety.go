@@ -155,19 +155,6 @@ func (p BrokerSnapshotPayload) Position(instrumentID string) (BrokerPosition, bo
 	return BrokerPosition{}, false
 }
 
-// WorkingSells is the total remaining quantity of every working and pending
-// sell IBKR reports for instrumentID, ours and unknown ones, cancel-pending
-// included (ADR 0019, amended 2026-10-15, "Sized from the broker").
-func (p BrokerSnapshotPayload) WorkingSells(instrumentID string) int64 {
-	var total int64
-	for _, o := range p.OpenOrders {
-		if o.InstrumentID == instrumentID && o.Side == OrderSideSell {
-			total += o.RemainingQuantity
-		}
-	}
-	return total
-}
-
 // Validate checks identity, each component's value against its readability,
 // the positions and the open orders.
 func (p BrokerSnapshotPayload) Validate() error {
@@ -270,11 +257,14 @@ const (
 	MarginAlarmUrgent  = "urgent"
 )
 
-// The alarm's causes: a reading's ratio, or no reading for the stale period
-// while the market is open.
+// The alarm's causes: a reading's ratio; a reading whose net liquidation is
+// zero or less, which gives no ratio but lies below every threshold, so it is
+// urgent at once; or no reading for the stale period while the market is
+// open.
 const (
-	MarginAlarmCauseRatio     = "ratio"
-	MarginAlarmCauseNoReading = "no-reading"
+	MarginAlarmCauseRatio       = "ratio"
+	MarginAlarmCauseNonPositive = "non-positive-net-liquidation"
+	MarginAlarmCauseNoReading   = "no-reading"
 )
 
 // MarginAlarmPayload is the alarm's new level, the reading behind it and the
@@ -287,7 +277,7 @@ type MarginAlarmPayload struct {
 	Level      string    `json:"level"`
 	Cause      string    `json:"cause"`
 	// The reading, when the snapshot had one; Ratio is ExcessLiquidity over
-	// NetLiquidation.
+	// NetLiquidation, and zero for a net liquidation that is not positive.
 	ExcessLiquidity float64 `json:"excess_liquidity"`
 	NetLiquidation  float64 `json:"net_liquidation"`
 	Ratio           float64 `json:"ratio"`
@@ -323,6 +313,13 @@ func (p MarginAlarmPayload) Validate() error {
 		if !p.ReadingSet {
 			errs = append(errs, errors.New("a ratio alarm carries its reading"))
 		}
+	case MarginAlarmCauseNonPositive:
+		if !p.ReadingSet {
+			errs = append(errs, errors.New("a non-positive net liquidation alarm carries its reading"))
+		}
+		if p.Level != MarginAlarmUrgent {
+			errs = append(errs, errors.New("a net liquidation that is not positive is urgent"))
+		}
 	case MarginAlarmCauseNoReading:
 		if p.ReadingSet {
 			errs = append(errs, errors.New("a no-reading alarm carries no reading"))
@@ -331,7 +328,7 @@ func (p MarginAlarmPayload) Validate() error {
 			errs = append(errs, errors.New("no reading while the market is open is urgent"))
 		}
 	default:
-		errs = append(errs, fmt.Errorf("cause %q is not ratio or no-reading", p.Cause))
+		errs = append(errs, fmt.Errorf("cause %q is not ratio, non-positive-net-liquidation or no-reading", p.Cause))
 	}
 	for _, v := range []struct {
 		name  string
@@ -344,8 +341,13 @@ func (p MarginAlarmPayload) Validate() error {
 	switch {
 	case !p.ReadingSet && (p.ExcessLiquidity != 0 || p.NetLiquidation != 0 || p.Ratio != 0):
 		errs = append(errs, errors.New("a reading carries values only when set"))
+	case p.Cause == MarginAlarmCauseNonPositive && p.NetLiquidation > 0:
+		errs = append(errs, errors.New("a non-positive net liquidation alarm's net liquidation must be zero or less"))
+	case p.Cause == MarginAlarmCauseNonPositive && p.Ratio != 0:
+		errs = append(errs, errors.New("a net liquidation that is not positive gives no ratio"))
+	case p.Cause == MarginAlarmCauseNonPositive:
 	case p.ReadingSet && !(p.NetLiquidation > 0):
-		errs = append(errs, errors.New("a reading's net liquidation must be positive"))
+		errs = append(errs, errors.New("a ratio reading's net liquidation must be positive"))
 	case p.ReadingSet && p.Ratio != p.ExcessLiquidity/p.NetLiquidation:
 		// Excess Liquidity can be negative in a margin deficit, so the
 		// ratio is checked by derivation, not by sign.
@@ -497,6 +499,12 @@ const (
 	// the smallest of the three bounds would sell into a short (ADR 0019:
 	// never short).
 	SaleWithheldNotPositive = "non-positive-broker-values"
+	// SaleWithheldLapsed: a sale withheld from a stale or non-positive
+	// snapshot was still withheld when what fired it stopped being in force
+	// (the exit no longer refused or no longer planned, or the alarm no
+	// longer urgent), so it is not decided again; the attempt stays unspent
+	// (ADR 0019, amendment of 2026-10-17, reading 1, "Lapse").
+	SaleWithheldLapsed = "lapsed"
 )
 
 // SaleWithheldPayload is a sale back to 98% that was not planned, with the
@@ -513,6 +521,10 @@ type SaleWithheldPayload struct {
 	Detail        string `json:"detail"`
 	// SnapshotID is the broker snapshot consulted; empty when there was none.
 	SnapshotID string `json:"snapshot_id"`
+	// Alert marks the stale-broker-snapshot withhold that opens the
+	// account's stale episode, which raises its one urgent alert (ADR 0019,
+	// amendment of 2026-10-17, reading 10, "Stale episode").
+	Alert bool `json:"alert,omitempty"`
 }
 
 // Attempted reports whether the withheld sale counts as the one attempt: an
@@ -552,9 +564,12 @@ func (p SaleWithheldPayload) Validate() error {
 		errs = append(errs, fmt.Errorf("trigger %q is not exit or margin-urgent", p.Trigger))
 	}
 	switch p.Reason {
-	case SaleWithheldUnreadable, SaleWithheldUnknownWorkingSell, SaleWithheldNothingToSell, SaleWithheldStaleBrokerSnapshot, SaleWithheldNotPositive:
+	case SaleWithheldUnreadable, SaleWithheldUnknownWorkingSell, SaleWithheldNothingToSell, SaleWithheldStaleBrokerSnapshot, SaleWithheldNotPositive, SaleWithheldLapsed:
 	default:
 		errs = append(errs, fmt.Errorf("reason %q is not recognised", p.Reason))
+	}
+	if p.Alert && p.Reason != SaleWithheldStaleBrokerSnapshot {
+		errs = append(errs, errors.New("only a stale-broker-snapshot withhold raises the alert"))
 	}
 	if p.Detail == "" {
 		errs = append(errs, errors.New("detail is required"))
