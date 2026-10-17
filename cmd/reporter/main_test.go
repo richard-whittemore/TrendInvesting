@@ -173,12 +173,16 @@ func TestRunAlertsOnHeartbeatLossFromTheFileTime(t *testing.T) {
 	}
 }
 
-func TestTheHeartbeatSessionsMustBePositive(t *testing.T) {
+// The close is counted before the session's group is written, so one session
+// of allowed silence would page on every trading day.
+func TestTheHeartbeatSessionsMustBeAtLeastTwo(t *testing.T) {
 	fakeEnv, fakeClient := acceptingNtfy(t)
 	dir := t.TempDir()
-	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-heartbeat-sessions", "0"}
-	if err := run(args, fakeEnv, time.Now, &bytes.Buffer{}, fakeClient); err == nil || !strings.Contains(err.Error(), "-heartbeat-sessions") {
-		t.Fatalf("err = %v", err)
+	for _, n := range []string{"0", "1"} {
+		args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-heartbeat-sessions", n}
+		if err := run(args, fakeEnv, time.Now, &bytes.Buffer{}, fakeClient); err == nil || !strings.Contains(err.Error(), "-heartbeat-sessions must be at least 2") {
+			t.Fatalf("-heartbeat-sessions %s: err = %v", n, err)
+		}
 	}
 }
 

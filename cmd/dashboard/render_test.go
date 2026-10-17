@@ -21,7 +21,7 @@ func TestDashboardSaysWhetherAReleasedOrderWasSent(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := buf.String()
-	for _, want := range []string{"<td>tw-a</td><td>buy 39 SPY @ 101.00</td><td>released (sent)</td>", "<td>tw-b</td><td>buy 1 SPY @ 101.00</td><td>released (not sent)</td>", "<td>refused</td><td>order-size</td>"} {
+	for _, want := range []string{"<td>tw-a</td><td>buy 39 SPY @ 101.00</td><td>released (send requested)</td>", "<td>tw-b</td><td>buy 1 SPY @ 101.00</td><td>released (not sent)</td>", "<td>refused</td><td>order-size</td>"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks %q:\n%s", want, body)
 		}

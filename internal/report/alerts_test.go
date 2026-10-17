@@ -1,6 +1,7 @@
 package report_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -205,5 +206,17 @@ func TestTheSameEngineStateAfterAnotherIsANewIncident(t *testing.T) {
 	fresh := report.Fresh(got, map[string]bool{got[0].Key: true})
 	if len(fresh) != 2 || fresh[1].Kind != report.KindHalted {
 		t.Fatalf("the second halt was dropped as already delivered: %v", fresh)
+	}
+}
+
+func TestAHeartbeatTheReporterCannotCheckIsItselfAnUrgentAlertKeyedByTheProblem(t *testing.T) {
+	at := ny("2026-10-17 12:00")
+	a := report.HeartbeatUncheckedAlert("joint", errors.New("no calendar for 2020"), at)
+	b := report.HeartbeatUncheckedAlert("joint", errors.New("no calendar for 2035"), at)
+	if a.Kind != report.KindHeartbeatUnchecked || a.Severity != report.Urgent || a.AccountID != "joint" || !contains(a.Body, "cannot check the heartbeat: no calendar for 2020") {
+		t.Fatalf("alert = %+v", a)
+	}
+	if a.Key == b.Key || a.Key != report.HeartbeatUncheckedAlert("joint", errors.New("no calendar for 2020"), at).Key {
+		t.Fatal("one failure is one incident and a different failure is another")
 	}
 }

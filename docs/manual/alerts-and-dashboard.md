@@ -42,7 +42,8 @@ account.
   fails is a sign of a damaged or mismatched file. The reporter then sends an
   urgent "the reporter cannot read the journal" alert naming the problem,
   still checks the heartbeat, sends nothing else from the file, and exits
-  with the error. The dashboard says the log does not verify.
+  with the error. The dashboard says "journal does not verify" when the file's fingerprints fail, and
+  "journal unavailable" for any other record it cannot read.
 - An input that fails (a bar, an account snapshot, a fill) is skipped and
   counted. The log keeps inputs the engine itself refused, so stopping for one
   would silence every later alert. An account snapshot is also skipped when
@@ -60,16 +61,21 @@ account.
 | A decision was withheld for another reason | routine | run of the same reason |
 | No sign of life from the engine | urgent | silence, keyed by the last activity |
 | The reporter cannot read the journal | urgent | account and problem |
+| The reporter cannot check the heartbeat (the calendar does not cover the span) | urgent | account and problem |
 | The daily summary (if asked for) | routine | account and day, once that day's session has closed in the log |
 
 "No sign of life" is measured in NYSE sessions, not hours: the alert fires
-once `-heartbeat-sessions` sessions (default 2) have closed since the log
+once `-heartbeat-sessions` sessions (default 2, minimum 2) have closed since the log
 file last changed. Weekends and exchange holidays close no session, so a
 quiet weekend or a long holiday weekend never pages you. With the default,
 an engine that stops after writing Monday's session is reported at
 Wednesday's close. The calendar is the same NYSE calendar the market-data
 adapter uses, and covers 2022 to 2030; outside those years the reporter
-exits with an error rather than guess. A reporter running on the engine's
+exits with an error rather than guess, and also sends an urgent "the reporter
+cannot check the heartbeat" alert, once per distinct problem, so a timer run
+never fails silently. The minimum is 2 because a session's close is counted
+before the engine writes that session's records, so 1 would page every
+trading day. A reporter running on the engine's
 own machine cannot catch that machine dying; the outside dead-man's switch
 ADR 0019 asks for is a separate service and is not built.
 
@@ -167,15 +173,17 @@ that merely looks like a Tailscale one but belongs to another network is
 refused.
 Pages: `/` (the summaries, with each alert's full text under its title),
 `/api/summary.json` and `/healthz`. Anything but a
-read is answered "method not allowed". If a log does not verify, the page says
-so without showing paths or figures.
+read is answered "method not allowed". If a log does not verify the page says
+"journal does not verify"; if it cannot be read for any other reason it says
+"journal unavailable". Neither shows paths or figures.
 
 ## What the summary shows, and its limits
 
 - Holdings come from the broker's account snapshot.
-- Each released order says whether it was sent to the broker: "released
-  (sent)" or "released (not sent)". A dry-run releases orders without sending
-  them.
+- Each released order says "released (send requested)" or "released (not
+  sent)". The engine records a release before it sends, so a release is only
+  possibly sent; the summary does not yet say a broker confirmed it. A dry-run
+  releases orders without sending them.
 - Equity against SPY pairs the snapshot's net liquidation with SPY's closing
   price on the same day. It is price return only (no dividends) and needs two
   paired points before it shows a comparison. The comparison names the dates

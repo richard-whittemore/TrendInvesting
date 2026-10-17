@@ -99,6 +99,72 @@ func TestAJournalTheReporterCannotReadStillAlertsAndChecksTheHeartbeat(t *testin
 	}
 }
 
+// A journal path that does not exist is a journal the reporter cannot read:
+// the refusal is delivered once, there is no modification time so the
+// heartbeat is skipped, and the error is returned.
+func TestAMissingJournalPathIsAlertedOnceWithoutAHeartbeatCheck(t *testing.T) {
+	dir := t.TempDir()
+	r := &relay{sent: map[string][]string{}}
+	args := []string{"-journal", filepath.Join(dir, "missing.journal"), "-state", filepath.Join(dir, "s.json"), "-channel", "pagerduty", "-summary"}
+	environment := env(map[string]string{"TI_PAGERDUTY_ROUTING_KEY": "k", "TI_PAGERDUTY_URL": "https://events.pagerduty.test/v2/enqueue"})
+	now := func() time.Time { return t0.Add(time.Hour) }
+	client := &http.Client{Transport: r}
+	if err := run(args, environment, now, &bytes.Buffer{}, client); err == nil || !strings.Contains(err.Error(), "read journal") {
+		t.Fatalf("the failure must be returned, got %v", err)
+	}
+	all := strings.Join(r.to("events.pagerduty.test"), "\n")
+	if !strings.Contains(all, "missing.journal: the reporter cannot read the journal") || strings.Contains(all, "no engine heartbeat") {
+		t.Fatalf("want the refusal alert and no heartbeat alert:\n%s", all)
+	}
+	sent := len(r.to("events.pagerduty.test"))
+	if err := run(args, environment, now, &bytes.Buffer{}, client); err == nil {
+		t.Fatal("the failure must be returned on every run")
+	}
+	if again := len(r.to("events.pagerduty.test")); again != sent || sent != 1 {
+		t.Fatalf("the refusal must be delivered once: %d then %d", sent, again)
+	}
+}
+
+// A heartbeat check the calendar cannot answer is never a silent failure on a
+// timer run: it is an urgent alert, once per distinct failure, and the error
+// is still returned.
+func TestAHeartbeatTheCalendarCannotAnswerIsAnUrgentAlertOnce(t *testing.T) {
+	newYork, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct{ modified, now time.Time }{
+		"the journal was last changed before the calendar begins": {time.Date(2020, time.March, 2, 12, 0, 0, 0, newYork), time.Date(2026, time.October, 14, 16, 30, 0, 0, newYork)},
+		"now is after the calendar ends":                          {time.Date(2026, time.October, 12, 18, 0, 0, 0, newYork), time.Date(2035, time.January, 5, 16, 30, 0, 0, newYork)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeJournal(t, dir)
+			if err := os.Chtimes(path, c.modified, c.modified); err != nil {
+				t.Fatal(err)
+			}
+			r := &relay{sent: map[string][]string{}}
+			args := []string{"-journal", path, "-state", filepath.Join(dir, "s.json"), "-channel", "pagerduty"}
+			environment := env(map[string]string{"TI_PAGERDUTY_ROUTING_KEY": "k", "TI_PAGERDUTY_URL": "https://events.pagerduty.test/v2/enqueue"})
+			client := &http.Client{Transport: r}
+			if err := run(args, environment, func() time.Time { return c.now }, &bytes.Buffer{}, client); err == nil {
+				t.Fatal("the failure must be returned")
+			}
+			all := strings.Join(r.to("events.pagerduty.test"), "\n")
+			if !strings.Contains(all, "The reporter cannot check the heartbeat:") || !strings.Contains(all, `"severity":"critical"`) {
+				t.Fatalf("an urgent alert was not delivered:\n%s", all)
+			}
+			sent := len(r.to("events.pagerduty.test"))
+			if err := run(args, environment, func() time.Time { return c.now }, &bytes.Buffer{}, client); err == nil {
+				t.Fatal("the failure must be returned on every run")
+			}
+			if again := len(r.to("events.pagerduty.test")); again != sent {
+				t.Fatalf("one failure must be sent once: %d then %d", sent, again)
+			}
+		})
+	}
+}
+
 // decidedDay is a day whose session has closed, with its decision.
 func decidedDay(t *testing.T) []journal.Entry {
 	t.Helper()

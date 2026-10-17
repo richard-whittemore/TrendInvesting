@@ -49,7 +49,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	benchmark := flags.String("benchmark", "SPY", "benchmark instrument for the equity comparison")
 	date := flags.String("date", "", "summary date, YYYY-MM-DD, sent once the log records that day's session closed (default: the latest closed session)")
 	summary := flags.Bool("summary", false, "also deliver the daily summary")
-	sessions := flags.Int("heartbeat-sessions", 2, "NYSE sessions that may close with nothing written to the journal before a heartbeat alert fires; weekends and holidays close none")
+	sessions := flags.Int("heartbeat-sessions", 2, "NYSE sessions that may close with nothing written to the journal before a heartbeat alert fires (at least 2); weekends and holidays close none")
 	accountName := flags.String("account", "", "account name for alerts when the journal cannot name its own (default: the journal file's name)")
 	sendTimeout := flags.Duration("send-timeout", 30*time.Second, "longest one send to one channel may take before it counts as failed")
 	if err := flags.Parse(args); err != nil {
@@ -58,8 +58,8 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if *journalPath == "" || *statePath == "" {
 		return errors.New("reporter: -journal and -state are required")
 	}
-	if *sessions < 1 {
-		return errors.New("reporter: -heartbeat-sessions must be at least 1")
+	if *sessions < 2 {
+		return errors.New("reporter: -heartbeat-sessions must be at least 2: a session's close is counted before the engine writes that session's records, so 1 would page on every trading day")
 	}
 	if *sendTimeout <= 0 {
 		return errors.New("reporter: -send-timeout must be positive: a send with no bound can hold the run forever, and with it every later alert")
@@ -97,7 +97,10 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if statErr == nil {
 		a, lost, err := report.HeartbeatAlert(label, info.ModTime(), now(), *sessions)
 		if err != nil {
+			// A check the calendar cannot answer is as silent as the lost
+			// heartbeat it would have caught, so it reaches a person too.
 			failures = append(failures, err)
+			alerts = append(alerts, report.HeartbeatUncheckedAlert(label, err, now()))
 		} else if lost {
 			alerts = append(alerts, a)
 		}

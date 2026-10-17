@@ -48,7 +48,7 @@ func TestTheTextSummarySaysWhetherAReleasedOrderWasSent(t *testing.T) {
 		{ClientOrderID: "tw-a", Side: event.OrderSideBuy, Quantity: 39, InstrumentID: "SPY", LimitPrice: 101, Status: report.OrderReleased, Send: true},
 		{ClientOrderID: "tw-b", Side: event.OrderSideBuy, Quantity: 1, InstrumentID: "SPY", LimitPrice: 101, Status: report.OrderReleased},
 	}})
-	if !contains(text, "tw-a buy 39 SPY limit 101.00: released (sent)") || !contains(text, "tw-b buy 1 SPY limit 101.00: released (not sent)") {
+	if !contains(text, "tw-a buy 39 SPY limit 101.00: released (send requested)") || !contains(text, "tw-b buy 1 SPY limit 101.00: released (not sent)") {
 		t.Fatalf("the summary must say whether each released order went to the broker:\n%s", text)
 	}
 }

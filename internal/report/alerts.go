@@ -34,6 +34,9 @@ const (
 	// KindJournalRefused is the reporter's own failure to read the journal:
 	// every alert the journal holds is withheld until it reads.
 	KindJournalRefused Kind = "journal-refused"
+	// KindHeartbeatUnchecked is the reporter's own failure to check the
+	// heartbeat, such as a span the calendar does not cover.
+	KindHeartbeatUnchecked Kind = "heartbeat-unchecked"
 )
 
 // Alert is one incident to tell the owner about. Key names the incident:
@@ -199,6 +202,18 @@ func JournalRefusedAlert(account string, err error, at time.Time) Alert {
 		Key: "journal-refused:" + account + ":" + err.Error(), Kind: KindJournalRefused, Severity: Urgent, AccountID: account, At: at,
 		Title: fmt.Sprintf("%s: the reporter cannot read the journal", account),
 		Body:  fmt.Sprintf("The reporter refused the journal: %s. No alert recorded in it (refusals, Degraded or Halted, withheld decisions) can be sent until it reads, and the daily summary is not sent. The heartbeat is still checked. Stops and orders at the broker are unaffected. Check the file with journal-query; recovery is a person's.", err),
+	}
+}
+
+// HeartbeatUncheckedAlert reports that the heartbeat could not be checked, so
+// the reporter cannot tell a live engine from a dead one: a check that fails
+// quietly on a timer run is the silence the heartbeat exists to catch. The
+// key is the account and the reason, so one failure is one incident.
+func HeartbeatUncheckedAlert(account string, err error, at time.Time) Alert {
+	return Alert{
+		Key: "heartbeat-unchecked:" + account + ":" + err.Error(), Kind: KindHeartbeatUnchecked, Severity: Urgent, AccountID: account, At: at,
+		Title: fmt.Sprintf("%s: the reporter cannot check the heartbeat", account),
+		Body:  fmt.Sprintf("The reporter cannot check the heartbeat: %s. Until it can, a silent engine goes unreported. Stops and orders at the broker are unaffected. Check the NYSE calendar's years and the journal's modification time.", err),
 	}
 }
 
