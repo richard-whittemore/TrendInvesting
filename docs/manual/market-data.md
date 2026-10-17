@@ -156,7 +156,11 @@ written for those sessions and the session close does not name it.
   such window, so the momentum rule ranks the stock again once its window
   lies wholly after the jump, 253 sessions after the ex-date. If that
   session also holds a malformed bar, it is still one session left out and
-  both reasons are named.
+  both reasons are named. Two Go tests pin the rule this relies on: a stock
+  with more than 253 closes but one session missing inside its window is
+  left out of the ranking, not ranked on a shifted window
+  (`TestScoreLeavesOutANameWithAGapInItsWindow` and
+  `TestDecideRecordsEveryRankedName`, in `internal/targetweight/momentum`).
 - A split or dividend with no readable date cannot be placed, so that stock
   is left out of every session.
 

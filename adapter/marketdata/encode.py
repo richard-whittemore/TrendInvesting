@@ -244,7 +244,11 @@ def _member_factors(ticker, loaded, days, actions, base):
     exact within each side (the levels differ by one constant, returns are
     unchanged), and the first session on or after the ex-date is left out.
     No complete 253-close window spans the jump, because the ex-date session
-    is missing from every such window (ADR 0026 point 5). When that session
+    is missing from every such window (ADR 0026 point 5; the Go tests
+    TestScoreLeavesOutANameWithAGapInItsWindow and
+    TestDecideRecordsEveryRankedName in internal/targetweight/momentum pin
+    that a name with bars on both sides of one missing session, even with
+    more than 253 closes, is a gap and is not ranked). When that session
     already holds a malformed bar it is still one session, with both reasons
     recorded. Only the action is dropped; that session's close is kept for
     the next action. An action with no readable date cannot be placed, so
@@ -349,7 +353,11 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
       like a malformed bar. No complete 253-close window spans the jump,
       because the ex-date session is missing from every such window, so the
       momentum rule ranks the ticker again once its window lies wholly after
-      the jump (ADR 0026 point 5).
+      the jump (ADR 0026 point 5). The Go tests
+      TestScoreLeavesOutANameWithAGapInItsWindow and
+      TestDecideRecordsEveryRankedName (internal/targetweight/momentum) pin
+      that one missing session inside the window leaves the name out of the
+      ranking even when 253 or more of its bars have arrived.
 
     Its bars before the bad session are written, so later bad data never
     changes an earlier session's bars. A universe snapshot row whose close
