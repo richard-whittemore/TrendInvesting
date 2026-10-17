@@ -33,8 +33,9 @@ false) is never sent (ADR 0026 point 3, "Mode").
 A person settles a stopped hand-over with the resolve command, never by
 editing the record: `python3 adapter/ibkr/relay.py resolve PENDING_FILE
 CLIENT_ORDER_ID --sent | --resend --reason TEXT`. It writes only a known
-mark, settles only an order the record marks about to be sent (a sent mark
-is the relay's own proof the sender returned), and appends the decision, its
+mark, settles only an order the record marks about to be sent or allowed to
+be sent again (a sent mark is the relay's own proof the sender returned),
+and appends the decision, its
 reason, its UTC time and the session date it was judged against to a
 sidecar file. A resend is allowed only for an order committed in today's
 session (in New York): an order from an earlier session may have filled or
@@ -42,11 +43,15 @@ been cancelled where today's open orders and executions no longer show it,
 so it is marked sent instead. For the same reason a resend is recorded as a
 permission dated with that session, and an adapter started on a later day
 does not send it: it marks the order about to be sent again and stops
-(ResendExpired). The record is edited read-modify-write, so the adapter
-holds an exclusive lock on the pending file's lock file for its lifetime and
-resolve holds it while it runs, refusing while the adapter has it. The
-record is read strictly (fail closed on unknown, AGENTS.md): anything but a
-JSON object from client order ID to a known mark raises
+(ResendExpired). A permission can be withdrawn the same way it was given,
+by marking the order sent, for an owner who finds the order at IBKR after
+allowing it; it is never given twice. The record is edited
+read-modify-write, so each relay holds an exclusive lock on the pending
+file's lock file from construction until close, and resolve holds it while
+it runs, refusing while a relay has it; a closed relay neither edits the
+record nor sends. The record is read strictly (fail closed on unknown, AGENTS.md): anything but a
+JSON object from client order ID to a known mark, a resend permission
+included only in exactly the shape resolve writes, raises
 HandoverRecordInvalid, and the adapter stops before sending.
 
 An input ID names one input (ADR 0027 section 4): a retry under the ID of
@@ -57,18 +62,24 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import sys
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 RELEASED = "risk.order.released"
-# The two marks the write-ahead record holds for a client order ID.
+# The write-ahead record holds one of three marks for a client order ID:
+# HANDING_OVER, SENT, or a resend permission "resend:YYYY-MM-DD".
 HANDING_OVER = "handing-over"
 SENT = "sent"
 MARKS = (HANDING_OVER, SENT)
 # A person's permission to send an order again, dated with the session it
 # was given in: "resend:YYYY-MM-DD". It is acted on only on that date.
 RESEND = "resend:"
+# The only shape of a resend permission the record accepts: the one resolve
+# writes, so a hand edit the interpreter's date reader happens to take (the
+# basic or week-date forms) is refused, not honoured (fail closed, AGENTS.md).
+RESEND_SHAPE = re.compile(r"resend:[0-9]{4}-[0-9]{2}-[0-9]{2}")
 # The trading session's calendar: a session's date is its New York date.
 SESSION_ZONE = ZoneInfo("America/New_York")
 # The person's decisions on a stopped hand-over.
@@ -114,7 +125,7 @@ class ResendExpired(HandoverUnconfirmed):
 
 
 class PendingInUse(Exception):
-    """Another adapter, or the resolve command, holds the pending file; this one does not start."""
+    """Another relay, or the resolve command, holds the pending file; or this relay was closed and holds it no more."""
 
 
 class HandoverRecordInvalid(ValueError):
@@ -136,26 +147,9 @@ class PendingInput:
         self.path = path
         self.handover_path = path + ".handover"
         self.decisions_path = path + ".handover.decisions"
+        # Never removed: a lock lives on the file's inode, so deleting it
+        # under a live holder would let a second writer lock a new file.
         self.lock_path = path + ".lock"
-        self._held = None
-
-    def hold(self):
-        """Take the pending file for this adapter's lifetime, or raise PendingInUse when another process has it.
-
-        An exclusive advisory lock on the lock file beside it: the record is
-        edited read-modify-write, so only one adapter or one resolve may
-        edit it at a time. Taken once; the lock ends with the process.
-        """
-        if self._held is None:
-            self._held = _lock(self.lock_path)
-            if self._held is None:
-                raise PendingInUse("{} is held by another adapter or by relay.py resolve".format(self.path))
-
-    def release(self):
-        """Give up the pending file, as the adapter's process ending would."""
-        if self._held is not None:
-            os.close(self._held)
-            self._held = None
 
     def load(self):
         try:
@@ -170,7 +164,7 @@ class PendingInput:
         self._write(self.path, envelope)
 
     def handovers(self):
-        """The write-ahead record: each client order ID's mark, HANDING_OVER or SENT.
+        """The write-ahead record: each client order ID's mark, HANDING_OVER, SENT or "resend:YYYY-MM-DD".
 
         Anything else raises HandoverRecordInvalid: a mark the relay does
         not know is never read as no mark, which would send the order again.
@@ -192,7 +186,12 @@ class PendingInput:
         return marks
 
     def mark(self, client_order_id, state):
-        """Record durably, before the call it precedes returns, that an order is being or was handed over."""
+        """Record an order's mark durably, before the call it precedes returns.
+
+        The mark is HANDING_OVER (about to be handed over), SENT (the sender
+        returned) or "resend:YYYY-MM-DD" (a person allowed it to be sent
+        again in that session).
+        """
         marks = self.handovers()
         marks[client_order_id] = state
         self._write(self.handover_path, marks)
@@ -257,12 +256,16 @@ class Relay:
     released order's payload to an OrderRequest. reconnects bounds how often one exchange reconnects and
     asks again before EngineUnavailable reaches the caller. today returns
     the session's date (New York), against which a resend permission is
-    checked. The relay holds the pending file from construction until close
-    (PendingInUse if another process has it).
+    checked. Each relay takes its own exclusive lock on the pending file at
+    construction and holds it until close (PendingInUse if another relay or
+    resolve has it, in this process or another); once closed it raises
+    PendingInUse rather than edit the record or send.
     """
 
     def __init__(self, connect, send, pending, broker_orders, to_request, reconnects=1, today=None):
-        pending.hold()
+        self._held = _lock(pending.lock_path)
+        if self._held is None:
+            raise PendingInUse("{} is held by another adapter or by relay.py resolve".format(pending.path))
         self._today = today or _session_today
         self._connect = connect
         self._send = send
@@ -274,8 +277,10 @@ class Relay:
         self._sent = set()
 
     def close(self):
-        """Release the pending file, as the adapter stopping does."""
-        self._pending.release()
+        """Release the pending file, as the adapter stopping does; the closed relay edits and sends nothing more."""
+        if self._held is not None:
+            os.close(self._held)
+            self._held = None
 
     def exchange(self, envelope):
         """Send one input and act on its reply, after settling any input still awaiting one."""
@@ -290,6 +295,9 @@ class Relay:
         return self._settle(envelope)
 
     def _settle(self, envelope):
+        if self._held is None:
+            raise PendingInUse("this relay was closed and no longer holds {}; it edits and sends nothing".format(
+                self._pending.path))
         self._pending.save(envelope)
         reply = self._ask(envelope)
         marks = self._pending.handovers()
@@ -335,13 +343,15 @@ class Relay:
 
 
 def resend_date(mark):
-    """The session date of a resend permission, or None when the mark is not one."""
-    if not isinstance(mark, str) or not mark.startswith(RESEND):
+    """The session date of a resend permission, or None when the mark is not one in the shape resolve writes."""
+    if not isinstance(mark, str) or RESEND_SHAPE.fullmatch(mark) is None:
         return None
+    text = mark[len(RESEND):]
     try:
-        return date.fromisoformat(mark[len(RESEND):])
+        allowed_on = date.fromisoformat(text)
     except ValueError:
         return None
+    return allowed_on if allowed_on.isoformat() == text else None
 
 
 def _session_today():
@@ -381,9 +391,11 @@ def resolve(pending, client_order_id, decision, reason, today=None):
 
     Refuses (ResolveRefused, nothing changed) while an adapter holds the
     pending file, an order the record does not hold or does not mark
-    HANDING_OVER (a SENT mark is the relay's proof the sender returned), an
-    unknown decision, an empty reason, and a resend of an order not
-    committed in today's session. The order's committed session is its
+    HANDING_OVER or a resend permission (a SENT mark is the relay's proof
+    the sender returned), an unknown decision, an empty reason, a resend of
+    an order already allowed one, and a resend of an order not committed in
+    today's session. A resend permission can only be withdrawn, by marking
+    the order sent: the owner found it at IBKR after allowing it. The order's committed session is its
     input's event time as a New York date: the engine commits the order only
     once it receives that input, so no earlier. A missing or unreadable
     event time refuses the resend. A resend is recorded as a permission
@@ -409,10 +421,14 @@ def _resolve(pending, client_order_id, decision, reason, today):
     if client_order_id not in marks:
         raise ResolveRefused("order {} is not in the hand-over record {}; check the client order ID".format(
             client_order_id, pending.handover_path))
-    if marks[client_order_id] != HANDING_OVER:
+    mark = marks[client_order_id]
+    if mark != HANDING_OVER and resend_date(mark) is None:
         raise ResolveRefused("order {} is marked {!r}, not {!r}: it is not a stopped hand-over, so there is "
                              "nothing to settle; check the client order ID".format(
-                                 client_order_id, marks[client_order_id], HANDING_OVER))
+                                 client_order_id, mark, HANDING_OVER))
+    if mark != HANDING_OVER and decision == DECIDE_RESEND:
+        raise ResolveRefused("order {} is already allowed to be sent again ({!r}); only --sent is accepted, to "
+                             "withdraw that permission if IBKR shows the order".format(client_order_id, mark))
     recorded = {"client_order_id": client_order_id, "decision": decision, "reason": reason,
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "session_date": today.isoformat()}
     if decision == DECIDE_RESEND:

@@ -121,8 +121,10 @@ class RelayTests(unittest.TestCase):
         self.sent = []
 
     def relay(self, connect, broker=holding(), reconnects=1, send=None, mapper=to_request, today=date(2026, 10, 16)):
-        return Relay(connect=connect, send=send or self.sent.append, pending=self.pending, broker_orders=broker,
-                     to_request=mapper, reconnects=reconnects, today=lambda: today)
+        relay = Relay(connect=connect, send=send or self.sent.append, pending=self.pending, broker_orders=broker,
+                      to_request=mapper, reconnects=reconnects, today=lambda: today)
+        self.addCleanup(relay.close)
+        return relay
 
     def test_a_reply_lost_to_a_crash_is_asked_for_again_and_its_order_sent_once(self):
         log = {}
@@ -147,7 +149,9 @@ class RelayTests(unittest.TestCase):
         log = {}
         connect = Restarts(log, {"session:0": [released("tw-1")]}, crash_before_reply=["session:0"])
         for broker in (holding(open_orders=["tw-1"]), holding(executions=["tw-1"])):
-            self.relay(connect, broker=broker).exchange(envelope(0))
+            relay = self.relay(connect, broker=broker)
+            relay.exchange(envelope(0))
+            relay.close()
         self.assertEqual(self.sent, [], "an open order or an execution carrying the tag is the broker's already")
 
     def test_an_order_handed_over_before_a_crash_is_never_sent_again(self):
@@ -159,6 +163,7 @@ class RelayTests(unittest.TestCase):
         crashed = self.relay(Restarts(log, decisions), send=CrashingSender(self.sent, crash_on=["tw-1"]))
         with self.assertRaises(ConnectionError):
             crashed.exchange(envelope(0))
+        crashed.close()
 
         self.relay(Restarts(log, decisions), broker=holding(executions=["tw-1"])).exchange(envelope(1))
         self.assertEqual([r.client_order_id for r in self.sent], ["tw-1", "tw-2"])
@@ -172,6 +177,7 @@ class RelayTests(unittest.TestCase):
         crashed = self.relay(Restarts(log, decisions), send=CrashingSender(self.sent, crash_on=["tw-1"]))
         with self.assertRaises(ConnectionError):
             crashed.exchange(envelope(0))
+        crashed.close()
 
         connect = Restarts(log, decisions)
         restarted = self.relay(connect)
@@ -192,8 +198,10 @@ class RelayTests(unittest.TestCase):
         def unshapeable(order):
             raise ValueError("cannot shape {}".format(order["client_order_id"]))
 
+        unshaping = self.relay(Restarts(log, decisions), mapper=unshapeable)
         with self.assertRaises(ValueError):
-            self.relay(Restarts(log, decisions), mapper=unshapeable).exchange(envelope(0))
+            unshaping.exchange(envelope(0))
+        unshaping.close()
         self.assertEqual(self.pending.handovers(), {}, "no hand-over is recorded for a request never built")
 
         self.relay(Restarts(log, decisions)).exchange(envelope(1))
@@ -206,6 +214,7 @@ class RelayTests(unittest.TestCase):
         crashed = self.relay(Restarts(log, decisions, crash_before_reply=["session:0"]), reconnects=0)
         with self.assertRaises(EngineUnavailable):
             crashed.exchange(envelope(0))
+        crashed.close()
 
         changed = dict(envelope(0), sequence=99)
         connect = Restarts(log, decisions)
@@ -222,6 +231,7 @@ class RelayTests(unittest.TestCase):
         crashed = self.relay(Restarts(log, decisions, crash_before_reply=["session:0"]), reconnects=0)
         with self.assertRaises(EngineUnavailable):
             crashed.exchange(envelope(0))
+        crashed.close()
         self.assertEqual(self.pending.load(), envelope(0), "the input awaiting its reply survives the adapter")
         self.assertEqual(self.sent, [])
 
@@ -260,8 +270,10 @@ class RelayTests(unittest.TestCase):
         for record in ({"tw-1": "Sent"}, {"tw-1": None}, ["tw-1"], "sent"):
             with open(self.pending.handover_path, "w", encoding="utf-8") as f:
                 json.dump(record, f)
+            restarted = self.relay(Restarts(log, decisions))
             with self.assertRaises(HandoverRecordInvalid):
-                self.relay(Restarts(log, decisions)).exchange(envelope(1))
+                restarted.exchange(envelope(1))
+            restarted.close()
         with open(self.pending.handover_path, "w", encoding="utf-8") as f:
             f.write('{"tw-1": sent')
         with self.assertRaises(HandoverRecordInvalid):
@@ -340,6 +352,71 @@ class RelayTests(unittest.TestCase):
         with self.assertRaises(HandoverUnconfirmed):
             self.relay(Restarts(log, decisions)).exchange(envelope(1))
         self.assertEqual([r.client_order_id for r in self.sent], ["tw-1", "tw-2"], "nothing is sent again")
+
+    def test_a_resend_permission_can_be_withdrawn_by_marking_the_order_sent(self):
+        # The owner allowed a resend, then found the order in IBKR's audit
+        # trail: the permission must be withdrawable, or the next start that
+        # day sends the order again (fail closed, AGENTS.md).
+        inp = dict(envelope(0), event_time="2026-10-16T14:00:00Z")
+        decisions = {"session:0": [released("tw-1")]}
+        log = self.stopped_mid_send(inp, decisions)
+        resolve(self.pending, "tw-1", "resend", "no trace in IBKR at 10:00", today=date(2026, 10, 16))
+        with self.assertRaises(ResolveRefused):
+            resolve(self.pending, "tw-1", "resend", "asked again", today=date(2026, 10, 16))
+        self.assertEqual(self.pending.handovers(), {"tw-1": "resend:2026-10-16"})
+
+        resolve(self.pending, "tw-1", "sent", "audit trail shows it accepted then cancelled", today=date(2026, 10, 16))
+        self.assertEqual(self.pending.handovers(), {"tw-1": "sent"}, "the permission is withdrawn")
+        self.assertEqual([d["decision"] for d in self.pending.decisions()], ["resend", "sent"], "both are kept")
+
+        self.relay(Restarts(log, decisions)).exchange(envelope(1))
+        self.assertEqual([r.client_order_id for r in self.sent], ["tw-1"], "a withdrawn permission sends nothing")
+
+    def test_a_resend_mark_is_read_only_in_the_shape_resolve_writes(self):
+        # A date reader that also takes the basic and week-date forms, as
+        # Python 3.11 and later do: the record's shape must not depend on it.
+        import relay as relay_module
+
+        class Lenient(date):
+            @classmethod
+            def fromisoformat(cls, text):
+                text = text.strip()
+                if len(text) == 8 and text.isdigit():
+                    return date(int(text[:4]), int(text[4:6]), int(text[6:]))
+                if len(text) == 10 and text[4:6] == "-W":
+                    return date.fromisocalendar(int(text[:4]), int(text[6:8]), int(text[9]))
+                return date.fromisoformat(text)
+
+        original = relay_module.date
+        relay_module.date = Lenient
+        self.addCleanup(setattr, relay_module, "date", original)
+        for mark in ("resend:20261016", "resend:2026-W42-5", "resend:2026-10-16\n", "resend: 2026-10-16",
+                     "resend:2026-02-30"):
+            with self.subTest(mark=mark):
+                with open(self.pending.handover_path, "w", encoding="utf-8") as f:
+                    json.dump({"tw-1": mark}, f)
+                with self.assertRaises(HandoverRecordInvalid):
+                    self.pending.handovers()
+        with open(self.pending.handover_path, "w", encoding="utf-8") as f:
+            json.dump({"tw-1": "resend:2026-10-16"}, f)
+        self.assertEqual(self.pending.handovers(), {"tw-1": "resend:2026-10-16"})
+
+    def test_each_relay_holds_its_own_lock_and_a_closed_relay_never_edits_or_sends(self):
+        decisions = {"session:0": [released("tw-1")]}
+        first = self.relay(Restarts({}, decisions))
+        with self.assertRaises(PendingInUse):
+            self.relay(Restarts({}, decisions))
+        first.close()
+
+        second = self.relay(Restarts({}, decisions))
+        first.close()
+        with self.assertRaises(ResolveRefused):
+            resolve(PendingInput(self.pending.path), "tw-1", "sent", "closing the old relay", today=date(2026, 10, 16))
+        with self.assertRaises(PendingInUse):
+            first.exchange(envelope(0))
+        self.assertEqual(self.sent, [], "a closed relay sends nothing")
+        self.assertIsNone(self.pending.load(), "and edits nothing")
+        second.close()
 
     def test_resolve_is_refused_while_an_adapter_holds_the_pending_file(self):
         inp = dict(envelope(0), event_time="2026-10-16T20:00:00Z")
