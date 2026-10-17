@@ -15,8 +15,9 @@ import (
 //
 //   - Version 2 is CompletedBarAdjustedPayload. Version 1
 //     (CompletedBarSchemaVersion) stays what the Turtle reducer, the
-//     backtest and the LEAN adapter read and write; each consumer refuses
-//     the other's version (ADR 0015).
+//     backtest and the LEAN adapter read and write; each of those refuses
+//     the other's version (ADR 0015). The reporter and dashboard
+//     (internal/report) read both, since they summarise every engine's log.
 const CompletedBarAdjustedVersion uint32 = 2
 
 // ViewAdjusted labels the split- and dividend-adjusted view of a version 2
