@@ -131,7 +131,9 @@ var notYetCrossed = map[string]string{
 	"risk.order.refused":                   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 	// cmd/engine delivers the owner's approval itself, from -approval,
 	// before the socket opens; no adapter sends or receives it.
-	"operator.run.approved": "cmd/engine's approval input (-approval), not an adapter",
+	"operator.run.approved":    "cmd/engine's approval input (-approval), not an adapter",
+	"market.universe.snapshot": "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
+	"market.session.calendar":  "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
 }
 
 func main() {
