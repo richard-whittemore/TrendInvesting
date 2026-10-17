@@ -1,0 +1,48 @@
+// Package journalquery answers questions about what a run did, from the
+// journals it left behind: the orders planned, released and refused, the
+// fills with their quantities, prices and commissions, the positions those
+// fills build, and the refusals and engine-state changes along the way.
+//
+// It is read-only by construction: every function takes bytes already read
+// and returns a table, so nothing here can write to a journal or reach an
+// engine. A journal is trusted only after journal.Verify accepts it; a file
+// whose hash chain does not verify is refused whole, naming the record where
+// it breaks, and no figure from it is reported (ADR 0017). Any index a caller
+// builds from these tables is a disposable copy, never a second source of
+// truth.
+package journalquery
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+)
+
+// Journal is one verified journal: its name (shown beside every row it
+// contributes), its header, and its records in sequence order.
+type Journal struct {
+	Name    string
+	Header  journal.Header
+	Records []journal.Record
+}
+
+// Load verifies data as a journal and returns it. The chain is checked before
+// anything else is trusted, so a tampered or truncated-in-the-middle file is
+// refused with the record at which it breaks.
+func Load(name string, data []byte) (Journal, error) {
+	if isDurableLog(data) {
+		return Journal{}, loadDurableLog(name, data)
+	}
+	if _, err := journal.Verify(bytes.NewReader(data)); err != nil {
+		var broken *journal.ChainBrokenError
+		if errors.As(err, &broken) {
+			return Journal{}, fmt.Errorf("%s: refused, the hash chain does not verify: %w", name, err)
+		}
+		return Journal{}, fmt.Errorf("%s: refused, the journal does not verify: %w", name, err)
+	}
+	// Verify has just parsed these same bytes, so Read cannot fail on them.
+	header, records, _ := journal.Read(bytes.NewReader(data))
+	return Journal{Name: name, Header: header, Records: records}, nil
+}
