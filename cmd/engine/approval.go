@@ -154,19 +154,14 @@ func freshRunApproval(opts options, comp composition) (*event.OperatorRunApprove
 // abandoned attempts included, recorded under this composition's header
 // and opening with its configuration input, or "" when there is none.
 func logOpeningWith(opts options, comp composition) (string, error) {
-	dir, _ := splitAsSpelled(opts.logPath)
-	names, err := logsByAge(dir)
+	names, recovered, err := readLogs(opts)
 	if err != nil {
 		return "", err
 	}
-	prefix, _ := filepath.Split(opts.logPath)
 	header := journal.NewLogHeader(comp.configurationHash, comp.strategyVersion)
 	opening := event.CanonicalEnvelopeBytes(comp.configEnvelope)
-	for _, name := range names {
-		recovery, err := recoverRun(prefix, name)
-		if err != nil {
-			return "", err
-		}
+	for i, name := range names {
+		recovery := recovered[i]
 		if recovery.Header == header && len(recovery.Entries) > 0 && bytes.Equal(event.CanonicalEnvelopeBytes(recovery.Entries[0].Envelope), opening) {
 			return name, nil
 		}
@@ -466,7 +461,7 @@ func checkApprovedLatch(entries []journal.Entry, approval event.OperatorRunAppro
 type logDirectory struct {
 	// runs are the runs, least recently modified first.
 	runs []string
-	// abandoned maps each abandoned resume attempt to the log it copied.
+	// abandoned maps each abandoned resume attempt to the run it copied.
 	abandoned map[string]string
 	// emptyStarts are the logs holding no committed record.
 	emptyStarts []string
@@ -488,22 +483,14 @@ func latestLog(opts options) (latest string, found logDirectory, err error) {
 // whose committed records are a prefix of an older log's under the same
 // header: a resume of that log abandoned partway (ADR 0027 §6: a resume's
 // new log begins with the old log's committed part, byte for byte, the
-// configuration first), attributed to the newest log it is a prefix of,
+// configuration first), attributed to the newest run it is a prefix of,
 // since a resume of a resumed run is a prefix of every run that run
-// continued. A log holding only its configuration that is no such prefix is
+// continued, and never to another attempt, which is no run to resume. A log holding only its configuration that is no such prefix is
 // a start cut short (attemptAtStart, stateBefore), and stays a run.
 func runsByAge(opts options) (logDirectory, error) {
-	dir, _ := splitAsSpelled(opts.logPath)
-	names, err := logsByAge(dir)
+	names, recovered, err := readLogs(opts)
 	if err != nil {
 		return logDirectory{}, err
-	}
-	prefix, _ := filepath.Split(opts.logPath)
-	recovered := make([]journal.Recovery, len(names))
-	for i, name := range names {
-		if recovered[i], err = recoverRun(prefix, name); err != nil {
-			return logDirectory{}, err
-		}
 	}
 	found := logDirectory{abandoned: map[string]string{}}
 	for i, name := range names {
@@ -515,6 +502,12 @@ func runsByAge(opts options) (logDirectory, error) {
 		// empty start is never the source of an attempt.
 		source := ""
 		for j := i - 1; j >= 0; j-- {
+			// An attempt is never the log another attempt copied: a prefix
+			// of an attempt is a prefix of that attempt's own source, which
+			// the scan still reaches.
+			if _, attempt := found.abandoned[names[j]]; attempt {
+				continue
+			}
 			if committedPrefixOf(recovered[i], recovered[j]) {
 				source = names[j]
 				break
@@ -550,40 +543,85 @@ func committedPrefixOf(attempt, source journal.Recovery) bool {
 // engine reads only the directory's root, so it never reads that folder.
 const quarantineFolder = "quarantine"
 
-// recoverRun recovers the log name in the directory spelled prefix,
-// naming the operator's step when it cannot: every log in the directory is
-// read to find the latest run, so one whose content cannot be recovered
-// (ADR 0027 §5) stops every start until it is set aside, and one that
-// cannot be read stops every start until the fault is fixed. Only the first
-// is quarantined: a log that cannot be read may be an intact crashed run.
-func recoverRun(prefix, name string) (journal.Recovery, error) {
-	recovery, err := recoverLogFile(prefix + name)
-	var unrecoverable *unrecoverableLogError
-	switch {
-	case err == nil:
-		return recovery, nil
-	case errors.As(err, &unrecoverable):
-		return journal.Recovery{}, fmt.Errorf("%w; every log in the directory is read to find the latest run, so move %s, unchanged, into %s and start again, never editing or deleting it (ADR 0018; docs/runbooks/durable-log.md, \"An unrecoverable log\")",
-			err, name, prefix+quarantineFolder)
-	default:
-		return journal.Recovery{}, fmt.Errorf("%w; %s could not be read, a fault in reading it, such as its permissions or the disk, not damage to what it holds, so it may be an intact crashed run: fix the fault and start again, leaving the log where it is (docs/runbooks/durable-log.md, \"A log that cannot be read\")",
-			err, name)
+// readLogs returns the names of the logs in the directory of -log, least
+// recently modified first as logsByAge orders them, and what each holds,
+// naming the operator's step when one cannot be recovered. Every log is read
+// to find the latest run, and none is skipped: one whose content cannot be
+// recovered (ADR 0027 §5) stops every start until it is set aside, and one
+// that cannot be opened or read stops every start until the fault is fixed
+// or, when it is not the latest run, until it is set aside (readFault).
+func readLogs(opts options) ([]string, []journal.Recovery, error) {
+	dir, _ := splitAsSpelled(opts.logPath)
+	logs, err := logsByAge(dir)
+	if err != nil {
+		return nil, nil, err
 	}
+	prefix, _ := filepath.Split(opts.logPath)
+	names := make([]string, len(logs))
+	recovered := make([]journal.Recovery, len(logs))
+	failed := make([]error, len(logs))
+	for i, log := range logs {
+		names[i] = log.name
+		recovered[i], failed[i] = recoverLogFile(prefix + log.name)
+	}
+	for i, err := range failed {
+		var unrecoverable *unrecoverableLogError
+		switch {
+		case err == nil:
+		case errors.As(err, &unrecoverable):
+			return nil, nil, fmt.Errorf("%w; every log in the directory is read to find the latest run, so move %s, unchanged, into %s and start again, never editing or deleting it (ADR 0018; docs/runbooks/durable-log.md, \"An unrecoverable log\")",
+				err, names[i], prefix+quarantineFolder)
+		default:
+			return nil, nil, readFault(err, prefix, logs, recovered, failed, i)
+		}
+	}
+	return names, recovered, nil
 }
 
-// logsByAge returns the names of the durable logs in dir, least recently
-// modified first. Two logs modified at the same instant are ordered by name,
-// the later name being the later log.
-func logsByAge(dir string) ([]string, error) {
+// readFault is the refusal for logs[i], which could not be opened or read:
+// a fault in reading it, not damage to what it holds, so it may be an intact
+// crashed run. It is set aside only when it is not the latest run, which
+// holds when a later log holding a committed record was modified after it;
+// even then that later log may be a resume of it abandoned partway, which
+// only the operator can rule out, so the step is theirs to take after the
+// check the runbook gives. A permission fault is never set aside: its owner
+// or mode is fixed.
+func readFault(err error, prefix string, logs []loggedFile, recovered []journal.Recovery, failed []error, i int) error {
+	name := logs[i].name
+	if errors.Is(err, fs.ErrPermission) {
+		return fmt.Errorf("%w; %s could not be read, as the engine is not permitted to read it, not for damage to what it holds: fix its owner or mode and start again, leaving the log where it is (docs/runbooks/durable-log.md, \"A log that cannot be read\")",
+			err, name)
+	}
+	newer := ""
+	for j := i + 1; j < len(logs); j++ {
+		if failed[j] == nil && len(recovered[j].Entries) > 0 && logs[j].modified.After(logs[i].modified) {
+			newer = logs[j].name
+		}
+	}
+	if newer == "" {
+		return fmt.Errorf("%w; %s could not be read, a fault in reading it, such as the disk, not damage to what it holds, and no log holding a record was modified after it, so it is or may be the latest run, an intact crashed run: fix the fault and start again, leaving the log where it is, never setting it aside (docs/runbooks/durable-log.md, \"A log that cannot be read\")",
+			err, name)
+	}
+	return fmt.Errorf("%w; %s could not be read, a fault in reading it, such as the disk, not damage to what it holds: fix the fault and start again; if it persists, %s, a log holding a record, was modified after it, so it is not the latest run unless %s is a resume of it abandoned partway: once the service journal shows a start after it was last written that finished its resume or recorded an approval, move %s, unchanged, into %s and start again, never editing or deleting it (ADR 0018; docs/runbooks/durable-log.md, \"A log that cannot be read\")",
+		err, name, newer, newer, name, prefix+quarantineFolder)
+}
+
+// loggedFile is a durable log in the directory of -log and when it was last
+// modified.
+type loggedFile struct {
+	name     string
+	modified time.Time
+}
+
+// logsByAge returns the durable logs in dir, least recently modified first.
+// Two logs modified at the same instant are ordered by name, the later name
+// being the later log.
+func logsByAge(dir string) ([]loggedFile, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("engine: list the durable log's directory %s: %w", dir, err)
 	}
-	type found struct {
-		name     string
-		modified time.Time
-	}
-	var logs []found
+	var logs []loggedFile
 	for _, entry := range entries {
 		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), durableLogSuffix) {
 			continue
@@ -595,7 +633,7 @@ func logsByAge(dir string) ([]string, error) {
 			}
 			return nil, fmt.Errorf("engine: examine %s in %s: %w", entry.Name(), dir, err)
 		}
-		logs = append(logs, found{entry.Name(), info.ModTime()})
+		logs = append(logs, loggedFile{entry.Name(), info.ModTime()})
 	}
 	sort.Slice(logs, func(i, j int) bool {
 		if !logs[i].modified.Equal(logs[j].modified) {
@@ -603,11 +641,7 @@ func logsByAge(dir string) ([]string, error) {
 		}
 		return logs[i].name < logs[j].name
 	})
-	names := make([]string, len(logs))
-	for i, log := range logs {
-		names[i] = log.name
-	}
-	return names, nil
+	return logs, nil
 }
 
 // readApproval reads and validates an approval file, refusing a key it

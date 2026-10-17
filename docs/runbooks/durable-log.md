@@ -140,28 +140,57 @@ The engine reads its settings from
    read to find the latest run, so a log the engine cannot recover (ADR
    0027 §5) stops every start until it is set aside: see "An unrecoverable
    log"; a log it cannot open or read stops every start until the fault is
-   fixed: see "A log that cannot be read".
+   fixed or, if it is a superseded log, it is set aside: see "A log that
+   cannot be read".
 
 ## A log that cannot be read
 
 A log the engine cannot open or read (its owner or mode after a manual
 copy, or a disk fault) refuses every start with a message saying it "could
-not be read" and giving no quarantine step. The file may be an intact
-crashed run, so never quarantine it for this.
+not be read". The engine never skips it: until it is read, nothing tells
+whether it is the crashed run. The message says which case it is.
 
-1. Fix the fault: for example
+1. **A permission fault** ("not permitted to read it"): fix the file's owner
+   or mode, never quarantine it:
    `sudo chown ti-trader: /var/lib/trend-investing/engines/<account>/<name>.log`
-   and `sudo chmod 600` on it, or the disk the error names.
-2. Start again, leaving the log where it is. If the engine then reads it
-   and finds its content unrecoverable, follow "An unrecoverable log".
+   and `sudo chmod 600` on it. Start again.
+2. **A disk fault on a log that is or may be the latest run** ("it is or may
+   be the latest run", given when no log holding a record was modified after
+   it): fix the disk the error names and start again, leaving the log where
+   it is. Never quarantine it: it may be the intact crashed run. If the disk
+   cannot be recovered, the crashed run cannot be resumed: start a fresh run
+   from a reconciled baseline (ADR 0019's recovery procedure), with an
+   approval naming the latest run you can still read.
+3. **A disk fault on a superseded log** (the message names a newer log
+   holding a record, and the quarantine folder): fix the disk if you can and
+   start again. If the fault persists, confirm the log is not the crashed
+   run: the newer log is the latest run unless it is a resume of this one
+   abandoned while copying it. Check the service journal for a start after
+   the log was last written that finished its resume or recorded an
+   approval:
+
+   ```sh
+   sudo journalctl -u ti-engine@<account> \
+     --since "$(date -r /var/lib/trend-investing/engines/<account>/<name>.log '+%F %T')" \
+     | grep -E "resumed [0-9]+ record\(s\) from|recorded the owner's approval of a fresh run after"
+   ```
+
+   A line here comes from a start that completed its copy (`resumed`) or
+   began a fresh run (`recorded the owner's approval`) after the log was last
+   written, so a later run supersedes it. With such a line, follow "An
+   unrecoverable log" step 2 to move it, unchanged, into the quarantine
+   folder (a move needs no read), then start again. With no line, treat it as
+   case 2: leave it where it is.
+4. If the engine then reads the log and finds its content unrecoverable,
+   follow "An unrecoverable log".
 
 ## An unrecoverable log
 
 Every `*.log` in the root of the account's state directory,
 `/var/lib/trend-investing/engines/<account>/`, is read to find the latest
 run. A log whose content the engine cannot recover (ADR 0027 §5: a damaged file, an old
-log whose bytes rotted after it was superseded, or a stray file ending in
-`.log`) refuses every start, resume and fresh run alike, with a message
+log whose bytes rotted after it was superseded and still read back, or a stray file ending in
+`.log`; rot the disk reports as a read error is "A log that cannot be read") refuses every start, resume and fresh run alike, with a message
 ending "move `<name>`, unchanged, into `<state directory>/quarantine`".
 
 1. **Do not edit or delete the file.** It is recorded evidence (ADR 0018).

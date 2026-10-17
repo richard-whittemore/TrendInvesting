@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -858,4 +859,119 @@ func TestAnAbandonedResumeNamesTheLogItCopied(t *testing.T) {
 	resumed.logPath, resumed.outPath = filepath.Join(dir, "run-4.log"), filepath.Join(dir, "run-4.journal")
 	resumed.resumePath = attempt
 	refuse(t, "a resume of the abandoned attempt", resumed, "a resume of run-2.log abandoned")
+}
+
+// TestAnAttemptAtAnAttemptsSourceNamesTheRunItCopied: two resumes of one
+// crashed run, each abandoned while copying it, leave two attempts, the
+// later a prefix of the earlier as well as of the run. An attempt is never
+// the log another attempt copied: the operator is sent to the run both
+// copied, the one the engine resumes (ADR 0027 §6).
+func TestAnAttemptAtAnAttemptsSourceNamesTheRunItCopied(t *testing.T) {
+	source := t.TempDir()
+	full, _ := firstBoostRun(t, source)
+	dir := t.TempDir()
+	now := time.Now()
+	all := 0
+	for _, entry := range recoverFile(t, full.logPath).Entries {
+		if entry.Kind == journal.KindInput {
+			all++
+		}
+	}
+	committedPrefix(t, full.logPath, dir, "run-1.log", all, now.Add(time.Hour))
+	committedPrefix(t, full.logPath, dir, "run-2.log", 3, now.Add(2*time.Hour))
+	attempt := committedPrefix(t, full.logPath, dir, "run-3.log", 2, now.Add(3*time.Hour))
+	resumed := boostOptions(t, dir)
+	resumed.logPath, resumed.outPath = filepath.Join(dir, "run-4.log"), filepath.Join(dir, "run-4.journal")
+	resumed.resumePath = attempt
+	refuse(t, "a resume of the second abandoned attempt", resumed, "a resume of run-1.log abandoned")
+}
+
+// TestAnUnreadableLogSupersededByANewerRunMayBeQuarantined: a log that
+// cannot be read is never skipped, so it still stops every start; but when
+// a newer log holding a record was modified after it, it is not the latest
+// run, so once the operator confirms that newer log is no resume of it
+// abandoned partway, the refusal's step is to move it, unchanged, into
+// quarantine (ADR 0018), and the next start finds the newer run.
+func TestAnUnreadableLogSupersededByANewerRunMayBeQuarantined(t *testing.T) {
+	source := t.TempDir()
+	full, fullLog := firstBoostRun(t, source)
+	latch, _ := lastLatch(t, fullLog.Entries)
+	dir := t.TempDir()
+	now := time.Now()
+	all := 0
+	for _, entry := range fullLog.Entries {
+		if entry.Kind == journal.KindInput {
+			all++
+		}
+	}
+	old := committedPrefix(t, full.logPath, dir, "run-1.log", all, now.Add(time.Hour))
+	committedPrefix(t, full.logPath, dir, "run-2.log", all, now.Add(2*time.Hour))
+	faultLogRead(t, old, 200, errDiskFault)
+
+	fresh := boostOptions(t, dir)
+	fresh.logPath, fresh.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
+	fresh.asOf = laterAsOf
+	fresh.approvalPath = writeApproval(t, dir, "run-2.log", fullLog.FinalRecordHash, latch)
+	refuse(t, "a start beside a superseded unreadable log", fresh, "could not be read")
+	refuse(t, "a start beside a superseded unreadable log", fresh, "run-2.log")
+	refuse(t, "a start beside a superseded unreadable log", fresh, "into "+filepath.Join(dir, quarantineFolder))
+
+	if err := os.MkdirAll(filepath.Join(dir, quarantineFolder), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(old, filepath.Join(dir, quarantineFolder, "run-1.log")); err != nil {
+		t.Fatal(err)
+	}
+	if err := startEngine(t, fresh)(); err != nil {
+		t.Fatalf("the fresh run after the unreadable log was quarantined: %v", err)
+	}
+}
+
+// TestAnUnreadableLogThatMayBeTheLatestRunIsNeverQuarantined: a log that
+// cannot be read, and that no newer log holding a record was modified
+// after, is or may be the latest run, an intact crashed run, so the
+// refusal names the fault to fix and gives no quarantine step, even beside
+// a newer empty start.
+func TestAnUnreadableLogThatMayBeTheLatestRunIsNeverQuarantined(t *testing.T) {
+	source := t.TempDir()
+	full, _ := firstBoostRun(t, source)
+	dir := t.TempDir()
+	now := time.Now()
+	committedPrefix(t, full.logPath, dir, "run-1.log", 2, now.Add(time.Hour))
+	latest := committedPrefix(t, full.logPath, dir, "run-2.log", 3, now.Add(2*time.Hour))
+	committedPrefix(t, full.logPath, dir, "run-3.log", 0, now.Add(3*time.Hour))
+	faultLogRead(t, latest, 200, errDiskFault)
+
+	resumed := boostOptions(t, dir)
+	resumed.logPath, resumed.outPath = filepath.Join(dir, "run-4.log"), filepath.Join(dir, "run-4.journal")
+	resumed.resumePath = latest
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	err := run(ctx, resumed, io.Discard)
+	cancel()
+	if err == nil || strings.Contains(err.Error(), "quarantine") || !strings.Contains(err.Error(), "could not be read") {
+		t.Fatalf("run() = %v, want a refusal saying the log could not be read, with no quarantine step", err)
+	}
+}
+
+// TestAnOldLogWithAPermissionFaultIsNeverQuarantined: a log the engine is
+// not permitted to read is fixed by its owner or mode, never set aside,
+// however old it is.
+func TestAnOldLogWithAPermissionFaultIsNeverQuarantined(t *testing.T) {
+	source := t.TempDir()
+	full, _ := firstBoostRun(t, source)
+	dir := t.TempDir()
+	now := time.Now()
+	old := committedPrefix(t, full.logPath, dir, "run-1.log", 2, now.Add(time.Hour))
+	committedPrefix(t, full.logPath, dir, "run-2.log", 3, now.Add(2*time.Hour))
+	faultLogRead(t, old, -1, fs.ErrPermission)
+
+	resumed := boostOptions(t, dir)
+	resumed.logPath, resumed.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
+	resumed.resumePath = filepath.Join(dir, "run-2.log")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	err := run(ctx, resumed, io.Discard)
+	cancel()
+	if err == nil || strings.Contains(err.Error(), "quarantine") || !strings.Contains(err.Error(), "owner or mode") {
+		t.Fatalf("run() = %v, want a refusal naming the owner or mode to fix, with no quarantine step", err)
+	}
 }
