@@ -1,8 +1,8 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner)
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357))
 - Date: 2026-10-15
-- Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (both amendments), ADR 0020, ADR 0022, ADR 0025
+- Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
 ## In plain English
 
@@ -108,7 +108,7 @@ only cash, say), the buy phase is planned at once, in the same decision.
   (point 3), not the previous close, plus the configured maximum commission
   and fees. Buys worth $980 at the previous close cost $1,029 at a 5% band
   before fees, and it is the $1,029 that must fit.
-- **Scaling.** If the worst-case total exceeds the budget, every buy is
+- **Scaling.** *(Extended by a fallback in the 2026-10-17 amendment.)* If the worst-case total exceeds the budget, every buy is
   scaled by min(1, budget / worst-case cost) and rounded again. This scaling
   is **new**, not in the backtest, and goes into the parity rerun
   (`momentum/execution.py`, `EXEC_DELAY`).
@@ -346,7 +346,9 @@ the module's own rules version and decision corpus (ADR 0016;
   account snapshot carrying positions and net liquidation, as a new version of
   `account.snapshot` or as ADR 0019's proposed `account.reconciliation`, and a
   recorded IBKR mark.
-- **Existing types to change**, each in its own version bump:
+- **Existing types to change**, each in its own version bump *(the first two
+  sub-bullets, `OrderLifecyclePayload` and `execution.fill`, are superseded by
+  the 2026-10-17 amendment: parallel versions, not bumps)*:
   - `OrderLifecyclePayload`: `StopPrice` is required and positive today
     (`internal/event/order_lifecycle.go:77-80`). It becomes optional for limit
     orders, and `Quantity` (`int64`) becomes a decimal under D7-F;
@@ -360,7 +362,9 @@ the module's own rules version and decision corpus (ADR 0016;
     only `event.ConfigurationPayload`.
 - **Journal.** Live use needs a durable, streamed journal (#151). ADR 0017's
   one-pass, in-memory write reopens for live runs.
-- No code exists yet; Phase 2 implements this, test first.
+- *(Historical.)* No code existed when this was accepted; code exists since
+  slice 2 (PR #358) and slice 5 (PR #353), and the 2026-10-17 amendment
+  records what was built. Phase 2 implements the rest, test first.
 
 ## Amendment (2026-10-17, owner decision, #352 and #357): readings and planner choices
 
@@ -372,8 +376,12 @@ ones that belong here.
 ### From #352
 
 - **The urgent Excess Liquidity sale (point 4) goes once per urgent alarm.**
-  Its client identifier derives from the alarm decision, so one alarm
-  episode sells once. It has no unknown-working-sell check; its sizing nets
+  Its client identifier derives from the alarm decision, and a new alarm
+  is minted on every change of the alarm's level into urgent. An alarm
+  episode runs from the level becoming urgent until it next changes level.
+  Urgent, then warning, then urgent again is two alarms and may sell twice,
+  even if the cushion never got back above 40%; a change of cause while
+  staying urgent (ratio to no reading) is the same alarm. It has no unknown-working-sell check; its sizing nets
   every working sell, so it cannot open a short.
 - **Risk-reducing orders (point 3) are not counted toward N.** They are
   exempt from the order count, order size and price band, and do not add to
@@ -385,18 +393,24 @@ ones that belong here.
 
 ### From #357
 
-- **Buy scaling always fits the budget (replaces the Scaling rule in point
-  2).** With `max_fees_per_order` above zero, scaling by
-  min(1, budget ÷ worst-case cost) can still leave a total over the budget,
-  because the fee allowance does not shrink with quantity. The rule is: if
-  the worst-case total (limit price × quantity, plus the fee allowance per
-  order) exceeds the budget, scale every buy by
-  (budget − n × fee allowance) ÷ Σ(quantity × limit price), n being the
-  number of buys, and round toward zero. When the budget does not exceed
-  n × fee allowance the factor is zero or negative, and no buy is released:
-  the planner withholds them rather than apply a negative scale. The result fits the budget with
-  worst-case fees included. With a $0 allowance this is the earlier
-  formula.
+- **Buy scaling always fits the budget (extends the Scaling rule in point
+  2 with a fallback).** With `max_fees_per_order` above zero, point 2's
+  scaling alone can leave a total over the budget, because the fee allowance
+  does not shrink with quantity. As built (`orderplan.ScaleBuys`) the rule
+  has two steps. (a) Point 2's rule: scale every buy by
+  min(1, budget ÷ worst-case total), round toward zero and drop any buy that
+  rounds to zero. (b) Only if the rescaled total still exceeds the budget,
+  scale every buy instead by (budget − n × fee allowance) ÷
+  Σ(quantity × limit price), n being the number of buys before step (a),
+  floored at zero and rounded toward zero. The result fits the budget with
+  worst-case fees included. A buy that scales to zero is dropped: no buy is
+  planned for it. On main this is silent; once PR #392 lands, each is
+  recorded as `strategy.order.skipped`. It is not a withheld decision with
+  a reason from point 1's closed set. The budget is not a cutoff: a budget
+  at or below n × fee allowance can still release a buy (for example 100,
+  1 and 1 shares at $10, a $10 allowance and a $20 budget keep one share of
+  the first buy, which costs $20). With a $0 allowance step (b) is never
+  needed.
 - **A new rebalance is withheld while an earlier one's orders are working.**
   The decision is withheld with reason `rebalance-in-progress` while any
   order of an earlier rebalance is not terminal. It is the live form of
@@ -407,8 +421,9 @@ ones that belong here.
   `execution.order.lifecycle` v2 (`LimitOrderLifecyclePayload`) sit beside
   the Turtle's fill v4 and lifecycle v1, joined by client order ID. The
   Turtle reducer still reads v1 and v4; the target-weight engine reads v2
-  and v5. This supersedes the Consequences bullet that describes changing
-  these types by a version bump.
+  and v5. This supersedes the `OrderLifecyclePayload` and `execution.fill`
+  sub-bullets of the Consequences bullet "Existing types to change"; its
+  `market.bar.completed` and `event.ConfigurationHash` sub-bullets stand.
 - **The per-order fee allowance is $2.00**, pending confirmation in paper
   trading (`docs/research/commissions-30k-2026-10.md`): above every observed
   $30k average ($1.03 to $1.49), below the $2.50 that 500 shares would

@@ -1,6 +1,6 @@
 # ADR 0019: Broker reconciliation is an input, and unexplained differences halt
 
-- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument)
+- Status: Proposed (amended 2026-09-24: graduated response, alerting, recovery; amended 2026-10-15: one Halted exception for target-weight accounts; amended 2026-10-16: the same sale for a Degraded account's named instrument; amended 2026-10-17: eleven readings of the sale back to 98% (#352))
 - Date: 2026-09-17
 
 ## In plain English
@@ -313,44 +313,67 @@ here so that all eleven are in one place.
 2. **The kill switch does not suppress the sale.** With the kill switch
    engaged (ADR 0026 point 3), Boost's exit firing, or the Excess Liquidity
    alarm turning urgent, still produces the one sale back to 98%, in any
-   engine state. It is attempted once per engagement; engaging again while
-   engaged is the same engagement. Engagement does not reset the incident's
-   limit (reading 3): where a sale has already been attempted for the
-   instrument in the incident, engaging again sends no second one, so the
-   incident limit overrides the once-per-engagement limit.
+   engine state. Each sale carries one tag, and each tag allows one attempt
+   per instrument. The gate picks the tag in this order: the incident's
+   while the account is Halted, or Degraded on that instrument; otherwise,
+   with the switch engaged, the engagement's; otherwise the urgent alarm's.
+   Engaging again while engaged is the same engagement.
    Engaging the kill switch does not itself start an incident. While the
    engine stays Normal there is no incident, so the limit is the
    engagement's: one sale per instrument. Disengaging and engaging again
    is a new engagement and may send one more sale, even after an earlier
-   attempt failed or was withheld (reading 4). The first engine-state
-   record that leaves Normal starts an incident, and from then on the
-   incident limit applies.
+   attempt failed or was withheld (reading 4). The consequences:
+   - Once the account is Halted, or Degraded on the instrument, the
+     incident's tag applies and the incident limit (reading 3) is what
+     stops repeats; re-engaging then sends nothing more for that
+     instrument.
+   - A sale attempted under the engagement before that does not use up the
+     incident's sale. If the account then becomes Halted (or Degraded on
+     the instrument) under the same engagement, one more sale goes under
+     the incident's tag. "Once per engagement" is therefore not an upper
+     bound across an incident.
+   - While the account is Degraded on a different instrument and the
+     switch is engaged, a sale on this instrument is still tagged with the
+     engagement, so the engagement's limit applies, not the incident's;
+     disengaging and re-engaging allows another sale while that incident is
+     open.
 3. **Degraded to Halted is one incident.** An incident runs from the first
    engine-state record that leaves Normal until recovery. Moving from
    Degraded to Halted does not start another, so there is one sale per
    instrument for the whole episode.
-4. **A withheld sale counts as the attempt when it needs a person.** If no
-   order is sent because the broker's values could not be read, or a working
-   sell is unknown, the sale counts as attempted and is never retried
-   automatically; the alert asks the owner to act by hand, and a later
-   automatic sale could duplicate the owner's. If nothing was sent because
-   there was nothing to sell (exposure already at or below 98%), it is not
-   an attempt.
+4. **A withheld sale counts as the attempt when the broker's values cannot
+   be read or a working sell is unknown.** In those cases the sale counts as
+   attempted and is never retried automatically; the alert asks the owner to
+   act by hand, and a later automatic sale could duplicate the owner's.
+   "Nothing to sell" is not an attempt, and covers three cases as built:
+   the snapshot holds none of the instrument; the holding is short (a short
+   is never sold further; the alert asks for a person, but a later trigger
+   plans again and withholds again); or the smallest bound of reading 1 is
+   zero or negative, which includes working sells that already cover the
+   excess as well as exposure already at or below 98%.
 5. **The urgent Excess Liquidity sale goes once per urgent alarm** (ADR 0026
    amendment, 2026-10-17).
 6. **Risk-reducing orders are not counted toward N** (ADR 0026 amendment,
    2026-10-17).
 7. **"The strategy's own exit fires"** means a sell the strategy planned
    that the gate refused because the account is Halted, Degraded on the
-   instrument, or under the kill switch.
+   instrument, or under the kill switch. The state is read after the gate's
+   own refusal, not before it: a sell refused for a limit breach (reading
+   10's `broker-holding`, say) while the account is Normal degrades it on
+   that instrument in the same check, and the sale back to 98% then fires
+   at once.
 8. **An unknown working sell is per instrument.** It blocks the sale on that
    instrument only, matching CONTAINMENT REQUIRED.
 9. **"98%" is the configured `InvestedFraction`**, the unlevered weight (0.98
    for Boost). The sale keeps ceil(`InvestedFraction` × net liquidation ÷
    mark) shares.
 10. **A Degraded sell above the broker quantity is refused, not resized.**
-    The gate refuses it (`broker-holding`) and the account degrades further
-    as ADR 0026 point 4 says. The planner, not the gate, chooses quantities.
+    The gate refuses it (`broker-holding`), in any state where a broker
+    snapshot is set, not only Degraded. Where the refusal is a limit breach,
+    the instrument is added to the Degraded scope (ADR 0026 point 3, limits
+    table); with no readable broker snapshot the gate refuses with
+    `broker-holding` and does not degrade the account further. The planner,
+    not the gate, chooses quantities.
 11. **New event types** `account.broker.snapshot`, `risk.margin.alarm` and
     `risk.sale.withheld` are adopted (ADR 0026 amendment, 2026-10-17).
     `account.broker.snapshot` carries the observed side that
