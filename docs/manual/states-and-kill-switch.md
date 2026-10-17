@@ -116,7 +116,10 @@ in whatever order it arrived:
      ended it in an earlier second;
    - for each sell IBKR lists that the program did not send (a sale you
      placed by hand), what IBKR's latest listing before that snapshot says
-     remains, or nothing once IBKR no longer lists it.
+     remains, or nothing once IBKR no longer lists it. A snapshot is passed
+     over when IBKR lists a hand sale after it that its latest listing did
+     not, or lists one with more remaining than the listing before (you
+     raised its size): what that sale sold since cannot be known from it.
 3. That snapshot's holding minus that sum is a floor: once every working
    sell has filled, you will still hold at least that much. The program
    takes the highest of these floors, never below zero.
@@ -127,7 +130,8 @@ in whatever order it arrived:
 A sell's shares *known filled* by a snapshot are the most of two things:
 its fill reports stamped before the snapshot's second; or what an IBKR
 listing at or before it showed (the shares sent minus the quantity IBKR
-said remains), plus the fills reported in the seconds after that listing.
+said remains), plus the fills reported in the seconds between that
+listing's second and the snapshot's.
 
 For example, two sells are working, A for 60 and B for 40 of 100. An
 account snapshot shows 70, and B's fill report for 30 arrives after it. The
@@ -198,8 +202,12 @@ What follows from the rule:
   list is not counted until a snapshot lists it, and if it fills first it
   never is: its shares sold look like fills of the program's working sales,
   so the program can count them as further along than they are and size the
-  next exit from shares you have already sold. Do not sell by hand while a
-  sale of the program's is working; if you must, engage the kill switch
+  next exit from shares you have already sold. The same holds for a hand
+  sale whose size you raise: the extra shares count from the first IBKR
+  listing that shows more remaining than the one before, and if fills
+  between two listings outweigh the raise, so IBKR never lists more
+  remaining than before, they are never counted. Do not sell by hand, or change a hand sale, while a sale
+  of the program's is working; if you must, engage the kill switch
   first, which stops every new order but the sale back to 98%.
 
 The exit and the broker-holding check use this same rule, so a sell still

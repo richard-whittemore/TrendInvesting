@@ -881,6 +881,63 @@ func TestAHandSellsRemainingNeverFreesACancelledSellsFill(t *testing.T) {
 	}
 }
 
+// A hand sell whose size the owner raises in TWS keeps its order ID, so
+// IBKR lists the same order with a larger remaining. No snapshot credited
+// with a listing from before the rise bounds what the hand sell sold since:
+// each is skipped, and the hand sell is counted from the raised figure.
+func TestARaisedHandSellIsCountedFromTheRaisedFigure(t *testing.T) {
+	t.Run("raised above the listing credited", func(t *testing.T) {
+		// A hand sell is listed at 10 against 100; an account snapshot holds
+		// 100; a sell of 30 is released; the owner raises the hand sell to
+		// 50, and IBKR lists it at 50 and ours at 30 against 100. 80 work:
+		// netting 40 would let an exit of 60 pass, 40 short once all fill.
+		g := gate(t, limits(), event.TradingModeDryRun)
+		observe(t, g, "broker:1", broker(100, hand(10)))
+		g.ObserveAccount(account(100, 1))
+		released(t, check(t, g, order(event.OrderSideSell, 30, 100))[0])
+		observe(t, g, "broker:2", later(broker(100, hand(50), listed("tw-sell", event.BrokerOrderWorking, 30)), 2))
+		pendingIs(t, g, 80, "the raised hand sell's 50 and our 30")
+		if got := oneMore(t, g); got != 80 {
+			t.Errorf("working sells %d against the broker's 100, want 80", got)
+		}
+	})
+	t.Run("raised after a fall", func(t *testing.T) {
+		// A hand sell is listed at 20 against 100; an account snapshot holds
+		// 100; a sell of 30 is released; the hand sell fills 15, and IBKR
+		// lists it at 5 against 85; the owner raises it by 10, and IBKR lists
+		// it at 15. The rise is below the first listing's 20, yet 15 + 15 of
+		// the hand sell are sold since the account snapshot or still to sell:
+		// with our 30, 60 of its 100, and 45 of the broker's 85.
+		g := gate(t, limits(), event.TradingModeDryRun)
+		observe(t, g, "broker:1", broker(100, hand(20)))
+		g.ObserveAccount(account(100, 1))
+		released(t, check(t, g, order(event.OrderSideSell, 30, 100))[0])
+		observe(t, g, "broker:2", later(broker(85, hand(5), listed("tw-sell", event.BrokerOrderWorking, 30)), 2))
+		observe(t, g, "broker:3", later(broker(85, hand(15), listed("tw-sell", event.BrokerOrderWorking, 30)), 3))
+		pendingIs(t, g, 60, "against the account's 100")
+		if got := oneMore(t, g); got != 45 {
+			t.Errorf("working sells %d against the broker's 85, want 45", got)
+		}
+	})
+}
+
+// A hand sell placed after a snapshot, and first listed by a later one, was
+// sold none of before the earlier snapshot, which cannot bound it: a broker
+// snapshot and an account snapshot hold 100 with nothing listed; the owner
+// sells 20 by hand, which fills 10, and IBKR lists it at 10 against 90. 20 of
+// the account's 100 are sold since or still to sell, and 10 of the broker's
+// 90; counting neither snapshot's 100 as a floor.
+func TestAHandSellFirstListedLaterIsNotBoundedByAnEarlierSnapshot(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(100))
+	g.ObserveAccount(account(100, 1))
+	observe(t, g, "broker:2", later(broker(90, hand(10)), 2))
+	pendingIs(t, g, 20, "the hand sell's 10 sold since and 10 left")
+	if got := oneMore(t, g); got != 10 {
+		t.Errorf("working sells %d against the broker's 90, want 10", got)
+	}
+}
+
 // A buy IBKR lists is never counted as being sold.
 func TestAListedBuyIsNoUnknownSell(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)

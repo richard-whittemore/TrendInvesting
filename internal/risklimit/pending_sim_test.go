@@ -18,11 +18,28 @@ var pendingSeeds = flag.Int("pending-seeds", 500, "seeds the ground-truth pendin
 
 // simSell is a sell in the simulated broker: one of ours, released by the
 // gate (client set), or a hand sell the gate never released, which IBKR
-// lists by its broker order ID alone and reports no fill or end of.
+// lists by its broker order ID alone and reports no fill or end of. A hand
+// sell is seen once a broker snapshot that read the open orders has listed
+// it since it was placed or last raised, and filledSince is set by a fill
+// after its latest listing.
 type simSell struct {
 	instrument, client, brokerID string
 	size, filled                 int64
-	ended                        bool
+	ended, seen, filledSince     bool
+	// hidden are the shares IBKR has not yet listed: its size when placed,
+	// or what a raise added.
+	hidden []*simHidden
+}
+
+// simHidden is shares of a hand sell no broker snapshot that read the open
+// orders has yet listed: the gate cannot count them until one it records
+// does (the documented limitation). by is the true place of the snapshot
+// that first lists them, 0 while none has; quantity is 0 once the hand sell
+// is withdrawn unseen, having sold none of them.
+type simHidden struct {
+	instrument string
+	quantity   int64
+	by         int
 }
 
 func (s *simSell) live() bool { return !s.ended && s.filled < s.size }
@@ -41,14 +58,20 @@ type simFact struct {
 // The pending rule is never below the truth (fail closed): for every view,
 // the shares of an instrument already being sold that the view cannot show
 // are never fewer than the shares truly sold after it was taken and still
-// to be sold. A simulated broker holds 100 of each of two instruments, with
-// up to two resting hand sells each that IBKR lists, and executes and
-// cancels two sells of ours of 30 on each, second by second: partial fills,
+// to be sold, less the hand-sold shares no broker snapshot recorded has yet
+// listed, which the gate cannot know (the documented limitation). A
+// simulated broker holds 100 of each of two instruments, with up to two
+// resting hand sells each that IBKR lists, and executes and cancels two
+// sells of ours of 30 on each, second by second: partial fills,
 // cancel-pending and cancel reports before and after the snapshots that show
-// their fills, hand sells that fill or are withdrawn with no report, several
-// account snapshots a second and one broker snapshot a second at most (as
-// the gate requires), some of which cannot read the open orders or the
-// positions. IBKR stamps each fact in whole seconds, so facts in one second
+// their fills; hand sells placed at random seconds, which only later
+// snapshots list, raised in size, filled or withdrawn with no report, never
+// filled before IBKR lists them and never raised after a fill IBKR has not
+// yet listed (so a listing shows each raise); several account snapshots a
+// second and one broker snapshot a second at most (as the gate requires),
+// some of which cannot read the open orders or the positions. One more hand
+// sell is placed after the last snapshot, and in some runs fills before any
+// snapshot lists it. IBKR stamps each fact in whole seconds, so facts in one second
 // keep only their true order. The facts are recorded in random order,
 // account and broker snapshots each in their own order. After each, for
 // every snapshot recorded that read the holding and for now, the gate's
@@ -56,7 +79,12 @@ type simFact struct {
 // left once every sell still working has filled, every fact of the run
 // known. PendingSells is that figure for the latest account snapshot, and
 // the broker-holding check's working figure that for the latest broker
-// snapshot, when it read its positions and open orders.
+// snapshot, when it read its positions and open orders. Once every fact is
+// recorded, a last broker snapshot lists every sell still live: it shows
+// the late hand sell when it is still working, and every figure is then
+// checked against the whole truth; the late hand sell that filled before
+// any listing is the documented limitation, and every figure is checked to
+// be short of the truth by no more than its size.
 func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 	base := time.Date(2025, time.March, 5, 16, 0, 0, 0, time.UTC)
 	const tag = "targets-decided:joint:2025-03-04"
@@ -68,6 +96,7 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 	}
 	stamp := func(sec int) time.Time { return base.Add(time.Duration(sec) * time.Second) }
 	statuses := []string{event.OrderLifecycleStatusCancelPending, event.OrderLifecycleStatusCanceled, event.OrderLifecycleStatusInvalid}
+	limitation := 0
 	for seed := int64(1); seed <= int64(*pendingSeeds); seed++ {
 		rng := rand.New(rand.NewSource(seed))
 		g, err := NewGate("joint", limits, event.TradingModeDryRun, 30*time.Minute)
@@ -77,14 +106,20 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 		g.RecordDecision(tag)
 
 		// The broker's true state, as it moves.
+		// Each instrument's 100 cover our 60 and, at most, 40 sold by hand:
+		// 30 resting, placed or raised before the last snapshot, and 10 kept
+		// for the hand sell placed after it.
 		var ours, hand []*simSell
+		var hidden []*simHidden
+		room := map[string]int64{}
 		for _, instrument := range instruments {
 			var rest int64 = 20
 			for n := rng.Intn(3); n > 0 && rest > 0; n-- {
 				size := 1 + rng.Int63n(rest)
 				rest -= size
-				hand = append(hand, &simSell{instrument: instrument, brokerID: fmt.Sprintf("hand-%s-%d", instrument, len(hand)), size: size})
+				hand = append(hand, &simSell{instrument: instrument, brokerID: fmt.Sprintf("hand-%s-%d", instrument, len(hand)), size: size, seen: true})
 			}
+			room[instrument] = 10 + rest
 			for _, c := range []string{"a", "b"} {
 				ours = append(ours, &simSell{instrument: instrument, client: "tw-" + strings.ToLower(instrument) + "-" + c, brokerID: "ib-" + instrument + "-" + c, size: release})
 			}
@@ -175,7 +210,8 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 			for n := rng.Intn(5); n > 0; n-- {
 				seq++
 				o := ours[rng.Intn(len(ours))]
-				switch rng.Intn(6) {
+				instrument := instruments[rng.Intn(len(instruments))]
+				switch rng.Intn(8) {
 				case 0, 1:
 					if !o.live() {
 						continue
@@ -206,9 +242,44 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 					case !h.live():
 					case rng.Intn(4) == 0:
 						h.ended = true
-					default:
+						for _, x := range h.hidden {
+							if x.by == 0 {
+								x.quantity = 0
+							}
+						}
+					case h.seen:
 						h.filled += 1 + rng.Int63n(h.size-h.filled)
+						h.filledSince = true
 					}
+				case 4:
+					// The owner places a hand sell, which only later
+					// snapshots list.
+					if room[instrument] == 0 {
+						continue
+					}
+					size := 1 + rng.Int63n(min(room[instrument], 15))
+					room[instrument] -= size
+					h := &simSell{instrument: instrument, brokerID: fmt.Sprintf("hand-%s-%d", instrument, len(hand)), size: size}
+					h.hidden = append(h.hidden, &simHidden{instrument: instrument, quantity: size})
+					hidden = append(hidden, h.hidden[0])
+					hand = append(hand, h)
+				case 5:
+					// The owner raises a live hand sell's size in TWS; it
+					// keeps its order ID.
+					if len(hand) == 0 {
+						continue
+					}
+					h := hand[rng.Intn(len(hand))]
+					if !h.live() || !h.seen || h.filledSince || room[h.instrument] == 0 {
+						continue
+					}
+					raise := 1 + rng.Int63n(min(room[h.instrument], 10))
+					room[h.instrument] -= raise
+					h.size += raise
+					h.seen = false
+					x := &simHidden{instrument: h.instrument, quantity: raise}
+					h.hidden = append(h.hidden, x)
+					hidden = append(hidden, x)
 				default:
 					held := holding()
 					if rng.Intn(2) == 0 {
@@ -230,13 +301,29 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 					if rng.Intn(6) == 0 {
 						s.Unreadable, s.Positions, held = append(s.Unreadable, event.BrokerComponentPositions), nil, nil
 					}
-					id := fmt.Sprintf("broker:%d", seq)
-					facts = append(facts, simFact{seq: seq, stream: "broker", held: held, record: func(g *Gate) (view, error) {
-						_, err := g.ObserveBroker(id, s)
-						return g.brokerView, err
-					}})
+					if s.OpenOrders != nil {
+						seeHand(hand, seq)
+					}
+					facts = append(facts, brokerFact(seq, held, s))
 				}
 			}
+		}
+
+		// The hand sell placed after the last snapshot, which fills before
+		// any lists it in about half the runs, an account snapshot showing
+		// the fall.
+		late := &simSell{instrument: instruments[rng.Intn(len(instruments))], brokerID: "hand-late", size: 1 + rng.Int63n(10)}
+		late.hidden = append(late.hidden, &simHidden{instrument: late.instrument, quantity: late.size})
+		hidden = append(hidden, late.hidden[0])
+		hand = append(hand, late)
+		if rng.Intn(2) == 0 {
+			late.filled = late.size
+			seq++
+			held, p := holding(), accountAt(9, holding())
+			facts = append(facts, simFact{seq: seq, stream: "account", held: held, record: func(g *Gate) (view, error) {
+				g.ObserveAccount(p)
+				return g.account, nil
+			}})
 		}
 
 		// What will be left of each instrument once every sell still working
@@ -270,7 +357,58 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 			}
 		}
 
-		for step, f := range recorded {
+		// unlisted is, by instrument, the hand-sold shares no broker snapshot
+		// recorded has listed.
+		recordedBroker := map[int]bool{}
+		unlisted := func() map[string]int64 {
+			out := map[string]int64{}
+			for _, x := range hidden {
+				if x.by == 0 || !recordedBroker[x.by] {
+					out[x.instrument] += x.quantity
+				}
+			}
+			return out
+		}
+		short := false
+		checkAll := func(step int, slack map[string]int64) {
+			for _, instrument := range instruments {
+				// remains stops at the latest reference at which nothing
+				// released before it can still sell: that changes nothing
+				// while every hand-sold share is listed, and only lowers
+				// remains while some are not.
+				less := slack[instrument]
+				var every int64
+				for _, p := range g.ledger.refs {
+					if toGo, _, ok := g.ledger.toGo(instrument, p.view); ok {
+						every = max(every, p.held[instrument]-toGo)
+					}
+				}
+				if got := g.ledger.remains(instrument); got > every || got != every && less == 0 {
+					t.Fatalf("seed %d step %d: %s: remains %d, but %d over every reference, %d unlisted", seed, step, instrument, got, every, less)
+				}
+				for _, s := range views {
+					got, truth := g.ledger.unshown(instrument, s.v), s.held[instrument]-left[instrument]
+					if got < truth-less {
+						t.Fatalf("seed %d step %d: %s: the snapshot %d of %s is netted %d being sold, below the %d truly sold since or still to sell less %d unlisted", seed, step, instrument, s.v.by, s.v.at.Format(time.TimeOnly), got, truth, less)
+					}
+					short = short || got < truth
+				}
+				if got := g.ledger.unshown(instrument, now); got < working[instrument]-less {
+					t.Fatalf("seed %d step %d: %s: %d counted still to sell, below the %d truly working less %d unlisted", seed, step, instrument, got, working[instrument], less)
+				}
+				if got, truth := g.PendingSells(instrument), accountHeld[instrument]-left[instrument]; got < truth-less {
+					t.Fatalf("seed %d step %d: %s: pending sells %d, below the %d truly being sold that the account snapshot cannot show less %d unlisted", seed, step, instrument, got, truth, less)
+				}
+				h, w, ok := g.brokerHolding(instrument)
+				if ok != (brokerHeld != nil && brokerReadable) {
+					t.Fatalf("seed %d step %d: broker holding read %v", seed, step, ok)
+				}
+				if ok && (h != brokerHeld[instrument] || w < brokerHeld[instrument]-left[instrument]-less) {
+					t.Fatalf("seed %d step %d: %s: broker holding %d net of %d working, below the %d truly being sold that the broker snapshot cannot show less %d unlisted", seed, step, instrument, h, w, brokerHeld[instrument]-left[instrument], less)
+				}
+			}
+		}
+		record := func(step int, f simFact) {
 			v, err := f.record(g)
 			if err != nil {
 				t.Fatalf("seed %d step %d: %v", seed, step, err)
@@ -279,42 +417,61 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 			case "account":
 				accountHeld = f.held
 			case "broker":
+				recordedBroker[f.seq] = true
 				brokerHeld, brokerReadable = f.held, !slices.Contains(g.broker.Unreadable, event.BrokerComponentOpenOrders)
 			}
 			if f.held != nil {
 				views = append(views, seen{v, f.held})
 			}
-			for _, instrument := range instruments {
-				// remains stops at the latest reference at which nothing
-				// released before it can still sell; that changes nothing.
-				var every int64
-				for _, p := range g.ledger.refs {
-					if toGo, _, ok := g.ledger.toGo(instrument, p.view); ok {
-						every = max(every, p.held[instrument]-toGo)
-					}
-				}
-				if got := g.ledger.remains(instrument); got != every {
-					t.Fatalf("seed %d step %d: %s: remains %d, but %d over every reference", seed, step, instrument, got, every)
-				}
-				for _, s := range views {
-					if got, truth := g.ledger.unshown(instrument, s.v), s.held[instrument]-left[instrument]; got < truth {
-						t.Fatalf("seed %d step %d: %s: the snapshot %d of %s is netted %d being sold, below the %d truly sold since or still to sell", seed, step, instrument, s.v.by, s.v.at.Format(time.TimeOnly), got, truth)
-					}
-				}
-				if got := g.ledger.unshown(instrument, now); got < working[instrument] {
-					t.Fatalf("seed %d step %d: %s: %d counted still to sell, below the %d truly working", seed, step, instrument, got, working[instrument])
-				}
-				if got, truth := g.PendingSells(instrument), accountHeld[instrument]-left[instrument]; got < truth {
-					t.Fatalf("seed %d step %d: %s: pending sells %d, below the %d truly being sold that the account snapshot cannot show", seed, step, instrument, got, truth)
-				}
-				h, w, ok := g.brokerHolding(instrument)
-				if ok != (brokerHeld != nil && brokerReadable) {
-					t.Fatalf("seed %d step %d: broker holding read %v", seed, step, ok)
-				}
-				if ok && (h != brokerHeld[instrument] || w < brokerHeld[instrument]-left[instrument]) {
-					t.Fatalf("seed %d step %d: %s: broker holding %d net of %d working, below the %d truly being sold that the broker snapshot cannot show", seed, step, instrument, h, w, brokerHeld[instrument]-left[instrument])
-				}
+		}
+		for step, f := range recorded {
+			record(step, f)
+			checkAll(step, unlisted())
+		}
+
+		// The documented limitation, checked alone: a last broker snapshot
+		// lists every live sell. A late hand sell still working is then
+		// counted, and every figure meets the whole truth; one that filled
+		// before any listing never is, and every figure falls short of the
+		// truth by no more than its size.
+		seq++
+		s := brokerAt(10, holding(), 3)
+		seeHand(hand, seq)
+		record(len(recorded), brokerFact(seq, holding(), s))
+		if late.live() {
+			checkAll(len(recorded), map[string]int64{})
+			continue
+		}
+		short = false
+		checkAll(len(recorded), map[string]int64{late.instrument: late.size})
+		if short {
+			limitation++
+		}
+	}
+	t.Logf("a late hand sell that filled before any listing left a figure below the truth in %d of %d runs", limitation, *pendingSeeds)
+}
+
+// seeHand marks every live hand sell seen by the broker snapshot at true
+// place seq, which read the open orders, and the shares it first lists.
+func seeHand(hand []*simSell, seq int) {
+	for _, h := range hand {
+		if !h.live() {
+			continue
+		}
+		h.seen, h.filledSince = true, false
+		for _, x := range h.hidden {
+			if x.by == 0 {
+				x.by = seq
 			}
 		}
 	}
+}
+
+// brokerFact is the broker snapshot s at true place seq, which read held.
+func brokerFact(seq int, held map[string]int64, s event.BrokerSnapshotPayload) simFact {
+	id := fmt.Sprintf("broker:%d", seq)
+	return simFact{seq: seq, stream: "broker", held: held, record: func(g *Gate) (view, error) {
+		_, err := g.ObserveBroker(id, s)
+		return g.brokerView, err
+	}}
 }

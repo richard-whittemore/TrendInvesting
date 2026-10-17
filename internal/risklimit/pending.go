@@ -32,7 +32,10 @@ import (
 //   - each unknown sell's remaining in the latest broker snapshot credited to
 //     P that read the open orders, or nothing when that snapshot no longer
 //     lists it. A reference that is credited with no listing of an unknown
-//     sell that a later snapshot lists cannot bound what it sold, and is none.
+//     sell that a later snapshot lists cannot bound what it sold, and is none;
+//     so is one after whose credited listing the remaining ever rises from
+//     one listing to the next (the owner raised its size, keeping its order
+//     ID), as what it sold since is then unknown.
 //
 // A sell is known to have filled by P the most of its fill reports stamped
 // before P's second and, for each listing of it credited to P, its release
@@ -51,8 +54,8 @@ import (
 //     share that a working sell has sold since V or may still sell.
 //   - Monotone in facts: a fill report, a lifecycle end or a snapshot only
 //     adds to what is known, so never raises unshown at a view; only a
-//     release, or a listing of an unknown sell where it was not listed, shows
-//     more being sold.
+//     release, or a listing of an unknown sell where it was not listed or
+//     above its listing before, shows more being sold.
 //   - Same-second snapshots share nothing: the order of reads and fills
 //     within a second cannot be known, so each snapshot is credited with its
 //     own listing and the facts of earlier seconds only, and its holding
@@ -80,8 +83,9 @@ import (
 // A reference older than one at which nothing released before it, and no
 // unknown sell, can still sell is never the better bound: what was sold
 // between them is in the newer holding. So remains stops at the latest such
-// reference, which changes nothing for facts that are true and only lowers
-// remains, failing closed, for any that are not.
+// reference, which changes nothing for facts that are true and complete and
+// only lowers remains, failing closed, for any that are not, such as a hand
+// sell no snapshot has listed.
 
 // endOfTime is later than any fact: what is known now.
 var endOfTime = time.Unix(1<<62, 0)
@@ -273,6 +277,9 @@ func (l *sellLedger) toGo(instrumentID string, v view) (toGo int64, quiet, ok bo
 		}
 		switch {
 		case credited > 0 && listings[credited-1].by == latest.by:
+			if raised(listings[credited-1:]) {
+				return 0, false, false
+			}
 			toGo += listings[credited-1].quantity
 			quiet = false
 		case credited < len(listings):
@@ -281,6 +288,17 @@ func (l *sellLedger) toGo(instrumentID string, v view) (toGo int64, quiet, ok bo
 		}
 	}
 	return toGo, quiet, true
+}
+
+// raised reports whether an unknown sell's remaining rises from one of its
+// listings to the next: its size was raised, keeping its order ID.
+func raised(listings []stamped) bool {
+	for i := 1; i < len(listings); i++ {
+		if listings[i].quantity > listings[i-1].quantity {
+			return true
+		}
+	}
+	return false
 }
 
 // endedBefore reports whether a lifecycle report has ended the sell in a
