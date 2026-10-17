@@ -135,21 +135,31 @@ shape the owner has decided on is one compact universe input per session
 history input for only the 500 ranked names; the encoder does not write it
 yet.
 
-A stock written only because it is a universe member is left out of a
-session, instead of refusing the stream, when its last 253 closes up to that
-session (the window the momentum rule ranks on) hold bad data: a malformed
-bar (a missing or negative close or volume, a high below the close), or a
-split or dividend that cannot be adjusted exactly (counted from the first
-session on or after it). It is left out of those sessions only: no bar is
-written for them and the session close does not name it, so the momentum
-rule leaves it out of those months' rankings and records why (ADR 0026,
-point 5). Its bars before the bad session are written as usual, so bad data
-later on never changes an earlier session, and it is written, and ranked,
-again from the first session whose 253-close window is clean. A split or
-dividend with no readable date cannot be placed, so that stock is left out
-of every session. A universe snapshot row whose close or volume is missing
-or negative is left out of that session's snapshot; the stock's other rows
-are written. `encode` names each stretch on stderr (`marketdata: excluded
+A stock written only because it is a universe member is left out of some
+sessions, instead of refusing the stream, when its data is bad. No bar is
+written for those sessions and the session close does not name it.
+
+- A malformed bar (a missing or negative close or volume, a high below the
+  close) leaves out that one session's bar, and that session's universe
+  snapshot row when it has one. Nothing more is needed: the momentum rule
+  ranks a stock on its last 253 closes and leaves it out of any month's
+  ranking whose window is missing a session, and records why (ADR 0026,
+  point 5). So the stock is ranked again when its window is complete under
+  that rule, 253 sessions after the bad one.
+- A split or dividend that cannot be adjusted exactly is not applied, so
+  the stock's adjusted prices jump at the ex-date. Its bars are left out
+  from the first session on or after the ex-date for 253 sessions, so no
+  253-close window of written bars spans the jump; it is written again at
+  that session plus 253, and the prices on each side of the jump have their
+  true returns. The momentum rule then waits for a full window of written
+  bars, so the stock is ranked again only about 253 sessions after that,
+  roughly two years in all. Whether that second wait is wanted is an open
+  question in the repository's issue tracker.
+- A split or dividend with no readable date cannot be placed, so that stock
+  is left out of every session.
+
+Its bars before the bad session are written as usual, so bad data later on
+never changes an earlier session. `encode` names each stretch on stderr (`marketdata: excluded
 TICKER from FIRST to LAST (N sessions): reason`). SPY, IEF, SHY and every
 other instrument are still written, and the same bad data in SPY, IEF, SHY
 or any instrument named with `--instruments` or `--optional` still refuses

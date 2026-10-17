@@ -20,8 +20,10 @@ writes, in order:
    - a ``market.universe.snapshot`` v1 for a session with a universe
      recording: one row per type-CS reference ticker with a bar that
      session, its unadjusted close and volume, and its sector label and
-     source (sectors.py), sorted by instrument; a non-required row whose
-     close or volume is missing or negative is left out (see encode);
+     source (sectors.py), sorted by instrument; a row of a ticker not named
+     as required or optional whose close or volume is missing or negative
+     is left out (see encode), while such a row of a required or optional
+     instrument refuses the stream;
    - a ``market.session.closed`` v1 naming exactly the bars written.
 
 Bars come from ``grouped_<session>.json`` (the backfill) or, for a session
@@ -38,7 +40,8 @@ disagreeing recordings of a session (Conflict), a malformed bar or row
 (Malformed), or anything adjust.forward_factors cannot adjust exactly;
 except that a ticker written only as a universe member, or listed only in a
 universe snapshot, is left out of the sessions its bad data reaches instead
-(see encode).
+(see encode). A bad row of an optional instrument refuses the stream, as a
+required one's does.
 
 ``engine`` picks the inputs written. ``"momentum"`` (the default) writes
 all of the above. ``"boost"`` writes only the bars of its one required
@@ -237,21 +240,25 @@ def _event_day(row, key):
 
 def _member_factors(ticker, loaded, days, actions, base):
     """(factors, bad) for a ticker written only as a universe member: bad is
-    {session: reason} for each session whose data is bad, a malformed bar
-    or the first session on or after a split or dividend that cannot be
-    adjusted exactly. A bad bar is not used and such an action is not
-    applied, so the factors are still exact across any window holding no
-    bad session: on either side of an action left unapplied the levels
-    differ by one constant, and returns within a side are unchanged. An
-    action with no readable date cannot be placed, so every session is
-    bad."""
+    {session: (reason, sessions)}, the first session left out, why, and how
+    many sessions from it are left out. A malformed bar is not used and
+    leaves out that one session; the momentum rule's own 253-close window
+    then keeps the ticker out of every ranking that reaches it (ADR 0026
+    point 5). A split or dividend that cannot be adjusted exactly is not
+    applied, so the price series jumps at its ex-date: the factors are still
+    exact within each side (the levels differ by one constant, returns are
+    unchanged), and the WINDOW sessions from the first session on or after
+    the ex-date are left out, so no window of written bars spans the jump.
+    Only the action is dropped; that session's close is kept for the next
+    action. An action with no readable date cannot be placed, so every
+    session is bad."""
     bad, closes = {}, {}
     for s in loaded:
         if ticker in s.bars:
             try:
                 _check_bar(ticker, s.day, s.bars[ticker])
             except Malformed as e:
-                bad[s.day] = str(e)
+                bad[s.day] = (str(e), 1)
                 continue
             closes[s.day] = float(s.bars[ticker]["c"])
     splits, dividends = actions
@@ -260,24 +267,28 @@ def _member_factors(ticker, loaded, days, actions, base):
             return adjust.forward_factors(ticker, days, closes, splits, dividends, base), bad
         except adjust.CannotAdjust as e:
             if e.day is None:
-                return {}, dict.fromkeys(days, str(e))
-            bad.setdefault(next(d for d in days if d >= e.day), str(e))
+                return {}, {days[0]: (str(e), len(days))}
             kept = ([r for r in splits if _event_day(r, "execution_date") != e.day],
                     [r for r in dividends if _event_day(r, "ex_dividend_date") != e.day])
-            if e.day not in closes and kept == (splits, dividends):
-                return {}, dict.fromkeys(days, str(e))   # nothing left to drop: refuse every session
-            closes.pop(e.day, None)
-            splits, dividends = kept
+            if kept != (splits, dividends):
+                bad.setdefault(next(d for d in days if d >= e.day), (str(e), WINDOW))
+                splits, dividends = kept
+            elif e.day in closes:   # a refused close: leave out that session only
+                bad.setdefault(e.day, (str(e), 1))
+                closes.pop(e.day)
+            else:
+                return {}, {days[0]: (str(e), len(days))}   # nothing left to drop: refuse every session
 
 
 def _left_out(days, bad):
-    """{session: reason} for every session whose WINDOW-close window, the
-    WINDOW sessions ending at it, holds a bad session."""
+    """{session: reason} for every session left out by ``bad`` (see
+    _member_factors)."""
     out = {}
     for i, day in enumerate(days):
         if day in bad:
-            for later in days[i:i + WINDOW]:
-                out.setdefault(later, bad[day])
+            reason, n = bad[day]
+            for later in days[i:i + n]:
+                out.setdefault(later, reason)
     return out
 
 
@@ -324,17 +335,28 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     life of an engine's journal. ``engine`` is "momentum" or "boost", as
     described above.
 
-    A ticker written only because it is a universe member, with a bar that
-    cannot be encoded (malformed) or a split or dividend that cannot be
-    adjusted exactly (CannotAdjust, at the first session on or after it), is
-    left out of every session whose WINDOW-close window holds that bad
-    session, and only those: no bar is written for them and the session's
-    ``market.session.closed`` does not name it, so the momentum rule leaves
-    it out of those rankings (ADR 0026 point 5, "left out of that month's
-    ranking"). Its bars before the bad session, and from the session whose
-    window is clean again, are written, so later bad data never changes an
-    earlier session's bars. A universe snapshot row whose close or volume is
-    missing or negative is left out of that session's snapshot; the ticker's
+    A ticker written only because it is a universe member is left out of
+    some sessions when its data is bad: no bar is written for them and the
+    session's ``market.session.closed`` does not name it.
+
+    - A bar that cannot be encoded (malformed) leaves out that session only.
+      The momentum rule leaves a stock missing any session of its 253-close
+      window out of that ranking (ADR 0026 point 5, "left out of that
+      month's ranking"), so it keeps the ticker out of every ranking that
+      reaches the bad session, and the ticker is ranked again when its
+      window is complete under that rule.
+    - A split or dividend that cannot be adjusted exactly (CannotAdjust) is
+      not applied, so the price series is discontinuous at its ex-date. The
+      ticker is left out of the WINDOW sessions from the first session on or
+      after the ex-date (B), so no window of written bars spans the jump,
+      and is written again at B + WINDOW. The momentum rule then extends the
+      ranking exclusion by another window, until its window holds WINDOW
+      written bars (an open question in the issue tracker).
+
+    Its bars before the bad session are written, so later bad data never
+    changes an earlier session's bars. A universe snapshot row whose close
+    or volume is missing or negative is left out of that session's snapshot
+    (for a member, its bar that session is malformed too); the ticker's
     other rows are written. Each ticker left out of any session of the
     stream is named in ``excluded`` (a dict, if given) with an [Exclusion]
     per run of sessions. A required or optional instrument with bad data

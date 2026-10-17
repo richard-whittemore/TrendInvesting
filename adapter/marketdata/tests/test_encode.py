@@ -236,10 +236,10 @@ ALL_SESSIONS = ["2026-11-23", "2026-11-24", "2026-11-25", "2026-11-27", "2026-11
 
 
 class UniverseMemberExclusionTest(unittest.TestCase):
-    """A universe member with bad data is left out only of the sessions whose
-    253-close window holds it (ADR 0026 point 5, "that month's ranking"):
-    no bar is written for those sessions, its other bars are, and the
-    sessions are named in ``excluded``; the other inputs are still written."""
+    """A universe member with bad data is left out of the sessions it reaches
+    (a bad bar: that session; an unadjustable action: from its ex-date): no
+    bar is written for those sessions, its other bars are, and the sessions
+    are named in ``excluded``; the other inputs are still written."""
 
     def encoded(self, spoil, **kw):
         excluded = {}
@@ -265,11 +265,14 @@ class UniverseMemberExclusionTest(unittest.TestCase):
         self.assertEqual((gone.first, gone.last), (D(2026, 11, 25), LAST))
         self.assertIn("no close on the session before ex-date 2026-11-25", gone.reason)
 
-    def test_a_member_with_a_malformed_bar_is_left_out_from_that_session_and_named(self):
+    def test_a_member_with_a_malformed_bar_is_left_out_of_that_session_only_and_named(self):
         stream, excluded = self.encoded(lambda d: break_bar(d, "2026-11-25", "AAA"))
-        self.assertLeftOutFrom(stream, "AAA", "2026-11-25")
+        written = [s for s in ALL_SESSIONS if s != "2026-11-25"]
+        self.assertEqual([e["payload"]["period_end"][:10] for e in of(stream, "market.bar.completed")
+                          if e["payload"]["instrument_id"] == "AAA"], written)
+        self.assertEqual(sessions_with(stream, "AAA"), written)
         [gone] = excluded["AAA"]
-        self.assertEqual((gone.first, gone.last), (D(2026, 11, 25), LAST))
+        self.assertEqual((gone.first, gone.last), (D(2026, 11, 25), D(2026, 11, 25)))
         self.assertIn("inconsistent", gone.reason)
 
     def test_later_bad_data_never_changes_an_earlier_sessions_bars(self):
@@ -362,41 +365,95 @@ class UniverseMemberExclusionTest(unittest.TestCase):
             self.assertEqual(check.returncode, 0, check.stderr)
 
 
-class ExclusionWindowTest(unittest.TestCase):
-    """Over a span longer than the 253-close window, a member with one bad
-    bar is ranked again once that bar has left its window."""
+def record_span(d, days, aaa, splits=(), dividends=()):
+    """Records ``days`` with SPY, IEF and AAA closing at ``aaa(i)`` (a bar,
+    or a close) on session i, the actions given, and the universe and
+    sector recordings of the last session."""
+    last = days[-1]
+    for i, day in enumerate(days):
+        a = aaa(i)
+        bars = [row("SPY", 600.0), row("IEF", 95.0), a if isinstance(a, dict) else row("AAA", a, spread=0.01)]
+        rec = {"source": "massive", "session": day.isoformat(), "fetched_at": stamp(day),
+               "adjusted": False, "bars": bars}
+        if day == last:
+            rec.update(kind="universe", ticker_type="CS",
+                       tickers=[{"ticker": "AAA", "type": "CS", "market": "stocks"}])
+        else:
+            rec.update(kind="grouped")
+        record.write(d, rec)
+    for kind, rows in (("splits", list(splits)), ("dividends", list(dividends))):
+        record.write(d, {"kind": kind, "source": "massive", "session": last.isoformat(),
+                         "from": days[0].isoformat(), "fetched_at": stamp(last), "rows": rows})
+    for kind, source, url, body in (
+            ("sectors-iwv", sectors.IWV_SOURCE, sectors.IWV_URL,
+             {"as_of": "x", "body": iwv_csv(("AAA", "Information Technology", "Equity"))}),
+            ("sectors-nasdaq", sectors.NASDAQ_SOURCE, sectors.NASDAQ_URL,
+             {"rows": json.loads(screener(("AAA", "Technology")))["data"]["rows"]})):
+        record.write(d, dict({"kind": kind, "source": source, "session": last.isoformat(),
+                              "fetched_at": stamp(last), "url": url}, **body))
 
-    def test_a_member_is_written_again_once_its_window_is_clean(self):
-        days = nyse_calendar.sessions(D(2025, 10, 1), D(2026, 12, 31))[:256]
-        last = days[-1]
+
+def span_sessions(n):
+    return nyse_calendar.sessions(D(2025, 1, 2), D(2026, 12, 31))[:n]
+
+
+class ExclusionWindowTest(unittest.TestCase):
+    """Over spans longer than the 253-close window. A member with one bad bar
+    is left out of that session only; the momentum rule's own window then
+    keeps it out of every ranking that reaches the session (ADR 0026 point
+    5). A member with a split or dividend that cannot be adjusted exactly
+    has a price series that jumps at the ex-date, so it is left out from the
+    ex-date for 253 sessions and written again at ex-date + 253: no written
+    window spans the jump."""
+
+    def encoded(self, n, aaa, **actions):
+        days = span_sessions(n)
+        excluded = {}
         with tempfile.TemporaryDirectory() as d:
-            for i, day in enumerate(days):
-                bars = [row("SPY", 600.0), row("IEF", 95.0), row("AAA", 20.0)]
-                if i == 1:
-                    bars[2]["h"] = 1.0   # high below close
-                rec = {"source": "massive", "session": day.isoformat(), "fetched_at": stamp(day),
-                       "adjusted": False, "bars": bars}
-                if day == last:
-                    rec.update(kind="universe", ticker_type="CS",
-                               tickers=[{"ticker": "AAA", "type": "CS", "market": "stocks"}])
-                else:
-                    rec.update(kind="grouped")
-                record.write(d, rec)
-            for kind in ("splits", "dividends"):
-                record.write(d, {"kind": kind, "source": "massive", "session": last.isoformat(),
-                                 "from": days[0].isoformat(), "fetched_at": stamp(last), "rows": []})
-            for kind, source, url, body in (
-                    ("sectors-iwv", sectors.IWV_SOURCE, sectors.IWV_URL,
-                     {"as_of": "x", "body": iwv_csv(("AAA", "Information Technology", "Equity"))}),
-                    ("sectors-nasdaq", sectors.NASDAQ_SOURCE, sectors.NASDAQ_URL,
-                     {"rows": json.loads(screener(("AAA", "Technology")))["data"]["rows"]})):
-                record.write(d, dict({"kind": kind, "source": source, "session": last.isoformat(),
-                                      "fetched_at": stamp(last), "url": url}, **body))
-            excluded = {}
-            stream = run(d, first=days[0], last=last, optional=[], universe_members=True, excluded=excluded)
-        self.assertEqual([(g.first, g.last) for g in excluded["AAA"]], [(days[1], days[253])])
+            record_span(d, days, aaa, **actions)
+            stream = run(d, first=days[0], last=days[-1], optional=[], universe_members=True, excluded=excluded)
+        return days, stream, excluded
+
+    def test_a_member_with_one_bad_bar_is_left_out_of_that_session_only(self):
+        def aaa(i):
+            bar = row("AAA", 20.0)
+            if i == 1:
+                bar["h"] = 1.0   # high below close
+            return bar
+        days, stream, excluded = self.encoded(256, aaa)
+        self.assertEqual([(g.first, g.last) for g in excluded["AAA"]], [(days[1], days[1])])
+        iso = [day.isoformat() for day in days]
+        self.assertEqual(sessions_with(stream, "AAA"), iso[:1] + iso[2:])
+
+    def test_a_refused_dividend_keeps_that_sessions_close_for_the_next_sessions_dividend(self):
+        days = span_sessions(256)
+        dividends = [{"id": "V1", "ticker": "AAA", "ex_dividend_date": days[1].isoformat(), "cash_amount": 100.0},
+                     {"id": "V2", "ticker": "AAA", "ex_dividend_date": days[2].isoformat(), "cash_amount": 0.5}]
+        days, stream, excluded = self.encoded(256, lambda i: 20.0, dividends=dividends)
+        [gone] = excluded["AAA"]
+        self.assertEqual((gone.first, gone.last, gone.sessions), (days[1], days[253], 253))
+        self.assertIn("not below the prior close", gone.reason)
         iso = [day.isoformat() for day in days]
         self.assertEqual(sessions_with(stream, "AAA"), [iso[0], iso[254], iso[255]])
+
+    def test_a_dropped_split_leaves_exact_returns_on_each_side_and_no_window_spans_the_gap(self):
+        n, x = 300, 3
+        days = span_sessions(n)
+        raw = [(20.0 + i / 100) / (2 if i >= x else 1) for i in range(n)]
+        split = {"ticker": "AAA", "execution_date": days[x].isoformat(), "split_from": 1, "split_to": 2}
+        days, stream, excluded = self.encoded(n, lambda i: raw[i],
+                                              splits=[dict(split, id="S1"), dict(split, id="S2")])
+        [gone] = excluded["AAA"]
+        self.assertEqual((gone.first, gone.last, gone.sessions), (days[x], days[x + 252], 253))
+        self.assertIn("two splits", gone.reason)
+        iso = [day.isoformat() for day in days]
+        before, after = list(range(x)), list(range(x + 253, n))
+        self.assertEqual(sessions_with(stream, "AAA"), [iso[i] for i in before + after])
+        closes = {i: bar_of(stream, "AAA", iso[i])["adjusted"]["close"] for i in before + after}
+        for side in (before, after):
+            for i in side[1:]:
+                self.assertAlmostEqual(closes[i] / closes[side[0]], raw[i] / raw[side[0]], places=12)
+        self.assertGreater(after[0] - before[-1], encode.WINDOW)   # no 253-close window holds both sides
 
 
 class BoostStreamTest(unittest.TestCase):
