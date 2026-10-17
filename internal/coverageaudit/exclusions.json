@@ -892,6 +892,21 @@
     },
     {
       "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).applyApproval",
+      "statement": "return fmt.Errorf(\"targetweight: approval %s: %w\", in.ID, err)",
+      "category": "unreachable-by-construction",
+      "reason": "risklimit.Gate.RestoreSaleAttempt refuses only an empty incident ID or a second restore of one incident; OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses an incident in force with no ID (TestAnApprovalCarriesTheIncidentSaleAttempt), and applyApproval refuses a second approval before reaching it (TestApprovalInputRules)."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
+      "function": "(*Handler).applyApproval",
+      "statement": "return fmt.Errorf(\"targetweight: approval %s: %w\", in.ID, err)",
+      "occurrence": 2,
+      "category": "unreachable-by-construction",
+      "reason": "risklimit.Gate.RestoreIncidentState refuses a state that is not degraded or halted, a degraded state with no scope, a halted one with a scope, and a degraded state on a Halted gate; OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses the first three (TestAnApprovalStatesTheIncidentsRestrictions), and the gate is Normal here because an approval comes before any recorded state or decision and only once (TestApprovalInputRules)."
+    },
+    {
+      "file": "internal/targetweight/handler.go",
       "function": "New",
       "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
       "occurrence": 2,

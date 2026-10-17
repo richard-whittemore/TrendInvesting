@@ -8,13 +8,17 @@
 //
 //	engine -socket <path> -config <configuration.json> -out <journal.jsonl> -as-of <RFC3339> [-mode backtest|dry-run|paper|live] [-log <durable.log> [-resume <previous.log>]]
 //
-// # Wire contract: the adapter's first bar must carry Sequence 2
+// # Wire contract: the adapter's first input continues the engine's own
 //
 // This run's own configuration input is always delivered first, at Sequence
-// configurationSequence (1), before the socket opens. The adapter's bars,
-// session closes and account snapshots continue that SAME sequence — it does
-// not start a numbering of its own — so its very first bar must carry
-// Sequence configurationSequence+1 (2). Each slice's bars are one Session,
+// configurationSequence (1), before the socket opens. A fresh run after an
+// earlier one then delivers the owner's approval as its second input, at
+// Sequence approvalSequence (2; approval.go), also before the socket opens.
+// The adapter's bars, session closes and account snapshots continue that
+// SAME sequence — it does not start a numbering of its own — so its very
+// first input must carry Sequence configurationSequence+1 (2), or
+// approvalSequence+1 (3) when an approval was recorded, which the engine
+// reports when it records one. Each slice's bars are one Session,
 // ended by market.session.closed (ADR 0021); its account.snapshot follows
 // the close's decisions, continuing the single input sequence: bar 2,
 // session close 3, snapshot 4, bar 5, including warm-up. This
@@ -45,10 +49,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/richard-whittemore/TrendInvesting/internal/buildinfo"
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/replay"
-	"github.com/richard-whittemore/TrendInvesting/internal/strategy"
 	"github.com/richard-whittemore/TrendInvesting/transport"
 )
 
@@ -58,7 +62,8 @@ import (
 var rfc3339DateTime = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]([01]\d|2[0-3]):[0-5]\d)$`)
 
 // sourceEngine is stamped on the configuration input this command
-// manufactures for itself at startup, and on the outer envelope newDecider
+// manufactures for itself at startup, on the owner's approval input it
+// records after it (approvalEnvelope), and on the outer envelope newDecider
 // returns over the wire (event.Envelope.Source's own doc comment: "Source
 // names the component that emitted the event"). It never appears on a
 // decision: every decision this command journals or returns is the
@@ -79,7 +84,10 @@ type options struct {
 	outPath    string
 	logPath    string
 	resumePath string
-	asOf       string
+	// approvalPath names the owner's operator.run.approved file for a
+	// fresh run after an earlier one (approval.go).
+	approvalPath string
+	asOf         string
 	// mode is required and is what the adapter on the socket does with the
 	// decisions: modeBacktest (decisions are simulated), or a mode that can reach a
 	// broker. A mode other than backtest requires logPath (ADR 0027).
@@ -129,6 +137,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	case "":
 		missing = append(missing, fmt.Errorf("-mode is required: %s, %s, %s or %s; there is no default, so a live run cannot start without the durable log by forgetting it (owner decision 2026-10-16)", modeBacktest, modeDryRun, modePaper, modeLive))
 	case modeDryRun, modePaper, modeLive:
+		if opts.build == buildinfo.Unstamped {
+			missing = append(missing, fmt.Errorf("-mode %s refuses an unstamped build (%q): a run's build is part of every envelope's strategy version (ADR 0016) and a run never resumes across builds (ADR 0027), so it must be identified; build the engine with `make engine`, which stamps it from `git describe --always --dirty`", opts.mode, opts.build))
+		}
 		if opts.logPath == "" {
 			missing = append(missing, fmt.Errorf("-log is required in -mode %s: orders that can reach a broker are sent only after they are flushed to a durable log (ADR 0027; owner decision 2026-10-16)", opts.mode))
 		}
@@ -137,6 +148,9 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	}
 	if opts.resumePath != "" && opts.logPath == "" {
 		missing = append(missing, errors.New("-resume requires -log: a resumed run streams its own durable log, which begins with the records it resumes (ADR 0027)"))
+	}
+	if opts.resumePath != "" && strings.HasSuffix(opts.build, "-dirty") {
+		missing = append(missing, fmt.Errorf("-resume refuses build %q: a dirty build that does not identify its tree names every uncommitted change at its commit alike, and a run never resumes across builds (ADR 0027, owner decision 2026-10-16); `make engine` stamps a dirty tree with its own tree hash", opts.build))
 	}
 	if err := errors.Join(missing...); err != nil {
 		return fmt.Errorf("engine: %w", err)
@@ -171,21 +185,21 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 		return fmt.Errorf("engine: -log and -out both name %s: the durable log is streamed during the run and the journal is installed when it stops, so they must be two files", opts.outPath)
 	}
 
-	cfg, err := readConfiguration(opts.configPath)
+	// The configuration selects the strategy: the target-weight handler
+	// with its risk gate, or the Turtle reducer (compose.go).
+	comp, err := compose(opts.configPath, opts.build, asOf.UTC())
 	if err != nil {
 		return err
 	}
-	configurationHash := event.ConfigurationHash(cfg)
-	strategyVersion := event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, opts.build)
-
-	reducer, err := strategy.NewReducer(strategyVersion, cfg)
-	if err != nil {
-		return fmt.Errorf("engine: %w", err)
+	if err := checkModeBinding(opts.mode, comp); err != nil {
+		return err
 	}
-	configEnvelope, err := configurationEnvelope(cfg, strategyVersion, asOf.UTC())
+	approval, err := freshRunApproval(opts, comp)
 	if err != nil {
 		return err
 	}
+	configurationHash, strategyVersion, configEnvelope := comp.configurationHash, comp.strategyVersion, comp.configEnvelope
+	reducer := comp.handler
 
 	// # Durability: journal-before-send
 	//
@@ -314,6 +328,21 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 		// fail-closed style (see internal/strategy/reducer.go's own such
 		// guards).
 		return fmt.Errorf("engine: apply the configuration input: %w", err)
+	}
+	if approval != nil {
+		// A fresh run after an earlier one: the owner's approval is its
+		// second input, before the socket opens (approval.go).
+		envelope, err := approvalEnvelope(*approval, comp, asOf.UTC())
+		if err != nil {
+			return err
+		}
+		if _, err := wireEngine.Apply(ctx, envelope); err != nil {
+			return fmt.Errorf("engine: apply the approval input: %w", err)
+		}
+		if _, err := fmt.Fprintf(out, "recorded the owner's approval of a fresh run after %s at sequence %d; the adapter's first input carries sequence %d\n",
+			approval.PreviousLog, approvalSequence, approvalSequence+1); err != nil {
+			return fmt.Errorf("engine: report the approval: %w", err)
+		}
 	}
 
 	guard := &wireGuard{}
@@ -451,7 +480,8 @@ func readConfiguration(path string) (event.ConfigurationPayload, error) {
 // persistent cursor (see run) ever accepts for this run. It is a named
 // constant, not a literal 1 inlined where it is used, because it is also
 // half of this engine's wire contract: the adapter's OWN first bar must
-// carry Sequence configurationSequence+1, continuing this run's one input
+// carry Sequence configurationSequence+1 (approvalSequence+1 after a
+// recorded approval), continuing this run's one input
 // stream rather than starting a second one alongside it at the same value
 // — see run's own doc comment on why, and cmd/engine's package doc comment,
 // which is where an adapter author is expected to read this.

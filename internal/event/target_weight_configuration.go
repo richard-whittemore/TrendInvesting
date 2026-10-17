@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -268,6 +269,7 @@ func (p TargetWeightConfigurationPayload) Validate() error {
 	if !validTradingMode(p.Mode) {
 		errs = append(errs, fmt.Errorf("mode %q is not dry-run, paper or live", p.Mode))
 	}
+	errs = append(errs, accountMatchesMode(p.AccountID, p.Mode)...)
 	if p.Adapter != AdapterIBKR {
 		errs = append(errs, fmt.Errorf("adapter %q is not %q (ADR 0025)", p.Adapter, AdapterIBKR))
 	}
@@ -477,6 +479,25 @@ func (l MarginLimits) validate() []error {
 func (l MarginLimits) Validate() error {
 	if err := errors.Join(l.validate()...); err != nil {
 		return fmt.Errorf("invalid margin limits: %w", err)
+	}
+	return nil
+}
+
+// PaperAccountPrefix begins every IBKR paper trading account ID, and no live
+// account ID (IBKR: a paper account's ID starts "DU"; ADR 0025, point 3).
+const PaperAccountPrefix = "DU"
+
+// accountMatchesMode binds the account to the mode: a paper configuration
+// must name a paper account and a live one must not, so a configuration
+// cannot send paper orders to a live account or rehearse live on paper. A
+// dry-run sends nothing and may name either.
+func accountMatchesMode(accountID, mode string) []error {
+	paper := strings.HasPrefix(accountID, PaperAccountPrefix)
+	switch {
+	case mode == TradingModePaper && !paper:
+		return []error{fmt.Errorf("mode paper names account %q, but an IBKR paper account ID begins %q", accountID, PaperAccountPrefix)}
+	case mode == TradingModeLive && paper:
+		return []error{fmt.Errorf("mode live names account %q, but an account ID beginning %q is a paper account", accountID, PaperAccountPrefix)}
 	}
 	return nil
 }

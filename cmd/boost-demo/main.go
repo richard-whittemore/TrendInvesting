@@ -1,13 +1,21 @@
-// Command boost-demo runs Boost end to end over an invented SPY series: bars,
-// account snapshots and marks through the target-weight handler, every
-// decision journalled, the journal written, read back and replayed, and the
-// decision log printed. The series is synthetic, never market data. It is
-// composition only: every rule lives in internal/targetweight,
-// internal/orderplan and internal/risklimit.
+// Command boost-demo plays the broker adapter for a dry-run Boost engine: it
+// connects to cmd/engine's socket and sends an invented SPY series, session
+// by session (the bar, the account snapshot, the mark, the session close),
+// with a simulated account in which every released order fills at the next
+// session's close, and prints the decision log from the engine's replies.
+// The series is synthetic, never market data. It composes no strategy: every
+// decision is the engine's, so there is one composition root, cmd/engine.
+//
+//	boost-demo -socket <engine.sock> -log <the engine's durable log> -config <boost.config> [-sessions 320] [-first-sequence 2]
+//
+// The run's identity (configuration hash and strategy version) is read from
+// the engine's durable log header, so the envelopes carry the build the
+// engine was stamped with. `make demo-boost-dry-run` runs it against the
+// real engine and then replays the durable log byte for byte.
 package main
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,31 +25,15 @@ import (
 	"os"
 	"time"
 
-	"github.com/richard-whittemore/TrendInvesting/internal/buildinfo"
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
-	"github.com/richard-whittemore/TrendInvesting/internal/replay"
-	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
+	"github.com/richard-whittemore/TrendInvesting/transport"
 )
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
-	}
-}
-
-// configuration is the backtested Boost (plan.md section 2) for a dry-run
-// joint account. MaxOrderFraction is 1: the first decision from cash buys 98%
-// of net liquidation in one order.
-func configuration() event.TargetWeightConfigurationPayload {
-	return event.TargetWeightConfigurationPayload{
-		StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR,
-		Boost: event.BoostConfiguration{
-			InstrumentID: "SPY", InvestedFraction: 0.98, BoostSize: 1.5, RSIPeriod: 2, RSIEntry: 10,
-			TrendDays: 200, ExitSMA: 5, WarmUpStart: "2024-01-02",
-		},
-		Limits: event.MarginLimits{MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05},
 	}
 }
 
@@ -78,27 +70,38 @@ func sessions(n int) []time.Time {
 func run(args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("boost-demo", flag.ContinueOnError)
 	flags.SetOutput(out)
+	socket := flags.String("socket", "", "the engine's socket")
+	logPath := flags.String("log", "", "the engine's durable log, whose header names the run's identity")
+	configPath := flags.String("config", "", "the Boost configuration the engine was started with")
 	count := flags.Int("sessions", 320, "number of synthetic sessions")
-	outPath := flags.String("out", "", "path to write the run's journal to (optional)")
+	first := flags.Uint64("first-sequence", 2, "the sequence of the first input: 2 after the configuration, 3 after an approval")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *count < 1 {
 		return errors.New("boost-demo: at least one session is required")
 	}
-	cfg := configuration()
-	version := event.ComposeStrategyVersion(cfg.StrategyID, targetweight.RulesVersion, buildinfo.Version)
-	days := sessions(*count)
-	opts := targetweight.Options{DecideFrom: days[0]}
-	handler, err := targetweight.New(version, cfg, opts)
+	if *socket == "" || *logPath == "" || *configPath == "" {
+		return errors.New("boost-demo: -socket, -log and -config are required")
+	}
+	header, err := readLogHeader(*logPath)
 	if err != nil {
 		return err
 	}
-	recorder := journal.NewRecorder(handler)
-	feed := &feeder{hash: handler.ConfigurationHash(), version: version, recorder: recorder, account: account{cash: 4000}}
-	if err := feed.apply(event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", days[0].Add(-time.Hour), cfg); err != nil {
+	cfg, err := readConfiguration(*configPath)
+	if err != nil {
 		return err
 	}
+	client, err := transport.Dial(*socket)
+	if err != nil {
+		return fmt.Errorf("boost-demo: %w", err)
+	}
+	defer func() { _ = client.Close() }()
+	feed := &feeder{
+		client: client, hash: header.ConfigurationHash, version: header.StrategyVersion, sequence: *first,
+		accountID: cfg.AccountID, instrument: cfg.Boost.InstrumentID, account: account{cash: 4000},
+	}
+	days := sessions(*count)
 	for i, price := range syntheticCloses(*count) {
 		if err := feed.session(i, days[i], price); err != nil {
 			return err
@@ -109,93 +112,37 @@ func run(args []string, out io.Writer) error {
 			return err
 		}
 	}
-
-	header, err := recorder.Header(feed.hash, version)
-	if err != nil {
-		return err
-	}
-	var written bytes.Buffer
-	if err := journal.Write(&written, header, recorder.Entries()); err != nil {
-		return err
-	}
-	if *outPath != "" {
-		if err := writeNew(*outPath, written.Bytes()); err != nil {
-			return err
-		}
-	}
-	return replayJournal(written.Bytes(), version, cfg, opts, out)
-}
-
-// writeNew writes data to a file that must not exist yet: the exclusive
-// create refuses an occupied path, so a rerun never replaces an earlier run's
-// journal (AGENTS.md rule 6). The file is synced before it is closed.
-func writeNew(path string, data []byte) error {
-	return writeNewWith(path, data, func(f *os.File, b []byte) error {
-		_, err := f.Write(b)
-		return err
-	})
-}
-
-// writeNewWith is writeNew with the write step injectable, so a test can force
-// a failure after the file exists.
-func writeNewWith(path string, data []byte, write func(*os.File, []byte) error) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	// The path was created by this call, so removing it on failure never
-	// touches an earlier journal.
-	if err := write(f, data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(path)
-		return err
-	}
 	return nil
 }
 
-// replayJournal reads the journal back, verifies its chain and identity, and
-// replays its inputs through a fresh handler against its recorded decisions.
-func replayJournal(raw []byte, version string, cfg event.TargetWeightConfigurationPayload, opts targetweight.Options, out io.Writer) error {
-	if _, err := journal.Verify(bytes.NewReader(raw)); err != nil {
-		return err
-	}
-	header, records, err := journal.Read(bytes.NewReader(raw))
+// readLogHeader reads the durable log's first line (ADR 0027).
+func readLogHeader(path string) (journal.LogHeader, error) {
+	file, err := os.Open(path)
 	if err != nil {
-		return err
+		return journal.LogHeader{}, fmt.Errorf("boost-demo: open the engine's durable log: %w", err)
 	}
-	if err := journal.CheckIdentity(header, records); err != nil {
-		return err
-	}
-	inputs, decisions, err := journal.Split(records)
+	defer func() { _ = file.Close() }()
+	line, err := bufio.NewReader(file).ReadBytes('\n')
 	if err != nil {
-		return err
+		return journal.LogHeader{}, fmt.Errorf("boost-demo: read the durable log header: %w", err)
 	}
-	handler, err := targetweight.New(version, cfg, opts)
+	var header journal.LogHeader
+	if err := json.Unmarshal(line, &header); err != nil {
+		return journal.LogHeader{}, fmt.Errorf("boost-demo: decode the durable log header: %w", err)
+	}
+	return header, nil
+}
+
+func readConfiguration(path string) (event.TargetWeightConfigurationPayload, error) {
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return event.TargetWeightConfigurationPayload{}, fmt.Errorf("boost-demo: %w", err)
 	}
-	engine, err := replay.New(handler)
-	if err != nil {
-		return err
+	var cfg event.TargetWeightConfigurationPayload
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return event.TargetWeightConfigurationPayload{}, fmt.Errorf("boost-demo: decode %s: %w", path, err)
 	}
-	replayed, err := engine.Run(context.Background(), inputs)
-	if err != nil {
-		return err
-	}
-	if d := replay.Equivalent(decisions, replayed); d != nil {
-		return fmt.Errorf("boost-demo: replay diverged: %+v", d)
-	}
-	_, err = fmt.Fprintf(out, "replayed: journal decisions match (%d inputs, %d decisions)\n", len(inputs), len(decisions))
-	return err
+	return cfg, cfg.Validate()
 }
 
 // account is the simulated joint account: a released order fills at the next
@@ -207,29 +154,44 @@ type account struct {
 }
 
 type feeder struct {
-	hash     string
-	version  string
-	sequence uint64
-	recorder *journal.Recorder
-	account  account
-	log      []string
-	emitted  []event.Envelope
+	client     *transport.Client
+	hash       string
+	version    string
+	sequence   uint64
+	accountID  string
+	instrument string
+	account    account
+	log        []string
+	emitted    []event.Envelope
 }
 
-func (f *feeder) apply(eventType string, version uint32, id string, at time.Time, payload any) error {
+// decisions is the engine's reply: the decisions one input caused, in
+// emission order (cmd/engine's decisionsPayload).
+type decisions struct {
+	Decisions []event.Envelope `json:"decisions"`
+}
+
+func (f *feeder) send(eventType string, version uint32, id string, at time.Time, payload any) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	f.sequence++
 	in := event.Envelope{
 		ID: id, Type: eventType, EnvelopeVersion: event.CurrentEnvelopeVersion, SchemaVersion: version,
 		EventTime: at, RecordedAt: at, Sequence: f.sequence, Source: "boost-demo",
 		StrategyVersion: f.version, ConfigurationHash: f.hash, PayloadHash: event.HashPayload(raw), Payload: raw,
 	}
-	out, err := f.recorder.Apply(context.Background(), in)
-	f.emitted = out
-	return err
+	f.sequence++
+	reply, err := f.client.Decide(context.Background(), in)
+	if err != nil {
+		return fmt.Errorf("boost-demo: %s: %w", id, err)
+	}
+	var d decisions
+	if err := json.Unmarshal(reply.Payload, &d); err != nil {
+		return fmt.Errorf("boost-demo: decode the decisions for %s: %w", id, err)
+	}
+	f.emitted = append(f.emitted, d.Decisions...)
+	return nil
 }
 
 func (f *feeder) session(i int, at time.Time, price float64) error {
@@ -246,9 +208,9 @@ func (f *feeder) session(i int, at time.Time, price float64) error {
 	view := func(label string) event.PriceView {
 		return event.PriceView{View: label, Open: price, High: price, Low: price, Close: price, Volume: 1e6}
 	}
-	snapshot := event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: at, Currency: "USD", NetLiquidation: a.cash + float64(float64(a.held)*price)}
+	snapshot := event.AccountPositionsSnapshotPayload{AccountID: f.accountID, AsOf: at, Currency: "USD", NetLiquidation: a.cash + float64(float64(a.held)*price)}
 	if a.held != 0 {
-		snapshot.Positions = []event.AccountPosition{{InstrumentID: "SPY", Quantity: a.held}}
+		snapshot.Positions = []event.AccountPosition{{InstrumentID: f.instrument, Quantity: a.held}}
 	}
 	steps := []struct {
 		eventType string
@@ -257,22 +219,23 @@ func (f *feeder) session(i int, at time.Time, price float64) error {
 		payload   any
 	}{
 		{event.CompletedBarEventType, event.CompletedBarSchemaVersion, fmt.Sprintf("bar:%d", i),
-			event.CompletedBarPayload{InstrumentID: "SPY", PeriodEnd: at, SplitAdjusted: view(event.ViewSplitAdjusted), Raw: view(event.ViewRaw)}},
+			event.CompletedBarPayload{InstrumentID: f.instrument, PeriodEnd: at, SplitAdjusted: view(event.ViewSplitAdjusted), Raw: view(event.ViewRaw)}},
 		{event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, fmt.Sprintf("snapshot:%d", i), snapshot},
 		{event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("mark:%d", i),
-			event.MarkRecordedPayload{InstrumentID: "SPY", AsOf: at, Price: price, Source: event.AdapterIBKR}},
+			event.MarkRecordedPayload{InstrumentID: f.instrument, AsOf: at, Price: price, Source: event.AdapterIBKR}},
 		{event.SessionClosedEventType, event.SessionClosedSchemaVersion, fmt.Sprintf("session:%d", i),
-			event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: []string{"SPY"}}},
+			event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: []string{f.instrument}}},
 	}
+	f.emitted = nil
 	for _, s := range steps {
-		if err := f.apply(s.eventType, s.version, s.id, at, s.payload); err != nil {
+		if err := f.send(s.eventType, s.version, s.id, at, s.payload); err != nil {
 			return err
 		}
 	}
 	return f.describe(at)
 }
 
-// describe renders the session's emissions as one decision-log line.
+// describe renders the session's decisions as one decision-log line.
 func (f *feeder) describe(at time.Time) error {
 	line := at.Format("2006-01-02")
 	for _, e := range f.emitted {

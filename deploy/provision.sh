@@ -165,8 +165,9 @@ step_services() {
   log "directories and config"
   install -d -m 0755 "$etc" "$etc/engines" /usr/local/libexec/trend-investing /opt/trend-investing/bin
   install -m 0755 "$here"/libexec/*.sh /usr/local/libexec/trend-investing/
-  # Engine settings carry client IDs only, no secrets; repo-managed, overwritten.
-  install -m 0644 "$here"/etc/engines/*.env "$etc/engines/"
+  # Engine settings carry client IDs and modes only, no secrets; repo-managed,
+  # overwritten. Each configuration is hashed into its engine's run (ADR 0016).
+  install -m 0644 "$here"/etc/engines/*.env "$here"/etc/engines/*.config "$etc/engines/"
   # Non-secret gateway settings. Restart times are New York time (the unit sets TZ).
   install -m 0644 /dev/stdin "$etc/gateway.env" <<CONF
 GATEWAY_MAJOR=${GATEWAY_MAJOR}
@@ -186,11 +187,17 @@ CONF
   install -m 0644 "$here"/systemd/*.service "$here"/systemd/*.timer /etc/systemd/system/
   if test "$rehearsal" != 1; then
     systemctl daemon-reload
-    systemctl enable ti-gateway.service ti-data.timer ti-reporter.timer ti-dashboard.service \
-      ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service
-    # The gateway starts only once the owner has filled the login file; the
-    # unit's own check refuses an empty one. Engines, data step, reporter and
-    # dashboard are skipped (a unit condition) until their binaries are installed.
+    systemctl enable ti-gateway.service ti-data.timer ti-reporter.timer ti-dashboard.service
+    # Engines are not enabled: every engine start is the owner's explicit step
+    # (docs/runbooks/durable-log.md, "Restarting an engine"), so a reboot
+    # leaves them stopped. An earlier provisioner enabled them, and those
+    # links outlive it, so each instance is disabled too (ADR 0027, the
+    # restart model). Disabling stops nothing that is running.
+    systemctl disable ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service
+    # The gateway starts only once the owner has filled
+    # the login file; the unit's own check refuses an empty one. The data
+    # step, reporter and dashboard are skipped (a unit condition) until their
+    # binaries are installed.
     log "enabled; start with: systemctl start ti-gateway (after the owner enters the IBKR login)"
   fi
 }

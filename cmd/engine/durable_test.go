@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -451,17 +454,79 @@ func TestTheDurableLogIsRequiredOutsideABacktest(t *testing.T) {
 		t.Errorf("an unknown mode: run() = %v, want a refusal naming -mode", err)
 	}
 
-	// With -log a live mode starts; the backtest modes need none.
-	for _, mode := range []string{"backtest", "paper"} {
+	// With -log a mode that can reach a broker starts (a dry-run Boost
+	// configuration; the Turtle reducer runs only as a backtest); a backtest
+	// needs no log.
+	for _, mode := range []string{"backtest", "dry-run"} {
 		socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 		opts := options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, build: "test-build", mode: mode,
 			outPath: filepath.Join(dir, "ok-"+mode+".jsonl")}
-		if mode == "paper" {
-			opts.logPath = filepath.Join(dir, "ok-paper.log")
+		if mode == "dry-run" {
+			opts.configPath, opts.asOf = boostConfigPath, boostAsOf
+			opts.logPath = filepath.Join(dir, "ok-dry-run.log")
 		}
 		stop := startEngine(t, opts)
 		if err := stop(); err != nil {
 			t.Errorf("mode %q: %v", mode, err)
 		}
+	}
+}
+
+// faultLogRead makes every read of the log at path go through a reader that
+// returns its first n bytes and then fault, as a disk whose sector fails
+// partway through the file does; n < 0 fails the open itself.
+func faultLogRead(t *testing.T, path string, n int64, fault error) {
+	t.Helper()
+	opened := openDurableLog
+	t.Cleanup(func() { openDurableLog = opened })
+	openDurableLog = func(name string) (io.ReadCloser, error) {
+		if name != path {
+			return opened(name)
+		}
+		if n < 0 {
+			return nil, &fs.PathError{Op: "open", Path: name, Err: fault}
+		}
+		file, err := opened(name)
+		if err != nil {
+			return nil, err
+		}
+		return struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(io.LimitReader(file, n), iotest.ErrReader(fault)), file}, nil
+	}
+}
+
+// errDiskFault stands for an I/O error a disk returns partway through a
+// file.
+var errDiskFault = errors.New("input/output error")
+
+// TestAReadThatFailsPartwayIsAFaultNotDamage: a log that opens but whose
+// read fails after its header and first committed group is a fault in
+// reading it, never damage to what it holds, so it is never reported as an
+// unrecoverable log (ADR 0027 §5); a log read in full whose content is
+// damaged is.
+func TestAReadThatFailsPartwayIsAFaultNotDamage(t *testing.T) {
+	source := t.TempDir()
+	full, _ := firstBoostRun(t, source)
+	dir := t.TempDir()
+	path := committedPrefix(t, full.logPath, dir, "run-1.log", 1, time.Now())
+	whole, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	faultLogRead(t, path, int64(len(whole)), errDiskFault)
+	_, err = recoverLogFile(path)
+	var unrecoverable *unrecoverableLogError
+	if err == nil || errors.As(err, &unrecoverable) || !errors.Is(err, errDiskFault) {
+		t.Fatalf("recoverLogFile() = %v, want the read fault, not an unrecoverable log", err)
+	}
+
+	damaged := filepath.Join(dir, "run-2.log")
+	if err := os.WriteFile(damaged, append(whole[:len(whole)/2:len(whole)/2], "not a record\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recoverLogFile(damaged); !errors.As(err, &unrecoverable) {
+		t.Fatalf("recoverLogFile() of a damaged log = %v, want an unrecoverable log", err)
 	}
 }
