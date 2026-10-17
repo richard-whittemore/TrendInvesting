@@ -12,6 +12,7 @@ never the network, and writes the engines' input stream to --stream."""
 import argparse
 import datetime as dt
 import logging
+import shlex
 import sys
 
 from . import encode, history, massive, nyse_calendar, sectors, steps
@@ -32,6 +33,9 @@ def parse(argv, now=steps._now):
     ap.add_argument("--base", type=dt.date.fromisoformat, help="encode: adjusted views' base (default --first)")
     ap.add_argument("--optional", default="", help="encode: instruments written where they traded")
     ap.add_argument("--universe-members", action="store_true", help="encode: also every type-CS ticker with a bar")
+    ap.add_argument("--ranker", help="encode: the compact stream's ranker command, for example "
+                                     "'bin/universe-rank -config momentum.json': no member bars, and a close "
+                                     "history for each member it ranks at a decision session")
     ap.add_argument("--configuration-hash", help="encode: the engine's configuration hash")
     ap.add_argument("--strategy-version", help="encode: the engine's strategy version")
     ap.add_argument("--run-id", help="encode: the run's correlation id")
@@ -62,7 +66,8 @@ def main(argv):
                 encode.Identity(args.configuration_hash, args.strategy_version, args.run_id),
                 required=split(args.instruments), optional=split(args.optional),
                 universe_members=args.universe_members, base=args.base, first_sequence=args.first_sequence,
-                engine=args.engine, excluded=excluded)
+                engine=args.engine, excluded=excluded,
+                ranker=encode.go_ranker(shlex.split(args.ranker)) if args.ranker else None)
             for ticker in sorted(excluded):
                 for run in excluded[ticker]:
                     print("marketdata: excluded {} from {} to {} ({} sessions): {}".format(

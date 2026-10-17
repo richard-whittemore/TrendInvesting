@@ -65,6 +65,7 @@ import hashlib
 import json
 import math
 import os
+import subprocess
 import tempfile
 
 from . import adjust, history, nyse_calendar, record, sectors
@@ -78,6 +79,7 @@ CALENDAR = ("market.session.calendar", 1)     # SessionCalendarSchemaVersion
 UNIVERSE = ("market.universe.snapshot", 1)    # UniverseSnapshotSchemaVersion
 BAR = ("market.bar.completed", 2)             # CompletedBarAdjustedVersion
 SESSION_CLOSED = ("market.session.closed", 1)  # SessionClosedSchemaVersion
+HISTORY = ("market.close.history", 1)          # CloseHistorySchemaVersion
 
 ENGINES = ("momentum", "boost")
 
@@ -94,6 +96,51 @@ class Conflict(MarketDataError):
 
 class Malformed(MarketDataError):
     """A recorded row cannot be encoded as a valid input."""
+
+
+class RankerFailed(MarketDataError):
+    """The ranker refused a request or answered something unusable."""
+
+
+def go_ranker(argv):
+    """A ranker that asks cmd/universe-rank (``argv``, for example
+    ["bin/universe-rank", "-config", "momentum.json"]): one JSON request per
+    line on its stdin, one answer per line on its stdout. The ranking rule
+    and the window are the Go engine's own (targetweight.MomentumHistoryRequest),
+    so nothing here ranks."""
+    def rank(requests):
+        text = "".join(json.dumps(r, separators=(",", ":"), allow_nan=False) + "\n" for r in requests)
+        try:
+            done = subprocess.run(argv, input=text, capture_output=True, text=True, check=False)
+        except OSError as e:
+            raise RankerFailed("the ranker {} did not run: {}".format(argv, e)) from None
+        if done.returncode != 0:
+            raise RankerFailed("the ranker refused: {}".format(done.stderr.strip()))
+        try:
+            return [json.loads(line) for line in done.stdout.splitlines()]
+        except ValueError as e:
+            raise RankerFailed("the ranker's answer is not JSON lines: {}".format(e)) from None
+    return rank
+
+
+def _check_answers(requests, answers):
+    """The ranker's answers, checked against the requests: one per request, in
+    order, naming the request's session, a window of at least one session,
+    and distinct members, each a row of that session's snapshot."""
+    if not isinstance(answers, list) or len(answers) != len(requests):
+        raise RankerFailed("{} requests, but the ranker answered {!r}".format(len(requests), answers))
+    for req, ans in zip(requests, answers):
+        u = req["universe"]
+        rows = {r["instrument_id"] for r in u["rows"]}
+        if not isinstance(ans, dict):
+            raise RankerFailed("the ranker's answer for {} is unusable: {!r}".format(u["session"], ans))
+        members, window = ans.get("members"), ans.get("window")
+        if (ans.get("session") != u["session"] or not isinstance(ans.get("decision_session"), bool)
+                or not isinstance(window, int) or isinstance(window, bool) or window < 1
+                or not isinstance(members, list) or len(set(members)) != len(members)
+                or not set(members) <= rows or (members and not ans["decision_session"])):
+            raise RankerFailed("the ranker's answer for {} is unusable: {!r}".format(u["session"], ans))
+    return answers
 
 
 Session = collections.namedtuple("Session", "day bars fetched_at universe")
@@ -308,6 +355,19 @@ def _exclusions(span_days, out):
     return runs
 
 
+def _history(ticker, day, window, by_day, factors, left_out, base):
+    """The market.close.history payload of ``ticker`` at decision session
+    ``day``: its split- and dividend-adjusted close, computed exactly as its
+    bar's adjusted view would be, on each window session it traded and was
+    not left out of (see encode)."""
+    closes = []
+    for d in window:
+        s = by_day.get(d)
+        if s is not None and ticker in s.bars and d not in left_out:
+            closes.append({"session": d.isoformat(), "close": float(s.bars[ticker]["c"]) * factors[d][1]})
+    return {"instrument_id": ticker, "session": day.isoformat(), "adjusted_base": base.isoformat(), "closes": closes}
+
+
 class _Stream:
     def __init__(self, identity, first_sequence):
         if not all(identity):
@@ -328,7 +388,7 @@ class _Stream:
 
 def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), optional=(),
            universe_members=False, base=None, ahead=1, first_sequence=2, max_sector_age_days=7,
-           engine="momentum", excluded=None):
+           engine="momentum", excluded=None, ranker=None):
     """The envelopes for first..last, as described above. ``required``
     instruments must have a bar every session; ``optional`` ones (and, with
     ``universe_members``, every type-CS ticker of the span's universe
@@ -372,6 +432,9 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     boost = engine == "boost"
     if boost and (len(required) != 1 or optional or universe_members):
         raise ValueError("a boost stream names exactly one required instrument and nothing else")
+    compact = ranker is not None
+    if compact and (boost or universe_members):
+        raise ValueError("a compact stream is a momentum stream that writes ranked members' histories, not their bars")
     base = base or first
     if base > first or not nyse_calendar.is_trading_day(base):
         raise ValueError("base {} must be a session on or before the first {}".format(base, first))
@@ -379,6 +442,7 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
         raise ValueError("need first <= last and ahead >= 1")
     loaded = load_sessions(directory, base, last)
     days = [s.day for s in loaded]
+    by_day = {s.day: s for s in loaded}
     span = [s for s in loaded if s.day >= first]
     if not span:
         raise MissingData("no session in {}..{}".format(first, last))
@@ -412,10 +476,26 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     stream = _Stream(identity, first_sequence)
     through = nyse_calendar.sessions_after(last, ahead)[-1]
     opening = _utc(nyse_calendar.session_close(span[0].day).astimezone(dt.timezone.utc))
+    # A compact stream's histories reach back to the base, so its calendar
+    # does too: the engine refuses a close on a date its calendar does not list.
+    calendar = nyse_calendar.sessions(base if compact else span[0].day, through)
     if not boost:
-        stream.add(CALENDAR, "marketdata:calendar:{}:{}".format(span[0].day, through), opening, opening,
-                   {"source": CALENDAR_SOURCE,
-                    "sessions": [d.isoformat() for d in nyse_calendar.sessions(span[0].day, through)]})
+        stream.add(CALENDAR, "marketdata:calendar:{}:{}".format(calendar[0], through), opening, opening,
+                   {"source": CALENDAR_SOURCE, "sessions": [d.isoformat() for d in calendar]})
+    universes = {s.day: _universe_rows(directory, s.day, s.universe, max_sector_age_days, named)
+                 for s in span if s.universe is not None and not boost}
+    answers = {}
+    if compact and universes:
+        requests = [{"universe": {"session": day.isoformat(), "source": by_day[day].universe.get("source"),
+                                  "rows": rows},
+                     "next_session": calendar[calendar.index(day) + 1].isoformat()}
+                    for day, (rows, _) in sorted(universes.items())]
+        for req, ans in zip(requests, _check_answers(requests, ranker(requests))):
+            answers[dt.date.fromisoformat(req["universe"]["session"])] = ans
+        for ticker in sorted({m for a in answers.values() for m in a["members"]} - set(factors)):
+            factors[ticker], bad = _member_factors(ticker, loaded, days, by_ticker[ticker], base)
+            if bad:
+                out[ticker] = _left_out(days, bad)
     for s in span:
         end, session = _utc(nyse_calendar.session_close(s.day).astimezone(dt.timezone.utc)), s.day.isoformat()
         ids = sorted(t for t in wanted if t in s.bars and s.day not in out.get(t, ()))
@@ -430,13 +510,19 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
                 "raw": _view("raw", r, 1.0, 1.0),
                 "adjusted": _view("split-and-dividend-adjusted", r, total_m, split_m),
                 "adjusted_base": base.isoformat()})
-        if s.universe is not None and not boost:
-            rows, skipped = _universe_rows(directory, s.day, s.universe, max_sector_age_days, named)
+        if s.day in universes:
+            rows, skipped = universes[s.day]
             for ticker, reason in skipped.items():
                 out.setdefault(ticker, {}).setdefault(s.day, reason)
-            stream.add(UNIVERSE, "marketdata:universe:{}".format(session), end,
-                       _fetched_at(s.universe, "universe " + session),
+            fetched = _fetched_at(s.universe, "universe " + session)
+            stream.add(UNIVERSE, "marketdata:universe:{}".format(session), end, fetched,
                        {"session": session, "source": s.universe.get("source"), "rows": rows})
+            answer = answers.get(s.day)
+            if answer is not None and answer["decision_session"]:
+                window = [d for d in calendar if d <= s.day][-answer["window"]:]
+                for ticker in sorted(answer["members"]):
+                    stream.add(HISTORY, "marketdata:history:{}:{}".format(ticker, session), end, fetched,
+                               _history(ticker, s.day, window, by_day, factors[ticker], out.get(ticker, {}), base))
         stream.add(SESSION_CLOSED, "marketdata:session-closed:{}".format(session), end, s.fetched_at,
                    {"period_end": end, "instrument_ids": ids})
     if excluded is not None:
