@@ -60,3 +60,7 @@ Any constant that encodes a strategy rule (55, 20, 2N, ½N, 4 Units, 10 %/20 % d
 - Formatting, import order, and naming already enforced by `gofmt`, `go vet`, and `staticcheck` in `make check`.
 - Preferences with no correctness or auditability consequence.
 - Citation accuracy against third-party source documents, which are not in this repository and cannot be checked from the diff.
+
+## Review scope (review cost)
+
+Greptile reviews only the capital-safety paths: `internal/risklimit`, `internal/orderplan`, `internal/targetweight`, `internal/journal`, `internal/event`, `internal/replay`, `cmd/engine`, `adapter/ibkr`, `adapter/marketdata/adjust.py`, `adapter/marketdata/history.py` and `deploy/`. Every other path is listed in `ignorePatterns` in `config.json` (JSON has no comments, so the reason is recorded here); CodeRabbit alone reviews those. A new package or file outside the safety list must be added to `ignorePatterns` unless it is capital-safety code. Policy: `docs/development.md`, "Review cost".

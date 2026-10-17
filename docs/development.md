@@ -337,8 +337,21 @@ Never hide a failed research result by rewriting or removing its recorded config
 Each bot review is billed, so:
 
 - Push once per review round. Batch all fixes for a round into one push.
-- Never request a bot review manually. Auto-review already runs, and a manual
-  request bills a second review.
+- While automatic review is active, do not request a bot review manually; a
+  manual request then bills a second review. If CodeRabbit pauses automatic
+  reviews after five reviewed commits, use `@coderabbitai review` to review the
+  incremental changes.
 - Drafts are not reviewed (`.coderabbit.yaml` and `.greptile/config.json`), so
   stacked work stays draft until its base merges.
+- Review scope: both bots review the capital-safety paths (`internal/risklimit`,
+  `internal/orderplan`, `internal/targetweight`, `internal/journal`,
+  `internal/event`, `internal/replay`, `cmd/engine`, `adapter/ibkr`,
+  `adapter/marketdata/adjust.py`, `adapter/marketdata/history.py`, `deploy/`).
+  Everywhere else CodeRabbit alone reviews. Greptile is scoped through
+  `ignorePatterns` in `.greptile/config.json` (a deny list, so a new path
+  outside the safety list must be added there); CodeRabbit is unscoped.
+- On non-safety PRs the orchestrator may run a Claude review agent as a second
+  reader when warranted.
+- The merge rule is unchanged: every finding from whichever reviewer ran is
+  addressed.
 - The orchestrator's watcher nudges once if no review appears.
