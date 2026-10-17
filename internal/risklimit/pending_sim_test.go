@@ -3,6 +3,7 @@ package risklimit
 import (
 	"flag"
 	"fmt"
+	"math"
 	"math/rand"
 	"slices"
 	"strings"
@@ -29,6 +30,29 @@ type simSell struct {
 	// hidden are the shares IBKR has not yet listed: its size when placed,
 	// or what a raise added.
 	hidden []*simHidden
+	// fills are its fills, each at its true place.
+	fills []simFill
+}
+
+// simFill is shares of a sell filled at the true place seq.
+type simFill struct {
+	seq      int
+	quantity int64
+}
+
+// soldAfter is the shares of the sell h sold after the true place seq or
+// still to sell: its part of the truth for a view taken there.
+func (h *simSell) soldAfter(seq int) int64 {
+	var n int64
+	for _, f := range h.fills {
+		if f.seq > seq {
+			n += f.quantity
+		}
+	}
+	if h.live() {
+		n += h.size - h.filled
+	}
+	return n
 }
 
 // simHidden is shares of a hand sell no broker snapshot that read the open
@@ -58,8 +82,11 @@ type simFact struct {
 // The pending rule is never below the truth (fail closed): for every view,
 // the shares of an instrument already being sold that the view cannot show
 // are never fewer than the shares truly sold after it was taken and still
-// to be sold, less the hand-sold shares no broker snapshot recorded has yet
-// listed, which the gate cannot know (the documented limitation). A
+// to be sold, less, of each hand sell's part of that truth, no more than
+// its shares no broker snapshot recorded has yet listed, which the gate
+// cannot know (the documented limitation). The program's own sells are also
+// checked alone, against their own part of the truth with no allowance, so
+// no shortfall of them hides behind an unlisted hand sell. A
 // simulated broker holds 100 of each of two instruments, with up to two
 // resting hand sells each that IBKR lists, and executes and cancels two
 // sells of ours of 30 on each, second by second: partial fills,
@@ -83,8 +110,9 @@ type simFact struct {
 // recorded, a last broker snapshot lists every sell still live: it shows
 // the late hand sell when it is still working, and every figure is then
 // checked against the whole truth; the late hand sell that filled before
-// any listing is the documented limitation, and every figure is checked to
-// be short of the truth by no more than its size.
+// any listing is the documented limitation: every figure is checked to be
+// short of the truth by no more than its size, and what is counted still to
+// sell, now and at each reference taken after that fill, not at all.
 func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 	base := time.Date(2025, time.March, 5, 16, 0, 0, 0, time.UTC)
 	const tag = "targets-decided:joint:2025-03-04"
@@ -184,6 +212,8 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 		views = append(views, seen{g.brokerView, setup})
 		g.ObserveAccount(accountAt(0, setup))
 		views = append(views, seen{g.account, setup})
+		// placeOf is each snapshot's true place, by its identity in the gate.
+		placeOf := map[int]int{g.brokerView.by: 0, g.account.by: 0}
 		accountHeld, brokerHeld := setup, setup
 		brokerReadable := true
 		for _, o := range ours {
@@ -218,6 +248,7 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 					}
 					q := 1 + rng.Int63n(o.size-o.filled)
 					o.filled += q
+					o.fills = append(o.fills, simFill{seq, q})
 					p := event.TargetWeightFillPayload{
 						AccountID: "joint", ClientOrderID: o.client, FillID: fmt.Sprintf("f%d", seq), InstrumentID: o.instrument,
 						Side: event.OrderSideSell, Quantity: q, Price: 1, FilledAt: stamp(sec),
@@ -248,7 +279,9 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 							}
 						}
 					case h.seen:
-						h.filled += 1 + rng.Int63n(h.size-h.filled)
+						q := 1 + rng.Int63n(h.size-h.filled)
+						h.filled += q
+						h.fills = append(h.fills, simFill{seq, q})
 						h.filledSince = true
 					}
 				case 4:
@@ -317,8 +350,9 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 		hidden = append(hidden, late.hidden[0])
 		hand = append(hand, late)
 		if rng.Intn(2) == 0 {
-			late.filled = late.size
 			seq++
+			late.filled = late.size
+			late.fills = append(late.fills, simFill{seq, late.size})
 			held, p := holding(), accountAt(9, holding())
 			facts = append(facts, simFact{seq: seq, stream: "account", held: held, record: func(g *Gate) (view, error) {
 				g.ObserveAccount(p)
@@ -369,22 +403,72 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 			}
 			return out
 		}
+		// slack is, for a view taken at the true place seq, the most what
+		// it counts still to sell of instrument may fall short of the
+		// truth: of each hand sell's part of that truth, no more than its
+		// shares no broker snapshot recorded has listed. Our own sells and
+		// listed hand-sold shares give none.
+		slack := func(instrument string, seq int) int64 {
+			var out int64
+			for _, h := range hand {
+				if h.instrument != instrument {
+					continue
+				}
+				var unseen int64
+				for _, x := range h.hidden {
+					if x.by == 0 || !recordedBroker[x.by] {
+						unseen += x.quantity
+					}
+				}
+				out += min(unseen, h.soldAfter(seq))
+			}
+			return out
+		}
 		short := false
-		checkAll := func(step int, slack map[string]int64) {
+		checkAll := func(step int) {
 			for _, instrument := range instruments {
 				// remains stops at the latest reference at which nothing
 				// released before it can still sell: that changes nothing
 				// while every hand-sold share is listed, and only lowers
 				// remains while some are not.
-				less := slack[instrument]
-				var every int64
-				for _, p := range g.ledger.refs {
-					if toGo, _, ok := g.ledger.toGo(instrument, p.view); ok {
-						every = max(every, p.held[instrument]-toGo)
+				// Each reference's toGo meets its truth less its own slack
+				// alone, and the part of it for our own sells, with no unknown
+				// sell recorded, meets our sells' part of the truth exactly,
+				// so an under-count of our own sells there is caught. A
+				// snapshot's figure nets the most over the references, so it
+				// may fall short by the most any reference's slack is.
+				ourOwn := func(seq int) int64 {
+					var n int64
+					for _, o := range ours {
+						if o.instrument == instrument {
+							n += o.soldAfter(seq)
+						}
 					}
+					return n
 				}
-				if got := g.ledger.remains(instrument); got > every || got != every && less == 0 {
-					t.Fatalf("seed %d step %d: %s: remains %d, but %d over every reference, %d unlisted", seed, step, instrument, got, every, less)
+				bare := g.ledger
+				bare.unknown = nil
+				if got, _, _ := bare.toGo(instrument, now); got < ourOwn(math.MaxInt) {
+					t.Fatalf("seed %d step %d: %s: %d of our own sells counted still to sell, below the %d truly working", seed, step, instrument, got, ourOwn(math.MaxInt))
+				}
+				var every, less int64
+				for _, p := range g.ledger.refs {
+					if got, _, _ := bare.toGo(instrument, p.view); got < ourOwn(placeOf[p.by]) {
+						t.Fatalf("seed %d step %d: %s: the reference %d of %s counts %d of our own sells still to sell, below the %d they truly sold since or still sell", seed, step, instrument, p.by, p.at.Format(time.TimeOnly), got, ourOwn(placeOf[p.by]))
+					}
+					toGo, _, ok := g.ledger.toGo(instrument, p.view)
+					if !ok {
+						continue
+					}
+					every = max(every, p.held[instrument]-toGo)
+					truth, own := p.held[instrument]-left[instrument], slack(instrument, placeOf[p.by])
+					if toGo < truth-own {
+						t.Fatalf("seed %d step %d: %s: the reference %d of %s counts %d still to sell, below the %d truly sold since or still to sell less %d unlisted", seed, step, instrument, p.by, p.at.Format(time.TimeOnly), toGo, truth, own)
+					}
+					less = max(less, own)
+				}
+				if got, unseen := g.ledger.remains(instrument), unlisted()[instrument]; got > every || got != every && unseen == 0 {
+					t.Fatalf("seed %d step %d: %s: remains %d, but %d over every reference, %d unlisted", seed, step, instrument, got, every, unseen)
 				}
 				for _, s := range views {
 					got, truth := g.ledger.unshown(instrument, s.v), s.held[instrument]-left[instrument]
@@ -393,7 +477,7 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 					}
 					short = short || got < truth
 				}
-				if got := g.ledger.unshown(instrument, now); got < working[instrument]-less {
+				if got, less := g.ledger.unshown(instrument, now), slack(instrument, math.MaxInt); got < working[instrument]-less {
 					t.Fatalf("seed %d step %d: %s: %d counted still to sell, below the %d truly working less %d unlisted", seed, step, instrument, got, working[instrument], less)
 				}
 				if got, truth := g.PendingSells(instrument), accountHeld[instrument]-left[instrument]; got < truth-less {
@@ -422,29 +506,27 @@ func TestPendingIsNeverBelowTheTruth(t *testing.T) {
 			}
 			if f.held != nil {
 				views = append(views, seen{v, f.held})
+				placeOf[v.by] = f.seq
 			}
 		}
 		for step, f := range recorded {
 			record(step, f)
-			checkAll(step, unlisted())
+			checkAll(step)
 		}
 
 		// The documented limitation, checked alone: a last broker snapshot
 		// lists every live sell. A late hand sell still working is then
 		// counted, and every figure meets the whole truth; one that filled
 		// before any listing never is, and every figure falls short of the
-		// truth by no more than its size.
+		// truth by no more than its size; what is counted still to sell, now
+		// and at each reference taken after that fill, not at all.
 		seq++
 		s := brokerAt(10, holding(), 3)
 		seeHand(hand, seq)
 		record(len(recorded), brokerFact(seq, holding(), s))
-		if late.live() {
-			checkAll(len(recorded), map[string]int64{})
-			continue
-		}
 		short = false
-		checkAll(len(recorded), map[string]int64{late.instrument: late.size})
-		if short {
+		checkAll(len(recorded))
+		if !late.live() && short {
 			limitation++
 		}
 	}
