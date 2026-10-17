@@ -171,6 +171,9 @@ type momentumOptions struct {
 	// SHY and the names held, and at each universe snapshot one
 	// market.close.history per ranked member (closeHistories).
 	compact bool
+	// heldBarsOnly feeds a run configured for bars the compact stream's
+	// bars (SPY, IEF, SHY and the names held) and no close history.
+	heldBarsOnly bool
 	// retract feeds a market.session.retracted for each session named,
 	// just after the calendar; unlisted leaves sessions off the calendar fed.
 	retract  []string
@@ -337,7 +340,7 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			if _, ok := prices[n.id]; ok && opts.compact {
 				marked = append(marked, n.id) // the venue marks what it trades, whatever bars the stream carries
 			}
-			if _, ok := prices[n.id]; !ok || opts.noBar[session] == n.id || opts.compact && !compactBar(n.id, acct.held) {
+			if _, ok := prices[n.id]; !ok || opts.noBar[session] == n.id || (opts.compact || opts.heldBarsOnly) && !compactBar(n.id, acct.held) {
 				continue
 			}
 			ids = append(ids, n.id)

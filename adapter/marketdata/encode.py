@@ -21,9 +21,10 @@ writes, in order:
      recording: one row per type-CS reference ticker with a bar that
      session, its unadjusted close and volume, and its sector label and
      source (sectors.py), sorted by instrument; a row of a ticker not named
-     as required or optional whose close or volume is missing or negative
-     is left out (see encode), while such a row of a required or optional
-     instrument refuses the stream;
+     as required or optional whose close or volume is missing or negative,
+     or of a member left out of the session for bad data, is left out (see
+     encode), while a bad row of a required or optional instrument refuses
+     the stream;
    - a ``market.session.closed`` v1 naming exactly the bars written.
 
 A session the exchange cancelled is recorded once (record_retraction, the
@@ -486,8 +487,12 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     Its bars before the bad session are written, so later bad data never
     changes an earlier session's bars. A universe snapshot row whose close
     or volume is missing or negative is left out of that session's snapshot
-    (for a member, its bar that session is malformed too); the ticker's
-    other rows are written. Each ticker left out of any session of the
+    (for a member, its bar that session is malformed too), and so is the row
+    of a member left out of that session, whichever stream is written: the
+    snapshot records that it was left out, so every stream ranks the same
+    members and a momentum run configured for bars can require a bar for
+    every member it ranks (ADR 0026 point 5). The ticker's other rows are
+    written. Each ticker left out of any session of the
     stream is named in ``excluded`` (a dict, if given) with an [Exclusion]
     per run of sessions. A required or optional instrument with bad data
     still refuses the stream.
@@ -522,11 +527,14 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
         raise MissingData("no session in {}..{}".format(first, last))
     named = set(required) | set(optional)
     wanted = set(named)
-    if universe_members:
+    members = set()   # every type-CS ticker with a bar in a universe session, checked in every momentum stream
+    if not boost:
         for s in span:
             if s.universe is not None:
                 cs = {t.get("ticker") for t in s.universe.get("tickers") or () if t.get("type") == "CS"}
-                wanted |= cs & set(s.bars)
+                members |= cs & set(s.bars)
+    if universe_members:
+        wanted |= members
     start = base + dt.timedelta(days=1)
     by_ticker = collections.defaultdict(lambda: ([], []))
     for r in _actions(directory, "splits", start, last):
@@ -535,7 +543,7 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
         by_ticker[r.get("ticker")][1].append(r)
 
     factors, out = {}, {}   # out: ticker -> {session left out: reason}
-    for ticker in sorted(wanted):
+    for ticker in sorted(wanted | members):
         if ticker in named:
             factors[ticker] = _factors(ticker, loaded, days, by_ticker[ticker], base)
             continue
@@ -569,6 +577,11 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
                        {"source": rec["source"], "session": day.isoformat(), "reason": rec["reason"]})
     universes = {s.day: _universe_rows(directory, s.day, s.universe, max_sector_age_days, named)
                  for s in span if s.universe is not None and not boost}
+    # A member left out of a session for bad data is left out of that
+    # session's snapshot too, so the snapshot records it and a run configured
+    # for bars can require a bar for every member it ranks (ADR 0026 point 5).
+    universes = {day: ([r for r in rows if day not in out.get(r["instrument_id"], ())], skipped)
+                 for day, (rows, skipped) in universes.items()}
     answers = {}
     if compact and universes:
         requests = [{"universe": {"session": day.isoformat(), "source": by_day[day].universe.get("source"),

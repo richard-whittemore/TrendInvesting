@@ -13,7 +13,7 @@ from unittest import mock
 
 from marketdata import __main__ as cli
 from marketdata import encode, record
-from marketdata.tests.test_encode import ALL_SESSIONS, FIRST, REPO, bar_of, break_bar, build, of, run, unadjustable_ddd
+from marketdata.tests.test_encode import ALL_SESSIONS, FIRST, REPO, bar_of, break_bar, build, of, rewrite, run, unadjustable_ddd
 
 D = dt.date
 HISTORY = "market.close.history"
@@ -130,6 +130,20 @@ class HistoryContentTest(unittest.TestCase):
                          ["2026-11-27", "2026-11-30"])   # left out of 11-25, the ex-date it cannot be adjusted on
         self.assertEqual({t: [(r.first, r.last) for r in runs] for t, runs in excluded.items()},
                          {"AAA": [(D(2026, 11, 25), D(2026, 11, 25))], "DDD": [(D(2026, 11, 25), D(2026, 11, 25))]})
+
+    def test_a_member_left_out_of_the_decision_session_is_left_out_of_the_snapshot_ranked(self):
+        """The compact stream's snapshot is the full stream's: a member left
+        out of the session for bad data is not in the snapshot the ranker
+        ranks, so no history is asked for it."""
+        rewrite(self.tmp.name, "universe", "2026-11-30", "AAA", h=1.0)   # a high below the close
+        ranker, excluded = FakeRanker(members=("BBB",)), {}
+        stream = compact(self.tmp.name, ranker=ranker, excluded=excluded)
+        full = run(self.tmp.name, optional=[], universe_members=True)
+        snap = of(stream, "market.universe.snapshot")[0]["payload"]
+        self.assertEqual([r["instrument_id"] for r in snap["rows"]], ["BBB", "CCC", "DDD"])
+        self.assertEqual(snap, of(full, "market.universe.snapshot")[0]["payload"])
+        self.assertEqual(ranker.requests, [{"universe": snap, "next_session": "2026-12-01"}])
+        self.assertEqual([(r.first, r.last) for r in excluded["AAA"]], [(D(2026, 11, 30), D(2026, 11, 30))])
 
 
 class CompactRefusalTest(unittest.TestCase):

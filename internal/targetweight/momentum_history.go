@@ -109,8 +109,8 @@ func (r *momentumRun) applyPendingHistory(in event.Envelope, p event.CloseHistor
 // the universe input, so the check runs at every decision session with its
 // snapshot from the first: in the compact input, a decision session with no
 // history for the members ranked returns why (missing), for the decision to
-// be withheld as histories-missing (reason); in the bars input, one with no
-// bar for any member ranked is withheld as missing-bars (barsMissing).
+// be withheld as histories-missing (reason); in the bars input, one with a
+// member ranked that has no bar is withheld as missing-bars (barsMissing).
 // Neither is decided from the bars of the names held alone (ADR 0026, point
 // 5, "fail closed").
 func (r *momentumRun) mergeHistories(date string, at int) (reason, missing string, err error) {
@@ -145,16 +145,19 @@ func (r *momentumRun) mergeHistories(date string, at int) (reason, missing strin
 }
 
 // barsMissing says why a decision in the bars input cannot be made from the
-// universe snapshot u of the last session closed: the snapshot ranks members
-// and none had a bar in that session, as in a stream written without the
-// members' bars. A member left out of some sessions for bad data leaves the
-// others, so one ranked member's bar is enough.
+// universe snapshot u of the last session closed: a member ranked from it
+// has no bar in that session, as in a stream written without the members'
+// bars or with only the bars of the names held. Every member ranked needs
+// its bar (ADR 0026, point 5, "fail closed"): a member left out of a
+// session for bad data is left out of that session's snapshot too, so it is
+// not ranked from it.
 func (r *momentumRun) barsMissing(u event.UniverseSnapshotPayload) string {
 	ranked, _ := rankedMembers(r.rule, u)
-	if len(ranked) == 0 || slices.ContainsFunc(ranked, func(id string) bool { _, ok := r.raw[id]; return ok }) {
+	without := slices.DeleteFunc(ranked, func(id string) bool { _, ok := r.raw[id]; return ok })
+	if len(without) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("none of the %d members ranked from the universe snapshot of %s has a bar in that session, so none can be scored; a run configured for bars needs the ranked members' bars", len(ranked), u.Session)
+	return fmt.Sprintf("%d of the %d members ranked from the universe snapshot of %s have no bar in that session, so the ranking cannot be scored; a run configured for bars needs a bar for every member ranked", len(without), len(ranked), u.Session)
 }
 
 // merge adds the histories of the members ranked to the run's adjusted

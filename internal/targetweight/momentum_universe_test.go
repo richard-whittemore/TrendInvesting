@@ -309,10 +309,10 @@ func TestMomentumHistoryRequestNamesTheMembersTheRunRanks(t *testing.T) {
 	}
 }
 
-// TestADecisionSessionWithoutItsHistoriesIsWithheld: once a run reads the
-// compact stream, a decision session whose ranked members sent no close
-// history is withheld as histories-missing, never decided from the bars of
-// the names held alone.
+// TestADecisionSessionWithoutItsHistoriesIsWithheld: in a run configured
+// for the compact input, a decision session whose ranked members sent no
+// close history is withheld as histories-missing, never decided from the
+// bars of the names held alone.
 func TestADecisionSessionWithoutItsHistoriesIsWithheld(t *testing.T) {
 	r := simulateMomentum(t, momentumOptions{compact: true, noHistories: map[string]bool{"2025-02-28": true}})
 	got := targets(t, r.decisions)
@@ -409,15 +409,29 @@ func TestABarsDecisionSessionWithNoRankedMemberBarIsWithheld(t *testing.T) {
 	mustApply(t, f.h, f.universe("2025-01-31"))
 	mustApply(t, f.h, f.bar("SPY", "2025-01-31", 500))
 	got := targets(t, mustApply(t, f.h, f.close("2025-01-31", "SPY")))
-	if len(got) != 1 || got[0].WithheldReason != event.WithheldMissingBars || !strings.Contains(got[0].Detail, "none of the 2 members ranked") {
+	if len(got) != 1 || got[0].WithheldReason != event.WithheldMissingBars || !strings.Contains(got[0].Detail, "2 of the 2 members ranked") {
 		t.Fatalf("decisions %+v", got)
 	}
-	g := newHistoryFixtureReading(t, event.UniverseInputBars)
-	mustApply(t, g.h, g.universe("2025-01-31"))
-	mustApply(t, g.h, g.bar("AAA", "2025-01-31", 20))
-	mustApply(t, g.h, g.bar("SPY", "2025-01-31", 500))
-	if got := targets(t, mustApply(t, g.h, g.close("2025-01-31", "AAA", "SPY"))); len(got) != 1 || got[0].WithheldReason == event.WithheldMissingBars {
-		t.Fatalf("with a ranked member's bar, decisions %+v", got)
+}
+
+// TestABarsDecisionSessionWithOnlyTheHeldNamesBarsIsWithheld: a run
+// configured for bars fed a stream carrying bars only for SPY, IEF, SHY and
+// the names held, which rank, withholds each decision as missing-bars,
+// naming how many ranked members have no bar: every member ranked from the
+// snapshot needs its bar that session (ADR 0026, point 5, "fail closed").
+func TestABarsDecisionSessionWithOnlyTheHeldNamesBarsIsWithheld(t *testing.T) {
+	r := simulateMomentum(t, momentumOptions{heldBarsOnly: true, held: map[string]int64{"AAA": 10, "BBB": 10}})
+	got := targets(t, r.decisions)
+	if len(got) != 2 {
+		t.Fatalf("%d decisions, want January's and February's", len(got))
+	}
+	for _, d := range got {
+		if d.Outcome != event.TargetsOutcomeWithheld || d.WithheldReason != event.WithheldMissingBars || !strings.Contains(d.Detail, "of the 5 members ranked") {
+			t.Errorf("%s is %s (%s): %s", d.Momentum.CloseSession, d.Outcome, d.WithheldReason, d.Detail)
+		}
+	}
+	if len(planned(t, r.decisions)) != 0 {
+		t.Errorf("a withheld decision planned orders")
 	}
 }
 

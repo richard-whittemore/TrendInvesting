@@ -36,8 +36,9 @@ stream is, in the momentum section's `universe_input`:
 A configuration with no `universe_input`, or any other value, is refused
 before the run starts, and the value is part of the configuration hash. The
 engine never guesses the shape from what arrives. `encode` run with neither
-`--ranker` nor `--universe-members` writes a bars stream with no bar for any
-ranked stock: it is not a stream to decide from (see below). `universe-rank`
+`--ranker` nor `--universe-members` writes a bars stream with bars only for
+the instruments it names, so most ranked stocks have no bar: it is not a
+stream to decide from (see below). `universe-rank`
 refuses a configuration that says `"bars"`, since a bars run reads no
 histories.
 
@@ -88,16 +89,20 @@ stream written without `--ranker`), the engine does not decide from the few
 stocks it has bars for: it journals that month's decision withheld, with the
 reason `histories-missing`, and alerts you as missing data. In a run
 configured `"bars"`, a history is refused as it arrives, and a month's last
-session whose snapshot ranks stocks none of which has a bar that session is
-withheld as `missing-bars` the same way. One ranked stock's bar is enough to
-decide, since a stock with bad data is left out of some sessions and the
-others still score.
+session whose snapshot ranks any stock without a bar that session is
+withheld as `missing-bars` the same way, its detail saying how many of the
+ranked stocks have no bar. Every stock ranked needs its bar: a stream
+carrying only the bars of SPY, IEF, SHY and the stocks you hold is withheld,
+even when those stocks rank. A stock with bad data does not cause this,
+since `encode` leaves it out of that session's universe snapshot as well as
+its bars ([market data](market-data.md)), so it is not ranked that month.
 
 Tests: `TestTheFirstCompactDecisionSessionWithoutHistoriesIsWithheld`,
 `TestAUniverseOnlyCompactSessionIsWithheld`,
 `TestADecisionSessionWithoutItsHistoriesIsWithheld`,
-`TestABarsRunReadsNoCloseHistory` and
-`TestABarsDecisionSessionWithNoRankedMemberBarIsWithheld`
+`TestABarsRunReadsNoCloseHistory`,
+`TestABarsDecisionSessionWithNoRankedMemberBarIsWithheld` and
+`TestABarsDecisionSessionWithOnlyTheHeldNamesBarsIsWithheld`
 (`internal/targetweight/momentum_universe_test.go`).
 
 ## A session the exchange cancels
@@ -171,7 +176,7 @@ A second copy of the same retraction changes nothing, and a later calendar
 that still lists the cancelled day is read without it.
 
 A month's last session with no history for the stocks it ranks in a compact
-run, or no bar for any of them in a bars run, is not a stop: the decision is
+run, or a ranked stock without its bar in a bars run, is not a stop: the decision is
 withheld as `histories-missing` or `missing-bars` (above).
 
 A stock whose history is short or has a gap is recorded in the decision as

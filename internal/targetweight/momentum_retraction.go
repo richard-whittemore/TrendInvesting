@@ -24,8 +24,8 @@ import (
 // When the session retracted followed the last one closed and was its
 // month's last, the session closed becomes the last before the rebalance,
 // and its decision is due. A run configured for bars holds every close it
-// needs and decides at once, or withholds as missing-bars when no member
-// ranked from that session's snapshot had a bar in it (barsMissing). A run
+// needs and decides at once, or withholds as missing-bars when a member
+// ranked from that session's snapshot had no bar in it (barsMissing). A run
 // configured for the compact universe input has no histories for the
 // members ranked from that session's snapshot, since it was no decision
 // session when it closed: its decision waits for them

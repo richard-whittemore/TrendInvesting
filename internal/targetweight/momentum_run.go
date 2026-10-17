@@ -402,9 +402,9 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 // the run. So no decision time passes without a decision (ADR 0026, point
 // 1): a decision session that never closed (missing-bars), one whose
 // ranked members sent no close history in the compact universe input
-// (histories-missing), and one whose ranked members sent no bar in the bars
-// input (missing-bars), never decided from the bars of the names held alone
-// (point 5).
+// (histories-missing), and one with a ranked member that sent no bar in the
+// bars input (missing-bars), never decided from the bars of the names held
+// alone (point 5).
 func (r *momentumRun) withheldAt(b *emissions, id, session string, end time.Time, at int, reason, detail string) error {
 	p := event.TargetsDecidedPayload{
 		AccountID: r.h.cfg.AccountID, StrategyID: r.h.cfg.StrategyID,

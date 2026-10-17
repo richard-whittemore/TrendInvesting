@@ -139,10 +139,12 @@ The momentum configuration must declare which shape its stream is, in
 `--universe-members`, `"compact"` for one written with `--ranker`. The
 engine refuses a configuration without it and never infers the shape from
 the inputs. `encode` with neither `--ranker` nor `--universe-members`
-writes a bars stream with no bar for any universe member: a momentum
-engine configured `"bars"` withholds each month's decision from it as
-`missing-bars`, and one configured `"compact"` as `histories-missing`, so
-it is not a stream to run an IRA on ([the momentum
+writes a bars stream with bars only for the instruments named with
+`--instruments` and `--optional`, so most of the 500 ranked stocks have no
+bar: a momentum engine configured `"bars"` withholds each month's decision
+from it as `missing-bars` (every ranked stock needs its bar, even when the
+stocks you hold rank), and one configured `"compact"` as
+`histories-missing`, so it is not a stream to run an IRA on ([the momentum
 universe](momentum-universe.md)).
 
 ### The compact stream (`--ranker`)
@@ -218,10 +220,11 @@ sessions, instead of refusing the stream, when its data is bad. No bar is
 written for those sessions and the session close does not name it.
 
 - A malformed bar (a missing or negative close or volume, a high below the
-  close) leaves out that one session's bar. Only a close or volume that is
-  itself missing or negative also leaves out that session's universe
-  snapshot row; a bar whose high is below its close keeps its row. Nothing
-  more is needed: the momentum rule ranks a stock on its last 253 closes
+  close) leaves out that one session's bar and its universe snapshot row,
+  so the snapshot records that the stock was left out: a momentum engine
+  configured `"bars"` needs a bar for every stock it ranks from the
+  snapshot, and the stock is not ranked from that session's. Nothing more
+  is needed: the momentum rule ranks a stock on its last 253 closes
   and leaves it out of any month's ranking whose window is missing a
   session, and records why (ADR 0026, point 5). So the stock is ranked
   again when its window is complete under that rule, 253 sessions after the
@@ -242,8 +245,11 @@ written for those sessions and the session close does not name it.
 - A split or dividend with no readable date cannot be placed, so that stock
   is left out of every session.
 
-Its bars before the bad session are written as usual, so bad data later on
-never changes an earlier session. `encode` names each stretch on stderr (`marketdata: excluded
+Each session a stock is left out of, its universe snapshot row is left out
+too, whichever stream is written (`--universe-members`, `--ranker` or
+neither), so every stream ranks the same stocks. Its bars before the bad
+session are written as usual, so bad data later on never changes an
+earlier session. `encode` names each stretch on stderr (`marketdata: excluded
 TICKER from FIRST to LAST (N sessions): reason`). SPY, IEF, SHY and every
 other instrument are still written, and the same bad data in SPY, IEF, SHY
 or any instrument named with `--instruments` or `--optional` still refuses
