@@ -1,8 +1,8 @@
 # ADR 0026: Target-weight strategies decide targets; orders and limits are decided outside them
 
-- Status: Accepted (2026-10-16, by the owner)
+- Status: Accepted (2026-10-16, by the owner; amended 2026-10-17: readings and planner choices (#352, #357))
 - Date: 2026-10-15
-- Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (both amendments), ADR 0020, ADR 0022, ADR 0025
+- Relates to: ADR 0004, ADR 0012, ADR 0015, ADR 0016, ADR 0017, ADR 0019 (amendments of 2026-09-24 to 2026-10-17), ADR 0020, ADR 0022, ADR 0025
 
 ## In plain English
 
@@ -47,7 +47,11 @@ contract are Turtle-shaped too (Consequences).
   - the account, the decision time and the session whose closes it used;
   - an outcome, `decided` or `withheld`; `withheld` carries a reason from a
     closed set (for example `missing-bars`, `missing-universe`,
-    `stale-account-snapshot`) and no targets;
+    `stale-account-snapshot`) and no targets. These are the strategy
+    decision's reasons. The limit gate's reasons for refusing an order or
+    withholding the sale back to 98% are separate closed sets (point 3);
+    in particular the gate's `stale-broker-snapshot` is not
+    `stale-account-snapshot`;
   - for `decided`, the target weight per instrument. Where both sleeves hold
     one fund, the payload records each sleeve's share and their sum (`plan.md`
     lines 77-78);
@@ -108,7 +112,7 @@ only cash, say), the buy phase is planned at once, in the same decision.
   (point 3), not the previous close, plus the configured maximum commission
   and fees. Buys worth $980 at the previous close cost $1,029 at a 5% band
   before fees, and it is the $1,029 that must fit.
-- **Scaling.** If the worst-case total exceeds the budget, every buy is
+- **Scaling.** *(Extended by a fallback in the 2026-10-17 amendment.)* If the worst-case total exceeds the budget, every buy is
   scaled by min(1, budget / worst-case cost) and rounded again. This scaling
   is **new**, not in the backtest, and goes into the parity rerun
   (`momentum/execution.py`, `EXEC_DELAY`).
@@ -130,7 +134,9 @@ first target, normally 98% from cash, whether or not a boost is on.
 configuration (point 6):
 - **D7-F, fractional:** quantity = value / pᵢ, rounded down to IBKR's
   fractional increment, itself configuration. Quantities become exact
-  decimals, not `int64`. That needs the schema changes in Consequences.
+  decimals, not `int64`. That needs the decimal quantity on the parallel
+  execution-report versions (`execution.fill` v5 and
+  `execution.order.lifecycle` v2, Consequences and the 2026-10-17 amendment).
 - **D7-L, minimum lot:** whole shares. Before weighting, a pick whose one
   share at pᵢ exceeds its target value is skipped and the next eligible
   ranked name, within the sector cap, takes its place (`plan.md` lines
@@ -140,7 +146,9 @@ configuration (point 6):
 
 **Order identity** (`plan.md` lines 358-368). Each planned order carries:
 - a tag: the ID of the `strategy.targets.decided` envelope it serves, or, for
-  a D6 sale, the incident decision. This is the same join
+  a D6 sale, the incident decision, a durable `operator.kill-switch`
+  engagement or a `risk.margin.alarm` decision (ADR 0019 amendment,
+  2026-10-17, reading 2). This is the same join
   `OrderLifecyclePayload.Tag` makes today;
 - a client order ID derived deterministically from the tag, the instrument and
   the phase (sell or buy).
@@ -169,16 +177,61 @@ replaces `plan.md`'s "per run", since a live run spans many decisions.
 | Maximum orders per decision time (`plan.md` 334; ADR 0025) | count of planned orders ≤ N (configuration) | refuse the whole plan's buys; alert; **Degraded** |
 | Maximum order size as a share of V (`plan.md` 334-335) | \|qty·pᵢ\| / V ≤ the per-account limit | refuse that order; alert; **Degraded** |
 | Price band (`plan.md` 335; ADR 0025) | pᵢ within the band of the latest recorded IBKR mark (an input, never a live read) | refuse; alert; **Degraded** |
-| No order without a journalled decision (ADR 0025) | the tag names a durable `strategy.targets.decided` or incident decision in this run | refuse; urgent alert; **Halted** (a defect in the order path, so its scope cannot be bounded) |
+| No order without a journalled decision (ADR 0025) | the tag names a durable `strategy.targets.decided`, incident, `operator.kill-switch` engagement or `risk.margin.alarm` decision in this run | refuse; urgent alert; **Halted** (a defect in the order path, so its scope cannot be bounded) |
+| Broker holding (ADR 0019 amendment, 2026-10-17, reading 10) | a sell other than ADR 0019's sale back to 98% is no more than the latest broker snapshot's holding, when that snapshot is readable and fresh; with no readable latest snapshot, a Normal account releases the sell against the journal's account book, only an account Degraded on another instrument reaches this refusal, and every other state has already refused the sell under ADR 0019 reading 7 (checked first) and the exit has fired; an older readable snapshot is never used | refuse (`risk.order.refused`, reason `broker-holding`); alert; **Degraded** on the instrument when the sell is above a fresh snapshot's holding |
+| Broker snapshot freshness (ADR 0019 amendment, 2026-10-17, reading 10) | a sell other than ADR 0019's sale back to 98% is checked against the latest broker snapshot, which is stale: older than `MaxSnapshotAge`, or stamped later than the sell's journalled time (point 6) | refuse (`risk.order.refused`, reason `stale-broker-snapshot`); one urgent alert per stale episode, carried by the episode's first `stale-broker-snapshot` refusal or withhold and cleared by whichever comes first: the first journalled `account.broker.snapshot` fresh by its own journalled time, or the first gate check whose latest snapshot is fresh as measured from that check's triggering event (ADR 0019 reading 10); a stale check opens an episode when no episode is open for the account and either no episode has yet closed or the check's triggering event comes after (by journal sequence) the event that closed the most recent episode; a stale check whose triggering event precedes that close belongs to the closed episode and opens none; state unchanged; the sell is re-planned at the next decision |
 | Kill switch (`plan.md` 405) | a recorded `operator.kill-switch` input (new) is engaged | refuse every order except ADR 0019's one sale back to 98% in a margin account (its 2026-10-15 and 2026-10-16 amendments), which still goes; routine risk-reducing sells, including the IRAs', are refused; alert once; state unchanged (owner decision 2026-10-16) |
 | Mode (`plan.md` 406-407) | `dry-run`: released orders are journalled with `send: false` and never sent | not a breach |
 
 Degraded and Halted are emitted through the existing `strategy.engine.state`.
 A new reason, `risk-limit-breached`, joins its closed set, as
-`internal/event/engine_state.go:14-19` invites. ADR 0019's
-`EngineStatePayload` version 2 adds the `degraded` state and the scope; it is
-not built yet. Leaving either state follows ADR 0019's recovery procedure,
-never automatically.
+`internal/event/engine_state.go:14-19` invites.
+
+**The gate's closed reason sets.** Replay compares each reason byte for
+byte (point 7, item 6), so the members named below are exact strings, and
+a reason both sets hold is spelled the same in each. Each set also holds
+its other reasons, not listed here; these are the snapshot reasons.
+"The latest broker snapshot" is the latest journalled
+`account.broker.snapshot` for the account at or before the triggering
+event's journal sequence, as ADR 0019's snapshot rule defines it
+(amendment, 2026-10-17, reading 1):
+- **`risk.order.refused`** for any sell other than ADR 0019's sale back to
+  98% (ADR 0019 amendment, 2026-10-17, reading 10):
+  - `broker-holding`: the sell is above the latest broker snapshot's
+    holding; or no broker snapshot is readable yet or the latest is
+    unreadable and the account is Degraded on another instrument. A
+    Normal account then releases the sell against the journal's account
+    book; every other state has already refused the sell under ADR 0019
+    reading 7, which is checked first, and the exit has fired. An older
+    readable snapshot is never used in its place;
+  - `stale-broker-snapshot`: the latest broker snapshot is readable but
+    stale: older than `MaxSnapshotAge`, or stamped later than the sell's
+    journalled time (point 6); one urgent alert is raised per stale
+    episode (ADR 0019 reading 10) and the sell is re-planned at the next
+    decision.
+
+  These sells never read net liquidation or the mark, so
+  `non-positive-broker-values` is not in this set.
+- **`risk.sale.withheld`** for ADR 0019's sale back to 98%, beside the
+  withholds reading 4 names (values that cannot be read, an unknown working
+  sell, nothing to sell):
+  - `stale-broker-snapshot`: the latest broker snapshot is readable but
+    older than `MaxSnapshotAge`, or stamped later than the triggering
+    event's journalled time (the payload records the skew); the attempt is
+    not consumed;
+  - `non-positive-broker-values`: the latest broker snapshot is readable
+    and fresh, but its net liquidation or its mark for the instrument is
+    zero or negative; the attempt is not consumed;
+  - `lapsed`: the exit or the urgent alarm that needed a sale withheld for
+    one of the two reasons above is no longer in force, so the sale is
+    dropped unsent; reported in the daily summary, not paged.
+
+`stale-broker-snapshot`, in both sets, is distinct from the strategy
+decision's `stale-account-snapshot` (point 1). When, how and with what
+effect each is used is ADR 0019's snapshot rule (amendment, 2026-10-17,
+reading 1), not restated here. ADR 0019's `EngineStatePayload` version 2
+adds the `degraded` state and the scope; it is not built yet. Leaving
+either state follows ADR 0019's recovery procedure, never automatically.
 
 Values are set per account so **every order in the parity backtests
 passes** (Boost's step to 147% is about 49% of V; a risk-off month moves about
@@ -223,7 +276,13 @@ nothing else. It uses the same sizing rule, adopted by this ADR for these two
 states: one sell-only order bringing exposure toward 98% of net liquidation
 and never below, its quantity the smaller of what reaches 98% at the mark of
 one IBKR account snapshot (shares kept rounded up) and the broker-reported
-holding minus every working or pending sell (including `cancel-pending` ones, which may still execute). When the
+holding minus every working or pending sell (including `cancel-pending` ones, which may still execute).
+*(Refined by the ADR 0019 amendment of 2026-10-17, reading 1: a third bound,
+holding − every working or pending sell − keep, is added; the quantity is the
+smallest of the three, never below zero and never more than the holding.
+Which snapshot sizes the sale, when it is withheld instead, whether the
+withhold spends the attempt and when the sale is evaluated again are that
+reading's snapshot rule, stated there once.)* When the
 instrument to sell is the one a Degraded account's discrepancy names, the
 sale is ADR 0019's one sale, sized and checked as that ADR states (amended
 2026-10-16).
@@ -240,7 +299,24 @@ IBKR bars:
   pending). A restart mid-rebalance sends nothing for that decision time until
   the owner clears it (`plan.md` line 332).
 - The engine state and its scope (ADR 0019, amended 2026-09-24).
-- Whether the incident sale has been attempted (ADR 0019, 2026-10-15).
+- Whether the incident sale has been attempted (ADR 0019, 2026-10-15), and
+  the one-attempt-per-instrument state of the kill-switch engagement and of the
+  margin alarm (ADR 0019, 2026-10-17, reading 2). A released order consumes an
+  attempt; a withhold consumes one only in the two cases of reading 4. A
+  sale withheld without consuming its attempt is re-evaluated after a
+  restart exactly as ADR 0019's snapshot rule states (reading 1), from the
+  journalled withhold and the condition still in force; a journalled
+  `lapsed` withhold ends it.
+- Whether a stale-snapshot episode is open for the account, from its opening
+  `stale-broker-snapshot` record and whichever comes first after it: the first
+  journalled `account.broker.snapshot` fresh by its own journalled time, or
+  the first fresh gate check (ADR 0019 reading 10), ordered by the triggering
+  event's journal sequence. A stale check opens an episode when no episode is
+  open for the account and either no episode has yet closed or the check's
+  triggering event comes after (by journal sequence) the event that closed the
+  most recent episode; a stale check whose triggering event precedes that close
+  belongs to the closed episode and opens none, so a restart does
+  not resend the alert.
 - The day-trade count, under the legacy regime (`plan.md` lines 393-404).
 
 **Missing bars fail closed:**
@@ -268,7 +344,15 @@ run and is hashed by ADR 0016's derivation. It holds:
   months, so the day is never needed and never stored; owner decision
   2026-10-16),
   which lives only in server configuration (`plan.md` lines 109-110).
-- **Execution:** the D7 choice and its parameters; the D5 cash rule; the day-trading regime.
+- **Execution:** the D7 choice and its parameters; the D5 cash rule; the
+  day-trading regime; `MaxSnapshotAge`, the age past which the latest broker
+  snapshot is stale: the sale back to 98% is withheld and any other sell is
+  refused, each with `stale-broker-snapshot` (ADR 0019 amendment,
+  2026-10-17, readings 1 and 10; point 3). The age is the journalled time
+  of the event that triggers the check minus the snapshot's recorded broker
+  timestamp, never the wall clock; a negative age is stale, with no
+  tolerance. Configuration validation rejects a
+  missing, zero or negative `MaxSnapshotAge`.
 - **Limits:** every value in point 3, and the Excess Liquidity thresholds of
   40%, 20% and 30 minutes.
 - **Identity:** the account, the mode, the adapter name `ibkr` (ADR 0025,
@@ -341,11 +425,15 @@ the module's own rules version and decision corpus (ADR 0016;
 - **New event types**, each needing a schema and tests under ADR 0015:
   `strategy.target-weight.configuration`, `strategy.targets.decided`,
   `strategy.order.planned`, `risk.order.released`, `risk.order.refused`,
-  `market.universe.snapshot` and `operator.kill-switch`. They also need an
+  `market.universe.snapshot`, `operator.kill-switch`,
+  `account.broker.snapshot`, `risk.margin.alarm`, `risk.sale.withheld` and
+  `strategy.order.skipped` (this last lands with the minimum-lot slice). They also need an
   account snapshot carrying positions and net liquidation, as a new version of
   `account.snapshot` or as ADR 0019's proposed `account.reconciliation`, and a
   recorded IBKR mark.
-- **Existing types to change**, each in its own version bump:
+- **Existing types to change**, each in its own version bump *(the first two
+  sub-bullets, `OrderLifecyclePayload` and `execution.fill`, are superseded by
+  the 2026-10-17 amendment: parallel versions, not bumps)*:
   - `OrderLifecyclePayload`: `StopPrice` is required and positive today
     (`internal/event/order_lifecycle.go:77-80`). It becomes optional for limit
     orders, and `Quantity` (`int64`) becomes a decimal under D7-F;
@@ -359,4 +447,85 @@ the module's own rules version and decision corpus (ADR 0016;
     only `event.ConfigurationPayload`.
 - **Journal.** Live use needs a durable, streamed journal (#151). ADR 0017's
   one-pass, in-memory write reopens for live runs.
-- No code exists yet; Phase 2 implements this, test first.
+- *(Historical.)* No code existed when this was accepted; code exists since
+  slice 2 (PR #358) and slice 5 (PR #353), and the 2026-10-17 amendment
+  records what was built. Phase 2 implements the rest, test first.
+
+## Amendment (2026-10-17, owner decision, #352 and #357): readings and planner choices
+
+The owner accepted the following as built (slice 5, PR #353; slice 2,
+PR #358). Readings 1 to 4 and 7 to 10 of the ADR 0019 amendment of the same
+date (the sale back to 98%) are stated there; this amendment states the
+ones that belong here.
+
+### From #352
+
+- **The urgent Excess Liquidity sale (point 4) goes once per urgent alarm.**
+  Its client identifier derives from the alarm decision, and a new alarm
+  is minted on every change of the alarm's level into urgent. An alarm
+  episode runs from the level becoming urgent until it next changes level.
+  Urgent, then warning, then urgent again is two alarms and may sell twice,
+  even if the cushion never got back above 40%; a change of cause while
+  staying urgent (ratio to no reading) is the same alarm. This applies in
+  Normal, and in Degraded on another instrument, with the kill switch
+  disengaged, where the sale carries the alarm's tag (ADR 0019 amendment,
+  reading 2). In a Halted account, in Degraded on the instrument, or with
+  the kill switch engaged, the sale carries the incident's or the
+  engagement's tag, so that tag's one attempt per instrument applies and
+  ADR 0019's unknown-working-sell check applies (readings 4 and 8). Under
+  the alarm's tag there is no unknown-working-sell check; the sizing nets
+  every working sell, so it cannot open a short.
+- **Risk-reducing orders (point 3) are not counted toward N.** They are
+  exempt from the order count, order size and price band, and do not add to
+  the count that later orders are checked against.
+- **New event types.** `account.broker.snapshot` (the single IBKR snapshot
+  ADR 0019's sale is sized from), `risk.margin.alarm` and
+  `risk.sale.withheld` join the safety types in Consequences beside
+  `operator.kill-switch`, each under ADR 0015.
+
+### From #357
+
+- **Buy scaling always fits the budget (extends the Scaling rule in point
+  2 with a fallback).** With `max_fees_per_order` above zero, point 2's
+  scaling alone can leave a total over the budget, because the fee allowance
+  does not shrink with quantity. As built (`orderplan.ScaleBuys`) the rule
+  has two steps. (a) Point 2's rule: scale every buy by
+  min(1, budget ÷ worst-case total), round toward zero and drop any buy that
+  rounds to zero. (b) Only if the rescaled total still exceeds the budget,
+  scale every buy instead by (budget − n × fee allowance) ÷
+  Σ(quantity × limit price), n being the number of buys before step (a),
+  floored at zero and rounded toward zero. The result fits the budget with
+  worst-case fees included. A buy that scales to zero is dropped: no buy is
+  planned for it, and each dropped buy is recorded as
+  `strategy.order.skipped` (the type lands with the minimum-lot slice; until
+  then the drop is unrecorded). It is not a withheld decision with
+  a reason from point 1's closed set. The budget is not a cutoff: a budget
+  at or below n × fee allowance can still release a buy (for example 100,
+  1 and 1 shares at $10, a $10 allowance and a $20 budget keep one share of
+  the first buy, which costs $20). With a $0 allowance step (b) is never
+  needed.
+- **A new rebalance is withheld while an earlier one's orders are working.**
+  The decision is withheld with reason `rebalance-in-progress` while any
+  order of an earlier rebalance is not terminal. It is the live form of
+  point 5's "a restart mid-rebalance sends nothing until the owner clears
+  it", and it waits only for orders of an earlier
+  rebalance, so the planner's own earlier rebalance sells are never working at
+  plan time. The planner still nets every other working or pending sell
+  (point 2, step 5).
+- **Execution reports for target-weight accounts are parallel versions, not
+  bumps.** `execution.fill` v5 (`TargetWeightFillPayload`) and
+  `execution.order.lifecycle` v2 (`LimitOrderLifecyclePayload`) sit beside
+  the Turtle's fill v4 and lifecycle v1, joined by client order ID. The
+  Turtle reducer still reads v1 and v4; the target-weight engine reads v2
+  and v5. Both carry the D7-F decimal quantity, and
+  `StopPrice` is optional for limit orders on v2. The required test of a
+  fractional partial fill stays, applied to v5 and v2 and built with D7-F as
+  configuration. This supersedes the `OrderLifecyclePayload` and
+  `execution.fill` sub-bullets of the Consequences bullet "Existing types to
+  change" as versioning (parallel versions, not bumps); their facts carry over
+  to v2 and v5 as just stated. The
+  `market.bar.completed` and `event.ConfigurationHash` sub-bullets stand.
+- **The per-order fee allowance is $2.00**, pending confirmation in paper
+  trading (`docs/research/commissions-30k-2026-10.md`): above every observed
+  $30k average ($1.03 to $1.49), below the $2.50 that 500 shares would
+  cost before the 1% cap lowers it.
