@@ -121,9 +121,10 @@ these rules live; `cmd/engine` only finds, orders and reads the logs);
 `TestAnApprovalCarriesTheIncidentSaleAttempt`,
 `TestDecodeOperatorRunApprovedRequiresEveryKey` (`internal/event`).
 
-The engine records the approval's attempt in its risk gate, and the sale
-back to 98% ([states-and-kill-switch](states-and-kill-switch.md)) checks it
-before planning one: an incident whose sale was attempted is never sold
-again, and one whose sale was not attempted is sold once, tagged with that
-incident (`TestARestoredIncidentsEarlierAttemptIsNotRepeated`,
+The engine writes the approval's attempt into its risk gate's one record
+of the incident's sale, the same record the sale back to 98%
+([states-and-kill-switch](states-and-kill-switch.md)) checks before
+planning one and updates when it does: an incident whose sale was attempted
+is never sold again, and one whose sale was not attempted is sold once,
+tagged with that incident (`TestARestoredIncidentsEarlierAttemptIsNotRepeated`,
 `internal/risklimit`).

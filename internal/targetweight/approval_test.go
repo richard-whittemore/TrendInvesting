@@ -1,11 +1,11 @@
 package targetweight_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
-	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
 func approval(latched bool) event.OperatorRunApprovedPayload {
@@ -57,30 +57,57 @@ func TestApprovalInputRules(t *testing.T) {
 // TestAFreshRunNeverAttemptsAnIncidentsSaleTwice: the incident in force and
 // whether its one sale back to 98% was attempted (ADR 0019, amended
 // 2026-10-15) come from the owner's approval, since a fresh run does not
-// replay the previous run's log. Approved with the sale attempted, the fresh
-// run refuses a second sale for that incident; approved with it not
-// attempted, the sale may go once.
+// replay the previous run's log. Approved Halted while boosted, the first
+// session refuses Boost's exit, which fires the incident's sale from the
+// latest broker snapshot, and the next session's broker snapshot turns the
+// margin alarm urgent, which fires it again. Approved with the sale
+// attempted, the fresh run plans no sale; approved with it not attempted,
+// the sale is planned once and never again.
 func TestAFreshRunNeverAttemptsAnIncidentsSaleTwice(t *testing.T) {
-	at := sessionEnd(0)
 	for _, c := range []struct {
 		name      string
 		attempted bool
 		order     string
-		mayGo     bool
+		want      int
 	}{
-		{"attempted and sent", true, "joint-sale-1", false},
-		{"attempted and withheld", true, "", false},
-		{"not attempted", false, "", true},
+		{"attempted and sent", true, "joint-sale-1", 0},
+		{"attempted and withheld", true, "", 0},
+		{"not attempted", false, "", 1},
 	} {
 		h, s := configured(t)
 		p := approval(false)
 		p.IncidentInForce = &event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(c.attempted), SaleClientOrderID: c.order}
-		mustApply(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", at, p))
-		if got := targetweight.AttemptIncidentSale(h, "engine-state:joint:1"); got != c.mayGo {
-			t.Errorf("%s: the first sale may go = %v, want %v", c.name, got, c.mayGo)
+		mustApply(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", sessionEnd(0), p))
+		// Boosted: 60 shares at 100 against 4,000 of net liquidation, and
+		// nothing fills, since only the sale is ever released while Halted.
+		held := &account{cash: -2000, held: 60}
+		var out []event.Envelope
+		for i := range 2 {
+			at := sessionEnd(i)
+			out = append(out, mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, fmt.Sprintf("b%d", i), at, bar(100, at)))...)
+			out = append(out, mustApply(t, h, s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, fmt.Sprintf("a%d", i), at, held.snapshot(at, 100)))...)
+			b := held.broker(at, 100)
+			if i == 1 {
+				b.ExcessLiquidity = 0.1 * b.NetLiquidation
+			}
+			out = append(out, mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, fmt.Sprintf("k%d", i), at, b))...)
+			out = append(out, mustApply(t, h, s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("m%d", i), at, event.MarkRecordedPayload{InstrumentID: "SPY", AsOf: at, Price: 100, Source: event.AdapterIBKR}))...)
+			out = append(out, mustApply(t, h, s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, fmt.Sprintf("s%d", i), at, event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: []string{"SPY"}}))...)
 		}
-		if targetweight.AttemptIncidentSale(h, "engine-state:joint:1") {
-			t.Errorf("%s: the incident's sale was attempted twice", c.name)
+		if n := len(ofType(out, event.OrderRefusedEventType)); n != 1 {
+			t.Fatalf("%s: refused %d order(s), want Boost's exit refused", c.name, n)
+		}
+		if len(ofType(out, event.MarginAlarmEventType)) == 0 {
+			t.Fatalf("%s: the urgent alarm is journalled", c.name)
+		}
+		sold := sales(t, out)
+		if len(sold) != c.want {
+			t.Errorf("%s: planned %d sale(s) back to 98%%, want %d: %+v", c.name, len(sold), c.want, sold)
+		}
+		for _, sale := range sold {
+			if sale.Tag != "engine-state:joint:1" || sale.Sale.Kind != event.SaleKindIncident {
+				t.Errorf("%s: sale %+v, want the incident's", c.name, sale)
+			}
 		}
 	}
 }

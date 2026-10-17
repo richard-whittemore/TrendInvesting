@@ -294,10 +294,11 @@ func (g *Gate) StaleEpisodeOpen() bool { return g.staleOpen }
 // stale episode open, which ADR 0026 point 5 lists among the state a restart
 // recovers from the journal ("Whether a stale-snapshot episode is open for
 // the account, from its opening `stale-broker-snapshot` record" and what
-// closes it), so a restart within it does not alert again. Like
-// RestoreSaleAttempt it is an unwired seam: a crash resumes by replaying the
-// durable log's inputs, which rebuilds the episode identically (ADR 0027,
-// section 6).
+// closes it), so a restart within it does not alert again. It is an unwired
+// seam: a crash resume rebuilds the episode by replaying the durable log's
+// inputs (ADR 0027, section 6), and the owner's approval of a fresh run,
+// which restores the incident's sale attempt, is where a restore of the
+// episode would be wired.
 func (g *Gate) RestoreStaleEpisode(open bool) { g.staleOpen = open }
 
 // freshCheck applies a gate check of the latest broker snapshot at at, the
@@ -388,10 +389,10 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 	}
 	switch {
 	case sale.Order != nil:
-		g.attempted[sale.Order.ClientOrderID] = true
+		g.recordAttempt(tag, instrumentID)
 		g.pending[sale.Order.ClientOrderID] = true
 	case sale.Withheld.Attempted():
-		g.attempted[sale.Withheld.ClientOrderID] = true
+		g.recordAttempt(tag, instrumentID)
 	}
 	// The decision is a gate check of the latest snapshot: fresh, it ends
 	// the stale episode; a stale withhold opening one carries its alert.
@@ -426,9 +427,22 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 // already attempted: planned, or withheld for a person (ADR 0019, amended
 // 2026-10-15: the sale is attempted once and never retried automatically),
 // in this run, or, for an incident whose attempt the owner's approval of a
-// fresh run restored (RestoreSaleAttempt), in an earlier run.
+// fresh run restored (RestoreSaleAttempt), in an earlier run. It reads the
+// tag's one attempt record.
 func (g *Gate) saleAttemptedFor(tag, instrumentID string) bool {
-	return g.attempted[orderplan.SaleClientOrderID(tag, instrumentID)] || g.saleAttempted[tag]
+	a := g.attempts[tag]
+	return a != nil && (a.earlier || a.instruments[instrumentID])
+}
+
+// recordAttempt adds instrumentID's sale under tag to the tag's one attempt
+// record, so it is never planned again (ADR 0019, amended 2026-10-15).
+func (g *Gate) recordAttempt(tag, instrumentID string) {
+	a := g.attempts[tag]
+	if a == nil {
+		a = &saleAttempt{instruments: make(map[string]bool)}
+		g.attempts[tag] = a
+	}
+	a.instruments[instrumentID] = true
 }
 
 // noReadingSince is when the "no reading" clock started: the last Excess

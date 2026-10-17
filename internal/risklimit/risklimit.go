@@ -115,13 +115,13 @@ type Gate struct {
 
 	// released holds every client order ID the journal released, so a
 	// working broker order is recognised by it. saleTags holds the tags a
-	// sale back to 98% may carry; attempted the sale client IDs planned or
-	// withheld for a person, never planned again; pending those planned and
-	// not yet checked.
-	released  map[string]bool
-	saleTags  map[string]bool
-	attempted map[string]bool
-	pending   map[string]bool
+	// sale back to 98% may carry; attempts, per tag, the one record of which
+	// sales were attempted, never planned again; pending the sale client IDs
+	// planned and not yet checked.
+	released map[string]bool
+	saleTags map[string]bool
+	attempts map[string]*saleAttempt
+	pending  map[string]bool
 	// ledger holds every fact the pending rule reads: the released sells,
 	// their reports and the snapshots. account is the view of the latest
 	// account snapshot, the snapshot a planner sizes from, which PendingSells
@@ -132,10 +132,17 @@ type Gate struct {
 	account, brokerView view
 	orders              map[string]*releasedOrder
 	fills               map[string]event.TargetWeightFillPayload
-	// saleAttempted holds, per incident, whether its one sale back to 98%
-	// was attempted (ADR 0019, amended 2026-10-15), as the owner's approval
-	// of a fresh run restores it or AttemptSale claims it.
-	saleAttempted map[string]bool
+}
+
+// saleAttempt is one tag's record of its sale back to 98%, attempted once
+// and never retried automatically (ADR 0019, amended 2026-10-15). earlier is
+// whether the owner's approval of a fresh run records the incident's sale as
+// attempted in an earlier run (RestoreSaleAttempt), which spends it for
+// every instrument; instruments holds those whose sale this run planned or
+// withheld for a person (Sale).
+type saleAttempt struct {
+	earlier     bool
+	instruments map[string]bool
 }
 
 // NewGate returns a Normal gate for the joint margin account accountID under
@@ -191,9 +198,9 @@ func newGate(accountID string, limits event.MarginLimits, mode string, maxSnapsh
 		accountID: accountID, limits: limits, mode: mode, decided: make(map[string]bool),
 		state: StateNormal, alarmLevel: event.MarginAlarmClear, maxSnapshotAge: maxSnapshotAge,
 		released: make(map[string]bool), saleTags: make(map[string]bool),
-		attempted: make(map[string]bool), pending: make(map[string]bool),
+		attempts: make(map[string]*saleAttempt), pending: make(map[string]bool),
 		ledger: newSellLedger(), orders: make(map[string]*releasedOrder),
-		fills: make(map[string]event.TargetWeightFillPayload), saleAttempted: make(map[string]bool),
+		fills: make(map[string]event.TargetWeightFillPayload),
 	}, nil
 }
 
@@ -212,29 +219,18 @@ func (g *Gate) Incident() string { return g.incident }
 // earlier run attempted incidentID's one sale back to 98%: ADR 0019 (amended
 // 2026-10-15) allows one attempt per incident, never retried automatically,
 // and a fresh run learns of an earlier attempt only from the owner's
-// approval, since it does not replay the earlier run's log. An incident is
-// restored once.
+// approval, since it does not replay the earlier run's log. It writes the
+// incident's one attempt record, the record Sale consults and adds to, so an
+// incident is restored once, and never after this run attempted its sale.
 func (g *Gate) RestoreSaleAttempt(incidentID string, attempted bool) error {
 	if incidentID == "" {
 		return errors.New("risklimit: a restored sale attempt must name its incident")
 	}
-	if _, ok := g.saleAttempted[incidentID]; ok {
-		return fmt.Errorf("risklimit: incident %q's sale attempt is restored once", incidentID)
+	if _, ok := g.attempts[incidentID]; ok {
+		return fmt.Errorf("risklimit: incident %q's sale attempt is restored once, before its sale is attempted", incidentID)
 	}
-	g.saleAttempted[incidentID] = attempted
+	g.attempts[incidentID] = &saleAttempt{earlier: attempted, instruments: make(map[string]bool)}
 	return nil
-}
-
-// AttemptSale claims incidentID's one sale back to 98% (ADR 0019, amended
-// 2026-10-15): it reports true, and records the attempt, only when no
-// attempt is recorded, in this run or restored from an approval. The sale's
-// planner calls it before planning the sale and plans nothing on false.
-func (g *Gate) AttemptSale(incidentID string) bool {
-	if g.saleAttempted[incidentID] {
-		return false
-	}
-	g.saleAttempted[incidentID] = true
-	return true
 }
 
 // RestoreState applies one strategy.engine.state record an earlier run of

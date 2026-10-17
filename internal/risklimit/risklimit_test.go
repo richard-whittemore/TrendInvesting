@@ -515,30 +515,23 @@ func TestRestoreState(t *testing.T) {
 
 // TestAnIncidentsSaleIsAttemptedOnce: ADR 0019's sale back to 98% (amended
 // 2026-10-15) is attempted once per incident and never retried
-// automatically. A fresh run restores whether the previous run attempted it
-// from the owner's approval, so an attempt recorded there refuses a second
-// one, and one recorded as not attempted may go once.
+// automatically. The gate keeps one attempt record per incident: the
+// owner's approval of a fresh run restores it, and Sale consults and
+// records it. An incident's attempt is restored once, before any order is
+// checked, so a sale this run already attempted can never be restored as
+// not attempted.
 func TestAnIncidentsSaleIsAttemptedOnce(t *testing.T) {
-	attempted := gate(t, limits(), event.TradingModeDryRun)
-	if err := attempted.RestoreSaleAttempt("incident-1", true); err != nil {
-		t.Fatal(err)
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", boosted())
+	halted := halt(t, g)
+	if s, ok := requestSale(t, g, event.SaleTriggerExit); !ok || s.Order == nil {
+		t.Fatalf("the incident's first sale = %+v, %v; want an order", s, ok)
 	}
-	if attempted.AttemptSale("incident-1") {
-		t.Error("a sale the approval records as attempted was attempted again")
+	if err := g.RestoreSaleAttempt(halted.StateID, false); err == nil {
+		t.Error("an incident whose sale this run attempted was restored as not attempted")
 	}
-
-	open := gate(t, limits(), event.TradingModeDryRun)
-	if err := open.RestoreSaleAttempt("incident-1", false); err != nil {
-		t.Fatal(err)
-	}
-	if !open.AttemptSale("incident-1") {
-		t.Error("a sale the approval records as not attempted was refused")
-	}
-	if open.AttemptSale("incident-1") {
-		t.Error("the incident's sale was attempted twice")
-	}
-	if !open.AttemptSale("incident-2") {
-		t.Error("another incident's sale was refused")
+	if s, ok := requestSale(t, g, event.SaleTriggerExit); ok {
+		t.Errorf("the incident's sale was attempted twice: %+v", s)
 	}
 
 	twice := gate(t, limits(), event.TradingModeDryRun)
