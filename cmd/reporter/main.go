@@ -87,25 +87,33 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		label = account
 	}
 	var failures []error
-	if refused != nil {
-		// A journal that cannot be read must not silence the one path that
-		// reaches a person (ADR 0019, "Alerting"): the failure is itself an
-		// alert, the heartbeat is still checked when the file can be stat-ed, and the
-		// error is returned.
-		failures = append(failures, refused)
-		alerts = []report.Alert{report.JournalRefusedAlert(label, refused, statErr == nil, now())}
-	}
-	if statErr == nil {
+	// The heartbeat is checked first so a refused journal's alert can say
+	// whether liveness is monitored.
+	var heartbeat []report.Alert
+	unchecked := ""
+	if statErr != nil {
+		unchecked = "the journal file has no modification time to check"
+	} else {
 		a, lost, err := report.HeartbeatAlert(label, info.ModTime(), now(), *sessions)
 		if err != nil {
 			// A check the calendar cannot answer is as silent as the lost
 			// heartbeat it would have caught, so it reaches a person too.
+			unchecked = "the calendar cannot answer: " + err.Error()
 			failures = append(failures, err)
-			alerts = append(alerts, report.HeartbeatUncheckedAlert(label, err, now()))
+			heartbeat = append(heartbeat, report.HeartbeatUncheckedAlert(label, err, now()))
 		} else if lost {
-			alerts = append(alerts, a)
+			heartbeat = append(heartbeat, a)
 		}
 	}
+	if refused != nil {
+		// A journal that cannot be read must not silence the one path that
+		// reaches a person (ADR 0019, "Alerting"): the failure is itself an
+		// alert, the heartbeat is checked where it can be, and the error is
+		// returned.
+		failures = append(failures, refused)
+		alerts = []report.Alert{report.JournalRefusedAlert(label, refused, unchecked, now())}
+	}
+	alerts = append(alerts, heartbeat...)
 	// A summary that cannot be built is reported, but never holds back the
 	// incident alerts: they are what ADR 0019 requires to reach a person.
 	if *summary && refused == nil {

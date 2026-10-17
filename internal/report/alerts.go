@@ -194,26 +194,28 @@ func HeartbeatAlert(account string, lastActivity, now time.Time, sessions int) (
 
 // JournalRefusedAlert reports that the journal could not be read, so no
 // alert it holds can be sent: a damaged or mismatched log is refused rather
-// than guessed at, and goes to a person (ADR 0027, section 5). The body says the
-// heartbeat is still checked only when the caller could check it. The key is the
-// account and the error, so one failure is one incident and a different
-// failure is another.
-func JournalRefusedAlert(account string, err error, heartbeatChecked bool, at time.Time) Alert {
-	checked := ""
-	if heartbeatChecked {
-		checked = " The heartbeat is still checked."
+// than guessed at, and goes to a person (ADR 0027, section 5). heartbeatUnchecked
+// is the outcome of the heartbeat check: empty when it ran, otherwise the reason
+// it did not, and the body then says plainly that liveness is unmonitored. The
+// key is the account and the error, so one failure is one incident and a
+// different failure is another.
+func JournalRefusedAlert(account string, err error, heartbeatUnchecked string, at time.Time) Alert {
+	heartbeat := " The heartbeat is still checked."
+	if heartbeatUnchecked != "" {
+		heartbeat = " The heartbeat is NOT checked: " + heartbeatUnchecked + "."
 	}
 	return Alert{
 		Key: "journal-refused:" + account + ":" + err.Error(), Kind: KindJournalRefused, Severity: Urgent, AccountID: account, At: at,
 		Title: fmt.Sprintf("%s: the reporter cannot read the journal", account),
-		Body:  fmt.Sprintf("The reporter refused the journal: %s. No alert recorded in it (refusals, Degraded or Halted, withheld decisions) can be sent until it reads, and the daily summary is not sent.%s Stops and orders at the broker are unaffected. Check the file with journal-query; recovery is a person's.", err, checked),
+		Body:  fmt.Sprintf("The reporter refused the journal: %s. No alert recorded in it (refusals, Degraded or Halted, withheld decisions) can be sent until it reads, and the daily summary is not sent.%s Stops and orders at the broker are unaffected. Check the file with journal-query; recovery is a person's.", err, heartbeat),
 	}
 }
 
 // HeartbeatUncheckedAlert reports that the heartbeat could not be checked, so
 // the reporter cannot tell a live engine from a dead one: a check that fails
-// quietly on a timer run is the silence the heartbeat exists to catch. The
-// key is the account and the reason, so one failure is one incident.
+// quietly on a timer run is the silence the heartbeat exists to catch (ADR
+// 0019, "Alerting"; the heartbeat is counted in sessions, ADR 0027, section 3).
+// The key is the account and the reason, so one failure is one incident.
 func HeartbeatUncheckedAlert(account string, err error, at time.Time) Alert {
 	return Alert{
 		Key: "heartbeat-unchecked:" + account + ":" + err.Error(), Kind: KindHeartbeatUnchecked, Severity: Urgent, AccountID: account, At: at,

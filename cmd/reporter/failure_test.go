@@ -113,7 +113,7 @@ func TestAMissingJournalPathIsAlertedOnceWithoutAHeartbeatCheck(t *testing.T) {
 		t.Fatalf("the failure must be returned, got %v", err)
 	}
 	all := strings.Join(r.to("events.pagerduty.test"), "\n")
-	if !strings.Contains(all, "missing.journal: the reporter cannot read the journal") || strings.Contains(all, "no engine heartbeat") || strings.Contains(all, "The heartbeat is still checked") {
+	if !strings.Contains(all, "missing.journal: the reporter cannot read the journal") || strings.Contains(all, "no engine heartbeat") || strings.Contains(all, "The heartbeat is still checked") || !strings.Contains(all, "The heartbeat is NOT checked: the journal file has no modification time") {
 		t.Fatalf("want the refusal alert and no heartbeat alert:\n%s", all)
 	}
 	sent := len(r.to("events.pagerduty.test"))
@@ -162,6 +162,31 @@ func TestAHeartbeatTheCalendarCannotAnswerIsAnUrgentAlertOnce(t *testing.T) {
 				t.Fatalf("one failure must be sent once: %d then %d", sent, again)
 			}
 		})
+	}
+}
+
+// An unreadable journal whose heartbeat check also fails must say so: the
+// person paged has to know liveness is unmonitored, not be told it is checked.
+func TestAnUnreadableJournalWhoseHeartbeatCannotBeCheckedSaysLivenessIsUnmonitored(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "joint.journal")
+	if err := os.WriteFile(path, []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Date(2020, time.March, 2, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	r := &relay{sent: map[string][]string{}}
+	args := []string{"-journal", path, "-state", filepath.Join(dir, "s.json"), "-channel", "pagerduty"}
+	environment := env(map[string]string{"TI_PAGERDUTY_ROUTING_KEY": "k", "TI_PAGERDUTY_URL": "https://events.pagerduty.test/v2/enqueue"})
+	now := func() time.Time { return time.Date(2026, time.October, 14, 16, 30, 0, 0, time.UTC) }
+	if err := run(args, environment, now, &bytes.Buffer{}, &http.Client{Transport: r}); err == nil {
+		t.Fatal("the failure must be returned")
+	}
+	all := strings.Join(r.to("events.pagerduty.test"), "\n")
+	if !strings.Contains(all, "The heartbeat is NOT checked:") || strings.Contains(all, "The heartbeat is still checked") {
+		t.Fatalf("the refusal must say the heartbeat is not checked:\n%s", all)
 	}
 }
 

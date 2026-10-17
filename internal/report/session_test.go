@@ -55,15 +55,15 @@ func TestTheTextSummarySaysWhetherAReleasedOrderWasSent(t *testing.T) {
 
 func TestAJournalTheReporterCannotReadIsItselfAnUrgentAlert(t *testing.T) {
 	at := time.Date(2026, time.October, 17, 12, 0, 0, 0, time.UTC)
-	a := report.JournalRefusedAlert("joint", errors.New("report: chain broken at record 7"), true, at)
+	a := report.JournalRefusedAlert("joint", errors.New("report: chain broken at record 7"), "", at)
 	if a.Kind != report.KindJournalRefused || a.Severity != report.Urgent || a.AccountID != "joint" || !contains(a.Body, "chain broken at record 7") {
 		t.Fatalf("alert = %+v", a)
 	}
-	if unchecked := report.JournalRefusedAlert("joint", errors.New("x"), false, at); contains(unchecked.Body, "heartbeat is still checked") {
+	if unchecked := report.JournalRefusedAlert("joint", errors.New("x"), "no calendar", at); contains(unchecked.Body, "heartbeat is still checked") || !contains(unchecked.Body, "The heartbeat is NOT checked: no calendar.") {
 		t.Fatal("the body claims a heartbeat check that did not happen")
 	}
-	again := report.JournalRefusedAlert("joint", errors.New("report: chain broken at record 7"), true, at.Add(time.Hour))
-	other := report.JournalRefusedAlert("joint", errors.New("report: chain broken at record 9"), true, at)
+	again := report.JournalRefusedAlert("joint", errors.New("report: chain broken at record 7"), "", at.Add(time.Hour))
+	other := report.JournalRefusedAlert("joint", errors.New("report: chain broken at record 9"), "", at)
 	if a.Key != again.Key || a.Key == other.Key {
 		t.Fatal("one failure must be one incident, and a different failure another")
 	}
