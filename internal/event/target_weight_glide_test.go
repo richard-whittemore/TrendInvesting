@@ -38,6 +38,9 @@ func TestGlideConfigurationValidate(t *testing.T) {
 	expectInvalid(t, "ages not increasing", v, anchors(func(a []event.GlideAnchor) []event.GlideAnchor { a[2].AgeYears = 53; return a }), "increase")
 	expectInvalid(t, "share above one", v, anchors(func(a []event.GlideAnchor) []event.GlideAnchor { a[3].Share = 1.01; return a }), "[0, 1]")
 	expectInvalid(t, "share nan", v, anchors(func(a []event.GlideAnchor) []event.GlideAnchor { a[1].Share = math.NaN(); return a }), "[0, 1]")
+	expectInvalid(t, "share falls with age", v, anchors(func([]event.GlideAnchor) []event.GlideAnchor {
+		return []event.GlideAnchor{{AgeYears: 38, Share: 0}, {AgeYears: 53, Share: 0.9}, {AgeYears: 65, Share: 0.1}}
+	}), "does not rise")
 	expectInvalid(t, "first share not zero", v, anchors(func(a []event.GlideAnchor) []event.GlideAnchor { a[0].Share = 0.1; return a }), "first anchor")
 	expectInvalid(t, "first age negative", v, anchors(func(a []event.GlideAnchor) []event.GlideAnchor { a[0].AgeYears = -1; return a }), "age")
 	expectInvalid(t, "retirement not an anchor", v, func(p *P) { p.Glide.RetirementAgeYears = 66 }, "retirement")

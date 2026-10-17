@@ -105,9 +105,10 @@ Every one of these stops a trade rather than guessing.
   shape) is refused when the configuration is checked. The run does not
   start.
 - **An implausible age.** A birth value that makes you younger than 18 or
-  older than 110 on the first session the run decides is refused when the run
-  starts, as a likely typo. If a long run later reaches an age above 110 at a
-  decision, it stops with an error instead of deciding.
+  older than 110 is refused as a likely typo. The bounds are checked at the
+  configured first decision time, when the run starts, and again at every
+  decision's rebalance session, where a run that reaches an age above 110
+  stops with an error instead of deciding.
 - **A missing final bar for a bond fund.** SHY and IEF need their final bar
   of the month like every other fund that is held or targeted. Whenever b is
   above 0 the bond sleeve targets both, so if either has no final bar the

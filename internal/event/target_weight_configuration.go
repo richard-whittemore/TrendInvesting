@@ -388,6 +388,9 @@ func (c GlideConfiguration) validate() []error {
 		}
 		if !isFinite(a.Share) || a.Share < 0 || a.Share > 1 {
 			errs = append(errs, fmt.Errorf("glide anchor %d share must lie in [0, 1]", i+1))
+		} else if i > 0 && a.Share < c.Anchors[i-1].Share {
+			// b only rises with age (plan.md section 2).
+			errs = append(errs, fmt.Errorf("glide anchor %d share does not rise: b only rises with age", i+1))
 		}
 		retirement = retirement || a.AgeYears == c.RetirementAgeYears
 	}
