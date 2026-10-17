@@ -141,12 +141,7 @@ func decode(j Journal) ([]item, error) {
 // journal's other records name exactly one. With none or several it leaves
 // them unattributed rather than guessing.
 func attributeAccounts(items []item) {
-	seen := map[string]bool{}
-	for _, it := range items {
-		if it.account != "" {
-			seen[it.account] = true
-		}
-	}
+	seen := namedAccounts(items)
 	if len(seen) != 1 {
 		return
 	}
@@ -159,6 +154,19 @@ func attributeAccounts(items []item) {
 			items[i].account = only
 		}
 	}
+}
+
+// namedAccounts is the set of accounts the records themselves name. It is the
+// one rule for how many accounts a journal has: attribution and the fill
+// replay both read it.
+func namedAccounts(items []item) map[string]bool {
+	seen := map[string]bool{}
+	for _, it := range items {
+		if it.account != "" {
+			seen[it.account] = true
+		}
+	}
+	return seen
 }
 
 func read(env event.Envelope, schemas []uint32, into any) error {
@@ -247,9 +255,7 @@ func (f fill) id() string {
 func sameFill(x, y fill) bool {
 	switch {
 	case x.limit != nil && y.limit != nil:
-		a, b := *x.limit, *y.limit
-		a.FilledAt, b.FilledAt = a.FilledAt.UTC(), b.FilledAt.UTC()
-		return reflect.DeepEqual(a, b)
+		return x.limit.SameExecution(*y.limit)
 	case x.turtle != nil && y.turtle != nil:
 		a, b := *x.turtle, *y.turtle
 		a.FilledAt, b.FilledAt = a.FilledAt.UTC(), b.FilledAt.UTC()

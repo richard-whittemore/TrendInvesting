@@ -571,7 +571,7 @@ func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 	// A fill id names one execution across the account
 	// (TargetWeightFillPayload), so it is checked across every order.
 	if seen, dup := r.fills[p.FillID]; dup {
-		if seen == p {
+		if seen.SameExecution(p) {
 			return nil, nil // a redelivery of the same execution
 		}
 		return nil, fmt.Errorf("targetweight: fill %s reuses fill id %s for a different execution", in.ID, p.FillID)

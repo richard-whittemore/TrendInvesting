@@ -779,3 +779,18 @@ func TestAFillIDUsedByBothFillVersionsIsRefused(t *testing.T) {
 		t.Errorf("one fill id in two versions: %v", err)
 	}
 }
+
+func TestTurtleFillIsRefusedWhenAnotherAccountOnlyAppearsOnAFill(t *testing.T) {
+	d := at(time.March, 2)
+	// Account A has a snapshot; account I appears only on a limit fill. A
+	// Turtle fill names no account, so with two accounts in the journal it
+	// has no account to be placed in.
+	js := []journalquery.Journal{load(t, "j", build(t, snap(d), limitFill("f-1", event.OrderSideBuy, 1, 0, d), fillInput(validFill("f-2", 3, d))))}
+	for name, fn := range map[string]func([]journalquery.Journal, journalquery.Filter) (journalquery.Table, error){
+		"positions": journalquery.Positions, "reconcile": journalquery.Reconcile,
+	} {
+		if _, err := fn(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "cannot be attributed") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

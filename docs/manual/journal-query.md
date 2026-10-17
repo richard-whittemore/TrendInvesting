@@ -117,8 +117,9 @@ not only the failures. After a comparison the snapshot becomes the new
 starting point, so one mismatch is reported once and not repeated.
 
 Turtle fills do not name an account. They are counted toward the journal's
-account when the journal names exactly one. Target-weight fills name their
-own account.
+account when the journal's records name exactly one account, counting every
+record that names one (a target-weight fill included). Target-weight fills
+name their own account.
 
 For a target-weight account's limit orders, an `orders` lifecycle row shows
 the order's side, its limit price and, in `note`, its client order id; a

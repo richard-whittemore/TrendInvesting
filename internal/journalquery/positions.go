@@ -53,12 +53,7 @@ func rebuild(j Journal) ([]step, []check, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	accounts := map[string]bool{}
-	for _, it := range items {
-		if it.snapshot != nil || it.planned != nil || it.released != nil || it.refused != nil {
-			accounts[it.account] = true
-		}
-	}
+	accounts := namedAccounts(items)
 	books := map[string]map[string]int64{}
 	started := map[string]bool{}
 	var steps []step

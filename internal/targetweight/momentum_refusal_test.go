@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
@@ -149,6 +150,12 @@ func TestMomentumVenueReportRules(t *testing.T) {
 	// different execution is a producer defect.
 	if out, err := apply(event.FillEventType, event.FillTargetWeightVersion, "f1-again", fill); err != nil || out != nil {
 		t.Fatalf("a redelivered fill: %v %v", out, err)
+	}
+	// One instant written in another UTC offset is the same execution.
+	offset := fill
+	offset.FilledAt = fill.FilledAt.In(time.FixedZone("EST", -5*3600))
+	if out, err := apply(event.FillEventType, event.FillTargetWeightVersion, "f1-offset", offset); err != nil || out != nil {
+		t.Fatalf("a redelivery in another offset: %v %v", out, err)
 	}
 	reused := fill
 	reused.Quantity = 1
