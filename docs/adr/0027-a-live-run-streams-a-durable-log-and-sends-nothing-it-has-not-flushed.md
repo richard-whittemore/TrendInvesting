@@ -207,14 +207,15 @@ continues the recovered sequence. A torn input is sent again.
 - `internal/journal` gains `CreateLog`, `LogWriter`, `RecoverLog`,
   `NewDurableRecorder` and `Resume`. The package still opens no path, because
   the composition root hands it a `SyncWriter` (an `*os.File`).
-- `cmd/engine` gains `-log` and `-resume`. **`-log` is optional in this
+- `cmd/engine` gains `-log` and `-resume`. **`-log` was optional in this
   slice**, so existing invocations, including the LEAN adapter's end-to-end
-  test, are unchanged. Making it mandatory before paper trading is an owner
-  decision.
+  test, were unchanged. Superseded by the amendment below, which makes it
+  mandatory outside `-mode backtest`.
 - **A restart must use the same build.** The strategy version, which includes
   the build (ADR 0016), is stamped on every decision. Another build therefore
-  regenerates different bytes, and the restart is refused. Restarting across
-  an upgrade needs its own decision.
+  regenerates different bytes, and the restart is refused. Superseded by the
+  amendment below: a run does not resume across builds, and an upgrade starts a
+  fresh run.
 - A refused log (§5) or a refused restart (§6) needs a runbook entry: what an
   operator checks, and how a new run is started from a reconciled baseline
   (ADR 0019's recovery procedure).

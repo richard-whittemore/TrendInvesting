@@ -50,6 +50,8 @@ func recoverLogFile(path string) (journal.Recovery, error) {
 	return recovery, nil
 }
 
+var errDifferentConfigurationInput = errors.New("engine: the durable log opens with a different configuration input from the one this invocation composed; resume with the -config and -as-of the logged run started with")
+
 // checkResumable refuses a durable log this invocation cannot continue: one
 // recorded by another configuration or build, or one opening with a
 // different configuration input from the one this invocation composed (a
@@ -57,6 +59,14 @@ func recoverLogFile(path string) (journal.Recovery, error) {
 // log, so a refused restart leaves nothing new behind.
 func checkResumable(recovery journal.Recovery, logHeader journal.LogHeader, configEnvelope event.Envelope) error {
 	if recovery.Header != logHeader {
+		// A changed start is the operator's to correct whatever else differs,
+		// so it outranks the build-upgrade procedure.
+		if len(recovery.Entries) > 0 {
+			first := recovery.Entries[0].Envelope
+			if !first.EventTime.Equal(configEnvelope.EventTime) || !first.RecordedAt.Equal(configEnvelope.RecordedAt) {
+				return errDifferentConfigurationInput
+			}
+		}
 		if err := buildUpgradeRefusal(recovery.Header, logHeader); err != nil {
 			return err
 		}
@@ -67,14 +77,14 @@ func checkResumable(recovery journal.Recovery, logHeader journal.LogHeader, conf
 		return nil
 	}
 	if !bytes.Equal(event.CanonicalEnvelopeBytes(recovery.Entries[0].Envelope), event.CanonicalEnvelopeBytes(configEnvelope)) {
-		return errors.New("engine: the durable log opens with a different configuration input from the one this invocation composed; resume with the -config and -as-of the logged run started with")
+		return errDifferentConfigurationInput
 	}
 	return nil
 }
 
 // buildUpgradeRefusal reports the refusal for a log that differs from this
-// run only in its build, naming the procedure the owner decided on
-// 2026-10-16 (#337): a run does not resume across builds. It returns nil for
+// run only in its build, naming the procedure ADR 0027 sets: a run
+// does not resume across builds. It returns nil for
 // any other difference, which keeps the generic refusal.
 func buildUpgradeRefusal(logged, current journal.LogHeader) error {
 	if logged.ConfigurationHash != current.ConfigurationHash {

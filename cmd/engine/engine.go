@@ -85,7 +85,7 @@ type options struct {
 	asOf         string
 	// mode is required and is what the adapter on the socket does with the
 	// decisions: modeBacktest (decisions are simulated), or a mode that can reach a
-	// broker. A mode other than backtest requires logPath (#336).
+	// broker. A mode other than backtest requires logPath (ADR 0027).
 	mode            string
 	build           string
 	maxFrameBytes   int
@@ -95,8 +95,7 @@ type options struct {
 // The run modes. Only backtest may run without a durable log: every other
 // mode serves an adapter whose orders can reach a broker, or rehearses
 // doing so, and so must hold journal-before-send (ADR 0019 amended
-// 2026-09-24; ADR 0026 §3; ADR 0027). The owner's decision of 2026-10-16
-// (#336). There is no default: an empty mode is refused, so forgetting -mode
+// 2026-09-24; ADR 0026 §3; ADR 0027). There is no default: an empty mode is refused, so forgetting -mode
 // can never run a live engine without the log.
 const (
 	modeBacktest = "backtest"
