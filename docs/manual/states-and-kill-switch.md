@@ -93,8 +93,11 @@ amounts: what reaches 98%; your holding minus every working sell (so it can
 never sell shares you do not have); and that minus the shares to keep (so,
 together with a sell of ours still working, it never takes you below 98%).
 A sell this program sent after that snapshot counts as working until a later
-snapshot shows it. Boost's own exit is reduced by the same working sells, so
-an urgent sale and the exit in one session never sell the same shares twice.
+snapshot shows it. Boost's own exit is sized from the account snapshot, so it
+is reduced by every sell sent since that snapshot and every other sell IBKR
+reports working: an urgent sale and the exit in one session never sell the
+same shares twice, and a sell the account snapshot already shows filled does
+not shrink a later exit.
 Worked example (ADR 0019): 147 SPY, $4,700 borrowed, mark $90, so net
 liquidation is $8,530. It keeps 93 shares and sells 54.
 

@@ -31,18 +31,37 @@ func (g *Gate) brokerHolding(instrumentID string) (holding, working int64, ok bo
 	return position.Quantity, s.WorkingSells(instrumentID) + g.inFlight[instrumentID], true
 }
 
-// PendingSells returns the shares of instrumentID already being sold: every
-// working or pending sell the latest broker snapshot reports, when it read
-// its open orders, and every sell released since that snapshot. A planner
-// nets them from a new sell, so a sell and one already working never
-// together take exposure below the target (ADR 0019, amended 2026-10-15,
-// "never below it"; ADR 0026, point 2.5).
+// PendingSells returns the shares of instrumentID already being sold that
+// the latest account snapshot cannot show, for a planner sizing a new sell
+// from that snapshot: every sell released since it, and every other working
+// or pending sell the latest broker snapshot reports, when it read its open
+// orders. A sell the broker reports and the gate released since the account
+// snapshot is counted once. The planner nets them from a new sell, so a sell
+// and one already working never together take exposure below the target
+// (ADR 0019, amended 2026-10-15, "never below it"; ADR 0026, point 2.5).
 func (g *Gate) PendingSells(instrumentID string) int64 {
-	working := g.inFlight[instrumentID]
-	if s := g.broker; s != nil && s.Readable(event.BrokerComponentOpenOrders) {
-		working += s.WorkingSells(instrumentID)
+	var pending int64
+	for _, sell := range g.unshown {
+		if sell.instrumentID == instrumentID {
+			pending += sell.quantity
+		}
 	}
-	return working
+	if s := g.broker; s != nil && s.Readable(event.BrokerComponentOpenOrders) {
+		for _, o := range s.OpenOrders {
+			if _, released := g.unshown[o.ClientOrderID]; !released && o.InstrumentID == instrumentID && o.Side == event.OrderSideSell {
+				pending += o.RemainingQuantity
+			}
+		}
+	}
+	return pending
+}
+
+// ObserveAccount records that an account snapshot was taken after every sell
+// released so far: its holding shows each one filled, and one still working
+// is reported by the broker snapshot, so none stays pending for the planner
+// (ADR 0026, point 2.5).
+func (g *Gate) ObserveAccount() {
+	clear(g.unshown)
 }
 
 // riskReducing reports whether p is risk-reducing (ADR 0026, point 4): a sell

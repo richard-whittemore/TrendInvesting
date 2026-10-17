@@ -293,6 +293,7 @@ func (h *Handler) applySnapshot(in event.Envelope) error {
 		return fmt.Errorf("targetweight: snapshot as of %s does not follow the last, %s", p.AsOf, h.snapshot.AsOf)
 	}
 	h.snapshot = &p
+	h.gate.ObserveAccount()
 	return nil
 }
 

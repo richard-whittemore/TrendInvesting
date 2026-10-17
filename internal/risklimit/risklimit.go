@@ -106,6 +106,17 @@ type Gate struct {
 	// never both take the same shares (ADR 0019, amended 2026-10-15, "never
 	// below it").
 	inFlight map[string]int64
+	// unshown holds, by client order ID, every sell released since the
+	// latest account snapshot (ObserveAccount), which the planner sizes
+	// from: that snapshot's holding cannot show them, and one recorded after
+	// them shows each as filled or no longer working (ADR 0026, point 2.5).
+	unshown map[string]releasedSell
+}
+
+// releasedSell is a released sell's instrument and quantity.
+type releasedSell struct {
+	instrumentID string
+	quantity     int64
 }
 
 // NewGate returns a Normal gate for the joint margin account accountID under
@@ -155,7 +166,7 @@ func newGate(accountID string, limits event.MarginLimits, mode string) (*Gate, e
 		state: StateNormal, alarmLevel: event.MarginAlarmClear,
 		released: make(map[string]bool), saleTags: make(map[string]bool),
 		attempted: make(map[string]bool), pending: make(map[string]bool),
-		inFlight: make(map[string]int64),
+		inFlight: make(map[string]int64), unshown: make(map[string]releasedSell),
 	}, nil
 }
 
@@ -362,6 +373,7 @@ func (g *Gate) release(o Order, f event.RiskFigures) Outcome {
 	g.released[p.ClientOrderID] = true
 	if p.Side == event.OrderSideSell {
 		g.inFlight[p.InstrumentID] += p.Quantity
+		g.unshown[p.ClientOrderID] = releasedSell{instrumentID: p.InstrumentID, quantity: p.Quantity}
 	}
 	return Outcome{Released: &event.OrderReleasedPayload{
 		AccountID: g.accountID, PlanID: o.PlanID, Tag: p.Tag, ClientOrderID: p.ClientOrderID,

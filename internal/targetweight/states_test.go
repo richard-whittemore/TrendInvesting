@@ -399,3 +399,26 @@ func TestAnUrgentSaleAndTheExitTogetherNeverSellBelow98(t *testing.T) {
 		t.Fatalf("the sale and the exit together leave %d shares; the sale keeps %d", held, keep)
 	}
 }
+
+// A sell the account snapshot already shows filled is no longer pending, so
+// a later exit in a run fed only account snapshots is sized to the full
+// target: Boost's exit trades want x V / p - q (ADR 0026, point 2, "Boost"),
+// net only of sells the snapshot cannot show (ADR 0026, point 2.5).
+func TestAFilledSellDoesNotShrinkALaterExit(t *testing.T) {
+	closes := append(syntheticCloses(), 158, 161, 164, 167, 170, 173, 176, 179, 182, 185, 178, 176, 175, 174.5, 174.4, 179, 181)
+	r := simulate(t, options{closes: closes})
+	var exits []event.OrderPlannedPayload
+	for _, p := range planned(t, r.decisions) {
+		if p.Side == event.OrderSideSell {
+			exits = append(exits, p)
+		}
+	}
+	if len(exits) != 2 {
+		t.Fatalf("two exits expected: %+v", exits)
+	}
+	for _, p := range exits {
+		if want := int64(float64(p.HeldQuantity) - p.TargetWeight*p.NetLiquidation/p.ReferencePrice); p.Quantity != want {
+			t.Errorf("exit %s sells %d of %d; the target needs %d", p.ClientOrderID, p.Quantity, p.HeldQuantity, want)
+		}
+	}
+}
