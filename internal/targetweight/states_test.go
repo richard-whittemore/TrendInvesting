@@ -324,6 +324,22 @@ func TestRecordedDecisionsAndSafetyInputsAreChecked(t *testing.T) {
 		return s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "broker:x", start,
 			event.BrokerSnapshotPayload{AccountID: "ira", AsOf: start, NetLiquidation: 1})
 	})
+	// A venue report names an order the gate released, at the version a
+	// target-weight account's orders are reported at.
+	fill := event.TargetWeightFillPayload{AccountID: cfg.AccountID, ClientOrderID: "tw-1", FillID: "f1", InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 1, Price: 1, FilledAt: start}
+	refuses("a fill of an order never released", nil, func(s *stream) event.Envelope {
+		return s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, "fill:x", start, fill)
+	})
+	refuses("a Turtle fill version", nil, func(s *stream) event.Envelope {
+		return s.envelope(t, event.FillEventType, event.FillSchemaVersion, "fill:x", start, fill)
+	})
+	report := event.LimitOrderLifecyclePayload{AccountID: cfg.AccountID, ClientOrderID: "tw-1", OrderID: "ib-1", InstrumentID: "SPY", Side: event.OrderSideSell, Status: event.OrderLifecycleStatusCanceled, Quantity: 1, LimitPrice: 1, OccurredAt: start}
+	refuses("a lifecycle report on an order never released", nil, func(s *stream) event.Envelope {
+		return s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "lifecycle:x", start, report)
+	})
+	refuses("a Turtle lifecycle version", nil, func(s *stream) event.Envelope {
+		return s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleSchemaVersion, "lifecycle:x", start, report)
+	})
 	refuses("a Halted record before a Degraded one", func(h *targetweight.Handler, s *stream) {
 		if _, err := h.Apply(context.Background(), s.envelope(t, event.EngineStateEventType, event.EngineStateScopedVersion, "engine-state:a", start, halted)); err != nil {
 			t.Fatal(err)

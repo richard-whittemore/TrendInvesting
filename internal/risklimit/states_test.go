@@ -592,10 +592,9 @@ func TestARestoredStateNamesTheIncident(t *testing.T) {
 }
 
 // TestASellReleasedSinceTheSnapshotIsCountedAsWorking: a released sell is
-// counted against every later sell until a broker snapshot recorded after it
-// shows it, and pending for the planner until an account snapshot follows
-// it, so two sells never both take the same shares (ADR 0019 line 241,
-// "back to 98% of net liquidation and never below it").
+// counted against every later sell, beside every other sell the broker
+// reports working, so two sells never both take the same shares (ADR 0019,
+// amended 2026-10-15, "back to 98% of net liquidation and never below it").
 func TestASellReleasedSinceTheSnapshotIsCountedAsWorking(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	observe(t, g, "broker:1", broker(100, event.BrokerOrder{
@@ -607,47 +606,9 @@ func TestASellReleasedSinceTheSnapshotIsCountedAsWorking(t *testing.T) {
 	}
 	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
 	if got := g.PendingSells("SPY"); got != 70 {
-		t.Fatalf("the released sell is pending until a snapshot shows it: %d", got)
+		t.Fatalf("the released sell is pending beside the broker's: %d", got)
 	}
 	again := order(event.OrderSideSell, 31, 100)
 	again.Planned.ClientOrderID = "tw-again"
 	refusedFor(t, check(t, g, again)[0], event.RefusedBrokerHolding)
-	later := broker(40)
-	later.AsOf = later.AsOf.Add(time.Minute)
-	later.Unreadable = []string{event.BrokerComponentOpenOrders}
-	observe(t, g, "broker:2", later)
-	g.ObserveAccount()
-	if got := g.PendingSells("SPY"); got != 0 {
-		t.Errorf("later snapshots account for the released sell: %d", got)
-	}
-}
-
-// TestASellIsPendingForThePlannerUntilAnAccountSnapshotFollowsIt: Boost's
-// exit is planned from the account snapshot, so a sell released after that
-// snapshot is pending for the planner even once a broker snapshot shows it
-// filled, and a broker snapshot showing it still working does not count it
-// twice (ADR 0026, point 2.5; ADR 0019, amended 2026-10-15, "never below
-// it").
-func TestASellIsPendingForThePlannerUntilAnAccountSnapshotFollowsIt(t *testing.T) {
-	g := gate(t, limits(), event.TradingModeDryRun)
-	observe(t, g, "broker:1", broker(100))
-	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
-	filled := broker(40)
-	filled.AsOf = filled.AsOf.Add(time.Minute)
-	observe(t, g, "broker:2", filled)
-	if got := g.PendingSells("SPY"); got != 60 {
-		t.Fatalf("a sell the planner's account snapshot cannot show is pending: %d", got)
-	}
-	working := broker(80,
-		event.BrokerOrder{BrokerOrderID: "ib-1", ClientOrderID: "tw-" + event.OrderSideSell, InstrumentID: "SPY", Side: event.OrderSideSell, Status: event.BrokerOrderWorking, RemainingQuantity: 20},
-		event.BrokerOrder{BrokerOrderID: "ib-2", ClientOrderID: "tw-other", InstrumentID: "SPY", Side: event.OrderSideSell, Status: event.BrokerOrderWorking, RemainingQuantity: 10})
-	working.AsOf = filled.AsOf.Add(time.Minute)
-	observe(t, g, "broker:3", working)
-	if got := g.PendingSells("SPY"); got != 70 {
-		t.Fatalf("the released sell once and the other working sell: %d", got)
-	}
-	g.ObserveAccount()
-	if got := g.PendingSells("SPY"); got != 30 {
-		t.Errorf("after an account snapshot, only what the broker reports working: %d", got)
-	}
 }

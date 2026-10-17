@@ -100,23 +100,14 @@ type Gate struct {
 	saleTags  map[string]bool
 	attempted map[string]bool
 	pending   map[string]bool
-	// inFlight holds, per instrument, the shares of every sell released
-	// since the latest broker snapshot, which that snapshot cannot show as
-	// working: a later sell is sized and checked net of them, so two sells
-	// never both take the same shares (ADR 0019, amended 2026-10-15, "never
-	// below it").
-	inFlight map[string]int64
-	// unshown holds, by client order ID, every sell released since the
-	// latest account snapshot (ObserveAccount), which the planner sizes
-	// from: that snapshot's holding cannot show them, and one recorded after
-	// them shows each as filled or no longer working (ADR 0026, point 2.5).
-	unshown map[string]releasedSell
-}
-
-// releasedSell is a released sell's instrument and quantity.
-type releasedSell struct {
-	instrumentID string
-	quantity     int64
+	// sells holds every sell the gate released, by client order ID, and
+	// sellOrder their IDs in release order; orders holds every released
+	// order, so a fill or lifecycle report is checked against the order it
+	// names, and fills every execution reported, by fill ID.
+	sells     map[string]*trackedSell
+	sellOrder []string
+	orders    map[string]*releasedOrder
+	fills     map[string]event.TargetWeightFillPayload
 }
 
 // NewGate returns a Normal gate for the joint margin account accountID under
@@ -166,7 +157,8 @@ func newGate(accountID string, limits event.MarginLimits, mode string) (*Gate, e
 		state: StateNormal, alarmLevel: event.MarginAlarmClear,
 		released: make(map[string]bool), saleTags: make(map[string]bool),
 		attempted: make(map[string]bool), pending: make(map[string]bool),
-		inFlight: make(map[string]int64), unshown: make(map[string]releasedSell),
+		sells: make(map[string]*trackedSell), orders: make(map[string]*releasedOrder),
+		fills: make(map[string]event.TargetWeightFillPayload),
 	}, nil
 }
 
@@ -371,9 +363,10 @@ func (g *Gate) check(o Order, planSize, counted int, book *Book) Outcome {
 func (g *Gate) release(o Order, f event.RiskFigures) Outcome {
 	p := o.Planned
 	g.released[p.ClientOrderID] = true
+	g.orders[p.ClientOrderID] = &releasedOrder{planned: p}
 	if p.Side == event.OrderSideSell {
-		g.inFlight[p.InstrumentID] += p.Quantity
-		g.unshown[p.ClientOrderID] = releasedSell{instrumentID: p.InstrumentID, quantity: p.Quantity}
+		g.sells[p.ClientOrderID] = &trackedSell{instrumentID: p.InstrumentID, released: p.Quantity, watched: true}
+		g.sellOrder = append(g.sellOrder, p.ClientOrderID)
 	}
 	return Outcome{Released: &event.OrderReleasedPayload{
 		AccountID: g.accountID, PlanID: o.PlanID, Tag: p.Tag, ClientOrderID: p.ClientOrderID,

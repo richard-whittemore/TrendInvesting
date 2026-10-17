@@ -82,8 +82,8 @@ func bar(price float64, at time.Time) event.CompletedBarPayload {
 	return event.CompletedBarPayload{InstrumentID: "SPY", PeriodEnd: at, SplitAdjusted: view(event.ViewSplitAdjusted), Raw: view(event.ViewRaw)}
 }
 
-// account simulates the joint account: a released order fills at the next
-// session's close, cash pays for it, and net liquidation is cash plus the
+// account simulates the joint account: a released order is acknowledged and
+// fills at the next session's close and the venue reports the execution, cash pays for it, and net liquidation is cash plus the
 // holding at the close.
 type account struct {
 	cash    float64
@@ -103,7 +103,10 @@ func (a *account) take(t *testing.T, out []event.Envelope) {
 	}
 }
 
-func (a *account) fill(price float64) {
+// fill fills every queued order at price and returns the venue's report of
+// each execution, filled at at.
+func (a *account) fill(price float64, at time.Time) []event.TargetWeightFillPayload {
+	var reports []event.TargetWeightFillPayload
 	for _, o := range a.pending {
 		quantity := o.Quantity
 		if o.Side == event.OrderSideSell {
@@ -111,8 +114,13 @@ func (a *account) fill(price float64) {
 		}
 		a.held += quantity
 		a.cash -= float64(float64(quantity) * price)
+		reports = append(reports, event.TargetWeightFillPayload{
+			AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, FillID: "fill:" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+			Side: o.Side, Quantity: o.Quantity, Price: price, FilledAt: at,
+		})
 	}
 	a.pending = nil
+	return reports
 }
 
 // broker is IBKR's view of the simulated account at the close: the holding
@@ -233,7 +241,16 @@ func simulate(t *testing.T, opts options) run {
 	for i := opts.from; i < len(opts.closes); i++ {
 		at := sessionEnd(i)
 		price := opts.closes[i]
-		acct.fill(price)
+		for _, o := range acct.pending {
+			ack := event.LimitOrderLifecyclePayload{
+				AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, OrderID: "ib-" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+				Side: o.Side, Status: event.OrderLifecycleStatusSubmitted, Quantity: o.Quantity, LimitPrice: o.LimitPrice, OccurredAt: at.Add(-3 * time.Hour),
+			}
+			apply(s.envelope(t, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:"+o.ClientOrderID, ack.OccurredAt, ack))
+		}
+		for _, f := range acct.fill(price, at.Add(-2*time.Hour)) {
+			apply(s.envelope(t, event.FillEventType, event.FillTargetWeightVersion, f.FillID, f.FilledAt, f))
+		}
 		if engaged, ok := opts.kill[i]; ok {
 			apply(s.envelope(t, event.KillSwitchEventType, event.KillSwitchSchemaVersion, fmt.Sprintf("kill:%d", i), at.Add(-time.Hour),
 				event.KillSwitchPayload{AccountID: "joint", AsOf: at.Add(-time.Hour), Engaged: engaged, Operator: "owner", Detail: "fixture"}))

@@ -566,8 +566,10 @@ func (r *momentumRun) applyLifecycle(in event.Envelope) ([]event.Envelope, error
 	if err != nil {
 		return nil, err
 	}
-	if p.Quantity != o.planned.Quantity || p.LimitPrice != o.planned.LimitPrice {
-		return nil, fmt.Errorf("targetweight: lifecycle %s reports %d at %v; order %s is %d at %v", in.ID, p.Quantity, p.LimitPrice, p.ClientOrderID, o.planned.Quantity, o.planned.LimitPrice)
+	// The gate checks the report's quantity and limit against the order and
+	// nets every pending sell from later sizing (ADR 0026, point 2.5).
+	if err := r.h.gate.ObserveLifecycle(p); err != nil {
+		return nil, fmt.Errorf("targetweight: lifecycle %s: %w", in.ID, err)
 	}
 	if p.Terminal() {
 		return r.terminal(in, o, p.OccurredAt)
@@ -592,8 +594,10 @@ func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 	if err != nil {
 		return nil, err
 	}
-	if o.filled+p.Quantity > o.planned.Quantity {
-		return nil, fmt.Errorf("targetweight: fill %s takes order %s past its %d shares", in.ID, p.ClientOrderID, o.planned.Quantity)
+	// The gate refuses a fill past the order's shares and nets every
+	// pending sell from later sizing (ADR 0026, point 2.5).
+	if err := r.h.gate.ObserveFill(p); err != nil {
+		return nil, fmt.Errorf("targetweight: fill %s: %w", in.ID, err)
 	}
 	r.fills[p.FillID] = p
 	o.fills[p.FillID] = p

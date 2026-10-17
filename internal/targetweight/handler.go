@@ -28,7 +28,8 @@ import (
 //     (ADR 0015), so a journal written under 1.0.0 does not replay.
 //   - 1.2.0 reads configuration schema version 3 (the margin-cushion
 //     thresholds) and refuses earlier versions, and its gate reads the kill
-//     switch and broker snapshots and issues ADR 0019's sale back to 98%.
+//     switch, broker snapshots and the venue's reports on released orders,
+//     and issues ADR 0019's sale back to 98%.
 const RulesVersion = "1.2.0"
 
 // source names this handler on every envelope it emits.
@@ -64,7 +65,10 @@ type Options struct {
 //   - per session: the Boost instrument's market.bar.completed, account.snapshot
 //     version 3, market.mark.recorded, then market.session.closed, which decides;
 //   - at any time after the configuration: operator.kill-switch, and
-//     account.broker.snapshot, which also evaluates the margin-cushion alarm.
+//     account.broker.snapshot, which also evaluates the margin-cushion alarm;
+//   - after an order's release: the venue's execution.fill (version 5) and
+//     execution.order.lifecycle (version 2) reports on it, which resolve a
+//     released sell's pending shares (risklimit.Gate.PendingSells).
 //
 // # The sale back to 98%
 //
@@ -182,6 +186,10 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 		return nil, h.applyMark(in)
 	case event.SessionClosedEventType:
 		return h.applySession(in)
+	case event.FillEventType:
+		return nil, h.applyFill(in)
+	case event.OrderLifecycleEventType:
+		return nil, h.applyLifecycle(in)
 	case event.RunCompletedEventType:
 		return nil, nil
 	}
@@ -402,6 +410,33 @@ func (h *Handler) applyKillSwitch(in event.Envelope) error {
 		return err
 	}
 	if err := h.gate.SetKillSwitch(in.ID, p); err != nil {
+		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
+	return nil
+}
+
+// applyFill records a venue's execution of a released order: a sell's
+// filled shares are no longer pending (ADR 0026, point 2.5).
+func (h *Handler) applyFill(in event.Envelope) error {
+	p, err := decodeInput[event.TargetWeightFillPayload](in, event.FillTargetWeightVersion)
+	if err != nil {
+		return err
+	}
+	if err := h.gate.ObserveFill(p); err != nil {
+		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
+	}
+	return nil
+}
+
+// applyLifecycle records a venue's state change of a released order: a
+// canceled or invalid sell's remainder is no longer pending, a
+// cancel-pending one still is (ADR 0026, point 2.5).
+func (h *Handler) applyLifecycle(in event.Envelope) error {
+	p, err := decodeInput[event.LimitOrderLifecyclePayload](in, event.OrderLifecycleLimitVersion)
+	if err != nil {
+		return err
+	}
+	if err := h.gate.ObserveLifecycle(p); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
 	return nil

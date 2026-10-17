@@ -92,14 +92,36 @@ ceil(0.98 × net liquidation ÷ mark) shares. It sells the smallest of three
 amounts: what reaches 98%; your holding minus every working sell (so it can
 never sell shares you do not have); and that minus the shares to keep (so,
 together with a sell of ours still working, it never takes you below 98%).
-A sell this program sent after that snapshot counts as working until a later
-snapshot shows it. Boost's own exit is sized from the account snapshot, so it
-is reduced by every sell sent since that snapshot and every other sell IBKR
-reports working: an urgent sale and the exit in one session never sell the
-same shares twice, and a sell the account snapshot already shows filled does
-not shrink a later exit.
+Boost's own exit is sized from the account snapshot, and is reduced the same
+way, so an urgent sale and the exit in one session never sell the same shares
+twice. Which sells count is set by one rule, below.
 Worked example (ADR 0019): 147 SPY, $4,700 borrowed, mark $90, so net
 liquidation is $8,530. It keeps 93 shares and sells 54.
+
+**When a sell stops counting.** A sell this program sent is *pending* from
+the moment it is released until the broker's own reports settle it. Pending
+shares are the shares sent, minus the shares the broker reports filled, minus
+the shares it reports cancelled. In plain terms:
+
+- A fill report ends the shares it filled. A partial fill leaves the rest
+  pending.
+- A cancellation or a refusal ends whatever had not filled.
+- A sell waiting to be cancelled (cancel-pending) may still fill, so it stays
+  pending in full until the cancellation is confirmed.
+- A sell IBKR lists as working counts at the quantity IBKR says remains.
+- A sell IBKR no longer lists is settled by comparing IBKR's holding with its
+  previous snapshot. The drop that other fills do not explain counts as
+  filled, oldest sell first, and the rest as cancelled. When that comparison
+  cannot be made (no earlier snapshot, or IBKR could not read the holding or
+  the open orders), the sell stays pending until a fill or cancellation
+  report arrives.
+- A snapshot on its own never clears a sell. The account snapshot shows only
+  what had filled when it was taken, so shares filled after it still count
+  against the exit.
+
+The exit and the broker-holding check use this same rule, so a sell still
+working is never sold again, and a sell that was cancelled no longer holds
+the exit back (ADR 0019, amended 2026-10-15; ADR 0026, points 2.5 and 4).
 
 **Once per incident.** An incident runs from the first move out of Normal
 until recovery. Going from Degraded to Halted is the same incident. Under the
