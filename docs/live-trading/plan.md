@@ -229,7 +229,7 @@ Lightsail VM (Ubuntu, $12/month, US East)
     or fails;
   - the flatten is sell-only and sized from IBKR's own figures, never the
     journal's (which is what is in doubt), taken from the latest account
-    snapshot only. The quantity is the smallest of three bounds: what
+    snapshot only (latest by journal sequence, ADR 0019 reading 1). The quantity is the smallest of three bounds: what
     reaches 98%, IBKR's reported holding minus every working or pending
     sell (ours or unknown), and that holding minus those sells minus the
     shares kept. So no combination of fills can open a short or take

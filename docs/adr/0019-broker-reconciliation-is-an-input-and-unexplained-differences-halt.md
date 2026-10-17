@@ -247,7 +247,8 @@ to the Turtle reducer, and changes nothing else in this ADR.
   reading 1: a third bound, holding − every working or pending sell − keep,
   is added; the quantity is the smallest of the three bounds, never below
   zero, and never more than the holding. The sale is sized from the latest
-  broker snapshot only. Where that snapshot's net liquidation or mark is not
+  broker snapshot only (latest by journal sequence, as reading 1 defines
+  it). Where that snapshot's net liquidation or mark is not
   strictly positive, or it is stale (older than `MaxSnapshotAge`, or
   stamped later than the triggering event), the sale is
   withheld without consuming the attempt and re-evaluated later: reading 1.
@@ -330,9 +331,11 @@ here so that all eleven are in one place.
    sizes the sale, when the sale is withheld instead, whether that spends
    the attempt, and when the sale is evaluated again; the other readings,
    the 2026-10-15 amendment and ADR 0026 points 4 to 6 cite it.
-   - **The latest snapshot only.** The sale is sized from the latest
-     `account.broker.snapshot`. An older snapshot is never used in its
-     place, whatever the latest one's condition.
+   - **The latest snapshot only.** "The latest snapshot" means, here and
+     wherever these readings or ADR 0026 use it, the latest journalled
+     `account.broker.snapshot` for the account by journal sequence, not by
+     its broker timestamp. The sale is sized from it. An older snapshot is
+     never used in its place, whatever the latest one's condition.
    - **Unreadable:** the latest snapshot cannot be read, or none has been
      recorded yet. This counts as
      "the broker's values cannot be read" (reading 4): the sale is
@@ -449,8 +452,8 @@ here so that all eleven are in one place.
    mark) shares.
 10. **A sell above the broker quantity is refused, not resized.** The
     check applies to every sell, in any engine state, not only Degraded,
-    and reads the latest broker snapshot only; an older snapshot is never
-    used in its place.
+    and reads the latest broker snapshot only (reading 1 defines latest);
+    an older snapshot is never used in its place.
     - **ADR 0019's sale back to 98%** follows reading 1's snapshot rule
       instead of this reading: withheld (`risk.sale.withheld`); unspent and
       re-evaluated for `stale-broker-snapshot` and

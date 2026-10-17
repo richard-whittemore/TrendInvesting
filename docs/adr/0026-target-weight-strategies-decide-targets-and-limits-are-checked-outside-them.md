@@ -178,6 +178,7 @@ replaces `plan.md`'s "per run", since a live run spans many decisions.
 | Maximum order size as a share of V (`plan.md` 334-335) | \|qty·pᵢ\| / V ≤ the per-account limit | refuse that order; alert; **Degraded** |
 | Price band (`plan.md` 335; ADR 0025) | pᵢ within the band of the latest recorded IBKR mark (an input, never a live read) | refuse; alert; **Degraded** |
 | No order without a journalled decision (ADR 0025) | the tag names a durable `strategy.targets.decided`, incident, `operator.kill-switch` engagement or `risk.margin.alarm` decision in this run | refuse; urgent alert; **Halted** (a defect in the order path, so its scope cannot be bounded) |
+| Broker snapshot freshness (ADR 0019 amendment, 2026-10-17, reading 10) | a sell other than ADR 0019's sale back to 98% is checked against the latest broker snapshot, which is stale: older than `MaxSnapshotAge`, or stamped later than the sell's journalled time (point 6) | refuse (`risk.order.refused`, reason `stale-broker-snapshot`); urgent alert once per snapshot condition, cleared when a fresh snapshot arrives; state unchanged; the sell is re-planned at the next decision |
 | Kill switch (`plan.md` 405) | a recorded `operator.kill-switch` input (new) is engaged | refuse every order except ADR 0019's one sale back to 98% in a margin account (its 2026-10-15 and 2026-10-16 amendments), which still goes; routine risk-reducing sells, including the IRAs', are refused; alert once; state unchanged (owner decision 2026-10-16) |
 | Mode (`plan.md` 406-407) | `dry-run`: released orders are journalled with `send: false` and never sent | not a breach |
 
@@ -188,7 +189,10 @@ A new reason, `risk-limit-breached`, joins its closed set, as
 **The gate's closed reason sets.** Replay compares each reason byte for
 byte (point 7, item 6), so the members named below are exact strings, and
 a reason both sets hold is spelled the same in each. Each set also holds
-its other reasons, not listed here; these are the snapshot reasons:
+its other reasons, not listed here; these are the snapshot reasons.
+"The latest broker snapshot" is the latest journalled
+`account.broker.snapshot` for the account by journal sequence, as ADR
+0019's snapshot rule defines it (amendment, 2026-10-17, reading 1):
 - **`risk.order.refused`** for any sell other than ADR 0019's sale back to
   98% (ADR 0019 amendment, 2026-10-17, reading 10):
   - `broker-holding`: the sell is above the latest broker snapshot's
