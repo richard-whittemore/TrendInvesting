@@ -33,6 +33,9 @@ func iraOrder(id, side string, quantity int64) risklimit.Order {
 
 func checkBook(t *testing.T, g *risklimit.Gate, book risklimit.Book, plan ...risklimit.Order) []risklimit.Outcome {
 	t.Helper()
+	if book.At.IsZero() {
+		book.At = at
+	}
 	outcomes, err := g.Check(book, plan)
 	if err != nil {
 		t.Fatal(err)

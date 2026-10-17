@@ -28,6 +28,7 @@ func testConfiguration() event.TargetWeightConfigurationPayload {
 			MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05,
 			ExcessLiquidityWarning: 0.4, ExcessLiquidityUrgent: 0.2, ExcessLiquidityStaleMinutes: 30,
 		},
+		Execution: event.ExecutionConfiguration{MaxSnapshotAge: 30},
 	}
 }
 

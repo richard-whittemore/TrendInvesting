@@ -101,7 +101,8 @@ func TestDegradedOnSPYWhileBoostedSellsBackTo98(t *testing.T) {
 
 // TestHaltedSellsOncePerIncident: a later urgent alarm in the same incident
 // sells nothing; the incident's one sale is spent (ADR 0019, amended
-// 2026-10-15; amended 2026-10-17, reading 3).
+// 2026-10-15; amendment of 2026-10-17: Degraded to Halted is one incident,
+// with one sale per instrument for the whole episode).
 func TestHaltedSellsOncePerIncident(t *testing.T) {
 	full := simulate(t, options{brokers: true})
 	state := haltedState(t)
@@ -124,7 +125,8 @@ func TestHaltedSellsOncePerIncident(t *testing.T) {
 
 // TestAWithheldSaleIsAnAttempt: a sale withheld because IBKR's open orders
 // were unreadable asked the owner to act by hand, so it is never attempted
-// again in the incident (ADR 0019, amended 2026-10-17, reading 4).
+// again in the incident (ADR 0019, amendment of 2026-10-17: a withheld sale
+// counts as the attempt when the broker's values cannot be read).
 func TestAWithheldSaleIsAnAttempt(t *testing.T) {
 	full := simulate(t, options{brokers: true})
 	mutate := map[int]func(*event.BrokerSnapshotPayload){
@@ -137,6 +139,37 @@ func TestAWithheldSaleIsAnAttempt(t *testing.T) {
 	}
 	if got := sales(t, r.decisions); len(got) != 0 {
 		t.Fatalf("a sale the owner was asked to make by hand is never attempted again: %+v", got)
+	}
+}
+
+// TestAStaleWithholdIsNotAnAttempt: a sale withheld because the latest broker
+// snapshot was older than the configured maximum age changes no state and
+// spends no attempt, so the incident's next trigger, with a fresh snapshot,
+// is decided again under the same tag (here, by session 22, the exit has
+// already brought the holding to 98%, so it finds nothing to sell).
+func TestAStaleWithholdIsNotAnAttempt(t *testing.T) {
+	full := simulate(t, options{brokers: true})
+	state := haltedState(t)
+	mutate := map[int]func(*event.BrokerSnapshotPayload){
+		20: func(b *event.BrokerSnapshotPayload) { b.AsOf = b.AsOf.Add(-2 * time.Hour) },
+		22: func(b *event.BrokerSnapshotPayload) { b.ExcessLiquidity = 0.1 * b.NetLiquidation },
+	}
+	r := restartAt17(t, full, options{prelude: []event.Envelope{state}, brokerMutate: mutate})
+	withheld := ofType(r.decisions, event.SaleWithheldEventType)
+	if len(withheld) != 2 {
+		t.Fatalf("withheld %d, want the stale one and the re-evaluation", len(withheld))
+	}
+	var stale, again event.SaleWithheldPayload
+	decode(t, withheld[0], &stale)
+	decode(t, withheld[1], &again)
+	if stale.Reason != event.SaleWithheldStaleBrokerSnapshot || stale.SnapshotID != "broker:20" {
+		t.Errorf("first: %+v", stale)
+	}
+	if again.Tag != state.ID || again.Trigger != event.SaleTriggerMarginUrgent || again.SnapshotID != "broker:22" || again.Reason != event.SaleWithheldNothingToSell {
+		t.Errorf("the next trigger is decided again under the incident from the fresh snapshot: %+v", again)
+	}
+	if got := ofType(r.decisions, event.EngineStateEventType); len(got) != 0 {
+		t.Fatalf("the withhold changes no state: %d", len(got))
 	}
 }
 
@@ -375,6 +408,14 @@ func TestEachDecisionIsJournalledAtTheVersionThatHoldsIt(t *testing.T) {
 		}
 		for _, e := range es {
 			want := c.want
+			if c.kind == event.OrderReleasedEventType {
+				// A risk-reducing sell records its exemption, a version 3 field.
+				var p event.OrderReleasedPayload
+				decode(t, e, &p)
+				if p.Figures.RiskReducing {
+					want = event.OrderReleasedSafetyVersion
+				}
+			}
 			if want == 0 {
 				var p event.OrderPlannedPayload
 				decode(t, e, &p)
@@ -435,6 +476,33 @@ func TestAFilledSellDoesNotShrinkALaterExit(t *testing.T) {
 	for _, p := range exits {
 		if want := int64(float64(p.HeldQuantity) - p.TargetWeight*p.NetLiquidation/p.ReferencePrice); p.Quantity != want {
 			t.Errorf("exit %s sells %d of %d; the target needs %d", p.ClientOrderID, p.Quantity, p.HeldQuantity, want)
+		}
+	}
+}
+
+// TestARepeatedNothingToSellWithholdHasItsOwnID: nothing to sell is not an
+// attempt, so a later trigger in the same incident may withhold again; each
+// withhold is its own record, named for the input that triggered it.
+func TestARepeatedNothingToSellWithholdHasItsOwnID(t *testing.T) {
+	full := simulate(t, options{brokers: true})
+	none := func(b *event.BrokerSnapshotPayload) { b.Positions = nil }
+	mutate := map[int]func(*event.BrokerSnapshotPayload){
+		20: none,
+		22: func(b *event.BrokerSnapshotPayload) { none(b); b.ExcessLiquidity = 0.1 * b.NetLiquidation },
+	}
+	r := restartAt17(t, full, options{prelude: []event.Envelope{haltedState(t)}, brokerMutate: mutate})
+	withheld := ofType(r.decisions, event.SaleWithheldEventType)
+	if len(withheld) != 2 {
+		t.Fatalf("withheld %d, want 2", len(withheld))
+	}
+	if withheld[0].ID == withheld[1].ID {
+		t.Errorf("two withholds share the ID %s", withheld[0].ID)
+	}
+	for _, w := range withheld {
+		var p event.SaleWithheldPayload
+		decode(t, w, &p)
+		if p.Reason != event.SaleWithheldNothingToSell {
+			t.Errorf("%s: reason %s", w.ID, p.Reason)
 		}
 	}
 }

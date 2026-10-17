@@ -59,7 +59,7 @@ func TestAMomentumRunReadsTheKillSwitch(t *testing.T) {
 // TestAMomentumRunSizesSellsFromTheBrokerSnapshot: a broker snapshot reaches
 // the IRA's gate, so a sell beyond the broker's holding is refused as a
 // breach and degrades the account on that instrument, never resized (ADR
-// 0019, amended 2026-10-17; ADR 0026, point 2.5). The figures of every order
+// 0019, amendment of 2026-10-17; ADR 0026, point 2.5). The figures of every order
 // checked after it carry the broker snapshot, at the version that holds them,
 // and an IRA's snapshot raises no margin alarm.
 func TestAMomentumRunSizesSellsFromTheBrokerSnapshot(t *testing.T) {

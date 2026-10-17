@@ -87,7 +87,27 @@ func TestBrokerSnapshotValidate(t *testing.T) {
 	type P = event.BrokerSnapshotPayload
 	expectInvalid(t, "account", v, func(p *P) { p.AccountID = "" }, "account")
 	expectInvalid(t, "as of", v, func(p *P) { p.AsOf = time.Time{} }, "as of")
-	expectInvalid(t, "net liquidation", v, func(p *P) { p.NetLiquidation = 0 }, "net liquidation")
+	expectInvalid(t, "net liquidation", v, func(p *P) { p.NetLiquidation = math.Inf(-1) }, "net liquidation")
+	// IBKR can report a net liquidation or mark that is not positive: the
+	// snapshot records it as observed, and the gate refuses to size from it.
+	for name, mutate := range map[string]func(*P){
+		"zero net liquidation":     func(p *P) { p.NetLiquidation = 0 },
+		"negative net liquidation": func(p *P) { p.NetLiquidation = -500 },
+		"set mark zero": func(p *P) {
+			p.Positions = slicesClone(p.Positions)
+			p.Positions[0].Mark = 0
+		},
+		"set mark negative": func(p *P) {
+			p.Positions = slicesClone(p.Positions)
+			p.Positions[0].Mark = -1
+		},
+	} {
+		p := v
+		mutate(&p)
+		if err := p.Validate(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
 	expectInvalid(t, "excess liquidity", v, func(p *P) { p.ExcessLiquidity = math.NaN() }, "excess liquidity")
 	expectInvalid(t, "unknown component", v, func(p *P) { p.Unreadable = []string{"weather"} }, "component")
 	expectInvalid(t, "unsorted components", v, func(p *P) {
@@ -102,7 +122,7 @@ func TestBrokerSnapshotValidate(t *testing.T) {
 	expectInvalid(t, "position instrument", v, func(p *P) { p.Positions = []event.BrokerPosition{{Quantity: 1}} }, "instrument")
 	expectInvalid(t, "zero position", v, func(p *P) { p.Positions = slicesClone(p.Positions); p.Positions[0].Quantity = 0 }, "zero")
 	expectInvalid(t, "mark without set", v, func(p *P) { p.Positions = slicesClone(p.Positions); p.Positions[0].MarkSet = false }, "mark")
-	expectInvalid(t, "set mark not positive", v, func(p *P) { p.Positions = slicesClone(p.Positions); p.Positions[0].Mark = 0 }, "mark")
+	expectInvalid(t, "set mark not finite", v, func(p *P) { p.Positions = slicesClone(p.Positions); p.Positions[0].Mark = math.NaN() }, "mark")
 	expectInvalid(t, "unsorted positions", v, func(p *P) {
 		p.Positions = []event.BrokerPosition{{InstrumentID: "SPY", Quantity: 1}, {InstrumentID: "IEF", Quantity: 1}}
 	}, "ascending")
@@ -194,7 +214,18 @@ func TestSaleWithheldValidate(t *testing.T) {
 	expectInvalid(t, "trigger", v, func(p *P) { p.Trigger = "whim" }, "trigger")
 	expectInvalid(t, "reason", v, func(p *P) { p.Reason = "whim" }, "reason")
 	expectInvalid(t, "detail", v, func(p *P) { p.Detail = "" }, "detail")
-	for _, reason := range []string{event.SaleWithheldUnreadable, event.SaleWithheldUnknownWorkingSell, event.SaleWithheldNothingToSell} {
+	// Only a withhold that asks the owner to act by hand is the attempt.
+	for reason, attempt := range map[string]bool{
+		event.SaleWithheldUnreadable: true, event.SaleWithheldUnknownWorkingSell: true,
+		event.SaleWithheldNothingToSell: false, event.SaleWithheldStaleBrokerSnapshot: false, event.SaleWithheldNotPositive: false,
+	} {
+		p := v
+		p.Reason = reason
+		if p.Attempted() != attempt {
+			t.Errorf("%s: attempted %v, want %v", reason, p.Attempted(), attempt)
+		}
+	}
+	for _, reason := range []string{event.SaleWithheldUnreadable, event.SaleWithheldUnknownWorkingSell, event.SaleWithheldNothingToSell, event.SaleWithheldStaleBrokerSnapshot, event.SaleWithheldNotPositive} {
 		p := v
 		p.Reason = reason
 		if err := p.Validate(); err != nil {
@@ -236,6 +267,7 @@ func TestSaleOrderValidate(t *testing.T) {
 
 func TestRiskFiguresBrokerFields(t *testing.T) {
 	r := validOrderReleased()
+	r.Side = event.OrderSideSell
 	r.Figures.RiskReducing, r.Figures.BrokerSet, r.Figures.BrokerHolding, r.Figures.WorkingSells = true, true, 147, 10
 	if err := r.Validate(); err != nil {
 		t.Fatalf("broker figures: %v", err)
@@ -243,9 +275,14 @@ func TestRiskFiguresBrokerFields(t *testing.T) {
 	type R = event.OrderReleasedPayload
 	expectInvalid(t, "broker values without broker", r, func(p *R) { p.Figures.BrokerSet = false }, "broker")
 	expectInvalid(t, "negative working sells", r, func(p *R) { p.Figures.WorkingSells = -1 }, "working sells")
-	expectInvalid(t, "risk-reducing without broker", r, func(p *R) {
-		p.Figures.BrokerSet, p.Figures.BrokerHolding, p.Figures.WorkingSells = false, 0, 0
-	}, "risk-reducing")
+	expectInvalid(t, "a risk-reducing buy", r, func(p *R) { p.Side = event.OrderSideBuy }, "risk-reducing")
+	// With no broker snapshot, a sell within the account snapshot's holding
+	// is still risk-reducing, and the figures say so.
+	account := r
+	account.Figures.BrokerSet, account.Figures.BrokerHolding, account.Figures.WorkingSells = false, 0, 0
+	if err := account.ValidateSchema(event.OrderReleasedSafetyVersion); err != nil {
+		t.Errorf("risk-reducing without a broker snapshot: %v", err)
+	}
 	// The broker fields are omitted when unset, so figures without a broker snapshot keep their bytes.
 	raw, err := json.Marshal(validRiskFigures())
 	if err != nil {
@@ -291,11 +328,11 @@ func TestSafetyFieldsJoinAtTheirVersions(t *testing.T) {
 	withBroker := validRiskFigures()
 	withBroker.BrokerSet, withBroker.BrokerHolding, withBroker.WorkingSells, withBroker.RiskReducing = true, 147, 10, true
 	brokerReleased := validOrderReleased()
-	brokerReleased.Figures = withBroker
+	brokerReleased.Figures, brokerReleased.Side = withBroker, event.OrderSideSell
 	cashReleased := validOrderReleased()
 	cashReleased.Figures.CashChecked, cashReleased.Figures.BuyCost, cashReleased.Figures.CashAvailable = true, 900, 980
 	brokerRefused := validOrderRefused()
-	brokerRefused.Figures = withBroker
+	brokerRefused.Figures, brokerRefused.Side = withBroker, event.OrderSideSell
 	killRefused := validOrderRefused()
 	killRefused.Reason = event.RefusedKillSwitch
 	sellRefused := validOrderRefused()

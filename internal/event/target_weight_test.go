@@ -38,6 +38,7 @@ func validTargetWeightConfiguration() event.TargetWeightConfigurationPayload {
 			ExcessLiquidityUrgent:       0.2,
 			ExcessLiquidityStaleMinutes: 30,
 		},
+		Execution: event.ExecutionConfiguration{MaxSnapshotAge: 30},
 	}
 }
 
@@ -179,7 +180,7 @@ func TestTargetWeightConfigurationValidate(t *testing.T) {
 // or an encoding change.
 func TestTargetWeightConfigurationHashStability(t *testing.T) {
 	got := event.TargetWeightConfigurationHash(validTargetWeightConfiguration())
-	const want = "sha256:eba3a6b9d07f600a527f7df04d2644faec0abb9a74bea0b09f343e518fa95329"
+	const want = "sha256:f49cf708aec6e453ba8978f31323ae6fb0657d5b9e07ac53fd60615a54f7409e"
 	if got != want {
 		t.Fatalf("TargetWeightConfigurationHash = %s, want %s", got, want)
 	}

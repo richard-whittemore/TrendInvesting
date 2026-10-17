@@ -19,7 +19,7 @@ func limits() event.MarginLimits {
 
 func gate(t *testing.T, l event.MarginLimits, mode string) *risklimit.Gate {
 	t.Helper()
-	g, err := risklimit.NewGate("joint", l, mode)
+	g, err := risklimit.NewGate("joint", l, mode, 30*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func order(side string, quantity, held int64) risklimit.Order {
 // bookOf is the book the orders were planned against: each order's held
 // quantity of its instrument at its reference price, and nothing else held.
 func bookOf(plan ...risklimit.Order) risklimit.Book {
-	book := risklimit.Book{Holdings: map[string]int64{}, Prices: map[string]float64{}}
+	book := risklimit.Book{Holdings: map[string]int64{}, Prices: map[string]float64{}, At: at}
 	for _, o := range plan {
 		if o.Planned.HeldQuantity != 0 {
 			book.Holdings[o.Planned.InstrumentID] = o.Planned.HeldQuantity
@@ -244,7 +244,8 @@ func TestDegradedAllowsNoBuyAndFreezesItsScope(t *testing.T) {
 	observe(t, g, "broker:1", ief)
 	released(t, check(t, g, other)[0])
 	// A sell beyond the broker's holding would open a short: refused, not
-	// resized (ADR 0019, amended 2026-10-17, reading 10), and IEF is frozen.
+	// resized (ADR 0019, amendment of 2026-10-17: a sell above the broker
+	// quantity is refused, not resized), and IEF is frozen.
 	otherShort := order(event.OrderSideSell, 11, 10)
 	otherShort.Planned.InstrumentID = "IEF"
 	refusedFor(t, check(t, g, otherShort)[0], event.RefusedBrokerHolding)
@@ -286,7 +287,8 @@ func TestDegradedKeepsManagingInstrumentsItDoesNotName(t *testing.T) {
 // TestDegradedSellAboveTheBrokerHoldingIsRefusedNotResized: a Degraded sell
 // above the broker quantity is refused (broker-holding) and the account
 // degrades further, naming the instrument; the gate never resizes it (ADR
-// 0019, amended 2026-10-17, reading 10).
+// 0019, amendment of 2026-10-17: the planner, not the gate, chooses
+// quantities).
 func TestDegradedSellAboveTheBrokerHoldingIsRefusedNotResized(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	check(t, g, order(event.OrderSideBuy, 5001, 0))
@@ -328,14 +330,17 @@ func TestDryRunReleasesWithoutSending(t *testing.T) {
 func TestGateRefusesBadConstructionAndInput(t *testing.T) {
 	invalid := limits()
 	invalid.MaxExposure = 0
-	if _, err := risklimit.NewGate("joint", invalid, event.TradingModeDryRun); err == nil {
+	if _, err := risklimit.NewGate("joint", invalid, event.TradingModeDryRun, 30*time.Minute); err == nil {
 		t.Error("invalid limits accepted")
 	}
-	if _, err := risklimit.NewGate("joint", limits(), "yolo"); err == nil {
+	if _, err := risklimit.NewGate("joint", limits(), "yolo", 30*time.Minute); err == nil {
 		t.Error("invalid mode accepted")
 	}
-	if _, err := risklimit.NewGate("", limits(), event.TradingModeDryRun); err == nil {
+	if _, err := risklimit.NewGate("", limits(), event.TradingModeDryRun, 30*time.Minute); err == nil {
 		t.Error("missing account accepted")
+	}
+	if _, err := risklimit.NewGate("joint", limits(), event.TradingModeDryRun, 0); err == nil {
+		t.Error("a margin gate without a maximum broker snapshot age")
 	}
 	g := gate(t, limits(), event.TradingModeDryRun)
 	bad := order(event.OrderSideBuy, 0, 0)

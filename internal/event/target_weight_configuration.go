@@ -137,16 +137,28 @@ type MomentumConfiguration struct {
 	SectorSources []string `json:"sector_sources"`
 }
 
-// ExecutionConfiguration is an IRA's execution rules (ADR 0026, points 2 and 6).
+// ExecutionConfiguration is an account's execution rules (ADR 0026, points 2
+// and 6): an IRA's cash rule, share quantity and fee allowance, and the joint
+// margin account's MaxSnapshotAge, alone.
 type ExecutionConfiguration struct {
-	// CashRule is one of the CashRule constants (D5).
-	CashRule string `json:"cash_rule"`
+	// CashRule is one of the CashRule constants (D5). It and ShareQuantity
+	// are always set for an IRA, so omitting them when empty changes no IRA
+	// configuration's bytes or hash, and the joint account's execution
+	// section encodes only what it sets.
+	CashRule string `json:"cash_rule,omitzero"`
 	// ShareQuantity is ShareQuantityWhole (D7).
-	ShareQuantity string `json:"share_quantity"`
+	ShareQuantity string `json:"share_quantity,omitzero"`
 	// MaxFeesPerOrder is the most commission and fees one order can cost,
 	// added to every buy's worst-case cost (ADR 0026, point 2, "Worst-case
 	// cost").
 	MaxFeesPerOrder float64 `json:"max_fees_per_order"`
+	// MaxSnapshotAge, in minutes, is the oldest the latest broker snapshot
+	// may be at its trigger for the sale back to 98% to be sized from it
+	// (ADR 0019: the maximum snapshot age is required configuration with no
+	// permissive default; "a stale matching snapshot is not success"). It is
+	// set for the joint margin account and is zero, and omitted, for an IRA,
+	// which never gets the sale.
+	MaxSnapshotAge int `json:"max_snapshot_age_minutes,omitzero"`
 }
 
 // BoostConfiguration is Boost's parameters as backtested
@@ -210,12 +222,18 @@ func (p TargetWeightConfigurationPayload) Validate() error {
 		if !p.Limits.HasCushion() {
 			errs = append(errs, errors.New("a margin account's limits set the excess liquidity thresholds"))
 		}
-		if !p.Momentum.isZero() || p.Execution != (ExecutionConfiguration{}) {
-			errs = append(errs, errors.New("a boost configuration sets no momentum or execution section"))
+		if !p.Momentum.isZero() || p.Execution != (ExecutionConfiguration{MaxSnapshotAge: p.Execution.MaxSnapshotAge}) {
+			errs = append(errs, errors.New("a boost configuration sets no momentum or execution section beyond the execution max snapshot age"))
+		}
+		if p.Execution.MaxSnapshotAge < 1 {
+			errs = append(errs, errors.New("a margin account's execution max snapshot age must be at least 1 minute"))
 		}
 	case TargetWeightStrategyMomentum:
 		errs = append(errs, p.Momentum.validate()...)
 		errs = append(errs, p.Execution.validate()...)
+		if p.Execution.MaxSnapshotAge != 0 {
+			errs = append(errs, errors.New("an IRA's execution sets no max snapshot age: it never gets the sale back to 98%"))
+		}
 		if p.Boost != (BoostConfiguration{}) {
 			errs = append(errs, errors.New("a momentum configuration sets no boost section"))
 		}

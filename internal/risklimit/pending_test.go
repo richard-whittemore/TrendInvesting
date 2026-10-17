@@ -13,9 +13,11 @@ import (
 // every working or pending sell", cancel-pending included; ADR 0026, points
 // 2.5 and 4): a released sell is pending from its release until recorded
 // broker facts resolve it. Its pending quantity is what was released, less
-// what fill reports or a broker snapshot show filled, less the remainder a
-// lifecycle report or a broker snapshot shows cancelled. A snapshot alone
-// never clears it.
+// what is known filled: fill reports, a broker snapshot that lists it at a
+// remaining quantity, or a fall in the holding, seen by an account or broker
+// snapshot, that known fills do not explain. Only a canceled or invalid
+// lifecycle report ends the remainder: a snapshot that no longer lists a sell
+// never shows it cancelled.
 
 // sellFill records an execution of the released sell client.
 func sellFill(t *testing.T, g *risklimit.Gate, client, fillID string, quantity int64) {
@@ -38,6 +40,16 @@ func sellStatus(t *testing.T, g *risklimit.Gate, client, status string, quantity
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// account is an account snapshot holding held SPY, taken minutes after the
+// fixture time.
+func account(held int64, minutes int) event.AccountPositionsSnapshotPayload {
+	p := event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: at.Add(time.Duration(minutes) * time.Minute), NetLiquidation: 10000, Currency: "USD"}
+	if held != 0 {
+		p.Positions = []event.AccountPosition{{InstrumentID: "SPY", Quantity: held}}
+	}
+	return p
 }
 
 // later returns s taken minutes after the fixture time.
@@ -80,25 +92,74 @@ func pendingIs(t *testing.T, g *risklimit.Gate, want int64, why string) {
 func TestAnAccountSnapshotNeverClearsAWorkingSell(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	urgentSale(t, g)
-	g.ObserveAccount()
+	g.ObserveAccount(account(147, 1))
 	pendingIs(t, g, 54, "the account snapshot shows 147 while the sale works")
 	exit := order(event.OrderSideSell, 94, 147)
 	refusedFor(t, check(t, g, exit)[0], event.RefusedBrokerHolding)
 }
 
-// A broker snapshot that no longer lists the urgent sale and shows the
-// holding unchanged shows it cancelled unfilled, so it no longer shrinks or
-// blocks the exit.
-func TestABrokerSnapshotShowingASellCancelledUnfilledFreesTheExit(t *testing.T) {
+// A broker snapshot that does not list a sell released before it, with the
+// holding unchanged, shows nothing: the sell may not have reached IBKR yet.
+// It stays pending, so the same session's exit cannot also sell its shares:
+// the urgent sale of 54 and an exit of 54 would otherwise sell 108 of 147,
+// far below 98%. A later listing, a fill or a holding fall, or a
+// cancellation report, resolves it.
+func TestADroppedSellWithTheHoldingUnchangedStaysPending(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
-	g.ObserveAccount()
-	urgentSale(t, g)
+	g.ObserveAccount(account(147, -1))
+	sale := urgentSale(t, g)
 	pendingIs(t, g, 54, "released after the account snapshot")
 	observe(t, g, "broker:2", later(boosted(), 1))
-	pendingIs(t, g, 0, "dropped from the open orders with the holding unchanged: cancelled")
-	exit := order(event.OrderSideSell, 54, 147)
+	pendingIs(t, g, 54, "not yet listed, the holding unchanged: still pending")
+	exit := order(event.OrderSideSell, 94, 147)
 	exit.Planned.ClientOrderID = "tw-exit"
-	released(t, check(t, g, exit)[0])
+	o := check(t, g, exit)[0]
+	refusedFor(t, o, event.RefusedBrokerHolding)
+	if o.Refused.Figures.WorkingSells != 54 {
+		t.Errorf("the exit is checked net of the unlisted sale: %+v", o.Refused.Figures)
+	}
+	observe(t, g, "broker:3", later(boosted(listed(sale.ClientOrderID, event.BrokerOrderWorking, 54)), 2))
+	pendingIs(t, g, 54, "listed working at last")
+	observe(t, g, "broker:4", later(boosted(), 3))
+	pendingIs(t, g, 54, "dropped again, the holding unchanged")
+	sellStatus(t, g, sale.ClientOrderID, event.OrderLifecycleStatusCanceled, 54, sale.LimitPrice)
+	pendingIs(t, g, 0, "only the cancellation report ends it")
+}
+
+// A completed sell that the account snapshot shows before any broker
+// snapshot does is not counted again when the broker snapshot then infers
+// the fill: the urgent sale of 54 of 147 fills, the account snapshot shows
+// 93, and neither the next exit's sizing nor the broker-holding check counts
+// the 54 a second time.
+func TestACompletedSellTheAccountSnapshotShowsFirstIsNotCountedTwice(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	g.ObserveAccount(account(147, -1))
+	sale := urgentSale(t, g)
+	g.ObserveAccount(account(93, 60))
+	pendingIs(t, g, 0, "the account snapshot's 93 already shows the 54 sold")
+	b := later(boosted(), 65)
+	b.Positions[0].Quantity = 93
+	observe(t, g, "broker:2", b)
+	pendingIs(t, g, 0, "the broker snapshot infers the same 54, already shown")
+	sellFill(t, g, sale.ClientOrderID, "late", 54)
+	pendingIs(t, g, 0, "a late fill report of the same 54 is not counted again")
+	o := check(t, g, order(event.OrderSideSell, 1, 93))[0]
+	released(t, o)
+	if o.Released.Figures.WorkingSells != 0 || o.Released.Figures.BrokerHolding != 93 {
+		t.Errorf("nothing left working against the broker's 93: %+v", o.Released.Figures)
+	}
+}
+
+// With no broker snapshot between them, two account snapshots show a fill
+// by the fall in the holding alone.
+func TestAnAccountSnapshotsHoldingFallShowsAFill(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	g.ObserveAccount(account(100, 0))
+	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+	g.ObserveAccount(account(75, 10))
+	pendingIs(t, g, 35, "25 shown sold; 35 still pending")
+	sellFill(t, g, "tw-sell", "f1", 25)
+	pendingIs(t, g, 35, "the report of the same 25 changes nothing")
 }
 
 // A partial fill leaves the rest pending; the filled shares are still not
@@ -106,11 +167,11 @@ func TestABrokerSnapshotShowingASellCancelledUnfilledFreesTheExit(t *testing.T) 
 func TestAPartialFillLeavesTheRestPending(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	observe(t, g, "broker:1", broker(100))
-	g.ObserveAccount()
+	g.ObserveAccount(account(100, 1))
 	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
 	sellFill(t, g, "tw-sell", "f1", 20)
 	pendingIs(t, g, 60, "40 working and 20 filled since the account snapshot")
-	g.ObserveAccount()
+	g.ObserveAccount(account(80, 2))
 	pendingIs(t, g, 40, "an account snapshot after the fill shows the 20")
 	again := order(event.OrderSideSell, 41, 100)
 	again.Planned.ClientOrderID = "tw-again"
@@ -128,7 +189,7 @@ func TestAPartialFillLeavesTheRestPending(t *testing.T) {
 func TestACancelPendingSellStaysPendingInFull(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	observe(t, g, "broker:1", broker(100))
-	g.ObserveAccount()
+	g.ObserveAccount(account(100, 0))
 	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
 	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCancelPending, 60, 1)
 	pendingIs(t, g, 60, "cancel-pending")
@@ -138,13 +199,13 @@ func TestACancelPendingSellStaysPendingInFull(t *testing.T) {
 	pendingIs(t, g, 0, "cancelled")
 }
 
-// A broker snapshot resolves a sell: listed, it is pending at the broker's
-// remaining quantity; dropped, the fall in the holding shows what filled
-// and the rest is cancelled; unreadable, it resolves nothing.
+// A broker snapshot resolves what it shows of a sell: listed, it is pending
+// at the broker's remaining quantity; dropped, the fall in the holding shows
+// what filled and the rest stays pending; unreadable, it resolves nothing.
 func TestABrokerSnapshotResolvesASell(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	observe(t, g, "broker:1", broker(100))
-	g.ObserveAccount()
+	g.ObserveAccount(account(100, 0))
 	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
 
 	blind := later(broker(100), 1)
@@ -154,15 +215,17 @@ func TestABrokerSnapshotResolvesASell(t *testing.T) {
 
 	observe(t, g, "broker:3", later(broker(75, listed("tw-sell", event.BrokerOrderWorking, 35)), 2))
 	pendingIs(t, g, 60, "35 working and 25 filled since the account snapshot")
-	g.ObserveAccount()
+	g.ObserveAccount(account(75, 2))
 	pendingIs(t, g, 35, "pending at the broker's remaining quantity")
 
 	observe(t, g, "broker:4", later(broker(55), 3))
-	pendingIs(t, g, 20, "20 more filled since the account snapshot; the other 15 cancelled")
-	g.ObserveAccount()
-	pendingIs(t, g, 0, "resolved")
+	pendingIs(t, g, 35, "20 more filled since the account snapshot; the other 15 still pending")
+	g.ObserveAccount(account(55, 3))
+	pendingIs(t, g, 15, "the dropped 15 are not taken as cancelled")
 	sellFill(t, g, "tw-sell", "f1", 45)
-	pendingIs(t, g, 0, "a fill report of shares a snapshot already showed is not counted twice")
+	pendingIs(t, g, 15, "a fill report of shares a snapshot already showed is not counted twice")
+	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCanceled, 60, 1)
+	pendingIs(t, g, 0, "the cancellation report ends the 15")
 }
 
 // A broker snapshot with the sell dropped but no earlier holding to compare
@@ -170,7 +233,6 @@ func TestABrokerSnapshotResolvesASell(t *testing.T) {
 // report resolves it.
 func TestADroppedSellWithNoEarlierHoldingStaysPending(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
-	g.ObserveAccount()
 	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
 	observe(t, g, "broker:1", broker(100))
 	pendingIs(t, g, 60, "no earlier broker holding")
@@ -185,7 +247,7 @@ func TestADroppedSellWithNoEarlierHoldingStaysPending(t *testing.T) {
 func TestALifecycleReportResolvesASell(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	observe(t, g, "broker:1", broker(100))
-	g.ObserveAccount()
+	g.ObserveAccount(account(100, 0))
 	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
 	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusSubmitted, 60, 1)
 	pendingIs(t, g, 60, "acknowledged")
@@ -193,7 +255,7 @@ func TestALifecycleReportResolvesASell(t *testing.T) {
 	pendingIs(t, g, 0, "cancelled unfilled")
 	sellFill(t, g, "tw-sell", "late", 10)
 	pendingIs(t, g, 10, "a late fill since the account snapshot")
-	g.ObserveAccount()
+	g.ObserveAccount(account(90, 1))
 	pendingIs(t, g, 0, "shown")
 }
 
@@ -289,7 +351,7 @@ func TestPendingStaysWithinZeroAndTheRelease(t *testing.T) {
 				}
 				observe(t, g, "broker:"+string(rune('a'+step)), s)
 			}
-			g.ObserveAccount()
+			g.ObserveAccount(account(40+rng.Int63n(61), step))
 			if got := g.PendingSells("SPY"); got < 0 || got > release {
 				t.Fatalf("seed %d step %d: pending %d outside [0, %d]", seed, step, got, release)
 			}
@@ -305,9 +367,21 @@ func TestAnUnknownSellsFillsExplainTheirShareOfTheFall(t *testing.T) {
 	}
 	g := gate(t, limits(), event.TradingModeDryRun)
 	observe(t, g, "broker:1", broker(100, unknown(30)))
-	g.ObserveAccount()
+	g.ObserveAccount(account(100, 0))
 	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
 	pendingIs(t, g, 90, "ours and the unknown sell")
 	observe(t, g, "broker:2", later(broker(80, unknown(10)), 1))
-	pendingIs(t, g, 10, "the unknown sell sold the 20; ours was cancelled")
+	pendingIs(t, g, 70, "the unknown sell sold the 20; ours, dropped, stays pending")
+}
+
+// An account snapshot's fall in the holding is taken first as the fills of
+// any unknown sell the broker lists, which may be what sold, so ours stays
+// pending rather than be counted as sold too early.
+func TestAnAccountSnapshotsFallIsFirstAnUnknownSells(t *testing.T) {
+	unknown := event.BrokerOrder{BrokerOrderID: "ib-hand", InstrumentID: "SPY", Side: event.OrderSideSell, Status: event.BrokerOrderWorking, RemainingQuantity: 30}
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(100, unknown))
+	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+	g.ObserveAccount(account(60, 10))
+	pendingIs(t, g, 80, "a fall of 40: 30 may be the unknown sell's, so only 10 are taken as ours; 50 pending and the unknown 30")
 }

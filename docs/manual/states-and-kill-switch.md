@@ -99,25 +99,32 @@ Worked example (ADR 0019): 147 SPY, $4,700 borrowed, mark $90, so net
 liquidation is $8,530. It keeps 93 shares and sells 54.
 
 **When a sell stops counting.** A sell this program sent is *pending* from
-the moment it is released until the broker's own reports settle it. Pending
-shares are the shares sent, minus the shares the broker reports filled, minus
-the shares it reports cancelled. In plain terms:
+the moment it is released until the shares are known filled or a
+cancellation report ends it. Pending shares are the shares sent minus the
+shares known filled. One rule decides what is known filled:
 
-- A fill report ends the shares it filled. A partial fill leaves the rest
+- A fill report shows the shares it filled. A partial fill leaves the rest
   pending.
-- A cancellation or a refusal ends whatever had not filled.
-- A sell waiting to be cancelled (cancel-pending) may still fill, so it stays
-  pending in full until the cancellation is confirmed.
-- A sell IBKR lists as working counts at the quantity IBKR says remains.
-- A sell IBKR no longer lists is settled by comparing IBKR's holding with its
-  previous snapshot. The drop that other fills do not explain counts as
-  filled, oldest sell first, and the rest as cancelled. When that comparison
-  cannot be made (no earlier snapshot, or IBKR could not read the holding or
-  the open orders), the sell stays pending until a fill or cancellation
-  report arrives.
-- A snapshot on its own never clears a sell. The account snapshot shows only
-  what had filled when it was taken, so shares filled after it still count
-  against the exit.
+- A sell IBKR lists as working has filled all but the quantity IBKR says
+  remains.
+- A fall in your holding, seen by an account snapshot or an IBKR snapshot
+  against the snapshot before it, that the fills already known do not
+  explain counts as filled, oldest sell first. An account snapshot first
+  sets aside the shares of any unknown sell IBKR listed, since that order
+  may be what sold.
+- A fill learned in more than one way is counted once. If the account
+  snapshot already showed the 54 shares of the sale sold (147 down to 93),
+  the IBKR snapshot and the fill report that follow add nothing, and the
+  next exit is not cut down by them a second time.
+
+Only a cancellation or refusal report ends what has not filled. A sell IBKR
+no longer lists, with your holding unchanged, stays pending: it may simply
+not have reached IBKR yet. So an urgent sale of 54 that a snapshot a minute
+later does not list still holds the same session's exit back; otherwise both
+could fill and sell 108 of 147, far below 98%. The sell is settled by a
+later snapshot that lists it, a fall in the holding, a fill report or a
+cancellation report. A sell waiting to be cancelled (cancel-pending) may
+still fill, so it stays pending in full until the cancellation is confirmed.
 
 The exit and the broker-holding check use this same rule, so a sell still
 working is never sold again, and a sell that was cancelled no longer holds
@@ -131,14 +138,40 @@ alarm.
 **When it does not go.** It is *withheld*, and recorded as
 `risk.sale.withheld`, when:
 
-- IBKR's values cannot be read; or
+- IBKR's values cannot be read (`broker-values-unreadable`); or
 - a working sell is at IBKR that this program did not release (an unknown
-  order, marked **CONTAINMENT REQUIRED**); or
-- there is nothing to sell, because you are already at or below 98%.
+  order, marked **CONTAINMENT REQUIRED**, `unknown-working-sell`); or
+- the latest IBKR snapshot is older, at the trigger, than the configured
+  `MaxSnapshotAge` (`stale-broker-snapshot`); or
+- the latest IBKR snapshot reports a net liquidation or a mark that is not
+  strictly positive (`non-positive-broker-values`): the shares to keep
+  would be zero or negative, and the sale could sell into a short; or
+- there is nothing to sell, because you are already at or below 98%
+  (`nothing-to-sell`).
 
 In the first two cases the sale counts as attempted and is never tried again
 automatically. The alert will ask you to act by hand, and a later automatic
-sale could duplicate yours. In the third case nothing was attempted.
+sale could duplicate yours. No IBKR snapshot recorded yet counts as
+unreadable. In the other three nothing was attempted: the engine state does
+not change, and the sale is decided again while what fired it is still in
+force: Boost's exit firing again at a later session, or the alarm still
+urgent at the next IBKR snapshot. The incident or the engagement only decides
+the tag, picked afresh each time. The sale is always sized from the latest
+snapshot, never an older one. A snapshot both stale and not positive is
+withheld as `stale-broker-snapshot`: freshness is checked first.
+
+**`MaxSnapshotAge`.** The margin account's configuration sets it, in
+minutes, in the execution section (`execution.max_snapshot_age_minutes`).
+It has no default: a margin configuration without it, or with zero or less,
+is rejected. For the sale, the age is the triggering input's journalled time
+(the session's close for the exit, the snapshot's own time for the urgent
+alarm) minus the IBKR snapshot's time; for any other sell, it is measured
+from that sell's `strategy.order.planned` time. The wall clock is never
+read. The same bound applies to every other sell in the margin
+account: one checked against a stale snapshot is refused
+(`stale-broker-snapshot`), and one checked against a net liquidation or mark
+that is not positive is refused (`non-positive-broker-values`). Neither
+refusal changes the engine state.
 
 ## The margin-cushion alarm
 
@@ -151,6 +184,10 @@ account's Excess Liquidity as a share of net liquidation:
 | warning | below 40% |
 | urgent | below 20%, or no reading for 30 minutes while the market is open |
 
+With no reading yet in a run, the 30 minutes run from the run's first IBKR
+snapshot, so a run started mid-session is not urgent at once. A net
+liquidation that is not positive gives no ratio, so it counts as no reading.
+
 The thresholds are in the configuration (version 3 of
 `strategy.target-weight.configuration`). Only the margin account has them: an
 IRA has no margin cushion, so its configuration leaves them out and it gets no
@@ -160,8 +197,11 @@ alarm. A change of level is recorded as
 ## Reading it afterwards
 
 `journal-query refusals` lists each refusal with its reason and each state
-change. The new reasons are `kill-switch`, `broker-holding` and
-`sale-attempted`. A planned sale is version 2 of `strategy.order.planned`.
+change. The new reasons are `kill-switch`, `broker-holding`,
+`sale-attempted`, `stale-broker-snapshot` and `non-positive-broker-values`.
+A sell exempt as risk-reducing records `risk_reducing`, with or without an
+IBKR snapshot, so the journal shows why its mark, band and size were not
+checked. A planned sale is version 2 of `strategy.order.planned`.
 Releases and refusals with broker figures or one of the new reasons are
 version 3 of `risk.order.released` and `risk.order.refused` (version 2 is the
 account-wide exposure and the IRA's cash check). The tool reads every version. See [journal-query](journal-query.md).
@@ -171,6 +211,9 @@ account-wide exposure and the IRA's cash check). The tool reads every version. S
 - **The broker snapshot is missing or unreadable.** Degraded sells are refused
   and the sale back to 98% is withheld. Nothing is guessed. Sell by hand if the
   alert asks you to.
+- **The broker snapshot is old, or reports a net liquidation or mark of zero
+  or less.** The sale is withheld and other sells are refused, with no state
+  change; the next fresh, positive snapshot decides again.
 - **An order you placed by hand is still working at IBKR.** The program does
   not recognise it, so the sale is withheld (CONTAINMENT REQUIRED). Cancel or
   settle it, then recover.

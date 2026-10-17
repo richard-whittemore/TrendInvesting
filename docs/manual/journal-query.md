@@ -164,8 +164,9 @@ Turtle stop order's row shows its stop price and its tag.
   (target-weight), order lifecycle changes of versions 1 (Turtle stop orders)
   and 2 (target-weight limit orders), planned orders of versions 1 and 2 (2 is a
   sale back to 98%), risk-gate releases and refusals of versions 1, 2 and 3
-  (3 adds the broker figures and the kill-switch, broker-holding and
-  sale-attempted reasons), and account snapshots of versions 3 (positions) and 4
+  (3 adds the broker figures and the kill-switch, broker-holding,
+  sale-attempted, stale-broker-snapshot and non-positive-broker-values
+  reasons), and account snapshots of versions 3 (positions) and 4
   (positions and cash; the cash is not reported). Only the equity-and-cash
   snapshot (version 2), which holds no positions, is passed over by design.
 - **A bad flag** (a malformed date, a backwards range, an unknown format or

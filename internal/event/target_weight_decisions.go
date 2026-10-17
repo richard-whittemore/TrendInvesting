@@ -331,7 +331,7 @@ const OrderPlannedEventType = "strategy.order.planned"
 //
 //   - Version 1 is an ordinary planned order, with no Sale.
 //   - Version 2 adds Sale, the figures of ADR 0019's sale back to 98%
-//     (amended 2026-10-15 and 2026-10-17). It reads every version-1 field.
+//     (amendments of 2026-10-15 and 2026-10-17). It reads every version-1 field.
 const (
 	OrderPlannedSchemaVersion uint32 = 1
 	OrderPlannedSafetyVersion uint32 = 2
@@ -494,7 +494,8 @@ const (
 //     unvalued-holding) to the closed set.
 //   - Version 3 adds the figures' broker fields (BrokerSet, BrokerHolding,
 //     WorkingSells, RiskReducing) and the refusal reasons kill-switch,
-//     broker-holding and sale-attempted (ADR 0019, amended 2026-10-15 and
+//     broker-holding, sale-attempted, stale-broker-snapshot and
+//     non-positive-broker-values (ADR 0019, amended 2026-10-15 and
 //     2026-10-17; ADR 0026, points 3 and 4).
 //
 // Each version reads every earlier version's fields, and refuses a later
@@ -552,6 +553,16 @@ const (
 	// attempted for the instrument, and is never retried automatically
 	// (ADR 0019, amended 2026-10-15).
 	RefusedSaleAttempted = "sale-attempted"
+	// RefusedStaleBrokerSnapshot: a sell would be checked against a latest
+	// broker snapshot older at its trigger than the configured execution
+	// MaxSnapshotAge (ADR 0019: "a stale matching snapshot is not success").
+	// It changes no engine state.
+	RefusedStaleBrokerSnapshot = "stale-broker-snapshot"
+	// RefusedNonPositiveBrokerValues: the latest broker snapshot reports a
+	// net liquidation or a mark for the instrument that is not strictly
+	// positive, which no sell is checked against (ADR 0019: never short). It
+	// changes no engine state.
+	RefusedNonPositiveBrokerValues = "non-positive-broker-values"
 )
 
 // RiskFigures are the values the gate checked an order against, so the
@@ -574,7 +585,9 @@ type RiskFigures struct {
 	CashAvailable    float64 `json:"cash_available,omitzero"`
 	// RiskReducing marks an order ADR 0026 point 4 calls risk-reducing: a
 	// sell within the broker-reported holding net of every working or
-	// pending sell. It is exempt from the order count, size and price band.
+	// pending sell (BrokerSet), or, with no readable broker snapshot, within
+	// the account snapshot's holding it was sized from. It is exempt from
+	// the order count, size and price band.
 	RiskReducing bool `json:"risk_reducing,omitempty"`
 	// The latest broker snapshot's holding and working sells for the
 	// instrument, when the gate had one (BrokerSet). WorkingSells also counts
@@ -587,7 +600,7 @@ type RiskFigures struct {
 	WorkingSells  int64 `json:"working_sells,omitempty"`
 }
 
-func (f RiskFigures) validate() []error {
+func (f RiskFigures) validate(side string) []error {
 	var errs []error
 	if !isFinite(f.NetLiquidation) || f.NetLiquidation <= 0 {
 		errs = append(errs, errors.New("figures net liquidation must be finite and positive"))
@@ -617,11 +630,11 @@ func (f RiskFigures) validate() []error {
 	if f.WorkingSells < 0 {
 		errs = append(errs, errors.New("figures working sells must not be negative"))
 	}
+	if f.RiskReducing && side != OrderSideSell {
+		errs = append(errs, errors.New("figures risk-reducing marks a sell only: no buy is risk-reducing"))
+	}
 	if !f.BrokerSet && (f.BrokerHolding != 0 || f.WorkingSells != 0) {
 		errs = append(errs, errors.New("figures broker holding and working sells carry values but no broker snapshot is set"))
-	}
-	if f.RiskReducing && !f.BrokerSet {
-		errs = append(errs, errors.New("figures risk-reducing needs the broker snapshot it was sized within"))
 	}
 	switch {
 	case !isFinite(f.BuyCost) || f.BuyCost < 0 || !isFinite(f.CashAvailable):
@@ -690,7 +703,7 @@ func (p OrderReleasedPayload) Validate() error {
 	if p.Mode == TradingModeDryRun && p.Send {
 		errs = append(errs, errors.New("a dry-run release is never sent"))
 	}
-	errs = append(errs, p.Figures.validate()...)
+	errs = append(errs, p.Figures.validate(p.Side)...)
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid order released payload: %w", err)
 	}
@@ -718,7 +731,7 @@ type OrderRefusedPayload struct {
 // version its reason joined at.
 func (p OrderRefusedPayload) need() uint32 {
 	switch p.Reason {
-	case RefusedKillSwitch, RefusedBrokerHolding, RefusedSaleAttempted:
+	case RefusedKillSwitch, RefusedBrokerHolding, RefusedSaleAttempted, RefusedStaleBrokerSnapshot, RefusedNonPositiveBrokerValues:
 		return OrderRefusedSafetyVersion
 	case RefusedIRAExposure, RefusedInsufficientCash, RefusedSellExceedsHolding, RefusedUnvaluedHolding:
 		return max(p.Figures.need(), 2)
@@ -750,14 +763,14 @@ func (p OrderRefusedPayload) Validate() error {
 	case RefusedUndecidedOrder, RefusedMarginExposure, RefusedOrderCount, RefusedOrderSize,
 		RefusedPriceBand, RefusedMissingMark, RefusedEngineDegraded, RefusedEngineHalted,
 		RefusedIRAExposure, RefusedInsufficientCash, RefusedSellExceedsHolding, RefusedUnvaluedHolding,
-		RefusedKillSwitch, RefusedBrokerHolding, RefusedSaleAttempted:
+		RefusedKillSwitch, RefusedBrokerHolding, RefusedSaleAttempted, RefusedStaleBrokerSnapshot, RefusedNonPositiveBrokerValues:
 	default:
 		errs = append(errs, fmt.Errorf("refusal reason %q is not recognised", p.Reason))
 	}
 	if p.Detail == "" {
 		errs = append(errs, errors.New("detail is required: a refusal without its figures cannot be checked"))
 	}
-	errs = append(errs, p.Figures.validate()...)
+	errs = append(errs, p.Figures.validate(p.Side)...)
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid order refused payload: %w", err)
 	}

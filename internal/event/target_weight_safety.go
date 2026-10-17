@@ -187,8 +187,10 @@ func (p BrokerSnapshotPayload) Validate() error {
 		}
 	}
 	if p.Readable(BrokerComponentNetLiquidation) {
-		if !isFinite(p.NetLiquidation) || p.NetLiquidation <= 0 {
-			errs = append(errs, errors.New("net liquidation must be finite and positive"))
+		// Recorded as IBKR reports it, even when not positive: the gate
+		// refuses to size anything from such a value (ADR 0019: never short).
+		if !isFinite(p.NetLiquidation) {
+			errs = append(errs, errors.New("net liquidation must be finite"))
 		}
 	} else if p.NetLiquidation != 0 {
 		errs = append(errs, errors.New("an unreadable net liquidation carries no value"))
@@ -215,10 +217,8 @@ func (p BrokerSnapshotPayload) Validate() error {
 			errs = append(errs, fmt.Errorf("position %s: quantity must not be zero; an empty holding is stated by absence", position.InstrumentID))
 		}
 		switch {
-		case !isFinite(position.Mark) || position.Mark < 0:
-			errs = append(errs, fmt.Errorf("position %s: mark must be finite and not negative", position.InstrumentID))
-		case position.MarkSet && position.Mark == 0:
-			errs = append(errs, fmt.Errorf("position %s: a set mark must be positive", position.InstrumentID))
+		case !isFinite(position.Mark):
+			errs = append(errs, fmt.Errorf("position %s: mark must be finite", position.InstrumentID))
 		case !position.MarkSet && position.Mark != 0:
 			errs = append(errs, fmt.Errorf("position %s: mark carries a value but none is set", position.InstrumentID))
 		}
@@ -487,6 +487,16 @@ const (
 	// SaleWithheldNothingToSell: the holding is already at or below 98%,
 	// net of every working sell.
 	SaleWithheldNothingToSell = "nothing-to-sell"
+	// SaleWithheldStaleBrokerSnapshot: the latest broker snapshot is older at the
+	// trigger than the configured maximum age, so it cannot size the sale
+	// (ADR 0019: "a stale matching snapshot is not success").
+	SaleWithheldStaleBrokerSnapshot = "stale-broker-snapshot"
+	// SaleWithheldNotPositive: the latest broker snapshot is readable, but
+	// its net liquidation or the instrument's mark is not strictly positive,
+	// so ceil(target x V / mark) shares to keep would be zero or negative and
+	// the smallest of the three bounds would sell into a short (ADR 0019:
+	// never short).
+	SaleWithheldNotPositive = "non-positive-broker-values"
 )
 
 // SaleWithheldPayload is a sale back to 98% that was not planned, with the
@@ -503,6 +513,17 @@ type SaleWithheldPayload struct {
 	Detail        string `json:"detail"`
 	// SnapshotID is the broker snapshot consulted; empty when there was none.
 	SnapshotID string `json:"snapshot_id"`
+}
+
+// Attempted reports whether the withheld sale counts as the one attempt: an
+// unreadable latest snapshot or an unknown working sell, for which the alert
+// asks the owner to act by hand and a later automatic sale could duplicate
+// the owner's. A sale withheld with nothing to sell, from a stale snapshot, or
+// from a net liquidation or mark that is not strictly positive is not: it
+// changes no state, and the next trigger with a readable, fresh latest
+// snapshot decides again under the same tag.
+func (p SaleWithheldPayload) Attempted() bool {
+	return p.Reason == SaleWithheldUnreadable || p.Reason == SaleWithheldUnknownWorkingSell
 }
 
 // Validate checks identity, kind, trigger, reason and detail.
@@ -531,7 +552,7 @@ func (p SaleWithheldPayload) Validate() error {
 		errs = append(errs, fmt.Errorf("trigger %q is not exit or margin-urgent", p.Trigger))
 	}
 	switch p.Reason {
-	case SaleWithheldUnreadable, SaleWithheldUnknownWorkingSell, SaleWithheldNothingToSell:
+	case SaleWithheldUnreadable, SaleWithheldUnknownWorkingSell, SaleWithheldNothingToSell, SaleWithheldStaleBrokerSnapshot, SaleWithheldNotPositive:
 	default:
 		errs = append(errs, fmt.Errorf("reason %q is not recognised", p.Reason))
 	}

@@ -140,7 +140,7 @@ func New(strategyVersion string, cfg event.TargetWeightConfigurationPayload, opt
 	if err != nil {
 		return nil, fmt.Errorf("targetweight: %w", err)
 	}
-	gate, err := risklimit.NewGate(cfg.AccountID, cfg.Limits, cfg.Mode)
+	gate, err := risklimit.NewGate(cfg.AccountID, cfg.Limits, cfg.Mode, time.Duration(cfg.Execution.MaxSnapshotAge)*time.Minute)
 	if err != nil {
 		return nil, fmt.Errorf("targetweight: %w", err)
 	}
@@ -301,7 +301,7 @@ func (h *Handler) applySnapshot(in event.Envelope) error {
 		return fmt.Errorf("targetweight: snapshot as of %s does not follow the last, %s", p.AsOf, h.snapshot.AsOf)
 	}
 	h.snapshot = &p
-	h.gate.ObserveAccount()
+	h.gate.ObserveAccount(p)
 	return nil
 }
 
@@ -397,7 +397,7 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	if h.mark != nil && !h.mark.AsOf.Before(p.PeriodEnd) {
 		gateOrder.Mark, gateOrder.MarkSet = h.mark.Price, true
 	}
-	book := risklimit.Book{Holdings: holdings(snapshot.Positions), Prices: map[string]float64{h.cfg.Boost.InstrumentID: bar.Raw.Close}}
+	book := risklimit.Book{Holdings: holdings(snapshot.Positions), Prices: map[string]float64{h.cfg.Boost.InstrumentID: bar.Raw.Close}, At: b.at}
 	if outcome := b.order(gateOrder, book); order.Side == event.OrderSideSell && outcome.Refused != nil {
 		b.sale(event.SaleTriggerExit)
 	}
@@ -583,18 +583,20 @@ func (b *emissions) order(o risklimit.Order, book risklimit.Book) risklimit.Outc
 // trigger, and journals it and its outcome, or why it was withheld.
 func (b *emissions) sale(trigger string) {
 	h := b.h
-	s, ok, err := h.gate.Sale(trigger, h.cfg.Boost.InstrumentID, h.cfg.Boost.InvestedFraction, h.cfg.Limits.PriceBand)
+	s, ok, err := h.gate.Sale(trigger, h.cfg.Boost.InstrumentID, b.at, h.cfg.Boost.InvestedFraction, h.cfg.Limits.PriceBand)
 	b.fail(err)
 	switch {
 	case !ok:
 	case s.Withheld != nil:
-		b.add("sale-withheld:"+s.Withheld.ClientOrderID, event.SaleWithheldEventType, event.SaleWithheldSchemaVersion, *s.Withheld)
+		// Nothing to sell is not an attempt, so the same sale may be withheld
+		// again on a later trigger: the triggering input names each record.
+		b.add("sale-withheld:"+s.Withheld.ClientOrderID+":"+b.in.ID, event.SaleWithheldEventType, event.SaleWithheldSchemaVersion, *s.Withheld)
 	default:
 		// The sale is sized from the broker snapshot alone (orderplan.PlanSale),
 		// so it is valued at the broker's holding and mark: the joint margin
 		// account holds the Boost instrument only.
 		o := *s.Order
-		book := risklimit.Book{Holdings: map[string]int64{o.InstrumentID: o.HeldQuantity}, Prices: map[string]float64{o.InstrumentID: o.ReferencePrice}}
+		book := risklimit.Book{Holdings: map[string]int64{o.InstrumentID: o.HeldQuantity}, Prices: map[string]float64{o.InstrumentID: o.ReferencePrice}, At: b.at}
 		b.order(risklimit.Order{Planned: o}, book)
 	}
 }

@@ -155,7 +155,7 @@ func TestBoostPayloadsOmitMomentumSections(t *testing.T) {
 		payload any
 		absent  []string
 	}{
-		{validTargetWeightConfiguration(), []string{`"momentum"`, `"execution"`}},
+		{validTargetWeightConfiguration(), []string{`"momentum"`, `"cash_rule"`, `"share_quantity"`}},
 		{validTargetsDecided(), []string{`"momentum"`}},
 		{validMomentumDecided(), []string{`"boost"`}},
 		{validOrderReleased(), []string{"cash_checked", "buy_cost", "cash_available"}},

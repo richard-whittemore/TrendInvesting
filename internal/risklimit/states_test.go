@@ -56,7 +56,7 @@ func kill(t *testing.T, g *risklimit.Gate, id string, engaged bool) {
 
 func requestSale(t *testing.T, g *risklimit.Gate, trigger string) (orderplan.Sale, bool) {
 	t.Helper()
-	s, ok, err := g.Sale(trigger, "SPY", 0.98, 0.05)
+	s, ok, err := g.Sale(trigger, "SPY", at, 0.98, 0.05)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,13 +147,17 @@ func TestRiskReducingSellsAreExemptFromCountSizeAndBand(t *testing.T) {
 // TestWithoutABrokerSnapshotASellIsExemptWithinTheAccountHolding: with no
 // readable broker snapshot, a Normal account's sell is risk-reducing within
 // the account snapshot's holding it was sized from (ADR 0026, point 4), and
-// its figures record no broker snapshot.
+// its figures record the exemption and no broker snapshot, so the journal
+// alone explains why the mark, band and size were not checked.
 func TestWithoutABrokerSnapshotASellIsExemptWithinTheAccountHolding(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	o := check(t, g, order(event.OrderSideSell, 5001, 9800))[0]
 	released(t, o)
-	if o.Released.Figures.RiskReducing || o.Released.Figures.BrokerSet {
-		t.Errorf("figures: %+v", o.Released.Figures)
+	if !o.Released.Figures.RiskReducing || o.Released.Figures.BrokerSet {
+		t.Errorf("the exemption is recorded, without a broker snapshot: %+v", o.Released.Figures)
+	}
+	if err := o.Released.ValidateSchema(o.Released.SchemaVersion()); err != nil {
+		t.Errorf("the figures journal: %v", err)
 	}
 	// Beyond the holding it is not exempt, and the book's holding refuses it
 	// before the size is reached.
@@ -350,6 +354,18 @@ func TestHaltedSaleChecks(t *testing.T) {
 			t.Error("not retried")
 		}
 	})
+	t.Run("the latest snapshot, never an older readable one", func(t *testing.T) {
+		g := gate(t, limits(), event.TradingModeDryRun)
+		halt(t, g)
+		observe(t, g, "broker:1", boosted())
+		blind := boosted()
+		blind.AsOf, blind.Unreadable = at.Add(time.Minute), []string{event.BrokerComponentOpenOrders}
+		observe(t, g, "broker:2", blind)
+		s, ok := requestSale(t, g, event.SaleTriggerExit)
+		if !ok || s.Withheld == nil || s.Withheld.Reason != event.SaleWithheldUnreadable || s.Withheld.SnapshotID != "broker:2" {
+			t.Fatalf("the latest snapshot is unreadable; the older readable one is not used: %+v", s)
+		}
+	})
 	t.Run("nothing to sell is not an attempt", func(t *testing.T) {
 		g := gate(t, limits(), event.TradingModeDryRun)
 		halt(t, g)
@@ -373,6 +389,7 @@ func TestHaltedSaleChecks(t *testing.T) {
 		forged, err := orderplan.PlanSale(orderplan.SaleInput{
 			AccountID: "joint", Tag: "engine-state:joint:never", InstrumentID: "SPY", Kind: event.SaleKindIncident,
 			Trigger: event.SaleTriggerExit, Target: 0.98, PriceBand: 0.05, SnapshotID: "broker:1", Snapshot: ptr(boosted()),
+			At: at, MaxSnapshotAge: 30 * time.Minute,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -467,16 +484,25 @@ func TestNoReadingForThirtyMinutesWhileOpenIsUrgent(t *testing.T) {
 	if obs := observe(t, g, "broker:30", blind(30, true)); !obs.Urgent {
 		t.Error("30 minutes open is urgent")
 	}
-	// No reading since the run began, while open, is urgent at once.
+	// With no reading since the run began, the run's first snapshot starts
+	// the clock: urgent once the stale period has passed since it, not at once.
 	g = gate(t, limits(), event.TradingModeDryRun)
-	if obs := observe(t, g, "broker:0", blind(0, true)); !obs.Urgent || obs.Alarm.LastReadingSet {
-		t.Errorf("never read: %+v", obs.Alarm)
+	if obs := observe(t, g, "broker:0", blind(0, true)); obs.Alarm != nil {
+		t.Errorf("the run's first snapshot, without a reading: %+v", obs.Alarm)
+	}
+	if obs := observe(t, g, "broker:29", blind(29, true)); obs.Alarm != nil {
+		t.Errorf("29 minutes since the first snapshot: %+v", obs.Alarm)
+	}
+	if obs := observe(t, g, "broker:30", blind(30, true)); !obs.Urgent || obs.Alarm.LastReadingSet {
+		t.Errorf("never read in 30 minutes: %+v", obs.Alarm)
 	}
 	// An unreadable net liquidation is no reading either.
 	g = gate(t, limits(), event.TradingModeDryRun)
 	s := blind(0, true)
 	s.Unreadable, s.NetLiquidation, s.ExcessLiquidity = []string{event.BrokerComponentNetLiquidation}, 0, 100
-	if obs := observe(t, g, "broker:0", s); !obs.Urgent {
+	observe(t, g, "broker:0", s)
+	s.AsOf = at.Add(30 * time.Minute)
+	if obs := observe(t, g, "broker:30", s); !obs.Urgent {
 		t.Error("no net liquidation, no ratio")
 	}
 	// An IRA has no margin alarm.
@@ -522,7 +548,7 @@ func TestBrokerAndKillSwitchInputsAreChecked(t *testing.T) {
 		t.Error("another account's snapshot accepted")
 	}
 	bad := broker(1)
-	bad.NetLiquidation = -1
+	bad.Unreadable = []string{"no-such-component"}
 	if _, err := g.ObserveBroker("broker:1", bad); err == nil {
 		t.Error("an invalid snapshot accepted")
 	}
@@ -544,7 +570,7 @@ func TestBrokerAndKillSwitchInputsAreChecked(t *testing.T) {
 	}
 	noCushion := limits()
 	noCushion.ExcessLiquidityWarning, noCushion.ExcessLiquidityUrgent, noCushion.ExcessLiquidityStaleMinutes = 0, 0, 0
-	if _, err := risklimit.NewGate("joint", noCushion, event.TradingModeDryRun); err == nil || !strings.Contains(err.Error(), "excess liquidity") {
+	if _, err := risklimit.NewGate("joint", noCushion, event.TradingModeDryRun, 30*time.Minute); err == nil || !strings.Contains(err.Error(), "excess liquidity") {
 		t.Errorf("a margin gate without the alarm's thresholds: %v", err)
 	}
 	cushioned := iraLimits()
@@ -552,18 +578,19 @@ func TestBrokerAndKillSwitchInputsAreChecked(t *testing.T) {
 	if _, err := risklimit.NewIRAGate("joint", cushioned, event.TradingModeDryRun, 0); err == nil || !strings.Contains(err.Error(), "no margin cushion") {
 		t.Errorf("an IRA gate with a margin cushion: %v", err)
 	}
-	if _, _, err := g.Sale("whim", "SPY", 0.98, 0.05); err == nil {
+	if _, _, err := g.Sale("whim", "SPY", at, 0.98, 0.05); err == nil {
 		t.Error("an unknown trigger accepted")
 	}
 	halt(t, g)
-	if _, _, err := g.Sale(event.SaleTriggerExit, "SPY", 0, 0.05); err == nil {
+	if _, _, err := g.Sale(event.SaleTriggerExit, "SPY", at, 0, 0.05); err == nil {
 		t.Error("a sale to no target accepted")
 	}
 }
 
 // TestARestoredStateNamesTheIncident: the first restored record out of
 // Normal is the incident, and a later one (Degraded to Halted) is the same
-// incident (ADR 0019, amended 2026-10-17, reading 3), so the restored run's
+// incident (ADR 0019, amendment of 2026-10-17: Degraded to Halted is one
+// incident), so the restored run's
 // one sale back to 98% is tagged with the first.
 func TestARestoredStateNamesTheIncident(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
@@ -611,4 +638,189 @@ func TestASellReleasedSinceTheSnapshotIsCountedAsWorking(t *testing.T) {
 	again := order(event.OrderSideSell, 31, 100)
 	again.Planned.ClientOrderID = "tw-again"
 	refusedFor(t, check(t, g, again)[0], event.RefusedBrokerHolding)
+}
+
+// TestASaleIsNeverSizedFromAStaleBrokerSnapshot: the sale is sized from the
+// latest broker snapshot only while it is no older than the configured
+// maximum age at the trigger (ADR 0019: "a stale matching snapshot is not
+// success"; the maximum snapshot age is required configuration). The last
+// snapshot shows 147 at 15:00; the owner sells 100 by hand before Boost's
+// exit fires at 23:00, so selling 54 from the 15:00 figures would open a
+// short. The sale is withheld instead, the state unchanged; the withhold is
+// not the attempt, so the next fresh snapshot is sized from again.
+func TestASaleIsNeverSizedFromAStaleBrokerSnapshot(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", boosted())
+	incident := halt(t, g).StateID
+	trigger := at.Add(8 * time.Hour)
+	s, ok, err := g.Sale(event.SaleTriggerExit, "SPY", trigger, 0.98, 0.05)
+	if err != nil || !ok || s.Withheld == nil || s.Withheld.Reason != event.SaleWithheldStaleBrokerSnapshot {
+		t.Fatalf("a snapshot 8 hours old at the trigger: %+v %v %v", s, ok, err)
+	}
+	if err := s.Withheld.Validate(); err != nil {
+		t.Errorf("withheld record: %v", err)
+	}
+	if g.State() != risklimit.StateHalted || g.Incident() != incident {
+		t.Errorf("state %s incident %s: unchanged by the withhold", g.State(), g.Incident())
+	}
+	// Not the attempt: a fresh snapshot at the next trigger sells.
+	fresh := boosted()
+	fresh.AsOf = trigger
+	observe(t, g, "broker:2", fresh)
+	if s, ok, _ := g.Sale(event.SaleTriggerExit, "SPY", trigger, 0.98, 0.05); !ok || s.Order == nil || s.Order.Tag != incident {
+		t.Errorf("re-evaluated on a fresh snapshot under the same tag: %+v", s)
+	}
+	// Exactly the maximum age is still fresh.
+	g = gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", boosted())
+	halt(t, g)
+	s, ok, err = g.Sale(event.SaleTriggerExit, "SPY", at.Add(30*time.Minute), 0.98, 0.05)
+	if err != nil || !ok || s.Order == nil || s.Order.Quantity != 54 {
+		t.Fatalf("a snapshot 30 minutes old: %+v %v %v", s, ok, err)
+	}
+}
+
+// TestARestoredIncidentsEarlierAttemptIsNotRepeated: a fresh run that
+// restores an incident also restores whether its sale was attempted (ADR
+// 0026, point 5: "Whether the incident sale has been attempted"), so the one
+// sale is never attempted twice across a restart (ADR 0019, amended
+// 2026-10-15: "A failed or cancelled attempt is not retried automatically").
+func TestARestoredIncidentsEarlierAttemptIsNotRepeated(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	halted := halt(t, g)
+
+	r := gate(t, limits(), event.TradingModeDryRun)
+	if err := r.RestoreSaleAttempt(halted.StateID, "SPY"); err == nil {
+		t.Error("an attempt restored before its incident was accepted")
+	}
+	if err := r.RestoreState(halted.StateID, *halted.State, halted.StateSchemaVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RestoreSaleAttempt("engine-state:joint:other", "SPY"); err == nil {
+		t.Error("an attempt under another tag was accepted")
+	}
+	if err := r.RestoreSaleAttempt(halted.StateID, ""); err == nil {
+		t.Error("an attempt with no instrument was accepted")
+	}
+	if err := r.RestoreSaleAttempt(halted.StateID, "SPY"); err != nil {
+		t.Fatal(err)
+	}
+	observe(t, r, "broker:1", boosted())
+	if s, ok := requestSale(t, r, event.SaleTriggerExit); ok {
+		t.Fatalf("the restored incident's sale was attempted again: %+v", s)
+	}
+}
+
+// TestASellIsNeverCheckedAgainstAStaleOrNonPositiveSnapshot: an ordinary
+// sell checked against a latest broker snapshot older than the maximum age
+// at its trigger, or one whose net liquidation or mark is not strictly
+// positive, is refused with that reason, and the engine state is unchanged.
+func TestASellIsNeverCheckedAgainstAStaleOrNonPositiveSnapshot(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(100))
+	sell := order(event.OrderSideSell, 10, 100)
+	book := bookOf(sell)
+	book.At = at.Add(31 * time.Minute)
+	out, err := g.Check(book, []risklimit.Order{sell})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusedFor(t, out[0], event.RefusedStaleBrokerSnapshot)
+	if out[0].State != nil || g.State() != risklimit.StateNormal {
+		t.Errorf("the refusal changes no state: %+v", out[0].State)
+	}
+	if err := out[0].Refused.ValidateSchema(out[0].Refused.SchemaVersion()); err != nil {
+		t.Error(err)
+	}
+	for name, mutate := range map[string]func(*event.BrokerSnapshotPayload){
+		"net liquidation": func(s *event.BrokerSnapshotPayload) { s.NetLiquidation = -1 },
+		"mark":            func(s *event.BrokerSnapshotPayload) { s.Positions[0].Mark = 0 },
+	} {
+		g := gate(t, limits(), event.TradingModeDryRun)
+		s := broker(100)
+		mutate(&s)
+		observe(t, g, "broker:1", s)
+		o := check(t, g, order(event.OrderSideSell, 10, 100))[0]
+		refusedFor(t, o, event.RefusedNonPositiveBrokerValues)
+		if o.State != nil || g.State() != risklimit.StateNormal {
+			t.Errorf("%s: the refusal changes no state", name)
+		}
+	}
+	if _, err := g.Check(risklimit.Book{}, []risklimit.Order{sell}); err == nil {
+		t.Error("a margin account's check without its trigger time")
+	}
+	// Stale is checked first; an unreadable snapshot is the existing case.
+	both := gate(t, limits(), event.TradingModeDryRun)
+	deficit := broker(100)
+	deficit.NetLiquidation = -1
+	observe(t, both, "broker:1", deficit)
+	out, err = both.Check(book, []risklimit.Order{sell})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusedFor(t, out[0], event.RefusedStaleBrokerSnapshot)
+	blind := gate(t, limits(), event.TradingModeDryRun)
+	unread := broker(100)
+	unread.Unreadable = []string{event.BrokerComponentOpenOrders}
+	observe(t, blind, "broker:1", unread)
+	if out, err = blind.Check(book, []risklimit.Order{sell}); err != nil || out[0].Released == nil {
+		t.Errorf("an unreadable snapshot sizes as without one: %+v %v", out, err)
+	}
+}
+
+// TestANonPositiveSnapshotWithholdsTheSaleUntilAPositiveOne: the sale is
+// withheld (non-positive-broker-values), the state is unchanged and no
+// attempt is spent, so the next readable, positive, fresh snapshot sizes it.
+func TestANonPositiveSnapshotWithholdsTheSaleUntilAPositiveOne(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	incident := halt(t, g).StateID
+	deficit := boosted()
+	deficit.NetLiquidation = -200
+	observe(t, g, "broker:1", deficit)
+	s, ok := requestSale(t, g, event.SaleTriggerExit)
+	if !ok || s.Withheld == nil || s.Withheld.Reason != event.SaleWithheldNotPositive {
+		t.Fatalf("withheld: %+v", s)
+	}
+	if g.State() != risklimit.StateHalted || g.Incident() != incident {
+		t.Errorf("unchanged by the withhold: %s %s", g.State(), g.Incident())
+	}
+	positive := boosted()
+	positive.AsOf = at.Add(time.Minute)
+	observe(t, g, "broker:2", positive)
+	s, ok = requestSale(t, g, event.SaleTriggerExit)
+	if !ok || s.Order == nil || s.Order.Quantity != 54 || s.Order.Tag != incident {
+		t.Fatalf("re-evaluated from the positive snapshot: %+v", s)
+	}
+}
+
+// TestAnUrgentAlarmStillInForceRetriesAWithheldSale: a sale the urgent alarm
+// fired, withheld because the latest snapshot reported a net liquidation
+// that is not positive, is decided again on the next snapshot while the
+// alarm is still urgent, though the alarm's level has not changed.
+func TestAnUrgentAlarmStillInForceRetriesAWithheldSale(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:0", boosted())
+	deficit := boosted()
+	deficit.AsOf, deficit.NetLiquidation = at.Add(30*time.Minute), -200
+	if obs := observe(t, g, "broker:30", deficit); !obs.Urgent {
+		t.Fatalf("no reading for 30 minutes: %+v", obs.Alarm)
+	}
+	s, ok := requestSale(t, g, event.SaleTriggerMarginUrgent)
+	if !ok || s.Withheld == nil || s.Withheld.Reason != event.SaleWithheldNotPositive {
+		t.Fatalf("withheld: %+v", s)
+	}
+	low := boosted()
+	low.AsOf, low.ExcessLiquidity = at.Add(31*time.Minute), 1500
+	obs := observe(t, g, "broker:31", low)
+	if obs.Alarm != nil || !obs.Urgent {
+		t.Fatalf("still urgent, no new alarm, the sale decided again: %+v", obs)
+	}
+	if s, ok := requestSale(t, g, event.SaleTriggerMarginUrgent); !ok || s.Order == nil || s.Order.Quantity != 54 {
+		t.Fatalf("re-evaluated: %+v", s)
+	}
+	later := boosted()
+	later.AsOf, later.ExcessLiquidity = at.Add(32*time.Minute), 1500
+	if obs := observe(t, g, "broker:32", later); obs.Urgent {
+		t.Error("once planned, the alarm's sale is not decided again")
+	}
 }

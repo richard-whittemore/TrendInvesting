@@ -3,6 +3,7 @@ package orderplan_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
@@ -22,6 +23,7 @@ func saleInput(s *event.BrokerSnapshotPayload) orderplan.SaleInput {
 		AccountID: "joint", Tag: "engine-state:joint:tw-1", InstrumentID: "SPY",
 		Kind: event.SaleKindIncident, Trigger: event.SaleTriggerExit, Target: 0.98, PriceBand: 0.05,
 		SnapshotID: "broker-snapshot:1", Snapshot: s, Recognised: map[string]bool{"tw-ours": true},
+		At: session, MaxSnapshotAge: 30 * time.Minute,
 	}
 }
 
@@ -186,7 +188,7 @@ func TestSaleRefusesBadInput(t *testing.T) {
 		"snapshot id without snapshot": func(in *orderplan.SaleInput) { in.Snapshot = nil },
 		"other account":                func(in *orderplan.SaleInput) { in.Snapshot.AccountID = "ira" },
 		"invalid snapshot": func(in *orderplan.SaleInput) {
-			in.Snapshot.NetLiquidation = -1
+			in.Snapshot.Unreadable = []string{"no-such-component"}
 		},
 	} {
 		in := saleInput(workedExample())
@@ -200,5 +202,57 @@ func TestSaleRefusesBadInput(t *testing.T) {
 	tiny.Positions[0].Mark = 1e-300
 	if _, err := orderplan.PlanSale(saleInput(tiny)); err == nil {
 		t.Error("an unrepresentable share count accepted")
+	}
+}
+
+// TestNoSaleFromANetLiquidationOrMarkThatIsNotPositive: keep =
+// ceil(Target x V / mark) is zero or negative when net liquidation or the mark
+// is not strictly positive, and the smallest of the three bounds would then
+// sell the whole holding or past it into a short, which ADR 0019's no-short
+// rule forbids. Such a snapshot is withheld with its own reason, never sized
+// from, and the withhold is not the attempt.
+func TestNoSaleFromANetLiquidationOrMarkThatIsNotPositive(t *testing.T) {
+	for name, mutate := range map[string]func(*event.BrokerSnapshotPayload){
+		"zero net liquidation":     func(s *event.BrokerSnapshotPayload) { s.NetLiquidation = 0 },
+		"negative net liquidation": func(s *event.BrokerSnapshotPayload) { s.NetLiquidation = -500 },
+		"zero mark":                func(s *event.BrokerSnapshotPayload) { s.Positions[0].Mark = 0 },
+		"negative mark":            func(s *event.BrokerSnapshotPayload) { s.Positions[0].Mark = -90 },
+	} {
+		s := workedExample()
+		mutate(s)
+		got := sale(t, saleInput(s))
+		if got.Withheld == nil || got.Withheld.Reason != event.SaleWithheldNotPositive || got.Withheld.Attempted() {
+			t.Errorf("%s: want withheld as not positive, not an attempt, got %+v", name, got)
+		}
+	}
+}
+
+// TestNoSaleFromAStaleSnapshot: a snapshot older at the trigger than the
+// maximum age is withheld as stale; one exactly that old still sizes.
+func TestNoSaleFromAStaleSnapshot(t *testing.T) {
+	in := saleInput(workedExample())
+	in.At = session.Add(31 * time.Minute)
+	if got := sale(t, in); got.Withheld == nil || got.Withheld.Reason != event.SaleWithheldStaleBrokerSnapshot || got.Withheld.Attempted() {
+		t.Errorf("31 minutes old: %+v", got)
+	}
+	in.At = session.Add(30 * time.Minute)
+	if got := sale(t, in); got.Order == nil {
+		t.Errorf("30 minutes old: %+v", got)
+	}
+	// Freshness is checked before the values: stale and not positive is stale.
+	both := saleInput(workedExample())
+	both.Snapshot.NetLiquidation, both.At = -1, session.Add(31*time.Minute)
+	if got := sale(t, both); got.Withheld == nil || got.Withheld.Reason != event.SaleWithheldStaleBrokerSnapshot {
+		t.Errorf("stale and not positive: %+v", got)
+	}
+	// An unreadable snapshot is unreadable, however old.
+	blind := saleInput(workedExample())
+	blind.Snapshot.Unreadable, blind.Snapshot.OpenOrders, blind.At = []string{event.BrokerComponentOpenOrders}, nil, session.Add(time.Hour)
+	if got := sale(t, blind); got.Withheld == nil || got.Withheld.Reason != event.SaleWithheldUnreadable {
+		t.Errorf("unreadable and old: %+v", got)
+	}
+	in.MaxSnapshotAge = 0
+	if _, err := orderplan.PlanSale(in); err == nil {
+		t.Error("no maximum age accepted")
 	}
 }

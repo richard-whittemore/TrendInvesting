@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 )
@@ -29,6 +30,10 @@ type SaleInput struct {
 	SnapshotID   string
 	Snapshot     *event.BrokerSnapshotPayload
 	Recognised   map[string]bool
+	// At is when the sale's trigger fired, and MaxSnapshotAge the oldest the
+	// snapshot may be then.
+	At             time.Time
+	MaxSnapshotAge time.Duration
 }
 
 // Sale is a planned sale back to 98%, or the reason none was planned:
@@ -59,9 +64,11 @@ func SaleClientOrderID(tag, instrumentID string) string {
 //     unknown, cancel-pending included; and, so that the sale together with
 //     those working sells never takes exposure below Target ("never below
 //     it"), the holding minus every working sell minus keep;
-//   - no order when the holding, net liquidation, open orders or mark cannot
-//     be read, or, for the incident sale, when any working sell on the
-//     instrument is not one the journal released (CONTAINMENT REQUIRED).
+//   - no order when the snapshot is older at the trigger than MaxSnapshotAge,
+//     when the holding, net liquidation, open orders or mark cannot be read
+//     or net liquidation or the mark is not strictly positive, or, for the
+//     incident sale, when any working sell on the instrument is not one the
+//     journal released (CONTAINMENT REQUIRED).
 //
 // The sale is a limit at the band's lower edge around the snapshot's mark
 // (ADR 0026, point 2, "Order type and price"). An error is a defect in the
@@ -86,8 +93,19 @@ func PlanSale(in SaleInput) (Sale, error) {
 			return withheld(event.SaleWithheldUnreadable, fmt.Sprintf("broker snapshot %s could not read %s; act by hand", in.SnapshotID, c))
 		}
 	}
+	// A readable snapshot's freshness is checked before its values.
+	if age := in.At.Sub(s.AsOf); age > in.MaxSnapshotAge {
+		return withheld(event.SaleWithheldStaleBrokerSnapshot, fmt.Sprintf("broker snapshot %s is %v old at the trigger; the most a sale is sized from is %v", in.SnapshotID, age, in.MaxSnapshotAge))
+	}
 	position, held := s.Position(in.InstrumentID)
 	switch {
+	case !(s.NetLiquidation > 0):
+		// keep = ceil(Target x V / mark) is zero or negative here, and the
+		// smallest of the three bounds would sell the whole holding or past
+		// it into a short: never short (ADR 0019), so never sized from it.
+		return withheld(event.SaleWithheldNotPositive, fmt.Sprintf("broker snapshot %s reports net liquidation %v, which no sale can be sized from; act by hand", in.SnapshotID, s.NetLiquidation))
+	case held && position.MarkSet && !(position.Mark > 0):
+		return withheld(event.SaleWithheldNotPositive, fmt.Sprintf("broker snapshot %s reports a mark of %v for %s, which no sale can be sized from; act by hand", in.SnapshotID, position.Mark, in.InstrumentID))
 	case !held:
 		return withheld(event.SaleWithheldNothingToSell, fmt.Sprintf("broker snapshot %s holds no %s", in.SnapshotID, in.InstrumentID))
 	case position.Quantity < 0:
@@ -148,6 +166,9 @@ func (in SaleInput) validate() error {
 	}
 	if !(in.PriceBand > 0 && in.PriceBand < 1) {
 		errs = append(errs, errors.New("the price band must lie strictly between 0 and 1"))
+	}
+	if in.MaxSnapshotAge <= 0 {
+		errs = append(errs, errors.New("a sale needs a positive maximum snapshot age"))
 	}
 	if in.Snapshot == nil && in.SnapshotID != "" {
 		errs = append(errs, errors.New("a snapshot ID names no broker snapshot"))
