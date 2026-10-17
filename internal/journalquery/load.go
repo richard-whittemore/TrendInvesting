@@ -33,7 +33,7 @@ type Journal struct {
 // refused with the record at which it breaks.
 func Load(name string, data []byte) (Journal, error) {
 	if isDurableLog(data) {
-		return Journal{}, loadDurableLog(name, data)
+		return loadDurableLog(name, data)
 	}
 	if _, err := journal.Verify(bytes.NewReader(data)); err != nil {
 		var broken *journal.ChainBrokenError

@@ -122,16 +122,19 @@ when the journal names exactly one.
 - **Several accounts in one journal and a fill to place.** The tool refuses
   `positions` and `reconcile` rather than guess which account a fill belongs
   to.
-- **A durable log (the live engine's crash-safe log, ADR 0027).** The tool
-  recognises the form and refuses it by name for now. Reading it is a separate
-  piece of work, waiting on that log reader landing.
+- **A durable log (the live engine's crash-safe log, ADR 0027).** Read the
+  same way as a journal, through the journal package's own log reader, which
+  checks the chain and every commit. Only committed groups are reported: the
+  uncommitted tail a crash can leave holds no trusted figure and is left out.
+  A damaged log (not merely torn) is refused whole, naming the file.
 - **A record whose values are invalid** (for example a fill with a negative
   quantity or an unknown kind, which a journal can keep as a rejected input).
   The chain only proves the file was not altered, so the tool also checks each
   record's values and refuses the file, naming the record, before it prints
   any figure.
 - **The same fill delivered more than once.** A fill id that appears again
-  with identical content is one execution and is counted once. The same id
+  with the same execution (an absent and an empty unit list are the same, and
+  one instant is the same in any UTC offset) is one execution and is counted once. The same id
   with different content is refused, naming both records.
 - **A record from a newer or older build** (a schema version this build does
   not read, including a newer account snapshot). Refused, naming the record; the
@@ -144,7 +147,7 @@ when the journal names exactly one.
 
 - ADR 0017 (journal tamper-evidence) defines the journal and its hash chain,
   which the tool verifies with the same code the engine uses (`journal.Verify`).
-- ADR 0027 (durable log) defines the live log form; see above for its status.
+- ADR 0027 (durable log) defines the live log form, read as described above.
 - Tests: `cmd/journal-query/main_test.go` drives the command line against
   small hand-built journals whose totals are added up by hand, including
   tamper refusal, byte-identical files after every report and format,

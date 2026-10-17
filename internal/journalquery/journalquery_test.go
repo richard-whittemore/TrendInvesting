@@ -215,9 +215,6 @@ func TestLoadRefusals(t *testing.T) {
 	if _, err := journalquery.Load("empty", nil); err == nil {
 		t.Error("empty file accepted")
 	}
-	if _, err := journalquery.Load("log", []byte(`{"log_version":1}`+"\n")); !errors.Is(err, journalquery.ErrDurableLogUnsupported) {
-		t.Errorf("durable log: %v", err)
-	}
 	data := build(t, snap(at(time.March, 3)))
 	_, err := journalquery.Load("j", bytes.Replace(data, []byte(`"net_liquidation":1`), []byte(`"net_liquidation":2`), 1))
 	if err == nil || !strings.Contains(err.Error(), "record 1") {
@@ -394,5 +391,125 @@ func TestUnknownSnapshotVersionsAreRefusedNotSkipped(t *testing.T) {
 		if _, err := journalquery.Reconcile(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "record 1") {
 			t.Errorf("snapshot v%d skipped: %v", v, err)
 		}
+	}
+}
+
+func TestEquivalentRepresentationsOfOneFillAreOneExecution(t *testing.T) {
+	d := at(time.March, 2)
+	// null versus empty unit_ids, and one instant written in two offsets: the
+	// reducer (strategy.acceptedFillState.matches) treats both as identical.
+	nullIDs := validFill("f-1", 5, d)
+	emptyIDs := validFill("f-1", 5, d)
+	emptyIDs.UnitIDs = []string{}
+	zone := validFill("f-1", 5, d.In(time.FixedZone("EST", -5*3600)))
+	data := build(t, fillInput(nullIDs), fillInput(emptyIDs), fillInput(zone), fillInput(validFill("f-2", 3, d)))
+	js := []journalquery.Journal{load(t, "j", data)}
+	f, err := journalquery.Fills(js, journalquery.Filter{})
+	if err != nil || len(f.Rows) != 2 {
+		t.Fatalf("equivalent representations were not one fill: %v %v", f.Rows, err)
+	}
+}
+
+// syncBuffer is the SyncWriter a durable log is written to in tests.
+type syncBuffer struct{ bytes.Buffer }
+
+func (*syncBuffer) Sync() error { return nil }
+
+// buildLog writes recs through the journal package's own durable-log writer:
+// each input starts a group and the decisions after it join that group. When
+// uncommitted is set, the last group is left without its commit line.
+func buildLog(t *testing.T, uncommitted bool, recs ...rec) []byte {
+	t.Helper()
+	var groups [][]journal.Entry
+	for i, r := range recs {
+		raw, err := json.Marshal(r.payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := journal.Entry{Kind: r.kind, Envelope: event.Envelope{
+			ID: fmt.Sprintf("e%d", i+1), Type: r.typ, EnvelopeVersion: event.CurrentEnvelopeVersion, SchemaVersion: r.schema,
+			EventTime: r.at, RecordedAt: r.at, Sequence: uint64(i + 1), Source: "fixture", StrategyVersion: "s", ConfigurationHash: "h",
+			PayloadHash: event.HashPayload(raw), Payload: raw,
+		}}
+		if r.kind == journal.KindInput {
+			groups = append(groups, nil)
+		}
+		groups[len(groups)-1] = append(groups[len(groups)-1], e)
+	}
+	var buf syncBuffer
+	log, err := journal.CreateLog(&buf, journal.NewLogHeader("h", "s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range groups {
+		if err := log.Append(g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := buf.Bytes()
+	if uncommitted {
+		// Drop the final commit line: the last group is then a torn tail.
+		trimmed := bytes.TrimRight(out, "\n")
+		out = trimmed[:bytes.LastIndexByte(trimmed, '\n')+1]
+	}
+	return out
+}
+
+func durableRecs() []rec {
+	d := at(time.March, 2)
+	return []rec{
+		fillRec(event.FillKindEntry, "AAA", 5, 0.1, d),
+		dec(event.OrderPlannedEventType, event.OrderPlannedSchemaVersion, d, plannedPayload("AAA", "buy")),
+		fillRec(event.FillKindEntry, "BBB", 4, 0.2, d),
+	}
+}
+
+func TestADurableLogReadsLikeTheEquivalentJournal(t *testing.T) {
+	recs := durableRecs()
+	fromJournal := []journalquery.Journal{load(t, "run", build(t, recs...))}
+	fromLog := []journalquery.Journal{load(t, "run", buildLog(t, false, recs...))}
+	for name, report := range map[string]func([]journalquery.Journal, journalquery.Filter) (journalquery.Table, error){
+		"fills": journalquery.Fills, "totals": journalquery.Totals, "orders": journalquery.Orders,
+	} {
+		want, err := report(fromJournal, journalquery.Filter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := report(fromLog, journalquery.Filter{})
+		if err != nil {
+			t.Fatalf("%s over a durable log: %v", name, err)
+		}
+		if len(got.Rows) == 0 || fmt.Sprint(got.Rows) != fmt.Sprint(want.Rows) {
+			t.Errorf("%s over a durable log = %v, want %v", name, got.Rows, want.Rows)
+		}
+	}
+}
+
+func TestADurableLogReportsOnlyCommittedGroups(t *testing.T) {
+	js := []journalquery.Journal{load(t, "run", buildLog(t, true, durableRecs()...))}
+	f, err := journalquery.Fills(js, journalquery.Filter{})
+	if err != nil || len(f.Rows) != 1 || cell(f, 0, "instrument") != "AAA" {
+		t.Fatalf("a torn final group was reported: %v %v", f.Rows, err)
+	}
+}
+
+func TestADamagedDurableLogIsRefusedByName(t *testing.T) {
+	data := buildLog(t, false, durableRecs()...)
+	data = bytes.Replace(data, []byte(`"quantity":5`), []byte(`"quantity":6`), 1)
+	_, err := journalquery.Load("run.log", data)
+	var damaged *journal.LogDamageError
+	if !errors.As(err, &damaged) || !strings.Contains(err.Error(), "run.log") {
+		t.Fatalf("want a *journal.LogDamageError naming run.log, got %v", err)
+	}
+}
+
+func TestADurableLogWithNothingCommittedReportsNoRows(t *testing.T) {
+	var buf syncBuffer
+	if _, err := journal.CreateLog(&buf, journal.NewLogHeader("h", "s")); err != nil {
+		t.Fatal(err)
+	}
+	f, err := journalquery.Fills([]journalquery.Journal{load(t, "run", buf.Bytes())}, journalquery.Filter{})
+	if err != nil || len(f.Rows) != 0 {
+		t.Fatalf("empty log: %v %v", f.Rows, err)
 	}
 }

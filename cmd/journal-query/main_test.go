@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/journal"
 	"github.com/richard-whittemore/TrendInvesting/internal/journalquery"
 )
 
@@ -328,19 +331,58 @@ func TestNoQueryChangesAJournalByAByte(t *testing.T) {
 	}
 }
 
-func TestADurableLogIsRecognisedAndRefusedByNameNotMisread(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "run.log")
-	header := `{"log_version":1,"chain_algorithm":"x","configuration_hash":"sha256:c","strategy_version":"s"}` + "\n"
-	if err := os.WriteFile(path, []byte(header), 0o600); err != nil {
+// syncBuffer is the SyncWriter the journal package's durable log is written to.
+type syncBuffer struct{ bytes.Buffer }
+
+func (*syncBuffer) Sync() error { return nil }
+
+func TestADurableLogIsReadLikeTheJournalOfTheSameFills(t *testing.T) {
+	evs := []ev{
+		fill(event.FillKindEntry, "AAA", 100, 10, 1.00, day(2025, 3, 3)),
+		fill(event.FillKindExit, "AAA", 100, 11, 1.00, day(2025, 4, 3)),
+	}
+	var buf syncBuffer
+	log, err := journal.CreateLog(&buf, journal.NewLogHeader("sha256:synthetic", "synthetic/1"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := query(t, "fills", path)
-	if !errors.Is(err, journalquery.ErrDurableLogUnsupported) || !strings.Contains(err.Error(), path) {
-		t.Fatalf("want ErrDurableLogUnsupported naming %s, got %v", path, err)
+	for i, e := range evs {
+		raw, err := json.Marshal(e.payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		group := []journal.Entry{{Kind: e.kind, Envelope: event.Envelope{
+			ID: fmt.Sprintf("evt-%d", i+1), Type: e.typ, EnvelopeVersion: event.CurrentEnvelopeVersion,
+			SchemaVersion: e.schema, EventTime: e.at, RecordedAt: e.at, Sequence: uint64(i + 1), Source: "fixture",
+			StrategyVersion: "synthetic/1", ConfigurationHash: "sha256:synthetic",
+			PayloadHash: event.HashPayload(raw), Payload: raw,
+		}}}
+		if err := log.Append(group); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if out != "" {
-		t.Errorf("printed %q", out)
+	path := filepath.Join(t.TempDir(), "run.log")
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
 	}
+	journalPath := writeJournal(t, "run.jsonl", evs...)
+	want, err := query(t, "fills", journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := query(t, "fills", path)
+	if err != nil {
+		t.Fatalf("durable log: %v", err)
+	}
+	// The journal column names the file, so compare the rows without it.
+	if strip(got, path) != strip(want, journalPath) || !strings.Contains(got, "AAA") {
+		t.Errorf("durable log fills\n%s\nwant the journal's\n%s", got, want)
+	}
+}
+
+// strip removes the file name and the column padding it caused.
+func strip(out, name string) string {
+	return strings.Join(strings.Fields(strings.ReplaceAll(out, name, "")), " ")
 }
 
 func TestAPayloadAtASchemaVersionThisBuildDoesNotReadIsRefusedNotGuessed(t *testing.T) {

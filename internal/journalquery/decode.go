@@ -87,7 +87,7 @@ func decode(j Journal) ([]item, error) {
 			// A repeated delivery of one fill is one execution (the reducer
 			// ignores it too); the same id with different content is refused.
 			if first, dup := fills[it.fill.FillID]; dup {
-				if !reflect.DeepEqual(first.payload, *it.fill) {
+				if !sameFill(first.payload, *it.fill) {
 					return nil, fmt.Errorf("%s: record %d: fill %q conflicts with record %d, which used the same fill id differently", j.Name, record.Sequence, it.fill.FillID, first.seq)
 				}
 				continue
@@ -144,4 +144,19 @@ func read(env event.Envelope, schemas []uint32, into any) error {
 		}
 	}
 	return nil
+}
+
+// sameFill reports whether two deliveries state one execution, by the
+// reducer's rules (strategy.acceptedFillState.matches): an absent and an
+// empty unit_ids list are the same, and one instant is the same however its
+// offset is written. Every other field is compared exactly.
+func sameFill(a, b event.FillPayload) bool {
+	a.FilledAt, b.FilledAt = a.FilledAt.UTC(), b.FilledAt.UTC()
+	if len(a.UnitIDs) == 0 {
+		a.UnitIDs = nil
+	}
+	if len(b.UnitIDs) == 0 {
+		b.UnitIDs = nil
+	}
+	return reflect.DeepEqual(a, b)
 }
