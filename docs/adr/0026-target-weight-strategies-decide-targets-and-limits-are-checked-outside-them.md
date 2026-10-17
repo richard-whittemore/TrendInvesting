@@ -529,3 +529,19 @@ ones that belong here.
   trading (`docs/research/commissions-30k-2026-10.md`): above every observed
   $30k average ($1.03 to $1.49), below the $2.50 that 500 shares would
   cost before the 1% cap lowers it.
+
+## Amendment (2026-10-17): D7-L as built, rule the owner is asked to confirm
+
+This extends the D7-L decision recorded in point 2 so the text matches the
+code as built. The owner is asked to confirm it.
+
+- **No affordable candidate.** When D7-L skips every candidate, the momentum
+  rule's decision is decided, not withheld: the whole invested fraction goes
+  to the risk-off instrument and the planner sells every stock held, in a
+  risk-on month and a risk-off month alike. A book with no pick for any other
+  reason is still withheld (`no-eligible-names`).
+- **What is recorded.** The `MinimumLot` figures (net liquidation V and the
+  momentum sleeve's scale, 1 - b) are recorded exactly when the rule decided a
+  book under D7-L, including a book D7-L emptied. They stay if the run then
+  withholds that book; a decision the rule itself withheld compared no pick
+  and records none.
