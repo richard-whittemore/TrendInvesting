@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from marketdata import __main__ as cli
-from marketdata import encode
+from marketdata import encode, record
 from marketdata.tests.test_encode import ALL_SESSIONS, FIRST, REPO, bar_of, break_bar, build, of, run, unadjustable_ddd
 
 D = dt.date
@@ -178,6 +178,68 @@ class CompactRefusalTest(unittest.TestCase):
         self.assertEqual(status, 0)
         named.assert_called_once_with(["bin/universe-rank", "-config", "my config.json"])
         self.assertEqual([json.loads(line) for line in Path(out).read_text().splitlines()], compact(self.tmp.name))
+
+
+def retract(d, day, reason="NYSE closed for a national day of mourning"):
+    """Records the exchange's cancellation of ``day`` and removes its bars."""
+    os.remove(os.path.join(d, "grouped_{}.json".format(day)))
+    encode.record_retraction(d, D.fromisoformat(day), reason, recorded_at="2026-11-24T23:00:00Z")
+
+
+class RetractionTest(unittest.TestCase):
+    """A session the exchange cancelled: recorded once, written as a
+    market.session.retracted right after the calendar, and no session at all
+    to the rest of the stream."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        build(self.tmp.name)
+        retract(self.tmp.name, "2026-11-25")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_calendar_is_followed_by_the_retraction_and_the_session_is_skipped(self):
+        stream = compact(self.tmp.name)
+        self.assertEqual([e["type"] for e in stream[:2]], ["market.session.calendar", "market.session.retracted"])
+        self.assertIn("2026-11-25", stream[0]["payload"]["sessions"])   # the NYSE rules, as every run writes them
+        self.assertEqual((stream[1]["payload"], stream[1]["recorded_at"]), (
+            {"source": "marketdata-retraction", "session": "2026-11-25", "reason": "NYSE closed for a national day of mourning"},
+            "2026-11-24T23:00:00Z"))
+        self.assertEqual([e["event_time"][:10] for e in of(stream, "market.session.closed")],
+                         ["2026-11-23", "2026-11-24", "2026-11-27", "2026-11-30"])
+        window = [c["session"] for c in next(e for e in of(stream, HISTORY))["payload"]["closes"]]
+        self.assertEqual(window, ["2026-11-23", "2026-11-24", "2026-11-27", "2026-11-30"])
+
+    def test_a_retracted_session_with_bars_recorded_is_refused(self):
+        record_bars = os.path.join(self.tmp.name, "grouped_2026-11-27.json")
+        os.rename(record_bars, os.path.join(self.tmp.name, "kept.json"))
+        encode.record_retraction(self.tmp.name, D(2026, 11, 27), "test", recorded_at="2026-11-24T23:00:00Z")
+        os.rename(os.path.join(self.tmp.name, "kept.json"), record_bars)
+        with self.assertRaises(encode.Conflict):
+            compact(self.tmp.name)
+
+    def test_a_retraction_is_recorded_once(self):
+        with self.assertRaises(record.AlreadyRecorded):
+            encode.record_retraction(self.tmp.name, D(2026, 11, 25), "again", recorded_at="2026-11-24T23:00:00Z")
+        with self.assertRaises(ValueError):
+            encode.record_retraction(self.tmp.name, D(2026, 11, 28), "a Saturday is no session", recorded_at="2026-11-24T23:00:00Z")
+
+    def test_the_cli_records_a_retraction_without_a_key(self):
+        with mock.patch("marketdata.massive.load_key", side_effect=AssertionError("key loaded")):
+            status = cli.main(["retract", "--out", self.tmp.name, "--session", "2026-11-27", "--reason", "storm"])
+        self.assertEqual(status, 0)
+        self.assertEqual(encode.load_retractions(self.tmp.name)[D(2026, 11, 27)]["reason"], "storm")
+        self.assertEqual(cli.main(["retract", "--out", self.tmp.name, "--session", "2026-11-27", "--reason", "x"]), 1)
+        self.assertEqual(cli.main(["retract", "--out", self.tmp.name, "--session", "2026-11-26"]), 1)
+
+    def test_the_retracted_stream_satisfies_the_go_validators(self):
+        path = os.path.join(self.tmp.name, "retracted.jsonl")
+        encode.write_stream(path, compact(self.tmp.name, ranker=go_ranker))
+        with open(path) as f:
+            result = subprocess.run(["go", "run", "./adapter/marketdata/tests/testdata/envelope_contract.go"],
+                                    cwd=REPO, stdin=f, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 # The Go ranker over a synthetic momentum configuration: lookbacks of 3 and

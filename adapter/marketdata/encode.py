@@ -26,6 +26,15 @@ writes, in order:
      instrument refuses the stream;
    - a ``market.session.closed`` v1 naming exactly the bars written.
 
+A session the exchange cancelled is recorded once (record_retraction, the
+CLI's ``retract``) and needs no bar recording. The calendar is still written
+from the NYSE rules, as every run writes it, followed at once by one
+``market.session.retracted`` v1 per recorded retraction it covers; the rest of
+the stream treats the day as no session, and the calendar reaches far enough
+past the last session to list ``ahead`` sessions that are not retracted. A
+retracted day with bars recorded is a Conflict. (Boost streams carry no
+calendar, so they read no retraction.)
+
 With a ``ranker`` the stream is the compact universe input instead (the
 owner's 2026-10-16 decision on the momentum input shape): bars only for the
 required and optional instruments, the one universe snapshot per recorded
@@ -77,6 +86,7 @@ inputs restamps them.
 """
 import collections
 import datetime as dt
+import glob
 import hashlib
 import json
 import math
@@ -86,7 +96,7 @@ import tempfile
 
 from . import adjust, history, nyse_calendar, record, sectors
 from .massive import MarketDataError
-from .steps import MissingData
+from .steps import MissingData, _now
 
 SOURCE = "marketdata"
 CALENDAR_SOURCE = "nyse-calendar"
@@ -96,6 +106,8 @@ UNIVERSE = ("market.universe.snapshot", 1)    # UniverseSnapshotSchemaVersion
 BAR = ("market.bar.completed", 2)             # CompletedBarAdjustedVersion
 SESSION_CLOSED = ("market.session.closed", 1)  # SessionClosedSchemaVersion
 HISTORY = ("market.close.history", 1)          # CloseHistorySchemaVersion
+RETRACTED = ("market.session.retracted", 1)    # SessionRetractedSchemaVersion
+RETRACTION_SOURCE = "marketdata-retraction"
 
 ENGINES = ("momentum", "boost")
 
@@ -183,10 +195,46 @@ def _canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-def load_sessions(directory, first, last):
-    """[Session] for the trading days first..last, oldest first."""
+def record_retraction(directory, day, reason, recorded_at=None, now=_now):
+    """Records that the exchange cancelled the session ``day``, with why, as
+    ``retraction_<day>.json``: never overwritten (record.write), so a
+    retraction is recorded once. ``day`` must be a session by the NYSE rules.
+    The encoder then writes it as a market.session.retracted and treats the
+    day as no session."""
+    if not nyse_calendar.is_trading_day(day):
+        raise ValueError("{} is not a session by the NYSE rules, so there is nothing to retract".format(day))
+    if not reason:
+        raise ValueError("a retraction needs a reason")
+    return record.write(directory, {"kind": "retraction", "source": RETRACTION_SOURCE, "session": day.isoformat(),
+                                    "fetched_at": recorded_at or _utc(now()), "reason": reason})
+
+
+def load_retractions(directory):
+    """{day: recording} for every recorded retraction."""
+    out = {}
+    for path in sorted(glob.glob(os.path.join(directory, "retraction_*.json"))):
+        rec = record.read(path)
+        try:
+            day = dt.date.fromisoformat(rec.get("session"))
+        except (TypeError, ValueError):
+            raise Malformed("{} names session {!r}".format(path, rec.get("session"))) from None
+        if not nyse_calendar.is_trading_day(day) or not rec.get("reason"):
+            raise Malformed("{} retracts {} with reason {!r}".format(path, day, rec.get("reason")))
+        _fetched_at(rec, path)
+        out[day] = rec
+    return out
+
+
+def load_sessions(directory, first, last, retracted=()):
+    """[Session] for the trading days first..last, oldest first, leaving out
+    each ``retracted`` day, which must have no bar recording."""
     out = []
     for day in nyse_calendar.sessions(first, last):
+        if day in retracted:
+            for kind in ("grouped", "universe"):
+                if os.path.exists(os.path.join(directory, "{}_{}.json".format(kind, day.isoformat()))):
+                    raise Conflict("{} is retracted, but its {} bars are recorded".format(day, kind))
+            continue
         found = []
         for kind in ("grouped", "universe"):
             path = os.path.join(directory, "{}_{}.json".format(kind, day.isoformat()))
@@ -465,7 +513,8 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
         raise ValueError("base {} must be a session on or before the first {}".format(base, first))
     if first > last or ahead < 1:
         raise ValueError("need first <= last and ahead >= 1")
-    loaded = load_sessions(directory, base, last)
+    retractions = {} if boost else load_retractions(directory)
+    loaded = load_sessions(directory, base, last, retractions)
     days = [s.day for s in loaded]
     by_day = {s.day: s for s in loaded}
     span = [s for s in loaded if s.day >= first]
@@ -499,14 +548,25 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
             raise MissingData("{} has no bar on {}".format(ticker, ", ".join(missing)))
 
     stream = _Stream(identity, first_sequence)
-    through = nyse_calendar.sessions_after(last, ahead)[-1]
+    after = nyse_calendar.sessions_after(last, ahead)
+    while len([d for d in after if d not in retractions]) < ahead:
+        after = nyse_calendar.sessions_after(last, len(after) + 1)
+    through = after[-1]
     opening = _utc(nyse_calendar.session_close(span[0].day).astimezone(dt.timezone.utc))
     # A compact stream's histories reach back to the base, so its calendar
     # does too: the engine refuses a close on a date its calendar does not list.
-    calendar = nyse_calendar.sessions(base if compact else span[0].day, through)
+    # The calendar is written from the NYSE rules, as every run writes it,
+    # and each recorded retraction it covers follows it; the rest of the
+    # stream treats a retracted day as no session.
+    rules = nyse_calendar.sessions(base if compact else span[0].day, through)
+    calendar = [d for d in rules if d not in retractions]
     if not boost:
-        stream.add(CALENDAR, "marketdata:calendar:{}:{}".format(calendar[0], through), opening, opening,
-                   {"source": CALENDAR_SOURCE, "sessions": [d.isoformat() for d in calendar]})
+        stream.add(CALENDAR, "marketdata:calendar:{}:{}".format(rules[0], through), opening, opening,
+                   {"source": CALENDAR_SOURCE, "sessions": [d.isoformat() for d in rules]})
+        for day in sorted(d for d in retractions if rules[0] <= d <= through):
+            rec = retractions[day]
+            stream.add(RETRACTED, "marketdata:retracted:{}".format(day), opening, rec["fetched_at"],
+                       {"source": rec["source"], "session": day.isoformat(), "reason": rec["reason"]})
     universes = {s.day: _universe_rows(directory, s.day, s.universe, max_sector_age_days, named)
                  for s in span if s.universe is not None and not boost}
     answers = {}
