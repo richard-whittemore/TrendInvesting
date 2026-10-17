@@ -23,7 +23,10 @@ import (
 
 // RulesVersion is the target-weight module's rules version (ADR 0016),
 // bumped only when a rule changes.
-const RulesVersion = "1.0.0"
+//
+//   - 1.1.0 reads configuration schema version 2 and refuses version 1
+//     (ADR 0015), so a journal written under 1.0.0 does not replay.
+const RulesVersion = "1.1.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
