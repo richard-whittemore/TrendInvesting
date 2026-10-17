@@ -19,6 +19,11 @@ build:
 engine:
 	go build -ldflags "$(LDFLAGS)" -o bin/ti-engine ./cmd/engine
 
+# The one engine in dry-run over a synthetic SPY series, its decision log,
+# and its durable log replayed byte for byte (scripts/demo-boost-dry-run.sh).
+demo-boost-dry-run:
+	./scripts/demo-boost-dry-run.sh
+
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './vendor/*')
 
