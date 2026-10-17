@@ -147,6 +147,9 @@ func TestAnApprovalMustNameTheLatestRun(t *testing.T) {
 		opts := boostOptions(t, dir)
 		opts.logPath, opts.outPath = filepath.Join(dir, name+".log"), filepath.Join(dir, name+".journal")
 		if name == "run-2" {
+			// A new start: run-1 holds nothing past its configuration, and a
+			// fresh run never repeats that start.
+			opts.asOf = "2024-01-03T21:00:00Z"
 			opts.approvalPath = writeApproval(t, dir, "run-1.log", hashes["run-1.log"], false)
 		}
 		if err := startEngine(t, opts)(); err != nil {
@@ -346,4 +349,162 @@ func TestAnApprovalNeverLoosensThePreviousRunsState(t *testing.T) {
 			t.Errorf("%s: checkIncidentInForce = %v, want a refusal saying %q", c.name, err, c.refusal)
 		}
 	}
+}
+
+// approvalEntry is a recorded operator.run.approved input.
+func approvalEntry(t *testing.T, p event.OperatorRunApprovedPayload) journal.Entry {
+	t.Helper()
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return journal.Entry{Kind: journal.KindInput, Envelope: event.Envelope{
+		ID: "operator-run-approved:x", Type: event.OperatorRunApprovedEventType, SchemaVersion: event.OperatorRunApprovedSchemaVersion, Payload: raw,
+	}}
+}
+
+// TestAnInheritedIncidentSurvivesARunThatRecordsNoStateChange: a fresh run
+// restores the incident its approval carries in force without recording a
+// strategy.engine.state decision, and refusing orders while held records
+// none either, so the approved log's own approval is evidence of the state
+// it ended in. An approval of that log must clear the incident or carry it
+// at least as tight; leaving Degraded or Halted is never automatic (ADR
+// 0019, amended 2026-09-24, "The state survives a restart").
+func TestAnInheritedIncidentSurvivesARunThatRecordsNoStateChange(t *testing.T) {
+	inForce := func(state string, ids ...string) *event.IncidentInForce {
+		return &event.IncidentInForce{IncidentID: "engine-state:joint:1", State: state, ScopeInstrumentIDs: ids, SaleAttempted: new(false)}
+	}
+	inherited := func(in *event.IncidentInForce) journal.Entry {
+		return approvalEntry(t, event.OperatorRunApprovedPayload{
+			AccountID: "joint", PreviousLog: "run-0.log", PreviousLogFinalHash: "sha256:" + strings.Repeat("0", 64),
+			ApprovedBy: "owner", ApprovedAt: time.Date(2026, time.October, 17, 13, 0, 0, 0, time.UTC),
+			Boost: event.BoostStateInForce{Latched: new(false)}, IncidentInForce: in,
+		})
+	}
+	degradedTLT := engineStateEntry(t, event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x", ScopeInstrumentIDs: []string{"TLT"}})
+	for _, c := range []struct {
+		name    string
+		entries []journal.Entry
+		clears  string
+		in      *event.IncidentInForce
+		refusal string
+	}{
+		{"inherited none", []journal.Entry{inherited(nil)}, "", nil, ""},
+		{"inherited halted, dropped", []journal.Entry{inherited(inForce(event.EngineStateHalted))}, "", nil, "ended halted"},
+		{"inherited halted, carried degraded", []journal.Entry{inherited(inForce(event.EngineStateHalted))}, "", inForce(event.EngineStateDegraded, "SPY"), "ended halted"},
+		{"inherited halted, carried", []journal.Entry{inherited(inForce(event.EngineStateHalted))}, "", inForce(event.EngineStateHalted), ""},
+		{"inherited halted, cleared", []journal.Entry{inherited(inForce(event.EngineStateHalted))}, "engine-state:joint:1", nil, ""},
+		{"inherited degraded, dropped", []journal.Entry{inherited(inForce(event.EngineStateDegraded, "SPY"))}, "", nil, "ended degraded"},
+		{"inherited degraded, widened later", []journal.Entry{inherited(inForce(event.EngineStateDegraded, "SPY")), degradedTLT}, "", inForce(event.EngineStateDegraded, "TLT"), "SPY"},
+		{"inherited degraded, widened later, carried", []journal.Entry{inherited(inForce(event.EngineStateDegraded, "SPY")), degradedTLT}, "", inForce(event.EngineStateDegraded, "SPY", "TLT"), ""},
+		{"inherited halted, degraded later", []journal.Entry{inherited(inForce(event.EngineStateHalted)), degradedTLT}, "", inForce(event.EngineStateDegraded, "TLT"), "ended halted"},
+	} {
+		approval := event.OperatorRunApprovedPayload{IncidentID: c.clears, IncidentInForce: c.in}
+		err := checkIncidentInForce(c.entries, approval, "run-1.log")
+		switch {
+		case c.refusal == "" && err != nil:
+			t.Errorf("%s: %v", c.name, err)
+		case c.refusal != "" && (err == nil || !strings.Contains(err.Error(), c.refusal)):
+			t.Errorf("%s: checkIncidentInForce = %v, want a refusal saying %q", c.name, err, c.refusal)
+		}
+	}
+}
+
+// configurationOnlyLog records a Boost run that stops before any input,
+// leaving a log holding its configuration only, and installs a copy of it
+// as dir/name modified at at: the log a start cut short leaves, whether a
+// first run, a fresh run before its approval, or a resume of either.
+func configurationOnlyLog(t *testing.T, dir, name string, at time.Time) string {
+	t.Helper()
+	scratch := t.TempDir()
+	opts := boostOptions(t, scratch)
+	if err := startEngine(t, opts)(); err != nil {
+		t.Fatalf("the configuration-only run: %v", err)
+	}
+	raw, err := os.ReadFile(opts.logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, at, at); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestARepeatedCrashBeforeTheApprovalIsRecordedResumesWithTheSameApproval:
+// a resume of a start cut short copies its configuration before recording
+// the approval, so a second crash in that window leaves another log holding
+// the configuration only. Each such log is an attempt at the same start, so
+// the approval to record is still the one naming the run before the first
+// attempt (ADR 0027, the restart model; ADR 0026, point 5: the state in
+// force is restored, never lost to a restart).
+func TestARepeatedCrashBeforeTheApprovalIsRecordedResumesWithTheSameApproval(t *testing.T) {
+	dir := t.TempDir()
+	first := boostOptions(t, dir)
+	first.logPath, first.outPath = filepath.Join(dir, "run-1.log"), filepath.Join(dir, "run-1.journal")
+	stop := startEngine(t, first)
+	feed := newBoostFeed(t, first.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
+	feed.sessions(0, 3)
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatalf("the first run: %v", err)
+	}
+	firstLog := recoverFile(t, first.logPath)
+	latch, _ := lastLatch(t, firstLog.Entries)
+	now := time.Now()
+	configurationOnlyLog(t, dir, "run-2.log", now.Add(time.Hour))
+	attempt := configurationOnlyLog(t, dir, "run-3.log", now.Add(2*time.Hour))
+
+	resumed := boostOptions(t, dir)
+	resumed.logPath, resumed.outPath = filepath.Join(dir, "run-4.log"), filepath.Join(dir, "run-4.journal")
+	resumed.resumePath = attempt
+	refuse(t, "a resume without the approval", resumed, "-approval")
+
+	approved := resumed
+	approved.approvalPath = writeApproval(t, dir, "run-1.log", firstLog.FinalRecordHash, latch)
+	stop = startEngine(t, approved)
+	if err := stop(); err != nil {
+		t.Fatalf("the resumed run: %v", err)
+	}
+	entries := recoverFile(t, approved.logPath).Entries
+	if len(entries) < 2 || entries[1].Envelope.Type != event.OperatorRunApprovedEventType {
+		t.Fatalf("the resumed log does not record the approval as its second input: %d record(s)", len(entries))
+	}
+}
+
+// TestACutShortFirstRunResumesWithoutAnApprovalAfterRepeatedCrashes: a
+// first run needs no approval, and neither does a resume of its start cut
+// short, however many attempts the directory holds; an attempt at the same
+// start is never an earlier run an approval must name (ADR 0027, the
+// restart model).
+func TestACutShortFirstRunResumesWithoutAnApprovalAfterRepeatedCrashes(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	configurationOnlyLog(t, dir, "run-1.log", now.Add(time.Hour))
+	attempt := configurationOnlyLog(t, dir, "run-2.log", now.Add(2*time.Hour))
+	resumed := boostOptions(t, dir)
+	resumed.logPath, resumed.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
+	resumed.resumePath = attempt
+	if err := startEngine(t, resumed)(); err != nil {
+		t.Fatalf("the resumed first run: %v", err)
+	}
+}
+
+// TestAFreshRunCannotRepeatAStartThatRecordedNothing: a fresh run whose
+// configuration input is the very one a log holding nothing past it opens
+// with would leave a log no resume could tell from an attempt at that same
+// start, so a crash before its approval was recorded would lose the
+// approval (ADR 0027, the restart model). It is refused: resume that log,
+// or declare a new start with -as-of.
+func TestAFreshRunCannotRepeatAStartThatRecordedNothing(t *testing.T) {
+	dir := t.TempDir()
+	previous := configurationOnlyLog(t, dir, "run-1.log", time.Now())
+	fresh := boostOptions(t, dir)
+	fresh.logPath, fresh.outPath = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal")
+	fresh.approvalPath = writeApproval(t, dir, "run-1.log", recoverFile(t, previous).FinalRecordHash, false)
+	refuse(t, "a repeated start", fresh, "-as-of")
 }

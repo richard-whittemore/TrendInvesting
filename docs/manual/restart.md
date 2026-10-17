@@ -61,13 +61,14 @@ latch can never quietly switch the boost off.
 | The approval names an older log than the latest | Refuses, names the latest. |
 | The approval leaves out the latch or the incident in force, or adds an item the engine does not know | Refuses, names it. |
 | The approval's latch is not the one the previous log ended with | Refuses, names the previous log's latch. |
-| The previous log ended Degraded or Halted and the approval neither clears that incident nor carries it in force at least as tightly | Refuses: a restart never loosens Degraded or Halted (ADR 0019). |
+| The previous log ended Degraded or Halted and the approval neither clears that incident nor carries it in force at least as tightly | Refuses: a restart never loosens Degraded or Halted (ADR 0019). An incident the previous run was itself approved to continue counts, even when that run recorded no new state. |
 | A resume names a log that is not the latest in the folder | Refuses, names the latest: only the crashed run, which is the latest, is resumed. |
 | Resuming on a build stamped only "-dirty" | Refuses: such a stamp cannot tell two different uncommitted changes apart. |
 | The fingerprint does not match the log | Refuses: the log is not the one you approved. |
 | The approval is for another account | Refuses. |
 | An approval and a resume together | Refuses: a crash resume needs no approval. |
-| A resume of a log holding nothing past its configuration, in a folder with an earlier run | Refuses without the approval: the fresh run crashed before recording it. Resume with the same approval; the engine checks it against the earlier run and records it. |
+| A resume of a log holding nothing past its configuration, in a folder with an earlier run | Refuses without the approval: the fresh run crashed before recording it. Resume with the same approval; the engine checks it against the earlier run and records it. If that resume crashed too before recording it, resume the newest log with the same approval again: the logs left by attempts at the same start are skipped, so the approval still names the run before them. |
+| A fresh run whose start (configuration and `-as-of`) is the very one the latest log opens with, when that log holds nothing past it | Refuses: a crash of it before its approval was recorded would look like another attempt at that start. Resume that log, or pick a new `-as-of`. |
 | Resuming a log made by another build | Refuses, and names the upgrade procedure (ADR 0027). |
 | The approval is accepted | Records it as the run's second entry, straight after the configuration, then starts. |
 
@@ -84,6 +85,12 @@ ADR 0027 and its amendment of 2026-10-17 (accepted); ADR 0026, point 5
 Degraded and Halted; one sale back to 98% per incident). Tests:
 `TestAFreshRunAfterAPriorRunNeedsTheOwnersApproval`,
 `TestAnApprovalMustNameTheLatestRun`, `TestAnApprovalFileStatesEveryKey`,
+`TestACrashBeforeTheApprovalIsRecordedResumesWithIt`,
+`TestARepeatedCrashBeforeTheApprovalIsRecordedResumesWithTheSameApproval`,
+`TestACutShortFirstRunResumesWithoutAnApprovalAfterRepeatedCrashes`,
+`TestAFreshRunCannotRepeatAStartThatRecordedNothing`,
+`TestAnApprovalNeverLoosensThePreviousRunsState`,
+`TestAnInheritedIncidentSurvivesARunThatRecordsNoStateChange`,
 `TestABoostRunDoesNotResumeAcrossBuilds`,
 `TestADirtyBuildThatDoesNotIdentifyItsTreeNeverResumes` (`cmd/engine`);
 `TestAnApprovedFreshRunStartsFromTheApprovedLatch`, `TestApprovalInputRules`,

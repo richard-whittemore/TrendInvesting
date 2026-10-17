@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,7 +41,8 @@ const durableLogSuffix = ".log"
 // latch as the fresh run's start.
 //
 // The approved incident state must not loosen the one the approved log
-// ends in, read from its strategy.engine.state records: leaving Degraded or
+// ends in, read from the incident its own approval carried in force and its
+// strategy.engine.state records after it: leaving Degraded or
 // Halted is never automatic (ADR 0019, amended 2026-09-24, "The state
 // survives a restart"), so the approval either clears the incident by its
 // ID or carries it in force at least as tight.
@@ -50,7 +52,11 @@ const durableLogSuffix = ".log"
 // configuration. Resuming that log alone would start from no latch and no
 // incident, losing the approved state in force, so it resumes only with
 // -approval, checked against the run before it as a fresh run's is, and
-// recorded as its second input.
+// recorded as its second input. A crash of that resume in the same window
+// leaves another such log, an attempt at the same start, so the run before
+// it is the latest log that is not one (runBeforeStart), and a fresh run
+// never repeats the start of a log holding nothing past it (ADR 0027, the
+// restart model).
 //
 // freshRunApproval applies these rules to one invocation and returns the
 // approval to record, or nil when none is needed: a backtest, a resume of a
@@ -82,7 +88,58 @@ func freshRunApproval(opts options, comp composition) (*event.OperatorRunApprove
 		return nil, fmt.Errorf("engine: %s already holds an earlier run's durable log, %s, so this is a fresh run, and a fresh run decides nothing until the owner's approval is recorded: pass -approval with an operator.run.approved file naming %s and its final record hash (docs/runbooks/durable-log.md, \"Restarting an engine\"); after a crash, -resume that log instead",
 			dir, latest, latest)
 	}
-	return checkApproval(opts, comp, dir, latest)
+	approval, err := checkApproval(opts, comp, dir, latest)
+	if err != nil {
+		return nil, err
+	}
+	prefix, _ := filepath.Split(opts.logPath)
+	previous, err := recoverLogFile(prefix + latest)
+	if err != nil {
+		return nil, err
+	}
+	if attemptAtStart(previous, comp) {
+		return nil, fmt.Errorf("engine: %s holds nothing past its configuration, and this run's configuration input is the one it opens with, so a crash of this run before its approval was recorded would leave a log no resume could tell from another attempt at that same start: resume %s with -resume, or declare a new start with -as-of (ADR 0027, the restart model)",
+			latest, latest)
+	}
+	return approval, nil
+}
+
+// runBeforeStart returns the run a resume of resumed, a log cut short in
+// its start, must treat as the one before that start: the latest other log
+// in dir that is not itself an attempt at the same start (attemptAtStart),
+// or "" when there is none. A resume of a cut-short start records its
+// configuration before its approval, so a crash in that window again leaves
+// another such attempt, and the approval that start was given still names
+// the run before the first attempt.
+func runBeforeStart(opts options, comp composition, dir, resumed string) (string, error) {
+	logs, err := logsByAge(dir, resumed)
+	if err != nil {
+		return "", err
+	}
+	prefix, _ := filepath.Split(opts.logPath)
+	for i := len(logs) - 1; i >= 0; i-- {
+		other, err := recoverLogFile(prefix + logs[i])
+		if err != nil {
+			return "", err
+		}
+		if !attemptAtStart(other, comp) {
+			return logs[i], nil
+		}
+	}
+	return "", nil
+}
+
+// attemptAtStart reports whether recovery is a log of this composition's
+// start that holds nothing past it: recorded under the same configuration
+// and build, opening with this run's configuration input, if anything. Such
+// a log decided nothing, and nothing in it tells one attempt at the start
+// from another, so a fresh run never repeats that start (freshRunApproval).
+func attemptAtStart(recovery journal.Recovery, comp composition) bool {
+	if recovery.Header != journal.NewLogHeader(comp.configurationHash, comp.strategyVersion) || len(recovery.Entries) > 1 {
+		return false
+	}
+	return len(recovery.Entries) == 0 ||
+		bytes.Equal(event.CanonicalEnvelopeBytes(recovery.Entries[0].Envelope), event.CanonicalEnvelopeBytes(comp.configEnvelope))
 }
 
 // resumeApproval checks a -resume and returns the approval it records: nil,
@@ -97,12 +154,14 @@ func resumeApproval(opts options, comp composition) (*event.OperatorRunApprovedP
 		return nil, err
 	}
 	dir, _ := splitAsSpelled(opts.logPath)
-	_, resumed := filepath.Split(opts.resumePath)
-	before, err := latestLog(dir, resumed)
-	if err != nil {
-		return nil, err
+	before := ""
+	if len(recovery.Entries) <= 1 {
+		_, resumed := filepath.Split(opts.resumePath)
+		if before, err = runBeforeStart(opts, comp, dir, resumed); err != nil {
+			return nil, err
+		}
 	}
-	pending := before != "" && len(recovery.Entries) <= 1
+	pending := before != ""
 	switch {
 	case pending && opts.approvalPath == "":
 		return nil, fmt.Errorf("engine: %s holds nothing past its configuration, and %s holds an earlier run, %s, so its start was a fresh run whose approval was never recorded: resume it with -approval naming %s and its final record hash, the approval that run was started with (ADR 0027, the restart model)",
@@ -149,31 +208,46 @@ func checkApproval(opts options, comp composition, dir, latest string) (*event.O
 }
 
 // checkIncidentInForce refuses an approval that would loosen the engine
-// state the approved log ends in: its strategy.engine.state decisions folded
-// as the gate folds them, Halted overriding and Degraded scopes widening to
+// state the approved log ends in: the incident its own approval carried in
+// force, then its strategy.engine.state decisions, folded as the gate folds
+// them, Halted overriding and Degraded scopes widening to
 // their union (internal/risklimit). Clearing the incident by its ID is the
 // owner's recovery step (ADR 0019); otherwise the incident in force must be
 // Halted, or Degraded over at least the same instruments.
 func checkIncidentInForce(entries []journal.Entry, approval event.OperatorRunApprovedPayload, logName string) error {
 	state, scope := "", []string(nil)
-	for _, entry := range entries {
-		env := entry.Envelope
-		if entry.Kind != journal.KindDecision || env.Type != event.EngineStateEventType {
-			continue
-		}
-		var p event.EngineStatePayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
-			return fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
-		}
-		if p.State == event.EngineStateHalted || state == event.EngineStateHalted {
+	fold := func(next string, ids []string) {
+		if next == event.EngineStateHalted || state == event.EngineStateHalted {
 			state, scope = event.EngineStateHalted, nil
-			continue
+			return
 		}
 		state = event.EngineStateDegraded
-		for _, id := range p.ScopeInstrumentIDs {
+		for _, id := range ids {
 			if !slices.Contains(scope, id) {
 				scope = append(scope, id)
 			}
+		}
+	}
+	for _, entry := range entries {
+		env := entry.Envelope
+		switch {
+		case entry.Kind == journal.KindInput && env.Type == event.OperatorRunApprovedEventType:
+			// The approved log's own approval: the incident it carried in
+			// force was restored without a strategy.engine.state decision,
+			// so it is the state the log starts in.
+			inherited, err := event.DecodeOperatorRunApproved(env.Payload)
+			if err != nil {
+				return fmt.Errorf("engine: %s in %s: %w", env.ID, logName, err)
+			}
+			if in := inherited.IncidentInForce; in != nil {
+				fold(in.State, in.ScopeInstrumentIDs)
+			}
+		case entry.Kind == journal.KindDecision && env.Type == event.EngineStateEventType:
+			var p event.EngineStatePayload
+			if err := json.Unmarshal(env.Payload, &p); err != nil {
+				return fmt.Errorf("engine: decode %s in %s: %w", env.ID, logName, err)
+			}
+			fold(p.State, p.ScopeInstrumentIDs)
 		}
 	}
 	if state == "" || approval.IncidentID != "" {
@@ -248,9 +322,19 @@ func checkApprovedLatch(entries []journal.Entry, approval event.OperatorRunAppro
 // dir other than except, or "" when there is none. Two logs modified at the
 // same instant are ordered by name, the later name being the latest.
 func latestLog(dir, except string) (string, error) {
+	logs, err := logsByAge(dir, except)
+	if err != nil || len(logs) == 0 {
+		return "", err
+	}
+	return logs[len(logs)-1], nil
+}
+
+// logsByAge returns the names of the durable logs in dir other than except,
+// least recently modified first, as latestLog orders them.
+func logsByAge(dir, except string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return "", fmt.Errorf("engine: list the durable log's directory %s: %w", dir, err)
+		return nil, fmt.Errorf("engine: list the durable log's directory %s: %w", dir, err)
 	}
 	type found struct {
 		name     string
@@ -266,12 +350,9 @@ func latestLog(dir, except string) (string, error) {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
-			return "", fmt.Errorf("engine: examine %s in %s: %w", entry.Name(), dir, err)
+			return nil, fmt.Errorf("engine: examine %s in %s: %w", entry.Name(), dir, err)
 		}
 		logs = append(logs, found{entry.Name(), info.ModTime()})
-	}
-	if len(logs) == 0 {
-		return "", nil
 	}
 	sort.Slice(logs, func(i, j int) bool {
 		if !logs[i].modified.Equal(logs[j].modified) {
@@ -279,7 +360,11 @@ func latestLog(dir, except string) (string, error) {
 		}
 		return logs[i].name < logs[j].name
 	})
-	return logs[len(logs)-1].name, nil
+	names := make([]string, len(logs))
+	for i, log := range logs {
+		names[i] = log.name
+	}
+	return names, nil
 }
 
 // readApproval reads and validates an approval file, refusing a key it

@@ -62,7 +62,9 @@ The engine reads its settings from
    saying the log holds nothing past its configuration means a fresh run
    crashed before recording its approval: add
    `-approval <the approval it was started with>` to `TI_RESTART_ARGS`
-   beside `-resume`, and start again.
+   beside `-resume`, and start again. If that start crashes too, resume
+   the newest log with the same approval: the approval still names the run
+   before the first attempt.
 
 ### Start a fresh run after an earlier one
 
@@ -93,7 +95,9 @@ The engine reads its settings from
    "sale_client_order_id": "<id, only if the sale was sent>"}`: the state
    and scope the incident holds the account in (degraded names its
    instruments, in ascending order; halted names none: `[]`), from the last
-   `strategy.engine.state` records in the previous log; the new run starts
+   `strategy.engine.state` records in the previous log, or, if it recorded
+   none since its start, the `incident_in_force` its own approval carried
+   (a continued incident records no new state); the new run starts
    in them (ADR 0019, amended 2026-09-24). And whether that incident's one
    sale back to 98% was attempted (ADR 0019, amended 2026-10-15). A run
    approved with `true` never attempts it again. If the previous log ended
@@ -101,9 +105,12 @@ The engine reads its settings from
    (`incident_id`) or carry it in force at least as tight; the engine
    refuses one that would loosen it.
 4. Set `TI_RUN` to a new name, `TI_AS_OF` to the first session the new run
-   decides, and `TI_RESTART_ARGS=-approval <that file>`.
+   decides, and `TI_RESTART_ARGS=-approval <that file>`. If the latest log
+   holds nothing past its configuration, `TI_AS_OF` must differ from its
+   run's: the engine refuses to repeat that start (resume that log instead).
 5. `sudo systemctl start ti-engine@<account>`. Expect `recorded the owner's
    approval ... the adapter's first input carries sequence 3`. A refusal
    names what does not match: a later log than the one approved, a final hash
    that is not the log's, a latch the log does not end with, an incident
-   state looser than the one the log ended in, or another account.
+   state looser than the one the log ended in, a repeated start, or another
+   account.

@@ -275,8 +275,9 @@ which records how `cmd/engine` implements it, on 2026-10-17.*
   hash is the one approved, and that the approved latch is the one that log
   ends with (its last decision's `latched_after`, or its own approval's
   latch when it decided nothing), and that the approval does not loosen
-  the engine state that log ends in (its `strategy.engine.state`
-  decisions): it either clears the incident by its ID or carries it in
+  the engine state that log ends in (the incident its own approval
+  carried in force, then its `strategy.engine.state` decisions, since a
+  restored incident records no state decision): it either clears the incident by its ID or carries it in
   force as Halted, or as Degraded over at least the same instruments. It
   then records the approval as the run's second input (sequence 2,
   straight after the configuration), so the adapter's first input carries
@@ -289,7 +290,17 @@ which records how `cmd/engine` implements it, on 2026-10-17.*
   them leaves a log holding nothing past its configuration. Such a log, in
   a directory holding an earlier run, resumes only with `-approval` naming
   that earlier run, checked as above and recorded as its second input;
-  resumed alone, it would start from no latch and no incident.
+  resumed alone, it would start from no latch and no incident. Its resume
+  records the configuration before the approval, so a second crash in that
+  window leaves another such log: a log recorded under the same
+  configuration and build, opening with the same configuration input and
+  holding nothing past it, is an attempt at the same start, and the earlier
+  run the approval names is the latest log that is not one. A first run cut
+  short likewise resumes without an approval however many attempts there
+  are. So that no fresh run can be taken for such an attempt, a fresh run
+  whose configuration input is the one the latest log opens with, when that
+  log holds nothing past it, is refused: resume that log, or declare a new
+  start with `-as-of`.
 - **Build identity.** `-mode dry-run`, `paper` and `live` refuse an
   unstamped build ("dev"); `make engine` and `deploy/build-engine.sh` stamp
   it with `scripts/build-stamp.sh`: `git describe --always --dirty`, and for
