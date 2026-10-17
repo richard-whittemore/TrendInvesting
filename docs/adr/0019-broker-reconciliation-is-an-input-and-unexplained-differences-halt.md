@@ -354,8 +354,8 @@ here so that all eleven are in one place.
      a broker snapshot itself (the retry below), its age is its own
      journalled time minus its own broker timestamp. A negative age (the
      broker's timestamp ahead of our journalled time, from clock skew or a
-     malformed timestamp) is stale, never fresh, with no tolerance; the withheld
-     payload records the skew. A snapshot is fresh only when its age is
+     malformed timestamp) is stale, never fresh, with no tolerance; the
+     withheld payload records the skew. A snapshot is fresh only when its age is
      zero or more and not above `MaxSnapshotAge`. `MaxSnapshotAge` is an
      account configuration field, covered by the configuration hash;
      configuration validation rejects a missing, zero or negative value
@@ -381,11 +381,13 @@ here so that all eleven are in one place.
    the withheld sale is still in force, the next latest snapshot that is
    readable, fresh and strictly positive re-evaluates the sale. The exit
    (reading 7) is in force until whichever comes first:
-   - the incident that made it fire ends: the engine state returns to
-     Normal through the owner's recovery. An escalation from Degraded to
-     Halted is the same incident (reading 3) and does not end it. For an
-     exit fired by the kill switch, the force ends when the engagement
-     ends;
+   - no refusal cause of reading 7 still applies to the instrument: the
+     kill switch is not engaged, and the account is neither Halted nor
+     Degraded on the instrument. The exit stays in force while any one of
+     them applies, whichever of them fired it, so a hand-off from the
+     engagement to an incident, or from an incident to the engagement,
+     does not lapse the sale. An escalation from Degraded to Halted is the
+     same incident (reading 3) and does not end it;
    - a `strategy.targets.decided` for the account with a `decided`
      outcome that no longer plans the sell that fired it. A `withheld`
      decision (ADR 0026 point 1) plans nothing and decides nothing, so it
@@ -489,24 +491,33 @@ here so that all eleven are in one place.
       Normal account becomes Degraded on that instrument. When no snapshot
       has yet been readable or the latest is unreadable, no broker-holding
       check is possible yet. A Normal account releases the sell against
-      the journal's account book. Only an account Degraded on another
+      the journal's account book. This rests on this ADR's own premise: a
+      Normal account's book has been reconciled against the broker that
+      session, since an unexplained difference would have made it
+      Degraded, and the broker snapshot input is a later, additional
+      check. So a stale snapshot is refused and a missing one is not: a
+      stale snapshot is positive evidence that the broker view is out of
+      date, while no snapshot is not. Only an account Degraded on another
       instrument reaches the `broker-holding` refusal: every other state
       (Halted, Degraded on this instrument, the kill switch engaged) has
       already refused the sell under reading 7, by the check order below,
       and the exit has fired. An older readable snapshot is never used in
-      its place. When the latest
-      is stale, the sell is refused (`risk.order.refused`, reason
-      `stale-broker-snapshot`) and the engine state is left unchanged (a
-      Normal account stays Normal).
+      its place. When the latest is stale, the sell is refused
+      (`risk.order.refused`, reason `stale-broker-snapshot`) and the
+      engine state is left unchanged (a Normal account stays Normal).
       **Stale episode:** an episode for the account starts at the first
       `stale-broker-snapshot` refusal or withhold (reading 1) and ends at
-      the first gate check, a refusal, a withhold or a release, whose
-      latest snapshot is fresh as measured from that check's triggering
-      event. One urgent alert is raised at the episode's start, carried by
-      that first refusal or withhold record; there is no new event type.
-      The reporter treats the first fresh check as the clear. Both ends
-      are journalled records, so a restart rebuilds the episode from the
-      journal and does not send the alert again. A sell refused as stale is
+      whichever comes first: the first journalled `account.broker.snapshot`
+      that is fresh by its own journalled time (its age measured as for
+      the retry in reading 1), or the first gate check, a refusal, a
+      withhold or a release, whose latest snapshot is fresh as measured
+      from that check's triggering event. One urgent alert is raised at the
+      episode's start, carried by that first refusal or withhold record;
+      there is no new event type. The reporter treats the episode's end as
+      the clear, so a later outage opens a new episode and alerts again.
+      Both ends are journalled records, so replay and a restart rebuild the
+      episode from the journal identically and do not send the alert
+      again. A sell refused as stale is
       re-planned at the next decision, like any refused planned sell; it is
       not retried when a fresh snapshot arrives.
     - **Check order.** The engine-state and kill-switch refusals of reading
