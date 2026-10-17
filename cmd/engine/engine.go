@@ -79,7 +79,10 @@ type options struct {
 	outPath    string
 	logPath    string
 	resumePath string
-	asOf       string
+	// approvalPath names the owner's operator.run.approved file for a
+	// fresh run after an earlier one (approval.go).
+	approvalPath string
+	asOf         string
 	// mode is required and is what the adapter on the socket does with the
 	// decisions: modeBacktest (decisions are simulated), or a mode that can reach a
 	// broker. A mode other than backtest requires logPath (#336).
@@ -182,6 +185,10 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 		return err
 	}
 	if err := checkModeBinding(opts.mode, comp); err != nil {
+		return err
+	}
+	approval, err := freshRunApproval(opts, comp)
+	if err != nil {
 		return err
 	}
 	configurationHash, strategyVersion, configEnvelope := comp.configurationHash, comp.strategyVersion, comp.configEnvelope
@@ -314,6 +321,21 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 		// fail-closed style (see internal/strategy/reducer.go's own such
 		// guards).
 		return fmt.Errorf("engine: apply the configuration input: %w", err)
+	}
+	if approval != nil {
+		// A fresh run after an earlier one: the owner's approval is its
+		// second input, before the socket opens (approval.go).
+		envelope, err := approvalEnvelope(*approval, comp, asOf.UTC())
+		if err != nil {
+			return err
+		}
+		if _, err := wireEngine.Apply(ctx, envelope); err != nil {
+			return fmt.Errorf("engine: apply the approval input: %w", err)
+		}
+		if _, err := fmt.Fprintf(out, "recorded the owner's approval of a fresh run after %s at sequence %d; the adapter's first input carries sequence %d\n",
+			approval.PreviousLog, approvalSequence, approvalSequence+1); err != nil {
+			return fmt.Errorf("engine: report the approval: %w", err)
+		}
 	}
 
 	guard := &wireGuard{}

@@ -129,6 +129,9 @@ var notYetCrossed = map[string]string{
 	"strategy.order.planned":               "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 	"risk.order.released":                  "acted on by the IBKR adapter (ADR 0025), never by LEAN",
 	"risk.order.refused":                   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
+	// cmd/engine delivers the owner's approval itself, from -approval,
+	// before the socket opens; no adapter sends or receives it.
+	"operator.run.approved": "cmd/engine's approval input (-approval), not an adapter",
 }
 
 func main() {

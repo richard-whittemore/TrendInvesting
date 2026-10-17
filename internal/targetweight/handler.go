@@ -49,6 +49,9 @@ type Options struct {
 //     boost and the target in force from it, never by recomputing (ADR 0026,
 //     point 5); sessions up to its session then only feed the indicators,
 //     which are rebuilt from the journal's own bars from the warm-up start;
+//   - optionally, straight after the configuration, the owner's
+//     operator.run.approved: a fresh run after an earlier one starts from the
+//     approved latch;
 //   - optionally, before the first bar or session, the earlier run's
 //     strategy.engine.state records, in journal order. A restart while
 //     Degraded or Halted resumes in that state and scope (ADR 0019, amended
@@ -77,6 +80,7 @@ type Handler struct {
 	configured bool
 	started    bool // a bar or session has been applied
 	recovered  bool
+	approved   bool
 	quietUntil time.Time // sessions at or before it only feed the indicators
 
 	indicators *boost.Indicators
@@ -141,6 +145,8 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 		return nil, h.applyConfiguration(in)
 	case event.TargetsDecidedEventType:
 		return nil, h.applyRecovery(in)
+	case event.OperatorRunApprovedEventType:
+		return nil, h.applyApproval(in)
 	case event.EngineStateEventType:
 		return nil, h.applyRecordedState(in)
 	case event.CompletedBarEventType:
@@ -205,6 +211,28 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 		h.inForce, h.inForceSet = p.Targets[0].Weight, true
 	}
 	h.quietUntil = p.SessionPeriodEnd
+	return nil
+}
+
+// applyApproval starts a fresh run from the owner's approval: Boost's latch
+// is the approved one, never recomputed from the bars (ADR 0026, point 5).
+// It comes once, straight after the configuration, before any bar.
+func (h *Handler) applyApproval(in event.Envelope) error {
+	if h.approved || h.recovered || h.started {
+		return errors.New("targetweight: an approval comes once, straight after the configuration and before any bar")
+	}
+	p, err := decodeInput[event.OperatorRunApprovedPayload](in, event.OperatorRunApprovedSchemaVersion)
+	if err != nil {
+		return err
+	}
+	if in.ConfigurationHash != h.hash {
+		return fmt.Errorf("targetweight: approval %s belongs to another configuration", in.ID)
+	}
+	if p.AccountID != h.cfg.AccountID {
+		return fmt.Errorf("targetweight: approval %s is for another account, %q; this run decides %q", in.ID, p.AccountID, h.cfg.AccountID)
+	}
+	h.approved = true
+	h.latched = p.Boost.Latched
 	return nil
 }
 
