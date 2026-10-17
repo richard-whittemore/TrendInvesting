@@ -33,6 +33,7 @@ Run from `adapter/`. Every command takes `--out DIR`, the recordings folder.
 | `python3 -m marketdata actions --out DIR --lookback-days 400` | every split and every dividend dated in the window | yes |
 | `python3 -m marketdata sectors --out DIR` | iShares' IWV holdings file and Nasdaq's stock screener, for sector labels, for the latest settled session only | no |
 | `python3 -m marketdata encode --out DIR --first ... --asof ... --stream FILE ...` | the engines' input stream (below) | no, and it never uses the network |
+| `python3 -m marketdata retract --out DIR --session YYYY-MM-DD --reason TEXT` | that the exchange cancelled a session (below) | no |
 
 `--asof` defaults to today's date in New York, not the computer's own time
 zone. The session is the latest NYSE trading day on or before it, taken from
@@ -129,11 +130,72 @@ base needs a new run.
 `--instruments` names instruments that must have a bar every session;
 `--optional` names ones written only where they traded. `--universe-members`
 also writes a bar for every common stock in the universe, about 5,000 a
-session. That is the current stream and it is correct, but large. The target
-shape the owner has decided on is one compact universe input per session
-(every common stock's raw close and volume, ranked in Go) plus a short
-history input for only the 500 ranked names; the encoder does not write it
-yet.
+session. That stream is correct, but large: a year of warm-up is about 1.3
+million envelopes. The compact stream below is the shape the owner chose
+(2026-10-16) and the one to run the IRAs on.
+
+### The compact stream (`--ranker`)
+
+With `--ranker`, `encode` writes the compact universe input:
+
+- bars only for the instruments you name (`--instruments`, `--optional`):
+  SPY, IEF, SHY and anything you hold;
+- the one universe snapshot per session, as above: every common stock's raw
+  close and volume and its sector label;
+- at the last session of each month (a decision session), right after that
+  snapshot, one `market.close.history` for each of the 500 stocks the engine
+  will rank, carrying that stock's split- and dividend-adjusted closes for
+  the last 253 sessions. They are exactly the closes its daily bars would
+  have carried, and a session a stock is left out of for bad data (see
+  below) is missing from its history, just as its bar would be.
+
+So a month costs about 21 small sets of bars, 21 universe snapshots and 500
+histories, instead of about 105,000 bars. A new journal's warm-up is only the
+named instruments' bars (SPY's 200-session trend among them; start `--first`
+at the base for that), not every stock's: the first month's histories carry
+the stocks' 253 sessions.
+
+Which 500 is the ranking rule, and that lives in Go, so this step never
+works it out itself. `--ranker` names the command that does:
+
+```
+python3 -m marketdata encode ... --ranker "bin/universe-rank -config momentum.json"
+```
+
+`universe-rank` (`go build -o bin/universe-rank ./cmd/universe-rank`) reads
+the IRA's own configuration file and answers, for each universe snapshot,
+whether its session is a decision session, which stocks the engine will rank
+from it, and how many sessions of closes each history must cover. It uses
+the engine's own code for all three. The engine then ranks the snapshot again
+itself and refuses the stream if the histories name any other set of stocks,
+so a mistaken or stale ranker cannot slip a different universe in.
+
+In the compact stream the calendar starts at `--base` rather than `--first`,
+because the histories reach back to the base and the engine refuses a close
+on a day its calendar does not list. A decision session with no universe
+recording gets no histories, and the engine withholds that month's decision
+(`missing-universe`) and alerts, rather than decide from part of the market.
+
+### A session the exchange cancels
+
+Now and then the exchange closes on a day its normal rules call a session (a
+national day of mourning, a storm). Left alone, that day looks like a gap in
+every stock's prices, and the momentum rule refuses to rank a stock with a
+gap in its last 253 sessions: the IRAs would stop rebalancing for a year.
+Record the closure once:
+
+```
+python3 -m marketdata retract --out DIR --session 2026-11-25 --reason "NYSE closed: national day of mourning"
+```
+
+From then on `encode` writes the calendar from the NYSE rules as before,
+followed at once by a `market.session.retracted` for that day, and treats the
+day as no session: it needs no price recording, histories skip it, and the
+calendar reaches one extra session ahead to step past it. The engine removes
+the day from its calendar, so every window simply reaches one session
+further back. If the cancelled day was the last of its month, the session
+before it becomes the decision session; if that session has already closed
+when the retraction arrives, the engine makes its decision at once.
 
 A stock written only because it is a universe member is left out of some
 sessions, instead of refusing the stream, when its data is bad. No bar is
@@ -224,6 +286,14 @@ for the scheduler to alert on.
   no longer the latest one, and the encoder refuses a sector recording
   fetched before its session's close or after the next session's close.
 - **A boost stream asks for more than one instrument.** Refused.
+- **The ranker fails, cannot be run, or answers something that does not fit
+  the request** (another session, a stock not in the snapshot, a stock named
+  twice, stocks for a session that is not a decision session, no window).
+  Refused, naming the session.
+- **A cancelled session has price recordings.** Refused: either the day
+  traded or the retraction is wrong; find out which before encoding again.
+- **A retraction for a day that is not a session by the rules, without a
+  reason, or recorded twice.** Refused.
 - **The NYSE calendar does not reach the year asked for** (it covers
   2022-2030). Refused; extend it and check it against NYSE's published
   holidays and early closes.
@@ -246,3 +316,11 @@ for the scheduler to alert on.
 - `adapter/marketdata/tests/testdata/envelope_contract.go` decodes the encoded
   stream with the Go engine's own validators, refusing unknown fields, so a
   stream the engines would refuse fails the Python tests first.
+- The compact stream and retractions: `test_compact.py` (the stream's shape,
+  a count per session showing no input is written per listed stock, each
+  history against the closes the full stream's bars carry, bad data, every
+  refusal, the CLI), and with the real Go ranker the Go validators and
+  `tests/testdata/decision_equivalence.go`, which feeds the full and the
+  compact stream of the same recordings through two fresh momentum engines
+  and requires identical decisions. The engine side is in the momentum
+  universe chapter, [momentum-universe](momentum-universe.md).

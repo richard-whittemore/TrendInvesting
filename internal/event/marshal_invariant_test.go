@@ -51,6 +51,7 @@ func marshalPayloads() []validatedPayload {
 		validMomentumConfiguration(), validMomentumDecided(), validIRARefused(),
 		validUniverseSnapshot(), validSessionCalendar(), validAccountCashSnapshot(),
 		validLimitOrderLifecycle(), validTargetWeightFill(), validAdjustedBar(),
+		validCloseHistory(), validSessionRetracted(),
 	}
 }
 

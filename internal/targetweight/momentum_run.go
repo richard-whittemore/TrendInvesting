@@ -24,11 +24,18 @@ import (
 //     must be on it, and it must name the session after it, so the handler
 //     knows whether that session is the first of a month;
 //   - per session: each instrument's market.bar.completed version 2 (the
-//     trend instrument, the risk-off instrument, universe members and
-//     holdings; each instrument's bars on one adjusted base), then
+//     trend instrument, the risk-off instrument and holdings, and universe
+//     members unless their close histories come instead; each instrument's
+//     bars on one adjusted base), then
 //     market.session.closed naming exactly those instruments;
 //   - market.universe.snapshot, from the configured source, for the session
 //     it ranks;
+//   - market.close.history, after a decision session's universe snapshot and
+//     before its close: one per member the run ranks from that snapshot, in
+//     place of those members' daily bars (the compact universe input,
+//     applyHistory);
+//   - market.session.retracted: a session the exchange cancelled, removed
+//     from the calendar (applyRetraction);
 //   - account.snapshot version 4 and market.mark.recorded per instrument;
 //   - execution.order.lifecycle version 2 and execution.fill version 5 for the
 //     orders this run released.
@@ -98,6 +105,11 @@ type momentumRun struct {
 	orders    map[string]*trackedOrder
 	fills     map[string]event.TargetWeightFillPayload // every accepted fill, by fill id
 	rebalance *rebalance
+
+	// histories holds the ranked members' close histories until their
+	// session closes; retracted, every session withdrawn from the calendar.
+	histories map[string]event.CloseHistoryPayload
+	retracted map[string]bool
 }
 
 // trackedOrder is one released order and what the venue has reported of it.
@@ -123,13 +135,7 @@ type rebalance struct {
 
 func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayload, opts Options) (*Handler, error) {
 	m := cfg.Momentum
-	rule := momentum.Config{
-		ListingType: m.ListingType, UniverseSize: m.UniverseSize, MinPrice: m.MinPrice,
-		ScoreLookback: m.ScoreLookback, ScoreSkip: m.ScoreSkip, VolatilityReturns: m.VolatilityReturns,
-		TopN: m.TopN, SectorCap: m.SectorCap, Invested: m.Invested,
-		TrendInstrument: m.TrendInstrument, TrendCloses: m.TrendCloses,
-		RiskOffInstrument: m.RiskOffInstrument, RiskOffFraction: m.RiskOffFraction,
-	}
+	rule := momentumRule(m)
 	// The bond sleeve holds glide.Invested of b, so the momentum book, scaled
 	// to 1 - b, must be invested at most that for the two to fit.
 	if m.Invested > glide.Invested {
@@ -161,7 +167,7 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 	}
 	h.momentum = &momentumRun{
 		h: h, rule: rule, cfg: m, exec: cfg.Execution,
-		window:  max(m.ScoreLookback+1, m.TrendCloses),
+		window:  momentumWindow(m),
 		anchors: anchors, funds: funds,
 		adjusted: map[string]map[string]float64{},
 		bars:     map[string]event.CompletedBarAdjustedPayload{},
@@ -169,6 +175,9 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 		marks:    map[string]event.MarkRecordedPayload{},
 		orders:   map[string]*trackedOrder{},
 		fills:    map[string]event.TargetWeightFillPayload{},
+
+		histories: map[string]event.CloseHistoryPayload{},
+		retracted: map[string]bool{},
 	}
 	return h, nil
 }
@@ -186,6 +195,10 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 		return nil, r.applyBar(in)
 	case event.UniverseSnapshotEventType:
 		return nil, r.applyUniverse(in)
+	case event.CloseHistoryEventType:
+		return nil, r.applyHistory(in)
+	case event.SessionRetractedEventType:
+		return r.applyRetraction(in)
 	case event.AccountSnapshotEventType:
 		return nil, r.applySnapshot(in)
 	case event.MarkRecordedEventType:
@@ -206,11 +219,16 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 // applyCalendar merges a calendar into the one held. The two must share a
 // session, and over the dates both cover they must list the same sessions: a
 // calendar that drops or adds a session the run already knows is a
-// contradiction, never a correction.
+// contradiction, never a correction. A retracted session is no session, so a
+// calendar that still lists one is read without it.
 func (r *momentumRun) applyCalendar(in event.Envelope) error {
 	p, err := decodeInput[event.SessionCalendarPayload](in, event.SessionCalendarSchemaVersion)
 	if err != nil {
 		return err
+	}
+	p.Sessions = slices.DeleteFunc(p.Sessions, func(s string) bool { return r.retracted[s] })
+	if len(p.Sessions) == 0 {
+		return nil
 	}
 	if len(r.calendar) > 0 {
 		lo, hi := max(p.Sessions[0], r.calendar[0]), min(p.Sessions[len(p.Sessions)-1], r.calendar[len(r.calendar)-1])
@@ -263,13 +281,8 @@ func (r *momentumRun) applyUniverse(in event.Envelope) error {
 	if err != nil {
 		return err
 	}
-	if p.Source != r.cfg.UniverseSource {
-		return fmt.Errorf("targetweight: universe %s is from %q; this run reads %q", in.ID, p.Source, r.cfg.UniverseSource)
-	}
-	for _, row := range p.Rows {
-		if row.SectorSource != "" && !slices.Contains(r.cfg.SectorSources, row.SectorSource) {
-			return fmt.Errorf("targetweight: universe %s labels %s from %q, not a configured sector source", in.ID, row.InstrumentID, row.SectorSource)
-		}
+	if err := checkUniverse(r.cfg, in.ID, p); err != nil {
+		return err
 	}
 	if r.universe != nil && p.Session <= r.universe.Session {
 		return fmt.Errorf("targetweight: universe for %s does not follow the last, %s", p.Session, r.universe.Session)
@@ -336,6 +349,9 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 		r.raw[id] = bar.Raw.Close
 	}
 	r.bars = map[string]event.CompletedBarAdjustedPayload{}
+	if err := r.mergeHistories(date, at); err != nil {
+		return nil, err
+	}
 	b := &emissions{h: r.h, in: in, at: p.PeriodEnd}
 	if err := r.missed(b, at); err != nil {
 		return nil, err
