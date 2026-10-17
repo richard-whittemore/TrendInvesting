@@ -337,12 +337,15 @@ Never hide a failed research result by rewriting or removing its recorded config
 Bot reviews are metered, so:
 
 - Push once per review round. Batch all fixes for a round into one push.
-- While automatic review is active, do not request a bot review manually. A
-  manual request counts against CodeRabbit's per-developer hourly review
+- While automatic review is active, do not request a bot review manually.
+  Every review event, whether an automatic incremental review on a push or a
+  manual request, uses one review from CodeRabbit's per-developer hourly
   allowance (usage charges apply only beyond the included limits, when
-  enabled), and that allowance is what has throttled us. If CodeRabbit pauses
-  automatic reviews after five reviewed commits, use `@coderabbitai review` to
-  review the incremental changes.
+  enabled), and that allowance is what has throttled us. Some plans also lower
+  the refill rate as a developer's review count over the last 7 days rises.
+  `.coderabbit.yaml` sets `auto_pause_after_reviewed_commits: 2`: after two
+  reviewed commits CodeRabbit pauses, and `@coderabbitai review` reviews the
+  incremental changes when the branch is ready.
 - Drafts are not reviewed (`.coderabbit.yaml` and `.greptile/config.json`), so
   stacked work stays draft until its base merges.
 - Review scope: both bots review the capital-safety paths (`internal/risklimit`,
@@ -352,8 +355,29 @@ Bot reviews are metered, so:
   Everywhere else CodeRabbit alone reviews. Greptile is scoped through
   `ignorePatterns` in `.greptile/config.json` (a deny list, so a new path
   outside the safety list must be added there); CodeRabbit is unscoped.
+- Greptile bills per completed review (1, 3 or 10 credits by review tier; 50
+  credits per active developer per billing period, then $1 per credit).
+  Skipped reviews are free. Scoping by path therefore saves money only on PRs
+  that touch no safety path; a mixed PR still costs a full review. Listed in
+  `ignorePatterns` ahead of need: `cmd/reporter/`, `cmd/dashboard/`,
+  `internal/report/`, `/tools/` (not all exist yet). The Turtle-only packages
+  `internal/strategy`, `internal/sizing`, `internal/indicator` and
+  `internal/universe` are ignored because they are off the live path (owner
+  approved their retirement in principle, 2026-10-17); `/transport/` is the live
+  adapter socket path and stays reviewed.
 - On non-safety PRs the orchestrator may run a Claude review agent as a second
   reader when warranted.
-- The merge rule is unchanged: every finding from whichever reviewer ran is
-  addressed.
+- Option 3 (owner decision, 2026-10-17): while CodeRabbit is rate-limited, a
+  Claude review agent stands in for CodeRabbit on docs-only and config-only PRs.
+- The merge rule: every finding from whichever reviewer ran is addressed. The
+  merge gate (`tools/gate.py`) currently requires `Greptile Review` to report
+  success.
+- Open owner decision: Greptile may post no check on a PR whose changed files
+  are all ignored, which would leave the required `Greptile Review` check
+  missing (the gate would end in `TIMEOUT`, or `REVIEW_STOP` if the check
+  description says the review was skipped). Proposed: remove the bot checks from
+  the required status checks and let the merge gate enforce review. The ruleset
+  is unchanged until decided. Until then a docs-only PR may need a manual
+  `@greptileai review` to obtain the check (a single, deliberate exception to
+  the no-manual-request rule above).
 - The orchestrator's watcher nudges once if no review appears.
