@@ -1,7 +1,8 @@
 #!/bin/bash
 # Prints the build stamp every envelope's strategy version carries (ADR
-# 0016): `git describe --always --dirty`, and for a dirty tree the hash of
-# its whole working tree, untracked files included, after "-dirty-". Two
+# 0016): `git describe --always --dirty`, and for a dirty tree, one with an
+# untracked file that is not ignored included, the hash of its whole working
+# tree, untracked files included, after "-dirty-". Two
 # different uncommitted changes at one commit are then two builds, and a run
 # never resumes across builds (ADR 0027, owner decision 2026-10-16). The
 # index and working tree are left as they were; the tree's objects are
@@ -12,6 +13,12 @@ set -euo pipefail
 if ! stamp=$(git describe --always --dirty 2>/dev/null); then
   echo dev
   exit 0
+fi
+# `git describe --dirty` ignores untracked files, but `go build` compiles an
+# untracked Go file, so an untracked file that is not ignored makes the tree
+# dirty too.
+if test "${stamp%-dirty}" = "$stamp" && test -n "$(git ls-files --others --exclude-standard)"; then
+  stamp=$stamp-dirty
 fi
 case $stamp in
   *-dirty)

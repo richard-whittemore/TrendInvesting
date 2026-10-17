@@ -43,7 +43,9 @@ A small file you write (the runbook has the template):
   previous run ended. The new run starts from that, rather than working it
   out again from prices;
 - the incident still in force, if the previous run ended in one (otherwise
-  `null`), and whether its one sale back to 98% was already attempted, with
+  `null`): whether it holds the account Degraded (and on which instruments)
+  or Halted, so the new run starts under the same restrictions, and whether
+  its one sale back to 98% was already attempted, with
   that sale's client order ID if it was sent. The rule is one attempt per
   incident (ADR 0019), so a new run told "attempted" never tries it again.
 
@@ -59,11 +61,13 @@ latch can never quietly switch the boost off.
 | The approval names an older log than the latest | Refuses, names the latest. |
 | The approval leaves out the latch or the incident in force, or adds an item the engine does not know | Refuses, names it. |
 | The approval's latch is not the one the previous log ended with | Refuses, names the previous log's latch. |
+| The previous log ended Degraded or Halted and the approval neither clears that incident nor carries it in force at least as tightly | Refuses: a restart never loosens Degraded or Halted (ADR 0019). |
 | A resume names a log that is not the latest in the folder | Refuses, names the latest: only the crashed run, which is the latest, is resumed. |
 | Resuming on a build stamped only "-dirty" | Refuses: such a stamp cannot tell two different uncommitted changes apart. |
 | The fingerprint does not match the log | Refuses: the log is not the one you approved. |
 | The approval is for another account | Refuses. |
 | An approval and a resume together | Refuses: a crash resume needs no approval. |
+| A resume of a log holding nothing past its configuration, in a folder with an earlier run | Refuses without the approval: the fresh run crashed before recording it. Resume with the same approval; the engine checks it against the earlier run and records it. |
 | Resuming a log made by another build | Refuses, and names the upgrade procedure (ADR 0027). |
 | The approval is accepted | Records it as the run's second entry, straight after the configuration, then starts. |
 

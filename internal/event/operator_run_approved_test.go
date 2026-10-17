@@ -22,7 +22,7 @@ func validOperatorRunApproved() event.OperatorRunApprovedPayload {
 
 func validOperatorRunApprovedInIncident() event.OperatorRunApprovedPayload {
 	p := validOperatorRunApproved()
-	p.IncidentInForce = &event.IncidentInForce{IncidentID: "engine-state:joint:1", SaleAttempted: new(true), SaleClientOrderID: "joint-sale-1"}
+	p.IncidentInForce = &event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(true), SaleClientOrderID: "joint-sale-1"}
 	return p
 }
 
@@ -79,9 +79,9 @@ func TestAnApprovalCarriesTheIncidentSaleAttempt(t *testing.T) {
 	type P = event.OperatorRunApprovedPayload
 	v := validOperatorRunApproved()
 	for name, in := range map[string]event.IncidentInForce{
-		"not attempted":       {IncidentID: "engine-state:joint:1", SaleAttempted: new(false)},
-		"attempted, withheld": {IncidentID: "engine-state:joint:1", SaleAttempted: new(true)},
-		"attempted, sent":     {IncidentID: "engine-state:joint:1", SaleAttempted: new(true), SaleClientOrderID: "joint-sale-1"},
+		"not attempted":       {IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(false)},
+		"attempted, withheld": {IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(true)},
+		"attempted, sent":     {IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(true), SaleClientOrderID: "joint-sale-1"},
 	} {
 		ok := v
 		ok.IncidentInForce = &in
@@ -91,7 +91,7 @@ func TestAnApprovalCarriesTheIncidentSaleAttempt(t *testing.T) {
 	}
 	in := func(mutate func(*event.IncidentInForce)) func(*P) {
 		return func(p *P) {
-			i := event.IncidentInForce{IncidentID: "engine-state:joint:1", SaleAttempted: new(true), SaleClientOrderID: "joint-sale-1"}
+			i := event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(true), SaleClientOrderID: "joint-sale-1"}
 			mutate(&i)
 			p.IncidentInForce = &i
 		}
@@ -105,6 +105,40 @@ func TestAnApprovalCarriesTheIncidentSaleAttempt(t *testing.T) {
 	}, "clears")
 }
 
+// TestAnApprovalStatesTheIncidentsRestrictions: an incident in force carries
+// the engine state and scope the previous run ended in, so the fresh run
+// resumes in them: "a crash or restart while Degraded or Halted resumes in
+// that same state and scope" and leaving either is never automatic (ADR
+// 0019, amended 2026-09-24, "The state survives a restart"). Degraded names
+// its instruments, strictly ascending; Halted covers the whole account and
+// names none; a missing state is refused, never read as Normal.
+func TestAnApprovalStatesTheIncidentsRestrictions(t *testing.T) {
+	type P = event.OperatorRunApprovedPayload
+	v := validOperatorRunApproved()
+	for name, in := range map[string]event.IncidentInForce{
+		"halted":   {IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(false)},
+		"degraded": {IncidentID: "engine-state:joint:1", State: event.EngineStateDegraded, ScopeInstrumentIDs: []string{"SPY"}, SaleAttempted: new(false)},
+	} {
+		ok := v
+		ok.IncidentInForce = &in
+		if err := ok.Validate(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	in := func(mutate func(*event.IncidentInForce)) func(*P) {
+		return func(p *P) {
+			i := event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateDegraded, ScopeInstrumentIDs: []string{"SPY"}, SaleAttempted: new(false)}
+			mutate(&i)
+			p.IncidentInForce = &i
+		}
+	}
+	expectInvalid(t, "no state", v, in(func(i *event.IncidentInForce) { i.State, i.ScopeInstrumentIDs = "", nil }), "state")
+	expectInvalid(t, "normal", v, in(func(i *event.IncidentInForce) { i.State, i.ScopeInstrumentIDs = "normal", nil }), "state")
+	expectInvalid(t, "degraded without scope", v, in(func(i *event.IncidentInForce) { i.ScopeInstrumentIDs = nil }), "scope")
+	expectInvalid(t, "halted with scope", v, in(func(i *event.IncidentInForce) { i.State = event.EngineStateHalted }), "scope")
+	expectInvalid(t, "scope out of order", v, in(func(i *event.IncidentInForce) { i.ScopeInstrumentIDs = []string{"TLT", "SPY"} }), "ascending")
+}
+
 // TestDecodeOperatorRunApprovedRequiresEveryKey: the approval file is
 // written outside the engine, so a key it leaves out, or one this build does
 // not know, is refused rather than read as a zero value: no Boost state, no
@@ -114,7 +148,8 @@ func TestDecodeOperatorRunApprovedRequiresEveryKey(t *testing.T) {
 	base := `"account_id":"joint","previous_log":"run-1.log","previous_log_final_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","incident_id":"","approved_by":"owner","approved_at":"2026-10-17T13:00:00Z"`
 	accept := []string{
 		`{` + base + `,"boost":{"latched":true},"incident_in_force":null}`,
-		`{` + base + `,"boost":{"latched":false},"incident_in_force":{"incident_id":"engine-state:joint:1","sale_attempted":false}}`,
+		`{` + base + `,"boost":{"latched":false},"incident_in_force":{"incident_id":"engine-state:joint:1","state":"halted","scope_instrument_ids":[],"sale_attempted":false}}`,
+		`{` + base + `,"boost":{"latched":false},"incident_in_force":{"incident_id":"engine-state:joint:1","state":"degraded","scope_instrument_ids":["SPY"],"sale_attempted":false}}`,
 	}
 	for _, raw := range accept {
 		if _, err := event.DecodeOperatorRunApproved([]byte(raw)); err != nil {
@@ -122,14 +157,17 @@ func TestDecodeOperatorRunApprovedRequiresEveryKey(t *testing.T) {
 		}
 	}
 	refuse := map[string]string{
-		`{` + base + `,"incident_in_force":null}`:                                         "boost",
-		`{` + base + `,"boost":{},"incident_in_force":null}`:                              "latched",
-		`{` + base + `,"boost":{"latched":null},"incident_in_force":null}`:                "latched",
-		`{` + base + `,"boost":null,"incident_in_force":null}`:                            "boost",
-		`{` + base + `,"boost":{"latched":true}}`:                                         "incident_in_force",
-		`{` + base + `,"boost":{"latched":true},"incident_in_force":{"incident_id":"x"}}`: "sale attempted",
-		`{` + base + `,"boost":{"latched":true},"incident_in_force":null,"extra":1}`:      "extra",
-		`{` + base + `,"boost":{"latched":true},"incident_in_force":null} {}`:             "one JSON value",
+		`{` + base + `,"incident_in_force":null}`:                                                                                          "boost",
+		`{` + base + `,"boost":{},"incident_in_force":null}`:                                                                               "latched",
+		`{` + base + `,"boost":{"latched":null},"incident_in_force":null}`:                                                                 "latched",
+		`{` + base + `,"boost":null,"incident_in_force":null}`:                                                                             "boost",
+		`{` + base + `,"boost":{"latched":true}}`:                                                                                          "incident_in_force",
+		`{` + base + `,"boost":{"latched":true},"incident_in_force":{"incident_id":"x"}}`:                                                  "incident_in_force.sale_attempted",
+		`{` + base + `,"boost":{"latched":true},"incident_in_force":{"incident_id":"x","scope_instrument_ids":[],"sale_attempted":false}}`: "incident_in_force.state",
+		`{` + base + `,"boost":{"latched":true},"incident_in_force":{"incident_id":"x","state":"degraded","sale_attempted":false}}`:        "incident_in_force.scope_instrument_ids",
+		`{` + base + `,"boost":{"latched":true},"incident_in_force":null,"extra":1}`:                                                       "extra",
+		`{` + base + `,"boost":{"latched":true},"incident_in_force":5}`:                                                                    "incident_in_force",
+		`{` + base + `,"boost":{"latched":true},"incident_in_force":null} {}`:                                                              "one JSON value",
 	}
 	for raw, want := range refuse {
 		if _, err := event.DecodeOperatorRunApproved([]byte(raw)); err == nil || !strings.Contains(err.Error(), want) {

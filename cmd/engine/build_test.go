@@ -224,3 +224,63 @@ func TestADirtyTreeIsStampedWithItsOwnTree(t *testing.T) {
 		t.Errorf("stamping changed the index or tree: status %q", status)
 	}
 }
+
+// TestAnUntrackedOnlyChangeIsStampedDirty: `git describe --dirty` ignores
+// untracked files, but `go build` compiles an untracked Go file, so a tree
+// whose only change is an untracked file is a different build from its
+// commit and is stamped with its own tree hash; deploy/build-engine.sh then
+// refuses it as dirty. Otherwise two binaries share a clean stamp and a run
+// resumes across builds (ADR 0027, owner decision 2026-10-16). An ignored
+// file is not part of the build and leaves the stamp clean.
+func TestAnUntrackedOnlyChangeIsStampedDirty(t *testing.T) {
+	script, err := filepath.Abs("../../scripts/build-stamp.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	stamp := func() string {
+		t.Helper()
+		cmd := exec.Command(script)
+		cmd.Dir = repo
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("build-stamp.sh: %v", err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("init", "-q")
+	write("a.go", "package a\n")
+	write(".gitignore", "ignored.txt\n")
+	git("add", "a.go", ".gitignore")
+	git("commit", "-q", "-m", "one")
+	clean := git("describe", "--always", "--dirty")
+	write("ignored.txt", "not built\n")
+	if got := stamp(); got != clean {
+		t.Errorf("an ignored file stamps the tree %q, want the clean %q", got, clean)
+	}
+	write("b.go", "package a\n")
+	first := stamp()
+	if !strings.HasPrefix(first, clean+"-dirty-") || first == clean+"-dirty-" {
+		t.Fatalf("a tree whose only change is an untracked file is stamped %q, want %s-dirty-<tree>", first, clean)
+	}
+	write("b.go", "package a\n\nconst B = 1\n")
+	if second := stamp(); second == first {
+		t.Errorf("two different untracked-only trees are both stamped %q", first)
+	}
+}

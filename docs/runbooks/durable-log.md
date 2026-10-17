@@ -58,7 +58,11 @@ The engine reads its settings from
 3. A refusal naming another build or configuration means this is not a
    crash restart: follow "Upgrading the build" or start a fresh run. A
    refusal naming a later log means the log you named is not the crashed
-   run: only the latest log in the state directory is resumed.
+   run: only the latest log in the state directory is resumed. A refusal
+   saying the log holds nothing past its configuration means a fresh run
+   crashed before recording its approval: add
+   `-approval <the approval it was started with>` to `TI_RESTART_ARGS`
+   beside `-resume`, and start again.
 
 ### Start a fresh run after an earlier one
 
@@ -84,14 +88,22 @@ The engine reads its settings from
    stated; the engine refuses any other value. `incident_id` names the
    incident you are clearing, or is empty. `incident_in_force` is `null`
    unless the new run continues an incident; then it is
-   `{"incident_id": "<id>", "sale_attempted": true|false,
-   "sale_client_order_id": "<id, only if the sale was sent>"}`: whether that
-   incident's one sale back to 98% was attempted (ADR 0019, amended
-   2026-10-15). A run approved with `true` never attempts it again.
+   `{"incident_id": "<id>", "state": "degraded"|"halted",
+   "scope_instrument_ids": ["SPY"], "sale_attempted": true|false,
+   "sale_client_order_id": "<id, only if the sale was sent>"}`: the state
+   and scope the incident holds the account in (degraded names its
+   instruments, in ascending order; halted names none: `[]`), from the last
+   `strategy.engine.state` records in the previous log; the new run starts
+   in them (ADR 0019, amended 2026-09-24). And whether that incident's one
+   sale back to 98% was attempted (ADR 0019, amended 2026-10-15). A run
+   approved with `true` never attempts it again. If the previous log ended
+   degraded or halted, the approval must either clear that incident
+   (`incident_id`) or carry it in force at least as tight; the engine
+   refuses one that would loosen it.
 4. Set `TI_RUN` to a new name, `TI_AS_OF` to the first session the new run
    decides, and `TI_RESTART_ARGS=-approval <that file>`.
 5. `sudo systemctl start ti-engine@<account>`. Expect `recorded the owner's
    approval ... the adapter's first input carries sequence 3`. A refusal
    names what does not match: a later log than the one approved, a final hash
-   that is not the log's, a latch the log does not end with, or another
-   account.
+   that is not the log's, a latch the log does not end with, an incident
+   state looser than the one the log ended in, or another account.

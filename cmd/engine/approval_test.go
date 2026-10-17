@@ -207,3 +207,143 @@ func TestAnApprovalFileStatesEveryKey(t *testing.T) {
 		refuse(t, name, fresh, c.want)
 	}
 }
+
+// TestACrashBeforeTheApprovalIsRecordedResumesWithIt: a fresh run records
+// its configuration, then the owner's approval; a crash between the two
+// leaves a log holding nothing past the configuration. Resuming it alone
+// would start from no latch and no incident, losing the approved state in
+// force (ADR 0026, point 5; ADR 0027, the restart model), so it is refused;
+// it resumes with the same approval, checked against the run before it, and
+// records it as the resumed log's second input.
+func TestACrashBeforeTheApprovalIsRecordedResumesWithIt(t *testing.T) {
+	dir := t.TempDir()
+	first := boostOptions(t, dir)
+	first.logPath, first.outPath = filepath.Join(dir, "run-1.log"), filepath.Join(dir, "run-1.journal")
+	stop := startEngine(t, first)
+	feed := newBoostFeed(t, first.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
+	feed.sessions(0, 3)
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatalf("the first run: %v", err)
+	}
+	firstLog := recoverFile(t, first.logPath)
+	latch, _ := lastLatch(t, firstLog.Entries)
+
+	// The crashed fresh run: its log holds the configuration only.
+	scratch := t.TempDir()
+	crashed := boostOptions(t, scratch)
+	if err := startEngine(t, crashed)(); err != nil {
+		t.Fatalf("the configuration-only run: %v", err)
+	}
+	if n := len(recoverFile(t, crashed.logPath).Entries); n != 1 {
+		t.Fatalf("the configuration-only log holds %d records, want 1", n)
+	}
+	raw, err := os.ReadFile(crashed.logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crashedLog := filepath.Join(dir, "run-2.log")
+	if err := os.WriteFile(crashedLog, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(crashedLog, later, later); err != nil {
+		t.Fatal(err)
+	}
+
+	resumed := boostOptions(t, dir)
+	resumed.logPath, resumed.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
+	resumed.resumePath = crashedLog
+	refuse(t, "a resume without the approval", resumed, "-approval")
+
+	wrong := resumed
+	wrong.approvalPath = writeApproval(t, dir, "run-2.log", recoverFile(t, crashedLog).FinalRecordHash, latch)
+	refuse(t, "an approval of the crashed run itself", wrong, "run-1.log")
+
+	unlatched := resumed
+	unlatched.approvalPath = writeApproval(t, dir, "run-1.log", firstLog.FinalRecordHash, !latch)
+	refuse(t, "a latch the run before does not hold", unlatched, fmt.Sprintf("latched_after %t", latch))
+
+	approved := resumed
+	approved.approvalPath = writeApproval(t, dir, "run-1.log", firstLog.FinalRecordHash, latch)
+	stop = startEngine(t, approved)
+	feed = newBoostFeed(t, approved.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 3)
+	feed.sessions(3, 4)
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatalf("the resumed run: %v", err)
+	}
+	entries := recoverFile(t, approved.logPath).Entries
+	if entries[1].Envelope.Type != event.OperatorRunApprovedEventType || entries[1].Envelope.Sequence != 2 {
+		t.Fatalf("the resumed log's second record is %s at sequence %d, want the approval at 2", entries[1].Envelope.Type, entries[1].Envelope.Sequence)
+	}
+	for _, e := range entries {
+		if e.Envelope.Type != event.TargetsDecidedEventType {
+			continue
+		}
+		var p event.TargetsDecidedPayload
+		if err := json.Unmarshal(e.Envelope.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.Boost.LatchedBefore != latch {
+			t.Errorf("%s: the resumed run did not start from the approved latch", e.Envelope.ID)
+		}
+		break
+	}
+}
+
+// engineStateEntry is a recorded strategy.engine.state decision.
+func engineStateEntry(t *testing.T, p event.EngineStatePayload) journal.Entry {
+	t.Helper()
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return journal.Entry{Kind: journal.KindDecision, Envelope: event.Envelope{
+		ID: "engine-state:joint:1", Type: event.EngineStateEventType, SchemaVersion: event.EngineStateScopedVersion, Payload: raw,
+	}}
+}
+
+// TestAnApprovalNeverLoosensThePreviousRunsState: the previous log's
+// strategy.engine.state records are the evidence of the state it ended in,
+// and a fresh run resumes in that state and scope; leaving Degraded or
+// Halted is never automatic (ADR 0019, amended 2026-09-24, "The state
+// survives a restart"). So an approval of a run that ended Degraded or
+// Halted either clears the incident by its ID (ADR 0019's recovery
+// procedure) or carries it in force at least as tight as it ended.
+func TestAnApprovalNeverLoosensThePreviousRunsState(t *testing.T) {
+	degraded := func(ids ...string) journal.Entry {
+		return engineStateEntry(t, event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x", ScopeInstrumentIDs: ids})
+	}
+	halted := engineStateEntry(t, event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x"})
+	inForce := func(state string, ids ...string) *event.IncidentInForce {
+		return &event.IncidentInForce{IncidentID: "engine-state:joint:1", State: state, ScopeInstrumentIDs: ids, SaleAttempted: new(false)}
+	}
+	for _, c := range []struct {
+		name    string
+		entries []journal.Entry
+		clears  string
+		in      *event.IncidentInForce
+		refusal string
+	}{
+		{"normal, none in force", nil, "", nil, ""},
+		{"degraded, cleared", []journal.Entry{degraded("SPY")}, "engine-state:joint:1", nil, ""},
+		{"degraded, carried", []journal.Entry{degraded("SPY")}, "", inForce(event.EngineStateDegraded, "SPY"), ""},
+		{"degraded, carried halted", []journal.Entry{degraded("SPY")}, "", inForce(event.EngineStateHalted), ""},
+		{"degraded, scopes merged", []journal.Entry{degraded("SPY"), degraded("TLT")}, "", inForce(event.EngineStateDegraded, "SPY", "TLT"), ""},
+		{"halted after degraded, carried", []journal.Entry{degraded("SPY"), halted}, "", inForce(event.EngineStateHalted), ""},
+		{"degraded, dropped", []journal.Entry{degraded("SPY")}, "", nil, "ended degraded"},
+		{"halted, dropped", []journal.Entry{halted}, "", nil, "ended halted"},
+		{"halted, carried degraded", []journal.Entry{halted}, "", inForce(event.EngineStateDegraded, "SPY"), "ended halted"},
+		{"degraded, scope narrowed", []journal.Entry{degraded("SPY"), degraded("TLT")}, "", inForce(event.EngineStateDegraded, "SPY"), "TLT"},
+	} {
+		approval := event.OperatorRunApprovedPayload{IncidentID: c.clears, IncidentInForce: c.in}
+		err := checkIncidentInForce(c.entries, approval, "run-1.log")
+		switch {
+		case c.refusal == "" && err != nil:
+			t.Errorf("%s: %v", c.name, err)
+		case c.refusal != "" && (err == nil || !strings.Contains(err.Error(), c.refusal)):
+			t.Errorf("%s: checkIncidentInForce = %v, want a refusal saying %q", c.name, err, c.refusal)
+		}
+	}
+}

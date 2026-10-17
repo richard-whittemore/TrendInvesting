@@ -193,7 +193,8 @@ CONF
     # leaves them stopped. An earlier provisioner enabled them, and those
     # links outlive it, so each instance is disabled too (ADR 0027, the
     # restart model). Disabling stops nothing that is running.
-    systemctl disable ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service The gateway starts only once the owner has filled
+    systemctl disable ti-engine@boost.service ti-engine@trad-ira.service ti-engine@roth-ira.service
+    # The gateway starts only once the owner has filled
     # the login file; the unit's own check refuses an empty one. The data
     # step, reporter and dashboard are skipped (a unit condition) until their
     # binaries are installed.

@@ -222,3 +222,28 @@ func TestTheProvisionerLeavesNoEngineEnabled(t *testing.T) {
 		}
 	}
 }
+
+// TestEverySystemctlArgumentIsAUnit: each word after a provisioner's
+// `systemctl <verb>` is a unit name or a flag. A stray word is read as a unit
+// that does not exist, the command fails, and `set -e` stops provisioning
+// before the firewall step (deploy/provision.sh). A unit is named with its
+// suffix, except the system daemons below, which systemd names as services.
+func TestEverySystemctlArgumentIsAUnit(t *testing.T) {
+	systemDaemons := map[string]bool{"tailscaled": true}
+	raw, err := os.ReadFile("../../deploy/provision.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "systemctl" || fields[1] == "daemon-reload" {
+			continue
+		}
+		for _, f := range fields[2:] {
+			if strings.HasPrefix(f, "-") || strings.HasSuffix(f, ".service") || strings.HasSuffix(f, ".timer") || systemDaemons[f] {
+				continue
+			}
+			t.Errorf("deploy/provision.sh:%d passes %q to systemctl %s as a unit: %q", n+1, f, fields[1], strings.TrimSpace(line))
+		}
+	}
+}

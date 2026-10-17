@@ -263,24 +263,39 @@ which records how `cmd/engine` implements it, on 2026-10-17.*
   file holding an `operator.run.approved` v1 payload: the account, the
   latest earlier log's file name and its final record hash, the incident it
   clears (if any), who approved and when, and the state in force: Boost's
-  latch, and the incident in force (null when none) with whether its one
-  sale back to 98% was attempted and the attempt's client order ID if sent
-  (ADR 0019, amended 2026-10-15: one attempt per incident). Every key is
+  latch, and the incident in force (null when none) with the engine state
+  and scope it holds the account in (Degraded with its instruments, or
+  Halted; ADR 0019, amended 2026-09-24, "The state survives a restart") and
+  whether its one sale back to 98% was attempted and the attempt's client
+  order ID if sent (ADR 0019, amended 2026-10-15: one attempt per
+  incident). Every key is
   required, null where there is none, and an unknown key is refused, so no
   state is a default. The engine checks that the log named is the most
   recently modified log in the directory, that its last committed record
   hash is the one approved, and that the approved latch is the one that log
   ends with (its last decision's `latched_after`, or its own approval's
-  latch when it decided nothing), then records the approval as the run's second input (sequence 2,
+  latch when it decided nothing), and that the approval does not loosen
+  the engine state that log ends in (its `strategy.engine.state`
+  decisions): it either clears the incident by its ID or carries it in
+  force as Halted, or as Degraded over at least the same instruments. It
+  then records the approval as the run's second input (sequence 2,
   straight after the configuration), so the adapter's first input carries
-  sequence 3. The target-weight handler starts from the approved latch, and
-  a sale recorded as attempted is never attempted again by the fresh run.
-  `-approval` with `-resume`, with a backtest, or with no earlier run is
-  refused.
+  sequence 3. The target-weight handler starts from the approved latch, in
+  the incident's state and scope before any market input, and a sale
+  recorded as attempted is never attempted again by the fresh run.
+  `-approval` with a backtest or with no earlier run is refused, and so is
+  `-approval` with `-resume`, except for one case: a fresh run records its
+  configuration and its approval one input at a time, so a crash between
+  them leaves a log holding nothing past its configuration. Such a log, in
+  a directory holding an earlier run, resumes only with `-approval` naming
+  that earlier run, checked as above and recorded as its second input;
+  resumed alone, it would start from no latch and no incident.
 - **Build identity.** `-mode dry-run`, `paper` and `live` refuse an
   unstamped build ("dev"); `make engine` and `deploy/build-engine.sh` stamp
   it with `scripts/build-stamp.sh`: `git describe --always --dirty`, and for
-  a dirty tree the hash of its whole working tree after "-dirty-", so two
+  a dirty tree, one holding an untracked file that is not ignored included
+  (`go build` compiles it), the hash of its whole working tree after
+  "-dirty-", so two
   different uncommitted changes are two builds. A bare "-dirty" stamp, which
   names every dirty tree at its commit alike, is refused by `-resume`.
   `deploy/build-engine.sh` still refuses a dirty tree for the server.

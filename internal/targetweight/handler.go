@@ -228,8 +228,11 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 }
 
 // applyApproval starts a fresh run from the owner's approval: Boost's latch
-// is the approved one, never recomputed from the bars (ADR 0026, point 5),
-// and an incident in force carries whether its one sale back to 98% was
+// is the approved one, never recomputed from the bars (ADR 0026, point 5).
+// An incident in force puts the gate in the incident's Degraded or Halted
+// state and scope before any market input, since a restart while Degraded
+// or Halted resumes in that state (ADR 0019, amended 2026-09-24, "The state
+// survives a restart"), and carries whether its one sale back to 98% was
 // attempted, so the fresh run never attempts it twice (ADR 0019, amended
 // 2026-10-15). It comes once, straight after the configuration, before any
 // bar.
@@ -249,6 +252,9 @@ func (h *Handler) applyApproval(in event.Envelope) error {
 	}
 	if incident := p.IncidentInForce; incident != nil {
 		if err := h.gate.RestoreSaleAttempt(incident.IncidentID, *incident.SaleAttempted); err != nil {
+			return fmt.Errorf("targetweight: approval %s: %w", in.ID, err)
+		}
+		if err := h.gate.RestoreIncidentState(incident.State, incident.ScopeInstrumentIDs); err != nil {
 			return fmt.Errorf("targetweight: approval %s: %w", in.ID, err)
 		}
 	}

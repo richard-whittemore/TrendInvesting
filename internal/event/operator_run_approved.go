@@ -67,13 +67,23 @@ type BoostStateInForce struct {
 }
 
 // IncidentInForce is one incident's state that a fresh run cannot recompute
-// from bars: whether ADR 0019's one sale back to 98% (amended 2026-10-15:
+// from bars: the engine state and scope it holds the account in, and whether
+// ADR 0019's one sale back to 98% (amended 2026-10-15:
 // attempted once per incident, never retried automatically) was attempted.
 // A fresh run approved with the sale attempted never attempts it again.
 type IncidentInForce struct {
 	// IncidentID names the incident (ADR 0019's first engine-state record
 	// out of Normal).
 	IncidentID string `json:"incident_id"`
+	// State is the engine state the incident holds the account in,
+	// EngineStateDegraded or EngineStateHalted, and ScopeInstrumentIDs the
+	// instruments a Degraded state freezes, strictly ascending; Halted covers
+	// the whole account and names none. Both are required: the fresh run
+	// resumes in that state and scope before any market input, and leaving
+	// either is never automatic (ADR 0019, amended 2026-09-24, "The state
+	// survives a restart").
+	State              string   `json:"state"`
+	ScopeInstrumentIDs []string `json:"scope_instrument_ids"`
 	// SaleAttempted is required: whether the incident's sale was attempted,
 	// sent or withheld (an unreadable broker value or an unknown working
 	// sell is an attempt; nothing to sell is not).
@@ -114,6 +124,19 @@ func (p OperatorRunApprovedPayload) Validate() error {
 		case p.IncidentID:
 			errs = append(errs, fmt.Errorf("incident %q cannot be both the one the approval clears and the one in force", in.IncidentID))
 		}
+		switch in.State {
+		case EngineStateHalted:
+			if len(in.ScopeInstrumentIDs) > 0 {
+				errs = append(errs, errors.New("incident in force: a halted state covers the whole account and names no scope"))
+			}
+		case EngineStateDegraded:
+			if len(in.ScopeInstrumentIDs) == 0 {
+				errs = append(errs, errors.New("incident in force: a degraded state names its scope instruments: scope is never inferred from absence"))
+			}
+		default:
+			errs = append(errs, fmt.Errorf("incident in force: state %q is not %q or %q; the state in force is stated, never assumed (ADR 0019, amended 2026-09-24)", in.State, EngineStateDegraded, EngineStateHalted))
+		}
+		errs = append(errs, ascendingIDs("incident in force: scope instrument id", in.ScopeInstrumentIDs)...)
 		switch {
 		case in.SaleAttempted == nil:
 			errs = append(errs, errors.New("incident in force: sale attempted is required (ADR 0019, amended 2026-10-15: one attempt per incident)"))
@@ -130,6 +153,10 @@ func (p OperatorRunApprovedPayload) Validate() error {
 // approvalKeys are the keys an approval file must state, null included: a
 // key left out is refused rather than read as its zero value.
 var approvalKeys = []string{"account_id", "previous_log", "previous_log_final_hash", "incident_id", "approved_by", "approved_at", "boost", "incident_in_force"}
+
+// incidentKeys are the keys an incident in force must state; the sale's
+// client order ID alone may be left out, when no sale was sent.
+var incidentKeys = []string{"incident_id", "state", "scope_instrument_ids", "sale_attempted"}
 
 // DecodeOperatorRunApproved decodes and validates an approval written
 // outside the engine. Every key must be present, an unknown key is refused,
@@ -148,6 +175,20 @@ func DecodeOperatorRunApproved(raw []byte) (OperatorRunApprovedPayload, error) {
 	}
 	if len(missing) > 0 {
 		return OperatorRunApprovedPayload{}, fmt.Errorf("the approval states no %s; every key is required, null where there is none", strings.Join(missing, ", "))
+	}
+	var incident map[string]json.RawMessage
+	if err := json.Unmarshal(keys["incident_in_force"], &incident); err != nil {
+		return OperatorRunApprovedPayload{}, fmt.Errorf("decode the approval's incident_in_force: it must be an object or null: %w", err)
+	}
+	if incident != nil {
+		for _, key := range incidentKeys {
+			if _, ok := incident[key]; !ok {
+				missing = append(missing, "incident_in_force."+key)
+			}
+		}
+		if len(missing) > 0 {
+			return OperatorRunApprovedPayload{}, fmt.Errorf("the approval states no %s; every key of an incident in force is required (ADR 0019, amended 2026-09-24)", strings.Join(missing, ", "))
+		}
 	}
 	var p OperatorRunApprovedPayload
 	decoder := json.NewDecoder(bytes.NewReader(raw))

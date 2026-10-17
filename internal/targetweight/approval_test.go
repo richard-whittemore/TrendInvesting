@@ -74,13 +74,43 @@ func TestAFreshRunNeverAttemptsAnIncidentsSaleTwice(t *testing.T) {
 	} {
 		h, s := configured(t)
 		p := approval(false)
-		p.IncidentInForce = &event.IncidentInForce{IncidentID: "engine-state:joint:1", SaleAttempted: new(c.attempted), SaleClientOrderID: c.order}
+		p.IncidentInForce = &event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(c.attempted), SaleClientOrderID: c.order}
 		mustApply(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", at, p))
 		if got := targetweight.AttemptIncidentSale(h, "engine-state:joint:1"); got != c.mayGo {
 			t.Errorf("%s: the first sale may go = %v, want %v", c.name, got, c.mayGo)
 		}
 		if targetweight.AttemptIncidentSale(h, "engine-state:joint:1") {
 			t.Errorf("%s: the incident's sale was attempted twice", c.name)
+		}
+	}
+}
+
+// TestAFreshRunContinuesTheIncidentsRestrictions: approved with an incident
+// in force, a fresh run resumes in the incident's state and scope before any
+// market input: "a crash or restart while Degraded or Halted resumes in that
+// same state and scope", and leaving either is never automatic (ADR 0019,
+// amended 2026-09-24, "The state survives a restart"; ADR 0026, point 5).
+// Degraded on SPY or Halted, the first session's buy is refused, never
+// released.
+func TestAFreshRunContinuesTheIncidentsRestrictions(t *testing.T) {
+	at := sessionEnd(0)
+	for name, in := range map[string]event.IncidentInForce{
+		"degraded on SPY": {IncidentID: "engine-state:joint:1", State: event.EngineStateDegraded, ScopeInstrumentIDs: []string{"SPY"}, SaleAttempted: new(false)},
+		"halted":          {IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(false)},
+	} {
+		h, s := configured(t)
+		p := approval(false)
+		p.IncidentInForce = &in
+		mustApply(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", at, p))
+		mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", at, bar(100, at)))
+		mustApply(t, h, s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, "a", at, (&account{cash: 4000}).snapshot(at, 100)))
+		mustApply(t, h, s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, "m", at, event.MarkRecordedPayload{InstrumentID: "SPY", AsOf: at, Price: 100, Source: event.AdapterIBKR}))
+		out := mustApply(t, h, s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s", at, event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: []string{"SPY"}}))
+		if n := len(ofType(out, event.OrderReleasedEventType)); n != 0 {
+			t.Errorf("%s: the fresh run released %d order(s) while the incident is in force", name, n)
+		}
+		if n := len(ofType(out, event.OrderRefusedEventType)); n != 1 {
+			t.Errorf("%s: the fresh run refused %d order(s), want the buy refused", name, n)
 		}
 	}
 }

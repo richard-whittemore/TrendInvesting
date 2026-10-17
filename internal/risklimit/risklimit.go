@@ -160,15 +160,41 @@ func (g *Gate) RestoreState(p event.EngineStatePayload, schemaVersion uint32) er
 	if len(p.ScopeOrderIDs) > 0 || len(p.ScopeCashComponents) > 0 {
 		return errors.New("risklimit: a recorded scope naming orders or cash components is not one this gate can hold")
 	}
-	if p.State == event.EngineStateHalted {
+	return g.tighten(p.State, p.ScopeInstrumentIDs)
+}
+
+// RestoreIncidentState applies, before any order is checked, the state and
+// scope of the incident in force that the owner's approval of a fresh run
+// carries: a fresh run does not replay the previous run's log, and "a crash
+// or restart while Degraded or Halted resumes in that same state and scope"
+// (ADR 0019, amended 2026-09-24, "The state survives a restart"). As with a
+// recorded state, it never loosens the gate. State is event.EngineStateDegraded
+// with the instruments it freezes, or event.EngineStateHalted with none.
+func (g *Gate) RestoreIncidentState(state string, instrumentIDs []string) error {
+	switch {
+	case state == event.EngineStateHalted && len(instrumentIDs) > 0:
+		return errors.New("risklimit: an approved Halted incident covers the whole account and names no scope")
+	case state == event.EngineStateDegraded && len(instrumentIDs) == 0:
+		return errors.New("risklimit: an approved Degraded incident names its scope instruments")
+	case state != event.EngineStateHalted && state != event.EngineStateDegraded:
+		return fmt.Errorf("risklimit: an approved incident's state %q is not degraded or halted", state)
+	}
+	return g.tighten(state, instrumentIDs)
+}
+
+// tighten moves the gate to state, a validated Degraded or Halted, without
+// ever loosening it: Halted overrides everything, a Degraded state cannot
+// follow Halted, and a Degraded scope widens to the union.
+func (g *Gate) tighten(state string, instrumentIDs []string) error {
+	if state == event.EngineStateHalted {
 		g.state, g.scope = StateHalted, nil
 		return nil
 	}
 	if g.state == StateHalted {
-		return errors.New("risklimit: a recorded Degraded state cannot follow Halted: leaving Halted is never automatic")
+		return errors.New("risklimit: a Degraded state cannot follow Halted: leaving Halted is never automatic")
 	}
 	scope := slices.Clone(g.scope)
-	for _, id := range p.ScopeInstrumentIDs {
+	for _, id := range instrumentIDs {
 		if !slices.Contains(scope, id) {
 			scope = append(scope, id)
 		}
