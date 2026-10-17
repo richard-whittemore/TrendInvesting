@@ -24,8 +24,9 @@ import (
 //     must be on it, and it must name the session after it, so the handler
 //     knows whether that session is the first of a month;
 //   - per session: each instrument's market.bar.completed version 2 (the
-//     trend instrument, the risk-off instrument, universe members and
-//     holdings; each instrument's bars on one adjusted base), then
+//     trend instrument, the risk-off instrument and holdings, and universe
+//     members unless their close histories come instead; each instrument's
+//     bars on one adjusted base), then
 //     market.session.closed naming exactly those instruments;
 //   - market.universe.snapshot, from the configured source, for the session
 //     it ranks;
