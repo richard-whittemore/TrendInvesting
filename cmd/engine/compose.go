@@ -31,22 +31,26 @@ type composition struct {
 }
 
 // configurationKind is the one field read before a configuration is decoded:
-// a target-weight configuration names a target-weight strategy (ADR 0026,
-// point 6), anything else is a Turtle configuration (AGENTS.md rule 4: the
-// two share no rule and no state).
+// a target-weight configuration names its target-weight strategy (ADR 0026,
+// point 6), and anything naming none of them is a Turtle configuration
+// (AGENTS.md rule 4: the two share no rule and no state).
 type configurationKind struct {
 	StrategyID string `json:"strategy_id"`
 }
 
 // compose reads the configuration at path and composes its strategy:
 //
-//   - a target-weight configuration (strategy_id "boost") gets the
-//     target-weight handler, which plans each decision's orders and passes
+//   - a Boost configuration (strategy_id "boost"), the one target-weight
+//     strategy composed here, gets the target-weight handler, which plans
+//     each decision's orders and passes
 //     them through the risk gate (internal/targetweight, internal/orderplan,
 //     internal/risklimit; ADR 0026). Its first session decided is asOf:
 //     sessions before it only feed the indicators, and asOf is the
 //     configuration input's own time, so a replay reads it back from the
 //     journal;
+//   - a momentum configuration (strategy_id "momentum") is refused: it is a
+//     target-weight strategy this command does not compose, never a Turtle
+//     configuration;
 //   - any other is the Turtle reducer (internal/strategy), as cmd/backtest
 //     composes it.
 func compose(path, build string, asOf time.Time) (composition, error) {
@@ -58,8 +62,12 @@ func compose(path, build string, asOf time.Time) (composition, error) {
 	if err := json.Unmarshal(raw, &kind); err != nil {
 		return composition{}, fmt.Errorf("engine: decode the configuration in %s: %w", path, err)
 	}
-	if kind.StrategyID == event.TargetWeightStrategyBoost {
+	switch kind.StrategyID {
+	case event.TargetWeightStrategyBoost:
 		return composeTargetWeight(path, raw, build, asOf)
+	case event.TargetWeightStrategyMomentum:
+		return composition{}, fmt.Errorf("engine: the configuration in %s names strategy_id %q, a target-weight strategy this engine does not compose: of the target-weight strategies it composes %q only",
+			path, kind.StrategyID, event.TargetWeightStrategyBoost)
 	}
 	return composeTurtle(path, build, asOf)
 }

@@ -20,7 +20,7 @@ import (
 func writeApproval(t *testing.T, dir, previous, finalHash string, latched bool) string {
 	t.Helper()
 	raw, err := json.Marshal(event.OperatorRunApprovedPayload{
-		AccountID: "joint", PreviousLog: previous, PreviousLogFinalHash: finalHash, IncidentID: "incident-1",
+		AccountID: "joint", PreviousLog: previous, PreviousLogFinalHash: finalHash,
 		ApprovedBy: "owner", ApprovedAt: time.Date(2026, time.October, 17, 13, 0, 0, 0, time.UTC),
 		Boost: event.BoostStateInForce{Latched: new(latched)},
 	})
@@ -339,6 +339,10 @@ func TestAnApprovalNeverLoosensThePreviousRunsState(t *testing.T) {
 		{"halted, dropped", []journal.Entry{halted}, "", nil, "ended halted"},
 		{"halted, carried degraded", []journal.Entry{halted}, "", inForce(event.EngineStateDegraded, "SPY"), "ended halted"},
 		{"degraded, scope narrowed", []journal.Entry{degraded("SPY"), degraded("TLT")}, "", inForce(event.EngineStateDegraded, "SPY"), "TLT"},
+		{"degraded, another incident cleared", []journal.Entry{degraded("SPY")}, "incident-9", nil, "engine-state:joint:1"},
+		{"halted, another incident cleared", []journal.Entry{halted}, "incident-9", nil, "engine-state:joint:1"},
+		{"halted, carried under another id", []journal.Entry{halted}, "", otherIncident(event.EngineStateHalted), "engine-state:joint:1"},
+		{"normal, an incident cleared", nil, "incident-9", nil, "no incident"},
 	} {
 		approval := event.OperatorRunApprovedPayload{IncidentID: c.clears, IncidentInForce: c.in}
 		err := checkIncidentInForce(c.entries, approval, "run-1.log")
@@ -349,6 +353,12 @@ func TestAnApprovalNeverLoosensThePreviousRunsState(t *testing.T) {
 			t.Errorf("%s: checkIncidentInForce = %v, want a refusal saying %q", c.name, err, c.refusal)
 		}
 	}
+}
+
+// otherIncident is an incident in force under an ID the logs in these
+// tests never record.
+func otherIncident(state string, ids ...string) *event.IncidentInForce {
+	return &event.IncidentInForce{IncidentID: "engine-state:joint:9", State: state, ScopeInstrumentIDs: ids, SaleAttempted: new(false)}
 }
 
 // approvalEntry is a recorded operator.run.approved input.
@@ -382,6 +392,7 @@ func TestAnInheritedIncidentSurvivesARunThatRecordsNoStateChange(t *testing.T) {
 		})
 	}
 	degradedTLT := engineStateEntry(t, event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x", ScopeInstrumentIDs: []string{"TLT"}})
+	degradedTLT.Envelope.ID = "engine-state:joint:2"
 	for _, c := range []struct {
 		name    string
 		entries []journal.Entry
@@ -398,6 +409,8 @@ func TestAnInheritedIncidentSurvivesARunThatRecordsNoStateChange(t *testing.T) {
 		{"inherited degraded, widened later", []journal.Entry{inherited(inForce(event.EngineStateDegraded, "SPY")), degradedTLT}, "", inForce(event.EngineStateDegraded, "TLT"), "SPY"},
 		{"inherited degraded, widened later, carried", []journal.Entry{inherited(inForce(event.EngineStateDegraded, "SPY")), degradedTLT}, "", inForce(event.EngineStateDegraded, "SPY", "TLT"), ""},
 		{"inherited halted, degraded later", []journal.Entry{inherited(inForce(event.EngineStateHalted)), degradedTLT}, "", inForce(event.EngineStateDegraded, "TLT"), "ended halted"},
+		{"inherited halted, another incident cleared", []journal.Entry{inherited(inForce(event.EngineStateHalted))}, "engine-state:joint:9", nil, "engine-state:joint:1"},
+		{"inherited degraded, widened later, the later record cleared", []journal.Entry{inherited(inForce(event.EngineStateDegraded, "SPY")), degradedTLT}, "engine-state:joint:2", nil, "engine-state:joint:1"},
 	} {
 		approval := event.OperatorRunApprovedPayload{IncidentID: c.clears, IncidentInForce: c.in}
 		err := checkIncidentInForce(c.entries, approval, "run-1.log")
@@ -507,4 +520,118 @@ func TestAFreshRunCannotRepeatAStartThatRecordedNothing(t *testing.T) {
 	fresh.logPath, fresh.outPath = filepath.Join(dir, "run-2.log"), filepath.Join(dir, "run-2.journal")
 	fresh.approvalPath = writeApproval(t, dir, "run-1.log", recoverFile(t, previous).FinalRecordHash, false)
 	refuse(t, "a repeated start", fresh, "-as-of")
+}
+
+// TestAFreshRunAfterACutShortStartIsCheckedAgainstTheRunBeforeIt: a log
+// holding nothing past its configuration decided nothing and records no
+// state, so a fresh run approved after it, with a new -as-of, is checked
+// against the latest earlier log that holds more: the latch and incident
+// that run ended with are still in force (ADR 0026, point 5; ADR 0019,
+// amended 2026-09-24, "The state survives a restart"; ADR 0027, the
+// restart model). The approval still names the latest log and its hash.
+func TestAFreshRunAfterACutShortStartIsCheckedAgainstTheRunBeforeIt(t *testing.T) {
+	dir := t.TempDir()
+	first := boostOptions(t, dir)
+	first.logPath, first.outPath = filepath.Join(dir, "run-1.log"), filepath.Join(dir, "run-1.journal")
+	stop := startEngine(t, first)
+	feed := newBoostFeed(t, first.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
+	feed.sessions(0, 3)
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatalf("the first run: %v", err)
+	}
+	latch, _ := lastLatch(t, recoverFile(t, first.logPath).Entries)
+	cut := configurationOnlyLog(t, dir, "run-2.log", time.Now().Add(time.Hour))
+	cutHash := recoverFile(t, cut).FinalRecordHash
+
+	fresh := boostOptions(t, dir)
+	fresh.logPath, fresh.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
+	fresh.asOf = "2024-01-03T21:00:00Z"
+	unlatched := fresh
+	unlatched.approvalPath = writeApproval(t, dir, "run-2.log", cutHash, !latch)
+	refuse(t, "a latch the run before the cut-short start does not hold", unlatched, fmt.Sprintf("latched_after %t", latch))
+
+	approved := fresh
+	approved.approvalPath = writeApproval(t, dir, "run-2.log", cutHash, latch)
+	if err := startEngine(t, approved)(); err != nil {
+		t.Fatalf("the approved fresh run: %v", err)
+	}
+}
+
+// committedPrefix installs dir/name as the first groups committed groups of
+// the log at source, modified at at: the log a resume of source leaves when
+// it stops partway through copying source's committed groups (ADR 0027 §6:
+// the new log begins with the committed part of the old, byte for byte).
+func committedPrefix(t *testing.T, source, dir, name string, groups int, at time.Time) string {
+	t.Helper()
+	raw, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.SplitAfter(string(raw), "\n")
+	kept, commits := lines[:1], 0
+	for _, line := range lines[1:] {
+		if commits == groups {
+			break
+		}
+		kept = append(kept, line)
+		if strings.Contains(line, `"commit"`) {
+			commits++
+		}
+	}
+	if commits != groups {
+		t.Fatalf("%s commits %d group(s), fewer than %d", source, commits, groups)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(strings.Join(kept, "")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, at, at); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestAResumeAbandonedPartwayIsNeverTheLatestRun: a resume creates its new
+// log, then copies the old log's committed groups into it one by one (ADR
+// 0027 §6), so a resume refused for divergence, or a crash during the copy,
+// leaves a newer log holding a strict prefix of the old one's committed
+// groups. That log is an abandoned attempt, not a run: the state it ends in
+// is a cut-down copy of the old run's, so it is never the latest log. The
+// old log is still the one resumed or approved, and the attempt is named
+// when it is.
+func TestAResumeAbandonedPartwayIsNeverTheLatestRun(t *testing.T) {
+	dir := t.TempDir()
+	first := boostOptions(t, dir)
+	first.logPath, first.outPath = filepath.Join(dir, "run-1.log"), filepath.Join(dir, "run-1.journal")
+	stop := startEngine(t, first)
+	feed := newBoostFeed(t, first.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
+	feed.sessions(0, 3)
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatalf("the first run: %v", err)
+	}
+	firstLog := recoverFile(t, first.logPath)
+	latch, _ := lastLatch(t, firstLog.Entries)
+	abandoned := committedPrefix(t, first.logPath, dir, "run-2.log", 3, time.Now().Add(time.Hour))
+	if n, all := len(recoverFile(t, abandoned).Entries), len(firstLog.Entries); n < 2 || n >= all {
+		t.Fatalf("the abandoned attempt holds %d of %d records, want a strict prefix past the configuration", n, all)
+	}
+
+	resumedAttempt := boostOptions(t, dir)
+	resumedAttempt.logPath, resumedAttempt.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
+	resumedAttempt.resumePath = abandoned
+	refuse(t, "a resume of the abandoned attempt", resumedAttempt, "run-1.log")
+
+	approvedAttempt := boostOptions(t, dir)
+	approvedAttempt.logPath, approvedAttempt.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
+	approvedAttempt.approvalPath = writeApproval(t, dir, "run-2.log", recoverFile(t, abandoned).FinalRecordHash, latch)
+	refuse(t, "an approval of the abandoned attempt", approvedAttempt, "run-1.log")
+
+	resumed := boostOptions(t, dir)
+	resumed.logPath, resumed.outPath = filepath.Join(dir, "run-3.log"), filepath.Join(dir, "run-3.journal")
+	resumed.resumePath = first.logPath
+	if err := startEngine(t, resumed)(); err != nil {
+		t.Fatalf("the resume of the run the attempt abandoned: %v", err)
+	}
 }

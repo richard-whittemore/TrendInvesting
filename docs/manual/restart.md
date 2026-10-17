@@ -62,6 +62,10 @@ latch can never quietly switch the boost off.
 | The approval leaves out the latch or the incident in force, or adds an item the engine does not know | Refuses, names it. |
 | The approval's latch is not the one the previous log ended with | Refuses, names the previous log's latch. |
 | The previous log ended Degraded or Halted and the approval neither clears that incident nor carries it in force at least as tightly | Refuses: a restart never loosens Degraded or Halted (ADR 0019). An incident the previous run was itself approved to continue counts, even when that run recorded no new state. |
+| The approval clears, or carries in force, an incident whose ID is not the one the previous log ended in | Refuses, names the log's incident: an approval clears or continues only that incident, by its ID (the continued incident's ID, or else the ID of the first `strategy.engine.state` record out of Normal). |
+| The approval clears an incident, but the previous log ended Normal | Refuses: there is no incident to clear; write `"incident_id": ""`. |
+| The latest log holds nothing past its configuration (a start cut short) and a fresh run approves it | The approval still names that log and its fingerprint, but the latch and incident are checked against the latest earlier log that holds more: a cut-short start decided nothing, so the run before it is the state still in force. |
+| A newer log holds an exact, shorter copy of an older log's records (more than its configuration) | It is a resume that stopped partway through copying (refused for divergence, or crashed), not a run: the engine skips it when finding the latest log, refuses to resume it or have it approved, and names the log it copied. Resume or approve that older log; keep the copy as evidence (ADR 0027 §6). |
 | A resume names a log that is not the latest in the folder | Refuses, names the latest: only the crashed run, which is the latest, is resumed. |
 | Resuming on a build stamped only "-dirty" | Refuses: such a stamp cannot tell two different uncommitted changes apart. |
 | The fingerprint does not match the log | Refuses: the log is not the one you approved. |
@@ -91,10 +95,13 @@ Degraded and Halted; one sale back to 98% per incident). Tests:
 `TestAFreshRunCannotRepeatAStartThatRecordedNothing`,
 `TestAnApprovalNeverLoosensThePreviousRunsState`,
 `TestAnInheritedIncidentSurvivesARunThatRecordsNoStateChange`,
+`TestAFreshRunAfterACutShortStartIsCheckedAgainstTheRunBeforeIt`,
+`TestAResumeAbandonedPartwayIsNeverTheLatestRun`,
 `TestABoostRunDoesNotResumeAcrossBuilds`,
 `TestADirtyBuildThatDoesNotIdentifyItsTreeNeverResumes` (`cmd/engine`);
 `TestAnApprovedFreshRunStartsFromTheApprovedLatch`, `TestApprovalInputRules`,
-`TestAFreshRunNeverAttemptsAnIncidentsSaleTwice` (`internal/targetweight`);
+`TestAFreshRunNeverAttemptsAnIncidentsSaleTwice`,
+`TestARecoveredDecisionNeverFollowsAnApproval` (`internal/targetweight`);
 `TestAnIncidentsSaleIsAttemptedOnce` (`internal/risklimit`);
 `TestOperatorRunApprovedValidate`, `TestAnApprovalStatesBoostsLatchExplicitly`,
 `TestAnApprovalCarriesTheIncidentSaleAttempt`,

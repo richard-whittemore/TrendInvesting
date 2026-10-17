@@ -59,6 +59,10 @@ The engine reads its settings from
    crash restart: follow "Upgrading the build" or start a fresh run. A
    refusal naming a later log means the log you named is not the crashed
    run: only the latest log in the state directory is resumed. A refusal
+   saying the log is a resume abandoned partway means an earlier resume
+   stopped while copying (refused, or crashed): resume the log it names,
+   the crashed run, and leave the partial copy where it is as evidence;
+   the engine skips it when finding the latest log (ADR 0027 §6). A refusal
    saying the log holds nothing past its configuration means a fresh run
    crashed before recording its approval: add
    `-approval <the approval it was started with>` to `TI_RESTART_ARGS`
@@ -88,7 +92,10 @@ The engine reads its settings from
    force: the `latched_after` of the latest `strategy.targets.decided` in the
    previous log, or, if that run decided nothing, the latch its own approval
    stated; the engine refuses any other value. `incident_id` names the
-   incident you are clearing, or is empty. `incident_in_force` is `null`
+   incident you are clearing, or is empty; it must be the ID of the incident
+   the previous log ended in (the `incident_id` its own approval carried in
+   force, or else the `id` of its first `strategy.engine.state` record out
+   of normal), and must be empty if that log ended normal. `incident_in_force` is `null`
    unless the new run continues an incident; then it is
    `{"incident_id": "<id>", "state": "degraded"|"halted",
    "scope_instrument_ids": ["SPY"], "sale_attempted": true|false,
@@ -102,8 +109,12 @@ The engine reads its settings from
    sale back to 98% was attempted (ADR 0019, amended 2026-10-15). A run
    approved with `true` never attempts it again. If the previous log ended
    degraded or halted, the approval must either clear that incident
-   (`incident_id`) or carry it in force at least as tight; the engine
-   refuses one that would loosen it.
+   (`incident_id`) or carry it in force, under that incident's ID, at least
+   as tight; the engine refuses one that would loosen it or names another
+   incident. If the latest log holds nothing past its configuration (a
+   start cut short), the approval still names it and its final record hash,
+   but take the latch and incident from the latest earlier log that holds
+   more: the engine checks them against that log.
 4. Set `TI_RUN` to a new name, `TI_AS_OF` to the first session the new run
    decides, and `TI_RESTART_ARGS=-approval <that file>`. If the latest log
    holds nothing past its configuration, `TI_AS_OF` must differ from its
@@ -112,5 +123,7 @@ The engine reads its settings from
    approval ... the adapter's first input carries sequence 3`. A refusal
    names what does not match: a later log than the one approved, a final hash
    that is not the log's, a latch the log does not end with, an incident
-   state looser than the one the log ended in, a repeated start, or another
-   account.
+   state looser than the one the log ended in, an incident ID that is not
+   the log's, a repeated start, or another account. Every log in the state
+   directory is read to find the latest run, so a log the engine cannot
+   recover (ADR 0027 §5) stops every start until it is dealt with.

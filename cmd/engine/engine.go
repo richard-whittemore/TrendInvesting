@@ -8,13 +8,17 @@
 //
 //	engine -socket <path> -config <configuration.json> -out <journal.jsonl> -as-of <RFC3339> [-mode backtest|dry-run|paper|live] [-log <durable.log> [-resume <previous.log>]]
 //
-// # Wire contract: the adapter's first bar must carry Sequence 2
+// # Wire contract: the adapter's first input continues the engine's own
 //
 // This run's own configuration input is always delivered first, at Sequence
-// configurationSequence (1), before the socket opens. The adapter's bars,
-// session closes and account snapshots continue that SAME sequence — it does
-// not start a numbering of its own — so its very first bar must carry
-// Sequence configurationSequence+1 (2). Each slice's bars are one Session,
+// configurationSequence (1), before the socket opens. A fresh run after an
+// earlier one then delivers the owner's approval as its second input, at
+// Sequence approvalSequence (2; approval.go), also before the socket opens.
+// The adapter's bars, session closes and account snapshots continue that
+// SAME sequence — it does not start a numbering of its own — so its very
+// first input must carry Sequence configurationSequence+1 (2), or
+// approvalSequence+1 (3) when an approval was recorded, which the engine
+// reports when it records one. Each slice's bars are one Session,
 // ended by market.session.closed (ADR 0021); its account.snapshot follows
 // the close's decisions, continuing the single input sequence: bar 2,
 // session close 3, snapshot 4, bar 5, including warm-up. This
@@ -58,7 +62,8 @@ import (
 var rfc3339DateTime = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]([01]\d|2[0-3]):[0-5]\d)$`)
 
 // sourceEngine is stamped on the configuration input this command
-// manufactures for itself at startup, and on the outer envelope newDecider
+// manufactures for itself at startup, on the owner's approval input it
+// records after it (approvalEnvelope), and on the outer envelope newDecider
 // returns over the wire (event.Envelope.Source's own doc comment: "Source
 // names the component that emitted the event"). It never appears on a
 // decision: every decision this command journals or returns is the
@@ -475,7 +480,8 @@ func readConfiguration(path string) (event.ConfigurationPayload, error) {
 // persistent cursor (see run) ever accepts for this run. It is a named
 // constant, not a literal 1 inlined where it is used, because it is also
 // half of this engine's wire contract: the adapter's OWN first bar must
-// carry Sequence configurationSequence+1, continuing this run's one input
+// carry Sequence configurationSequence+1 (approvalSequence+1 after a
+// recorded approval), continuing this run's one input
 // stream rather than starting a second one alongside it at the same value
 // — see run's own doc comment on why, and cmd/engine's package doc comment,
 // which is where an adapter author is expected to read this.

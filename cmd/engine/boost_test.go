@@ -300,3 +300,18 @@ func TestTheAccountMustMatchTheMode(t *testing.T) {
 		t.Fatalf("a paper account in -mode paper: %v", err)
 	}
 }
+
+// TestAMomentumConfigurationIsRefusedAsNotComposedHere: cmd/engine composes
+// Boost as its one target-weight strategy (ADR 0026, point 6); a momentum
+// configuration is refused by name rather than read as a Turtle
+// configuration, so the refusal tells the operator what is not composed.
+func TestAMomentumConfigurationIsRefusedAsNotComposedHere(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "momentum.json")
+	if err := os.WriteFile(path, []byte(`{"strategy_id":"momentum"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := compose(path, "test-build", time.Date(2024, time.January, 2, 21, 0, 0, 0, time.UTC))
+	if err == nil || !strings.Contains(err.Error(), `strategy_id "momentum"`) || strings.Contains(err.Error(), "Turtle") {
+		t.Fatalf("compose(momentum) = %v, want a refusal naming strategy_id \"momentum\" as not composed here", err)
+	}
+}

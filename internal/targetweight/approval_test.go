@@ -114,3 +114,17 @@ func TestAFreshRunContinuesTheIncidentsRestrictions(t *testing.T) {
 		}
 	}
 }
+
+// TestARecoveredDecisionNeverFollowsAnApproval: the approval states the
+// latch in force, restored and never changed afterwards (ADR 0026, point 5),
+// so a recorded strategy.targets.decided arriving after it is refused, just
+// as an approval after a recovered decision is; the decision-prelude model
+// that once fed such decisions in is dropped (ADR 0027, amended 2026-10-16).
+func TestARecoveredDecisionNeverFollowsAnApproval(t *testing.T) {
+	full := simulate(t, options{})
+	decided := ofType(full.decisions, event.TargetsDecidedEventType)[3]
+	at := sessionEnd(0)
+	h, s := configured(t)
+	mustApply(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", at, approval(true)))
+	mustRefuse(t, h, s.envelope(t, decided.Type, decided.SchemaVersion, decided.ID, at, decided.Payload), "comes once")
+}

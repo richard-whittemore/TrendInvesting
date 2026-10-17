@@ -206,9 +206,15 @@ func (h *Handler) applyConfiguration(in event.Envelope) error {
 	return nil
 }
 
+// applyRecovery restores Boost's latch and target in force from an earlier
+// run's recorded decision (ADR 0026, point 5). It comes once, straight after
+// the configuration, and never after an approval: the approval states the
+// latch in force, and nothing after it changes that latch (ADR 0026, point
+// 5; ADR 0027, amended 2026-10-16), just as applyApproval refuses to follow
+// a recovered decision.
 func (h *Handler) applyRecovery(in event.Envelope) error {
-	if h.recovered || h.started {
-		return errors.New("targetweight: a recovered decision comes once, straight after the configuration")
+	if h.recovered || h.approved || h.started {
+		return errors.New("targetweight: a recovered decision comes once, straight after the configuration, never after an approval or a bar")
 	}
 	p, err := decodeInput[event.TargetsDecidedPayload](in, event.TargetsDecidedSchemaVersion)
 	if err != nil {
