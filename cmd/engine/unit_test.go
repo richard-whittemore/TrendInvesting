@@ -71,7 +71,7 @@ var (
 // (systemd.service(5), "Command lines"): %i and %t specifiers; ${NAME} is
 // replaced by its value within a word; a word that is exactly $NAME becomes
 // the value split at whitespace, zero or more words.
-func expandExecStart(line string, specifiers map[string]string, env map[string]string) []string {
+func expandExecStart(line string, specifiers, env map[string]string) []string {
 	for spec, value := range specifiers {
 		line = strings.ReplaceAll(line, spec, value)
 	}

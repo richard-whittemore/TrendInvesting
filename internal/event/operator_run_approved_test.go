@@ -38,9 +38,13 @@ func TestOperatorRunApprovedValidate(t *testing.T) {
 	expectInvalid(t, "previous log path", v, func(p *P) { p.PreviousLog = "../engines/run.log" }, "file name")
 	expectInvalid(t, "previous log dot", v, func(p *P) { p.PreviousLog = ".." }, "file name")
 	expectInvalid(t, "hash", v, func(p *P) { p.PreviousLogFinalHash = "" }, "final hash")
-	expectInvalid(t, "hash prefix", v, func(p *P) { p.PreviousLogFinalHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }, "final hash")
+	expectInvalid(t, "hash prefix", v, func(p *P) {
+		p.PreviousLogFinalHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	}, "final hash")
 	expectInvalid(t, "hash short", v, func(p *P) { p.PreviousLogFinalHash = "sha256:0123" }, "final hash")
-	expectInvalid(t, "hash upper", v, func(p *P) { p.PreviousLogFinalHash = "sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef" }, "final hash")
+	expectInvalid(t, "hash upper", v, func(p *P) {
+		p.PreviousLogFinalHash = "sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
+	}, "final hash")
 	expectInvalid(t, "approved by", v, func(p *P) { p.ApprovedBy = "" }, "approved by")
 	expectInvalid(t, "approved at", v, func(p *P) { p.ApprovedAt = time.Time{} }, "approved at")
 }

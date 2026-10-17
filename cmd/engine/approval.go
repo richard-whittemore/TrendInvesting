@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -69,7 +70,10 @@ func freshRunApproval(opts options, comp composition) (*event.OperatorRunApprove
 	if approval.PreviousLog != latest {
 		return nil, fmt.Errorf("engine: the approval in %s names %s, but the latest earlier run in %s is %s; approve the latest run", opts.approvalPath, approval.PreviousLog, dir, latest)
 	}
-	recovery, err := recoverLogFile(dir + string(os.PathSeparator) + latest)
+	// The directory as spelled, separator included (filepath.Split), so the
+	// log read is the one listed, never one a cleaned path would name.
+	prefix, _ := filepath.Split(opts.logPath)
+	recovery, err := recoverLogFile(prefix + latest)
 	if err != nil {
 		return nil, err
 	}
