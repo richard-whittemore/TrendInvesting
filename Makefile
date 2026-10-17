@@ -54,6 +54,7 @@ deps:
 adapter-test: research-test
 	cd adapter/lean && python3 -m unittest discover -s tests
 	cd adapter/ibkr && python3 -m unittest discover -s tests
+	cd adapter && python3 -m unittest discover -s marketdata/tests -t .
 
 # The research checks' rule cores (research/qc-cloud for the Turtle
 # Baseline, research/qc-cloud-sublime for the Sublime control,
@@ -91,7 +92,7 @@ research-test:
 		research/edge-search/etf/rotation.py research/edge-search/momentum/defensive_v2.py \
 		research/edge-search/momentum/universe_parity.py research/edge-search/momentum/parity_compare.py \
 		research/edge-search/momentum/glide_path.py research/edge-search/momentum/golden_log.py \
-		research/edge-search/boost/golden_log.py
+		research/edge-search/boost/golden_log.py research/edge-search/momentum/fresh_universe.py
 	python3 -m py_compile research/edge-search/etf-trend/main.py research/edge-search/etf-trend/main_oos.py \
 		research/edge-search/factors/main.py research/edge-search/timing/main.py \
 		research/edge-search/riskparity/main.py research/edge-search/bh-rsp/main.py
