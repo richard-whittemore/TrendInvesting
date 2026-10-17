@@ -36,11 +36,16 @@ repeats the same figures as the execution test's baseline. The run IDs
 
 **Cause: QuantConnect's fundamental data changed between 2026-10-04 (the R4
 runs) and 2026-10-16 (the reruns). The code and the requests did not
-change.**
+change.** This is the conclusion the evidence supports and the one the plan
+adopts; it rests on counter output and exclusion of the other candidates, not
+on a direct comparison of the underlying data (see "Still open").
 - **Same requests.** The two runs read the same number of stock-months:
-  107,500 in-sample and 69,000 held out, in both R4 and the reruns.
+  107,500 in-sample and 69,000 held out, in both R4 and the reruns. Equal
+  read counts show the same number of reads, not that the same stock-months
+  were requested.
 - **Different data.** The reruns found about 1,190 fewer fundamental
-  fields in each window (below).
+  fields in each window (below). This is changed counter output; by itself
+  it does not prove which values changed.
 - **Different path.** With the same bytes and the same measure, the
   1999–2002 span alone moves from 4.94% / 34.03% (R4) to 11.74% / 46.05%.
 
@@ -204,13 +209,20 @@ different path, not a separate cause.
 | Average cash | 13.9% | 13.9% | 3.9% | 3.6% |
 | Fundamentals reads / hits | 107,500 / 196,051 | 107,500 / 194,862 | 69,000 / 127,905 | 69,000 / 126,718 |
 
-The trend filter's months are identical (59 and 25 risk-off months). The
-difference is in which stocks the momentum part held. That fits a change
+The trend filter's counts match (59 and 25 risk-off months), but these
+counts do not show whether the same months were risk-off. The difference
+appears to be in which stocks the momentum part held, which fits a change
 in the universe or fundamentals data (membership, the Morningstar sector
-codes the cap uses), not in SPY or IEF prices.
+codes the cap uses). SPY or IEF price changes are not ruled out without
+comparing the monthly decisions and price series.
 
 ### Still open
 
+- **Underlying inputs.** Matching `Fundamentals` totals are supporting
+  evidence only: `fund_hits` counts readable nonzero fields, not their
+  values, names, sectors or prices, and an engine change in how `_get` reads
+  attributes could also move the totals. Settling the cause needs a
+  comparison of the underlying inputs, not the counts.
 - **Engine version.** The log endpoint returned no first line for these
   runs, so it was not read. The morning golden runs log LEAN
   v2.5.0.0.18184.
@@ -284,5 +296,5 @@ Each was run once, on the identical bytes (md5 `5777e081…` and
 - **Pair and fingerprint every run.** QuantConnect's data can change
   without notice, so a figure is reproducible only together with its data
   state. Every comparison runs as a same-day pair, and each run records
-  its `Fundamentals` counter (reads / hits) as the fingerprint of the data
-  it saw.
+  its `Fundamentals` counter (reads / hits) as a coarse fingerprint of the
+  data it saw (a difference flags a change; a match does not prove none).
