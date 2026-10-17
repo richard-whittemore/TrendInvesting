@@ -140,7 +140,13 @@ def forward_factors(ticker, sessions, closes, splits, dividends, base):
     cash, as in adjusted_closes. As there, P is first restated by every
     split dated after the prior session and before the ex-date (a split on a
     non-trading day), since the cash is on the ex-date share basis. Ratios
-    between sessions equal those of adjusted_closes.
+    between sessions equal those of adjusted_closes, to within floating point.
+
+    Rule source: ADR 0004 (signals see split-adjusted prices, so the split
+    multiplier; its amendment's one-view rule) and ADR 0026 point 1 (the
+    momentum ranking weights use split- and dividend-adjusted closes, so the
+    total multiplier), both under the backward ratio convention in this
+    module's docstring.
 
     ``sessions`` is every trading day loaded, oldest first, from the base to
     the last; ``splits`` and ``dividends`` are the ticker's own rows, each
