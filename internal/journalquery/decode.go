@@ -23,19 +23,45 @@ type item struct {
 	// attributeAccounts), otherwise empty.
 	account string
 
-	fill      *event.FillPayload
+	fill      *fill
 	planned   *event.OrderPlannedPayload
 	released  *event.OrderReleasedPayload
 	refused   *event.OrderRefusedPayload
-	lifecycle *event.OrderLifecyclePayload
+	lifecycle *lifecycle
 	engine    *event.EngineStatePayload
 	snapshot  *event.AccountPositionsSnapshotPayload
 	renamed   *event.InstrumentSymbolChangedPayload
 }
 
+// fill is one execution in either fill version the queries read: a Turtle
+// fill (version 4), whose Kind is entry, add, stop or exit, or a
+// target-weight limit order's fill (version 5, ADR 0026), whose Kind is its
+// side, buy or sell. Quantity is the executed size, unsigned. Exactly one of
+// turtle and limit holds the record as written.
+type fill struct {
+	InstrumentID string
+	Kind         string
+	Quantity     int64
+	Price        float64
+	Commission   float64
+
+	turtle *event.FillPayload
+	limit  *event.TargetWeightFillPayload
+}
+
+// lifecycle is one order state change in either lifecycle version: a Turtle
+// stop order's (version 1), priced at its stop and noted with its tag, or a
+// target-weight limit order's (version 2, ADR 0026), priced at its limit and
+// noted with its client order id.
+type lifecycle struct {
+	InstrumentID, Status, Side, Note string
+	Quantity                         int64
+	Price                            float64
+}
+
 type seenFill struct {
 	seq     uint64
-	payload event.FillPayload
+	payload fill
 }
 
 func decode(j Journal) ([]item, error) {
@@ -47,24 +73,28 @@ func decode(j Journal) ([]item, error) {
 		var err error
 		switch env.Type {
 		case event.FillEventType:
-			it.fill = new(event.FillPayload)
-			err = read(env, []uint32{event.FillSchemaVersion}, it.fill)
-			it.at = it.fill.FilledAt
+			it.fill, err = readFill(env)
+			if it.fill != nil && it.fill.limit != nil {
+				it.at, it.account = it.fill.limit.FilledAt, it.fill.limit.AccountID
+			} else if it.fill != nil {
+				it.at = it.fill.turtle.FilledAt
+			}
 		case event.OrderPlannedEventType:
 			it.planned = new(event.OrderPlannedPayload)
 			err = read(env, []uint32{event.OrderPlannedSchemaVersion}, it.planned)
 			it.account = it.planned.AccountID
 		case event.OrderReleasedEventType:
+			// Version 2 adds the IRA cash figures and account-wide exposure
+			// to version 1's fields, so one payload type reads both.
 			it.released = new(event.OrderReleasedPayload)
-			err = read(env, []uint32{event.OrderReleasedSchemaVersion}, it.released)
+			err = read(env, []uint32{1, event.OrderReleasedSchemaVersion}, it.released)
 			it.account = it.released.AccountID
 		case event.OrderRefusedEventType:
 			it.refused = new(event.OrderRefusedPayload)
-			err = read(env, []uint32{event.OrderRefusedSchemaVersion}, it.refused)
+			err = read(env, []uint32{1, event.OrderRefusedSchemaVersion}, it.refused)
 			it.account = it.refused.AccountID
 		case event.OrderLifecycleEventType:
-			it.lifecycle = new(event.OrderLifecyclePayload)
-			err = read(env, []uint32{event.OrderLifecycleSchemaVersion}, it.lifecycle)
+			it.lifecycle, it.account, err = readLifecycle(env)
 		case event.InstrumentSymbolChangedEventType:
 			it.renamed = new(event.InstrumentSymbolChangedPayload)
 			err = read(env, []uint32{event.InstrumentSymbolChangedSchemaVersion}, it.renamed)
@@ -73,14 +103,16 @@ func decode(j Journal) ([]item, error) {
 			err = read(env, []uint32{event.EngineStateSchemaVersion, event.EngineStateScopedVersion}, it.engine)
 		case event.AccountSnapshotEventType:
 			// Version 2 (equity and cash) carries no positions and is not
-			// read here. Version 3 is the broker's positions; any other
-			// version is refused by read, never skipped.
+			// read here. Version 3 is the broker's positions and version 4
+			// adds the account's cash to them; any other version is refused
+			// by read, never skipped.
 			if env.SchemaVersion == event.AccountSnapshotSchemaVersion {
 				continue
 			}
-			it.snapshot = new(event.AccountPositionsSnapshotPayload)
-			err = read(env, []uint32{event.AccountSnapshotPositionsVersion}, it.snapshot)
-			it.account = it.snapshot.AccountID
+			it.snapshot, err = readSnapshot(env)
+			if it.snapshot != nil {
+				it.account = it.snapshot.AccountID
+			}
 		default:
 			continue
 		}
@@ -90,13 +122,13 @@ func decode(j Journal) ([]item, error) {
 		if it.fill != nil {
 			// A repeated delivery of one fill is one execution (the reducer
 			// ignores it too); the same id with different content is refused.
-			if first, dup := fills[it.fill.FillID]; dup {
+			if first, dup := fills[it.fill.id()]; dup {
 				if !sameFill(first.payload, *it.fill) {
-					return nil, fmt.Errorf("%s: record %d: fill %q conflicts with record %d, which used the same fill id differently", j.Name, record.Sequence, it.fill.FillID, first.seq)
+					return nil, fmt.Errorf("%s: record %d: fill %q conflicts with record %d, which used the same fill id differently", j.Name, record.Sequence, it.fill.id(), first.seq)
 				}
 				continue
 			}
-			fills[it.fill.FillID] = seenFill{seq: record.Sequence, payload: *it.fill}
+			fills[it.fill.id()] = seenFill{seq: record.Sequence, payload: *it.fill}
 		}
 		items = append(items, it)
 	}
@@ -109,12 +141,7 @@ func decode(j Journal) ([]item, error) {
 // journal's other records name exactly one. With none or several it leaves
 // them unattributed rather than guessing.
 func attributeAccounts(items []item) {
-	seen := map[string]bool{}
-	for _, it := range items {
-		if it.account != "" {
-			seen[it.account] = true
-		}
-	}
+	seen := namedAccounts(items)
 	if len(seen) != 1 {
 		return
 	}
@@ -127,6 +154,19 @@ func attributeAccounts(items []item) {
 			items[i].account = only
 		}
 	}
+}
+
+// namedAccounts is the set of accounts the records themselves name. It is the
+// one rule for how many accounts a journal has: attribution and the fill
+// replay both read it.
+func namedAccounts(items []item) map[string]bool {
+	seen := map[string]bool{}
+	for _, it := range items {
+		if it.account != "" {
+			seen[it.account] = true
+		}
+	}
+	return seen
 }
 
 func read(env event.Envelope, schemas []uint32, into any) error {
@@ -150,17 +190,82 @@ func read(env event.Envelope, schemas []uint32, into any) error {
 	return nil
 }
 
-// sameFill reports whether two deliveries state one execution, by the
-// reducer's rules (strategy.acceptedFillState.matches): an absent and an
-// empty unit_ids list are the same, and one instant is the same however its
-// offset is written. Every other field is compared exactly.
-func sameFill(a, b event.FillPayload) bool {
-	a.FilledAt, b.FilledAt = a.FilledAt.UTC(), b.FilledAt.UTC()
-	if len(a.UnitIDs) == 0 {
-		a.UnitIDs = nil
+// readFill decodes a fill of either version; any other version is refused.
+func readFill(env event.Envelope) (*fill, error) {
+	if env.SchemaVersion == event.FillTargetWeightVersion {
+		p := new(event.TargetWeightFillPayload)
+		if err := read(env, []uint32{event.FillTargetWeightVersion}, p); err != nil {
+			return nil, err
+		}
+		return &fill{InstrumentID: p.InstrumentID, Kind: p.Side, Quantity: p.Quantity, Price: p.Price, Commission: p.Commission, limit: p}, nil
 	}
-	if len(b.UnitIDs) == 0 {
-		b.UnitIDs = nil
+	p := new(event.FillPayload)
+	if err := read(env, []uint32{event.FillSchemaVersion, event.FillTargetWeightVersion}, p); err != nil {
+		return nil, err
 	}
-	return reflect.DeepEqual(a, b)
+	return &fill{InstrumentID: p.InstrumentID, Kind: p.Kind, Quantity: p.Quantity, Price: p.Price, Commission: p.Commission, turtle: p}, nil
+}
+
+// readLifecycle decodes an order state change of either version, with the
+// account a limit order's change names; any other version is refused.
+func readLifecycle(env event.Envelope) (*lifecycle, string, error) {
+	if env.SchemaVersion == event.OrderLifecycleLimitVersion {
+		p := new(event.LimitOrderLifecyclePayload)
+		if err := read(env, []uint32{event.OrderLifecycleLimitVersion}, p); err != nil {
+			return nil, "", err
+		}
+		return &lifecycle{InstrumentID: p.InstrumentID, Status: p.Status, Side: p.Side, Note: p.ClientOrderID, Quantity: p.Quantity, Price: p.LimitPrice}, p.AccountID, nil
+	}
+	p := new(event.OrderLifecyclePayload)
+	if err := read(env, []uint32{event.OrderLifecycleSchemaVersion, event.OrderLifecycleLimitVersion}, p); err != nil {
+		return nil, "", err
+	}
+	return &lifecycle{InstrumentID: p.InstrumentID, Status: p.Status, Note: p.Tag, Quantity: p.Quantity, Price: p.StopPrice}, "", nil
+}
+
+// readSnapshot decodes a positions snapshot of version 3 or 4 (version 4's
+// cash is not reported); any other version is refused.
+func readSnapshot(env event.Envelope) (*event.AccountPositionsSnapshotPayload, error) {
+	if env.SchemaVersion == event.AccountSnapshotCashVersion {
+		p := new(event.AccountCashSnapshotPayload)
+		if err := read(env, []uint32{event.AccountSnapshotCashVersion}, p); err != nil {
+			return nil, err
+		}
+		return &p.AccountPositionsSnapshotPayload, nil
+	}
+	p := new(event.AccountPositionsSnapshotPayload)
+	if err := read(env, []uint32{event.AccountSnapshotPositionsVersion, event.AccountSnapshotCashVersion}, p); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (f fill) id() string {
+	if f.limit != nil {
+		return f.limit.FillID
+	}
+	return f.turtle.FillID
+}
+
+// sameFill reports whether two deliveries state one execution. Two Turtle
+// fills follow the reducer's rules (strategy.acceptedFillState.matches): an
+// absent and an empty unit_ids list are the same. For either version one
+// instant is the same however its offset is written, and every other field
+// is compared exactly. Fills of different versions are never the same.
+func sameFill(x, y fill) bool {
+	switch {
+	case x.limit != nil && y.limit != nil:
+		return x.limit.SameExecution(*y.limit)
+	case x.turtle != nil && y.turtle != nil:
+		a, b := *x.turtle, *y.turtle
+		a.FilledAt, b.FilledAt = a.FilledAt.UTC(), b.FilledAt.UTC()
+		if len(a.UnitIDs) == 0 {
+			a.UnitIDs = nil
+		}
+		if len(b.UnitIDs) == 0 {
+			b.UnitIDs = nil
+		}
+		return reflect.DeepEqual(a, b)
+	}
+	return false
 }

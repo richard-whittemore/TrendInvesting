@@ -62,10 +62,11 @@ func (f Filter) keepFill(it item) bool {
 	return it.fill != nil && f.keep(it, it.fill.InstrumentID)
 }
 
-// signedQuantity is a fill's effect on the position: entries and adds buy,
-// stops and exits sell (event.FillPayload records the executed size unsigned).
+// signedQuantity is a fill's effect on the position: entries, adds and buys
+// buy, stops, exits and sells sell (both fill versions record the executed
+// size unsigned).
 func signedQuantity(kind string, quantity int64) int64 {
-	if kind == "stop" || kind == "exit" {
+	if kind == "stop" || kind == "exit" || kind == event.OrderSideSell {
 		return -quantity
 	}
 	return quantity
@@ -121,7 +122,7 @@ type tally struct {
 	commission          float64
 }
 
-func (t *tally) add(f *event.FillPayload) {
+func (t *tally) add(f *fill) {
 	t.fills++
 	if signedQuantity(f.Kind, f.Quantity) > 0 {
 		t.bought += f.Quantity

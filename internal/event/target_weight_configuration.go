@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -17,16 +18,44 @@ const TargetWeightConfigurationEventType = "strategy.target-weight.configuration
 // TargetWeightConfigurationSchemaVersion is the current schema version of
 // TargetWeightConfigurationPayload.
 //
-//   - Version 1 holds Boost's strategy fields, the margin account's limits and
-//     the account's identity only. Momentum, the glide path, execution (D5,
-//     D7) and the Excess Liquidity thresholds join in later versions, each a
-//     new hash (ADR 0016).
-const TargetWeightConfigurationSchemaVersion uint32 = 1
+//   - Version 1 held Boost's strategy fields, the margin account's limits and
+//     the account's identity only.
+//   - Version 2 adds the momentum strategy for an IRA: Momentum (its rule's
+//     parameters, the universe data source and the sector-label sources) and
+//     Execution (the D5 cash rule, the share quantity rule, the fee
+//     allowance). StrategyID chooses which strategy section is set; the other
+//     is zero. The glide path and the Excess Liquidity thresholds join in
+//     later versions, each a new hash (ADR 0016).
+const TargetWeightConfigurationSchemaVersion uint32 = 2
 
-// TargetWeightStrategyBoost is the only strategy this schema configures:
-// Boost on SPY for the joint margin account (docs/live-trading/plan.md,
-// section 2, "Boost").
-const TargetWeightStrategyBoost = "boost"
+// The strategies this schema configures: Boost on SPY for the joint margin
+// account, and the momentum combination for an IRA (docs/live-trading/plan.md,
+// section 2, "Boost" and "Momentum, combination").
+const (
+	TargetWeightStrategyBoost    = "boost"
+	TargetWeightStrategyMomentum = "momentum"
+)
+
+// MomentumRuleTrend names the momentum variant configured: mom_trend, the
+// variant F_COMBO selects (research/edge-search/build_variants.py:152-153).
+const MomentumRuleTrend = "mom_trend"
+
+// The D5 cash rules: which cash an IRA's buys are funded from (ADR 0026,
+// point 2, "Budget"; plan.md section 5, "IRA execution"). Whether a buy may
+// use unsettled sale proceeds is IBKR's answer to D5, so it is configuration.
+const (
+	// CashRuleSettled funds buys from settled cash only; the proceeds of the
+	// rebalance's own sells do not count until they settle.
+	CashRuleSettled = "settled-cash"
+	// CashRuleTotal funds buys from total cash, settled and unsettled, plus
+	// the proceeds the rebalance's sells realise.
+	CashRuleTotal = "total-cash"
+)
+
+// ShareQuantityWhole is the only share quantity rule built: whole shares,
+// rounded toward zero (ADR 0026, point 2, D7-L's rounding). Fractional
+// shares (D7-F) need decimal quantities in the order and fill payloads.
+const ShareQuantityWhole = "whole-shares"
 
 // The trading modes, set per account (docs/live-trading/plan.md, section 5,
 // "Modes"). A dry-run releases orders with send false and never sends them
@@ -50,10 +79,71 @@ type TargetWeightConfigurationPayload struct {
 	AccountID  string `json:"account_id"`
 	Mode       string `json:"mode"`
 	Adapter    string `json:"adapter"`
-	// Boost holds the rule's parameters (research/edge-search/boost/template.py:33-37).
-	Boost BoostConfiguration `json:"boost"`
-	// Limits holds the margin account's hard limits (ADR 0026, point 3).
+	// Boost holds the rule's parameters (research/edge-search/boost/template.py:33-37),
+	// set only for StrategyID boost.
+	Boost BoostConfiguration `json:"boost,omitzero"`
+	// Momentum holds the momentum rule's parameters, set only for StrategyID
+	// momentum.
+	Momentum MomentumConfiguration `json:"momentum,omitzero"`
+	// Execution holds the IRA execution rules, set only for StrategyID
+	// momentum.
+	Execution ExecutionConfiguration `json:"execution,omitzero"`
+	// Limits holds the account's hard limits (ADR 0026, point 3).
 	Limits MarginLimits `json:"limits"`
+}
+
+// MomentumConfiguration is the momentum combination's parameters as
+// backtested: research/edge-search/momentum/defensive_v2.py as F_COMBO
+// configures it (ADR 0026, point 6, "Strategy"; plan.md section 2), and the
+// identity of the universe's inputs (ADR 0026, point 6, "Identity").
+type MomentumConfiguration struct {
+	// Rule is MomentumRuleTrend.
+	Rule string `json:"rule"`
+	// ListingType is the listing type a universe row must carry, "CS"
+	// (plan.md section 4, D8 "As built").
+	ListingType string `json:"listing_type"`
+	// UniverseSize is how many rows by dollar volume join the universe (500).
+	UniverseSize int `json:"universe_size"`
+	// MinPrice is the unadjusted close a row needs, inclusive ($5).
+	MinPrice float64 `json:"min_price"`
+	// ScoreLookback (252) and ScoreSkip (21) place the 12-1 score's two
+	// closes, in sessions back from the last (defensive_v2.py:287-289).
+	ScoreLookback int `json:"score_lookback"`
+	ScoreSkip     int `json:"score_skip"`
+	// VolatilityReturns is how many daily returns the volatility measures (252).
+	VolatilityReturns int `json:"volatility_returns"`
+	TopN              int `json:"top_n"`
+	SectorCap         int `json:"sector_cap"`
+	// InverseVolatility is F_COMBO's INV_VOL; only true is built.
+	InverseVolatility bool    `json:"inverse_volatility"`
+	Invested          float64 `json:"invested"`
+	TrendInstrument   string  `json:"trend_instrument"`
+	// TrendCloses is TREND_DAYS: the closes the trend mean covers (200).
+	TrendCloses       int     `json:"trend_closes"`
+	RiskOffInstrument string  `json:"risk_off_instrument"`
+	RiskOffFraction   float64 `json:"risk_off_fraction"`
+	// RebalanceBand is REBALANCE_BAND: a held name is traded only when its
+	// weight is more than RebalanceBand x its target away from it (0.25).
+	RebalanceBand float64 `json:"rebalance_band"`
+	// UniverseSource names the producer of market.universe.snapshot; each
+	// snapshot must name it (ADR 0026, point 8).
+	UniverseSource string `json:"universe_source"`
+	// SectorSources are the sector-label sources a universe row may name, in
+	// order of preference (plan.md section 4, "Sectors", "Chosen": GICS from
+	// IWV, then Nasdaq's screener).
+	SectorSources []string `json:"sector_sources"`
+}
+
+// ExecutionConfiguration is an IRA's execution rules (ADR 0026, points 2 and 6).
+type ExecutionConfiguration struct {
+	// CashRule is one of the CashRule constants (D5).
+	CashRule string `json:"cash_rule"`
+	// ShareQuantity is ShareQuantityWhole (D7).
+	ShareQuantity string `json:"share_quantity"`
+	// MaxFeesPerOrder is the most commission and fees one order can cost,
+	// added to every buy's worst-case cost (ADR 0026, point 2, "Worst-case
+	// cost").
+	MaxFeesPerOrder float64 `json:"max_fees_per_order"`
 }
 
 // BoostConfiguration is Boost's parameters as backtested
@@ -76,12 +166,14 @@ type BoostConfiguration struct {
 	WarmUpStart string `json:"warm_up_start"`
 }
 
-// MarginLimits is the joint margin account's hard limits (ADR 0026, point 3).
-// Each is set so every order in the parity backtests passes; a value that
-// refuses a backtested order is a configuration error.
+// MarginLimits is an account's hard limits (ADR 0026, point 3): the joint
+// margin account's, or an IRA's, whose MaxExposure is at most 1 because an IRA
+// never uses margin. Each is set so every order in the parity backtests
+// passes; a value that refuses a backtested order is a configuration error.
 type MarginLimits struct {
 	// MaxExposure is the pre-trade exposure limit, 1.5 for the joint account
-	// (plan.md section 5). It applies only to orders that increase exposure.
+	// and 1.0 for an IRA (plan.md section 5). It applies only to orders that
+	// increase exposure.
 	MaxExposure          float64 `json:"max_exposure"`
 	MaxOrdersPerDecision int     `json:"max_orders_per_decision"`
 	// MaxOrderFraction bounds |quantity x price| / net liquidation per order.
@@ -100,7 +192,22 @@ func (c BoostConfiguration) WarmUpDate() (time.Time, error) {
 // Validate checks every field against its closed set or range.
 func (p TargetWeightConfigurationPayload) Validate() error {
 	var errs []error
-	if p.StrategyID != TargetWeightStrategyBoost {
+	switch p.StrategyID {
+	case TargetWeightStrategyBoost:
+		errs = append(errs, p.Boost.validate()...)
+		if !p.Momentum.isZero() || p.Execution != (ExecutionConfiguration{}) {
+			errs = append(errs, errors.New("a boost configuration sets no momentum or execution section"))
+		}
+	case TargetWeightStrategyMomentum:
+		errs = append(errs, p.Momentum.validate()...)
+		errs = append(errs, p.Execution.validate()...)
+		if p.Boost != (BoostConfiguration{}) {
+			errs = append(errs, errors.New("a momentum configuration sets no boost section"))
+		}
+		if p.Limits.MaxExposure > 1 {
+			errs = append(errs, errors.New("an IRA's max exposure is at most 1: it never uses margin"))
+		}
+	default:
 		errs = append(errs, fmt.Errorf("strategy id %q is not a target-weight strategy this schema configures", p.StrategyID))
 	}
 	if p.AccountID == "" {
@@ -112,7 +219,6 @@ func (p TargetWeightConfigurationPayload) Validate() error {
 	if p.Adapter != AdapterIBKR {
 		errs = append(errs, fmt.Errorf("adapter %q is not %q (ADR 0025)", p.Adapter, AdapterIBKR))
 	}
-	errs = append(errs, p.Boost.validate()...)
 	errs = append(errs, p.Limits.validate()...)
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("invalid target-weight configuration payload: %w", err)
@@ -145,6 +251,82 @@ func (c BoostConfiguration) validate() []error {
 	}
 	if _, err := c.WarmUpDate(); err != nil {
 		errs = append(errs, fmt.Errorf("boost warm-up start %q is not a YYYY-MM-DD date", c.WarmUpStart))
+	}
+	return errs
+}
+
+func (c MomentumConfiguration) isZero() bool {
+	return c.Rule == "" && c.ListingType == "" && c.UniverseSize == 0 && c.MinPrice == 0 &&
+		c.ScoreLookback == 0 && c.ScoreSkip == 0 && c.VolatilityReturns == 0 && c.TopN == 0 &&
+		c.SectorCap == 0 && !c.InverseVolatility && c.Invested == 0 && c.TrendInstrument == "" &&
+		c.TrendCloses == 0 && c.RiskOffInstrument == "" && c.RiskOffFraction == 0 &&
+		c.RebalanceBand == 0 && c.UniverseSource == "" && len(c.SectorSources) == 0
+}
+
+func (c MomentumConfiguration) validate() []error {
+	var errs []error
+	if c.Rule != MomentumRuleTrend {
+		errs = append(errs, fmt.Errorf("momentum rule %q is not %q", c.Rule, MomentumRuleTrend))
+	}
+	if c.ListingType == "" {
+		errs = append(errs, errors.New("momentum listing type is required"))
+	}
+	for _, f := range []struct {
+		name  string
+		value int
+	}{{"universe size", c.UniverseSize}, {"score lookback", c.ScoreLookback}, {"top n", c.TopN}, {"sector cap", c.SectorCap}, {"trend closes", c.TrendCloses}} {
+		if f.value < 1 {
+			errs = append(errs, fmt.Errorf("momentum %s must be at least 1", f.name))
+		}
+	}
+	if c.ScoreSkip < 0 || c.ScoreSkip >= c.ScoreLookback {
+		errs = append(errs, errors.New("momentum score skip must lie in [0, score lookback)"))
+	}
+	if c.VolatilityReturns < 2 || c.VolatilityReturns > c.ScoreLookback {
+		errs = append(errs, errors.New("momentum volatility returns must lie in [2, score lookback]"))
+	}
+	if !isFinite(c.MinPrice) || c.MinPrice < 0 {
+		errs = append(errs, errors.New("momentum min price must be finite and not negative"))
+	}
+	if !c.InverseVolatility {
+		errs = append(errs, errors.New("momentum inverse volatility must be true: equal weights are not built"))
+	}
+	if !isFinite(c.Invested) || c.Invested <= 0 || c.Invested > 1 {
+		errs = append(errs, errors.New("momentum invested must be finite, above 0 and at most 1"))
+	}
+	if c.TrendInstrument == "" || c.RiskOffInstrument == "" || c.TrendInstrument == c.RiskOffInstrument {
+		errs = append(errs, errors.New("momentum trend and risk-off instruments are required and distinct"))
+	}
+	if !isFinite(c.RiskOffFraction) || c.RiskOffFraction < 0 || c.RiskOffFraction > 1 {
+		errs = append(errs, errors.New("momentum risk-off fraction must lie in [0, 1]"))
+	}
+	if !isFinite(c.RebalanceBand) || c.RebalanceBand <= 0 || c.RebalanceBand >= 1 {
+		errs = append(errs, errors.New("momentum rebalance band must lie strictly between 0 and 1"))
+	}
+	if c.UniverseSource == "" {
+		errs = append(errs, errors.New("momentum universe source is required"))
+	}
+	if len(c.SectorSources) == 0 {
+		errs = append(errs, errors.New("momentum sector sources are required"))
+	}
+	for i, s := range c.SectorSources {
+		if s == "" || slices.Contains(c.SectorSources[:i], s) {
+			errs = append(errs, fmt.Errorf("momentum sector source %d is empty or repeated", i+1))
+		}
+	}
+	return errs
+}
+
+func (c ExecutionConfiguration) validate() []error {
+	var errs []error
+	if c.CashRule != CashRuleSettled && c.CashRule != CashRuleTotal {
+		errs = append(errs, fmt.Errorf("execution cash rule %q is not %q or %q", c.CashRule, CashRuleSettled, CashRuleTotal))
+	}
+	if c.ShareQuantity != ShareQuantityWhole {
+		errs = append(errs, fmt.Errorf("execution share quantity %q is not %q, the only rule built", c.ShareQuantity, ShareQuantityWhole))
+	}
+	if !isFinite(c.MaxFeesPerOrder) || c.MaxFeesPerOrder < 0 {
+		errs = append(errs, errors.New("execution max fees per order must be finite and not negative"))
 	}
 	return errs
 }
