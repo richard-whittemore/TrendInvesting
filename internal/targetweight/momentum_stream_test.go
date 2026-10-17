@@ -149,6 +149,9 @@ type momentumOptions struct {
 	decideFrom   string // first session decided, when not the first session
 	stopAfter    string // last session fed
 	beforeClose  func(session string) []event.Envelope
+	neverClosed  map[string]bool    // calendar sessions with no bar and no close
+	withdraw     map[string]float64 // session -> settled cash withdrawn after its close, in a snapshot an hour later
+	withdrawFill map[string]float64 // instrument -> settled cash withdrawn as its sell fills, in a snapshot as of the fill
 }
 
 type momentumResult struct {
@@ -204,6 +207,9 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 	}
 
 	for i, session := range cal[:len(cal)-1] {
+		if opts.neverClosed[session] {
+			continue
+		}
 		end := closeOf(session)
 		prices := map[string]float64{}
 		for _, n := range names() {
@@ -256,6 +262,10 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 					AccountID: iraAccount, ClientOrderID: o.ClientOrderID, FillID: "fill:" + o.ClientOrderID, InstrumentID: o.InstrumentID,
 					Side: o.Side, Quantity: quantity, Price: price, Commission: 0.5, FilledAt: at,
 				}, event.FillEventType, event.FillTargetWeightVersion, "fill:"+o.ClientOrderID)
+				if amount, ok := opts.withdrawFill[o.InstrumentID]; ok && o.Side == event.OrderSideSell {
+					acct.settled = float64(acct.settled - amount)
+					venue(acct.snapshot(at, prices), event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-at-fill:"+o.ClientOrderID)
+				}
 			}
 			if quantity < o.Quantity {
 				at = end.Add(time.Duration(-390+minute+1) * time.Minute)
@@ -316,6 +326,10 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 		}
 		apply(s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "session:"+session, end,
 			event.SessionClosedPayload{PeriodEnd: end, InstrumentIDs: ids}))
+		if amount, ok := opts.withdraw[session]; ok {
+			acct.settled = float64(acct.settled - amount)
+			apply(s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, "snapshot-after-withdrawal:"+session, end.Add(time.Hour), acct.snapshot(end.Add(time.Hour), prices)))
+		}
 		if session == opts.stopAfter {
 			break
 		}

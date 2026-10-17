@@ -183,8 +183,10 @@ func (g *Gate) RestoreState(p event.EngineStatePayload, schemaVersion uint32) er
 // after the order (ADR 0026, point 3). Only an order that increases it is
 // checked against MaxExposure, so a sale is never refused by that check even
 // when the account stays above it. A released order moves the book the next
-// order is checked against: its shares, its working sell, and an IRA buy's
-// worst-case cost out of the cash available, valued at its reference price.
+// order is checked against: its shares, valued at its reference price, and an
+// IRA buy's worst-case cost out of the cash available. A released sell lowers
+// the holding once; it is not also added to the working sells, which would
+// count it twice against what the next sell may take.
 func (g *Gate) Check(book Book, plan []Order) ([]Outcome, error) {
 	for i, o := range plan {
 		probe := o.Planned
@@ -231,8 +233,11 @@ func (g *Gate) Check(book Book, plan []Order) ([]Outcome, error) {
 			p := o.Planned
 			running.Prices[p.InstrumentID] = p.ReferencePrice
 			if p.Side == event.OrderSideSell {
+				// The lower holding is what the next sell may take from,
+				// net of the book's working sells: the released sell is
+				// counted once, not again as a working sell (ADR 0026,
+				// point 2.5).
 				running.Holdings[p.InstrumentID] -= p.Quantity
-				running.WorkingSells[p.InstrumentID] += p.Quantity
 			} else {
 				running.Holdings[p.InstrumentID] += p.Quantity
 				running.CashAvailable -= out.Released.Figures.BuyCost

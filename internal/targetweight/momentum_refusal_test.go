@@ -40,6 +40,10 @@ func TestMomentumCalendarRules(t *testing.T) {
 	mustRefuse(t, h, calendarInput(t, s, "c3", "2025-01-02", "2025-01-06"), "disagrees")
 	mustApply(t, h, calendarInput(t, s, "c4", "2025-01-06", "2025-01-07"))
 	mustRefuse(t, h, calendarInput(t, s, "c5"), "invalid")
+	// A calendar that shares no session with the one held would leave a hole
+	// between them, and a date in that hole would read as no session at all:
+	// it is refused, not merged (PR #358 review).
+	mustRefuse(t, h, calendarInput(t, s, "c6", "2025-01-09", "2025-01-10"), "does not overlap")
 
 	closeSession := func(session string, ids ...string) event.Envelope {
 		return s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s:"+session, closeOf(session),
@@ -149,6 +153,15 @@ func TestMomentumVenueReportRules(t *testing.T) {
 	reused := fill
 	reused.Quantity = 1
 	refuse(event.FillEventType, event.FillTargetWeightVersion, "f1-reused", reused, "reuses fill id")
+	// A fill id names one execution across the account, not per order: the
+	// same id on the other released order is refused, so one execution never
+	// moves two orders' fills and budget (PR #358 review).
+	other := buys[1]
+	elsewhere := event.TargetWeightFillPayload{
+		AccountID: iraAccount, ClientOrderID: other.ClientOrderID, FillID: "f1", InstrumentID: other.InstrumentID, Side: other.Side,
+		Quantity: 1, Price: other.LimitPrice, Commission: 0.5, FilledAt: at,
+	}
+	refuse(event.FillEventType, event.FillTargetWeightVersion, "f1-elsewhere", elsewhere, "reuses fill id")
 	last := fill
 	last.FillID, last.Quantity = "f2", 1
 	if _, err := apply(event.FillEventType, event.FillTargetWeightVersion, "f2", last); err != nil {
@@ -160,7 +173,7 @@ func TestMomentumVenueReportRules(t *testing.T) {
 	third.FillID, third.Quantity = "f3", 1
 	refuse(event.FillEventType, event.FillTargetWeightVersion, "f3", third, "already terminal")
 	unknown := fill
-	unknown.ClientOrderID = "tw-unknown"
+	unknown.ClientOrderID, unknown.FillID = "tw-unknown", "f4"
 	refuse(event.FillEventType, event.FillTargetWeightVersion, "f4", unknown, "never released")
 }
 
