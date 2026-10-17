@@ -379,11 +379,10 @@ func TestCreateLogFileFlushesTheDirectoryThatHoldsTheLog(t *testing.T) {
 	}
 }
 
-// TestAResumeAcrossBuildsNamesTheUpgradeProcedure pins the owner's decision of
-// 2026-10-16 (#337): a build upgrade ends the run at the end of a session and
-// starts a fresh run on the new build, never a resume. The refusal must name
-// both builds and the procedure, and must not be confused with a changed
-// configuration.
+// TestAResumeAcrossBuildsNamesTheUpgradeProcedure pins ADR 0027's rule that a build
+// upgrade ends the run at the end of a session and starts a fresh run on the
+// new build, never a resume. The refusal must name both builds and the
+// procedure, and must not be confused with a changed configuration.
 func TestAResumeAcrossBuildsNamesTheUpgradeProcedure(t *testing.T) {
 	cfg := testConfiguration(t)
 	hash := event.ConfigurationHash(cfg)
@@ -393,7 +392,7 @@ func TestAResumeAcrossBuildsNamesTheUpgradeProcedure(t *testing.T) {
 	if err == nil {
 		t.Fatal("checkResumable accepted a log from another build")
 	}
-	for _, want := range []string{"build-1", "build-2", "2026-10-16", "end of a session", "fresh run", "docs/runbooks/durable-log.md"} {
+	for _, want := range []string{"build-1", "build-2", "end of a session", "fresh run", "docs/runbooks/durable-log.md"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal %q does not say %q", err, want)
 		}
@@ -408,10 +407,10 @@ func TestAResumeAcrossBuildsNamesTheUpgradeProcedure(t *testing.T) {
 	}
 }
 
-// TestTheDurableLogIsRequiredOutsideABacktest pins #336 as the owner decided
-// on 2026-10-16: an engine that serves a dry-run, paper or live session
+// TestTheDurableLogIsRequiredOutsideABacktest pins ADR 0027's rule that an engine
+// that serves a dry-run, paper or live session
 // refuses to start without -log, so journal-before-send always holds; a
-// backtest (the default) keeps -log optional.
+// backtest keeps -log optional. There is no default mode.
 func TestTheDurableLogIsRequiredOutsideABacktest(t *testing.T) {
 	dir := t.TempDir()
 	base := options{mode: modeBacktest, socketPath: filepath.Join(shortSocketDir(t), "e.sock"), configPath: testConfigPath, asOf: testAsOf, build: "test-build"}

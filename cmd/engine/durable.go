@@ -73,8 +73,8 @@ func checkResumable(recovery journal.Recovery, logHeader journal.LogHeader, conf
 }
 
 // buildUpgradeRefusal reports the refusal for a log that differs from this
-// run only in its build, naming the procedure the owner decided on
-// 2026-10-16 (#337): a run does not resume across builds. It returns nil for
+// run only in its build, naming the procedure ADR 0027 sets: a run
+// does not resume across builds. It returns nil for
 // any other difference, which keeps the generic refusal.
 func buildUpgradeRefusal(logged, current journal.LogHeader) error {
 	if logged.ConfigurationHash != current.ConfigurationHash {
