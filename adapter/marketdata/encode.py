@@ -26,6 +26,22 @@ writes, in order:
      instrument refuses the stream;
    - a ``market.session.closed`` v1 naming exactly the bars written.
 
+With a ``ranker`` the stream is the compact universe input instead (the
+owner's 2026-10-16 decision on the momentum input shape): bars only for the
+required and optional instruments, the one universe snapshot per recorded
+session as above, and, at a session the ranker calls a decision session, one
+``market.close.history`` v1 per member it names, sorted by instrument, after
+the snapshot and before the close. A history carries the member's split- and
+dividend-adjusted closes, computed exactly as its bar's adjusted view would
+be, on each session of the ranker's window (calendar sessions ending at the
+decision session) that it traded and was not left out of. Which members, and
+the window, are Go rules (targetweight.MomentumHistoryRequest, served by
+cmd/universe-rank through go_ranker), so nothing here ranks; the engine ranks
+the snapshot again and refuses a history set that differs. The calendar then
+starts at ``base``, since histories reach back to it. A decision session with
+no universe recording gets no histories, and the engine withholds that
+decision (missing-universe).
+
 Bars come from ``grouped_<session>.json`` (the backfill) or, for a session
 the daily universe step recorded instead, the bars of
 ``universe_<session>.json``; two recordings of one session must agree. A
@@ -426,7 +442,16 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
     other rows are written. Each ticker left out of any session of the
     stream is named in ``excluded`` (a dict, if given) with an [Exclusion]
     per run of sessions. A required or optional instrument with bad data
-    still refuses the stream."""
+    still refuses the stream.
+
+    ``ranker`` (go_ranker, or any callable with its contract) makes the
+    stream compact, as described above: it is called once with a request
+    {"universe": snapshot payload, "next_session": YYYY-MM-DD} per universe
+    session and must answer each, in order, with {"session",
+    "decision_session", "window", "members"}; an answer that does not fit
+    its request (RankerFailed) refuses the stream. A member with bad data is
+    left out of the same sessions as above, in its history instead of its
+    bars, and named in ``excluded`` the same way."""
     if engine not in ENGINES:
         raise ValueError("engine {!r} is not one of {}".format(engine, ", ".join(ENGINES)))
     boost = engine == "boost"
