@@ -38,7 +38,9 @@ import (
 // before the rebalance: at its close the run decides, from closes to that
 // session and the universe ranked on it (plan.md lines 44-45; D8 timing). A
 // calendar session that never closed is a gap in every instrument's closes,
-// which the rule treats as missing bars (ADR 0026, point 5).
+// which the rule treats as missing bars (ADR 0026, point 5); when it was a
+// decision session, the next close journals its decision withheld
+// (missing-bars), so no decision time passes without one (point 1).
 //
 // # Fail-closed rules
 //
@@ -56,7 +58,8 @@ import (
 // sell is terminal, as a second set of orders caused by the last terminal
 // report, or at once when no sell was released (ADR 0026, point 2, "IRA
 // execution"). The buys are budgeted from cash under the D5 rule and scaled
-// to fit; the budget is carried through each release and fill.
+// to fit; the budget is carried through each release and fill, less any cash
+// a newer snapshot shows gone that the fills do not explain.
 type momentumRun struct {
 	h      *Handler
 	rule   momentum.Config
@@ -77,6 +80,7 @@ type momentumRun struct {
 	marks    map[string]event.MarkRecordedPayload
 
 	orders    map[string]*trackedOrder
+	fills     map[string]event.TargetWeightFillPayload // every accepted fill, by fill id
 	rebalance *rebalance
 }
 
@@ -129,6 +133,7 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 		bases:    map[string]string{},
 		marks:    map[string]event.MarkRecordedPayload{},
 		orders:   map[string]*trackedOrder{},
+		fills:    map[string]event.TargetWeightFillPayload{},
 	}
 	return h, nil
 }
@@ -137,7 +142,12 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 	switch in.Type {
 	case event.SessionCalendarEventType:
 		return nil, r.applyCalendar(in)
+	case event.EngineStateEventType:
+		// An earlier run's state and scope, before the first bar or session
+		// (ADR 0019, amended 2026-09-24; ADR 0026, point 5).
+		return nil, r.h.applyRecordedState(in)
 	case event.CompletedBarEventType:
+		r.h.started = true
 		return nil, r.applyBar(in)
 	case event.UniverseSnapshotEventType:
 		return nil, r.applyUniverse(in)
@@ -146,6 +156,7 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 	case event.MarkRecordedEventType:
 		return nil, r.applyMark(in)
 	case event.SessionClosedEventType:
+		r.h.started = true
 		return r.applySession(in)
 	case event.OrderLifecycleEventType:
 		return r.applyLifecycle(in)
@@ -157,9 +168,10 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 	return nil, fmt.Errorf("targetweight: input type %q is not one a momentum run reads", in.Type)
 }
 
-// applyCalendar merges a calendar into the one held. Over the dates both
-// cover, the two must list the same sessions: a calendar that drops or adds a
-// session the run already knows is a contradiction, never a correction.
+// applyCalendar merges a calendar into the one held. The two must share a
+// session, and over the dates both cover they must list the same sessions: a
+// calendar that drops or adds a session the run already knows is a
+// contradiction, never a correction.
 func (r *momentumRun) applyCalendar(in event.Envelope) error {
 	p, err := decodeInput[event.SessionCalendarPayload](in, event.SessionCalendarSchemaVersion)
 	if err != nil {
@@ -167,6 +179,11 @@ func (r *momentumRun) applyCalendar(in event.Envelope) error {
 	}
 	if len(r.calendar) > 0 {
 		lo, hi := max(p.Sessions[0], r.calendar[0]), min(p.Sessions[len(p.Sessions)-1], r.calendar[len(r.calendar)-1])
+		if lo > hi {
+			// Merged, the two would leave a hole whose dates read as no
+			// session at all (SessionCalendarPayload).
+			return fmt.Errorf("targetweight: calendar %s does not overlap the calendar held (%s to %s), so the sessions between them are unknown", in.ID, r.calendar[0], r.calendar[len(r.calendar)-1])
+		}
 		if !slices.Equal(within(r.calendar, lo, hi), within(p.Sessions, lo, hi)) {
 			return fmt.Errorf("targetweight: calendar %s disagrees with the calendar held between %s and %s", in.ID, lo, hi)
 		}
@@ -284,14 +301,46 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 		r.raw[id] = bar.Raw.Close
 	}
 	r.bars = map[string]event.CompletedBarAdjustedPayload{}
+	b := &emissions{h: r.h, in: in, at: p.PeriodEnd}
+	r.missed(b, at)
 	r.last, r.lastEnd = date, p.PeriodEnd
 	r.trim(at)
 
 	decide, _ := momentum.IsDecisionSession(date, r.calendar[at+1]) // both on the validated calendar
 	if !decide || p.PeriodEnd.Before(r.h.decideFrom) {
-		return nil, nil
+		return b.result()
 	}
-	return r.decide(in, p.PeriodEnd, at)
+	return r.decide(b, p.PeriodEnd, at)
+}
+
+// missed journals a withheld missing-bars decision for each decision session
+// between the last session closed and calendar session at that never closed,
+// at this close (b's): ADR 0026 emits one decision per account at each
+// decision time (point 1), and a missing final bar withholds it (point 5).
+// Before the first session closed, and before the first session to decide,
+// nothing is due.
+func (r *momentumRun) missed(b *emissions, at int) {
+	if r.last == "" {
+		return
+	}
+	end := b.at
+	from := r.h.decideFrom.UTC().Format(time.DateOnly)
+	prev, _ := slices.BinarySearch(r.calendar, r.last) // the last session closed is on the calendar
+	for k := prev + 1; k < at; k++ {
+		session := r.calendar[k]
+		if decide, _ := momentum.IsDecisionSession(session, r.calendar[k+1]); !decide || session < from {
+			continue
+		}
+		p := event.TargetsDecidedPayload{
+			AccountID: r.h.cfg.AccountID, StrategyID: r.h.cfg.StrategyID,
+			DecisionTime: end, SessionPeriodEnd: end,
+			Outcome: event.TargetsOutcomeWithheld, WithheldReason: event.WithheldMissingBars,
+			Detail: fmt.Sprintf("the decision session %s never closed, so no instrument has its final bar; found at the session closing %s",
+				session, end.Format(idTime)),
+			Momentum: event.MomentumFigures{CloseSession: session, TrendInstrument: r.rule.TrendInstrument},
+		}
+		b.add(fmt.Sprintf("targets-decided:%s:missed:%s", r.h.cfg.AccountID, session), event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, p)
+	}
 }
 
 // trim drops every close older than the window ending at calendar session at.
@@ -312,10 +361,9 @@ func (r *momentumRun) trim(at int) {
 	}
 }
 
-// decide makes the decision at the close of calendar session at.
-func (r *momentumRun) decide(in event.Envelope, end time.Time, at int) ([]event.Envelope, error) {
+// decide makes the decision at the close of calendar session at, adding to b.
+func (r *momentumRun) decide(b *emissions, end time.Time, at int) ([]event.Envelope, error) {
 	h := r.h
-	b := &emissions{h: h, in: in, at: end}
 	input := momentum.Input{Sessions: r.calendar[max(0, at+1-r.window) : at+1], Closes: r.adjusted}
 	if r.universe != nil && r.universe.Session == r.last {
 		input.Universe = momentum.Snapshot{Session: r.universe.Session, Rows: rows(r.universe.Rows)}
@@ -367,8 +415,13 @@ func decisionID(accountID string, end time.Time) string {
 // withhold returns why a decided rebalance cannot be planned, or "".
 func (r *momentumRun) withhold(p event.TargetsDecidedPayload, end time.Time) (reason, detail string) {
 	h := r.h
-	if r.snapshot == nil || r.snapshot.AsOf.Before(end) {
+	switch {
+	case r.snapshot == nil || r.snapshot.AsOf.Before(end):
 		return event.WithheldStaleAccountSnapshot, fmt.Sprintf("no account snapshot for %s as of the session closing %s", h.cfg.AccountID, end.Format(idTime))
+	case r.snapshot.AsOf.After(end):
+		// Orders are valued at the session's close (ADR 0026, point 2).
+		return event.WithheldStaleAccountSnapshot, fmt.Sprintf("the account snapshot for %s is as of %s, after the session closing %s; orders are valued at that close",
+			h.cfg.AccountID, r.snapshot.AsOf.Format(idTime), end.Format(idTime))
 	}
 	needed := make([]string, 0, len(p.Targets)+len(r.snapshot.Positions))
 	for _, t := range p.Targets {
@@ -401,16 +454,50 @@ func (r *momentumRun) cash(s event.AccountCashSnapshotPayload) float64 {
 
 // planBuys plans the rebalance's buy phase: the buys scaled to the budget,
 // then each through the gate, committing what each released buy may cost.
+// First, cash that a snapshot newer than the decision's shows missing, beyond
+// what the sells' recorded fills explain, leaves the budget (ADR 0026, point
+// 2, "Budget"; an IRA never borrows).
 func (r *momentumRun) planBuys(b *emissions) {
 	reb := r.rebalance
+	if short := r.unexplainedCashDrop(reb); short > 0 {
+		reb.budget.Remove(short)
+	}
 	buys, _ := orderplan.ScaleBuys(reb.buys, reb.budget.Remaining(), r.exec.MaxFeesPerOrder)
 	for _, o := range r.check(b, reb, buys, reb.sellsPlanned) {
 		reb.budget.Release(o.ClientOrderID, orderplan.BuyCost(o, r.exec.MaxFeesPerOrder))
 	}
 }
 
+// unexplainedCashDrop is how far the latest snapshot's cash under the D5 rule
+// falls short of the cash the decision's snapshot and the sells' fills since
+// explain, or 0 when no newer snapshot arrived. Under total-cash a fill at or
+// before the newer snapshot adds its proceeds, net of commission; settled
+// cash counts no proceeds, which settle later. A rise is never added: the
+// budget counts only cash it can explain.
+func (r *momentumRun) unexplainedCashDrop(reb *rebalance) float64 {
+	latest := r.snapshot
+	if !latest.AsOf.After(reb.snapshot.AsOf) {
+		return 0
+	}
+	expected := r.cash(reb.snapshot)
+	if r.exec.CashRule == event.CashRuleTotal {
+		for _, id := range reb.sells {
+			o := r.orders[id]
+			for _, fillID := range slices.Sorted(maps.Keys(o.fills)) {
+				if f := o.fills[fillID]; !f.FilledAt.After(latest.AsOf) {
+					expected += float64(float64(f.Quantity)*f.Price) - f.Commission
+				}
+			}
+		}
+	}
+	return max(0, expected-r.cash(*latest))
+}
+
 // check emits each order and the gate's outcome for it, and returns the
-// orders released, now tracked.
+// orders released, now tracked. The prior orders are the sell phase's, each
+// sized within its holding (orderplan.PlanIRA), so every one is risk-reducing
+// and none counts toward the order limit (ADR 0026, point 3): the book's
+// PriorCounted stays zero.
 func (r *momentumRun) check(b *emissions, reb *rebalance, orders []event.OrderPlannedPayload, prior int) []event.OrderPlannedPayload {
 	h := r.h
 	holdings := holdings(reb.snapshot.Positions)
@@ -487,13 +574,13 @@ func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 	if err != nil {
 		return nil, err
 	}
-	if o, ok := r.orders[p.ClientOrderID]; ok {
-		if seen, dup := o.fills[p.FillID]; dup {
-			if seen == p {
-				return nil, nil // a redelivery of the same execution
-			}
-			return nil, fmt.Errorf("targetweight: fill %s reuses fill id %s for a different execution", in.ID, p.FillID)
+	// A fill id names one execution across the account
+	// (TargetWeightFillPayload), so it is checked across every order.
+	if seen, dup := r.fills[p.FillID]; dup {
+		if seen.SameExecution(p) {
+			return nil, nil // a redelivery of the same execution
 		}
+		return nil, fmt.Errorf("targetweight: fill %s reuses fill id %s for a different execution", in.ID, p.FillID)
 	}
 	o, err := r.tracked(in, p.AccountID, p.ClientOrderID, p.InstrumentID, p.Side)
 	if err != nil {
@@ -502,6 +589,7 @@ func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 	if o.filled+p.Quantity > o.planned.Quantity {
 		return nil, fmt.Errorf("targetweight: fill %s takes order %s past its %d shares", in.ID, p.ClientOrderID, o.planned.Quantity)
 	}
+	r.fills[p.FillID] = p
 	o.fills[p.FillID] = p
 	o.filled += p.Quantity
 	value, reb := float64(float64(p.Quantity)*p.Price), r.rebalance

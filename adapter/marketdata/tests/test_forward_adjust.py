@@ -38,6 +38,23 @@ class ForwardFactorsTest(unittest.TestCase):
         self.assertEqual(got[DAYS[2]], (1.0, 100.0 / 98.0))
         self.assertEqual(got[DAYS[4]], (1.0, 100.0 / 98.0))
 
+    def test_dividends_sharing_an_ex_date_are_one_factor_on_their_total_cash(self):
+        # An ordinary and a special dividend on one ex-date: (P - (1 + 2)) / P,
+        # as adjusted_closes does, not the product of a factor per row.
+        closes = [100.0, 100.0, 97.0, 97.0, 97.0]
+        divs = [div("2026-03-04", 1.0), div("2026-03-04", 2.0)]
+        got = factors(closes, dividends=divs)
+        self.assertAlmostEqual(got[DAYS[2]][1], 100.0 / 97.0, places=12)
+        backward = [c for _, c in adjust.adjusted_closes([(d, [bar("A", c)]) for d, c in zip(DAYS, closes)],
+                                                        "A", [], divs)]
+        forward = [c * got[d][1] for d, c in zip(DAYS, closes)]
+        for i in range(1, 5):
+            self.assertAlmostEqual(forward[i] / forward[i - 1], backward[i] / backward[i - 1], places=12)
+
+    def test_dividends_sharing_an_ex_date_at_or_above_the_prior_close_fail_closed(self):
+        with self.assertRaisesRegex(adjust.CannotAdjust, "not below"):
+            factors([10.0] * 5, dividends=[div("2026-03-04", 6.0), div("2026-03-04", 4.0)])
+
     def test_returns_match_the_backward_adjustment_and_a_bar_is_never_restated(self):
         closes = [200.0, 100.0, 100.0, 90.0, 92.0]
         splits_, divs = [split("2026-03-03", 1, 2)], [div("2026-03-05", 10.0)]

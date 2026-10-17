@@ -3,6 +3,8 @@ package targetweight_test
 import (
 	"bytes"
 	"context"
+	"math"
+	"strings"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -246,6 +248,9 @@ func TestMomentumFailsClosed(t *testing.T) {
 	}{
 		"stale snapshot": {momentumOptions{noSnapshot: map[string]bool{"2025-01-31": true}},
 			[]string{"withheld:stale-account-snapshot", "decided:"}},
+		// Orders are valued at the close (ADR 0026, point 2).
+		"snapshot taken after the close": {momentumOptions{lateSnapshot: map[string]bool{"2025-01-31": true}},
+			[]string{"withheld:stale-account-snapshot", "decided:"}},
 		// IEF is targeted risk-off in February but has no final bar.
 		"risk-off instrument without its final bar": {momentumOptions{noBar: map[string]string{"2025-02-28": "IEF"}},
 			[]string{"decided:", "withheld:missing-bars"}},
@@ -262,6 +267,14 @@ func TestMomentumFailsClosed(t *testing.T) {
 		"no name with enough history": {momentumOptions{mutate: func(c *event.TargetWeightConfigurationPayload) { c.Momentum.ScoreLookback = 25 }},
 			[]string{"withheld:no-eligible-names", "decided:"}},
 		"decisions before the first session to decide are quiet": {momentumOptions{decideFrom: "2025-02-03"},
+			[]string{"decided:"}},
+		// ADR 0026 point 1 (line 45: "At each decision time it emits one
+		// decision per account") and point 5 (line 247: a missing final bar
+		// "gives withheld (missing-bars)"): January's decision session never
+		// closed, so its decision is journalled withheld, not skipped.
+		"a decision session that never closed": {momentumOptions{neverClosed: map[string]bool{"2025-01-31": true}},
+			[]string{"withheld:missing-bars", "decided:"}},
+		"a decision session that never closed before the first to decide": {momentumOptions{neverClosed: map[string]bool{"2025-01-31": true}, decideFrom: "2025-02-03"},
 			[]string{"decided:"}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -288,5 +301,73 @@ func TestAWithheldRebalancePlansNothing(t *testing.T) {
 	feb := targets(t, r.decisions)[1]
 	if len(feb.Momentum.Names) != 5 || !feb.Momentum.RiskOff {
 		t.Errorf("a withheld decision still records the ranking: %+v", feb.Momentum)
+	}
+}
+
+// TestAMissedDecisionSessionIsWithheldAtTheNextClose encodes ADR 0026 point 1
+// (line 45, one decision per account at each decision time) and point 5
+// (lines 246-248, missing bars fail closed): when the month's last session
+// never closes, the next close journals that decision withheld for
+// missing-bars, naming the session, and plans nothing.
+func TestAMissedDecisionSessionIsWithheldAtTheNextClose(t *testing.T) {
+	r := simulateMomentum(t, momentumOptions{neverClosed: map[string]bool{"2025-01-31": true}})
+	es := ofType(r.decisions, event.TargetsDecidedEventType)
+	if len(es) == 0 {
+		t.Fatal("no decision")
+	}
+	var missed event.TargetsDecidedPayload
+	decode(t, es[0], &missed)
+	if missed.Outcome != event.TargetsOutcomeWithheld || missed.WithheldReason != event.WithheldMissingBars ||
+		missed.Momentum.CloseSession != "2025-01-31" || !strings.Contains(missed.Detail, "2025-01-31") {
+		t.Fatalf("missed decision %+v", missed)
+	}
+	if !es[0].EventTime.Equal(closeOf("2025-02-03")) {
+		t.Errorf("missed decision journalled at %s, want the next close", es[0].EventTime)
+	}
+	for _, o := range planned(t, r.decisions) {
+		if o.Tag == es[0].ID {
+			t.Errorf("an order for a missed decision: %+v", o)
+		}
+	}
+}
+
+// TestBuysAreBudgetedFromNoMoreCashThanALaterSnapshotExplains encodes ADR
+// 0026 point 2, "Budget" (line 104: buys "are funded from cash on hand plus
+// cash realised by the sells"), and point 3 (line 167: "buy cost <= cash
+// available under D5"; an IRA never borrows): cash withdrawn while
+// February's sells are working, shown by a newer snapshot, comes out of the
+// buy budget before the buys are scaled and gated.
+func TestBuysAreBudgetedFromNoMoreCashThanALaterSnapshotExplains(t *testing.T) {
+	for _, rule := range []string{event.CashRuleSettled, event.CashRuleTotal} {
+		mutate := func(c *event.TargetWeightConfigurationPayload) { c.Execution.CashRule = rule }
+		base := released(t, simulateMomentum(t, momentumOptions{mutate: mutate}).decisions)[4:]
+		const withdrawn = 100
+		r := simulateMomentum(t, momentumOptions{mutate: mutate, withdraw: map[string]float64{"2025-02-28": withdrawn}})
+		buys := released(t, r.decisions)[4:]
+		if len(base) == 0 || len(buys) == 0 {
+			t.Fatalf("%s: %d and %d buys", rule, len(base), len(buys))
+		}
+		if got, want := buys[0].Figures.CashAvailable, base[0].Figures.CashAvailable-withdrawn; math.Abs(got-want) > 1e-9 {
+			t.Errorf("%s: first buy checked against %v, want %v (%v less the %v withdrawn)", rule, got, want, base[0].Figures.CashAvailable, withdrawn)
+		}
+		total := 0.0
+		for _, b := range buys {
+			total += b.Figures.BuyCost
+		}
+		if total > buys[0].Figures.CashAvailable {
+			t.Errorf("%s: buys cost %v against %v available", rule, total, buys[0].Figures.CashAvailable)
+		}
+	}
+	// Under total-cash, a snapshot taken as AAA's sell fills already holds its
+	// proceeds: the fill explains them, so only the withdrawal is removed, and
+	// with nothing withdrawn the budget is unchanged.
+	total := func(c *event.TargetWeightConfigurationPayload) { c.Execution.CashRule = event.CashRuleTotal }
+	base := released(t, simulateMomentum(t, momentumOptions{mutate: total}).decisions)[4:]
+	for _, withdrawn := range []float64{0, 100} {
+		r := simulateMomentum(t, momentumOptions{mutate: total, withdrawFill: map[string]float64{"AAA": withdrawn}})
+		buys := released(t, r.decisions)[4:]
+		if got, want := buys[0].Figures.CashAvailable, base[0].Figures.CashAvailable-withdrawn; math.Abs(got-want) > 1e-6 {
+			t.Errorf("withdrawn %v as AAA filled: first buy checked against %v, want %v", withdrawn, got, want)
+		}
 	}
 }

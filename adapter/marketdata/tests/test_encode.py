@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from marketdata import __main__ as cli
-from marketdata import encode, record
+from marketdata import encode, history, record
 from marketdata.tests.test_sectors import iwv_csv, screener
 from marketdata import sectors
 
@@ -225,6 +225,17 @@ class FailClosedTest(unittest.TestCase):
 
     def test_actions_that_do_not_cover_the_sessions_are_refused(self):
         self.assertRefused(encode.MissingData, splits_windows=(("2026-11-01", "2026-11-25"),))
+
+    def test_actions_are_read_through_the_history_reader(self):
+        # One reader of the action recordings (history.load_actions), so its
+        # per-id dedup and coverage rules apply to the encoder too.
+        with tempfile.TemporaryDirectory() as d:
+            build(d)
+            with mock.patch.object(history, "load_actions", wraps=history.load_actions) as reader:
+                run(d)
+        self.assertEqual(sorted(c.args for c in reader.call_args_list),
+                         [(d, "dividends", FIRST + dt.timedelta(days=1), LAST),
+                          (d, "splits", FIRST + dt.timedelta(days=1), LAST)])
 
     def test_conflicting_copies_of_one_action_are_refused(self):
         with tempfile.TemporaryDirectory() as d:

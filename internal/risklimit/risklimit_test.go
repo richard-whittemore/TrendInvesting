@@ -50,6 +50,11 @@ func bookOf(plan ...risklimit.Order) risklimit.Book {
 	return book
 }
 
+// holding is a book holding n of id at price 1, and nothing else.
+func holding(id string, n int64) risklimit.Book {
+	return risklimit.Book{Holdings: map[string]int64{id: n}, Prices: map[string]float64{id: 1}}
+}
+
 func check(t *testing.T, g *risklimit.Gate, plan ...risklimit.Order) []risklimit.Outcome {
 	t.Helper()
 	outcomes, err := g.Check(bookOf(plan...), plan)
@@ -130,7 +135,12 @@ func TestMaxOrderSizeAtBelowAndAbove(t *testing.T) {
 	released(t, check(t, gate(t, limits(), event.TradingModeDryRun), order(event.OrderSideBuy, 4999, 0))[0])
 	released(t, check(t, gate(t, limits(), event.TradingModeDryRun), order(event.OrderSideBuy, 5000, 0))[0])
 	refusedFor(t, check(t, gate(t, limits(), event.TradingModeDryRun), order(event.OrderSideBuy, 5001, 0))[0], event.RefusedOrderSize)
-	refusedFor(t, check(t, gate(t, limits(), event.TradingModeDryRun), order(event.OrderSideSell, 5001, 9800))[0], event.RefusedOrderSize)
+	// A sell beyond the holding it was sized from is not risk-reducing, so the
+	// size limit applies; the book holds more, so it is not refused first for
+	// exceeding the book's holding.
+	beyond := order(event.OrderSideSell, 5001, 100)
+	refusedFor(t, checkBook(t, gate(t, limits(), event.TradingModeDryRun), holding("SPY", 10000), beyond)[0], event.RefusedOrderSize)
+	refusedFor(t, check(t, gate(t, limits(), event.TradingModeDryRun), beyond)[0], event.RefusedSellExceedsHolding)
 }
 
 func TestMaxOrderCountAtBelowAndAbove(t *testing.T) {
@@ -145,8 +155,19 @@ func TestMaxOrderCountAtBelowAndAbove(t *testing.T) {
 		released(t, o)
 	}
 	l.MaxOrdersPerDecision = 1
-	outcomes := check(t, gate(t, l, event.TradingModeDryRun), sell, buy)
-	// Over the count, the plan's buys are refused; its sells are checked as usual.
+	// A risk-reducing sell is exempt from the count (ADR 0026, point 3,
+	// lines 188-189), so it does not push the plan's buy over it.
+	for _, o := range check(t, gate(t, l, event.TradingModeDryRun), sell, buy) {
+		released(t, o)
+	}
+	// A sell beyond the holding it was sized from is counted; over the count,
+	// the plan's buys are refused and its sells are checked as usual. The
+	// book holds more, so the sell is within the book's holding and released.
+	short := sell
+	short.Planned.Quantity = 101
+	book := holding("IEF", 1000)
+	book.Holdings["SPY"], book.Prices["SPY"] = 100, 1
+	outcomes := checkBook(t, gate(t, l, event.TradingModeDryRun), book, short, buy)
 	released(t, outcomes[0])
 	refusedFor(t, outcomes[1], event.RefusedOrderCount)
 	if outcomes[1].Refused.Figures.OrdersInDecision != 2 {
@@ -188,7 +209,8 @@ func TestAnUntaggedOrderIsRefusedAndHalts(t *testing.T) {
 		o.Planned.Tag = badTag
 		got := check(t, g, o)[0]
 		refusedFor(t, got, event.RefusedUndecidedOrder)
-		if got.State == nil || got.State.State != event.EngineStateHalted || got.StateSchemaVersion != event.EngineStateSchemaVersion {
+		// Schema version 2: risk-limit-breached is not a version-1 reason.
+		if got.State == nil || got.State.State != event.EngineStateHalted || got.StateSchemaVersion != event.EngineStateScopedVersion {
 			t.Fatalf("an order with no journalled decision halts: %+v", got.State)
 		}
 	}
@@ -210,27 +232,35 @@ func TestDegradedAllowsNoBuyAndFreezesItsScope(t *testing.T) {
 	other := order(event.OrderSideSell, 1, 10)
 	other.Planned.InstrumentID = "IEF"
 	released(t, check(t, g, other)[0])
+	// A sell beyond its holding would open a short: nothing that opens a
+	// position goes while not Normal (ADR 0019, amended 2026-09-24,
+	// "Risk-reducing management").
+	otherShort := order(event.OrderSideSell, 11, 10)
+	otherShort.Planned.InstrumentID = "IEF"
+	refusedFor(t, check(t, g, otherShort)[0], event.RefusedEngineDegraded)
 	otherBuy := order(event.OrderSideBuy, 1, 10)
 	otherBuy.Planned.InstrumentID = "IEF"
 	refusedFor(t, check(t, g, otherBuy)[0], event.RefusedEngineDegraded)
 }
 
-func TestASecondBreachWidensTheDegradedScope(t *testing.T) {
+// TestDegradedKeepsManagingInstrumentsItDoesNotName: while Degraded,
+// "risk-reducing sells continue for instruments the discrepancy does not
+// name" (ADR 0026, point 4, lines 204-205), and they stay exempt from the
+// mark, band and size checks (point 3, lines 188-191), so a late mark on one
+// of them neither refuses it nor widens the scope.
+func TestDegradedKeepsManagingInstrumentsItDoesNotName(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	check(t, g, order(event.OrderSideBuy, 5001, 0))
-	o := order(event.OrderSideSell, 10, 100)
+	o := order(event.OrderSideSell, 60, 100)
 	o.Planned.InstrumentID = "IEF"
 	o.MarkSet, o.Mark = false, 0
 	got := check(t, g, o)[0]
-	refusedFor(t, got, event.RefusedMissingMark)
-	if got.State == nil || len(got.State.ScopeInstrumentIDs) != 2 {
-		t.Fatalf("scope should name IEF and SPY: %+v", got.State)
+	released(t, got)
+	if got.State != nil || g.State() != risklimit.StateDegraded {
+		t.Errorf("a released sell changes no state: %+v, gate %s", got.State, g.State())
 	}
-	again := check(t, g, o)[0]
-	refusedFor(t, again, event.RefusedEngineDegraded)
-	if again.State != nil {
-		t.Error("a frozen instrument's refusal does not restate the scope")
-	}
+	o.MarkSet, o.Mark = true, 2
+	released(t, check(t, g, o)[0])
 }
 
 func TestDryRunReleasesWithoutSending(t *testing.T) {
@@ -280,5 +310,144 @@ func TestGateRefusesBadConstructionAndInput(t *testing.T) {
 	}
 	if g.State() != risklimit.StateNormal {
 		t.Errorf("errors change no state: %s", g.State())
+	}
+}
+
+// sellFrom147 is Boost's exit: 14,700 shares at 1 against net liquidation
+// 10,000 (147%) sold back to 9,800 (98%), 49% of net liquidation.
+func sellFrom147() risklimit.Order {
+	o := order(event.OrderSideSell, 4900, 14700)
+	o.Planned.TargetWeight = 0.98
+	return o
+}
+
+// TestARiskReducingSellIsExemptFromMarkBandAndSize: risk-reducing orders
+// "are exempt from the order count, the order size and the price band"
+// (ADR 0026, point 3, lines 188-191), and a risk-reducing order is "a sell
+// that moves the account's exposure toward 98% or lower, sized within the
+// broker-reported holding" (point 4, lines 195-200). The mark is the band's
+// only input, so a missing mark cannot refuse it either: one late mark does
+// not refuse Boost's exit back to 98%, nor degrade the account and freeze it.
+func TestARiskReducingSellIsExemptFromMarkBandAndSize(t *testing.T) {
+	l := limits()
+	l.MaxOrderFraction = 0.4 // the exit is 49% of net liquidation
+	for name, mutate := range map[string]func(*risklimit.Order){
+		"no mark":         func(o *risklimit.Order) { o.Mark, o.MarkSet = 0, false },
+		"outside band":    func(o *risklimit.Order) { o.Mark = 1.2 },
+		"over size":       func(*risklimit.Order) {},
+		"to below 98%":    func(o *risklimit.Order) { o.Planned.Quantity = 14700; o.Planned.TargetWeight = 0 },
+		"no mark, sell 1": func(o *risklimit.Order) { o.Planned.Quantity, o.Mark, o.MarkSet = 1, 0, false },
+	} {
+		g := gate(t, l, event.TradingModeDryRun)
+		o := sellFrom147()
+		mutate(&o)
+		got := check(t, g, o)[0]
+		if got.Released == nil {
+			t.Errorf("%s: refused for %s: %s", name, got.Refused.Reason, got.Refused.Detail)
+			continue
+		}
+		if got.State != nil || g.State() != risklimit.StateNormal {
+			t.Errorf("%s: a released sell changes no state", name)
+		}
+	}
+}
+
+// TestOnlyARiskReducingOrderIsExempt: no buy is risk-reducing (ADR 0026,
+// point 4, lines 199-200), and a sell beyond the holding is not "sized within
+// the broker-reported holding" (line 197); both stay subject to the mark, the
+// band and the size.
+func TestOnlyARiskReducingOrderIsExempt(t *testing.T) {
+	l := limits()
+	l.MaxOrderFraction = 0.4
+	buy := order(event.OrderSideBuy, 10, 9800)
+	buy.Mark, buy.MarkSet = 0, false
+	refusedFor(t, check(t, gate(t, l, event.TradingModeDryRun), buy)[0], event.RefusedMissingMark)
+	// The book holds more than each sell was sized from, so neither is
+	// refused first for exceeding the book's holding.
+	beyond := order(event.OrderSideSell, 101, 100)
+	beyond.Mark, beyond.MarkSet = 0, false
+	refusedFor(t, checkBook(t, gate(t, l, event.TradingModeDryRun), holding("SPY", 10000), beyond)[0], event.RefusedMissingMark)
+	beyond.Mark, beyond.MarkSet = 1.2, true
+	refusedFor(t, checkBook(t, gate(t, l, event.TradingModeDryRun), holding("SPY", 10000), beyond)[0], event.RefusedPriceBand)
+	big := order(event.OrderSideSell, 4001, 4000)
+	refusedFor(t, checkBook(t, gate(t, l, event.TradingModeDryRun), holding("SPY", 10000), big)[0], event.RefusedOrderSize)
+}
+
+// TestTheNamedInstrumentStaysFrozen: while Degraded, "named instruments are
+// frozen"; the only order on one that may go is ADR 0019's one sale back to
+// 98% (ADR 0026, point 4, lines 205-212; ADR 0019, amended 2026-10-16),
+// which is sized from IBKR's own holding, net liquidation and open orders,
+// and "no order is sent" when those cannot be read (ADR 0019, amended
+// 2026-10-15). This gate reads no open orders, so it sends no such sale:
+// every order on a named instrument is refused, risk-reducing or not. While
+// Halted, likewise, no order goes (lines 213-217).
+func TestTheNamedInstrumentStaysFrozen(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	check(t, g, order(event.OrderSideBuy, 5001, 0))
+	exit := sellFrom147()
+	refusedFor(t, check(t, g, exit)[0], event.RefusedEngineDegraded)
+
+	h := gate(t, limits(), event.TradingModeDryRun)
+	untagged := order(event.OrderSideBuy, 1, 0)
+	untagged.Planned.Tag = "targets-decided:joint:never"
+	check(t, h, untagged)
+	refusedFor(t, check(t, h, exit)[0], event.RefusedEngineHalted)
+}
+
+// TestRestoreState: a restart while Degraded or Halted "resumes in that same
+// state and scope, read back from the run's durable record" (ADR 0019,
+// amended 2026-09-24, "The state survives a restart"; ADR 0026, point 5,
+// line 242). Leaving either is never automatic, so a restored state never
+// loosens: Halted stays Halted, and a scope only widens.
+func TestRestoreState(t *testing.T) {
+	degraded := func(ids ...string) event.EngineStatePayload {
+		return event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "recorded", ScopeInstrumentIDs: ids}
+	}
+	halted := event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "recorded"}
+
+	g := gate(t, limits(), event.TradingModeDryRun)
+	if err := g.RestoreState(degraded("SPY"), event.EngineStateScopedVersion); err != nil {
+		t.Fatal(err)
+	}
+	if g.State() != risklimit.StateDegraded {
+		t.Fatalf("restored state %s", g.State())
+	}
+	refusedFor(t, check(t, g, sellFrom147())[0], event.RefusedEngineDegraded)
+	refusedFor(t, check(t, g, order(event.OrderSideBuy, 1, 0))[0], event.RefusedEngineDegraded)
+	other := order(event.OrderSideSell, 1, 10)
+	other.Planned.InstrumentID = "IEF"
+	released(t, check(t, g, other)[0])
+	// A later record naming only IEF keeps SPY frozen.
+	if err := g.RestoreState(degraded("IEF"), event.EngineStateScopedVersion); err != nil {
+		t.Fatal(err)
+	}
+	refusedFor(t, check(t, g, sellFrom147())[0], event.RefusedEngineDegraded)
+	refusedFor(t, check(t, g, other)[0], event.RefusedEngineDegraded)
+
+	if err := g.RestoreState(halted, event.EngineStateScopedVersion); err != nil {
+		t.Fatal(err)
+	}
+	refusedFor(t, check(t, g, other)[0], event.RefusedEngineHalted)
+	if err := g.RestoreState(degraded("SPY"), event.EngineStateScopedVersion); err == nil || g.State() != risklimit.StateHalted {
+		t.Errorf("a Degraded record after a Halted one must be refused: %v, %s", err, g.State())
+	}
+
+	for name, bad := range map[string]struct {
+		p       event.EngineStatePayload
+		version uint32
+	}{
+		"invalid":          {event.EngineStatePayload{State: "dazed"}, event.EngineStateScopedVersion},
+		"degraded at v1":   {degraded("SPY"), event.EngineStateSchemaVersion},
+		"risk limit at v1": {halted, event.EngineStateSchemaVersion},
+		"order scope":      {event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x", ScopeOrderIDs: []string{"tw-1"}}, event.EngineStateScopedVersion},
+		"cash scope":       {event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x", ScopeCashComponents: []string{"USD"}}, event.EngineStateScopedVersion},
+	} {
+		n := gate(t, limits(), event.TradingModeDryRun)
+		if err := n.RestoreState(bad.p, bad.version); err == nil {
+			t.Errorf("%s: restored", name)
+		}
+		if n.State() != risklimit.StateNormal {
+			t.Errorf("%s: a refused record changes no state", name)
+		}
 	}
 }

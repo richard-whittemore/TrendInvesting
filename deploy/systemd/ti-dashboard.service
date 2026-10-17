@@ -1,0 +1,29 @@
+[Unit]
+Description=Read-only dashboard (loopback only; published to the tailnet by tailscale serve)
+After=network-online.target
+# PLACEHOLDER: binary not built yet.
+ConditionFileIsExecutable=/opt/trend-investing/bin/ti-dashboard
+
+[Service]
+Type=simple
+User=ti-trader
+Group=ti-trader
+Environment=TZ=America/New_York
+# Loopback only. The firewall also closes every non-Tailscale port.
+Environment=TI_DASHBOARD_ADDR=127.0.0.1:8080
+Environment=TI_STATE_ROOT=/var/lib/trend-investing
+LoadCredential=secrets:/etc/trend-investing/secrets.env
+ExecStart=/opt/trend-investing/bin/ti-dashboard
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/trend-investing
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

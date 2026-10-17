@@ -14,8 +14,9 @@ writes, in order:
      the raw view is the recorded grouped bar (unadjusted); the
      split-adjusted and the split- and dividend-adjusted views are adjusted
      forward from ``base`` by adjust.forward_factors, with the bulk splits
-     and dividends recorded for the whole span, so a bar is never restated
-     by a later run;
+     and dividends recorded for the whole span (history.load_actions: each
+     action once by its id, the windows covering the span), so a bar is
+     never restated by a later run;
    - a ``market.universe.snapshot`` v1 for a session with a universe
      recording: one row per type-CS reference ticker with a bar that
      session, its unadjusted close and volume, and its sector label and
@@ -42,13 +43,12 @@ inputs restamps them.
 """
 import collections
 import datetime as dt
-import glob
 import hashlib
 import json
 import math
 import os
 
-from . import adjust, nyse_calendar, record, sectors
+from . import adjust, history, nyse_calendar, record, sectors
 from .massive import MarketDataError
 from .steps import MissingData
 
@@ -123,27 +123,14 @@ def load_sessions(directory, first, last):
     return out
 
 
-def load_actions(directory, kind, start, last):
-    """Every recorded ``kind`` (splits or dividends) row, each event once,
-    from windows that together cover start..last."""
-    windows, rows = [], {}
-    for path in sorted(glob.glob(os.path.join(directory, kind + "_*_*.json"))):
-        rec = record.read(path)
-        windows.append((dt.date.fromisoformat(rec["from"]), dt.date.fromisoformat(rec["session"])))
-        for r in rec["rows"]:
-            key = r.get("id") or _canonical(r)
-            if key in rows and rows[key] != r:
-                raise Conflict("{} {} is recorded twice with different figures".format(kind, key))
-            rows[key] = r
-    cursor = start
-    for a, b in sorted(windows):
-        if a > cursor:
-            break
-        cursor = max(cursor, b + dt.timedelta(days=1))
-    if start <= last and cursor <= last:
-        raise MissingData("the {} recordings do not cover {} (covered to {})".format(
-            kind, cursor, cursor - dt.timedelta(days=1)))
-    return [rows[k] for k in sorted(rows)]
+def _actions(directory, kind, first, last):
+    """history.load_actions, with its refusals as this module's errors."""
+    try:
+        return history.load_actions(directory, kind, first, last)
+    except history.Gap as e:
+        raise MissingData(str(e)) from e
+    except history.ConflictingActions as e:
+        raise Conflict(str(e)) from e
 
 
 def _finite(value, positive):
@@ -235,9 +222,9 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
                 wanted |= cs & set(s.bars)
     start = base + dt.timedelta(days=1)
     by_ticker = collections.defaultdict(lambda: ([], []))
-    for r in load_actions(directory, "splits", start, last):
+    for r in _actions(directory, "splits", start, last):
         by_ticker[r.get("ticker")][0].append(r)
-    for r in load_actions(directory, "dividends", start, last):
+    for r in _actions(directory, "dividends", start, last):
         by_ticker[r.get("ticker")][1].append(r)
 
     factors = {}
@@ -259,12 +246,12 @@ def encode(directory, first, last, identity, required=("SPY", "IEF", "SHY"), opt
 
     stream = _Stream(identity, first_sequence)
     through = nyse_calendar.sessions_after(last, ahead)[-1]
-    opening = _utc(nyse_calendar.close_utc(span[0].day))
+    opening = _utc(nyse_calendar.session_close(span[0].day).astimezone(dt.timezone.utc))
     stream.add(CALENDAR, "marketdata:calendar:{}:{}".format(span[0].day, through), opening, opening,
                {"source": CALENDAR_SOURCE,
                 "sessions": [d.isoformat() for d in nyse_calendar.sessions(span[0].day, through)]})
     for s in span:
-        end, session = _utc(nyse_calendar.close_utc(s.day)), s.day.isoformat()
+        end, session = _utc(nyse_calendar.session_close(s.day).astimezone(dt.timezone.utc)), s.day.isoformat()
         ids = sorted(t for t in wanted if t in s.bars)
         if not ids:
             raise MissingData("no requested instrument has a bar on {}".format(session))

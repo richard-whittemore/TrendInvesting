@@ -60,6 +60,7 @@ func TestRunEndToEndOverASocket(t *testing.T) {
 	configurationHash := event.ConfigurationHash(cfg)
 
 	stop := startEngine(t, options{
+		mode:       modeBacktest,
 		socketPath: socketPath,
 		configPath: testConfigPath,
 		asOf:       testAsOf,
@@ -208,6 +209,7 @@ func TestRunRefusesASecondConnectionEvenWhenItsCallsDoNotOverlapWithTheFirst(t *
 	configurationHash := event.ConfigurationHash(cfg)
 
 	stop := startEngine(t, options{
+		mode:       modeBacktest,
 		socketPath: socketPath,
 		configPath: testConfigPath,
 		asOf:       testAsOf,
@@ -296,6 +298,7 @@ func TestRunRefusesToStartWithoutAValidConfiguration(t *testing.T) {
 
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	err := run(context.Background(), options{
+		mode:       modeBacktest,
 		socketPath: socketPath,
 		configPath: badConfig,
 		asOf:       testAsOf,
@@ -342,6 +345,7 @@ func TestRunReportsAJournalWriteFailureRatherThanExitingClean(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(journalDir, 0o700) })
 
 	stop := startEngine(t, options{
+		mode:       modeBacktest,
 		socketPath: socketPath,
 		configPath: testConfigPath,
 		asOf:       testAsOf,

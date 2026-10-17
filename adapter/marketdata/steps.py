@@ -18,10 +18,18 @@ from .massive import MarketDataError
 
 NEW_YORK = zoneinfo.ZoneInfo("America/New_York")
 SOURCE = "massive"
+# A session is recorded only this long after its close, so intraday or
+# not-yet-final bars are never recorded as the day's close (a recording is
+# immutable). Massive's end-of-day aggregates are final well within it.
+SETTLE = dt.timedelta(hours=1)
 
 
 class MissingData(MarketDataError):
     """Required data was absent; the step failed closed and wrote nothing."""
+
+
+class NotSettled(MissingData):
+    """The session has not closed plus the settle delay; nothing is fetched."""
 
 
 def _stamp(now):
@@ -36,13 +44,28 @@ def _rows(pages):
     return [r for p in pages for r in (p.get("results") or ())]
 
 
-def find_session(client, asof):
+def new_york_date(now=_now):
+    """Today's date in New York, where sessions are dated; not the host's."""
+    return now().astimezone(NEW_YORK).date()
+
+
+def require_settled(session, now=_now, settle=SETTLE):
+    """Raises NotSettled unless ``now`` is at least ``settle`` after the
+    session's close (4 p.m. New York, 1 p.m. on an early close)."""
+    ready = nyse_calendar.session_close(session) + settle
+    if now() < ready:
+        raise NotSettled("session {} is not recordable before {}".format(session, ready.isoformat()))
+
+
+def find_session(client, asof, now=_now, settle=SETTLE):
     """(day, grouped body) of the latest NYSE trading day on or before
     ``asof``. Holidays come from the calendar; an empty response on a trading
-    day (data not yet published, or a transient fault) is MissingData."""
+    day (data not yet published, or a transient fault) is MissingData, and a
+    day before its close plus ``settle`` is NotSettled, with no request."""
     day = asof
     while not nyse_calendar.is_trading_day(day):
         day -= dt.timedelta(days=1)
+    require_settled(day, now, settle)
     body = client.grouped(day)
     if not body.get("results"):
         raise MissingData("no bars for trading day {}".format(day))
@@ -54,7 +77,11 @@ last_session = find_session
 
 def fetch_universe(client, session, now=_now, grouped_body=None):
     """The raw inputs of the universe ranking for ``session``: every stock's
-    unadjusted bar and the type-CS reference tickers dated that session."""
+    unadjusted bar and the type-CS reference tickers dated that session.
+    Decision D8 (docs/live-trading/plan.md section 4): one session's
+    unadjusted close and volume for every US common stock, the listing as of
+    that session; ranking itself is a Go rule (ADR 0026 point 1, "Universe").
+    No bars or no tickers fails closed (ADR 0026 point 5)."""
     body = grouped_body if grouped_body is not None else client.grouped(session)
     bars = body.get("results") or []
     if not bars:
@@ -91,9 +118,11 @@ def fetch_bars(client, instruments, session, lookback_days=400, now=_now):
             "lookback_days": lookback_days, "instruments": out}
 
 
-def run_universe(client, session, directory, now=_now, grouped_body=None):
+def run_universe(client, session, directory, now=_now, grouped_body=None, settle=SETTLE):
+    require_settled(session, now, settle)
     return recording.write(directory, fetch_universe(client, session, now=now, grouped_body=grouped_body))
 
 
-def run_bars(client, instruments, session, directory, lookback_days=400, now=_now):
+def run_bars(client, instruments, session, directory, lookback_days=400, now=_now, settle=SETTLE):
+    require_settled(session, now, settle)
     return recording.write(directory, fetch_bars(client, instruments, session, lookback_days, now=now))
