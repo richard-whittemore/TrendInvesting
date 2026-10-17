@@ -34,6 +34,10 @@ const (
 	// StatusGap: enough closes, but one session of its window has none
 	// (ADR 0026 point 5, "Missing bars fail closed").
 	StatusGap Status = "gap"
+	// StatusUnaffordable: D7-L skipped it, since one share at its previous
+	// raw close exceeds its target value; the next eligible ranked name
+	// takes its place (ADR 0026, point 2, "D7-L"; plan.md lines 380-383).
+	StatusUnaffordable Status = "unaffordable"
 )
 
 // History is one name's score and volatility, or why it has none.

@@ -29,9 +29,14 @@ type IRAInput struct {
 // are sized from the previous close and not yet budgeted: they are planned
 // only once every sell is terminal, or at once when there are no sells
 // (ADR 0026, point 2, "IRA execution"); ScaleBuys budgets them.
+//
+// Skipped records each trade the plan sized but cannot order, because
+// rounding toward zero to whole shares leaves none, or a sell's holding is
+// all in working sells: no planned trade disappears silently.
 type IRAPlan struct {
-	Sells []event.OrderPlannedPayload
-	Buys  []event.OrderPlannedPayload
+	Sells   []event.OrderPlannedPayload
+	Buys    []event.OrderPlannedPayload
+	Skipped []event.OrderSkippedPayload
 }
 
 // PlanIRA plans an IRA's momentum rebalance (ADR 0026, point 2, "Momentum
@@ -44,6 +49,9 @@ type IRAPlan struct {
 //     then (T x V - q x p) / p shares, rounded toward zero;
 //  5. no sell exceeds the holding minus the working and pending sells;
 //  6. sells first, then buys.
+//
+// A trade that rounds to no share, or a sell with nothing left after the
+// working sells, is recorded in Skipped with the shares the rule asked for.
 //
 // Whole shares rounded toward zero are D7-L's rounding; D7-L's substitution of
 // a pick whose one share exceeds its target is the momentum rule's, not this.
@@ -92,29 +100,41 @@ func PlanIRA(in IRAInput) (IRAPlan, error) {
 			return IRAPlan{}, fmt.Errorf("orderplan: %s has no finite, positive reference price", id)
 		}
 		held, target := in.Snapshot.Quantity(id), targets[id]
-		var delta float64
+		var shares float64
 		switch {
+		case target == 0 && held == 0:
+			continue // a zero target not held: nothing to trade
 		case target == 0:
-			delta = -float64(held)
+			shares = -float64(held)
 		case held == 0:
-			delta = math.Trunc(float64(target*v) / price)
+			shares = float64(target*v) / price
 		default:
 			value := float64(float64(held) * price)
 			if !(math.Abs(value/v-target) > float64(in.RebalanceBand*target)) {
 				continue
 			}
-			delta = math.Trunc((float64(target*v) - value) / price)
+			shares = (float64(target*v) - value) / price
 		}
+		delta := math.Trunc(shares)
 		if math.Abs(delta) >= math.MaxInt64 {
 			return IRAPlan{}, fmt.Errorf("orderplan: %v shares of %s cannot be ordered", delta, id)
 		}
 		quantity := int64(delta)
 		side := event.OrderSideBuy
-		if quantity < 0 {
+		if shares < 0 {
 			side = event.OrderSideSell
 			quantity = min(-quantity, held-in.WorkingSells[id])
 		}
 		if quantity <= 0 {
+			reason := event.OrderSkippedBelowOneShare
+			if side == event.OrderSideSell && delta != 0 {
+				reason = event.OrderSkippedHeldByWorkingSells
+			}
+			plan.Skipped = append(plan.Skipped, event.OrderSkippedPayload{
+				AccountID: d.AccountID, Tag: in.Tag, ClientOrderID: ClientOrderID(in.Tag, id, side),
+				InstrumentID: id, Side: side, Phase: side, Reason: reason, Shares: math.Abs(shares),
+				TargetWeight: target, NetLiquidation: v, HeldQuantity: held, ReferencePrice: price,
+			})
 			continue
 		}
 		order := event.OrderPlannedPayload{
@@ -152,14 +172,17 @@ func BuyCost(o event.OrderPlannedPayload, maxFees float64) float64 {
 // over the n buys, which always fits. With no budget, no buy is kept.
 //
 // This scaling is not in the backtest; the parity rerun measures it.
-func ScaleBuys(buys []event.OrderPlannedPayload, budget, maxFees float64) (kept []event.OrderPlannedPayload, scale float64) {
+//
+// A buy scaled to no share is returned in skipped, with the shares it was
+// scaled to, so it is recorded rather than dropped silently.
+func ScaleBuys(buys []event.OrderPlannedPayload, budget, maxFees float64) (kept []event.OrderPlannedPayload, skipped []event.OrderSkippedPayload, scale float64) {
 	total, atLimit := 0.0, 0.0
 	for _, b := range buys {
 		total += BuyCost(b, maxFees)
 		atLimit += float64(float64(b.Quantity) * b.LimitPrice)
 	}
 	if total <= budget {
-		return slices.Clone(buys), 1
+		return slices.Clone(buys), nil, 1
 	}
 	scale = max(budget/total, 0)
 	kept, cost := scaled(buys, scale, maxFees)
@@ -167,7 +190,16 @@ func ScaleBuys(buys []event.OrderPlannedPayload, budget, maxFees float64) (kept 
 		scale = max((budget-float64(float64(len(buys))*maxFees))/atLimit, 0)
 		kept, _ = scaled(buys, scale, maxFees)
 	}
-	return kept, scale
+	for _, b := range buys {
+		if shares := float64(b.Quantity) * scale; math.Floor(shares) < 1 {
+			skipped = append(skipped, event.OrderSkippedPayload{
+				AccountID: b.AccountID, Tag: b.Tag, ClientOrderID: b.ClientOrderID, InstrumentID: b.InstrumentID,
+				Side: b.Side, Phase: b.Phase, Reason: event.OrderSkippedScaledBelowOneShare, Shares: shares, Scale: scale,
+				TargetWeight: b.TargetWeight, NetLiquidation: b.NetLiquidation, HeldQuantity: b.HeldQuantity, ReferencePrice: b.ReferencePrice,
+			})
+		}
+	}
+	return kept, skipped, scale
 }
 
 // scaled returns buys with each quantity scaled by scale and rounded down,

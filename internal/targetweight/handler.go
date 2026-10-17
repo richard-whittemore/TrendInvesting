@@ -31,7 +31,11 @@ import (
 //   - 1.3.0 reads market.bar.completed version 2 and refuses version 1, and
 //     computes its indicators from the split- and dividend-adjusted close
 //     (ADR 0026), so a journal written under 1.2.0 does not replay.
-const RulesVersion = "1.3.0"
+//   - 1.4.0 adds D7-L's minimum-lot substitution of an unaffordable pick and
+//     records skipped trades (configuration schema version 4,
+//     targets.decided schema version 4), so a journal written under 1.3.0
+//     does not replay.
+const RulesVersion = "1.4.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
