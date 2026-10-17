@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily report after the data step
+
+[Timer]
+OnCalendar=Mon..Fri 17:30 America/New_York
+Persistent=true
+Unit=ti-reporter.service
+
+[Install]
+WantedBy=timers.target
