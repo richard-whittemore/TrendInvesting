@@ -187,7 +187,7 @@ func TestTargetWeightConfigurationValidate(t *testing.T) {
 // or an encoding change.
 func TestTargetWeightConfigurationHashStability(t *testing.T) {
 	got := event.TargetWeightConfigurationHash(validTargetWeightConfiguration())
-	const want = "sha256:6d0fe0ab1983edd2e2737c8ce6da5eb7116865b3b16361bf3b8ff3ed3e5d5496"
+	const want = "sha256:5919ad5ffdc0c76d76bd0326f647e590e7fb8b73f0e4cdb2fca3fe57178cf9a0"
 	if got != want {
 		t.Fatalf("TargetWeightConfigurationHash = %s, want %s", got, want)
 	}

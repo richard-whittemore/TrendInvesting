@@ -32,7 +32,11 @@ const TargetWeightConfigurationEventType = "strategy.target-weight.configuration
 //     sleeve's split and the owner's birth year and month. A momentum
 //     configuration requires it; a Boost one sets none. The Excess Liquidity
 //     thresholds join in a later version, a new hash (ADR 0016).
-const TargetWeightConfigurationSchemaVersion uint32 = 3
+//   - Version 4 settles D7 (owner decision 2026-10-16): Execution's share
+//     quantity is minimum-lot, D7-L, whole shares with the momentum rule's
+//     substitution of an unaffordable pick. Version 3's whole-shares had no
+//     substitution and is not a value of version 4.
+const TargetWeightConfigurationSchemaVersion uint32 = 4
 
 // The strategies this schema configures: Boost on SPY for the joint margin
 // account, and the momentum combination for an IRA (docs/live-trading/plan.md,
@@ -58,10 +62,14 @@ const (
 	CashRuleTotal = "total-cash"
 )
 
-// ShareQuantityWhole is the only share quantity rule built: whole shares,
-// rounded toward zero (ADR 0026, point 2, D7-L's rounding). Fractional
-// shares (D7-F) need decimal quantities in the order and fill payloads.
-const ShareQuantityWhole = "whole-shares"
+// ShareQuantityMinimumLot is D7-L, the share quantity rule the owner chose
+// for the IRAs on 2026-10-16, since IBKR does not take fractional orders
+// through the TWS API (ADR 0026, point 2, "D7"; plan.md section 5, "whole
+// shares"): whole shares, rounded toward zero, and a pick whose one share at
+// the previous raw close exceeds its target value is skipped for the next
+// eligible ranked name within the sector cap (plan.md lines 380-383). D7-F,
+// fractional shares, is not built.
+const ShareQuantityMinimumLot = "minimum-lot"
 
 // The trading modes, set per account (docs/live-trading/plan.md, section 5,
 // "Modes"). A dry-run releases orders with send false and never sends them
@@ -183,7 +191,7 @@ type BondFund struct {
 type ExecutionConfiguration struct {
 	// CashRule is one of the CashRule constants (D5).
 	CashRule string `json:"cash_rule"`
-	// ShareQuantity is ShareQuantityWhole (D7).
+	// ShareQuantity is ShareQuantityMinimumLot (D7).
 	ShareQuantity string `json:"share_quantity"`
 	// MaxFeesPerOrder is the most commission and fees one order can cost,
 	// added to every buy's worst-case cost (ADR 0026, point 2, "Worst-case
@@ -449,8 +457,8 @@ func (c ExecutionConfiguration) validate() []error {
 	if c.CashRule != CashRuleSettled && c.CashRule != CashRuleTotal {
 		errs = append(errs, fmt.Errorf("execution cash rule %q is not %q or %q", c.CashRule, CashRuleSettled, CashRuleTotal))
 	}
-	if c.ShareQuantity != ShareQuantityWhole {
-		errs = append(errs, fmt.Errorf("execution share quantity %q is not %q, the only rule built", c.ShareQuantity, ShareQuantityWhole))
+	if c.ShareQuantity != ShareQuantityMinimumLot {
+		errs = append(errs, fmt.Errorf("execution share quantity %q is not %q, the only rule built", c.ShareQuantity, ShareQuantityMinimumLot))
 	}
 	if !isFinite(c.MaxFeesPerOrder) || c.MaxFeesPerOrder < 0 {
 		errs = append(errs, errors.New("execution max fees per order must be finite and not negative"))

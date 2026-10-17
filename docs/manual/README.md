@@ -16,3 +16,7 @@ prints, and what happens when something goes wrong.
 - [order-lifecycle](order-lifecycle.md): reading an order's state from the
   log (committed, released, acknowledged), and the alert for an order IBKR
   never acknowledged.
+- [momentum-minimum-lot](momentum-minimum-lot.md): how the IRAs buy whole
+  shares only: a stock one share of which costs more than its target is
+  skipped for the next-ranked one, what happens when nothing is affordable,
+  and what the program records.

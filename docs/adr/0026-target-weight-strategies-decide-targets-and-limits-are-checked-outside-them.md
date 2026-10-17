@@ -529,3 +529,33 @@ ones that belong here.
   trading (`docs/research/commissions-30k-2026-10.md`): above every observed
   $30k average ($1.03 to $1.49), below the $2.50 that 500 shares would
   cost before the 1% cap lowers it.
+
+## Amendment (2026-10-17): D7-L as built, rule the owner is asked to confirm
+
+This extends the D7-L decision recorded in point 2 so the text matches the
+code as built. The owner is asked to confirm it. D7-L compares only a pick
+whose target weight is positive; the three cases below follow from that.
+
+- **(a) Fully risk-off by design.** When every pick's target weight is zero
+  (a risk-off month at `RiskOffFraction` 1), D7-L compares nothing and the
+  decision is decided: the whole invested fraction goes to the risk-off
+  instrument and the planner sells every stock held. The decision carries a
+  detail saying so.
+- **(b) Every positive-target pick unaffordable.** When no stock is picked and
+  D7-L skipped at least one candidate as unaffordable, the decision is
+  withheld (`all-unaffordable`) and the book is kept, in a risk-on month and
+  a partial risk-off month alike. A systematic valuation error (a bad net
+  liquidation or bad raw closes) looks the same as an account too small for
+  every pick, and selling every stock on it is the wrong failure (point 5,
+  fail closed). Every skipped candidate is recorded `unaffordable` with its
+  one-share price and target value, the detail names the one-share lot, the
+  momentum scale and the net liquidation, and the reporter sends the withhold
+  as an urgent alert. A book with no pick and none skipped is withheld as
+  `no-eligible-names`.
+- **(c) Some picks affordable.** The book is the affordable picks after
+  substitution, decided as usual.
+- **What is recorded.** The `MinimumLot` figures (net liquidation V and the
+  momentum sleeve's scale, 1 - b) are recorded exactly when D7-L valued the
+  picks: a book decided under it, or one withheld as `all-unaffordable`. They
+  stay if the run then withholds a decided book; a decision the rule
+  withheld for any other reason compared no pick and records none.

@@ -68,7 +68,8 @@ type Alert struct {
 //     incident; a decided outcome ends it. Reasons that name absent inputs
 //     (missing bars, stale snapshot, missing universe) and a refusal for a
 //     missing mark are missing data; every other withheld reason is a
-//     withheld decision.
+//     withheld decision, routine except all-unaffordable, which may rest
+//     on a bad valuation and is urgent.
 func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 	account, _, err := AccountOf(envelopes)
 	if err != nil {
@@ -162,6 +163,10 @@ func withheldAlert(account string, e event.Envelope, p event.TargetsDecidedPaylo
 	switch p.WithheldReason {
 	case event.WithheldMissingBars, event.WithheldStaleAccountSnapshot, event.WithheldMissingUniverse:
 		kind, severity = KindMissingData, Urgent
+	case event.WithheldAllUnaffordable:
+		// The valuation itself may be wrong (a bad net liquidation or bad
+		// raw closes), which a person checks now (ADR 0026, point 2, "D7-L").
+		severity = Urgent
 	}
 	return Alert{
 		Key:  fmt.Sprintf("%s:%s:%s", kind, p.WithheldReason, start.UTC().Format(time.RFC3339)) + "@" + account,
