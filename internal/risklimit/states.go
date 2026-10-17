@@ -370,7 +370,7 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 	default:
 		return orderplan.Sale{}, false, nil
 	}
-	if g.saleAttempted(tag, instrumentID) {
+	if g.saleAttemptedFor(tag, instrumentID) {
 		g.disarm(orderplan.SaleClientOrderID(tag, instrumentID))
 		return orderplan.Sale{}, false, nil
 	}
@@ -422,34 +422,13 @@ func (g *Gate) Sale(trigger, instrumentID string, at time.Time, target, band flo
 	return sale, true, nil
 }
 
-// saleAttempted reports whether the sale for tag and instrumentID was already
-// attempted: planned, or withheld for a person (ADR 0019, amended 2026-10-15:
-// the sale is attempted once and never retried automatically), in this run
-// or, restored by RestoreSaleAttempt, in an earlier run of the incident.
-func (g *Gate) saleAttempted(tag, instrumentID string) bool {
-	return g.attempted[orderplan.SaleClientOrderID(tag, instrumentID)]
-}
-
-// RestoreSaleAttempt records that an earlier run already attempted the
-// restored incident's sale of instrumentID under tag (ADR 0026, point 5:
-// "Whether the incident sale has been attempted"), so this run never
-// attempts it again. It is an unwired seam: the operator run-approval input,
-// which carries the earlier run's planned or withheld sale, wires it when it
-// lands. Until then nothing calls it, since a crash resumes by replaying the
-// durable log's inputs, never from recorded decisions (ADR 0027, section 6).
-// It needs the incident restored first (RestoreState), and tag must be that
-// incident.
-func (g *Gate) RestoreSaleAttempt(tag, instrumentID string) error {
-	switch {
-	case g.incident == "":
-		return errors.New("risklimit: a restored sale attempt needs its incident restored first")
-	case tag != g.incident:
-		return fmt.Errorf("risklimit: a restored sale attempt under %q names no restored incident; the incident is %q", tag, g.incident)
-	case instrumentID == "":
-		return errors.New("risklimit: a restored sale attempt needs its instrument")
-	}
-	g.attempted[orderplan.SaleClientOrderID(tag, instrumentID)] = true
-	return nil
+// saleAttemptedFor reports whether the sale for tag and instrumentID was
+// already attempted: planned, or withheld for a person (ADR 0019, amended
+// 2026-10-15: the sale is attempted once and never retried automatically),
+// in this run, or, for an incident whose attempt the owner's approval of a
+// fresh run restored (RestoreSaleAttempt), in an earlier run.
+func (g *Gate) saleAttemptedFor(tag, instrumentID string) bool {
+	return g.attempted[orderplan.SaleClientOrderID(tag, instrumentID)] || g.saleAttempted[tag]
 }
 
 // noReadingSince is when the "no reading" clock started: the last Excess

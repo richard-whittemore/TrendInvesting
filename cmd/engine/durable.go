@@ -37,17 +37,59 @@ func createLogFile(path string) (*os.File, error) {
 
 // recoverLogFile reads a previous process's durable log. It never opens the
 // file for writing: the log stays the evidence it is, torn tail included.
+// A log whose content cannot be recovered (ADR 0027 §5) is reported as an
+// *unrecoverableLogError; a failure to open or read the file is not, since
+// the file may be intact.
 func recoverLogFile(path string) (journal.Recovery, error) {
-	file, err := os.Open(path)
+	file, err := openDurableLog(path)
 	if err != nil {
 		return journal.Recovery{}, fmt.Errorf("engine: open the durable log to resume from: %w", err)
 	}
 	defer func() { _ = file.Close() }()
-	recovery, err := journal.RecoverLog(file)
-	if err != nil {
+	reader := &faultRecordingReader{r: file}
+	recovery, err := journal.RecoverLog(reader)
+	switch {
+	case err == nil:
+		return recovery, nil
+	case reader.fault != nil:
 		return journal.Recovery{}, fmt.Errorf("engine: resume from %s: %w", path, err)
 	}
-	return recovery, nil
+	return journal.Recovery{}, &unrecoverableLogError{path: path, err: err}
+}
+
+// openDurableLog opens a durable log for reading. It is the one seam a
+// test faults a read through, since a file's mode cannot fail a read after
+// the open, and does not stop root.
+var openDurableLog = func(path string) (io.ReadCloser, error) { return os.Open(path) }
+
+// unrecoverableLogError reports a durable log read in full whose content is
+// not a recoverable log (ADR 0027 §5): damaged, or cut short before its
+// header was complete.
+type unrecoverableLogError struct {
+	path string
+	err  error
+}
+
+func (e *unrecoverableLogError) Error() string {
+	return fmt.Sprintf("engine: resume from %s: %v", e.path, e.err)
+}
+
+func (e *unrecoverableLogError) Unwrap() error { return e.err }
+
+// faultRecordingReader records the first error, other than the end of the
+// file, its reader returns, so a fault in reading a log is told from damage
+// to what it holds.
+type faultRecordingReader struct {
+	r     io.Reader
+	fault error
+}
+
+func (f *faultRecordingReader) Read(p []byte) (int, error) {
+	n, err := f.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) && f.fault == nil {
+		f.fault = err
+	}
+	return n, err
 }
 
 var errDifferentConfigurationInput = errors.New("engine: the durable log opens with a different configuration input from the one this invocation composed; resume with the -config and -as-of the logged run started with")

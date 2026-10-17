@@ -19,6 +19,8 @@ const iraAccount = "ira"
 // score skipping 1, 4 returns of volatility, a 5-close trend), a top 2 with
 // one name per sector, and a universe of 5, so a few weeks of invented
 // closes rebalance twice. It is a test configuration, never the backtested one.
+// Its synthetic owner is 29 in 2025, before the glide path's first anchor, so
+// b is 0 and the book is the rule's own; glideBirth puts b on the path.
 func momentumConfiguration() event.TargetWeightConfigurationPayload {
 	return event.TargetWeightConfigurationPayload{
 		StrategyID: event.TargetWeightStrategyMomentum, AccountID: iraAccount, Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR,
@@ -29,7 +31,15 @@ func momentumConfiguration() event.TargetWeightConfigurationPayload {
 			RiskOffInstrument: "IEF", RiskOffFraction: 0.5, RebalanceBand: 0.25,
 			UniverseSource: "fixture-universe", SectorSources: []string{"gics", "screener"},
 		},
-		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityWhole, MaxFeesPerOrder: 1, MaxSnapshotAge: 30},
+		Glide: event.GlideConfiguration{
+			Anchors: []event.GlideAnchor{
+				{AgeYears: 38, Share: 0}, {AgeYears: 53, Share: 0.308}, {AgeYears: 65, Share: 0.5}, {AgeYears: 72, Share: 0.7},
+			},
+			RetirementAgeYears: 65,
+			BondFunds:          []event.BondFund{{InstrumentID: "IEF", Fraction: 0.5}, {InstrumentID: "SHY", Fraction: 0.5}},
+			Birth:              "1995-06",
+		},
+		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityMinimumLot, MaxFeesPerOrder: 1, MaxSnapshotAge: 30},
 		Limits:    event.MarginLimits{MaxExposure: 1, MaxOrdersPerDecision: 10, MaxOrderFraction: 0.9, PriceBand: 0.05},
 	}
 }
@@ -79,20 +89,22 @@ func names() []name {
 		{"III", "CS", "Materials", "gics", 1e4, 0, 10, 1, 1, 5},        // delisted after five sessions
 		{"SPY", "ETF", "", "", 1e8, 0, 500, 1.002, 1.002, 0},
 		{"IEF", "ETF", "", "", 1e7, 0, 95, 1.0005, 1.0005, 0},
+		{"SHY", "ETF", "", "", 1e7, 0, 80, 1.0002, 1.0002, 0},
 	}
 }
 
 // price is n's close on session i: base x growth^i, by month, times an
 // irregular factor; SPY falls 3% a session over February's last six sessions,
-// so February ends risk-off.
-func (n name) price(cal []string, i int) float64 {
+// so February ends risk-off, and over January's last six too when janFall is
+// set, so January ends risk-off as well.
+func (n name) price(cal []string, i int, janFall bool) float64 {
 	p := n.base
 	for k := 1; k <= i; k++ {
 		g := n.jan
 		if cal[k] >= "2025-02-01" {
 			g = n.feb
 		}
-		if n.id == "SPY" && cal[k] >= "2025-02-21" {
+		if n.id == "SPY" && (cal[k] >= "2025-02-21" || janFall && cal[k] >= "2025-01-24" && cal[k] <= "2025-01-31") {
 			g = 0.97
 		}
 		p = float64(p * g)
@@ -152,6 +164,13 @@ type momentumOptions struct {
 	neverClosed  map[string]bool                                  // calendar sessions with no bar and no close
 	withdraw     map[string]float64                               // session -> settled cash withdrawn after its close, in a snapshot an hour later
 	withdrawFill map[string]float64                               // instrument -> settled cash withdrawn as its sell fills, in a snapshot as of the fill
+	// riskOffJanuary makes SPY fall over January's last six sessions too.
+	riskOffJanuary bool
+	// rawScale multiplies an instrument's raw close, leaving its adjusted
+	// close, as an unadjusted split would: a stock dear by the share.
+	rawScale map[string]float64
+	// held is the IRA's holdings before the first session.
+	held map[string]int64
 }
 
 type momentumResult struct {
@@ -181,6 +200,9 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 	s := &stream{hash: event.TargetWeightConfigurationHash(cfg)}
 	res := momentumResult{run: run{recorder: rec, hash: s.hash}, stream: s}
 	acct := &ira{settled: 10000, held: map[string]int64{}}
+	for id, q := range opts.held {
+		acct.held[id] = q
+	}
 	apply := func(in event.Envelope) []event.Envelope {
 		t.Helper()
 		out, err := rec.Apply(context.Background(), in)
@@ -214,7 +236,7 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 		prices := map[string]float64{}
 		for _, n := range names() {
 			if i >= n.from && (n.to == 0 || i < n.to) {
-				prices[n.id] = n.price(cal, i)
+				prices[n.id] = n.price(cal, i, opts.riskOffJanuary)
 			}
 		}
 		// The venue: yesterday's proceeds settle, then each released order is
@@ -282,12 +304,12 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 				continue
 			}
 			ids = append(ids, n.id)
-			p := prices[n.id]
-			view := func(label string) event.PriceView {
-				return event.PriceView{View: label, Open: p, High: p, Low: p, Close: p, Volume: n.volume}
+			bar := adjustedBar(n.id, prices[n.id], n.volume, end)
+			if k, ok := opts.rawScale[n.id]; ok {
+				raw := float64(prices[n.id] * k)
+				bar.Raw.Open, bar.Raw.High, bar.Raw.Low, bar.Raw.Close = raw, raw, raw, raw
 			}
-			apply(s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, fmt.Sprintf("bar:%s:%s", n.id, session), end,
-				event.CompletedBarPayload{InstrumentID: n.id, PeriodEnd: end, SplitAdjusted: view(event.ViewSplitAdjusted), Raw: view(event.ViewRaw)}))
+			apply(s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, fmt.Sprintf("bar:%s:%s", n.id, session), end, bar))
 		}
 		if !opts.noUniverse && cal[i+1][:7] != session[:7] {
 			snap := event.UniverseSnapshotPayload{Session: session, Source: "fixture-universe"}

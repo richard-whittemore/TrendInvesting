@@ -35,6 +35,12 @@ func main() {
 // from main so the command is testable as a function rather than as a
 // process (mirrors cmd/backtest's run).
 func parseAndRun(ctx context.Context, args []string, out io.Writer) error {
+	return parseAndRunWithBuild(ctx, args, out, buildinfo.Version)
+}
+
+// parseAndRunWithBuild is parseAndRun with the build identity given, so a
+// test can run a parsed invocation as a stamped build would.
+func parseAndRunWithBuild(ctx context.Context, args []string, out io.Writer, build string) error {
 	flags := flag.NewFlagSet("engine", flag.ContinueOnError)
 	flags.SetOutput(out)
 	socketPath := flags.String("socket", "", "Unix-domain socket path to listen on (ADR 0014)")
@@ -42,6 +48,7 @@ func parseAndRun(ctx context.Context, args []string, out io.Writer) error {
 	outPath := flags.String("out", "", "path to write the run's journal to when this process stops")
 	logPath := flags.String("log", "", "path to stream this process's durable log to, each input flushed before its decisions are returned (ADR 0027); must not exist")
 	resumePath := flags.String("resume", "", "path of a previous process's durable log to rebuild state from before listening; requires -log")
+	approvalPath := flags.String("approval", "", "path of the owner's operator.run.approved file: required for a fresh run when the -log directory already holds an earlier run's durable log; never with -resume")
 	asOf := flags.String("as-of", "", "required nonzero run start as an RFC 3339 time; warm-up bars may precede it (ADR 0012)")
 	mode := flags.String("mode", "", "required: what the adapter does with decisions: backtest, dry-run, paper or live; every mode but backtest requires -log (ADR 0027)")
 	maxFrame := flags.Int("max-frame", transport.DefaultMaxFrameBytes, "maximum frame size in bytes")
@@ -55,9 +62,10 @@ func parseAndRun(ctx context.Context, args []string, out io.Writer) error {
 		outPath:         *outPath,
 		logPath:         *logPath,
 		resumePath:      *resumePath,
+		approvalPath:    *approvalPath,
 		asOf:            *asOf,
 		mode:            *mode,
-		build:           buildinfo.Version,
+		build:           build,
 		maxFrameBytes:   *maxFrame,
 		decisionTimeout: *decisionTimeout,
 	}, out)

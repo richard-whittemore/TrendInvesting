@@ -56,7 +56,7 @@ func TestRecordedStateInputRules(t *testing.T) {
 	mustRefuse(t, h, bad, "decode")
 	mustRefuse(t, h, s.envelope(t, event.EngineStateEventType, event.EngineStateScopedVersion, "st", at, event.EngineStatePayload{State: "dazed"}), "engine state")
 	mustApply(t, h, s.envelope(t, state.Type, state.SchemaVersion, state.ID, at, state.Payload))
-	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", at, bar(100, at)))
+	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b", at, bar(100, at)))
 	mustRefuse(t, h, s.envelope(t, state.Type, state.SchemaVersion, state.ID, at, state.Payload), "after the run began")
 }
 
@@ -101,7 +101,7 @@ func TestAnExitWithALateMarkIsReleased(t *testing.T) {
 func TestASnapshotAfterTheCloseWithholds(t *testing.T) {
 	h, s := configured(t)
 	at := sessionEnd(0)
-	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", at, bar(100, at)))
+	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b", at, bar(100, at)))
 	mustApply(t, h, s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, "a", at, (&account{cash: 4000}).snapshot(at.Add(time.Hour), 100)))
 	out := mustApply(t, h, s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s", at, event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: []string{"SPY"}}))
 	if len(out) != 1 {
@@ -122,7 +122,7 @@ func TestAShortHoldingIsAnError(t *testing.T) {
 	at := sessionEnd(0)
 	snap := (&account{cash: 4000}).snapshot(at, 100)
 	snap.Positions = []event.AccountPosition{{InstrumentID: "SPY", Quantity: -10}}
-	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "b", at, bar(100, at)))
+	mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b", at, bar(100, at)))
 	mustApply(t, h, s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, "a", at, snap))
 	mustRefuse(t, h, s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s", at, event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: []string{"SPY"}}), "short")
 }

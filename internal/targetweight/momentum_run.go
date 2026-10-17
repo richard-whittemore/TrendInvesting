@@ -10,6 +10,7 @@ import (
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/orderplan"
 	"github.com/richard-whittemore/TrendInvesting/internal/risklimit"
+	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/glide"
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/momentum"
 )
 
@@ -22,9 +23,10 @@ import (
 //   - market.session.calendar: the expected sessions. Every session closed
 //     must be on it, and it must name the session after it, so the handler
 //     knows whether that session is the first of a month;
-//   - per session: each instrument's market.bar.completed (the trend
-//     instrument, the risk-off instrument, universe members and holdings),
-//     then market.session.closed naming exactly those instruments;
+//   - per session: each instrument's market.bar.completed version 2 (the
+//     trend instrument, the risk-off instrument, universe members and
+//     holdings; each instrument's bars on one adjusted base), then
+//     market.session.closed naming exactly those instruments;
 //   - market.universe.snapshot, from the configured source, for the session
 //     it ranks;
 //   - account.snapshot version 4 and market.mark.recorded per instrument;
@@ -45,13 +47,26 @@ import (
 // decision session, the next close journals its decision withheld
 // (missing-bars), so no decision time passes without one (point 1).
 //
+// # Glide path
+//
+// Each decision counts the owner's age in whole months on its rebalance
+// session, the next calendar session (glide_path.py:242 computes b on the
+// month's first session), and sets b from the configured schedule. The
+// momentum book, with its own risk-off IEF, is scaled to 1 - b; the bond
+// sleeve holds 98% of b split over the bond funds; a fund both sleeves hold
+// is one target, the sum, with each sleeve's share recorded (plan.md section
+// 2, "Bond sleeve and glide path"; glide_path.py:80-88,177). The planner's
+// band applies to the summed targets. Every decision, withheld or not,
+// records the age and b.
+//
 // # Fail-closed rules
 //
 // A decided rebalance is withheld instead when the account snapshot is older
 // than the session (stale-account-snapshot), when a held or targeted
 // instrument has no bar in the session (missing-bars, which covers the
-// risk-off instrument's final bar), or when an order of an earlier rebalance
-// is not yet terminal (rebalance-in-progress).
+// final bars of the risk-off instrument and of the bond funds, which the
+// bond sleeve targets whenever b is above 0; ADR 0026, point 5), or when an
+// order of an earlier rebalance is not yet terminal (rebalance-in-progress).
 //
 // # Execution
 //
@@ -64,11 +79,13 @@ import (
 // to fit; the budget is carried through each release and fill, less any cash
 // a newer snapshot shows gone that the fills do not explain.
 type momentumRun struct {
-	h      *Handler
-	rule   momentum.Config
-	cfg    event.MomentumConfiguration
-	exec   event.ExecutionConfiguration
-	window int // calendar sessions of closes kept: the longest lookback
+	h       *Handler
+	rule    momentum.Config
+	cfg     event.MomentumConfiguration
+	exec    event.ExecutionConfiguration
+	window  int // calendar sessions of closes kept: the longest lookback
+	anchors []glide.Anchor
+	funds   []glide.Weight
 
 	calendar []string
 	last     string    // last session closed, YYYY-MM-DD
@@ -76,7 +93,8 @@ type momentumRun struct {
 
 	adjusted map[string]map[string]float64 // instrument -> session -> adjusted close
 	raw      map[string]float64            // instrument -> raw close in the last session
-	bars     map[string]event.CompletedBarPayload
+	bars     map[string]event.CompletedBarAdjustedPayload
+	bases    map[string]string // instrument -> its adjusted view's base
 	universe *event.UniverseSnapshotPayload
 	snapshot *event.AccountCashSnapshotPayload
 	marks    map[string]event.MarkRecordedPayload
@@ -116,6 +134,24 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 		TrendInstrument: m.TrendInstrument, TrendCloses: m.TrendCloses,
 		RiskOffInstrument: m.RiskOffInstrument, RiskOffFraction: m.RiskOffFraction,
 	}
+	// The bond sleeve holds glide.Invested of b, so the momentum book, scaled
+	// to 1 - b, must be invested at most that for the two to fit.
+	if m.Invested > glide.Invested {
+		return nil, fmt.Errorf("targetweight: momentum invested %v is above the bond sleeve's %v", m.Invested, glide.Invested)
+	}
+	anchors := make([]glide.Anchor, len(cfg.Glide.Anchors))
+	for i, a := range cfg.Glide.Anchors {
+		anchors[i] = glide.Anchor{AgeYears: a.AgeYears, Share: a.Share}
+	}
+	funds := make([]glide.Weight, len(cfg.Glide.BondFunds))
+	for i, f := range cfg.Glide.BondFunds {
+		funds[i] = glide.Weight{Symbol: f.InstrumentID, Weight: f.Fraction}
+	}
+	// A birth value implying an implausible age on the first session decided
+	// is refused here, as a likely typo, before any input is read.
+	if _, err := glide.AgeMonths(cfg.Glide.Birth, opts.DecideFrom); err != nil {
+		return nil, fmt.Errorf("targetweight: %w", err)
+	}
 	gate, err := risklimit.NewIRAGate(cfg.AccountID, cfg.Limits, cfg.Mode, cfg.Execution.MaxFeesPerOrder, time.Duration(cfg.Execution.MaxSnapshotAge)*time.Minute)
 	if err != nil {
 		return nil, fmt.Errorf("targetweight: %w", err)
@@ -129,9 +165,11 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 	}
 	h.momentum = &momentumRun{
 		h: h, rule: rule, cfg: m, exec: cfg.Execution,
-		window:   max(m.ScoreLookback+1, m.TrendCloses),
+		window:  max(m.ScoreLookback+1, m.TrendCloses),
+		anchors: anchors, funds: funds,
 		adjusted: map[string]map[string]float64{},
-		bars:     map[string]event.CompletedBarPayload{},
+		bars:     map[string]event.CompletedBarAdjustedPayload{},
+		bases:    map[string]string{},
 		marks:    map[string]event.MarkRecordedPayload{},
 		orders:   map[string]*trackedOrder{},
 		fills:    map[string]event.TargetWeightFillPayload{},
@@ -215,16 +253,19 @@ func within(sorted []string, lo, hi string) []string {
 }
 
 func (r *momentumRun) applyBar(in event.Envelope) error {
-	p, err := decodeInput[event.CompletedBarPayload](in, event.CompletedBarSchemaVersion)
+	p, err := decodeInput[event.CompletedBarAdjustedPayload](in, event.CompletedBarAdjustedVersion)
 	if err != nil {
 		return err
 	}
 	switch _, seen := r.bars[p.InstrumentID]; {
+	case r.bases[p.InstrumentID] != "" && r.bases[p.InstrumentID] != p.AdjustedBase:
+		return fmt.Errorf("targetweight: bar %s is based at %s; %s's bars are based at %s, and levels on two bases cannot be compared", in.ID, p.AdjustedBase, p.InstrumentID, r.bases[p.InstrumentID])
 	case seen:
 		return fmt.Errorf("targetweight: a second bar for %s before its session closed", p.InstrumentID)
 	case !p.PeriodEnd.After(r.lastEnd):
 		return fmt.Errorf("targetweight: bar %s does not follow the last session %s", p.PeriodEnd, r.lastEnd)
 	}
+	r.bases[p.InstrumentID] = p.AdjustedBase
 	r.bars[p.InstrumentID] = p
 	return nil
 }
@@ -301,14 +342,16 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 		if r.adjusted[id] == nil {
 			r.adjusted[id] = map[string]float64{}
 		}
-		// The split-adjusted close stands in for the split- and
-		// dividend-adjusted one, which market.bar.completed does not yet carry.
-		r.adjusted[id][date] = bar.SplitAdjusted.Close
+		// Scores, volatility and the trend read the split- and
+		// dividend-adjusted close (ADR 0026, point 1).
+		r.adjusted[id][date] = bar.Adjusted.Close
 		r.raw[id] = bar.Raw.Close
 	}
-	r.bars = map[string]event.CompletedBarPayload{}
+	r.bars = map[string]event.CompletedBarAdjustedPayload{}
 	b := &emissions{h: r.h, in: in, at: p.PeriodEnd}
-	r.missed(b, at)
+	if err := r.missed(b, at); err != nil {
+		return nil, err
+	}
 	r.last, r.lastEnd = date, p.PeriodEnd
 	r.trim(at)
 
@@ -324,10 +367,11 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 // at this close (b's): ADR 0026 emits one decision per account at each
 // decision time (point 1), and a missing final bar withholds it (point 5).
 // Before the first session closed, and before the first session to decide,
-// nothing is due.
-func (r *momentumRun) missed(b *emissions, at int) {
+// nothing is due. Each records the glide figures on its own rebalance
+// session, as a decided one does, and an implausible age there stops the run.
+func (r *momentumRun) missed(b *emissions, at int) error {
 	if r.last == "" {
-		return
+		return nil
 	}
 	end := b.at
 	from := r.h.decideFrom.UTC().Format(time.DateOnly)
@@ -345,8 +389,14 @@ func (r *momentumRun) missed(b *emissions, at int) {
 				session, end.Format(idTime)),
 			Momentum: event.MomentumFigures{CloseSession: session, TrendInstrument: r.rule.TrendInstrument},
 		}
+		figures, err := r.glideFigures(r.calendar[k+1])
+		if err != nil {
+			return fmt.Errorf("targetweight: decision for %s: %w", session, err)
+		}
+		r.applyGlide(&p, momentum.Decision{}, figures)
 		b.add(fmt.Sprintf("targets-decided:%s:missed:%s", r.h.cfg.AccountID, session), event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, p)
 	}
+	return nil
 }
 
 // trim drops every close older than the window ending at calendar session at.
@@ -374,11 +424,32 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int) ([]event.Envel
 	if r.universe != nil && r.universe.Session == r.last {
 		input.Universe = momentum.Snapshot{Session: r.universe.Session, Rows: rows(r.universe.Rows)}
 	}
+	figures, err := r.glideFigures(r.calendar[at+1])
+	if err != nil {
+		return nil, fmt.Errorf("targetweight: decision at %s: %w", end.Format(idTime), err)
+	}
+	lot, lotSet := r.minimumLot(end, figures.BondShare)
+	if lotSet {
+		input.MinimumLot = &lot
+	}
 	// Decide cannot refuse what this run has validated: the configuration,
-	// a calendar of distinct dates, closes on its sessions, validated rows.
+	// a calendar of distinct dates, closes on its sessions, validated rows,
+	// and under D7-L a raw close for every scored member, whose window ends
+	// with a bar in this session.
 	d, err := momentum.Decide(r.rule, input)
 	b.fail(err)
 	p := r.payload(d, end)
+	if lotSet && (d.Outcome == momentum.OutcomeDecided || d.Reason == momentum.ReasonAllUnaffordable) {
+		// The figures are recorded exactly when D7-L valued the picks: a
+		// book the rule decided under it, or one it withheld as
+		// all-unaffordable, beside the unaffordable names they value. They
+		// stay if the run then withholds a decided book (missing bars, a
+		// rebalance in progress). A decision the rule withheld for any other
+		// reason, no-eligible-names among them, compared no pick and records
+		// none.
+		p.Momentum.MinimumLot = event.MinimumLotFigures{NetLiquidation: lot.NetLiquidation, MomentumScale: lot.Scale}
+	}
+	r.applyGlide(&p, d, figures)
 
 	var plan orderplan.IRAPlan
 	if p.Outcome == event.TargetsOutcomeDecided {
@@ -398,6 +469,7 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int) ([]event.Envel
 	if p.Outcome != event.TargetsOutcomeDecided || b.err != nil {
 		return b.result()
 	}
+	r.skipped(b, plan.Skipped)
 	h.gate.RecordDecision(id)
 	reb := &rebalance{
 		decisionID: id, session: end, snapshot: *r.snapshot, prices: maps.Clone(r.raw),
@@ -414,20 +486,92 @@ func (r *momentumRun) decide(b *emissions, end time.Time, at int) ([]event.Envel
 	return b.result()
 }
 
+// minimumLot returns what D7-L's substitution values the picks against at the
+// close end, with b the decision's bond share (ADR 0026, point 2, "D7-L"):
+// the snapshot's net liquidation and this session's raw closes, the basis the
+// planner sizes orders from, and the momentum sleeve's scale 1 - b. With no
+// snapshot as of the close (staleSnapshot) the decision is withheld whatever
+// the picks, and with b at 1 there is no momentum sleeve, so neither applies
+// it.
+func (r *momentumRun) minimumLot(end time.Time, b float64) (momentum.MinimumLot, bool) {
+	if stale, _ := r.staleSnapshot(end); stale || r.exec.ShareQuantity != event.ShareQuantityMinimumLot {
+		return momentum.MinimumLot{}, false
+	}
+	scale := 1 - b
+	if scale <= 0 {
+		return momentum.MinimumLot{}, false
+	}
+	return momentum.MinimumLot{NetLiquidation: r.snapshot.NetLiquidation, Scale: scale, Prices: r.raw}, true
+}
+
+// skipped records each trade the planner sized but could not order.
+func (r *momentumRun) skipped(b *emissions, skipped []event.OrderSkippedPayload) {
+	for _, s := range skipped {
+		b.add("order-skipped:"+s.ClientOrderID, event.OrderSkippedEventType, event.OrderSkippedSchemaVersion, s)
+	}
+}
+
+// glideFigures counts the owner's age in whole months on the rebalance
+// session and sets b from the schedule. It fails only on an age outside the
+// plausible range, which stops the run.
+func (r *momentumRun) glideFigures(rebalance string) (event.GlideFigures, error) {
+	day, _ := time.Parse(time.DateOnly, rebalance) // a validated calendar date
+	age, err := glide.AgeMonths(r.h.cfg.Glide.Birth, day)
+	if err != nil {
+		return event.GlideFigures{}, err
+	}
+	// The anchors are validated by configuration, so this cannot refuse them.
+	b, _ := glide.BondShare(r.anchors, age)
+	return event.GlideFigures{RebalanceSession: rebalance, AgeMonths: age, BondShare: b}, nil
+}
+
+// applyGlide records the glide figures and, for a decided outcome, replaces
+// the rule's targets with the sleeves combined.
+func (r *momentumRun) applyGlide(p *event.TargetsDecidedPayload, d momentum.Decision, figures event.GlideFigures) {
+	p.Glide = figures
+	b := figures.BondShare
+	if p.Outcome != event.TargetsOutcomeDecided {
+		return
+	}
+	book := make([]glide.Weight, len(d.Targets))
+	for i, t := range d.Targets {
+		book[i] = glide.Weight{Symbol: t.InstrumentID, Weight: t.Weight}
+	}
+	combined, _ := glide.Combine(book, b, r.funds)
+	p.Targets = make([]event.TargetWeight, len(combined))
+	for i, t := range combined {
+		shares := make([]event.SleeveShare, len(t.Shares))
+		for k, s := range t.Shares {
+			shares[k] = event.SleeveShare{Sleeve: s.Sleeve, Weight: s.Weight}
+		}
+		p.Targets[i] = event.TargetWeight{InstrumentID: t.Symbol, Weight: t.Weight, Shares: shares}
+	}
+}
+
 func decisionID(accountID string, end time.Time) string {
 	return fmt.Sprintf("targets-decided:%s:%s", accountID, end.UTC().Format(idTime))
 }
 
-// withhold returns why a decided rebalance cannot be planned, or "".
-func (r *momentumRun) withhold(p event.TargetsDecidedPayload, end time.Time) (reason, detail string) {
-	h := r.h
+// staleSnapshot reports whether the account snapshot is not as of the close
+// end, and why: missing, earlier, or later. Orders and D7-L's target values
+// are valued at that close (ADR 0026, point 2), so either needs a snapshot
+// as of it exactly.
+func (r *momentumRun) staleSnapshot(end time.Time) (stale bool, detail string) {
+	id := r.h.cfg.AccountID
 	switch {
 	case r.snapshot == nil || r.snapshot.AsOf.Before(end):
-		return event.WithheldStaleAccountSnapshot, fmt.Sprintf("no account snapshot for %s as of the session closing %s", h.cfg.AccountID, end.Format(idTime))
+		return true, fmt.Sprintf("no account snapshot for %s as of the session closing %s", id, end.Format(idTime))
 	case r.snapshot.AsOf.After(end):
-		// Orders are valued at the session's close (ADR 0026, point 2).
-		return event.WithheldStaleAccountSnapshot, fmt.Sprintf("the account snapshot for %s is as of %s, after the session closing %s; orders are valued at that close",
-			h.cfg.AccountID, r.snapshot.AsOf.Format(idTime), end.Format(idTime))
+		return true, fmt.Sprintf("the account snapshot for %s is as of %s, after the session closing %s; orders are valued at that close",
+			id, r.snapshot.AsOf.Format(idTime), end.Format(idTime))
+	}
+	return false, ""
+}
+
+// withhold returns why a decided rebalance cannot be planned, or "".
+func (r *momentumRun) withhold(p event.TargetsDecidedPayload, end time.Time) (reason, detail string) {
+	if stale, detail := r.staleSnapshot(end); stale {
+		return event.WithheldStaleAccountSnapshot, detail
 	}
 	needed := make([]string, 0, len(p.Targets)+len(r.snapshot.Positions))
 	for _, t := range p.Targets {
@@ -468,7 +612,8 @@ func (r *momentumRun) planBuys(b *emissions) {
 	if short := r.unexplainedCashDrop(reb); short > 0 {
 		reb.budget.Remove(short)
 	}
-	buys, _ := orderplan.ScaleBuys(reb.buys, reb.budget.Remaining(), r.exec.MaxFeesPerOrder)
+	buys, skipped, _ := orderplan.ScaleBuys(reb.buys, reb.budget.Remaining(), r.exec.MaxFeesPerOrder)
+	r.skipped(b, skipped)
 	for _, o := range r.check(b, reb, buys, reb.sellsPlanned) {
 		reb.budget.Release(o.ClientOrderID, orderplan.BuyCost(o, r.exec.MaxFeesPerOrder))
 	}
@@ -653,16 +798,19 @@ func (r *momentumRun) payload(d momentum.Decision, end time.Time) event.TargetsD
 			UniverseAtOrAboveFloor: d.Universe.AtOrAboveFloor, UniverseMembers: d.Universe.Members,
 		},
 	}
+	p.Detail = d.Detail
 	if d.Outcome == momentum.OutcomeWithheld {
 		p.WithheldReason = string(d.Reason)
-		p.Detail = withheldDetail(d.Reason, r.rule, d.CloseSession)
+		if p.Detail == "" {
+			p.Detail = withheldDetail(d.Reason, r.rule, d.CloseSession)
+		}
 	}
 	for _, n := range d.Names {
 		p.Momentum.Names = append(p.Momentum.Names, event.MomentumName{
 			InstrumentID: n.InstrumentID, UniverseRank: n.UniverseRank, DollarVolume: n.DollarVolume,
 			Sector: n.Sector, SectorSource: n.SectorSource, Status: string(n.Status), Closes: n.Closes,
 			Score: n.Score, Volatility: n.Volatility, ScoreRank: n.ScoreRank, Weight: n.Weight,
-			BacktestWouldPick: n.BacktestWouldPick,
+			BacktestWouldPick: n.BacktestWouldPick, OneShare: n.OneShare, TargetValue: n.TargetValue,
 		})
 	}
 	for _, t := range d.Targets {

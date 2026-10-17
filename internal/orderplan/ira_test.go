@@ -10,11 +10,17 @@ import (
 
 const iraTag = "targets-decided:ira:2025-03-04"
 
+// momentumDecision is a momentum decision before the glide path starts (b is
+// 0), so each target is the momentum sleeve's alone.
 func momentumDecision(targets ...event.TargetWeight) event.TargetsDecidedPayload {
+	for i, t := range targets {
+		targets[i].Shares = []event.SleeveShare{{Sleeve: event.SleeveMomentum, Weight: t.Weight}}
+	}
 	return event.TargetsDecidedPayload{
 		AccountID: "ira", StrategyID: event.TargetWeightStrategyMomentum,
 		DecisionTime: session, SessionPeriodEnd: session, Outcome: event.TargetsOutcomeDecided, Targets: targets,
 		Momentum: event.MomentumFigures{CloseSession: "2025-03-04", TrendInstrument: "SPY", TrendCloses: 300, TrendClose: 110, TrendMean: 100},
+		Glide:    event.GlideFigures{RebalanceSession: "2025-03-05", AgeMonths: 30 * 12},
 	}
 }
 
@@ -129,6 +135,21 @@ func TestIRANeverSellsBeyondTheHoldingNetOfWorkingSells(t *testing.T) {
 	in.WorkingSells = map[string]int64{"AAA": 120, "BBB": 30}
 	plan := planIRA(t, in)
 	sameLegs(t, "sells", plan.Sells, leg{"AAA", event.OrderSideSell, 380})
+	if len(plan.Skipped) != 1 || plan.Skipped[0].InstrumentID != "BBB" || plan.Skipped[0].Reason != event.OrderSkippedHeldByWorkingSells || plan.Skipped[0].Shares != 30 {
+		t.Errorf("skipped %+v", plan.Skipped)
+	}
+}
+
+// TestIRAZeroTargetNotHeldIsNoTrade: a target of 0 on a name not held (a
+// momentum name with the whole book in the bond sleeve) is neither ordered
+// nor recorded as skipped: there is nothing to trade.
+func TestIRAZeroTargetNotHeldIsNoTrade(t *testing.T) {
+	d := momentumDecision(event.TargetWeight{InstrumentID: "AAA", Weight: 0}, event.TargetWeight{InstrumentID: "BBB", Weight: 0.5})
+	plan := planIRA(t, iraInput(d, 1000, map[string]float64{"AAA": 7, "BBB": 7}))
+	sameLegs(t, "buys", plan.Buys, leg{"BBB", event.OrderSideBuy, 71})
+	if len(plan.Sells) != 0 || len(plan.Skipped) != 0 {
+		t.Errorf("sells %v skipped %+v", legs(plan.Sells), plan.Skipped)
+	}
 }
 
 func TestIRARoundsTowardZero(t *testing.T) {
@@ -137,9 +158,29 @@ func TestIRARoundsTowardZero(t *testing.T) {
 	d := momentumDecision(event.TargetWeight{InstrumentID: "AAA", Weight: 0.33}, event.TargetWeight{InstrumentID: "BBB", Weight: 0.5})
 	plan := planIRA(t, iraInput(d, 1000, map[string]float64{"AAA": 7, "BBB": 7}, event.AccountPosition{InstrumentID: "BBB", Quantity: 30}))
 	sameLegs(t, "buys", plan.Buys, leg{"AAA", event.OrderSideBuy, 47}, leg{"BBB", event.OrderSideBuy, 41})
-	// A target worth less than one share orders nothing.
+	// A target worth less than one share orders nothing, and says so:
+	// 0.001 x 1000 / 7 = 0.14 of a share.
 	tiny := planIRA(t, iraInput(momentumDecision(event.TargetWeight{InstrumentID: "AAA", Weight: 0.001}), 1000, map[string]float64{"AAA": 7}))
 	sameLegs(t, "tiny", tiny.Buys)
+	if len(tiny.Skipped) != 1 {
+		t.Fatalf("skipped %+v", tiny.Skipped)
+	}
+	sk := tiny.Skipped[0]
+	if sk.InstrumentID != "AAA" || sk.Side != event.OrderSideBuy || sk.Reason != event.OrderSkippedBelowOneShare ||
+		sk.Shares != float64(0.001*1000)/7 || sk.Tag != iraTag || sk.ClientOrderID != orderplan.ClientOrderID(iraTag, "AAA", event.OrderSideBuy) {
+		t.Errorf("skipped %+v", sk)
+	}
+	if err := sk.Validate(); err != nil {
+		t.Error(err)
+	}
+	// A held name past the band by less than one share: one share at $120 is
+	// 0.12 against a 0.2 target, 0.08 off, past the band's 0.05, and
+	// (0.2 x 1000 - 120) / 120 = 0.67 of a share to buy.
+	band := planIRA(t, iraInput(momentumDecision(event.TargetWeight{InstrumentID: "AAA", Weight: 0.2}), 1000, map[string]float64{"AAA": 120},
+		event.AccountPosition{InstrumentID: "AAA", Quantity: 1}))
+	if len(band.Buys) != 0 || len(band.Skipped) != 1 || band.Skipped[0].HeldQuantity != 1 {
+		t.Errorf("band trade under a share: buys %v skipped %+v", legs(band.Buys), band.Skipped)
+	}
 }
 
 func TestIRAPlannerRefusesMalformedInput(t *testing.T) {
@@ -190,7 +231,7 @@ func TestBuysAreCostedAtTheBandEdgePlusFees(t *testing.T) {
 	}
 	// With $1,000 of cash the $1,029 does not fit: scaled by 1000/1029 to
 	// 9.7 -> 9 shares, $926.10.
-	kept, scale := orderplan.ScaleBuys(plan.Buys, 1000, 0)
+	kept, _, scale := orderplan.ScaleBuys(plan.Buys, 1000, 0)
 	sameLegs(t, "scaled", kept, leg{"AAA", event.OrderSideBuy, 9})
 	if scale != 1000.0/1029 {
 		t.Errorf("scale = %v", scale)
@@ -204,17 +245,21 @@ func buy(id string, quantity int64, limit float64) event.OrderPlannedPayload {
 func TestScaleBuys(t *testing.T) {
 	buys := []event.OrderPlannedPayload{buy("AAA", 10, 10), buy("BBB", 3, 100), buy("CCC", 1, 50)}
 	// Total 100 + 300 + 50 = 450.
-	fit, scale := orderplan.ScaleBuys(buys, 450, 0)
+	fit, none0, scale := orderplan.ScaleBuys(buys, 450, 0)
 	sameLegs(t, "exactly fits", fit, leg{"AAA", event.OrderSideBuy, 10}, leg{"BBB", event.OrderSideBuy, 3}, leg{"CCC", event.OrderSideBuy, 1})
-	if scale != 1 {
-		t.Errorf("scale = %v, want 1", scale)
+	if scale != 1 || len(none0) != 0 {
+		t.Errorf("scale = %v, want 1, skipping %v", scale, none0)
 	}
-	// Half the budget: 5 AAA, 1.5 -> 1 BBB, 0.5 -> 0 CCC (dropped).
-	half, _ := orderplan.ScaleBuys(buys, 225, 0)
+	// Half the budget: 5 AAA, 1.5 -> 1 BBB, 0.5 -> 0 CCC, which is recorded
+	// as skipped with the half share it was scaled to, never dropped silently.
+	half, skipped, _ := orderplan.ScaleBuys(buys, 225, 0)
 	sameLegs(t, "half", half, leg{"AAA", event.OrderSideBuy, 5}, leg{"BBB", event.OrderSideBuy, 1})
+	if len(skipped) != 1 || skipped[0].InstrumentID != "CCC" || skipped[0].Reason != event.OrderSkippedScaledBelowOneShare || skipped[0].Shares != 0.5 || skipped[0].Scale != 0.5 {
+		t.Errorf("skipped %+v", skipped)
+	}
 	// With $10 fees each the total is 480; at a budget of 240 the ADR's
 	// scale 0.5 gives 5 AAA (60) + 1 BBB (110) + 0 CCC = 170, which fits.
-	fees, s := orderplan.ScaleBuys(buys, 240, 10)
+	fees, _, s := orderplan.ScaleBuys(buys, 240, 10)
 	sameLegs(t, "fees", fees, leg{"AAA", event.OrderSideBuy, 5}, leg{"BBB", event.OrderSideBuy, 1})
 	if s != 0.5 {
 		t.Errorf("scale = %v, want 0.5", s)
@@ -222,15 +267,15 @@ func TestScaleBuys(t *testing.T) {
 	// One buy of 10 at 10 with $50 fees costs 150; budget 100 gives the
 	// ADR's scale 2/3 -> 6 shares, 110, over budget; the fee-aware scale
 	// (100 - 50) / 100 = 0.5 -> 5 shares, exactly 100.
-	tight, s2 := orderplan.ScaleBuys([]event.OrderPlannedPayload{buy("AAA", 10, 10)}, 100, 50)
+	tight, _, s2 := orderplan.ScaleBuys([]event.OrderPlannedPayload{buy("AAA", 10, 10)}, 100, 50)
 	sameLegs(t, "fee-aware", tight, leg{"AAA", event.OrderSideBuy, 5})
 	if s2 != 0.5 {
 		t.Errorf("fee-aware scale = %v, want 0.5", s2)
 	}
 	// No cash, or a debit: nothing is bought.
 	for _, budget := range []float64{0, -100} {
-		none, s := orderplan.ScaleBuys(buys, budget, 1)
-		if len(none) != 0 || s != 0 {
+		none, skipped, s := orderplan.ScaleBuys(buys, budget, 1)
+		if len(none) != 0 || s != 0 || len(skipped) != len(buys) {
 			t.Errorf("budget %v kept %v at scale %v", budget, legs(none), s)
 		}
 	}

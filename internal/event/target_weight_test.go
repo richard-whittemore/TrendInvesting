@@ -173,6 +173,18 @@ func TestTargetWeightConfigurationValidate(t *testing.T) {
 	expectInvalid(t, "max order fraction", v, func(p *P) { p.Limits.MaxOrderFraction = math.Inf(1) }, "max order fraction")
 	expectInvalid(t, "price band zero", v, func(p *P) { p.Limits.PriceBand = 0 }, "price band")
 	expectInvalid(t, "price band one", v, func(p *P) { p.Limits.PriceBand = 1 }, "price band")
+	expectInvalid(t, "paper on a live account", v, func(p *P) { p.Mode, p.AccountID = event.TradingModePaper, "U1234567" }, `begins "DU"`)
+	expectInvalid(t, "live on a paper account", v, func(p *P) { p.Mode, p.AccountID = event.TradingModeLive, "DU1234567" }, "paper account")
+	for _, ok := range []struct{ mode, account string }{
+		{event.TradingModePaper, "DU1234567"}, {event.TradingModeLive, "U1234567"},
+		{event.TradingModeDryRun, "DU1234567"}, {event.TradingModeDryRun, "U1234567"},
+	} {
+		p := v
+		p.Mode, p.AccountID = ok.mode, ok.account
+		if err := p.Validate(); err != nil {
+			t.Errorf("mode %s with account %s: %v", ok.mode, ok.account, err)
+		}
+	}
 }
 
 // TestTargetWeightConfigurationHashStability pins the fixture's hash (ADR
@@ -180,7 +192,7 @@ func TestTargetWeightConfigurationValidate(t *testing.T) {
 // or an encoding change.
 func TestTargetWeightConfigurationHashStability(t *testing.T) {
 	got := event.TargetWeightConfigurationHash(validTargetWeightConfiguration())
-	const want = "sha256:f49cf708aec6e453ba8978f31323ae6fb0657d5b9e07ac53fd60615a54f7409e"
+	const want = "sha256:b8e57a035c4f8a8ba90c3973d132a8cb1a4d28a5eb0d355a5ed3595d6d7465c4"
 	if got != want {
 		t.Fatalf("TargetWeightConfigurationHash = %s, want %s", got, want)
 	}

@@ -359,7 +359,7 @@ func TestRecordedDecisionsAndSafetyInputsAreChecked(t *testing.T) {
 	}
 	halted := event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "x"}
 	started := func(h *targetweight.Handler, s *stream) {
-		if _, err := h.Apply(context.Background(), s.envelope(t, event.CompletedBarEventType, event.CompletedBarSchemaVersion, "bar:0", sessionEnd(0), bar(100, sessionEnd(0)))); err != nil {
+		if _, err := h.Apply(context.Background(), s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "bar:0", sessionEnd(0), bar(100, sessionEnd(0)))); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -25,13 +27,20 @@ const TargetWeightConfigurationEventType = "strategy.target-weight.configuration
 //     Execution (the D5 cash rule, the share quantity rule, the fee
 //     allowance). StrategyID chooses which strategy section is set; the other
 //     is zero.
-//   - Version 3 adds the margin-cushion alarm's Excess Liquidity thresholds
+//   - Version 3 added Glide, the glide path for an IRA (ADR 0026, point 6,
+//     "Glide path"): the schedule's anchors, the retirement age, the bond
+//     sleeve's split and the owner's birth year and month. A momentum
+//     configuration requires it; a Boost one sets none.
+//   - Version 4 settled D7 (owner decision 2026-10-16): Execution's share
+//     quantity is minimum-lot, D7-L, whole shares with the momentum rule's
+//     substitution of an unaffordable pick. Version 3's whole-shares had no
+//     substitution and is not a value of version 4.
+//   - Version 5 adds the margin-cushion alarm's Excess Liquidity thresholds
 //     to the limits (ADR 0026, point 6): required for Boost's margin account,
 //     absent for an IRA, which has no margin cushion; and the execution
 //     section's MaxSnapshotAge, required for every account, from 1 minute to
-//     MaxSnapshotAgeCeiling. The glide path joins in a later version, a new
-//     hash (ADR 0016).
-const TargetWeightConfigurationSchemaVersion uint32 = 3
+//     MaxSnapshotAgeCeiling. Each version is a new hash (ADR 0016).
+const TargetWeightConfigurationSchemaVersion uint32 = 5
 
 // The strategies this schema configures: Boost on SPY for the joint margin
 // account, and the momentum combination for an IRA (docs/live-trading/plan.md,
@@ -57,10 +66,14 @@ const (
 	CashRuleTotal = "total-cash"
 )
 
-// ShareQuantityWhole is the only share quantity rule built: whole shares,
-// rounded toward zero (ADR 0026, point 2, D7-L's rounding). Fractional
-// shares (D7-F) need decimal quantities in the order and fill payloads.
-const ShareQuantityWhole = "whole-shares"
+// ShareQuantityMinimumLot is D7-L, the share quantity rule the owner chose
+// for the IRAs on 2026-10-16, since IBKR does not take fractional orders
+// through the TWS API (ADR 0026, point 2, "D7"; plan.md section 5, "whole
+// shares"): whole shares, rounded toward zero, and a pick whose one share at
+// the previous raw close exceeds its target value is skipped for the next
+// eligible ranked name within the sector cap (plan.md lines 380-383). D7-F,
+// fractional shares, is not built.
+const ShareQuantityMinimumLot = "minimum-lot"
 
 // The trading modes, set per account (docs/live-trading/plan.md, section 5,
 // "Modes"). A dry-run releases orders with send false and never sends them
@@ -90,6 +103,8 @@ type TargetWeightConfigurationPayload struct {
 	// Momentum holds the momentum rule's parameters, set only for StrategyID
 	// momentum.
 	Momentum MomentumConfiguration `json:"momentum,omitzero"`
+	// Glide holds the IRA's glide path, set only for StrategyID momentum.
+	Glide GlideConfiguration `json:"glide,omitzero"`
 	// Execution holds the IRA's execution rules and every account's
 	// MaxSnapshotAge, which is all the joint margin account sets.
 	Execution ExecutionConfiguration `json:"execution,omitzero"`
@@ -139,6 +154,43 @@ type MomentumConfiguration struct {
 	SectorSources []string `json:"sector_sources"`
 }
 
+// GlideConfiguration is an IRA's glide path (plan.md section 2, "Bond sleeve
+// and glide path", decision D2; ADR 0026, point 6): the bond share b set by
+// the owner's age in whole months on the rebalance date, held in BondFunds;
+// the momentum sleeve holds the rest. The schedule's arithmetic is
+// internal/targetweight/glide's.
+type GlideConfiguration struct {
+	// Anchors are the schedule's corners in order of age: b is 0 at or
+	// before the first, linear in months between two, and the last's share
+	// after it (plan.md section 2 table: 38/0, 53/0.308, 65/0.5, 72/0.7;
+	// research/edge-search/momentum/glide_path.py:59-71).
+	Anchors []GlideAnchor `json:"anchors"`
+	// RetirementAgeYears is the retirement age the schedule assumes (65,
+	// plan.md section 2), one of the anchors' ages.
+	RetirementAgeYears int `json:"retirement_age_years"`
+	// BondFunds is the bond sleeve's split, in order: IEF 0.5, SHY 0.5 (D2;
+	// glide_path.py:177). Fractions are positive and sum to 1.
+	BondFunds []BondFund `json:"bond_funds"`
+	// Birth is the owner's birth year and month, YYYY-MM, never the day
+	// (owner decision 2026-10-16). Its value is supplied only by the
+	// server's configuration and is never committed to the repository
+	// (plan.md section 2); every value in this repository is synthetic.
+	Birth string `json:"birth"`
+}
+
+// GlideAnchor is one corner of the glide schedule: bond share Share at the
+// owner's age AgeYears whole years.
+type GlideAnchor struct {
+	AgeYears int     `json:"age_years"`
+	Share    float64 `json:"share"`
+}
+
+// BondFund is one fund of the bond sleeve and its fraction of the sleeve.
+type BondFund struct {
+	InstrumentID string  `json:"instrument_id"`
+	Fraction     float64 `json:"fraction"`
+}
+
 // ExecutionConfiguration is an account's execution rules (ADR 0026, points 2
 // and 6): an IRA's cash rule, share quantity and fee allowance, and every
 // account's MaxSnapshotAge, which is all the joint margin account sets.
@@ -148,7 +200,7 @@ type ExecutionConfiguration struct {
 	// configuration's bytes or hash, and the joint account's execution
 	// section encodes only what it sets.
 	CashRule string `json:"cash_rule,omitzero"`
-	// ShareQuantity is ShareQuantityWhole (D7).
+	// ShareQuantity is ShareQuantityMinimumLot (D7).
 	ShareQuantity string `json:"share_quantity,omitzero"`
 	// MaxFeesPerOrder is the most commission and fees one order can cost,
 	// added to every buy's worst-case cost (ADR 0026, point 2, "Worst-case
@@ -233,10 +285,17 @@ func (p TargetWeightConfigurationPayload) Validate() error {
 		if !p.Momentum.isZero() || p.Execution != (ExecutionConfiguration{MaxSnapshotAge: p.Execution.MaxSnapshotAge}) {
 			errs = append(errs, errors.New("a boost configuration sets no momentum or execution section beyond the execution max snapshot age"))
 		}
-
+		if !p.Glide.isZero() {
+			errs = append(errs, errors.New("a boost configuration sets no glide section"))
+		}
 	case TargetWeightStrategyMomentum:
 		errs = append(errs, p.Momentum.validate()...)
 		errs = append(errs, p.Execution.validate()...)
+		if p.Glide.isZero() {
+			errs = append(errs, errors.New("a momentum configuration's glide path is required"))
+		} else {
+			errs = append(errs, p.Glide.validate()...)
+		}
 		if p.Boost != (BoostConfiguration{}) {
 			errs = append(errs, errors.New("a momentum configuration sets no boost section"))
 		}
@@ -261,6 +320,7 @@ func (p TargetWeightConfigurationPayload) Validate() error {
 	if !validTradingMode(p.Mode) {
 		errs = append(errs, fmt.Errorf("mode %q is not dry-run, paper or live", p.Mode))
 	}
+	errs = append(errs, accountMatchesMode(p.AccountID, p.Mode)...)
 	if p.Adapter != AdapterIBKR {
 		errs = append(errs, fmt.Errorf("adapter %q is not %q (ADR 0025)", p.Adapter, AdapterIBKR))
 	}
@@ -362,13 +422,86 @@ func (c MomentumConfiguration) validate() []error {
 	return errs
 }
 
+func (c GlideConfiguration) isZero() bool {
+	return len(c.Anchors) == 0 && c.RetirementAgeYears == 0 && len(c.BondFunds) == 0 && c.Birth == ""
+}
+
+func (c GlideConfiguration) validate() []error {
+	var errs []error
+	if len(c.Anchors) < 2 {
+		errs = append(errs, errors.New("glide path needs at least two anchors"))
+	}
+	retirement := false
+	for i, a := range c.Anchors {
+		switch {
+		case a.AgeYears < 0:
+			errs = append(errs, fmt.Errorf("glide anchor %d age must not be negative", i+1))
+		case i > 0 && a.AgeYears <= c.Anchors[i-1].AgeYears:
+			errs = append(errs, fmt.Errorf("glide anchor %d age does not increase", i+1))
+		}
+		if !isFinite(a.Share) || a.Share < 0 || a.Share > 1 {
+			errs = append(errs, fmt.Errorf("glide anchor %d share must lie in [0, 1]", i+1))
+		} else if i > 0 && a.Share < c.Anchors[i-1].Share {
+			// b only rises with age (plan.md section 2).
+			errs = append(errs, fmt.Errorf("glide anchor %d share does not rise: b only rises with age", i+1))
+		}
+		retirement = retirement || a.AgeYears == c.RetirementAgeYears
+	}
+	// The schedule is 0 at or before the first anchor (glide_path.py:62), so
+	// a first anchor with a share would be a step the schedule never takes.
+	if len(c.Anchors) > 0 && c.Anchors[0].Share != 0 {
+		errs = append(errs, errors.New("glide first anchor share must be 0: b is 0 up to it"))
+	}
+	if !retirement {
+		errs = append(errs, fmt.Errorf("glide retirement age %d is not an anchor's age", c.RetirementAgeYears))
+	}
+	if len(c.BondFunds) == 0 {
+		errs = append(errs, errors.New("glide bond fund split is required"))
+	}
+	total := 0.0
+	for i, f := range c.BondFunds {
+		switch {
+		case f.InstrumentID == "":
+			errs = append(errs, fmt.Errorf("glide bond fund %d has an empty instrument id", i+1))
+		case slices.ContainsFunc(c.BondFunds[:i], func(g BondFund) bool { return g.InstrumentID == f.InstrumentID }):
+			errs = append(errs, fmt.Errorf("glide bond fund %s is repeated", f.InstrumentID))
+		}
+		if !isFinite(f.Fraction) || f.Fraction <= 0 {
+			errs = append(errs, fmt.Errorf("glide bond fund %d fraction must be finite and positive", i+1))
+		}
+		total += f.Fraction
+	}
+	if len(c.BondFunds) > 0 && !(math.Abs(total-1) <= 1e-9) {
+		errs = append(errs, errors.New("glide bond fund fractions must sum to 1"))
+	}
+	if !validBirth(c.Birth) {
+		errs = append(errs, errors.New("glide birth value must be YYYY-MM with a month 01-12"))
+	}
+	return errs
+}
+
+// validBirth reports whether s is exactly four digits, a hyphen and a month
+// 01 to 12. The value itself is never echoed into an error.
+func validBirth(s string) bool {
+	if len(s) != 7 || s[4] != '-' {
+		return false
+	}
+	for i, c := range s {
+		if i != 4 && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	month := int(s[5]-'0')*10 + int(s[6]-'0')
+	return month >= 1 && month <= 12
+}
+
 func (c ExecutionConfiguration) validate() []error {
 	var errs []error
 	if c.CashRule != CashRuleSettled && c.CashRule != CashRuleTotal {
 		errs = append(errs, fmt.Errorf("execution cash rule %q is not %q or %q", c.CashRule, CashRuleSettled, CashRuleTotal))
 	}
-	if c.ShareQuantity != ShareQuantityWhole {
-		errs = append(errs, fmt.Errorf("execution share quantity %q is not %q, the only rule built", c.ShareQuantity, ShareQuantityWhole))
+	if c.ShareQuantity != ShareQuantityMinimumLot {
+		errs = append(errs, fmt.Errorf("execution share quantity %q is not %q, the only rule built", c.ShareQuantity, ShareQuantityMinimumLot))
 	}
 	if !isFinite(c.MaxFeesPerOrder) || c.MaxFeesPerOrder < 0 {
 		errs = append(errs, errors.New("execution max fees per order must be finite and not negative"))
@@ -414,6 +547,25 @@ func (l MarginLimits) HasCushion() bool {
 func (l MarginLimits) Validate() error {
 	if err := errors.Join(l.validate()...); err != nil {
 		return fmt.Errorf("invalid margin limits: %w", err)
+	}
+	return nil
+}
+
+// PaperAccountPrefix begins every IBKR paper trading account ID, and no live
+// account ID (IBKR: a paper account's ID starts "DU"; ADR 0025, point 3).
+const PaperAccountPrefix = "DU"
+
+// accountMatchesMode binds the account to the mode: a paper configuration
+// must name a paper account and a live one must not, so a configuration
+// cannot send paper orders to a live account or rehearse live on paper. A
+// dry-run sends nothing and may name either.
+func accountMatchesMode(accountID, mode string) []error {
+	paper := strings.HasPrefix(accountID, PaperAccountPrefix)
+	switch {
+	case mode == TradingModePaper && !paper:
+		return []error{fmt.Errorf("mode paper names account %q, but an IBKR paper account ID begins %q", accountID, PaperAccountPrefix)}
+	case mode == TradingModeLive && paper:
+		return []error{fmt.Errorf("mode live names account %q, but an account ID beginning %q is a paper account", accountID, PaperAccountPrefix)}
 	}
 	return nil
 }

@@ -133,8 +133,12 @@ var notYetCrossed = map[string]string{
 	"account.broker.snapshot":              "sent by the IBKR adapter (ADR 0025), never by LEAN",
 	"risk.margin.alarm":                    "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 	"risk.sale.withheld":                   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
-	"market.universe.snapshot":             "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
-	"market.session.calendar":              "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
+	// cmd/engine delivers the owner's approval itself, from -approval,
+	// before the socket opens; no adapter sends or receives it.
+	"operator.run.approved":    "cmd/engine's approval input (-approval), not an adapter",
+	"market.universe.snapshot": "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
+	"market.session.calendar":  "recorded by the market-data step (adapter/marketdata) for the target-weight engines, never by LEAN",
+	"strategy.order.skipped":   "a target-weight decision; the LEAN adapter never runs target-weight strategies",
 }
 
 func main() {

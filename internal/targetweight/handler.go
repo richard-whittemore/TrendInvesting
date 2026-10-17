@@ -26,11 +26,21 @@ import (
 //
 //   - 1.1.0 reads configuration schema version 2 and refuses version 1
 //     (ADR 0015), so a journal written under 1.0.0 does not replay.
-//   - 1.2.0 reads configuration schema version 3 (the margin-cushion
-//     thresholds) and refuses earlier versions, and its gate reads the kill
-//     switch, broker snapshots and the venue's reports on released orders,
-//     and issues ADR 0019's sale back to 98%.
-const RulesVersion = "1.2.0"
+//   - 1.2.0 adds the glide path to momentum decisions (configuration
+//     schema version 3, targets.decided schema version 3; ADR 0026).
+//   - 1.3.0 reads market.bar.completed version 2 and refuses version 1, and
+//     computes its indicators from the split- and dividend-adjusted close
+//     (ADR 0026), so a journal written under 1.2.0 does not replay.
+//   - 1.4.0 adds D7-L's minimum-lot substitution of an unaffordable pick and
+//     records skipped trades (configuration schema version 4,
+//     targets.decided schema version 4), so a journal written under 1.3.0
+//     does not replay.
+//   - 1.5.0 reads configuration schema version 5 (the margin-cushion
+//     thresholds and MaxSnapshotAge) and refuses earlier versions, and its
+//     gate reads the kill switch, broker snapshots and the venue's reports on
+//     released orders, and issues ADR 0019's sale back to 98%, so a journal
+//     written under 1.4.0 does not replay.
+const RulesVersion = "1.5.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"
@@ -58,12 +68,16 @@ type Options struct {
 //     boost and the target in force from it, never by recomputing (ADR 0026,
 //     point 5); sessions up to its session then only feed the indicators,
 //     which are rebuilt from the journal's own bars from the warm-up start;
+//   - optionally, straight after the configuration, the owner's
+//     operator.run.approved: a fresh run after an earlier one starts from the
+//     approved latch;
 //   - optionally, before the first bar or session, the earlier run's
 //     strategy.engine.state records, in journal order. A restart while
 //     Degraded or Halted resumes in that state and scope (ADR 0019, amended
 //     2026-09-24, "The state survives a restart"; ADR 0026, point 5);
-//   - per session: the Boost instrument's market.bar.completed, account.snapshot
-//     version 3, market.mark.recorded, then market.session.closed, which decides;
+//   - per session: the Boost instrument's market.bar.completed version 2
+//     (every bar on one adjusted base), account.snapshot version 3,
+//     market.mark.recorded, then market.session.closed, which decides;
 //   - at any time after the configuration: operator.kill-switch, and
 //     account.broker.snapshot, which also evaluates the margin-cushion alarm;
 //   - after an order's release: the venue's execution.fill (version 5) and
@@ -100,6 +114,7 @@ type Handler struct {
 	configured bool
 	started    bool // a bar or session has been applied
 	recovered  bool
+	approved   bool
 	quietUntil time.Time // sessions at or before it only feed the indicators
 
 	indicators *boost.Indicators
@@ -108,7 +123,8 @@ type Handler struct {
 	inForceSet bool
 	gapAt      time.Time
 	lastPeriod time.Time // last session closed
-	bar        *event.CompletedBarPayload
+	bar        *event.CompletedBarAdjustedPayload
+	base       string // the adjusted view's base, fixed by the first bar
 	snapshot   *event.AccountPositionsSnapshotPayload
 	mark       *event.MarkRecordedPayload
 	gate       *risklimit.Gate
@@ -172,6 +188,8 @@ func (h *Handler) Apply(_ context.Context, in event.Envelope) ([]event.Envelope,
 		return nil, h.applyConfiguration(in)
 	case event.TargetsDecidedEventType:
 		return nil, h.applyRecovery(in)
+	case event.OperatorRunApprovedEventType:
+		return nil, h.applyApproval(in)
 	case event.EngineStateEventType:
 		return nil, h.applyRecordedState(in)
 	case event.KillSwitchEventType:
@@ -226,9 +244,15 @@ func (h *Handler) applyConfiguration(in event.Envelope) error {
 	return nil
 }
 
+// applyRecovery restores Boost's latch and target in force from an earlier
+// run's recorded decision (ADR 0026, point 5). It comes once, straight after
+// the configuration, and never after an approval: the approval states the
+// latch in force, and nothing after it changes that latch (ADR 0026, point
+// 5; ADR 0027, amended 2026-10-16), just as applyApproval refuses to follow
+// a recovered decision.
 func (h *Handler) applyRecovery(in event.Envelope) error {
-	if h.recovered || h.started {
-		return errors.New("targetweight: a recovered decision comes once, before the first bar or session")
+	if h.recovered || h.approved || h.started {
+		return errors.New("targetweight: a recovered decision comes once, straight after the configuration, never after an approval or a bar")
 	}
 	p, err := decodeInput[event.TargetsDecidedPayload](in, event.TargetsDecidedSchemaVersion)
 	if err != nil {
@@ -244,6 +268,42 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 		h.inForce, h.inForceSet = p.Targets[0].Weight, true
 	}
 	h.quietUntil = p.SessionPeriodEnd
+	return nil
+}
+
+// applyApproval starts a fresh run from the owner's approval: Boost's latch
+// is the approved one, never recomputed from the bars (ADR 0026, point 5).
+// An incident in force puts the gate in the incident's Degraded or Halted
+// state and scope before any market input, since a restart while Degraded
+// or Halted resumes in that state (ADR 0019, amended 2026-09-24, "The state
+// survives a restart"), and carries whether its one sale back to 98% was
+// attempted, so the fresh run never attempts it twice (ADR 0019, amended
+// 2026-10-15). It comes once, straight after the configuration, before any
+// bar.
+func (h *Handler) applyApproval(in event.Envelope) error {
+	if h.approved || h.recovered || h.started {
+		return errors.New("targetweight: an approval comes once, straight after the configuration and before any bar")
+	}
+	p, err := decodeInput[event.OperatorRunApprovedPayload](in, event.OperatorRunApprovedSchemaVersion)
+	if err != nil {
+		return err
+	}
+	if in.ConfigurationHash != h.hash {
+		return fmt.Errorf("targetweight: approval %s belongs to another configuration", in.ID)
+	}
+	if p.AccountID != h.cfg.AccountID {
+		return fmt.Errorf("targetweight: approval %s is for another account, %q; this run decides %q", in.ID, p.AccountID, h.cfg.AccountID)
+	}
+	if incident := p.IncidentInForce; incident != nil {
+		if err := h.gate.RestoreSaleAttempt(incident.IncidentID, *incident.SaleAttempted); err != nil {
+			return fmt.Errorf("targetweight: approval %s: %w", in.ID, err)
+		}
+		if err := h.gate.RestoreIncidentState(incident.IncidentID, incident.State, incident.ScopeInstrumentIDs); err != nil {
+			return fmt.Errorf("targetweight: approval %s: %w", in.ID, err)
+		}
+	}
+	h.approved = true
+	h.latched = *p.Boost.Latched
 	return nil
 }
 
@@ -270,11 +330,13 @@ func (h *Handler) applyRecordedState(in event.Envelope) error {
 }
 
 func (h *Handler) applyBar(in event.Envelope) error {
-	p, err := decodeInput[event.CompletedBarPayload](in, event.CompletedBarSchemaVersion)
+	p, err := decodeInput[event.CompletedBarAdjustedPayload](in, event.CompletedBarAdjustedVersion)
 	if err != nil {
 		return err
 	}
 	switch {
+	case h.base != "" && p.AdjustedBase != h.base:
+		return fmt.Errorf("targetweight: bar %s is based at %s; this run's bars are based at %s, and levels on two bases cannot be compared", in.ID, p.AdjustedBase, h.base)
 	case p.InstrumentID != h.cfg.Boost.InstrumentID:
 		return fmt.Errorf("targetweight: bar for %s; this account decides %s only", p.InstrumentID, h.cfg.Boost.InstrumentID)
 	case h.bar != nil:
@@ -285,6 +347,7 @@ func (h *Handler) applyBar(in event.Envelope) error {
 		return fmt.Errorf("targetweight: bar %s precedes the warm-up start %s", p.PeriodEnd, h.cfg.Boost.WarmUpStart)
 	}
 	h.started = true
+	h.base = p.AdjustedBase
 	h.bar = &p
 	return nil
 }
@@ -358,7 +421,9 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		return b.result()
 	}
 
-	readings := h.indicators.Add(bar.SplitAdjusted.Close)
+	// RSI(2) and the means read the split- and dividend-adjusted close, as
+	// the backtest's adjusted series does (ADR 0026, point 1).
+	readings := h.indicators.Add(bar.Adjusted.Close)
 	if quiet {
 		return nil, nil
 	}

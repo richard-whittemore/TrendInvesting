@@ -695,33 +695,36 @@ func TestASaleIsNeverSizedFromAStaleBrokerSnapshot(t *testing.T) {
 }
 
 // TestARestoredIncidentsEarlierAttemptIsNotRepeated: a fresh run that
-// restores an incident also restores whether its sale was attempted (ADR
-// 0026, point 5: "Whether the incident sale has been attempted"), so the one
-// sale is never attempted twice across a restart (ADR 0019, amended
-// 2026-10-15: "A failed or cancelled attempt is not retried automatically").
+// restores an incident from the owner's approval also restores whether its
+// sale was attempted (ADR 0026, point 5: "Whether the incident sale has been
+// attempted"), so the one sale is never attempted twice across a restart
+// (ADR 0019, amended 2026-10-15: "A failed or cancelled attempt is not
+// retried automatically"); an incident whose sale was not attempted still
+// sells once, under the incident's tag.
 func TestARestoredIncidentsEarlierAttemptIsNotRepeated(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	halted := halt(t, g)
 
-	r := gate(t, limits(), event.TradingModeDryRun)
-	if err := r.RestoreSaleAttempt(halted.StateID, "SPY"); err == nil {
-		t.Error("an attempt restored before its incident was accepted")
+	restored := func(attempted bool) *risklimit.Gate {
+		r := gate(t, limits(), event.TradingModeDryRun)
+		if err := r.RestoreSaleAttempt(halted.StateID, attempted); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.RestoreIncidentState(halted.StateID, event.EngineStateHalted, nil); err != nil {
+			t.Fatal(err)
+		}
+		observe(t, r, "broker:1", boosted())
+		return r
 	}
-	if err := r.RestoreState(halted.StateID, *halted.State, halted.StateSchemaVersion); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.RestoreSaleAttempt("engine-state:joint:other", "SPY"); err == nil {
-		t.Error("an attempt under another tag was accepted")
-	}
-	if err := r.RestoreSaleAttempt(halted.StateID, ""); err == nil {
-		t.Error("an attempt with no instrument was accepted")
-	}
-	if err := r.RestoreSaleAttempt(halted.StateID, "SPY"); err != nil {
-		t.Fatal(err)
-	}
-	observe(t, r, "broker:1", boosted())
-	if s, ok := requestSale(t, r, event.SaleTriggerExit); ok {
+	if s, ok := requestSale(t, restored(true), event.SaleTriggerExit); ok {
 		t.Fatalf("the restored incident's sale was attempted again: %+v", s)
+	}
+	r := restored(false)
+	if r.Incident() != halted.StateID {
+		t.Fatalf("Incident() = %q, want the approved incident %q", r.Incident(), halted.StateID)
+	}
+	if s, ok := requestSale(t, r, event.SaleTriggerExit); !ok || s.Order == nil || s.Order.Tag != halted.StateID {
+		t.Fatalf("the approved incident's unattempted sale = %+v, %v; want one order tagged %q", s, ok, halted.StateID)
 	}
 }
 

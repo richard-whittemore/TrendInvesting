@@ -23,7 +23,8 @@ func validMomentumConfiguration() event.TargetWeightConfigurationPayload {
 			RiskOffInstrument: "IEF", RiskOffFraction: 0.5, RebalanceBand: 0.25,
 			UniverseSource: "massive", SectorSources: []string{"ishares-iwv-gics", "nasdaq-screener"},
 		},
-		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityWhole, MaxFeesPerOrder: 1, MaxSnapshotAge: 30},
+		Glide:     synthGlide(),
+		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityMinimumLot, MaxFeesPerOrder: 1, MaxSnapshotAge: 30},
 		Limits:    event.MarginLimits{MaxExposure: 1, MaxOrdersPerDecision: 60, MaxOrderFraction: 0.5, PriceBand: 0.05},
 	}
 }
@@ -32,7 +33,11 @@ func validMomentumDecided() event.TargetsDecidedPayload {
 	return event.TargetsDecidedPayload{
 		AccountID: "ira-traditional", StrategyID: event.TargetWeightStrategyMomentum,
 		DecisionTime: twSession, SessionPeriodEnd: twSession, Outcome: event.TargetsOutcomeDecided,
-		Targets: []event.TargetWeight{{InstrumentID: "AAA", Weight: 0.49}, {InstrumentID: "IEF", Weight: 0.49}},
+		Targets: []event.TargetWeight{
+			{InstrumentID: "AAA", Weight: 0.49, Shares: []event.SleeveShare{{Sleeve: event.SleeveMomentum, Weight: 0.49}}},
+			{InstrumentID: "IEF", Weight: 0.49, Shares: []event.SleeveShare{{Sleeve: event.SleeveMomentum, Weight: 0.49}}},
+		},
+		Glide: event.GlideFigures{RebalanceSession: "2025-03-05", AgeMonths: 30 * 12, BondShare: 0},
 		Momentum: event.MomentumFigures{
 			CloseSession: "2025-03-04", TrendInstrument: "SPY", TrendCloses: 300, TrendClose: 99, TrendMean: 100, RiskOff: true,
 			UniverseRows: 3, UniverseListingType: 2, UniverseAtOrAboveFloor: 2, UniverseMembers: 2,

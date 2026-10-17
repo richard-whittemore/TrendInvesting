@@ -11,3 +11,10 @@ prints, and what happens when something goes wrong.
   and the kill switch do to the target-weight accounts' orders, the margin
   account's one sale back to 98%, the margin-cushion alarm, and what can go
   wrong.
+- [alerts-and-dashboard](alerts-and-dashboard.md): the reporter that sends
+  alerts and a daily summary to your phone and PagerDuty, and the read-only
+  dashboard; what each alert means and what counts as delivered.
+- [momentum-minimum-lot](momentum-minimum-lot.md): how the IRAs buy whole
+  shares only: a stock one share of which costs more than its target is
+  skipped for the next-ranked one, what happens when nothing is affordable,
+  and what the program records.

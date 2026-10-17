@@ -48,9 +48,11 @@ func marshalPayloads() []validatedPayload {
 		validTargetsDecided(), validTargetsWithheld(), validOrderPlanned(),
 		validOrderReleased(), validOrderRefused(), validDegradedEngineState(),
 		validKillSwitch(), validBrokerSnapshot(), validMarginAlarm(), validSaleWithheld(), validSaleOrder(),
+		validOperatorRunApproved(), validOperatorRunApprovedInIncident(),
 		validMomentumConfiguration(), validMomentumDecided(), validIRARefused(),
 		validUniverseSnapshot(), validSessionCalendar(), validAccountCashSnapshot(),
-		validLimitOrderLifecycle(), validTargetWeightFill(),
+		validLimitOrderLifecycle(), validTargetWeightFill(), validOrderSkipped(),
+		validAdjustedBar(),
 	}
 }
 
@@ -148,6 +150,12 @@ func payloadLeaves(t *testing.T, v reflect.Value, path string, visit func(string
 		for i := range v.Len() {
 			payloadLeaves(t, v.Index(i), fmt.Sprintf("%s[%d]", path, i), visit)
 		}
+	case reflect.Pointer:
+		if v.IsNil() {
+			v.Set(reflect.New(v.Type().Elem()))
+			defer v.Set(reflect.Zero(v.Type()))
+		}
+		payloadLeaves(t, v.Elem(), path, visit)
 	case reflect.String, reflect.Int, reflect.Int64, reflect.Bool, reflect.Float64:
 		visit(path, v)
 	default:
@@ -235,6 +243,11 @@ func TestPayloadTimestampsAcceptWritableTimes(t *testing.T) {
 							field.Set(reflect.ValueOf(time.Date(year, at.Month(), at.Day(), at.Hour(), at.Minute(), at.Second(), at.Nanosecond(), time.FixedZone("writable", offset))))
 						}
 					})
+					// Keep an adjusted bar's base on or before its moved
+					// session, so only the timestamps are under test.
+					if v.Type() == reflect.TypeFor[event.CompletedBarAdjustedPayload]() {
+						v.FieldByName("AdjustedBase").SetString("0000-01-01")
+					}
 					requirePayloadMarshals(t, v.Interface().(validatedPayload))
 				})
 			}

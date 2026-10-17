@@ -153,6 +153,17 @@ The cash a broker pays, at a split, for a fraction of a share it cannot deliver.
 **Delisting Exit**:
 The forced closing of a Campaign because its instrument ceased to trade, distinct from an Exit-Channel exit or a stop-out.
 
+### Live runs
+
+**Resume**:
+Continuing a crashed engine's run from its durable log: every committed input is applied again and must reproduce its recorded decisions exactly (ADR 0027). Only a crash is resumed, and never across builds.
+
+**Fresh run**:
+Any engine start after an earlier run that is not a Resume: after a deliberate stop, a reboot, leaving Halted, a build upgrade or a cleared rebalance. It begins a new durable log and decides nothing until a Run approval is its input.
+
+**Run approval**:
+The owner's recorded `operator.run.approved` input that lets a Fresh run start: it names the previous run's durable log and that log's final record hash, the incident it clears, if any, and the state in force: Boost's latch, and the incident in force, if any, with the Degraded or Halted state and scope it holds the account in and whether its one sale back to 98% was attempted. Every item is stated, none defaulted. It is the run's second input, straight after the configuration.
+
 ### Research
 
 **Baseline**:
