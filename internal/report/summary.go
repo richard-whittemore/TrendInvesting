@@ -42,6 +42,19 @@ type OrderLine struct {
 	Send          bool
 }
 
+// StatusText is the order's status as a person reads it: a released order
+// says whether it was sent to the broker, since a dry-run releases orders
+// with send false and never sends them (ADR 0026, point 3).
+func (o OrderLine) StatusText() string {
+	if o.Status != OrderReleased {
+		return o.Status
+	}
+	if o.Send {
+		return "released (sent)"
+	}
+	return "released (not sent)"
+}
+
 // FillLine is one execution.fill record.
 type FillLine struct {
 	At           time.Time

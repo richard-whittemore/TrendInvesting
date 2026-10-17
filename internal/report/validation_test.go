@@ -65,6 +65,12 @@ func TestADecisionThatDoesNotValidateRefusesBothReports(t *testing.T) {
 			s.refused(0, "tw-a", event.RefusedOrderSize)
 			s.rewrite(1, event.OrderRefusedPayload{AccountID: "joint"})
 		},
+		"unknown configuration version": func(s *stream) {
+			s.out[0].SchemaVersion = 9
+		},
+		"invalid configuration": func(s *stream) {
+			s.rewrite(0, event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint"})
+		},
 		"invalid decision": func(s *stream) {
 			s.decided(0, 0.98)
 			s.rewrite(1, event.TargetsDecidedPayload{AccountID: "joint", Outcome: "bogus"})
@@ -78,5 +84,18 @@ func TestADecisionThatDoesNotValidateRefusesBothReports(t *testing.T) {
 		if _, err := report.Summarize(s.out, "2024-01-02", "SPY"); err == nil {
 			t.Errorf("%s: Summarize accepted it", name)
 		}
+	}
+}
+
+func TestAccountOfReadsTheConfigurationOnlyAtAKnownVersionAndValidated(t *testing.T) {
+	s := newStream(t)
+	s.out[0].SchemaVersion = 9
+	if _, _, err := report.AccountOf(s.out); err == nil || !contains(err.Error(), "schema version 9") {
+		t.Fatalf("a configuration at an unknown version must be refused, err = %v", err)
+	}
+	s = newStream(t)
+	s.rewrite(0, event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost})
+	if _, _, err := report.AccountOf(s.out); err == nil {
+		t.Fatal("a configuration that does not validate must be refused")
 	}
 }

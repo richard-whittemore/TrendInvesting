@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/nysecalendar"
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
@@ -58,6 +59,16 @@ func TestADegradedOrHaltedStateAlertsOncePerIncident(t *testing.T) {
 	}
 	if !contains(got[0].Body, "SPY") {
 		t.Fatalf("degraded body lacks its scope: %q", got[0].Body)
+	}
+	// ADR 0019, "Engine states": the named instruments are frozen, and only
+	// instruments outside the scope keep their risk-reducing management.
+	for _, want := range []string{"frozen", "outside the scope", "Protective Stop", "protection of the named positions"} {
+		if !contains(got[0].Body, want) {
+			t.Errorf("degraded body lacks %q: %q", want, got[0].Body)
+		}
+	}
+	if contains(got[0].Body, "orders that reduce exposure continue.") {
+		t.Errorf("degraded body says risk-reducing orders continue for the whole account: %q", got[0].Body)
 	}
 }
 
@@ -129,25 +140,44 @@ func TestFreshDropsSeenKeysAndDuplicates(t *testing.T) {
 	}
 }
 
-func TestHeartbeatLossAlertsOncePerSilence(t *testing.T) {
-	last := day(0)
-	if _, lost := report.HeartbeatAlert("joint", last, last.Add(time.Hour), 2*time.Hour); lost {
-		t.Fatal("within the timeout is not a loss")
+func ny(s string) time.Time {
+	t, err := time.ParseInLocation("2006-01-02 15:04", s, nysecalendar.NewYork)
+	if err != nil {
+		panic(err)
 	}
-	if _, lost := report.HeartbeatAlert("joint", last, last.Add(2*time.Hour), 2*time.Hour); lost {
-		t.Fatal("exactly at the timeout is not yet a loss")
+	return t
+}
+
+// Silence is measured in NYSE sessions, not hours: a weekend or a holiday
+// with nothing written is not a loss (ADR 0019 leaves the timeout to the
+// owner; the default is two sessions).
+func TestHeartbeatLossIsCountedInSessionsAndAlertsOncePerSilence(t *testing.T) {
+	friday := ny("2026-10-16 17:30")
+	if _, lost, err := report.HeartbeatAlert("joint", friday, ny("2026-10-19 09:00"), 2); lost || err != nil {
+		t.Fatalf("a weekend with nothing written is not a loss (lost %v, err %v)", lost, err)
 	}
-	a, lost := report.HeartbeatAlert("joint", last, last.Add(3*time.Hour), 2*time.Hour)
-	if !lost || a.Kind != report.KindHeartbeat || a.Severity != report.Urgent {
-		t.Fatalf("alert = %+v, lost %v", a, lost)
+	thursday := ny("2026-04-02 18:00")
+	if _, lost, err := report.HeartbeatAlert("joint", thursday, ny("2026-04-06 15:59"), 2); lost || err != nil {
+		t.Fatalf("Good Friday and a weekend are not a loss (lost %v, err %v)", lost, err)
 	}
-	b, _ := report.HeartbeatAlert("joint", last, last.Add(9*time.Hour), 2*time.Hour)
+	monday := ny("2026-10-12 18:00")
+	if _, lost, _ := report.HeartbeatAlert("joint", monday, ny("2026-10-14 15:59"), 2); lost {
+		t.Fatal("one session closed with nothing written is within two")
+	}
+	a, lost, err := report.HeartbeatAlert("joint", monday, ny("2026-10-14 16:30"), 2)
+	if err != nil || !lost || a.Kind != report.KindHeartbeat || a.Severity != report.Urgent || !contains(a.Body, "2 NYSE sessions") {
+		t.Fatalf("alert = %+v, lost %v, err %v", a, lost, err)
+	}
+	b, _, _ := report.HeartbeatAlert("joint", monday, ny("2026-10-20 16:30"), 2)
 	if a.Key != b.Key {
 		t.Fatal("one silence must be one incident however long it lasts")
 	}
-	c, _ := report.HeartbeatAlert("joint", last.Add(time.Hour), last.Add(9*time.Hour), 2*time.Hour)
+	c, _, _ := report.HeartbeatAlert("joint", monday.Add(time.Hour), ny("2026-10-20 16:30"), 2)
 	if a.Key == c.Key {
 		t.Fatal("a later silence is a new incident")
+	}
+	if _, _, err := report.HeartbeatAlert("joint", ny("2030-12-30 18:00"), ny("2031-01-06 18:00"), 2); err == nil {
+		t.Fatal("a silence the calendar does not cover must be an error, never a guess")
 	}
 }
 

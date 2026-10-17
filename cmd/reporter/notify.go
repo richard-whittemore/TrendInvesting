@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
@@ -190,16 +193,39 @@ func (n ntfySender) send(a report.Alert) error {
 
 // pagerDutySender triggers an incident through the PagerDuty Events API v2
 // (https://developer.pagerduty.com/api-reference/368ae3d938c9e-send-an-event-to-pager-duty).
-// The alert key is the dedup key, so a retried trigger joins the incident it
-// would have opened. The answer is read back: only HTTP 202 with status
-// "success" is an acknowledged delivery, and anything else is a failure. The
-// routing key is the credential and never appears in an error or in output.
+// The alert key is the dedup key (see dedupKey), so a retried trigger joins
+// the incident it would have opened. The answer is read back: only HTTP 202
+// with status "success" is an acknowledged delivery, and anything else is a
+// failure. The routing key is the credential and never appears in an error or
+// in output.
 type pagerDutySender struct {
 	url, routingKey string
 	client          *http.Client
 }
 
 func (pagerDutySender) name() string { return "pagerduty" }
+
+// maxDedupKey is the Events API v2 limit on dedup_key; a longer key is
+// answered 400 and the alert would never be delivered.
+const maxDedupKey = 255
+
+// dedupKey is the alert key when it fits PagerDuty's limit. A longer one
+// (an engine state naming many instruments or orders) keeps a readable
+// prefix and ends in the SHA-256 of the whole key, so it is stable across
+// runs and distinct for distinct alerts. The full key travels in
+// custom_details.
+func dedupKey(key string) string {
+	if len(key) <= maxDedupKey {
+		return key
+	}
+	sum := sha256.Sum256([]byte(key))
+	suffix := "~sha256:" + hex.EncodeToString(sum[:])
+	prefix := key[:maxDedupKey-len(suffix)]
+	for !utf8.ValidString(prefix) {
+		prefix = prefix[:len(prefix)-1]
+	}
+	return prefix + suffix
+}
 
 type pagerDutyEvent struct {
 	RoutingKey  string           `json:"routing_key"`
@@ -221,8 +247,8 @@ func (p pagerDutySender) send(a report.Alert) error {
 		severity = "critical"
 	}
 	body, err := json.Marshal(pagerDutyEvent{
-		RoutingKey: p.routingKey, EventAction: "trigger", DedupKey: a.Key,
-		Payload: pagerDutyPayload{Summary: a.Title, Source: a.AccountID, Severity: severity, CustomDetails: map[string]string{"detail": a.Body}},
+		RoutingKey: p.routingKey, EventAction: "trigger", DedupKey: dedupKey(a.Key),
+		Payload: pagerDutyPayload{Summary: a.Title, Source: a.AccountID, Severity: severity, CustomDetails: map[string]string{"detail": a.Body, "alert_key": a.Key}},
 	})
 	if err != nil {
 		return errors.New("build request")

@@ -42,7 +42,8 @@ func writeJournal(t *testing.T, dir string) string {
 // writeJournalWith writes the run with extra entries after its own.
 func writeJournalWith(t *testing.T, dir string, extra ...journal.Entry) string {
 	t.Helper()
-	cfg := event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint <b>", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR}
+	cfg := event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint <b>", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR, Boost: event.BoostConfiguration{InstrumentID: "SPY", InvestedFraction: 0.98, BoostSize: 1.5, RSIPeriod: 2, RSIEntry: 10, TrendDays: 200, ExitSMA: 5, WarmUpStart: "2024-01-02"},
+		Limits: event.MarginLimits{MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05}}
 	snap := event.AccountPositionsSnapshotPayload{AccountID: "joint <b>", AsOf: t0, Currency: "USD", NetLiquidation: 4000,
 		Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: 39}}}
 	refused := event.OrderRefusedPayload{AccountID: "joint", PlanID: "p", Tag: "targets:0", ClientOrderID: "tw-a", InstrumentID: "SPY",

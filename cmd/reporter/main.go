@@ -1,15 +1,15 @@
 // Command reporter reads one account's journal and delivers what a person
 // needs to know: alerts for every refusal, Degraded or Halted state, withheld
-// decision, missing input and lost heartbeat, each once per incident, and
-// optionally the daily summary (docs/live-trading/plan.md section 3; ADR
-// 0019, "Alerting"). It only reads the journal. The one file it writes is its
-// own state file of delivered incident keys. Every rule lives in
-// internal/report; this is composition.
+// decision, missing input, lost heartbeat and journal it cannot read, each
+// once per incident, and optionally the daily summary
+// (docs/live-trading/plan.md section 3; ADR 0019, "Alerting"). It only reads
+// the journal. The one file it writes is its own state file of delivered
+// incident keys. Every rule lives in internal/report; this is composition.
 //
 // It runs once per invocation, from a timer. The heartbeat it checks is the
-// journal file's modification time; a reporter on the engine's own host cannot
-// be the external dead-man's switch ADR 0019 asks for, which is a separate
-// service.
+// journal file's modification time, with silence counted in NYSE sessions; a
+// reporter on the engine's own host cannot be the external dead-man's switch
+// ADR 0019 asks for, which is a separate service.
 package main
 
 import (
@@ -47,15 +47,19 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	statePath := flags.String("state", "", "path to the reporter's own state file of delivered alerts")
 	channels := flags.String("channel", "stdout", "comma-separated channels: stdout (terminal echo, never a delivery), ntfy, pagerduty")
 	benchmark := flags.String("benchmark", "SPY", "benchmark instrument for the equity comparison")
-	date := flags.String("date", "", "summary date, YYYY-MM-DD (default: the journal's latest event day)")
+	date := flags.String("date", "", "summary date, YYYY-MM-DD, sent once the log records that day's session closed (default: the latest closed session)")
 	summary := flags.Bool("summary", false, "also deliver the daily summary")
-	timeout := flags.Duration("heartbeat-timeout", 36*time.Hour, "journal silence after which a heartbeat alert fires")
+	sessions := flags.Int("heartbeat-sessions", 2, "NYSE sessions that may close with nothing written to the journal before a heartbeat alert fires; weekends and holidays close none")
+	accountName := flags.String("account", "", "account name for alerts when the journal cannot name its own (default: the journal file's name)")
 	sendTimeout := flags.Duration("send-timeout", 30*time.Second, "longest one send to one channel may take before it counts as failed")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *journalPath == "" || *statePath == "" {
 		return errors.New("reporter: -journal and -state are required")
+	}
+	if *sessions < 1 {
+		return errors.New("reporter: -heartbeat-sessions must be at least 1")
 	}
 	if *sendTimeout <= 0 {
 		return errors.New("reporter: -send-timeout must be positive: a send with no bound can hold the run forever, and with it every later alert")
@@ -69,42 +73,43 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if err != nil {
 		return err
 	}
-	raw, err := os.ReadFile(*journalPath)
-	if err != nil {
-		return fmt.Errorf("reporter: read journal: %w", err)
-	}
-	info, err := os.Stat(*journalPath)
-	if err != nil {
-		return fmt.Errorf("reporter: stat journal: %w", err)
-	}
-	_, envelopes, err := report.Load(raw)
-	if err != nil {
-		return err
-	}
 	seen, err := loadState(*statePath)
 	if err != nil {
 		return err
 	}
-
-	alerts, err := report.Alerts(envelopes)
-	if err != nil {
-		return err
+	label := *accountName
+	if label == "" {
+		label = filepath.Base(*journalPath)
 	}
-	account, _, err := report.AccountOf(envelopes)
-	if err != nil {
-		return err
+	info, statErr := os.Stat(*journalPath)
+	envelopes, account, alerts, refused := readJournal(*journalPath)
+	if account != "" {
+		label = account
 	}
-	if a, lost := report.HeartbeatAlert(account, info.ModTime(), now(), *timeout); lost {
-		alerts = append(alerts, a)
+	var failures []error
+	if refused != nil {
+		// A journal that cannot be read must not silence the one path that
+		// reaches a person (ADR 0019, "Alerting"): the failure is itself an
+		// alert, the heartbeat is still checked, and the error is returned.
+		failures = append(failures, refused)
+		alerts = []report.Alert{report.JournalRefusedAlert(label, refused, now())}
+	}
+	if statErr == nil {
+		a, lost, err := report.HeartbeatAlert(label, info.ModTime(), now(), *sessions)
+		if err != nil {
+			failures = append(failures, err)
+		} else if lost {
+			alerts = append(alerts, a)
+		}
 	}
 	// A summary that cannot be built is reported, but never holds back the
 	// incident alerts: they are what ADR 0019 requires to reach a person.
-	var failures []error
-	if *summary {
-		a, err := summaryAlert(envelopes, *date, *benchmark)
-		if err != nil {
+	if *summary && refused == nil {
+		a, due, err := summaryAlert(envelopes, *date, *benchmark)
+		switch {
+		case err != nil:
 			failures = append(failures, fmt.Errorf("reporter: the daily summary was not sent: %w", err))
-		} else {
+		case due:
 			alerts = append(alerts, a)
 		}
 	}
@@ -120,24 +125,54 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	return errors.Join(failures...)
 }
 
-// summaryAlert wraps the day's summary as a routine message keyed by account
-// and date, so a rerun the same day does not resend it.
-func summaryAlert(envelopes []event.Envelope, date, benchmark string) (report.Alert, error) {
+// readJournal reads, verifies and decodes the journal, returning its
+// envelopes, its account and its alerts, or the reason it was refused.
+func readJournal(path string) ([]event.Envelope, string, []report.Alert, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("reporter: read journal: %w", err)
+	}
+	_, envelopes, err := report.Load(raw)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	account, _, err := report.AccountOf(envelopes)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	alerts, err := report.Alerts(envelopes)
+	if err != nil {
+		return nil, account, nil, err
+	}
+	return envelopes, account, alerts, nil
+}
+
+// summaryAlert wraps a day's summary as a routine message keyed by account
+// and date, so a rerun the same day does not resend it. A day is summarised
+// only once the log records its session closed, since the day's decision and
+// orders are written with that close: a summary sent earlier would be
+// incomplete and, being keyed by the day, never replaced. With no date it is
+// the latest closed session's day, and it is not yet due when none has
+// closed. A stated date whose session has not closed is an error.
+func summaryAlert(envelopes []event.Envelope, date, benchmark string) (report.Alert, bool, error) {
 	if date == "" {
-		last, err := report.LastDate(envelopes)
-		if err != nil {
-			return report.Alert{}, err
+		last, ok := report.ClosedSessionDate(envelopes)
+		if !ok {
+			return report.Alert{}, false, nil
 		}
 		date = last
 	}
 	s, err := report.Summarize(envelopes, date, benchmark)
 	if err != nil {
-		return report.Alert{}, err
+		return report.Alert{}, false, err
+	}
+	if !report.SessionClosedOn(envelopes, date) {
+		return report.Alert{}, false, fmt.Errorf("the log records no session closed on %s, so that day is not complete; it is sent once it is", date)
 	}
 	return report.Alert{
 		Key: "summary:" + s.AccountID + ":" + s.Date, Kind: kindSummary, Severity: report.Routine, AccountID: s.AccountID,
 		Title: fmt.Sprintf("%s: daily summary %s", s.AccountID, s.Date), Body: report.RenderText(s),
-	}, nil
+	}, true, nil
 }
 
 func loadState(path string) (map[string]bool, error) {

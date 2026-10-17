@@ -34,11 +34,15 @@ cannot disagree about what a file holds.
 
 Each record is then read the way `journal-query` reads it: only at a schema
 version this build knows, and only if its values pass the same checks the
-engine applies.
+engine applies. That includes the configuration record that names the
+account.
 
-- A record of what the engine decided (targets, orders, refusals, engine
-  state) that fails is a sign of a damaged or mismatched file, so the program
-  stops with an error naming it.
+- A file that does not verify, a configuration that fails, or a record of
+  what the engine decided (targets, orders, refusals, engine state) that
+  fails is a sign of a damaged or mismatched file. The reporter then sends an
+  urgent "the reporter cannot read the journal" alert naming the problem,
+  still checks the heartbeat, sends nothing else from the file, and exits
+  with the error. The dashboard says the log does not verify.
 - An input that fails (a bar, an account snapshot, a fill) is skipped and
   counted. The log keeps inputs the engine itself refused, so stopping for one
   would silence every later alert. An account snapshot is also skipped when
@@ -55,11 +59,22 @@ engine applies.
 | A decision was withheld for missing data (bars, account snapshot, universe) | urgent | run of the same reason |
 | A decision was withheld for another reason | routine | run of the same reason |
 | No sign of life from the engine | urgent | silence, keyed by the last activity |
-| The daily summary (if asked for) | routine | account and day |
+| The reporter cannot read the journal | urgent | account and problem |
+| The daily summary (if asked for) | routine | account and day, once that day's session has closed in the log |
 
-"No sign of life" is the log file's last-modified time. A reporter running on
-the engine's own machine cannot catch that machine dying; the outside
-dead-man's switch ADR 0019 asks for is a separate service and is not built.
+"No sign of life" is measured in NYSE sessions, not hours: the alert fires
+once `-heartbeat-sessions` sessions (default 2) have closed since the log
+file last changed. Weekends and exchange holidays close no session, so a
+quiet weekend or a long holiday weekend never pages you. With the default,
+an engine that stops after writing Monday's session is reported at
+Wednesday's close. The calendar is the same NYSE calendar the market-data
+adapter uses, and covers 2022 to 2030; outside those years the reporter
+exits with an error rather than guess. A reporter running on the engine's
+own machine cannot catch that machine dying; the outside dead-man's switch
+ADR 0019 asks for is a separate service and is not built.
+
+If the log cannot be read, the alert is named by the account the log names,
+or by `-account`, or by the log file's name.
 
 ## Where alerts go
 
@@ -89,6 +104,10 @@ The delivery rules:
   only to PagerDuty or your own ntfy server. If no such channel is named, the
   incident alerts still go out and the run ends with an error saying the
   summary had nowhere private to go.
+- The summary for a day is sent only once the log records that day's session
+  closed. The day's decision and orders are written with the close, so a
+  summary sent earlier would be incomplete, and, being sent once per day,
+  would never be replaced. Before the close the summary is simply not due.
 - If the summary cannot be built (a decision record the program cannot read),
   the incident alerts still go out and are remembered, and the run ends with
   an error naming the record.
@@ -102,7 +121,10 @@ The delivery rules:
 PagerDuty details: you sign up for PagerDuty and create a service with an
 Events API v2 integration, which gives the routing key. The reporter triggers
 an incident for each alert, using the alert's own key as PagerDuty's
-de-duplication key, so a resend joins the incident it would have opened. It
+de-duplication key, so a resend joins the incident it would have opened.
+PagerDuty refuses a key over 255 characters, so a longer one (an engine state
+naming many instruments or orders) is sent as its first part followed by a
+fingerprint of the whole key; the full key is in the incident's details. It
 reads PagerDuty's answer back: only an "accepted, success" answer is a
 delivery. A refusal, a throttle or an answer it cannot read is a failure. That
 is the machine acknowledgement. Acknowledging the incident yourself on your
@@ -122,9 +144,12 @@ TI_NTFY_TOPIC=... TI_PAGERDUTY_ROUTING_KEY=... \
 
 Flags: `-journal` and `-state` are required; `-channel` (default `stdout`,
 which is refused on its own, so always name a real channel); `-summary`
-(also send the day's summary); `-date YYYY-MM-DD` (default: the latest day in
-the log); `-benchmark` (default SPY); `-heartbeat-timeout` (default 36 hours of
-silence); `-send-timeout` (default 30 seconds per send).
+(also send the day's summary); `-date YYYY-MM-DD` (default: the latest day
+whose session has closed in the log; a stated day whose session has not
+closed is an error); `-benchmark` (default SPY); `-heartbeat-sessions`
+(default 2 NYSE sessions with nothing written); `-account` (the name for
+alerts when the log cannot name its account; default the log file's name);
+`-send-timeout` (default 30 seconds per send).
 
 If it exits with an error, read it: it names the channel that failed or the
 file it refused. Nothing is lost; the next run tries again.
@@ -148,6 +173,9 @@ so without showing paths or figures.
 ## What the summary shows, and its limits
 
 - Holdings come from the broker's account snapshot.
+- Each released order says whether it was sent to the broker: "released
+  (sent)" or "released (not sent)". A dry-run releases orders without sending
+  them.
 - Equity against SPY pairs the snapshot's net liquidation with SPY's closing
   price on the same day. It is price return only (no dividends) and needs two
   paired points before it shows a comparison. The comparison names the dates

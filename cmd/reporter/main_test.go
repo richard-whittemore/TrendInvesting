@@ -33,17 +33,20 @@ func envelope(t *testing.T, seq uint64, eventType string, version uint32, id str
 // engine.
 func haltedEntries(t *testing.T) []journal.Entry {
 	t.Helper()
-	cfg := event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR}
+	cfg := event.TargetWeightConfigurationPayload{StrategyID: event.TargetWeightStrategyBoost, AccountID: "joint", Mode: event.TradingModeDryRun, Adapter: event.AdapterIBKR, Boost: event.BoostConfiguration{InstrumentID: "SPY", InvestedFraction: 0.98, BoostSize: 1.5, RSIPeriod: 2, RSIEntry: 10, TrendDays: 200, ExitSMA: 5, WarmUpStart: "2024-01-02"},
+		Limits: event.MarginLimits{MaxExposure: 1.5, MaxOrdersPerDecision: 1, MaxOrderFraction: 1, PriceBand: 0.05}}
 	snap := event.AccountPositionsSnapshotPayload{AccountID: "joint", AsOf: t0, Currency: "USD", NetLiquidation: 4000}
 	refused := event.OrderRefusedPayload{AccountID: "joint", PlanID: "p", Tag: "targets:0", ClientOrderID: "tw-a", InstrumentID: "SPY",
 		Side: event.OrderSideBuy, Quantity: 39, LimitPrice: 101, Reason: event.RefusedOrderSize, Detail: "figures",
 		Figures: event.RiskFigures{NetLiquidation: 4000, ReferencePrice: 100, ExposureBefore: 0.5, ExposureAfter: 0.98, OrderFraction: 0.48, OrdersInDecision: 1}}
 	state := event.EngineStatePayload{State: event.EngineStateHalted, Reason: event.EngineStateReasonRiskLimitBreached, Detail: "figures"}
+	closed := event.SessionClosedPayload{PeriodEnd: t0, InstrumentIDs: []string{"SPY"}}
 	entries := []journal.Entry{
 		{Kind: journal.KindInput, Envelope: envelope(t, 1, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "cfg", t0.Add(-time.Hour), cfg)},
 		{Kind: journal.KindInput, Envelope: envelope(t, 2, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, "snap", t0, snap)},
-		{Kind: journal.KindDecision, Envelope: envelope(t, 3, event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, "refuse", t0, refused)},
-		{Kind: journal.KindDecision, Envelope: envelope(t, 4, event.EngineStateEventType, event.EngineStateScopedVersion, "state", t0, state)},
+		{Kind: journal.KindInput, Envelope: envelope(t, 3, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "session", t0, closed)},
+		{Kind: journal.KindDecision, Envelope: envelope(t, 4, event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, "refuse", t0, refused)},
+		{Kind: journal.KindDecision, Envelope: envelope(t, 5, event.EngineStateEventType, event.EngineStateScopedVersion, "state", t0, state)},
 	}
 	return entries
 }
@@ -116,7 +119,7 @@ func TestRunDeliversEachAlertOnceAcrossRuns(t *testing.T) {
 	dir := t.TempDir()
 	journalPath := writeJournal(t, dir)
 	state := filepath.Join(dir, "state.json")
-	args := []string{"-journal", journalPath, "-state", state, "-channel", "stdout,ntfy", "-heartbeat-timeout", "1000h"}
+	args := []string{"-journal", journalPath, "-state", state, "-channel", "stdout,ntfy"}
 	now := func() time.Time { return t0.Add(time.Hour) }
 
 	var first bytes.Buffer
@@ -138,27 +141,51 @@ func TestRunDeliversEachAlertOnceAcrossRuns(t *testing.T) {
 }
 
 func TestRunAlertsOnHeartbeatLossFromTheFileTime(t *testing.T) {
+	newYork, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		modified, now time.Time
+		lost          bool
+	}{
+		// Monday's session written, Tuesday's and Wednesday's closed with nothing.
+		"two sessions closed": {time.Date(2026, time.October, 12, 18, 0, 0, 0, newYork), time.Date(2026, time.October, 14, 16, 30, 0, 0, newYork), true},
+		// Friday's session written; nothing is due over the weekend, 63 hours later.
+		"a weekend": {time.Date(2026, time.October, 16, 17, 30, 0, 0, newYork), time.Date(2026, time.October, 19, 9, 0, 0, 0, newYork), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeEnv, fakeClient := acceptingNtfy(t)
+			dir := t.TempDir()
+			journalPath := writeJournal(t, dir)
+			if err := os.Chtimes(journalPath, c.modified, c.modified); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"-journal", journalPath, "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy"}
+			var out bytes.Buffer
+			if err := run(args, fakeEnv, func() time.Time { return c.now }, &out, fakeClient); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(out.String(), "no engine heartbeat"); got != c.lost {
+				t.Fatalf("heartbeat alert %v, want %v:\n%s", got, c.lost, out.String())
+			}
+		})
+	}
+}
+
+func TestTheHeartbeatSessionsMustBePositive(t *testing.T) {
 	fakeEnv, fakeClient := acceptingNtfy(t)
 	dir := t.TempDir()
-	journalPath := writeJournal(t, dir)
-	modified := time.Date(2024, time.January, 3, 0, 0, 0, 0, time.UTC)
-	if err := os.Chtimes(journalPath, modified, modified); err != nil {
-		t.Fatal(err)
-	}
-	args := []string{"-journal", journalPath, "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy", "-heartbeat-timeout", "2h"}
-	var out bytes.Buffer
-	if err := run(args, fakeEnv, func() time.Time { return modified.Add(3 * time.Hour) }, &out, fakeClient); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.String(), "no engine heartbeat") {
-		t.Fatalf("output:\n%s", out.String())
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-heartbeat-sessions", "0"}
+	if err := run(args, fakeEnv, time.Now, &bytes.Buffer{}, fakeClient); err == nil || !strings.Contains(err.Error(), "-heartbeat-sessions") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
 func TestRunSendsASummaryOncePerDay(t *testing.T) {
 	fakeEnv, fakeClient := acceptingNtfy(t)
 	dir := t.TempDir()
-	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy", "-summary", "-heartbeat-timeout", "1000h"}
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy", "-summary"}
 	now := func() time.Time { return t0.Add(time.Hour) }
 	var first, second bytes.Buffer
 	if err := run(args, fakeEnv, now, &first, fakeClient); err != nil {
@@ -188,7 +215,7 @@ func TestNtfyPostsToTheTopicWithPriorityAndNeverEchoesIt(t *testing.T) {
 	}))
 	defer server.Close()
 	dir := t.TempDir()
-	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-heartbeat-timeout", "1000h"}
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy"}
 	environment := env(map[string]string{"TI_NTFY_TOPIC": "secret-topic-123", "TI_NTFY_SERVER": server.URL})
 	var out bytes.Buffer
 	if err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, &out, server.Client()); err != nil {
@@ -218,7 +245,7 @@ func TestNtfyFailureIsReportedWithoutTheTopicAndRetriedNextRun(t *testing.T) {
 	}))
 	defer server.Close()
 	dir := t.TempDir()
-	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy", "-heartbeat-timeout", "1000h"}
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy"}
 	environment := env(map[string]string{"TI_NTFY_TOPIC": "secret-topic-123", "TI_NTFY_SERVER": server.URL})
 	now := func() time.Time { return t0.Add(time.Hour) }
 	err := run(args, environment, now, &bytes.Buffer{}, server.Client())
@@ -289,7 +316,7 @@ func TestTheJournalFileIsNeverWritten(t *testing.T) {
 	path := writeJournal(t, dir)
 	before, _ := os.ReadFile(path)
 	info, _ := os.Stat(path)
-	args := []string{"-journal", path, "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy", "-summary", "-heartbeat-timeout", "1000h"}
+	args := []string{"-journal", path, "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy", "-summary"}
 	if err := run(args, fakeEnv, func() time.Time { return t0 }, &bytes.Buffer{}, fakeClient); err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +330,7 @@ func TestTheJournalFileIsNeverWritten(t *testing.T) {
 func TestStdoutAloneIsNotADeliveryChannel(t *testing.T) {
 	dir := t.TempDir()
 	state := filepath.Join(dir, "s.json")
-	args := []string{"-journal", writeJournal(t, dir), "-state", state, "-channel", "stdout", "-heartbeat-timeout", "1000h"}
+	args := []string{"-journal", writeJournal(t, dir), "-state", state, "-channel", "stdout"}
 	var out bytes.Buffer
 	err := run(args, env(nil), func() time.Time { return t0.Add(time.Hour) }, &out, http.DefaultClient)
 	if err == nil || !strings.Contains(err.Error(), "delivery channel") {
@@ -352,7 +379,7 @@ func TestPagerDutyTriggersWithTheAlertKeyAndReadsTheAcknowledgementBack(t *testi
 	server := httptest.NewServer(http.HandlerFunc(pd.handler))
 	defer server.Close()
 	dir := t.TempDir()
-	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "pagerduty", "-heartbeat-timeout", "1000h"}
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "pagerduty"}
 	environment := env(map[string]string{"TI_PAGERDUTY_ROUTING_KEY": "routing-secret-9", "TI_PAGERDUTY_URL": server.URL})
 	var out bytes.Buffer
 	if err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, &out, server.Client()); err != nil {
@@ -380,7 +407,7 @@ func TestPagerDutyAnswerThatIsNotASuccessIsNotADelivery(t *testing.T) {
 	} {
 		server := httptest.NewServer(http.HandlerFunc(pd.handler))
 		dir := t.TempDir()
-		args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "pagerduty", "-heartbeat-timeout", "1000h"}
+		args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "pagerduty"}
 		environment := env(map[string]string{"TI_PAGERDUTY_ROUTING_KEY": "routing-secret-9", "TI_PAGERDUTY_URL": server.URL})
 		err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, server.Client())
 		server.Close()
@@ -422,7 +449,7 @@ func TestAFailureOnOneChannelIsNeverADeliveryAndOnlyThatChannelIsRetried(t *test
 	pager := httptest.NewServer(http.HandlerFunc(pd.handler))
 	defer pager.Close()
 	dir := t.TempDir()
-	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty", "-heartbeat-timeout", "1000h"}
+	args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty"}
 	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": ntfy.URL, "TI_PAGERDUTY_ROUTING_KEY": "k", "TI_PAGERDUTY_URL": pager.URL})
 	now := func() time.Time { return t0.Add(time.Hour) }
 	if err := run(args, environment, now, &bytes.Buffer{}, http.DefaultClient); err == nil {
@@ -449,7 +476,7 @@ func TestRunReadsAnEngineDurableLog(t *testing.T) {
 	fakeEnv, fakeClient := acceptingNtfy(t)
 	dir := t.TempDir()
 	path := writeDurableLog(t, dir)
-	args := []string{"-journal", path, "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy", "-heartbeat-timeout", "1000h"}
+	args := []string{"-journal", path, "-state", filepath.Join(dir, "s.json"), "-channel", "stdout,ntfy"}
 	var out bytes.Buffer
 	if err := run(args, fakeEnv, func() time.Time { return t0.Add(time.Hour) }, &out, fakeClient); err != nil {
 		t.Fatalf("a live engine writes only the durable log: %v", err)

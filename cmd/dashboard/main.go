@@ -251,14 +251,14 @@ table{border-collapse:collapse}td,th{padding:.2rem .7rem;text-align:left;border-
 .urgent{font-weight:700}@media(prefers-color-scheme:dark){body{background:#111;color:#eee}}</style></head>
 <body><h1>Trend Investing (read-only)</h1>
 {{range .}}{{with .Summary}}<h2>{{.AccountID}} <small>{{.StrategyID}}, {{.Date}}, engine {{.EngineState}}</small></h2>
-{{if .HaveSnapshot}}<p>Net liquidation {{printf "%.2f" .NetLiquidation}} as of {{.HoldingsAsOf.Format "2006-01-02 15:04Z"}}</p>{{else}}<p>No account snapshot.</p>{{end}}
+{{if .HaveSnapshot}}<p>Net liquidation {{printf "%.2f" .NetLiquidation}} as of {{.HoldingsAsOf.UTC.Format "2006-01-02 15:04Z"}}</p>{{else}}<p>No account snapshot.</p>{{end}}
 <h3>Holdings</h3>{{if .Holdings}}<table>{{range .Holdings}}<tr><td>{{.InstrumentID}}</td><td>{{.Quantity}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
 <h3>Targets</h3>{{if .Decisions}}<table>{{range .Decisions}}<tr><td>{{.Outcome}}</td><td>{{.WithheldReason}}</td><td>{{range .Targets}}{{.InstrumentID}} {{weight .Weight}} {{end}}</td></tr>{{end}}</table>{{else}}<p>No decision today.</p>{{end}}
-<h3>Orders</h3>{{if .Orders}}<table>{{range .Orders}}<tr><td>{{.ClientOrderID}}</td><td>{{.Side}} {{.Quantity}} {{.InstrumentID}} @ {{printf "%.2f" .LimitPrice}}</td><td>{{.Status}}</td><td>{{.Reason}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
+<h3>Orders</h3>{{if .Orders}}<table>{{range .Orders}}<tr><td>{{.ClientOrderID}}</td><td>{{.Side}} {{.Quantity}} {{.InstrumentID}} @ {{printf "%.2f" .LimitPrice}}</td><td>{{.StatusText}}</td><td>{{.Reason}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
 <p>Refusals today: {{.Refusals}}</p>
 <h3>Fills</h3>{{if .Fills}}<table>{{range .Fills}}<tr><td>{{.InstrumentID}}</td><td>{{.Quantity}} @ {{printf "%.2f" .Price}}</td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
 <h3>Equity against {{.Benchmark}}</h3>{{if .Equity.Available}}<p>{{.Equity.StartDate}} to {{.Equity.EndDate}}: account {{pct .Equity.AccountReturn}}, {{.Benchmark}} {{pct .Equity.BenchmarkReturn}}, difference {{pct .Equity.Excess}}.<br>{{if .Equity.DayAvailable}}Day, {{.Equity.DayStartDate}} to {{.Equity.EndDate}}: account {{pct .Equity.DayAccountReturn}}, {{.Benchmark}} {{pct .Equity.DayBenchmarkReturn}}.{{else}}Day: not available (no paired snapshot and {{.Benchmark}} close on {{.Date}}).{{end}}</p>{{else}}<p>Not enough paired snapshots and bars yet.</p>{{end}}
 {{if .RejectedInputs}}<p class="urgent">Inputs not read: {{.RejectedInputs}} (an unknown schema version or values that fail validation; they move no figure).</p>{{end}}{{end}}
-<h3>Alerts</h3>{{if .Alerts}}<table>{{range .Alerts}}<tr class="{{.Severity}}"><td>{{.At.Format "2006-01-02 15:04Z"}}</td><td>{{.Severity}}</td><td>{{.Title}}<p>{{.Body}}</p></td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
+<h3>Alerts</h3>{{if .Alerts}}<table>{{range .Alerts}}<tr class="{{.Severity}}"><td>{{.At.UTC.Format "2006-01-02 15:04Z"}}</td><td>{{.Severity}}</td><td>{{.Title}}<p>{{.Body}}</p></td></tr>{{end}}</table>{{else}}<p>None.</p>{{end}}
 {{end}}</body></html>
 `))

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
+	"github.com/richard-whittemore/TrendInvesting/internal/nysecalendar"
 )
 
 // Severity is how loudly an alert is delivered.
@@ -30,6 +31,9 @@ const (
 	KindWithheld    Kind = "withheld"
 	KindMissingData Kind = "missing-data"
 	KindHeartbeat   Kind = "heartbeat-lost"
+	// KindJournalRefused is the reporter's own failure to read the journal:
+	// every alert the journal holds is withheld until it reads.
+	KindJournalRefused Kind = "journal-refused"
 )
 
 // Alert is one incident to tell the owner about. Key names the incident:
@@ -137,7 +141,7 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 		e.EventTime.UTC().Format(time.RFC3339), p.Reason, p.Detail)
 	if p.State == event.EngineStateDegraded {
 		kind = KindDegraded
-		body = fmt.Sprintf("Engine degraded since %s: %s. %s. Scope: instruments [%s], orders [%s], cash [%s]. It opens no new risk and refuses buys; orders that reduce exposure continue. Recovery is a person's: docs/runbooks/reconciliation.md.",
+		body = fmt.Sprintf("Engine degraded since %s: %s. %s. Scope: instruments [%s], orders [%s], cash [%s]. It opens no new risk and refuses buys. The instruments in the scope are frozen: no order for them except restoring a missing Protective Stop, or, for a target-weight account, the one sale back toward 98%% (ADR 0019 amendment, 2026-10-16). Risk-reducing orders continue only for instruments outside the scope. Check the protection of the named positions at the broker. Recovery is a person's: docs/runbooks/reconciliation.md.",
 			e.EventTime.UTC().Format(time.RFC3339), p.Reason, p.Detail,
 			strings.Join(p.ScopeInstrumentIDs, ","), strings.Join(p.ScopeOrderIDs, ","), strings.Join(p.ScopeCashComponents, ","))
 	}
@@ -159,21 +163,43 @@ func withheldAlert(account string, e event.Envelope, p event.TargetsDecidedPaylo
 	}
 }
 
-// HeartbeatAlert reports whether the account's engine has been silent longer
-// than timeout. lastActivity is when the journal last changed; now is the
-// caller's clock. The key names the silence by its start, so one outage is one
-// incident however long it lasts, and a later outage is another (ADR 0019).
-func HeartbeatAlert(account string, lastActivity, now time.Time, timeout time.Duration) (Alert, bool) {
-	if now.Sub(lastActivity) <= timeout {
-		return Alert{}, false
+// HeartbeatAlert reports whether the account's engine has been silent for
+// sessions NYSE sessions: that many sessions have closed since lastActivity,
+// when the journal last changed, up to now, the caller's clock. Silence is
+// counted in sessions, not hours, because the engine writes once per session
+// input (ADR 0027, section 3) and nothing over a weekend or a holiday; the
+// count is the owner's operational setting (ADR 0019, "Alerting"). The key
+// names the silence by its start, so one outage is one incident however long
+// it lasts, and a later outage is another. A span the calendar does not cover
+// is an error, never a guess.
+func HeartbeatAlert(account string, lastActivity, now time.Time, sessions int) (Alert, bool, error) {
+	closed, latest, err := nysecalendar.Closes(lastActivity, now)
+	if err != nil {
+		return Alert{}, false, fmt.Errorf("report: heartbeat for %s: %w", account, err)
+	}
+	if closed < sessions {
+		return Alert{}, false, nil
 	}
 	return Alert{
 		Key: "heartbeat-lost:" + account + ":" + lastActivity.UTC().Format(time.RFC3339), Kind: KindHeartbeat, Severity: Urgent,
 		AccountID: account, At: now,
 		Title: fmt.Sprintf("%s: no engine heartbeat", account),
-		Body: fmt.Sprintf("The journal last changed at %s, more than %s ago. The engine may have crashed or wedged; stops and orders at the broker are unaffected.",
-			lastActivity.UTC().Format(time.RFC3339), timeout),
-	}, true
+		Body: fmt.Sprintf("The journal last changed at %s, and %d NYSE sessions have closed since, the latest at %s. The engine may have crashed or wedged; stops and orders at the broker are unaffected.",
+			lastActivity.UTC().Format(time.RFC3339), closed, latest.UTC().Format(time.RFC3339)),
+	}, true, nil
+}
+
+// JournalRefusedAlert reports that the journal could not be read, so no
+// alert it holds can be sent: a damaged or mismatched log is refused rather
+// than guessed at, and goes to a person (ADR 0027, section 5). The key is the
+// account and the error, so one failure is one incident and a different
+// failure is another.
+func JournalRefusedAlert(account string, err error, at time.Time) Alert {
+	return Alert{
+		Key: "journal-refused:" + account + ":" + err.Error(), Kind: KindJournalRefused, Severity: Urgent, AccountID: account, At: at,
+		Title: fmt.Sprintf("%s: the reporter cannot read the journal", account),
+		Body:  fmt.Sprintf("The reporter refused the journal: %s. No alert recorded in it (refusals, Degraded or Halted, withheld decisions) can be sent until it reads, and the daily summary is not sent. The heartbeat is still checked. Stops and orders at the broker are unaffected. Check the file with journal-query; recovery is a person's.", err),
+	}
 }
 
 // Fresh returns, in order, the alerts whose keys are not in seen and not

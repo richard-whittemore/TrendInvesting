@@ -29,7 +29,7 @@ func TestADeliveryThatHangsIsCutOffAndRetriedNextRun(t *testing.T) {
 	defer close(release)
 	dir := t.TempDir()
 	state := filepath.Join(dir, "s.json")
-	args := []string{"-journal", writeJournal(t, dir), "-state", state, "-channel", "ntfy", "-heartbeat-timeout", "1000h", "-send-timeout", "100ms"}
+	args := []string{"-journal", writeJournal(t, dir), "-state", state, "-channel", "ntfy", "-send-timeout", "100ms"}
 	environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": server.URL})
 	done := make(chan error, 1)
 	go func() {
@@ -112,7 +112,7 @@ func TestTheDailySummaryNeverGoesThroughThePublicRelay(t *testing.T) {
 			r := &relay{sent: map[string][]string{}}
 			client := &http.Client{Transport: r}
 			dir := t.TempDir()
-			args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty", "-summary", "-heartbeat-timeout", "1000h"}
+			args := []string{"-journal", writeJournal(t, dir), "-state", filepath.Join(dir, "s.json"), "-channel", "ntfy,pagerduty", "-summary"}
 			environment := env(map[string]string{"TI_NTFY_TOPIC": "t", "TI_NTFY_SERVER": server, "TI_PAGERDUTY_ROUTING_KEY": "k", "TI_PAGERDUTY_URL": "https://events.pagerduty.test/v2/enqueue"})
 			if err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, client); err != nil {
 				t.Fatalf("the summary reached PagerDuty, a private channel: %v", err)
@@ -137,7 +137,7 @@ func TestASummaryWithOnlyThePublicRelayIsRefusedButTheAlertsStillGo(t *testing.T
 	r := &relay{sent: map[string][]string{}}
 	dir := t.TempDir()
 	state := filepath.Join(dir, "s.json")
-	args := []string{"-journal", writeJournal(t, dir), "-state", state, "-channel", "ntfy", "-summary", "-heartbeat-timeout", "1000h"}
+	args := []string{"-journal", writeJournal(t, dir), "-state", state, "-channel", "ntfy", "-summary"}
 	environment := env(map[string]string{"TI_NTFY_TOPIC": "t"})
 	err := run(args, environment, func() time.Time { return t0.Add(time.Hour) }, &bytes.Buffer{}, &http.Client{Transport: r})
 	if err == nil || !strings.Contains(err.Error(), "public relay") {
@@ -157,7 +157,7 @@ func TestASummaryThatCannotBeBuiltStillLetsEveryAlertGo(t *testing.T) {
 	dir := t.TempDir()
 	// A decision at a schema version this build does not read refuses the
 	// summary; the refusal, the halt and the heartbeat loss must still go out.
-	planned := envelope(t, 5, event.OrderPlannedEventType, 99, "plan", t0, map[string]string{"client_order_id": "tw-a"})
+	planned := envelope(t, 6, event.OrderPlannedEventType, 99, "plan", t0, map[string]string{"client_order_id": "tw-a"})
 	var buf bytes.Buffer
 	entries := append(haltedEntries(t), journal.Entry{Kind: journal.KindDecision, Envelope: planned})
 	if err := journal.Write(&buf, journal.NewHeader("h", "v", t0.Add(-time.Hour), t0), entries); err != nil {
@@ -172,9 +172,10 @@ func TestASummaryThatCannotBeBuiltStillLetsEveryAlertGo(t *testing.T) {
 	}
 	r := &relay{sent: map[string][]string{}}
 	state := filepath.Join(dir, "s.json")
-	args := []string{"-journal", journalPath, "-state", state, "-channel", "pagerduty", "-summary", "-heartbeat-timeout", "2h"}
+	args := []string{"-journal", journalPath, "-state", state, "-channel", "pagerduty", "-summary"}
 	environment := env(map[string]string{"TI_PAGERDUTY_ROUTING_KEY": "k", "TI_PAGERDUTY_URL": "https://events.pagerduty.test/v2/enqueue"})
-	err := run(args, environment, func() time.Time { return t0.Add(3 * time.Hour) }, &bytes.Buffer{}, &http.Client{Transport: r})
+	// Two sessions (January 3 and 4) have closed since the journal last changed.
+	err := run(args, environment, func() time.Time { return t0.AddDate(0, 0, 2).Add(time.Hour) }, &bytes.Buffer{}, &http.Client{Transport: r})
 	if err == nil || !strings.Contains(err.Error(), "schema version 99") {
 		t.Fatalf("the summary's failure must be reported, got %v", err)
 	}
