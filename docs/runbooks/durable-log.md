@@ -181,6 +181,18 @@ whether it is the crashed run. The message says which case it is.
         was written; never loosen it on a guess.
       - `boost.latched` carries the latch from the last readable log.
 
+      The engine accepts in the approval only the incident and latch that
+      the last readable log ended with, and refuses anything else, looser or
+      stricter. An incident or latch change recorded only in the lost log
+      therefore cannot be expressed in the approval and must be handled
+      outside it, before you start the fresh run:
+      - If you believe an incident was open, engage the kill switch for the
+        account (an operator input the engine honours regardless of the
+        approval).
+      - If the latch may have been set, keep Boost off through
+        configuration.
+      - Disengage only after the broker reconciliation confirms the state.
+
    Any decision recorded only in the lost log is gone. The broker
    reconciliation is the baseline, not that log.
 3. **A disk fault on a superseded log** (the message names a newer log
