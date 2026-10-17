@@ -406,7 +406,7 @@ func TestRecordedDecisionsAndSafetyInputsAreChecked(t *testing.T) {
 	})
 	refuses("another account's broker snapshot", nil, func(s *stream) event.Envelope {
 		return s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "broker:x", start,
-			event.BrokerSnapshotPayload{AccountID: "ira", AsOf: start, NetLiquidation: 1, OpenOrders: []event.BrokerOrder{}})
+			event.BrokerSnapshotPayload{AccountID: "ira", AsOf: start, NetLiquidation: 1, Positions: []event.BrokerPosition{}, OpenOrders: []event.BrokerOrder{}})
 	})
 	// A venue report names an order the gate released, at the version a
 	// target-weight account's orders are reported at.
@@ -536,7 +536,7 @@ func TestAFilledSellDoesNotShrinkALaterExit(t *testing.T) {
 // withhold is its own record, named for the input that triggered it.
 func TestARepeatedNothingToSellWithholdHasItsOwnID(t *testing.T) {
 	full := simulate(t, options{brokers: true})
-	none := func(b *event.BrokerSnapshotPayload) { b.Positions = nil }
+	none := func(b *event.BrokerSnapshotPayload) { b.Positions = []event.BrokerPosition{} }
 	mutate := map[int]func(*event.BrokerSnapshotPayload){
 		20: none,
 		22: func(b *event.BrokerSnapshotPayload) { none(b); b.ExcessLiquidity = 0.1 * b.NetLiquidation },

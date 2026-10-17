@@ -135,7 +135,8 @@ type BrokerSnapshotPayload struct {
 	NetLiquidation  float64  `json:"net_liquidation"`
 	ExcessLiquidity float64  `json:"excess_liquidity"`
 	// Positions is strictly ascending by instrument, with no zero rows; an
-	// instrument not listed is not held.
+	// instrument not listed is not held. A readable list is stated, empty as
+	// []: a missing or null list is no reading.
 	Positions []BrokerPosition `json:"positions"`
 	// OpenOrders is strictly ascending by broker order ID. A readable list is
 	// stated, empty as []: a missing or null list is no reading, and a list
@@ -146,8 +147,8 @@ type BrokerSnapshotPayload struct {
 // UnmarshalJSON decodes the snapshot and requires market_open to be stated as
 // a boolean: omitted or null it would read as false, a closed market, and
 // silence the alarm's missing-reading rule (plan.md section 5). A missing or
-// null open_orders decodes as unstated, which Validate refuses unless the
-// orders are marked unreadable (ADR 0019, "An unavailable balance is not
+// null open_orders or positions decodes as unstated, which Validate refuses
+// unless that component is marked unreadable (ADR 0019, "An unavailable balance is not
 // zero").
 func (p *BrokerSnapshotPayload) UnmarshalJSON(raw []byte) error {
 	type plain BrokerSnapshotPayload
@@ -215,8 +216,11 @@ func (p BrokerSnapshotPayload) Validate() error {
 	} else if p.ExcessLiquidity != 0 {
 		errs = append(errs, errors.New("an unreadable excess liquidity carries no value"))
 	}
-	if !p.Readable(BrokerComponentPositions) && len(p.Positions) != 0 {
+	switch {
+	case !p.Readable(BrokerComponentPositions) && len(p.Positions) != 0:
 		errs = append(errs, errors.New("unreadable positions carry no rows"))
+	case p.Readable(BrokerComponentPositions) && p.Positions == nil:
+		errs = append(errs, errors.New("readable positions must be stated, [] when none are held; an unavailable list is marked unreadable"))
 	}
 	switch {
 	case !p.Readable(BrokerComponentOpenOrders) && len(p.OpenOrders) != 0:

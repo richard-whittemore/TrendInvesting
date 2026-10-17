@@ -177,6 +177,7 @@ func TestBrokerSnapshotStatesOrdersAndMarketOpen(t *testing.T) {
 	type P = event.BrokerSnapshotPayload
 	v := validBrokerSnapshot()
 	expectInvalid(t, "readable orders not stated", v, func(p *P) { p.OpenOrders = nil }, "open orders")
+	expectInvalid(t, "readable positions not stated", v, func(p *P) { p.Positions = nil }, "positions")
 	none := v
 	none.OpenOrders = []event.BrokerOrder{}
 	if err := none.Validate(); err != nil {
@@ -205,6 +206,8 @@ func TestBrokerSnapshotStatesOrdersAndMarketOpen(t *testing.T) {
 	for name, mutate := range map[string]func(map[string]any){
 		"open orders missing":  func(f map[string]any) { delete(f, "open_orders") },
 		"open orders null":     func(f map[string]any) { f["open_orders"] = nil },
+		"positions missing":    func(f map[string]any) { delete(f, "positions") },
+		"positions null":       func(f map[string]any) { f["positions"] = nil },
 		"market open missing":  func(f map[string]any) { delete(f, "market_open") },
 		"market open null":     func(f map[string]any) { f["market_open"] = nil },
 		"market open a string": func(f map[string]any) { f["market_open"] = "yes" },
@@ -218,6 +221,11 @@ func TestBrokerSnapshotStatesOrdersAndMarketOpen(t *testing.T) {
 		"open orders unreadable and missing": func(f map[string]any) {
 			delete(f, "open_orders")
 			f["unreadable"] = []any{event.BrokerComponentOpenOrders}
+		},
+		"positions empty": func(f map[string]any) { f["positions"] = []any{} },
+		"positions unreadable and missing": func(f map[string]any) {
+			delete(f, "positions")
+			f["unreadable"] = []any{event.BrokerComponentPositions}
 		},
 		"market closed": func(f map[string]any) { f["market_open"] = false },
 	} {
@@ -397,6 +405,13 @@ func TestExcessLiquidityLimits(t *testing.T) {
 	expectInvalid(t, "urgent", v, func(p *P) { p.Limits.ExcessLiquidityUrgent = 0 }, "excess liquidity")
 	expectInvalid(t, "urgent above warning", v, func(p *P) { p.Limits.ExcessLiquidityUrgent = 0.5 }, "excess liquidity")
 	expectInvalid(t, "stale", v, func(p *P) { p.Limits.ExcessLiquidityStaleMinutes = 0 }, "stale")
+	expectInvalid(t, "stale above a session", v, func(p *P) { p.Limits.ExcessLiquidityStaleMinutes = event.MaxSnapshotAgeCeiling + 1 }, "stale")
+	expectInvalid(t, "stale that wraps", v, func(p *P) { p.Limits.ExcessLiquidityStaleMinutes = 200_000_000_000_000 }, "stale")
+	atCeiling := v
+	atCeiling.Limits.ExcessLiquidityStaleMinutes = event.MaxSnapshotAgeCeiling
+	if err := atCeiling.Validate(); err != nil {
+		t.Errorf("a stale period of one session is valid: %v", err)
+	}
 }
 
 // TestSafetyFieldsJoinAtTheirVersions: a sale's figures join

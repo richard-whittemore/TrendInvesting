@@ -397,8 +397,8 @@ func (l MarginLimits) validate() []error {
 		!(0 < l.ExcessLiquidityUrgent && l.ExcessLiquidityUrgent < l.ExcessLiquidityWarning && l.ExcessLiquidityWarning < 1) {
 		errs = append(errs, errors.New("limits excess liquidity thresholds must satisfy 0 < urgent < warning < 1"))
 	}
-	if l.ExcessLiquidityStaleMinutes < 1 {
-		errs = append(errs, errors.New("limits excess liquidity stale minutes must be at least 1"))
+	if l.ExcessLiquidityStaleMinutes < 1 || l.ExcessLiquidityStaleMinutes > MaxSnapshotAgeCeiling {
+		errs = append(errs, fmt.Errorf("limits excess liquidity stale minutes must be from 1 to %d, one session", MaxSnapshotAgeCeiling))
 	}
 	return errs
 }

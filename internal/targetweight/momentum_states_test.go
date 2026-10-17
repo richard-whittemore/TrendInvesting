@@ -96,7 +96,7 @@ func TestAMomentumRunSizesSellsFromTheBrokerSnapshot(t *testing.T) {
 			return nil
 		}
 		snap := event.BrokerSnapshotPayload{AccountID: iraAccount, AsOf: closeOf(day), MarketOpen: false,
-			NetLiquidation: account.NetLiquidation, ExcessLiquidity: account.NetLiquidation, OpenOrders: []event.BrokerOrder{}}
+			NetLiquidation: account.NetLiquidation, ExcessLiquidity: account.NetLiquidation, Positions: []event.BrokerPosition{}, OpenOrders: []event.BrokerOrder{}}
 		for _, p := range account.Positions {
 			q := p.Quantity
 			if p.InstrumentID == short.InstrumentID {
@@ -150,6 +150,6 @@ func TestAMomentumRunRefusesBadSafetyInputs(t *testing.T) {
 		event.KillSwitchPayload{AccountID: "joint", AsOf: at, Engaged: true, Operator: "o", Detail: "d"}), "kill switch for account")
 	mustRefuse(t, h, s.envelope(t, event.KillSwitchEventType, event.KillSwitchSchemaVersion+1, "k", at, event.KillSwitchPayload{}), "schema version")
 	mustRefuse(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "b", at,
-		event.BrokerSnapshotPayload{AccountID: "joint", AsOf: at, NetLiquidation: 1, ExcessLiquidity: 1, OpenOrders: []event.BrokerOrder{}}), "broker snapshot for account")
+		event.BrokerSnapshotPayload{AccountID: "joint", AsOf: at, NetLiquidation: 1, ExcessLiquidity: 1, Positions: []event.BrokerPosition{}, OpenOrders: []event.BrokerOrder{}}), "broker snapshot for account")
 	mustRefuse(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion+1, "b", at, event.BrokerSnapshotPayload{}), "schema version")
 }

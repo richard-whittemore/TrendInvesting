@@ -190,7 +190,7 @@ func TestNothingToSellAtOrBelowNinetyEightPercent(t *testing.T) {
 	if w := sale(t, saleInput(s)).Withheld; w.Reason != event.SaleWithheldNothingToSell {
 		t.Fatalf("at 98.1%%: %+v", w)
 	}
-	s.Positions = nil
+	s.Positions = []event.BrokerPosition{}
 	if w := sale(t, saleInput(s)).Withheld; w.Reason != event.SaleWithheldNothingToSell {
 		t.Fatalf("nothing held: %+v", w)
 	}
