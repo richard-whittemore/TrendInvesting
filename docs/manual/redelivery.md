@@ -36,7 +36,9 @@ Re-delivery closes that gap:
 - **The adapter writes down that it is about to send, before it sends.**
   Once the order's request to IBKR is fully built, and just before it is
   handed over, it records on disk "about to send this client order ID", and
-  once IBKR has taken it, "sent". An order whose request cannot be built is
+  the moment the sender returns, "sent". That means the request left the
+  adapter; IBKR's acknowledgement is the separate lifecycle report that
+  moves the order to acknowledged. An order whose request cannot be built is
   never recorded, since it never left the adapter. It never sends a
   recorded order again. If the adapter stopped in between, it cannot know
   whether IBKR got the order, so after its restart it looks for the order in
