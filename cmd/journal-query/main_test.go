@@ -387,7 +387,7 @@ func strip(out, name string) string {
 
 func TestAPayloadAtASchemaVersionThisBuildDoesNotReadIsRefusedNotGuessed(t *testing.T) {
 	future := fill(event.FillKindEntry, "AAA", 1, 10, 0, day(2026, 1, 5))
-	future.schema = event.FillSchemaVersion + 1
+	future.schema = event.FillTargetWeightVersion + 1
 	path := writeJournal(t, "future.jsonl", future)
 	if _, err := query(t, "fills", path); err == nil || !strings.Contains(err.Error(), "schema version") {
 		t.Fatalf("want a schema version refusal, got %v", err)

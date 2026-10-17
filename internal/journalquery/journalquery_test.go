@@ -386,7 +386,7 @@ func TestInvalidPayloadsAreRefusedBeforeAnyFigure(t *testing.T) {
 
 func TestUnknownSnapshotVersionsAreRefusedNotSkipped(t *testing.T) {
 	d := at(time.March, 2)
-	for _, v := range []uint32{event.AccountSnapshotPositionsVersion + 1} {
+	for _, v := range []uint32{event.AccountSnapshotCashVersion + 1} {
 		r := rec{journal.KindInput, event.AccountSnapshotEventType, v, d, event.AccountPositionsSnapshotPayload{AccountID: "A", AsOf: d, NetLiquidation: 1, Currency: "USD"}}
 		js := []journalquery.Journal{load(t, "j", build(t, r))}
 		if _, err := journalquery.Reconcile(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "record 1") {
@@ -648,5 +648,134 @@ func TestPositionsThatWouldOverflowAreRefusedNotWrapped(t *testing.T) {
 				t.Errorf("%s, %s: want an overflow refusal, got %v", name, report, err)
 			}
 		}
+	}
+}
+
+// The target-weight account's record versions (ADR 0026): account.snapshot
+// version 4 (positions and cash), execution.fill version 5 (a limit order's
+// execution, by side), execution.order.lifecycle version 2 (a limit order's
+// state change) and risk.order.released/refused version 2 (account-wide
+// exposure and the IRA cash check).
+func cashSnap(when time.Time, p ...event.AccountPosition) rec {
+	return rec{journal.KindInput, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, when, event.AccountCashSnapshotPayload{
+		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: "I", AsOf: when, NetLiquidation: 100, Currency: "USD", Positions: p},
+		SettledCash:                     40, TotalCash: 50,
+	}}
+}
+
+func limitFill(id, side string, qty int64, commission float64, when time.Time) rec {
+	return rec{journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, when, event.TargetWeightFillPayload{
+		AccountID: "I", ClientOrderID: "c-" + id, FillID: id, InstrumentID: "AAA", Side: side, Quantity: qty, Price: 2, Commission: commission, FilledAt: when,
+	}}
+}
+
+func limitLifecycle(when time.Time) rec {
+	return rec{journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, when, event.LimitOrderLifecyclePayload{
+		AccountID: "I", ClientOrderID: "c1", OrderID: "o1", InstrumentID: "AAA", Side: "buy", Status: "submitted", Quantity: 5, LimitPrice: 2.5, OccurredAt: when,
+	}}
+}
+
+var cashFigures = event.RiskFigures{NetLiquidation: 100, ReferencePrice: 2.5, CashChecked: true, BuyCost: 12.5, CashAvailable: 40}
+
+func TestTheTargetWeightAccountsRecordVersionsAreRead(t *testing.T) {
+	d := at(time.March, 2)
+	data := build(t,
+		cashSnap(at(time.January, 1), event.AccountPosition{InstrumentID: "AAA", Quantity: 10}),
+		limitFill("f-1", "buy", 5, 0.1, d),
+		limitFill("f-2", "sell", 3, 0.2, d),
+		// A repeated delivery of f-1, its instant written in another offset.
+		limitFill("f-1", "buy", 5, 0.1, d.In(time.FixedZone("EST", -5*3600))),
+		limitLifecycle(d),
+		dec(event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, d, event.OrderReleasedPayload{AccountID: "I", ClientOrderID: "c1", PlanID: "p", Tag: "t", InstrumentID: "AAA", Side: "buy", Quantity: 5, LimitPrice: 2.5, Mode: "paper", Figures: cashFigures}),
+		dec(event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, d, event.OrderRefusedPayload{AccountID: "I", ClientOrderID: "c2", PlanID: "p", InstrumentID: "AAA", Side: "buy", Quantity: 50, LimitPrice: 2.5, Reason: event.RefusedInsufficientCash, Detail: "d", Figures: cashFigures}),
+		cashSnap(at(time.March, 3), event.AccountPosition{InstrumentID: "AAA", Quantity: 12}),
+	)
+	js := []journalquery.Journal{load(t, "ira", data)}
+	f, err := journalquery.NewFilter("I", "AAA", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fills, err := journalquery.Fills(js, f)
+	if err != nil || len(fills.Rows) != 2 {
+		t.Fatalf("fills: %v %v", fills.Rows, err)
+	}
+	if got := strings.Join(fills.Rows[1], " "); got != "ira 3 2026-03-02 AAA sell -3 2.00 0.20" {
+		t.Errorf("sell fill row: %q", got)
+	}
+	tot, err := journalquery.Totals(js, f)
+	if err != nil || strings.Join(tot.Rows[len(tot.Rows)-1], " ") != "TOTAL all 2 5 3 0.30" {
+		t.Errorf("totals: %v %v", tot.Rows, err)
+	}
+
+	orders, err := journalquery.Orders(js, f)
+	if err != nil || len(orders.Rows) != 3 {
+		t.Fatalf("orders: %v %v", orders.Rows, err)
+	}
+	if got := strings.Join(orders.Rows[0], " "); got != "ira 5 2026-03-02 I AAA lifecycle-submitted buy 5 2.50 c1" {
+		t.Errorf("limit lifecycle row: %q", got)
+	}
+	refusals, err := journalquery.Refusals(js, f)
+	if err != nil || len(refusals.Rows) != 1 || cell(refusals, 0, "reason") != event.RefusedInsufficientCash {
+		t.Errorf("refusals: %v %v", refusals.Rows, err)
+	}
+
+	pos, err := journalquery.Positions(js, f)
+	if err != nil || len(pos.Rows) != 2 || cell(pos, 0, "kind") != "buy" || cell(pos, 0, "position") != "15" || cell(pos, 1, "position") != "12" {
+		t.Errorf("positions: %v %v", pos.Rows, err)
+	}
+	rec, err := journalquery.Reconcile(js, f)
+	if err != nil || len(rec.Rows) != 1 || cell(rec, 0, "status") != "ok" || cell(rec, 0, "account") != "I" {
+		t.Errorf("reconcile: %v %v", rec.Rows, err)
+	}
+}
+
+func TestRiskRecordsOfTheEarlierVersionStillRead(t *testing.T) {
+	d := at(time.March, 2)
+	data := build(t, rec{journal.KindInput, "other.thing", 1, d, 1},
+		dec(event.OrderReleasedEventType, 1, d, event.OrderReleasedPayload{AccountID: "A", ClientOrderID: "c", PlanID: "p", Tag: "t", InstrumentID: "AAA", Side: "buy", Quantity: 1, LimitPrice: 3, Mode: "paper", Figures: figures}),
+		dec(event.OrderRefusedEventType, 1, d, event.OrderRefusedPayload{AccountID: "A", ClientOrderID: "c", PlanID: "p", InstrumentID: "AAA", Side: "sell", Quantity: 1, LimitPrice: 3, Reason: "order-size", Detail: "d", Figures: figures}),
+	)
+	orders, err := journalquery.Orders([]journalquery.Journal{load(t, "j", data)}, journalquery.Filter{})
+	if err != nil || len(orders.Rows) != 2 {
+		t.Errorf("version 1 risk records: %v %v", orders.Rows, err)
+	}
+}
+
+func TestTheNextVersionOfEveryReadRecordIsRefused(t *testing.T) {
+	d := at(time.March, 2)
+	for _, r := range []rec{
+		{journal.KindInput, event.FillEventType, event.FillTargetWeightVersion + 1, d, map[string]any{}},
+		{journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion + 1, d, map[string]any{}},
+		{journal.KindDecision, event.OrderReleasedEventType, event.OrderReleasedSchemaVersion + 1, d, map[string]any{}},
+		{journal.KindDecision, event.OrderRefusedEventType, event.OrderRefusedSchemaVersion + 1, d, map[string]any{}},
+		{journal.KindInput, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion + 1, d, map[string]any{}},
+	} {
+		js := []journalquery.Journal{load(t, "j", build(t, rec{journal.KindInput, "other.thing", 1, d, 1}, r))}
+		if _, err := journalquery.Orders(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "does not read") {
+			t.Errorf("%s v%d: %v", r.typ, r.schema, err)
+		}
+	}
+}
+
+func TestInvalidTargetWeightRecordsAreRefused(t *testing.T) {
+	d := at(time.March, 2)
+	for name, r := range map[string]rec{
+		"fill":      {journal.KindInput, event.FillEventType, event.FillTargetWeightVersion, d, event.TargetWeightFillPayload{AccountID: "I"}},
+		"lifecycle": {journal.KindInput, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, d, event.LimitOrderLifecyclePayload{AccountID: "I"}},
+		"snapshot":  {journal.KindInput, event.AccountSnapshotEventType, event.AccountSnapshotCashVersion, d, event.AccountCashSnapshotPayload{SettledCash: 1}},
+	} {
+		js := []journalquery.Journal{load(t, "j", build(t, r))}
+		if _, err := journalquery.Orders(js, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "record 1:") || strings.Contains(err.Error(), "does not read") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestAFillIDUsedByBothFillVersionsIsRefused(t *testing.T) {
+	d := at(time.March, 2)
+	data := build(t, fillInput(validFill("f-1", 5, d)), limitFill("f-1", "buy", 5, 0.5, d))
+	if _, err := journalquery.Fills([]journalquery.Journal{load(t, "j", data)}, journalquery.Filter{}); err == nil || !strings.Contains(err.Error(), "f-1") {
+		t.Errorf("one fill id in two versions: %v", err)
 	}
 }

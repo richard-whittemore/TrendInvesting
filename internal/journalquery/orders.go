@@ -35,7 +35,7 @@ func Orders(journals []Journal, f Filter) (Table, error) {
 				instrument, event, side, quantity, price, note = p.InstrumentID, "refused", p.Side, p.Quantity, p.LimitPrice, p.Reason
 			case it.lifecycle != nil:
 				p := it.lifecycle
-				instrument, event, quantity, price, note = p.InstrumentID, "lifecycle-"+p.Status, p.Quantity, p.StopPrice, p.Tag
+				instrument, event, side, quantity, price, note = p.InstrumentID, "lifecycle-"+p.Status, p.Side, p.Quantity, p.Price, p.Note
 			default:
 				continue
 			}
