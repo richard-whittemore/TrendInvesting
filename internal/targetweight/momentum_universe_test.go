@@ -134,9 +134,10 @@ func TestTheCompactStreamCarriesNoBarPerUniverseMember(t *testing.T) {
 	}
 }
 
-// historyFixture is a momentum run with a calendar of 2025-01-30, 01-31 and
-// 02-03, whose 01-31 is a decision session, and helpers for the inputs of the
-// compact universe stream.
+// historyFixture is a momentum run configured for the compact universe
+// input, with a calendar of 2025-01-30, 01-31 and 02-03, whose 01-31 is a
+// decision session, and helpers for the inputs of the compact universe
+// stream.
 type historyFixture struct {
 	t *testing.T
 	h *targetweight.Handler
@@ -145,7 +146,14 @@ type historyFixture struct {
 
 func newHistoryFixture(t *testing.T) historyFixture {
 	t.Helper()
-	h, s := momentumHandler(t)
+	return newHistoryFixtureReading(t, event.UniverseInputCompact)
+}
+
+// newHistoryFixtureReading is newHistoryFixture for a run whose
+// configuration declares the universe input shape input.
+func newHistoryFixtureReading(t *testing.T, input string) historyFixture {
+	t.Helper()
+	h, s := momentumHandlerReading(t, input)
 	mustApply(t, h, calendarInput(t, s, "calendar", "2025-01-30", "2025-01-31", "2025-02-03"))
 	return historyFixture{t: t, h: h, s: s}
 }
@@ -263,6 +271,7 @@ func TestCloseHistoryRules(t *testing.T) {
 // history must cover; for any other session, none.
 func TestMomentumHistoryRequestNamesTheMembersTheRunRanks(t *testing.T) {
 	cfg := momentumConfiguration()
+	cfg.Momentum.UniverseInput = event.UniverseInputCompact
 	f := historyFixture{t: t, s: &stream{}}
 	var snap event.UniverseSnapshotPayload
 	decode(t, f.universe("2025-01-31"), &snap)
@@ -292,6 +301,11 @@ func TestMomentumHistoryRequestNamesTheMembersTheRunRanks(t *testing.T) {
 	}
 	if _, err := targetweight.MomentumHistoryRequest(testConfiguration(), snap, "2025-01-31"); err == nil {
 		t.Error("a Boost configuration was accepted")
+	}
+	bars := cfg
+	bars.Momentum.UniverseInput = event.UniverseInputBars
+	if _, err := targetweight.MomentumHistoryRequest(bars, snap, "2025-01-31"); err == nil || !strings.Contains(err.Error(), "reads bars") {
+		t.Errorf("a configuration reading bars: %v", err)
 	}
 }
 
@@ -342,4 +356,83 @@ func TestCloseHistoryArrivalRules(t *testing.T) {
 		mustApply(t, f.h, f.history("BBB", "2025-01-31", base, close31(10)))
 		mustRefuse(t, f.h, f.close("2025-01-31", "AAA"), "universe row close 20 for AAA disagrees with its bar's raw close 21")
 	})
+}
+
+// TestTheFirstCompactDecisionSessionWithoutHistoriesIsWithheld: a run
+// configured for the compact input applies its rules from the first decision
+// session, before any history has been read, so a first month whose ranked
+// members sent no close history is withheld as histories-missing, never
+// decided from the bars of the names held alone.
+func TestTheFirstCompactDecisionSessionWithoutHistoriesIsWithheld(t *testing.T) {
+	r := simulateMomentum(t, momentumOptions{compact: true, noHistories: map[string]bool{"2025-01-31": true}})
+	got := targets(t, r.decisions)
+	if len(got) == 0 {
+		t.Fatal("no decision")
+	}
+	jan := got[0]
+	if jan.Outcome != event.TargetsOutcomeWithheld || jan.WithheldReason != event.WithheldHistoriesMissing || jan.Momentum.CloseSession != "2025-01-31" {
+		t.Fatalf("January is %s (%s) at %s: %s", jan.Outcome, jan.WithheldReason, jan.Momentum.CloseSession, jan.Detail)
+	}
+	if len(planned(t, r.decisions)) != 0 && got[len(got)-1].Momentum.CloseSession == "2025-01-31" {
+		t.Errorf("January's withheld decision planned orders")
+	}
+}
+
+// TestAUniverseOnlyCompactSessionIsWithheld: a compact run fed a decision
+// session's universe snapshot and bars for SPY alone, no history at all,
+// withholds that session as histories-missing.
+func TestAUniverseOnlyCompactSessionIsWithheld(t *testing.T) {
+	f := newHistoryFixture(t)
+	mustApply(t, f.h, f.universe("2025-01-31"))
+	mustApply(t, f.h, f.bar("SPY", "2025-01-31", 500))
+	got := targets(t, mustApply(t, f.h, f.close("2025-01-31", "SPY")))
+	if len(got) != 1 || got[0].WithheldReason != event.WithheldHistoriesMissing || !strings.Contains(got[0].Detail, "2 members ranked") {
+		t.Fatalf("decisions %+v", got)
+	}
+}
+
+// TestABarsRunReadsNoCloseHistory: a run configured for bars refuses a
+// close history, which only the compact input carries.
+func TestABarsRunReadsNoCloseHistory(t *testing.T) {
+	f := newHistoryFixtureReading(t, event.UniverseInputBars)
+	mustApply(t, f.h, f.universe("2025-01-31"))
+	mustRefuse(t, f.h, f.history("AAA", "2025-01-31", "2024-12-31", close31(20)), "reads bars")
+}
+
+// TestABarsDecisionSessionWithNoRankedMemberBarIsWithheld: a run configured
+// for bars whose decision session has its universe snapshot but no bar for
+// any member ranked from it (a stream written without the members' bars) is
+// withheld as missing-bars, never decided from the bars of the names held
+// alone.
+func TestABarsDecisionSessionWithNoRankedMemberBarIsWithheld(t *testing.T) {
+	f := newHistoryFixtureReading(t, event.UniverseInputBars)
+	mustApply(t, f.h, f.universe("2025-01-31"))
+	mustApply(t, f.h, f.bar("SPY", "2025-01-31", 500))
+	got := targets(t, mustApply(t, f.h, f.close("2025-01-31", "SPY")))
+	if len(got) != 1 || got[0].WithheldReason != event.WithheldMissingBars || !strings.Contains(got[0].Detail, "none of the 2 members ranked") {
+		t.Fatalf("decisions %+v", got)
+	}
+	g := newHistoryFixtureReading(t, event.UniverseInputBars)
+	mustApply(t, g.h, g.universe("2025-01-31"))
+	mustApply(t, g.h, g.bar("AAA", "2025-01-31", 20))
+	mustApply(t, g.h, g.bar("SPY", "2025-01-31", 500))
+	if got := targets(t, mustApply(t, g.h, g.close("2025-01-31", "AAA", "SPY"))); len(got) != 1 || got[0].WithheldReason == event.WithheldMissingBars {
+		t.Fatalf("with a ranked member's bar, decisions %+v", got)
+	}
+}
+
+// TestACompactDecisionSessionRankingNoMemberNeedsNoHistory: a compact
+// decision session whose snapshot ranks no member needs no history, so it
+// is decided by the rule, not withheld as histories-missing.
+func TestACompactDecisionSessionRankingNoMemberNeedsNoHistory(t *testing.T) {
+	f := newHistoryFixture(t)
+	mustApply(t, f.h, f.s.envelope(t, event.UniverseSnapshotEventType, event.UniverseSnapshotSchemaVersion, "universe:2025-01-31", closeOf("2025-01-31"),
+		event.UniverseSnapshotPayload{Session: "2025-01-31", Source: "fixture-universe", Rows: []event.UniverseRow{
+			{InstrumentID: "ETF", Type: "ETF", Close: 50, Volume: 1e6},
+		}}))
+	mustApply(t, f.h, f.bar("SPY", "2025-01-31", 500))
+	got := targets(t, mustApply(t, f.h, f.close("2025-01-31", "SPY")))
+	if len(got) != 1 || got[0].WithheldReason == event.WithheldHistoriesMissing {
+		t.Fatalf("decisions %+v", got)
+	}
 }

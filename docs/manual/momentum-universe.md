@@ -24,6 +24,23 @@ can decide. The owner chose a smaller shape on 2026-10-16:
 
 The engine never reads a bar for every listed stock in a session.
 
+## The configuration says which shape the run reads
+
+The IRA's configuration (version 5) must say which of the two shapes its
+stream is, in the momentum section's `universe_input`:
+
+- `"compact"`: the shape above, written by `encode --ranker`;
+- `"bars"`: a daily bar for every stock ranked, written by `encode
+  --universe-members`.
+
+A configuration with no `universe_input`, or any other value, is refused
+before the run starts, and the value is part of the configuration hash. The
+engine never guesses the shape from what arrives. `encode` run with neither
+`--ranker` nor `--universe-members` writes a bars stream with no bar for any
+ranked stock: it is not a stream to decide from (see below). `universe-rank`
+refuses a configuration that says `"bars"`, since a bars run reads no
+histories.
+
 ## How the 500 are chosen without ranking twice
 
 Ranking is a rule, and rules live in Go (ADR 0026, point 1). The market-data
@@ -57,21 +74,31 @@ this in place:
 `test_counted_per_session_no_input_is_written_per_listed_stock` count the
 inputs per session.
 
-A stock's raw price for orders comes from its universe row, the same
-unadjusted close its bar would carry. A stock you hold has a bar too, and
-the bar's raw close and the universe row's close must agree; the engine
-stops the run if they do not.
+A ranked stock's raw price for orders comes from its universe row, the same
+unadjusted close its bar would carry. A ranked stock you hold has a bar too,
+and the bar's raw close and the universe row's close must agree; the engine
+stops the run if they do not. Any other stock you hold (one the snapshot
+leaves out, or ranks below the 500) is priced from its bar alone.
 
-Once the engine has read one history, it knows the stream is the compact
-one, and from then on it expects histories at every month's last session. If
-a month's last session closes with its universe snapshot but no history for
-the stocks it ranks (a ranker that wrongly said it was not a decision
-session, or named no stocks), the engine does not decide from the few stocks
-it has bars for: it journals that month's decision withheld, with the reason
-`histories-missing`, and alerts you as missing data. A stream that has sent
-no history yet (the very first month of a compact run) cannot be told apart
-from one that sends a bar for every stock, so that first month is not
-checked this way.
+In a run configured `"compact"`, the engine expects histories at every
+month's last session, from the very first. If a month's last session closes
+with its universe snapshot but no history for the stocks it ranks (a ranker
+that wrongly said it was not a decision session, or named no stocks, or a
+stream written without `--ranker`), the engine does not decide from the few
+stocks it has bars for: it journals that month's decision withheld, with the
+reason `histories-missing`, and alerts you as missing data. In a run
+configured `"bars"`, a history is refused as it arrives, and a month's last
+session whose snapshot ranks stocks none of which has a bar that session is
+withheld as `missing-bars` the same way. One ranked stock's bar is enough to
+decide, since a stock with bad data is left out of some sessions and the
+others still score.
+
+Tests: `TestTheFirstCompactDecisionSessionWithoutHistoriesIsWithheld`,
+`TestAUniverseOnlyCompactSessionIsWithheld`,
+`TestADecisionSessionWithoutItsHistoriesIsWithheld`,
+`TestABarsRunReadsNoCloseHistory` and
+`TestABarsDecisionSessionWithNoRankedMemberBarIsWithheld`
+(`internal/targetweight/momentum_universe_test.go`).
 
 ## A session the exchange cancels
 
@@ -87,9 +114,10 @@ If the cancelled day was the last of its month, the day before becomes the
 month's decision session. The retraction can arrive after that day has
 already closed, when it was not yet a decision session:
 
-- with a bar for every stock, the engine already holds every price it needs
-  and makes that day's decision at once;
-- with the compact stream, no history was sent for that day, since it was
+- in a run configured `"bars"`, the engine already holds every price it
+  needs and makes that day's decision at once (withheld as `missing-bars` if
+  no stock it ranks had a bar that day);
+- in a run configured `"compact"`, no history was sent for that day, since it was
   not the month's last when it closed. The engine waits for them: once a
   history has arrived for every stock it ranks from that day's snapshot, it
   makes the decision, exactly as it would have at that day's close had the
@@ -107,6 +135,10 @@ calendar that never listed it, while the same day left in place withholds
 January), `TestALateRetractionWaitsForTheLastSessionsHistories` (a late
 retraction decides exactly as a calendar that never listed the day, from
 either stream), `TestALateRetractionWithoutHistoriesIsWithheldAtTheNextClose`,
+`TestALateRetractionBeforeAnyHistoryWaitsForThem`,
+`TestALateRetractionInABarsRunWithNoRankedMemberBarIsWithheld`,
+`TestAPendingDecisionThatCompletesDecides` (the decision ranks its own day's
+snapshot even when the next day's has arrived),
 `TestRetractingTheNextSessionDecidesTheLastOneClosed`,
 `TestSessionRetractionRules` and the encoder's `RetractionTest`.
 
@@ -123,8 +155,9 @@ when:
   twice for one stock;
 - a universe snapshot arrives while the histories of the one before it are
   still waiting for their session to close;
-- a stock with both a bar and a history has a bar whose raw close differs
-  from its universe row's close;
+- a history arrives in a run configured `"bars"`;
+- a ranked stock with both a bar and a history has a bar whose raw close
+  differs from its universe row's close;
 - a history has a price on a day the calendar does not list, or a price that
   disagrees with one the engine already holds for that stock and day, or was
   adjusted from a different base;
@@ -137,9 +170,9 @@ when:
 A second copy of the same retraction changes nothing, and a later calendar
 that still lists the cancelled day is read without it.
 
-A month's last session with no history for the stocks it ranks, once the
-stream is known to be compact, is not a stop: the decision is withheld as
-`histories-missing` (above).
+A month's last session with no history for the stocks it ranks in a compact
+run, or no bar for any of them in a bars run, is not a stop: the decision is
+withheld as `histories-missing` or `missing-bars` (above).
 
 A stock whose history is short or has a gap is recorded in the decision as
 `short-history` or `gap` and left out of that month, exactly as with daily
@@ -148,7 +181,10 @@ bars (ADR 0026, point 5).
 ## What backs it
 
 - ADR 0026, points 1 (inputs, ranking in Go, decision times) and 5 (missing
-  bars fail closed); ADR 0015 (the two new record types start at version 1);
+  bars fail closed); ADR 0015 (the two new record types start at version 1;
+  the configuration's `universe_input` is its version 5, and version 4 is
+  refused); ADR 0016 (the value is part of the configuration hash; rules
+  version 1.5.0);
   ADR 0004 and the adjusted-bar rule in `internal/event/bar_adjusted.go` (how
   closes are adjusted).
 - `internal/event/universe_inputs.go`: `market.close.history` and

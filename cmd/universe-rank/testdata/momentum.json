@@ -24,7 +24,8 @@
     "sector_sources": [
       "ishares-iwv-gics",
       "nasdaq-screener"
-    ]
+    ],
+    "universe_input": "compact"
   },
   "glide": {
     "anchors": [

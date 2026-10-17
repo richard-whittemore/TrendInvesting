@@ -829,12 +829,15 @@ func TestTheGlidePathRecordVersionsAreRead(t *testing.T) {
 }
 
 // TestTheCompactUniverseInputsAreRead: a momentum journal records its
-// compact universe input, the universe snapshot, the ranked members' close
-// histories and any session retraction. No report draws a figure from them,
-// so a journal holding them reads in every report, its fills unchanged.
+// configuration, version 5, declaring the compact universe input, then that
+// input: the universe snapshot, the ranked members' close histories and any
+// session retraction. No report draws a figure from them, so a journal
+// holding them reads in every report, its fills unchanged.
 func TestTheCompactUniverseInputsAreRead(t *testing.T) {
 	d := at(time.March, 2)
 	data := build(t,
+		rec{journal.KindInput, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, at(time.January, 1),
+			map[string]any{"strategy_id": event.TargetWeightStrategyMomentum, "momentum": map[string]any{"universe_input": event.UniverseInputCompact}}},
 		rec{journal.KindInput, event.SessionRetractedEventType, event.SessionRetractedSchemaVersion, at(time.January, 1),
 			event.SessionRetractedPayload{Source: "marketdata-retraction", Session: "2026-03-03", Reason: "storm"}},
 		rec{journal.KindInput, event.UniverseSnapshotEventType, event.UniverseSnapshotSchemaVersion, d,

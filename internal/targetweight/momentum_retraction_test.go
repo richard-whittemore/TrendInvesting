@@ -130,9 +130,10 @@ func TestALateRetractionWithoutHistoriesIsWithheldAtTheNextClose(t *testing.T) {
 // decision (ADR 0026, point 1).
 func TestRetractingTheNextSessionDecidesTheLastOneClosed(t *testing.T) {
 	feed := func(f historyFixture) []event.Envelope {
+		mustApply(t, f.h, f.bar("AAA", "2025-01-30", 20))
 		mustApply(t, f.h, f.bar("SPY", "2025-01-30", 500))
 		mustApply(t, f.h, f.universe("2025-01-30"))
-		return mustApply(t, f.h, f.close("2025-01-30", "SPY"))
+		return mustApply(t, f.h, f.close("2025-01-30", "AAA", "SPY"))
 	}
 	never, _ := momentumHandler(t)
 	n := historyFixture{t: t, h: never}
@@ -140,7 +141,7 @@ func TestRetractingTheNextSessionDecidesTheLastOneClosed(t *testing.T) {
 	mustApply(t, never, calendarInput(t, n.s, "calendar", "2025-01-30", "2025-02-03"))
 	want := targets(t, feed(n))
 
-	f := newHistoryFixture(t) // 2025-01-30, 01-31, 02-03
+	f := newHistoryFixtureReading(t, event.UniverseInputBars) // 2025-01-30, 01-31, 02-03
 	if out := feed(f); len(out) != 0 {
 		t.Fatalf("01-30 decided with 01-31 still on the calendar: %d records", len(out))
 	}
@@ -206,6 +207,7 @@ func TestRetractingTheNextSessionMidMonthDecidesNothing(t *testing.T) {
 func compactRun(t *testing.T, birth string, sessions ...string) historyFixture {
 	t.Helper()
 	cfg := momentumConfiguration()
+	cfg.Momentum.UniverseInput = event.UniverseInputCompact
 	cfg.Glide.Birth = birth
 	h, err := targetweight.New(strategyVersion, cfg, targetweight.Options{DecideFrom: closeOf("2025-01-02")})
 	if err != nil {
@@ -249,23 +251,68 @@ func TestAPendingDecisionReadsOnlyItsMembersHistories(t *testing.T) {
 }
 
 // TestAPendingDecisionThatCompletesDecides: the last member's history
-// decides the session awaiting them, at that session's close time.
+// decides the session awaiting them, at that session's close time, from
+// that session's universe snapshot, even when the next session's snapshot
+// arrived in between.
 func TestAPendingDecisionThatCompletesDecides(t *testing.T) {
-	f := compactRun(t, "1995-06", "2025-01-02", "2025-01-30", "2025-01-31", "2025-02-03", "2025-02-04")
-	f.closeWithSPY("2025-01-02")
+	// Enough SPY closes for the trend, so the decision ranks its universe.
+	f := compactRun(t, "1995-06", "2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07", "2025-01-30", "2025-01-31", "2025-02-03", "2025-02-04")
+	for _, session := range []string{"2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07"} {
+		f.closeWithSPY(session)
+	}
 	mustApply(t, f.h, f.universe("2025-01-30"))
 	f.closeWithSPY("2025-01-30")
 	mustApply(t, f.h, f.retract("2025-01-31"))
+	// 02-03's snapshot lists one row, 01-30's three.
+	mustApply(t, f.h, f.s.envelope(t, event.UniverseSnapshotEventType, event.UniverseSnapshotSchemaVersion, "universe:2025-02-03", closeOf("2025-02-03"),
+		event.UniverseSnapshotPayload{Session: "2025-02-03", Source: "fixture-universe", Rows: []event.UniverseRow{
+			{InstrumentID: "AAA", Type: "CS", Close: 20, Volume: 1e6, Sector: "Tech", SectorSource: "gics"},
+		}}))
 	on30 := func(price float64) event.SessionClose { return event.SessionClose{Session: "2025-01-30", Close: price} }
 	if out := mustApply(t, f.h, f.history("AAA", "2025-01-30", "2024-12-31", on30(20))); len(out) != 0 {
 		t.Fatalf("one of two histories decided: %d records", len(out))
 	}
 	got := targets(t, mustApply(t, f.h, f.history("BBB", "2025-01-30", "2024-12-31", on30(10))))
-	if len(got) != 1 || got[0].Momentum.CloseSession != "2025-01-30" || !got[0].DecisionTime.Equal(closeOf("2025-01-30")) {
+	if len(got) != 1 || got[0].Momentum.CloseSession != "2025-01-30" || !got[0].DecisionTime.Equal(closeOf("2025-01-30")) || got[0].Momentum.UniverseRows != 3 {
 		t.Fatalf("decisions %+v", got)
 	}
 	if out := f.closeWithSPY("2025-02-03"); len(targets(t, out)) != 0 {
 		t.Errorf("02-03 journalled %d decisions after 01-30's was made", len(targets(t, out)))
+	}
+}
+
+// TestALateRetractionBeforeAnyHistoryWaitsForThem: a compact run that has
+// read no history yet still waits for the histories of the decision a late
+// retraction makes due, and withholds it as histories-missing when the next
+// session closes first.
+func TestALateRetractionBeforeAnyHistoryWaitsForThem(t *testing.T) {
+	h, s := momentumHandlerReading(t, event.UniverseInputCompact)
+	f := historyFixture{t: t, h: h, s: s}
+	mustApply(t, h, calendarInput(t, s, "calendar", "2025-01-30", "2025-01-31", "2025-02-03", "2025-02-04"))
+	mustApply(t, h, f.universe("2025-01-30"))
+	f.closeWithSPY("2025-01-30")
+	if out := mustApply(t, h, f.retract("2025-01-31")); len(out) != 0 {
+		t.Fatalf("the compact run decided at the retraction: %d records", len(out))
+	}
+	got := targets(t, f.closeWithSPY("2025-02-03"))
+	if len(got) != 1 || got[0].WithheldReason != event.WithheldHistoriesMissing || got[0].Momentum.CloseSession != "2025-01-30" {
+		t.Fatalf("decisions %+v", got)
+	}
+}
+
+// TestALateRetractionInABarsRunWithNoRankedMemberBarIsWithheld: the
+// decision a late retraction makes due in a run configured for bars is
+// withheld as missing-bars when no member ranked from its universe snapshot
+// had a bar in that session.
+func TestALateRetractionInABarsRunWithNoRankedMemberBarIsWithheld(t *testing.T) {
+	h, s := momentumHandler(t)
+	f := historyFixture{t: t, h: h, s: s}
+	mustApply(t, h, calendarInput(t, s, "calendar", "2025-01-30", "2025-01-31", "2025-02-03", "2025-02-04"))
+	mustApply(t, h, f.universe("2025-01-30"))
+	f.closeWithSPY("2025-01-30")
+	got := targets(t, mustApply(t, h, f.retract("2025-01-31")))
+	if len(got) != 1 || got[0].WithheldReason != event.WithheldMissingBars || got[0].Momentum.CloseSession != "2025-01-30" {
+		t.Fatalf("decisions %+v", got)
 	}
 }
 
@@ -290,5 +337,20 @@ func TestAWithheldHistoriesMissingDecisionChecksTheAge(t *testing.T) {
 		mustApply(t, f.h, f.retract("2025-01-31"))
 		mustApply(t, f.h, f.bar("SPY", "2025-02-03", 500))
 		mustRefuse(t, f.h, f.close("2025-02-03", "SPY"), "implies an age of 1321 months")
+	})
+	t.Run("missing-bars at the retraction in a bars run", func(t *testing.T) {
+		cfg := momentumConfiguration()
+		cfg.Glide.Birth = birth
+		h, err := targetweight.New(strategyVersion, cfg, targetweight.Options{DecideFrom: closeOf("2025-01-02")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := historyFixture{t: t, h: h, s: &stream{hash: h.ConfigurationHash()}}
+		mustApply(t, h, f.s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", closeOf("2025-01-02"), cfg))
+		mustApply(t, h, calendarInput(t, f.s, "calendar", "2025-01-02", "2025-01-30", "2025-01-31", "2025-02-03"))
+		f.closeWithSPY("2025-01-02")
+		mustApply(t, h, f.universe("2025-01-30"))
+		f.closeWithSPY("2025-01-30")
+		mustRefuse(t, h, f.retract("2025-01-31"), "implies an age of 1321 months")
 	})
 }

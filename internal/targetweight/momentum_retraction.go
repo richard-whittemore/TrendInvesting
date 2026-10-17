@@ -23,12 +23,14 @@ import (
 //
 // When the session retracted followed the last one closed and was its
 // month's last, the session closed becomes the last before the rebalance,
-// and its decision is due. A run reading bars for every listed stock holds
-// every close it needs and decides at once. A run reading the compact
-// universe input has no histories for the members ranked from that
-// session's snapshot, since it was no decision session when it closed: its
-// decision waits for them (applyPendingHistory), and is withheld as
-// histories-missing if the next session closes first.
+// and its decision is due. A run configured for bars holds every close it
+// needs and decides at once, or withholds as missing-bars when no member
+// ranked from that session's snapshot had a bar in it (barsMissing). A run
+// configured for the compact universe input has no histories for the
+// members ranked from that session's snapshot, since it was no decision
+// session when it closed: its decision waits for them
+// (applyPendingHistory), and is withheld as histories-missing if the next
+// session closes first.
 func (r *momentumRun) applyRetraction(in event.Envelope) ([]event.Envelope, error) {
 	p, err := decodeInput[event.SessionRetractedPayload](in, event.SessionRetractedSchemaVersion)
 	if err != nil {
@@ -76,13 +78,22 @@ func (r *momentumRun) applyRetraction(in event.Envelope) ([]event.Envelope, erro
 	if r.universe != nil && r.universe.Session == r.last {
 		u = r.universe
 	}
-	if u != nil && r.compact {
+	b := &emissions{h: r.h, in: in, at: r.lastEnd}
+	switch {
+	case u != nil && r.compact:
 		ranked, closes := rankedMembers(r.rule, *u)
 		if len(ranked) > 0 {
 			slices.Sort(ranked)
 			r.pending = &pendingDecision{session: r.last, end: r.lastEnd, universe: *u, ranked: ranked, closes: closes, histories: map[string]event.CloseHistoryPayload{}}
 			return nil, nil
 		}
+	case u != nil:
+		if detail := r.barsMissing(*u); detail != "" {
+			if err := r.withheldAt(b, decisionID(r.h.cfg.AccountID, r.lastEnd), r.last, r.lastEnd, prev, event.WithheldMissingBars, detail); err != nil {
+				return nil, err
+			}
+			return b.result()
+		}
 	}
-	return r.decide(&emissions{h: r.h, in: in, at: r.lastEnd}, r.lastEnd, prev, u)
+	return r.decide(b, r.lastEnd, prev, u)
 }

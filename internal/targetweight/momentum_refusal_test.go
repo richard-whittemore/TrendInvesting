@@ -12,7 +12,15 @@ import (
 
 func momentumHandler(t *testing.T) (*targetweight.Handler, *stream) {
 	t.Helper()
+	return momentumHandlerReading(t, event.UniverseInputBars)
+}
+
+// momentumHandlerReading is momentumHandler for a run whose configuration
+// declares the universe input shape input.
+func momentumHandlerReading(t *testing.T, input string) (*targetweight.Handler, *stream) {
+	t.Helper()
 	cfg := momentumConfiguration()
+	cfg.Momentum.UniverseInput = input
 	h, err := targetweight.New(strategyVersion, cfg, targetweight.Options{DecideFrom: closeOf("2025-01-02")})
 	if err != nil {
 		t.Fatal(err)

@@ -134,6 +134,17 @@ session. That stream is correct, but large: a year of warm-up is about 1.3
 million envelopes. The compact stream below is the shape the owner chose
 (2026-10-16) and the one to run the IRAs on.
 
+The momentum configuration must declare which shape its stream is, in
+`momentum.universe_input`: `"bars"` for a stream written with
+`--universe-members`, `"compact"` for one written with `--ranker`. The
+engine refuses a configuration without it and never infers the shape from
+the inputs. `encode` with neither `--ranker` nor `--universe-members`
+writes a bars stream with no bar for any universe member: a momentum
+engine configured `"bars"` withholds each month's decision from it as
+`missing-bars`, and one configured `"compact"` as `histories-missing`, so
+it is not a stream to run an IRA on ([the momentum
+universe](momentum-universe.md)).
+
 ### The compact stream (`--ranker`)
 
 With `--ranker`, `encode` writes the compact universe input:
@@ -163,7 +174,8 @@ python3 -m marketdata encode ... --ranker "bin/universe-rank -config momentum.js
 ```
 
 `universe-rank` (`go build -o bin/universe-rank ./cmd/universe-rank`) reads
-the IRA's own configuration file and answers, for each universe snapshot,
+the IRA's own configuration file, which must say `"universe_input":
+"compact"` (it refuses `"bars"`), and answers, for each universe snapshot,
 whether its session is a decision session, which stocks the engine will rank
 from it, and how many sessions of closes each history must cover. It uses
 the engine's own code for all three. The engine then ranks the snapshot again
@@ -195,8 +207,8 @@ calendar reaches one extra session ahead to step past it. The engine removes
 the day from its calendar, so every window simply reaches one session
 further back. If the cancelled day was the last of its month, the session
 before it becomes the decision session. If that session has already closed
-when the retraction arrives, an engine fed a bar for every stock decides at
-once; one fed the compact stream waits for that session's histories, which
+when the retraction arrives, an engine configured `"bars"` decides at
+once; one configured `"compact"` waits for that session's histories, which
 a stream encoded from the next session on does not carry, and withholds the
 decision as `histories-missing` if the next session closes first (see
 [momentum-universe](momentum-universe.md)).

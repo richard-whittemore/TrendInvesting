@@ -45,6 +45,7 @@ func TestRankRefusesWhatTheRunWouldRefuse(t *testing.T) {
 		"an invalid snapshot":   {[]string{"-config", config}, `{"universe":{},"next_session":"2026-12-01"}` + "\n", "invalid universe snapshot"},
 		"another source":        {[]string{"-config", config}, strings.Replace(universeLine("2026-11-30", "2026-12-01"), `"massive"`, `"other"`, 1), "this run reads"},
 		"a bad flag":            {[]string{"-nope"}, "", "flag provided but not defined"},
+		"a bars configuration":  {[]string{"-config", "testdata/momentum-bars.json"}, universeLine("2026-11-30", "2026-12-01"), "reads bars"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var out, errs bytes.Buffer

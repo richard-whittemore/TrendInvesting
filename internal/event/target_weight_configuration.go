@@ -36,7 +36,11 @@ const TargetWeightConfigurationEventType = "strategy.target-weight.configuration
 //     quantity is minimum-lot, D7-L, whole shares with the momentum rule's
 //     substitution of an unaffordable pick. Version 3's whole-shares had no
 //     substitution and is not a value of version 4.
-const TargetWeightConfigurationSchemaVersion uint32 = 4
+//   - Version 5 adds Momentum's UniverseInput, the shape of the universe
+//     input the run reads (bars or compact), required for momentum: the
+//     run applies the compact input's rules from its first decision session
+//     instead of inferring the shape from the first close history read.
+const TargetWeightConfigurationSchemaVersion uint32 = 5
 
 // The strategies this schema configures: Boost on SPY for the joint margin
 // account, and the momentum combination for an IRA (docs/live-trading/plan.md,
@@ -70,6 +74,19 @@ const (
 // eligible ranked name within the sector cap (plan.md lines 380-383). D7-F,
 // fractional shares, is not built.
 const ShareQuantityMinimumLot = "minimum-lot"
+
+// The shapes of a momentum run's universe input (owner decision of
+// 2026-10-16 on the momentum input shape; ADR 0026, point 1).
+const (
+	// UniverseInputBars is a daily bar for every universe member it ranks,
+	// beside one market.universe.snapshot per session; it reads no
+	// market.close.history.
+	UniverseInputBars = "bars"
+	// UniverseInputCompact is one market.universe.snapshot per session and,
+	// at a decision session, one market.close.history per member ranked
+	// from it, in place of those members' bars.
+	UniverseInputCompact = "compact"
+)
 
 // The trading modes, set per account (docs/live-trading/plan.md, section 5,
 // "Modes"). A dry-run releases orders with send false and never sends them
@@ -148,6 +165,11 @@ type MomentumConfiguration struct {
 	// order of preference (plan.md section 4, "Sectors", "Chosen": GICS from
 	// IWV, then Nasdaq's screener).
 	SectorSources []string `json:"sector_sources"`
+	// UniverseInput is the shape of the universe input the run reads,
+	// UniverseInputBars or UniverseInputCompact, declared rather than
+	// inferred from the inputs, so the rules of the compact input hold from
+	// the first decision session (ADR 0026, point 5, "fail closed").
+	UniverseInput string `json:"universe_input"`
 }
 
 // GlideConfiguration is an IRA's glide path (plan.md section 2, "Bond sleeve
@@ -322,7 +344,8 @@ func (c MomentumConfiguration) isZero() bool {
 		c.ScoreLookback == 0 && c.ScoreSkip == 0 && c.VolatilityReturns == 0 && c.TopN == 0 &&
 		c.SectorCap == 0 && !c.InverseVolatility && c.Invested == 0 && c.TrendInstrument == "" &&
 		c.TrendCloses == 0 && c.RiskOffInstrument == "" && c.RiskOffFraction == 0 &&
-		c.RebalanceBand == 0 && c.UniverseSource == "" && len(c.SectorSources) == 0
+		c.RebalanceBand == 0 && c.UniverseSource == "" && len(c.SectorSources) == 0 &&
+		c.UniverseInput == ""
 }
 
 func (c MomentumConfiguration) validate() []error {
@@ -367,6 +390,9 @@ func (c MomentumConfiguration) validate() []error {
 	}
 	if c.UniverseSource == "" {
 		errs = append(errs, errors.New("momentum universe source is required"))
+	}
+	if c.UniverseInput != UniverseInputBars && c.UniverseInput != UniverseInputCompact {
+		errs = append(errs, fmt.Errorf("momentum universe input %q is not %q or %q", c.UniverseInput, UniverseInputBars, UniverseInputCompact))
 	}
 	if len(c.SectorSources) == 0 {
 		errs = append(errs, errors.New("momentum sector sources are required"))

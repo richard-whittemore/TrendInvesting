@@ -109,9 +109,10 @@ type momentumRun struct {
 
 	// histories holds the ranked members' close histories until their
 	// session closes; retracted, every session withdrawn from the calendar.
-	// compact is set by the first history read: the run reads the compact
-	// universe input, so a decision session's ranked members have no bars
-	// and need their histories. pending is the decision a retraction left
+	// compact is the configuration's universe input: true for the compact
+	// input, whose decision sessions' ranked members have no bars and need
+	// their histories from the first decision session on; false for bars,
+	// which reads no history. pending is the decision a retraction left
 	// awaiting its histories (applyRetraction).
 	histories map[string]event.CloseHistoryPayload
 	retracted map[string]bool
@@ -185,6 +186,7 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 
 		histories: map[string]event.CloseHistoryPayload{},
 		retracted: map[string]bool{},
+		compact:   m.UniverseInput == event.UniverseInputCompact,
 	}
 	return h, nil
 }
@@ -371,7 +373,7 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 		r.raw[id] = bar.Raw.Close
 	}
 	r.bars = map[string]event.CompletedBarAdjustedPayload{}
-	missing, err := r.mergeHistories(date, at)
+	reason, missing, err := r.mergeHistories(date, at)
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +388,7 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 	case !decide || p.PeriodEnd.Before(r.h.decideFrom):
 		return b.result()
 	case missing != "":
-		if err := r.withheldAt(b, decisionID(r.h.cfg.AccountID, p.PeriodEnd), date, p.PeriodEnd, at, event.WithheldHistoriesMissing, missing); err != nil {
+		if err := r.withheldAt(b, decisionID(r.h.cfg.AccountID, p.PeriodEnd), date, p.PeriodEnd, at, reason, missing); err != nil {
 			return nil, err
 		}
 		return b.result()
@@ -398,9 +400,10 @@ func (r *momentumRun) applySession(in event.Envelope) ([]event.Envelope, error) 
 // closing at end), found at b's time, with the glide figures on the session
 // after it, as a decided one records them; an implausible age there stops
 // the run. So no decision time passes without a decision (ADR 0026, point
-// 1): a decision session that never closed (missing-bars), and one whose
+// 1): a decision session that never closed (missing-bars), one whose
 // ranked members sent no close history in the compact universe input
-// (histories-missing), never decided from the bars of the names held alone
+// (histories-missing), and one whose ranked members sent no bar in the bars
+// input (missing-bars), never decided from the bars of the names held alone
 // (point 5).
 func (r *momentumRun) withheldAt(b *emissions, id, session string, end time.Time, at int, reason, detail string) error {
 	p := event.TargetsDecidedPayload{

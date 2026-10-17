@@ -2,10 +2,11 @@
 // recordings, the full one (a bar for every universe member every session)
 // and the compact one (one universe snapshot per session and a close history
 // per ranked member), through a fresh momentum run each, under the
-// configuration given, and fails unless both runs emit the same records,
-// byte for byte. On success it prints the compact run's
-// strategy.targets.decided payloads, one per line, for the Python test to
-// read.
+// configuration given with its universe input declared to fit each stream
+// (bars for the full one, compact for the compact one), and fails unless
+// both runs emit the same records, byte for byte. On success it prints the
+// compact run's strategy.targets.decided payloads, one per line, for the
+// Python test to read.
 //
 // Usage: go run decision_equivalence.go CONFIG FULL COMPACT
 package main
@@ -33,8 +34,10 @@ func main() {
 	must(err)
 	var cfg event.TargetWeightConfigurationPayload
 	must(json.Unmarshal(raw, &cfg))
+	cfg.Momentum.UniverseInput = event.UniverseInputBars
 	full, err := decide(cfg, os.Args[2])
 	must(err)
+	cfg.Momentum.UniverseInput = event.UniverseInputCompact
 	compact, err := decide(cfg, os.Args[3])
 	must(err)
 	if len(full) != len(compact) {

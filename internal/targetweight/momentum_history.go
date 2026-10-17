@@ -27,6 +27,9 @@ func (r *momentumRun) applyHistory(in event.Envelope) ([]event.Envelope, error) 
 	if err != nil {
 		return nil, err
 	}
+	if !r.compact {
+		return nil, fmt.Errorf("targetweight: history %s: this run reads bars for its universe members (universe input %q), never a close history", in.ID, event.UniverseInputBars)
+	}
 	if r.pending != nil && p.Session == r.pending.session {
 		return r.applyPendingHistory(in, p)
 	}
@@ -42,7 +45,6 @@ func (r *momentumRun) applyHistory(in event.Envelope) ([]event.Envelope, error) 
 		return nil, err
 	}
 	r.histories[p.InstrumentID] = p
-	r.compact = true
 	return nil, nil
 }
 
@@ -103,36 +105,56 @@ func (r *momentumRun) applyPendingHistory(in event.Envelope, p event.CloseHistor
 // Histories arrive only for a decision session, and they must name exactly
 // the members this run ranks from that session's universe snapshot
 // (RankUniverse, ADR 0026, point 1: ranking is a Go rule, so a producer's
-// list is checked against it, never trusted). The check runs at every
-// decision session with its snapshot: once the run has read a history, it
-// reads the compact input, and a decision session with none for the members
-// ranked returns why (missing), for the decision to be withheld as
-// histories-missing rather than decided from the bars of the names held
-// alone (ADR 0026, point 5, "fail closed"). A run that never reads a history
-// reads a bar for every listed stock instead.
-func (r *momentumRun) mergeHistories(date string, at int) (missing string, err error) {
+// list is checked against it, never trusted). The configuration declares
+// the universe input, so the check runs at every decision session with its
+// snapshot from the first: in the compact input, a decision session with no
+// history for the members ranked returns why (missing), for the decision to
+// be withheld as histories-missing (reason); in the bars input, one with no
+// bar for any member ranked is withheld as missing-bars (barsMissing).
+// Neither is decided from the bars of the names held alone (ADR 0026, point
+// 5, "fail closed").
+func (r *momentumRun) mergeHistories(date string, at int) (reason, missing string, err error) {
 	histories := r.histories
 	r.histories = map[string]event.CloseHistoryPayload{}
 	decide, _ := momentum.IsDecisionSession(date, r.calendar[at+1]) // both on the validated calendar
 	held := r.universe != nil && r.universe.Session == date
 	if len(histories) > 0 && (!decide || !held) {
-		return "", fmt.Errorf("targetweight: close histories arrived for the session %s, which is not a decision session with its universe snapshot", date)
+		return "", "", fmt.Errorf("targetweight: close histories arrived for the session %s, which is not a decision session with its universe snapshot", date)
 	}
 	if !decide || !held {
-		return "", nil
+		return "", "", nil
+	}
+	if !r.compact {
+		if detail := r.barsMissing(*r.universe); detail != "" {
+			return event.WithheldMissingBars, detail, nil
+		}
+		return "", "", nil
 	}
 	ranked, closes := rankedMembers(r.rule, *r.universe)
 	slices.Sort(ranked)
 	if len(histories) == 0 {
-		if r.compact && len(ranked) > 0 {
-			return fmt.Sprintf("no market.close.history arrived for the %d members ranked from the universe snapshot of %s, so none can be scored", len(ranked), date), nil
+		if len(ranked) > 0 {
+			return event.WithheldHistoriesMissing, fmt.Sprintf("no market.close.history arrived for the %d members ranked from the universe snapshot of %s, so none can be scored", len(ranked), date), nil
 		}
-		return "", nil
+		return "", "", nil
 	}
 	if got := slices.Sorted(maps.Keys(histories)); !slices.Equal(got, ranked) {
-		return "", fmt.Errorf("targetweight: close histories for the session %s name %v, but the universe ranks %v", date, got, ranked)
+		return "", "", fmt.Errorf("targetweight: close histories for the session %s name %v, but the universe ranks %v", date, got, ranked)
 	}
-	return "", r.merge(ranked, closes, histories)
+	return "", "", r.merge(ranked, closes, histories)
+}
+
+// barsMissing says why a decision in the bars input cannot be made from the
+// universe snapshot u of the last session closed: the snapshot ranks members
+// and none had a bar in that session, as in a stream written without the
+// members' bars. A member left out of some sessions for bad data leaves the
+// others, so one ranked member's bar is enough.
+func (r *momentumRun) barsMissing(u event.UniverseSnapshotPayload) string {
+	ranked, _ := rankedMembers(r.rule, u)
+	if len(ranked) == 0 || slices.ContainsFunc(ranked, func(id string) bool { _, ok := r.raw[id]; return ok }) {
+		return ""
+	}
+	return fmt.Sprintf("none of the %d members ranked from the universe snapshot of %s has a bar in that session, so none can be scored; a run configured for bars needs the ranked members' bars", len(ranked), u.Session)
 }
 
 // merge adds the histories of the members ranked to the run's adjusted
@@ -190,6 +212,9 @@ func MomentumHistoryRequest(cfg event.TargetWeightConfigurationPayload, u event.
 	}
 	if err := errors.Join(cfg.Validate(), u.Validate()); err != nil {
 		return HistoryRequest{}, fmt.Errorf("targetweight: %w", err)
+	}
+	if cfg.Momentum.UniverseInput != event.UniverseInputCompact {
+		return HistoryRequest{}, fmt.Errorf("targetweight: a history request needs a configuration reading the compact universe input; this one reads bars (universe input %q)", cfg.Momentum.UniverseInput)
 	}
 	if err := checkUniverse(cfg.Momentum, "for "+u.Session, u); err != nil {
 		return HistoryRequest{}, err

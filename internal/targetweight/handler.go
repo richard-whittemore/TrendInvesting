@@ -35,7 +35,11 @@ import (
 //     records skipped trades (configuration schema version 4,
 //     targets.decided schema version 4), so a journal written under 1.3.0
 //     does not replay.
-const RulesVersion = "1.4.0"
+//   - 1.5.0 reads the universe input shape the configuration declares
+//     (configuration schema version 5) and refuses version 4, and withholds
+//     a decision session whose ranked members sent neither their bars nor
+//     their histories, so a journal written under 1.4.0 does not replay.
+const RulesVersion = "1.5.0"
 
 // source names this handler on every envelope it emits.
 const source = "target-weight"

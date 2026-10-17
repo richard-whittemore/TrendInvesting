@@ -30,6 +30,7 @@ func momentumConfiguration() event.TargetWeightConfigurationPayload {
 			InverseVolatility: true, Invested: 0.98, TrendInstrument: "SPY", TrendCloses: 5,
 			RiskOffInstrument: "IEF", RiskOffFraction: 0.5, RebalanceBand: 0.25,
 			UniverseSource: "fixture-universe", SectorSources: []string{"gics", "screener"},
+			UniverseInput: event.UniverseInputBars,
 		},
 		Glide: event.GlideConfiguration{
 			Anchors: []event.GlideAnchor{
@@ -200,6 +201,9 @@ type momentumResult struct {
 func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 	t.Helper()
 	cfg := momentumConfiguration()
+	if opts.compact {
+		cfg.Momentum.UniverseInput = event.UniverseInputCompact
+	}
 	if opts.mutate != nil {
 		opts.mutate(&cfg)
 	}

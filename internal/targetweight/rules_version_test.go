@@ -63,3 +63,20 @@ func TestRulesVersionDeclaresMinimumLot(t *testing.T) {
 		}
 	}
 }
+
+// TestRulesVersionDeclaresTheDeclaredUniverseInput pins ADR 0016's
+// same-rules-version replay guarantee for the declared universe input:
+// configuration schema version 5 is required and version 4 refused (ADR
+// 0015), and a decision session whose ranked members sent neither a bar nor
+// a history is withheld where it was decided, so a journal written under
+// rules 1.4.0 cannot replay under this build and the build must not claim
+// 1.4.0 or earlier.
+func TestRulesVersionDeclaresTheDeclaredUniverseInput(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.4.0 once the configuration declares the universe input", targetweight.RulesVersion)
+		}
+	}
+}
