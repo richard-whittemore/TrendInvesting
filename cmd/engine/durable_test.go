@@ -119,7 +119,7 @@ func uninterruptedJournal(t *testing.T, to int) []byte {
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	out := filepath.Join(dir, "journal.jsonl")
-	stop := startEngine(t, options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: out, build: "test-build"})
+	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: out, build: "test-build"})
 	driveSessions(t, socketPath, "", 0, to)
 	if err := stop(); err != nil {
 		t.Fatalf("the uninterrupted run: %v", err)
@@ -135,7 +135,7 @@ func TestARestartResumesFromTheDurableLog(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	firstLog := filepath.Join(dir, "first.log")
-	stop := startEngine(t, options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
+	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
 	driveSessions(t, socketPath, firstLog, 0, 4)
 	if err := stop(); err != nil {
 		t.Fatalf("the first run: %v", err)
@@ -143,7 +143,7 @@ func TestARestartResumesFromTheDurableLog(t *testing.T) {
 
 	secondLog := filepath.Join(dir, "second.log")
 	secondOut := filepath.Join(dir, "second.jsonl")
-	report := resumeEngine(t, options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: secondOut, logPath: secondLog, resumePath: firstLog, build: "test-build"})
+	report := resumeEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: secondOut, logPath: secondLog, resumePath: firstLog, build: "test-build"})
 	driveSessions(t, socketPath, secondLog, 4, 8)
 	if err := report.stop(); err != nil {
 		t.Fatalf("the resumed run: %v", err)
@@ -184,7 +184,7 @@ func TestARestartAfterACrashMidWriteResumesFromTheLastCommit(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	firstLog := filepath.Join(dir, "first.log")
-	stop := startEngine(t, options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
+	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
 	driveSessions(t, socketPath, firstLog, 0, 3)
 	if err := stop(); err != nil {
 		t.Fatalf("the first run: %v", err)
@@ -200,7 +200,7 @@ func TestARestartAfterACrashMidWriteResumesFromTheLastCommit(t *testing.T) {
 
 	secondOut := filepath.Join(dir, "second.jsonl")
 	secondLog := filepath.Join(dir, "second.log")
-	report := resumeEngine(t, options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: secondOut, logPath: secondLog, resumePath: torn, build: "test-build"})
+	report := resumeEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: secondOut, logPath: secondLog, resumePath: torn, build: "test-build"})
 	strategyVersion, configurationHash := testIdentity(t)
 	client, err := transport.Dial(socketPath)
 	if err != nil {
@@ -230,7 +230,7 @@ func TestRunRefusesAResumeItCannotHonour(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
 	firstLog := filepath.Join(dir, "first.log")
-	stop := startEngine(t, options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
+	stop := startEngine(t, options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: filepath.Join(dir, "first.jsonl"), logPath: firstLog, build: "test-build"})
 	driveSessions(t, socketPath, firstLog, 0, 1)
 	if err := stop(); err != nil {
 		t.Fatalf("the first run: %v", err)
@@ -240,7 +240,7 @@ func TestRunRefusesAResumeItCannotHonour(t *testing.T) {
 		t.Fatalf("write the damaged log: %v", err)
 	}
 
-	base := options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, build: "test-build"}
+	base := options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, build: "test-build"}
 	for name, tc := range map[string]struct {
 		mutate func(*options)
 		want   string
@@ -256,7 +256,7 @@ func TestRunRefusesAResumeItCannotHonour(t *testing.T) {
 		}, "configuration input"},
 		"another build": {func(o *options) {
 			o.logPath, o.resumePath, o.build = filepath.Join(dir, "b.log"), firstLog, "other-build"
-		}, "not this run"},
+		}, "does not resume across builds"},
 	} {
 		opts := base
 		opts.outPath = filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".jsonl")
@@ -290,7 +290,7 @@ func TestRunRefusesALogAtTheJournalPath(t *testing.T) {
 		"the same path, dot": dir + string(filepath.Separator) + "." + string(filepath.Separator) + "run.jsonl",
 		"the same path, up":  filepath.Join(dir, "sub") + string(filepath.Separator) + ".." + string(filepath.Separator) + "run.jsonl",
 	} {
-		opts := options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: out, logPath: logPath, build: "test-build"}
+		opts := options{mode: modeBacktest, socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, outPath: out, logPath: logPath, build: "test-build"}
 		// Bounded, so a run that wrongly starts serving fails the test
 		// rather than hanging it.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -376,5 +376,92 @@ func TestCreateLogFileFlushesTheDirectoryThatHoldsTheLog(t *testing.T) {
 	_ = file.Close()
 	if _, err := os.Stat(filepath.Join(root, "other", "run.log")); err != nil {
 		t.Fatalf("the log is not in the link target's parent: %v", err)
+	}
+}
+
+// TestAResumeAcrossBuildsNamesTheUpgradeProcedure pins ADR 0027's rule that a build
+// upgrade ends the run at the end of a session and starts a fresh run on the
+// new build, never a resume. The refusal must name both builds and the
+// procedure, and must not be confused with a changed configuration.
+func TestAResumeAcrossBuildsNamesTheUpgradeProcedure(t *testing.T) {
+	cfg := testConfiguration(t)
+	hash := event.ConfigurationHash(cfg)
+	old := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "build-1"))
+	next := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "build-2"))
+	err := checkResumable(journal.Recovery{Header: old}, next, event.Envelope{})
+	if err == nil {
+		t.Fatal("checkResumable accepted a log from another build")
+	}
+	for _, want := range []string{"build-1", "build-2", "end of a session", "fresh run", "docs/runbooks/durable-log.md"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q does not say %q", err, want)
+		}
+	}
+
+	// A different configuration is a different refusal: the upgrade
+	// procedure would mislead an operator who changed -config.
+	other := journal.NewLogHeader("sha256:other", next.StrategyVersion)
+	err = checkResumable(journal.Recovery{Header: old}, other, event.Envelope{})
+	if err == nil || strings.Contains(err.Error(), "docs/runbooks/durable-log.md") {
+		t.Fatalf("a changed configuration got %v, want the generic refusal", err)
+	}
+}
+
+// TestAChangedStartOutranksABuildChange: a resume that differs in both build
+// and -as-of must send the operator to the configuration correction, not to
+// the build-upgrade procedure, which would not fix the start time.
+func TestAChangedStartOutranksABuildChange(t *testing.T) {
+	cfg := testConfiguration(t)
+	hash := event.ConfigurationHash(cfg)
+	old := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "build-1"))
+	next := journal.NewLogHeader(hash, event.ComposeStrategyVersion(cfg.StrategyID, strategy.RulesVersion, "build-2"))
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	logged := event.Envelope{EventTime: start, RecordedAt: start}
+	composed := event.Envelope{EventTime: start.Add(time.Second), RecordedAt: start.Add(time.Second)}
+	err := checkResumable(journal.Recovery{Header: old, Entries: []journal.Entry{{Kind: journal.KindInput, Envelope: logged}}}, next, composed)
+	if err == nil || !strings.Contains(err.Error(), "configuration input") || strings.Contains(err.Error(), "docs/runbooks/durable-log.md") {
+		t.Fatalf("a changed start and build got %v, want the configuration-input refusal", err)
+	}
+}
+
+// TestTheDurableLogIsRequiredOutsideABacktest pins ADR 0027's rule that an engine
+// that serves a dry-run, paper or live session
+// refuses to start without -log, so journal-before-send always holds; a
+// backtest keeps -log optional. There is no default mode.
+func TestTheDurableLogIsRequiredOutsideABacktest(t *testing.T) {
+	dir := t.TempDir()
+	base := options{mode: modeBacktest, socketPath: filepath.Join(shortSocketDir(t), "e.sock"), configPath: testConfigPath, asOf: testAsOf, build: "test-build"}
+	for _, mode := range []string{"dry-run", "paper", "live"} {
+		opts := base
+		opts.mode = mode
+		opts.outPath = filepath.Join(dir, mode+".jsonl")
+		err := run(context.Background(), opts, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "-log is required") || !strings.Contains(err.Error(), mode) {
+			t.Errorf("mode %s without -log: run() = %v, want a refusal naming -log and the mode", mode, err)
+		}
+	}
+	opts := base
+	opts.mode, opts.outPath = "", filepath.Join(dir, "none.jsonl")
+	if err := run(context.Background(), opts, io.Discard); err == nil || !strings.Contains(err.Error(), "-mode is required") {
+		t.Errorf("no mode: run() = %v, want a refusal saying -mode is required", err)
+	}
+	opts = base
+	opts.mode, opts.outPath = "sandbox", filepath.Join(dir, "sandbox.jsonl")
+	if err := run(context.Background(), opts, io.Discard); err == nil || !strings.Contains(err.Error(), "-mode") {
+		t.Errorf("an unknown mode: run() = %v, want a refusal naming -mode", err)
+	}
+
+	// With -log a live mode starts; the backtest modes need none.
+	for _, mode := range []string{"backtest", "paper"} {
+		socketPath := filepath.Join(shortSocketDir(t), "engine.sock")
+		opts := options{socketPath: socketPath, configPath: testConfigPath, asOf: testAsOf, build: "test-build", mode: mode,
+			outPath: filepath.Join(dir, "ok-"+mode+".jsonl")}
+		if mode == "paper" {
+			opts.logPath = filepath.Join(dir, "ok-paper.log")
+		}
+		stop := startEngine(t, opts)
+		if err := stop(); err != nil {
+			t.Errorf("mode %q: %v", mode, err)
+		}
 	}
 }

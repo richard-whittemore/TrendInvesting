@@ -6,7 +6,7 @@
 // file. It is composition only and contains no rules
 // (cmd-is-composition-only, .golangci.yml; AGENTS.md rule 7).
 //
-//	engine -socket <path> -config <configuration.json> -out <journal.jsonl> -as-of <RFC3339> [-log <durable.log> [-resume <previous.log>]]
+//	engine -socket <path> -config <configuration.json> -out <journal.jsonl> -as-of <RFC3339> [-mode backtest|dry-run|paper|live] [-log <durable.log> [-resume <previous.log>]]
 //
 // # Wire contract: the adapter's first bar must carry Sequence 2
 //
@@ -74,16 +74,32 @@ const sourceEngine = "engine"
 // asserting a journal byte for byte needs to fix it (backtest.go's own
 // comment on this field).
 type options struct {
-	socketPath      string
-	configPath      string
-	outPath         string
-	logPath         string
-	resumePath      string
-	asOf            string
+	socketPath string
+	configPath string
+	outPath    string
+	logPath    string
+	resumePath string
+	asOf       string
+	// mode is required and is what the adapter on the socket does with the
+	// decisions: modeBacktest (decisions are simulated), or a mode that can reach a
+	// broker. A mode other than backtest requires logPath (ADR 0027).
+	mode            string
 	build           string
 	maxFrameBytes   int
 	decisionTimeout time.Duration
 }
+
+// The run modes. Only backtest may run without a durable log: every other
+// mode serves an adapter whose orders can reach a broker, or rehearses
+// doing so, and so must hold journal-before-send (ADR 0019 amended
+// 2026-09-24; ADR 0026 §3; ADR 0027). There is no default: an empty mode is refused, so forgetting -mode
+// can never run a live engine without the log.
+const (
+	modeBacktest = "backtest"
+	modeDryRun   = "dry-run"
+	modePaper    = "paper"
+	modeLive     = "live"
+)
 
 // run performs one invocation: read and validate the configuration, compose
 // the reducer and its journal, deliver the configuration as the run's
@@ -107,6 +123,17 @@ func run(ctx context.Context, opts options, out io.Writer) error {
 	}
 	if opts.build == "" {
 		missing = append(missing, errors.New("the running build must be identified; it is part of every envelope's strategy version (ADR 0016)"))
+	}
+	switch opts.mode {
+	case modeBacktest:
+	case "":
+		missing = append(missing, fmt.Errorf("-mode is required: %s, %s, %s or %s; there is no default, so a live run cannot start without the durable log by forgetting it (owner decision 2026-10-16)", modeBacktest, modeDryRun, modePaper, modeLive))
+	case modeDryRun, modePaper, modeLive:
+		if opts.logPath == "" {
+			missing = append(missing, fmt.Errorf("-log is required in -mode %s: orders that can reach a broker are sent only after they are flushed to a durable log (ADR 0027; owner decision 2026-10-16)", opts.mode))
+		}
+	default:
+		missing = append(missing, fmt.Errorf("-mode must be one of %s, %s, %s or %s, not %q", modeBacktest, modeDryRun, modePaper, modeLive, opts.mode))
 	}
 	if opts.resumePath != "" && opts.logPath == "" {
 		missing = append(missing, errors.New("-resume requires -log: a resumed run streams its own durable log, which begins with the records it resumes (ADR 0027)"))

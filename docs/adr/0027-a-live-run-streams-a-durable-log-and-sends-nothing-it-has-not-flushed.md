@@ -207,15 +207,40 @@ continues the recovered sequence. A torn input is sent again.
 - `internal/journal` gains `CreateLog`, `LogWriter`, `RecoverLog`,
   `NewDurableRecorder` and `Resume`. The package still opens no path, because
   the composition root hands it a `SyncWriter` (an `*os.File`).
-- `cmd/engine` gains `-log` and `-resume`. **`-log` is optional in this
+- `cmd/engine` gains `-log` and `-resume`. **`-log` was optional in this
   slice**, so existing invocations, including the LEAN adapter's end-to-end
-  test, are unchanged. Making it mandatory before paper trading is an owner
-  decision.
+  test, were unchanged. Superseded by the amendment below, which makes it
+  mandatory outside `-mode backtest`.
 - **A restart must use the same build.** The strategy version, which includes
   the build (ADR 0016), is stamped on every decision. Another build therefore
-  regenerates different bytes, and the restart is refused. Restarting across
-  an upgrade needs its own decision.
+  regenerates different bytes, and the restart is refused. Superseded by the
+  amendment below: a run does not resume across builds, and an upgrade starts a
+  fresh run.
 - A refused log (§5) or a refused restart (§6) needs a runbook entry: what an
   operator checks, and how a new run is started from a reconciled baseline
   (ADR 0019's recovery procedure).
 - Every existing journal, journal test and replay test is unchanged.
+
+## Amendment (2026-10-16, owner decisions #336, #337; accepted with the ADR 2026-10-17)
+
+*This section records two decisions the owner made on 2026-10-16. The owner
+accepted them together with this ADR on 2026-10-17.*
+
+- **The durable log is mandatory before paper trading (#336).** This replaces
+  the Consequences' statement that `-log` is optional. `cmd/engine` takes
+  `-mode backtest|dry-run|paper|live`, which is required and has no default,
+  so a live run that forgets it is refused rather than run without the log. In
+  any mode but `backtest` it refuses to start without `-log`. A backtest,
+  including the LEAN adapter's end-to-end test (which passes `-mode backtest`),
+  keeps `-log` optional. The mode is a
+  declaration by the person starting the engine; the live engine's
+  configuration naming its adapter (ADR 0025 point 3, still to be built) is
+  what will later bind a live adapter to a live mode.
+- **A build upgrade starts a fresh run; it never resumes (#337).** This
+  settles the question Consequences leaves open. An upgrade stops the run at
+  the end of a session, with the old log kept as evidence, and starts a fresh
+  run on the new build from a reconciled baseline (ADR 0019 recovery). There
+  is no resume across builds, and the build part of the strategy version is
+  never ignored when comparing decisions. `-resume` therefore refuses a log
+  recorded by another build, and its message names this procedure. The
+  runbook is `docs/runbooks/durable-log.md`.
