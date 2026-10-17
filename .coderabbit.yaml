@@ -4,7 +4,7 @@
 # kept explicit below.
 reviews:
   # Explicit (also the default): no auto-approve on resolution; the merge gate decides.
-  # (request_changes_workflow is left at its default of false.)
+  request_changes_workflow: false
   # Skip the long PR summary to shorten output.
   high_level_summary: false
   auto_review:

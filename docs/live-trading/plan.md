@@ -545,7 +545,7 @@ so Pro's margin rate does not help them.
 Each phase is a ticket with its own work log, worked test-first and merged
 only after the findings of whichever reviewers ran are addressed. Greptile
 reviews the capital-safety paths only; CodeRabbit reviews everything, and a
-Claude reviewer stands in for it on docs-only PRs while it is rate-limited
+Claude reviewer stands in for it on docs-only and config-only PRs while it is rate-limited
 (owner decision 2026-10-17; `docs/development.md`, "Review cost").
 
 ## 10. Owner decisions
