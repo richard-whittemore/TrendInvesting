@@ -24,7 +24,12 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     and bond sleeves each contribute to a fund both hold (ADR 0026,
 //     point 1). Both are omitted from a Boost decision, whose payload bytes
 //     are still version 1's.
-const TargetsDecidedSchemaVersion uint32 = 3
+//   - Version 4 records D7-L's substitution in momentum decisions (ADR 0026,
+//     point 2, "D7-L"): the MinimumLot figures the picks were valued against,
+//     the name status unaffordable, and each unaffordable name's one share
+//     and target value. All are omitted when unset, so a Boost decision's
+//     bytes are still version 1's.
+const TargetsDecidedSchemaVersion uint32 = 4
 
 // The two outcomes of a target decision (ADR 0026, point 1).
 const (
@@ -46,12 +51,18 @@ const (
 	// WithheldInsufficientTrendHistory: fewer than 200 SPY closes, which the
 	// backtest treats as risk-on and live withholds (ADR 0026, point 5).
 	WithheldInsufficientTrendHistory = "insufficient-trend-history"
-	// WithheldNoEligibleNames: the ranking left no name to hold.
+	// WithheldNoEligibleNames: the ranking left no name to hold, none of
+	// them skipped as unaffordable.
 	WithheldNoEligibleNames = "no-eligible-names"
 	// WithheldRebalanceInProgress: an order of an earlier decision is not
 	// yet terminal, so no new rebalance is planned until it is (ADR 0026,
 	// point 5: nothing is sent mid-rebalance until the owner clears it).
 	WithheldRebalanceInProgress = "rebalance-in-progress"
+	// WithheldAllUnaffordable: D7-L skipped every pick with a positive
+	// target as unaffordable, so no stock could be picked. The book is kept,
+	// since a bad net liquidation or bad raw closes would look the same
+	// (ADR 0026, point 2, "D7-L", and point 5, "fail closed").
+	WithheldAllUnaffordable = "all-unaffordable"
 )
 
 // TargetWeight is one instrument's target as a fraction of net liquidation.
@@ -156,6 +167,20 @@ type MomentumFigures struct {
 	UniverseMembers        int `json:"universe_members"`
 	// Names holds every universe member in universe rank order.
 	Names []MomentumName `json:"names"`
+	// MinimumLot is set exactly when D7-L valued the picks: the momentum
+	// rule decided a book under it, or withheld one as all-unaffordable. It
+	// holds net liquidation V at the previous close and the momentum sleeve's
+	// scale, 1 - b; a pick's target value is its weight x MomentumScale x V.
+	// The figures stay when the run then withholds a decided book (missing
+	// bars, a rebalance in progress); a decision the rule withheld for any
+	// other reason, no-eligible-names included, compared no pick and has none.
+	MinimumLot MinimumLotFigures `json:"minimum_lot,omitzero"`
+}
+
+// MinimumLotFigures are what D7-L valued each pick against.
+type MinimumLotFigures struct {
+	NetLiquidation float64 `json:"net_liquidation"`
+	MomentumScale  float64 `json:"momentum_scale"`
 }
 
 // The closed set of MomentumName.Status values: what the rule did with a
@@ -169,6 +194,9 @@ const (
 	MomentumStatusZeroVolatility = "zero-volatility"
 	MomentumStatusShortHistory   = "short-history"
 	MomentumStatusGap            = "gap"
+	// MomentumStatusUnaffordable: D7-L skipped the pick, since one share at
+	// its previous raw close exceeds its target value.
+	MomentumStatusUnaffordable = "unaffordable"
 )
 
 // MomentumName is one ranked universe member: its universe rank and dollar
@@ -188,6 +216,10 @@ type MomentumName struct {
 	ScoreRank         int     `json:"score_rank"`
 	Weight            float64 `json:"weight"`
 	BacktestWouldPick bool    `json:"backtest_would_pick"`
+	// OneShare and TargetValue are set for an unaffordable name: its
+	// previous raw close and the target value it exceeded.
+	OneShare    float64 `json:"one_share,omitzero"`
+	TargetValue float64 `json:"target_value,omitzero"`
 }
 
 // Validate checks the identity, the outcome and its reason, the targets and
@@ -237,7 +269,7 @@ func (p TargetsDecidedPayload) Validate() error {
 	case TargetsOutcomeWithheld:
 		switch p.WithheldReason {
 		case WithheldMissingBars, WithheldStaleAccountSnapshot, WithheldMissingUniverse,
-			WithheldInsufficientTrendHistory, WithheldNoEligibleNames, WithheldRebalanceInProgress:
+			WithheldInsufficientTrendHistory, WithheldNoEligibleNames, WithheldRebalanceInProgress, WithheldAllUnaffordable:
 		default:
 			errs = append(errs, fmt.Errorf("withheld reason %q is not recognised", p.WithheldReason))
 		}
@@ -318,7 +350,7 @@ func (g GlideFigures) validate(closeSession string) []error {
 func (m MomentumFigures) isZero() bool {
 	return m.CloseSession == "" && m.TrendInstrument == "" && m.TrendCloses == 0 && m.TrendClose == 0 &&
 		m.TrendMean == 0 && !m.RiskOff && m.UniverseRows == 0 && m.UniverseListingType == 0 &&
-		m.UniverseAtOrAboveFloor == 0 && m.UniverseMembers == 0 && len(m.Names) == 0
+		m.UniverseAtOrAboveFloor == 0 && m.UniverseMembers == 0 && len(m.Names) == 0 && m.MinimumLot == (MinimumLotFigures{})
 }
 
 func (m MomentumFigures) validate() []error {
@@ -342,8 +374,16 @@ func (m MomentumFigures) validate() []error {
 	if len(m.Names) != m.UniverseMembers && len(m.Names) != 0 {
 		errs = append(errs, fmt.Errorf("momentum records %d names for %d universe members", len(m.Names), m.UniverseMembers))
 	}
+	lot := m.MinimumLot != (MinimumLotFigures{})
+	if lot && (!isFinite(m.MinimumLot.NetLiquidation) || m.MinimumLot.NetLiquidation <= 0 ||
+		!isFinite(m.MinimumLot.MomentumScale) || m.MinimumLot.MomentumScale <= 0 || m.MinimumLot.MomentumScale > 1) {
+		errs = append(errs, errors.New("momentum minimum lot needs a positive net liquidation and a scale in (0, 1]"))
+	}
 	for i, n := range m.Names {
 		errs = append(errs, n.validate(i+1)...)
+		if n.Status == MomentumStatusUnaffordable && !lot {
+			errs = append(errs, fmt.Errorf("momentum name %s: an unaffordable name needs the minimum lot figures", n.InstrumentID))
+		}
 	}
 	return errs
 }
@@ -359,6 +399,13 @@ func (n MomentumName) validate(rank int) []error {
 	switch n.Status {
 	case MomentumStatusScored, MomentumStatusPicked, MomentumStatusSectorCapped, MomentumStatusBeyondTopN,
 		MomentumStatusNoSector, MomentumStatusZeroVolatility, MomentumStatusShortHistory, MomentumStatusGap:
+		if n.OneShare != 0 || n.TargetValue != 0 {
+			errs = append(errs, fmt.Errorf("momentum name %s: only an unaffordable name records a one-share price and target value", n.InstrumentID))
+		}
+	case MomentumStatusUnaffordable:
+		if !isFinite(n.OneShare) || !isFinite(n.TargetValue) || n.TargetValue < 0 || !(n.OneShare > n.TargetValue) {
+			errs = append(errs, fmt.Errorf("momentum name %s: an unaffordable name's one share exceeds its target value", n.InstrumentID))
+		}
 	default:
 		errs = append(errs, fmt.Errorf("momentum name %s: status %q is not recognised", n.InstrumentID, n.Status))
 	}

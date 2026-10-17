@@ -60,7 +60,7 @@
   },
   "execution": {
     "cash_rule": "settled-cash",
-    "share_quantity": "whole-shares",
+    "share_quantity": "minimum-lot",
     "max_fees_per_order": 1
   },
   "limits": {

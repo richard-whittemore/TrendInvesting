@@ -98,6 +98,25 @@ func TestAWithheldRunIsOneIncidentAndADecisionEndsIt(t *testing.T) {
 	}
 }
 
+// TestAnAllUnaffordableWithholdIsUrgent: a book D7-L found wholly
+// unaffordable may rest on a bad net liquidation or bad raw closes, so the
+// owner is paged now, with the detail naming the valuation, not left to the
+// daily read.
+func TestAnAllUnaffordableWithholdIsUrgent(t *testing.T) {
+	s := newStream(t)
+	s.withheld(0, event.WithheldAllUnaffordable)
+	got, err := report.Alerts(s.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Kind != report.KindWithheld || got[0].Severity != report.Urgent {
+		t.Fatalf("alerts = %+v", got)
+	}
+	if !contains(got[0].Body, "detail for all-unaffordable") {
+		t.Errorf("body lacks the detail: %q", got[0].Body)
+	}
+}
+
 func TestAStaleSnapshotAndAMissingMarkAreMissingData(t *testing.T) {
 	s := newStream(t)
 	s.withheld(0, event.WithheldStaleAccountSnapshot)

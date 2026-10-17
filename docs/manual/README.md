@@ -16,3 +16,7 @@ prints, and what happens when something goes wrong.
 - [momentum-universe](momentum-universe.md): how the IRAs' momentum engine
   sees the market: one universe snapshot a session, price histories for the
   500 it ranks, and what happens when the exchange cancels a session.
+- [momentum-minimum-lot](momentum-minimum-lot.md): how the IRAs buy whole
+  shares only: a stock one share of which costs more than its target is
+  skipped for the next-ranked one, what happens when nothing is affordable,
+  and what the program records.

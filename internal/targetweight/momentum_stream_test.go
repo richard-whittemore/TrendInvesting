@@ -39,7 +39,7 @@ func momentumConfiguration() event.TargetWeightConfigurationPayload {
 			BondFunds:          []event.BondFund{{InstrumentID: "IEF", Fraction: 0.5}, {InstrumentID: "SHY", Fraction: 0.5}},
 			Birth:              "1995-06",
 		},
-		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityWhole, MaxFeesPerOrder: 1},
+		Execution: event.ExecutionConfiguration{CashRule: event.CashRuleSettled, ShareQuantity: event.ShareQuantityMinimumLot, MaxFeesPerOrder: 1},
 		Limits:    event.MarginLimits{MaxExposure: 1, MaxOrdersPerDecision: 10, MaxOrderFraction: 0.9, PriceBand: 0.05},
 	}
 }
@@ -174,6 +174,11 @@ type momentumOptions struct {
 	// just after the calendar; unlisted leaves sessions off the calendar fed.
 	retract  []string
 	unlisted map[string]bool
+	// rawScale multiplies an instrument's raw close, leaving its adjusted
+	// close, as an unadjusted split would: a stock dear by the share.
+	rawScale map[string]float64
+	// held is the IRA's holdings before the first session.
+	held map[string]int64
 }
 
 type momentumResult struct {
@@ -203,6 +208,9 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 	s := &stream{hash: event.TargetWeightConfigurationHash(cfg)}
 	res := momentumResult{run: run{recorder: rec, hash: s.hash}, stream: s}
 	acct := &ira{settled: 10000, held: map[string]int64{}}
+	for id, q := range opts.held {
+		acct.held[id] = q
+	}
 	apply := func(in event.Envelope) []event.Envelope {
 		t.Helper()
 		out, err := rec.Apply(context.Background(), in)
@@ -311,8 +319,12 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 				continue
 			}
 			ids = append(ids, n.id)
-			apply(s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, fmt.Sprintf("bar:%s:%s", n.id, session), end,
-				adjustedBar(n.id, prices[n.id], n.volume, end)))
+			bar := adjustedBar(n.id, prices[n.id], n.volume, end)
+			if k, ok := opts.rawScale[n.id]; ok {
+				raw := float64(prices[n.id] * k)
+				bar.Raw.Open, bar.Raw.High, bar.Raw.Low, bar.Raw.Close = raw, raw, raw, raw
+			}
+			apply(s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, fmt.Sprintf("bar:%s:%s", n.id, session), end, bar))
 		}
 		if !opts.noUniverse && cal[i+1][:7] != session[:7] {
 			snap := event.UniverseSnapshotPayload{Session: session, Source: "fixture-universe"}
