@@ -84,7 +84,7 @@ func TestAJournalTheReporterCannotReadStillAlertsAndChecksTheHeartbeat(t *testin
 			}
 			sent := r.to("events.pagerduty.test")
 			all := strings.Join(sent, "\n")
-			for _, want := range []string{c.account + ": the reporter cannot read the journal", c.account + ": no engine heartbeat", `"severity":"critical"`} {
+			for _, want := range []string{"The heartbeat is still checked", c.account + ": the reporter cannot read the journal", c.account + ": no engine heartbeat", `"severity":"critical"`} {
 				if !strings.Contains(all, want) {
 					t.Errorf("%q was not delivered:\n%s", want, all)
 				}
@@ -113,7 +113,7 @@ func TestAMissingJournalPathIsAlertedOnceWithoutAHeartbeatCheck(t *testing.T) {
 		t.Fatalf("the failure must be returned, got %v", err)
 	}
 	all := strings.Join(r.to("events.pagerduty.test"), "\n")
-	if !strings.Contains(all, "missing.journal: the reporter cannot read the journal") || strings.Contains(all, "no engine heartbeat") {
+	if !strings.Contains(all, "missing.journal: the reporter cannot read the journal") || strings.Contains(all, "no engine heartbeat") || strings.Contains(all, "The heartbeat is still checked") {
 		t.Fatalf("want the refusal alert and no heartbeat alert:\n%s", all)
 	}
 	sent := len(r.to("events.pagerduty.test"))

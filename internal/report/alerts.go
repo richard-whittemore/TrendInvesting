@@ -194,14 +194,19 @@ func HeartbeatAlert(account string, lastActivity, now time.Time, sessions int) (
 
 // JournalRefusedAlert reports that the journal could not be read, so no
 // alert it holds can be sent: a damaged or mismatched log is refused rather
-// than guessed at, and goes to a person (ADR 0027, section 5). The key is the
+// than guessed at, and goes to a person (ADR 0027, section 5). The body says the
+// heartbeat is still checked only when the caller could check it. The key is the
 // account and the error, so one failure is one incident and a different
 // failure is another.
-func JournalRefusedAlert(account string, err error, at time.Time) Alert {
+func JournalRefusedAlert(account string, err error, heartbeatChecked bool, at time.Time) Alert {
+	checked := ""
+	if heartbeatChecked {
+		checked = " The heartbeat is still checked."
+	}
 	return Alert{
 		Key: "journal-refused:" + account + ":" + err.Error(), Kind: KindJournalRefused, Severity: Urgent, AccountID: account, At: at,
 		Title: fmt.Sprintf("%s: the reporter cannot read the journal", account),
-		Body:  fmt.Sprintf("The reporter refused the journal: %s. No alert recorded in it (refusals, Degraded or Halted, withheld decisions) can be sent until it reads, and the daily summary is not sent. The heartbeat is still checked. Stops and orders at the broker are unaffected. Check the file with journal-query; recovery is a person's.", err),
+		Body:  fmt.Sprintf("The reporter refused the journal: %s. No alert recorded in it (refusals, Degraded or Halted, withheld decisions) can be sent until it reads, and the daily summary is not sent.%s Stops and orders at the broker are unaffected. Check the file with journal-query; recovery is a person's.", err, checked),
 	}
 }
 

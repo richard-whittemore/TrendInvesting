@@ -90,9 +90,10 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if refused != nil {
 		// A journal that cannot be read must not silence the one path that
 		// reaches a person (ADR 0019, "Alerting"): the failure is itself an
-		// alert, the heartbeat is still checked, and the error is returned.
+		// alert, the heartbeat is still checked when the file can be stat-ed, and the
+		// error is returned.
 		failures = append(failures, refused)
-		alerts = []report.Alert{report.JournalRefusedAlert(label, refused, now())}
+		alerts = []report.Alert{report.JournalRefusedAlert(label, refused, statErr == nil, now())}
 	}
 	if statErr == nil {
 		a, lost, err := report.HeartbeatAlert(label, info.ModTime(), now(), *sessions)

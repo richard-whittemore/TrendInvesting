@@ -41,7 +41,7 @@ account.
   what the engine decided (targets, orders, refusals, engine state) that
   fails is a sign of a damaged or mismatched file. The reporter then sends an
   urgent "the reporter cannot read the journal" alert naming the problem,
-  still checks the heartbeat, sends nothing else from the file, and exits
+  still checks the heartbeat (unless the file is missing altogether, when there is no modification time to check), sends nothing else from the file, and exits
   with the error. The dashboard says "journal does not verify" when the file's fingerprints fail, and
   "journal unavailable" for any other record it cannot read.
 - An input that fails (a bar, an account snapshot, a fill) is skipped and
@@ -60,7 +60,7 @@ account.
 | A decision was withheld for missing data (bars, account snapshot, universe) | urgent | run of the same reason |
 | A decision was withheld for another reason | routine | run of the same reason |
 | No sign of life from the engine | urgent | silence, keyed by the last activity |
-| The reporter cannot read the journal | urgent | account and problem |
+| The reporter cannot read the journal (its text says the heartbeat is still checked only when the file exists to check it) | urgent | account and problem |
 | The reporter cannot check the heartbeat (the calendar does not cover the span) | urgent | account and problem |
 | The daily summary (if asked for) | routine | account and day, once that day's session has closed in the log |
 

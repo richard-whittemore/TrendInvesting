@@ -55,12 +55,15 @@ func TestTheTextSummarySaysWhetherAReleasedOrderWasSent(t *testing.T) {
 
 func TestAJournalTheReporterCannotReadIsItselfAnUrgentAlert(t *testing.T) {
 	at := time.Date(2026, time.October, 17, 12, 0, 0, 0, time.UTC)
-	a := report.JournalRefusedAlert("joint", errors.New("report: chain broken at record 7"), at)
+	a := report.JournalRefusedAlert("joint", errors.New("report: chain broken at record 7"), true, at)
 	if a.Kind != report.KindJournalRefused || a.Severity != report.Urgent || a.AccountID != "joint" || !contains(a.Body, "chain broken at record 7") {
 		t.Fatalf("alert = %+v", a)
 	}
-	again := report.JournalRefusedAlert("joint", errors.New("report: chain broken at record 7"), at.Add(time.Hour))
-	other := report.JournalRefusedAlert("joint", errors.New("report: chain broken at record 9"), at)
+	if unchecked := report.JournalRefusedAlert("joint", errors.New("x"), false, at); contains(unchecked.Body, "heartbeat is still checked") {
+		t.Fatal("the body claims a heartbeat check that did not happen")
+	}
+	again := report.JournalRefusedAlert("joint", errors.New("report: chain broken at record 7"), true, at.Add(time.Hour))
+	other := report.JournalRefusedAlert("joint", errors.New("report: chain broken at record 9"), true, at)
 	if a.Key != again.Key || a.Key == other.Key {
 		t.Fatal("one failure must be one incident, and a different failure another")
 	}
