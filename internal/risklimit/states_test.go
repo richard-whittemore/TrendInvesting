@@ -16,7 +16,7 @@ var at = time.Date(2025, time.March, 5, 15, 0, 0, 0, time.UTC)
 // mark of 1 against net liquidation 10,000, so exposures read as held/10,000,
 // with Excess Liquidity at 60% of net liquidation.
 func broker(held int64, orders ...event.BrokerOrder) event.BrokerSnapshotPayload {
-	s := event.BrokerSnapshotPayload{AccountID: "joint", AsOf: at, MarketOpen: true, NetLiquidation: 10000, ExcessLiquidity: 6000, OpenOrders: orders}
+	s := event.BrokerSnapshotPayload{AccountID: "joint", AsOf: at, MarketOpen: true, NetLiquidation: 10000, ExcessLiquidity: 6000, OpenOrders: append([]event.BrokerOrder{}, orders...)}
 	if held != 0 {
 		s.Positions = []event.BrokerPosition{{InstrumentID: "SPY", Quantity: held, Mark: 1, MarkSet: true}}
 	}
@@ -29,7 +29,7 @@ func boosted(orders ...event.BrokerOrder) event.BrokerSnapshotPayload {
 	return event.BrokerSnapshotPayload{
 		AccountID: "joint", AsOf: at, MarketOpen: true, NetLiquidation: 8530, ExcessLiquidity: 5222.5,
 		Positions:  []event.BrokerPosition{{InstrumentID: "SPY", Quantity: 147, Mark: 90, MarkSet: true}},
-		OpenOrders: orders,
+		OpenOrders: append([]event.BrokerOrder{}, orders...),
 	}
 }
 
@@ -955,6 +955,41 @@ func TestAnUrgentAlarmStillInForceRetriesAWithheldSale(t *testing.T) {
 	later.AsOf, later.ExcessLiquidity = at.Add(32*time.Minute), 1500
 	if obs := observe(t, g, "broker:32", later); obs.Urgent {
 		t.Error("once planned, the alarm's sale is not decided again")
+	}
+}
+
+// TestAnUrgentSaleIsRetriedFromASnapshotWithoutAMarginReading: a sale the
+// urgent alarm fired, withheld because the snapshot's mark was zero, is
+// decided again on a later snapshot that can size it though it carries no
+// Excess Liquidity reading: without a reading the level stands, so the alarm
+// is still urgent and what fired the sale is still in force (ADR 0019,
+// amendment of 2026-10-17, reading 1).
+func TestAnUrgentSaleIsRetriedFromASnapshotWithoutAMarginReading(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	unmarked := boosted()
+	unmarked.ExcessLiquidity = 1500
+	unmarked.Positions = []event.BrokerPosition{{InstrumentID: "SPY", Quantity: 147, Mark: 0, MarkSet: true}}
+	if obs := observe(t, g, "broker:0", unmarked); !obs.Urgent {
+		t.Fatalf("setup: a low reading is urgent: %+v", obs.Alarm)
+	}
+	s, ok := requestSale(t, g, event.SaleTriggerMarginUrgent)
+	if !ok || s.Withheld == nil || s.Withheld.Reason != event.SaleWithheldNotPositive {
+		t.Fatalf("withheld from the zero mark: %+v", s)
+	}
+	for _, open := range []bool{false, true} {
+		g := gate(t, limits(), event.TradingModeDryRun)
+		observe(t, g, "broker:0", unmarked)
+		requestSale(t, g, event.SaleTriggerMarginUrgent)
+		marked := later(boosted(), 1)
+		marked.MarketOpen = open
+		marked.Unreadable, marked.ExcessLiquidity = []string{event.BrokerComponentExcessLiquidity}, 0
+		obs := observe(t, g, "broker:1", marked)
+		if obs.Alarm != nil || !obs.Urgent {
+			t.Fatalf("market open %v: no reading, the alarm stays urgent and the sale is decided again: %+v", open, obs)
+		}
+		if s, ok := requestSale(t, g, event.SaleTriggerMarginUrgent); !ok || s.Order == nil || s.Order.Quantity != 54 {
+			t.Fatalf("market open %v: sent from the restored mark: %+v", open, s)
+		}
 	}
 }
 

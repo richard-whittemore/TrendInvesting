@@ -89,10 +89,12 @@ type trackedSell struct {
 	// snapshot's time.
 	fills, listed []shown
 	// frozen is what was counted filled when a canceled or invalid lifecycle
-	// report, which occurred at endedAt, ended the sell.
-	frozen  int64
-	endedAt time.Time
-	ended   bool
+	// report, which occurred at endedAt, ended the sell; frozenFills is how
+	// many of fills it counted.
+	frozen      int64
+	frozenFills int
+	endedAt     time.Time
+	ended       bool
 }
 
 // endedBy reports whether a lifecycle report had ended the sell before t.
@@ -100,7 +102,9 @@ func (s *trackedSell) endedBy(t time.Time) bool { return s.ended && s.endedAt.Be
 
 // knownBy is the most the sell's own facts credited to a snapshot taken at t
 // show filled: fill reports and a lifecycle end before t, listings at or
-// before t.
+// before t. A lifecycle end is credited with what it froze less the fill
+// reports it counted that are stamped at or after t: a fill stamped after
+// the end is credited by its own time, never from the end's.
 func (s *trackedSell) knownBy(t time.Time) int64 {
 	var reported int64
 	for _, f := range s.fills {
@@ -110,7 +114,13 @@ func (s *trackedSell) knownBy(t time.Time) int64 {
 	}
 	known := max(reported, most(s.listed, t))
 	if s.endedBy(t) {
-		known = max(known, s.frozen)
+		frozen := s.frozen
+		for _, f := range s.fills[:s.frozenFills] {
+			if !f.at.Before(t) {
+				frozen -= f.filled
+			}
+		}
+		known = max(known, frozen)
 	}
 	return known
 }
@@ -376,7 +386,7 @@ func (g *Gate) ObserveLifecycle(p event.LimitOrderLifecyclePayload) error {
 				part = take
 			}
 		})
-		s.frozen, s.endedAt, s.ended = s.knownBy(endOfTime)+part, p.OccurredAt, true
+		s.frozen, s.frozenFills, s.endedAt, s.ended = s.knownBy(endOfTime)+part, len(s.fills), p.OccurredAt, true
 	}
 	return nil
 }

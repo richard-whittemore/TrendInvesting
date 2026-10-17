@@ -266,6 +266,24 @@ func TestALifecycleReportResolvesASell(t *testing.T) {
 	pendingIs(t, g, 0, "shown")
 }
 
+// An ended sell is counted filled, from its end's time, by what the facts
+// before the end show: a fill report stamped after the end, recorded before
+// it, is credited only from its own time, so a snapshot taken between the
+// end and that fill still nets it (a snapshot is credited with no fill it
+// cannot show).
+func TestAFillStampedAfterTheEndIsNotCreditedFromTheEnd(t *testing.T) {
+	g := gate(t, limits(), event.TradingModeDryRun)
+	observe(t, g, "broker:1", broker(100))
+	g.ObserveAccount(account(100, 0))
+	released(t, check(t, g, order(event.OrderSideSell, 60, 100))[0])
+	sellFill(t, g, "tw-sell", "after-end", 10, 5)
+	sellStatus(t, g, "tw-sell", event.OrderLifecycleStatusCanceled, 60, 1, 2)
+	g.ObserveAccount(account(100, 3))
+	pendingIs(t, g, 10, "filled after the snapshot between the end and the fill")
+	g.ObserveAccount(account(90, 6))
+	pendingIs(t, g, 0, "shown")
+}
+
 func TestFillAndLifecycleReportsAreChecked(t *testing.T) {
 	g := gate(t, limits(), event.TradingModeDryRun)
 	observe(t, g, "broker:1", broker(100))

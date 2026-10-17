@@ -14,7 +14,8 @@ import (
 func workedExample() *event.BrokerSnapshotPayload {
 	return &event.BrokerSnapshotPayload{
 		AccountID: "joint", AsOf: session, MarketOpen: true, NetLiquidation: 8530, ExcessLiquidity: 5222.5,
-		Positions: []event.BrokerPosition{{InstrumentID: "SPY", Quantity: 147, Mark: 90, MarkSet: true}},
+		Positions:  []event.BrokerPosition{{InstrumentID: "SPY", Quantity: 147, Mark: 90, MarkSet: true}},
+		OpenOrders: []event.BrokerOrder{},
 	}
 }
 

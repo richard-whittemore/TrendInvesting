@@ -103,7 +103,9 @@ func (g *Gate) SetKillSwitch(id string, p event.KillSwitchPayload) error {
 // market is open, is urgent once there has been no reading for the stale
 // period: since the last reading, or, with none yet, since the run's first
 // broker snapshot, which starts the clock. Without a reading and short of
-// that, the level stands. An alarm is returned only when its level changes.
+// that, the level stands, and a sale the urgent alarm fired, withheld from a
+// snapshot that could not size it, is decided again from one that can. An
+// alarm is returned only when its level changes.
 // A sale withheld from a snapshot that could not size it lapses when what
 // fired it is no longer in force: the account no longer refuses Boost's
 // exit, or the alarm is no longer urgent.
@@ -171,15 +173,13 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 			alarm.Detail = fmt.Sprintf("no excess liquidity reading in the %d minutes since the run's first broker snapshot, while the market is open", g.limits.ExcessLiquidityStaleMinutes)
 		}
 	default:
-		return Observation{RetryExit: retryExit, Lapsed: lapsed}, nil
+		// No reading and short of the stale period: the level stands, so
+		// an urgent alarm's withheld sale is still in force.
+		return g.unchanged(s, retryExit, lapsed), nil
 	}
 	alarm.LastReadingAt, alarm.LastReadingSet = g.lastReading, g.lastReadingSet
 	if alarm.Level == g.alarmLevel {
-		// Still urgent, with the alarm's sale withheld from a snapshot that
-		// could not size it: the producing condition is still in force, so
-		// a readable, positive snapshot decides the sale again.
-		urgent := alarm.Level == event.MarginAlarmUrgent && g.urgentRetry && g.urgentInstrument != "" && sizable(s, g.urgentInstrument)
-		return Observation{Urgent: urgent, RetryExit: retryExit && !urgent, Lapsed: lapsed}, nil
+		return g.unchanged(s, retryExit, lapsed), nil
 	}
 	if g.urgentRetry {
 		// The level changed, so the alarm that fired the withheld sale is no
@@ -199,6 +199,16 @@ func (g *Gate) ObserveBroker(id string, s event.BrokerSnapshotPayload) (Observat
 		obs.Urgent, obs.RetryExit = true, false
 	}
 	return obs, nil
+}
+
+// unchanged is the observation of snapshot s when the alarm's level stands:
+// still urgent, with the alarm's sale withheld from a snapshot that could not
+// size it, the producing condition is still in force, so a readable, positive
+// snapshot decides the sale again (ADR 0019, amendment of 2026-10-17, reading
+// 1), whether or not s carries a reading.
+func (g *Gate) unchanged(s event.BrokerSnapshotPayload, retryExit bool, lapsed []event.SaleWithheldPayload) Observation {
+	urgent := g.alarmLevel == event.MarginAlarmUrgent && g.urgentRetry && g.urgentInstrument != "" && sizable(s, g.urgentInstrument)
+	return Observation{Urgent: urgent, RetryExit: retryExit && !urgent, Lapsed: lapsed}
 }
 
 // refusesExit reports whether the account still refuses Boost's exit on

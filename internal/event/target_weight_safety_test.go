@@ -167,6 +167,72 @@ func TestBrokerSnapshotValidate(t *testing.T) {
 	}
 }
 
+// TestBrokerSnapshotStatesOrdersAndMarketOpen: a snapshot states its open
+// orders and whether the market was open. A missing or null order list is
+// not an empty one: unavailable orders are marked unreadable, or the sale and
+// the broker-holding check would net no working sell; a missing market_open
+// would read as closed and silence the missing-reading alarm (ADR 0019, "An
+// unavailable balance is not zero").
+func TestBrokerSnapshotStatesOrdersAndMarketOpen(t *testing.T) {
+	type P = event.BrokerSnapshotPayload
+	v := validBrokerSnapshot()
+	expectInvalid(t, "readable orders not stated", v, func(p *P) { p.OpenOrders = nil }, "open orders")
+	none := v
+	none.OpenOrders = []event.BrokerOrder{}
+	if err := none.Validate(); err != nil {
+		t.Errorf("an empty, stated order list is a valid observation: %v", err)
+	}
+
+	decode := func(mutate func(map[string]any)) (P, error) {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		mutate(fields)
+		if raw, err = json.Marshal(fields); err != nil {
+			t.Fatal(err)
+		}
+		var p P
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return p, err
+		}
+		return p, p.Validate()
+	}
+	for name, mutate := range map[string]func(map[string]any){
+		"open orders missing":  func(f map[string]any) { delete(f, "open_orders") },
+		"open orders null":     func(f map[string]any) { f["open_orders"] = nil },
+		"market open missing":  func(f map[string]any) { delete(f, "market_open") },
+		"market open null":     func(f map[string]any) { f["market_open"] = nil },
+		"market open a string": func(f map[string]any) { f["market_open"] = "yes" },
+	} {
+		if _, err := decode(mutate); err == nil {
+			t.Errorf("%s: decoded as a valid snapshot", name)
+		}
+	}
+	for name, mutate := range map[string]func(map[string]any){
+		"open orders empty": func(f map[string]any) { f["open_orders"] = []any{} },
+		"open orders unreadable and missing": func(f map[string]any) {
+			delete(f, "open_orders")
+			f["unreadable"] = []any{event.BrokerComponentOpenOrders}
+		},
+		"market closed": func(f map[string]any) { f["market_open"] = false },
+	} {
+		if _, err := decode(mutate); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if p, err := decode(func(map[string]any) {}); err != nil || !p.MarketOpen || len(p.OpenOrders) != 1 {
+		t.Errorf("round trip: %+v %v", p, err)
+	}
+	if p, err := decode(func(f map[string]any) { f["market_open"] = false }); err != nil || p.MarketOpen {
+		t.Errorf("an explicit false is closed: %+v %v", p, err)
+	}
+}
+
 func slicesClone[T any](s []T) []T { return append([]T(nil), s...) }
 
 func TestMarginAlarmValidate(t *testing.T) {

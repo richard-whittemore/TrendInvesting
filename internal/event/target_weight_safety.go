@@ -126,7 +126,8 @@ type BrokerSnapshotPayload struct {
 	AccountID string    `json:"account_id"`
 	AsOf      time.Time `json:"as_of"`
 	// MarketOpen is the producer's record that the market was open at AsOf;
-	// the alarm counts a missing reading as urgent only while it is.
+	// the alarm counts a missing reading as urgent only while it is. It must
+	// be stated (UnmarshalJSON).
 	MarketOpen bool `json:"market_open"`
 	// Unreadable lists, strictly ascending, the components IBKR could not
 	// supply; each carries no value.
@@ -136,8 +137,33 @@ type BrokerSnapshotPayload struct {
 	// Positions is strictly ascending by instrument, with no zero rows; an
 	// instrument not listed is not held.
 	Positions []BrokerPosition `json:"positions"`
-	// OpenOrders is strictly ascending by broker order ID.
+	// OpenOrders is strictly ascending by broker order ID. A readable list is
+	// stated, empty as []: a missing or null list is no reading, and a list
+	// IBKR could not supply is marked unreadable, never sent as none.
 	OpenOrders []BrokerOrder `json:"open_orders"`
+}
+
+// UnmarshalJSON decodes the snapshot and requires market_open to be stated as
+// a boolean: omitted or null it would read as false, a closed market, and
+// silence the alarm's missing-reading rule (plan.md section 5). A missing or
+// null open_orders decodes as unstated, which Validate refuses unless the
+// orders are marked unreadable (ADR 0019, "An unavailable balance is not
+// zero").
+func (p *BrokerSnapshotPayload) UnmarshalJSON(raw []byte) error {
+	type plain BrokerSnapshotPayload
+	var stated struct {
+		plain
+		MarketOpen *bool `json:"market_open"`
+	}
+	if err := json.Unmarshal(raw, &stated); err != nil {
+		return err
+	}
+	if stated.MarketOpen == nil {
+		return errors.New("broker snapshot payload: market_open must be stated as true or false")
+	}
+	*p = BrokerSnapshotPayload(stated.plain)
+	p.MarketOpen = *stated.MarketOpen
+	return nil
 }
 
 // Readable reports whether component was read.
@@ -192,8 +218,11 @@ func (p BrokerSnapshotPayload) Validate() error {
 	if !p.Readable(BrokerComponentPositions) && len(p.Positions) != 0 {
 		errs = append(errs, errors.New("unreadable positions carry no rows"))
 	}
-	if !p.Readable(BrokerComponentOpenOrders) && len(p.OpenOrders) != 0 {
+	switch {
+	case !p.Readable(BrokerComponentOpenOrders) && len(p.OpenOrders) != 0:
 		errs = append(errs, errors.New("unreadable open orders carry no rows"))
+	case p.Readable(BrokerComponentOpenOrders) && p.OpenOrders == nil:
+		errs = append(errs, errors.New("readable open orders must be stated, [] when none work; an unavailable list is marked unreadable"))
 	}
 	for i, position := range p.Positions {
 		if position.InstrumentID == "" {

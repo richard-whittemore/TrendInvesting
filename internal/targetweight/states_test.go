@@ -406,7 +406,7 @@ func TestRecordedDecisionsAndSafetyInputsAreChecked(t *testing.T) {
 	})
 	refuses("another account's broker snapshot", nil, func(s *stream) event.Envelope {
 		return s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "broker:x", start,
-			event.BrokerSnapshotPayload{AccountID: "ira", AsOf: start, NetLiquidation: 1})
+			event.BrokerSnapshotPayload{AccountID: "ira", AsOf: start, NetLiquidation: 1, OpenOrders: []event.BrokerOrder{}})
 	})
 	// A venue report names an order the gate released, at the version a
 	// target-weight account's orders are reported at.

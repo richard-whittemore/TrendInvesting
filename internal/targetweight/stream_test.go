@@ -133,6 +133,7 @@ func (a *account) broker(at time.Time, price float64) event.BrokerSnapshotPayloa
 	s := event.BrokerSnapshotPayload{
 		AccountID: "joint", AsOf: at, MarketOpen: true,
 		NetLiquidation: netLiq, ExcessLiquidity: netLiq - float64(0.25*value),
+		OpenOrders: []event.BrokerOrder{},
 	}
 	if a.held != 0 {
 		s.Positions = []event.BrokerPosition{{InstrumentID: "SPY", Quantity: a.held, Mark: price, MarkSet: true}}

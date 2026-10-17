@@ -142,7 +142,10 @@ shares known filled. One rule decides what is known filled:
   reading: against that snapshot, the 54 still count as being sold. A fill
   stamped 16:00:01 is one the snapshot shows. A cancellation in the same
   second as a snapshot is treated the same way: the shares the sale had sold
-  by then still count as being sold against that snapshot.
+  by then still count as being sold against that snapshot. A fill stamped
+  after a cancellation (IBKR can report a late fill) counts only from its
+  own time: a snapshot taken between the cancellation and that fill still
+  counts its shares as being sold.
 - A snapshot taken earlier than one already seen, but recorded after it
   (account and IBKR snapshots each keep their own order), is judged by its
   own time too. An IBKR snapshot from 15:59:55 that still shows 147,
@@ -194,7 +197,9 @@ readable and positive, while what fired it is still in force:
 - for Boost's exit, until the next decision no longer plans that sell, or
   the account no longer refuses the exit (no longer Halted, Degraded on SPY
   or under the kill switch);
-- for the alarm, while it stays urgent.
+- for the alarm, while it stays urgent. A snapshot with no Excess Liquidity
+  reading leaves the alarm where it was, so a later snapshot that can size
+  the sale still sends it, even without that reading.
 
 Otherwise the withheld sale lapses, its attempt unspent, and the program
 records one more `risk.sale.withheld`, with reason `lapsed`, so the journal
@@ -254,6 +259,13 @@ liquidation of zero or less, with Excess Liquidity readable, is a reading,
 and the worst one: there is no ratio, but it is below every threshold, so
 the alarm is urgent at once, market open or not (cause
 `non-positive-net-liquidation`).
+
+Every IBKR snapshot must say whether the market was open and list its open
+orders; a snapshot that leaves either out is refused as invalid. "No open
+orders" is an empty list. When IBKR cannot supply the orders, the snapshot
+marks them unreadable instead: the sale back to 98% is then withheld as
+`broker-values-unreadable` (and counts as attempted), and Degraded sells are
+refused, because working sells could not be checked.
 
 The thresholds are in the configuration (version 3 of
 `strategy.target-weight.configuration`). Only the margin account has them: an
