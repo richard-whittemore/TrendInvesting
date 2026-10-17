@@ -331,3 +331,14 @@ Each change should reference its GitHub issue (`#N`) and state:
 - unresolved assumptions.
 
 Never hide a failed research result by rewriting or removing its recorded configuration and evidence.
+
+## Review cost
+
+Each bot review is billed, so:
+
+- Push once per review round. Batch all fixes for a round into one push.
+- Never request a bot review manually. Auto-review already runs, and a manual
+  request bills a second review.
+- Drafts are not reviewed (`.coderabbit.yaml` and `.greptile/config.json`), so
+  stacked work stays draft until its base merges.
+- The orchestrator's watcher nudges once if no review appears.

@@ -1,0 +1,21 @@
+# CodeRabbit configuration. Goal: keep reviews cheap without losing real findings.
+# Keys verified against https://docs.coderabbit.ai/reference/configuration
+reviews:
+  # chill: fewer nitpick-level comments than assertive.
+  profile: chill
+  # Do not post a blocking "request changes" review; comments only.
+  request_changes_workflow: false
+  # Skip the long PR summary to shorten output.
+  high_level_summary: false
+  # No poem in the walkthrough.
+  poem: false
+  auto_review:
+    # Auto-review stays on: a manual request would bill a second review.
+    enabled: true
+    # Draft PRs (stacked work) are not reviewed.
+    drafts: false
+    # A PR whose title contains one of these words is skipped.
+    ignore_title_keywords:
+      - "WIP"
+  # No path_filters: the repo has no generated or vendored files, and docs
+  # reviews catch real errors, so nothing is excluded.
