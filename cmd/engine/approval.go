@@ -94,8 +94,12 @@ const durableLogSuffix = ".log"
 // the operator moves it, unchanged, into the directory's quarantine folder,
 // which the engine never reads (ADR 0018: evidence is never edited or
 // deleted). A log the engine cannot open or read, for its permissions or a
-// disk fault, refuses every start too, but may be an intact crashed run, so
-// the step is to fix the fault and start again, never to quarantine it.
+// disk fault, refuses every start too. Three cases are told apart
+// (readFault): a permission fault, where the fix is the file's owner or mode;
+// a disk fault on a log that is or may be the latest run, where the fix is
+// the disk and the log is never set aside, for it may be the intact crashed
+// run; and a disk fault on a superseded log, which is set aside only after
+// the runbook's journal check shows a later run superseded it.
 //
 // freshRunApproval applies these rules to one invocation and returns the
 // approval to record, or nil when none is needed: a backtest, a resume of a

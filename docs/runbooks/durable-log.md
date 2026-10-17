@@ -157,10 +157,20 @@ whether it is the crashed run. The message says which case it is.
 2. **A disk fault on a log that is or may be the latest run** ("it is or may
    be the latest run", given when no log holding a record was modified after
    it): fix the disk the error names and start again, leaving the log where
-   it is. Never quarantine it: it may be the intact crashed run. If the disk
-   cannot be recovered, the crashed run cannot be resumed: start a fresh run
-   from a reconciled baseline (ADR 0019's recovery procedure), with an
-   approval naming the latest run you can still read.
+   it is. Never quarantine it while the disk may yet be fixed: it may be the
+   intact crashed run. If the disk
+   cannot be recovered, the crashed run cannot be resumed, and only then do
+   you give it up:
+   1. Write the disk off (replace it or restore the folder from backup;
+      do not keep retrying it).
+   2. Move the unreadable log, unchanged, into the quarantine folder as
+      evidence, as in "An unrecoverable log" step 2 (a move needs no read).
+   3. Start a fresh run from a reconciled baseline (ADR 0019's recovery
+      procedure), with an approval naming the latest run the engine can
+      still read.
+
+   Any decision recorded only in the lost log is gone. The broker
+   reconciliation is the baseline, not that log.
 3. **A disk fault on a superseded log** (the message names a newer log
    holding a record, and the quarantine folder): fix the disk if you can and
    start again. If the fault persists, confirm the log is not the crashed
