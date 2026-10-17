@@ -23,7 +23,8 @@ const (
 	// order.
 	LifecycleReleased OrderState = "released"
 	// LifecycleAcknowledged: the venue has reported on it, by a lifecycle report
-	// or a fill naming its client order ID.
+	// or a fill naming its client order ID that the engine reads (see
+	// OrderLifecycles).
 	LifecycleAcknowledged OrderState = "acknowledged"
 )
 
@@ -52,13 +53,26 @@ type Order struct {
 }
 
 // OrderLifecycles returns every released order in the log, in the order
-// released, with its lifecycle state. entries are the log's committed
-// records in recording order, inputs and decisions marked as such. A record
-// at a schema version this build does not read is refused (ADR 0015). A
-// venue's report naming no released order changes nothing: explaining it is
-// reconciliation's (ADR 0019).
-func OrderLifecycles(entries []journal.Entry) ([]Order, error) {
+// released, with its lifecycle state, and the venue's reports the engine did
+// not read. entries are the log's committed records in recording order,
+// inputs and decisions marked as such; strategyID is the run's
+// configuration's (AccountOf). A release at a schema version this build does
+// not read is refused (ADR 0015).
+//
+// The log commits an input the engine refused as well as one it read, with
+// no mark of which (journal.Recorder.Apply), so a venue's report is read as
+// the engine reads it, and only one the engine reads acknowledges an order:
+// a lifecycle report that describes the order as released
+// (event.LimitOrderLifecyclePayload's Describes), or, in a momentum run, the
+// one run that reads fills, a fill of no more than the order's quantity on
+// its account, instrument and side. A report that does not validate, or
+// does not describe the released order it names, is returned as unread for
+// its own alert rather than refusing the log, since the log is append-only
+// and would be refused on every later reading. A report naming no released
+// order changes nothing: explaining it is reconciliation's (ADR 0019).
+func OrderLifecycles(entries []journal.Entry, strategyID string) ([]Order, []UnreadReport, error) {
 	var orders []*Order
+	var unread []UnreadReport
 	byID := map[string]*Order{}
 	var group string // the input whose group the current record belongs to
 	for _, entry := range entries {
@@ -70,8 +84,8 @@ func OrderLifecycles(entries []journal.Entry) ([]Order, error) {
 					o.State = LifecycleReleased
 				}
 			}
-			if err := acknowledge(e, byID); err != nil {
-				return nil, err
+			if u := acknowledge(e, strategyID, byID); u != nil {
+				unread = append(unread, *u)
 			}
 			continue
 		}
@@ -80,7 +94,7 @@ func OrderLifecycles(entries []journal.Entry) ([]Order, error) {
 		}
 		var p event.OrderReleasedPayload
 		if err := read(e, releasedVersions, &p); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if _, seen := byID[p.ClientOrderID]; seen {
 			continue
@@ -97,36 +111,91 @@ func OrderLifecycles(entries []journal.Entry) ([]Order, error) {
 	for i, o := range orders {
 		out[i] = *o
 	}
-	return out, nil
+	return out, unread, nil
+}
+
+// UnreadReport is a venue's report the log holds that the engine did not
+// read: InputID is the input, ClientOrderID the order it names (empty when
+// its payload does not decode), Reason why it was not read, and At when it
+// was recorded.
+type UnreadReport struct {
+	InputID, Type, ClientOrderID, Reason string
+	At                                   time.Time
+}
+
+// UnreadReportAlerts returns an urgent alert for each venue report the
+// engine did not read, one incident per input however often the reporter
+// runs (ADR 0019, "Alerting"). Such a report acknowledges nothing, so an
+// order it names stays unacknowledged and alerts in its own right.
+func UnreadReportAlerts(account string, unread []UnreadReport) []Alert {
+	out := make([]Alert, 0, len(unread))
+	for _, u := range unread {
+		out = append(out, Alert{
+			Key: "venue-report-unread:" + u.InputID + "@" + account, Kind: KindVenueReportUnread, Severity: Urgent, AccountID: account, At: u.At,
+			Title: fmt.Sprintf("%s: venue report %s not read", account, u.InputID),
+			Body: fmt.Sprintf("The log holds the venue's report %s (%s, client order ID %q), recorded at %s, which the engine did not read: %s. It acknowledges nothing. Check IBKR for the order it names before acting on it; the reporter's other alerts are unaffected.",
+				u.InputID, u.Type, u.ClientOrderID, u.At.UTC().Format(time.RFC3339), u.Reason),
+		})
+	}
+	return out
 }
 
 // acknowledge marks the order a venue's report names as acknowledged, the
-// first report only.
-func acknowledge(e event.Envelope, byID map[string]*Order) error {
-	var clientID, status string
+// first report only, when the engine reads the report (see OrderLifecycles),
+// and returns the report as unread when the engine does not.
+func acknowledge(e event.Envelope, strategyID string, byID map[string]*Order) *UnreadReport {
+	unread := func(clientID, reason string) *UnreadReport {
+		return &UnreadReport{InputID: e.ID, Type: e.Type, ClientOrderID: clientID, Reason: reason, At: e.RecordedAt}
+	}
+	var o *Order
+	var status string
 	var at time.Time
 	switch {
 	case e.Type == event.OrderLifecycleEventType && e.SchemaVersion == event.OrderLifecycleLimitVersion:
 		var p event.LimitOrderLifecyclePayload
 		if err := read(e, lifecycleVersions, &p); err != nil {
-			return err
+			return unread(p.ClientOrderID, err.Error())
 		}
-		clientID, status, at = p.ClientOrderID, p.Status, p.OccurredAt
+		var ok bool
+		if o, ok = byID[p.ClientOrderID]; !ok {
+			return nil
+		}
+		if !p.Describes(o.released()) {
+			return unread(p.ClientOrderID, fmt.Sprintf("it reports %s %s %d %s at %v, which does not describe order %s as released (%s %s %d %s at %.2f)",
+				p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, o.ClientOrderID, o.AccountID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice))
+		}
+		status, at = p.Status, p.OccurredAt
 	case e.Type == event.FillEventType && e.SchemaVersion == event.FillTargetWeightVersion:
+		if strategyID != event.TargetWeightStrategyMomentum {
+			return nil // a Boost run reads no fill
+		}
 		var p event.TargetWeightFillPayload
 		if err := read(e, targetWeightFillVersions, &p); err != nil {
-			return err
+			return unread(p.ClientOrderID, err.Error())
 		}
-		clientID, status, at = p.ClientOrderID, "fill", p.FilledAt
+		var ok bool
+		if o, ok = byID[p.ClientOrderID]; !ok {
+			return nil
+		}
+		if p.AccountID != o.AccountID || p.InstrumentID != o.InstrumentID || p.Side != o.Side || p.Quantity > o.Quantity {
+			return unread(p.ClientOrderID, fmt.Sprintf("it fills %s %s %d %s, which does not describe order %s as released (%s %s %d %s)",
+				p.AccountID, p.Side, p.Quantity, p.InstrumentID, o.ClientOrderID, o.AccountID, o.Side, o.Quantity, o.InstrumentID))
+		}
+		status, at = "fill", p.FilledAt
 	default:
 		return nil
 	}
-	o, ok := byID[clientID]
-	if !ok || o.State == LifecycleAcknowledged {
-		return nil
+	if o.State != LifecycleAcknowledged {
+		o.State, o.AcknowledgedAt, o.Acknowledgement = LifecycleAcknowledged, at, status
 	}
-	o.State, o.AcknowledgedAt, o.Acknowledgement = LifecycleAcknowledged, at, status
 	return nil
+}
+
+// released is the order's identity as its release recorded it, for
+// event.LimitOrderLifecyclePayload's Describes.
+func (o *Order) released() event.OrderReleasedPayload {
+	return event.OrderReleasedPayload{ClientOrderID: o.ClientOrderID, AccountID: o.AccountID, InstrumentID: o.InstrumentID,
+		Side: o.Side, Quantity: o.Quantity, LimitPrice: o.LimitPrice}
 }
 
 // UnacknowledgedAlerts returns an urgent alert for every order to be sent

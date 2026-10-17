@@ -135,8 +135,12 @@ func TestMomentumVenueReportRules(t *testing.T) {
 	refuse(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l2", mutated(func(p *event.LimitOrderLifecyclePayload) { p.ClientOrderID = "tw-unknown" }), "never released")
 	refuse(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l3", mutated(func(p *event.LimitOrderLifecyclePayload) { p.Side = event.OrderSideSell }), "describes")
 	refuse(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l4", mutated(func(p *event.LimitOrderLifecyclePayload) { p.Quantity++ }), "reports")
+	refuse(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l4b", mutated(func(p *event.LimitOrderLifecyclePayload) { p.LimitPrice = o.LimitPrice + 0.01 }), "reports")
 	refuse(event.OrderLifecycleEventType, event.OrderLifecycleSchemaVersion, "l5", lifecycle, "schema version")
-	if _, err := apply(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l6", lifecycle); err != nil {
+	// The venue's echo of the limit need not be bit-equal to the engine's
+	// (.greptile/rules.md, "Numbers and money").
+	echoed := mutated(func(p *event.LimitOrderLifecyclePayload) { p.LimitPrice = o.LimitPrice + 1e-9 })
+	if _, err := apply(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "l6", echoed); err != nil {
 		t.Fatal(err)
 	}
 	fill := event.TargetWeightFillPayload{

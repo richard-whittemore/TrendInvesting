@@ -160,7 +160,7 @@ func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[s
 	for i, e := range entries {
 		envelopes[i] = e.Envelope
 	}
-	account, _, err := report.AccountOf(envelopes)
+	account, strategy, err := report.AccountOf(envelopes)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -168,10 +168,11 @@ func readJournal(path string, now time.Time, ackWithin time.Duration, seen map[s
 	if err != nil {
 		return nil, account, nil, err
 	}
-	orders, err := report.OrderLifecycles(entries)
+	orders, unread, err := report.OrderLifecycles(entries, strategy)
 	if err != nil {
 		return nil, account, nil, err
 	}
+	alerts = append(alerts, report.UnreadReportAlerts(account, unread)...)
 	alerts = append(alerts, report.UnacknowledgedAlerts(orders, now, ackWithin, func(key string) bool { return deliveredAnywhere(seen, key) })...)
 	return envelopes, account, alerts, nil
 }

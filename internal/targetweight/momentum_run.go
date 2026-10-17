@@ -699,7 +699,9 @@ func (r *momentumRun) applyLifecycle(in event.Envelope) ([]event.Envelope, error
 	if err != nil {
 		return nil, err
 	}
-	if p.Quantity != o.planned.Quantity || p.LimitPrice != o.planned.LimitPrice {
+	// The limit within event.LimitPriceTolerance, never compared with ==
+	// (.greptile/rules.md, "Numbers and money").
+	if p.Quantity != o.planned.Quantity || !event.SameLimitPrice(p.LimitPrice, o.planned.LimitPrice) {
 		return nil, fmt.Errorf("targetweight: lifecycle %s reports %d at %v; order %s is %d at %v", in.ID, p.Quantity, p.LimitPrice, p.ClientOrderID, o.planned.Quantity, o.planned.LimitPrice)
 	}
 	if p.Terminal() {

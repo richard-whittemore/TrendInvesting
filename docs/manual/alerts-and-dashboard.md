@@ -67,6 +67,7 @@ account.
 | A decision was withheld for another reason | routine | run of the same reason |
 | An order to be sent was not acknowledged by IBKR within `-ack-within` of its commit ([order lifecycle](order-lifecycle.md)) | urgent | order (its client order ID) |
 | An order already alerted as unacknowledged has since been acknowledged | routine | order |
+| A report from IBKR in the log that the engine did not read: it does not validate, or does not match the order it names ([order lifecycle](order-lifecycle.md)) | urgent | that report (its input ID) |
 | No sign of life from the engine | urgent | silence, keyed by the last activity |
 | The reporter cannot read the journal (its text says "The heartbeat is NOT checked" and why, whenever liveness is unmonitored) | urgent | account and problem |
 | The reporter cannot check the heartbeat (the calendar does not cover the span) | urgent | account and problem |

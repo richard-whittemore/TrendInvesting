@@ -465,7 +465,8 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 
 // applyLifecycle records the venue's report of a change to an order this
 // run released, and decides nothing from it (ADR 0022). The report must name
-// the order as released: its account, instrument, side, quantity and limit.
+// the order as released: its account, instrument, side, quantity and limit,
+// the limit within event.LimitPriceTolerance (event's Describes).
 func (h *Handler) applyLifecycle(in event.Envelope) error {
 	p, err := decodeInput[event.LimitOrderLifecyclePayload](in, event.OrderLifecycleLimitVersion)
 	if err != nil {
@@ -475,7 +476,7 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	if !ok {
 		return fmt.Errorf("targetweight: lifecycle %s reports order %s, which this run did not release", in.ID, p.ClientOrderID)
 	}
-	if p.AccountID != o.AccountID || p.InstrumentID != o.InstrumentID || p.Side != o.Side || p.Quantity != o.Quantity || p.LimitPrice != o.LimitPrice {
+	if !p.Describes(o) {
 		return fmt.Errorf("targetweight: lifecycle %s reports %s %s %d %s at %v; order %s was released as %s %s %d %s at %v",
 			in.ID, p.AccountID, p.Side, p.Quantity, p.InstrumentID, p.LimitPrice, p.ClientOrderID, o.AccountID, o.Side, o.Quantity, o.InstrumentID, o.LimitPrice)
 	}

@@ -31,8 +31,24 @@ Re-delivery closes that gap:
   input's reply first, before sending anything new.
 - **The adapter sends each order once.** It hands an order to IBKR only if the
   reply marks it to be sent (dry-run orders never are), it has not sent it
-  already, and IBKR does not already hold an order with that order's tag
-  (its client order ID, which IBKR calls `orderRef`).
+  already, and IBKR shows no order with that order's tag (its client order
+  ID, which IBKR calls `orderRef`), neither open nor already executed.
+- **The adapter writes down that it is about to send, before it sends.**
+  Just before it hands an order to IBKR it records on disk "about to send
+  this client order ID", and once IBKR has taken it, "sent". It never sends a
+  recorded order again. If the adapter stopped in between, it cannot know
+  whether IBKR got the order, so after its restart it looks for the order in
+  IBKR's open orders **and** its executions (an order that has already filled
+  is no longer open). If either shows it, IBKR has it and nothing is sent. If
+  neither does, the adapter stops with "was being handed to the broker when
+  the adapter stopped" and sends nothing more until you have looked: the order
+  may have reached IBKR and been cancelled, or never arrived, and only you can
+  tell which.
+- **A changed input never replaces the one waiting for its reply.** If the
+  adapter is asked to send an input under the ID of the one it is still
+  waiting on, but with different content, it first finishes the original
+  (asks for its reply and sends its orders once), then refuses the changed
+  copy. The original is never overwritten on disk.
 
 ## Why
 
@@ -69,13 +85,25 @@ and after a crash.
   log holds no second order.
 - `adapter/ibkr/tests/test_relay.py`: the adapter asks again after a crash
   and sends the order once; it never sends an order twice when the reply comes
-  twice; it skips an order IBKR already holds; after its own restart it asks
-  for the pending input before the next one; it never sends a dry-run order.
+  twice; it skips an order IBKR shows open or executed; after its own restart
+  it asks for the pending input before the next one; it never sends a dry-run
+  order.
+  - `test_an_order_handed_over_before_a_crash_is_never_sent_again`: the
+    adapter stops mid-send; by its restart the order has filled, so only its
+    execution shows it, and it is not sent again.
+  - `test_a_handover_the_broker_does_not_show_stops_the_relay_rather_than_resend`:
+    the adapter stops mid-send and IBKR shows nothing; the restarted adapter
+    refuses to go on, every time, and the order is sent once only.
+  - `test_a_changed_retry_under_a_pending_id_is_refused_and_the_original_settled`:
+    a changed copy under the waiting input's ID is refused; the original's
+    reply is asked for and its order sent once.
 
 ## What can go wrong
 
 | What you see | What it means | What to do |
 | --- | --- | --- |
+| The adapter stops with "was being handed to the broker when the adapter stopped" | It stopped while sending that order, and IBKR shows it neither open nor executed. It may have been taken and cancelled, or never arrived. The adapter will not guess: it sends nothing more. | Look in IBKR (including cancelled orders and today's trades) for an order whose `orderRef` is the client order ID named. Do not place it by hand until you know. The waiting input and its "about to send" record stay on disk (the adapter's pending file and the same name ending `.handover`); deciding what to do with them is yours. |
+| The adapter reports "retried with other content" | The adapter was asked to resend its waiting input with something changed. The original was finished and its orders sent once; the changed copy was refused. | A fault in the adapter. Find why the input changed before starting again. |
 | The adapter reports "committed with different content" | It sent a different input under an ID it had already used. That is a fault in the adapter, not the market. | Stop the adapter. Nothing was recorded for the refused input. Find why the input changed before starting again. |
 | An "order not acknowledged" alert (see [order lifecycle](order-lifecycle.md)) | The order is on disk and IBKR has not reported on it. | Follow the alert's text. Look in IBKR for an order whose `orderRef` is the alert's client order ID **before** anything is placed by hand. |
 | The engine was resumed and the adapter has no pending file | The adapter received its last reply before the crash and acted on it. | Nothing: the adapter sends its next input as usual. |

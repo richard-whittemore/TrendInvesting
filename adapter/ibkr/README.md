@@ -18,7 +18,7 @@ an order (AGENTS.md rule 5).
 | `account.py` | `read_snapshot`: positions, NetLiquidation, TotalCashValue and ExcessLiquidity for the configured account, as exact decimals with currency |
 | `orders.py` | `OrderTracker`: order status, open-order, execution and commission callbacks as records. `collect_broker_orders` and `match_on_reconnect`: matching by client order ID, under this engine's own client ID, on reconnect |
 | `sender.py` | `DryRunSender` journals with `send=False` and holds no IBKR client. `make_sender` refuses `paper` and `live` |
-| `relay.py` | `Relay`: the adapter's side of re-delivery (ADR 0027 section 4). It keeps the input awaiting its reply on disk (`PendingInput`), asks for that input's committed reply again by sending it again under its ID after the engine or the adapter restarts, and hands each released order marked `send` to the sender once, skipping one the broker already holds |
+| `relay.py` | `Relay`: the adapter's side of re-delivery (ADR 0027 section 4). It keeps the input awaiting its reply on disk (`PendingInput`), asks for that input's committed reply again by sending it again under its ID after the engine or the adapter restarts, and hands each released order marked `send` to the sender once: it records "about to send" on disk before each hand-over and never sends a recorded order again, skips one IBKR shows open or executed, and stops (`HandoverUnconfirmed`) rather than resend one it was handing over when it stopped that IBKR shows neither open nor executed. A changed retry under the waiting input's ID is refused (`InputChanged`) after the original is settled |
 
 ## Rules this code keeps
 

@@ -95,6 +95,42 @@ func TestTheReporterAlertsOnceOnAnUnacknowledgedOrderUntilItIsAcknowledged(t *te
 	}
 }
 
+// TestAnUnreadVenueReportDoesNotSilenceTheOtherAlerts: a venue report the
+// engine refused for not validating is still committed, and the log is
+// append-only, so it is in every later reading. It raises its own urgent
+// alert once, acknowledges nothing, and the reporter's other alerts keep
+// reaching the owner (ADR 0019, "Alerting").
+func TestAnUnreadVenueReportDoesNotSilenceTheOtherAlerts(t *testing.T) {
+	fakeEnv, fakeClient := acceptingNtfy(t)
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "paper.log")
+	at := t0.Add(time.Minute)
+	entries := append(paperEntries(t, false), journal.Entry{Kind: journal.KindInput, Envelope: envelope(t, 4, event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack-bad", at,
+		event.LimitOrderLifecyclePayload{ClientOrderID: "tw-a", OccurredAt: at})})
+	writeEntriesLog(t, logPath, entries)
+	args := []string{"-journal", logPath, "-state", filepath.Join(dir, "state.json"), "-channel", "stdout,ntfy", "-ack-within", "10m"}
+	now := func() time.Time { return t0.Add(time.Hour) }
+
+	var first, second bytes.Buffer
+	if err := run(args, fakeEnv, now, &first, fakeClient); err != nil {
+		t.Fatalf("first run: %v\n%s", err, first.String())
+	}
+	for _, want := range []string{"order tw-a not acknowledged", "venue report ack-bad not read"} {
+		if !strings.Contains(first.String(), want) {
+			t.Errorf("first run lacks %q:\n%s", want, first.String())
+		}
+	}
+	if strings.Contains(first.String(), "journal") && strings.Contains(first.String(), "refused") {
+		t.Errorf("the unread report refused the whole journal:\n%s", first.String())
+	}
+	if err := run(args, fakeEnv, now, &second, fakeClient); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(second.String(), "not read") || strings.Contains(second.String(), "not acknowledged") {
+		t.Errorf("second run repeated an alert:\n%s", second.String())
+	}
+}
+
 func TestTheAcknowledgementBoundMustBePositive(t *testing.T) {
 	fakeEnv, fakeClient := acceptingNtfy(t)
 	dir := t.TempDir()

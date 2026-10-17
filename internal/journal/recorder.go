@@ -129,8 +129,10 @@ type Committed struct {
 
 // Committed returns the group committed for the input with this ID: made
 // durable for a durable Recorder, recorded for an in-memory one. An input
-// whose group was refused, or could not be made durable, was never
-// committed, and reports false. Because the group is the log's own record,
+// refused before it was recorded (a resume divergence, the emission
+// ceiling) or whose group could not be made durable was never committed,
+// and reports false; an input the handler refused is committed with its
+// refusal. Because the group is the log's own record,
 // the reply built from it is the same however often it is asked for and
 // whether the run was resumed since (ADR 0027, sections 4 and 6).
 func (r *Recorder) Committed(inputID string) (Committed, bool) {

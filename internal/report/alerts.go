@@ -42,6 +42,10 @@ const (
 	// notice that one already alerted has since been acknowledged.
 	KindUnacknowledged Kind = "order-unacknowledged"
 	KindAcknowledged   Kind = "order-acknowledged"
+	// KindVenueReportUnread is a venue's report the log holds that the
+	// engine did not read: it does not validate, or does not describe the
+	// order it names as released. It acknowledges nothing.
+	KindVenueReportUnread Kind = "venue-report-unread"
 )
 
 // Alert is one incident to tell the owner about. Key names the incident:

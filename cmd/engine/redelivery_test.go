@@ -245,7 +245,7 @@ func lifecycleIn(t *testing.T, path, clientID string) report.OrderState {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	orders, err := report.OrderLifecycles(entries)
+	orders, _, err := report.OrderLifecycles(entries, event.TargetWeightStrategyBoost)
 	if err != nil {
 		t.Fatal(err)
 	}

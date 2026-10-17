@@ -25,13 +25,11 @@ const decisionsEventType = "engine.decisions"
 // internal/strategy defines: this shape belongs to this command alone.
 const decisionsSchemaVersion uint32 = 1
 
-// decisionsPayload is decisionsEventType's payload: the decisions
-// strategy.Reducer emitted for one accepted input, in emission order,
-// exactly as replay.Engine.Apply returned them to this command's Decider —
-// stamped (Sequence, CausationID, CorrelationID) exactly as journal.Recorder
-// stamps its own copy for the journal, by the same replay.Stamp function,
-// because both now go through the one replay.Engine wrapping the same
-// recorder (decision 1's own routing; see newDecider).
+// decisionsPayload is decisionsEventType's payload: the decisions the
+// recorder committed for one input, in recording order, stamped (Sequence,
+// CausationID, CorrelationID) as the durable log holds them
+// (journal.Recorder.Committed), so the wire and the log carry the same
+// bytes however often the reply is asked for (ADR 0027, section 4).
 //
 // Decisions is never nil on the wire: bundleDecisions normalises a reducer
 // that decided nothing for this input into an empty JSON array, never the
