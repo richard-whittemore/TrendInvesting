@@ -11,6 +11,7 @@ import (
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
 	"github.com/richard-whittemore/TrendInvesting/internal/journal"
+	"github.com/richard-whittemore/TrendInvesting/internal/report"
 )
 
 // paperBoostOptions is a paper Boost invocation writing into dir, whose
@@ -233,5 +234,57 @@ func TestABoostEngineRecordsTheAcknowledgementOfAnOrderItReleased(t *testing.T) 
 	}
 	if !logHoldsInput(recoverFile(t, opts.logPath), "ack:"+order.ClientOrderID) {
 		t.Fatal("the durable log does not hold the acknowledgement")
+	}
+}
+
+// lifecycleIn reads the released order's lifecycle state from the durable
+// log at path.
+func lifecycleIn(t *testing.T, path, clientID string) report.OrderState {
+	t.Helper()
+	_, entries, err := report.LoadEntries(readFile(t, path))
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	orders, err := report.OrderLifecycles(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range orders {
+		if o.ClientOrderID == clientID {
+			return o.State
+		}
+	}
+	t.Fatalf("%s holds no order %s", path, clientID)
+	return ""
+}
+
+// TestTheLogRecordsAnOrderCommittedThenReleasedThenAcknowledged: the order
+// a paper engine releases is committed in the log once its group is
+// flushed, released once the adapter's next input shows it holds the reply,
+// and acknowledged once the venue's report is recorded (ADR 0027, section
+// 4; ADR 0022).
+func TestTheLogRecordsAnOrderCommittedThenReleasedThenAcknowledged(t *testing.T) {
+	dir := t.TempDir()
+	opts, cfg := paperBoostOptions(t, dir)
+	stop := startEngine(t, opts)
+	feed := newBoostFeed(t, opts.socketPath, cfg, "test-build", 2)
+	session := feedUntilReleased(t, feed)
+	order := feed.released[0]
+
+	if got := lifecycleIn(t, opts.logPath, order.ClientOrderID); got != report.LifecycleCommitted {
+		t.Fatalf("after its release: %s, want %s", got, report.LifecycleCommitted)
+	}
+	feed.sessions(session+1, session+2)
+	if got := lifecycleIn(t, opts.logPath, order.ClientOrderID); got != report.LifecycleReleased {
+		t.Fatalf("after the adapter's next input: %s, want %s", got, report.LifecycleReleased)
+	}
+	at := boostSession(session + 1).Add(time.Minute)
+	feed.send(event.OrderLifecycleEventType, event.OrderLifecycleLimitVersion, "ack:"+order.ClientOrderID, at, lifecycle(order, event.OrderLifecycleStatusSubmitted, at))
+	if got := lifecycleIn(t, opts.logPath, order.ClientOrderID); got != report.LifecycleAcknowledged {
+		t.Fatalf("after the venue's report: %s, want %s", got, report.LifecycleAcknowledged)
+	}
+	_ = feed.client.Close()
+	if err := stop(); err != nil {
+		t.Fatalf("stop the engine: %v", err)
 	}
 }
