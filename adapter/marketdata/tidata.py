@@ -80,7 +80,7 @@ import re
 import sys
 from collections import namedtuple
 
-from . import encode, history, massive, nyse_calendar, record, steps
+from . import encode, history, kinds, massive, nyse_calendar, record, steps
 
 ENGINE = "boost"
 STREAM = re.compile(r"boost-(\d{4}-\d{2}-\d{2})\.jsonl")
@@ -118,7 +118,7 @@ except ImportError:
     STAMP = "dev"
 
 EngineLog = namedtuple("EngineLog",
-                       "configuration_hash strategy_version run_id boost identity inputs record_hashes chain_break")
+                       "configuration_hash strategy_version run_id boost identity inputs record_hashes chain_break market")
 """The engine's durable log as the job reads it: the header's identity, the
 log's own run name (its file name without ``.log``), the Boost
 configuration, the run's identity (see read_engine_log), the IDs of its
@@ -126,7 +126,8 @@ committed inputs in order, every committed record's hash in order, its
 hash chain (a crash resume's begin with the crashed run's), and the
 sequence of the first committed record whose stored hash is not the one
 LOG_CHAIN_ALGORITHM gives over the records before it (_chain_next), or None
-when every one's is."""
+when every one's is, and the count of committed market inputs (the data
+job's kinds, kinds.KINDS), the history a fresh run's log cannot hold."""
 
 
 class Boost(namedtuple("Boost", "instrument warm_up_start trend_days exit_sma rsi_period")):
@@ -210,6 +211,7 @@ def read_engine_log(path):
             or not all(isinstance(header[k], str) and header[k] for k in ("configuration_hash", "strategy_version"))):
         raise _log_error(path, 1, "it is not a durable log header of version {}".format(LOG_VERSION))
     sequence, last_hash, group, configuration, first, approved, inputs = 0, None, [], None, None, None, []
+    market = 0
     hashes = []
     chain, chain_break, pending_break = _chain_seed(header), None, None
     for n, line in enumerate(parsed[1:], 2):
@@ -242,6 +244,7 @@ def read_engine_log(path):
         if approved is None and group[0][1].get("type") == RUN_APPROVED:
             approved = group[0][1].get("id")
         inputs.append(group[0][1].get("id"))
+        market += (group[0][1].get("type"), group[0][1].get("schema_version")) in kinds.KINDS
         hashes.extend(h for _, _, h in group)
         group = []
         chain_break = chain_break if chain_break is not None else pending_break
@@ -250,7 +253,7 @@ def read_engine_log(path):
                       "first".format(path))
     identity = approved if approved else "{}@{}".format(first.get("id"), first.get("recorded_at"))
     return EngineLog(header["configuration_hash"], header["strategy_version"], run, configuration, identity,
-                     tuple(inputs), tuple(hashes), chain_break)
+                     tuple(inputs), tuple(hashes), chain_break, market)
 
 
 def _chain_seed(header):
@@ -494,12 +497,12 @@ def _own_or_resume(engine_streams, logs, engine_log, log):
     """The run's own name for a log of a fresh run; Refused for a log that holds history, no folder being found.
 
     The adapter's rule is the same (adapter/ibkr/delivery.py,
-    _own_or_resume): a log whose committed inputs extend beyond its
-    configuration and Run approval holds copied history, so it is a crash
+    _own_or_resume): a log holding committed market inputs
+    holds copied history (operator, approval and configuration inputs never
+    count), so it is a crash
     resume whose first run's log is not in the engine's log folder, and a
     warm-up under its new name would make a second folder."""
-    approved = not log.identity.startswith(log.inputs[0] + "@") if log.inputs else False
-    history = len(log.inputs) - 1 - (1 if approved else 0)
+    history = log.market
     if history <= 0:
         return log.run_id
     unmatched = sorted(n for n in (os.listdir(engine_streams) if os.path.isdir(engine_streams) else [])
@@ -510,7 +513,7 @@ def _own_or_resume(engine_streams, logs, engine_log, log):
         hint = " The stream folder {} has no log beside it: it is likely the first run's.".format(
             ", ".join(os.path.join(engine_streams, n) for n in unmatched))
     raise Refused(
-        "the log {} already holds {} committed inputs beyond its configuration; if it is a crash resume of an "
+        "the log {} already holds {} committed market inputs beyond its configuration; if it is a crash resume of an "
         "earlier run, restore that run's log beside it and start again; do not run a warm-up under this name (a "
         "second stream folder splits one run's stream).{} (docs/manual/market-data.md, \"A crash "
         "resume\")".format(engine_log, history, hint))

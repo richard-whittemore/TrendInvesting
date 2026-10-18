@@ -85,15 +85,20 @@ def write_stream(folder, last, envelopes, prefix="boost"):
     return path
 
 
-def commit(engine, ident, kind="test.input", payload=None):
+def commit(engine, ident, kind="test.input", payload=None, version=1):
     """An input committed to engine's durable log under ident, as the engine commits one."""
     payload = payload or {"input": ident}
     raw = json.dumps(payload, separators=(",", ":"))
-    engine.decide({"id": ident, "type": kind, "envelope_version": 1, "schema_version": 1,
+    engine.decide({"id": ident, "type": kind, "envelope_version": 1, "schema_version": version,
                    "event_time": "2027-01-14T22:05:00Z", "recorded_at": "2027-01-14T22:05:00Z",
                    "sequence": engine.next_sequence, "source": "engine",
                    "configuration_hash": engine.configuration_hash, "strategy_version": engine.strategy_version,
                    "payload": payload, "payload_hash": hashlib.sha256(raw.encode()).hexdigest()})
+
+
+def commit_bar(engine, ident):
+    """A market input as the data job writes one, committed as a stream's copy in a resumed log holds it."""
+    commit(engine, ident, kind="market.bar.completed", version=2)
 
 
 def approve(engine, previous_log):
@@ -1321,7 +1326,7 @@ class StreamFolderRuleTests(unittest.TestCase):
         first = self.engine("run-a")
         if approved:
             approve(first, str(self.engine("run-0").path))
-        commit(first, "input-a")
+        commit_bar(first, "input-a")
         self.folder("run-a")
         return first
 
@@ -1505,7 +1510,7 @@ class StreamFolderRuleTests(unittest.TestCase):
         for refusal in (str(adapter.exception), str(data.exception)):
             self.assertIn("crash resume of an earlier run", refusal)
             self.assertIn("restore that run's log beside it", refusal)
-            self.assertIn("committed inputs", refusal)
+            self.assertIn("committed market inputs beyond its configuration", refusal)
             self.assertIn(str(self.streams / "run-a"), refusal)
             self.assertIn("do not run a warm-up under this name", refusal)
             self.assertNotIn("Run it once", refusal)
@@ -1518,7 +1523,7 @@ class StreamFolderRuleTests(unittest.TestCase):
         from delivery import stream_run
         from marketdata import tidata
         first = self.engine("run-a")
-        commit(first, "input-a")
+        commit_bar(first, "input-a")
         resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
         os.remove(first.path)
         log = str(resumed.path)
@@ -1529,6 +1534,35 @@ class StreamFolderRuleTests(unittest.TestCase):
         for refusal in (str(adapter.exception), str(data.exception)):
             self.assertIn("crash resume of an earlier run", refusal)
             self.assertNotIn("Run it once", refusal)
+
+    def test_a_fresh_run_whose_log_holds_an_operator_input_is_told_to_run_the_warm_up_not_refused_as_a_resume(self):
+        from delivery import Deliverer, stream_run
+        from marketdata import tidata
+        fresh = self.engine("run-b")
+        commit(fresh, "operator-kill-switch:1", kind="operator.kill_switch.set")
+        log = str(fresh.path)
+        self.assertEqual(stream_run(str(self.streams), log), "run-b")
+        self.assertEqual(tidata.stream_run(str(self.streams), log, tidata.read_engine_log(log)), "run-b")
+        check = Deliverer(str(self.streams), str(self.root / "record.json"), None, log, None, None)
+        with self.assertRaises(StreamRefused) as checked:
+            check.check()
+        self.assertIn("Run it once", str(checked.exception))
+
+    def test_a_resume_holding_copied_bars_gets_the_resume_message_counting_market_inputs_only(self):
+        from delivery import stream_run
+        from marketdata import tidata
+        first = self.engine("run-a")
+        commit_bar(first, "input-a")
+        commit(first, "operator-kill-switch:1", kind="operator.kill_switch.set")
+        resumed = LoggedEngine.resumed(str(first.path), str(self.root / "run-c.log"))
+        os.remove(first.path)
+        log = str(resumed.path)
+        with self.assertRaises(StreamRefused) as adapter:
+            stream_run(str(self.streams), log)
+        with self.assertRaises(tidata.Refused) as data:
+            tidata.stream_run(str(self.streams), log, tidata.read_engine_log(log))
+        for refusal in (str(adapter.exception), str(data.exception)):
+            self.assertIn("already holds 1 committed market inputs beyond its configuration", refusal)
 
     def test_a_true_fresh_run_with_no_folder_is_still_told_to_run_the_warm_up(self):
         from delivery import Deliverer

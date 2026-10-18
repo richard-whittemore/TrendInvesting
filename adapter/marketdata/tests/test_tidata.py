@@ -275,7 +275,7 @@ class EngineLogTest(unittest.TestCase):
                           if line.startswith('{"record"'))
             self.assertEqual(got, tidata.EngineLog("hash-boost", "boost/r1/test", RUN, boost,
                                                    "configuration:hash-boost@2026-03-13T21:00:00Z",
-                                                   ("configuration:hash-boost", "input-2"), chain, None))
+                                                   ("configuration:hash-boost", "input-2"), chain, None, 0))
             self.assertEqual(len(chain), 2)
             write_log(p, inputs=3, approval="operator.run.approved:1")
             self.assertEqual(tidata.read_engine_log(str(p)).identity, "operator.run.approved:1")
