@@ -192,9 +192,10 @@ chmod 0400 "$rep/creds/secrets"
 line=$(sed -n 's/^ExecStart=//p' /etc/systemd/system/ti-reporter@.service)
 line=${line//%i/boost}
 line=${line//%d/$rep/creds}
-line=${line//'${TI_STATE_DIR}'/$rep/engines/boost}
-line=${line//'${TI_REPORTS_DIR}'/$rep/reports}
-line=${line//'${TI_RUN}'/run-rehearsal}
+# The unit file holds these as literal ${...} text; the backslash matches them verbatim.
+line=${line//"\${TI_STATE_DIR}"/$rep/engines/boost}
+line=${line//"\${TI_REPORTS_DIR}"/$rep/reports}
+line=${line//"\${TI_RUN}"/run-rehearsal}
 case $line in *'$'* | *%*) fail "the reporter's ExecStart has a variable the rehearsal does not expand: $line" ;; esac
 # shellcheck disable=SC2086
 sudo -u ti-trader env -i PATH=/usr/bin:/bin $line >/dev/null || fail "the reporter, run as its unit runs it (as ti-trader), failed"
