@@ -1668,7 +1668,9 @@ class GlidePathTest(unittest.TestCase):
         expected = {"P38": ("path", 0.0, 38.0), "P53": ("path", 0.0, 53.0), "P65": ("path", 0.0, 65.0),
                     "F00": ("fixed", 0.0, 38.0), "F30": ("fixed", 0.3, 38.0), "F50": ("fixed", 0.5, 38.0),
                     "F60": ("fixed", 0.6, 38.0), "F70": ("fixed", 0.7, 38.0)}
-        names = [n for n in build_variants.VARIANTS if n.startswith("G_")]
+        # The *_PARITY runs are these runs exporting for parity, tested in
+        # test_parity_remaining.py.
+        names = [n for n in build_variants.VARIANTS if n.startswith("G_") and not n.endswith("_PARITY")]
         self.assertEqual(len(names), 15)
         for name in names:
             window, kind = name.rsplit("_", 1)
