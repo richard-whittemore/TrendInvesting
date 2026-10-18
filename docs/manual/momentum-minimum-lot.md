@@ -26,7 +26,7 @@ price of one share and the target value it exceeded.
 ## When nothing is affordable
 
 The rule only compares a stock whose target is above zero. Three cases follow
-(ADR 0026 amendment, 2026-10-17, which the owner is asked to confirm):
+(ADR 0026 amendment, 2026-10-17, accepted by the owner 2026-10-18):
 
 - **(a) Fully risk-off by design.** In a risk-off month with the risk-off
   fraction at 1, every stock's target is zero, so nothing is compared. The

@@ -109,7 +109,7 @@ journals it only when it takes its next input from the adapter, so with the
 engine stopped the repeats continue until it runs; the reporter's first run
 after that sends the alert no more.
 
-On PagerDuty, each repeat opens a **new incident**: the first alert's
+On both channels, ntfy and PagerDuty, repeats come every `-repeat-interval` (default 30 minutes). On PagerDuty, each repeat opens a **new incident**: the first alert's
 incident is named by the alert key, and each repeat's by the alert key with
 `#repeat-1`, `#repeat-2` and so on, while the alert key itself is shown in
 the incident's details. So until the acknowledgement is recorded in the

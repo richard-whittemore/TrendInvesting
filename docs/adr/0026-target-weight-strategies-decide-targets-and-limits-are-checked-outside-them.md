@@ -530,10 +530,10 @@ ones that belong here.
   $30k average ($1.03 to $1.49), below the $2.50 that 500 shares would
   cost before the 1% cap lowers it.
 
-## Amendment (2026-10-17): D7-L as built, rule the owner is asked to confirm
+## Amendment (2026-10-17): D7-L as built, accepted by the owner 2026-10-18
 
 This extends the D7-L decision recorded in point 2 so the text matches the
-code as built. The owner is asked to confirm it. D7-L compares only a pick
+code as built. The owner accepted it on 2026-10-18. D7-L compares only a pick
 whose target weight is positive; the three cases below follow from that.
 
 - **(a) Fully risk-off by design.** When every pick's target weight is zero
