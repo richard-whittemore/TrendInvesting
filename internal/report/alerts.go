@@ -37,18 +37,37 @@ const (
 	// KindHeartbeatUnchecked is the reporter's own failure to check the
 	// heartbeat, such as a span the calendar does not cover.
 	KindHeartbeatUnchecked Kind = "heartbeat-unchecked"
+	// KindReconciliation is a reconciliation that did not match: the
+	// account's book and the broker disagree, or the broker's evidence could
+	// not be compared (ADR 0019).
+	KindReconciliation Kind = "reconciliation"
 )
 
 // Alert is one incident to tell the owner about. Key names the incident:
-// two alerts with the same Key are the same incident and are delivered once.
+// two alerts with the same Key are the same incident and are delivered once,
+// unless Repeat is set: then the alert is sent again at the owner's interval
+// until a recorded operator.alert.acknowledged names its key, which sets
+// Acknowledged (ADR 0019, amended 2026-09-24, "Alerting"). PublicBody, when
+// set, is the text for a public relay: it names what is in doubt and carries
+// no balance.
 type Alert struct {
-	Key       string
-	Kind      Kind
-	Severity  Severity
-	AccountID string
-	At        time.Time
-	Title     string
-	Body      string
+	Key          string
+	Kind         Kind
+	Severity     Severity
+	AccountID    string
+	At           time.Time
+	Title        string
+	Body         string
+	PublicBody   string
+	Repeat       bool
+	Acknowledged bool
+}
+
+// Due reports whether a is to be sent to a channel now: never delivered to
+// it, or delivered last at last and, repeating and unacknowledged, at least
+// every since then.
+func Due(a Alert, delivered bool, last, now time.Time, every time.Duration) bool {
+	return !delivered || a.Repeat && !a.Acknowledged && now.Sub(last) >= every
 }
 
 // Alerts returns the journal's alerts in recording order, each incident once.
@@ -65,6 +84,14 @@ type Alert struct {
 //     histories) and a refusal for a missing mark are missing data; every
 //     other withheld reason is a withheld decision, routine except
 //     all-unaffordable, which may rest on a bad valuation and is urgent.
+//   - A risk.reconciliation.result that degrades or halts is one incident,
+//     however many components it names; the engine-state record the same
+//     reconciliation caused is that incident too, not another alert. A
+//     result that continues sends nothing.
+//
+// Engine-state and reconciliation alerts repeat until acknowledged; an
+// operator.alert.acknowledged anywhere in the journal acknowledges the alert
+// whose key it names.
 func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 	account, _, err := AccountOf(envelopes)
 	if err != nil {
@@ -73,8 +100,25 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 	var out []Alert
 	var lastState, runReason string
 	var runStart time.Time
+	reconciled := map[string]bool{}
+	acknowledged := map[string]bool{}
 	for _, e := range envelopes {
 		switch e.Type {
+		case event.ReconciliationResultEventType:
+			var p event.ReconciliationResultPayload
+			if err := read(e, reconciliationVersions, &p); err != nil {
+				return nil, err
+			}
+			if p.Action != event.ReconciliationActionContinue {
+				reconciled[e.CausationID] = true
+				out = append(out, reconciliationAlert(account, e, p))
+			}
+		case event.AlertAcknowledgedEventType:
+			var p event.AlertAcknowledgedPayload
+			if err := read(e, acknowledgedVersions, &p); err != nil {
+				return nil, err
+			}
+			acknowledged[p.AlertKey] = true
 		case event.OrderRefusedEventType:
 			var p event.OrderRefusedPayload
 			if err := read(e, refusedVersions, &p); err != nil {
@@ -91,6 +135,9 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 				continue
 			}
 			lastState = key
+			if e.CausationID != "" && reconciled[e.CausationID] {
+				continue
+			}
 			out = append(out, engineStateAlert(account, e, p))
 		case event.TargetsDecidedEventType:
 			var p event.TargetsDecidedPayload
@@ -108,8 +155,48 @@ func Alerts(envelopes []event.Envelope) ([]Alert, error) {
 			out = append(out, withheldAlert(account, e, p, runStart))
 		}
 	}
+	for i := range out {
+		out[i].Acknowledged = acknowledged[out[i].Key]
+	}
 	return out, nil
 }
+
+// acknowledge is the line a repeating alert ends with: the key the owner's
+// acknowledgement names, and that it repeats until then.
+func acknowledge(key string) string {
+	return " This alert repeats until you acknowledge it; acknowledge with alert key: " + key
+}
+
+// reconciliationAlert states one reconciliation's differences, the state it
+// puts the account in and what that state still does (ADR 0019's "Every
+// alert states" list, as far as the result knows). Its public text names the
+// instruments and cash components in doubt and no figure.
+func reconciliationAlert(account string, e event.Envelope, p event.ReconciliationResultPayload) Alert {
+	key := "reconciliation:" + e.ID + "@" + account
+	when := e.EventTime.UTC().Format(time.RFC3339)
+	effect := fmt.Sprintf("The account is Degraded on instruments [%s] and cash [%s]: it opens no new risk and refuses buys; the named instruments are frozen, except, for the joint account, the one sale back toward 98%% (ADR 0019 amendment, 2026-10-16); sells elsewhere continue.",
+		strings.Join(p.ScopeInstrumentIDs, ","), strings.Join(p.ScopeCashComponents, ","))
+	doubt := fmt.Sprintf("an unexplained difference in [%s]", strings.Join(slicesConcat(p.ScopeInstrumentIDs, p.ScopeCashComponents), ","))
+	if p.Action == event.ReconciliationActionHalt {
+		effect = "The account is Halted: no order is released, except, for the joint account, the one sale back toward 98% (ADR 0019 amendment, 2026-10-15)."
+		doubt = "evidence that could not be compared: " + strings.Join(p.Unverifiable, "; ")
+	}
+	recovery := " Leaving the state is never automatic. Recovery is a person's: docs/runbooks/reconciliation.md." + acknowledge(key)
+	book := "with no book recorded"
+	if p.AnchorID != "" {
+		book = "against the book " + p.AnchorID
+	}
+	return Alert{
+		Key: key, Kind: KindReconciliation, Severity: Urgent, AccountID: account, At: e.EventTime, Repeat: true,
+		Title: fmt.Sprintf("%s: reconciliation %s (%s)", account, p.Classification, p.ReconciliationID),
+		Body: fmt.Sprintf("Reconciliation %s at %s %s found %s. %s. %s Check the named positions and cash at the broker.%s",
+			p.ReconciliationID, when, book, doubt, p.Detail, effect, recovery),
+		PublicBody: fmt.Sprintf("Reconciliation %s at %s found %s. %s Figures are in the journal (journal-query) and the dashboard.%s",
+			p.ReconciliationID, when, doubt, effect, recovery),
+	}
+}
+
+func slicesConcat(a, b []string) []string { return append(append([]string{}, a...), b...) }
 
 func refusalAlerts(account string, e event.Envelope, p event.OrderRefusedPayload) []Alert {
 	out := []Alert{{
@@ -149,8 +236,9 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 			e.EventTime.UTC().Format(time.RFC3339), p.Reason, p.Detail,
 			strings.Join(p.ScopeInstrumentIDs, ","), strings.Join(p.ScopeOrderIDs, ","), strings.Join(p.ScopeCashComponents, ","))
 	}
-	return Alert{Key: engineStateKey(p) + ":" + e.EventTime.UTC().Format(time.RFC3339Nano) + "@" + account, Kind: kind, Severity: Urgent, AccountID: account, At: e.EventTime,
-		Title: fmt.Sprintf("%s: engine %s (%s)", account, p.State, p.Reason), Body: body}
+	key := engineStateKey(p) + ":" + e.EventTime.UTC().Format(time.RFC3339Nano) + "@" + account
+	return Alert{Key: key, Kind: kind, Severity: Urgent, AccountID: account, At: e.EventTime, Repeat: true,
+		Title: fmt.Sprintf("%s: engine %s (%s)", account, p.State, p.Reason), Body: body + acknowledge(key)}
 }
 
 func withheldAlert(account string, e event.Envelope, p event.TargetsDecidedPayload, start time.Time) Alert {

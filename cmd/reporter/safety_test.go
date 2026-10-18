@@ -61,7 +61,7 @@ func TestTheSendTimeoutMustBePositive(t *testing.T) {
 func TestAStateWriteThatIsNotDurableIsAnErrorAndKeepsTheOldState(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s.json")
-	if err := saveState(path, map[string]bool{"ntfy|old": true}); err != nil {
+	if err := saveState(path, map[string]bool{"ntfy|old": true}, nil); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := os.ReadFile(path)
@@ -69,7 +69,7 @@ func TestAStateWriteThatIsNotDurableIsAnErrorAndKeepsTheOldState(t *testing.T) {
 	saved := syncFile
 	syncFile = func(*os.File) error { return failing }
 	defer func() { syncFile = saved }()
-	if err := saveState(path, map[string]bool{"ntfy|new": true}); !errors.Is(err, failing) {
+	if err := saveState(path, map[string]bool{"ntfy|new": true}, nil); !errors.Is(err, failing) {
 		t.Fatalf("a state file not synced to disk can come back empty after a power cut, so it must fail: %v", err)
 	}
 	after, _ := os.ReadFile(path)

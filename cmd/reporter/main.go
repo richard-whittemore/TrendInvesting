@@ -1,10 +1,13 @@
 // Command reporter reads one account's journal and delivers what a person
-// needs to know: alerts for every refusal, Degraded or Halted state, withheld
-// decision, missing input, lost heartbeat and journal it cannot read, each
-// once per incident, and optionally the daily summary
-// (docs/live-trading/plan.md section 3; ADR 0019, "Alerting"). It only reads
-// the journal. The one file it writes is its own state file of delivered
-// incident keys. Every rule lives in internal/report; this is composition.
+// needs to know: alerts for every refusal, Degraded or Halted state,
+// reconciliation that did not match, withheld decision, missing input, lost
+// heartbeat and journal it cannot read, each once per incident, and
+// optionally the daily summary (docs/live-trading/plan.md section 3; ADR
+// 0019, "Alerting"). A Degraded, Halted or reconciliation alert is sent
+// again every -repeat-interval until the journal records the owner's
+// acknowledgement of it. It only reads the journal. The one file it writes
+// is its own state file of delivered incident keys and when each channel last
+// took each. Every rule lives in internal/report; this is composition.
 //
 // It runs once per invocation, from a timer. The heartbeat it checks is the
 // journal file's modification time, with silence counted in NYSE sessions; a
@@ -35,9 +38,11 @@ func main() {
 	}
 }
 
-// delivered is the reporter's state file: the incident keys already sent.
+// delivered is the reporter's state file: the incident keys already sent,
+// per channel, and when each channel last took each, which times a repeat.
 type delivered struct {
-	Keys []string `json:"keys"`
+	Keys []string             `json:"keys"`
+	Sent map[string]time.Time `json:"sent,omitempty"`
 }
 
 func run(args []string, getenv func(string) string, now func() time.Time, out io.Writer, client *http.Client) error {
@@ -52,6 +57,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	sessions := flags.Int("heartbeat-sessions", 2, "NYSE sessions that may close with nothing written to the journal before a heartbeat alert fires (at least 2); weekends and holidays close none")
 	accountName := flags.String("account", "", "account name for alerts when the journal cannot name its own (default: the journal file's name)")
 	sendTimeout := flags.Duration("send-timeout", 30*time.Second, "longest one send to one channel may take before it counts as failed")
+	repeat := flags.Duration("repeat-interval", 30*time.Minute, "how often a Degraded, Halted or reconciliation alert is sent again until the journal records its acknowledgement (the owner's setting, ADR 0019)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -64,6 +70,9 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if *sendTimeout <= 0 {
 		return errors.New("reporter: -send-timeout must be positive: a send with no bound can hold the run forever, and with it every later alert")
 	}
+	if *repeat <= 0 {
+		return errors.New("reporter: -repeat-interval must be positive: an alert repeated on every run would page without pause")
+	}
 	// Every send is bounded, so a stalled channel fails as that channel's
 	// failure, is retried next run, and never holds back the other alerts or
 	// the state file.
@@ -73,7 +82,7 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 	if err != nil {
 		return err
 	}
-	seen, err := loadState(*statePath)
+	seen, sent, err := loadState(*statePath)
 	if err != nil {
 		return err
 	}
@@ -126,12 +135,13 @@ func run(args []string, getenv func(string) string, now func() time.Time, out io
 		}
 	}
 
+	at := now()
 	for _, a := range report.Fresh(alerts, nil) {
-		if err := deliver(senders, a, seen); err != nil {
+		if err := deliver(senders, a, seen, sent, at, *repeat); err != nil {
 			failures = append(failures, err)
 		}
 	}
-	if err := saveState(*statePath, seen); err != nil {
+	if err := saveState(*statePath, seen, sent); err != nil {
 		failures = append(failures, err)
 	}
 	return errors.Join(failures...)
@@ -187,23 +197,29 @@ func summaryAlert(envelopes []event.Envelope, date, benchmark string) (report.Al
 	}, true, nil
 }
 
-func loadState(path string) (map[string]bool, error) {
-	seen := map[string]bool{}
+// loadState reads the delivered channel keys and when each was last sent. A
+// key with no send time (a state file written before repeats) is due for its
+// repeat at once, if it repeats.
+func loadState(path string) (map[string]bool, map[string]time.Time, error) {
+	seen, sent := map[string]bool{}, map[string]time.Time{}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return seen, nil
+		return seen, sent, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reporter: read state: %w", err)
+		return nil, nil, fmt.Errorf("reporter: read state: %w", err)
 	}
 	var d delivered
 	if err := json.Unmarshal(raw, &d); err != nil {
-		return nil, fmt.Errorf("reporter: the state file is unreadable and is not reset, since a reset resends every alert: %w", err)
+		return nil, nil, fmt.Errorf("reporter: the state file is unreadable and is not reset, since a reset resends every alert: %w", err)
 	}
 	for _, k := range d.Keys {
 		seen[k] = true
 	}
-	return seen, nil
+	for k, at := range d.Sent {
+		sent[k] = at
+	}
+	return seen, sent, nil
 }
 
 // syncFile flushes a file to disk; a test replaces it to see a failure.
@@ -213,8 +229,8 @@ var syncFile = func(f *os.File) error { return f.Sync() }
 // is on disk before the rename, and the rename before it returns. Without
 // that, a power cut can leave an empty state file, which loadState refuses,
 // and every later run then fails.
-func saveState(path string, seen map[string]bool) error {
-	d := delivered{Keys: make([]string, 0, len(seen))}
+func saveState(path string, seen map[string]bool, sent map[string]time.Time) error {
+	d := delivered{Keys: make([]string, 0, len(seen)), Sent: sent}
 	for k := range seen {
 		d.Keys = append(d.Keys, k)
 	}

@@ -69,6 +69,9 @@ var (
 	plannedVersions     = []uint32{event.OrderPlannedSchemaVersion}
 	releasedVersions    = []uint32{event.OrderReleasedSchemaVersion}
 	refusedVersions     = []uint32{event.OrderRefusedSchemaVersion}
+	// The reconciliation's result and the owner's acknowledgement (ADR 0019).
+	reconciliationVersions = []uint32{event.ReconciliationResultSchemaVersion}
+	acknowledgedVersions   = []uint32{event.AlertAcknowledgedSchemaVersion}
 )
 
 func dateOf(t time.Time) string { return t.UTC().Format(time.DateOnly) }

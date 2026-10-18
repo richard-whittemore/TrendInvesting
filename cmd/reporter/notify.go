@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/report"
@@ -94,15 +95,16 @@ func buildSenders(channels string, getenv func(string) string, client *http.Clie
 // channelKey is the state-file key recording that one channel took one alert.
 func channelKey(channel, alertKey string) string { return channel + "|" + alertKey }
 
-// deliver sends an alert to every delivery channel that has not yet taken it
-// and records each success in seen. An alert counts as delivered only when
-// every delivery channel has taken it: a failure on one channel is never
-// covered by another's success, and only the channel that failed is tried
-// again. The terminal echo shows an alert while any channel still lacks it
-// and never counts. The daily summary skips a channel on a public relay, and
-// is an error when no other delivery channel was named. The error joins every
-// channel failure.
-func deliver(senders []sender, a report.Alert, seen map[string]bool) error {
+// deliver sends an alert to every delivery channel it is due on
+// (report.Due: not yet taken, or a repeating, unacknowledged alert last taken
+// at least every ago) and records each success in seen and its time in sent.
+// An alert counts as delivered only when every delivery channel has taken it:
+// a failure on one channel is never covered by another's success, and only
+// the channel that failed is tried again. The terminal echo shows an alert
+// while any channel still lacks it and never counts. The daily summary skips
+// a channel on a public relay, and is an error when no other delivery channel
+// was named. The error joins every channel failure.
+func deliver(senders []sender, a report.Alert, seen map[string]bool, sent map[string]time.Time, now time.Time, every time.Duration) error {
 	var pending []sender
 	private := false
 	for _, s := range senders {
@@ -111,7 +113,8 @@ func deliver(senders []sender, a report.Alert, seen map[string]bool) error {
 			continue
 		}
 		private = private || !echo
-		if echo || !seen[channelKey(s.name(), a.Key)] {
+		key := channelKey(s.name(), a.Key)
+		if echo || report.Due(a, seen[key], sent[key], now, every) {
 			pending = append(pending, s)
 		}
 	}
@@ -138,6 +141,9 @@ func deliver(senders []sender, a report.Alert, seen map[string]bool) error {
 			continue
 		}
 		seen[channelKey(s.name(), a.Key)] = true
+		if a.Repeat {
+			sent[channelKey(s.name(), a.Key)] = now
+		}
 	}
 	return errors.Join(failures...)
 }
@@ -165,8 +171,15 @@ func (ntfySender) name() string { return "ntfy" }
 
 func (n ntfySender) publicRelay() bool { return n.public }
 
+// send posts the alert's text; through a public relay it posts the alert's
+// public text when it has one, which carries no balance (owner decision
+// 2026-10-17).
 func (n ntfySender) send(a report.Alert) error {
-	req, err := http.NewRequest(http.MethodPost, n.server+"/"+url.PathEscape(n.topic), bytes.NewBufferString(a.Body))
+	body := a.Body
+	if n.public && a.PublicBody != "" {
+		body = a.PublicBody
+	}
+	req, err := http.NewRequest(http.MethodPost, n.server+"/"+url.PathEscape(n.topic), bytes.NewBufferString(body))
 	if err != nil {
 		return errors.New("build request")
 	}
