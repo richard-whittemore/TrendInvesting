@@ -153,13 +153,28 @@ What the switch does is in [states-and-kill-switch](states-and-kill-switch.md):
 every order is refused except the margin account's one sale back to 98%,
 and the engine state does not change.
 
-**Boost does not re-try a refused order.** Boost orders only when its target
-changes (ADR 0026, point 2, "Boost"). An order refused under the switch is
-not planned again when you release it. The account stays where it was until
-Boost's target next changes. If you engaged the switch while Boost wanted
-to buy, the account stays at 98% invested; if Boost wanted to sell, the sale
-back to 98% has gone anyway. The momentum IRAs plan afresh at every decision
-time, so their next rebalance orders as usual.
+**After you release the switch, Boost tries again at its next decision.**
+Normally Boost orders only when its target changes (ADR 0026, point 2,
+"Boost"). But an order the switch refused is planned again at the next
+decision, after the market's next close: Boost works out the difference
+between what the account holds and the target in force, and orders that.
+If you engaged the switch while Boost wanted to buy, the buy goes at the
+first close after you release it that decides, while the account is
+Normal; if Boost wanted to sell, the sale back
+to 98% has gone anyway, and the next decision sells whatever is still above
+the target. While the switch stays on, each close plans the order again and
+the switch refuses it again, so you see one `kill-switch` refusal per close
+in the journal, but the reporter alerts you only for the first one of each
+engagement (a log written before the engine marked that first refusal
+alerts for every one). A close that withholds its decision (no bar, or no account
+snapshot as of it) plans nothing, so the order waits for the next close
+that decides.
+This applies to any refusal that leaves the engine Normal (the kill switch,
+or an IBKR snapshot that is too old); a refusal while the account is
+Degraded or Halted follows that state's own rules
+([states-and-kill-switch](states-and-kill-switch.md)). The owner decided
+this on 2026-10-18. The momentum IRAs plan afresh at every decision time, so
+their next rebalance orders as usual.
 
 ## A rebalance clearance
 
@@ -236,6 +251,13 @@ see them, and the log is the only evidence of what you acknowledged.
 
 Two acknowledgements in the same second share a file name, so the second is
 refused; run it again a second later.
+
+The engine refuses an acknowledgement stating a time more than five minutes
+ahead or a file it cannot read: it is never recorded, and you see a `.refused`
+note beside the file in the inbox and on the engine's output. One recorded for
+another account has no effect: the reporter does not count it and the alert
+keeps repeating. Record the acknowledgement again with the right account and
+the current time.
 
 ## An approval
 
@@ -318,11 +340,13 @@ reports ([journal-query](journal-query.md)).
 | A typing slip in `-state`, or a missing `-by` or `-detail` (`-detail` is optional only for `acknowledge`) | Refused, nothing written | Run it again |
 | An acknowledgement with no `-alert` or no `-by`, or a key holding a newline (surrounding whitespace is trimmed) | Refused, nothing written | Run it again with the key from the alert |
 | An acknowledgement naming a key with a typing slip | Recorded; it acknowledges nothing, and the alert keeps repeating | Copy the key from the alert again, in single quotes |
+| An acknowledgement the engine refuses (a time more than five minutes ahead, an unreadable file) | Never recorded; a `.refused` note beside the file says why | Record it again with the current time |
+| An acknowledgement recorded for another account | Recorded with no effect; the reporter does not count it, so the alert keeps repeating | Record it again with the right account |
 | Two instructions of one kind in the same second | The second is refused (the file name exists); nothing is overwritten | Run it again a second later |
 | Someone edits a file in the inbox | The engine refuses it, writes `<file>.refused` saying why, and never uses it | Record the instruction again with the tool |
 | A clearance that names the wrong orders | Recorded with no effect; `.refused` note says which orders are open | Clear again naming exactly those |
 | The engine is restarted fresh while the switch was on | The fresh run starts with the switch off; `operator approve` warns you | Record the switch again before starting it |
-| A refused Boost order after you release the switch | Not retried until Boost's target changes | Wait, or rebalance by hand at IBKR |
+| A refused Boost order after you release the switch | Planned again at the next close, for the difference to Boost's target | Nothing; check the next close's release with `journal-query` |
 | The engine cannot list the inbox (permissions) | It says so on its output and tries again at the next input; nothing is recorded meanwhile | Fix the folder's owner or mode (`ti-trader`) |
 
 The kill switch stops new orders from this program only. To stop everything,
@@ -362,7 +386,8 @@ tool records); `TestTheOperatorsKillSwitchStopsAndReleasesOrders`,
 `TestAResumeWithAnApprovalStatesOneNextSequence`,
 `TestTheOperatorInboxIsForARunThatCanReachABroker`,
 `TestAnApprovalCannotUnderstateTheIncidentsSaleAttempt` (`cmd/engine`, how
-the engine responds); `TestTheOwnersClearanceEndsARebalanceInProgress`,
+the engine responds); `TestARefusalThatLeavesTheEngineNormalIsReplannedAtTheNextDecision`,
+`TestTheOwnersClearanceEndsARebalanceInProgress`,
 `TestAClearanceMustNameTheRebalanceInProgress`, `TestBoostReadsNoClearance`
 (`internal/targetweight`); `TestReadEndStateFindsWhatAFreshRunMustBeToldOf`,
 `TestAnApprovalNeverUnderstatesTheSaleAttempt`,

@@ -3,6 +3,7 @@ package momentum
 import (
 	"fmt"
 	"math"
+	"slices"
 	"time"
 )
 
@@ -44,6 +45,10 @@ type History struct {
 	Closes     int
 	Score      float64
 	Volatility float64
+	// GapSessions are the sessions with no close in the window read: for
+	// StatusGap the live window's; for a score across a gap (BacktestScore,
+	// ScoreHeld) the sessions between the first close read and the last.
+	GapSessions []string
 }
 
 // Score computes a name's 12-1 score and volatility from its split- and
@@ -59,7 +64,7 @@ type History struct {
 //
 // The backtest dropped missing closes and took the last 253 it had, so its
 // window shifted across a gap (defensive_v2.py:286); live leaves the name
-// out (ADR 0026 points 5 and 8).
+// out (ADR 0026 points 5 and 8), unless the account holds it (ScoreHeld).
 //
 // Every close must be dated on a calendar session, finite and positive:
 // a close after the last session would be look-ahead, and anything else is
@@ -90,8 +95,10 @@ func score(cfg Config, sessions []string, closes map[string]float64, last window
 	w, ok := last(sessions, closes, need)
 	if !ok {
 		h.Status = StatusGap
+		h.GapSessions = gapsIn(sessions[len(sessions)-need:], closes, need)
 		return h, nil
 	}
+	h.GapSessions = gapsIn(sessions, closes, need)
 	h.Score = w[need-1-cfg.ScoreSkip]/w[0] - 1
 	h.Volatility = populationStd(w[need-1-cfg.VolatilityReturns:])
 	h.Status = StatusScored
@@ -99,6 +106,59 @@ func score(cfg Config, sessions []string, closes map[string]float64, last window
 		h.Status = StatusZeroVolatility
 	}
 	return h, nil
+}
+
+// ScoreHeld is Score for a name the account holds (ADR 0026 point 5,
+// amended 2026-10-18, the owner's decision): a held name whose live window
+// has a gap is scored, and its volatility computed, as the backtest scored
+// it, from the last ScoreLookback+1 closes it has in the last
+// BacktestHistorySessions sessions, across the gap (BacktestScore;
+// defensive_v2.py:271,286-291), so it is kept or sold on its merits rather
+// than left out of the book. Its GapSessions name what it is missing. A
+// name with fewer closes than that in those sessions is StatusShortHistory,
+// held or not.
+//
+// Only a held name is scored so: a candidate the account does not hold
+// still needs a complete window (Score), and the ranking of new names is
+// unchanged.
+//
+// Invariant: the closes must have no unadjusted price jump across the gap.
+// A name the market-data step writes as a named instrument (every holding)
+// refuses the stream on a split or dividend it cannot adjust, so its gaps
+// are sessions it did not trade (docs/manual/market-data.md).
+func ScoreHeld(cfg Config, sessions []string, closes map[string]float64) (History, error) {
+	h, err := Score(cfg, sessions, closes)
+	if err != nil || h.Status != StatusGap {
+		return h, err
+	}
+	span := sessions[max(0, len(sessions)-BacktestHistorySessions):]
+	within := make(map[string]float64, len(span))
+	for _, s := range span {
+		if p, ok := closes[s]; ok {
+			within[s] = p
+		}
+	}
+	// Score has validated the configuration, the calendar and the closes,
+	// and span and within are parts of them, so BacktestScore cannot refuse.
+	b, _ := BacktestScore(cfg, span, within)
+	b.Closes = h.Closes
+	return b, nil
+}
+
+// gapsIn returns the sessions of sessions with no close, oldest first,
+// from the n-th close from the end, or the first session, to the last.
+func gapsIn(sessions []string, closes map[string]float64, n int) []string {
+	var gaps []string
+	found := 0
+	for i := len(sessions) - 1; i >= 0 && found < n; i-- {
+		if _, ok := closes[sessions[i]]; ok {
+			found++
+		} else {
+			gaps = append(gaps, sessions[i])
+		}
+	}
+	slices.Reverse(gaps)
+	return gaps
 }
 
 // populationStd is the population standard deviation of the simple daily

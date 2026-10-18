@@ -89,6 +89,32 @@ func TestNoOrderWithoutAStateChange(t *testing.T) {
 	}
 }
 
+// TestARefusedOrderIsReplannedAtTheNextDecision: after the last order was
+// refused and the engine stayed Normal (the kill switch, a stale broker
+// snapshot), the next decision plans the difference to the target in force
+// although the target has not changed (ADR 0026, point 2, "Boost", amended
+// 2026-10-18; ADR 0019 reading 10).
+func TestARefusedOrderIsReplannedAtTheNextDecision(t *testing.T) {
+	in := input(decision(0.98, 0.98, true), 4000, 0, 400)
+	in.Replan = true
+	order, ok := plan(t, in)
+	if !ok || order.Side != event.OrderSideBuy || order.Quantity != 9 {
+		t.Fatalf("got ok=%v %s %d, want the refused entry re-planned as buy 9", ok, order.Side, order.Quantity)
+	}
+	// The exit to 98% was refused with 14 held: sell 4 to 98%.
+	in = input(decision(0.98, 0.98, true), 4000, 14, 400)
+	in.Replan = true
+	if order, ok = plan(t, in); !ok || order.Side != event.OrderSideSell || order.Quantity != 4 {
+		t.Fatalf("got ok=%v %s %d, want the refused exit re-planned as sell 4", ok, order.Side, order.Quantity)
+	}
+	// Already at the target: a re-plan that rounds to zero shares plans nothing.
+	in = input(decision(0.98, 0.98, true), 4000, 9, 400)
+	in.Replan = true
+	if _, ok = plan(t, in); ok {
+		t.Error("9.8 - 9 rounds to 0: no order, re-plan or not")
+	}
+}
+
 func TestNoOrderWhenTheRoundedQuantityIsZero(t *testing.T) {
 	if _, ok := plan(t, input(decision(0.98, 0, false), 4000, 9, 400)); ok {
 		t.Error("9.8 - 9 rounds to 0: no order")

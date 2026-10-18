@@ -60,7 +60,8 @@ account.
 
 | Alert | Urgency | Sent once per |
 | --- | --- | --- |
-| An order was refused | urgent | refused order |
+| An order was refused | urgent | refused order, except: a kill-switch refusal once per engagement (turning the switch off and on again is a new one), and a refusal for a too-old IBKR snapshot once per stale episode ([states-and-kill-switch](states-and-kill-switch.md)); a log written before the engine marked those first refusals alerts for every one |
+| A sale back to 98% was not placed because the IBKR snapshot was too old, and it opened the stale episode (sell by hand if it is needed) | urgent | stale episode; the episode's later too-old refusals send nothing more |
 | The engine went Degraded or Halted | urgent, repeated until acknowledged | change of state, reason and scope; the same state coming back after another is a new alert |
 | A reconciliation did not match: an unexplained difference (Degraded) or evidence that could not be compared (Halted); see [reconciliation](reconciliation.md) | urgent, repeated until acknowledged | reconciliation; the state change it caused is part of the same alert, not a second one |
 | A decision was withheld for missing data (bars, account snapshot, universe, the close histories of the stocks ranked) | urgent | run of the same reason |
@@ -109,6 +110,14 @@ the alert ([operator](operator.md), "Acknowledging an alert"). The engine
 journals it only when it takes its next input from the adapter, so with the
 engine stopped the repeats continue until it runs; the reporter's first run
 after that sends the alert no more.
+
+Only an acknowledgement for the account counts. One recorded for another
+account has no effect, so the alert keeps coming until an acknowledgement for
+this account is in the log. One the engine refuses (its time is more than five
+minutes ahead of the engine's clock, or it cannot be read) is never recorded;
+you see a `.refused` note beside the file saying why in the engine's inbox and
+on the engine's output (`journalctl -u ti-engine@<account>`). Record the
+acknowledgement again with the right account and the current time.
 
 On both channels, ntfy and PagerDuty, repeats come every `-repeat-interval` (default 30 minutes). On PagerDuty, each repeat opens a **new incident**: the first alert's
 incident is named by the alert key, and each repeat's by the alert key with

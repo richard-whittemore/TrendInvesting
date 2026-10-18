@@ -29,11 +29,19 @@ Run from `adapter/`. Every command takes `--out DIR`, the recordings folder.
 | --- | --- | --- |
 | `python3 -m marketdata universe --out DIR` | the last session's bars for every US stock, plus the list of common-stock (type CS) tickers | yes |
 | `python3 -m marketdata bars --out DIR --instruments SPY,IEF,SHY` | the named instruments' bars | yes |
-| `python3 -m marketdata backfill --out DIR --sessions 253` | one whole-market bar file per past session (about 53 minutes at Massive's 5 requests a minute; resumable) | yes |
+| `python3 -m marketdata backfill --out DIR --sessions 260` | one whole-market bar file per past session (about 54 minutes at Massive's 5 requests a minute; resumable) | yes |
 | `python3 -m marketdata actions --out DIR --lookback-days 400` | every split and every dividend dated in the window | yes |
 | `python3 -m marketdata sectors --out DIR` | iShares' IWV holdings file and Nasdaq's stock screener, for sector labels, for the latest settled session only | no |
 | `python3 -m marketdata encode --out DIR --first ... --asof ... --stream FILE ...` | the engines' input stream (below) | no, and it never uses the network |
 | `python3 -m marketdata retract --out DIR --session YYYY-MM-DD --reason TEXT` | that the exchange cancelled a session (below) | no |
+
+If your recordings hold an older 253-session backfill, extend it to 260
+before a fresh run's first decision: `backfill --sessions 260` resumes and
+records only the missing days. A stock you hold with a missing day is scored
+across it when it has at least 253 usable closes within the last 260
+sessions; with fewer (for example, a 253-session backfill with one missing
+day leaves 252), it reads `short-history` and is sold. 260 sessions leave
+the seven spare days the rule allows.
 
 `--asof` defaults to today's date in New York, not the computer's own time
 zone. The session is the latest NYSE trading day on or before it, taken from
@@ -158,7 +166,9 @@ With `--ranker`, `encode` writes the compact universe input:
 - at the last session of each month (a decision session), right after that
   snapshot, one `market.close.history` for each of the 500 stocks the engine
   will rank, carrying that stock's split- and dividend-adjusted closes for
-  the last 253 sessions. They are exactly the closes its daily bars would
+  the last 260 sessions (the engine keeps 260 so a stock you hold can be
+  scored across a missing day; [the momentum universe](momentum-universe.md)).
+  They are exactly the closes its daily bars would
   have carried, and a session a stock is left out of for bad data (see
   below) is missing from its history, just as its bar would be.
 
@@ -166,7 +176,7 @@ So a month costs about 21 small sets of bars, 21 universe snapshots and 500
 histories, instead of about 105,000 bars. A new journal's warm-up is only the
 named instruments' bars (SPY's 200-session trend among them; start `--first`
 at the base for that), not every stock's: the first month's histories carry
-the stocks' 253 sessions.
+the stocks' 260 sessions.
 
 Which 500 is the ranking rule, and that lives in Go, so this step never
 works it out itself. `--ranker` names the command that does:
@@ -253,7 +263,15 @@ earlier session. `encode` names each stretch on stderr (`marketdata: excluded
 TICKER from FIRST to LAST (N sessions): reason`). SPY, IEF, SHY and every
 other instrument are still written, and the same bad data in SPY, IEF, SHY
 or any instrument named with `--instruments` or `--optional` still refuses
-the whole stream.
+the whole stream. That refusal is what lets the engine score a stock you hold
+across a missing day (ADR 0026 point 5, amended 2026-10-18): a holding named
+with `--optional` can be missing a day only because it did not trade, never
+because a split was left unadjusted. That guarantee holds only for the
+compact stream (`--ranker`, below), where only named stocks have bars.
+Naming every stock you hold with `--optional` is mandatory: one you leave
+unnamed is treated as not held when its prices have a gap. In a bars stream (`--universe-members`) every member
+has bars, named or not, so the engine scores no holding across a gap there
+at all: a held stock with a gap is sold, as before 2026-10-18.
 
 Sector labels are GICS from iShares' IWV holdings where it lists the stock,
 else Nasdaq's sector, both mapped onto Morningstar's eleven sector names so

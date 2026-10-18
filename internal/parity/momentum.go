@@ -403,7 +403,8 @@ func (r *momentumRun) history(m *MomentumMonth, ranked map[string]RankedEntry, n
 func (r *momentumRun) scoreDeparture(m *MomentumMonth, name string, bt, live momentum.History) bool {
 	where := m.Month + " " + name
 	switch {
-	case live == bt:
+	case live.Status == bt.Status && live.Closes == bt.Closes && live.Score == bt.Score && live.Volatility == bt.Volatility:
+		// The sessions a window is missing are a record, not a figure.
 		return false
 	case live.Status == momentum.StatusGap && bt.Status != momentum.StatusShortHistory &&
 		missingIn(m.Closes[name], r.cfg.ScoreLookback+1):

@@ -84,19 +84,24 @@ func inboxOptions(t *testing.T, dir string) options {
 // delivered as an operator.kill-switch input before the adapter's next
 // input, at the next position of the run's one input sequence, and journalled
 // before any decision it affects (ADR 0026, point 3; ADR 0027). Engaged,
-// Boost's first buy is refused (kill-switch) and nothing is released; Boost
-// orders only when its target changes (orderplan.PlanBoost), so the refused
-// buy is not planned again. Released before the session closes, the buy is
-// released. The adapter continues the sequence the decisions carry.
+// Boost's first buy is refused (kill-switch) and nothing is released; the
+// refusal leaves the engine Normal, so each later decision plans the
+// difference to the target in force again (ADR 0026, point 2, "Boost",
+// amended 2026-10-18) and, the switch still on, is refused again. Released
+// after the first decision, the next decision plans the entry and releases
+// it. Released before the session closes, the buy is released. The adapter
+// continues the sequence the decisions carry.
 func TestTheOperatorsKillSwitchStopsAndReleasesOrders(t *testing.T) {
+	kill := event.RefusedKillSwitch
 	for _, c := range []struct {
-		name     string
-		release  bool
-		released int
-		refused  []string
+		name      string
+		releaseAt int // the session before whose close the switch is released; -1 never
+		released  int
+		refused   []string
 	}{
-		{"engaged", false, 0, []string{event.RefusedKillSwitch}},
-		{"released before the close", true, 1, nil},
+		{"engaged", -1, 0, []string{kill, kill, kill}},
+		{"released after the first decision", 1, 1, []string{kill}},
+		{"released before the close", 0, 1, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -105,8 +110,8 @@ func TestTheOperatorsKillSwitchStopsAndReleasesOrders(t *testing.T) {
 			want := []string{writeKillSwitch(t, opts.operatorDir, "joint", boostSession(0).Add(-2*time.Hour), true).ID}
 			feed := newBoostFeed(t, opts.socketPath, boostConfiguration(t, boostConfigPath), "test-build", 2)
 			feed.beforeClose = func(i int) {
-				if i == 0 && c.release {
-					want = append(want, writeKillSwitch(t, opts.operatorDir, "joint", boostSession(0).Add(-time.Hour), false).ID)
+				if i == c.releaseAt {
+					want = append(want, writeKillSwitch(t, opts.operatorDir, "joint", boostSession(i).Add(-time.Hour), false).ID)
 				}
 			}
 			feed.sessions(0, 3)
@@ -116,6 +121,12 @@ func TestTheOperatorsKillSwitchStopsAndReleasesOrders(t *testing.T) {
 			}
 			if len(feed.released) != c.released {
 				t.Errorf("released %+v, want %d", feed.released, c.released)
+			}
+			if c.released > 0 && len(feed.released) > 0 {
+				tag := "targets-decided:joint:" + boostSession(c.releaseAt).Format(time.RFC3339)
+				if r := feed.released[0]; r.Side != event.OrderSideBuy || r.Quantity != 9 || r.Tag != tag {
+					t.Errorf("released %+v, want the entry to 98%% (buy 9 SPY) decided by %s", r, tag)
+				}
 			}
 			entries := recoverFile(t, opts.logPath).Entries
 			var got []string

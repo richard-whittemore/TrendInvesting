@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"math"
+	"reflect"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -88,7 +89,7 @@ func TestGlideSleevesAreSummedIntoOneTarget(t *testing.T) {
 			t.Fatalf("decision %d ranks differently with the glide path", i)
 		}
 		for k, n := range d.Momentum.Names {
-			if n != plain[i].Momentum.Names[k] {
+			if !reflect.DeepEqual(n, plain[i].Momentum.Names[k]) {
 				t.Errorf("decision %d name %s: %+v, without the glide %+v", i, n.InstrumentID, n, plain[i].Momentum.Names[k])
 			}
 		}

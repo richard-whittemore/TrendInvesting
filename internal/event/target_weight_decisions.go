@@ -32,8 +32,16 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     which only a run reading the compact universe input emits, is a
 //     reason of this version too: no journal read before that input has it.
 //     So is labels-missing, which only a run under configuration version 7
-//     emits.
-const TargetsDecidedSchemaVersion uint32 = 4
+//     emits, and a name's GapSessions, which rules 1.15.0 and later record and
+//     which are omitted when empty, so a Boost decision's bytes are still
+//     version 1's (ADR 0026 point 5, amended 2026-10-18).
+//   - Version 5 records Boost's pending re-plan (ADR 0026, point 2, "Boost",
+//     amended 2026-10-18): BoostFigures.ReplanPending, set when the next
+//     decided session plans the difference to the target in force after a
+//     refusal that left the engine Normal, so a restart from the decision
+//     recovers it (ADR 0026, point 5). It is omitted when unset, so a
+//     decision without a pending re-plan has version 4's bytes.
+const TargetsDecidedSchemaVersion uint32 = 5
 
 // The two outcomes of a target decision (ADR 0026, point 1).
 const (
@@ -133,6 +141,14 @@ type BoostFigures struct {
 	LatchedAfter     bool    `json:"latched_after"`
 	TargetInForce    float64 `json:"target_in_force"`
 	TargetInForceSet bool    `json:"target_in_force_set"`
+	// ReplanPending is set when, after this decision, the next decided
+	// session plans the difference to the target in force though the target
+	// has not changed: this session's order, or an earlier one's still
+	// waiting, was refused and the refusal left the engine Normal (ADR 0026,
+	// point 2, "Boost", amended 2026-10-18). A restart recovers it from the
+	// last decision with the target in force (ADR 0026, point 5). Omitted
+	// when unset.
+	ReplanPending bool `json:"replan_pending,omitempty"`
 }
 
 // TargetsDecidedPayload is one account's target decision.
@@ -241,6 +257,11 @@ type MomentumName struct {
 	// previous raw close and the target value it exceeded.
 	OneShare    float64 `json:"one_share,omitzero"`
 	TargetValue float64 `json:"target_value,omitzero"`
+	// GapSessions are the sessions, YYYY-MM-DD and ascending, with no close
+	// in the window the name was scored or refused on: a gap name's, or a
+	// held name's scored across its gap (ADR 0026 point 5, amended
+	// 2026-10-18). Omitted for a complete window.
+	GapSessions []string `json:"gap_sessions,omitempty"`
 }
 
 // Validate checks the identity, the outcome and its reason, the targets and
@@ -403,6 +424,7 @@ func (m MomentumFigures) validate() []error {
 	}
 	for i, n := range m.Names {
 		errs = append(errs, n.validate(i+1)...)
+		errs = append(errs, n.validateGaps(m.CloseSession)...)
 		if n.Status == MomentumStatusUnaffordable && !lot {
 			errs = append(errs, fmt.Errorf("momentum name %s: an unaffordable name needs the minimum lot figures", n.InstrumentID))
 		}
@@ -447,6 +469,43 @@ func (n MomentumName) validate(rank int) []error {
 	}
 	if n.Weight > 0 && n.Status != MomentumStatusPicked {
 		errs = append(errs, fmt.Errorf("momentum name %s: only a picked name has a weight", n.InstrumentID))
+	}
+	return errs
+}
+
+// ValidateWritten is the check on a decision being written now: Validate,
+// and a momentum name left out for a gap names the sessions it is missing
+// (ADR 0026 point 5, amended 2026-10-18). Validate, which readers use, does
+// not require it, so a record written before gap sessions existed is read.
+func (p TargetsDecidedPayload) ValidateWritten() error {
+	errs := []error{p.Validate()}
+	for _, n := range p.Momentum.Names {
+		if n.Status == MomentumStatusGap && len(n.GapSessions) == 0 {
+			errs = append(errs, fmt.Errorf("momentum name %s: a gap name names its missing sessions", n.InstrumentID))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// validateGaps checks a name's gap sessions: dates, strictly ascending, on
+// or before the close session; a short history, refused before any window
+// is read, names none. A gap name may name none here, because a record
+// written before gap sessions existed names none and its log must still be
+// read; ValidateWritten holds a record being written now to the full rule.
+func (n MomentumName) validateGaps(closeSession string) []error {
+	var errs []error
+	if n.Status == MomentumStatusShortHistory && len(n.GapSessions) > 0 {
+		errs = append(errs, fmt.Errorf("momentum name %s: a short history records no gap sessions", n.InstrumentID))
+	}
+	for i, s := range n.GapSessions {
+		switch _, err := time.Parse(time.DateOnly, s); {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("momentum name %s: gap session %q is not a YYYY-MM-DD date", n.InstrumentID, s))
+		case i > 0 && s <= n.GapSessions[i-1]:
+			errs = append(errs, fmt.Errorf("momentum name %s: gap sessions must be strictly ascending; %s follows %s", n.InstrumentID, s, n.GapSessions[i-1]))
+		case s > closeSession:
+			errs = append(errs, fmt.Errorf("momentum name %s: gap session %s is after the close session %s", n.InstrumentID, s, closeSession))
+		}
 	}
 	return errs
 }
@@ -899,9 +958,13 @@ type OrderRefusedPayload struct {
 	Reason        string      `json:"reason"`
 	Detail        string      `json:"detail"`
 	Figures       RiskFigures `json:"figures"`
-	// Alert marks the first stale-broker-snapshot refusal against one latest
-	// broker snapshot: it raises the urgent alert, once per snapshot, until a
-	// later snapshot is recorded (ADR 0019, amendment of 2026-10-17).
+	// Alert marks the refusal that raises the urgent alert: the first
+	// stale-broker-snapshot refusal of the account's stale episode (ADR 0019,
+	// amendment of 2026-10-17, reading 10), or the first kill-switch refusal
+	// of one engagement (ADR 0026, point 3, kill switch: "alert once"). The
+	// later refusals of the same episode or engagement are recorded without
+	// it and send nothing. Only a journal recorded under rules version 1.16.0
+	// or later flags a kill-switch refusal.
 	Alert bool `json:"alert,omitempty"`
 }
 
@@ -948,8 +1011,8 @@ func (p OrderRefusedPayload) Validate() error {
 	if p.Detail == "" {
 		errs = append(errs, errors.New("detail is required: a refusal without its figures cannot be checked"))
 	}
-	if p.Alert && p.Reason != RefusedStaleBrokerSnapshot {
-		errs = append(errs, errors.New("only a stale-broker-snapshot refusal raises the alert"))
+	if p.Alert && p.Reason != RefusedStaleBrokerSnapshot && p.Reason != RefusedKillSwitch {
+		errs = append(errs, errors.New("only a stale-broker-snapshot or kill-switch refusal raises the alert"))
 	}
 	errs = append(errs, p.Figures.validate(p.Side)...)
 	if err := errors.Join(errs...); err != nil {

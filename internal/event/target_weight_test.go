@@ -445,3 +445,18 @@ func TestMarginLimitsAndModesStandAlone(t *testing.T) {
 		}
 	}
 }
+
+// TestARefusalAlertBelongsToAKillSwitchOrStaleRefusal: the alert flag marks
+// the one refusal that pages the owner for a kill-switch engagement (ADR
+// 0026, point 3, kill switch: "alert once") or a stale episode (ADR 0019,
+// amendment of 2026-10-17, reading 10); no other reason carries it.
+func TestARefusalAlertBelongsToAKillSwitchOrStaleRefusal(t *testing.T) {
+	for _, reason := range []string{event.RefusedKillSwitch, event.RefusedStaleBrokerSnapshot} {
+		p := validOrderRefused()
+		p.Reason, p.Alert = reason, true
+		if err := p.ValidateSchema(event.OrderRefusedSafetyVersion); err != nil {
+			t.Errorf("%s with the alert: %v", reason, err)
+		}
+	}
+	expectInvalid(t, "alert on another reason", validOrderRefused(), func(p *event.OrderRefusedPayload) { p.Alert = true }, "alert")
+}

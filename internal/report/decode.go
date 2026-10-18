@@ -74,6 +74,9 @@ var (
 	plannedVersions  = event.OrderPlannedVersions()
 	releasedVersions = event.OrderReleasedVersions()
 	refusedVersions  = event.OrderRefusedVersions()
+	// A withheld sale back to 98%, for the stale episode it opens (ADR 0019,
+	// amendment of 2026-10-17, reading 10).
+	saleWithheldVersions = []uint32{event.SaleWithheldSchemaVersion}
 	// A target-weight account's orders are limit orders, reported at
 	// lifecycle version 2 and fill version 5 (ADR 0026, Consequences).
 	lifecycleVersions = []uint32{event.OrderLifecycleLimitVersion}

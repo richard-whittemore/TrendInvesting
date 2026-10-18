@@ -196,6 +196,10 @@ type momentumOptions struct {
 	rawScale map[string]float64
 	// held is the IRA's holdings before the first session.
 	held map[string]int64
+	// unnamed are instruments the compact stream writes no bar for even when
+	// held, as when a holding is not named to the market-data step: only its
+	// close history reaches the run.
+	unnamed map[string]bool
 	// refusals names inputs, by envelope ID, the run must refuse, with what
 	// the refusal says.
 	refusals map[string]string
@@ -355,7 +359,7 @@ func simulateMomentum(t *testing.T, opts momentumOptions) momentumResult {
 			if _, ok := prices[n.id]; ok && opts.compact {
 				marked = append(marked, n.id) // the venue marks what it trades, whatever bars the stream carries
 			}
-			if _, ok := prices[n.id]; !ok || opts.noBar[session] == n.id || (opts.compact || opts.heldBarsOnly) && !compactBar(n.id, acct.held) {
+			if _, ok := prices[n.id]; !ok || opts.noBar[session] == n.id || (opts.compact || opts.heldBarsOnly) && (!compactBar(n.id, acct.held) || opts.unnamed[n.id]) {
 				continue
 			}
 			ids = append(ids, n.id)

@@ -45,7 +45,7 @@ func closeHistories(t *testing.T, cfg event.TargetWeightConfigurationPayload, ca
 	listed := slices.DeleteFunc(slices.Clone(cal[:i+1]), func(s string) bool {
 		return opts.unlisted[s] || slices.Contains(opts.retract, s)
 	})
-	window := listed[max(0, len(listed)-max(m.ScoreLookback+1, m.TrendCloses)):]
+	window := listed[max(0, len(listed)-max(m.ScoreLookback+1, m.TrendCloses, momentum.BacktestHistorySessions)):]
 	byID := map[string]name{}
 	for _, n := range names() {
 		byID[n.id] = n
@@ -281,7 +281,7 @@ func TestMomentumHistoryRequestNamesTheMembersTheRunRanks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := targetweight.HistoryRequest{Session: "2025-01-31", DecisionSession: true, Window: 7, Members: []string{"AAA", "BBB"}}
+	want := targetweight.HistoryRequest{Session: "2025-01-31", DecisionSession: true, Window: momentum.BacktestHistorySessions, Members: []string{"AAA", "BBB"}}
 	if !equalJSON(t, got, want) {
 		t.Errorf("request %+v, want %+v", got, want)
 	}

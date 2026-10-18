@@ -68,6 +68,10 @@ type Input struct {
 	// MinimumLot, when set, applies D7-L's substitution
 	// (SelectBookWithMinimumLot); nil selects the book as the backtest did.
 	MinimumLot *MinimumLot
+	// Held names the instruments the account holds at the decision. A held
+	// member whose window has a gap is scored across it, as the backtest
+	// scored every name (ScoreHeld; ADR 0026 point 5, amended 2026-10-18).
+	Held map[string]bool
 }
 
 // NameRecord is the decision's record of one universe member.
@@ -91,6 +95,11 @@ type NameRecord struct {
 	// OneShare and TargetValue are set for an unaffordable name (D7-L).
 	OneShare    float64
 	TargetValue float64
+	// GapSessions are the calendar sessions with no close inside the window
+	// it was scored, or refused, on: for StatusGap the live window's, for a
+	// held name scored across its gap the sessions its closes span. Empty
+	// for a complete window.
+	GapSessions []string
 }
 
 // Decision is one momentum decision with the figures behind it, so the
@@ -151,7 +160,11 @@ func Decide(cfg Config, in Input) (Decision, error) {
 	index := make(map[string]int, len(members))
 	var candidates []Candidate
 	for i, m := range members {
-		h, err := Score(cfg, in.Sessions, in.Closes[m.InstrumentID])
+		score := Score
+		if in.Held[m.InstrumentID] {
+			score = ScoreHeld
+		}
+		h, err := score(cfg, in.Sessions, in.Closes[m.InstrumentID])
 		if err != nil {
 			return Decision{}, fmt.Errorf("momentum: %s: %w", m.InstrumentID, err)
 		}
@@ -163,6 +176,7 @@ func Decide(cfg Config, in Input) (Decision, error) {
 			SectorSource: m.SectorSource,
 			Status:       h.Status,
 			Closes:       h.Closes,
+			GapSessions:  h.GapSessions,
 		}
 		index[m.InstrumentID] = i
 		if h.Status == StatusScored || h.Status == StatusZeroVolatility {
