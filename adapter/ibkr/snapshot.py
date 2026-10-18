@@ -113,7 +113,7 @@ def read_account(conn):
     for tag, component in ((NET_LIQUIDATION, NET), (EXCESS_LIQUIDITY, EXCESS), (TOTAL_CASH, CASH)):
         if tag not in balances:
             unread.add(component)
-    for component, tag in ((NET, NET_LIQUIDATION), (EXCESS, EXCESS_LIQUIDITY)):
+    for component, tag in ((NET, NET_LIQUIDATION), (EXCESS, EXCESS_LIQUIDITY), (CASH, TOTAL_CASH)):
         if tag in balances and balances[tag].currency != BASE_CURRENCY:
             unread.add(component)
     return AccountReading(

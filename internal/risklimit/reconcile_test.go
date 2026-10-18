@@ -221,3 +221,32 @@ func TestARecordedCashScopeIsRestored(t *testing.T) {
 		t.Errorf("the breach's record states the whole scope: %+v", out.State)
 	}
 }
+
+// TestAnApprovedCashIncidentStillRefusesBuys: a fresh run approved with a
+// Degraded incident whose scope covers cash resumes in that same scope (ADR
+// 0019, amended 2026-09-24, "The state survives a restart"): a cash-only
+// scope is restored, not refused, and a scope of an instrument and cash
+// keeps the cash, so buys stay refused and sells go.
+func TestAnApprovedCashIncidentStillRefusesBuys(t *testing.T) {
+	cash := []string{event.ReconciliationComponentCash}
+	for name, instruments := range map[string][]string{"cash alone": nil, "instrument and cash": {"SPY"}} {
+		g := gate(t, limits(), event.TradingModeDryRun)
+		if err := g.RestoreIncidentState("engine-state:joint:1", event.EngineStateDegraded, instruments, cash); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if g.State() != risklimit.StateDegraded {
+			t.Fatalf("%s: the gate is %s", name, g.State())
+		}
+		refusedFor(t, check(t, g, order(event.OrderSideBuy, 1, 0))[0], event.RefusedEngineDegraded)
+	}
+	sells := gate(t, limits(), event.TradingModeDryRun)
+	if err := sells.RestoreIncidentState("engine-state:joint:1", event.EngineStateDegraded, nil, cash); err != nil {
+		t.Fatal(err)
+	}
+	observe(t, sells, "broker:1", broker(10))
+	released(t, check(t, sells, order(event.OrderSideSell, 1, 10))[0])
+	halted := gate(t, limits(), event.TradingModeDryRun)
+	if err := halted.RestoreIncidentState("engine-state:joint:1", event.EngineStateHalted, nil, cash); err == nil {
+		t.Error("a Halted incident naming a cash scope was restored")
+	}
+}

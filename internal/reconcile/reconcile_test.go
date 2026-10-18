@@ -1,6 +1,7 @@
 package reconcile_test
 
 import (
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -274,5 +275,94 @@ func TestCentsRoundsHalfAwayFromZero(t *testing.T) {
 		if got := reconcile.Cents(x); got != want {
 			t.Errorf("Cents(%v) = %d, want %d", x, got, want)
 		}
+	}
+}
+
+// TestCentsRoundsTheDecimalNotItsBinaryNeighbour: a half cent written in
+// decimal is often just below the half in binary, so rounding x*100 as a
+// float books 0.145 as 14 cents. ADR 0019 ("Quantities and unexplained cash
+// residuals both have zero tolerance": binary floating-point epsilon is not
+// a monetary tolerance) asks for the declared rule, half away from zero, on
+// the decimal figure, and a fill's value on the exact product of its
+// quantity and decimal price.
+func TestCentsRoundsTheDecimalNotItsBinaryNeighbour(t *testing.T) {
+	for x, want := range map[float64]int64{0.145: 15, 1.005: 101, 2.195: 220, 1.025: 103, -0.145: -15, -1.005: -101, 0.144: 14, 1.0049: 100} {
+		if got := reconcile.Cents(x); got != want {
+			t.Errorf("Cents(%v) = %d, want %d", x, got, want)
+		}
+	}
+	// 3 at 1.005 is 3.015 exactly, 3.0149999999999997 as a float product;
+	// a commission of 0.145 is 15 cents.
+	buy := reconcile.FillChange(event.TargetWeightFillPayload{FillID: "f", InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 3, Price: 1.005, Commission: 0.145})
+	if buy.Cash != -302-15 {
+		t.Errorf("a buy of 3 at 1.005 with 0.145 commission costs %d cents, want %d", buy.Cash, -302-15)
+	}
+	sell := reconcile.FillChange(event.TargetWeightFillPayload{FillID: "f", InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: 7, Price: 2.195, Commission: 0.145})
+	if sell.Cash != 1537-15 {
+		t.Errorf("a sale of 7 at 2.195 less 0.145 commission credits %d cents, want %d", sell.Cash, 1537-15)
+	}
+}
+
+// TestCentsRefusesAFigureThatIsNotANumber: JSON cannot carry NaN or an
+// infinity, and the payloads Cents reads refuse them, so one reaching it is
+// a defect in the caller, never a figure to book.
+func TestCentsRefusesAFigureThatIsNotANumber(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("Cents(NaN) returned")
+		}
+	}()
+	reconcile.Cents(math.NaN())
+}
+
+// TestTheDetailCountsEachExplainingEventOnce: a fill moves a position and
+// the cash, and is listed under both, but it is one journalled event, so
+// the result's detail, the durable evidence the owner reads, counts it once.
+func TestTheDetailCountsEachExplainingEventOnce(t *testing.T) {
+	fill := reconcile.FillChange(event.TargetWeightFillPayload{
+		AccountID: "ira", ClientOrderID: "tw-1", FillID: "exec-1", InstrumentID: "TLT", Side: event.OrderSideBuy,
+		Quantity: 3, Price: 91.17, Commission: 1, FilledAt: closeAt.Add(time.Hour),
+	})
+	r := classify(t, iraBook(), []reconcile.Change{fill}, observed(237.79, held("SPY", 147), held("TLT", 23)))
+	if !strings.Contains(r.Detail, "explained by 1 journalled event(s)") {
+		t.Errorf("one fill is one event: %q", r.Detail)
+	}
+}
+
+// TestTheCashComparisonStatesItsParts: the journal knows each part of the
+// expected cash (fills' values, their commissions, dividends and cash in
+// lieu), but IBKR's TotalCashValue is one net figure, so a residual can only
+// be stated against the whole, with its parts beside it, and a journalled
+// credit and an equal unjournalled debit cancel undetected. ADR 0019
+// ("Explained means") says offsetting activities do not explain one another;
+// until the observation carries IBKR's cash activity rows the result says
+// plainly that cash is compared as one net total.
+func TestTheCashComparisonStatesItsParts(t *testing.T) {
+	fill := reconcile.FillChange(event.TargetWeightFillPayload{
+		AccountID: "ira", ClientOrderID: "tw-1", FillID: "exec-1", InstrumentID: "TLT", Side: event.OrderSideBuy,
+		Quantity: 3, Price: 91.17, Commission: 1, FilledAt: closeAt.Add(time.Hour),
+	})
+	dividend := reconcile.CorporateActionChange("ca:div", event.CorporateActionPayload{
+		InstrumentID: "TLT", Kind: event.CorporateActionKindDividend, EffectiveAt: closeAt.Add(2 * time.Hour), CashAmount: 6.4, Currency: "USD",
+	})
+	// 512.30 - 273.51 - 1.00 + 6.40 = 244.19 expected; the broker shows 244.00.
+	r := classify(t, iraBook(), []reconcile.Change{fill, dividend}, observed(244, held("SPY", 147), held("TLT", 23)))
+	if r.Classification != event.ReconciliationUnexplained {
+		t.Fatalf("got %s: %s", r.Classification, r.Detail)
+	}
+	for _, want := range []string{"book 512.30", "fills -273.51", "commissions -1.00", "dividends 6.40", "cash in lieu 0.00", "expected 244.19", "broker 244.00", "residual -0.19", "one net total"} {
+		if !strings.Contains(r.Detail, want) {
+			t.Errorf("the detail states %q: %q", want, r.Detail)
+		}
+	}
+	for name, cash := range map[string]float64{"matched": 512.3} {
+		m := classify(t, iraBook(), nil, observed(cash, held("SPY", 147), held("TLT", 20)))
+		if !strings.Contains(m.Detail, "one net total") {
+			t.Errorf("%s: the limit is stated: %q", name, m.Detail)
+		}
+	}
+	explained := classify(t, iraBook(), []reconcile.Change{dividend}, observed(518.7, held("SPY", 147), held("TLT", 20)))
+	if !strings.Contains(explained.Detail, "one net total") {
+		t.Errorf("explained: the limit is stated: %q", explained.Detail)
 	}
 }

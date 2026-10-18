@@ -275,19 +275,21 @@ func (g *Gate) RestoreState(id string, p event.EngineStatePayload, schemaVersion
 // or restart while Degraded or Halted resumes in that same state and scope"
 // (ADR 0019, amended 2026-09-24, "The state survives a restart"). As with a
 // recorded state, it never loosens the gate. State is event.EngineStateDegraded
-// with the instruments it freezes, or event.EngineStateHalted with none.
-// incidentID, the incident's first engine-state record, tags its one sale
-// back to 98%, as RestoreState's first record out of Normal does.
-func (g *Gate) RestoreIncidentState(incidentID, state string, instrumentIDs []string) error {
+// with the instruments and cash components it freezes, at least one of
+// either, or event.EngineStateHalted with none. incidentID, the incident's
+// first engine-state record, tags its one sale back to 98%, as RestoreState's
+// first record out of Normal does.
+func (g *Gate) RestoreIncidentState(incidentID, state string, instrumentIDs, cashComponents []string) error {
+	scoped := len(instrumentIDs)+len(cashComponents) > 0
 	switch {
-	case state == event.EngineStateHalted && len(instrumentIDs) > 0:
+	case state == event.EngineStateHalted && scoped:
 		return errors.New("risklimit: an approved Halted incident covers the whole account and names no scope")
-	case state == event.EngineStateDegraded && len(instrumentIDs) == 0:
-		return errors.New("risklimit: an approved Degraded incident names its scope instruments")
+	case state == event.EngineStateDegraded && !scoped:
+		return errors.New("risklimit: an approved Degraded incident names its scope instruments or cash components")
 	case state != event.EngineStateHalted && state != event.EngineStateDegraded:
 		return fmt.Errorf("risklimit: an approved incident's state %q is not degraded or halted", state)
 	}
-	return g.tighten(incidentID, state, instrumentIDs, nil)
+	return g.tighten(incidentID, state, instrumentIDs, cashComponents)
 }
 
 // tighten moves the gate to state, a validated Degraded or Halted, without

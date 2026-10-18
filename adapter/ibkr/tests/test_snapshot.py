@@ -192,6 +192,16 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(payload["unreadable"], ["total-cash"])
         self.assertEqual(payload["positions"], [])
 
+    def test_cash_in_another_currency_is_unreadable(self):
+        # The engine's book is in USD; a TotalCashValue in another currency
+        # is not a figure it can compare, so the adapter marks it unreadable
+        # rather than pass it on.
+        h = connected()
+        h.fake.summary = [row if row[1] != "TotalCashValue" else (row[0], row[1], row[2], "EUR") for row in full_summary()]
+        payload = reconciliation_record(read_account(h.conn), "morning:1").payload
+        self.assertIn("total-cash", payload["unreadable"])
+        self.assertEqual((payload["total_cash"], payload["currency"]), (0, ""))
+
     def test_a_reconciliation_names_its_trigger(self):
         h = scripted()
         with self.assertRaises(ValueError):

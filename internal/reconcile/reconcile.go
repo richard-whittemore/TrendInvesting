@@ -9,8 +9,9 @@ package reconcile
 import (
 	"fmt"
 	"maps"
-	"math"
+	"math/big"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,8 +61,10 @@ const (
 // "a typed, validated event recorded before this reconciliation input"). ID
 // is its stable identity, a fill's fill ID or a corporate action's envelope
 // ID. Shares is a fill's signed change in raw shares; Cash its signed effect
-// in whole cents. Any other corporate action is recorded with its own kind,
-// which no book can apply.
+// in whole cents, and Commission the part of Cash that is a fill's
+// commission, in whole cents, a cost (so Cash+Commission is the fill's
+// value). Any other corporate action is recorded with its own kind, which no
+// book can apply.
 type Change struct {
 	ID           string
 	Kind         string
@@ -69,6 +72,7 @@ type Change struct {
 	At           time.Time
 	Shares       int64
 	Cash         int64
+	Commission   int64
 	// Currency is the currency of a corporate action's cash, empty for a
 	// fill, which is in the account's own.
 	Currency             string
@@ -77,13 +81,15 @@ type Change struct {
 
 // FillChange is fill p's change: a buy adds its shares and costs its value
 // and commission, a sell removes its shares and credits its value less
-// commission. The booking rule: the value and the commission are each
-// rounded to the cent, half away from zero, as IBKR books them.
+// commission. The booking rule: the value, the exact product of the
+// quantity and the decimal price, and the commission are each rounded to the
+// cent, half away from zero, as IBKR books them.
 func FillChange(p event.TargetWeightFillPayload) Change {
-	value := Cents(float64(float64(p.Quantity) * p.Price))
-	c := Change{ID: p.FillID, Kind: ChangeFill, InstrumentID: p.InstrumentID, At: p.FilledAt, Shares: p.Quantity, Cash: -value - Cents(p.Commission)}
+	value := roundCents(new(big.Rat).Mul(decimal(p.Price), new(big.Rat).SetInt64(p.Quantity)))
+	commission := Cents(p.Commission)
+	c := Change{ID: p.FillID, Kind: ChangeFill, InstrumentID: p.InstrumentID, At: p.FilledAt, Shares: p.Quantity, Cash: -value - commission, Commission: commission}
 	if p.Side == event.OrderSideSell {
-		c.Shares, c.Cash = -p.Quantity, value-Cents(p.Commission)
+		c.Shares, c.Cash = -p.Quantity, value-commission
 	}
 	return c
 }
@@ -103,9 +109,33 @@ func CorporateActionChange(id string, p event.CorporateActionPayload) Change {
 	return c
 }
 
-// Cents is x dollars in whole cents, rounded half away from zero. A product
-// with no addition needs no rounding barrier (docs/development.md).
-func Cents(x float64) int64 { return int64(math.Round(x * 100)) }
+// Cents is x dollars in whole cents, rounded half away from zero on x's
+// decimal figure, the shortest decimal that reads back as x (the figure its
+// producer wrote), never on the binary product x*100, which puts a half cent
+// such as 0.145 just below the half: binary floating-point epsilon is not a
+// monetary tolerance (ADR 0019, "Quantities and unexplained cash residuals
+// both have zero tolerance"). x is finite: the payloads it comes from refuse
+// anything else.
+func Cents(x float64) int64 { return roundCents(decimal(x)) }
+
+// decimal is x's shortest decimal figure, exactly.
+func decimal(x float64) *big.Rat {
+	r, ok := new(big.Rat).SetString(strconv.FormatFloat(x, 'f', -1, 64))
+	if !ok {
+		panic(fmt.Sprintf("reconcile: %v has no decimal figure", x))
+	}
+	return r
+}
+
+// roundCents is dollars d in whole cents, rounded half away from zero.
+func roundCents(d *big.Rat) int64 {
+	scaled := new(big.Rat).Mul(d, big.NewRat(100, 1))
+	quo, rem := new(big.Int).QuoRem(scaled.Num(), scaled.Denom(), new(big.Int))
+	if new(big.Int).Mul(new(big.Int).Abs(rem), big.NewInt(2)).Cmp(scaled.Denom()) >= 0 {
+		quo.Add(quo, big.NewInt(int64(scaled.Num().Sign())))
+	}
+	return quo.Int64()
+}
 
 // Classify reconciles obs, the account.reconciliation envelope inputID,
 // against book and changes, the journal's events since the book in journal
@@ -118,7 +148,13 @@ func Cents(x float64) int64 { return int64(math.Round(x * 100)) }
 //   - The positions compared are the union of the book's, the broker's and
 //     those a change touched; an instrument not listed is not held. Every
 //     share and every cent counts: no residual is small enough to ignore.
-//   - Cash is compared only when the book states it.
+//   - Cash is compared only when the book states it, and as one net total:
+//     IBKR's TotalCashValue is one figure, so the expected cash's journalled
+//     parts (fills' values, their commissions, dividends, cash in lieu) are
+//     stated beside a residual but cannot each be matched, and unjournalled
+//     activities that offset one another are not detected. The result's
+//     detail says so (ADR 0019, "Explained means": offsetting activities do
+//     not explain one another).
 //   - No book, an observation that cannot be read or precedes the book, a
 //     currency that differs, or a change no book can apply is unverifiable:
 //     the action halts. Otherwise a residual is unexplained, and the scope is
@@ -135,7 +171,7 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 	}
 	if book == nil {
 		reasons = append(reasons, "no account snapshot has been recorded, so the journal has no book to compare")
-		return finish(r, reasons)
+		return finish(r, reasons, "")
 	}
 	r.AnchorID = book.AnchorID
 	if obs.AsOf.Before(book.AsOf) {
@@ -158,6 +194,7 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 	maps.Copy(expected, book.Positions)
 	explained := map[string][]string{}
 	cash, cashExplained := book.Cash, []string{}
+	var parts cashParts
 	for _, c := range changes {
 		at := c.At.Truncate(time.Second)
 		if at.Before(book.AsOf) || !at.Before(obs.AsOf) {
@@ -182,6 +219,7 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 		if c.Cash != 0 || c.Kind == ChangeFill {
 			cash += c.Cash
 			cashExplained = append(cashExplained, c.ID)
+			parts.add(c)
 		}
 	}
 
@@ -204,7 +242,7 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 			}))
 		}
 	}
-	return finish(r, reasons)
+	return finish(r, reasons, parts.String(book.Cash))
 }
 
 // entry completes a component's residual and whether it is explained.
@@ -214,24 +252,51 @@ func entry(c event.ReconciliationComponent) event.ReconciliationComponent {
 	return c
 }
 
+// cashParts are the journalled parts of the expected cash, in whole cents.
+type cashParts struct{ fills, commissions, dividends, inLieu int64 }
+
+func (p *cashParts) add(c Change) {
+	switch c.Kind {
+	case ChangeFill:
+		p.fills += c.Cash + c.Commission
+		p.commissions -= c.Commission
+	case ChangeDividend:
+		p.dividends += c.Cash
+	case ChangeSplit:
+		p.inLieu += c.Cash
+	}
+}
+
+// String states the book's cash and each part, the terms the expected cash
+// sums.
+func (p cashParts) String(book int64) string {
+	return fmt.Sprintf("book %s, fills %s, commissions %s, dividends %s, cash in lieu %s",
+		dollars(book), dollars(p.fills), dollars(p.commissions), dollars(p.dividends), dollars(p.inLieu))
+}
+
+// netCashLimit is the limit every result that compares cash states.
+const netCashLimit = "; cash is compared as one net total, IBKR's TotalCashValue, so unjournalled cash activities that offset one another are not detected"
+
 // finish classifies r from its components and the unverifiable reasons, and
-// states its detail.
-func finish(r event.ReconciliationResultPayload, reasons []string) event.ReconciliationResultPayload {
+// states its detail; parts states the expected cash's journalled parts.
+func finish(r event.ReconciliationResultPayload, reasons []string, parts string) event.ReconciliationResultPayload {
 	var differences []string
-	applied := 0
+	events := map[string]bool{}
 	for _, c := range r.Components {
-		applied += len(c.Explanations)
+		for _, id := range c.Explanations {
+			events[id] = true
+		}
 		switch {
 		case c.Explained:
 		case c.Component == event.ReconciliationComponentCash:
 			r.ScopeCashComponents = append(r.ScopeCashComponents, c.Component)
-			differences = append(differences, fmt.Sprintf("total cash: expected %s %s, broker %s (residual %s)", dollars(c.Expected), r.Currency, dollars(c.Observed), dollars(c.Residual)))
+			differences = append(differences, fmt.Sprintf("total cash: %s, expected %s %s, broker %s (residual %s)", parts, dollars(c.Expected), r.Currency, dollars(c.Observed), dollars(c.Residual)))
 		default:
 			r.ScopeInstrumentIDs = append(r.ScopeInstrumentIDs, c.InstrumentID)
 			differences = append(differences, fmt.Sprintf("%s: book %d, expected %d, broker %d (residual %+d)", c.InstrumentID, c.Book, c.Expected, c.Observed, c.Residual))
 		}
 	}
-	cash := ""
+	cash := netCashLimit
 	if !r.CashCompared {
 		cash = "; the book states no cash, so cash is not compared"
 	}
@@ -243,9 +308,9 @@ func finish(r event.ReconciliationResultPayload, reasons []string) event.Reconci
 	case len(differences) > 0:
 		r.Classification, r.Action = event.ReconciliationUnexplained, event.ReconciliationActionDegrade
 		r.Detail = "unexplained: " + strings.Join(differences, "; ") + cash
-	case applied > 0:
+	case len(events) > 0:
 		r.Classification, r.Action = event.ReconciliationExplained, event.ReconciliationActionContinue
-		r.Detail = fmt.Sprintf("explained by %d journalled event(s) since the book %s%s", applied, r.AnchorID, cash)
+		r.Detail = fmt.Sprintf("explained by %d journalled event(s) since the book %s%s", len(events), r.AnchorID, cash)
 	default:
 		r.Classification, r.Action = event.ReconciliationMatched, event.ReconciliationActionContinue
 		r.Detail = "matched the book " + r.AnchorID + cash
