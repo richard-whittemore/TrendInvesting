@@ -27,6 +27,7 @@ type item struct {
 	planned   *event.OrderPlannedPayload
 	released  *event.OrderReleasedPayload
 	refused   *event.OrderRefusedPayload
+	withheld  *event.SaleWithheldPayload
 	lifecycle *lifecycle
 	engine    *event.EngineStatePayload
 	snapshot  *event.AccountPositionsSnapshotPayload
@@ -81,18 +82,23 @@ func decode(j Journal) ([]item, error) {
 			}
 		case event.OrderPlannedEventType:
 			it.planned = new(event.OrderPlannedPayload)
-			err = read(env, []uint32{event.OrderPlannedSchemaVersion}, it.planned)
+			err = read(env, []uint32{event.OrderPlannedSchemaVersion, event.OrderPlannedSafetyVersion}, it.planned)
 			it.account = it.planned.AccountID
 		case event.OrderReleasedEventType:
 			// Version 2 adds the IRA cash figures and account-wide exposure
-			// to version 1's fields, so one payload type reads both.
+			// to version 1's fields, and version 3 the broker figures, so
+			// one payload type reads all three.
 			it.released = new(event.OrderReleasedPayload)
-			err = read(env, []uint32{1, event.OrderReleasedSchemaVersion}, it.released)
+			err = read(env, []uint32{1, event.OrderReleasedSchemaVersion, event.OrderReleasedSafetyVersion}, it.released)
 			it.account = it.released.AccountID
 		case event.OrderRefusedEventType:
 			it.refused = new(event.OrderRefusedPayload)
-			err = read(env, []uint32{1, event.OrderRefusedSchemaVersion}, it.refused)
+			err = read(env, []uint32{1, event.OrderRefusedSchemaVersion, event.OrderRefusedSafetyVersion}, it.refused)
 			it.account = it.refused.AccountID
+		case event.SaleWithheldEventType:
+			it.withheld = new(event.SaleWithheldPayload)
+			err = read(env, []uint32{event.SaleWithheldSchemaVersion}, it.withheld)
+			it.account = it.withheld.AccountID
 		case event.OrderLifecycleEventType:
 			it.lifecycle, it.account, err = readLifecycle(env)
 		case event.InstrumentSymbolChangedEventType:
@@ -169,6 +175,12 @@ func namedAccounts(items []item) map[string]bool {
 	return seen
 }
 
+// versioned is a payload whose fields depend on its schema version.
+type versioned interface {
+	SchemaVersion() uint32
+	ValidateSchema(schemaVersion uint32) error
+}
+
 func read(env event.Envelope, schemas []uint32, into any) error {
 	known := false
 	for _, s := range schemas {
@@ -182,6 +194,15 @@ func read(env event.Envelope, schemas []uint32, into any) error {
 	}
 	// Chain verification does not check payload values, and a journal keeps
 	// rejected inputs, so a record is validated before it can move a figure.
+	// A payload whose fields depend on its version is checked against the
+	// version it was recorded at, so a record carrying a later version's
+	// field is refused (ADR 0015).
+	if v, ok := into.(versioned); ok {
+		if err := v.ValidateSchema(env.SchemaVersion); err != nil {
+			return fmt.Errorf("%s: %w", env.Type, err)
+		}
+		return nil
+	}
 	if v, ok := into.(interface{ Validate() error }); ok {
 		if err := v.Validate(); err != nil {
 			return fmt.Errorf("%s: %w", env.Type, err)

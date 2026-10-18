@@ -146,7 +146,7 @@ func readConfiguration(path string) (event.TargetWeightConfigurationPayload, err
 }
 
 // account is the simulated joint account: a released order fills at the next
-// session's close.
+// session's close, and the venue reports the execution.
 type account struct {
 	cash    float64
 	held    int64
@@ -203,6 +203,14 @@ func (f *feeder) session(i int, at time.Time, price float64) error {
 		}
 		a.held += quantity
 		a.cash -= float64(float64(quantity) * price)
+		// The venue reports each execution, which ends a sell's pending shares.
+		fill := event.TargetWeightFillPayload{
+			AccountID: o.AccountID, ClientOrderID: o.ClientOrderID, FillID: "fill:" + o.ClientOrderID, InstrumentID: o.InstrumentID,
+			Side: o.Side, Quantity: o.Quantity, Price: price, FilledAt: at,
+		}
+		if err := f.send(event.FillEventType, event.FillTargetWeightVersion, fill.FillID, at, fill); err != nil {
+			return err
+		}
 	}
 	a.pending = nil
 	view := func(label string) event.PriceView {

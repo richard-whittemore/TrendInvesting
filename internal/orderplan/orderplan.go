@@ -17,13 +17,16 @@ import (
 // BoostInput is what the Boost path plans from: the decision and the ID of
 // the envelope that carried it, the account snapshot as of the previous close,
 // the instrument's raw previous close (ADR 0004: orders are priced on raw
-// prices) and the configured price band.
+// prices) and the configured price band. WorkingSells are the shares of the
+// instrument already being sold (risklimit.Gate.PendingSells), which the
+// account snapshot does not report.
 type BoostInput struct {
 	Tag            string
 	Decision       event.TargetsDecidedPayload
 	Snapshot       event.AccountPositionsSnapshotPayload
 	ReferencePrice float64
 	PriceBand      float64
+	WorkingSells   int64
 }
 
 // PlanBoost plans Boost's one order (ADR 0026, point 2, "Boost";
@@ -35,7 +38,10 @@ type BoostInput struct {
 //
 // Rounding toward zero never sells below the target on an exit nor buys above
 // it on an entry, and a sell never exceeds the holding, since want x V / p is
-// never negative.
+// never negative. A sell is reduced by WorkingSells, so it and the sells
+// already working never together sell below the target (ADR 0019, amended
+// 2026-10-15, "never below it"); what is left at or below zero plans nothing,
+// and a working sell never turns the order into a buy.
 func PlanBoost(in BoostInput) (event.OrderPlannedPayload, bool, error) {
 	d := in.Decision
 	if err := d.Validate(); err != nil {
@@ -62,6 +68,9 @@ func PlanBoost(in BoostInput) (event.OrderPlannedPayload, bool, error) {
 	if !(in.PriceBand > 0 && in.PriceBand < 1) {
 		return event.OrderPlannedPayload{}, false, errors.New("orderplan: the price band must lie strictly between 0 and 1")
 	}
+	if in.WorkingSells < 0 {
+		return event.OrderPlannedPayload{}, false, errors.New("orderplan: working sells must not be negative")
+	}
 	target := d.Targets[0]
 	held := in.Snapshot.Quantity(target.InstrumentID)
 	if held < 0 {
@@ -81,7 +90,10 @@ func PlanBoost(in BoostInput) (event.OrderPlannedPayload, bool, error) {
 	}
 	side, quantity := event.OrderSideBuy, int64(delta)
 	if delta < 0 {
-		side, quantity = event.OrderSideSell, -quantity
+		side, quantity = event.OrderSideSell, -quantity-in.WorkingSells
+		if quantity <= 0 {
+			return event.OrderPlannedPayload{}, false, nil
+		}
 	}
 	order := event.OrderPlannedPayload{
 		AccountID:      d.AccountID,

@@ -31,7 +31,11 @@ import (
 //     it ranks;
 //   - account.snapshot version 4 and market.mark.recorded per instrument;
 //   - execution.order.lifecycle version 2 and execution.fill version 5 for the
-//     orders this run released.
+//     orders this run released;
+//   - operator.kill-switch, which refuses every order while engaged, and
+//     account.broker.snapshot, whose holdings net of working sells size
+//     every sell the gate checks after it (ADR 0026, points 2.5, 3 and 4).
+//     An IRA gets no sale back to 98% and no margin alarm.
 //
 // # Decision time
 //
@@ -148,7 +152,7 @@ func newMomentum(strategyVersion string, cfg event.TargetWeightConfigurationPayl
 	if _, err := glide.AgeMonths(cfg.Glide.Birth, opts.DecideFrom); err != nil {
 		return nil, fmt.Errorf("targetweight: %w", err)
 	}
-	gate, err := risklimit.NewIRAGate(cfg.AccountID, cfg.Limits, cfg.Mode, cfg.Execution.MaxFeesPerOrder)
+	gate, err := risklimit.NewIRAGate(cfg.AccountID, cfg.Limits, cfg.Mode, cfg.Execution.MaxFeesPerOrder, time.Duration(cfg.Execution.MaxSnapshotAge)*time.Minute)
 	if err != nil {
 		return nil, fmt.Errorf("targetweight: %w", err)
 	}
@@ -193,6 +197,14 @@ func (r *momentumRun) apply(in event.Envelope) ([]event.Envelope, error) {
 	case event.SessionClosedEventType:
 		r.h.started = true
 		return r.applySession(in)
+	case event.KillSwitchEventType:
+		// The kill switch refuses every order of an IRA, which gets no sale
+		// back to 98% (ADR 0026, points 3 and 4).
+		return nil, r.h.applyKillSwitch(in)
+	case event.BrokerSnapshotEventType:
+		// The latest broker holdings and open orders size every sell (ADR
+		// 0026, point 2.5); an IRA has no margin alarm, so this emits nothing.
+		return r.h.applyBrokerSnapshot(in)
 	case event.OrderLifecycleEventType:
 		return r.applyLifecycle(in)
 	case event.FillEventType:
@@ -643,14 +655,14 @@ func (r *momentumRun) check(b *emissions, reb *rebalance, orders []event.OrderPl
 	for id, sold := range reb.sold {
 		holdings[id] -= sold
 	}
-	book := risklimit.Book{Holdings: holdings, Prices: reb.prices, PriorOrders: prior, CashAvailable: reb.budget.Remaining()}
+	book := risklimit.Book{Holdings: holdings, Prices: reb.prices, PriorOrders: prior, CashAvailable: reb.budget.Remaining(), At: b.at}
 	plan := make([]risklimit.Order, len(orders))
 	for i, o := range orders {
 		plan[i] = risklimit.Order{PlanID: "order-planned:" + o.ClientOrderID, Planned: o}
 		if mark, ok := r.marks[o.InstrumentID]; ok && !mark.AsOf.Before(reb.session) {
 			plan[i].Mark, plan[i].MarkSet = mark.Price, true
 		}
-		b.add(plan[i].PlanID, event.OrderPlannedEventType, event.OrderPlannedSchemaVersion, o)
+		b.add(plan[i].PlanID, event.OrderPlannedEventType, o.SchemaVersion(), o)
 	}
 	// The gate cannot refuse orders the planner built from validated inputs
 	// for this account, so an error is a defect.
@@ -660,14 +672,14 @@ func (r *momentumRun) check(b *emissions, reb *rebalance, orders []event.OrderPl
 	for i, out := range outcomes {
 		o := orders[i]
 		if out.Released != nil {
-			b.add("risk-order-released:"+o.ClientOrderID, event.OrderReleasedEventType, event.OrderReleasedSchemaVersion, *out.Released)
+			b.add("risk-order-released:"+o.ClientOrderID, event.OrderReleasedEventType, out.Released.SchemaVersion(), *out.Released)
 			r.orders[o.ClientOrderID] = &trackedOrder{planned: o, fills: map[string]event.TargetWeightFillPayload{}}
 			released = append(released, o)
 		} else {
-			b.add("risk-order-refused:"+o.ClientOrderID, event.OrderRefusedEventType, event.OrderRefusedSchemaVersion, *out.Refused)
+			b.add("risk-order-refused:"+o.ClientOrderID, event.OrderRefusedEventType, out.Refused.SchemaVersion(), *out.Refused)
 		}
 		if out.State != nil {
-			b.add("engine-state:"+o.ClientOrderID, event.EngineStateEventType, out.StateSchemaVersion, *out.State)
+			b.add(out.StateID, event.EngineStateEventType, out.StateSchemaVersion, *out.State)
 		}
 	}
 	return released
@@ -699,8 +711,10 @@ func (r *momentumRun) applyLifecycle(in event.Envelope) ([]event.Envelope, error
 	if err != nil {
 		return nil, err
 	}
-	if p.Quantity != o.planned.Quantity || p.LimitPrice != o.planned.LimitPrice {
-		return nil, fmt.Errorf("targetweight: lifecycle %s reports %d at %v; order %s is %d at %v", in.ID, p.Quantity, p.LimitPrice, p.ClientOrderID, o.planned.Quantity, o.planned.LimitPrice)
+	// The gate checks the report's quantity and limit against the order and
+	// nets every pending sell from later sizing (ADR 0026, point 2.5).
+	if err := r.h.gate.ObserveLifecycle(p); err != nil {
+		return nil, fmt.Errorf("targetweight: lifecycle %s: %w", in.ID, err)
 	}
 	if p.Terminal() {
 		return r.terminal(in, o, p.OccurredAt)
@@ -725,8 +739,10 @@ func (r *momentumRun) applyFill(in event.Envelope) ([]event.Envelope, error) {
 	if err != nil {
 		return nil, err
 	}
-	if o.filled+p.Quantity > o.planned.Quantity {
-		return nil, fmt.Errorf("targetweight: fill %s takes order %s past its %d shares", in.ID, p.ClientOrderID, o.planned.Quantity)
+	// The gate refuses a fill past the order's shares and nets every
+	// pending sell from later sizing (ADR 0026, point 2.5).
+	if err := r.h.gate.ObserveFill(p); err != nil {
+		return nil, fmt.Errorf("targetweight: fill %s: %w", in.ID, err)
 	}
 	r.fills[p.FillID] = p
 	o.fills[p.FillID] = p

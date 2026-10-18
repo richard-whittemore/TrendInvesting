@@ -895,7 +895,7 @@
       "function": "(*Handler).applyApproval",
       "statement": "return fmt.Errorf(\"targetweight: approval %s: %w\", in.ID, err)",
       "category": "unreachable-by-construction",
-      "reason": "risklimit.Gate.RestoreSaleAttempt refuses only an empty incident ID or a second restore of one incident; OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses an incident in force with no ID (TestAnApprovalCarriesTheIncidentSaleAttempt), and applyApproval refuses a second approval before reaching it (TestApprovalInputRules)."
+      "reason": "risklimit.Gate.RestoreSaleAttempt refuses three calls: an empty incident ID; a second restore of one incident; and an incident that already has its attempt record, which Sale writes into the same attempts record when this run has already attempted that incident's sale. OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses an incident in force with no ID (TestAnApprovalCarriesTheIncidentSaleAttempt), and applyApproval refuses a second approval before reaching it (TestApprovalInputRules). And no attempt record can exist when the approval reaches it: Apply refuses an approval read after any input but the configuration (TestAnApprovalIsTheFirstInputAfterTheConfiguration), so the gate is the one New built, with no attempt record, since only Sale writes one and Sale runs only from a session close or a broker snapshot, both of which come after the approval."
     },
     {
       "file": "internal/targetweight/handler.go",
@@ -903,7 +903,7 @@
       "statement": "return fmt.Errorf(\"targetweight: approval %s: %w\", in.ID, err)",
       "occurrence": 2,
       "category": "unreachable-by-construction",
-      "reason": "risklimit.Gate.RestoreIncidentState refuses a state that is not degraded or halted, a degraded state with no scope, a halted one with a scope, and a degraded state on a Halted gate; OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses the first three (TestAnApprovalStatesTheIncidentsRestrictions), and the gate is Normal here because an approval comes before any recorded state or decision and only once (TestApprovalInputRules)."
+      "reason": "risklimit.Gate.RestoreIncidentState refuses a state that is not degraded or halted, a degraded state with no scope, a halted one with a scope, and a degraded state on a Halted gate; OperatorRunApprovedPayload.Validate, run by decodeInput above, refuses the first three (TestAnApprovalStatesTheIncidentsRestrictions), and the gate is Normal here because Apply refuses an approval read after any input but the configuration, so no recorded state can precede it (TestAnApprovalIsTheFirstInputAfterTheConfiguration), and a second approval (TestApprovalInputRules)."
     },
     {
       "file": "internal/targetweight/handler.go",
@@ -919,7 +919,7 @@
       "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
       "occurrence": 3,
       "category": "unreachable-by-construction",
-      "reason": "risklimit.NewGate refuses only an empty account, invalid limits or an unknown mode; TargetWeightConfigurationPayload.Validate, called above, refuses all three with the same MarginLimits rules."
+      "reason": "risklimit.NewGate refuses only an empty account, invalid limits, limits without the margin-cushion thresholds, an unknown mode or a maximum snapshot age that is not positive; TargetWeightConfigurationPayload.Validate, called above, refuses all five (the age by requiring execution.max_snapshot_age_minutes from 1 to one session) for a boost configuration with the same MarginLimits rules."
     },
     {
       "file": "internal/targetweight/handler.go",
@@ -941,7 +941,7 @@
       "statement": "return nil, fmt.Errorf(\"targetweight: %w\", err)",
       "occurrence": 2,
       "category": "unreachable-by-construction",
-      "reason": "risklimit.NewIRAGate refuses only an empty account, invalid limits, an unknown mode, a max exposure above 1 or a negative or non-finite fee allowance; New calls TargetWeightConfigurationPayload.Validate first, which refuses each of those for a momentum configuration (TestMomentumConfigurationValidate)."
+      "reason": "risklimit.NewIRAGate refuses only an empty account, invalid limits, an unknown mode, a max exposure above 1, margin-cushion thresholds, a negative or non-finite fee allowance or a maximum snapshot age that is not positive; New calls TargetWeightConfigurationPayload.Validate first, which refuses each of those for a momentum configuration (the age by requiring execution.max_snapshot_age_minutes from 1 to one session; TestMomentumConfigurationValidate, TestOnlyAMarginAccountHasACushion)."
     },
     {
       "file": "internal/nysecalendar/calendar.go",

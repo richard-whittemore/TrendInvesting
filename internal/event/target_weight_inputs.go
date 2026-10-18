@@ -24,7 +24,8 @@ type AccountPosition struct {
 }
 
 // AccountPositionsSnapshotPayload is account.snapshot version 3: what the
-// broker reports one account holds, and its net liquidation, at AsOf.
+// broker reports one account holds, and its net liquidation, at AsOf, a
+// whole second.
 type AccountPositionsSnapshotPayload struct {
 	AccountID string    `json:"account_id"`
 	AsOf      time.Time `json:"as_of"`
@@ -53,7 +54,7 @@ func (p AccountPositionsSnapshotPayload) Validate() error {
 	if p.AccountID == "" {
 		errs = append(errs, errors.New("account id is required"))
 	}
-	errs = append(errs, requiredTime("as of", p.AsOf)...)
+	errs = append(errs, wholeSecondTime("as of", p.AsOf)...)
 	if !isFinite(p.NetLiquidation) || p.NetLiquidation <= 0 {
 		errs = append(errs, errors.New("net liquidation must be finite and positive"))
 	}
@@ -120,6 +121,21 @@ func requiredTime(name string, t time.Time) []error {
 		return []error{fmt.Errorf("%s is required", name)}
 	case !writableTime(t):
 		return []error{fmt.Errorf("%s cannot be written as RFC 3339", name)}
+	}
+	return nil
+}
+
+// wholeSecondTime is requiredTime for a time the risk gate orders by the
+// whole second IBKR stamps it with: a snapshot's as-of time or a fill's
+// execution time. Finer precision would claim an order within the second
+// that the broker never showed, so it is refused at the input (ADR 0015:
+// validated on the way in; fail closed).
+func wholeSecondTime(name string, t time.Time) []error {
+	if errs := requiredTime(name, t); errs != nil {
+		return errs
+	}
+	if t.Nanosecond() != 0 {
+		return []error{fmt.Errorf("%s must be a whole second; IBKR stamps no finer", name)}
 	}
 	return nil
 }

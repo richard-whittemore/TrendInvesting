@@ -1,11 +1,13 @@
 package targetweight_test
 
 import (
+	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
-	"github.com/richard-whittemore/TrendInvesting/internal/targetweight"
 )
 
 func approval(latched bool) event.OperatorRunApprovedPayload {
@@ -57,30 +59,57 @@ func TestApprovalInputRules(t *testing.T) {
 // TestAFreshRunNeverAttemptsAnIncidentsSaleTwice: the incident in force and
 // whether its one sale back to 98% was attempted (ADR 0019, amended
 // 2026-10-15) come from the owner's approval, since a fresh run does not
-// replay the previous run's log. Approved with the sale attempted, the fresh
-// run refuses a second sale for that incident; approved with it not
-// attempted, the sale may go once.
+// replay the previous run's log. Approved Halted while boosted, the first
+// session refuses Boost's exit, which fires the incident's sale from the
+// latest broker snapshot, and the next session's broker snapshot turns the
+// margin alarm urgent, which fires it again. Approved with the sale
+// attempted, the fresh run plans no sale; approved with it not attempted,
+// the sale is planned once and never again.
 func TestAFreshRunNeverAttemptsAnIncidentsSaleTwice(t *testing.T) {
-	at := sessionEnd(0)
 	for _, c := range []struct {
 		name      string
 		attempted bool
 		order     string
-		mayGo     bool
+		want      int
 	}{
-		{"attempted and sent", true, "joint-sale-1", false},
-		{"attempted and withheld", true, "", false},
-		{"not attempted", false, "", true},
+		{"attempted and sent", true, "joint-sale-1", 0},
+		{"attempted and withheld", true, "", 0},
+		{"not attempted", false, "", 1},
 	} {
 		h, s := configured(t)
 		p := approval(false)
 		p.IncidentInForce = &event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(c.attempted), SaleClientOrderID: c.order}
-		mustApply(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", at, p))
-		if got := targetweight.AttemptIncidentSale(h, "engine-state:joint:1"); got != c.mayGo {
-			t.Errorf("%s: the first sale may go = %v, want %v", c.name, got, c.mayGo)
+		mustApply(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", sessionEnd(0), p))
+		// Boosted: 60 shares at 100 against 4,000 of net liquidation, and
+		// nothing fills, since only the sale is ever released while Halted.
+		held := &account{cash: -2000, held: 60}
+		var out []event.Envelope
+		for i := range 2 {
+			at := sessionEnd(i)
+			out = append(out, mustApply(t, h, s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, fmt.Sprintf("b%d", i), at, bar(100, at)))...)
+			out = append(out, mustApply(t, h, s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, fmt.Sprintf("a%d", i), at, held.snapshot(at, 100)))...)
+			b := held.broker(at, 100)
+			if i == 1 {
+				b.ExcessLiquidity = 0.1 * b.NetLiquidation
+			}
+			out = append(out, mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, fmt.Sprintf("k%d", i), at, b))...)
+			out = append(out, mustApply(t, h, s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, fmt.Sprintf("m%d", i), at, event.MarkRecordedPayload{InstrumentID: "SPY", AsOf: at, Price: 100, Source: event.AdapterIBKR}))...)
+			out = append(out, mustApply(t, h, s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, fmt.Sprintf("s%d", i), at, event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: []string{"SPY"}}))...)
 		}
-		if targetweight.AttemptIncidentSale(h, "engine-state:joint:1") {
-			t.Errorf("%s: the incident's sale was attempted twice", c.name)
+		if n := len(ofType(out, event.OrderRefusedEventType)); n != 1 {
+			t.Fatalf("%s: refused %d order(s), want Boost's exit refused", c.name, n)
+		}
+		if len(ofType(out, event.MarginAlarmEventType)) == 0 {
+			t.Fatalf("%s: the urgent alarm is journalled", c.name)
+		}
+		sold := sales(t, out)
+		if len(sold) != c.want {
+			t.Errorf("%s: planned %d sale(s) back to 98%%, want %d: %+v", c.name, len(sold), c.want, sold)
+		}
+		for _, sale := range sold {
+			if sale.Tag != "engine-state:joint:1" || sale.Sale.Kind != event.SaleKindIncident {
+				t.Errorf("%s: sale %+v, want the incident's", c.name, sale)
+			}
 		}
 	}
 }
@@ -119,7 +148,7 @@ func TestAFreshRunContinuesTheIncidentsRestrictions(t *testing.T) {
 // latch in force, restored and never changed afterwards (ADR 0026, point 5),
 // so a recorded strategy.targets.decided arriving after it is refused, just
 // as an approval after a recovered decision is; the decision-prelude model
-// that once fed such decisions in is dropped (ADR 0027, amended 2026-10-16).
+// that once fed such decisions in is dropped (ADR 0027, amended 2026-10-17).
 func TestARecoveredDecisionNeverFollowsAnApproval(t *testing.T) {
 	full := simulate(t, options{})
 	decided := ofType(full.decisions, event.TargetsDecidedEventType)[3]
@@ -127,4 +156,65 @@ func TestARecoveredDecisionNeverFollowsAnApproval(t *testing.T) {
 	h, s := configured(t)
 	mustApply(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", at, approval(true)))
 	mustRefuse(t, h, s.envelope(t, decided.Type, decided.SchemaVersion, decided.ID, at, decided.Payload), "comes once")
+}
+
+// TestAFreshRunReadsNothingBeforeItsApproval: a fresh run after an earlier
+// one decides nothing until the owner's approval is recorded (ADR 0027,
+// amended 2026-10-17), so every input but the configuration and the
+// approval is refused until then. A broker snapshot that would turn the
+// margin alarm urgent while Halted plans no sale; the same snapshot after
+// the approval is read.
+func TestAFreshRunReadsNothingBeforeItsApproval(t *testing.T) {
+	at := sessionEnd(0)
+	h, s := newHandler(t)
+	h.AwaitApproval()
+	mustApply(t, h, s.envelope(t, event.TargetWeightConfigurationEventType, event.TargetWeightConfigurationSchemaVersion, "configuration", at, testConfiguration()))
+	held := &account{cash: -2000, held: 60}
+	urgent := held.broker(at, 100)
+	urgent.ExcessLiquidity = 0.1 * urgent.NetLiquidation
+	const want = "before the owner's approval"
+	if out, err := h.Apply(context.Background(), s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k", at, urgent)); err == nil || !strings.Contains(err.Error(), want) || len(sales(t, out)) != 0 {
+		t.Fatalf("broker snapshot before the approval: error %v, %d sale(s); want it refused, mentioning %q, and no sale", err, len(sales(t, out)), want)
+	}
+	for _, in := range []event.Envelope{
+		haltedState(t),
+		s.envelope(t, event.CompletedBarEventType, event.CompletedBarAdjustedVersion, "b", at, bar(100, at)),
+		s.envelope(t, event.AccountSnapshotEventType, event.AccountSnapshotPositionsVersion, "a", at, held.snapshot(at, 100)),
+		s.envelope(t, event.MarkRecordedEventType, event.MarkRecordedSchemaVersion, "m", at, event.MarkRecordedPayload{InstrumentID: "SPY", AsOf: at, Price: 100, Source: event.AdapterIBKR}),
+		s.envelope(t, event.SessionClosedEventType, event.SessionClosedSchemaVersion, "s", at, event.SessionClosedPayload{PeriodEnd: at, InstrumentIDs: []string{"SPY"}}),
+		s.envelope(t, event.KillSwitchEventType, 1, "kill", at, struct{}{}),
+		s.envelope(t, event.FillEventType, 5, "fill", at, struct{}{}),
+		s.envelope(t, event.OrderLifecycleEventType, 2, "lifecycle", at, struct{}{}),
+		s.envelope(t, event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "decided", at, struct{}{}),
+		s.envelope(t, event.RunCompletedEventType, 1, "done", at, struct{}{}),
+	} {
+		mustRefuse(t, h, in, want)
+	}
+	p := approval(false)
+	p.IncidentInForce = &event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateHalted, SaleAttempted: new(false)}
+	mustApply(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", at, p))
+	if sold := sales(t, mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k2", at, urgent))); len(sold) != 1 || sold[0].Tag != "engine-state:joint:1" {
+		t.Fatalf("broker snapshot after the approval planned %+v, want the incident's one sale", sold)
+	}
+}
+
+// TestAnApprovalIsTheFirstInputAfterTheConfiguration: an approval read
+// after any other input is refused, so no recorded state or sale of this run
+// can precede it. A recorded Halted incident followed by an urgent broker
+// snapshot fires that incident's sale; an approval naming the incident
+// afterwards is refused for its place in the stream, before the gate is
+// asked to restore an attempt this run already made.
+func TestAnApprovalIsTheFirstInputAfterTheConfiguration(t *testing.T) {
+	at := sessionEnd(0)
+	h, s := configured(t)
+	mustApply(t, h, haltedState(t))
+	held := &account{cash: -2000, held: 60}
+	urgent := held.broker(at, 100)
+	urgent.ExcessLiquidity = 0.1 * urgent.NetLiquidation
+	if sold := sales(t, mustApply(t, h, s.envelope(t, event.BrokerSnapshotEventType, event.BrokerSnapshotSchemaVersion, "k", at, urgent))); len(sold) != 1 {
+		t.Fatalf("planned %d sale(s), want the recorded incident's one sale", len(sold))
+	}
+	p := approval(false)
+	p.IncidentInForce = &event.IncidentInForce{IncidentID: "engine-state:joint:recorded", State: event.EngineStateHalted, SaleAttempted: new(false)}
+	mustRefuse(t, h, s.envelope(t, event.OperatorRunApprovedEventType, event.OperatorRunApprovedSchemaVersion, "approval", at, p), "straight after the configuration")
 }
