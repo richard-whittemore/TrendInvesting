@@ -520,6 +520,68 @@ func TestEverySampleTheExportPromisesMustHaveAColumn(t *testing.T) {
 	})
 }
 
+// The sample is the names the template chose, found from the export itself:
+// the first 5 capped and the first 5 beyond the book in ranked order, and
+// the first 5 too-short names in the order the export lists them. Any other
+// name's column does not stand in for one of them.
+
+func TestTheSampledNamesThemselvesMustHaveColumns(t *testing.T) {
+	for name, mark := range map[string]parity.Mark{"capped": parity.MarkCapped, "beyond the book": parity.MarkBeyond} {
+		t.Run(name, func(t *testing.T) {
+			ms := months()
+			var of []string
+			for _, e := range ms[0].Ranked {
+				if e.Mark == mark {
+					of = append(of, e.Ticker)
+				}
+			}
+			if len(of) < 6 {
+				t.Fatalf("fixture: %d %s names, want more than the sample of 5", len(of), name)
+			}
+			// The first sampled name loses its column while a name outside
+			// the sample keeps one: five columns remain, one is the wrong one.
+			delete(ms[0].Closes, of[0])
+			r := compare(ms)
+			failsOnly(t, r, parity.CheckHistory)
+			if c := checkNamed(r, parity.CheckHistory); !strings.Contains(c.First, of[0]) {
+				t.Errorf("first failure %q must name the sampled name %s", c.First, of[0])
+			}
+		})
+	}
+	t.Run("a name outside the sample may have no column", func(t *testing.T) {
+		ms := months()
+		var capped []string
+		for _, e := range ms[0].Ranked {
+			if e.Mark == parity.MarkCapped {
+				capped = append(capped, e.Ticker)
+			}
+		}
+		delete(ms[0].Closes, capped[len(capped)-1])
+		if r := compare(ms); !checkNamed(r, parity.CheckHistory).Pass() {
+			t.Errorf("a sixth capped name is not sampled: %+v", checkNamed(r, parity.CheckHistory))
+		}
+	})
+	t.Run("too short, in the export's order", func(t *testing.T) {
+		ms := months()
+		ms[0].Short["S3"] = 50
+		ms[0].Members += 4
+		ms[0].ShortOrder = []string{"S3", "S1", "S2"}
+		for _, n := range []string{"S4", "S5", "S6"} {
+			ms[0].Short[n] = 50
+			ms[0].ShortOrder = append(ms[0].ShortOrder, n)
+		}
+		// S3 is listed first, so it is sampled and has no column; S6 is the
+		// sixth listed and is not.
+		for _, n := range []string{"S4", "S5", "S6"} {
+			ms[0].Closes[n] = ms[0].Closes["S1"]
+		}
+		r := compare(ms)
+		if c := checkNamed(r, parity.CheckHistory); c.Pass() || !strings.Contains(c.First, "S3") {
+			t.Errorf("history %+v must fail naming the sampled S3", c)
+		}
+	})
+}
+
 func TestTheReportShowsEveryMonthsComparisonCounts(t *testing.T) {
 	r := compare(months())
 	if len(r.Months) != 2 {

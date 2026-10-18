@@ -123,13 +123,17 @@ go run ./cmd/parity \
   -momentum FU_PARITY=$HOME/Desktop/Trend_Investing/data/parity/FU_PARITY_orders.json \
   -months FU_PARITY=1999-03,1999-11,... \
   -boost BX_PARITY=$HOME/Desktop/Trend_Investing/data/parity/BX_PARITY_orders.json \
-  -sessions BX_PARITY=1998-01-02,2026-06-30,7166
+  -sessions BX_PARITY=research/edge-search/boost/parity_plan.json
 ```
 
 Each `-momentum` run needs its `-months` list: the months chosen in advance.
-Each `-boost` run needs its `-sessions` plan (first session, last session,
-session count), written down before the run: an export that stops short of it,
-for example one missing its final chunk, fails the `export` check. The
+Each `-boost` run needs its `-sessions` plan file, a JSON file of the first
+session, last session and session count, committed before the run (the
+recorded one is `research/edge-search/boost/parity_plan.json`). The tool
+refuses a plan whose first session is not before its last, that has no
+sessions, or that holds more sessions than there are weekdays between them;
+an export that stops short of it, for example one missing its final chunk,
+fails the `export` check. The
 momentum report also lists, for each month, how many comparisons each check
 made, so a month that compared less cannot hide behind the others.
 The exact command used for the recorded result, with every month, is in

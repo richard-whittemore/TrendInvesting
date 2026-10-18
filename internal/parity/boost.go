@@ -1,8 +1,10 @@
 package parity
 
 import (
+	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/targetweight/boost"
 )
@@ -41,9 +43,14 @@ func BacktestBoost() boost.Parameters {
 
 // CompareBoost rebuilds Boost's indicators from the logged closes, from the
 // first, and runs the rule from the first session after warm-up, unlatched,
-// on its own readings, once the export covers the planned range; it checks every session's RSI(2), both means and
+// on its own readings. It checks every session's RSI(2), both means and
 // their readiness, and the state and target, all exactly (ADR 0026 point
 // 7, item 2: "Boost's state must match day by day").
+//
+// The export must start and end on the plan's first and last session and
+// hold exactly its session count, and the plan must make sense
+// (BoostPlan.Validate); otherwise the export check fails and no session is
+// compared.
 //
 // The state is carried on Go's own readings, never reset to QuantConnect's,
 // so a difference on one session shows on every session it affects.
@@ -104,8 +111,8 @@ func reading(c *Check, where string, got float64, ready bool, want *float64) {
 // run, so an export that stops short of it, starts after it or holds
 // another number of sessions is not the run that was planned.
 func wellFormedBoost(plan BoostPlan, sessions []BoostSession) error {
-	if plan.First == "" || plan.Last == "" || plan.Sessions <= 0 {
-		return fmt.Errorf("no planned session range (first %q, last %q, %d sessions)", plan.First, plan.Last, plan.Sessions)
+	if err := plan.Validate(); err != nil {
+		return err
 	}
 	if len(sessions) > 0 {
 		switch first, last := sessions[0].Date, sessions[len(sessions)-1].Date; {
@@ -131,4 +138,65 @@ func wellFormedBoost(plan BoostPlan, sessions []BoostSession) error {
 		decided = decided || !s.Warmup
 	}
 	return nil
+}
+
+// boostPlanFile is the plan file's JSON: all three fields are required.
+type boostPlanFile struct {
+	First    *string `json:"first"`
+	Last     *string `json:"last"`
+	Sessions *int    `json:"sessions"`
+}
+
+// DecodeBoostPlan reads a plan file, {"first":"YYYY-MM-DD","last":
+// "YYYY-MM-DD","sessions":N}, refusing an unknown or missing field, trailing
+// data and a plan that Validate refuses. The file is committed before the
+// run, so the plan cannot be fitted to the export.
+func DecodeBoostPlan(raw []byte) (BoostPlan, error) {
+	var f boostPlanFile
+	if err := strictDecode(raw, &f); err != nil {
+		return BoostPlan{}, err
+	}
+	if f.First == nil || f.Last == nil || f.Sessions == nil {
+		return BoostPlan{}, errors.New("parity: plan needs first, last and sessions")
+	}
+	p := BoostPlan{First: *f.First, Last: *f.Last, Sessions: *f.Sessions}
+	return p, p.Validate()
+}
+
+// Validate refuses a plan that cannot describe a run: a first or last that
+// is not a date, a first that is not before the last, no sessions, or more
+// sessions than there are weekdays from the first to the last, the most any
+// exchange calendar holds.
+func (p BoostPlan) Validate() error {
+	first, err := time.Parse(time.DateOnly, p.First)
+	if err != nil {
+		return fmt.Errorf("planned first session %q: %w", p.First, err)
+	}
+	last, err := time.Parse(time.DateOnly, p.Last)
+	if err != nil {
+		return fmt.Errorf("planned last session %q: %w", p.Last, err)
+	}
+	if !first.Before(last) {
+		return fmt.Errorf("planned first session %s is not before the last, %s", p.First, p.Last)
+	}
+	if p.Sessions <= 0 {
+		return fmt.Errorf("planned %d sessions", p.Sessions)
+	}
+	if most := weekdays(first, last); p.Sessions > most {
+		return fmt.Errorf("planned %d sessions, but only %d weekdays from %s to %s", p.Sessions, most, p.First, p.Last)
+	}
+	return nil
+}
+
+// weekdays counts the Monday-to-Friday days from first to last, both
+// included.
+func weekdays(first, last time.Time) int {
+	days := int(last.Sub(first).Hours()/24) + 1
+	n := days / 7 * 5
+	for d := first.AddDate(0, 0, days/7*7); !d.After(last); d = d.AddDate(0, 0, 1) {
+		if d.Weekday() != time.Saturday && d.Weekday() != time.Sunday {
+			n++
+		}
+	}
+	return n
 }

@@ -125,3 +125,23 @@ func TestAMalformedBoostPayloadIsRefused(t *testing.T) {
 		})
 	}
 }
+
+func TestTheShortNamesKeepTheOrderTheExportListsThem(t *testing.T) {
+	raw := strings.Replace(momentumPayload, `"short":{"NEW":2}`, `"short":{"ZED":2,"NEW":2,"ABC":2}`, 1)
+	m, err := parity.DecodeMomentum([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(m.ShortOrder, ","); got != "ZED,NEW,ABC" {
+		t.Errorf("short order %q, want ZED,NEW,ABC", got)
+	}
+}
+
+func TestAShortCountThatIsNotANumberOrAnObjectIsRefused(t *testing.T) {
+	for name, short := range map[string]string{"a word": `{"NEW":"two"}`, "null": `null`, "a list": `[1]`} {
+		raw := strings.Replace(momentumPayload, `"short":{"NEW":2}`, `"short":`+short, 1)
+		if _, err := parity.DecodeMomentum([]byte(raw)); err == nil {
+			t.Errorf("%s must be refused", name)
+		}
+	}
+}

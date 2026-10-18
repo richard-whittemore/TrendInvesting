@@ -10,10 +10,11 @@
 //
 //	parity -momentum FU_PARITY=orders.json -months FU_PARITY=1999-01,1999-09 \
 //	       -boost BX_PARITY=boost-orders.json \
-//	       -sessions BX_PARITY=1998-01-02,2026-09-30,7166
+//	       -sessions BX_PARITY=research/edge-search/boost/parity_plan.json
 //
-// and a Boost run names its planned first and last session and session
-// count, recorded before the run, which its export must cover.
+// and a Boost run names its plan file, {"first":"1998-01-02","last":
+// "2026-06-30","sessions":7166}, committed before the run, which its export
+// must cover.
 //
 // It exits 0 when every check passes, 1 when any fails, and 2 when an
 // input cannot be read or compared at all.
@@ -27,7 +28,6 @@ import (
 	"io"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/parity"
@@ -80,7 +80,7 @@ func run(args []string, stdout, stderr io.Writer) (bool, error) {
 	flags.Func("momentum", "NAME=FILE: a momentum run's orders (repeatable)", mom.set)
 	flags.Func("months", "NAME=YYYY-MM,...: that run's planned months (repeatable)", months.set)
 	flags.Func("boost", "NAME=FILE: a Boost run's orders (repeatable)", bst.set)
-	flags.Func("sessions", "NAME=FIRST,LAST,COUNT: that Boost run's planned first and last session and session count (repeatable)", sess.set)
+	flags.Func("sessions", "NAME=FILE: the JSON plan file of that Boost run: first, last, sessions (repeatable)", sess.set)
 	if err := flags.Parse(args); err != nil {
 		return false, err
 	}
@@ -124,9 +124,9 @@ func run(args []string, stdout, stderr io.Writer) (bool, error) {
 		if !ok {
 			return false, fmt.Errorf("%s has no planned sessions", name)
 		}
-		sp, err := sessionPlan(spec)
+		sp, err := readPlan(spec)
 		if err != nil {
-			return false, fmt.Errorf("%s: sessions %w", name, err)
+			return false, fmt.Errorf("%s: sessions plan %s: %w", name, spec, err)
 		}
 		tags, total, err := tagged(bst.values[name], boostPrefix)
 		if err != nil {
@@ -150,17 +150,13 @@ func run(args []string, stdout, stderr io.Writer) (bool, error) {
 	return r.Pass(), nil
 }
 
-// sessionPlan parses FIRST,LAST,COUNT.
-func sessionPlan(spec string) (parity.BoostPlan, error) {
-	parts := strings.Split(spec, ",")
-	if len(parts) != 3 {
-		return parity.BoostPlan{}, fmt.Errorf("%q is not FIRST,LAST,COUNT", spec)
-	}
-	n, err := strconv.Atoi(parts[2])
+// readPlan reads and validates a Boost run's plan file.
+func readPlan(path string) (parity.BoostPlan, error) {
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		return parity.BoostPlan{}, fmt.Errorf("%q: count: %w", spec, err)
+		return parity.BoostPlan{}, err
 	}
-	return parity.BoostPlan{First: parts[0], Last: parts[1], Sessions: n}, nil
+	return parity.DecodeBoostPlan(raw)
 }
 
 type tag struct {

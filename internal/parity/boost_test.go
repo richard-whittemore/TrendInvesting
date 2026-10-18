@@ -172,12 +172,62 @@ func TestABoostExportThatStartsLateOrCountsOtherwiseFails(t *testing.T) {
 		got  []parity.BoostSession
 	}{
 		"a missing first chunk": {planOf(full), full[100:]},
-		"another session count": {parity.BoostPlan{First: full[0].Date, Last: full[399].Date, Sessions: 401}, full},
+		"another session count": {parity.BoostPlan{First: full[0].Date, Last: full[399].Date, Sessions: 399}, full},
 		"a plan with no range":  {parity.BoostPlan{}, full},
 		"a plan with no count":  {parity.BoostPlan{First: full[0].Date, Last: full[399].Date}, full},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if r := parity.CompareBoost(boostParams(), "BSYN", c.plan, c.got); r.Pass() || checkNamed(r, parity.CheckExport).Pass() {
+				t.Errorf("%s must fail the export check", name)
+			}
+		})
+	}
+}
+
+// The plan is read from a file recorded before the run, and refused when it
+// cannot describe a run: a typed flag could say anything.
+
+func TestAPlanFileDecodesAndAMakesSense(t *testing.T) {
+	p, err := parity.DecodeBoostPlan([]byte(`{"first":"1998-01-02","last":"2026-06-30","sessions":7166}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (parity.BoostPlan{First: "1998-01-02", Last: "2026-06-30", Sessions: 7166}); p != want {
+		t.Errorf("plan %+v, want %+v", p, want)
+	}
+}
+
+func TestAPlanThatCannotDescribeARunIsRefused(t *testing.T) {
+	for name, raw := range map[string]string{
+		"first after last":            `{"first":"2026-06-30","last":"1998-01-02","sessions":10}`,
+		"first equal to last":         `{"first":"1998-01-02","last":"1998-01-02","sessions":1}`,
+		"no sessions":                 `{"first":"1998-01-02","last":"1998-01-09","sessions":0}`,
+		"negative sessions":           `{"first":"1998-01-02","last":"1998-01-09","sessions":-3}`,
+		"more sessions than weekdays": `{"first":"1998-01-02","last":"1998-01-09","sessions":7}`,
+		"a first that is not a date":  `{"first":"1998-02-30","last":"1998-03-09","sessions":3}`,
+		"a last that is not a date":   `{"first":"1998-02-02","last":"1998-03-32","sessions":3}`,
+		"a missing first":             `{"last":"1998-01-09","sessions":3}`,
+		"a missing count":             `{"first":"1998-01-02","last":"1998-01-09"}`,
+		"an unknown field":            `{"first":"1998-01-02","last":"1998-01-09","sessions":3,"note":"x"}`,
+		"trailing data":               `{"first":"1998-01-02","last":"1998-01-09","sessions":3} {}`,
+		"not JSON":                    `{`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parity.DecodeBoostPlan([]byte(raw)); err == nil {
+				t.Errorf("%s must be refused", name)
+			}
+		})
+	}
+}
+
+func TestAPlanWithNoSenseFailsTheExportCheckWhateverTheExportHolds(t *testing.T) {
+	full := syntheticBoost(400, 210)
+	for name, plan := range map[string]parity.BoostPlan{
+		"first after last": {First: full[399].Date, Last: full[0].Date, Sessions: 400},
+		"too many":         {First: full[0].Date, Last: full[399].Date, Sessions: 10000},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if r := parity.CompareBoost(boostParams(), "BSYN", plan, full); checkNamed(r, parity.CheckExport).Pass() {
 				t.Errorf("%s must fail the export check", name)
 			}
 		})

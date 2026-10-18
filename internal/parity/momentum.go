@@ -37,18 +37,19 @@ type RankedEntry struct {
 // close counts, and the adjusted closes of a sample of names and of SPY,
 // aligned to Index (nil where a name has no close on that row).
 type MomentumMonth struct {
-	Month     string
-	RiskOff   bool
-	SPYClose  float64
-	SPYMean   float64
-	SPYCloses int
-	Members   int
-	Scored    int
-	Index     []string
-	Ranked    []RankedEntry
-	Weights   map[string]float64
-	Short     map[string]int
-	Closes    map[string][]*float64
+	Month      string
+	RiskOff    bool
+	SPYClose   float64
+	SPYMean    float64
+	SPYCloses  int
+	Members    int
+	Scored     int
+	Index      []string
+	Ranked     []RankedEntry
+	Weights    map[string]float64
+	Short      map[string]int
+	ShortOrder []string
+	Closes     map[string][]*float64
 }
 
 type momentumRun struct {
@@ -338,39 +339,35 @@ func (r *momentumRun) histories(m *MomentumMonth) (map[string]bool, error) {
 // PARITY_SAMPLE).
 const sampleSize = 5
 
-// coverage fails the history check for each sampled name the export
-// promises and does not carry a close column for: every pick, and as many
-// of the capped names, the names beyond the book and the names too short
-// to score as the template samples. Without its column a name cannot be
-// recomputed, so its score and volatility would go unchecked.
+// coverage fails the history check for each sampled name the export does
+// not carry a close column for. The sample is found from the export by the
+// template's rule: every pick, the first sampleSize capped names and the
+// first sampleSize beyond the book in ranked order, and the first
+// sampleSize names too short to score in the order the export lists them.
+// Without its column a name cannot be recomputed, so its score and
+// volatility would go unchecked.
 func (r *momentumRun) coverage(m *MomentumMonth) {
-	var missing []string
 	kinds := map[Mark][]string{}
 	for _, e := range m.Ranked {
 		kinds[e.Mark] = append(kinds[e.Mark], e.Ticker)
 	}
-	short := make([]string, 0, len(m.Short))
-	for name := range m.Short {
-		short = append(short, name)
-	}
-	sort.Strings(short)
-	for _, group := range []struct {
-		names []string
-		need  int
-	}{
-		{kinds[MarkPicked], len(kinds[MarkPicked])},
-		{kinds[MarkCapped], min(sampleSize, len(kinds[MarkCapped]))},
-		{kinds[MarkBeyond], min(sampleSize, len(kinds[MarkBeyond]))},
-		{short, min(sampleSize, len(short))},
-	} {
-		var absent []string
-		for _, n := range group.names {
-			if _, ok := m.Closes[n]; !ok {
-				absent = append(absent, n)
-			}
+	short := m.ShortOrder
+	if len(short) != len(m.Short) {
+		short = make([]string, 0, len(m.Short))
+		for name := range m.Short {
+			short = append(short, name)
 		}
-		if shortfall := group.need - (len(group.names) - len(absent)); shortfall > 0 {
-			missing = append(missing, absent[:shortfall]...)
+		sort.Strings(short)
+	}
+	var missing []string
+	for _, names := range [][]string{
+		kinds[MarkPicked], kinds[MarkCapped][:min(sampleSize, len(kinds[MarkCapped]))],
+		kinds[MarkBeyond][:min(sampleSize, len(kinds[MarkBeyond]))], short[:min(sampleSize, len(short))],
+	} {
+		for _, n := range names {
+			if _, ok := m.Closes[n]; !ok {
+				missing = append(missing, n)
+			}
 		}
 	}
 	if len(missing) > 0 {

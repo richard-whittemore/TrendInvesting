@@ -30,7 +30,7 @@ type momentumPayload struct {
 	Index     []string              `json:"index"`
 	Ranked    [][]json.RawMessage   `json:"ranked"`
 	Weights   map[string]*float64   `json:"weights"`
-	Short     map[string]*int       `json:"short"`
+	Short     orderedCounts         `json:"short"`
 	Closes    map[string][]*float64 `json:"closes"`
 }
 
@@ -51,7 +51,7 @@ func DecodeMomentum(raw []byte) (MomentumMonth, error) {
 	}{
 		{"risk_off", p.RiskOff != nil}, {"spy_close", p.SPYClose != nil}, {"spy_mean", p.SPYMean != nil},
 		{"spy_n", p.SPYCloses != nil}, {"members", p.Members != nil}, {"scored", p.Scored != nil},
-		{"weights", p.Weights != nil}, {"short", p.Short != nil},
+		{"weights", p.Weights != nil}, {"short", p.Short.counts != nil},
 	} {
 		if !f.present {
 			return MomentumMonth{}, fmt.Errorf("parity: %s: %s missing or null", *p.Month, f.name)
@@ -61,13 +61,13 @@ func DecodeMomentum(raw []byte) (MomentumMonth, error) {
 	if err != nil {
 		return MomentumMonth{}, err
 	}
-	short, err := required(*p.Month, "short", p.Short)
+	short, err := required(*p.Month, "short", p.Short.counts)
 	if err != nil {
 		return MomentumMonth{}, err
 	}
 	m := MomentumMonth{Month: *p.Month, RiskOff: *p.RiskOff, SPYClose: *p.SPYClose, SPYMean: *p.SPYMean,
 		SPYCloses: *p.SPYCloses, Members: *p.Members, Scored: *p.Scored, Index: p.Index,
-		Weights: weights, Short: short, Closes: p.Closes}
+		Weights: weights, Short: short, ShortOrder: p.Short.order, Closes: p.Closes}
 	for i, row := range p.Ranked {
 		e, err := rankedEntry(row)
 		if err != nil {
@@ -76,6 +76,29 @@ func DecodeMomentum(raw []byte) (MomentumMonth, error) {
 		m.Ranked = append(m.Ranked, e)
 	}
 	return m, nil
+}
+
+// orderedCounts is a JSON object of close counts that remembers the order
+// of its keys, which is the order the template sampled them in.
+type orderedCounts struct {
+	counts map[string]*int
+	order  []string
+}
+
+func (o *orderedCounts) UnmarshalJSON(raw []byte) error {
+	if err := json.Unmarshal(raw, &o.counts); err != nil || o.counts == nil {
+		return err
+	}
+	// The object is valid JSON by now, so its tokens read without error.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	_, _ = dec.Token()
+	for dec.More() {
+		key, _ := dec.Token()
+		o.order = append(o.order, key.(string))
+		var value json.RawMessage
+		_ = dec.Decode(&value)
+	}
+	return nil
 }
 
 // required returns the values of field, refusing a null one.
