@@ -63,7 +63,6 @@ after the saved original is settled, and never replaces it on disk.
 import argparse
 import fcntl
 import json
-import math
 import os
 import re
 import sys
