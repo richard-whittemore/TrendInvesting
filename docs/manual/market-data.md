@@ -30,16 +30,18 @@ Run from `adapter/`. Every command takes `--out DIR`, the recordings folder.
 | `python3 -m marketdata universe --out DIR` | the last session's bars for every US stock, plus the list of common-stock (type CS) tickers | yes |
 | `python3 -m marketdata bars --out DIR --instruments SPY,IEF,SHY` | the named instruments' bars | yes |
 | `python3 -m marketdata backfill --out DIR --sessions 260` | one whole-market bar file per past session (about 54 minutes at Massive's 5 requests a minute; resumable) | yes |
-
-If your recordings hold an older 253-session backfill, extend it to 260
-before a fresh run's first decision: `backfill --sessions 260` resumes and
-records only the missing days. With fewer than 260 sessions recorded, a
-stock you hold with a missing day has too few prices to be scored across
-it, reads `short-history` and is sold.
 | `python3 -m marketdata actions --out DIR --lookback-days 400` | every split and every dividend dated in the window | yes |
 | `python3 -m marketdata sectors --out DIR` | iShares' IWV holdings file and Nasdaq's stock screener, for sector labels, for the latest settled session only | no |
 | `python3 -m marketdata encode --out DIR --first ... --asof ... --stream FILE ...` | the engines' input stream (below) | no, and it never uses the network |
 | `python3 -m marketdata retract --out DIR --session YYYY-MM-DD --reason TEXT` | that the exchange cancelled a session (below) | no |
+
+If your recordings hold an older 253-session backfill, extend it to 260
+before a fresh run's first decision: `backfill --sessions 260` resumes and
+records only the missing days. A stock you hold with a missing day is scored
+across it when it has at least 253 usable closes within the last 260
+sessions; with fewer (for example, a 253-session backfill with one missing
+day leaves 252), it reads `short-history` and is sold. 260 sessions leave
+the seven spare days the rule allows.
 
 `--asof` defaults to today's date in New York, not the computer's own time
 zone. The session is the latest NYSE trading day on or before it, taken from

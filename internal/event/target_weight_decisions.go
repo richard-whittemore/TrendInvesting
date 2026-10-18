@@ -459,10 +459,25 @@ func (n MomentumName) validate(rank int) []error {
 	return errs
 }
 
+// ValidateWritten is the check on a decision being written now: Validate,
+// and a momentum name left out for a gap names the sessions it is missing
+// (ADR 0026 point 5, amended 2026-10-18). Validate, which readers use, does
+// not require it, so a record written before gap sessions existed is read.
+func (p TargetsDecidedPayload) ValidateWritten() error {
+	errs := []error{p.Validate()}
+	for _, n := range p.Momentum.Names {
+		if n.Status == MomentumStatusGap && len(n.GapSessions) == 0 {
+			errs = append(errs, fmt.Errorf("momentum name %s: a gap name names its missing sessions", n.InstrumentID))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // validateGaps checks a name's gap sessions: dates, strictly ascending, on
 // or before the close session; a short history, refused before any window
-// is read, names none. A gap name may name none: version 4 was written
-// before gap sessions were recorded, and its logs must still be read.
+// is read, names none. A gap name may name none here, because a record
+// written before gap sessions existed names none and its log must still be
+// read; ValidateWritten holds a record being written now to the full rule.
 func (n MomentumName) validateGaps(closeSession string) []error {
 	var errs []error
 	if n.Status == MomentumStatusShortHistory && len(n.GapSessions) > 0 {

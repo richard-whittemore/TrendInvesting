@@ -1,6 +1,7 @@
 package event_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/richard-whittemore/TrendInvesting/internal/event"
@@ -39,5 +40,26 @@ func TestGapSessionsValidate(t *testing.T) {
 		"short with some": {with(event.MomentumStatusShortHistory, "2025-02-20"), "short history"},
 	} {
 		expectInvalid(t, name, c.v, func(*P) {}, c.want)
+	}
+}
+
+// TestAGapNameWrittenNowNamesItsMissingSessions: a gap name written under
+// the current rules names the sessions it is missing (ADR 0026 point 5,
+// amended 2026-10-18), though a record written before gap sessions existed
+// is still read. ValidateWritten is the writer's check; Validate stays the
+// reader's.
+func TestAGapNameWrittenNowNamesItsMissingSessions(t *testing.T) {
+	v := validMomentumDecided()
+	v.Momentum.Names = append([]event.MomentumName(nil), v.Momentum.Names...)
+	v.Momentum.Names[1].Status, v.Momentum.Names[1].GapSessions = event.MomentumStatusGap, nil
+	if err := v.Validate(); err != nil {
+		t.Fatalf("a reader refuses an old gap name: %v", err)
+	}
+	if err := v.ValidateWritten(); err == nil || !strings.Contains(err.Error(), "names its missing sessions") {
+		t.Errorf("the writer stamps a gap name with no sessions: %v", err)
+	}
+	v.Momentum.Names[1].GapSessions = []string{"2025-02-20"}
+	if err := v.ValidateWritten(); err != nil {
+		t.Errorf("a gap name with its sessions is refused: %v", err)
 	}
 }

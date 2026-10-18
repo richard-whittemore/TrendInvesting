@@ -706,14 +706,18 @@ recorded.
   session the stock did not trade; the stream marks no gap as a plain
   missing session. A bars run therefore keeps the complete-window rule for
   every name, held or not (fail closed): a held stock with a gap reads
-  `gap` and is sold, as before this amendment. The compact stream is the
-  shape the IRAs run on (point 1, "Universe"), and naming every holding
-  with `--optional` is mandatory there.
+  `gap` and is sold, as it was sold before this amendment (then recorded as
+  `short-history`). The compact stream is the
+  shape the IRAs run on (the input-shape decision of 2026-10-16, recorded in
+  docs/manual/momentum-universe.md, "The configuration says which shape the
+  run reads"), and naming every holding with `--optional` is mandatory there.
 
 A rules change: target-weight rules version 1.15.0 (1.14.0 is reserved for
 a change landing in parallel), so a journal written under 1.13.0 does not
 replay. `strategy.targets.decided` keeps schema version 4: `gap_sessions`
-is omitted when empty, so a Boost decision's bytes are unchanged.
+is omitted when empty, so a Boost decision's bytes are unchanged. A reader
+accepts a `gap` name that names no sessions, as a record written before
+`gap_sessions` existed does; the writer refuses to stamp one.
 
 **Parity.** The live rule now departs from the backtest for a gapped name
 only when the account does not hold it, which is point 8's gap departure

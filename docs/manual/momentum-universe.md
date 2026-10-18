@@ -60,8 +60,11 @@ trades.
 The histories carry exactly the closes the stock's daily bars would have
 carried, adjusted the same way from the same base, and a session missing from
 a stock's bars (bad data, a day it did not trade) is missing from its history
-too. So the engine decides the same thing from either stream. Two tests hold
-this in place:
+too. So the engine decides the same thing from either stream, with one
+difference: a stock you hold with a missing day is scored across it in the
+compact stream only, where the stocks you hold are named to the market-data
+step; a bars run sells it as `gap` (see "A stock you hold with a missing day"
+below). Two tests hold this in place for the stocks without such a day:
 
 - `TestTheCompactStreamDecidesAsTheFullBarsDo`
   (`internal/targetweight/momentum_universe_test.go`) runs two months of

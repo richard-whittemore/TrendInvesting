@@ -65,7 +65,7 @@ func TestAHeldStockWithOneMissingSessionIsDecidedAcrossTheGap(t *testing.T) {
 // across it: a bars run keeps the complete-window rule for every name, and
 // CCC reads gap and is not targeted (ADR 0026 point 5, amended 2026-10-18).
 func TestABarsRunDoesNotScoreAHoldingAcrossAGap(t *testing.T) {
-	r := simulateMomentum(t, momentumOptions{noBar: map[string]string{"2025-02-20": "CCC"}, unnamed: map[string]bool{"CCC": true}})
+	r := simulateMomentum(t, momentumOptions{noBar: map[string]string{"2025-02-20": "CCC"}})
 	feb, ccc := february(t, r, "CCC")
 	if ccc.Status != event.MomentumStatusGap || !slices.Equal(ccc.GapSessions, []string{"2025-02-20"}) {
 		t.Errorf("CCC %+v, want gap on 2025-02-20", ccc)

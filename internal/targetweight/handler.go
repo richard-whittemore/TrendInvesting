@@ -91,7 +91,9 @@ import (
 //     2026-10-18 (ADR 0026 point 5, amended). A candidate not held still
 //     needs a complete window. The run keeps 260 sessions of closes, a
 //     name left out for a gap reads gap, and every gap's sessions are
-//     recorded, so a journal written under 1.13.0 does not replay.
+//     recorded, so a journal written under 1.13.0 does not replay. Only a
+//     run reading the compact universe input scores a held name so; a bars
+//     run keeps the complete-window rule for every name, held or not.
 const RulesVersion = "1.15.0"
 
 // source names this handler on every envelope it emits.
@@ -776,7 +778,11 @@ func (b *emissions) targets(figures event.BoostFigures, reason, detail string) (
 // the input's, never the wall clock. Sequence, causation and correlation are
 // the engine's to set (replay.Handler).
 func (h *Handler) stamp(id, eventType string, version uint32, at time.Time, in event.Envelope, payload interface{ Validate() error }) (event.Envelope, error) {
-	if err := payload.Validate(); err != nil {
+	check := payload.Validate
+	if w, ok := payload.(interface{ ValidateWritten() error }); ok {
+		check = w.ValidateWritten
+	}
+	if err := check(); err != nil {
 		return event.Envelope{}, fmt.Errorf("targetweight: %s %s: %w", eventType, id, err)
 	}
 	raw, err := json.Marshal(payload)
