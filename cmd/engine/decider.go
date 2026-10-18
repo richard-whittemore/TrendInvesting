@@ -149,10 +149,9 @@ type wireGuard struct {
 // input was not recorded and its sequence was spent (the engine's cursor
 // moved during this call: the recorder refused input of its own, its record
 // bound or its emission ceiling), or records were delivered first and so
-// moved it,
-// or a record could not be delivered, g is poisoned and the run stops with
-// the cause (stopWith), whether or not any record was delivered. When
-// records were delivered first, the error states the last sequence
+// moved it, or a record could not be delivered, g is poisoned and the run
+// stops with the cause (stopWith), whether or not any record was delivered.
+// When records were delivered first, the error states the last sequence
 // recorded, the last record's (transport.SequencedError). Resumed, the log
 // ends there, and the adapter's next input continues from it.
 func (g *wireGuard) answer(ctx context.Context, engine *replay.Engine, recorder *journal.Recorder, input event.Envelope, inbox *operatorInbox) (committed journal.Committed, sent, ok bool, err error) {

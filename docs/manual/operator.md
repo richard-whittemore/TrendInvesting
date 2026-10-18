@@ -118,8 +118,11 @@ could not be resumed.) Either way the engine writes the refusal to the
 adapter first and only then stops, so a connected adapter always receives
 it; if the adapter has gone away, or the refusal cannot be delivered, the
 run still stops, within a couple of seconds, with the same error. An input
-carrying a number already used or out of date is different: it is simply
-refused, uses up no number, and the run carries on.
+carrying a number already used or out of date is different. An input sent
+again under its own ID, at the sequence it was sent with, gets its committed
+reply again. A different input under a used number, or the same input at
+another sequence, is simply refused; the refusal uses up no number, and the
+run carries on.
 
 When the engine records your instructions before the adapter's input, the
 input is recorded under a later number than the one it was sent with. If
