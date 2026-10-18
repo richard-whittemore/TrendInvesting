@@ -77,7 +77,8 @@ order a session:
   decision buys to 98% from cash), or after a refusal that left the account
   Normal, or after the last order ended with shares unfilled (part-filled
   or unfilled), or once after IBKR rejected it (next section). On any other
-  session no order is planned.
+  session no order is planned, and after IBKR has rejected two orders in a
+  row none is planned at all until you start a fresh run (next section).
 - **How many shares.** target x net liquidation / SPY's raw (unadjusted)
   close of the session just decided, called the **previous close** because
   the order is for the session after it, minus the shares held, rounded **toward zero** to whole shares. Rounding
@@ -133,15 +134,26 @@ would trade drift, or buy twice while the new buy is still working.
 
 If IBKR **rejects** the order outright (`invalid`, it never rested), the
 reason may last (a permission, a margin requirement), so the program plans
-it again **once** (`replan` cause `rejected`). If IBKR rejects that order
-too, the program does not try again: that session's decision records it
-(`replan_withheld`), you get one urgent page, and the account stays off its
-target until the target changes or a fresh run. The kill switch or a stale
+it again **once** (`replan` cause `rejected`). The kill switch or a stale
 IBKR snapshot refusing that one retry does not earn it another: the order
-sent once the refusal clears is still the one retry. A change of target
-ends the bound: the order to the new target is a new order, with its own
-one retry (`TestARejectionsBoundEndsWhenTheTargetChanges`). This bound is
-the orchestrator's reading, put to you for confirmation.
+sent once the refusal clears is still the one retry.
+
+**Two rejections in a row stop Boost's orders.** If IBKR rejects two of the
+account's orders in a row, whatever their targets (the retry, or an order
+to a new target after the boost turned on or off), the program sends no
+more orders for the account: that session's decision records the second
+rejection (`replan_withheld`), you get **one** urgent page, and no session
+orders again, not even at a change of target or Boost's exit, until you
+start a fresh run you approve (`operator approve`, adding
+`-clear-incident` if the run also ended in an incident). An order IBKR
+accepts, whether it fills in full or is cancelled, ends the run of
+rejections. Without this, a boost that turns on and off at each session
+would send IBKR a rejected order every session. Each decision records the
+rejections in a row (`venue_rejections`), so a restart from it stays
+stopped; the fresh run starts from none
+(`TestTwoRejectionsInARowAwaitTheOwnerAcrossATargetChange`). While
+stopped, the margin alarm's sale back to 98% still runs. The one retry and
+this stop are the orchestrator's readings, put to you for confirmation.
 
 A refusal that moves the account to Degraded or Halted does **not** set up a
 re-plan: those states follow their own rules, and the way out is a fresh
@@ -153,8 +165,16 @@ decision that re-plans, or is withheld while one is pending, also records
 why (`replan`): `refused`, or `part-filled`, `unfilled` or `rejected` with
 the order's client order ID and its filled and released shares. Each
 decision also records the order being watched (`watched`: its client order
-ID, side, shares, limit, shares filled so far and, once IBKR ended it, how),
-so that a start which reads the decision could watch the order still. Which
+ID, side, shares, limit, shares filled so far, once IBKR ended it how, and
+IBKR's own ID for it, `venue_order_id`, once IBKR has reported on it), so
+that a start which reads the decision could watch the order still. IBKR
+does not always repeat the client order ID when it lists an open order, so
+a sell being watched is matched to IBKR's listing by that ID too; if the
+decision has none, a listing with no client order ID and exactly the sell's
+remaining shares is taken to be it. If that listing was really a sell you
+placed by hand of the same size, the program counts only one of the two
+until IBKR shows them apart: do not place a hand sell while the engine
+restarts with a sell working (ADR 0026, amendment of 2026-10-18). Which
 of the two starts does what today is in the table below ("The engine
 restarts while an order is still working"): a resume after a crash rebuilds
 the watch by replaying the log; a fresh run does not watch the earlier
@@ -247,9 +267,10 @@ In dry-run, step 5 never sends (every order says `send: false`); see the
 Each decided or withheld session writes one `strategy.targets.decided`
 record. For Boost it carries the close, RSI(2), both averages (and whether
 each was ready), the latch before and after, the target in force,
-whether a re-plan is pending and why (`replan`), a re-plan withheld after
-a second rejection (`replan_withheld`), the order being watched
-(`watched`, with each of its fills and when it ended), and any sessions with no bar since the last close it read
+whether a re-plan is pending and why (`replan`), the second order IBKR
+rejected in a row (`replan_withheld`), the rejections in a row
+(`venue_rejections`), the order being watched
+(`watched`, with each of its fills, when it ended and IBKR's ID for it), and any sessions with no bar since the last close it read
 (`gap_sessions`). An order adds `strategy.order.planned`, then
 `risk.order.released` or `risk.order.refused`. `journal-query orders` and
 `journal-query refusals` list them ([journal-query](journal-query.md)).
@@ -265,7 +286,7 @@ a second rejection (`replan_withheld`), the order being watched
 | IBKR's latest snapshot is too old when a sell is checked | The sell is refused (`stale-broker-snapshot`), no state change, one urgent alert per outage, re-planned at the next decision. | Check the Gateway. |
 | The exit is refused because the account is Halted, Degraded on SPY or under the kill switch | The one sale back to 98% goes instead ([states-and-kill-switch](states-and-kill-switch.md#the-one-sale-back-to-98)). | Follow the alert; do not sell by hand while that sale is working. |
 | The DAY order expires, or IBKR cancels it, with part or all unfilled | The cancellation is recorded and ends the order. The next session that decides after the program has read it plans the rest of the difference to the target (`replan` cause `part-filled` or `unfilled`), unless a newer released order already replaced it. A session that decides without ordering does not cancel the plan. | Nothing, normally. Do not buy or sell the rest by hand as well: the program will. If you must, engage the kill switch first. |
-| IBKR rejects the order (`invalid`) | The rejection is recorded. The next session that decides plans it once more (`replan` cause `rejected`). If IBKR rejects that one too, it is not planned again (`replan_withheld`) and you get one urgent page; the account stays off its target until the target changes. | Find the reason in IBKR's order log (`journal-query orders` lists the rejection). Once fixed, the next change of target orders as normal; or start a fresh run you approve, whose first decision plans to the target from scratch. |
+| IBKR rejects the order (`invalid`) | The rejection is recorded. The next session that decides plans it once more (`replan` cause `rejected`). If IBKR rejects two orders in a row, that one or an order to a new target, the second is recorded (`replan_withheld`), you get one urgent page, and the program sends no more orders for the account, a change of target or the exit included, until you start a fresh run. | Find the reason in IBKR's order log (`journal-query orders` lists the rejections) and fix it. Then start a fresh run you approve (`operator approve`), whose first decision plans to the target from scratch. If the exit was due meanwhile, decide whether to sell by hand first, with the kill switch on. |
 | An order is never sent (the adapter refused it for good and you settled it `--never-sent`) | The order stays released in the log. A never-sent **sell** keeps counting as being sold, so every later exit in the run is smaller, or nothing, as in dry-run. A never-sent **buy** is not re-planned: settling it records nothing the engine reads, so the engine never sees the order end (the target in force has not changed). | After settling it, reconcile and start a fresh run you approve: its first decision plans to the target from scratch ([IBKR adapter](ibkr-adapter.md)). |
 | The engine crashes while the boost is on | Resumed from its log, it carries on in the same latch, neither entering nor exiting by mistake (`TestARestartWhileBoostedNeitherEntersNorExits`). | Resume it (`docs/runbooks/durable-log.md`). |
 | The engine restarts while an order is still working | It depends on how it starts. **Resume after a crash** replays the whole log: the order, every fill and report on it already recorded, are read again in order, so the engine watches it exactly as before; a fill IBKR sends again counts once, and a fill or cancel IBKR reports after the crash is read and any remainder planned as above. **A fresh run after your approval** does not watch the earlier run's order at all: you start it after the session's end, when a DAY order has expired, and after reconciling; IBKR's reports on that order are refused as reports on an order this run did not release, and the fresh run's first decided session plans to the target from the account as it stands. (Each decision also records the watched order, its fills and its end, `watched`, so a restart from that decision would count a fill sent again once and keep a working sell out of later exits: `TestARunRecoveredReadsAFillRecordedAfterItsDecisionOnce`, `TestARunRecoveredWatchingASellSizesLaterSellsNetOfIt`.) | After a crash: resume, nothing more. Before a fresh run: wait for the session's end and reconcile, which compares IBKR's open orders too (`docs/runbooks/durable-log.md`, "Start a fresh run after an earlier one"). |

@@ -226,8 +226,9 @@ func TestAPendingPartFillReplanReadsTheLatestFills(t *testing.T) {
 // (ADR 0026, point 2, "Boost", amended 2026-10-18): 98% of 4000 at 104 is
 // 37.69 shares, none held, so 37. When the venue rejects that order too, no
 // session plans it again: session 2 records the re-plan withheld, naming
-// the order and its shares, which the reporter pages, and plans nothing,
-// as after a refusal under Degraded or Halted.
+// the order and its shares, which the reporter pages, and no session
+// orders again, the entry at session 16 included: two of the account's
+// orders rejected in a row wait for the owner's fresh run.
 func TestAVenueRejectionIsReplannedOnceThenWithheld(t *testing.T) {
 	r := simulate(t, options{reject: map[int]bool{1: true, 2: true}})
 	first := releasedBy(t, r.decisions, 0)
@@ -245,10 +246,10 @@ func TestAVenueRejectionIsReplannedOnceThenWithheld(t *testing.T) {
 	if d.Boost.ReplanWithheld != withheld || d.Boost.ReplanPending || d.Boost.Replan != (event.BoostReplan{}) {
 		t.Errorf("session 2: withheld %+v pending %v re-plan %+v, want %+v withheld and nothing pending", d.Boost.ReplanWithheld, d.Boost.ReplanPending, d.Boost.Replan, withheld)
 	}
-	for n := 2; n < 16; n++ {
-		if got := releasedBy(t, r.decisions, n); len(got) != 0 {
-			t.Errorf("session %d releases %+v, want nothing until the target changes", n, got)
-		}
+	if got := planned(t, r.decisions); len(got) != 2 {
+		t.Errorf("the run plans %d orders, want the first purchase and its one re-plan only: nothing, the entry at session 16 included, until the owner starts a fresh run", len(got))
+	}
+	for n := 2; n < len(decided); n++ {
 		if n > 2 && decided[n].Boost.ReplanWithheld != (event.BoostReplan{}) {
 			t.Errorf("session %d records the withheld re-plan again", n)
 		}
@@ -477,31 +478,92 @@ func TestARunRecoveredFromARefusedRejectionReplanStillBoundsIt(t *testing.T) {
 	assertRejectedTwiceIsWithheld(t, r)
 }
 
-// TestARejectionsBoundEndsWhenTheTargetChanges: the first purchase fills 30
-// of 39 shares, the venue rejects its re-plan, and the kill switch refuses
-// the rejection's one re-plan at every session until Boost's entry at
-// session 16 changes the target to 147%. The order
-// to the new target is a new order with its own one re-plan, not the
-// rejection's (ADR 0026, point 2, "Boost", amended 2026-10-18: the account
-// waits off its target "until the target changes"), so when the venue
-// rejects it, session 17 re-plans it once, cause rejected, and nothing is
-// withheld.
-func TestARejectionsBoundEndsWhenTheTargetChanges(t *testing.T) {
+// TestTwoRejectionsInARowAwaitTheOwnerAcrossATargetChange: the first
+// purchase fills 30 of 39 shares, the venue rejects its re-plan, and the
+// kill switch refuses the rejection's one re-plan at every session until
+// Boost's entry at session 16 changes the target to 147%. The order to the
+// new target is a new order, but the venue rejects it too: two of the
+// account's orders in a row rejected, whatever their targets, so session 17
+// records it withheld (paged once) and no session orders again, the exit at
+// session 20 included, until the owner starts a fresh run (ADR 0026, point
+// 2, "Boost", amended 2026-10-18: the bound of two rejections in a row).
+// Every decision from session 17 records the two rejections.
+func TestTwoRejectionsInARowAwaitTheOwnerAcrossATargetChange(t *testing.T) {
 	r := simulate(t, options{partFill: map[int]int64{1: 30}, reject: map[int]bool{2: true, 17: true}, kill: map[int]bool{2: true, 16: false}})
-	if d := targets(t, r.decisions)[15]; !d.Boost.ReplanPending || d.Boost.Replan.Cause != event.ReplanCauseRejected {
-		t.Fatalf("session 15: pending %v re-plan %+v, want the rejection's one re-plan still refused", d.Boost.ReplanPending, d.Boost.Replan)
+	decided := targets(t, r.decisions)
+	if d := decided[15]; !d.Boost.ReplanPending || d.Boost.Replan.Cause != event.ReplanCauseRejected || d.Boost.VenueRejections != 1 {
+		t.Fatalf("session 15: pending %v re-plan %+v rejections %d, want the rejection's one re-plan still refused, one rejection counted",
+			d.Boost.ReplanPending, d.Boost.Replan, d.Boost.VenueRejections)
 	}
 	entry := releasedBy(t, r.decisions, 16)
 	if len(entry) != 1 || entry[0].Side != event.OrderSideBuy {
 		t.Fatalf("session 16 releases %+v, want the entry once the switch is off", entry)
 	}
-	d := targets(t, r.decisions)[17]
 	want := event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: entry[0].ClientOrderID, Released: entry[0].Quantity}
-	if d.Boost.Replan != want || d.Boost.ReplanWithheld != (event.BoostReplan{}) {
-		t.Errorf("session 17: re-plan %+v withheld %+v, want %+v re-planned and nothing withheld", d.Boost.Replan, d.Boost.ReplanWithheld, want)
+	if d := decided[17]; d.Boost.ReplanWithheld != want || d.Boost.ReplanPending || d.Boost.Replan != (event.BoostReplan{}) {
+		t.Errorf("session 17: withheld %+v pending %v re-plan %+v, want %+v withheld and nothing pending", d.Boost.ReplanWithheld, d.Boost.ReplanPending, d.Boost.Replan, want)
 	}
-	if got := releasedBy(t, r.decisions, 17); len(got) != 1 || got[0].Side != event.OrderSideBuy {
-		t.Errorf("session 17 releases %+v, want the entry's one re-plan", got)
+	if d := decided[20]; d.Targets[0].Weight != 0.98 || d.Boost.TargetInForce != 1.47 {
+		t.Fatalf("session 20 decides %v from %v, want Boost's exit", d.Targets[0].Weight, d.Boost.TargetInForce)
+	}
+	for n := 17; n < len(decided); n++ {
+		if got := releasedBy(t, r.decisions, n); len(got) != 0 {
+			t.Errorf("session %d releases %+v, want nothing until the owner starts a fresh run", n, got)
+		}
+		if d := decided[n]; d.Boost.VenueRejections != 2 || d.Boost.ReplanPending {
+			t.Errorf("session %d: rejections %d pending %v, want the two rejections recorded and nothing pending", n, d.Boost.VenueRejections, d.Boost.ReplanPending)
+		}
+		if n > 17 && decided[n].Boost.ReplanWithheld != (event.BoostReplan{}) {
+			t.Errorf("session %d records the withheld order again", n)
+		}
+	}
+}
+
+// TestARejectionAfterAnOrderTheVenueAcceptedIsReplannedOnce: the venue
+// rejects the first purchase, its re-plan is accepted and expires with 10
+// filled, and the venue rejects the re-plan of that remainder. An order the
+// venue accepted ends the run of rejections, so that rejection is the first
+// in a row: session 3 re-plans it once, cause rejected, and withholds
+// nothing.
+func TestARejectionAfterAnOrderTheVenueAcceptedIsReplannedOnce(t *testing.T) {
+	r := simulate(t, options{reject: map[int]bool{1: true, 3: true}, partFill: map[int]int64{2: 10}})
+	third := releasedBy(t, r.decisions, 2)
+	if len(third) != 1 {
+		t.Fatalf("session 2 releases %+v, want the part-fill's remainder", third)
+	}
+	d := targets(t, r.decisions)[3]
+	want := event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: third[0].ClientOrderID, Released: third[0].Quantity}
+	if d.Boost.Replan != want || d.Boost.ReplanWithheld != (event.BoostReplan{}) || d.Boost.VenueRejections != 1 {
+		t.Errorf("session 3: re-plan %+v withheld %+v rejections %d, want %+v re-planned, nothing withheld, one rejection",
+			d.Boost.Replan, d.Boost.ReplanWithheld, d.Boost.VenueRejections, want)
+	}
+	if got := releasedBy(t, r.decisions, 3); len(got) != 1 || got[0].Side != event.OrderSideBuy {
+		t.Errorf("session 3 releases %+v, want the rejection's one re-plan", got)
+	}
+}
+
+// TestARunRecoveredAwaitingTheOwnerOrdersNothing: a run restarted from the
+// decision that recorded the second rejection in a row recovers it, so it
+// orders nothing, the exit at session 20 included, and pages nothing again,
+// as the full run (ADR 0026, point 5).
+func TestARunRecoveredAwaitingTheOwnerOrdersNothing(t *testing.T) {
+	opts := options{partFill: map[int]int64{1: 30}, reject: map[int]bool{2: true, 17: true}, kill: map[int]bool{2: true, 16: false}}
+	full := simulate(t, opts)
+	decisions := ofType(full.decisions, event.TargetsDecidedEventType)
+	recovery := decisions[17]
+	r := simulate(t, options{recovery: &recovery, snapshots: full.inputs})
+	if len(released(t, r.decisions)) != 0 {
+		t.Errorf("the recovered run releases %+v, want nothing until the owner starts a fresh run", released(t, r.decisions))
+	}
+	got := ofType(r.decisions, event.TargetsDecidedEventType)
+	want := decisions[18:]
+	if len(got) != len(want) {
+		t.Fatalf("the recovered run records %d decisions, the full run %d after session 17", len(got), len(want))
+	}
+	for i := range want {
+		if !bytes.Equal(got[i].Payload, want[i].Payload) {
+			t.Errorf("session %d: the recovered run records\n%s\nthe full run\n%s", 18+i, got[i].Payload, want[i].Payload)
+		}
 	}
 }
 
@@ -537,7 +599,8 @@ func assertRejectedTwiceIsWithheld(t *testing.T, r run) {
 // works until session 17. The entry at session 16 is refused by the kill
 // switch, so a refusal's re-plan is pending when the venue rejects the
 // re-planned order at session 17: that rejection is still recorded
-// withheld, and paged, at session 17's decision.
+// withheld, and paged, at session 17's decision, and the refusal's re-plan
+// is not ordered: the account waits for the owner.
 func TestASecondRejectionWithARefusalPendingIsStillWithheld(t *testing.T) {
 	hold := map[int]bool{}
 	for i := 2; i <= 16; i++ {
@@ -555,6 +618,10 @@ func TestASecondRejectionWithARefusalPendingIsStillWithheld(t *testing.T) {
 	want := event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: second[0].ClientOrderID, Released: second[0].Quantity}
 	if got := decided[17].Boost.ReplanWithheld; got != want {
 		t.Errorf("session 17 withheld %+v, want %+v", got, want)
+	}
+	if d := decided[17]; d.Boost.ReplanPending || len(releasedBy(t, r.decisions, 17)) != 0 {
+		t.Errorf("session 17: pending %v, released %+v; want the refusal's re-plan dropped: two rejections in a row await the owner",
+			d.Boost.ReplanPending, releasedBy(t, r.decisions, 17))
 	}
 }
 
@@ -634,5 +701,93 @@ func assertByteIdenticalAndReplays(t *testing.T, opts options) {
 	}
 	if d := replay.Equivalent(decisions, replayed); d != nil {
 		t.Fatalf("replay diverged: %+v", d)
+	}
+}
+
+// TestARunRecoveredFromATargetChangeRefusedAfterARejectionDecidesAsTheFullRun:
+// the venue rejects the first purchase's re-plan at session 2, and the kill
+// switch refuses the rejection's one re-plan through session 16, whose
+// decision changes the target to 147% (Boost's entry) and has its order to
+// the new target refused too. That order was a new order, not the
+// rejection's re-plan (the bound holds only while the target is
+// unchanged), so the full run carries a refusal's re-plan out of session
+// 16, though the decision records the rejection it entered with. A run
+// restarted from session 16's decision must read it the same way (ADR 0026,
+// point 5: recovered, never recomputed, and read as the full run read it):
+// every decision it records from session 17 on is the full run's, byte for
+// byte.
+func TestARunRecoveredFromATargetChangeRefusedAfterARejectionDecidesAsTheFullRun(t *testing.T) {
+	opts := options{partFill: map[int]int64{1: 30}, reject: map[int]bool{2: true, 18: true}, kill: map[int]bool{2: true, 17: false}}
+	full := simulate(t, opts)
+	decisions := ofType(full.decisions, event.TargetsDecidedEventType)
+	recovery := decisions[16]
+	var p event.TargetsDecidedPayload
+	decode(t, recovery, &p)
+	if p.Boost.Replan.Cause != event.ReplanCauseRejected || !p.Boost.ReplanPending || p.Targets[0].Weight == p.Boost.TargetInForce {
+		t.Fatalf("session 16: re-plan %+v pending %v, target %v from %v; want the rejection entered, a re-plan pending and the target changed",
+			p.Boost.Replan, p.Boost.ReplanPending, p.Targets[0].Weight, p.Boost.TargetInForce)
+	}
+	if got := releasedBy(t, full.decisions, 16); len(got) != 0 {
+		t.Fatalf("session 16 releases %+v, want the order to the new target refused", got)
+	}
+	r := simulate(t, options{recovery: &recovery, snapshots: full.inputs, reject: opts.reject, kill: opts.kill})
+	got := ofType(r.decisions, event.TargetsDecidedEventType)
+	want := decisions[17:]
+	if len(got) != len(want) {
+		t.Fatalf("the recovered run records %d decisions, the full run %d after session 16", len(got), len(want))
+	}
+	for i := range want {
+		if !bytes.Equal(got[i].Payload, want[i].Payload) {
+			t.Errorf("session %d: the recovered run records\n%s\nthe full run\n%s", 17+i, got[i].Payload, want[i].Payload)
+		}
+	}
+}
+
+// TestADecisionRecordsTheWatchedOrdersVenueOrderID: the venue's lifecycle
+// report names the watched order's venue order ID, and every decision after
+// it records that ID with the order, so a run restarted from the decision
+// can match IBKR's listing of it when no client order ID is echoed (ADR
+// 0026, point 5, amended 2026-10-18).
+func TestADecisionRecordsTheWatchedOrdersVenueOrderID(t *testing.T) {
+	r := simulate(t, options{hold: map[int]bool{1: true}})
+	order := releasedBy(t, r.decisions, 0)[0]
+	if got := targets(t, r.decisions)[0].Boost.Watched.VenueOrderID; got != "" {
+		t.Errorf("session 0 records venue order ID %q before any report on the order", got)
+	}
+	if got := targets(t, r.decisions)[1].Boost.Watched.VenueOrderID; got != "ib-"+order.ClientOrderID {
+		t.Errorf("session 1 records venue order ID %q, want the lifecycle report's %q", got, "ib-"+order.ClientOrderID)
+	}
+}
+
+// TestARunRecoveredWatchingASellMatchesItsListingByVenueOrderID: Boost's
+// exit, a sell of 17 released at session 20, works unfilled through session
+// 22, when the margin alarm turns urgent and IBKR lists the exit with no
+// client order ID echoed. The full run knows the exit's venue order ID from
+// the venue's report, and a run restarted from session 21's decision from
+// the decision, so both net the exit's 17 shares once in the sale back to
+// 98%, never twice (ADR 0019, amended 2026-10-15, "net of every working
+// sell").
+func TestARunRecoveredWatchingASellMatchesItsListingByVenueOrderID(t *testing.T) {
+	hold := map[int]bool{21: true, 22: true}
+	exit := releasedBy(t, simulate(t, options{brokers: true, hold: hold}).decisions, 20)
+	if len(exit) != 1 || exit[0].Side != event.OrderSideSell {
+		t.Fatalf("session 20 releases %+v, want the exit", exit)
+	}
+	urgent := map[int]func(*event.BrokerSnapshotPayload){22: func(b *event.BrokerSnapshotPayload) {
+		b.NetLiquidation *= 0.8
+		b.ExcessLiquidity = 0.1 * b.NetLiquidation
+		b.OpenOrders = []event.BrokerOrder{{BrokerOrderID: "ib-" + exit[0].ClientOrderID, InstrumentID: "SPY", Side: event.OrderSideSell,
+			Status: event.BrokerOrderWorking, RemainingQuantity: exit[0].Quantity}}
+	}}
+	full := simulate(t, options{brokers: true, hold: hold, brokerMutate: urgent})
+	want := sales(t, full.decisions)
+	if len(want) != 1 || want[0].Sale.WorkingSells != exit[0].Quantity {
+		t.Fatalf("the full run's sale back to 98%%: %+v, want one netting the exit's %d shares once", want, exit[0].Quantity)
+	}
+	recovery := ofType(full.decisions, event.TargetsDecidedEventType)[21]
+	r := simulate(t, options{brokers: true, recovery: &recovery, snapshots: full.inputs, hold: hold})
+	got := sales(t, r.decisions)
+	if len(got) != 1 || got[0].Quantity != want[0].Quantity || got[0].Sale != want[0].Sale {
+		t.Errorf("the recovered run's sale back to 98%%: %+v, want the full run's %+v", got, want)
 	}
 }

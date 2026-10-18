@@ -133,8 +133,9 @@ first target, normally 98% from cash, whether or not a boost is on.
 Amended 2026-10-18 (owner): after a refusal that leaves the engine Normal,
 the next decision also plans the difference to the target in force (see the
 amendment of that date); and after its last order ends with shares
-unfilled, or is rejected by the venue, once (see "Amendment (2026-10-18,
-owner decision, #487 and #488)").
+unfilled, or is rejected by the venue, once, and two of its orders
+rejected in a row stop its orders until the owner starts a fresh run (see
+"Amendment (2026-10-18, owner decision, #487 and #488)").
 
 **D7, whole shares, open: both options specified.** The choice is
 configuration (point 6):
@@ -937,27 +938,45 @@ target next changed; point 2 said nothing of a partial fill.
   Its reason may last (a permission, a margin requirement, a contract
   IBKR will not trade), so the re-plan is bounded: the next decided session
   re-plans it **once**, through the same re-plan as a refusal, recording the
-  cause `rejected`. If the venue rejects that re-planned order too, nothing
-  plans it again: the decision of the session at whose close the second
-  rejection is read records it (`boost.replan_withheld`, the order and its
-  shares), the reporter pages it once (urgent), and the account waits off
-  its target until the target changes or a fresh run, as after a refusal
-  under Degraded or Halted. A re-planned order that is instead canceled
+  cause `rejected`. A re-planned order that is instead canceled
   part-filled is re-planned as any other. The bound counts orders the venue
   rejected, not decisions: when the gate refuses the one re-plan (the kill
   switch, a stale broker snapshot) and a later decided session releases it,
   that order is still the rejection's one re-plan, and a restart from the
-  decision that recorded the refusal recovers it as such. The bound holds
-  only while the target in force is unchanged: an order planned to a new
-  target is a new order, with its own one re-plan, so a rejection's re-plan
-  pending when the target changes does not mark the order to the new
-  target, and a restart from a decision recording it reads it the same
-  way. A second rejection read while a refusal's re-plan is pending is
-  recorded all the same. One
-  read during a restarted run's warm-up, whose sessions only feed the
-  indicators, is recorded by the first decision after it. (The
-  orchestrator's reading of a review finding, put to the owner for
-  confirmation with the `unfilled` extension.)
+  decision that recorded the refusal recovers it as such. The one re-plan
+  is marked only while the target in force is unchanged: an order planned
+  to a new target is a new order, so a rejection's re-plan pending when the
+  target changes does not mark the order to the new target, and a restart
+  from a decision recording it reads it the same way, by the target in
+  force before that decision and the target it decided.
+- **Two rejections in a row stop Boost's orders.** A target that changes
+  at each session (the latch flipping) would give every order its own one
+  re-plan, so a venue that rejects for a lasting reason would be sent an
+  order at every session. The bound is therefore also independent of the
+  target: when the venue has rejected **2** of the account's orders in a
+  row (the watched orders, those decided sessions released; the sale back
+  to 98% is ADR 0019's one attempt and not counted), whatever their
+  targets, the decision of the session at whose close the second rejection
+  is read records it (`boost.replan_withheld`, the order and its shares),
+  the reporter pages it once (urgent), and **no session orders again**, a
+  change of target included, until the owner starts a fresh run he
+  approves (`operator approve`, with `-clear-incident` when the run also
+  ended in an incident; ADR 0027). A watched order that fills in full or
+  that the venue accepts and then cancels ends the run of rejections. A
+  re-planned order rejected again is always the second in a row, so this
+  bound holds it too. Every decision records the rejections in a row as
+  they stand after it (`boost.venue_rejections`, omitted when none), so a
+  run restarted from the decision waits as the full run does; a fresh run
+  starts from none. A refusal's re-plan pending at the second rejection is
+  dropped, and the rejection is recorded all the same. One read during a
+  restarted run's warm-up, whose sessions only feed the indicators, is
+  recorded by the first decision after it. The limit, 2, is a constant of
+  the target-weight module (`maxVenueRejections`), not configuration. While
+  the orders are stopped an exit is not ordered either: the page asks the
+  owner to act, and the margin alarm's sale back to 98% (ADR 0019) still
+  runs. (The orchestrator's reading of review findings, put to the owner for
+  confirmation with the `unfilled` extension, the one re-plan of a
+  rejection, and the skipped session.)
 - An order filled in full plans nothing more, and a re-plan it set is
   cleared if the rest of its fills arrive before the session that would
   plan it: re-planning then would trade drift toward an unchanged target.
@@ -985,7 +1004,9 @@ target next changed; point 2 said nothing of a partial fill.
   it (`boost.watched`: client order ID, side, released shares, limit, shares
   filled so far and each execution (`fills`: fill ID, shares, price,
   commission, time), its terminal status once reported and when it
-  occurred (`ended_at`), and whether it is a rejection's one re-plan). A
+  occurred (`ended_at`), whether it is a rejection's one re-plan, and its
+  venue order ID (`venue_order_id`, from the first lifecycle report on it,
+  omitted before one)). A
   run restarted from that decision watches the order still and reads the
   venue's fill and lifecycle reports on it as on an order it released,
   adding it to any order a broker snapshot read before the recovery
@@ -1000,11 +1021,49 @@ target next changed; point 2 said nothing of a partial fill.
   recorded executions as stamped and ended at its recorded end, so a later
   exit cannot sell its shares again. A broker snapshot read before the
   recovery that listed it, as a sell the gate did not then know, is read as
-  its listing, matched by its client order ID and instrument, so it is
-  counted once. A run restarted from a withheld
+  its listing, so it is counted once. IBKR does not always echo the client
+  order ID on its listing, so the listing is matched in this order:
+  1. by its client order ID and instrument;
+  2. failing that, with no client order ID echoed, by the venue order ID
+     the decision recorded, for the listings before the recovery and every
+     one after it. The same holds for a sell this run released: the venue's
+     lifecycle report names its venue order ID, and a listing under it with
+     no client order ID is its own. This needs the producer to write the
+     same IBKR identifier (the `permId`) as a lifecycle report's `order_id`
+     and a listing's `broker_order_id`; where they differ, nothing matches
+     and the sell is counted twice, which sells less, never more;
+  3. failing both, when the decision recorded no venue order ID (the
+     earlier run saw no lifecycle report on the order), the first unknown
+     listing, by venue order ID, with no client order ID and exactly the
+     restored sell's remaining shares (released less the executions the
+     decision holds) is taken to be it: it is not counted while the restored
+     sell has not ended, the restored sell being counted once in its place,
+     and so are its later listings. A listing of the restored sell under its
+     client order ID beside it, or a lifecycle report naming another venue
+     order ID, ends the pairing, and both are counted. A listing of another
+     size is never paired.
+  **Failure mode of 3.** If the paired listing was in fact a hand sell of
+  identical size, and the restored sell had not yet reached IBKR, the hand
+  sell's shares are not counted until a snapshot or report tells the two
+  apart, or either sell ends or fills. That is the one case where the
+  pending rule counts fewer working shares than are truly working, so a
+  sell sized meanwhile (an exit, the sale back to 98%) can be that hand
+  sell's size larger than the free shares: it is **not** the fail-closed
+  direction for sizing a sale, which is to count a working sell twice
+  rather than miss one. It is accepted because the alternative, counting
+  the restored sell twice for its whole life whenever IBKR omits the client
+  order ID, under-sells the sale back to 98% in a margin emergency, and
+  because a hand sell placed in the same instrument, of the same size, in
+  the window between the earlier run's release and the restart is the
+  owner's own action, which reconciliation explains (ADR 0019). (The
+  orchestrator's reading of a review finding, put to the owner.) A run
+  restarted from a withheld
   decision recovers the pending re-plan's cause; one restarted from a
   decided decision whose own order was refused recovers `refused`, or
-  `rejected` when that order was a rejection's one re-plan.
+  `rejected` when that order was a rejection's one re-plan: the decision
+  entered with `rejected` and decided the target in force before it
+  (`target_in_force`), so an order refused at a change of target recovers
+  `refused`, as the full run reads it.
 - **Which start reads a recorded decision.** Neither of the engine's two
   starts feeds the handler a recorded decision today. A **resume** after a
   crash (ADR 0027) re-applies every input of the crashed log, so the order,
@@ -1026,15 +1085,17 @@ target next changed; point 2 said nothing of a partial fill.
 
 A journal holding a gap or such an order decides differently under an
 earlier build: target-weight rules version **1.18.0** (ADR 0016).
-`strategy.targets.decided` moves to schema version **6** for the four new
-Boost fields, `replan`, `replan_withheld`, `watched` and `gap_sessions`,
-each omitted when unset; the refused re-plan now records its cause too. The synthetic cases are the
+`strategy.targets.decided` moves to schema version **6** for the five new
+Boost fields, `replan`, `replan_withheld`, `watched` (with its
+`venue_order_id`), `venue_rejections` and `gap_sessions`, each omitted when
+unset; the refused re-plan now records its cause too. The synthetic cases are the
 golden cases for both rules (`TestSyntheticGoldenBoostGap`;
 `TestAPartFilledOrderIsReplannedAtTheNextDecision` and
 `TestAnExpiredUnfilledOrderIsReplannedInFull`,
 `TestACancelRecordedAfterItsExpirySessionIsStillReplanned`,
-`TestAPendingPartFillReplanReadsTheLatestFills` and
-`TestAVenueRejectionIsReplannedOnceThenWithheld`, whose quantities are
+`TestAPendingPartFillReplanReadsTheLatestFills`,
+`TestAVenueRejectionIsReplannedOnceThenWithheld` and
+`TestTwoRejectionsInARowAwaitTheOwnerAcrossATargetChange`, whose quantities are
 computed by hand in their comments; the gap case is built so that skipping
 and LEAN's fill-forward give a different RSI(2) and different means). The parity tool's Boost comparison is
 unchanged: QuantConnect's exports have neither a gap nor a partial fill.

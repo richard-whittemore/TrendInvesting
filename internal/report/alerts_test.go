@@ -228,8 +228,9 @@ func TestABoostGapPagesOnceAndSaysDecisionsContinue(t *testing.T) {
 // TestAWithheldRejectionReplanPagesOnce: a Boost decision that records a
 // re-plan withheld after the venue rejected the re-planned order again
 // (ADR 0026, point 2, "Boost", amended 2026-10-18) is one urgent page naming
-// the order and its shares and saying the program will not plan it again;
-// the decisions after it page nothing more.
+// the order and its shares and saying the program sends no more orders
+// until the owner approves a fresh run; the decisions after it page nothing
+// more.
 func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 	s := newStream(t)
 	s.add(event.TargetsDecidedEventType, event.TargetsDecidedSchemaVersion, "targets:0", day(0),
@@ -249,7 +250,10 @@ func TestAWithheldRejectionReplanPagesOnce(t *testing.T) {
 	if a.Kind != report.KindRefusal || a.Severity != report.Urgent {
 		t.Errorf("page: %s %v", a.Kind, a.Severity)
 	}
-	for _, want := range []string{"tw-7", "37", "rejected", "will not plan it again"} {
+	// Two orders rejected in a row stop Boost's orders until the owner
+	// approves a fresh run, whatever the target does (ADR 0026, point 2,
+	// "Boost", amended 2026-10-18), and the page says so.
+	for _, want := range []string{"tw-7", "37", "rejected", "two orders in a row", "sends no more orders", "operator approve", "fresh run"} {
 		if !contains(a.Body, want) {
 			t.Errorf("page lacks %q: %q", want, a.Body)
 		}

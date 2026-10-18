@@ -123,28 +123,32 @@ import (
 //     session released ends with shares unfilled, as after a refusal, where
 //     1.17.0 left the account short until the target changed: canceled
 //     (a DAY order's expiry included) part-filled or with nothing filled, or
-//     rejected by the venue (invalid), which is re-planned once and, rejected
-//     again, withheld and paged; a gate refusal of that one re-plan does not
-//     reset the bound. The order is watched until it fills in full or a
+//     rejected by the venue (invalid), which is re-planned once; a gate
+//     refusal of that one re-plan does not reset the bound. Two of the
+//     account's orders rejected in a row, whatever their targets, are
+//     withheld and paged once, and no session orders again until the owner
+//     starts a fresh run. The order is watched until it fills in full or a
 //     decided session plans after its end; only a later decided session's
 //     released order replaces it, and each decision records it with its
-//     executions and its end, so a restart watches it still, counts an
-//     execution sent again once, and nets a sell as any working sell. Each
-//     decision records the cause of the re-plan it planned or carries
-//     (refused, part-filled, unfilled or rejected, with the order and its
-//     filled and released shares; targets.decided schema version 6). The
-//     part-fill rule is the owner's decision of 2026-10-18; its extension to
-//     an order with nothing filled, and the bound on a rejection's re-plan,
-//     are the orchestrator's readings, put to the owner for confirmation. A
-//     session with no bar is
-//     withheld and skipped: the indicators continue at the next bar over the
-//     closes received, and that decision names the gap (gap_sessions), where
-//     1.17.0 withheld every later session. That a missing bar must not stop
-//     the run is the owner's decision of 2026-10-18; skipping the session,
-//     rather than filling the close forward as LEAN does, is the
-//     orchestrator's reading, put to the owner for confirmation (ADR 0026,
-//     point 2, "Boost", and point 5, amended 2026-10-18). A journal holding
-//     such an order or gap decides differently under 1.17.0.
+//     executions, its end and its venue order ID, so a restart watches it
+//     still, counts an execution sent again once, and nets a sell as any
+//     working sell, matched to IBKR's listing of it by that ID when IBKR
+//     echoes no client order ID. Each decision records the rejections in a
+//     row, and the cause of the re-plan it planned or carries (refused,
+//     part-filled, unfilled or rejected, with the order and its filled and
+//     released shares; targets.decided schema version 6). The part-fill
+//     rule is the owner's decision of 2026-10-18; its extension to an order
+//     with nothing filled, the bound on a rejection's re-plan, and the bound
+//     of two rejections in a row, are the orchestrator's readings, put to the
+//     owner for confirmation. A session with no bar is withheld and skipped:
+//     the indicators continue at the next bar over the closes received, and
+//     that decision names the gap (gap_sessions), where 1.17.0 withheld every
+//     later session. That a missing bar must not stop the run is the owner's
+//     decision of 2026-10-18; skipping the session, rather than filling the
+//     close forward as LEAN does, is the orchestrator's reading, put to the
+//     owner for confirmation (ADR 0026, point 2, "Boost", and point 5,
+//     amended 2026-10-18). A journal holding such an order or gap decides
+//     differently under 1.17.0.
 const RulesVersion = "1.18.0"
 
 // source names this handler on every envelope it emits.
@@ -152,6 +156,14 @@ const source = "target-weight"
 
 // idTime is the fixed timestamp layout of the decision IDs this handler builds.
 const idTime = "2006-01-02T15:04:05Z07:00"
+
+// maxVenueRejections is how many of the account's orders the venue may
+// reject (invalid) in a row, whatever their targets, before Boost orders
+// nothing more until the owner starts a fresh run: a target that changes at
+// each session would otherwise give every rejected order its own re-plan
+// (ADR 0026, point 2, "Boost", amended 2026-10-18; the orchestrator's
+// reading, put to the owner for confirmation).
+const maxVenueRejections = 2
 
 // Options are run-level facts, recorded beside the configuration hash rather
 // than inside it (ADR 0016).
@@ -261,7 +273,12 @@ type Handler struct {
 	// released order replaces it, since that order was sized from the
 	// account as it stood (settleWatch).
 	watch *watched
-	// withheld is a rejection's one re-plan rejected again, read at a close
+	// rejections counts the watched orders the venue rejected in a row,
+	// whatever their targets; one that filled in full or was canceled ends
+	// the run (BoostFigures.VenueRejections). At maxVenueRejections no
+	// session orders until the owner starts a fresh run.
+	rejections int
+	// withheld is the second order rejected in a row, read at a close
 	// and held until the next decision, decided or withheld, records it
 	// (BoostFigures.ReplanWithheld): a session that only feeds the
 	// indicators, as a restarted run's warm-up does, records nothing.
@@ -450,15 +467,20 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 	// session, by this run as by the earlier one (ADR 0026, point 2, "Boost",
 	// amended 2026-10-18).
 	h.replan = p.Boost.ReplanPending
+	h.rejections = p.Boost.VenueRejections
 	// A withheld decision carries the pending re-plan's cause forward. A
 	// decided one left a re-plan pending only by its own order's refusal:
 	// refused, unless the order refused was a rejection's one re-plan, which
-	// stays that re-plan until an order is released (ADR 0026, point 2,
-	// "Boost", amended 2026-10-18).
+	// stays that re-plan until an order is released, but only while the
+	// target is unchanged: an order to a new target is a new order, read by
+	// the rule applySession reads it by (ADR 0026, point 2, "Boost", and
+	// point 5, amended 2026-10-18). The decision records the target in force
+	// before it and the target it decided.
+	sameTarget := p.Outcome == event.TargetsOutcomeDecided && p.Boost.TargetInForceSet && p.Boost.TargetInForce == p.Targets[0].Weight
 	switch {
 	case !h.replan:
 	case p.Outcome == event.TargetsOutcomeWithheld && p.Boost.Replan.Cause != "",
-		p.Boost.Replan.Cause == event.ReplanCauseRejected:
+		p.Boost.Replan.Cause == event.ReplanCauseRejected && sameTarget:
 		h.replanCause = p.Boost.Replan
 	default:
 		h.replanCause = event.BoostReplan{Cause: event.ReplanCauseRefused}
@@ -479,11 +501,11 @@ func (h *Handler) applyRecovery(in event.Envelope) error {
 		for i, f := range w.Fills {
 			fills[i] = w.Fill(h.cfg.AccountID, h.cfg.Boost.InstrumentID, f)
 		}
-		if err := h.gate.RestoreReleased(o, fills, w.EndedAt); err != nil {
+		if err := h.gate.RestoreReleased(o, fills, w.EndedAt, w.VenueOrderID); err != nil {
 			return fmt.Errorf("targetweight: recovered decision %s: %w", in.ID, err)
 		}
 		h.release(o)
-		h.watch = &watched{order: o, status: w.Status, endedAt: w.EndedAt, afterRejection: w.AfterRejection}
+		h.watch = &watched{order: o, status: w.Status, endedAt: w.EndedAt, afterRejection: w.AfterRejection, venueID: w.VenueOrderID}
 	}
 	h.quietUntil = p.SessionPeriodEnd
 	return nil
@@ -676,6 +698,16 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 	h.inForce, h.inForceSet = decided.Targets[0].Weight, true
 	h.gate.RecordDecision(decisionID)
 
+	// Two of the account's orders rejected in a row, whatever their targets,
+	// wait for the owner: no session orders until a fresh run, started from
+	// the owner's approval, which carries no count (ADR 0026, point 2,
+	// "Boost", amended 2026-10-18; ADR 0027). The decision records the
+	// count, so a restart from it waits too.
+	if h.rejections >= maxVenueRejections {
+		b.settleReplan(at, decided)
+		return b.result()
+	}
+
 	// The planner and the gate cannot refuse what this handler has validated
 	// (the decision just built, a validated snapshot, the bar's raw close and
 	// the configured band and limits), so an error from either is a defect.
@@ -686,12 +718,11 @@ func (h *Handler) applySession(in event.Envelope) ([]event.Envelope, error) {
 		Replan:       h.replan,
 	})
 	b.fail(err)
-	// A rejection's one re-plan is marked on the order it releases, so a
-	// second rejection withholds it (settleWatch). The bound holds only
-	// while the target is unchanged: an order to a new target is a new
-	// order, with its own one re-plan, as the account waits off its target
-	// only "until the target changes" (ADR 0026, point 2, "Boost", amended
-	// 2026-10-18).
+	// A rejection's one re-plan is marked on the order it releases. The mark
+	// holds only while the target is unchanged: an order to a new target is
+	// a new order, not the rejection's re-plan, though a rejection of it is
+	// still the second in a row (settleWatch; ADR 0026, point 2, "Boost",
+	// amended 2026-10-18).
 	afterRejection := h.replan && h.replanCause.Cause == event.ReplanCauseRejected && sameTarget
 	rejection := h.replanCause
 	h.replan, h.replanCause = false, event.BoostReplan{}
@@ -867,8 +898,18 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 	if err := h.gate.ObserveLifecycle(p); err != nil {
 		return fmt.Errorf("targetweight: %s %s: %w", in.Type, in.ID, err)
 	}
+	if w := h.watch; w != nil && w.order.ClientOrderID == p.ClientOrderID && w.venueID == "" {
+		w.venueID = p.OrderID
+	}
 	if w := h.watch; w != nil && w.order.ClientOrderID == p.ClientOrderID && p.Terminal() && w.status == "" {
 		w.status, w.endedAt = p.Status, p.OccurredAt.UTC()
+		// A rejection extends the account's run of rejections; an order the
+		// venue accepted and then canceled ends it.
+		if p.Status == event.OrderLifecycleStatusInvalid {
+			h.rejections++
+		} else {
+			h.rejections = 0
+		}
 	}
 	return nil
 }
@@ -876,12 +917,14 @@ func (h *Handler) applyLifecycle(in event.Envelope) error {
 // watched is the order the latest decided session released, and its
 // status once the venue ended it, canceled (a DAY order's expiry included)
 // or invalid, and when that end occurred; empty while it may still execute.
-// afterRejection marks the one re-plan of an order the venue rejected.
+// afterRejection marks the one re-plan of an order the venue rejected;
+// venueID is the venue's own ID for it, from the first lifecycle report.
 type watched struct {
 	order          event.OrderReleasedPayload
 	status         string
 	endedAt        time.Time
 	afterRejection bool
+	venueID        string
 }
 
 // settleWatch reads the watched order as a session closes (ADR 0026, point
@@ -895,13 +938,15 @@ type watched struct {
 // order's remainder included, and keeps its cause.
 //
 // An order the venue rejected (invalid) may have been refused for a reason
-// that lasts, so it is re-planned once, cause rejected, as a refusal is;
-// when that re-planned order is rejected too, nothing is planned again: the
-// withheld re-plan is held until a decision records it and the reporter
-// pages it, the next session that decides or is withheld after any
-// warm-up, and the account waits for its target to change, as after a
-// refusal under Degraded or Halted. A refusal's re-plan already pending
-// does not hide that second rejection: it is recorded all the same.
+// that lasts, so it is re-planned once, cause rejected, as a refusal is.
+// When the venue has rejected maxVenueRejections of the account's watched
+// orders in a row, whatever their targets (that re-planned order, or an
+// order to a new target), nothing is planned again: the rejection is held
+// until a decision records it and the reporter pages it, the next session
+// that decides or is withheld after any warm-up, and no session orders
+// until the owner starts a fresh run. A refusal's re-plan already pending
+// is dropped and does not hide that rejection: it is recorded all the
+// same.
 func (h *Handler) settleWatch() {
 	w := h.watch
 	if w == nil {
@@ -915,9 +960,13 @@ func (h *Handler) settleWatch() {
 		if own {
 			h.replan, h.replanCause = false, event.BoostReplan{}
 		}
+		h.rejections = 0
 		h.watch = nil
-	case w.status == event.OrderLifecycleStatusInvalid && w.afterRejection:
+	case w.status == event.OrderLifecycleStatusInvalid && h.rejections >= maxVenueRejections:
+		// A rejection's one re-plan is always the second rejection in a row,
+		// so this bound holds it too.
 		h.watch = nil
+		h.replan, h.replanCause = false, event.BoostReplan{}
 		h.withheld = event.BoostReplan{Cause: event.ReplanCauseRejected, ClientOrderID: id, Filled: filled, Released: released}
 	case w.status == "", h.replan && !own:
 	default:
@@ -952,6 +1001,7 @@ func (h *Handler) figures(r boost.Readings, latchedBefore bool) event.BoostFigur
 		LatchedBefore: latchedBefore, LatchedAfter: h.latched,
 		TargetInForce: h.inForce, TargetInForceSet: h.inForceSet,
 		ReplanPending: h.replan, Replan: h.replanCause, Watched: h.watchedFigures(),
+		VenueRejections: h.rejections,
 	}
 }
 
@@ -971,6 +1021,7 @@ func (h *Handler) watchedFigures() event.BoostWatchedOrder {
 	return event.BoostWatchedOrder{
 		ClientOrderID: w.order.ClientOrderID, Side: w.order.Side, Released: w.order.Quantity, LimitPrice: w.order.LimitPrice,
 		Filled: h.gate.Filled(w.order.ClientOrderID), Fills: fills, Status: w.status, EndedAt: w.endedAt, AfterRejection: w.afterRejection,
+		VenueOrderID: w.venueID,
 	}
 }
 

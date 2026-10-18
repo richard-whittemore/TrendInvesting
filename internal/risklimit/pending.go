@@ -2,6 +2,7 @@ package risklimit
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -52,7 +53,9 @@ import (
 //   - Never below the truth (fail closed): toGo(P) is never below what can
 //     truly still sell after P, so remains is never above what will truly be
 //     held, and a sell sized from V's holding net of unshown(V) never sells a
-//     share that a working sell has sold since V or may still sell.
+//     share that a working sell has sold since V or may still sell. The one
+//     exception is a restored sell taken to be an unknown listing of its
+//     size (restore), when that listing was in fact a hand sell.
 //   - Monotone in facts: a fill report, a lifecycle end or a snapshot only
 //     adds to what is known, so never raises unshown at a view; only a
 //     release, or a listing of an unknown sell where it was not listed or
@@ -130,12 +133,17 @@ type ledgerSell struct {
 	// since is the number of snapshots recorded before its release.
 	since int
 	// fills are its fill reports; listings its remaining in each broker
-	// snapshot that read the open orders and listed it.
+	// snapshot that read the open orders and listed it, in no order the
+	// rule reads (filledBy).
 	fills, listings []stamped
 	// ended is set by a canceled or invalid lifecycle report, end the
 	// earliest such report's second.
 	ended bool
 	end   time.Time
+	// venueID is the sell's venue order ID, as a lifecycle report on it, or
+	// a restored sell's decision, recorded it: a listing under it with no
+	// client order ID is the sell's own (learnVenue).
+	venueID string
 }
 
 // reference is a snapshot that read the holding, and what it held.
@@ -164,10 +172,13 @@ type sellLedger struct {
 }
 
 // unknownSell is a sell the broker lists that the gate did not release: the
-// client order ID it was listed with, and its listings.
+// client order ID it was listed with, and its listings. twin is the
+// restored sell it is taken to be (restore), counted in its place while
+// that sell has not ended.
 type unknownSell struct {
 	client   string
 	listings []stamped
+	twin     *ledgerSell
 }
 
 func newSellLedger() sellLedger {
@@ -187,16 +198,43 @@ func (l *sellLedger) release(client, instrumentID string, quantity int64) {
 // restore records a sell an earlier run released, before every snapshot
 // this run records, so no reference of this run is taken before it: first in
 // release order. A broker snapshot recorded before the restore may already
-// list it, as an unknown sell: each such listing, matched by its client
-// order ID and instrument as listOpenOrders matches a released sell's, is
-// taken onto the restored sell, so it is counted once (the invariant
-// "Unknown sells are counted once" above).
-func (l *sellLedger) restore(client, instrumentID string, quantity int64) *ledgerSell {
-	s := &ledgerSell{instrumentID: instrumentID, released: quantity}
-	for id, u := range l.unknown[instrumentID] {
-		if u.client == client {
+// list it, as an unknown sell, and IBKR does not always echo its client
+// order ID, so the restored sell is counted once (the invariant "Unknown
+// sells are counted once" above; ADR 0026, point 5, amended 2026-10-18):
+//
+//   - a listing under its client order ID and instrument, as listOpenOrders
+//     matches a released sell's, is taken onto it;
+//   - failing that, a listing with no client order ID under the venue order
+//     ID venueID its decision recorded is taken onto it, and so is every
+//     later one (listOpenOrders);
+//   - failing both, when its decision recorded no venue order ID, the first
+//     unknown sell, by venue order ID, listed with no client order ID and
+//     whose latest listing is exactly the remaining shares, released less
+//     filled, is taken to be it: that unknown sell is not counted while the
+//     restored sell has not ended, the restored sell being counted in its
+//     place. A listing of the restored sell under its client order ID beside
+//     it ends the pairing (listOpenOrders). If that listing was in fact a
+//     hand sell of the same size, the hand sell's shares are not counted
+//     until then, or until either ends: the one case where the bound may
+//     fall below the truth (ADR 0026, point 5, amended 2026-10-18).
+func (l *sellLedger) restore(client, instrumentID string, quantity, remaining int64, venueID string) *ledgerSell {
+	s := &ledgerSell{instrumentID: instrumentID, released: quantity, venueID: venueID}
+	byID := l.unknown[instrumentID]
+	ids := slices.Sorted(maps.Keys(byID))
+	matched := false
+	for _, id := range ids {
+		if u := byID[id]; u.client == client || venueID != "" && u.client == "" && id == venueID {
 			s.listings = append(s.listings, u.listings...)
-			delete(l.unknown[instrumentID], id)
+			delete(byID, id)
+			matched = true
+		}
+	}
+	if !matched && venueID == "" {
+		for _, id := range ids {
+			if u := byID[id]; u.client == "" && u.twin == nil && u.listings[len(u.listings)-1].quantity == remaining {
+				u.twin = s
+				break
+			}
 		}
 	}
 	l.sells[client] = s
@@ -225,7 +263,9 @@ func (l *sellLedger) snapshot(asOf time.Time, held map[string]int64, isReference
 }
 
 // listOpenOrders records the open orders a broker snapshot v read: each sell
-// of ours it lists, and each sell it lists that the gate did not release.
+// of ours it lists, by its client order ID or, with none echoed, by its
+// venue order ID (learnVenue), and each sell it lists that the gate did not
+// release.
 func (l *sellLedger) listOpenOrders(v view, orders []event.BrokerOrder) {
 	l.openOrders = append(l.openOrders, v)
 	for _, o := range orders {
@@ -234,6 +274,11 @@ func (l *sellLedger) listOpenOrders(v view, orders []event.BrokerOrder) {
 		}
 		listing := stamped{at: v.at, by: v.by, quantity: o.RemainingQuantity}
 		if s := l.sells[o.ClientOrderID]; s != nil && s.instrumentID == o.InstrumentID {
+			s.listings = append(s.listings, listing)
+			l.untwin(s, o.BrokerOrderID)
+			continue
+		}
+		if s := l.byVenue(o); s != nil {
 			s.listings = append(s.listings, listing)
 			continue
 		}
@@ -249,6 +294,49 @@ func (l *sellLedger) listOpenOrders(v view, orders []event.BrokerOrder) {
 		}
 		u.client = o.ClientOrderID
 		u.listings = append(u.listings, listing)
+	}
+}
+
+// learnVenue records venueID, the venue order ID a lifecycle report names,
+// as the released sell s's, when none is recorded: IBKR does not always echo
+// a client order ID, so a listing under that ID with none, read before the
+// report or after it, is s's own and counted once (the invariant "Unknown
+// sells are counted once" above). An unknown sell taken to be s under
+// another venue order ID is not s (restore).
+func (l *sellLedger) learnVenue(s *ledgerSell, venueID string) {
+	if venueID == "" || s.venueID != "" {
+		return
+	}
+	s.venueID = venueID
+	if u := l.unknown[s.instrumentID][venueID]; u != nil && u.client == "" && (u.twin == nil || u.twin == s) {
+		s.listings = append(s.listings, u.listings...)
+		delete(l.unknown[s.instrumentID], venueID)
+	}
+	l.untwin(s, venueID)
+}
+
+// byVenue returns the released sell whose venue order ID is o's, when IBKR
+// lists o with no client order ID (learnVenue, restore).
+func (l *sellLedger) byVenue(o event.BrokerOrder) *ledgerSell {
+	if o.ClientOrderID != "" || o.BrokerOrderID == "" {
+		return nil
+	}
+	for _, s := range l.byInstrument[o.InstrumentID] {
+		if s.venueID == o.BrokerOrderID {
+			return s
+		}
+	}
+	return nil
+}
+
+// untwin ends the pairing of s with an unknown sell listed under another
+// venue order ID than s's own listing, venueID: two sells, each counted
+// (restore).
+func (l *sellLedger) untwin(s *ledgerSell, venueID string) {
+	for id, u := range l.unknown[s.instrumentID] {
+		if u.twin == s && id != venueID {
+			u.twin = nil
+		}
 	}
 }
 
@@ -305,6 +393,9 @@ func (l *sellLedger) toGo(instrumentID string, v view) (toGo int64, quiet, ok bo
 		}
 	}
 	for _, u := range l.unknown[instrumentID] {
+		if u.twin != nil && !u.twin.endedBefore(v) {
+			continue
+		}
 		listings := u.listings
 		// Broker snapshots follow one another, so the listings credited to v
 		// come first.
@@ -492,8 +583,10 @@ func (g *Gate) Fills(clientOrderID string) []event.TargetWeightFillPayload {
 
 // RestoreReleased restores an order an earlier run released and a run
 // restarted from its recorded decision still watches (ADR 0026, point 5),
-// with the executions its fill reports stated before the restart and, when
-// the venue had ended it, the time of that end. The venue's later reports on
+// with the executions its fill reports stated before the restart, when the
+// venue had ended it the time of that end, and its venue order ID when the
+// decision recorded one (empty otherwise), by which IBKR's listing of a
+// restored sell with no client order ID echoed is matched (restore). The venue's later reports on
 // it are read against it: an execution restored, sent again, is a
 // redelivery that changes nothing (ObserveFill; ADR 0019, "Explained
 // means"). A restored sell is still being sold, so it is netted as any
@@ -503,7 +596,7 @@ func (g *Gate) Fills(clientOrderID string) []event.TargetWeightFillPayload {
 // gate's account's and not already known, its executions its own, with
 // distinct fill ids and fewer shares than released; on a refusal nothing is
 // restored.
-func (g *Gate) RestoreReleased(o event.OrderReleasedPayload, fills []event.TargetWeightFillPayload, ended time.Time) error {
+func (g *Gate) RestoreReleased(o event.OrderReleasedPayload, fills []event.TargetWeightFillPayload, ended time.Time, venueOrderID string) error {
 	switch _, known := g.orders[o.ClientOrderID]; {
 	case o.AccountID != g.accountID:
 		return fmt.Errorf("risklimit: restored order %s is for account %q; this gate is %q", o.ClientOrderID, o.AccountID, g.accountID)
@@ -542,7 +635,7 @@ func (g *Gate) RestoreReleased(o event.OrderReleasedPayload, fills []event.Targe
 		},
 	}
 	if o.Side == event.OrderSideSell {
-		s := g.ledger.restore(o.ClientOrderID, o.InstrumentID, o.Quantity)
+		s := g.ledger.restore(o.ClientOrderID, o.InstrumentID, o.Quantity, o.Quantity-filled, venueOrderID)
 		if !ended.IsZero() {
 			s.ended, s.end = true, ended.Truncate(time.Second)
 		}
@@ -556,7 +649,9 @@ func (g *Gate) RestoreReleased(o event.OrderReleasedPayload, fills []event.Targe
 
 // ObserveLifecycle applies a recorded lifecycle report on a released order:
 // canceled or invalid ends a sell's remainder, from the earliest such
-// report's second; submitted and cancel-pending leave it pending. The
+// report's second; submitted and cancel-pending leave it pending. The venue
+// order ID it names is the sell's, so IBKR's listing of the sell with no
+// client order ID echoed is counted as the sell's own (learnVenue). The
 // report's limit is the order's when within event.LimitPriceTolerance of it
 // (event.SameLimitPrice), the rule the engine and the reporter read a report
 // by.
@@ -571,7 +666,11 @@ func (g *Gate) ObserveLifecycle(p event.LimitOrderLifecyclePayload) error {
 	if p.Quantity != o.planned.Quantity || !event.SameLimitPrice(p.LimitPrice, o.planned.LimitPrice) {
 		return fmt.Errorf("risklimit: a lifecycle report on order %s reports %d at %v; the order is %d at %v", p.ClientOrderID, p.Quantity, p.LimitPrice, o.planned.Quantity, o.planned.LimitPrice)
 	}
-	if s := g.ledger.sells[p.ClientOrderID]; s != nil && p.Terminal() {
+	s := g.ledger.sells[p.ClientOrderID]
+	if s != nil {
+		g.ledger.learnVenue(s, p.OrderID)
+	}
+	if s != nil && p.Terminal() {
 		if end := p.OccurredAt.Truncate(time.Second); !s.ended || end.Before(s.end) {
 			s.ended, s.end = true, end
 		}

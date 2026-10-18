@@ -447,15 +447,15 @@ func engineStateAlert(account string, e event.Envelope, p event.EngineStatePaylo
 		Title: fmt.Sprintf("%s: engine %s (%s)", account, p.State, p.Reason), Body: body + acknowledgeLine(key)}
 }
 
-// rejectionAlert states a Boost re-plan withheld because the venue rejected
-// the re-planned order too (ADR 0026, point 2, "Boost", amended
-// 2026-10-18): the program does not plan it again, so the account stays off
-// its target until the target changes, and the owner finds the reason.
+// rejectionAlert states the second of the account's Boost orders the venue
+// rejected in a row, whatever their targets (ADR 0026, point 2, "Boost",
+// amended 2026-10-18): the program sends no more orders for the account
+// until the owner finds the reason and approves a fresh run.
 func rejectionAlert(account string, e event.Envelope, w event.BoostReplan) Alert {
 	return Alert{
 		Key: "replan-withheld:" + w.ClientOrderID + "@" + account, Kind: KindRefusal, Severity: Urgent, AccountID: account, At: e.EventTime,
-		Title: fmt.Sprintf("%s: order %s rejected again, not re-planned", account, w.ClientOrderID),
-		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled), which re-planned an order IBKR had rejected before. The program will not plan it again: the account stays off its target until the target changes. Find why IBKR rejects the order in IBKR's order log (journal-query orders lists the rejection) before the next change of target.",
+		Title: fmt.Sprintf("%s: order %s rejected, two orders in a row; Boost orders stopped", account, w.ClientOrderID),
+		Body: fmt.Sprintf("IBKR rejected order %s (%d of %d shares filled), the second of this account's orders it has rejected, two orders in a row. The program sends no more orders for this account, whatever the target does, until you start a fresh run: find why IBKR rejects the orders in IBKR's order log (journal-query orders lists the rejections), fix it, then approve a fresh run (operator approve).",
 			w.ClientOrderID, w.Filled, w.Released),
 	}
 }

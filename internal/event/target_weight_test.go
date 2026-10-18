@@ -640,3 +640,18 @@ func TestBoostWatchedOrderEqualAndFill(t *testing.T) {
 		t.Errorf("Fill = %+v, want %+v", f, want)
 	}
 }
+
+// TestBoostVenueRejectionsValidate: a Boost decision counts the venue's
+// rejections in a row as a whole number, never below none, and figures with
+// a count are not empty (ADR 0026, point 2, "Boost", amended 2026-10-18).
+func TestBoostVenueRejectionsValidate(t *testing.T) {
+	v := validTargetsDecided()
+	v.Boost.VenueRejections = 2
+	if err := v.Validate(); err != nil {
+		t.Fatalf("two rejections in a row are valid: %v", err)
+	}
+	if (event.BoostFigures{VenueRejections: 1}).IsZero() {
+		t.Error("figures with a rejection count are not empty")
+	}
+	expectInvalid(t, "negative count", v, func(p *event.TargetsDecidedPayload) { p.Boost.VenueRejections = -1 }, "rejections")
+}

@@ -51,10 +51,12 @@ const TargetsDecidedEventType = "strategy.targets.decided"
 //     "Boost", amended 2026-10-18): BoostFigures.Replan, the cause, refused,
 //     part-filled, unfilled or rejected, with such an order's client order
 //     ID and its filled and released shares, omitted when the decision
-//     entered with no re-plan pending; BoostFigures.ReplanWithheld, a
-//     rejection's re-plan rejected again; BoostFigures.Watched, the order
-//     watched for an unfilled remainder with its executions and its end, so
-//     a restart watches it still; and
+//     entered with no re-plan pending; BoostFigures.ReplanWithheld, the
+//     second of the account's orders the venue rejected in a row;
+//     BoostFigures.VenueRejections, the rejections in a row;
+//     BoostFigures.Watched, the order watched for an unfilled remainder with
+//     its executions, its end and its venue order ID, so a restart watches
+//     it still; and
 //     BoostFigures.GapSessions, the sessions with no bar the decision's
 //     readings span (ADR 0026, point 5, amended 2026-10-18). Each is omitted
 //     when unset.
@@ -178,15 +180,23 @@ type BoostFigures struct {
 	// decision's: the gap this decision's readings span (ADR 0026, point 5,
 	// amended 2026-10-18). Omitted when empty.
 	GapSessions []string `json:"gap_sessions,omitempty"`
-	// ReplanWithheld is a re-planned order the venue rejected again, which
-	// no session plans again (ADR 0026, point 2, "Boost", amended
-	// 2026-10-18): cause rejected, with its client order ID and its filled
-	// and released shares. It is recorded once, on the decision of the
+	// ReplanWithheld is the second of the account's orders the venue
+	// rejected in a row, whatever their targets, after which no session
+	// orders until the owner starts a fresh run (ADR 0026, point 2, "Boost",
+	// amended 2026-10-18): cause rejected, with its client order ID and its
+	// filled and released shares. It is recorded once, on the decision of the
 	// session at whose close the second rejection was read or, when that
 	// session only fed the indicators (a restarted run's warm-up), on the
 	// first decision after it, and omitted otherwise.
 	ReplanWithheld BoostReplan       `json:"replan_withheld,omitzero"`
 	Watched        BoostWatchedOrder `json:"watched,omitzero"`
+	// VenueRejections counts, as they stand after this decision, the orders
+	// decided sessions released that the venue rejected (invalid) in a row,
+	// whatever their targets: an order that filled in full or was canceled
+	// ends the run. At two, no session orders until the owner starts a fresh
+	// run (ADR 0026, point 2, "Boost", amended 2026-10-18), and a restart
+	// from the decision recovers it (ADR 0026, point 5). Omitted when none.
+	VenueRejections int `json:"venue_rejections,omitempty"`
 }
 
 // BoostWatchedOrder is the order the latest decided Boost session
@@ -211,6 +221,11 @@ type BoostWatchedOrder struct {
 	Status         string             `json:"status,omitempty"`
 	EndedAt        time.Time          `json:"ended_at,omitzero"`
 	AfterRejection bool               `json:"after_rejection,omitempty"`
+	// VenueOrderID is the venue's own ID for the order, from the first
+	// lifecycle report on it, omitted before one: a run restarted from the
+	// decision matches IBKR's listing of the order by it when IBKR echoes no
+	// client order ID (ADR 0026, point 5, amended 2026-10-18).
+	VenueOrderID string `json:"venue_order_id,omitempty"`
 }
 
 // BoostWatchedFill is one execution of a watched order, as its fill report
@@ -232,6 +247,7 @@ func (w BoostWatchedOrder) IsZero() bool { return w.Equal(BoostWatchedOrder{}) }
 func (w BoostWatchedOrder) Equal(o BoostWatchedOrder) bool {
 	return w.ClientOrderID == o.ClientOrderID && w.Side == o.Side && w.Released == o.Released && w.LimitPrice == o.LimitPrice &&
 		w.Filled == o.Filled && w.Status == o.Status && w.EndedAt.Equal(o.EndedAt) && w.AfterRejection == o.AfterRejection &&
+		w.VenueOrderID == o.VenueOrderID &&
 		slices.EqualFunc(w.Fills, o.Fills, func(a, b BoostWatchedFill) bool {
 			return a.FillID == b.FillID && a.Quantity == b.Quantity && a.Price == b.Price && a.Commission == b.Commission && a.FilledAt.Equal(b.FilledAt)
 		})
@@ -252,7 +268,7 @@ func (b BoostFigures) IsZero() bool {
 	return b.InstrumentID == "" && b.Close == 0 && b.RSI == 0 && !b.RSIReady && b.TrendMean == 0 && !b.TrendMeanReady &&
 		b.ExitMean == 0 && !b.ExitMeanReady && !b.LatchedBefore && !b.LatchedAfter && b.TargetInForce == 0 &&
 		!b.TargetInForceSet && !b.ReplanPending && b.Replan == (BoostReplan{}) && len(b.GapSessions) == 0 &&
-		b.ReplanWithheld == (BoostReplan{}) && b.Watched.IsZero()
+		b.ReplanWithheld == (BoostReplan{}) && b.Watched.IsZero() && b.VenueRejections == 0
 }
 
 // validateGaps checks the gap sessions against the decided session's date:
@@ -288,7 +304,7 @@ const (
 	ReplanCauseUnfilled = "unfilled"
 	// ReplanCauseRejected: the venue refused the last planned order before
 	// it rested (invalid), a reason that may last, so it is re-planned once;
-	// a re-planned order rejected again is withheld
+	// the second order rejected in a row is withheld
 	// (BoostFigures.ReplanWithheld).
 	ReplanCauseRejected = "rejected"
 )
@@ -797,6 +813,9 @@ func (b BoostFigures) validate() []error {
 	}
 	errs = append(errs, b.Replan.validate()...)
 	errs = append(errs, b.Watched.validate()...)
+	if b.VenueRejections < 0 {
+		errs = append(errs, fmt.Errorf("boost venue rejections in a row are never below none; got %d", b.VenueRejections))
+	}
 	if w := b.ReplanWithheld; w != (BoostReplan{}) {
 		if w.Cause != ReplanCauseRejected {
 			errs = append(errs, fmt.Errorf("a withheld boost re-plan is a rejection's; got cause %q", w.Cause))
