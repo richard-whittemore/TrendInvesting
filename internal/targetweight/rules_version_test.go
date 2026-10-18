@@ -129,14 +129,31 @@ func TestRulesVersionDeclaresTheHalfCentLimitMatch(t *testing.T) {
 	}
 }
 
+// TestRulesVersionDeclaresReconciliation: the handler reads
+// account.reconciliation, market.corporate-action and
+// operator.alert.acknowledged, and a reconciliation degrades or halts the
+// account, so a journal written under this build cannot replay under an
+// earlier rules version, which refuses those inputs. 1.8.0 is the lifecycle
+// match's, so the reconciliation's is 1.9.0 (ADR 0016: each rules change
+// takes its own version).
+func TestRulesVersionDeclaresReconciliation(t *testing.T) {
+	t.Parallel()
+
+	for _, earlier := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0"} {
+		if targetweight.RulesVersion == earlier {
+			t.Fatalf("targetweight.RulesVersion = %q, want a version above 1.8.0 once a reconciliation moves the engine state", targetweight.RulesVersion)
+		}
+	}
+}
+
 // TestRulesVersionDeclaresTheOwnersClearance pins ADR 0016's
 // same-rules-version replay guarantee for the owner's clearance and the
 // kill switch's time order: a momentum run reads operator.rebalance.cleared
 // and ends a rebalance in progress (ADR 0026, point 5), and the gate refuses
 // a kill switch stating a time earlier than the last one it applied (ADR
 // 0019, amendment of 2026-10-17), so the build must not claim a version a
-// journal written without those rules carries. 1.9.0 is taken by the
-// reconciliation rules landing in parallel, so this one is 1.10.0.
+// journal written without those rules carries. 1.9.0 is the
+// reconciliation's, so this one is 1.10.0.
 func TestRulesVersionDeclaresTheOwnersClearance(t *testing.T) {
 	t.Parallel()
 

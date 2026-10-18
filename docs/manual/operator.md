@@ -204,8 +204,9 @@ operator approve -log /var/lib/trend-investing/engines/boost/<latest run>.log \
 
 It reads the log and states what it ends in: its file name and the
 fingerprint of its last record, Boost's latch, and the incident it ended
-in (Degraded or Halted, which instruments, and whether that incident's one
-sale back to 98% was already attempted). That incident is carried into the
+in (Degraded or Halted; which instruments, and `total-cash` when a
+[reconciliation](reconciliation.md) found cash it could not explain; and
+whether that incident's one sale back to 98% was already attempted). That incident is carried into the
 new run unless you clear it with `-clear-incident <incident id>`, which is
 the step ADR 0019's recovery procedure ends with, after you have reconciled
 the account. It prints what the approval says and the next step:

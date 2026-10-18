@@ -12,8 +12,9 @@ import (
 // approved log ends with: its last strategy.targets.decided's latched_after,
 // or, when that run decided nothing, the latch its own approval stated (ADR
 // 0026, point 5: the latch is restored, never recomputed). A log with
-// neither leaves the approval's latch as the fresh run's start. logName
-// names the approved log in a refusal.
+// neither leaves the approval's latch as the fresh run's start. The approved
+// log's approval is read at the schema version it was recorded at (ADR 0015).
+// logName names the approved log in a refusal.
 func CheckApprovedLatch(entries []journal.Entry, approval event.OperatorRunApprovedPayload, logName string) error {
 	stated := *approval.Boost.Latched
 	latched, from, found, err := latchAtEnd(entries, logName)
@@ -42,7 +43,7 @@ func latchAtEnd(entries []journal.Entry, logName string) (latched bool, from eve
 			}
 			return decided.Boost.LatchedAfter, env, true, nil
 		case event.OperatorRunApprovedEventType:
-			previous, err := event.DecodeOperatorRunApproved(env.Payload)
+			previous, err := event.DecodeRecordedOperatorRunApproved(env.Payload, env.SchemaVersion)
 			if err != nil {
 				return false, env, false, fmt.Errorf("engine: %s in %s: %w", env.ID, logName, err)
 			}

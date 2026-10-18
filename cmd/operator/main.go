@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -319,8 +320,8 @@ func describe(out io.Writer, name string, end restart.EndState, approval event.O
 		fmt.Fprintf(&b, "; the approval clears incident %s (%s)", approval.IncidentID, end.State)
 	case end.IncidentID != "":
 		fmt.Fprintf(&b, "; the approval carries incident %s in force, %s", end.IncidentID, end.State)
-		if len(end.Scope) > 0 {
-			fmt.Fprintf(&b, " on %s", strings.Join(end.Scope, ", "))
+		if scope := slices.Concat(end.Scope, end.ScopeCash); len(scope) > 0 {
+			fmt.Fprintf(&b, " on %s", strings.Join(scope, ", "))
 		}
 		fmt.Fprintf(&b, ", its one sale back to 98%% attempted %t", end.SaleAttempted)
 	default:

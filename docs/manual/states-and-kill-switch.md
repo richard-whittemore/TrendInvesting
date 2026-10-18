@@ -16,21 +16,24 @@ go wrong. The rules come from ADR 0019 (amended 2026-09-24, 2026-10-15,
 What is built today: the gate, the states, the kill switch input, the
 margin-cushion alarm and the sale, all recorded in the journal and replayed
 byte for byte, and the way you switch the kill switch on and off from the
-server: `operator kill-switch` ([operator](operator.md)). The alerts that tell
-you a state changed are in [alerts-and-dashboard](alerts-and-dashboard.md).
+server: `operator kill-switch` ([operator](operator.md)). The reporter alerts
+you when a state changes, and repeats the alert until you acknowledge it
+([alerts-and-dashboard](alerts-and-dashboard.md)).
 
 ## The three states
 
 | State | What causes it | What still goes | What stops |
 | --- | --- | --- | --- |
 | **Normal** | the starting state | every order that passes the limits | orders that break a limit |
-| **Degraded** | an order broke a limit (too large, outside the price band, no mark, too much exposure, a sell larger than the broker's holding) | sells on instruments the problem does not name, sized from the broker's latest holding | every buy; every order on a named instrument |
-| **Halted** | something the gate cannot contain, such as an order that names no recorded decision, which means a defect in the order path | only the one sale back to 98% (below) | every other order |
+| **Degraded** | an order broke a limit (too large, outside the price band, no mark, too much exposure, a sell larger than the broker's holding), or the morning reconciliation found a difference no journalled event explains ([reconciliation](reconciliation.md)) | sells on instruments the problem does not name, sized from the broker's latest holding | every buy; every order on a named instrument |
+| **Halted** | something the gate cannot contain, such as an order that names no recorded decision, which means a defect in the order path, or a reconciliation whose evidence could not be compared | only the one sale back to 98% (below) | every other order |
 
 Each move out of Normal is written to the journal as a
 `strategy.engine.state` record. It says which state, why, and for Degraded
-which instruments are frozen (the *scope*). A second breach on another
-instrument widens the scope; it never narrows. Degraded can become Halted.
+which instruments are frozen (the *scope*). A reconciliation's scope can also
+name the account's cash (`total-cash`) when only the cash differs: then no
+instrument is frozen, every buy is refused and sells carry on. A second breach
+on another instrument widens the scope; it never narrows. Degraded can become Halted.
 Halted never becomes Degraded again.
 
 **Leaving Degraded or Halted is never automatic.** A later clean check does

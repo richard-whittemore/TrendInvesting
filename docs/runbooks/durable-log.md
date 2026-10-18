@@ -119,10 +119,14 @@ The engine reads its settings from
    of normal), and must be empty if that log ended normal. `incident_in_force` is `null`
    unless the new run continues an incident; then it is
    `{"incident_id": "<id>", "state": "degraded"|"halted",
-   "scope_instrument_ids": ["SPY"], "sale_attempted": true|false,
+   "scope_instrument_ids": ["SPY"], "scope_cash_components": ["total-cash"],
+   "sale_attempted": true|false,
    "sale_client_order_id": "<id, only if the sale was sent>"}`: the state
    and scope the incident holds the account in (degraded names its
-   instruments, in ascending order; halted names none: `[]`), from the last
+   instruments and its cash components, each in ascending order, at least
+   one of either: `["total-cash"]` when a reconciliation found unexplained
+   cash, which refuses every buy, else `[]`; halted names none: `[]` for
+   both), from the last
    `strategy.engine.state` records in the previous log, or, if it recorded
    none since its start, the `incident_in_force` its own approval carried
    (a continued incident records no new state); the new run starts

@@ -245,7 +245,7 @@ func TestAPagerDutyDedupKeyNeverExceedsTheEventsAPILimit(t *testing.T) {
 	long := "engine-state:degraded:broker-discrepancy:SPY|" + strings.Repeat("tw-0123456789abcdef,", 20) + "|@joint"
 	other := long[:len(long)-len("@joint")] + "@ira"
 	for _, key := range []string{"refusal:short", long, other} {
-		if err := sender.send(report.Alert{Key: key, AccountID: "joint", Severity: report.Urgent, Title: "t", Body: "b"}); err != nil {
+		if err := sender.send(report.Alert{Key: key, AccountID: "joint", Severity: report.Urgent, Title: "t", Body: "b"}, 0); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -454,3 +454,36 @@ func TestARecordTheEngineCouldNotReadIsRefused(t *testing.T) {
 		t.Errorf("the inbox's owner: %v", err)
 	}
 }
+
+// TestTheApprovalCarriesACashScopeInForce: a log that ended Degraded on a
+// reconciliation's unexplained cash is approved with that cash scope carried
+// in force (a restart never narrows a Degraded scope; ADR 0019, amended
+// 2026-09-24), and the tool says which cash component stays frozen.
+func TestTheApprovalCarriesACashScopeInForce(t *testing.T) {
+	dir := t.TempDir()
+	degraded := event.Envelope{ID: "engine-state:joint:1", Type: event.EngineStateEventType, SchemaVersion: event.EngineStateScopedVersion,
+		Payload: encoded(t, event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonReconciliationUnexplained, Detail: "test",
+			ScopeCashComponents: []string{event.ReconciliationComponentCash}})}
+	logPath := filepath.Join(dir, "run-1.log")
+	previousLog(t, logPath, degraded)
+
+	path := filepath.Join(dir, "carried.json")
+	out, err := invoke(t, "approve", "-log", logPath, "-account", "joint", "-by", "owner", "-out", path, "-at", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := event.DecodeOperatorRunApproved(raw)
+	if err != nil {
+		t.Fatalf("the engine would refuse the approval: %v", err)
+	}
+	if in := p.IncidentInForce; in == nil || in.State != event.EngineStateDegraded || len(in.ScopeCashComponents) != 1 || in.ScopeCashComponents[0] != event.ReconciliationComponentCash {
+		t.Errorf("incident in force %+v, want degraded on %s", p.IncidentInForce, event.ReconciliationComponentCash)
+	}
+	if !strings.Contains(out, event.ReconciliationComponentCash) {
+		t.Errorf("printed %q, want it to name the cash component %s", out, event.ReconciliationComponentCash)
+	}
+}

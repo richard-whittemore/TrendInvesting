@@ -19,11 +19,16 @@ type EndState struct {
 	// point 5), false for a log that never decided.
 	Latched bool
 	// IncidentID, State and Scope are the incident the log ends in, its
-	// engine state and, Degraded, its scope, strictly ascending
-	// (CheckIncidentInForce); all empty for a log that ended Normal.
+	// engine state and, Degraded, the instruments it freezes, strictly
+	// ascending (CheckIncidentInForce); all empty for a log that ended
+	// Normal.
 	IncidentID string
 	State      string
 	Scope      []string
+	// ScopeCash is, Degraded, the cash components the incident freezes (a
+	// reconciliation's unexplained cash, ADR 0019, amended 2026-09-24),
+	// strictly ascending; empty otherwise.
+	ScopeCash []string
 	// SaleAttempted is whether that incident's one sale back to 98% was
 	// attempted, and SaleClientOrderID the attempt's order when it was sent
 	// (ADR 0019, amended 2026-10-15; saleAttemptAtEnd).
@@ -47,10 +52,11 @@ func ReadEndState(entries []journal.Entry, accountID, logName string) (EndState,
 	if end.Latched, _, _, err = latchAtEnd(entries, logName); err != nil {
 		return EndState{}, err
 	}
-	if end.IncidentID, end.State, end.Scope, err = incidentAtEnd(entries, logName); err != nil {
+	if end.IncidentID, end.State, end.Scope, end.ScopeCash, err = incidentAtEnd(entries, logName); err != nil {
 		return EndState{}, err
 	}
 	end.Scope = slices.Sorted(slices.Values(end.Scope))
+	end.ScopeCash = slices.Sorted(slices.Values(end.ScopeCash))
 	if end.SaleAttempted, end.SaleClientOrderID, err = saleAttemptAtEnd(entries, end.IncidentID, logName); err != nil {
 		return EndState{}, err
 	}
@@ -88,8 +94,8 @@ func saleAttemptAtEnd(entries []journal.Entry, incident, logName string) (attemp
 		env := entry.Envelope
 		switch {
 		case entry.Kind == journal.KindInput && env.Type == event.OperatorRunApprovedEventType:
-			// Decoded already by incidentAtEnd.
-			inherited, _ := event.DecodeOperatorRunApproved(env.Payload)
+			// Decoded already by incidentAtEnd, at its recorded version.
+			inherited, _ := event.DecodeRecordedOperatorRunApproved(env.Payload, env.SchemaVersion)
 			if in := inherited.IncidentInForce; in != nil && in.IncidentID == incident && *in.SaleAttempted {
 				attempted, clientOrderID = true, in.SaleClientOrderID
 			}
@@ -147,10 +153,10 @@ type ApprovalRequest struct {
 
 // ProposeApproval builds the approval of a fresh run after a log ending in
 // end: Boost's latch in force, and either the incident end holds carried in
-// force with its state, scope and sale attempt, or, when the owner clears
-// it, that incident cleared by its ID and none in force (ADR 0027, amended
-// 2026-10-17; ADR 0019, amended 2026-09-24, "The state survives a
-// restart"). Clearing an incident other than the one end holds is refused.
+// force with its state, scope (instruments and cash components) and sale
+// attempt, or, when the owner clears it, that incident cleared by its ID and
+// none in force (ADR 0027, amended 2026-10-17; ADR 0019, amended
+// 2026-09-24, "The state survives a restart"). Clearing an incident other than the one end holds is refused.
 func ProposeApproval(end EndState, req ApprovalRequest) (event.OperatorRunApprovedPayload, error) {
 	p := event.OperatorRunApprovedPayload{
 		AccountID: req.AccountID, PreviousLog: req.PreviousLog, PreviousLogFinalHash: req.PreviousLogFinalHash,
@@ -165,7 +171,7 @@ func ProposeApproval(end EndState, req ApprovalRequest) (event.OperatorRunApprov
 		p.IncidentID = req.ClearIncident
 	case end.IncidentID != "":
 		p.IncidentInForce = &event.IncidentInForce{
-			IncidentID: end.IncidentID, State: end.State, ScopeInstrumentIDs: end.Scope,
+			IncidentID: end.IncidentID, State: end.State, ScopeInstrumentIDs: end.Scope, ScopeCashComponents: end.ScopeCash,
 			SaleAttempted: new(end.SaleAttempted), SaleClientOrderID: end.SaleClientOrderID,
 		}
 	}

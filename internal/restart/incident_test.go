@@ -158,3 +158,69 @@ func TestAnUndecodableRecordRefusesTheIncidentCheck(t *testing.T) {
 		}
 	}
 }
+
+// TestAnApprovalNeverDropsTheCashScope: a reconciliation's unexplained cash
+// Degrades the account on its cash, which blocks buys, and a fresh run
+// resumes in that same scope (ADR 0019, amended 2026-09-24, "The state
+// survives a restart"), so an approval carrying the incident Degraded must
+// name the cash scope the log ended in, whether the log recorded it or
+// inherited it from its own approval; one recorded by an earlier build, at
+// schema version 1, could carry none.
+func TestAnApprovalNeverDropsTheCashScope(t *testing.T) {
+	cash := []string{event.ReconciliationComponentCash}
+	degraded := func(ids, cashScope []string) journal.Entry {
+		return engineStateEntry(t, event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonReconciliationUnexplained, Detail: "x", ScopeInstrumentIDs: ids, ScopeCashComponents: cashScope})
+	}
+	inForce := func(ids, cashScope []string) *event.IncidentInForce {
+		return &event.IncidentInForce{IncidentID: "engine-state:joint:1", State: event.EngineStateDegraded, ScopeInstrumentIDs: ids, ScopeCashComponents: cashScope, SaleAttempted: new(false)}
+	}
+	inherited := approvalEntry(t, event.OperatorRunApprovedPayload{
+		AccountID: "joint", PreviousLog: "run-0.log", PreviousLogFinalHash: "sha256:" + strings.Repeat("0", 64),
+		ApprovedBy: "owner", ApprovedAt: time.Date(2026, time.October, 17, 13, 0, 0, 0, time.UTC),
+		Boost: event.BoostStateInForce{Latched: new(false)}, IncidentInForce: inForce(nil, cash),
+	})
+	version1 := approvalEntry(t, event.OperatorRunApprovedPayload{
+		AccountID: "joint", PreviousLog: "run-0.log", PreviousLogFinalHash: "sha256:" + strings.Repeat("0", 64),
+		ApprovedBy: "owner", ApprovedAt: time.Date(2026, time.October, 17, 13, 0, 0, 0, time.UTC),
+		Boost: event.BoostStateInForce{Latched: new(false)}, IncidentInForce: inForce([]string{"SPY"}, nil),
+	})
+	var keys map[string]json.RawMessage
+	var incident map[string]json.RawMessage
+	if err := json.Unmarshal(version1.Envelope.Payload, &keys); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(keys["incident_in_force"], &incident); err != nil {
+		t.Fatal(err)
+	}
+	delete(incident, "scope_cash_components")
+	var err error
+	if keys["incident_in_force"], err = json.Marshal(incident); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version1.Envelope.Payload, version1.Envelope.SchemaVersion = raw, 1
+	for _, c := range []struct {
+		name    string
+		entries []journal.Entry
+		in      *event.IncidentInForce
+		refusal string
+	}{
+		{"cash recorded, carried", []journal.Entry{degraded(nil, cash)}, inForce(nil, cash), ""},
+		{"cash recorded, dropped", []journal.Entry{degraded(nil, cash)}, inForce([]string{"SPY"}, nil), "total-cash"},
+		{"instrument and cash recorded, cash dropped", []journal.Entry{degraded([]string{"SPY"}, cash)}, inForce([]string{"SPY"}, nil), "total-cash"},
+		{"cash inherited, dropped", []journal.Entry{inherited}, inForce([]string{"SPY"}, nil), "total-cash"},
+		{"cash inherited, carried", []journal.Entry{inherited}, inForce(nil, cash), ""},
+		{"version 1 inherited, carried", []journal.Entry{version1}, inForce([]string{"SPY"}, nil), ""},
+	} {
+		err := restart.CheckIncidentInForce(c.entries, event.OperatorRunApprovedPayload{IncidentInForce: c.in}, "run-1.log")
+		switch {
+		case c.refusal == "" && err != nil:
+			t.Errorf("%s: %v", c.name, err)
+		case c.refusal != "" && (err == nil || !strings.Contains(err.Error(), c.refusal)):
+			t.Errorf("%s: CheckIncidentInForce = %v, want a refusal saying %q", c.name, err, c.refusal)
+		}
+	}
+}

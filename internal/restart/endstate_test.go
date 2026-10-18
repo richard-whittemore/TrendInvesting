@@ -214,3 +214,35 @@ func TestProposeApprovalStatesTheEndStateOrClearsTheIncident(t *testing.T) {
 		t.Errorf("an approval without its approver: %v", err)
 	}
 }
+
+// TestAnIncidentDegradedOnCashIsCarriedInForceWithItsCashScope: a
+// reconciliation's unexplained cash degrades the account on a cash component
+// (ADR 0019, amended 2026-09-24), and a restart never narrows a Degraded
+// scope, so the approval the operator tool proposes carries that cash scope
+// in force, and the engine accepts it against the log it was read from.
+func TestAnIncidentDegradedOnCashIsCarriedInForceWithItsCashScope(t *testing.T) {
+	cash := []string{event.ReconciliationComponentCash}
+	degraded := engineStateEntry(t, event.EngineStatePayload{State: event.EngineStateDegraded, Reason: event.EngineStateReasonReconciliationUnexplained, Detail: "x", ScopeCashComponents: cash})
+	entries := []journal.Entry{degraded}
+
+	end, err := restart.ReadEndState(entries, "joint", "run-1.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end.State != event.EngineStateDegraded || len(end.Scope) != 0 || !slices.Equal(end.ScopeCash, cash) {
+		t.Fatalf("ReadEndState = %+v, want Degraded on the cash component %v", end, cash)
+	}
+	p, err := restart.ProposeApproval(end, restart.ApprovalRequest{
+		AccountID: "joint", PreviousLog: "run-1.log", PreviousLogFinalHash: "sha256:" + strings.Repeat("a", 64),
+		ApprovedBy: "owner", ApprovedAt: time.Date(2026, time.October, 17, 15, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("ProposeApproval = %v, want the cash scope carried in force", err)
+	}
+	if in := p.IncidentInForce; in == nil || !slices.Equal(in.ScopeCashComponents, cash) {
+		t.Fatalf("incident in force %+v, want scope cash components %v", p.IncidentInForce, cash)
+	}
+	if err := restart.CheckIncidentInForce(entries, p, "run-1.log"); err != nil {
+		t.Errorf("CheckIncidentInForce = %v, want the proposed approval accepted", err)
+	}
+}

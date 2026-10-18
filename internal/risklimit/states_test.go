@@ -729,7 +729,7 @@ func TestARestoredIncidentsEarlierAttemptIsNotRepeated(t *testing.T) {
 		if err := r.RestoreSaleAttempt(halted.StateID, attempted); err != nil {
 			t.Fatal(err)
 		}
-		if err := r.RestoreIncidentState(halted.StateID, event.EngineStateHalted, nil); err != nil {
+		if err := r.RestoreIncidentState(halted.StateID, event.EngineStateHalted, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		observe(t, r, "broker:1", boosted())
