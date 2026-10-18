@@ -36,10 +36,10 @@ All times are New York time (each unit sets `TZ=America/New_York`).
 
 | Unit | What it does | When it runs | Today |
 | --- | --- | --- | --- |
-| `ti-gateway.service` | IB Gateway under IBC, logged in to IBKR | Starts at boot (enabled). Restarts itself 30 seconds after IBC exits (for example when the weekly phone approval times out), except when the login file is empty or wrong. IBC restarts the Gateway nightly at 11:45 PM and logs in again from cold every Sunday at 09:00 (`/etc/trend-investing/gateway.env`) | Installed; not yet run against a real IBKR login |
+| `ti-gateway.service` | IB Gateway under IBC, logged in to IBKR | Starts at boot (enabled). Restarts itself 30 seconds after IBC exits (for example when the weekly phone approval times out), except when the login file is empty or malformed (a wrong password is not caught: see the table below). IBC restarts the Gateway nightly at 11:45 PM and logs in again from cold every Sunday at 09:00 (`/etc/trend-investing/gateway.env`) | Installed; not yet run against a real IBKR login |
 | `ti-data.timer` and `ti-data.service` | The daily data job: records the day's market data from Massive and writes the Boost engine's input ([market data](market-data.md), "The daily data job") | Monday to Friday at 17:05, retried at 18:05 and 20:05. A firing missed while the server was off runs when it starts again. A run is stopped after an hour | Built and installed by `provision.sh services` when `dist/ti-data` is beside `deploy/`. It fails, with a message, until the Boost engine has been started once |
 | `ti-engine@boost.service` (and `@trad-ira`, `@roth-ira`) | One engine per account ([engine](engine.md)) | **Never by itself.** Not started at boot, never restarted by systemd (`Restart=no`): every start is yours ([restart](restart.md)) | Boost in dry-run. The IRA instances are skipped: they have no configuration file |
-| `ti-reporter.timer` and `ti-reporter.service` | The reporter: alerts and the daily summary ([alerts and dashboard](alerts-and-dashboard.md)) | Monday to Friday at 17:30, **once a day** | **Not working as shipped.** The binary is not installed, so the unit is skipped. When it is installed, the unit passes none of the settings the reporter requires (`-journal`, `-state`, `-channel`), and the reporter refuses to run without the first two |
+| `ti-reporter.timer` and `ti-reporter.service` | The reporter: alerts and the daily summary ([alerts and dashboard](alerts-and-dashboard.md)) | Monday to Friday at 17:30, **once a day** | **Not working as shipped.** The binary is not installed, so the unit is skipped. When it is installed, the unit passes none of the settings the reporter requires (`-journal`, `-state`, `-channel`), and the reporter refuses to run without all three (with no `-channel` it falls back to stdout, which alone is refused) |
 | `ti-dashboard.service` | The read-only dashboard | Starts at boot once installed | **Not working as shipped.** Not installed; the unit sets `TI_DASHBOARD_ADDR=127.0.0.1:8080`, which the program does not read (it listens on `-addr`, default `127.0.0.1:8088`), and passes no `-journal`, without which it refuses to start |
 | `tailscaled` | Tailscale | At boot | Installed by `provision.sh base` |
 
@@ -69,7 +69,7 @@ then refuses to start in paper, which is safe, but your edits are gone.
 
 | File | What it holds | Who reads it |
 | --- | --- | --- |
-| `/etc/trend-investing/ibkr-login.env` (root only, mode 0600) | the IBKR username and password, the trading mode (`paper`) and the read-only switch (`TWS_READONLY_API=yes`) | only `ti-gateway.service`, through systemd's credential hand-over. IBC's settings file is written from it into memory on each start, never to disk beside the code |
+| `/etc/trend-investing/ibkr-login.env` (root only, mode 0600) | the IBKR username and password, the trading mode (`paper`) and the read-only switch (`TWS_READONLY_API=yes`). Read-only means the Gateway refuses every order from the adapter, paper included; you set it to `no` yourself, as a step of the first-paper-order runbook | only `ti-gateway.service`, through systemd's credential hand-over. IBC's settings file is written from it into memory on each start, never to disk beside the code |
 | `/etc/trend-investing/secrets.env` (root only, mode 0600) | `IBKR_ACCOUNT_BOOST`, `IBKR_ACCOUNT_TRAD_IRA`, `IBKR_ACCOUNT_ROTH_IRA`, `MASSIVE_API_KEY`, `NTFY_URL`, `HEALTHCHECK_URL` | handed as a file to the data job, the engines, the reporter and the dashboard |
 
 What each program actually reads today:
@@ -151,9 +151,17 @@ inbox"):
   folder outside the repository and outside iCloud, and run `go run
   ./cmd/journal-query ...` there. It only reads.
 - The **operator** commands the runbooks show (`sudo -u ti-trader operator
-  ...`) cannot be run on the server today. The kill switch you can always
-  use instead is outside the program: stop the Gateway
-  (`sudo systemctl stop ti-gateway`), or use IBKR's own app.
+  ...`) cannot be run on the server today. **Today there is no recorded
+  kill switch on the server.** The operator tool, and with it
+  `operator kill-switch`, will be there once the pending change that
+  installs it is merged; until then, to stop the program trading, stop the
+  engine (`sudo systemctl stop ti-engine@<account>`) and the adapter, and
+  cancel anything already at IBKR by calling IBKR or using IBKR's own app.
+  Do not treat stopping the Gateway (`sudo systemctl stop ti-gateway`) as a
+  kill switch: it only delays. An order the engine has released waits in the
+  adapter and goes out once the Gateway is back the same day (settle it
+  `--never-sent` if it must not go), and an order already at IBKR keeps
+  working until you cancel it in IBKR's app.
 
 ## What can go wrong, and what happens then
 

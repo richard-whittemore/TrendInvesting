@@ -13,7 +13,7 @@ Provisioning for the live server in `docs/live-trading/plan.md` section 3: one U
 | Users | `ti-gateway` (Gateway and IBC), `ti-trader` (data step, engines, reporter, dashboard) | System users, no login shell. Engines never run as the user that can see the IBKR login. |
 | IBKR login | `/etc/trend-investing/ibkr-login.env`, root:root 0600 | Outside the repository. Handed to `ti-gateway.service` only, through systemd `LoadCredential`. IBC's `config.ini` is rendered from it into a tmpfs on each start, so the password is never on disk beside the code, never in the journal, never committed. |
 | Other secrets | `/etc/trend-investing/secrets.env`, root:root 0600 | Account numbers, ntfy and Healthchecks URLs. Names only in `deploy/etc/secrets.env.example`. |
-| Engine settings | `/etc/trend-investing/engines/<account>.env` | Client IDs only: `boost` 11, `trad-ira` 12, `roth-ira` 13. Each must stay unique. The data step uses Massive, not IB Gateway, and has none. |
+| Engine settings | `/etc/trend-investing/engines/<account>.env` | The account's label (`TI_ACCOUNT`), its client ID (`boost` 11, `trad-ira` 12, `roth-ira` 13; each must stay unique) and, for Boost, the start mode (`TI_MODE`). The data step uses Massive, not IB Gateway, and has none. |
 | Gateway, IBC | `/var/lib/ti-gateway/Jts/ibgateway/1050`, `/opt/ibc` | Pinned and checksummed in `deploy/versions.env`. |
 | State | `/var/lib/trend-investing/{data,engines/<account>,reports}` | One journal and state directory per engine. |
 | Firewall | `ufw`: deny inbound, allow only `tailscale0` | Lightsail's own firewall should also close port 22 once Tailscale works. |

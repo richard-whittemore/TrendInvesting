@@ -2,7 +2,7 @@
 
 Issues and specs for this repo live as **GitHub issues in `richard-whittemore/TrendInvesting`**.
 
-**Use the `gh` CLI or the GitHub MCP tools.** `gh` is installed and logged in on the Mac mini and has been the working route since 2026-10 (`gh issue …`, `gh pr …`, `gh api …`). The GitHub MCP tools below remain an alternative, with the same operations.
+**Use the route `AGENTS.md` names (the GitHub MCP tools).** Whether the `gh` CLI is installed varies by machine: where it is installed and logged in, it performs the same operations (`gh issue …`, `gh pr …`, `gh api …`); where it is not, use the GitHub MCP tools below.
 
 | Operation | Tool |
 |---|---|

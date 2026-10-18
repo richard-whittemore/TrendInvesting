@@ -27,7 +27,7 @@ gate (plan section 9, Phase 5).
 ## Built today and not built yet
 
 This is the one list for the whole program. Other chapters link here
-rather than keep their own. As of `main` on 2026-10-19:
+rather than keep their own. As of `main` on 2026-10-18:
 
 | Piece | Built today | Not built yet |
 | --- | --- | --- |

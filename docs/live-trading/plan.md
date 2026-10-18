@@ -226,7 +226,7 @@ Lightsail VM (Ubuntu, $12/month, US East)
   - an urgent alert when any account enters Degraded or Halted, with the
     reason (the reconciliation difference or the missing evidence);
   - an alert when the automatic flatten is sent, and another when it fills
-    or fails (*not built yet, 2026-10-19: the reporter sends neither, nor an
+    or fails (*not built yet, 2026-10-18: the reporter sends neither, nor an
     alert for the margin alarm or for a sale withheld for the owner to act
     by hand; tracked with the reporter follow-up on missing alerts.
     `docs/manual/alerts-and-dashboard.md` lists what is sent*);
@@ -635,8 +635,10 @@ Claude reviewer stands in for it on docs-only and config-only PRs while it is ra
   decision (`docs/research/universe-massive-2026-10.md`, "Effect of the
   timing on returns"). The paired `F_COMBO` / `OOS_F_COMBO` reruns show
   worst drawdowns of 46.05% and 40.47% against the recorded 34.0% and 31.0%;
-  the cause is unresolved and under investigation in #403. The figures this
-  plan cites are unchanged until then, and parity (#324) waits on #403.
+  the cause was unresolved and under investigation in #403.
+  *(Note, 2026-10-18: parity for the rule passed once the owner's decisions
+  of that date were applied: `docs/research/parity-2026-10.md`. The figures
+  this plan cites stand as recorded.)*
 - **D9** Slice 5's eleven readings of ADR 0019 and ADR 0026 (the sale back
   to 98%, kill switch, incidents, order count, event types): **approved as
   built** (decided 2026-10-17, #352; ADR 0019 and ADR 0026 amendments).

@@ -15,8 +15,10 @@ go wrong. The rules come from ADR 0019 (amended 2026-09-24, 2026-10-15,
 
 What is built today: the gate, the states, the kill switch input, the
 margin-cushion alarm and the sale, all recorded in the journal and replayed
-byte for byte, and the way you switch the kill switch on and off from the
-server: `operator kill-switch` ([operator](operator.md)). The reporter alerts
+byte for byte, and the way you switch the kill switch on and off,
+`operator kill-switch` ([operator](operator.md)), which is not yet installed
+on the server ([server](server.md), "Reading the logs without the tools on the
+server"). The reporter alerts
 you when a state changes, and repeats the alert until you acknowledge it
 ([alerts-and-dashboard](alerts-and-dashboard.md)). **Not built yet:** the
 reporter is not yet installed or set up on the server, and it sends no alert

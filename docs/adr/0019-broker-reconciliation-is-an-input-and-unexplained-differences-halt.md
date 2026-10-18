@@ -30,7 +30,7 @@ The guiding rule: **a problem is a reason to stop taking on new risk, not a reas
 
 **How it gets back to Normal.** Never on its own, even if the numbers later match, and not after a restart either. You follow the runbook (`docs/runbooks/reconciliation.md`): acknowledge the alert, find the cause in the broker's records, record the missing event (the fill, trade, dividend and so on), decide what to do with any affected order, then approve a restart. The restart must pass a fresh check before trading resumes.
 
-**Before any of this is live.** This is a design, not code yet. *(Note, 2026-10-19: much of it is now built for the target-weight accounts: the states, the sale back to 98%, the morning reconciliation's engine side and the alerts. What is built and what is not is listed in `docs/manual/README.md`, "Built today and not built yet". The text below is the decision as recorded.)* It also needs journal durability (#151), the alert and heartbeat services set up and priced, and timing limits you choose and we prove out in paper trading.
+**Before any of this is live.** This is a design, not code yet. *(Note, 2026-10-18: much of it is now built for the target-weight accounts: the states, the sale back to 98%, the morning reconciliation's engine side and the alerts. What is built and what is not is listed in `docs/manual/README.md`, "Built today and not built yet". The text below is the decision as recorded.)* It also needs journal durability (#151), the alert and heartbeat services set up and priced, and timing limits you choose and we prove out in paper trading.
 
 ## Context
 

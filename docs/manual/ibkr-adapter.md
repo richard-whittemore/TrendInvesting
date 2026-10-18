@@ -24,7 +24,7 @@ link, not the program that holds the record (ADR 0025, plan section 3).
 | Piece (file) | What it does | Built? |
 | --- | --- | --- |
 | Configuration (`config.py`) | Host, port (4002 is IB Gateway's paper port), this engine's client ID, the IBKR account, the mode, the timing bounds (`commission_wait` among them) and `con_ids`, IBKR's contract number for each instrument. Every value is required. A key that looks like a credential is refused: the adapter never holds the IBKR login, IBC does. A paper configuration must name a paper account (beginning `DU`), and `live` is refused | Built |
-| Connection (`connection.py`) | Connects under the engine's own **client ID** (Boost 11, Traditional IRA 12, Roth IRA 13; 0 is refused), notices a lost link (a closed socket, IBKR's codes 1100, 1101, 1102, 2110, 504, 1300, or no answer to a heartbeat), and reconnects with growing pauses. Each new session records which accounts the IBKR login manages | Built |
+| Connection (`connection.py`) | Connects under the engine's own **client ID** (Boost 11, Traditional IRA 12, Roth IRA 13; 0 is refused), notices a lost link (a closed socket, IBKR's codes 1100, 2110, 504, 1300, or no answer to a heartbeat) and a restored one (1101, 1102), after which it matches IBKR's orders and balances again before sending, and reconnects with growing pauses. Each new session records which accounts the IBKR login manages | Built |
 | Account read (`account.py`, `snapshot.py`) | Reads positions, net liquidation, total cash, Excess Liquidity and every open order in one pass, bracketed by IBKR's clock, and builds two records: the **broker snapshot** the risk gate sizes sells from and the margin alarm watches, and the **reconciliation** the morning check compares. Anything IBKR did not deliver, or delivered in a form the engine cannot hold exactly, is marked **unreadable**, never sent as zero ([reconciliation](reconciliation.md), "What the adapter sends") | Built |
 | Relay (`relay.py`) | Keeps the input waiting for the engine's reply in a small file on disk (the **pending file**), asks the engine for that reply again after either side restarts, and hands each released order marked `send` to the sender once, writing "about to send" before and "sent" after (the **hand-over** marks) ([re-delivery](redelivery.md)) | Built |
 | Sender (`sender.py`) | Sends a released order to IB Gateway only in paper, on a paper account the login manages, while the link is up and matched, as a whole-share DAY limit order released in today's New York session, under IBKR's next order number (never reused). Dry-run never sends. Live is refused | Built, against a stand-in for IB Gateway only |
@@ -43,32 +43,9 @@ Degraded or Halted ([reconciliation](reconciliation.md)). The
 
 ## What runs today, and what does not
 
-On `main` at the time of writing:
-
-- **Built and tested against a stand-in gateway** (`tests/fake_tws.py`,
-  invented accounts and prices): every piece in the table above. The suite
-  runs in `make adapter-test`.
-- **Not built yet:**
-  - the adapter's **main loop**, the part that keeps reading IB Gateway's
-    messages and passing them on (so the `commission_wait` stop happens only
-    when the next message arrives, not on a timer);
-  - a **start command and a service unit** for the adapter: nothing on the
-    server runs it, and the pending file's path is set by that command;
-  - the link to the **engine's socket**: the adapter's records are plain
-    records, not yet sent to an engine;
-  - delivering the **daily data files** `ti-data` writes, and turning its
-    account reads into the account snapshot and the mark the engine decides
-    from;
-  - installing **`ibapi`** into the adapter's environment (`provision.sh
-    twsapi` only fetches and checks it);
-  - the real client's sending, which waits for the paper-account test;
-  - the second check of the **hard limits** before calling IBKR (ADR 0026,
-    point 3, asks for it; `sender.py` says it is not there yet).
-
-A pull request for the second half of the paper-sending work (the real
-client, the main loop, the start command and the `ibapi` install) was open
-when this chapter was written. Until it lands, the first-paper-order
-runbook's steps marked **[AFTER SECOND HALF]** cannot be done.
+What of the adapter is built, and what is not, is in the one table in the
+[README](README.md#built-today-and-not-built-yet). The first-paper-order
+runbook marks the steps that wait on unbuilt pieces.
 
 ## Every stop, and the command that settles it
 

@@ -50,9 +50,10 @@ stops ordering, not an order resting at the broker.
 4. **Do not trade by hand while a sale of the program's is working.** If
    you must act at IBKR first, stop the program sending anything new: the
    kill switch (`operator kill-switch ... -state engaged`), or, while the
-   tool is not on the server, stop the Gateway
-   (`sudo systemctl stop ti-gateway`). The kill switch does not cancel an
-   order already at IBKR: cancel one in IBKR's own app.
+   tool is not on the server, stop the engine and the adapter (stopping the
+   Gateway only delays: a released order goes out once it is back the same
+   day). The kill switch does not cancel an order already at IBKR: cancel
+   one in IBKR's own app.
 5. **If the alert or `journal-query refusals` says CONTAINMENT REQUIRED**
    (`unknown-working-sell`): a sell order the program did not send is
    working at IBKR, and the program will not sell over it. At IBKR, cancel
