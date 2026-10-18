@@ -127,7 +127,16 @@ that is why the approval is your attestation and must follow a real check.
    its journal. Keep the log and the journal: they are evidence, never
    edited or deleted (ADR 0018).
 4. **To leave the incident behind** (every difference explained), write the
-   approval clearing it by its ID:
+   approval clearing it by its ID. `operator` is not installed on the server
+   yet ([server](../manual/server.md), "Reading the logs without the tools
+   on the server"), so until it is, run it on the Mac against a copy of the
+   log (`scp` the stopped engine's log into a folder outside the repository
+   and iCloud, run `go run ./cmd/operator approve -log <copy> ...` with the
+   same flags, minus `sudo -u ti-trader` and with `-out` pointing at a local
+   file), then `scp` the approval file back into the account's state
+   directory, owned by `ti-trader`, and check that the file name in it
+   matches the log you copied. Once the tool is installed, run it on the
+   server:
 
    ```
    sudo -u ti-trader operator approve -log <latest run>.log -account <account> -by owner \

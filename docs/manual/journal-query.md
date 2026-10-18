@@ -39,7 +39,7 @@ Reports:
 | `totals` | fills, shares bought and sold, and commission per instrument per year, plus a TOTAL row |
 | `positions` | the holding after each fill, rebuilt from the fills; a recorded symbol change moves the holding to the new id |
 | `reconcile` | whether the fills agree with the account snapshots recorded in the journal |
-| `operator` | your own instructions the engine recorded: kill switches, approvals and rebalance clearances (not acknowledgements), with who recorded each and why ([operator](operator.md), "Seeing what was recorded") |
+| `operator` | your own instructions the engine recorded: kill switches, approvals and rebalance clearances (not acknowledgements), kill switches and rebalance clearances show the detail recorded with them, and approvals show the approver and state context rather than a reason ([operator](operator.md), "Seeing what was recorded") |
 
 Flags, all optional: `-account A1`, `-instrument AAA`, `-from 2026-01-01`,
 `-to 2026-12-31` (UTC dates, both ends inclusive of the whole day) and

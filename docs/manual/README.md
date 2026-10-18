@@ -8,8 +8,11 @@ from "what is this program" to "my first paper order".
 
 ## What this program is
 
-It trades three IBKR accounts automatically, each with its own rule
-(`docs/live-trading/plan.md`, sections 1 to 3):
+The program is designed to trade three IBKR accounts automatically, each
+with its own rule (`docs/live-trading/plan.md`, sections 1 to 3). As of
+2026-10-18 only Boost runs, in dry-run; the engine refuses a momentum
+configuration and no IRA configuration exists, so the IRA rows below are not
+runnable yet:
 
 | Account | Rule | Chapter |
 | --- | --- | --- |

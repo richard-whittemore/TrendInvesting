@@ -14,10 +14,15 @@ point 6). Its thresholds are in the account's hashed configuration
 > warning or urgent, nor for the sale back to 98% being sent, filling or
 > failing ([alerts-and-dashboard](../manual/alerts-and-dashboard.md),
 > "Alerts the reporter does not send"; tracked with the reporter follow-up
-> on missing alerts). Until it does, nothing tells you the alarm moved:
-> check the joint account's Excess Liquidity in IBKR's app on any day SPY
-> falls sharply, and read the alarm's records with
-> `grep '"risk.margin.alarm"' <log>`.
+> on missing alerts). Until it does, nothing tells you the alarm moved, and
+> it can move while SPY is flat (a higher house-margin requirement, a net
+> liquidation of zero or less, or readings that are stale or missing). So
+> while the joint account holds a position, check at least twice each market
+> day (after the open and before the close): Excess Liquidity and net
+> liquidation in IBKR's app, and that the program's last reading is recent
+> (the newest `risk.margin.alarm` or account record in the log). Read the
+> alarm's records with `grep '"risk.margin.alarm"' <log>`. If you cannot
+> keep this check, do not run the joint account live until the alert exists.
 
 | Level | When | What the program does | What you do |
 | --- | --- | --- | --- |

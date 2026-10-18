@@ -397,8 +397,10 @@ the dashboard read every version. See [journal-query](journal-query.md).
   attempt in that incident, so it cannot sell a second time.
 - **The sale fills only partly, or IBKR rejects it.** It is not retried. The
   account stays in its state until you recover. Check the account at IBKR;
-  if it is still above 98%, engage the kill switch and sell the rest by hand
-  (`docs/runbooks/margin-warning.md`).
+  if it is still above 98%, engage the kill switch (it does not cancel orders
+  already at IBKR), cancel any remaining sale in IBKR, and confirm that no
+  `working`, `pending` or `cancel-pending` sell remains before selling the rest
+  by hand (`docs/runbooks/margin-warning.md`).
 - **The kill switch is on and the margin alarm turns urgent.** The sale still
   goes. That is intended: the switch never keeps you borrowed.
 - **You release the kill switch after it refused a Boost order.** Nothing
