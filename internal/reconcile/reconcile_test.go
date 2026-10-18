@@ -451,3 +451,73 @@ func TestSumsOfInRangeFiguresThatWrapAreUnverifiable(t *testing.T) {
 		}
 	}
 }
+
+// TestShareArithmeticThatWrapsOrDividesByZeroIsUnverifiable: a split's new
+// share count and every running share total are checked, and a split of no
+// old or no new shares is no split, so each halts instead of comparing a
+// wrapped or undefined count.
+func TestShareArithmeticThatWrapsOrDividesByZeroIsUnverifiable(t *testing.T) {
+	at := closeAt.Add(time.Hour)
+	split := func(newShares, oldShares int64) reconcile.Change {
+		return reconcile.CorporateActionChange("ca:1", event.CorporateActionPayload{Kind: event.CorporateActionKindSplit, InstrumentID: "SPY", EffectiveAt: at, NewShares: newShares, OldShares: oldShares, Currency: "USD"})
+	}
+	fill := func(id string, q int64) reconcile.Change {
+		return reconcile.FillChange(event.TargetWeightFillPayload{FillID: id, InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: q, FilledAt: at})
+	}
+	sell := func(id string, q int64) reconcile.Change {
+		return reconcile.FillChange(event.TargetWeightFillPayload{FillID: id, InstrumentID: "SPY", Side: event.OrderSideSell, Quantity: q, FilledAt: at})
+	}
+	cases := map[string][]reconcile.Change{
+		"split product wraps": {split(math.MaxInt64, 1)},
+		"split of no old":     {split(2, 0)},
+		"split of no new":     {split(0, 1)},
+		"split of negative":   {split(-2, 1)},
+		"running shares wrap": {fill("f1", math.MaxInt64)},
+		"running shares dive": {sell("f1", math.MaxInt64), sell("f2", math.MaxInt64)},
+	}
+	for name, changes := range cases {
+		r := classify(t, iraBook(), changes, observed(512.3, held("SPY", 147), held("TLT", 20)))
+		if r.Classification != event.ReconciliationUnverifiable || r.Action != event.ReconciliationActionHalt || len(r.Unverifiable) == 0 {
+			t.Errorf("%s: got %s/%s %v, want unverifiable and halt", name, r.Classification, r.Action, r.Unverifiable)
+		}
+	}
+}
+
+// TestACashFigureNothingComparesCannotHalt: cash arithmetic runs only when
+// cash is compared, so a positions-only book with a fill value beyond any
+// cent count still matches on its positions.
+func TestACashFigureNothingComparesCannotHalt(t *testing.T) {
+	b := reconcile.PositionsBook("snapshot:joint", event.AccountPositionsSnapshotPayload{
+		AccountID: "joint", AsOf: closeAt, Currency: "USD",
+		Positions: []event.AccountPosition{{InstrumentID: "SPY", Quantity: 1}},
+	})
+	at := closeAt.Add(time.Hour)
+	fill := func(id string) reconcile.Change {
+		return reconcile.FillChange(event.TargetWeightFillPayload{FillID: id, InstrumentID: "SPY", Side: event.OrderSideBuy, Quantity: 1, Price: 5e16, FilledAt: at})
+	}
+	obs := observed(0, held("SPY", 3))
+	obs.AccountID = "joint"
+	r := classify(t, &b, []reconcile.Change{fill("f1"), fill("f2")}, obs)
+	if r.Action != event.ReconciliationActionContinue || r.CashCompared {
+		t.Fatalf("got %s/%s %v, want positions to explain the fills", r.Classification, r.Action, r.Unverifiable)
+	}
+}
+
+// TestOnlyTheCashPartsWrapping: the book's cash offsets two large dividends,
+// so the running cash never leaves range but the dividends part does; the
+// reason names the expected cash.
+func TestOnlyTheCashPartsWrapping(t *testing.T) {
+	const big = 5e16
+	b := reconcile.CashBook("snapshot:1", event.AccountCashSnapshotPayload{
+		AccountPositionsSnapshotPayload: event.AccountPositionsSnapshotPayload{AccountID: "ira", AsOf: closeAt, Currency: "USD", Positions: []event.AccountPosition{}},
+		SettledCash:                     -big, TotalCash: -big,
+	})
+	at := closeAt.Add(time.Hour)
+	div := func(id string) reconcile.Change {
+		return reconcile.CorporateActionChange(id, event.CorporateActionPayload{Kind: event.CorporateActionKindDividend, InstrumentID: "SPY", EffectiveAt: at, CashAmount: big, Currency: "USD"})
+	}
+	r := classify(t, &b, []reconcile.Change{div("ca:1"), div("ca:2")}, observed(big))
+	if r.Action != event.ReconciliationActionHalt || !strings.Contains(strings.Join(r.Unverifiable, ";"), "the expected cash") {
+		t.Fatalf("got %s/%s %v, want a halt naming the expected cash", r.Classification, r.Action, r.Unverifiable)
+	}
+}

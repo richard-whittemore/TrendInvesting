@@ -158,6 +158,27 @@ func addCents(a, b int64) (int64, error) {
 	return a + b, nil
 }
 
+// sharesAfter is held shares after c: a fill adds its shares and a split
+// scales them, truncating toward zero. It is an error when the count does not
+// fit an int64, or when a split has no old or no new shares.
+func sharesAfter(held int64, c Change) (int64, error) {
+	if c.Kind != ChangeSplit {
+		if (c.Shares > 0 && held > math.MaxInt64-c.Shares) || (c.Shares < 0 && held < math.MinInt64-c.Shares) {
+			return 0, fmt.Errorf("%d shares plus %d shares is more shares than a book can count", held, c.Shares)
+		}
+		return held + c.Shares, nil
+	}
+	if c.OldShares <= 0 || c.NewShares <= 0 {
+		return 0, fmt.Errorf("a split of %d new for %d old shares is no split", c.NewShares, c.OldShares)
+	}
+	scaled := new(big.Int).Mul(big.NewInt(held), big.NewInt(c.NewShares))
+	scaled.Quo(scaled, big.NewInt(c.OldShares))
+	if !scaled.IsInt64() {
+		return 0, fmt.Errorf("%d shares split %d for %d is more shares than a book can count", held, c.NewShares, c.OldShares)
+	}
+	return scaled.Int64(), nil
+}
+
 // subCents is a-b in whole cents, with addCents' guarantee.
 func subCents(a, b int64) (int64, error) {
 	if (b < 0 && a > math.MaxInt64+b) || (b > 0 && a < math.MinInt64+b) {
@@ -275,23 +296,26 @@ func Classify(book *Book, changes []Change, inputID string, obs event.Reconcilia
 			reasons = append(reasons, c.Fault)
 			continue
 		}
-		nextCash, err := addCents(cash, c.Cash)
-		if err == nil {
-			err = parts.add(c)
-		}
+		nextShares, err := sharesAfter(expected[c.InstrumentID], c)
 		if err != nil {
-			reasons = append(reasons, fmt.Sprintf("%s: the expected cash: %v", c.ID, err))
+			reasons = append(reasons, fmt.Sprintf("%s: the expected shares of %s: %v", c.ID, c.InstrumentID, err))
 			continue
 		}
-		if c.Kind == ChangeSplit {
-			expected[c.InstrumentID] = expected[c.InstrumentID] * c.NewShares / c.OldShares
-		} else {
-			expected[c.InstrumentID] += c.Shares
+		nextCash := cash
+		if cashRead {
+			if nextCash, err = addCents(cash, c.Cash); err == nil {
+				err = parts.add(c)
+			}
+			if err != nil {
+				reasons = append(reasons, fmt.Sprintf("%s: the expected cash: %v", c.ID, err))
+				continue
+			}
 		}
+		expected[c.InstrumentID] = nextShares
 		if c.Kind != ChangeDividend {
 			explained[c.InstrumentID] = append(explained[c.InstrumentID], c.ID)
 		}
-		if c.Cash != 0 || c.Kind == ChangeFill {
+		if cashRead && (c.Cash != 0 || c.Kind == ChangeFill) {
 			cash = nextCash
 			cashExplained = append(cashExplained, c.ID)
 		}
