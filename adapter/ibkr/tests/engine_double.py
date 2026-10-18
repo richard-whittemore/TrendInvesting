@@ -102,7 +102,8 @@ class LoggedEngine:
         with open(self.path, "a", encoding="utf-8") as f:
             f.write("".join(lines))
         self.next_sequence += 1
-        reply = {"id": "decisions:" + envelope["id"], "type": "engine.decisions", "causation_id": envelope["id"],
+        reply = {"id": "decisions:" + envelope["id"], "type": "engine.decisions", "envelope_version": 1,
+                 "schema_version": 1, "causation_id": envelope["id"],
                  "sequence": envelope["sequence"], "configuration_hash": self.configuration_hash,
                  "strategy_version": self.strategy_version, "payload": {"decisions": decisions}}
         self.committed[envelope["id"]] = (copy.deepcopy(envelope), reply)

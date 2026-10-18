@@ -19,12 +19,13 @@ Environment=TZ=America/New_York
 # run file the engine starts from (docs/runbooks/durable-log.md). Start the
 # engine first; the adapter refuses to start without its log.
 EnvironmentFile=/var/lib/trend-investing/engines/boost/run.env
-# The account number is read from the root-only secrets file's
-# IBKR_ACCOUNT_BOOST line, handed to this service as a private copy; the
+# The account number is read from the IBKR_ACCOUNT_BOOST line of this
+# adapter's own root-only account file, handed to this service as a private
+# copy; nothing else (no other account's number, no alert URL) is. The
 # adapter's configuration names no account.
-LoadCredential=secrets:/etc/trend-investing/secrets.env
+LoadCredential=account:/etc/trend-investing/accounts/boost.env
 WorkingDirectory=/opt/trend-investing/adapter
-ExecStart=/opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr run --config /etc/trend-investing/adapters/boost.json --secrets %d/secrets --account-key IBKR_ACCOUNT_BOOST --pending /var/lib/trend-investing/adapters/boost/pending.json --engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log --socket /run/ti-engine-boost/engine.sock --ibapi-record /opt/trend-investing/twsapi/INSTALLED --versions /opt/trend-investing/adapter/versions.env
+ExecStart=/opt/trend-investing/adapter-venv/bin/python3 -m adapter.ibkr run --config /etc/trend-investing/adapters/boost.json --secrets %d/account --account-key IBKR_ACCOUNT_BOOST --pending /var/lib/trend-investing/adapters/boost/pending.json --engine-log /var/lib/trend-investing/engines/boost/${TI_RUN}.log --socket /run/ti-engine-boost/engine.sock --ibapi-record /opt/trend-investing/twsapi/INSTALLED --versions /opt/trend-investing/adapter/versions.env
 # Never restarted by systemd: every stop is for a person to read (the reason
 # is in the journal: journalctl -u ti-adapter-boost), and every start is the
 # owner's. SIGTERM stops it cleanly.

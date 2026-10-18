@@ -45,6 +45,15 @@ STATUS_LIFECYCLE = {
 INACTIVE = "Inactive"
 # IBKR message code 201: "Order rejected - reason: ...".
 REJECTION_CODES = frozenset({201})
+# IBKR message codes that refuse a newly placed order before it works, but
+# that IBKR also uses for other requests, whose request IDs may equal an
+# order ID ("Message Codes" in IBKR's TWS API documentation): 103 duplicate
+# order ID, 110 price not a multiple of the minimum tick, 200 no security
+# definition, 203 security not allowed for this account, 321 error
+# validating the request (the Read-Only API refuses every order this way).
+# Each is a rejection only for an order this client placed in this session
+# (OrderTracker.placed) that IBKR has not yet shown working.
+PLACEMENT_REJECTION_CODES = frozenset({103, 110, 200, 203, 321})
 # ibapi marks an unset price with sys.float_info.max (UNSET_DOUBLE).
 _UNSET_PRICE = 1.7e308
 
@@ -180,6 +189,9 @@ class OrderTracker:
     last status IBKR sent for an order is collapsed, since IBKR repeats them.
     Per-order state is keyed by order_key; client_id is this engine's own,
     which an order rejection (error with reqId = orderId) implicitly carries.
+    A code in PLACEMENT_REJECTION_CODES is that order's rejection only once
+    placed(order_id) has named the order and before IBKR shows it working
+    (an openOrder or a status).
 
     Invariant: a report counts as seen only once sink has accepted it, so a
     sink that raises (a failed journal write) leaves IBKR's redelivery of the
@@ -197,6 +209,15 @@ class OrderTracker:
         self._rejections = {}
         self._executions = set()
         self._commissions = set()
+        self._placed = set()
+
+    def placed(self, order_id):
+        """Record that this client placed order_id in this session, so IBKR's refusal of it is read as one."""
+        self._placed.add(order_key(self.client_id, order_id, None))
+
+    def _shown(self, key):
+        """Whether IBKR has shown the order working: an openOrder, or a status recorded or held."""
+        return key in self._client_ids or key in self._last or key in self._held
 
     def on_event(self, event):
         handler = getattr(self, "_on_" + event.name, None)
@@ -266,10 +287,12 @@ class OrderTracker:
         self._emit(key, report)
 
     def _on_error(self, req_id, code, message, *_):
-        if code not in REJECTION_CODES or req_id <= 0:
+        if req_id <= 0 or (code not in REJECTION_CODES and code not in PLACEMENT_REJECTION_CODES):
             return
         key = order_key(self.client_id, req_id, None)
         if key in self._foreign:
+            return
+        if code in PLACEMENT_REJECTION_CODES and (key not in self._placed or self._shown(key)):
             return
         # Statuses held before the rejection arrived precede it.
         self._release(key)

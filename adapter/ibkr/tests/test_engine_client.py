@@ -24,12 +24,14 @@ INPUT = {"id": "ibkr:1", "type": "execution.fill", "envelope_version": 1, "schem
          "payload": {"fill_id": "x"}}
 
 
-def reply_line(req, payload=b'{"decisions":[]}', **overrides):
+def reply_line(req, payload=b'{"decisions":[]}', drop=(), **overrides):
     """A reply as cmd/engine writes one: the decision envelope, payload last, hashed over its exact bytes."""
     head = {"id": "decisions:" + req["id"], "type": "engine.decisions", "envelope_version": 1, "schema_version": 1,
             "causation_id": req["id"], "sequence": req["sequence"], "strategy_version": req["strategy_version"],
             "configuration_hash": req["configuration_hash"], "payload_hash": hashlib.sha256(payload).hexdigest()}
     head.update(overrides)
+    for key in drop:
+        del head[key]
     text = json.dumps(head, separators=(",", ":"))
     return b'{"envelope":' + text[:-1].encode() + b',"payload":' + payload + b"}}\n"
 
@@ -70,6 +72,26 @@ class EngineClientTests(unittest.TestCase):
         thread = threading.Thread(target=run, daemon=True)
         thread.start()
         self.addCleanup(thread.join, 2)
+
+    def test_a_reply_in_an_envelope_or_schema_version_this_adapter_does_not_read_is_refused(self):
+        # cmd/engine writes envelope version 1 and engine.decisions schema
+        # version 1; any other shape could mean other orders.
+        bad = [dict(envelope_version=2), dict(envelope_version=0), dict(envelope_version="1"),
+               dict(envelope_version=True), dict(schema_version=2), dict(schema_version=None),
+               dict(drop=("envelope_version",)), dict(drop=("schema_version",))]
+        for change in bad:
+            with self.subTest(change=change):
+                self.tearDown_socket()
+                self.serve(lambda req, change=change: reply_line(req, **change))
+                client = EngineClient(self.path, timeout=2)
+                with self.assertRaises(EngineUnavailable) as caught:
+                    client.decide(INPUT)
+                self.assertIn("version", str(caught.exception))
+                client.close()
+
+    def tearDown_socket(self):
+        if os.path.exists(self.path):
+            os.remove(self.path)
 
     def test_one_exchange_returns_the_decision_envelope(self):
         self.serve(lambda req: reply_line(req, b'{"decisions":[{"type":"x","payload":{}}]}'))

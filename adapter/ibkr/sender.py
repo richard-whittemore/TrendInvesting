@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from config import is_paper_account
+from connection import NotConnected
 from values import to_decimal
 
 ACTIONS = ("BUY", "SELL")
@@ -187,12 +188,18 @@ class PaperSender:
                               "and the adapter stops here until a person settles it with relay.py resolve "
                               "--never-sent (docs/manual/paper-trading.md)".format(
                                   request.client_order_id, request.session, today))
-        if not self._conn.api.can_place_orders():
-            raise SendRefused("the IBKR client on this connection does not place orders; nothing is sent")
+        # The link first: a link down or not yet reconciled holds the input
+        # until it is back (NotConnected, NotReconciled), where the switch's
+        # refusal below stops the adapter for a person.
         self._conn.require_connected()
+        if not self._conn.api.is_connected():
+            raise NotConnected("IB Gateway's socket is closed; nothing is sent")
         if self._conn.needs_reconciliation:
             raise NotReconciled("the link to IB Gateway has not been reconciled since it connected; nothing is "
-                                "sent until IBKR's orders, executions and balances are matched to the journal")
+                                "sent until IBKR's open orders and executions are matched to the journal and its "
+                                "account read in full")
+        if not self._conn.api.can_place_orders():
+            raise SendRefused("the IBKR client on this connection does not place orders; nothing is sent")
         if config.account_id not in self._conn.managed_accounts:
             raise SendRefused("account {!r} is not among the accounts this IBKR login manages; nothing is "
                               "sent".format(config.account_id))

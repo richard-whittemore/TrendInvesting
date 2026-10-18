@@ -137,6 +137,27 @@ class PaperSenderTests(unittest.TestCase):
         self.assertEqual(h.fake.placed, [])
         self.assertEqual(journal, [])
 
+    def test_a_link_down_is_reported_as_link_down_before_the_sending_switch_is_asked(self):
+        # A link known to be down holds the input (NotConnected, NotReconciled);
+        # the switch's refusal (SendRefused) would stop the adapter instead.
+        dropped = paper_harness()
+        dropped.fake.can_place = False
+        dropped.fake.drop()
+        dropped.conn.pump(0)
+        # The socket closed underneath, before any callback said so.
+        silent = paper_harness()
+        silent.fake.can_place = False
+        silent.fake.connected = False
+        for name, h in (("dropped", dropped), ("socket closed", silent)):
+            with self.subTest(name), self.assertRaises(NotConnected):
+                paper_sender(h, []).check(limit_request())
+        unreconciled = paper_harness(reconciled=False)
+        unreconciled.fake.can_place = False
+        with self.assertRaises(NotReconciled):
+            paper_sender(unreconciled, []).check(limit_request())
+        for h in (dropped, silent, unreconciled):
+            self.assertEqual(h.fake.placed, [])
+
     def test_a_request_the_paper_account_cannot_carry_is_refused_before_the_gateway(self):
         h = paper_harness()
         journal = []

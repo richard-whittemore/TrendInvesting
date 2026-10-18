@@ -159,8 +159,9 @@ step_gateway() {
 # link, so once IBKR replaces the file the checksum fails, and that must not
 # block the Gateway or the services.
 #
-# Installs the verified installer's tree under $twsapi_root/<version>, then
-# the Python client it bundles (source/pythonclient) into the adapter's own
+# Runs the verified installer unprivileged, installs the Python client it
+# bundles (source/pythonclient) as root under $twsapi_root/<version>, then
+# into the adapter's own
 # environment, $adapter_venv, offline (--no-index, --no-deps: ibapi has no
 # dependencies), and only then writes the install record the adapter checks
 # at start against the pin installed with its code (adapter/ibkr/ibapi_pin.py):
@@ -182,16 +183,33 @@ step_twsapi() {
   local target="$twsapi_root/$TWSAPI_VERSION"
   rm -rf "$target" "$twsapi_root/INSTALLED"
   install -d -m 0755 "$twsapi_root"
-  # -q: unattended; -dir: where to put the tree. The install4j installer
-  # writes under HOME, so it gets a scratch one.
-  local home
-  home=$(mktemp -d)
-  HOME=$home sh "$installer" -q -dir "$target" >/dev/null
-  rm -rf "$home"
-  local client
-  client=$(find "$target" -type d -name pythonclient -path '*/source/*' | head -n 2)
-  test "$(printf '%s\n' "$client" | grep -c .)" = 1 || die "the TWS API ${TWSAPI_VERSION} tree under $target has not exactly one source/pythonclient; not installing"
-  test -f "$client/setup.py" || test -f "$client/pyproject.toml" || die "$client has no setup.py or pyproject.toml; not installing"
+  # The vendor installer runs unprivileged (as nobody), into a scratch
+  # directory it owns, as step_gateway runs the Gateway's installer as its
+  # service user; only the Python client it unpacks is then installed, as
+  # root, under $target. -q: unattended; -dir: where to put the tree. The
+  # install4j installer writes under HOME, so it gets a scratch one.
+  local scratch
+  scratch=$(mktemp -d)
+  chmod 0755 "$scratch"
+  install -d -o nobody -g nogroup -m 0700 "$scratch/home" "$scratch/tree"
+  install -m 0644 "$installer" "$scratch/installer.sh"
+  runuser -u nobody -- env HOME="$scratch/home" sh "$scratch/installer.sh" -q -dir "$scratch/tree" >/dev/null
+  local unpacked
+  unpacked=$(find "$scratch/tree" -type d -name pythonclient -path '*/source/*' | head -n 2)
+  if test "$(printf '%s\n' "$unpacked" | grep -c .)" != 1; then
+    rm -rf "$scratch"
+    die "the TWS API ${TWSAPI_VERSION} tree has not exactly one source/pythonclient; not installing"
+  fi
+  if ! test -f "$unpacked/setup.py" && ! test -f "$unpacked/pyproject.toml"; then
+    rm -rf "$scratch"
+    die "the TWS API ${TWSAPI_VERSION} pythonclient has no setup.py or pyproject.toml; not installing"
+  fi
+  install -d -o root -g root -m 0755 "$target"
+  cp -R "$unpacked" "$target/pythonclient"
+  chown -R root:root "$target"
+  chmod -R u=rwX,go=rX "$target"
+  rm -rf "$scratch"
+  local client="$target/pythonclient"
   # A fresh environment each time: nothing of an earlier ibapi remains. The
   # system site packages give pip the setuptools and wheel it builds with,
   # offline.
@@ -252,6 +270,10 @@ TI_GATEWAY_COLD_RESTART=09:00
 CONF
   write_stub "$etc/ibkr-login.env" "$here/etc/ibkr-login.env.example"
   write_stub "$etc/secrets.env" "$here/etc/secrets.env.example"
+  # Each adapter's account number in a file of its own, handed only to that
+  # adapter (ADR 0026 point 8: one engine per account).
+  install -d -o root -g root -m 0700 "$etc/accounts"
+  write_stub "$etc/accounts/boost.env" "$here/etc/accounts/boost.env.example"
   install -d -o ti-trader -g ti-trader -m 0750 \
     /var/lib/trend-investing/data /var/lib/trend-investing/reports /var/lib/trend-investing/engines
   local a
@@ -260,7 +282,7 @@ CONF
     install -d -o ti-trader -g ti-trader -m 0750 "/var/lib/trend-investing/adapters/$a"
   done
   # The adapter's configuration carries no secret (the account number comes
-  # from secrets.env): created once from the example, never overwritten, so
+  # from accounts/boost.env): created once from the example, never overwritten, so
   # the owner's paper settings survive a re-run.
   install -d -m 0755 "$etc/adapters"
   if ! test -e "$etc/adapters/boost.json"; then

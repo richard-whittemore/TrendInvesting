@@ -23,6 +23,7 @@ from tws import Inbox
 from datetime import date
 from decimal import Decimal
 from test_connection import config
+from relay import HandoverUnconfirmed
 from sender import LiveSendingDisabled, OrderRequest, SendRefused, request_shape
 
 PAPER = "DU0000001"
@@ -42,7 +43,20 @@ def paper_config(**overrides):
     return config(**values)
 
 
+class _Conn:
+    """ibapi.connection.Connection: its own socket, which IB Gateway can close without telling EClient."""
+
+    def __init__(self):
+        self.socket = object()
+
+    def isConnected(self):
+        return self.socket is not None
+
+
 class _EClient:
+    # Called as placeOrder(orderId, contract, order) runs, so a test can close
+    # the socket underneath it (ibapi's sendMsg then returns 0, sending nothing).
+    on_place = None
     # Set to a threading.Event to make connect block until it is set, as a
     # stalled socket connect or handshake does.
     connect_gate = None
@@ -55,6 +69,7 @@ class _EClient:
     def __init__(self, wrapper):
         self.wrapper = wrapper
         self.requests = []
+        self.conn = None
         self._stopped = threading.Event()
 
     def connect(self, host, port, clientId):
@@ -64,6 +79,7 @@ class _EClient:
         if _EClient.after_connect is not None:
             _EClient.after_connect()
         # The socket is open now, whatever happened while connect was blocked.
+        self.conn = _Conn()
         self._stopped.clear()
 
     def run(self):
@@ -78,6 +94,9 @@ class _EClient:
 
     def disconnect(self):
         self.requests.append(("disconnect",))
+        if self.conn is not None:
+            self.conn.socket = None
+        self.conn = None
         self._stopped.set()
 
     def reqCurrentTime(self):
@@ -103,6 +122,8 @@ class _EClient:
 
     def placeOrder(self, orderId, contract, order):
         self.requests.append(("placeOrder", orderId, contract, order))
+        if _EClient.on_place is not None:
+            _EClient.on_place(orderId, contract, order)
 
 
 # ibapi marks an unset price with sys.float_info.max (ibapi.const.UNSET_DOUBLE).
@@ -148,17 +169,19 @@ class _Order:
         self.trailStopPrice = UNSET_DOUBLE
         self.whatIf = False
         self.conditions = []
+        self.includeOvernight = False
+        self.usePriceMgmtAlgo = None
         self.displaySize = 0
 
 
-def _install_stub(new_error_signature, order_class=_Order):
+def _install_stub(new_error_signature, order_class=_Order, contract_class=_Contract):
     pkg = types.ModuleType("ibapi")
     client = types.ModuleType("ibapi.client")
     wrapper = types.ModuleType("ibapi.wrapper")
     execution = types.ModuleType("ibapi.execution")
     contract_module = types.ModuleType("ibapi.contract")
     order_module = types.ModuleType("ibapi.order")
-    contract_module.Contract = _Contract
+    contract_module.Contract = contract_class
     order_module.Order = order_class
 
     class EWrapper:
@@ -520,12 +543,16 @@ class OrderMappingTests(unittest.TestCase):
                 self.goodTillDate = "20261016 16:00:00"
                 self.algoStrategy = "Adaptive"
                 self.trailStopPrice = 2.0
+                self.includeOvernight = True
+                self.usePriceMgmtAlgo = True
                 self.transmit = False
         built = real_client.ibapi_order(request_shape(paper_request())[1], Odd)
         expected = {"outsideRth": False, "parentId": 0, "ocaGroup": "", "conditions": [], "whatIf": False,
                     "auxPrice": UNSET_DOUBLE, "hidden": False, "allOrNone": False, "goodAfterTime": "",
-                    "goodTillDate": "", "algoStrategy": "", "trailStopPrice": UNSET_DOUBLE, "transmit": True}
+                    "goodTillDate": "", "algoStrategy": "", "trailStopPrice": UNSET_DOUBLE,
+                    "includeOvernight": False, "usePriceMgmtAlgo": False, "transmit": True}
         self.assertEqual({k: getattr(built, k) for k in expected}, expected)
+        self.assertIs(built.usePriceMgmtAlgo, False, "explicitly off, not ibapi's None (the account's setting)")
         self.assertEqual(dict(real_client.ORDER_FIELDS_SET), {k: v for k, v in expected.items() if k != "transmit"})
         self.assertEqual(real_client.ORDER_REQUEST_FIELDS,
                          ("orderRef", "account", "action", "totalQuantity", "orderType", "lmtPrice", "tif",
@@ -553,6 +580,44 @@ class OrderMappingTests(unittest.TestCase):
             real_client.ibapi_order(request_shape(paper_request())[1], NoConditions)
         self.assertIn("conditions", str(caught.exception))
 
+    def test_an_ibapi_lacking_a_field_the_adapter_sets_refuses_at_construction_before_any_order_is_marked(self):
+        # The relay marks an order "about to send" before place_order builds
+        # ibapi's objects, so a missing field must refuse before then.
+        class NoOvernight(_Order):
+            def __init__(self):
+                super().__init__()
+                del self.includeOvernight
+
+        class NoConditions(_Order):
+            def __init__(self):
+                super().__init__()
+                del self.conditions
+
+        class NoExchange(_Contract):
+            def __init__(self):
+                super().__init__()
+                del self.exchange
+
+        class NoOrderRef(_Order):
+            def __init__(self):
+                super().__init__()
+                del self.orderRef
+        for order_class, contract_class, name in ((NoOvernight, _Contract, "includeOvernight"),
+                                                  (NoConditions, _Contract, "conditions"),
+                                                  (NoOrderRef, _Contract, "orderRef"),
+                                                  (_Order, NoExchange, "exchange")):
+            with self.subTest(missing=name):
+                _install_stub(False, order_class, contract_class)
+                import real_client
+                real_client = importlib.reload(real_client)
+                with self.assertRaises(real_client.IbapiMismatch) as caught:
+                    real_client.IbapiClient(start_reader=False, config=paper_config())
+                self.assertIn(name, str(caught.exception))
+        _install_stub(False)
+        import real_client
+        real_client = importlib.reload(real_client)
+        real_client.IbapiClient(start_reader=False, config=paper_config())
+
     def test_a_request_not_in_the_adapters_shape_is_refused(self):
         real_client = self.module()
         contract, order = request_shape(paper_request())
@@ -579,6 +644,7 @@ class PlacingOrdersTests(unittest.TestCase):
     """can_place_orders: paper mode, a DU account the session's login manages, and the configuration's switch."""
 
     def tearDown(self):
+        _EClient.on_place = None
         _uninstall_stub()
         import real_client
         importlib.reload(real_client)
@@ -651,11 +717,46 @@ class PlacingOrdersTests(unittest.TestCase):
         self.assertFalse(client.can_place_orders())
 
     def test_no_order_is_placed_while_the_link_is_down(self):
+        # The relay has marked the order "about to send" by now, so a link
+        # found down here leaves the hand-over for a person, never "sent".
         client = self.client(paper_config())
         client.disconnect()
-        self.assertFalse(client.can_place_orders())
-        with self.assertRaises(SendRefused):
+        self.assertFalse(client.is_connected())
+        with self.assertRaises(HandoverUnconfirmed):
             client.place_order(7, *request_shape(paper_request()))
+        self.assertNotIn("placeOrder", [r[0] for r in client._client.requests])
+
+    def test_the_sending_switch_is_the_configuration_and_the_login_not_the_link(self):
+        # The link's state is the connection's to report (NotConnected, which
+        # holds the input), never a refusal of the switch.
+        client = self.client(paper_config())
+        client._client.conn.socket = None
+        self.assertFalse(client.is_connected())
+        self.assertTrue(client.can_place_orders())
+
+    def test_a_socket_ibapi_closed_underneath_is_a_link_down_whatever_eclient_says(self):
+        # IB Gateway closing the socket (its nightly restart, a crash) leaves
+        # EClient's own state CONNECTED; only ibapi's connection knows.
+        client = self.client(paper_config())
+        client._client.conn.socket = None
+        self.assertTrue(client._client.isConnected())
+        self.assertFalse(client.is_connected())
+        with self.assertRaises(HandoverUnconfirmed):
+            client.place_order(7, *request_shape(paper_request()))
+        self.assertNotIn("placeOrder", [r[0] for r in client._client.requests])
+        client._client.conn = None
+        self.assertFalse(client.is_connected())
+
+    def test_an_order_whose_socket_closed_during_placeorder_is_unconfirmed_never_taken_as_sent(self):
+        client = self.client(paper_config())
+
+        def gateway_closes(order_id, contract, order):
+            # ibapi's sendMsg returns 0 on a closed socket and raises nothing.
+            client._client.conn.socket = None
+        _EClient.on_place = gateway_closes
+        with self.assertRaises(HandoverUnconfirmed) as caught:
+            client.place_order(7, *request_shape(paper_request()))
+        self.assertIn("tw-paper-1", str(caught.exception))
 
 
 if __name__ == "__main__":

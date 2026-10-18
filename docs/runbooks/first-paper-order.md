@@ -164,7 +164,7 @@ files never contain it, because the repository is public.
 
 | Where | What | Why |
 | --- | --- | --- |
-| `/etc/trend-investing/secrets.env`, the line `IBKR_ACCOUNT_BOOST=` (use `sudo -e`; root-only, mode 0600) | your paper account (DU…) | The shipped file holds names only; each engine reads only its own line |
+| `/etc/trend-investing/accounts/boost.env`, the line `IBKR_ACCOUNT_BOOST=` (use `sudo -e`; root-only, mode 0600) | your paper account (DU…), with no quotes and no spaces | The shipped file holds the name only. It is the only file the Boost adapter is given: no other account's number and no alert URL |
 | The Boost engine's paper configuration, `/etc/trend-investing/engines/boost.config`: a copy of the shipped dry-run file with `"mode": "paper"` and `"account_id"` set to your paper account (DU…) | the mode and the account | The engine refuses to start if the mode in this file is not the mode you start it with, or if a paper configuration names an account not beginning `DU`. The file is hashed into the run (ADR 0016), so a change is a new run |
 | `/etc/trend-investing/engines/boost.env`: set `TI_MODE=paper` | the engine's start mode | It must equal the mode in the configuration |
 | The adapter's configuration: `mode` paper, `account_id` your paper account (DU…), `host` 127.0.0.1, `port` 4002, the engine's `client_id` (Boost is 11), the timing values and `con_ids` with SPY's IBKR contract number | the adapter's side of the binding | See B2 |
@@ -264,8 +264,9 @@ Order of starting, each on the server, each an explicit step of yours:
    Engines are never started by systemd on their own and never restarted by
    it; every start is yours.
 5. Confirm the engine's log begins with the paper configuration, and that the
-   adapter says it connected on 4002, and matched IBKR's open orders, trades
-   and balances ("reconciled") before anything else. The adapter does this on
+   adapter says it connected on 4002, read the account's balances in full
+   and matched IBKR's open orders and today's trades to the orders the
+   engine released ("reconciled") before anything else. The adapter does this on
    every start and reconnect (ADR 0025 point 5).
 
 The adapter's startup command and service unit are added by the second half;
@@ -309,8 +310,9 @@ and stops on a value it does not know.
 
 The rule is in the manual (`docs/manual/paper-trading.md`) and in
 `docs/manual/redelivery.md`: on every reconnect the adapter reconnects with
-the same client ID and matches IBKR's open orders, trades and balances to its
-own records **before** anything else is sent. An order already marked "sent",
+the same client ID, reads the account's balances in full and matches IBKR's
+open orders and today's trades to its own records **before** anything else is
+sent. An order already marked "sent",
 or one IBKR shows as open or executed, is never sent again. The code's tests
 (`adapter/ibkr/tests/test_paper.py`, against the fake) include a reconnect
 that never resends and a crash between the send and its mark that never

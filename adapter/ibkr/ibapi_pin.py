@@ -9,11 +9,18 @@ adapter's environment and, only then, writes an install record:
 
 At start the adapter compares that record with the pin in the versions.env
 beside its own code (installed by `provision.sh adapter` from the same
-checkout) and refuses to start on any difference: code updated to a new pin
-without ibapi being installed again, an ibapi installed by hand, or a record
-not exactly as the step writes it (fail closed, AGENTS.md). ADR 0025 point 5:
-a change of API version repeats the paper-account test before the pin moves.
+checkout), and the version of the ibapi Python actually imports with the
+pinned version, and refuses to start on any difference: code updated to a
+new pin without ibapi being installed again, an environment changed after
+the record was written or an ibapi installed by hand (a system-wide one
+included), an ibapi that does not import, or a record not exactly as the
+step writes it (fail closed, AGENTS.md). ADR 0025 point 5: a change of API
+version repeats the paper-account test before the pin moves.
+
+The TWS API's version "10.51.01" is ibapi's VERSION {"major": 10, "minor":
+51, "micro": 1}: compared as whole numbers.
 """
+import importlib
 import re
 
 PIN_KEYS = ("TWSAPI_VERSION", "TWSAPI_SHA256")
@@ -59,10 +66,31 @@ def read_pin(versions_path):
     return values["TWSAPI_VERSION"], values["TWSAPI_SHA256"]
 
 
-def check_installed(record_path, versions_path):
-    """Return the pinned version if record_path records installing exactly that build, else raise IbapiNotPinned.
+def _version_numbers(text):
+    return tuple(int(part) for part in text.split("."))
+
+
+def installed_ibapi_version():
+    """(major, minor, micro) of the ibapi this Python imports, else IbapiNotPinned."""
+    try:
+        ibapi = importlib.import_module("ibapi")
+    except ImportError as err:
+        raise IbapiNotPinned("ibapi does not import ({}); install the pinned build with `sudo deploy/provision.sh "
+                             "twsapi`".format(type(err).__name__)) from None
+    version = getattr(ibapi, "VERSION", None)
+    parts = tuple(version.get(k) for k in ("major", "minor", "micro")) if isinstance(version, dict) else ()
+    if len(parts) != 3 or not all(isinstance(p, int) and not isinstance(p, bool) for p in parts):
+        raise IbapiNotPinned("the ibapi this Python imports names no version (ibapi.VERSION); install the pinned "
+                             "build with `sudo deploy/provision.sh twsapi`")
+    return parts
+
+
+def check_installed(record_path, versions_path, installed_version=installed_ibapi_version):
+    """Return the pinned version if exactly that build is recorded as installed and imports, else raise IbapiNotPinned.
 
     The record holds the two pin keys and nothing else, each once.
+    installed_version returns the imported ibapi's (major, minor, micro);
+    by default the ibapi this Python imports.
     """
     pinned = read_pin(versions_path)
     text = _read(record_path, "the ibapi install record")
@@ -75,4 +103,9 @@ def check_installed(record_path, versions_path):
         raise IbapiNotPinned("the installed ibapi is TWS API {} (installer {}), but the pin is {} ({}); install the "
                              "pinned build with `sudo deploy/provision.sh twsapi` before starting".format(
                                  installed[0], installed[1][:12], pinned[0], pinned[1][:12]))
+    imported = installed_version()
+    if tuple(imported) != _version_numbers(pinned[0]):
+        raise IbapiNotPinned("the ibapi this Python imports is {}, but the pin is TWS API {}; install the pinned "
+                             "build with `sudo deploy/provision.sh twsapi` before starting".format(
+                                 ".".join(map(str, imported)), pinned[0]))
     return pinned[0]

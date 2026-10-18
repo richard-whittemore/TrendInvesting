@@ -6,7 +6,11 @@ decision envelope or an error. Nothing on the wire pairs a reply with its
 request beyond order, so a connection is abandoned the moment an exchange
 does not complete, and every reply is checked before it is used: it names
 the input just sent (causation_id), it is the run's own (configuration hash
-and strategy version), and its payload's exact bytes match its payload_hash
+and strategy version), it is in an envelope version and an engine.decisions
+schema version this adapter reads (ACCEPTED_ENVELOPE_VERSIONS,
+ACCEPTED_SCHEMA_VERSIONS: event.CurrentEnvelopeVersion and cmd/engine's
+decisionsSchemaVersion; another shape could carry other orders under the
+same keys), and its payload's exact bytes match its payload_hash
 (event.Envelope.Validate's rule; Go's encoding is not re-created here, so
 the bytes are taken from the line as received).
 
@@ -24,6 +28,8 @@ from relay import EngineUnavailable
 MAX_FRAME_BYTES = 1 << 20
 CODE_UNAVAILABLE = "unavailable"
 DECISIONS_TYPE = "engine.decisions"
+ACCEPTED_ENVELOPE_VERSIONS = (1,)
+ACCEPTED_SCHEMA_VERSIONS = (1,)
 _PAYLOAD_KEY = b'"payload":'
 
 
@@ -110,6 +116,12 @@ class EngineClient:
                           ("strategy_version", envelope["strategy_version"])):
             if decision.get(key) != want:
                 raise EngineUnavailable("the engine's reply has {} {!r}, not {!r}".format(key, decision.get(key), want))
+        for key, accepted in (("envelope_version", ACCEPTED_ENVELOPE_VERSIONS),
+                              ("schema_version", ACCEPTED_SCHEMA_VERSIONS)):
+            value = decision.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value not in accepted:
+                raise EngineUnavailable("the engine's reply has {} {!r}; this adapter reads only {}".format(
+                    key, value, ", ".join(map(str, accepted))))
         if hashlib.sha256(_raw_payload(line)).hexdigest() != decision.get("payload_hash"):
             raise EngineUnavailable("the engine's decision payload does not match its payload_hash")
         if not isinstance(decision.get("payload"), dict) or not isinstance(decision["payload"].get("decisions"), list):

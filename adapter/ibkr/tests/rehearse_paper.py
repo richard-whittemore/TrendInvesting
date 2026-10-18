@@ -22,7 +22,11 @@ It proves, in order, and stops at the first that fails, exiting 1:
    records nothing twice.
 
 The session's close, which a producer not yet built will send, is recorded
-in the adapter's outbox before the first start, as that producer would.
+in the adapter's outbox before the first start, as that producer would:
+through loop.Outbox.append, under the outbox's lock.
+
+ibapi is not installed here, so the imported ibapi's version is given as
+the pinned one; everything else the start command checks is checked.
 
 The account is synthetic (DU0000001) unless TI_REHEARSAL_ACCOUNT holds one
 beginning DU (deploy/rehearse-paper.sh asks for it at a hidden prompt); it
@@ -51,7 +55,7 @@ from config import is_paper_account  # noqa: E402
 from engine_double import EngineRefused, LoggedEngine  # noqa: E402
 from fake_tws import FakeTWS  # noqa: E402
 from ibapi_pin import read_pin  # noqa: E402
-from loop import OUTBOX_SUFFIX  # noqa: E402
+from loop import OUTBOX_SUFFIX, Outbox  # noqa: E402
 from relay import RELEASED  # noqa: E402
 from reports import FILL_TYPE, LIFECYCLE_TYPE  # noqa: E402
 
@@ -154,7 +158,7 @@ def rehearse(work, account):
     server = SocketEngine(sock_path, engine)
     pending = work / "adapter" / "pending.json"
     pending.parent.mkdir()
-    secrets = work / "secrets.env"
+    secrets = work / "boost.env"
     secrets.write_text("IBKR_ACCOUNT_BOOST={}\n".format(account))
     os.chmod(str(secrets), 0o600)
     adapter_config = work / "boost.json"
@@ -168,9 +172,9 @@ def rehearse(work, account):
     record = work / "INSTALLED"
     record.write_text("TWSAPI_VERSION={}\nTWSAPI_SHA256={}\n".format(version, sha))
     # The session's close, as the producer that sends it will record it.
-    Path(str(pending) + OUTBOX_SUFFIX).write_text(json.dumps([{
+    Outbox(str(pending) + OUTBOX_SUFFIX).append({
         "id": "session:rehearsal", "event_type": "market.session.closed", "schema_version": 1,
-        "event_time": closed_at, "payload": {"period_end": closed_at, "instrument_ids": ["SPY"]}}]))
+        "event_time": closed_at, "payload": {"period_end": closed_at, "instrument_ids": ["SPY"]}})
 
     gateway = FakeTWS()
     gateway.managed_accounts = (account,)
@@ -184,7 +188,8 @@ def rehearse(work, account):
     log = (work / "adapter.log").open("w")
 
     def run(phase):
-        status = adapter_main(argv, api_factory=lambda cfg: gateway, should_stop=phase, err=log, poll=0.01)
+        status = adapter_main(argv, api_factory=lambda cfg: gateway, should_stop=phase, err=log, poll=0.01,
+                              ibapi_version=lambda: tuple(int(p) for p in version.split(".")))
         log.flush()
         if status != 0:
             raise RehearsalFailed("the adapter stopped (exit {}): {}".format(

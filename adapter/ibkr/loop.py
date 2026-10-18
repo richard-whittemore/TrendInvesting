@@ -5,8 +5,18 @@ with the engine's own client ID and, before any order can be sent, reads
 the account (snapshot.read_account: positions, balances and open orders)
 and IBKR's open orders and the session's executions
 (orders.collect_broker_orders), refusing to go on if any of it could not be
-read (ReconcileIncomplete; an unavailable balance is not zero, ADR 0019),
-and only then marks the link reconciled (Connection.mark_reconciled, which
+read (ReconcileIncomplete; an unavailable balance is not zero, ADR 0019).
+It then matches IBKR's open orders and executions against the orders the
+engine's durable log released to be sent (orders.match_on_reconnect, by
+client order ID under this engine's client ID): an open order or execution
+in the account that none of them explains (an order placed by hand or by
+another client, or one from another run) stops the adapter for a person
+(ReconcileMismatch) before anything is sent. A released order IBKR no
+longer shows is not a refusal here: a DAY order ended or filled on an
+earlier day leaves nothing in today's lists, and the relay checks IBKR for
+the one order it is about to send. Positions and balances are read in full
+but not matched here: that is the engine's reconciliation (ADR 0019).
+Only then is the link marked reconciled (Connection.mark_reconciled, which
 refuses an account the login does not manage). It does the same after
 every reconnect or restoration. It then settles the input left awaiting
 its reply by a stop, if any, before anything new.
@@ -18,7 +28,11 @@ states, that the check runs after each pump, so a missing commission stops
 the adapter on time and not only when IBKR next writes), and, while the
 link is up and reconciled, sends the engine every input recorded since,
 oldest first, through the relay, which hands each released order marked
-send to the sender once (relay.Relay).
+send to the sender once (relay.Relay). While the engine decides, the
+exchange runs on a thread of its own and this thread keeps reading IB
+Gateway's callbacks and checking for overdue commissions, so a slow reply
+neither leaves the heartbeat's answer unread (which would drop a healthy
+link) nor lets an arrived commission count as missing.
 
 Inputs are recorded in the outbox (OUTBOX_SUFFIX beside the pending file)
 before they are sent, written durably, so a report IBKR will not repeat (a
@@ -27,26 +41,31 @@ carries its input ID from the moment it is recorded; its sequence and the
 run's identity are taken from the engine's durable log when it is sent
 (relay.read_engine_log), so a stop between the engine's reply and the entry
 being struck off sends nothing twice: an entry the log already holds as a
-committed input is struck off unsent. The records already committed, in the
-outbox, or awaiting their reply seed the report journal, so IBKR's replay
-after a restart records nothing twice.
+committed input, with the same type, schema version and payload, is struck
+off unsent, and one whose ID the log holds with any other content stops
+the adapter (OutboxInvalid). The records already committed, in the outbox,
+or awaiting their reply seed the report journal, so IBKR's replay after a
+restart records nothing twice.
 
 The engine must be running, with its durable log begun, before the adapter
 starts: the log is the run's identity. Nothing here sends when the
 configuration is not paper (sender.make_sender), and the real client sends
 only with paper_sending_enabled on (real_client.IbapiClient.can_place_orders).
 """
+import contextlib
+import fcntl
 import hashlib
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
 
 from connection import Connection, NotConnected
-from orders import OrderTracker, collect_broker_orders
-from relay import PendingInput, Relay, read_engine_log
+from orders import BrokerOrdersIncomplete, OrderTracker, collect_broker_orders, match_on_reconnect
+from relay import PendingInput, Relay, read_engine_log, released_client_order_ids
 from reports import FILL_TYPE, LIFECYCLE_TYPE, OrderReportJournal
 from sender import NotReconciled, make_sender, release_to_request
 from snapshot import Record, read_account
@@ -64,10 +83,17 @@ HELD_SUFFIX = ".held"
 OUTBOX_FIELDS = ("event_time", "event_type", "id", "payload", "schema_version")
 # The input types whose event time is in their payload.
 EVENT_TIME_FIELD = {LIFECYCLE_TYPE: "occurred_at", FILL_TYPE: "filled_at"}
+# How long, in seconds, the loop waits on the engine's thread between reads
+# of IB Gateway's callbacks while the engine decides.
+ENGINE_WAIT_POLL = 0.05
 
 
 class ReconcileIncomplete(Exception):
     """IBKR's account could not be read in full, so the link is not reconciled and nothing is sent."""
+
+
+class ReconcileMismatch(Exception):
+    """IBKR shows an open order or execution the journal does not explain; the link is not reconciled."""
 
 
 class OutboxInvalid(ValueError):
@@ -87,10 +113,19 @@ def _new_id(event_type):
 
 
 class Outbox:
-    """The inputs recorded for the engine and not yet struck off, oldest first, in a JSON file rewritten atomically."""
+    """The inputs recorded for the engine and not yet struck off, oldest first, in a JSON file rewritten atomically.
+
+    Every change is a read-modify-write of the whole file, made only under
+    an exclusive lock on lock_path (path + ".lock"), held for that one
+    change: the adapter and any producer of its inputs in another process
+    (the session's close, say) write it only through append, so neither
+    loses the other's entry. Never edit the file by hand while either runs.
+    Reads need no lock: each write replaces the file whole.
+    """
 
     def __init__(self, path):
         self.path = path
+        self.lock_path = path + ".lock"
 
     def load(self):
         try:
@@ -109,14 +144,26 @@ class Outbox:
         return entries
 
     def append(self, entry):
-        self._write(self.load() + [entry])
+        with self._locked():
+            self._write(self.load() + [entry])
 
     def strike(self, input_id):
         """Remove the entry for input_id; one not there is already struck off."""
-        entries = self.load()
-        kept = [e for e in entries if e["id"] != input_id]
-        if len(kept) != len(entries):
-            self._write(kept)
+        with self._locked():
+            entries = self.load()
+            kept = [e for e in entries if e["id"] != input_id]
+            if len(kept) != len(entries):
+                self._write(kept)
+
+    @contextlib.contextmanager
+    def _locked(self):
+        # Never removed: the lock lives on the file's inode.
+        fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
 
     def _write(self, entries):
         tmp = self.path + ".tmp"
@@ -130,6 +177,29 @@ class Outbox:
             os.fsync(fd)
         finally:
             os.close(fd)
+
+
+class _AskedOnItsOwnThread:
+    """An engine client whose decide runs on a thread of its own while await_engine(worker) keeps this one busy."""
+
+    def __init__(self, engine, await_engine):
+        self._engine = engine
+        self._await = await_engine
+
+    def decide(self, envelope):
+        outcome = {}
+
+        def ask():
+            try:
+                outcome["reply"] = self._engine.decide(envelope)
+            except BaseException as err:  # handed back to the caller below
+                outcome["error"] = err
+        worker = threading.Thread(target=ask, name="engine-exchange", daemon=True)
+        worker.start()
+        self._await(worker)
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["reply"]
 
 
 class AdapterLoop:
@@ -160,6 +230,7 @@ class AdapterLoop:
         self.conn = None
         self.relay = None
         self.reports = None
+        self.tracker = None
         self.outbox = Outbox(pending_path + OUTBOX_SUFFIX)
         self.pending = PendingInput(pending_path)
 
@@ -171,7 +242,8 @@ class AdapterLoop:
         sender = make_sender(cfg, self._sent, conn=self.conn, today=self._today)
         # The relay takes the adapter's exclusive lock first; the report
         # journal reads its held file only while that lock is held.
-        self.relay = Relay(self._engine_connect, sender, self.pending, lambda: collect_broker_orders(self.conn),
+        self.relay = Relay(lambda: _AskedOnItsOwnThread(self._engine_connect(), self._await_engine), sender,
+                           self.pending, lambda: collect_broker_orders(self.conn),
                            lambda order, session: release_to_request(order, cfg.mode, cfg.con_ids, session),
                            today=self._today)
         engine_log = read_engine_log(self._engine_log_path)
@@ -180,7 +252,8 @@ class AdapterLoop:
             held_path=self._pending_path + HELD_SUFFIX, owns_lock=self.relay.holds, ready=self.ready,
             journalled=self._journalled(engine_log), acknowledged=self.pending.acknowledged_corrections(),
             late_fills=self.pending.acknowledged_late_fills())
-        self.conn.subscribe(OrderTracker(cfg.account_id, cfg.client_id, self.reports.on_record).on_event)
+        self.tracker = OrderTracker(cfg.account_id, cfg.client_id, self.reports.on_record)
+        self.conn.subscribe(self.tracker.on_event)
         self.conn.connect_with_backoff()
         self.reconcile()
         self._settle_waiting()
@@ -190,13 +263,25 @@ class AdapterLoop:
         return self.conn is not None and self.conn.connected and not self.conn.needs_reconciliation
 
     def reconcile(self):
-        """Read IBKR's account, open orders and executions in full, then mark the link reconciled."""
+        """Read IBKR's account in full, match its open orders and executions to the journal, then mark the link reconciled."""
         reading = read_account(self.conn)
         if reading.unread:
             raise ReconcileIncomplete("IBKR's account could not be read in full ({} unread); nothing is sent until a "
                                       "read is complete (ADR 0019: an unavailable balance is not zero)".format(
                                           ", ".join(sorted(reading.unread))))
         broker = collect_broker_orders(self.conn)
+        expected = released_client_order_ids(self._engine_log_path) | set(self.pending.handovers())
+        match = match_on_reconnect(expected, broker, self.config.client_id)
+        if match.unknown_at_broker or match.unknown_executions:
+            unexplained = ["open order orderRef={} client_id={} order_id={} perm_id={}".format(
+                r.client_order_id or "-", r.client_id, r.broker_order_id, r.perm_id) for r in match.unknown_at_broker]
+            unexplained += ["execution {} orderRef={} client_id={} order_id={}".format(
+                r.exec_id, r.client_order_id or "-", r.client_id, r.broker_order_id) for r in match.unknown_executions]
+            raise ReconcileMismatch(
+                "IBKR shows {} unexplained open order(s) or execution(s) in the account, which no order the engine "
+                "released explains: {}. Nothing is sent: check them in IBKR (an order placed by hand or by another "
+                "client, or one from another run) and reconcile the account before starting again "
+                "(docs/manual/paper-trading.md)".format(len(unexplained), "; ".join(unexplained)))
         self.conn.mark_reconciled()
         log.info("ibkr reconciled client_id=%d positions=%d open_orders=%d executions=%d", self.config.client_id,
                  len(reading.positions), len(broker.open_orders), len(broker.executions))
@@ -253,6 +338,20 @@ class AdapterLoop:
         log.info("ibkr sent client_order_id=%s client_id=%d order_id=%d", record.request.client_order_id,
                  record.client_id, record.broker_order_id)
         self.reports.sent(record)
+        self.tracker.placed(record.broker_order_id)
+
+    def _await_engine(self, worker):
+        """While worker asks the engine, read every callback IB Gateway has sent and check for overdue commissions."""
+        while True:
+            # Read after the worker is seen finished too, so whatever arrived
+            # during the exchange is applied before anything else.
+            alive = worker.is_alive()
+            while self.conn.pump(0) is not None:
+                pass
+            self.reports.check_overdue()
+            if not alive:
+                return
+            worker.join(ENGINE_WAIT_POLL)
 
     def _envelope(self, entry, engine_log):
         """The input envelope for an outbox entry: the run's identity and next sequence from the engine's log."""
@@ -287,13 +386,26 @@ class AdapterLoop:
                     return
                 entry = entries[0]
                 engine_log = read_engine_log(self._engine_log_path)
-                if entry["id"] in {i.id for i in engine_log.inputs}:
+                committed = {i.id: i for i in engine_log.inputs}.get(entry["id"])
+                if committed is not None:
+                    if (committed.event_type, committed.schema_version, committed.payload) != (
+                            entry["event_type"], entry["schema_version"], entry["payload"]):
+                        raise OutboxInvalid(
+                            "the outbox entry {} carries other content than the input the engine committed under "
+                            "that ID; it is neither sent nor struck off: a person decides which is right "
+                            "(docs/manual/paper-trading.md)".format(entry["id"]))
                     self.outbox.strike(entry["id"])
                     continue
                 self._exchange(self._envelope(entry, engine_log))
         except (NotReconciled, NotConnected) as err:
             # The link went while an order was due: the input stays on disk
             # and is asked for again once the link is back and reconciled.
+            log.info("ibkr input held until the link is reconciled: %s", err)
+        except BrokerOrdersIncomplete as err:
+            if "connection" not in err.missing:
+                raise
+            # The link went while IBKR's orders were read for an order due:
+            # nothing was marked or sent, so the input is held as above.
             log.info("ibkr input held until the link is reconciled: %s", err)
 
     def _status(self, status):

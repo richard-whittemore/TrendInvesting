@@ -102,6 +102,30 @@ class OrderStatusTests(unittest.TestCase):
         self.assertIn("insufficient funds", statuses[0].reason)
         self.assertEqual(statuses[0].client_order_id, "tag-1")
 
+    def test_an_order_level_refusal_of_an_order_this_client_placed_is_invalid_with_ibkr_reason(self):
+        # IBKR answers an order it will not take (the Read-Only API, code 321)
+        # with an error under the order's ID and no openOrder: the order never
+        # worked, and the engine is told so.
+        t = Tracked()
+        t.tracker.placed(7)
+        t.cb.error(7, 321, "Error validating request.-'bW' : cause - The API interface is currently in Read-Only mode.")
+        status(t.cb, 7, "Inactive", "0", "10")
+        t.drain()
+        statuses = t.of(OrderStatusReport)
+        self.assertEqual([(s.lifecycle, s.ibkr_code, s.broker_order_id) for s in statuses], [("invalid", 321, 7)])
+        self.assertIn("Read-Only", statuses[0].reason)
+
+    def test_an_order_level_code_on_anything_but_an_order_placed_and_not_yet_shown_is_no_order_report(self):
+        # Code 321 also answers other requests, whose IDs may equal an order's.
+        t = Tracked()
+        t.cb.error(7, 321, "Error validating request.-'bW' : cause - synthetic")
+        t.tracker.placed(8)
+        t.cb.open_order(8, contract(), order(order_ref="tag-8"), STATE)
+        status(t.cb, 8, "Submitted", "0", "10")
+        t.cb.error(8, 321, "Error validating request.-'bW' : cause - synthetic")
+        t.drain()
+        self.assertEqual([s.lifecycle for s in t.of(OrderStatusReport)], ["submitted"])
+
     def test_inactive_without_a_rejection_fails_closed(self):
         t = Tracked()
         t.cb.open_order(7, contract(), order(), STATE)

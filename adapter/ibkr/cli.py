@@ -2,9 +2,10 @@
 
 Everything is read and checked before anything connects: the configuration
 (config.AdapterConfig, strict), the account number from exactly one place
-(the configuration file, or one named line of the machine's secrets file,
-never echoed: the repository is public), the installed ibapi against the
-pin (ibapi_pin), and the engine's durable log (read at start by the loop).
+(the configuration file, or one named KEY=VALUE line of the account's own
+file, read bare and never echoed: the repository is public), the installed
+ibapi against the pin (ibapi_pin), and the engine's durable log (read at
+start by the loop).
 Then the loop runs (loop.AdapterLoop) until SIGTERM or SIGINT, or until it
 stops for a person. Exit status: 0 for a requested stop, 1 for a refusal or
 a stop for a person (the reason is written to standard error), 2 for a
@@ -80,7 +81,8 @@ def _parser():
     run.add_argument("--socket", required=True, metavar="PATH", help="the engine's socket, as given to it as -socket")
     run.add_argument("--secrets", metavar="FILE",
                      help="a KEY=VALUE file holding the account number (with --account-key), when the "
-                          "configuration does not name account_id")
+                          "configuration does not name account_id. On the server: the adapter's own account file, "
+                          "/etc/trend-investing/accounts/boost.env")
     run.add_argument("--account-key", metavar="NAME", help="the line of --secrets naming the account, e.g. "
                                                            "IBKR_ACCOUNT_BOOST")
     run.add_argument("--ibapi-record", required=True, metavar="FILE",
@@ -103,17 +105,31 @@ def _read_config(path):
     return values
 
 
+# What may not appear in an account number read from a KEY=VALUE line: a
+# quote or a space would make an account IBKR's login does not name, and
+# the refusal could not show the value to explain it.
+_NOT_BARE = re.compile(r"[\s\"']")
+
+
 def _read_secret(path, key):
-    """The value of key's line in a KEY=VALUE file, never echoed in an error."""
+    """The value of key's line in a KEY=VALUE file, read bare, never echoed in an error.
+
+    Whitespace around the value (a trailing space, a CRLF line end) is
+    dropped; a value with a quote or a space inside it is refused.
+    """
     try:
         with open(path, encoding="utf-8") as f:
             lines = f.read().splitlines()
     except OSError as err:
         raise Refused("cannot read the secrets file {}: {}".format(path, err.strerror or err)) from None
     found = [line.split("=", 1)[1] for line in lines if line.split("=", 1)[0] == key and "=" in line]
-    if len(found) != 1 or not found[0]:
+    value = found[0].strip() if len(found) == 1 else ""
+    if not value:
         raise Refused("the secrets file {} does not hold exactly one filled-in {} line".format(path, key))
-    return found[0]
+    if _NOT_BARE.search(value):
+        raise Refused("the {} line of {} is not KEY=VALUE with a bare value: write the account number with no "
+                      "quotes and no spaces".format(key, path))
+    return value
 
 
 def load_config(args):
@@ -149,18 +165,21 @@ def _engine_connect(path, timeout):
     return connector(path, timeout)
 
 
-def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err=None, poll=POLL):
+def main(argv=None, api_factory=None, engine_connect=None, should_stop=None, err=None, poll=POLL,
+         ibapi_version=None):
     """Run the command; returns the process exit status.
 
-    api_factory, engine_connect and should_stop replace the real IBKR
-    client, the engine's socket and the signal handlers (for the tests and
-    the rehearsal); poll is how long one step waits for a callback.
+    api_factory, engine_connect, should_stop and ibapi_version replace the
+    real IBKR client, the engine's socket, the signal handlers and the
+    imported ibapi's version (for the tests and the rehearsal, which run
+    without ibapi); poll is how long one step waits for a callback.
     """
     err = err or sys.stderr
     args = _parser().parse_args(argv)
     try:
         cfg = load_config(args)
-        version = check_installed(args.ibapi_record, args.versions)
+        version = check_installed(args.ibapi_record, args.versions,
+                                  **({"installed_version": ibapi_version} if ibapi_version else {}))
     except (Refused, IbapiNotPinned) as refusal:
         print("refused: {}".format(refusal), file=err)
         return 1

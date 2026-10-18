@@ -1,6 +1,7 @@
 """`python3 -m adapter.ibkr run`: the adapter's start command, read strictly before anything connects."""
 import io
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -50,7 +51,7 @@ class CommandTests(unittest.TestCase):
         self.pending = self.dir / "pending.json"
         self.engine_log = self.dir / "run-1.log"
         self.write_config(dict(CONFIG))
-        self.secrets.write_text("IBKR_ACCOUNT_TRAD_IRA=\nIBKR_ACCOUNT_BOOST={}\nNTFY_URL=\n".format(ACCOUNT))
+        self.secrets.write_text("IBKR_ACCOUNT_BOOST={}\n".format(ACCOUNT))
         self.versions.write_text("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA))
         self.record.write_text("TWSAPI_VERSION=10.51.01\nTWSAPI_SHA256={}\n".format(SHA))
         self.engine = LoggedEngine(str(self.engine_log))
@@ -76,7 +77,7 @@ class CommandTests(unittest.TestCase):
 
     def run_main(self, argv, steps=3):
         return main(argv, api_factory=self.api, engine_connect=lambda path, timeout: self.engine,
-                    should_stop=Steps(steps), err=self.err, poll=0.01)
+                    should_stop=Steps(steps), err=self.err, poll=0.01, ibapi_version=lambda: (10, 51, 1))
 
     def test_run_connects_reconciles_and_stops_cleanly(self):
         self.assertEqual(self.run_main(self.argv()), 0, self.err.getvalue())
@@ -121,6 +122,24 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(self.run_main(self.argv()), 1)
         self.assertNotIn("U9999999", self.err.getvalue())
         self.assertEqual(self.made, [])
+
+    def test_the_account_line_is_read_bare_and_one_with_quotes_or_inner_spaces_is_refused(self):
+        # Surrounding whitespace (a trailing space, a CRLF line end) is not
+        # part of the account; quotes or a space inside it are refused, by
+        # the shape expected, before anything connects.
+        self.secrets.write_text("IBKR_ACCOUNT_BOOST= {} \r\n".format(ACCOUNT))
+        self.assertEqual(self.run_main(self.argv()), 0, self.err.getvalue())
+        self.assertEqual(self.made[-1].account_id, ACCOUNT)
+        for line in ('"{}"'.format(ACCOUNT), "'{}'".format(ACCOUNT), "DU00 00001", "{}\t#boost".format(ACCOUNT)):
+            with self.subTest(line=line):
+                self.made = []
+                self.err = io.StringIO()
+                self.secrets.write_text("IBKR_ACCOUNT_BOOST={}\n".format(line))
+                self.assertEqual(self.run_main(self.argv()), 1)
+                self.assertIn("KEY=VALUE", self.err.getvalue())
+                self.assertNotIn(ACCOUNT, self.err.getvalue())
+                self.assertNotIn("DU00 00001", self.err.getvalue())
+                self.assertEqual(self.made, [])
 
     def test_an_account_in_the_configuration_file_needs_no_secrets_file(self):
         self.write_config(dict(CONFIG, account_id=ACCOUNT))
@@ -172,9 +191,36 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(args.engine_log, "/var/lib/trend-investing/engines/boost/run-1.log")
         self.assertEqual(args.socket, "/run/ti-engine-boost/engine.sock")
         self.assertEqual(args.pending, "/var/lib/trend-investing/adapters/boost/pending.json")
-        self.assertIn("LoadCredential=secrets:/etc/trend-investing/secrets.env", unit)
+        self.assertIn("LoadCredential=account:/etc/trend-investing/accounts/boost.env", unit)
+        self.assertEqual(args.secrets, "/run/credentials/ti-adapter-boost.service/account")
         self.assertIn("Restart=no", unit)
         self.assertNotRegex(unit, r"\bD?U[0-9]{5,}", "no account number in the unit")
+
+    def test_the_adapter_is_handed_its_own_account_file_and_nothing_else(self):
+        # One engine per account (ADR 0026 point 8): the Boost adapter never
+        # sees another account's number or the alert URLs.
+        unit = (repo / "deploy" / "systemd" / "ti-adapter-boost.service").read_text()
+        loads = [line for line in unit.splitlines() if line.startswith("LoadCredential=")]
+        self.assertEqual(loads, ["LoadCredential=account:/etc/trend-investing/accounts/boost.env"])
+        self.assertNotIn("secrets.env", "\n".join(l for l in unit.splitlines() if not l.startswith("#")))
+        example = (repo / "deploy" / "etc" / "accounts" / "boost.env.example").read_text()
+        keys = [l.split("=", 1)[0] for l in example.splitlines() if l and not l.startswith("#")]
+        self.assertEqual(keys, ["IBKR_ACCOUNT_BOOST"])
+        self.assertNotRegex(example, r"\bD?U[0-9]{5,}")
+        secrets = (repo / "deploy" / "etc" / "secrets.env.example").read_text()
+        self.assertNotIn("IBKR_ACCOUNT_BOOST=", secrets)
+        provision = (repo / "deploy" / "provision.sh").read_text()
+        self.assertIn('write_stub "$etc/accounts/boost.env" "$here/etc/accounts/boost.env.example"', provision)
+
+    def test_the_tws_api_installer_runs_unprivileged_and_only_its_python_client_is_installed_as_root(self):
+        provision = (repo / "deploy" / "provision.sh").read_text()
+        body = provision[provision.index("step_twsapi() {"):]
+        body = body[:body.index("\n}\n")]
+        runs = [l.strip() for l in body.splitlines()
+                if re.search(r'\bsh "[^"]*installer[^"]*" -q', l) and not l.strip().startswith("#")]
+        self.assertEqual(len(runs), 1, runs)
+        self.assertTrue(runs[0].startswith("runuser -u "), "the vendor installer never runs as root: " + runs[0])
+        self.assertRegex(body, r"\binstall -d .*-o root")
 
     def test_the_shipped_adapter_configuration_is_valid_and_sends_nothing(self):
         values = json.loads((repo / "deploy" / "etc" / "adapters" / "boost.json.example").read_text())

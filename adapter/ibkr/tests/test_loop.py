@@ -7,9 +7,12 @@ engine each input it records through the relay, so a released order goes
 out once and IBKR's reports on it come back as inputs. Synthetic figures
 only; nothing here reaches IBKR.
 """
+import fcntl
 import json
+import os
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -19,10 +22,13 @@ if str(tests_dir) not in sys.path:
     sys.path.insert(0, str(tests_dir))
 
 from engine_double import CONFIGURATION_HASH, STRATEGY_VERSION, LoggedEngine
-from fake_tws import ACCOUNT, FakeTWS
+from types import SimpleNamespace
+
+from fake_tws import ACCOUNT, FakeTWS, contract, execution, order
 from test_connection import Clock, config
 from connection import AccountNotManaged
-from loop import AdapterLoop, ReconcileIncomplete, SOURCE
+from engine_client import EngineRejected
+from loop import OUTBOX_SUFFIX, AdapterLoop, Outbox, OutboxInvalid, ReconcileIncomplete, ReconcileMismatch, SOURCE
 from relay import RELEASED, PendingInput, read_engine_log
 from reports import FILL_TYPE, LIFECYCLE_TYPE, UnreportableOrder
 
@@ -48,6 +54,51 @@ class Ids:
         return "ibkr:{}:{}".format(event_type, self.n)
 
 
+class SwitchFollowsLink(FakeTWS):
+    """A client whose sending switch reads false while its socket is closed, as one folding the link into it would."""
+
+    def can_place_orders(self):
+        return self.can_place and self.connected
+
+
+class DropsOnTheRelaysOrderRead(FakeTWS):
+    """IB Gateway closes the connection as the relay reads IBKR's orders for an order about to be sent.
+
+    The start's reconciliation reads them twice (the account read and the
+    order match); the third read is the relay's.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.reads = 0
+
+    def req_all_open_orders(self):
+        self.reads += 1
+        if self.reads == 3:
+            self.calls.append(("req_all_open_orders",))
+            self.drop()
+            return
+        super().req_all_open_orders()
+
+
+class Interposed:
+    """The engine, with act() run once, inside the next exchange, before the reply returns."""
+
+    def __init__(self, engine, act):
+        self.engine = engine
+        self.act = act
+
+    def __call__(self):
+        self.engine()
+        return self
+
+    def decide(self, envelope):
+        if self.act is not None:
+            act, self.act = self.act, None
+            act()
+        return self.engine.decide(envelope)
+
+
 class LoopTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -63,14 +114,14 @@ class LoopTests(unittest.TestCase):
         fake.summary = list(SUMMARY)
         return fake
 
-    def loop(self, fake=None, **overrides):
+    def loop(self, fake=None, engine=None, **overrides):
         values = dict(mode="paper", paper_sending_enabled=True, commission_wait=COMMISSION_WAIT)
         values.update(overrides)
-        clock = Clock()
+        clock = self.clock = Clock()
 
         def sleep(seconds):
             clock.now += seconds
-        loop = AdapterLoop(config(**values), fake or self.fake, self.engine, self.pending, self.engine_log,
+        loop = AdapterLoop(config(**values), fake or self.fake, engine or self.engine, self.pending, self.engine_log,
                            now=lambda: self.received, today=lambda: SESSION, sleep=sleep, monotonic=clock, poll=0,
                            new_id=Ids())
         self.addCleanup(loop.close)
@@ -240,6 +291,143 @@ class LoopTests(unittest.TestCase):
         self.settle(restarted)
         self.assertEqual([e["id"] for e in self.engine.received].count("session:1"), 1)
         self.assertEqual(restarted.outbox.load(), [])
+
+    def test_a_link_lost_while_the_engine_decides_holds_the_order_and_sends_it_once_the_link_is_back(self):
+        # The socket closes underneath during the exchange, before any
+        # callback says so: the order waits, the adapter does not stop.
+        fake = SwitchFollowsLink()
+        fake.summary = list(SUMMARY)
+        fake.on_place = fake.accept
+        loop = self.loop(fake, engine=Interposed(self.engine, lambda: setattr(fake, "connected", False)))
+        loop.start()
+        self.session_closed(loop)
+        loop.step()
+        self.assertEqual(fake.placed, [])
+        self.assertIsNotNone(PendingInput(self.pending).load(), "the input is held on disk")
+        fake.connected = True
+        self.settle(loop)
+        self.assertEqual(len(fake.placed), 1)
+        self.assertIsNone(PendingInput(self.pending).load())
+
+    def test_a_link_lost_while_ibkr_is_read_for_a_due_order_holds_it_and_sends_it_once_reconnected(self):
+        fake = DropsOnTheRelaysOrderRead()
+        fake.summary = list(SUMMARY)
+        fake.on_place = fake.accept
+        loop = self.loop(fake)
+        loop.start()
+        self.session_closed(loop)
+        loop.step()
+        self.assertEqual(fake.placed, [])
+        self.assertIsNotNone(PendingInput(self.pending).load(), "the input is held on disk")
+        self.settle(loop)
+        self.assertEqual(len(fake.called("connect")), 2)
+        self.assertEqual(len(fake.placed), 1)
+        self.assertIsNone(PendingInput(self.pending).load())
+
+    def test_the_engines_refusal_during_an_exchange_stops_the_adapter_and_keeps_the_input(self):
+        class Refusing:
+            def __call__(self):
+                return self
+
+            def decide(self, envelope):
+                raise EngineRejected("invalid", "synthetic refusal")
+        loop = self.loop(engine=Refusing())
+        loop.start()
+        self.session_closed(loop)
+        with self.assertRaises(EngineRejected):
+            loop.step()
+        self.assertEqual(PendingInput(self.pending).load()["id"], "session:1")
+
+    def test_an_open_order_or_trade_at_ibkr_the_journal_does_not_know_stops_before_anything_is_sent(self):
+        manual = (0, contract(), order(order_ref="", client_id=0, perm_id=4242, order_type="LMT", lmt_price=1.0),
+                  SimpleNamespace(status="Submitted"))
+        other_tag = (contract(), execution(order_ref="not-the-engines", order_id=99, perm_id=4343, client_id=5))
+        for name, orders, executions in (("open order", [manual], []), ("execution", [], [other_tag])):
+            with self.subTest(name):
+                fake = self.gateway()
+                fake.open_orders = orders
+                fake.executions = executions
+                loop = self.loop(fake)
+                try:
+                    with self.assertRaises(ReconcileMismatch) as caught:
+                        loop.start()
+                finally:
+                    loop.close()
+                self.assertTrue(loop.conn.needs_reconciliation, "the link is not marked reconciled")
+                self.assertIn("unexplained", str(caught.exception))
+                self.assertNotIn(ACCOUNT, str(caught.exception))
+                self.assertEqual(fake.placed, [])
+
+    def test_ibkr_refusing_the_order_in_read_only_mode_reaches_the_engine_as_invalid_with_its_reason(self):
+        def read_only(order_id, contract_, order_):
+            self.fake.callbacks.error(order_id, 321, "Error validating request.-'bW' : cause - The API interface is "
+                                                     "currently in Read-Only mode.")
+        self.fake.on_place = read_only
+        loop = self.loop()
+        loop.start()
+        self.session_closed(loop)
+        self.settle(loop)
+        lifecycle = self.engine.inputs(LIFECYCLE_TYPE)
+        self.assertEqual(len(lifecycle), 1)
+        self.assertEqual((lifecycle[0]["payload"]["status"], lifecycle[0]["payload"]["client_order_id"]),
+                         ("invalid", "tw-paper-1"))
+        self.assertIn("Read-Only", lifecycle[0]["payload"]["message"])
+
+    def test_an_outbox_entry_under_a_committed_id_with_other_content_stops_the_adapter(self):
+        loop = self.loop()
+        self.fake.on_place = self.fake.accept
+        loop.start()
+        self.session_closed(loop)
+        self.settle(loop)
+        loop.close()
+        changed = {"id": "session:1", "event_type": "market.session.closed", "schema_version": 1,
+                   "event_time": SESSION_CLOSED, "payload": {"period_end": SESSION_CLOSED, "instrument_ids": ["QQQ"]}}
+        loop.outbox.append(changed)
+        restarted = self.loop()
+        restarted.start()
+        with self.assertRaises(OutboxInvalid) as caught:
+            restarted.step()
+        self.assertIn("session:1", str(caught.exception))
+        self.assertEqual(restarted.outbox.load(), [changed], "the entry is kept for a person")
+
+    def test_the_outbox_is_changed_only_under_its_exclusive_lock(self):
+        # A producer in another process takes the same lock (Outbox.append).
+        outbox = Outbox(self.pending + OUTBOX_SUFFIX)
+        entry = {"id": "session:9", "event_type": "market.session.closed", "schema_version": 1,
+                 "event_time": SESSION_CLOSED, "payload": {}}
+        fd = os.open(self.pending + OUTBOX_SUFFIX + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        writer = threading.Thread(target=outbox.append, args=(entry,), daemon=True)
+        try:
+            writer.start()
+            writer.join(0.3)
+            self.assertTrue(writer.is_alive(), "append waits for the lock")
+            self.assertEqual(outbox.load(), [])
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        writer.join(2)
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(outbox.load(), [entry])
+
+    def test_a_slow_engine_reply_does_not_drop_a_healthy_link(self):
+        # A 15 s reply with a 10 s heartbeat timeout: IBKR's answer to the
+        # probe arrives during the wait and is read then, not left unread.
+        self.engine = LoggedEngine(self.engine_log, {"session:1": []})
+
+        def slow():
+            self.fake.callbacks.current_time(self.fake.server_time)
+            self.clock.now += 15.0
+        loop = self.loop(engine=Interposed(self.engine, slow), heartbeat_interval=30.0, heartbeat_timeout=10.0)
+        loop.start()
+        self.fake.answer_current_time = False
+        loop.step()
+        self.session_closed(loop)
+        loop.step()
+        loop.step()
+        self.assertEqual(self.fake.called("disconnect"), [])
+        self.assertTrue(loop.conn.connected)
+        self.assertEqual([e["id"] for e in self.engine.inputs()], ["session:1"])
 
     def test_a_dry_run_sends_nothing(self):
         self.engine = LoggedEngine(self.engine_log, {"session:1": []})

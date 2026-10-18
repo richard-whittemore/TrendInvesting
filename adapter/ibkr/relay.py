@@ -834,6 +834,24 @@ def journalled_reports(path):
     return JournalledReports(fills, ended)
 
 
+def released_client_order_ids(path):
+    """The client order ID of every order a committed decision in the engine's durable log at path released to be sent.
+
+    Read as journalled_reports reads the log (ResolveRefused for one that
+    cannot be read). These are the orders IBKR may show under this engine's
+    client ID; reconciliation matches IBKR's open orders and executions
+    against them (orders.match_on_reconnect).
+    """
+    released = set()
+    for group in _committed_groups(path)[1]:
+        for _, kind, envelope in group:
+            payload = envelope["payload"]
+            if (kind == LOG_DECISION and envelope["type"] == RELEASED and isinstance(payload, dict)
+                    and payload.get("send") is True and _is_text(payload.get("client_order_id"))):
+                released.add(payload["client_order_id"])
+    return released
+
+
 def read_engine_log(path):
     """The run's identity and every committed input in the engine's durable log at path, read as journalled_reports reads it.
 
