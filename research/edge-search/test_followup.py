@@ -2257,5 +2257,206 @@ class BoostParityLogTest(unittest.TestCase):
         self.assertEqual(c.pop("PARITY_CHUNK"), 1500)
         self.assertEqual(c, _class_constants(*build_variants.VARIANTS["BX_SPY"]))
 
+
+class MinimumLotTest(unittest.TestCase):
+    """momentum/minimum_lot.py: ADR 0026's D7-L (point 2, and its 2026-10-17
+    amendment) added to fresh_universe.py, as written ("literal") and with
+    the held-name exception measured for docs/research/d7l-held-name-2026-10.md
+    ("held"). The book cases transcribe internal/targetweight/momentum's
+    minimum_lot_test.go: capCandidates without D (no sector) and G (zero
+    volatility), which the Go tests leave out of the book they value, ranked
+    as Go ranks them (B before C on their tied score), top 3, one name per
+    sector, at a $1,000 account and full scale."""
+
+    RANKED = ["A", "B", "C", "E", "F"]
+    SECTOR = {"A": "X", "B": "X", "C": "Y", "E": "Z", "F": "W"}
+    VOL = {"A": 0.02, "B": 0.05, "C": 0.04, "E": 0.01, "F": 0.03}
+    PRICES = {"A": 100, "B": 100, "C": 100, "E": 100, "F": 50}
+
+    def setUp(self):
+        sys.modules.setdefault("numpy", types.SimpleNamespace(std=lambda x: 0.0))
+        self.module = _load_template(self, "momentum/minimum_lot.py", {})
+        self.module.Universe = types.SimpleNamespace(Unchanged="unchanged")
+
+    def _book(self, prices=None, held=(), nlv=1000.0, risk_off=False):
+        price = dict(self.PRICES, **(prices or {}))
+        return self.module.minimum_lot_book(
+            self.RANKED, 3, price, nlv, held=set(held), sector=self.SECTOR, sector_cap=1, vol=self.VOL,
+            inv_vol=True, risk_off=risk_off, risk_off_fraction=0.5)
+
+    @staticmethod
+    def _names(targets):
+        return sorted(n for n in targets if n != "IEF")
+
+    def test_a_pick_whose_one_share_exceeds_its_target_is_skipped_for_the_next_name(self):
+        # Go: TestMinimumLotSkipsAPickWhoseOneShareExceedsItsTarget. C's
+        # target is 0.98 x 25/175 of $1,000 = $140, below its $150 share.
+        targets, skipped, kept, noprice = self._book({"C": 150})
+        self.assertEqual(self._names(targets), ["A", "E", "F"])
+        self.assertEqual((skipped, kept, noprice), (["C"], set(), 0))
+
+    def test_a_skipped_pick_frees_its_sector_slot(self):
+        # Go: TestMinimumLotFreesTheSectorSlot.
+        targets, skipped, _, _ = self._book({"A": 300})
+        self.assertEqual(self._names(targets), ["B", "C", "E"])
+        self.assertEqual(skipped, ["A"])
+
+    def test_the_selection_repeats_until_every_pick_is_affordable(self):
+        # Go: TestMinimumLotIteratesUntilEveryPickIsAffordable. Taking F for
+        # C lowers A's weight below $270 on the second pass.
+        targets, skipped, _, _ = self._book({"C": 150, "A": 270})
+        self.assertEqual(self._names(targets), ["B", "E", "F"])
+        self.assertEqual(sorted(skipped), ["A", "C"])
+        for n in self._names(targets):
+            self.assertLessEqual(dict(self.PRICES, C=150, A=270)[n], targets[n] * 1000.0)
+
+    def test_with_no_affordable_pick_the_decision_is_withheld(self):
+        # Go: TestMinimumLotWithNoAffordablePickPicksNothing; Decide then
+        # withholds it as all-unaffordable (amendment, case b).
+        targets, skipped, _, _ = self._book({n: 5000 for n in self.RANKED})
+        self.assertIsNone(targets)
+        self.assertEqual(sorted(skipped), self.RANKED)
+
+    def test_the_target_value_is_the_risk_off_books_weight(self):
+        # Half risk-off halves C's target to $70: $100 is then unaffordable.
+        targets, skipped, _, _ = self._book(risk_off=True)
+        self.assertIn("C", skipped)
+        self.assertNotIn("C", targets)
+
+    def test_with_every_pick_affordable_the_book_is_defensive_books(self):
+        targets, skipped, kept, _ = self._book()
+        plain = self.module.defensive_book(self.RANKED, 3, sector=self.SECTOR, sector_cap=1, vol=self.VOL,
+                                           inv_vol=True)
+        self.assertEqual((targets, skipped, kept), (plain, [], set()))
+
+    def test_a_held_unaffordable_pick_keeps_its_place_and_weight(self):
+        targets, skipped, kept, _ = self._book({"C": 150}, held={"C"})
+        plain = self.module.defensive_book(self.RANKED, 3, sector=self.SECTOR, sector_cap=1, vol=self.VOL,
+                                           inv_vol=True)
+        self.assertEqual((targets, skipped, kept), (plain, [], {"C"}))
+
+    def test_only_the_held_pick_is_kept_and_the_rest_substitute(self):
+        targets, skipped, kept, _ = self._book({"C": 180, "A": 300}, held={"C"})
+        self.assertEqual(self._names(targets), ["B", "C", "E"])
+        self.assertEqual((skipped, kept), (["A"], {"C"}))
+
+    def test_a_pick_with_no_raw_close_is_counted_and_left_in_the_book(self):
+        price = dict(self.PRICES)
+        del price["E"]
+        targets, skipped, _, noprice = self.module.minimum_lot_book(
+            self.RANKED, 3, price, 1000.0, sector=self.SECTOR, sector_cap=1, vol=self.VOL, inv_vol=True)
+        self.assertEqual((self._names(targets), skipped, noprice), (["A", "C", "E"], [], 1))
+
+    def _algo(self, mode, held):
+        algo = self.module.MomentumResearch()
+        algo.MIN_LOT, algo.TOP_N, algo.SECTOR_CAP, algo.INV_VOL = mode, 3, 1, True
+        algo.RISK_OFF_FRACTION, algo.SPY_BLEND = 0.5, 0.0
+        algo.bond, algo.spy = "IEF", "SPY"
+        algo.sectors = self.SECTOR
+        algo.raw_close = dict(self.PRICES, C=150)
+        for attr in ("lot_skipped", "lot_held_sold", "lot_kept_n", "lot_withheld", "lot_noprice", "lot_raw_above",
+                     "resizes"):
+            setattr(algo, attr, 0)
+        algo.lot_kept = set()
+        algo.orders = []
+
+        class Book(dict):
+            TotalPortfolioValue = 1000.0
+
+            def __iter__(self):
+                return iter([types.SimpleNamespace(Key=k, Value=v) for k, v in dict.items(self)])
+
+            def __missing__(self, key):
+                return types.SimpleNamespace(Invested=False, IsLong=False, IsShort=False, HoldingsValue=0.0)
+
+        algo.Portfolio = Book({k: types.SimpleNamespace(Invested=True, IsLong=True, IsShort=False,
+                                                        HoldingsValue=v) for k, v in held.items()})
+        algo.SetHoldings = lambda s, w: algo.orders.append((s, round(w, 6)))
+        algo.Liquidate = lambda s: algo.orders.append((s, 0))
+        algo._priced = lambda s: True
+        return algo
+
+    def test_the_literal_rule_sells_a_held_unaffordable_pick_in_full(self):
+        algo = self._algo("literal", {"C": 150.0})
+        targets = algo._minimum_lot(self.RANKED, self.VOL, None, False)
+        algo._trade(targets)
+        self.assertIn(("C", 0), algo.orders)
+        self.assertEqual((algo.lot_skipped, algo.lot_held_sold, algo.lot_kept_n), (1, 1, 0))
+
+    def test_the_held_exception_places_no_order_in_the_kept_pick(self):
+        # C's $400 holding is far past the 25% band around its $140
+        # target, so without the exception the band would resize it.
+        algo = self._algo("held", {"C": 400.0})
+        targets = algo._minimum_lot(self.RANKED, self.VOL, None, False)
+        algo._trade(targets)
+        self.assertEqual([o for o in algo.orders if o[0] == "C"], [])
+        self.assertEqual(sorted(o[0] for o in algo.orders), ["A", "E"])
+        self.assertEqual((algo.lot_skipped, algo.lot_held_sold, algo.lot_kept_n), (0, 0, 1))
+
+    def test_an_all_unaffordable_month_is_withheld_and_counted(self):
+        algo = self._algo("literal", {})
+        algo.raw_close = {n: 5000 for n in self.RANKED}
+        self.assertIsNone(algo._minimum_lot(self.RANKED, self.VOL, None, False))
+        self.assertEqual(algo.lot_withheld, 1)
+
+    def test_the_month_choosing_selection_records_the_raw_closes(self):
+        # A's raw close is twice its adjusted price (a later 2:1 split), so
+        # rawAbove counts it; B's equal prices and C, outside the universe,
+        # are not counted.
+        row = namedtuple("Coarse", "Symbol HasFundamentalData Price AdjustedPrice DollarVolume")
+        rows = [row("A", True, 10.0, 5.0, 3.0), row("B", True, 20.0, 20.0, 2.0), row("C", True, 30.0, 1.0, 1.0)]
+        algo = self.module.MomentumResearch()
+        algo.MIN_LOT, algo.FRESH_SELECTION, algo.UNIVERSE_SIZE = "literal", False, 2
+        algo.last_month, algo.early_selections, algo.raw_close, algo.lot_raw_above = (2025, 5), 0, {}, 0
+        algo.Time = _dt.datetime(2025, 6, 2)
+        self.assertEqual(algo.Coarse(rows), ["A", "B"])
+        self.assertEqual((algo.raw_close, algo.lot_raw_above), ({"A": 10.0, "B": 20.0}, 1))
+        algo.Time = _dt.datetime(2025, 6, 3)
+        self.assertEqual(algo.Coarse([row("A", True, 99.0, 1.0, 3.0)]), "unchanged")
+        self.assertEqual((algo.raw_close, algo.lot_raw_above), ({"A": 10.0, "B": 20.0}, 1))
+
+    def test_without_the_rule_the_template_records_and_skips_nothing(self):
+        algo = self._algo(None, {"C": 150.0})
+        row = namedtuple("Coarse", "Symbol HasFundamentalData Price DollarVolume")
+        algo.FRESH_SELECTION, algo.UNIVERSE_SIZE, algo.last_month, algo.early_selections = False, 2, None, 0
+        algo.raw_close = {}
+        algo.Time = _dt.datetime(2025, 6, 2)
+        algo.Coarse([row("A", True, 10.0, 3.0)])
+        self.assertEqual(algo.raw_close, {})
+
+    def test_the_end_statistic_reports_the_counts(self):
+        algo = self._algo("held", {})
+        algo.lot_skipped, algo.lot_held_sold, algo.lot_kept_n, algo.lot_withheld, algo.lot_noprice = 5, 2, 3, 0, 0
+        stats = {}
+        algo.SetRuntimeStatistic = lambda k, v: stats.__setitem__(k, v)
+        algo.Portfolio, algo.equity_curve, algo.spy_curve, algo.scales = [], [], [], []
+        algo.Transactions = types.SimpleNamespace(OrdersCount=1)
+        algo.MEASURE_FROM, algo.END_DATE = (1999, 1, 1), (2015, 12, 31)
+        for attr in ("rebalances", "risk_off_months", "borrow_paid", "retried", "cash_sum", "cash_days",
+                     "fund_reads", "fund_hits", "early_selections", "skipped"):
+            setattr(algo, attr, 0)
+        algo.OnEndOfAlgorithm()
+        self.assertEqual(stats["MinLot"], "mode=held skipped=5 heldSold=2 kept=3 withheld=0 noPrice=0")
+        self.assertEqual(stats["RawCheck"], "rawAbove=0")
+
+    def test_the_template_only_adds_to_fresh_universe(self):
+        _additions_only(self, "momentum/fresh_universe.py", "momentum/minimum_lot.py")
+
+    def test_the_template_fits_the_free_plans_file_limit(self):
+        with open(os.path.join(HERE, "momentum", "minimum_lot.py")) as f:
+            self.assertLess(len(f.read()), 32_000)
+
+    def test_the_runs_are_the_30k_combination_plus_the_rule(self):
+        for name, base, mode in (("D7L_NONE_30K", "FU_COMBO_30K", None),
+                                 ("D7L_LIT_30K", "FU_COMBO_30K", "literal"),
+                                 ("D7L_HELD_30K", "FU_COMBO_30K", "held"),
+                                 ("OOS_D7L_LIT_30K", "OOS_FU_COMBO_30K", "literal"),
+                                 ("OOS_D7L_HELD_30K", "OOS_FU_COMBO_30K", "held")):
+            template, params = build_variants.VARIANTS[name]
+            self.assertEqual(template, "momentum/minimum_lot.py", name)
+            c = _class_constants(template, params)
+            self.assertEqual(c.pop("MIN_LOT"), mode, name)
+            self.assertEqual(c, _class_constants(*build_variants.VARIANTS[base]), name)
+
 if __name__ == "__main__":
     unittest.main()
